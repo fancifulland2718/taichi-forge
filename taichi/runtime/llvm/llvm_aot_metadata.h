@@ -10,23 +10,35 @@
 namespace taichi::lang::LLVM {
 
 inline constexpr char kLlvmAotMetadataFilename[] = "aot_metadata.json";
-// Graph Arg now serializes the exact image format. Reject old binary tables
-// before decoding them; this is an artifact schema, not a runtime wheel pin.
-inline constexpr std::uint32_t kLlvmAotSchemaVersion = 2;
+// Schema 2 introduced the exact Graph image format. Schema 3 declares the
+// kernel representation; old runtimes must reject it instead of reading a
+// stale .ll beside a newer .bc. Binary task/Graph layouts are unchanged.
+inline constexpr std::uint32_t kLlvmAotSchemaVersion = 3;
 
 struct LlvmAotMetadata {
   std::uint32_t schema_version{0};
   std::map<std::string, uint32_t> required_caps;
+  // Empty is only valid for legacy schema-2 text artifacts.
+  std::string kernel_format;
 
-  TI_IO_DEF(schema_version, required_caps);
+  TI_IO_DEF(schema_version, required_caps, kernel_format);
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
-  TI_ERROR_IF(metadata.schema_version != kLlvmAotSchemaVersion,
+  TI_ERROR_IF(metadata.schema_version != 2 &&
+                  metadata.schema_version != kLlvmAotSchemaVersion,
               "LLVM AOT artifact schema {} is incompatible with runtime "
               "schema {}. Rebuild the artifact with the current Forge AOT "
               "compiler.",
               metadata.schema_version, kLlvmAotSchemaVersion);
+  if (metadata.schema_version == 2) {
+    TI_ERROR_IF(!metadata.kernel_format.empty() && metadata.kernel_format != "ll",
+                "Legacy LLVM AOT schema 2 requires text kernel format.");
+  } else {
+    TI_ERROR_IF(metadata.kernel_format != "ll" && metadata.kernel_format != "bc",
+                "Unsupported or missing LLVM AOT kernel format '{}'.",
+                metadata.kernel_format);
+  }
 }
 
 inline void validate_cuda_aot_metadata(const LlvmAotMetadata &metadata,

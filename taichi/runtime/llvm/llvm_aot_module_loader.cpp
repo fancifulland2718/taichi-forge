@@ -15,8 +15,7 @@ LlvmAotModule::LlvmAotModule(
     LlvmRuntimeExecutor *executor,
     std::unique_ptr<LLVM::KernelLauncher> kernel_launcher)
     : executor_(executor),
-      kernel_launcher_(std::move(kernel_launcher)),
-      cache_reader_(LlvmOfflineCacheFileReader::make(module_path)) {
+      kernel_launcher_(std::move(kernel_launcher)) {
   TI_ASSERT(executor_ != nullptr);
 
   const std::string metadata_path =
@@ -34,6 +33,12 @@ LlvmAotModule::LlvmAotModule(
   liong::json::deserialize(json, metadata);
   validate_llvm_aot_metadata(metadata);
 
+  // Select exactly the declared representation. Missing/corrupt payloads must
+  // not silently fall back to a different generation left in this directory.
+  const auto format = metadata.kernel_format == "bc"
+                          ? LlvmOfflineCache::Format::BC
+                          : LlvmOfflineCache::Format::LL;
+  cache_reader_ = LlvmOfflineCacheFileReader::make(module_path, format);
   TI_ERROR_IF(cache_reader_ == nullptr,
               "LLVM AOT artifact metadata at {} is corrupt or incompatible. "
               "Rebuild the artifact with the current Forge AOT compiler.",

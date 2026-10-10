@@ -3,6 +3,7 @@
 #include <queue>
 
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -264,26 +265,27 @@ std::unique_ptr<llvm::Module> LlvmOfflineCacheFileReader::load_module(
     const std::string &key,
     llvm::LLVMContext &llvm_ctx) const {
   TI_AUTO_PROF;
-  if (format_ & Format::BC) {
-    LlvmModuleBitcodeLoader loader;
-    return loader
-        .set_bitcode_path(path_prefix + "." +
-                          offline_cache::kLlvmCacheFilenameBCExt)
-        .set_buffer_id(key)
-        .set_inline_funcs(false)
-        .load(&llvm_ctx);
-  } else if (format_ & Format::LL) {
+  if (format_ & (Format::BC | Format::LL)) {
+    const bool bitcode = (format_ & Format::BC) != 0;
     const std::string filename =
-        path_prefix + "." + offline_cache::kLlvmCacheFilenameLLExt;
+        path_prefix + "." + (bitcode ? offline_cache::kLlvmCacheFilenameBCExt
+                                    : offline_cache::kLlvmCacheFilenameLLExt);
     auto buffer = llvm::MemoryBuffer::getFile(filename);
     if (!buffer) {
       TI_DEBUG("Fail to read {}: {}", filename, buffer.getError().message());
       return nullptr;
     }
-    auto ret = decode_llvm_module((*buffer)->getMemBufferRef(), llvm_ctx,
-                                  LLVMModuleEncoding::assembly);
+    auto ret = decode_llvm_module(
+        (*buffer)->getMemBufferRef(), llvm_ctx,
+        bitcode ? LLVMModuleEncoding::bitcode : LLVMModuleEncoding::assembly);
     if (!ret) {  // File not found or Parse failed
       TI_DEBUG("Fail to parse {}: {}", filename, llvm::toString(ret.takeError()));
+      return nullptr;
+    }
+    // Preserve the bitcode loader's IR verification without its fatal error
+    // path; malformed deployment inputs are reported as artifact failures.
+    if (bitcode && llvm::verifyModule(**ret, &llvm::errs())) {
+      TI_DEBUG("Invalid LLVM bitcode module {}", filename);
       return nullptr;
     }
     return std::move(*ret);

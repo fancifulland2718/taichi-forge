@@ -1,5 +1,7 @@
 #include "gtest/gtest.h"
 
+#include <fstream>
+
 #include "taichi/common/platform_macros.h"
 #include "taichi/common/cleanup.h"
 #include "taichi/common/filesystem.hpp"
@@ -233,6 +235,45 @@ TEST_P(LlvmOfflineCacheTest, ConsumeFailureLeavesArtifactFilesUntouched) {
   EXPECT_EQ(result.compiled_data.module, nullptr);
   EXPECT_TRUE(fs::exists(payload));
   EXPECT_EQ(fs::file_size(payload), size);
+}
+
+TEST_P(LlvmOfflineCacheTest, SelectedFormatDoesNotFallBack) {
+  fs::path path{fs::temp_directory_path() /= std::tmpnam(nullptr)};
+  auto cleanup = make_cleanup([path]() { fs::remove_all(path); });
+  ASSERT_TRUE(fs::create_directories(path));
+  auto *ctx = tlctx_->get_this_thread_context();
+  LlvmOfflineCache::KernelCacheData cache;
+  cache.kernel_key = kKernelName;
+  cache.created_at = cache.last_used_at = 1;
+  cache.compiled_data.module = make_module(*ctx);
+  cache.compiled_data.tasks.emplace_back(kTaskName, 1, 1);
+  LlvmOfflineCacheFileWriter writer;
+  writer.add_kernel_cache(kKernelName, std::move(cache));
+  writer.set_no_mangle();
+  writer.dump(path.u8string(), static_cast<Format>(Format::LL | Format::BC));
+
+  const auto selected = path / (std::string(kKernelName) +
+                               (GetParam() == Format::LL ? ".ll" : ".bc"));
+  {
+    std::ofstream out(selected, std::ios::binary | std::ios::trunc);
+    out << "corrupt selected representation";
+  }
+  auto reader = LlvmOfflineCacheFileReader::make(path.u8string(), GetParam());
+  ASSERT_NE(reader, nullptr);
+  LlvmOfflineCache::KernelCacheData result;
+  EXPECT_FALSE(reader->take_kernel_cache(result, kKernelName, *ctx));
+  EXPECT_FALSE(reader->take_kernel_cache(result, kKernelName, *ctx));
+  EXPECT_TRUE(fs::exists(selected));
+  EXPECT_EQ(result.compiled_data.module, nullptr);
+
+  fs::remove(selected);
+  reader = LlvmOfflineCacheFileReader::make(path.u8string(), GetParam());
+  ASSERT_NE(reader, nullptr);
+  EXPECT_FALSE(reader->take_kernel_cache(result, kKernelName, *ctx));
+  const auto other = GetParam() == Format::LL ? Format::BC : Format::LL;
+  reader = LlvmOfflineCacheFileReader::make(path.u8string(), other);
+  ASSERT_NE(reader, nullptr);
+  EXPECT_TRUE(reader->take_kernel_cache(result, kKernelName, *ctx));
 }
 
 INSTANTIATE_TEST_SUITE_P(Format,

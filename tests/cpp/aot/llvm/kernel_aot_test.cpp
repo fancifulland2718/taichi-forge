@@ -23,6 +23,7 @@ namespace taichi::lang {
 TEST(LlvmAotMetadataTest, ValidatesCudaComputeAndPtxRequirements) {
   LLVM::LlvmAotMetadata metadata;
   metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
+  metadata.kernel_format = "ll";
   metadata.required_caps["cuda_compute_capability"] = 60;
   metadata.required_caps["cuda_ptx_version"] = 50;
 
@@ -42,6 +43,33 @@ TEST(LlvmAotMetadataTest, ValidatesCudaComputeAndPtxRequirements) {
   missing_ptx.schema_version = LLVM::kLlvmAotSchemaVersion;
   missing_ptx.required_caps["cuda_compute_capability"] = 60;
   EXPECT_ANY_THROW(LLVM::validate_cuda_aot_metadata(missing_ptx, 90, 78));
+}
+
+TEST(LlvmAotMetadataTest, DeclaredRepresentationAndLegacyText) {
+  LLVM::LlvmAotMetadata legacy;
+  const auto json = liong::json::parse(
+      R"({"schema_version":2,"required_caps":[]})");
+  liong::json::deserialize(json, legacy);
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(legacy));
+  EXPECT_TRUE(legacy.kernel_format.empty());
+  legacy.kernel_format = "bc";
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(legacy));
+
+  LLVM::LlvmAotMetadata current;
+  current.schema_version = LLVM::kLlvmAotSchemaVersion;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(current));
+  for (const auto *format : {"ll", "bc"}) {
+    current.kernel_format = format;
+    LLVM::LlvmAotMetadata decoded;
+    liong::json::deserialize(liong::json::serialize(current), decoded);
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(decoded));
+    EXPECT_EQ(decoded.kernel_format, format);
+  }
+  current.kernel_format = "guess";
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(current));
+  current.kernel_format = "bc";
+  current.schema_version = LLVM::kLlvmAotSchemaVersion + 1;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(current));
 }
 
 TEST(LlvmAotTest, CpuKernel) {
