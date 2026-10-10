@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Reverse-mode autodiff now backs up nested loop bounds across forward/reverse
+  scopes, including argument and locally derived bounds. The fast tier no longer
+  depends on advanced optimization to make these references valid.
 - LLVM autodiff stacks now allocate the complete 64-bit counter header, matching
   the runtime layout and preventing out-of-bounds adjoint accesses and incorrect
   gradients in the fast tier. IR allocation and runtime share the layout;

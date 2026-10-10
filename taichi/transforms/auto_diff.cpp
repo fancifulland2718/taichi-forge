@@ -2361,8 +2361,10 @@ class BackupSSA : public BasicStmtVisitor {
     BasicStmtVisitor::visit(stmt);
   }
 
-  // TODO: test operands for statements
   void visit(RangeForStmt *stmt) override {
+    // Reversed loops can still refer to bounds in the forward loop's scope.
+    // Back up the header operands as well as the statements in the body.
+    generic_visit(stmt);
     stmt->body->accept(this);
   }
 

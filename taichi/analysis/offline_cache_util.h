@@ -179,7 +179,8 @@ class Kernel;
 //       compatibility, but separate new writes from text-only runtimes.
 //  56 - AD stack allocations include the runtime's full 64-bit counter header.
 //       Previously cached adjoints may contain out-of-bounds stack accesses.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 56;
+//  57 - Reverse loops back up bounds defined in the forward loop's scope.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 57;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still
