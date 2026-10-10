@@ -5464,7 +5464,16 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("get_device_caps", &Program::get_device_caps);
 
+  py::class_<KernelCompileOptions>(m, "KernelCompileOptions")
+      .def(py::init<>())
+      .def_readwrite("compile_tier", &KernelCompileOptions::compile_tier)
+      .def_readwrite("advanced_optimization", &KernelCompileOptions::advanced_optimization)
+      .def_readwrite("llvm_opt_level", &KernelCompileOptions::llvm_opt_level)
+      .def_readwrite("external_optimization_level", &KernelCompileOptions::external_optimization_level)
+      .def_readwrite("fast_math", &KernelCompileOptions::fast_math)
+      .def_readwrite("full_simplify_global_iter_cap", &KernelCompileOptions::full_simplify_global_iter_cap);
   py::class_<AotModuleBuilder>(m, "AotModuleBuilder")
+      .def("set_compile_options", &AotModuleBuilder::set_compile_options)
       .def("add_field", &AotModuleBuilder::add_field)
       .def("add", &AotModuleBuilder::add)
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)

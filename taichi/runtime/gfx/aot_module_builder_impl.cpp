@@ -152,7 +152,8 @@ void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
 void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
                                               Kernel *kernel) {
   const auto request = resolve_kernel_compile_request(
-      config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot);
+      config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
+      compile_options_);
   const auto &ckd = compilation_manager_.load_or_compile(
       request.config(), request.device_caps(), *kernel);
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);

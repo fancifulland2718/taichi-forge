@@ -9,7 +9,16 @@
 namespace taichi::lang {
 
 enum class CompilePurpose { jit, aot };
-enum class CompileTierSource { base_config, kernel_override };
+enum class CompileTierSource { base_config, kernel_override, export_override };
+
+struct KernelCompileOptions {
+  std::optional<std::string> compile_tier;
+  std::optional<bool> advanced_optimization;
+  std::optional<int> llvm_opt_level;
+  std::optional<int> external_optimization_level;
+  std::optional<bool> fast_math;
+  std::optional<int> full_simplify_global_iter_cap;
+};
 
 // Diagnostic provenance, not code identity. The current resolver preserves
 // legacy defaults; purpose does not yet choose different JIT/AOT policies.
@@ -50,13 +59,15 @@ class KernelCompileRequest {
       const CompileConfig &,
       const DeviceCapabilityConfig &,
       const std::optional<std::string> &,
-      CompilePurpose);
+      CompilePurpose,
+      const KernelCompileOptions &);
 };
 
 KernelCompileRequest resolve_kernel_compile_request(
     const CompileConfig &base_config,
     const DeviceCapabilityConfig &caps,
     const std::optional<std::string> &kernel_tier = std::nullopt,
-    CompilePurpose purpose = CompilePurpose::jit);
+    CompilePurpose purpose = CompilePurpose::jit,
+    const KernelCompileOptions &export_options = {});
 
 }  // namespace taichi::lang

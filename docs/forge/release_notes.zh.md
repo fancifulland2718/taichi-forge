@@ -71,6 +71,10 @@
   fast math 和全局简化迭代次数。full 档保留显式设置的
   `full_simplify_global_iter_cap=1`，包括环境变量和 Python 配置直接赋值。
   来源标签不会拆分等效代码的缓存键；Python 与 native 组件现在须配对使用 ABI revision 13。
+- CPU/CUDA/Vulkan AOT 可通过 `ti.aot.Module(compile_options={...})` 单独设置上述六项。
+  显式导出选项覆盖 kernel/Program 的对应值，省略项继续继承；映射会被复制并在
+  导出 kernel 前冻结，统一作用于直接 kernel、模板和普通 Graph，不修改 JIT 配置。
+  现有优化默认值保持不变。
 - 至多一个分量非零的局部矩阵加法（包括矩阵伴随累加），在读取、加法和写回相邻
   时，不再把零贡献展开为冗余操作。该处理在标量化边界、`fast_math` 开启时进行，
   保留此前 full 档的优化路径和关闭 `fast_math` 时的语义。

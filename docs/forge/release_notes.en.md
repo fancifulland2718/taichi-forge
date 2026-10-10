@@ -93,6 +93,11 @@ lifetimes. The entries below describe the changes.
   the full tier, including environment and direct Python config assignments.
   Provenance does not split equivalent code-cache keys. Python and native
   components must now be paired at ABI revision 13.
+- CPU/CUDA/Vulkan AOT accepts `ti.aot.Module(compile_options={...})` for those
+  six options. Explicit export entries override kernel/Program selections;
+  omitted entries inherit them. The mapping is copied, frozen before kernel
+  export and applied to direct kernels, templates and ordinary Graphs without
+  mutating the JIT configuration. Optimization defaults are unchanged.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.

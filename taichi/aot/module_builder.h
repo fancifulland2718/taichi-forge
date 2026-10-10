@@ -8,6 +8,7 @@
 #include "taichi/ir/snode.h"
 #include "taichi/aot/module_data.h"
 #include "taichi/aot/graph_data.h"
+#include "taichi/program/kernel_compile_request.h"
 
 namespace taichi::lang {
 
@@ -17,6 +18,12 @@ class DataType;
 class AotModuleBuilder {
  public:
   virtual ~AotModuleBuilder() = default;
+
+  void set_compile_options(KernelCompileOptions options) {
+    TI_ERROR_IF(compile_options_frozen_,
+                "AOT compile options must be selected before exporting kernels.");
+    compile_options_ = std::move(options);
+  }
 
   void add(const std::string &identifier, Kernel *kernel);
 
@@ -76,6 +83,8 @@ class AotModuleBuilder {
 
  protected:
   std::unordered_map<std::string, aot::CompiledGraph> graphs_;
+  KernelCompileOptions compile_options_;
+  bool compile_options_frozen_{false};
 };
 
 }  // namespace taichi::lang

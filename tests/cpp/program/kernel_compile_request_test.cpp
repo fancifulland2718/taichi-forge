@@ -97,5 +97,35 @@ TEST(KernelCompileRequest, PreservesExplicitCapAndIgnoresOriginsInCodeIdentity) 
             get_hashed_offline_cache_key_context(implicit_request.config(), {}, nullptr));
 }
 
+TEST(KernelCompileRequest, ExportOverridesAreFrozenValuesWithoutJitMutation) {
+  CompileConfig base;
+  base.compile_tier = "fast";
+  base.advanced_optimization = true;
+  KernelCompileOptions options;
+  options.compile_tier = "full";
+  options.advanced_optimization = false;
+  options.fast_math = false;
+  options.llvm_opt_level = 0;
+  options.external_optimization_level = 0;
+  options.full_simplify_global_iter_cap = 1;
+  const auto request = resolve_kernel_compile_request(
+      base, {}, "balanced", CompilePurpose::aot, options);
+  EXPECT_EQ(request.config().compile_tier, "full");
+  EXPECT_FALSE(request.config().advanced_optimization);
+  EXPECT_FALSE(request.config().fast_math);
+  EXPECT_EQ(request.config().llvm_opt_level, 0);
+  EXPECT_EQ(request.config().external_optimization_level, 0);
+  EXPECT_EQ(request.config().full_simplify_global_iter_cap, 1);
+  EXPECT_FALSE(request.provenance().normalized_full_simplify_cap);
+  EXPECT_EQ(request.provenance().tier_source, CompileTierSource::export_override);
+  EXPECT_EQ(base.compile_tier, "fast");
+  EXPECT_TRUE(base.advanced_optimization);
+  EXPECT_ANY_THROW(resolve_kernel_compile_request(base, {}, {}, CompilePurpose::jit, options));
+  options.compile_tier = "fast";
+  EXPECT_EQ(request.config().compile_tier, "full");
+  options.llvm_opt_level = -1;
+  EXPECT_ANY_THROW(resolve_kernel_compile_request(base, {}, {}, CompilePurpose::aot, options));
+}
+
 }  // namespace
 }  // namespace taichi::lang

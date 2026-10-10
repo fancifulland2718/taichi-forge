@@ -150,7 +150,7 @@ LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
     Kernel *kernel) {
   const auto request = resolve_kernel_compile_request(
       compile_config_, caps_, kernel->get_compile_tier_override(),
-      CompilePurpose::aot);
+      CompilePurpose::aot, compile_options_);
   const auto &ckd = compilation_manager_.load_or_compile(
       request.config(), request.device_caps(), *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));

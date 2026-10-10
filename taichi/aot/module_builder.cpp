@@ -4,6 +4,7 @@
 namespace taichi::lang {
 
 void AotModuleBuilder::add(const std::string &identifier, Kernel *kernel) {
+  compile_options_frozen_ = true;
   add_per_backend(identifier, kernel);
 }
 
@@ -21,6 +22,7 @@ void AotModuleBuilder::add_field(const std::string &identifier,
 void AotModuleBuilder::add_kernel_template(const std::string &identifier,
                                            const std::string &key,
                                            Kernel *kernel) {
+  compile_options_frozen_ = true;
   add_per_backend_tmpl(identifier, key, kernel);
 }
 
@@ -52,6 +54,7 @@ void AotModuleBuilder::dump_graph(std::string output_dir) const {
 
 void AotModuleBuilder::add_graph(const std::string &name,
                                  const aot::CompiledGraph &graph) {
+  compile_options_frozen_ = true;
   for (const auto &[arg_name, arg] : graph.args) {
     TI_ERROR_IF(arg.tag == aot::ArgKind::kAccelerationStructure,
                 "AOT Graph {} contains JIT-only acceleration-structure argument {}",

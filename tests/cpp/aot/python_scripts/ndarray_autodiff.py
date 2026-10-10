@@ -1,5 +1,6 @@
 """Export explicit ndarray adjoints for independent C API deployment."""
 import argparse
+import json
 import os
 
 import taichi_forge as ti
@@ -28,9 +29,9 @@ def export_case(module, name, dtype):
     module.add_graph("differentiate_" + name, graph.compile())
 
 
-def main(arch):
+def main(arch, compile_options=None):
     ti.init(arch=arch, offline_cache=False)
-    module = ti.aot.Module()
+    module = ti.aot.Module(compile_options=compile_options)
     for name, dtype in [("scalar", ti.f32), ("vector", ti.types.vector(2, ti.f32)),
                         ("matrix", ti.types.matrix(2, 2, ti.f32))]:
         export_case(module, name, dtype)
@@ -40,4 +41,6 @@ def main(arch):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("arch", choices=["cpu", "cuda", "vulkan"])
-    main(getattr(ti, parser.parse_args().arch))
+    parser.add_argument("--compile-options", type=json.loads)
+    args = parser.parse_args()
+    main(getattr(ti, args.arch), args.compile_options)

@@ -971,6 +971,31 @@ def test_gfx_aot_dense_resource_closure(tmp_path):
     assert metadata["fields"][0]["snode_tree_id"] == 1
 
 
+@test_utils.test(arch=[ti.cpu], compile_tier="fast", offline_cache=False)
+def test_aot_compile_options_are_frozen_without_changing_jit(tmp_path):
+    @ti.kernel(opt_level="fast")
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i + 3
+
+    options = {"compile_tier": "balanced", "llvm_opt_level": 1,
+               "advanced_optimization": False, "fast_math": False,
+               "full_simplify_global_iter_cap": 1}
+    module = ti.aot.Module(compile_options=options)
+    options["compile_tier"] = "invalid"
+    module.add_kernel(fill)
+    module.save(str(tmp_path))
+    assert ti.lang.impl.current_cfg().compile_tier == "fast"
+    with pytest.raises(RuntimeError, match="before exporting kernels"):
+        module._aot_builder.set_compile_options(ti._lib.core.KernelCompileOptions())
+    with pytest.raises(ValueError, match="Unknown AOT"):
+        ti.aot.Module(compile_options={"unknown": 1})
+    with pytest.raises(ValueError, match="must be fast"):
+        ti.aot.Module(compile_options={"compile_tier": "invalid"})
+    with pytest.raises(ValueError, match="integer from 0 to 3"):
+        ti.aot.Module(compile_options={"llvm_opt_level": -1})
+
+
 @test_utils.test(arch=[ti.vulkan])
 def test_save_kernel_with_rwtexture():
     @ti.kernel

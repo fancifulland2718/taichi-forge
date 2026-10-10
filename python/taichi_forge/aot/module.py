@@ -232,12 +232,18 @@ class Module:
         # for running ``foo`` and ``bar``.
     """
 
-    def __init__(self, arch=None, caps=None):
+    def __init__(self, arch=None, caps=None, *, compile_options=None):
         """Creates a new AOT module instance
 
         Args:
           arch: Target backend architecture. Default to the one initialized in :func:`~taichi_forge.lang.init` if not specified.
           caps (List[str]): Enabled device capabilities.
+          compile_options (dict): Optional export-only overrides for
+            ``compile_tier``, ``advanced_optimization``, ``llvm_opt_level``,
+            ``external_optimization_level``, ``fast_math`` and
+            ``full_simplify_global_iter_cap`` on CPU/CUDA/Vulkan. Explicit
+            entries override per-kernel and Program values; omitted entries
+            inherit them. Options are copied and do not mutate JIT settings.
         """
         if caps is None:
             caps = []
@@ -252,6 +258,28 @@ class Module:
                 "module; cross-arch compilation is not supported."
             )
 
+        options = None
+        if compile_options is not None:
+            if not isinstance(compile_options, dict):
+                raise TypeError("AOT compile_options must be a dict")
+            if compile_options and arch not in (taichi_forge.cpu, taichi_forge.cuda, taichi_forge.vulkan):
+                raise TaichiRuntimeError("AOT compile_options currently supports CPU, CUDA and Vulkan")
+            allowed = {
+                "compile_tier", "advanced_optimization", "llvm_opt_level",
+                "external_optimization_level", "fast_math", "full_simplify_global_iter_cap",
+            }
+            unknown = set(compile_options) - allowed
+            if unknown:
+                raise ValueError("Unknown AOT compile options: " + ", ".join(sorted(unknown)))
+            options = _ti_core.KernelCompileOptions()
+            for key, value in compile_options.items():
+                if key == "compile_tier" and value is not None and value not in ("fast", "balanced", "full"):
+                    raise ValueError("AOT compile_tier must be fast, balanced or full")
+                if key in ("llvm_opt_level", "external_optimization_level") and value is not None:
+                    if not isinstance(value, int) or not 0 <= value <= 3:
+                        raise ValueError(f"AOT {key} must be an integer from 0 to 3")
+                setattr(options, key, value)
+
         self._arch = arch
         self._kernels = []
         self._exported_kernels = {}
@@ -259,6 +287,8 @@ class Module:
         rtm = impl.get_runtime()
         rtm._finalize_root_fb_for_aot()
         self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps)
+        if options is not None:
+            self._aot_builder.set_compile_options(options)
         self._content = []
 
     def add_field(self, name, field):

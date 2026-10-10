@@ -1,11 +1,12 @@
 """Export a dense-field reverse pass for a separate public C API process."""
 import argparse
+import json
 import os
 
 import taichi_forge as ti
 
 
-def main(arch):
+def main(arch, compile_options=None):
     ti.init(arch=arch, offline_cache=False)
     unused = ti.field(ti.f32)
     unused_builder = ti.FieldsBuilder()
@@ -39,7 +40,7 @@ def main(arch):
             out[i] = y[i]
             out[i + 4] = x.grad[i]
 
-    module = ti.aot.Module()
+    module = ti.aot.Module(compile_options=compile_options)
     for kernel in (initialize, evaluate, evaluate.grad, readback):
         module.add_kernel(kernel)
     graph = ti.graph.GraphBuilder()
@@ -54,5 +55,6 @@ def main(arch):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("arch", choices=["cpu", "cuda", "vulkan"])
+    parser.add_argument("--compile-options", type=json.loads)
     args = parser.parse_args()
-    main(getattr(ti, args.arch))
+    main(getattr(ti, args.arch), args.compile_options)
