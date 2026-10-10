@@ -1676,8 +1676,18 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
   params.num_snode_trees = reg_params.num_snode_trees;
   params.device = device_;
   params.root_buffers = {};
-  for (int root = 0; root < root_buffers_.size(); ++root) {
-    params.root_buffers.push_back(root_buffers_[root].get());
+  if (reg_params.root_buffer_bindings.empty()) {
+    TI_ERROR_IF(reg_params.num_snode_trees > root_buffers_.size(),
+                "GFX kernel references missing root buffers.");
+    for (int root = 0; root < reg_params.num_snode_trees; ++root) {
+      params.root_buffers.push_back(root_buffers_[root].get());
+    }
+  } else {
+    TI_ERROR_IF(reg_params.root_buffer_bindings.size() != reg_params.num_snode_trees,
+                "GFX AOT root binding count does not match its layouts.");
+    for (int root : reg_params.root_buffer_bindings) {
+      params.root_buffers.push_back(get_root_buffer(root));
+    }
   }
   params.global_tmps_buffer = global_tmps_buffer_.get();
   params.hash_overflow_buffer = hash_overflow_buffer_.get();
@@ -6260,6 +6270,53 @@ void GfxRuntime::init_nonroot_buffers() {
 void GfxRuntime::add_root_buffer(size_t root_buffer_size) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   add_root_buffer(static_cast<int>(root_buffers_.size()), root_buffer_size);
+}
+
+std::vector<int> GfxRuntime::allocate_aot_root_buffers(
+    const std::vector<size_t> &sizes) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  std::vector<int> ids;
+  ids.reserve(sizes.size());
+  free_aot_root_ids_.reserve(free_aot_root_ids_.size() + sizes.size());
+  try {
+    for (size_t size : sizes) {
+      const bool reuse = !free_aot_root_ids_.empty();
+      const int id = reuse ? free_aot_root_ids_.back()
+                           : static_cast<int>(root_buffers_.size());
+      add_root_buffer(id, size);
+      if (reuse) {
+        free_aot_root_ids_.pop_back();
+      }
+      ids.push_back(id);
+    }
+  } catch (...) {
+    for (int id : ids) {
+      remove_root_buffer(id);
+      free_aot_root_ids_.push_back(id);
+    }
+    throw;
+  }
+  return ids;
+}
+
+void GfxRuntime::release_aot_resources(
+    const std::vector<KernelHandle> &kernels,
+    const std::vector<int> &roots) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  if (kernels.empty() && roots.empty()) {
+    return;
+  }
+  free_aot_root_ids_.reserve(free_aot_root_ids_.size() + roots.size());
+  synchronize();
+  for (const auto handle : kernels) {
+    const int id = handle.get_launch_id();
+    ti_kernels_.erase(id);
+    ti_kernel_snode_tree_ids_.erase(id);
+  }
+  for (int id : roots) {
+    remove_root_buffer(id);
+    free_aot_root_ids_.push_back(id);
+  }
 }
 
 void GfxRuntime::add_root_buffer(int root_id, size_t root_buffer_size) {

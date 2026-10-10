@@ -82,6 +82,11 @@ lifetimes. The entries below describe the changes.
   Graphs or explicitly exported fields. Producer tree-ID holes are compacted
   into module-local IDs, with shader root bindings validated against the
   declared dependencies. Sparse runtime state is not relocated by this path.
+- C API GFX AOT modules bind local roots to independent runtime allocations.
+  Closing a module synchronizes its submitted work and retires its registrations
+  and roots; freed IDs can be reused without rebinding another live module.
+  Small Vulkan tests cover interleaved modules, forward/reverse Graph results
+  and close/reload. This is ordinary AOT Graph support, not native Graph export.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.

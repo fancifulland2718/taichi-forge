@@ -282,6 +282,9 @@ class TI_DLL_EXPORT GfxRuntime {
     std::vector<std::vector<uint32_t>> task_spirv_source_codes;
     std::size_t num_snode_trees{0};
     std::vector<int> snode_tree_ids;
+    // AOT-local root index -> this runtime's physical tree id. Empty keeps
+    // the JIT/legacy identity mapping. Dependencies above use physical ids.
+    std::vector<int> root_buffer_bindings;
     // AOT modules and loaded kernels share immutable host code storage.
     std::shared_ptr<const std::vector<std::vector<uint32_t>>>
         shared_task_spirv_source_codes;
@@ -595,6 +598,12 @@ class TI_DLL_EXPORT GfxRuntime {
 
   void add_root_buffer(size_t root_buffer_size);
 
+  std::vector<int> allocate_aot_root_buffers(const std::vector<size_t> &sizes);
+  // Ordinary AOT modules own these registrations and roots. Synchronizes
+  // their submitted work before retirement; not a native Graph ownership API.
+  void release_aot_resources(const std::vector<KernelHandle> &kernels,
+                             const std::vector<int> &roots);
+
   // Install a root buffer at the generation-safe Program SNodeTree id. The
   // indexed overload permits an explicitly destroyed slot to be reused
   // without changing the root binding seen by compiled kernels.
@@ -753,6 +762,7 @@ class TI_DLL_EXPORT GfxRuntime {
   // Fixed Graph command payloads share root allocations until their last
   // parent command retires, independently of the active tree table.
   std::vector<std::shared_ptr<DeviceAllocationGuard>> root_buffers_;
+  std::vector<int> free_aot_root_ids_;
 #if defined(TI_WITH_VULKAN_POINTER)
   // 路线 B B-1（2026-04-30）：每棵 SNode tree 上每个 pointer SNode 对应
   // 一个 DeviceNodeAllocator。outer key = root_id（与 root_buffers_ 同步），

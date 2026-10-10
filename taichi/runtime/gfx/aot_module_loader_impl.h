@@ -38,5 +38,9 @@ TI_DLL_EXPORT std::unique_ptr<aot::Module> make_aot_module(
     std::any mod_params,
     Arch device_api_backend);
 
+// Called after capability admission and before looking up any kernel/Graph.
+// The module then owns independent roots and its execution registrations.
+TI_DLL_EXPORT void allocate_aot_root_buffers(aot::Module *module);
+
 }  // namespace gfx
 }  // namespace taichi::lang

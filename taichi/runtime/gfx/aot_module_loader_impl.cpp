@@ -204,6 +204,35 @@ class AotModuleImpl : public aot::Module {
     }
   }
 
+  ~AotModuleImpl() override {
+    if (owns_runtime_resources_) {
+      try {
+        std::vector<GfxRuntime::KernelHandle> handles;
+        handles.reserve(registered_kernels_.size());
+        for (const auto &[index, handle] : registered_kernels_) {
+          handles.push_back(handle);
+        }
+        runtime_->release_aot_resources(handles, root_bindings_);
+      } catch (const std::exception &e) {
+        // A failed device synchronization must not free resources still in
+        // flight or throw from a destructor. The runtime retains them.
+        TI_WARN("Cannot retire GFX AOT resources: {}", e.what());
+      }
+    }
+  }
+
+  void allocate_root_buffers() {
+    TI_ERROR_IF(is_corrupted() || runtime_ == nullptr,
+                "Cannot allocate resources for an invalid GFX AOT module.");
+    if (owns_runtime_resources_) {
+      return;
+    }
+    TI_ERROR_IF(!registered_kernels_.empty(),
+                "GFX AOT resources must be bound before loading kernels.");
+    root_bindings_ = runtime_->allocate_aot_root_buffers(ti_aot_data_.root_buffer_sizes);
+    owns_runtime_resources_ = true;
+  }
+
   std::unique_ptr<aot::CompiledGraph> get_graph(
       const std::string &name) override {
     auto it = graphs_.find(name);
@@ -271,6 +300,13 @@ class AotModuleImpl : public aot::Module {
       kernel.num_snode_trees = ti_aot_data_.kernel_metadata[i].num_snode_trees;
       kernel.snode_tree_ids =
           ti_aot_data_.kernel_metadata[i].used_snode_tree_ids;
+      if (owns_runtime_resources_) {
+        kernel.root_buffer_bindings = root_bindings_;
+        for (int &id : kernel.snode_tree_ids) {
+          id = root_bindings_.at(id);
+        }
+        std::sort(kernel.snode_tree_ids.begin(), kernel.snode_tree_ids.end());
+      }
       return true;
     }
     return false;
@@ -340,6 +376,8 @@ class AotModuleImpl : public aot::Module {
   std::vector<std::string> shader_errors_;
   std::unordered_map<std::string, size_t> kernel_indices_;
   std::unordered_map<size_t, GfxRuntime::KernelHandle> registered_kernels_;
+  std::vector<int> root_bindings_;
+  bool owns_runtime_resources_{false};
   GfxRuntime *runtime_{nullptr};
   Arch device_api_backend_;
 };
@@ -350,6 +388,12 @@ std::unique_ptr<aot::Module> make_aot_module(std::any mod_params,
                                              Arch device_api_backend) {
   AotModuleParams params = std::any_cast<AotModuleParams &>(mod_params);
   return std::make_unique<AotModuleImpl>(params, device_api_backend);
+}
+
+void allocate_aot_root_buffers(aot::Module *module) {
+  auto *gfx_module = dynamic_cast<AotModuleImpl *>(module);
+  TI_ERROR_IF(!gfx_module, "Expected a GFX AOT module.");
+  gfx_module->allocate_root_buffers();
 }
 
 }  // namespace gfx

@@ -158,6 +158,32 @@ void run_dense_field_kernel(Arch arch, taichi::lang::Device *device) {
     EXPECT_FLOAT_EQ(builder.get_ret<float>(0), 0.2);
   }
   EXPECT_TRUE(retired_code.expired());
+
+  const auto registrations = gfx_runtime->debug_registered_kernel_count();
+  std::vector<int> previous_bindings;
+  for (int iteration = 0; iteration < 2; ++iteration) {
+    auto owned = aot::Module::load(arch, mod_params);
+    gfx::allocate_aot_root_buffers(owned.get());
+    auto *init = dynamic_cast<gfx::KernelImpl *>(owned->get_kernel("init"));
+    ASSERT_NE(init, nullptr);
+    const auto bindings = init->params().root_buffer_bindings;
+    ASSERT_EQ(bindings.size(), 1);
+    // The earlier manually allocated root 0 remains live.
+    EXPECT_NE(bindings[0], 0);
+    if (iteration) {
+      EXPECT_EQ(bindings, previous_bindings);
+    }
+    previous_bindings = bindings;
+    EXPECT_NE(owned->get_kernel("simple_return"), nullptr);
+    EXPECT_EQ(gfx_runtime->debug_registered_kernel_count(), registrations + 2);
+    {
+      LaunchContextBuilder builder(init);
+      builder.get_context().result_buffer = result_buffer;
+      init->launch(builder);
+    }
+    owned.reset();
+    EXPECT_EQ(gfx_runtime->debug_registered_kernel_count(), registrations);
+  }
 }
 
 void run_kernel_test1(Arch arch, taichi::lang::Device *device) {
