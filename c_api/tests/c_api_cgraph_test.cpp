@@ -1,4 +1,5 @@
 #include "gtest/gtest.h"
+#include "c_api_test_utils.h"
 #include <limits>
 
 #include "taichi/cpp/taichi.hpp"

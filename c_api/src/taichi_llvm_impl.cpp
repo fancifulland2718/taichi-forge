@@ -246,7 +246,12 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cuda_memory(TiRuntime runtime,
 // function.set_cuda_stream
 TI_DLL_EXPORT void TI_API_CALL ti_set_cuda_stream(void *stream) {
 #ifdef TI_WITH_CUDA
-  taichi::lang::CUDAContext::get_instance().set_stream(stream);
+  // Ordinary kernels and Graph replay share the legacy default stream.
+  // Accepting another stream here would falsely promise interop ordering.
+  if (stream != nullptr) {
+    ti_set_last_error(TI_ERROR_NOT_SUPPORTED,
+                      "CUDA runtime uses the legacy default stream");
+  }
 
 #else
   TI_NOT_IMPLEMENTED;
@@ -256,7 +261,8 @@ TI_DLL_EXPORT void TI_API_CALL ti_set_cuda_stream(void *stream) {
 // function.get_cuda_stream
 TI_DLL_EXPORT void TI_API_CALL ti_get_cuda_stream(void **stream) {
 #ifdef TI_WITH_CUDA
-  *stream = taichi::lang::CUDAContext::get_instance().get_stream();
+  TI_CAPI_ARGUMENT_NULL(stream);
+  *stream = nullptr;
 #else
   TI_NOT_IMPLEMENTED;
 

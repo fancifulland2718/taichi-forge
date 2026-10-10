@@ -901,7 +901,7 @@ void ti_launch_compute_graph(TiRuntime runtime,
   std::unordered_map<std::string, taichi::lang::aot::IValue> arg_map{};
   std::vector<taichi::lang::Ndarray> ndarrays;
   ndarrays.reserve(arg_count);
-  std::vector<taichi::lang::Texture> textures;
+  std::vector<std::unique_ptr<taichi::lang::Texture>> textures;
   textures.reserve(arg_count);
   std::vector<taichi::lang::Matrix> matrices;
   matrices.reserve(arg_count);
@@ -1056,10 +1056,10 @@ void ti_launch_compute_graph(TiRuntime runtime,
         uint32_t height = arg.argument.value.texture.extent.height;
         uint32_t depth = arg.argument.value.texture.extent.depth;
 
-        textures.emplace_back(
-            taichi::lang::Texture(devalloc, format, width, height, depth));
+        textures.push_back(std::make_unique<taichi::lang::Texture>(
+            devalloc, format, width, height, depth));
         arg_map.emplace(std::make_pair(
-            arg.name, taichi::lang::aot::IValue::create(textures.back())));
+            arg.name, taichi::lang::aot::IValue::create(*textures.back())));
         break;
       }
       case TI_ARGUMENT_TYPE_TENSOR: {

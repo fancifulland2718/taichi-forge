@@ -11,6 +11,21 @@
 #include "c_api/tests/gtest_fixture.h"
 
 #ifdef TI_WITH_LLVM
+#ifdef TI_WITH_CUDA
+TEST_F(CapiTest, CudaDefaultStreamContract) {
+  void *stream = reinterpret_cast<void *>(uintptr_t(1));
+  ti_get_cuda_stream(&stream);
+  EXPECT_EQ(stream, nullptr);
+  ASSERT_TAICHI_SUCCESS();
+  ti_set_cuda_stream(nullptr);
+  ASSERT_TAICHI_SUCCESS();
+  ti_set_cuda_stream(reinterpret_cast<void *>(uintptr_t(1)));
+  EXPECT_TAICHI_ERROR(TI_ERROR_NOT_SUPPORTED, "default stream");
+  ti_get_cuda_stream(nullptr);
+  EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_NULL, "stream");
+}
+#endif
+
 TEST_F(CapiTest, AotTestCpuBufferInterop) {
   TiArch arch = TiArch::TI_ARCH_X64;
   ti::Runtime runtime(arch);

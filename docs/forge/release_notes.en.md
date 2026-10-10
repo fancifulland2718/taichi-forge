@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Restore the Windows C API build with the split runtime's object dependencies
+  and stable Graph texture ownership. CUDA stream interop reports the existing
+  legacy-default-stream contract and rejects unsupported non-default streams.
 - LLVM O0 removes private scalar spill slots after runtime helper inlining,
   reducing temporary loads/stores before machine-code generation without
   enabling higher-tier arithmetic optimizations.

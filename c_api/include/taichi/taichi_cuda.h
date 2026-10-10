@@ -26,9 +26,12 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cuda_memory(TiRuntime runtime,
                                                          size_t memory_size);
 
 // Function `ti_set_cuda_stream`
+// Forge uses the legacy default stream. nullptr is accepted; non-null streams
+// report TI_ERROR_NOT_SUPPORTED without changing the runtime's stream.
 TI_DLL_EXPORT void TI_API_CALL ti_set_cuda_stream(void *stream);
 
 // Function `ti_get_cuda_stream`
+// Writes nullptr (the legacy default stream). `stream` must not be null.
 TI_DLL_EXPORT void TI_API_CALL ti_get_cuda_stream(void **stream);
 
 #ifdef __cplusplus
