@@ -54,11 +54,11 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
                                 const std::string &filename) const {
   LlvmOfflineCacheFileWriter writer;
   writer.set_data(std::move(cache_));
-  writer.dump(output_dir);
+  writer.dump(output_dir, LlvmOfflineCache::Format::BC);
 
   LLVM::LlvmAotMetadata metadata;
   metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
-  metadata.kernel_format = "ll";
+  metadata.kernel_format = "bc";
   if (compile_config_.arch == Arch::cuda) {
     for (const auto capability : {
              DeviceCapability::cuda_compute_capability,

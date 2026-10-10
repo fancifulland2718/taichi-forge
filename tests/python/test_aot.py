@@ -790,6 +790,23 @@ def test_devcap_weird_user_input():
         )
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_llvm_aot_declares_bitcode_payload(tmp_path):
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i + 3
+
+    module = ti.aot.Module()
+    module.add_kernel(fill)
+    module.save(tmp_path)
+    metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
+    assert metadata["schema_version"] == 3
+    assert metadata["kernel_format"] == "bc"
+    assert (tmp_path / "fill.bc").read_bytes().startswith(b"BC\xc0\xde")
+    assert not list(tmp_path.glob("*.ll"))
+
+
 def test_cuda_aot_capability_argument_validation():
     assert (
         ti.DeviceCapability.cuda_compute_capability(86)

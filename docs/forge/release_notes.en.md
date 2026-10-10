@@ -126,8 +126,10 @@ lifetimes. The entries below describe the changes.
   request skip the SNode lifecycle lock.
 - LLVM offline JIT caches store bitcode to reduce serialized size and read costs,
   while retaining legacy text payload reading. New writes use a separate cache
-  schema. JIT and AOT share the module codec; AOT still exports text IR by default,
-  with optimization tiers and numerical rules unchanged.
+  schema. JIT and AOT share the module codec. CPU/CUDA AOT now writes bitcode
+  with schema 3 metadata declaring the encoding; schema 2 text artifacts remain
+  readable. Invalid declared payloads fail without selecting a stale alternative
+  file. Optimization tiers and numerical rules are unchanged.
 - LLVM AOT loading transfers ownership instead of making two intermediate module
   copies. Callables retain only their ABI, reducing load peaks and retained IR;
   the backend continues to own the executable modules and resources.
