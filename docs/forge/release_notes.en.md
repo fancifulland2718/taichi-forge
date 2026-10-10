@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- SPIR-V compute shaders without ray queries skip the use-index construction
+  needed only for ray-query result analysis. Code generation, GFX registration
+  and AOT export avoid intermediate shader copies while preserving query
+  results, artifact formats and resource ownership contracts.
 - Whole-kernel CSE avoids creating empty candidate tables during ancestor-scope
   lookups and groups global pointer candidates by field. No-op iterations skip
   use-index construction while preserving branch-hoisting invalidation,

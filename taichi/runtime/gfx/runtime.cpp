@@ -1713,13 +1713,9 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
 #endif
   params.backend_cache = backend_cache_.get();
 
-  for (int i = 0; i < reg_params.task_spirv_source_codes.size(); ++i) {
-    const auto &spirv_src = reg_params.task_spirv_source_codes[i];
-
-    // If we can reach here, we have succeeded. Otherwise
-    // std::optional::value() would have killed us.
-    params.spirv_bins.push_back(std::move(spirv_src));
-  }
+  // Registration owns this staging copy. Transfer its code buffers to the
+  // pipeline constructor; moving a const task vector would copy every word.
+  params.spirv_bins = std::move(reg_params.task_spirv_source_codes);
   KernelHandle res;
   TI_ERROR_IF(next_ti_kernel_id_ == std::numeric_limits<int>::max(),
               "GFX kernel registration ID space exhausted; call ti.reset().");

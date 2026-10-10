@@ -91,7 +91,7 @@ void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
       request.config(), request.device_caps(), *kernel);
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
-  auto compiled = spirv_ckd.get_internal_data();
+  const auto &compiled = spirv_ckd.get_internal_data();
   TI_ERROR_IF(
       compiled.metadata.num_snode_trees !=
           ti_aot_data_.root_buffer_sizes.size(),
@@ -100,8 +100,8 @@ void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
       identifier,
       compiled.metadata.num_snode_trees,
       ti_aot_data_.root_buffer_sizes.size());
-  compiled.metadata.kernel_attribs.name = identifier;
   ti_aot_data_.kernels.push_back(compiled.metadata.kernel_attribs);
+  ti_aot_data_.kernels.back().name = identifier;
   ti_aot_data_.kernel_metadata.push_back(
       {compiled.metadata.num_snode_trees,
        compiled.metadata.used_snode_tree_ids});
@@ -157,7 +157,7 @@ void AotModuleBuilderImpl::add_per_backend_tmpl(const std::string &identifier,
       request.config(), request.device_caps(), *kernel);
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
-  auto compiled = spirv_ckd.get_internal_data();
+  const auto &compiled = spirv_ckd.get_internal_data();
   TI_ERROR_IF(
       compiled.metadata.num_snode_trees !=
           ti_aot_data_.root_buffer_sizes.size(),
@@ -167,8 +167,8 @@ void AotModuleBuilderImpl::add_per_backend_tmpl(const std::string &identifier,
       key,
       compiled.metadata.num_snode_trees,
       ti_aot_data_.root_buffer_sizes.size());
-  compiled.metadata.kernel_attribs.name = identifier + "__tmpl__" + key;
   ti_aot_data_.kernels.push_back(compiled.metadata.kernel_attribs);
+  ti_aot_data_.kernels.back().name = identifier + "__tmpl__" + key;
   ti_aot_data_.kernel_metadata.push_back(
       {compiled.metadata.num_snode_trees,
        compiled.metadata.used_snode_tree_ids});

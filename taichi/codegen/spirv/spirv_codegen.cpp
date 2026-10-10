@@ -4377,7 +4377,6 @@ class TaskCodegen : public IRVisitor {
 
   void collect_ray_query_result_masks() {
     constexpr std::uint32_t kAllRayQueryMembers = (1u << 9) - 1u;
-    const auto usages = irpass::analysis::gather_statement_usages(task_ir_);
     const auto calls = irpass::analysis::gather_statements(
         task_ir_, [](Stmt *stmt) {
           const auto *call = stmt->cast<InternalFuncStmt>();
@@ -4386,6 +4385,11 @@ class TaskCodegen : public IRVisitor {
                   call->func_name == "vulkan_ray_query_candidate" ||
                   call->func_name == "vulkan_ray_query_committed");
         });
+    // Compute-only tasks have no result members to analyze. Avoid building
+    // a full reverse-use map for every unrelated physics/array shader.
+    if (calls.empty())
+      return;
+    const auto usages = irpass::analysis::gather_statement_usages(task_ir_);
     for (Stmt *call : calls) {
       std::uint32_t mask = 0;
       if (const auto found = usages.find(call); found != usages.end()) {
