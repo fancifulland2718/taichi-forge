@@ -11,6 +11,9 @@
 namespace taichi::lang {
 
 struct RuntimeContext;
+namespace aot {
+struct CompiledGraphKernelInvocation;
+}
 
 class LaunchContextBuilder {
  public:
@@ -272,10 +275,12 @@ class LaunchContextBuilder {
 
  private:
   friend class Kernel;
+  friend struct aot::CompiledGraphKernelInvocation;
 
   // Bind launch-only projections owned by an immutable Kernel execution plan.
   // Keeping this private prevents callers from supplying temporary or forged
-  // references; Kernel owns every referenced object for the launch lifetime.
+  // references; the Kernel or frozen Graph invocation owns every referenced
+  // object for the launch lifetime.
   void bind_cuda_task_execution_plan(
       const std::string &identity,
       const CudaTaskExecutionPlanDigest &content_digest,

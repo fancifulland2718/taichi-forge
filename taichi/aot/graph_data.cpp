@@ -38,6 +38,74 @@
 namespace taichi::lang {
 namespace aot {
 
+struct CompiledGraphKernelInvocation {
+  CallableBase callable;
+  std::shared_ptr<KernelExecutionHandle> execution_handle;
+  struct TaskLaunchPlan {
+    std::string identity;
+    LaunchContextBuilder::CudaTaskExecutionPlanDigest digest;
+    std::vector<std::string> kinds;
+    std::vector<int> residency_waves;
+    std::vector<int> work_per_thread;
+    std::vector<int> sparse_list_policies;
+  };
+  std::optional<TaskLaunchPlan> task_launch_plan;
+
+  CompiledGraphKernelInvocation(taichi::lang::Kernel &kernel,
+                               std::shared_ptr<KernelExecutionHandle> handle)
+      : callable(static_cast<const CallableBase &>(kernel)),
+        execution_handle(std::move(handle)) {
+    // Use the ordinary context constructor to freeze launch policy before
+    // copying its immutable values. No frontend IR or SNode pointers survive
+    // in this snapshot, even if another variant later retires the definition.
+    auto context = kernel.make_launch_context();
+    if (context.has_cuda_task_execution_plan()) {
+      task_launch_plan.emplace(TaskLaunchPlan{
+          context.cuda_task_execution_plan_identity(),
+          context.cuda_task_execution_plan_content_digest(),
+          context.cuda_task_execution_plan_kinds(),
+          context.cuda_task_grid_residency_waves(),
+          context.cuda_task_range_work_per_thread_targets(),
+          context.cuda_task_sparse_list_policies()});
+    }
+  }
+
+  LaunchContextBuilder make_launch_context(bool cpu_bounded_range) {
+    LaunchContextBuilder context(&callable, cpu_bounded_range);
+    if (task_launch_plan) {
+      const auto &plan = *task_launch_plan;
+      context.bind_cuda_task_execution_plan(
+          plan.identity, plan.digest, plan.kinds, plan.residency_waves,
+          plan.work_per_thread, plan.sparse_list_policies);
+    }
+    return context;
+  }
+};
+
+void CompiledDispatch::bind_jit_kernel(
+    std::shared_ptr<KernelExecutionHandle> handle) {
+  TI_ASSERT(ti_kernel != nullptr && handle != nullptr);
+  jit_invocation = std::make_shared<CompiledGraphKernelInvocation>(
+      *ti_kernel, std::move(handle));
+}
+
+const std::shared_ptr<KernelExecutionHandle> &
+CompiledDispatch::jit_execution_handle() const {
+  static const std::shared_ptr<KernelExecutionHandle> empty;
+  return jit_invocation ? jit_invocation->execution_handle : empty;
+}
+
+CallableBase *CompiledDispatch::jit_callable() const {
+  return jit_invocation ? &jit_invocation->callable : ti_kernel;
+}
+
+LaunchContextBuilder CompiledDispatch::make_launch_context(
+    bool cpu_bounded_range) const {
+  return jit_invocation
+             ? jit_invocation->make_launch_context(cpu_bounded_range)
+             : ti_kernel->make_launch_context(cpu_bounded_range);
+}
+
 namespace {
 
 std::vector<SNodeTreeDependency> collect_snode_tree_dependencies(
@@ -406,10 +474,16 @@ const CompiledKernelData *get_or_compile_cached_kernel(
     CompiledGraphJITCachedKernel &cached,
     bool cache_compiled_kernel_data) {
   auto *prog = dispatch.ti_kernel->program;
-  auto execution_handle = cached.execution_handle;
-  if (execution_handle != nullptr && !execution_handle->active()) {
-    execution_handle.reset();
-    cached.execution_handle.reset();
+  auto execution_handle = dispatch.jit_execution_handle();
+  if (execution_handle != nullptr) {
+    TI_ERROR_IF(!execution_handle->active(),
+                "Graph build artifact has retired; rebuild the Graph.");
+  } else {
+    execution_handle = cached.execution_handle;
+    if (execution_handle != nullptr && !execution_handle->active()) {
+      execution_handle.reset();
+      cached.execution_handle.reset();
+    }
   }
   if (execution_handle == nullptr && !cached.kernel_key.empty()) {
     execution_handle = prog->find_cached_kernel_execution_handle(
@@ -418,9 +492,9 @@ const CompiledKernelData *get_or_compile_cached_kernel(
   if (execution_handle == nullptr) {
     execution_handle = prog->compile_kernel_execution_handle(
         compile_config, prog->get_device_caps(), *dispatch.ti_kernel);
-    if (cached.kernel_key.empty()) {
-      cached.kernel_key = execution_handle->compiled().kernel_identity();
-    }
+  }
+  if (cached.kernel_key.empty()) {
+    cached.kernel_key = execution_handle->compiled().kernel_identity();
   }
   // All JIT Graph paths retain the stable handle. The historical flag is kept
   // at call sites for source compatibility while Vulkan transitions away from
@@ -528,7 +602,7 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
     plan.bounded_capacity = dispatch.cpu_bounded_dispatch->capacity;
   }
   plan.args.reserve(dispatch.symbolic_args.size());
-  auto *args_type = dispatch.ti_kernel->args_type;
+  auto *args_type = dispatch.jit_callable()->args_type;
   for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
     const auto &symbolic_arg = dispatch.symbolic_args[i];
     CompiledGraphRuntimeArgPlan arg_plan;
@@ -2357,7 +2431,7 @@ bool patch_cuda_graph_arguments(
       return false;
     }
 
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -2727,7 +2801,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
 
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -3121,7 +3195,7 @@ bool try_run_cuda_masked_control_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel_graph_gated(llvm_ckd);
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -3451,7 +3525,7 @@ bool try_run_cuda_conditional_nested_control_graph(
           dispatch, compile_config, cache.kernels[i], true);
       auto handle = launcher->register_llvm_kernel(
           dynamic_cast<const LLVM::CompiledKernelData &>(*data));
-      auto context = dispatch.ti_kernel->make_launch_context();
+      auto context = dispatch.make_launch_context();
       context.append_dispatch_label(dispatch.dispatch_label);
       graph.init_runtime_context(dispatch.symbolic_args, args, context);
       program.resolve_ndarray_launch_context_under_guard(context);
@@ -3965,7 +4039,7 @@ bool try_run_cuda_device_update_nested_control_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -4483,7 +4557,7 @@ bool try_run_cuda_masked_nested_control_graph(
     auto handle = initial_outer_condition
                       ? launcher->register_llvm_kernel(llvm_ckd)
                       : launcher->register_llvm_kernel_graph_gated(llvm_ckd);
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -4820,7 +4894,7 @@ bool try_run_cuda_bounded_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -5238,7 +5312,7 @@ bool try_run_cuda_conditional_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -5724,7 +5798,7 @@ bool prepare_vulkan_graph_launch(
     auto handle = launcher->get_or_register_kernel(*compiled_kernel_data);
     prepared.launch_contexts.push_back(
         std::make_unique<LaunchContextBuilder>(
-            dispatch.ti_kernel->make_launch_context()));
+            dispatch.make_launch_context()));
     prepared.launch_contexts.back()->append_dispatch_label(
         dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args,
@@ -6393,16 +6467,16 @@ void CompiledGraph::jit_run(
 #endif
     }
     TI_ASSERT(dispatch.ti_kernel);
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
+    auto launch_ctx = dispatch.make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
-    // Compile & Run (JIT): The compilation result will be cached, so don't
-    // worry that the kernels dispatched by this cgraph will be compiled
-    // repeatedly.
+    // Launch the artifact selected while building the Graph. The helper also
+    // handles internal dispatches assembled without a bound invocation.
     auto *prog = dispatch.ti_kernel->program;
-    const auto &compiled_kernel_data = prog->compile_kernel(
-        compile_config, prog->get_device_caps(), *dispatch.ti_kernel);
-    prog->launch_kernel(compiled_kernel_data, launch_ctx);
+    CompiledGraphJITCachedKernel cached;
+    const auto *compiled_kernel_data = get_or_compile_cached_kernel(
+        dispatch, compile_config, cached, true);
+    prog->launch_kernel(*compiled_kernel_data, launch_ctx);
   }
   if (resource_guard) {
     resource_guard->finish_external_access_epoch();
@@ -6692,7 +6766,7 @@ void CompiledGraph::jit_run_cached(
     }
     TI_ASSERT(dispatch.ti_kernel);
     auto *prog = dispatch.ti_kernel->program;
-    auto launch_ctx = dispatch.ti_kernel->make_launch_context(
+    auto launch_ctx = dispatch.make_launch_context(
         dispatch.cpu_bounded_dispatch.has_value());
     if (compile_config.arch == Arch::cuda) {
       set_cuda_bounded_range_binding(dispatch, launch_ctx);

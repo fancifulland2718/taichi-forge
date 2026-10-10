@@ -655,9 +655,11 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
   dispatch.cpu_bounded_dispatch = cpu_bounded_dispatch_;
   dispatch.ti_kernel = kernel_;
   dispatch.compiled_kernel = nullptr;
-  const auto &compiled = kernel_->program->compile_kernel(
+  auto handle = kernel_->program->compile_kernel_execution_handle(
       kernel_->program->compile_config(),
       kernel_->program->get_device_caps(), *kernel_);
+  const auto &compiled = handle->compiled();
+  dispatch.bind_jit_kernel(std::move(handle));
   dispatch.graph_metadata = compiled.graph_metadata();
   dispatch.compiled_task_count = static_cast<std::uint32_t>(
       std::min<std::size_t>(compiled.task_count(),

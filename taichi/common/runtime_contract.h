@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Kernel cache contexts change private Kernel ownership and key return ABI.
-inline constexpr int kForgeNativeAbiRevision = 11;
+inline constexpr int kForgeNativeAbiRevision = 12;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

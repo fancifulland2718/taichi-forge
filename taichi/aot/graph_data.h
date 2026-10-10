@@ -34,6 +34,7 @@ class Matrix;
 class Kernel;
 class CompiledKernelData;
 class KernelExecutionHandle;
+class LaunchContextBuilder;
 class Program;
 namespace storage {
 class RuntimeStorageArgument;
@@ -329,6 +330,8 @@ class CudaGraphCaptureCommand {
   }
 };
 
+struct CompiledGraphKernelInvocation;
+
 struct CompiledDispatch {
   std::string kernel_name;
   // JIT-only invocation metadata. AOT payloads remain source-compatible and
@@ -337,6 +340,13 @@ struct CompiledDispatch {
   std::vector<Arg> symbolic_args;
   Kernel *compiled_kernel{nullptr};
   taichi::lang::Kernel *ti_kernel{nullptr};
+  // JIT-only immutable build artifact and callable ABI. Shared by dispatch
+  // copies; neither frontend IR nor process-local handles enter AOT payloads.
+  std::shared_ptr<CompiledGraphKernelInvocation> jit_invocation;
+  void bind_jit_kernel(std::shared_ptr<KernelExecutionHandle> handle);
+  const std::shared_ptr<KernelExecutionHandle> &jit_execution_handle() const;
+  CallableBase *jit_callable() const;
+  LaunchContextBuilder make_launch_context(bool cpu_bounded_range = false) const;
   // JIT-only metadata. AOT serialization intentionally remains unchanged:
   // loaded module fields have a module-owned lifecycle rather than Program
   // SNodeTree identities.

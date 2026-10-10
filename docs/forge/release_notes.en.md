@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- JIT Graphs retain their build-time execution artifact, callable ABI and launch
+  policy. First replay no longer selects different code or recompiles after a
+  global configuration change; rebuild the Graph to adopt new compilation
+  options. Valid artifacts and their actual resource bindings
+  remain usable after frontend definition retirement. AOT Graph serialization is
+  unchanged; Python/native pairs require ABI revision 12.
 - Different optimization requests for one kernel may retain different Field
   dependencies, fixing an assertion when switching configurations. Definition
   retirement accumulates dependencies across variants; artifacts and Graphs keep
@@ -54,7 +60,7 @@ lifetimes. The entries below describe the changes.
   ABI and optimization metadata, preventing cross-request reuse between JIT and
   AOT. Precompile key queries apply the same kernel-tier normalization as JIT.
   Context comparison avoids hashing unchanged requests; old compiled caches are
-  invalidated. The Python shim and native runtime require matching ABI revision 11.
+  invalidated. The Python shim and native runtime require matching ABI revision 12.
 - Algebraic simplification maintains actual statement users across its rewrite
   iterations, building the index only when a reference replacement needs it.
   This reduces repeated IR scans without changing algebraic rules.
