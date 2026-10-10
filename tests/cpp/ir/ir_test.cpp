@@ -2,6 +2,7 @@
 
 #include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
+#include "taichi/program/compile_config.h"
 
 namespace taichi::lang {
 namespace {
@@ -39,6 +40,85 @@ TEST(Block, EraseRange) {
   EXPECT_EQ(b.size(), 2);
   EXPECT_EQ(b.locate(stmt_ptrs.front()), 0);
   EXPECT_EQ(b.locate(stmt_ptrs.back()), 1);
+}
+
+TEST(DelayedIRModifier, PreservesInsertionGroupsAndErasedOwnership) {
+  Block block;
+  auto *anchor = block.insert(make_const_i32(0));
+  auto *last = block.insert(make_const_i32(9));
+  DelayedIRModifier edits;
+  VecStatement first;
+  first.push_back(make_const_i32(1));
+  first.push_back(make_const_i32(2));
+  edits.insert_before(anchor, std::move(first));
+  edits.insert_before(anchor, make_const_i32(3));
+  VecStatement after;
+  after.push_back(make_const_i32(4));
+  after.push_back(make_const_i32(5));
+  edits.insert_after(anchor, std::move(after));
+  edits.insert_after(anchor, make_const_i32(6));
+  edits.erase(last);
+  edits.erase(anchor);
+  EXPECT_TRUE(edits.modify_ir());
+  std::vector<int> values;
+  for (auto &stmt : block.statements) {
+    values.push_back(stmt->as<ConstStmt>()->val.val_int32());
+    EXPECT_EQ(stmt->parent, &block);
+    EXPECT_FALSE(stmt->erased);
+  }
+  EXPECT_EQ(values, (std::vector<int>{1, 2, 3, 6, 4, 5}));
+  EXPECT_TRUE(anchor->erased);
+  EXPECT_TRUE(last->erased);
+  EXPECT_EQ(block.trash_bin.size(), 2);
+  EXPECT_FALSE(edits.modify_ir());
+}
+
+TEST(DelayedIRModifier, PreservesDependenciesOnNewAnchors) {
+  for (bool before : {false, true}) {
+    Block block;
+    auto *anchor = block.insert(make_const_i32(0));
+    auto middle = make_const_i32(1);
+    auto *middle_ptr = middle.get();
+    DelayedIRModifier edits;
+    if (before) {
+      edits.insert_before(anchor, std::move(middle));
+      edits.insert_before(middle_ptr, make_const_i32(2));
+    } else {
+      edits.insert_after(anchor, std::move(middle));
+      edits.insert_after(middle_ptr, make_const_i32(2));
+    }
+    EXPECT_TRUE(edits.modify_ir());
+    std::vector<int> values;
+    for (auto &stmt : block.statements) {
+      values.push_back(stmt->as<ConstStmt>()->val.val_int32());
+      EXPECT_EQ(stmt->parent, &block);
+    }
+    EXPECT_EQ(values, before ? (std::vector<int>{2, 1, 0})
+                             : (std::vector<int>{0, 1, 2}));
+  }
+}
+
+TEST(DelayedIRModifier, EditsChildrenOfErasedContainers) {
+  Block block;
+  auto *condition = block.insert(make_const_i32(1));
+  auto branch = std::make_unique<IfStmt>(condition);
+  branch->true_statements = std::make_unique<Block>();
+  auto *child = branch->true_statements->insert(make_const_i32(2));
+  auto *body = branch->true_statements.get();
+  auto *branch_ptr = block.insert(std::move(branch));
+  DelayedIRModifier edits;
+  edits.insert_before(child, make_const_i32(3));
+  edits.insert_after(child, make_const_i32(4));
+  edits.insert_before(condition, make_const_i32(5));
+  edits.erase(branch_ptr);
+  edits.erase(child);
+  edits.modify_ir();
+  EXPECT_EQ(block.size(), 2);
+  EXPECT_EQ(body->size(), 2);
+  EXPECT_EQ(body->statements[0]->as<ConstStmt>()->val.val_int32(), 3);
+  EXPECT_EQ(body->statements[1]->as<ConstStmt>()->val.val_int32(), 4);
+  EXPECT_TRUE(branch_ptr->erased);
+  EXPECT_TRUE(child->erased);
 }
 
 TEST(RangeFor, CloneWithBody) {

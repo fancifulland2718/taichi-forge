@@ -37,6 +37,9 @@ lifetimes. The entries below describe the changes.
 - LLVM O0 removes private scalar spill slots after runtime helper inlining,
   reducing temporary loads/stores before machine-code generation without
   enabling higher-tier arithmetic optimizations.
+- Delayed IR edits batch independent insertions and erasures by block, avoiding
+  repeated statement searches and array moves during scalarization. Edits that
+  depend on newly inserted anchors preserve their sequential order.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.

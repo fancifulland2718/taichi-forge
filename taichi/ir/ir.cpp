@@ -534,23 +534,93 @@ void DelayedIRModifier::type_check(IRNode *node, CompileConfig cfg) {
   to_type_check_.emplace_back(node, cfg);
 }
 
+namespace {
+
+void apply_delayed_insertions(
+    std::vector<std::pair<Stmt *, VecStatement>> &insertions,
+    bool before) {
+  if (insertions.empty())
+    return;
+  // A later edit can target a statement inserted by an earlier edit. Its
+  // parent is not assigned yet, so preserve the sequential dependency order.
+  if (insertions.size() == 1 ||
+      std::any_of(insertions.begin(), insertions.end(), [](const auto &edit) {
+        return edit.first->parent == nullptr;
+      })) {
+    for (auto &edit : insertions) {
+      auto *block = edit.first->parent;
+      if (before)
+        block->insert_before(edit.first, std::move(edit.second));
+      else
+        block->insert_after(edit.first, std::move(edit.second));
+    }
+    insertions.clear();
+    return;
+  }
+
+  std::unordered_map<Stmt *, std::vector<VecStatement *>> by_anchor;
+  std::unordered_map<Block *, size_t> added_counts;
+  for (auto &edit : insertions) {
+    by_anchor[edit.first].push_back(&edit.second);
+    added_counts[edit.first->parent] += edit.second.size();
+  }
+  size_t applied = 0;
+  for (const auto &[block, added] : added_counts) {
+    stmt_vector rebuilt;
+    rebuilt.reserve(block->statements.size() + added);
+    auto append = [&](VecStatement *values) {
+      ++applied;
+      for (auto &value : values->stmts) {
+        value->parent = block;
+        rebuilt.push_back(std::move(value));
+      }
+    };
+    for (auto &stmt : block->statements) {
+      auto found = by_anchor.find(stmt.get());
+      if (found == by_anchor.end()) {
+        rebuilt.push_back(std::move(stmt));
+        continue;
+      }
+      if (before) {
+        for (auto *values : found->second)
+          append(values);
+        rebuilt.push_back(std::move(stmt));
+      } else {
+        rebuilt.push_back(std::move(stmt));
+        // Repeated insert_after places the newest group nearest the anchor.
+        for (auto it = found->second.rbegin(); it != found->second.rend(); ++it)
+          append(*it);
+      }
+    }
+    block->statements = std::move(rebuilt);
+  }
+  TI_ASSERT(applied == insertions.size());
+  insertions.clear();
+}
+
+}  // namespace
+
 bool DelayedIRModifier::modify_ir() {
+  TI_AUTO_PROF;
   bool force_modified = modified_;
   modified_ = false;
   if (to_insert_before_.empty() && to_insert_after_.empty() &&
       to_erase_.empty() && to_replace_with_.empty() &&
       to_extract_to_block_front_.empty() && to_type_check_.empty())
     return force_modified;
-  for (auto &i : to_insert_before_) {
-    i.first->parent->insert_before(i.first, std::move(i.second));
-  }
-  to_insert_before_.clear();
-  for (auto &i : to_insert_after_) {
-    i.first->parent->insert_after(i.first, std::move(i.second));
-  }
-  to_insert_after_.clear();
-  for (auto &stmt : to_erase_) {
-    stmt->parent->erase(stmt);
+  apply_delayed_insertions(to_insert_before_, true);
+  apply_delayed_insertions(to_insert_after_, false);
+  if (to_erase_.size() == 1) {
+    to_erase_.front()->parent->erase(to_erase_.front());
+  } else if (!to_erase_.empty()) {
+    // Retain erased objects in their block's trash bin, as sequential erase
+    // does, so queued replacements and edits inside removed containers stay
+    // valid until the modifier has finished.
+    std::unordered_map<Block *, std::unordered_set<Stmt *>> by_block;
+    for (auto *stmt : to_erase_)
+      by_block[stmt->parent].insert(stmt);
+    for (auto &[block, stmts] : by_block)
+      block->erase(std::move(stmts));
   }
   to_erase_.clear();
   for (auto &i : to_replace_with_) {
