@@ -37,6 +37,10 @@ lifetimes. The entries below describe the changes.
 - Restore the Windows C API build with the split runtime's object dependencies
   and stable Graph texture ownership. CUDA stream interop reports the existing
   legacy-default-stream contract and rejects unsupported non-default streams.
+- GFX AOT loading rejects incomplete SPIR-V reads and invalid headers. The C API
+  now checks serialized capability requirements, accepting devices with equal
+  or higher capability levels and rejecting insufficient devices before root
+  allocation.
 - LLVM O0 removes private scalar spill slots after runtime helper inlining,
   reducing temporary loads/stores before machine-code generation without
   enabling higher-tier arithmetic optimizations.

@@ -22,7 +22,7 @@ Error GfxRuntime::create_aot_module(const taichi::io::VirtualDir *dir,
   for (const auto &pair : required_devcaps.devcaps) {
     uint32_t current_version = current_devcaps.get(pair.first);
     uint32_t required_version = pair.second;
-    if (current_version != required_version) {
+    if (current_version < required_version) {
       return Error(TI_ERROR_INCOMPATIBLE_MODULE,
                    taichi::lang::to_string(pair.first).c_str());
     }

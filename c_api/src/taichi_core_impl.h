@@ -133,6 +133,10 @@ class Runtime {
   [[deprecated("create_aot_module")]] virtual TiAotModule load_aot_module(
       const char *module_path) {
     auto dir = taichi::io::VirtualDir::open(module_path);
+    if (!dir) {
+      ti_set_last_error(TI_ERROR_CORRUPTED_DATA, module_path);
+      return TI_NULL_HANDLE;
+    }
     TiAotModule aot_module = TI_NULL_HANDLE;
     Error err = create_aot_module(dir.get(), aot_module);
     err.set_last_error();

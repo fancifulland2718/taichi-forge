@@ -41,10 +41,19 @@ class AotModuleImpl : public aot::Module {
         TI_WARN("'metadata.json' cannot be read");
         return;
       }
-      auto json = liong::json::parse(
-          (const char *)metadata_json.data(),
-          (const char *)(metadata_json.data() + metadata_json.size()));
-      liong::json::deserialize(json, ti_aot_data_);
+      try {
+        auto json = liong::json::parse(
+            (const char *)metadata_json.data(),
+            (const char *)(metadata_json.data() + metadata_json.size()));
+        liong::json::deserialize(json, ti_aot_data_);
+        for (const auto &[name, level] : ti_aot_data_.required_caps) {
+          required_caps_.set(str2devcap(name), level);
+        }
+      } catch (const std::exception &e) {
+        mark_corrupted();
+        TI_WARN("Invalid GFX AOT metadata: {}", e.what());
+        return;
+      }
     }
 
     if (ti_aot_data_.metadata_version == 0) {
@@ -126,16 +135,17 @@ class AotModuleImpl : public aot::Module {
         std::string spirv_path = k.tasks_attribs[j].name + ".spv";
 
         std::vector<uint32_t> spirv;
-        dir->load_file(spirv_path, spirv);
-
-        if (spirv.size() == 0) {
+        if (!dir->load_file(spirv_path, spirv)) {
           mark_corrupted();
           TI_WARN("spirv '{}' cannot be read", spirv_path);
           return;
         }
-        if (spirv.at(0) != 0x07230203) {
-          TI_WARN("spirv '{}' has a incorrect magic number {}", spirv_path,
-                  spirv.at(0));
+        // SPIR-V starts with a five-word header. Never pass a truncated or
+        // incorrectly typed payload to the driver.
+        if (spirv.size() < 5 || spirv[0] != 0x07230203) {
+          mark_corrupted();
+          TI_WARN("spirv '{}' has an invalid header", spirv_path);
+          return;
         }
         spirv_sources_codes.emplace_back(std::move(spirv));
       }
@@ -154,10 +164,16 @@ class AotModuleImpl : public aot::Module {
         return;
       }
 
-      auto json = liong::json::parse(
-          (const char *)graphs_json.data(),
-          (const char *)(graphs_json.data() + graphs_json.size()));
-      liong::json::deserialize(json, graphs_);
+      try {
+        auto json = liong::json::parse(
+            (const char *)graphs_json.data(),
+            (const char *)(graphs_json.data() + graphs_json.size()));
+        liong::json::deserialize(json, graphs_);
+      } catch (const std::exception &e) {
+        mark_corrupted();
+        TI_WARN("Invalid GFX AOT graph metadata: {}", e.what());
+        return;
+      }
     }
   }
 
@@ -183,6 +199,10 @@ class AotModuleImpl : public aot::Module {
   }
   std::vector<size_t> get_root_sizes() const override {
     return ti_aot_data_.root_buffer_sizes;
+  }
+
+  const DeviceCapabilityConfig &get_required_caps() const override {
+    return required_caps_;
   }
 
   // Module metadata
@@ -263,6 +283,7 @@ class AotModuleImpl : public aot::Module {
 
   std::string module_path_;
   TaichiAotData ti_aot_data_;
+  DeviceCapabilityConfig required_caps_;
   std::vector<std::shared_ptr<const std::vector<std::vector<uint32_t>>>>
       shader_codes_;
   GfxRuntime *runtime_{nullptr};

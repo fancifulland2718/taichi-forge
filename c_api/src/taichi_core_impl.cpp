@@ -655,10 +655,8 @@ TiAotModule ti_load_aot_module(TiRuntime runtime, const char *module_path) {
   // adapted to it.
   TiAotModule aot_module = ((Runtime *)runtime)->load_aot_module(module_path);
 
-  if (aot_module == TI_NULL_HANDLE) {
-    ti_set_last_error(TI_ERROR_CORRUPTED_DATA, module_path);
-    return TI_NULL_HANDLE;
-  }
+  // The backend records the specific failure (for example an unmet device
+  // capability). Do not overwrite it with a generic corrupted-data error.
   out = aot_module;
   TI_CAPI_TRY_CATCH_END();
   return out;
