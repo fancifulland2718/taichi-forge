@@ -1,17 +1,15 @@
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from tests import test_utils
 
 
-@test_utils.test(
-    arch=[ti.cpu, ti.cuda],
-    require=ti.extension.adstack,
-    compile_tier="fast",
-    advanced_optimization=False,
-    offline_cache=False,
-)
-def test_nonlinear_matrix_history_in_nested_loops():
+@pytest.mark.parametrize("tier,advanced", [("fast", False), ("fast", True), ("full", True)])
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.adstack, offline_cache=False)
+def test_nonlinear_matrix_history_in_nested_loops(tier, advanced):
+    ti.cfg.compile_tier = tier
+    ti.cfg.advanced_optimization = advanced
     x = ti.Matrix.field(3, 3, ti.f32, shape=2, needs_grad=True, needs_dual=True)
     y = ti.field(ti.f32, shape=2, needs_grad=True, needs_dual=True)
 

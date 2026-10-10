@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Reverse-mode autodiff maps outer-value adjoints to the corresponding reverse
+  loop scope. Advanced optimization no longer produces invalid adjoint references
+  when loads or expressions are shared across nested loops.
 - Reverse-mode autodiff preserves per-iteration local load values, including
   matrix components used by nonlinear expressions. Nested elastic-energy loops
   no longer compute gradients using only the final iteration's matrix values.
