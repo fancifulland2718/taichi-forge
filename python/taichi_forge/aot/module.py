@@ -200,7 +200,7 @@ class KernelTemplate:
             )
         if key_p in self._instantiated_keys:
             return
-        key = kernel.ensure_compiled(*injected_args)
+        key = kernel.ensure_compiled(*injected_args, _for_aot=True)
         compiled = kernel.compiled_kernels[key]
         export_name = name + "__tmpl__" + key_p
         if self._aot_module._check_kernel_export(export_name, compiled):
@@ -379,7 +379,7 @@ class Module:
             # Bound self is already a compile-time value. Do not synthesize a
             # scalar placeholder for its ti.template annotation first.
             injected_args = produce_injected_args(kernel, bound_args=bound_args)
-        key = kernel.ensure_compiled(*injected_args)
+        key = kernel.ensure_compiled(*injected_args, _for_aot=True)
         compiled = kernel.compiled_kernels[key]
         if not self._check_kernel_export(kernel_name, compiled):
             return

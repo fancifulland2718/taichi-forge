@@ -51,6 +51,12 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 bitcode 在生成设备代码前解析显式 tree 符号；PTX 在暴露 kernel 前绑定一次模块
 常量。kernel 参数和普通 Graph 布局不变。
 
+CPU/CUDA 导出 field kernel 时，不会为生产端仅编译布局的树分配存储。同一 Python
+会话随后使用 JIT kernel、准备普通 Graph 或从 host 访问字段时，Forge 复用已有
+布局，只分配一次；已分配字段的内容保持。小规模 CPU/CUDA/Vulkan 测试覆盖了该
+转换的前向结果、反向及前向模式微分；这是生产端生命周期修复，与消费端 AOT
+模块资源隔离是两项独立能力。
+
 CPU/CUDA 模块关闭会等待已提交工作完成，退休代码注册，释放已降为普通循环的
 dense tree 及预留 ID。旧产物和需要 sparse/list/mesh/quantized 操作的模块仍使用
 生产端 ID；ID 重叠时需使用独立 runtime，冲突在初始化前拒绝。sparse/依赖 element

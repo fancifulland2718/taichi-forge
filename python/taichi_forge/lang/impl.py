@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from types import FunctionType, MethodType
 from typing import Any, Iterable, Sequence
 
@@ -524,6 +524,7 @@ class PyTaichi:
         # True so the first materialize() does run all checks.
         self._materialize_fast_path = True
         self._materialize_dirty = True
+        self._pending_aot_snode_trees = deque()
         self.prog = None
         self.src_info_stack = []
         self.inside_kernel = False
@@ -894,6 +895,7 @@ class PyTaichi:
 
     @staticmethod
     def _finalize_root_fb_for_aot():
+        global _root_fb
         if _root_fb.finalized:
             raise RuntimeError("AOT: can only finalize the root FieldsBuilder once")
         if _root_fb.empty and get_runtime().prog.get_active_snode_tree_ids():
@@ -904,6 +906,10 @@ class PyTaichi:
             # metadata captured by GFX backends.
             return
         _root_fb._finalize_for_aot()
+        # Keep a fresh builder for fields created after this export, just as
+        # ordinary materialization does. The empty trailing builder is skipped
+        # while an active layout exists.
+        _root_fb = FieldsBuilder()
 
     @staticmethod
     def _get_tb(_var):
@@ -959,13 +965,17 @@ class PyTaichi:
         for _field in self.matrix_fields:
             _field._calc_dynamic_index_stride()
 
-    def materialize(self):
+    def materialize(self, *, for_aot=False):
         # R4.a fast path: skip the full validate/check sequence when nothing
         # has changed since the previous materialize(). All mutating entry
         # points (create_field_member, FieldsBuilder.__init__, matrix field
         # registration, clear/reset) flip _materialize_dirty back to True.
         # _materialize_fast_path is the user-facing kill switch.
-        if self._materialize_fast_path and not self._materialize_dirty:
+        if (
+            self._materialize_fast_path
+            and not self._materialize_dirty
+            and (for_aot or not self._pending_aot_snode_trees)
+        ):
             return
         self.materialize_root_fb(not self.materialized)
         self.materialized = True
@@ -985,6 +995,16 @@ class PyTaichi:
         # kernel-call-driven materialize() invocations can short-circuit
         # until a new field/snode/builder is created.
         self._materialize_dirty = False
+        if not for_aot and self._pending_aot_snode_trees:
+            # Export compiles layouts without allocating LLVM field storage.
+            # Resume that cold transition before JIT/Graph preparation or host
+            # field access. Reuse the layout; never repeat it on warm launches.
+            with self._kernel_compilation_lock:
+                while self._pending_aot_snode_trees:
+                    tree = self._pending_aot_snode_trees[0]
+                    if not tree.destroyed:
+                        self.prog._materialize_compiled_snode_tree(tree.id, tree.generation)
+                    self._pending_aot_snode_trees.popleft()
 
     def _register_signal_handlers(self):
         if self._signal_handler_registry is None:
@@ -1005,6 +1025,7 @@ class PyTaichi:
         if has_submission_owners:
             self.clear_runtime_submission_owners()
         self.invalidate_runtime_objects()
+        self._pending_aot_snode_trees.clear()
         # Structured Graph definitions and locally defined kernels can form
         # Python reference cycles. Collect unreachable cycles while the
         # Program and backend device still exist, so pybind kernel/graph

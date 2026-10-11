@@ -59,6 +59,14 @@ primal and gradient storage. Bitcode resolves explicit tree symbols before code
 generation; PTX binds per-module constants once before exposing a kernel. The
 kernel argument and ordinary Graph layouts are unchanged.
 
+Exporting CPU/CUDA field kernels does not allocate the producer's compile-only
+field trees. If the same Python session subsequently uses JIT kernels, prepares
+an ordinary Graph or accesses fields on the host, Forge allocates their storage
+once using the existing layouts. Previously materialized field contents are
+preserved. Small CPU/CUDA/Vulkan tests cover this transition with primal,
+reverse and forward-mode differentiation; this is separate from consumer-side
+AOT module resource isolation.
+
 Destroying a CPU/CUDA module waits for submitted work, retires its executable
 registrations and releases its demoted dense trees and reservations. Legacy
 artifacts and modules requiring sparse/list/mesh/quantized operations retain

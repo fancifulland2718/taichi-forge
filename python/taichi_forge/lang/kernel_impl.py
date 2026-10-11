@@ -1684,10 +1684,11 @@ class Kernel:
         kernel_optimization_spec=None,
         range_one_to_one=False,
         offload_execution_plan=None,
+        for_aot=False,
     ):
         if key is None:
             key = (self.func, 0, self.autodiff_mode)
-        self.runtime.materialize()
+        self.runtime.materialize(for_aot=for_aot)
 
         if key in self.compiled_kernels:
             return
@@ -2688,13 +2689,13 @@ class Kernel:
             return launch_ctx.get_struct_ret_float(index)
         raise TaichiRuntimeTypeError(f"Invalid return type on index={index}")
 
-    def ensure_compiled(self, *args):
+    def ensure_compiled(self, *args, _for_aot=False):
         with python_compile_profile_event(
             f"python.kernel.ensure_compiled:{self.func.__name__}"
         ):
             instance_id, arg_features = self.mapper.lookup(args)
             key = (self.func, instance_id, self.autodiff_mode)
-            self.materialize(key=key, args=args, arg_features=arg_features)
+            self.materialize(key=key, args=args, arg_features=arg_features, for_aot=_for_aot)
             return key
 
     def _ensure_compiled_with_task_launch_policy(

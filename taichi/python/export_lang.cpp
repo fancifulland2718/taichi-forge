@@ -2590,6 +2590,8 @@ void export_lang(py::module &m) {
       .def("make_aot_module_builder", &Program::make_aot_module_builder)
       .def("get_snode_tree_size", &Program::get_snode_tree_size)
       .def("get_active_snode_tree_ids", &Program::get_active_snode_tree_ids)
+      .def("_materialize_compiled_snode_tree",
+           &Program::materialize_compiled_snode_tree)
       .def("get_snode_root", &Program::get_snode_root,
            py::return_value_policy::reference)
       .def(

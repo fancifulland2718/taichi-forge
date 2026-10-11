@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fix producer-side field storage after AOT export: subsequent JIT calls,
+  ordinary Graph preparation and host field access allocate missing storage
+  once from the existing layout. CPU/CUDA export-only trees remain unallocated;
+  destroying them and reusing their IDs is supported.
 - CPU/CUDA dense-field AOT schema 5 binds module-local resources at load time.
   Independent instances can share one runtime without sharing primal/gradient
   storage; close/reload and ordinary Graph replay are verified for bitcode and

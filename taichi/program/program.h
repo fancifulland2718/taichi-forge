@@ -932,13 +932,14 @@ class TI_DLL_EXPORT Program {
    * @param compile_only Only generates the compiled type
    * @return The pointer to SNode tree.
    *
-   * FIXME: compile_only is mostly a hack to make AOT & cross-compilation work.
-   * E.g. users who would like to AOT to a specific target backend can do so,
-   * even if their platform doesn't support that backend. Unfortunately, the
-   * current implementation would leave the backend in a mostly broken state. We
-   * need a cleaner design to support both AOT and JIT modes.
+   * Compile-only LLVM trees have no storage. Before JIT execution, prepare
+   * their storage with materialize_compiled_snode_tree().
    */
   SNodeTree *add_snode_tree(std::unique_ptr<SNode> root, bool compile_only);
+
+  // Cold transition from an export-only layout to executable field storage.
+  // Idempotent for the same live generation; does not recompile its layout.
+  void materialize_compiled_snode_tree(int tree_id, std::uint64_t generation);
 
   /**
    * Allocates a SNode tree id for a new SNode tree

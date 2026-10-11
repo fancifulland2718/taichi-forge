@@ -821,9 +821,6 @@ def test_llvm_aot_declares_bitcode_payload(tmp_path):
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_llvm_aot_dense_resource_contract(tmp_path):
     value = ti.field(ti.f32, shape=4)
-    # Materialize storage first: compile-only AOT trees have no producer-side
-    # allocation. This test isolates the AOT/JIT compilation request contract.
-    ti.lang.impl.get_runtime().materialize()
 
     @ti.kernel
     def fill():
@@ -840,6 +837,87 @@ def test_llvm_aot_dense_resource_contract(tmp_path):
     # The AOT-only code contract must not leak into normal JIT compilation.
     fill()
     assert list(value.to_numpy()) == [3, 4, 5, 6]
+
+
+@pytest.mark.parametrize("graph_first", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_aot_export_then_jit_field_storage(tmp_path, graph_first):
+    x = ti.field(ti.f32, shape=4, needs_grad=True, needs_dual=True)
+    y = ti.field(ti.f32, shape=4, needs_grad=True, needs_dual=True)
+
+    @ti.kernel
+    def initialize():
+        for i in x:
+            x[i] = i + 1
+            x.grad[i] = 0
+            y.grad[i] = 1
+
+    @ti.kernel
+    def square():
+        for i in x:
+            y[i] = x[i] * x[i]
+
+    module = ti.aot.Module()
+    module.add_kernel(initialize)
+    module.add_kernel(square)
+    module.add_kernel(square.grad)
+    module.save(tmp_path)
+    runtime = ti.lang.impl.get_runtime()
+    tree = runtime._pending_aot_snode_trees[0]
+    fingerprint = runtime.prog._snode_tree_layout_fingerprint(tree.id)
+    if ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda):
+        assert runtime.prog._debug_snode_runtime_directory_stats()["active_tree_count"] == 0
+    if graph_first:
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(initialize)
+        builder.dispatch(square)
+        builder.dispatch(square.grad)
+        graph = builder.compile()
+        graph.run({})
+    else:
+        initialize()
+        square()
+        square.grad()
+    assert not runtime._pending_aot_snode_trees
+    np.testing.assert_allclose(y.to_numpy(), [1, 4, 9, 16])
+    np.testing.assert_allclose(x.grad.to_numpy(), [2, 4, 6, 8])
+    # Repeated preparation preserves both layout identity and stored data.
+    runtime.prog._materialize_compiled_snode_tree(tree.id, tree.generation)
+    assert runtime.prog._snode_tree_layout_fingerprint(tree.id) == fingerprint
+    np.testing.assert_allclose(x.to_numpy(), [1, 2, 3, 4])
+    with ti.ad.FwdMode(loss=y, param=x, seed=[1, 1, 1, 1]):
+        square()
+    np.testing.assert_allclose(y.dual.to_numpy(), [2, 4, 6, 8])
+    if graph_first:
+        graph.run({})
+        np.testing.assert_allclose(x.grad.to_numpy(), [2, 4, 6, 8])
+    later = ti.field(ti.i32, shape=2)
+    later[0] = 9
+    assert later[0] == 9
+    np.testing.assert_allclose(x.to_numpy(), [1, 2, 3, 4])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_aot_compile_only_tree_retirement_and_host_access():
+    value = ti.field(ti.f32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 4).place(value)
+    old = builder._finalize_for_aot()
+    old_id, old_generation = old.id, old.generation
+    old.destroy()  # No storage or runtime tree directory entry exists yet.
+    replacement = ti.field(ti.f32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 4).place(replacement)
+    current = builder._finalize_for_aot()
+    assert current.id == old_id
+    runtime = ti.lang.impl.get_runtime()
+    with pytest.raises(RuntimeError, match="inactive SNodeTree"):
+        runtime.prog._materialize_compiled_snode_tree(old_id, old_generation)
+    # Host access must resume storage too; skip the retired queued wrapper.
+    replacement[0] = 7
+    assert replacement[0] == 7
+    assert not runtime._pending_aot_snode_trees
+    current.destroy()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, demote_dense_struct_fors=False)

@@ -44,9 +44,8 @@ class LlvmProgramImpl : public ProgramImpl {
 
   void compile_snode_tree_types(SNodeTree *tree) override;
 
-  // TODO(zhanlue): refactor materialize_snode_tree()
-  // materialize_snode_tree = compile_snode_tree_types +
-  // initialize_llvm_runtime_snodes It's a 2-in-1 interface
+  // Reuses a compile-only layout and allocates its storage once, or compiles
+  // and allocates a new tree in the ordinary JIT path.
   void materialize_snode_tree(SNodeTree *tree, uint64 *result_buffer) override;
 
   void cache_field(int snode_tree_id,
@@ -100,7 +99,12 @@ class LlvmProgramImpl : public ProgramImpl {
     if (cache_data_->fields.find(snode_tree->id()) != cache_data_->fields.end())
       cache_data_->fields.erase(snode_tree->id());
 
-    return runtime_exec_->destroy_snode_tree(snode_tree);
+    if (runtime_exec_->has_snode_tree_runtime_state(snode_tree->id())) {
+      runtime_exec_->destroy_snode_tree(snode_tree);
+    } else {
+      // A compile-only export owns a layout but no runtime allocation.
+      runtime_exec_->get_llvm_context()->delete_snode_tree(snode_tree->id());
+    }
   }
 
   SparseSNodeTreeMemoryStatistics get_snode_tree_memory_statistics(

@@ -66,13 +66,15 @@ void LlvmProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
 
 void LlvmProgramImpl::materialize_snode_tree(SNodeTree *tree,
                                              uint64 *result_buffer) {
-  compile_snode_tree_types(tree);
   int snode_tree_id = tree->id();
-
-  TI_ASSERT(cache_data_->fields.find(snode_tree_id) !=
-            cache_data_->fields.end());
-  initialize_llvm_runtime_snodes(cache_data_->fields.at(snode_tree_id),
-                                 result_buffer);
+  if (cache_data_->fields.find(snode_tree_id) == cache_data_->fields.end()) {
+    compile_snode_tree_types(tree);
+  }
+  const auto &field = cache_data_->fields.at(snode_tree_id);
+  TI_ASSERT(field.tree_generation == tree->generation());
+  if (!runtime_exec_->has_snode_tree_runtime_state(snode_tree_id)) {
+    initialize_llvm_runtime_snodes(field, result_buffer);
+  }
 }
 
 std::unique_ptr<AotModuleBuilder> LlvmProgramImpl::make_aot_module_builder(

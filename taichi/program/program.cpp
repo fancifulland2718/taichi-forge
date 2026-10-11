@@ -6364,6 +6364,20 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
   return snode_trees_[id].get();
 }
 
+void Program::materialize_compiled_snode_tree(int tree_id,
+                                              std::uint64_t generation) {
+  std::unique_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
+  TI_ERROR_IF(tree_id < 0 ||
+                  static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
+                  !snode_tree_active_[tree_id] ||
+                  snode_tree_generations_[tree_id] != generation,
+              "Cannot materialize inactive SNodeTree id={} generation={}",
+              tree_id, generation);
+  program_impl_->materialize_snode_tree(snode_trees_[tree_id].get(),
+                                        result_buffer);
+}
+
 std::vector<int> Program::get_active_snode_tree_ids() const {
   std::shared_lock<std::shared_mutex> lifecycle_lock(
       snode_tree_lifecycle_mutex_);

@@ -60,6 +60,13 @@ void GfxProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
 
 void GfxProgramImpl::materialize_snode_tree(SNodeTree *tree,
                                             uint64 *result_buffer) {
+  TI_ERROR_IF(!runtime_,
+              "Cannot materialize field storage without a GFX runtime");
+  const auto &compiled = snode_tree_mgr_->get_compiled_structs();
+  if (tree->id() < compiled.size() && compiled[tree->id()].root != nullptr) {
+    TI_ASSERT(compiled[tree->id()].root == tree->root());
+    return;  // compile_snode_tree_types already allocates on a live runtime.
+  }
   spirv::PointerLayoutPolicy policy;
   policy.freelist = config->vulkan_pointer_freelist;
   policy.ambient_zone = config->vulkan_pointer_ambient_zone;
