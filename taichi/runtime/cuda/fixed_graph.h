@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <functional>
 #include <vector>
 #include "taichi/program/kernel_launcher.h"
 
@@ -16,6 +17,8 @@ class FixedGraph {
     KernelLauncher *launcher;
     KernelLaunchHandle handle;
     LaunchContextBuilder *context;
+    // Cold capture callback only; never retained or invoked during replay.
+    std::function<void(void *)> external;
   };
   explicit FixedGraph(const std::vector<Dispatch> &dispatches);
   ~FixedGraph();

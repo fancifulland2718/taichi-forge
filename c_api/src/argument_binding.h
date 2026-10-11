@@ -7,6 +7,8 @@
 #include "taichi/program/texture.h"
 
 namespace capi {
+// Validate primitive/tensor storage and return its declared logical byte size.
+uint64_t validated_ndarray_bytes(Runtime &runtime, const TiNdArray &array);
 
 // Cold ABI marshalling shared by ordinary launch and prepared execution. These
 // own the host descriptors referenced by LaunchContextBuilder, not device data.

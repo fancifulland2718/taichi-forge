@@ -68,6 +68,10 @@ FixedGraph::FixedGraph(const std::vector<Dispatch> &dispatches)
   constexpr std::size_t alignment = 16;  // RuntimeContext argument ABI.
   for (std::size_t i = 0; i < dispatches.size(); ++i) {
     const auto &dispatch = dispatches[i];
+    if (dispatch.external) {
+      offsets.push_back(0);
+      continue;
+    }
     TI_ERROR_IF(!dispatch.launcher || !dispatch.context ||
                     !dispatch.launcher->prepare_cuda_graph_launch_packet(
                         dispatch.handle, *dispatch.context, packets[i]),
@@ -108,8 +112,13 @@ FixedGraph::FixedGraph(const std::vector<Dispatch> &dispatches)
   driver.stream_begin_capture(state.stream,
                               CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
   state.capturing = true;
-  for (std::size_t i = 0; i < packets.size(); ++i)
-    dispatches[i].launcher->capture_cuda_graph_launch(packets[i], state.stream);
+  for (std::size_t i = 0; i < packets.size(); ++i) {
+    if (dispatches[i].external)
+      dispatches[i].external(state.stream);
+    else
+      dispatches[i].launcher->capture_cuda_graph_launch(packets[i],
+                                                        state.stream);
+  }
   const auto error = driver.stream_end_capture.call(state.stream, &state.graph);
   state.capturing = false;
   TI_ERROR_IF(error != CUDA_SUCCESS, "Fixed CUDA Graph capture failed: {}",

@@ -243,7 +243,9 @@ struct Tokenizer {
   }
 };
 
-bool try_parse_impl(Tokenizer &tokenizer, JsonValue &out) {
+bool try_parse_impl(Tokenizer &tokenizer,
+                    JsonValue &out,
+                    bool unique_keys = false) {
   JsonToken token;
   while (tokenizer.next_token(token)) {
     JsonValue val;
@@ -274,7 +276,7 @@ bool try_parse_impl(Tokenizer &tokenizer, JsonValue &out) {
       case L_JSON_TOKEN_OPEN_BRACKET:
         out.ty = L_JSON_ARRAY;
         for (;;) {
-          if (!try_parse_impl(tokenizer, val)) {
+          if (!try_parse_impl(tokenizer, val, unique_keys)) {
             // When the array has no element.
             break;
           }
@@ -317,9 +319,11 @@ bool try_parse_impl(Tokenizer &tokenizer, JsonValue &out) {
             throw JsonException("unexpected token in object");
           }
           // Match the value.
-          if (!try_parse_impl(tokenizer, val)) {
+          if (!try_parse_impl(tokenizer, val, unique_keys)) {
             throw JsonException("unexpected end of object");
           }
+          if (unique_keys && out.obj.inner.count(key))
+            throw JsonException("duplicate object field");
           out.obj.inner[key] = std::move(val);
           // Should we head for another round?
           if (tokenizer.next_token(token)) {
@@ -358,6 +362,20 @@ JsonValue parse(const char *beg, const char *end) {
 }
 JsonValue parse(const std::string &json_lit) {
   return parse(json_lit.c_str(), json_lit.c_str() + json_lit.size());
+}
+JsonValue parse_complete(const std::string &json_lit) {
+  if (json_lit.empty() || json_lit.find('\0') != std::string::npos)
+    throw JsonException("json text is empty or contains NUL");
+  Tokenizer tokenizer(json_lit.data(), json_lit.data() + json_lit.size());
+  JsonValue result;
+  if (!try_parse_impl(tokenizer, result, true))
+    throw JsonException("unexpected close token");
+  while (tokenizer.pos != tokenizer.end) {
+    const char value = *tokenizer.pos++;
+    if (value != ' ' && value != '\t' && value != '\r' && value != '\n')
+      throw JsonException("unexpected content after json document");
+  }
+  return result;
 }
 bool try_parse(const std::string &json_lit, JsonValue &out) {
   try {

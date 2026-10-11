@@ -356,6 +356,9 @@ struct JsonValue {
 // unsupported, `JsonException` will be raised.
 JsonValue parse(const char *beg, const char *end);
 JsonValue parse(const std::string &json_lit);
+// Parse one complete document. Legacy parse() permits a trailing document;
+// versioned execution descriptions must not silently ignore trailing content.
+JsonValue parse_complete(const std::string &json_lit);
 // Returns true when JSON parsing successfully finished and parsed value is
 // returned via `out`. Otherwise, false is returned and out contains incomplete
 // result.

@@ -2,16 +2,11 @@
 
 #include <algorithm>
 #include <unordered_set>
-#ifdef TI_WITH_LLVM
-#include "taichi/runtime/llvm/aot_graph_data.h"
-#include "taichi/runtime/cpu/kernel_launcher.h"
-#endif
-#ifdef TI_WITH_CUDA
-#include "taichi/runtime/cuda/fixed_graph.h"
-#include "taichi/runtime/cuda/kernel_launcher.h"
-#endif
+#include <limits>
+#include "taichi/aot/execution_plan.h"
+#include "taichi/runtime/fixed_execution.h"
 #ifdef TI_WITH_VULKAN
-#include "taichi/runtime/gfx/aot_graph_data.h"
+#include "taichi_gfx_impl.h"
 #endif
 
 namespace capi {
@@ -22,143 +17,64 @@ struct PreparedExecution {
   std::vector<TiMemory> memories;
   TiPreparedExecutionInfo info{};
   bool live{false};
-  // Contexts point into these descriptor owners. Backend retirement always
-  // precedes their destruction, including a failed cold preparation.
+  // The backend consumes these cold descriptors before they are released.
   std::unique_ptr<BoundKernelArguments> kernel_arguments;
   std::unique_ptr<BoundGraphArguments> graph_arguments;
   std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
-#ifdef TI_WITH_LLVM
-  cpu::KernelLauncher *cpu_launcher{nullptr};
-  std::vector<cpu::KernelLauncher::PreparedLaunch> cpu_launches;
-#endif
+  std::vector<std::unique_ptr<BoundKernelArguments>> plan_arguments;
+  std::unique_ptr<FixedExecution> native;
 
   void release_source_bindings() {
     contexts.clear();
     graph_arguments.reset();
     kernel_arguments.reset();
+    plan_arguments.clear();
   }
-#ifdef TI_WITH_CUDA
-  std::unique_ptr<cuda::FixedGraph> cuda_graph;
-#endif
+
+  void prepare_operations(
+      Runtime &runtime,
+      const std::vector<FixedExecution::Operation> &operations) {
+    gfx::GfxRuntime *gfx_runtime = nullptr;
 #ifdef TI_WITH_VULKAN
-  std::unique_ptr<gfx::GraphReplayRegistration> vulkan_graph;
+    if (auto *gfx = dynamic_cast<::GfxRuntime *>(&runtime))
+      gfx_runtime = &gfx->get_gfx_runtime();
 #endif
+    try {
+      native = std::make_unique<FixedExecution>(runtime.arch, runtime.get(),
+                                                gfx_runtime, operations);
+    } catch (const std::invalid_argument &error) {
+      throw MemoryBindingError(error.what());
+    }
+    info.dispatch_count = static_cast<uint32_t>(std::count_if(
+        operations.begin(), operations.end(), [](const auto &operation) {
+          return std::holds_alternative<FixedExecution::Dispatch>(operation);
+        }));
+    info.execution_kind = native->execution_kind();
+    info.argument_bytes = native->argument_bytes();
+    release_source_bindings();
+    live = true;
+  }
 
   void prepare(
-      taichi::Arch arch,
+      Runtime &runtime,
       const std::vector<std::pair<aot::Kernel *, LaunchContextBuilder *>>
           &dispatches) {
-    if (dispatches.empty())
-      throw MemoryBindingError("Prepared execution requires a nonempty batch");
-    // Current C API image handles have no generation-qualified owner. Admit
-    // them only when the resource-binding slice supplies that missing lease.
-    for (const auto &[kernel, context] : dispatches) {
-      if (kernel->ret_size || !context->argpack_ptrs.empty())
-        throw MemoryBindingError(
-            "Prepared execution does not support returns or ArgPacks");
-      for (const auto &[index, param] : kernel->nested_parameters) {
-        if (param.ptype == ParameterType::kTexture ||
-            param.ptype == ParameterType::kRWTexture)
-          throw MemoryBindingError(
-              "Prepared texture bindings require the resource-owner extension");
-      }
-    }
-    info.dispatch_count = static_cast<uint32_t>(dispatches.size());
-#ifdef TI_WITH_LLVM
-    if (taichi::arch_is_cpu(arch)) {
-      for (const auto &[kernel, context] : dispatches) {
-        auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(kernel);
-        auto *launcher =
-            loaded ? dynamic_cast<cpu::KernelLauncher *>(&loaded->launcher())
-                   : nullptr;
-        if (!launcher || (cpu_launcher && cpu_launcher != launcher))
-          throw MemoryBindingError(
-              "Prepared CPU batch requires one loaded launcher");
-        cpu_launcher = launcher;
-        cpu_launches.push_back(
-            launcher->prepare_launch(loaded->handle(), *context));
-        info.argument_bytes += context->arg_buffer_size;
-      }
-      info.execution_kind = 0;
-      release_source_bindings();
-      live = true;
-      return;
-    }
-#endif
-#ifdef TI_WITH_CUDA
-    if (arch == taichi::Arch::cuda) {
-      std::vector<cuda::FixedGraph::Dispatch> native;
-      for (const auto &[kernel, context] : dispatches) {
-        auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(kernel);
-        auto *launcher =
-            loaded ? dynamic_cast<cuda::KernelLauncher *>(&loaded->launcher())
-                   : nullptr;
-        if (!launcher)
-          throw MemoryBindingError("Prepared CUDA entry is not registered");
-        native.push_back({launcher, loaded->handle(), context});
-      }
-      cuda_graph = std::make_unique<cuda::FixedGraph>(native);
-      info.execution_kind = 1;
-      info.argument_bytes = cuda_graph->argument_bytes();
-      release_source_bindings();
-      live = true;
-      return;
-    }
-#endif
-#ifdef TI_WITH_VULKAN
-    if (arch == taichi::Arch::vulkan) {
-      gfx::GfxRuntime *runtime = nullptr;
-      std::vector<gfx::GfxRuntime::GraphRecordingOperation> operations;
-      for (const auto &[kernel, context] : dispatches) {
-        auto *loaded = dynamic_cast<gfx::KernelImpl *>(kernel);
-        if (!loaded || (runtime && runtime != &loaded->runtime()))
-          throw MemoryBindingError(
-              "Prepared Vulkan entries must share a runtime");
-        runtime = &loaded->runtime();
-        operations.push_back({{loaded->handle(), context}, {}});
-      }
-      vulkan_graph = runtime->prepare_fixed_graph(operations, {});
-      info.execution_kind = 2;
-      info.argument_bytes =
-          vulkan_graph->snapshot_stats().known_persistent_argument_bytes;
-      release_source_bindings();
-      live = true;
-      return;
-    }
-#endif
-    throw MemoryBindingError("Prepared execution requires CPU, CUDA or Vulkan");
+    std::vector<FixedExecution::Operation> operations;
+    for (const auto &[kernel, context] : dispatches)
+      operations.emplace_back(FixedExecution::Dispatch{kernel, context});
+    prepare_operations(runtime, operations);
   }
 
   void run() {
     if (!live)
       throw MemoryBindingError("Prepared execution has a retired dependency");
-#ifdef TI_WITH_LLVM
-    if (cpu_launcher)
-      cpu_launcher->launch_prepared(cpu_launches);
-#endif
-#ifdef TI_WITH_CUDA
-    if (cuda_graph)
-      cuda_graph->run();
-#endif
-#ifdef TI_WITH_VULKAN
-    if (vulkan_graph)
-      vulkan_graph->launch_prepared();
-#endif
+    native->run();
     ++info.launches;
   }
 
   void invalidate() {
     live = false;
-#ifdef TI_WITH_CUDA
-    cuda_graph.reset();
-#endif
-#ifdef TI_WITH_VULKAN
-    vulkan_graph.reset();
-#endif
-#ifdef TI_WITH_LLVM
-    cpu_launches.clear();
-    cpu_launcher = nullptr;
-#endif
+    native.reset();
     release_source_bindings();
   }
 };
@@ -295,8 +211,8 @@ TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,
   prepared->owner = arguments->owner;
   prepared->memories = arguments->memories;
   prepared->kernel_arguments = std::move(arguments);
-  prepared->prepare(rt.arch, {{prepared->kernel_arguments->kernel,
-                               prepared->kernel_arguments->context.get()}});
+  prepared->prepare(rt, {{prepared->kernel_arguments->kernel,
+                          prepared->kernel_arguments->context.get()}});
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
@@ -345,7 +261,147 @@ TiPreparedExecution ti_prepare_compute_graph_ext(
     dispatches.emplace_back(dispatch.compiled_kernel, context.get());
     prepared->contexts.push_back(std::move(context));
   }
-  prepared->prepare(rt.arch, dispatches);
+  prepared->prepare(rt, dispatches);
+  return rt.prepared_registry().publish(std::move(prepared));
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+
+TiPreparedExecution ti_prepare_execution_plan_ext(
+    TiRuntime runtime,
+    TiAotModule module,
+    uint64_t description_size,
+    const char *description,
+    uint32_t arg_count,
+    const TiNamedArgument *args,
+    uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(module);
+  TI_CAPI_ARGUMENT_NULL_RV(description);
+  if ((arg_count && !args) || (binding_count && !bindings) ||
+      description_size > std::numeric_limits<std::size_t>::max())
+    throw MemoryBindingError("Invalid execution plan input descriptors");
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto &mod = *reinterpret_cast<AotModule *>(module);
+  if (&mod.runtime() != &rt)
+    throw MemoryBindingError(
+        "Execution plan module belongs to another runtime");
+  using namespace taichi::lang;
+  aot::ExecutionPlan plan;
+  try {
+    plan =
+        aot::ExecutionPlan::parse(std::string(description, description_size));
+  } catch (const std::invalid_argument &error) {
+    throw MemoryBindingError(error.what());
+  }
+  std::unordered_map<std::string, const TiArgument *> arguments;
+  for (uint32_t i = 0; i < arg_count; ++i) {
+    if (!args[i].name || !*args[i].name ||
+        !arguments.emplace(args[i].name, &args[i].argument).second)
+      throw MemoryBindingError(
+          "Execution plan argument names must be unique and nonempty");
+  }
+  if (arguments.size() != plan.arguments.size())
+    throw MemoryBindingError(
+        "Execution plan argument set does not match its slots");
+  for (const auto &name : plan.arguments) {
+    if (!arguments.count(name))
+      throw MemoryBindingError("Missing execution plan argument: " + name);
+  }
+  std::unordered_map<std::string, const TiNamedNdArrayBinding *> layouts;
+  std::unordered_set<std::string> used_bindings;
+  for (uint32_t i = 0; i < binding_count; ++i) {
+    if (!bindings[i].name || !arguments.count(bindings[i].name) ||
+        !layouts.emplace(bindings[i].name, &bindings[i]).second)
+      throw MemoryBindingError(
+          "Invalid or duplicate execution plan ndarray binding");
+  }
+
+  auto prepared = std::make_unique<capi::PreparedExecution>();
+  prepared->owner = &mod;
+  struct Storage {
+    DevicePtr pointer;
+    uint64_t size;
+  };
+  auto storage = [&](const std::string &name, uint64_t offset) {
+    const auto &arg = *arguments.at(name);
+    if (arg.type != TI_ARGUMENT_TYPE_NDARRAY)
+      throw MemoryBindingError("Execution memory operations require ndarrays");
+    const auto &array = arg.value.ndarray;
+    const auto bytes = capi::validated_ndarray_bytes(rt, array);
+    if (offset > bytes)
+      throw MemoryBindingError(
+          "Execution memory offset exceeds ndarray extent");
+    const auto allocation = rt.get_memory(array.memory);
+    prepared->memories.push_back(array.memory);
+    return Storage{allocation.allocation.get_ptr(offset), bytes - offset};
+  };
+  std::vector<FixedExecution::Operation> operations;
+  for (const auto &operation : plan.operations) {
+    if (const auto *kernel =
+            std::get_if<aot::ExecutionPlan::Kernel>(&operation)) {
+      auto handle = mod.get_kernel_handle(kernel->entry);
+      if (!handle)
+        throw MemoryBindingError("Execution plan kernel was not exported: " +
+                                 kernel->entry);
+      std::vector<TiArgument> kernel_args;
+      std::vector<TiNdArrayBinding> kernel_bindings;
+      for (std::size_t i = 0; i < kernel->arguments.size(); ++i) {
+        const auto &name = kernel->arguments[i];
+        kernel_args.push_back(*arguments.at(name));
+        if (auto binding = layouts.find(name); binding != layouts.end()) {
+          used_bindings.insert(name);
+          const auto &value = *binding->second;
+          kernel_bindings.push_back({static_cast<uint32_t>(i),
+                                     value.layout_version, value.layout,
+                                     value.gradient});
+        }
+      }
+      auto bound = capi::bind_kernel_arguments(
+          rt, handle, static_cast<uint32_t>(kernel_args.size()),
+          kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
+          kernel_bindings.data());
+      if (!bound)
+        return TI_NULL_HANDLE;
+      prepared->memories.insert(prepared->memories.end(),
+                                bound->memories.begin(), bound->memories.end());
+      operations.emplace_back(
+          FixedExecution::Dispatch{bound->kernel, bound->context.get()});
+      prepared->plan_arguments.push_back(std::move(bound));
+    } else if (const auto *copy =
+                   std::get_if<aot::ExecutionPlan::Copy>(&operation)) {
+      const auto src = storage(copy->source, copy->source_offset);
+      const auto dst = storage(copy->destination, copy->destination_offset);
+      const auto bytes = copy->bytes.value_or(src.size);
+      if (bytes > src.size || bytes > dst.size ||
+          bytes > std::numeric_limits<std::size_t>::max())
+        throw MemoryBindingError("Execution copy exceeds ndarray extent");
+      if (bytes && src.pointer.alloc_id == dst.pointer.alloc_id &&
+          src.pointer.offset < dst.pointer.offset + bytes &&
+          dst.pointer.offset < src.pointer.offset + bytes)
+        throw MemoryBindingError("Execution copy slices must not overlap");
+      operations.emplace_back(FixedExecution::BufferCopy{
+          dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
+    } else {
+      const auto &fill = std::get<aot::ExecutionPlan::Fill>(operation);
+      const auto dst = storage(fill.destination, fill.offset);
+      const auto bytes = fill.bytes.value_or(dst.size);
+      const auto &array = arguments.at(fill.destination)->value.ndarray;
+      if (bytes > dst.size || bytes > std::numeric_limits<std::size_t>::max() ||
+          rt.get_memory(array.memory).base_offset % 4)
+        throw MemoryBindingError(
+            "Execution fill exceeds ndarray extent or alignment");
+      operations.emplace_back(FixedExecution::BufferFill{
+          dst.pointer, static_cast<std::size_t>(bytes), fill.value});
+    }
+  }
+  if (used_bindings.size() != layouts.size())
+    throw MemoryBindingError(
+        "Ndarray layout/gradient binding is unused by any kernel");
+  prepared->prepare_operations(rt, operations);
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;

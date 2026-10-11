@@ -1200,6 +1200,21 @@ ti_prepare_compute_graph_ext(TiRuntime runtime,
                              const TiNamedArgument *args,
                              uint32_t binding_count,
                              const TiNamedNdArrayBinding *bindings);
+// Version 1 persistent execution description: ordered loaded kernels and native
+// buffer copy/fill32 operations. JSON is consumed only during preparation.
+// Named slots refer to supplied arguments; memory operations use primitive or
+// tensor ndarray storage. All descriptors/ranges are checked before recording,
+// and the result shares the ownership and replay contract above. No provider,
+// control-region or live callback is silently substituted for an unknown kind.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_ext(TiRuntime runtime,
+                              TiAotModule module,
+                              uint64_t description_size,
+                              const char *description,
+                              uint32_t arg_count,
+                              const TiNamedArgument *args,
+                              uint32_t binding_count,
+                              const TiNamedNdArrayBinding *bindings);
 TI_DLL_EXPORT void TI_API_CALL
 ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
 TI_DLL_EXPORT void TI_API_CALL
