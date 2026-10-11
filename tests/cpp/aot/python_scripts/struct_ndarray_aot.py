@@ -5,7 +5,7 @@ from pathlib import Path
 import taichi_forge as ti
 
 
-def export(arch, directory, ptx=False, initialize=True):
+def export(arch, directory, ptx=False, initialize=True, *, artifact_format=None, cuda_target=None):
     if initialize:
         ti.init(arch=getattr(ti, arch), offline_cache=False)
     inner = ti.types.struct(code=ti.u16, value=ti.f32)
@@ -47,6 +47,10 @@ def export(arch, directory, ptx=False, initialize=True):
     builder.dispatch(update, records_arg, result_arg)
     graph = builder.compile()
     options = {"artifact_format": "ptx"} if ptx else {}
+    if artifact_format is not None:
+        options["artifact_format"] = artifact_format
+    if cuda_target is not None:
+        options["caps"] = [f"cuda_compute_capability={cuda_target}"]
     if arch == "vulkan":
         options["caps"] = ["spirv_has_int8", "spirv_has_int16",
                            "spirv_has_int8_storage", "spirv_has_int16_storage"]
@@ -70,5 +74,8 @@ if __name__ == "__main__":
     parser.add_argument("arch", choices=("cpu", "cuda", "vulkan"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("--ptx", action="store_true")
+    parser.add_argument("--artifact-format", choices=("bc", "ptx", "cubin"))
+    parser.add_argument("--cuda-target", type=int)
     args = parser.parse_args()
-    export(args.arch, args.directory, args.ptx)
+    export(args.arch, args.directory, args.ptx,
+           artifact_format=args.artifact_format, cuda_target=args.cuda_target)

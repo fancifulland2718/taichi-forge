@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA AOT can explicitly export `cubin` with a declared compute capability and
+  external NVIDIA ptxas. Schema 6 reuses lazy loading, dense resource relocation
+  and module retirement; corruption fails without a PTX/bitcode fallback.
+  Small Windows deployment tests cover forward/reverse and ordinary Graphs.
+  Consumers still use bundled LLVM for runtime initialization. Bitcode remains
+  the default; see the [target and toolchain contract](aot_sdk.en.md).
+
 - Fixed AoS `StructNdarray` AOT exports now support CPU/CUDA/Vulkan direct
   execution and ordinary CGraphs, including CUDA PTX. Module-owned target layout
   descriptors compose with existing ndarray gradient bindings; complete binding

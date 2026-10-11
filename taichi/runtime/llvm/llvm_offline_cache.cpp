@@ -317,8 +317,8 @@ void LlvmOfflineCacheFileWriter::dump(const std::string &path,
                                           const std::string &,
                                           LlvmOfflineCache::KernelCacheData &)>
                                           emit_device_artifact) {
-  TI_ERROR_IF(format == Format::PTX && (!emit_device_artifact || merge_with_old),
-              "PTX AOT requires an artifact writer without cache merging");
+  TI_ERROR_IF(format == Format::CUDAArtifact && (!emit_device_artifact || merge_with_old),
+              "CUDA AOT requires an artifact writer without cache merging");
   auto write_llvm_module =
       [](const std::string &filename,
          std::function<void(llvm::raw_os_ostream & os)> writer) {
@@ -343,7 +343,7 @@ void LlvmOfflineCacheFileWriter::dump(const std::string &path,
       auto &data = v.compiled_data;
       auto *mod = data.module.get();
       TI_ASSERT(mod != nullptr);
-      if (format == Format::PTX) {
+      if (format == Format::CUDAArtifact) {
         size = emit_device_artifact(filename_prefix, v);
       }
       if (format & Format::LL) {

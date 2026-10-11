@@ -132,6 +132,28 @@ TEST(LlvmAotMetadataTest, DenseRelocationHasAnExplicitFormatContract) {
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
 }
 
+TEST(LlvmAotMetadataTest, CubinRequiresNewSchemaAndBinaryCompatibleTarget) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;
+  metadata.kernel_format = "cubin";
+  metadata.abi_sha256 = std::string(64, 'c');
+  metadata.required_caps["cuda_compute_capability"] = 86;
+  metadata.required_caps["cuda_ptx_version"] = 87;
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.resource_binding = "dense_v1";
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  // Loading machine code does not parse the producer's PTX version.
+  EXPECT_NO_THROW(LLVM::validate_cuda_aot_metadata(metadata, 86, 70));
+  EXPECT_NO_THROW(LLVM::validate_cuda_aot_metadata(metadata, 89, 70));
+  EXPECT_ANY_THROW(LLVM::validate_cuda_aot_metadata(metadata, 80, 87));
+  EXPECT_ANY_THROW(LLVM::validate_cuda_aot_metadata(metadata, 120, 87));
+  metadata.schema_version = LLVM::kRelocatableLlvmAotSchemaVersion;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;
+  metadata.abi_sha256.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+}
+
 TEST(LlvmAotMetadataTest, ResourceReservationsPrecedeAllocation) {
   CompileConfig cfg;
   cfg.arch = Arch::x64;

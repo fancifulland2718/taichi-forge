@@ -243,9 +243,13 @@ class Module:
             entries override per-kernel and Program values; omitted entries
             inherit them. Options are copied and do not mutate JIT settings.
           artifact_format (str): Optional ``bc`` for CPU/CUDA LLVM bitcode or
-            ``ptx`` for CUDA device code. PTX moves user-kernel LLVM compilation
+            ``ptx`` or ``cubin`` for CUDA device code. PTX moves user-kernel LLVM compilation
             to export; driver compilation and runtime initialization remain.
             CUDA target requirements are selected by ``caps``.
+            Cubin requires an explicit ``cuda_compute_capability`` capability
+            and external ptxas at export (``TI_CUDA_PTXAS_PATH`` or PATH). It
+            stores machine code without implicit PTX fallback. Runtime bootstrap
+            still uses LLVM; binary target compatibility is checked at load.
         """
         if caps is None:
             caps = []
@@ -261,10 +265,10 @@ class Module:
             )
 
         if artifact_format is not None:
-            if artifact_format not in ("bc", "ptx"):
-                raise ValueError("AOT artifact_format must be bc or ptx")
-            if artifact_format == "ptx" and arch != taichi_forge.cuda:
-                raise TaichiRuntimeError("AOT PTX artifacts require CUDA")
+            if artifact_format not in ("bc", "ptx", "cubin"):
+                raise ValueError("AOT artifact_format must be bc, ptx or cubin")
+            if artifact_format in ("ptx", "cubin") and arch != taichi_forge.cuda:
+                raise TaichiRuntimeError(f"AOT {artifact_format.upper()} artifacts require CUDA")
             if artifact_format == "bc" and arch not in (taichi_forge.cpu, taichi_forge.cuda):
                 raise TaichiRuntimeError("AOT bitcode artifacts require CPU or CUDA")
 

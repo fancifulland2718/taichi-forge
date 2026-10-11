@@ -40,6 +40,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;
   DeviceCapabilityConfig caps_;
+  bool explicit_cuda_target_{false};
   std::string artifact_format_{"bc"};
 };
 

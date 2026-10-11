@@ -12,6 +12,7 @@
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
+#include "taichi/runtime/cuda/cuda_artifact_provider.h"
 #endif
 
 namespace taichi::lang {
@@ -24,7 +25,9 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
     : compilation_manager_(compilation_manager),
       compile_config_(compile_config),
       prog_(prog),
-      caps_(caps) {
+      caps_(caps),
+      explicit_cuda_target_(
+          caps.contains(DeviceCapability::cuda_compute_capability)) {
   if (compile_config_.arch != Arch::cuda) {
     return;
   }
@@ -61,10 +64,13 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
 void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   TI_ERROR_IF(compile_options_frozen_,
               "AOT artifact format must be selected before exporting kernels.");
-  TI_ERROR_IF(format != "bc" && format != "ptx",
+  TI_ERROR_IF(format != "bc" && !LLVM::is_cuda_aot_artifact_format(format),
               "Unsupported LLVM AOT artifact format '{}'", format);
-  TI_ERROR_IF(format == "ptx" && compile_config_.arch != Arch::cuda,
-              "AOT PTX artifacts require CUDA");
+  TI_ERROR_IF(LLVM::is_cuda_aot_artifact_format(format) &&
+                  compile_config_.arch != Arch::cuda,
+              "AOT PTX/cubin artifacts require CUDA");
+  TI_ERROR_IF(format == "cubin" && !explicit_cuda_target_,
+              "AOT cubin requires an explicit cuda_compute_capability in caps");
   artifact_format_ = format;
 }
 
@@ -116,13 +122,13 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     }
   }
   writer.set_data(std::move(cache_));
-  if (artifact_format_ == "ptx") {
+  if (LLVM::is_cuda_aot_artifact_format(artifact_format_)) {
 #if defined(TI_WITH_CUDA)
     metadata.schema_version = LLVM::kCudaPtxAotSchemaVersion;
     const CUDACodegenTarget target{
         fmt::format("sm_{}", caps_.get(DeviceCapability::cuda_compute_capability)),
         fmt::format("+ptx{}", caps_.get(DeviceCapability::cuda_ptx_version))};
-    writer.dump(output_dir, LlvmOfflineCache::Format::PTX, false,
+    writer.dump(output_dir, LlvmOfflineCache::Format::CUDAArtifact, false,
                 [&](const std::string &prefix,
                     LlvmOfflineCache::KernelCacheData &kernel) {
       auto &compiled = kernel.compiled_data;
@@ -133,14 +139,19 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       if (relocatable) {
         LLVM::prepare_ptx_tree_relocations(*compiled.module);
       }
-      const auto artifact = compile_cuda_kernel_artifact(
+      auto artifact = compile_cuda_kernel_artifact(
           compiled.module, compile_config_, target, max_reg,
           JITModuleRole::user_kernel);
-      std::ofstream out(prefix + ".ptx", std::ios::binary | std::ios::trunc);
-      TI_ERROR_IF(!out, "Cannot write CUDA AOT artifact {}.ptx", prefix);
+      if (artifact_format_ == "cubin") {
+        artifact = cuda::compile_cuda_aot_cubin(std::move(artifact), compile_config_);
+        metadata.cuda_cubin_providers[kernel.kernel_key] = artifact.provider_identity;
+      }
+      const auto path = prefix + "." + artifact_format_;
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      TI_ERROR_IF(!out, "Cannot write CUDA AOT artifact {}", path);
       out.write(artifact.payload.data(), artifact.code_size());
       out.close();
-      TI_ERROR_IF(!out, "Failed to write CUDA AOT artifact {}.ptx", prefix);
+      TI_ERROR_IF(!out, "Failed to write CUDA AOT artifact {}", path);
       item.sha256 = LLVM::aot_artifact_sha256(
           llvm::StringRef(artifact.payload.data(), artifact.code_size()));
       item.size = artifact.code_size();
@@ -150,7 +161,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       item.max_registers = artifact.max_registers;
       item.fast_math = artifact.fast_math;
       item.llvm_opt_level = artifact.llvm_opt_level;
-      if (relocatable)
+      if (relocatable || artifact_format_ == "cubin")
         item.contract_sha256 = LLVM::aot_cuda_contract_sha256(item);
       return artifact.code_size();
     });
@@ -166,6 +177,9 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     metadata.schema_version = LLVM::kRelocatableLlvmAotSchemaVersion;
     metadata.abi_sha256 = LLVM::aot_artifact_sha256(
         LLVM::read_aot_artifact(taichi::join_path(output_dir, "metadata.tcb")));
+  }
+  if (artifact_format_ == "cubin") {
+    metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;
   }
   if (compile_config_.arch == Arch::cuda) {
     for (const auto capability : {

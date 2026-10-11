@@ -16,6 +16,11 @@ inline constexpr char kLlvmAotMetadataFilename[] = "aot_metadata.json";
 inline constexpr std::uint32_t kLlvmAotSchemaVersion = 3;
 inline constexpr std::uint32_t kCudaPtxAotSchemaVersion = 4;
 inline constexpr std::uint32_t kRelocatableLlvmAotSchemaVersion = 5;
+inline constexpr std::uint32_t kCudaCubinAotSchemaVersion = 6;
+
+inline bool is_cuda_aot_artifact_format(const std::string &format) {
+  return format == "ptx" || format == "cubin";
+}
 
 struct CudaAotArtifactMetadata {
   std::string sha256;
@@ -47,6 +52,8 @@ struct LlvmAotMetadata {
   // Schema 4 binds PTX to the serialized launch ABI, with per-kernel hashes.
   std::string abi_sha256;
   std::map<std::string, CudaAotArtifactMetadata> cuda_artifacts;
+  // Separate from the version-5 per-kernel contract hash for compatibility.
+  std::map<std::string, std::string> cuda_cubin_providers;
   std::string resource_binding;
 
   TI_IO_DEF(schema_version,
@@ -54,6 +61,7 @@ struct LlvmAotMetadata {
             kernel_format,
             abi_sha256,
             cuda_artifacts,
+            cuda_cubin_providers,
             resource_binding);
 };
 
@@ -61,12 +69,20 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   TI_ERROR_IF(metadata.schema_version != 2 &&
                   metadata.schema_version != kLlvmAotSchemaVersion &&
                   metadata.schema_version != kCudaPtxAotSchemaVersion &&
-                  metadata.schema_version != kRelocatableLlvmAotSchemaVersion,
+                  metadata.schema_version != kRelocatableLlvmAotSchemaVersion &&
+                  metadata.schema_version != kCudaCubinAotSchemaVersion,
               "LLVM AOT artifact schema {} is incompatible with this runtime. "
               "Rebuild the artifact with the current Forge AOT "
               "compiler.",
               metadata.schema_version);
-  if (metadata.schema_version == kRelocatableLlvmAotSchemaVersion) {
+  if (metadata.schema_version == kCudaCubinAotSchemaVersion) {
+    TI_ERROR_IF(metadata.kernel_format != "cubin" ||
+                    metadata.abi_sha256.size() != 64 ||
+                    (!metadata.resource_binding.empty() &&
+                     metadata.resource_binding != "dense_v1"),
+                "CUDA cubin AOT requires cubin, an ABI checksum and a supported "
+                "resource binding");
+  } else if (metadata.schema_version == kRelocatableLlvmAotSchemaVersion) {
     TI_ERROR_IF(
         metadata.resource_binding != "dense_v1" ||
             (metadata.kernel_format != "bc" &&
@@ -86,6 +102,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                 metadata.kernel_format);
   }
   TI_ERROR_IF(metadata.schema_version != kRelocatableLlvmAotSchemaVersion &&
+                  metadata.schema_version != kCudaCubinAotSchemaVersion &&
                   !metadata.resource_binding.empty(),
               "Legacy LLVM AOT cannot declare resource relocation");
 }
@@ -105,6 +122,16 @@ inline void validate_cuda_aot_metadata(const LlvmAotMetadata &metadata,
       "CUDA AOT artifact requires compute capability {}, but the active "
       "device provides {}.",
       cc_it->second, device_compute_capability);
+  // Cubins have binary compatibility within a compute-capability major, in
+  // the forward minor direction. PTX retains its broader JIT compatibility.
+  if (metadata.kernel_format == "cubin") {
+    TI_ERROR_IF(device_compute_capability / 10 !=
+                    static_cast<int>(cc_it->second) / 10,
+                "CUDA cubin target {} is incompatible with device {}: "
+                "compute-capability major versions must match",
+                cc_it->second, device_compute_capability);
+    return;  // Producer PTX version does not constrain loading machine code.
+  }
   TI_ERROR_IF(device_ptx_version < static_cast<int>(ptx_it->second),
               "CUDA AOT artifact requires PTX {}, but the active CUDA target "
               "provides PTX {}.",

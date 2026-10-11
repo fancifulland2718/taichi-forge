@@ -6,7 +6,7 @@ import os
 import taichi_forge as ti
 
 
-def main(arch, compile_options=None, artifact_format=None):
+def main(arch, compile_options=None, artifact_format=None, cuda_target=None):
     ti.init(arch=arch, offline_cache=False)
     unused = ti.field(ti.f32)
     unused_builder = ti.FieldsBuilder()
@@ -40,7 +40,8 @@ def main(arch, compile_options=None, artifact_format=None):
             out[i] = y[i]
             out[i + 4] = x.grad[i]
 
-    module = ti.aot.Module(compile_options=compile_options, artifact_format=artifact_format)
+    caps = [f"cuda_compute_capability={cuda_target}"] if cuda_target is not None else None
+    module = ti.aot.Module(compile_options=compile_options, artifact_format=artifact_format, caps=caps)
     for kernel in (initialize, evaluate, evaluate.grad, readback):
         module.add_kernel(kernel)
     if arch in (ti.cpu, ti.cuda):
@@ -66,6 +67,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("arch", choices=["cpu", "cuda", "vulkan"])
     parser.add_argument("--compile-options", type=json.loads)
-    parser.add_argument("--artifact-format", choices=["bc", "ptx"])
+    parser.add_argument("--artifact-format", choices=["bc", "ptx", "cubin"])
+    parser.add_argument("--cuda-target", type=int)
     args = parser.parse_args()
-    main(getattr(ti, args.arch), args.compile_options, args.artifact_format)
+    main(getattr(ti, args.arch), args.compile_options, args.artifact_format, args.cuda_target)

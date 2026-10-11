@@ -39,3 +39,12 @@ For CUDA, `python export.py cuda MODULE --artifact-format ptx` moves user-kernel
 LLVM optimization and PTX emission to the producer. The default CUDA AOT target
 is Ampere (`sm_80`, PTX 7.0); custom exporters can set `Module(caps=...)` for the
 deployment device. Driver compilation and runtime initialization remain.
+
+For a fixed deployment GPU, `python export.py cuda MODULE --artifact-format cubin
+--cuda-target 120` also assembles device code on the producer. Set
+`TI_CUDA_PTXAS_PATH` to a compatible NVIDIA ptxas executable, or put it on PATH.
+The consumer needs no ptxas; bundled LLVM runtime initialization remains.
+Cubins require the same compute-capability major and an equal or higher device
+minor. This example was checked with LLVM 20.1.7, ptxas 13.3.73 and RTX 5090 on
+Windows. Measure warm execution as well as export/load costs before selecting
+this explicit format; the default remains bitcode.

@@ -1130,8 +1130,68 @@ def test_aot_compile_options_are_frozen_without_changing_jit(tmp_path):
 def test_aot_ptx_rejects_other_backends():
     with pytest.raises(ti.TaichiRuntimeError, match="require CUDA"):
         ti.aot.Module(artifact_format="ptx")
-    with pytest.raises(ValueError, match="must be bc or ptx"):
+    with pytest.raises(ti.TaichiRuntimeError, match="require CUDA"):
+        ti.aot.Module(artifact_format="cubin")
+    with pytest.raises(ValueError, match="must be bc, ptx or cubin"):
         ti.aot.Module(artifact_format="automatic")
+
+
+@test_utils.test(arch=[ti.cuda], offline_cache=False)
+def test_aot_cubin_requires_explicit_target():
+    with pytest.raises(RuntimeError, match="explicit cuda_compute_capability"):
+        ti.aot.Module(artifact_format="cubin")
+
+
+@test_utils.test(arch=[ti.cuda], offline_cache=False)
+def test_aot_cubin_contract(tmp_path, monkeypatch):
+    import hashlib
+    import os
+    import shutil
+
+    compiler = os.environ.get("TI_CUDA_PTXAS_PATH") or shutil.which("ptxas")
+    if not compiler:
+        pytest.skip("External ptxas is required for cubin export")
+    monkeypatch.setenv("TI_CUDA_PTXAS_PATH", compiler)
+    monkeypatch.setenv("TI_CUDA_ARTIFACT_CACHE_PATH", str(tmp_path / "assembly_cache"))
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i + 3
+
+    module = ti.aot.Module(artifact_format="cubin", caps=["cuda_compute_capability=80"])
+    module.add_kernel(fill)
+    module.save(tmp_path)
+    metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
+    assert metadata["schema_version"] == 6
+    assert metadata["kernel_format"] == "cubin"
+    assert not list(tmp_path.glob("*.ptx"))
+    assert not list(tmp_path.glob("*.bc"))
+    payload = (tmp_path / "fill.cubin").read_bytes()
+    assert payload.startswith(b"\x7fELF")
+    artifact = metadata["cuda_artifacts"][0]["value"]
+    assert artifact["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert artifact["size"] == len(payload)
+    assert len(artifact["contract_sha256"]) == 64
+    assert artifact["target_identity"] == "sm_80|+ptx70"
+    assert metadata["cuda_cubin_providers"][0]["value"].startswith("external_ptxas:")
+
+
+@test_utils.test(arch=[ti.cuda], offline_cache=False)
+def test_aot_cubin_does_not_save_ptx_after_assembly_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("TI_CUDA_PTXAS_PATH", str(tmp_path / "missing-ptxas"))
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i
+
+    module = ti.aot.Module(artifact_format="cubin", caps=["cuda_compute_capability=80"])
+    module.add_kernel(fill)
+    with pytest.raises(RuntimeError, match="ptxas"):
+        module.save(tmp_path)
+    assert not (tmp_path / "aot_metadata.json").exists()
+    assert not list(tmp_path.glob("*.cubin"))
 
 
 @test_utils.test(arch=[ti.cuda], offline_cache=False)

@@ -30,6 +30,11 @@ struct CUDAArtifactProviderTelemetrySnapshot {
 CUDAKernelArtifact select_cuda_kernel_artifact(CUDAKernelArtifact artifact,
                                                const CompileConfig &config);
 
+// Explicit AOT cubin requests always use external ptxas and reject its
+// driver-PTX fallback, so the saved representation cannot silently change.
+CUDAKernelArtifact compile_cuda_aot_cubin(CUDAKernelArtifact artifact,
+                                         const CompileConfig &config);
+
 std::string cuda_artifact_provider_configuration_identity();
 
 void record_cuda_artifact_load(std::size_t entry_count,

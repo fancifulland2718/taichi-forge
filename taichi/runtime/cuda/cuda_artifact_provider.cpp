@@ -597,6 +597,15 @@ CUDAKernelArtifact select_cuda_kernel_artifact(CUDAKernelArtifact artifact,
   return select_external_ptxas_artifact(std::move(artifact), config);
 }
 
+CUDAKernelArtifact compile_cuda_aot_cubin(CUDAKernelArtifact artifact,
+                                         const CompileConfig &config) {
+  auto result = select_external_ptxas_artifact(std::move(artifact), config);
+  TI_ERROR_IF(result.kind != CUDAArtifactKind::cubin,
+              "CUDA AOT cubin assembly failed; canonical PTX was not saved as "
+              "cubin. Check the external ptxas diagnostics or select PTX export.");
+  return result;
+}
+
 std::string cuda_artifact_provider_configuration_identity() {
   llvm::SHA256 hash;
   auto mode = normalized_mode();

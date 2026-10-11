@@ -118,12 +118,13 @@ Small Windows CPU/CUDA/Vulkan and CUDA PTX consumers verify nested mixed-type
 records, rebinding, retirement, and Graphs combining structure forward work
 with explicitly bound primitive-array reverse differentiation.
 
-CPU/CUDA exports containing only dense fields and serial/range tasks use schema
-5 (`resource_binding="dense_v1"`). The module compacts its required resource
+CPU/CUDA bitcode and CUDA PTX exports containing only dense fields and
+serial/range tasks use schema 5 (`resource_binding="dense_v1"`); CUDA cubin uses
+schema 6 with the same resource binding. The module compacts its required resource
 closure and reserves independent runtime IDs before field allocation. Two
 instances of the same artifact can coexist in one runtime, with independent
 primal and gradient storage. Bitcode resolves explicit tree symbols before code
-generation; PTX binds per-module constants once before exposing a kernel. The
+generation; PTX/cubin bind per-module constants once before exposing a kernel. The
 kernel argument and ordinary Graph layouts are unchanged.
 
 Exporting CPU/CUDA field kernels does not allocate the producer's compile-only
@@ -166,6 +167,42 @@ matrix ndarray forward/reverse kernels and ordinary CGraphs. This does not
 establish a runtime speedup or remove the field-resource and native-recording
 boundaries above. Compare producer cost, consumer load time, size and execution
 on the intended device before choosing PTX for deployment.
+
+For a known deployment GPU, select cubin to also assemble device code on the
+producer. An explicit target and an external NVIDIA `ptxas` supporting that
+target and PTX version are required:
+
+```python
+module = ti.aot.Module(artifact_format="cubin",
+                      caps=["cuda_compute_capability=120"])
+```
+
+Set `TI_CUDA_PTXAS_PATH` to the assembler executable, or make `ptxas` available
+on `PATH`. The example accepts `--artifact-format cubin --cuda-target 120`.
+Explicit cubin export invokes the assembler even if `TI_CUDA_PTXAS_MODE=driver`;
+assembly failure fails export instead of saving PTX under a cubin extension.
+Consumers need neither `ptxas` nor a CUDA Toolkit installation. They still need
+a compatible NVIDIA driver and this SDK's LLVM runtime for initialization.
+The tested producer uses LLVM 20.1.7 and ptxas 13.3.73 on Windows, targeting
+`sm_120`/PTX 8.7, with an RTX 5090 consumer. This does not require every producer
+to use that exact ptxas patch version.
+
+Cubins use schema 6, recording payload/ABI/resource checksums and assembler
+identity. Payloads load on demand and are released with the module; missing or
+damaged files do not fall back to PTX or bitcode. The loader requires the same
+compute-capability major and an equal or higher minor. This is narrower than
+PTX compatibility; architecture-specific suffix targets are not exposed by this
+API. Check NVIDIA's [binary compatibility rules](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/cuda-platform.html)
+and validate each deployment device/driver combination. GPU availability in the
+exporting process must not be used to infer the deployment target.
+
+Small Windows cubin consumers cover dense fields, scalar/vector/matrix ndarray
+gradients, fixed structure arrays, direct/ordinary Graph execution, independent
+module resources, retirement and reload. A real VBD artifact demonstrates lower
+kernel load time and payload size; its deployed heavy execution has not been
+qualified. External assembly can change execution performance as well as
+producer cost. Compare warm execution on the target GPU before choosing cubin.
+No JIT provider or AOT artifact default changes with this feature.
 
 PTX 6.0 is needed for Forge's synchronized warp collectives on older targets;
 the processor's minimum ISA alone is insufficient. See NVIDIA's

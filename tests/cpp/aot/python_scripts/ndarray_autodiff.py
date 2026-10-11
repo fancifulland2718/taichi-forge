@@ -29,9 +29,10 @@ def export_case(module, name, dtype):
     module.add_graph("differentiate_" + name, graph.compile())
 
 
-def main(arch, compile_options=None, artifact_format=None):
+def main(arch, compile_options=None, artifact_format=None, cuda_target=None):
     ti.init(arch=arch, offline_cache=False)
-    module = ti.aot.Module(compile_options=compile_options, artifact_format=artifact_format)
+    caps = [f"cuda_compute_capability={cuda_target}"] if cuda_target is not None else None
+    module = ti.aot.Module(compile_options=compile_options, artifact_format=artifact_format, caps=caps)
     for name, dtype in [("scalar", ti.f32), ("vector", ti.types.vector(2, ti.f32)),
                         ("matrix", ti.types.matrix(2, 2, ti.f32))]:
         export_case(module, name, dtype)
@@ -42,6 +43,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("arch", choices=["cpu", "cuda", "vulkan"])
     parser.add_argument("--compile-options", type=json.loads)
-    parser.add_argument("--artifact-format", choices=["bc", "ptx"])
+    parser.add_argument("--artifact-format", choices=["bc", "ptx", "cubin"])
+    parser.add_argument("--cuda-target", type=int)
     args = parser.parse_args()
-    main(getattr(ti, args.arch), args.compile_options, args.artifact_format)
+    main(getattr(ti, args.arch), args.compile_options, args.artifact_format, args.cuda_target)

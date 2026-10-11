@@ -24,7 +24,8 @@ struct LlvmOfflineCache {
   enum Format {
     LL = 0x01,
     BC = 0x10,
-    PTX = 0x100,
+    CUDAArtifact = 0x100,
+    PTX = CUDAArtifact,
   };
 
   struct KernelCacheData {

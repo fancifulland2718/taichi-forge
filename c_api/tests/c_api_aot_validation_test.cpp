@@ -43,13 +43,14 @@ TEST_F(CapiTest, AotVulkanCapabilityRequirements) {
   }
 }
 
-// Uses ndarray_autodiff.py --artifact-format ptx, which has no owned fields.
-TEST_F(CapiTest, AotCudaPtxIntegrity) {
+// Uses ndarray_autodiff.py with the selected format and no owned fields.
+static void check_cuda_artifact_integrity(CapiTest &test,
+                                          const std::string &extension) {
   if (!ti::is_arch_available(TI_ARCH_CUDA)) GTEST_SKIP();
   const char *source = std::getenv("TAICHI_AOT_FOLDER_PATH");
   ASSERT_NE(source, nullptr);
   auto path = std::filesystem::temp_directory_path() /
-      ("forge-aot-ptx-" + std::to_string(
+      ("forge-aot-device-" + std::to_string(
           std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::copy(source, path, std::filesystem::copy_options::recursive);
   struct Cleanup {
@@ -67,7 +68,7 @@ TEST_F(CapiTest, AotCudaPtxIntegrity) {
     std::ofstream stream(file, std::ios::binary | std::ios::trunc);
     stream.write(bytes.data(), bytes.size());
   };
-  const auto ptx_path = path / "forward_scalar.ptx";
+  const auto ptx_path = path / ("forward_scalar." + extension);
   const auto original = read(ptx_path);
   ASSERT_FALSE(original.empty());
   ti::Runtime runtime(TI_ARCH_CUDA);
@@ -83,16 +84,16 @@ TEST_F(CapiTest, AotCudaPtxIntegrity) {
     }
     auto module = runtime.load_aot_module(path.string().c_str());
     ASSERT_TRUE(module.is_valid());
-    ASSERT_TAICHI_SUCCESS();
+    test.ASSERT_TAICHI_SUCCESS();
     auto kernel = module.get_kernel("forward_scalar");
     EXPECT_FALSE(kernel.is_valid());
-    EXPECT_TAICHI_ERROR(TI_ERROR_CORRUPTED_DATA,
+    test.EXPECT_TAICHI_ERROR(TI_ERROR_CORRUPTED_DATA,
                         missing ? "Cannot read" : "integrity");
     write(ptx_path, original);
     // Failed lookup is stable; a file replacement does not silently retry.
     kernel = module.get_kernel("forward_scalar");
     EXPECT_FALSE(kernel.is_valid());
-    EXPECT_TAICHI_ERROR(TI_ERROR_CORRUPTED_DATA,
+    test.EXPECT_TAICHI_ERROR(TI_ERROR_CORRUPTED_DATA,
                         missing ? "Cannot read" : "integrity");
   }
   const auto abi_path = path / "metadata.tcb";
@@ -102,7 +103,15 @@ TEST_F(CapiTest, AotCudaPtxIntegrity) {
   write(abi_path, abi);
   auto invalid = runtime.load_aot_module(path.string().c_str());
   EXPECT_FALSE(invalid.is_valid());
-  EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_STATE, "ABI checksum mismatch");
+  test.EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_STATE, "ABI checksum mismatch");
+}
+
+TEST_F(CapiTest, AotCudaPtxIntegrity) {
+  check_cuda_artifact_integrity(*this, "ptx");
+}
+
+TEST_F(CapiTest, AotCudaCubinIntegrity) {
+  check_cuda_artifact_integrity(*this, "cubin");
 }
 
 // Uses field_autodiff.py cuda --artifact-format ptx. A torn relocation table

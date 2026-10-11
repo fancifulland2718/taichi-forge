@@ -97,10 +97,11 @@ CGraph，不包含任意 stride/切片、指针成员、结构梯度或 native G
 Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重绑定、退休，以及
 同一 Graph 中结构前向工作与显式绑定的普通 ndarray 反向微分组合。
 
-仅包含 dense field 与 serial/range task 的 CPU/CUDA 导出使用 schema 5
-（`resource_binding="dense_v1"`）。模块压紧所需资源闭包，在 field 分配前预留独立
+仅包含 dense field 与 serial/range task 的 CPU/CUDA bitcode 和 CUDA PTX 导出
+使用 schema 5（`resource_binding="dense_v1"`）；CUDA cubin 使用 schema 6 和同一
+资源绑定合同。模块压紧所需资源闭包，在 field 分配前预留独立
 的 runtime ID。同一产物可在一个 runtime 中加载多份，前向和梯度存储彼此独立。
-bitcode 在生成设备代码前解析显式 tree 符号；PTX 在暴露 kernel 前绑定一次模块
+bitcode 在生成设备代码前解析显式 tree 符号；PTX/cubin 在暴露 kernel 前绑定一次模块
 常量。kernel 参数和普通 Graph 布局不变。
 
 CPU/CUDA 导出 field kernel 时，不会为生产端仅编译布局的树分配存储。同一 Python
@@ -134,6 +135,34 @@ Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向
 反向和普通 CGraph 部署。这不代表已获得运行加速，也不改变上述 field 资源及
 原生 recording 边界。部署选择应同时比较生产端成本、消费端加载、体积和目标设备
 上的执行表现。
+
+部署 GPU 已知时，可选择 cubin，在生产端进一步完成设备代码汇编。必须显式指定
+目标，并提供支持该目标与 PTX 版本的外部 NVIDIA `ptxas`：
+
+```python
+module = ti.aot.Module(artifact_format="cubin",
+                      caps=["cuda_compute_capability=120"])
+```
+
+用 `TI_CUDA_PTXAS_PATH` 指定汇编器，或将 `ptxas` 加入 `PATH`。示例接受
+`--artifact-format cubin --cuda-target 120`。显式 cubin 导出即使在
+`TI_CUDA_PTXAS_MODE=driver` 下也会调用汇编器；汇编失败会终止导出，不会把 PTX
+伪装为 cubin 保存。消费端不需要 `ptxas` 或 CUDA Toolkit，仍需要兼容的 NVIDIA
+驱动，并由 SDK 随包 LLVM 完成 runtime 初始化。已验证的 Windows 生产工具链为
+LLVM 20.1.7 与 ptxas 13.3.73，目标 `sm_120`/PTX 8.7，消费设备为 RTX 5090；
+这不要求每个生产环境都固定使用该 ptxas 补丁版本。
+
+cubin 使用 schema 6，记录载荷、ABI、资源合同校验和及汇编器身份。载荷按需加载，
+随模块释放；文件缺失或损坏不回退至 PTX/bitcode。加载器要求 compute capability
+主版本相同，设备次版本不低于产物目标，适用范围比 PTX 窄；本接口不暴露带架构
+专用后缀的目标。应按 NVIDIA 的[二进制兼容规则](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/cuda-platform.html)
+验证实际设备与驱动组合，不能把导出进程所在 GPU 自动视为部署目标。
+
+Windows 小型 cubin 消费测试覆盖 dense field、scalar/vector/matrix ndarray
+梯度、固定结构数组、直接执行与普通 Graph、模块资源隔离、退休和重载。真实 VBD
+产物已显示 kernel 加载时间及载荷体积下降，但尚未验证部署后重函数的实际执行。
+外部汇编除增加生产成本外，也可能改变运行性能；应测量目标 GPU 上的暖态执行后
+再选择。此功能不改变 JIT provider 或 AOT 产物格式默认项。
 
 Forge 在较旧目标上生成的同步 warp 操作也需要 PTX 6.0，仅采用处理器的最低 ISA
 版本不足以覆盖这些操作，见 NVIDIA 的

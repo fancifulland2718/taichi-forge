@@ -41,10 +41,10 @@ LlvmAotModule::LlvmAotModule(
   liong::json::deserialize(json, metadata);
   validate_llvm_aot_metadata(metadata);
 
-  if (metadata.kernel_format == "ptx") {
-    TI_ERROR_IF(arch() != Arch::cuda, "CUDA PTX artifacts require a CUDA runtime");
+  if (is_cuda_aot_artifact_format(metadata.kernel_format)) {
+    TI_ERROR_IF(arch() != Arch::cuda, "CUDA device artifacts require a CUDA runtime");
   }
-  if (metadata.kernel_format == "ptx" || !metadata.resource_binding.empty()) {
+  if (is_cuda_aot_artifact_format(metadata.kernel_format) || !metadata.resource_binding.empty()) {
     TI_ERROR_IF(aot_artifact_sha256(read_aot_artifact(taichi::join_path(
                     module_path, "metadata.tcb"))) != metadata.abi_sha256,
                 "LLVM AOT launch ABI checksum mismatch");
@@ -54,8 +54,8 @@ LlvmAotModule::LlvmAotModule(
   // not silently fall back to a different generation left in this directory.
   const auto format = metadata.kernel_format == "bc"
                           ? LlvmOfflineCache::Format::BC
-                          : (metadata.kernel_format == "ptx"
-                                 ? LlvmOfflineCache::Format::PTX
+                          : (is_cuda_aot_artifact_format(metadata.kernel_format)
+                                 ? LlvmOfflineCache::Format::CUDAArtifact
                                  : LlvmOfflineCache::Format::LL);
   cache_reader_ = LlvmOfflineCacheFileReader::make(module_path, format);
   TI_ERROR_IF(cache_reader_ == nullptr,
@@ -177,7 +177,7 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
     const std::string &name) {
   TI_ASSERT(cache_reader_ != nullptr);
   LlvmOfflineCache::KernelCacheData loaded;
-  auto ok = metadata_.kernel_format == "ptx"
+  auto ok = is_cuda_aot_artifact_format(metadata_.kernel_format)
                 ? cache_reader_->take_kernel_metadata(loaded, name)
                 : cache_reader_->take_kernel_cache(
                       loaded, name,
@@ -217,7 +217,7 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
 
 std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel(
     const std::string &name) {
-  if (metadata_.kernel_format != "ptx" && metadata_.resource_binding.empty()) {
+  if (!is_cuda_aot_artifact_format(metadata_.kernel_format) && metadata_.resource_binding.empty()) {
     return make_new_kernel_impl(name);
   }
   const auto failed = artifact_failures_.find(name);
@@ -245,27 +245,38 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
   if (!cache_reader_->has_kernel(name)) return nullptr;
   auto kernel_cache = load_kernel_from_cache(name);
   const auto kernel_name = std::move(kernel_cache.kernel_key);
-  if (metadata_.kernel_format == "ptx") {
+  if (is_cuda_aot_artifact_format(metadata_.kernel_format)) {
 #if defined(TI_WITH_CUDA)
+    const bool cubin = metadata_.kernel_format == "cubin";
+    if (cubin) {
+      const auto provider = metadata_.cuda_cubin_providers.find(name);
+      TI_ERROR_IF(provider == metadata_.cuda_cubin_providers.end() ||
+                      provider->second.empty(),
+                  "Missing CUDA cubin AOT provider identity for kernel {}", name);
+    }
     const auto it = metadata_.cuda_artifacts.find(name);
     TI_ERROR_IF(it == metadata_.cuda_artifacts.end(),
-                "Missing CUDA PTX AOT manifest for kernel {}", name);
+                "Missing CUDA AOT manifest for kernel {}", name);
     const auto &item = it->second;
-    TI_ERROR_IF(!metadata_.resource_binding.empty() &&
+    TI_ERROR_IF((cubin || !metadata_.resource_binding.empty()) &&
                     item.contract_sha256 != aot_cuda_contract_sha256(item),
-                "CUDA PTX AOT resource contract checksum mismatch for {}",
+                "CUDA AOT resource contract checksum mismatch for {}",
                 name);
-    auto bytes = read_aot_artifact(taichi::join_path(module_path_, name + ".ptx"));
+    auto bytes = read_aot_artifact(taichi::join_path(
+        module_path_, name + "." + metadata_.kernel_format));
     TI_ERROR_IF(bytes.empty() || bytes.size() != item.size ||
                     aot_artifact_sha256(bytes) != item.sha256 ||
-                    bytes.find('\0') != std::string::npos,
-                "CUDA PTX AOT payload integrity failure for kernel {}", name);
+                    (!cubin && bytes.find('\0') != std::string::npos),
+                "CUDA AOT payload integrity failure for kernel {}", name);
+    TI_ERROR_IF(cubin && (bytes.size() < 64 || bytes[0] != '\177' ||
+                         bytes.compare(1, 3, "ELF") != 0),
+                "CUDA cubin AOT payload is not an ELF image for kernel {}", name);
     const auto target = fmt::format("sm_{}|+ptx{}",
         required_caps_.get(DeviceCapability::cuda_compute_capability),
         required_caps_.get(DeviceCapability::cuda_ptx_version));
     TI_ERROR_IF(item.target_identity != target || item.max_registers < 0 ||
                     item.llvm_opt_level < 0 || item.llvm_opt_level > 3,
-                "Invalid CUDA PTX AOT target or compiler contract for {}", name);
+                "Invalid CUDA AOT target or compiler contract for {}", name);
     std::vector<std::string> task_names;
     for (const auto &task : kernel_cache.compiled_data.tasks) {
       task_names.push_back(task.name);
@@ -275,13 +286,16 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     std::sort(task_names.begin(), task_names.end());
     TI_ERROR_IF(entries != task_names ||
                     std::adjacent_find(entries.begin(), entries.end()) != entries.end(),
-                "CUDA PTX AOT entry manifest mismatch for {}", name);
+                "CUDA AOT entry manifest mismatch for {}", name);
     CUDAKernelArtifact artifact;
+    artifact.kind = cubin ? CUDAArtifactKind::cubin : CUDAArtifactKind::ptx;
     artifact.payload.assign(bytes.begin(), bytes.end());
-    artifact.payload.push_back('\0');
+    if (!cubin)
+      artifact.payload.push_back('\0');
     artifact.entry_names = item.entry_names;
     artifact.target_identity = item.target_identity;
-    artifact.provider_identity = "aot_ptx";
+    artifact.provider_identity = cubin
+        ? "aot_cubin:" + metadata_.cuda_cubin_providers.at(name) : "aot_ptx";
     artifact.max_registers = item.max_registers;
     artifact.fast_math = item.fast_math;
     artifact.llvm_opt_level = item.llvm_opt_level;
@@ -295,7 +309,7 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
                                   kernel_cache.used_snode_tree_ids.end(),
                                   binding->second) ||
               !bindings.emplace(id, binding->second).second,
-          "Invalid CUDA PTX AOT resource relocation {}", id);
+          "Invalid CUDA AOT resource relocation {}", id);
     }
     auto data = std::move(kernel_cache).take_llvm_ckd_data();
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
@@ -307,7 +321,7 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     };
     return std::make_unique<llvm_aot::KernelImpl>(std::move(fn), kernel_name, data);
 #else
-    TI_ERROR("CUDA PTX artifacts require a build with CUDA support");
+    TI_ERROR("CUDA device artifacts require a build with CUDA support");
 #endif
   }
   LLVM::CompiledKernelData compiled{
