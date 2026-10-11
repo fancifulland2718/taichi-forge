@@ -407,13 +407,22 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
     }
 
     uint32_t set_count = 0;
-    result = reflection.EnumerateEntryPointDescriptorSets(
-        code_view.entry_point.c_str(), &set_count, nullptr);
+    // Compute task metadata describes the module-wide descriptor ABI,
+    // including unused declarations in older cached/AOT shaders. Restricting
+    // it to active entry-point resources makes valid supplied bindings change
+    // the layout. Graphics/ray modules need entry-point-specific interfaces.
+    const auto descriptor_sets = [&](uint32_t *count,
+                                     SpvReflectDescriptorSet **sets) {
+      if (code_view.stage == VK_SHADER_STAGE_COMPUTE_BIT)
+        return reflection.EnumerateDescriptorSets(count, sets);
+      return reflection.EnumerateEntryPointDescriptorSets(
+          code_view.entry_point.c_str(), count, sets);
+    };
+    result = descriptor_sets(&set_count, nullptr);
     RHI_THROW_UNLESS(result == SPV_REFLECT_RESULT_SUCCESS,
                      std::runtime_error("Failed to enumerate number of sets"));
     std::vector<SpvReflectDescriptorSet *> desc_sets(set_count);
-    result = reflection.EnumerateEntryPointDescriptorSets(
-        code_view.entry_point.c_str(), &set_count, desc_sets.data());
+    result = descriptor_sets(&set_count, desc_sets.data());
     RHI_THROW_UNLESS(
         result == SPV_REFLECT_RESULT_SUCCESS,
         std::runtime_error("spvReflectEnumerateDescriptorSets failed"));

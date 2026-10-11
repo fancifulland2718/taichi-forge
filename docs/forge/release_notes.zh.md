@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 修复 Vulkan 嵌套 ArgPack 的 descriptor 布局不匹配。compute pipeline 保留旧
+  shader 的模块级描述符合同，新 ArgPack 编译只在实际使用时声明普通参数 buffer；
+  graphics/ray 继续按入口反射。
+
 - CUDA AOT 可显式导出 `cubin`，需声明 compute capability 并提供外部 NVIDIA
   ptxas。schema 6 复用按需加载、dense 资源重定位与模块退休，损坏时不回退读取
   PTX/bitcode。Windows 小型部署测试覆盖前向、反向和普通 Graph；消费端仍使用

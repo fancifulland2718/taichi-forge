@@ -7098,9 +7098,9 @@ class TaskCodegen : public IRVisitor {
     }
 
     if (buffer.type == BufferType::ArgPack) {
-      // Make sure that Args Buffer are loaded first:
-      get_buffer_value(BufferType::Args, PrimitiveType::i32);
-
+      // ArgPacks have independent uniform-buffer types and bindings. Declaring
+      // the ordinary Args buffer here creates an unused descriptor for kernels
+      // that access only ArgPacks; generate it only on an actual Args access.
       int binding = binding_head_++;
       buffer_binding_map_[key] = binding;
 

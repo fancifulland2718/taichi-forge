@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fixed Vulkan nested ArgPack descriptor layout failures. Compute pipelines
+  preserve the module-wide descriptor contract for older shaders; new ArgPack
+  code emits the ordinary argument buffer only when it is used. Graphics/ray
+  pipelines keep entry-point-specific reflection.
+
 - CUDA AOT can explicitly export `cubin` with a declared compute capability and
   external NVIDIA ptxas. Schema 6 reuses lazy loading, dense resource relocation
   and module retirement; corruption fails without a PTX/bitcode fallback.

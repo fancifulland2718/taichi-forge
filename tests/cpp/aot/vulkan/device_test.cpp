@@ -108,12 +108,15 @@ std::vector<uint32_t> make_indirect_packet_writer(
   return builder.finalize();
 }
 
-std::vector<uint32_t> make_indirect_target(
-    const DeviceCapabilityConfig &caps) {
+std::vector<uint32_t> make_indirect_target(const DeviceCapabilityConfig &caps,
+                                           bool declare_unused_buffer = false) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
   builder.init_header();
   const auto u32 = builder.u32_type();
   const auto output = builder.buffer_argument(u32, 0, 0, "output");
+  spirv::Value unused;
+  if (declare_unused_buffer)
+    unused = builder.buffer_argument(u32, 0, 5, "unused_legacy_binding");
   const auto function = builder.new_function();
   builder.start_function(function);
 
@@ -128,6 +131,8 @@ std::vector<uint32_t> make_indirect_target(
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
     interfaces = {output};
+    if (declare_unused_buffer)
+      interfaces.push_back(unused);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -763,6 +768,43 @@ TEST(VulkanDeviceTest, DeviceWrittenIndirectDispatchReplaysWithoutStalePacket) {
   EXPECT_EQ(replay(0), (std::array<uint32_t, kOutputCount>{0, 0, 0, 0}));
   EXPECT_EQ(replay(kOutputCount),
             (std::array<uint32_t, kOutputCount>{1, 2, 3, 4}));
+}
+
+TEST(VulkanDeviceTest, UnusedComputeDescriptorPreservesModuleBindingAbi) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = creator->device();
+  const auto code = make_indirect_target(device->get_caps(), true);
+  PipelineSourceDesc source{PipelineSourceType::spirv_binary,
+                            const_cast<uint32_t *>(code.data()),
+                            code.size() * sizeof(uint32_t)};
+  auto [pipeline, status] =
+      device->create_pipeline_unique(source, "legacy_unused_descriptor");
+  ASSERT_EQ(status, RhiResult::success);
+  auto [output, allocated] = device->allocate_memory_unique(
+      {sizeof(uint32_t), false, true, false, AllocUsage::Storage});
+  ASSERT_EQ(allocated, RhiResult::success);
+  auto resources = device->create_resource_set_unique();
+  resources->rw_buffer(0, *output);
+  resources->rw_buffer(5, *output);
+  auto *stream = device->get_compute_stream();
+  auto [commands, recorded] = stream->new_command_list_unique();
+  ASSERT_EQ(recorded, RhiResult::success);
+  commands->bind_pipeline(pipeline.get());
+  ASSERT_EQ(commands->bind_shader_resources(resources.get()),
+            RhiResult::success);
+  ASSERT_EQ(commands->dispatch(1), RhiResult::success);
+  commands->memory_barrier();
+  ASSERT_NE(stream->submit_synced(commands.get()), nullptr);
+  uint32_t value = 0;
+  auto pointer = output->get_ptr();
+  void *host = &value;
+  size_t bytes = sizeof(value);
+  ASSERT_EQ(device->readback_data(&pointer, &host, &bytes), RhiResult::success);
+  EXPECT_EQ(value, 1u);
 }
 
 TEST(VulkanDeviceTest, ConcurrentDescriptorAndRenderPassCreation) {

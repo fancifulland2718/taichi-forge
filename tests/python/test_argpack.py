@@ -111,6 +111,30 @@ def test_argpack_nested():
     assert h(pack) == 233
 
 
+@pytest.mark.parametrize("external_optimization_level", [0, 2])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_argpack_only_and_mixed_uniform_bindings(external_optimization_level):
+    impl.current_cfg().compile_tier = "balanced"
+    impl.current_cfg().external_optimization_level = external_optimization_level
+    inner = ti.types.argpack(value=ti.i32)
+    outer = ti.types.argpack(child=inner, unused=ti.f32)
+    pack = outer(child=inner(value=17), unused=2.0)
+
+    @ti.kernel
+    def only_pack(p: outer) -> ti.i32:
+        return p.child.value
+
+    @ti.kernel
+    def mixed(p: outer, scale: ti.i32) -> ti.i32:
+        return p.child.value * scale
+
+    assert only_pack(pack) == 17
+    assert mixed(pack, 3) == 51
+    pack.child.value = -5
+    assert only_pack(pack) == -5
+    assert mixed(pack, 2) == -10
+
+
 @test_utils.test()
 def test_argpack_as_return():
     pack_type = ti.types.argpack(a=ti.i32, b=bool)
