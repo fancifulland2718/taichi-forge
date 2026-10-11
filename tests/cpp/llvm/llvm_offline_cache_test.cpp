@@ -70,6 +70,24 @@ constexpr int kGridDim = 1;
 
 using Format = LlvmOfflineCache::Format;
 
+class ObservedDirectory : public io::VirtualDir {
+ public:
+  explicit ObservedDirectory(const std::string &path)
+      : files(io::VirtualDir::from_fs_dir(path)) {
+  }
+  bool get_file_size(const std::string &path, size_t &size) const override {
+    return files->get_file_size(path, size);
+  }
+  size_t load_file(const std::string &path,
+                   void *data,
+                   size_t size) const override {
+    ++reads[path];
+    return files->load_file(path, data, size);
+  }
+  std::unique_ptr<io::VirtualDir> files;
+  mutable std::unordered_map<std::string, int> reads;
+};
+
 class LlvmOfflineCacheTest : public testing::TestWithParam<Format> {
  protected:
   void SetUp() override {
@@ -205,6 +223,27 @@ TEST_P(LlvmOfflineCacheTest, ReadWrite) {
     reader.reset();
     EXPECT_NE(owned.compiled_data.module->getFunction(kTaskName), nullptr);
   }
+
+  // Archive readers share this interface. Opening retains the source and reads
+  // only metadata; executable payloads stay lazy and are consumed once.
+  auto directory = std::make_shared<ObservedDirectory>(tmp_dir_str);
+  reader = LlvmOfflineCacheFileReader::make(directory, llvm_fmt);
+  ASSERT_NE(reader, nullptr);
+  EXPECT_EQ(directory->reads.size(), 1);
+  EXPECT_EQ(directory->reads["metadata.tcb"], 1);
+  std::weak_ptr<ObservedDirectory> lifetime = directory;
+  directory.reset();
+  LlvmOfflineCache::KernelCacheData from_directory;
+  ASSERT_TRUE(
+      reader->take_kernel_cache(from_directory, kKernelName, *llvm_ctx));
+  ASSERT_NE(from_directory.compiled_data.module, nullptr);
+  EXPECT_EQ(from_directory.args, arg_infos);
+  EXPECT_EQ(lifetime.lock()->reads.size(), 2);
+  EXPECT_EQ(lifetime.lock()->reads[std::string(kKernelName) +
+                                   (llvm_fmt == Format::LL ? ".ll" : ".bc")],
+            1);
+  reader.reset();
+  EXPECT_TRUE(lifetime.expired());
 }
 
 TEST_P(LlvmOfflineCacheTest, ConsumeFailureLeavesArtifactFilesUntouched) {

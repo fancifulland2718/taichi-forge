@@ -1,8 +1,6 @@
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 
 #include <algorithm>
-#include <fstream>
-#include <iterator>
 
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/aot/graph_artifact.h"
@@ -16,25 +14,37 @@
 
 namespace taichi::lang {
 namespace LLVM {
+namespace {
+
+std::string read_artifact(const io::VirtualDir &directory,
+                          const std::string &name) {
+  size_t size = 0;
+  TI_ERROR_IF(!directory.get_file_size(name, size),
+              "Cannot find AOT artifact {}", name);
+  std::string bytes(size, '\0');
+  TI_ERROR_IF(directory.load_file(name, bytes.data(), size) != size,
+              "Failed to read AOT artifact {}", name);
+  return bytes;
+}
+
+}  // namespace
 
 LlvmAotModule::LlvmAotModule(
     const std::string &module_path,
     LlvmRuntimeExecutor *executor,
     std::unique_ptr<LLVM::KernelLauncher> kernel_launcher)
     : executor_(executor),
-      kernel_launcher_(std::move(kernel_launcher)) {
+      kernel_launcher_(std::move(kernel_launcher)),
+      directory_(io::VirtualDir::open(module_path)) {
   TI_ASSERT(executor_ != nullptr);
 
-  const std::string metadata_path =
-      taichi::join_path(module_path, kLlvmAotMetadataFilename);
-  std::ifstream stream(metadata_path, std::ios::in | std::ios::binary);
-  TI_ERROR_IF(!stream.is_open(),
+  size_t metadata_size = 0;
+  TI_ERROR_IF(!directory_ || !directory_->get_file_size(
+                                 kLlvmAotMetadataFilename, metadata_size),
               "LLVM AOT artifact is missing required schema metadata at {}. "
               "Rebuild the artifact with the current Forge AOT compiler.",
-              metadata_path);
-  const std::string contents((std::istreambuf_iterator<char>(stream)),
-                             std::istreambuf_iterator<char>());
-  module_path_ = module_path;
+              taichi::join_path(module_path, kLlvmAotMetadataFilename));
+  const auto contents = read_artifact(*directory_, kLlvmAotMetadataFilename);
   auto &metadata = metadata_;
   auto json = liong::json::parse(contents.data(),
                                  contents.data() + contents.size());
@@ -45,8 +55,8 @@ LlvmAotModule::LlvmAotModule(
     TI_ERROR_IF(arch() != Arch::cuda, "CUDA device artifacts require a CUDA runtime");
   }
   if (is_cuda_aot_artifact_format(metadata.kernel_format) || !metadata.resource_binding.empty()) {
-    TI_ERROR_IF(aot_artifact_sha256(read_aot_artifact(taichi::join_path(
-                    module_path, "metadata.tcb"))) != metadata.abi_sha256,
+    TI_ERROR_IF(aot_artifact_sha256(read_artifact(
+                    *directory_, "metadata.tcb")) != metadata.abi_sha256,
                 "LLVM AOT launch ABI checksum mismatch");
   }
 
@@ -57,7 +67,7 @@ LlvmAotModule::LlvmAotModule(
                           : (is_cuda_aot_artifact_format(metadata.kernel_format)
                                  ? LlvmOfflineCache::Format::CUDAArtifact
                                  : LlvmOfflineCache::Format::LL);
-  cache_reader_ = LlvmOfflineCacheFileReader::make(module_path, format);
+  cache_reader_ = LlvmOfflineCacheFileReader::make(directory_, format);
   TI_ERROR_IF(cache_reader_ == nullptr,
               "LLVM AOT artifact metadata at {} is corrupt or incompatible. "
               "Rebuild the artifact with the current Forge AOT compiler.",
@@ -76,10 +86,14 @@ LlvmAotModule::LlvmAotModule(
 
   snode_tree_ids_ = cache_reader_->get_snode_tree_ids();
 
-  const std::string graph_path = fmt::format("{}/graphs.tcb", module_path);
-  if (!aot::load_struct_graph_artifact(
-          *io::VirtualDir::from_fs_dir(module_path), graphs_)) {
-    read_from_binary_file(graphs_, graph_path);
+  if (!aot::load_struct_graph_artifact(*directory_, graphs_)) {
+    size_t graph_size = 0;
+    if (directory_->get_file_size("graphs.tcb", graph_size)) {
+      const auto bytes = read_artifact(*directory_, "graphs.tcb");
+      TI_ERROR_IF(bytes.size() < sizeof(size_t) ||
+                      !read_from_binary(graphs_, bytes.data(), bytes.size()),
+                  "Invalid LLVM AOT Graph metadata");
+    }
   }
   const bool relocatable = metadata.resource_binding == "dense_v1";
   // Validate the complete resource closure before reserving or allocating any
@@ -253,8 +267,8 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
                     item.contract_sha256 != aot_cuda_contract_sha256(item),
                 "CUDA AOT resource contract checksum mismatch for {}",
                 name);
-    auto bytes = read_aot_artifact(taichi::join_path(
-        module_path_, name + "." + metadata_.kernel_format));
+    auto bytes =
+        read_artifact(*directory_, name + "." + metadata_.kernel_format);
     TI_ERROR_IF(bytes.empty() || bytes.size() != item.size ||
                     aot_artifact_sha256(bytes) != item.sha256 ||
                     (!cubin && bytes.find('\0') != std::string::npos),

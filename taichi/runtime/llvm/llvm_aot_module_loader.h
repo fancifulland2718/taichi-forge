@@ -86,7 +86,7 @@ class LlvmAotModule final : public aot::Module {
   std::unique_ptr<LLVM::KernelLauncher> kernel_launcher_{nullptr};
   std::unique_ptr<LlvmOfflineCacheFileReader> cache_reader_{nullptr};
   DeviceCapabilityConfig required_caps_;
-  std::string module_path_;
+  std::shared_ptr<const io::VirtualDir> directory_;
   LlvmAotMetadata metadata_;
   std::unordered_map<std::string, std::string> artifact_failures_;
   std::vector<int> snode_tree_ids_;

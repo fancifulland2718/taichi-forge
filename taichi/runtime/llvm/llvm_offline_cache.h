@@ -7,6 +7,7 @@
 #include "llvm/IR/Module.h"
 #include "taichi/common/core.h"
 #include "taichi/common/serialization.h"
+#include "taichi/common/virtual_dir.h"
 #include "taichi/program/kernel.h"
 #include "taichi/util/offline_cache.h"
 #include "taichi/codegen/llvm/llvm_compiled_data.h"
@@ -192,20 +193,23 @@ class LlvmOfflineCacheFileReader {
       const std::string &path,
       LlvmOfflineCache::Format format = LlvmOfflineCache::Format::LL);
 
+  static std::unique_ptr<LlvmOfflineCacheFileReader> make(
+      std::shared_ptr<const io::VirtualDir> directory,
+      LlvmOfflineCache::Format format);
+
   static bool load_meta_data(LlvmOfflineCache &data,
                              const std::string &cache_file_path,
                              bool with_lock = true);
 
  private:
-  LlvmOfflineCacheFileReader(const std::string &path,
+  LlvmOfflineCacheFileReader(std::shared_ptr<const io::VirtualDir> directory,
                              LlvmOfflineCache &&data,
                              LlvmOfflineCache::Format format);
 
-  std::unique_ptr<llvm::Module> load_module(const std::string &path_prefix,
-                                            const std::string &key,
+  std::unique_ptr<llvm::Module> load_module(const std::string &key,
                                             llvm::LLVMContext &llvm_ctx) const;
 
-  std::string path_;
+  std::shared_ptr<const io::VirtualDir> directory_;
   LlvmOfflineCache data_;
   LlvmOfflineCache::Format format_;
   std::unordered_set<std::string> failed_kernels_;

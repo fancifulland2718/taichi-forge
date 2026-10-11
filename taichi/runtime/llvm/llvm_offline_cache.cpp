@@ -104,7 +104,27 @@ std::unique_ptr<LlvmOfflineCacheFileReader> LlvmOfflineCacheFileReader::make(
     return nullptr;
   }
   return std::unique_ptr<LlvmOfflineCacheFileReader>(
-      new LlvmOfflineCacheFileReader(path, std::move(data), format));
+      new LlvmOfflineCacheFileReader(io::VirtualDir::from_fs_dir(path),
+                                     std::move(data), format));
+}
+
+std::unique_ptr<LlvmOfflineCacheFileReader> LlvmOfflineCacheFileReader::make(
+    std::shared_ptr<const io::VirtualDir> directory,
+    LlvmOfflineCache::Format format) {
+  std::vector<uint8_t> bytes;
+  LlvmOfflineCache data;
+  LlvmOfflineCache::Version version{};
+  if (!directory || !directory->load_file("metadata.tcb", bytes) ||
+      bytes.size() < sizeof(size_t) + sizeof(version) ||
+      !read_from_binary(version, bytes.data(), bytes.size(), false) ||
+      version[0] != TI_VERSION_MAJOR || version[1] != TI_VERSION_MINOR ||
+      version[2] != TI_VERSION_PATCH ||
+      !read_from_binary(data, bytes.data(), bytes.size())) {
+    return nullptr;
+  }
+  return std::unique_ptr<LlvmOfflineCacheFileReader>(
+      new LlvmOfflineCacheFileReader(std::move(directory), std::move(data),
+                                     format));
 }
 
 bool LlvmOfflineCacheFileReader::load_meta_data(
@@ -137,10 +157,12 @@ bool LlvmOfflineCacheFileReader::load_meta_data(
 }
 
 LlvmOfflineCacheFileReader::LlvmOfflineCacheFileReader(
-    const std::string &path,
+    std::shared_ptr<const io::VirtualDir> directory,
     LlvmOfflineCache &&data,
     LlvmOfflineCache::Format format)
-    : path_(path), data_(std::move(data)), format_(format) {
+    : directory_(std::move(directory)),
+      data_(std::move(data)),
+      format_(format) {
 }
 
 size_t LlvmOfflineCacheFileReader::get_num_snode_trees() {
@@ -185,7 +207,7 @@ bool LlvmOfflineCacheFileReader::take_kernel_cache(
   auto &compiled = cache.compiled_data;
   if (!compiled.module) {
     try {
-      compiled.module = load_module(taichi::join_path(path_, key), key, llvm_ctx);
+      compiled.module = load_module(key, llvm_ctx);
     } catch (const std::runtime_error &) {
       failed_kernels_.insert(key);
       return false;
@@ -248,8 +270,7 @@ bool LlvmOfflineCacheFileReader::get_kernel_cache(
   auto &kernel_data = itr->second;
   auto &data = kernel_data.compiled_data;
   if (!data.module) {
-    std::string filename_prefix = taichi::join_path(path_, key);
-    data.module = load_module(filename_prefix, key, llvm_ctx);
+    data.module = load_module(key, llvm_ctx);
     if (!data.module) {
       data_.kernels.erase(itr);
       return false;  // Must return
@@ -267,32 +288,33 @@ bool LlvmOfflineCacheFileReader::get_kernel_cache(
       verified = false;
     }
   }
-  if (!verified) {
-    for (const auto &f : get_possible_llvm_cache_filename_by_key(key)) {
-      taichi::remove(taichi::join_path(path_, f));
-    }
-  }
-
   return verified;
 }
 
 std::unique_ptr<llvm::Module> LlvmOfflineCacheFileReader::load_module(
-    const std::string &path_prefix,
     const std::string &key,
     llvm::LLVMContext &llvm_ctx) const {
   TI_AUTO_PROF;
   if (format_ & (Format::BC | Format::LL)) {
     const bool bitcode = (format_ & Format::BC) != 0;
     const std::string filename =
-        path_prefix + "." + (bitcode ? offline_cache::kLlvmCacheFilenameBCExt
-                                    : offline_cache::kLlvmCacheFilenameLLExt);
-    auto buffer = llvm::MemoryBuffer::getFile(filename);
-    if (!buffer) {
-      TI_DEBUG("Fail to read {}: {}", filename, buffer.getError().message());
+        key + "." +
+        (bitcode ? offline_cache::kLlvmCacheFilenameBCExt
+                 : offline_cache::kLlvmCacheFilenameLLExt);
+    size_t size = 0;
+    if (!directory_->get_file_size(filename, size)) {
+      TI_DEBUG("Fail to find {}", filename);
+      return nullptr;
+    }
+    auto buffer =
+        llvm::WritableMemoryBuffer::getNewUninitMemBuffer(size, filename);
+    if (!buffer || directory_->load_file(filename, buffer->getBufferStart(),
+                                         size) != size) {
+      TI_DEBUG("Fail to read {}", filename);
       return nullptr;
     }
     auto ret = decode_llvm_module(
-        (*buffer)->getMemBufferRef(), llvm_ctx,
+        buffer->getMemBufferRef(), llvm_ctx,
         bitcode ? LLVMModuleEncoding::bitcode : LLVMModuleEncoding::assembly);
     if (!ret) {  // File not found or Parse failed
       TI_DEBUG("Fail to parse {}: {}", filename, llvm::toString(ret.takeError()));
