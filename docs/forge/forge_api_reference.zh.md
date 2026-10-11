@@ -1824,7 +1824,7 @@ print(err.to_float())
 
 ## AOT API
 
-### `ti.aot.Module(arch=None, caps=None)`
+### `ti.aot.Module(arch=None, caps=None, *, compile_options=None, artifact_format=None)`
 
 当前 Forge AOT 只支持 same-target 编译。省略 `arch` 时使用 active runtime arch；显式值
 必须与 `ti.init()` 选择的 arch 相同。不匹配时会在创建 backend builder 前抛出
@@ -1832,7 +1832,7 @@ print(err.to_float())
 编译。
 
 CUDA AOT 使用显式 artifact target，不把构建机 GPU 当作发行合同。默认 target 为 compute
-capability 60，并派生 PTX 50 下限；可通过例如
+capability 80、PTX 70，面向 Ampere 及更新设备；可通过例如
 `caps=[ti.DeviceCapability.cuda_compute_capability(86)]` 选择更高的精确 target。target 必须
 不低于 60，并且必须是 Forge 内置 LLVM NVPTX backend 精确支持的值。Forge 会把 compute
 capability 与 PTX 写入 `aot_metadata.json`；LLVM AOT loader 在注册任何 kernel 前验证 active
@@ -1840,6 +1840,11 @@ device 及其选定 PTX target。更高 target 可以开放 target-specific code
 加载 GPU 范围。该机制只使用 CUDA Driver API，不增加 CUDART 或 CUDA Toolkit runtime 依赖。
 此 metadata 合同建立前生成的 CUDA LLVM AOT artifact 必须重新构建；loader 会拒绝缺失
 sidecar 的产物，而不会根据构建机猜测能力要求。
+
+`artifact_format="ptx"` 在导出端完成 CUDA 用户 kernel 的 LLVM 优化和 PTX 生成；
+消费端直接加载 PTX，驱动编译与 runtime 初始化仍会发生。CPU/CUDA 默认表示仍为 LLVM
+bitcode。`compile_options` 提供固定的导出专用编译覆盖，部署、完整性校验和支持边界见
+[独立 AOT SDK](aot_sdk.zh.md)。
 
 LLVM AOT schema 2 另外保存 Graph storage image 的精确格式，例如 RGBA8 UNORM 与 RGBA8 UINT。
 schema-1 的二进制 Graph artifact 需要重新生成；已有 metadata 检查会在解码前明确拒绝旧格式。

@@ -203,6 +203,10 @@ class JITSessionCUDA : public JITSession {
 
   bool remove_module(JITModule *module) override;
 
+  // Load an already selected artifact without invoking LLVM or an artifact
+  // provider. Ownership and telemetry match ordinary JIT modules.
+  JITModule *add_artifact(const CUDAKernelArtifact &artifact);
+
   llvm::DataLayout get_data_layout() override {
     return data_layout;
   }

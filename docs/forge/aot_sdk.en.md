@@ -55,3 +55,31 @@ Current CPU/CUDA field artifacts embed producer resource IDs. Modules with
 overlapping tree IDs require separate runtimes; a conflicting load is rejected
 before tree initialization. Vulkan dense AOT resources use module-local mappings
 and support independently loaded modules in the same runtime.
+
+CUDA exporters can select `ti.aot.Module(artifact_format="ptx")`, or pass
+`--artifact-format ptx` to the example exporter. The default remains LLVM
+bitcode. PTX exports perform user-kernel LLVM optimization and PTX generation
+once on the producer; consumers load PTX directly through the CUDA driver.
+The driver still compiles PTX for the device, and runtime initialization still
+uses bundled LLVM. No external `ptxas` is required for this path.
+
+Select a deployment target with `caps=["cuda_compute_capability=80"]`, for
+example. The default target is compute capability 80 with PTX 7.0 (Ampere and
+newer); select the deployment device explicitly for a more specific target.
+For example, compute capability 120 uses PTX 8.7. Selecting a
+newer target narrows the device range. Export-only `compile_options` are baked
+into PTX. Schema 4 records the target, entry points, register limit, numerical
+policy and payload checksum, and binds the payloads to their launch metadata.
+Missing or damaged PTX never falls back to a stale bitcode file. A failed kernel
+lookup remains failed within that module; reload the module after replacing
+an artifact. Legacy schema 2 text and schema 3 bitcode remain readable.
+
+PTX deployment was checked on Windows CUDA with dense-field and scalar/vector/
+matrix ndarray forward/reverse kernels and ordinary CGraphs. This does not
+establish a runtime speedup or remove the field-resource and native-recording
+boundaries above. Compare producer cost, consumer load time, size and execution
+on the intended device before choosing PTX for deployment.
+
+PTX 6.0 is needed for Forge's synchronized warp collectives on older targets;
+the processor's minimum ISA alone is insufficient. See NVIDIA's
+[shfl.sync specification](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-shfl-sync).

@@ -11,7 +11,7 @@ namespace taichi {
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // CompileConfig provenance changes the private object layout shared by shim
 // and runtime. Reject older pairs before constructing any config objects.
-inline constexpr int kForgeNativeAbiRevision = 13;
+inline constexpr int kForgeNativeAbiRevision = 14;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

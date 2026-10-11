@@ -19,6 +19,7 @@
 #include <array>
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/runtime/cuda/jit_cuda.h"
 #endif
 
 #include "taichi/platform/amdgpu/detect_amdgpu.h"
@@ -228,6 +229,17 @@ bool LlvmRuntimeExecutor::remove_jit_module(JITModule *module) {
   TI_ASSERT(module != nullptr);
   TI_ASSERT(module != runtime_jit_module_);
   return jit_session_->remove_module(module);
+}
+
+JITModule *LlvmRuntimeExecutor::create_cuda_artifact_module(
+    const CUDAKernelArtifact &artifact) {
+#if defined(TI_WITH_CUDA)
+  auto *session = dynamic_cast<JITSessionCUDA *>(jit_session_.get());
+  TI_ERROR_IF(!session, "CUDA artifacts require a CUDA runtime");
+  return session->add_artifact(artifact);
+#else
+  TI_ERROR("CUDA artifacts require a runtime built with CUDA support");
+#endif
 }
 
 JITModule *LlvmRuntimeExecutor::get_runtime_jit_module() {

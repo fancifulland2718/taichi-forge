@@ -2199,7 +2199,7 @@ See also [Native algorithms](native_algorithms.en.md).
 
 ## AOT APIs
 
-### `ti.aot.Module(arch=None, caps=None)`
+### `ti.aot.Module(arch=None, caps=None, *, compile_options=None, artifact_format=None)`
 
 Current Forge AOT compilation is same-target only. Omitting `arch` uses the
 active runtime architecture; an explicit value must equal the architecture
@@ -2208,8 +2208,8 @@ the backend builder. Forge does not silently replace the requested target and
 does not currently claim cross-architecture compilation.
 
 CUDA AOT uses an explicit artifact target instead of treating the build GPU as
-the distribution contract. The default target is compute capability 60 with
-its derived PTX 50 floor. Select a newer exact target with, for example,
+the distribution contract. The default target is compute capability 80 with
+PTX 70 (Ampere and newer). Select an exact deployment target with, for example,
 `caps=[ti.DeviceCapability.cuda_compute_capability(86)]`. The target must be at
 least 60 and must be supported exactly by Forge's bundled LLVM NVPTX backend.
 Forge records both values in `aot_metadata.json`; the LLVM AOT loader validates
@@ -2220,6 +2220,13 @@ does not add a CUDART or CUDA Toolkit runtime dependency. CUDA LLVM AOT
 artifacts created before this metadata contract must be rebuilt; the loader
 rejects a missing sidecar rather than guessing requirements from the build
 machine.
+
+`artifact_format="ptx"` performs CUDA user-kernel LLVM optimization and PTX
+generation at export time. Consumers load that PTX directly; driver compilation
+and runtime initialization still occur. The default CPU/CUDA representation is
+LLVM bitcode. `compile_options` provides frozen export-only compilation
+overrides. See [Standalone AOT SDK](aot_sdk.en.md) for deployment, integrity and
+support boundaries.
 
 LLVM AOT schema 2 also preserves exact Graph storage-image formats (for example,
 RGBA8 UNORM versus RGBA8 UINT). Rebuild schema-1 binary Graph artifacts before

@@ -72,6 +72,18 @@ TEST(LlvmAotMetadataTest, DeclaredRepresentationAndLegacyText) {
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(current));
 }
 
+TEST(LlvmAotMetadataTest, PtxRequiresExplicitSchemaAndAbiDigest) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.kernel_format = "ptx";
+  metadata.abi_sha256 = std::string(64, 'a');
+  metadata.schema_version = 3;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.schema_version = LLVM::kCudaPtxAotSchemaVersion;
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.abi_sha256.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+}
+
 TEST(LlvmAotTest, CpuKernel) {
   CompileConfig cfg;
   cfg.arch = Arch::x64;

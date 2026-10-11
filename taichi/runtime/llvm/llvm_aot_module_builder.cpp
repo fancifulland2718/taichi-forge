@@ -8,6 +8,10 @@
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
+#include "taichi/runtime/llvm/aot_artifact_integrity.h"
+#if defined(TI_WITH_CUDA)
+#include "taichi/runtime/cuda/jit_cuda.h"
+#endif
 
 namespace taichi::lang {
 
@@ -24,7 +28,10 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
     return;
   }
 
-  constexpr int kDefaultCudaAotComputeCapability = 60;
+  // AOT targets a deployable device family rather than the producer's device.
+  // Ampere is the default; callers may select an exact target through caps.
+  constexpr int kDefaultCudaAotComputeCapability = 80;
+  constexpr int kMinimumCudaAotComputeCapability = 60;
   int target = caps_.contains(DeviceCapability::cuda_compute_capability)
                    ? static_cast<int>(caps_.get(
                          DeviceCapability::cuda_compute_capability))
@@ -32,7 +39,7 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
   const auto resolution =
       cuda::detail::resolve_compute_capability_target(target);
   TI_ERROR_IF(
-      target < kDefaultCudaAotComputeCapability ||
+      target < kMinimumCudaAotComputeCapability ||
           resolution.codegen_compute_capability != target,
       "Unsupported CUDA AOT target compute capability {}. Choose an exact "
       "LLVM-supported target at or above 60.",
@@ -50,15 +57,63 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
   caps_.set(DeviceCapability::cuda_ptx_version, resolution.ptx_version);
 }
 
+void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
+  TI_ERROR_IF(compile_options_frozen_,
+              "AOT artifact format must be selected before exporting kernels.");
+  TI_ERROR_IF(format != "bc" && format != "ptx",
+              "Unsupported LLVM AOT artifact format '{}'", format);
+  TI_ERROR_IF(format == "ptx" && compile_config_.arch != Arch::cuda,
+              "AOT PTX artifacts require CUDA");
+  artifact_format_ = format;
+}
+
 void LlvmAotModuleBuilder::dump(const std::string &output_dir,
                                 const std::string &filename) const {
   LlvmOfflineCacheFileWriter writer;
   writer.set_data(std::move(cache_));
-  writer.dump(output_dir, LlvmOfflineCache::Format::BC);
-
   LLVM::LlvmAotMetadata metadata;
   metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
-  metadata.kernel_format = "bc";
+  metadata.kernel_format = artifact_format_;
+  if (artifact_format_ == "ptx") {
+#if defined(TI_WITH_CUDA)
+    metadata.schema_version = LLVM::kCudaPtxAotSchemaVersion;
+    const CUDACodegenTarget target{
+        fmt::format("sm_{}", caps_.get(DeviceCapability::cuda_compute_capability)),
+        fmt::format("+ptx{}", caps_.get(DeviceCapability::cuda_ptx_version))};
+    writer.dump(output_dir, LlvmOfflineCache::Format::PTX, false,
+                [&](const std::string &prefix,
+                    LlvmOfflineCache::KernelCacheData &kernel) {
+      auto &compiled = kernel.compiled_data;
+      const int max_reg = compiled.cuda_max_registers < 0
+                              ? compile_config_.gpu_max_reg
+                              : compiled.cuda_max_registers;
+      const auto artifact = compile_cuda_kernel_artifact(
+          compiled.module, compile_config_, target, max_reg,
+          JITModuleRole::user_kernel);
+      std::ofstream out(prefix + ".ptx", std::ios::binary | std::ios::trunc);
+      TI_ERROR_IF(!out, "Cannot write CUDA AOT artifact {}.ptx", prefix);
+      out.write(artifact.payload.data(), artifact.code_size());
+      out.close();
+      TI_ERROR_IF(!out, "Failed to write CUDA AOT artifact {}.ptx", prefix);
+      auto &item = metadata.cuda_artifacts[kernel.kernel_key];
+      item.sha256 = LLVM::aot_artifact_sha256(
+          llvm::StringRef(artifact.payload.data(), artifact.code_size()));
+      item.size = artifact.code_size();
+      item.entry_names = artifact.entry_names;
+      item.target_identity = artifact.target_identity;
+      item.max_registers = artifact.max_registers;
+      item.fast_math = artifact.fast_math;
+      item.llvm_opt_level = artifact.llvm_opt_level;
+      return artifact.code_size();
+    });
+    metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
+        taichi::join_path(output_dir, "metadata.tcb")));
+#else
+    TI_ERROR("PTX export requires a build with CUDA support");
+#endif
+  } else {
+    writer.dump(output_dir, LlvmOfflineCache::Format::BC);
+  }
   if (compile_config_.arch == Arch::cuda) {
     for (const auto capability : {
              DeviceCapability::cuda_compute_capability,

@@ -273,18 +273,18 @@ void add_cuda_graph_execution_gate(LLVMCompiledKernel &compiled) {
 }  // namespace
 
 void KernelLauncher::configure_root_binding(
-    const LLVM::CompiledKernelData &compiled,
+    const LLVM::CompiledKernelData::InternalData &compiled,
     Context &context) {
   // The result-buffer slot is otherwise unused for a no-return kernel. New
   // kernels use it for the compact binding; old cached kernels safely ignore
   // it and continue resolving roots through the runtime directory.
-  context.uses_root_binding = compiled.get_internal_data().rets.empty() &&
+  context.uses_root_binding = compiled.rets.empty() &&
                               !context.snode_tree_ids.empty();
   if (!context.uses_root_binding) {
     return;
   }
 
-  TI_ASSERT(compiled.get_internal_data().rets.empty());
+  TI_ASSERT(compiled.rets.empty());
   TI_ASSERT(!context.snode_tree_ids.empty());
 }
 
@@ -1651,13 +1651,36 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     ctx->snode_tree_ids = compiled.snode_tree_ids();
     ctx->parameters = std::move(parameters);
     ctx->offloaded_tasks = std::move(data.tasks);
-    configure_root_binding(compiled, *ctx);
+    configure_root_binding(compiled.get_internal_data(), *ctx);
     const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
     TI_ASSERT(was_inserted);
 
     compiled.set_handle(handle);
   }
   return *compiled.get_handle();
+}
+
+KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
+    const LLVM::CompiledKernelData::InternalData &metadata,
+    const CUDAKernelArtifact &artifact) {
+  std::unique_lock<std::shared_mutex> lock(registration_mutex());
+  auto handle = make_handle();
+  auto ctx = std::make_shared<Context>();
+  ctx->snode_tree_ids = metadata.used_snode_tree_ids;
+  ctx->parameters = metadata.args;
+  ctx->offloaded_tasks = metadata.compiled_data.tasks;
+  configure_root_binding(metadata, *ctx);
+  auto *executor = get_runtime_executor();
+  auto *module = executor->create_cuda_artifact_module(artifact);
+  try {
+    bind_cuda_native_functions(module, ctx->offloaded_tasks);
+    ctx->jit_module = module;
+    TI_ASSERT(contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second);
+  } catch (...) {
+    executor->remove_jit_module(module);
+    throw;
+  }
+  return handle;
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
@@ -1687,7 +1710,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   ctx->snode_tree_ids = compiled.snode_tree_ids();
   ctx->parameters = std::move(parameters);
   ctx->offloaded_tasks = std::move(data.tasks);
-  configure_root_binding(compiled, *ctx);
+  configure_root_binding(compiled.get_internal_data(), *ctx);
   const bool inserted =
       contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second;
   TI_ASSERT(inserted);

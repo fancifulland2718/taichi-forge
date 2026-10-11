@@ -94,9 +94,20 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
     writer.write(std::string(artifact.payload.data(), artifact.code_size()));
   }
   artifact = select_artifact(std::move(artifact));
+  return add_artifact(artifact);
+}
+
+JITModule *JITSessionCUDA::add_artifact(const CUDAKernelArtifact &artifact) {
+  // Reserve host ownership before loading a driver object, so allocation
+  // failure cannot leave an unowned CUDA module behind.
+  if (modules.size() == modules.capacity()) {
+    modules.reserve(std::max(modules.size() + 1, modules.capacity() * 2));
+  }
+  auto owned = std::make_unique<JITModuleCUDA>(nullptr, artifact.kind,
+                                               artifact.code_size());
   auto *cuda_module = load_artifact(artifact);
-  modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module, artifact.kind,
-                                                    artifact.code_size()));
+  owned->module_ = cuda_module;
+  modules.push_back(std::move(owned));
   return modules.back().get();
 }
 

@@ -16,6 +16,8 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   void dump(const std::string &output_dir,
             const std::string &filename) const override;
 
+  void set_artifact_format(const std::string &format) override;
+
  protected:
   void add_per_backend(const std::string &identifier, Kernel *kernel) override;
   void add_per_backend_tmpl(const std::string &identifier,
@@ -38,6 +40,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;
   DeviceCapabilityConfig caps_;
+  std::string artifact_format_{"bc"};
 };
 
 }  // namespace taichi::lang

@@ -34,3 +34,8 @@ this small functional fixture, not application performance measurements.
 `sdk_manifest.json` lists installed payload sizes and SHA256 hashes. The source
 revision records CMake configuration time; file hashes identify the installed
 bytes. The SDK is a full runtime distribution, not a compiler-free compact runtime.
+
+For CUDA, `python export.py cuda MODULE --artifact-format ptx` moves user-kernel
+LLVM optimization and PTX emission to the producer. The default CUDA AOT target
+is Ampere (`sm_80`, PTX 7.0); custom exporters can set `Module(caps=...)` for the
+deployment device. Driver compilation and runtime initialization remain.

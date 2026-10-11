@@ -8,6 +8,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("arch", choices=("cpu", "cuda", "vulkan"))
     parser.add_argument("output")
+    parser.add_argument("--artifact-format", choices=("bc", "ptx"))
     args = parser.parse_args()
     ti.init(arch=getattr(ti, args.arch), offline_cache=False)
 
@@ -17,7 +18,7 @@ def main():
         for i in x:
             y[i] = x[i] * x[i] + 2 * x[i]
 
-    module = ti.aot.Module()
+    module = ti.aot.Module(artifact_format=args.artifact_format)
     module.add_kernel(evaluate, name="forward")
     module.add_kernel(evaluate.grad, name="backward")
     graph = ti.graph.GraphBuilder()

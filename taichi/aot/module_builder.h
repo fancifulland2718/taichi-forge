@@ -19,6 +19,11 @@ class AotModuleBuilder {
  public:
   virtual ~AotModuleBuilder() = default;
 
+  virtual void set_artifact_format(const std::string &format) {
+    TI_ERROR("Explicit AOT artifact format '{}' is unsupported by this backend",
+             format);
+  }
+
   void set_compile_options(KernelCompileOptions options) {
     TI_ERROR_IF(compile_options_frozen_,
                 "AOT compile options must be selected before exporting kernels.");

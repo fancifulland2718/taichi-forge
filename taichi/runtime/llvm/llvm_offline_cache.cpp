@@ -218,6 +218,22 @@ bool LlvmOfflineCacheFileReader::take_kernel_cache(
   return true;
 }
 
+bool LlvmOfflineCacheFileReader::take_kernel_metadata(
+    LlvmOfflineCache::KernelCacheData &res,
+    const std::string &key) {
+  auto it = data_.kernels.find(key);
+  if (it == data_.kernels.end() || failed_kernels_.count(key)) return false;
+  for (int tree_id : it->second.used_snode_tree_ids) {
+    if (data_.fields.find(tree_id) == data_.fields.end()) {
+      failed_kernels_.insert(key);
+      return false;
+    }
+  }
+  res = std::move(it->second);
+  data_.kernels.erase(it);
+  return true;
+}
+
 bool LlvmOfflineCacheFileReader::get_kernel_cache(
     LlvmOfflineCache::KernelCacheData &res,
     const std::string &key,
@@ -296,7 +312,13 @@ std::unique_ptr<llvm::Module> LlvmOfflineCacheFileReader::load_module(
 
 void LlvmOfflineCacheFileWriter::dump(const std::string &path,
                                       LlvmOfflineCache::Format format,
-                                      bool merge_with_old) {
+                                      bool merge_with_old,
+                                      std::function<size_t(
+                                          const std::string &,
+                                          LlvmOfflineCache::KernelCacheData &)>
+                                          emit_device_artifact) {
+  TI_ERROR_IF(format == Format::PTX && (!emit_device_artifact || merge_with_old),
+              "PTX AOT requires an artifact writer without cache merging");
   auto write_llvm_module =
       [](const std::string &filename,
          std::function<void(llvm::raw_os_ostream & os)> writer) {
@@ -321,6 +343,9 @@ void LlvmOfflineCacheFileWriter::dump(const std::string &path,
       auto &data = v.compiled_data;
       auto *mod = data.module.get();
       TI_ASSERT(mod != nullptr);
+      if (format == Format::PTX) {
+        size = emit_device_artifact(filename_prefix, v);
+      }
       if (format & Format::LL) {
         std::string filename =
             filename_prefix + "." + offline_cache::kLlvmCacheFilenameLLExt;

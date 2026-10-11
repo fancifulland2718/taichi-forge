@@ -24,6 +24,7 @@ struct LlvmOfflineCache {
   enum Format {
     LL = 0x01,
     BC = 0x10,
+    PTX = 0x100,
   };
 
   struct KernelCacheData {
@@ -175,6 +176,11 @@ class LlvmOfflineCacheFileReader {
                          llvm::LLVMContext &llvm_ctx);
   bool has_kernel(const std::string &key) const;
 
+  // PTX carries executable code separately; retain the same task and ABI data
+  // without parsing or manufacturing an LLVM module.
+  bool take_kernel_metadata(LlvmOfflineCache::KernelCacheData &res,
+                            const std::string &key);
+
   bool get_field_cache(LlvmOfflineCache::FieldCacheData &res,
                        int snode_tree_id);
 
@@ -224,7 +230,10 @@ class LlvmOfflineCacheFileWriter {
 
   void dump(const std::string &path,
             LlvmOfflineCache::Format format = LlvmOfflineCache::Format::LL,
-            bool merge_with_old = false);
+            bool merge_with_old = false,
+            std::function<size_t(const std::string &,
+                                 LlvmOfflineCache::KernelCacheData &)>
+                emit_device_artifact = {});
 
   void set_no_mangle() {
     mangled_ = true;

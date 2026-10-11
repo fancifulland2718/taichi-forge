@@ -16,6 +16,7 @@
 #undef TI_RUNTIME_HOST
 
 namespace taichi::lang {
+struct CUDAKernelArtifact;
 namespace cuda {
 
 constexpr std::size_t kMaxOrdinaryLaunchArgRingSize = 8;
@@ -161,6 +162,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
+  Handle register_cuda_artifact_kernel(
+      const LLVM::CompiledKernelData::InternalData &metadata,
+      const CUDAKernelArtifact &artifact);
   // Register a private variant whose offloaded task entries uniformly test a
   // device gate before executing. The source kernel and ordinary registration
   // remain untouched, so only internal masked CUDA Graph replay pays the
@@ -232,7 +236,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   bool sparse_list_task_is_current(const OffloadedTask &task);
   void mark_sparse_list_task_launched(const OffloadedTask &task);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
-  void configure_root_binding(const LLVM::CompiledKernelData &compiled,
+  void configure_root_binding(const LLVM::CompiledKernelData::InternalData &compiled,
                               Context &context);
   void ensure_root_binding(const Context &context);
   const std::vector<OffloadedTask> &resolve_grid_policy_tasks(

@@ -14,19 +14,38 @@ inline constexpr char kLlvmAotMetadataFilename[] = "aot_metadata.json";
 // kernel representation; old runtimes must reject it instead of reading a
 // stale .ll beside a newer .bc. Binary task/Graph layouts are unchanged.
 inline constexpr std::uint32_t kLlvmAotSchemaVersion = 3;
+inline constexpr std::uint32_t kCudaPtxAotSchemaVersion = 4;
+
+struct CudaAotArtifactMetadata {
+  std::string sha256;
+  uint64_t size{0};
+  std::vector<std::string> entry_names;
+  std::string target_identity;
+  int max_registers{-1};
+  bool fast_math{false};
+  int llvm_opt_level{-1};
+
+  TI_IO_DEF(sha256, size, entry_names, target_identity, max_registers,
+            fast_math, llvm_opt_level);
+};
 
 struct LlvmAotMetadata {
   std::uint32_t schema_version{0};
   std::map<std::string, uint32_t> required_caps;
   // Empty is only valid for legacy schema-2 text artifacts.
   std::string kernel_format;
+  // Schema 4 binds PTX to the serialized launch ABI, with per-kernel hashes.
+  std::string abi_sha256;
+  std::map<std::string, CudaAotArtifactMetadata> cuda_artifacts;
 
-  TI_IO_DEF(schema_version, required_caps, kernel_format);
+  TI_IO_DEF(schema_version, required_caps, kernel_format, abi_sha256,
+            cuda_artifacts);
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   TI_ERROR_IF(metadata.schema_version != 2 &&
-                  metadata.schema_version != kLlvmAotSchemaVersion,
+                  metadata.schema_version != kLlvmAotSchemaVersion &&
+                  metadata.schema_version != kCudaPtxAotSchemaVersion,
               "LLVM AOT artifact schema {} is incompatible with runtime "
               "schema {}. Rebuild the artifact with the current Forge AOT "
               "compiler.",
@@ -34,6 +53,10 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   if (metadata.schema_version == 2) {
     TI_ERROR_IF(!metadata.kernel_format.empty() && metadata.kernel_format != "ll",
                 "Legacy LLVM AOT schema 2 requires text kernel format.");
+  } else if (metadata.schema_version == kCudaPtxAotSchemaVersion) {
+    TI_ERROR_IF(metadata.kernel_format != "ptx" ||
+                    metadata.abi_sha256.size() != 64,
+                "CUDA PTX AOT requires PTX format and a launch ABI checksum.");
   } else {
     TI_ERROR_IF(metadata.kernel_format != "ll" && metadata.kernel_format != "bc",
                 "Unsupported or missing LLVM AOT kernel format '{}'.",

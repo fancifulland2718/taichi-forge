@@ -6,7 +6,7 @@ import os
 import taichi_forge as ti
 
 
-def main(arch, compile_options=None):
+def main(arch, compile_options=None, artifact_format=None):
     ti.init(arch=arch, offline_cache=False)
     unused = ti.field(ti.f32)
     unused_builder = ti.FieldsBuilder()
@@ -40,7 +40,7 @@ def main(arch, compile_options=None):
             out[i] = y[i]
             out[i + 4] = x.grad[i]
 
-    module = ti.aot.Module(compile_options=compile_options)
+    module = ti.aot.Module(compile_options=compile_options, artifact_format=artifact_format)
     for kernel in (initialize, evaluate, evaluate.grad, readback):
         module.add_kernel(kernel)
     graph = ti.graph.GraphBuilder()
@@ -56,5 +56,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("arch", choices=["cpu", "cuda", "vulkan"])
     parser.add_argument("--compile-options", type=json.loads)
+    parser.add_argument("--artifact-format", choices=["bc", "ptx"])
     args = parser.parse_args()
-    main(getattr(ti, args.arch), args.compile_options)
+    main(getattr(ti, args.arch), args.compile_options, args.artifact_format)

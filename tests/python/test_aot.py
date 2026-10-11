@@ -813,6 +813,10 @@ def test_llvm_aot_declares_bitcode_payload(tmp_path):
     assert (tmp_path / "fill.bc").read_bytes().startswith(b"BC\xc0\xde")
     assert not list(tmp_path.glob("*.ll"))
 
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        caps = {item["key"]: item["value"] for item in metadata["required_caps"]}
+        assert caps == {"cuda_compute_capability": 80, "cuda_ptx_version": 70}
+
 
 def test_cuda_aot_capability_argument_validation():
     assert (
@@ -1001,6 +1005,47 @@ def test_aot_compile_options_are_frozen_without_changing_jit(tmp_path):
         ti.aot.Module(compile_options={"compile_tier": "invalid"})
     with pytest.raises(ValueError, match="integer from 0 to 3"):
         ti.aot.Module(compile_options={"llvm_opt_level": -1})
+
+
+@test_utils.test(arch=[ti.cpu, ti.vulkan])
+def test_aot_ptx_rejects_other_backends():
+    with pytest.raises(ti.TaichiRuntimeError, match="require CUDA"):
+        ti.aot.Module(artifact_format="ptx")
+    with pytest.raises(ValueError, match="must be bc or ptx"):
+        ti.aot.Module(artifact_format="automatic")
+
+
+@test_utils.test(arch=[ti.cuda], offline_cache=False)
+def test_aot_ptx_contract(tmp_path):
+    import hashlib
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i + 3
+
+    module = ti.aot.Module(artifact_format="ptx",
+                          caps=["cuda_compute_capability=70"],
+                          compile_options={"fast_math": False, "llvm_opt_level": 1})
+    module.add_kernel(fill)
+    with pytest.raises(RuntimeError, match="before exporting kernels"):
+        module._aot_builder.set_artifact_format("bc")
+    module.save(tmp_path)
+    assert not list(tmp_path.glob("*.bc"))
+    assert not list(tmp_path.glob("*.ll"))
+    metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
+    assert metadata["schema_version"] == 4
+    assert metadata["kernel_format"] == "ptx"
+    assert metadata["abi_sha256"] == hashlib.sha256((tmp_path / "metadata.tcb").read_bytes()).hexdigest()
+    artifact = metadata["cuda_artifacts"][0]["value"]
+    ptx = (tmp_path / "fill.ptx").read_bytes()
+    assert artifact["sha256"] == hashlib.sha256(ptx).hexdigest()
+    assert artifact["size"] == len(ptx)
+    assert artifact["target_identity"] == "sm_70|+ptx60"
+    assert not artifact["fast_math"]
+    assert artifact["llvm_opt_level"] == 1
+    assert artifact["entry_names"]
+    assert b".target sm_70" in ptx
 
 
 @test_utils.test(arch=[ti.vulkan])

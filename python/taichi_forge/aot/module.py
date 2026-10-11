@@ -232,7 +232,7 @@ class Module:
         # for running ``foo`` and ``bar``.
     """
 
-    def __init__(self, arch=None, caps=None, *, compile_options=None):
+    def __init__(self, arch=None, caps=None, *, compile_options=None, artifact_format=None):
         """Creates a new AOT module instance
 
         Args:
@@ -244,6 +244,10 @@ class Module:
             ``full_simplify_global_iter_cap`` on CPU/CUDA/Vulkan. Explicit
             entries override per-kernel and Program values; omitted entries
             inherit them. Options are copied and do not mutate JIT settings.
+          artifact_format (str): Optional ``bc`` for CPU/CUDA LLVM bitcode or
+            ``ptx`` for CUDA device code. PTX moves user-kernel LLVM compilation
+            to export; driver compilation and runtime initialization remain.
+            CUDA target requirements are selected by ``caps``.
         """
         if caps is None:
             caps = []
@@ -257,6 +261,14 @@ class Module:
                 "Initialize Taichi with the requested arch before creating the "
                 "module; cross-arch compilation is not supported."
             )
+
+        if artifact_format is not None:
+            if artifact_format not in ("bc", "ptx"):
+                raise ValueError("AOT artifact_format must be bc or ptx")
+            if artifact_format == "ptx" and arch != taichi_forge.cuda:
+                raise TaichiRuntimeError("AOT PTX artifacts require CUDA")
+            if artifact_format == "bc" and arch not in (taichi_forge.cpu, taichi_forge.cuda):
+                raise TaichiRuntimeError("AOT bitcode artifacts require CPU or CUDA")
 
         options = None
         if compile_options is not None:
@@ -287,6 +299,8 @@ class Module:
         rtm = impl.get_runtime()
         rtm._finalize_root_fb_for_aot()
         self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps)
+        if artifact_format is not None:
+            self._aot_builder.set_artifact_format(artifact_format)
         if options is not None:
             self._aot_builder.set_compile_options(options)
         self._content = []

@@ -22,6 +22,8 @@
 
 namespace taichi::lang {
 
+struct CUDAKernelArtifact;
+
 namespace cuda {
 class CudaDevice;
 }  // namespace cuda
@@ -85,6 +87,8 @@ class LlvmRuntimeExecutor {
                                int cuda_max_registers = -1);
 
   bool remove_jit_module(JITModule *module);
+
+  JITModule *create_cuda_artifact_module(const CUDAKernelArtifact &artifact);
 
   JITModule *get_runtime_jit_module();
 

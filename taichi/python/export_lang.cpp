@@ -5474,6 +5474,7 @@ void export_lang(py::module &m) {
       .def_readwrite("full_simplify_global_iter_cap", &KernelCompileOptions::full_simplify_global_iter_cap);
   py::class_<AotModuleBuilder>(m, "AotModuleBuilder")
       .def("set_compile_options", &AotModuleBuilder::set_compile_options)
+      .def("set_artifact_format", &AotModuleBuilder::set_artifact_format)
       .def("add_field", &AotModuleBuilder::add_field)
       .def("add", &AotModuleBuilder::add)
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)

@@ -70,6 +70,7 @@ class LlvmAotModule final : public aot::Module {
 
   std::unique_ptr<aot::Kernel> make_new_kernel(
       const std::string &name) override;
+  std::unique_ptr<aot::Kernel> make_new_kernel_impl(const std::string &name);
 
   std::unique_ptr<aot::KernelTemplate> make_new_kernel_template(
       const std::string &name) override {
@@ -87,6 +88,9 @@ class LlvmAotModule final : public aot::Module {
   std::unique_ptr<LLVM::KernelLauncher> kernel_launcher_{nullptr};
   std::unique_ptr<LlvmOfflineCacheFileReader> cache_reader_{nullptr};
   DeviceCapabilityConfig required_caps_;
+  std::string module_path_;
+  LlvmAotMetadata metadata_;
+  std::unordered_map<std::string, std::string> artifact_failures_;
   std::vector<int> snode_tree_ids_;
 
   // To prevent repeated SNodeTree initialization

@@ -48,3 +48,26 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 当前 CPU/CUDA field 产物仍内嵌生产端资源 ID。tree ID 重叠的模块需使用独立
 runtime，冲突加载会在 tree 初始化前拒绝。Vulkan dense AOT 资源已使用模块局部
 映射，支持在同一 runtime 中独立加载多个模块。
+
+CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令也支持
+`--artifact-format ptx`；默认仍为 LLVM bitcode。PTX 在生产端完成用户 kernel
+的 LLVM 优化和 PTX 生成，消费端直接通过 CUDA 驱动加载。驱动仍需将 PTX 编译为
+设备代码，runtime 初始化仍使用随包 LLVM；此路径不需要外部 `ptxas`。
+
+可用 `caps=["cuda_compute_capability=80"]` 选择部署目标。默认目标为 compute
+capability 80、PTX 7.0，面向 Ampere 及更新设备；已知部署设备时可指定更具体的
+目标，例如 compute capability 120 使用 PTX 8.7。选择更高目标会缩小可用设备
+范围。导出专用的
+`compile_options` 已固化到 PTX 中。schema 4 记录目标、入口、寄存器上限、数值
+策略和载荷校验和，并将载荷与启动元数据绑定。缺失或损坏的 PTX 不会回退读取旧
+bitcode；同一模块内失败的 kernel 查询保持失败，替换产物后需重新加载模块。
+旧 schema 2 文本和 schema 3 bitcode 仍可读取。
+
+Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、
+反向和普通 CGraph 部署。这不代表已获得运行加速，也不改变上述 field 资源及
+原生 recording 边界。部署选择应同时比较生产端成本、消费端加载、体积和目标设备
+上的执行表现。
+
+Forge 在较旧目标上生成的同步 warp 操作也需要 PTX 6.0，仅采用处理器的最低 ISA
+版本不足以覆盖这些操作，见 NVIDIA 的
+[shfl.sync 说明](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-shfl-sync)。
