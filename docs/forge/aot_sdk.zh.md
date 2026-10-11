@@ -121,7 +121,8 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 
 此 AOT 路径不序列化 native Graph recording、provider 及其外部依赖。
 在途工作结束前需保持 buffer、模块和 runtime 存活；普通 CGraph 支持不等于
-原生 recording 支持。
+混合原生 recording 支持。上面的固定准备 API 可录制已加载普通 kernel，不代表
+可以序列化或重建混合 native/provider recipe。
 
 C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用其他 runtime 的
 句柄或已释放句柄，会在访问后端内存前报告参数错误；复制切片必须在声明的分配

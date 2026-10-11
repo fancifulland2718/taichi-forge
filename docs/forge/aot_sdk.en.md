@@ -145,7 +145,8 @@ printed by this small example are diagnostics, not application benchmarks.
 
 Native Graph recordings, providers and their external dependencies are not
 serialized by this AOT path. Keep buffers, modules and the runtime alive while
-work uses them; ordinary CGraph support does not imply native recording support.
+work uses them. The fixed preparation API above records loaded ordinary kernels;
+it does not serialize or rebuild mixed native/provider recipes.
 
 Memory handles returned by C API allocation/import functions belong to that
 runtime. Using another runtime's handle or a freed handle reports an argument

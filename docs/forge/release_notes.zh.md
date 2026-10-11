@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- runtime wheel 现提供仅依赖标准库的 `taichi_forge_runtime.aot` 消费入口，与 JIT
+  共用原生库。普通 AOT kernel/CGraph 可显式准备为 CPU 批次、CUDA Graph 或 Vulkan
+  固定命令，支持显式 ndarray 梯度。准备不执行用户 kernel；关闭代码/存储会使相关
+  prepared 对象失效。尚未覆盖混合 provider 或通用新场景特化，详见
+  [AOT SDK 合同](aot_sdk.zh.md)。
+
 - 修复 Vulkan 嵌套 ArgPack 的 descriptor 布局不匹配。compute pipeline 保留旧
   shader 的模块级描述符合同，新 ArgPack 编译只在实际使用时声明普通参数 buffer；
   graphics/ray 继续按入口反射。
@@ -43,7 +49,8 @@
 - 固定 AoS `StructNdarray` 已支持 CPU/CUDA/Vulkan 的 AOT 直接执行和普通 CGraph，
   包含 CUDA PTX。模块拥有的目标布局描述符可与已有 ndarray 梯度绑定组合，Graph
   dispatch 前检查全部绑定。独立小夹具覆盖嵌套混合类型、重绑定与退休；结构梯度、
-  任意 view 和 native capture 不在此范围。详见 [SDK 合同](aot_sdk.zh.md)。
+  任意 view 不在此范围；固定原生 kernel/CGraph 准备由上面的扩展单独覆盖。详见
+  [SDK 合同](aot_sdk.zh.md)。
 - C API 内存句柄现在绑定所属 runtime 的存活分配，包含导入内存。跨 runtime 或
   已释放的句柄会在访问后端前报告参数错误；设备复制的切片按声明容量检查边界，
   避免 offset 算术溢出。既有 `TiMemory`、`TiNdArray`、`TiArgument` 布局保持。

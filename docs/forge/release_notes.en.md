@@ -34,6 +34,14 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- The runtime wheel now includes a stdlib-only `taichi_forge_runtime.aot`
+  consumer sharing JIT's native library. Ordinary AOT kernels and CGraphs can
+  explicitly prepare fixed CPU batches, CUDA Graphs and Vulkan commands with
+  explicit ndarray gradients. Preparation executes no user kernels; closing
+  bound code/storage invalidates its dependent executions. This does not yet
+  cover mixed providers or generic scene specialization; see the
+  [AOT SDK contract](aot_sdk.en.md).
+
 - Fixed Vulkan nested ArgPack descriptor layout failures. Compute pipelines
   preserve the module-wide descriptor contract for older shaders; new ArgPack
   code emits the ordinary argument buffer only when it is used. Graphics/ray
@@ -51,7 +59,8 @@ lifetimes. The entries below describe the changes.
   descriptors compose with existing ndarray gradient bindings; complete binding
   checks precede Graph dispatch. Nested mixed-type records, rebinding and
   retirement are covered by small independent consumers. Structure gradients,
-  arbitrary views and native capture remain outside this scope. See the
+  arbitrary views remain outside this scope. Fixed native kernel/CGraph
+  preparation is covered separately by the extension above. See the
   [SDK contract](aot_sdk.en.md).
 - C API memory handles now identify live allocations in their owning runtime,
   including imported memory. Foreign and retired handles report an argument
