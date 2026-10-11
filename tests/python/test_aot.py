@@ -849,7 +849,7 @@ def test_cuda_aot_explicit_capability_metadata():
         }
         assert required_caps == {
             "cuda_compute_capability": 60,
-            "cuda_ptx_version": 50,
+            "cuda_ptx_version": 60,
         }
 
 

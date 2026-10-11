@@ -2,8 +2,10 @@
 
 #if defined(TI_WITH_CUDA)
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/IntrinsicsNVPTX.h"
 #include "llvm/Support/TargetSelect.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
+#include "taichi/rhi/cuda/cuda_capability.h"
 
 namespace taichi::lang {
 namespace {
@@ -62,6 +64,31 @@ TEST(CUDAArtifactTarget, RejectsUnknownTargetsAndFeatures) {
     EXPECT_ANY_THROW(compile_cuda_kernel_artifact(
         module, config, target, 0, JITModuleRole::user_kernel));
   }
+}
+
+TEST(CUDAArtifactTarget, PascalTargetCanEmitSynchronizedWarpShuffle) {
+  llvm::LLVMContext context;
+  auto module = make_cuda_artifact_fixture(context);
+  auto *entry = module->getFunction("target_entry");
+  llvm::IRBuilder<> builder(entry->getEntryBlock().getTerminator());
+  auto *shuffle = llvm::Intrinsic::getDeclaration(
+      module.get(), llvm::Intrinsic::nvvm_shfl_sync_idx_i32);
+  auto *value = builder.CreateCall(shuffle,
+      {builder.getInt32(-1), builder.getInt32(42), builder.getInt32(0),
+       builder.getInt32(31)});
+  auto *output = new llvm::GlobalVariable(
+      *module, builder.getInt32Ty(), false, llvm::GlobalValue::ExternalLinkage,
+      nullptr, "output", nullptr, llvm::GlobalValue::NotThreadLocal, 1);
+  builder.CreateStore(value, output);
+  const auto resolved = cuda::detail::resolve_compute_capability_target(60);
+  EXPECT_EQ(resolved.ptx_version, 60);
+  const CUDACodegenTarget target{"sm_60", "+ptx60"};
+  CompileConfig config;
+  auto artifact = compile_cuda_kernel_artifact(module, config, target, 0,
+                                               JITModuleRole::user_kernel);
+  const std::string ptx(artifact.payload.data(), artifact.code_size());
+  EXPECT_NE(ptx.find(".target sm_60"), std::string::npos);
+  EXPECT_NE(ptx.find("shfl.sync"), std::string::npos);
 }
 
 }  // namespace taichi::lang

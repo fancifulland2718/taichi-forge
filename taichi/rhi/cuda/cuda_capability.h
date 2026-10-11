@@ -67,8 +67,16 @@ constexpr ComputeCapabilityResolution resolve_compute_capability_target(
     }
     selected = candidate;
   }
+  // Forge lowers warp collectives to synchronized NVVM intrinsics. Their PTX
+  // instructions require ISA 6.0 even on pre-Volta GPUs (sm_30 and later).
+  // Selecting only the processor's minimum PTX ISA breaks real kernels during
+  // emission, e.g. shfl.sync on sm_60 with +ptx50. Keep JIT and AOT consistent.
+  const int runtime_ptx_version =
+      selected.compute_capability >= 30 && selected.ptx_version < 60
+          ? 60
+          : selected.ptx_version;
   return {device_compute_capability, selected.compute_capability,
-          selected.ptx_version,
+          runtime_ptx_version,
           selected.compute_capability != device_compute_capability};
 }
 
