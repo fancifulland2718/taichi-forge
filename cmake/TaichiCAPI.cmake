@@ -18,46 +18,10 @@ endif()
 endfunction()
 
 set(TAICHI_C_API_NAME taichi_c_api)
-list(APPEND C_API_SOURCE "c_api/src/taichi_core_impl.cpp")
-list(APPEND C_API_SOURCE "c_api/src/aot_bindings.cpp")
-list(APPEND C_API_PUBLIC_HEADERS
-  "c_api/include/taichi/taichi_platform.h"
-  "c_api/include/taichi/taichi_core.h"
-  "c_api/include/taichi/taichi.h"
-  # FIXME: (penguinliong) Remove this in the future when we have a option for
-  # Unity3D integration?
-  "c_api/include/taichi/taichi_unity.h"
-  )
-
-if (TI_WITH_LLVM)
-  list(APPEND C_API_SOURCE "c_api/src/taichi_llvm_impl.cpp")
-  list(APPEND C_API_PUBLIC_HEADERS "c_api/include/taichi/taichi_cpu.h")
-
-  if (TI_WITH_CUDA)
-    list(APPEND C_API_PUBLIC_HEADERS "c_api/include/taichi/taichi_cuda.h")
-  endif()
-endif()
-
-if (TI_WITH_OPENGL OR TI_WITH_VULKAN OR TI_WITH_METAL)
-  list(APPEND C_API_SOURCE "c_api/src/taichi_gfx_impl.cpp")
-endif()
-
-if (TI_WITH_OPENGL)
-  list(APPEND C_API_SOURCE "c_api/src/taichi_opengl_impl.cpp")
-  list(APPEND C_API_PUBLIC_HEADERS "c_api/include/taichi/taichi_opengl.h")
-endif()
-
-if (TI_WITH_METAL)
-  list(APPEND C_API_SOURCE "c_api/src/taichi_metal_impl.mm")
-  list(APPEND C_API_PUBLIC_HEADERS "c_api/include/taichi/taichi_metal.h")
-endif()
-
-if (TI_WITH_VULKAN)
-  list(APPEND C_API_SOURCE "c_api/src/taichi_vulkan_impl.cpp")
-  list(APPEND C_API_PUBLIC_HEADERS "c_api/include/taichi/taichi_vulkan.h")
-  if (APPLE)
-    install(FILES ${MoltenVK_LIBRARY} DESTINATION c_api/lib)
-  endif()
+include(cmake/TaichiCAPISources.cmake)
+ti_get_c_api_sources(C_API_SOURCE C_API_PUBLIC_HEADERS)
+if(TI_WITH_VULKAN AND APPLE)
+  install(FILES ${MoltenVK_LIBRARY} DESTINATION c_api/lib)
 endif()
 
 if(TI_BUILD_TESTS)
@@ -93,24 +57,7 @@ elseif(APPLE)
     target_link_options(${TAICHI_C_API_NAME} PRIVATE -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/c_api/version_scripts/export_symbols_mac.lds)
 endif()
 
-target_include_directories(${TAICHI_C_API_NAME}
-    PUBLIC
-        # Used when building the library:
-        $<BUILD_INTERFACE:${taichi_c_api_BINARY_DIR}/c_api/include>
-        $<BUILD_INTERFACE:${taichi_c_api_SOURCE_DIR}/c_api/include>
-        # Used when installing the library:
-        $<INSTALL_INTERFACE:c_api/include>
-    PRIVATE
-        # Used only when building the library:
-        ${PROJECT_SOURCE_DIR}
-        ${PROJECT_SOURCE_DIR}/c_api/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/spdlog/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/Vulkan-Headers/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/VulkanMemoryAllocator/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/volk
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/glad/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/glfw/include
-    )
+ti_configure_c_api_target(${TAICHI_C_API_NAME})
 set_property(TARGET ${TAICHI_C_API_NAME} PROPERTY PUBLIC_HEADER ${C_API_PUBLIC_HEADERS})
 
 # This helper provides us standard locations across Linux/Windows/MacOS

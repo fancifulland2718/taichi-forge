@@ -70,7 +70,7 @@ def build_export_closure(
     seeds: tuple[str, ...] = EXPLICIT_ABI_SEEDS,
     additional_required_symbols: set[str] | None = None,
 ) -> tuple[list[str], dict]:
-    """Return the exact runtime symbols consumed by the shim plus ABI seeds."""
+    """Retain shim references, public runtime C API entries and ABI seeds."""
 
     normalized_undefined = {
         normalize_reference(symbol) for symbol in undefined_symbols
@@ -79,11 +79,19 @@ def build_export_closure(
     additional_required = raw_symbols.intersection(
         additional_required_symbols or set()
     ) - directly_required
-    required = directly_required.union(additional_required)
+    # Runtime-hosted AOT consumers use the same public C API as the standalone
+    # library. Preserve those entry points even when the Python shim does not
+    # reference them. Match the standalone C API's version-script namespace.
+    c_api_prefix = "_ti_" if platform == "macos-macho" else "ti_"
+    public_c_api = {
+        symbol for symbol in raw_symbols if symbol.startswith(c_api_prefix)
+    }
+    shim_required = directly_required.union(additional_required)
+    required = shim_required.union(public_c_api)
     exports = sorted(required.union(seeds))
     classifications: dict[str, int] = {}
     for symbol in exports:
-        role = classify(symbol)
+        role = "public_c_api" if symbol in public_c_api else classify(symbol)
         classifications[role] = classifications.get(role, 0) + 1
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -93,8 +101,9 @@ def build_export_closure(
         "shim_undefined_symbol_count": len(undefined_symbols),
         "shim_direct_runtime_symbol_count": len(directly_required),
         "shim_shared_odr_symbol_count": len(additional_required),
-        "shim_required_runtime_symbol_count": len(required),
+        "shim_required_runtime_symbol_count": len(shim_required),
         "explicit_abi_seed_count": len(seeds),
+        "public_c_api_symbol_count": len(public_c_api),
         "exported_symbol_count": len(exports),
         "dropped_raw_symbol_count": len(raw_symbols - required),
         "classifications": dict(sorted(classifications.items())),

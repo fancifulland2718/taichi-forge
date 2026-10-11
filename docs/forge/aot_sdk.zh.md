@@ -36,6 +36,26 @@ runtime bitcode、许可证、CMake package 和 `sdk_manifest.json`，不会在�
 wheel 安装中额外复制一份。清单记录 LLVM/CUDA/Vulkan 构建能力、LLVM 版本、
 文件大小及 SHA256。源码 revision 对应 CMake 配置时刻，文件哈希标识实际安装内容。
 
+需要同时承载 JIT 的 SDK 可以通过可选构建，将同一套 C API 放入 split
+`taichi_runtime`，避免在 Python shim 之外分发第二份完整原生核心。在匹配的
+Python 构建环境中执行：
+
+```sh
+cmake -S . -B BUILD -DTI_WITH_PYTHON=ON \
+  -DTI_WITH_SPLIT_PYTHON_RUNTIME=ON -DTI_WITH_RUNTIME_C_API=ON \
+  -DTI_WITH_C_API=OFF
+cmake --build BUILD --target taichi_runtime taichi_python
+cmake --install BUILD --prefix SDK --component TaichiSDK
+```
+
+消费端仍链接 `TaichiForge::c_api`；CMake package 选择 `taichi_runtime`，
+清单通过 `native_library` 和 `build_features.runtime_c_api` 记录此配置。
+构建匹配的 shim 和私有导出合同需要 Python，C/C++ 消费进程无需加载 Python。
+`TI_WITH_RUNTIME_C_API` 默认关闭，不能据此认为现有 runtime wheel 已包含这些
+入口。shim 与原生库必须配对。共用二进制库不会自动共用可变 runtime 实例，
+也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
+recording/provider 支持边界仍然适用。
+
 安装后的 `examples/aot_sdk` 包含导出脚本及独立消费程序。`SDK`、`MODULE`
 请使用绝对路径：
 

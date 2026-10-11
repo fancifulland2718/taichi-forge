@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 _SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -57,6 +59,25 @@ def test_export_closure_is_deterministic():
     )
 
     assert first == second
+
+
+@pytest.mark.parametrize(
+    "platform,prefix", [("windows-pe", ""), ("linux-elf", ""), ("macos-macho", "_")]
+)
+def test_runtime_c_api_exports_are_independent_of_shim_references(platform, prefix):
+    anchor = prefix + "taichi_runtime_anchor"
+    public = prefix + "ti_launch_compute_graph"
+    private = prefix + "private_shim_entry"
+    vendor = prefix + "vkCreateInstance"
+    exports, manifest = _MODULE.build_export_closure(
+        {public, private, vendor}, {private}, platform=platform, seeds=(anchor,)
+    )
+
+    assert set(exports) == {anchor, public, private}
+    assert manifest["public_c_api_symbol_count"] == 1
+    assert manifest["shim_required_runtime_symbol_count"] == 1
+    assert manifest["classifications"]["public_c_api"] == 1
+    assert manifest["dropped_raw_symbol_count"] == 1
 
 
 def test_dll_audit_includes_implicit_exports_and_is_deterministic():

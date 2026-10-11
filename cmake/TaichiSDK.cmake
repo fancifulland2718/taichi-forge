@@ -1,7 +1,27 @@
 # A separate opt-in install component. Ordinary wheel installs do not duplicate
 # their C API/runtime payloads, and standalone consumers need no Python package.
 set(_ti_sdk_component TaichiSDK)
-install(TARGETS ${TAICHI_C_API_NAME}
+if(TI_WITH_RUNTIME_C_API)
+    set(TAICHI_SDK_LIBRARY_NAME taichi_runtime)
+    set(TAICHI_SDK_RUNTIME_C_API true)
+    install(FILES ${C_API_PUBLIC_HEADERS} DESTINATION include/taichi
+        COMPONENT ${_ti_sdk_component} EXCLUDE_FROM_ALL)
+    if(WIN32)
+        set(_ti_sdk_native_dir bin)
+    else()
+        set(_ti_sdk_native_dir lib)
+    endif()
+    if(MSVC OR LINUX OR APPLE)
+        install(FILES "${_ti_runtime_export_manifest}"
+            DESTINATION ${_ti_sdk_native_dir}
+            RENAME taichi_runtime.exports.json
+            COMPONENT ${_ti_sdk_component} EXCLUDE_FROM_ALL)
+    endif()
+else()
+    set(TAICHI_SDK_LIBRARY_NAME ${TAICHI_C_API_NAME})
+    set(TAICHI_SDK_RUNTIME_C_API false)
+endif()
+install(TARGETS ${TAICHI_SDK_LIBRARY_NAME}
     RUNTIME DESTINATION bin COMPONENT ${_ti_sdk_component} EXCLUDE_FROM_ALL
     LIBRARY DESTINATION lib COMPONENT ${_ti_sdk_component} EXCLUDE_FROM_ALL
     ARCHIVE DESTINATION lib COMPONENT ${_ti_sdk_component} EXCLUDE_FROM_ALL

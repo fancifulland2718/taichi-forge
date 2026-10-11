@@ -219,6 +219,12 @@ if (TI_WITH_C_API)
   if (TI_BUILD_TESTS)
     include(cmake/TaichiCAPITests.cmake)
   endif()
+elseif(TI_WITH_RUNTIME_C_API)
+  # A runtime wheel can also supply a standalone public-header SDK without
+  # building another library containing the backend core.
+  include(cmake/TaichiCAPISources.cmake)
+  ti_get_c_api_sources(_ti_sdk_sources C_API_PUBLIC_HEADERS)
+  include(cmake/TaichiSDK.cmake)
 endif()
 
 if (TI_BUILD_EXAMPLES)

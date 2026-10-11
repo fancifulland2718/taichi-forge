@@ -42,6 +42,28 @@ installs. The manifest records enabled LLVM/CUDA/Vulkan features, LLVM version,
 file sizes and SHA256 hashes. Its source revision is the revision at CMake
 configuration time; hashes identify the actual installed bytes.
 
+For an SDK that also hosts JIT, an opt-in build can expose the same C API from
+the split `taichi_runtime` library. This avoids distributing a second complete
+native core alongside the Python shim. In a matching Python-enabled build:
+
+```sh
+cmake -S . -B BUILD -DTI_WITH_PYTHON=ON \
+  -DTI_WITH_SPLIT_PYTHON_RUNTIME=ON -DTI_WITH_RUNTIME_C_API=ON \
+  -DTI_WITH_C_API=OFF
+cmake --build BUILD --target taichi_runtime taichi_python
+cmake --install BUILD --prefix SDK --component TaichiSDK
+```
+
+The consumer still links `TaichiForge::c_api`; the CMake package selects
+`taichi_runtime` and the manifest records `native_library` and
+`build_features.runtime_c_api`. Python is required to build the matching shim
+and its private export contract, but the C/C++ consumer does not load Python.
+`TI_WITH_RUNTIME_C_API` defaults to `OFF`; this configuration is not implied by
+installing an existing runtime wheel. Keep the shim and native library paired.
+Sharing this binary does not automatically share mutable runtime instances or
+make arrays interchangeable between independently created runtimes. The AOT
+artifact and native recording/provider support boundaries below still apply.
+
 The installed `examples/aot_sdk` directory contains an exporter and standalone
 consumer. Use absolute paths for `SDK` and `MODULE`:
 

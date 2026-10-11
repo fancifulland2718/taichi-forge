@@ -26,6 +26,9 @@ option(TI_WITH_GGUI "Build with GGUI" OFF)                      # wheel-tag: ggu
 option(TI_WITH_SPLIT_PYTHON_RUNTIME
        "Build taichi_python as a small shim linked against a shared native runtime"
        OFF)
+option(TI_WITH_RUNTIME_C_API
+       "Include the public AOT C API in the shared native runtime"
+       OFF)
 set(TI_PREBUILT_PYTHON_RUNTIME_DIR ""
     CACHE PATH "Directory containing a prebuilt split Python runtime library for shim-only builds")
 set(TI_PYTHON_INSTALL_PACKAGE ""
@@ -33,6 +36,12 @@ set(TI_PYTHON_INSTALL_PACKAGE ""
 set(TI_WITH_PREBUILT_PYTHON_RUNTIME OFF)
 if(TI_WITH_SPLIT_PYTHON_RUNTIME AND TI_PREBUILT_PYTHON_RUNTIME_DIR)
     set(TI_WITH_PREBUILT_PYTHON_RUNTIME ON)
+endif()
+if(TI_WITH_RUNTIME_C_API AND
+   (NOT TI_WITH_SPLIT_PYTHON_RUNTIME OR NOT TI_WITH_PYTHON OR
+    TI_WITH_PREBUILT_PYTHON_RUNTIME))
+    message(FATAL_ERROR
+        "TI_WITH_RUNTIME_C_API requires building the split Python runtime")
 endif()
 
 # Force symbols to be 'hidden' by default so nothing is exported from the Taichi
@@ -1131,6 +1140,15 @@ if(TI_WITH_PYTHON)
                 llvm_rhi
                 opengl_rhi
                 vulkan_rhi)
+
+            if(TI_WITH_RUNTIME_C_API)
+                include(cmake/TaichiCAPISources.cmake)
+                ti_get_c_api_sources(_ti_runtime_c_api_sources _ti_runtime_c_api_headers)
+                ti_add_native_library(taichi_runtime_c_api ${_ti_runtime_c_api_sources})
+                ti_configure_c_api_target(taichi_runtime_c_api)
+                target_link_libraries(taichi_runtime_c_api PRIVATE ${CORE_LIBRARY_NAME})
+                list(APPEND _ti_runtime_native_targets taichi_runtime_c_api)
+            endif()
 
             target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE taichi_ui)
             target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
