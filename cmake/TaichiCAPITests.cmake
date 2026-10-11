@@ -15,8 +15,9 @@ file(GLOB_RECURSE TAICHI_C_API_TESTS_SOURCE
 
 add_executable(${C_API_TESTS_NAME} ${TAICHI_C_API_TESTS_SOURCE})
 if (WIN32)
-    # Output the executable to build/ instead of build/Debug/...
-    set(C_API_TESTS_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
+    # Keep all configurations next to the matching C API DLL. Honor an
+    # isolated build's output directory instead of overwriting another build.
+    set(C_API_TESTS_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
     set_target_properties(${C_API_TESTS_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${C_API_TESTS_OUTPUT_DIR})
     set_target_properties(${C_API_TESTS_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG ${C_API_TESTS_OUTPUT_DIR})
     set_target_properties(${C_API_TESTS_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${C_API_TESTS_OUTPUT_DIR})
