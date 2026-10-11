@@ -8,6 +8,124 @@
 #include "taichi/taichi_cuda.h"
 #include "c_api/tests/gtest_fixture.h"
 
+TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
+  for (TiArch arch : {TI_ARCH_X64, TI_ARCH_CUDA, TI_ARCH_VULKAN}) {
+    if (!ti::is_arch_available(arch))
+      continue;
+    SCOPED_TRACE(int(arch));
+    ti::Runtime left(arch), right(arch);
+    TiMemoryAllocateInfo info{};
+    info.size = 16;
+    info.host_read = info.host_write = TI_TRUE;
+    info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+    TiMemory a = ti_allocate_memory(left, &info);
+    TiMemory b = ti_allocate_memory(right, &info);
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    EXPECT_NE(a, b);
+    ASSERT_TAICHI_SUCCESS();
+    auto *initial = static_cast<int *>(ti_map_memory(right, b));
+    ASSERT_NE(initial, nullptr);
+    initial[0] = 29;
+    ti_unmap_memory(right, b);
+    ASSERT_TAICHI_SUCCESS();
+
+    // Reject before invoking a backend with a foreign RHI allocation slot.
+    EXPECT_EQ(ti_map_memory(right, a), nullptr);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+    ti_unmap_memory(right, a);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+    ti_free_memory(right, a);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+    TiMemorySlice source{a, 0, 16}, target{b, 0, 16};
+    ti_copy_memory_device_to_device(right, &target, &source);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+
+    if (arch == TI_ARCH_X64) {
+      auto *values = static_cast<int *>(ti_map_memory(right, b));
+      ASSERT_NE(values, nullptr);
+      values[0] = 29;
+      ti_unmap_memory(right, b);
+      TiCpuMemoryInteropInfo exported{};
+      ti_export_cpu_memory(right, a, &exported);
+      EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+      EXPECT_EQ(exported.ptr, nullptr);
+      ti_export_cpu_memory(right, b, &exported);
+      ASSERT_TAICHI_SUCCESS();
+      EXPECT_EQ(static_cast<int *>(exported.ptr)[0], 29);
+    } else if (arch == TI_ARCH_CUDA) {
+      TiCudaMemoryInteropInfo exported{};
+      ti_export_cuda_memory(right, a, &exported);
+      EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+      EXPECT_EQ(exported.ptr, nullptr);
+      ti_export_cuda_memory(right, b, &exported);
+      ASSERT_TAICHI_SUCCESS();
+      EXPECT_GE(exported.size, 16);  // CUDA may round physical allocations.
+    }
+
+    ti_free_memory(left, a);
+    ASSERT_TAICHI_SUCCESS();
+    TiMemory replacement = ti_allocate_memory(left, &info);
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_NE(replacement, a);
+    ti_free_memory(left, a);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "live allocation");
+    ti_free_memory(left, replacement);
+    ASSERT_TAICHI_SUCCESS();
+    left.destroy();
+    // Retiring one runtime must leave both the other runtime's internal
+    // allocations and its public buffers usable.
+    right.wait();
+    ASSERT_TAICHI_SUCCESS();
+    auto *retained = static_cast<int *>(ti_map_memory(right, b));
+    ASSERT_NE(retained, nullptr);
+    EXPECT_EQ(retained[0], 29);
+    ti_unmap_memory(right, b);
+    ti_free_memory(right, b);
+    ASSERT_TAICHI_SUCCESS();
+    right.destroy();
+    ti::Runtime later(arch);
+    TiMemory c = ti_allocate_memory(later, &info);
+    EXPECT_NE(c, a);
+    EXPECT_EQ(ti_map_memory(later, a), nullptr);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "live allocation");
+    ti_free_memory(later, c);
+    ASSERT_TAICHI_SUCCESS();
+  }
+}
+
+TEST_F(CapiTest, ImportedMemoryCapacityAndRetirement) {
+  if (!ti::is_arch_available(TI_ARCH_X64))
+    GTEST_SKIP();
+  ti::Runtime runtime(TI_ARCH_X64);
+  int source[4] = {1, 2, 3, 4};
+  int target[4] = {9, 9, 9, 9};
+  TiMemory a = ti_import_cpu_memory(runtime, source, sizeof(source));
+  TiMemory b = ti_import_cpu_memory(runtime, target, sizeof(target));
+  ASSERT_TAICHI_SUCCESS();
+  TiMemorySlice src{a, 0, sizeof(source)}, dst{b, 1, sizeof(target)};
+  ti_copy_memory_device_to_device(runtime, &dst, &src);
+  EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "capacity");
+  dst.offset = 0;
+  src.offset = UINT64_MAX;  // Offset+size must not wrap past the bounds check.
+  ti_copy_memory_device_to_device(runtime, &dst, &src);
+  EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "capacity");
+  EXPECT_EQ(target[0], 9);
+  // The CPU C API does not implement device-to-device copy. Invalid slices
+  // are rejected before that backend boundary; the original bytes stay intact.
+  for (int value : target)
+    EXPECT_EQ(value, 9);
+  ti_free_memory(runtime, a);
+  ti_free_memory(runtime, b);
+  ASSERT_TAICHI_SUCCESS();
+  // Releasing import wrappers leaves external allocations under caller control.
+  source[0] = 17;
+  EXPECT_EQ(source[0], 17);
+  TiCpuMemoryInteropInfo exported{};
+  ti_export_cpu_memory(runtime, a, &exported);
+  EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "live allocation");
+}
+
 TEST_F(CapiTest, TestBehaviorCreateRuntime) {
   auto inner = [this](TiArch arch) {
     TiRuntime runtime = ti_create_runtime(arch, 0);

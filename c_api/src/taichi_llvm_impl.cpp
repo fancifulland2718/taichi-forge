@@ -60,7 +60,7 @@ TiMemory LlvmRuntime::allocate_memory(
           {params, executor_->get_runtime_jit_module(), llvm_runtime,
            result_buffer, executor_->use_device_memory_pool()});
 
-  return devalloc2devmem(*this, devalloc);
+  return devalloc2devmem(*this, devalloc, params.size);
 }
 
 void LlvmRuntime::free_memory(TiMemory devmem) {
@@ -135,6 +135,7 @@ void LlvmRuntime::wait() {
 void ti_export_cpu_memory(TiRuntime runtime,
                           TiMemory memory,
                           TiCpuMemoryInteropInfo *interop_info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
 #ifdef TI_WITH_LLVM
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(memory);
@@ -160,13 +161,23 @@ void ti_export_cpu_memory(TiRuntime runtime,
 #else
   TI_NOT_IMPLEMENTED;
 #endif  // TI_WITH_LLVM
+  TI_CAPI_TRY_CATCH_END();
 }
 
 // function.import_cpu_runtime
 TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cpu_memory(TiRuntime runtime,
                                                         void *ptr,
                                                         size_t memory_size) {
+  TiMemory out = TI_NULL_HANDLE;
+  TI_CAPI_TRY_CATCH_BEGIN();
 #ifdef TI_WITH_LLVM
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(ptr);
+  if (((Runtime *)runtime)->arch != taichi::Arch::x64 &&
+      ((Runtime *)runtime)->arch != taichi::Arch::arm64) {
+    ti_set_last_error(TI_ERROR_INVALID_INTEROP, "arch!= cpu");
+    return TI_NULL_HANDLE;
+  }
   capi::LlvmRuntime *llvm_runtime =
       static_cast<capi::LlvmRuntime *>((Runtime *)runtime);
 
@@ -177,18 +188,19 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cpu_memory(TiRuntime runtime,
       cpu_device.import_memory(ptr, memory_size);
 
   // prepare memory object
-  TiMemory memory = devalloc2devmem(*llvm_runtime, device_alloc);
-
-  return memory;
+  out = devalloc2devmem(*llvm_runtime, device_alloc, memory_size);
 #else
   TI_NOT_IMPLEMENTED;
 #endif  // TI_WITH_LLVM
+  TI_CAPI_TRY_CATCH_END();
+  return out;
 }
 
 // function.export_cuda_runtime
 void ti_export_cuda_memory(TiRuntime runtime,
                            TiMemory memory,
                            TiCudaMemoryInteropInfo *interop_info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
 #ifdef TI_WITH_CUDA
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(memory);
@@ -212,13 +224,19 @@ void ti_export_cuda_memory(TiRuntime runtime,
 #else
   TI_NOT_IMPLEMENTED;
 #endif
+  TI_CAPI_TRY_CATCH_END();
 }
 
 // function.import_cuda_runtime
 TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cuda_memory(TiRuntime runtime,
                                                          void *ptr,
                                                          size_t memory_size) {
+  TiMemory out = TI_NULL_HANDLE;
+  TI_CAPI_TRY_CATCH_BEGIN();
 #ifdef TI_WITH_CUDA
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(ptr);
+  TI_CAPI_INVALID_INTEROP_ARCH_RV(((Runtime *)runtime)->arch, cuda);
   capi::LlvmRuntime *llvm_runtime =
       static_cast<capi::LlvmRuntime *>((Runtime *)runtime);
 
@@ -229,12 +247,12 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cuda_memory(TiRuntime runtime,
       cuda_device.import_memory(ptr, memory_size);
 
   // prepare memory object
-  TiMemory memory = devalloc2devmem(*llvm_runtime, device_alloc);
-
-  return memory;
+  out = devalloc2devmem(*llvm_runtime, device_alloc, memory_size);
 #else
   TI_NOT_IMPLEMENTED;
 #endif
+  TI_CAPI_TRY_CATCH_END();
+  return out;
 }
 
 // function.set_cuda_stream

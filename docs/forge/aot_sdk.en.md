@@ -51,6 +51,12 @@ Native Graph recordings, providers and their external dependencies are not
 serialized by this AOT path. Keep buffers, modules and the runtime alive while
 work uses them; ordinary CGraph support does not imply native recording support.
 
+Memory handles returned by C API allocation/import functions belong to that
+runtime. Using another runtime's handle or a freed handle reports an argument
+error before backend memory access. Copy slices must fit within the declared
+allocation size. Applications must still retain buffers until submitted work
+finishes and unmap mapped memory before releasing it.
+
 CPU/CUDA exports containing only dense fields and serial/range tasks use schema
 5 (`resource_binding="dense_v1"`). The module compacts its required resource
 closure and reserves independent runtime IDs before field allocation. Two

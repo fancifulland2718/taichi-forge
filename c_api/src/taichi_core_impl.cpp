@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <atomic>
+#include <limits>
 #include <unordered_set>
 
 #include "taichi_core_impl.h"
@@ -158,10 +160,52 @@ TiMemory Runtime::allocate_memory(
   if (res != taichi::lang::RhiResult::success) {
     throw std::bad_alloc();
   }
-  return devalloc2devmem(*this, devalloc);
+  return devalloc2devmem(*this, devalloc, params.size);
 }
 void Runtime::free_memory(TiMemory devmem) {
-  this->get().dealloc_memory(devmem2devalloc(*this, devmem));
+  std::lock_guard<std::mutex> lock(memory_mutex_);
+  const auto found = memories_.find(devmem);
+  if (found == memories_.end()) {
+    throw MemoryBindingError("Memory is not a live allocation of this runtime");
+  }
+  this->get().dealloc_memory(found->second.allocation);
+  memories_.erase(found);
+}
+
+TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
+                                  uint64_t size,
+                                  bool release_on_failure) {
+  TI_ASSERT(allocation.device == &get());
+  try {
+    // Never reuse a token, including across runtime destruction. Refuse the
+    // machine's exhausted handle space instead of wrapping into a live token.
+    static std::atomic<std::uintptr_t> next{1};
+    auto token = next.load(std::memory_order_relaxed);
+    do {
+      if (token == std::numeric_limits<std::uintptr_t>::max()) {
+        throw std::bad_alloc();
+      }
+    } while (!next.compare_exchange_weak(token, token + 1,
+                                         std::memory_order_relaxed));
+    const auto handle = reinterpret_cast<TiMemory>(token);
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    memories_.emplace(handle, MemoryAllocation{allocation, size});
+    return handle;
+  } catch (...) {
+    // RHI import paths allocate their own wrapper too. Retire that wrapper;
+    // the backend retains ownership rules for the external storage itself.
+    if (release_on_failure) get().dealloc_memory(allocation);
+    throw;
+  }
+}
+
+Runtime::MemoryAllocation Runtime::get_memory(TiMemory memory) const {
+  std::lock_guard<std::mutex> lock(memory_mutex_);
+  const auto found = memories_.find(memory);
+  if (found == memories_.end()) {
+    throw MemoryBindingError("Memory is not a live allocation of this runtime");
+  }
+  return found->second;
 }
 
 AotModule::AotModule(Runtime &runtime,
@@ -562,10 +606,16 @@ void ti_copy_memory_device_to_device(TiRuntime runtime,
   }
 
   Runtime *runtime2 = (Runtime *)runtime;
-  auto dst = devmem2devalloc(*runtime2, dst_memory->memory)
-                 .get_ptr(dst_memory->offset);
-  auto src = devmem2devalloc(*runtime2, src_memory->memory)
-                 .get_ptr(src_memory->offset);
+  const auto dst_allocation = runtime2->get_memory(dst_memory->memory);
+  const auto src_allocation = runtime2->get_memory(src_memory->memory);
+  if (dst_memory->offset > dst_allocation.size ||
+      dst_memory->size > dst_allocation.size - dst_memory->offset ||
+      src_memory->offset > src_allocation.size ||
+      src_memory->size > src_allocation.size - src_memory->offset) {
+    throw MemoryBindingError("Memory slice exceeds its allocation capacity");
+  }
+  auto dst = dst_allocation.allocation.get_ptr(dst_memory->offset);
+  auto src = src_allocation.allocation.get_ptr(src_memory->offset);
   runtime2->buffer_copy(dst, src, dst_memory->size);
   TI_CAPI_TRY_CATCH_END();
 }

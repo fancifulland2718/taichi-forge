@@ -4,6 +4,8 @@
 #include <string>
 #include <exception>
 #include <stdexcept>
+#include <mutex>
+#include <unordered_map>
 
 // Taichi runtime is not necessarily using the same 3rd-party headers as the
 // user codes. For C-API implementations we only use the internal headers.
@@ -77,8 +79,16 @@
     return TI_NULL_HANDLE;                                       \
   }
 
+class MemoryBindingError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
 #define TI_CAPI_TRY_CATCH_BEGIN() try {
 #define TI_CAPI_TRY_CATCH_END()                                 \
+  }                                                             \
+  catch (const MemoryBindingError &e) {                         \
+    ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, e.what());     \
   }                                                             \
   catch (const std::exception &e) {                             \
     ti_set_last_error(TI_ERROR_INVALID_STATE, e.what());        \
@@ -117,6 +127,16 @@ class MetalRuntime;
 }  // namespace capi
 
 class Runtime {
+ public:
+  struct MemoryAllocation {
+    taichi::lang::DeviceAllocation allocation;
+    uint64_t size;
+  };
+
+ private:
+  mutable std::mutex memory_mutex_;
+  std::unordered_map<TiMemory, MemoryAllocation> memories_;
+
  protected:
   // 32 is a magic number in `taichi/inc/constants.h`.
   std::array<uint64_t, 32> host_result_buffer_;
@@ -150,6 +170,13 @@ class Runtime {
   virtual TiMemory allocate_memory(
       const taichi::lang::Device::AllocParams &params);
   virtual void free_memory(TiMemory devmem);
+
+  // Adopts an RHI allocation, including imported allocation wrappers. The
+  // process-unique opaque handle is never reinterpreted as an RHI slot ID.
+  TiMemory register_memory(taichi::lang::DeviceAllocation allocation,
+                            uint64_t size,
+                            bool release_on_failure = true);
+  MemoryAllocation get_memory(TiMemory memory) const;
 
   virtual TiImage allocate_image(const taichi::lang::ImageParams &params) {
     TI_NOT_IMPLEMENTED
@@ -220,13 +247,15 @@ struct devalloc_cast_t {
 [[maybe_unused]] taichi::lang::DeviceAllocation devmem2devalloc(
     Runtime &runtime,
     TiMemory devmem) {
-  return devalloc_cast_t<TiMemory>::handle2devalloc(runtime, devmem);
+  return runtime.get_memory(devmem).allocation;
 }
 
 [[maybe_unused]] TiMemory devalloc2devmem(
     Runtime &runtime,
-    const taichi::lang::DeviceAllocation &devalloc) {
-  return devalloc_cast_t<TiMemory>::devalloc2handle(runtime, devalloc);
+    const taichi::lang::DeviceAllocation &devalloc,
+    uint64_t size,
+    bool release_on_failure = true) {
+  return runtime.register_memory(devalloc, size, release_on_failure);
 }
 
 [[maybe_unused]] taichi::lang::DeviceAllocation devimg2devalloc(

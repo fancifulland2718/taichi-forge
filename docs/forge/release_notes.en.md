@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- C API memory handles now identify live allocations in their owning runtime,
+  including imported memory. Foreign and retired handles report an argument
+  error before backend access, and device-copy slices are checked against the
+  declared allocation capacity without overflowing offset arithmetic. Existing
+  `TiMemory`, `TiNdArray` and `TiArgument` layouts are unchanged.
 - CUDA runtime retirement preserves another runtime's live allocations instead
   of resetting the process-wide memory pool. Fallback allocation caches are
   scoped to their Device and discarded on retirement; cache reuse no longer

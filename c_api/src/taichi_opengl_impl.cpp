@@ -48,7 +48,9 @@ TiMemory ti_import_opengl_memory(TiRuntime runtime,
   taichi::lang::DeviceAllocation devalloc{};
   devalloc.device = &runtime2->get_gl();
   devalloc.alloc_id = (taichi::lang::DeviceAllocationId)interop_info->buffer;
-  out = devalloc2devmem(*runtime2, devalloc);
+  // OpenGL imports refer directly to the caller's buffer name, without an RHI
+  // allocation wrapper to retire if host-side handle registration fails.
+  out = devalloc2devmem(*runtime2, devalloc, interop_info->size, false);
   TI_CAPI_TRY_CATCH_END();
   return out;
 }

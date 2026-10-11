@@ -231,13 +231,14 @@ TiMemory ti_import_vulkan_memory(
       vk_runtime.vk_device(), interop_info->buffer, interop_info->usage);
   taichi::lang::DeviceAllocation devalloc = vk_runtime.import_vkbuffer(
       buffer, interop_info->size, interop_info->memory, interop_info->offset);
-  out = devalloc2devmem(*runtime2, devalloc);
+  out = devalloc2devmem(*runtime2, devalloc, interop_info->size);
   TI_CAPI_TRY_CATCH_END();
   return out;
 }
 void ti_export_vulkan_memory(TiRuntime runtime,
                              TiMemory memory,
                              TiVulkanMemoryInteropInfo *interop_info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(memory);
   TI_CAPI_ARGUMENT_NULL(interop_info);
@@ -255,6 +256,7 @@ void ti_export_vulkan_memory(TiRuntime runtime,
   interop_info->usage = buffer.get()->usage;
   interop_info->memory = vk_mem;
   interop_info->offset = (uint64_t)offset;
+  TI_CAPI_TRY_CATCH_END();
 }
 TiImage ti_import_vulkan_image(TiRuntime runtime,
                                const TiVulkanImageInteropInfo *interop_info,

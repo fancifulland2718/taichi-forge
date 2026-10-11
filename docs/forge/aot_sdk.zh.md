@@ -45,6 +45,10 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 在途工作结束前需保持 buffer、模块和 runtime 存活；普通 CGraph 支持不等于
 原生 recording 支持。
 
+C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用其他 runtime 的
+句柄或已释放句柄，会在访问后端内存前报告参数错误；复制切片必须在声明的分配
+容量内。应用仍需保持 buffer 存活至在途工作结束，并在释放前解除 host 映射。
+
 仅包含 dense field 与 serial/range task 的 CPU/CUDA 导出使用 schema 5
 （`resource_binding="dense_v1"`）。模块压紧所需资源闭包，在 field 分配前预留独立
 的 runtime ID。同一产物可在一个 runtime 中加载多份，前向和梯度存储彼此独立。
