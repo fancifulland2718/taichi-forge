@@ -51,10 +51,35 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 消费端仍链接 `TaichiForge::c_api`；CMake package 选择 `taichi_runtime`，
 清单通过 `native_library` 和 `build_features.runtime_c_api` 记录此配置。
 构建匹配的 shim 和私有导出合同需要 Python，C/C++ 消费进程无需加载 Python。
-`TI_WITH_RUNTIME_C_API` 默认关闭，不能据此认为现有 runtime wheel 已包含这些
-入口。shim 与原生库必须配对。共用二进制库不会自动共用可变 runtime 实例，
+`TI_WITH_RUNTIME_C_API` 在独立 CMake 配置中默认关闭，0.6.4 runtime wheel 构建
+会开启它；此前构建的 wheel 可能没有这些入口。shim 与原生库必须配对。
+共用二进制库不会自动共用可变 runtime 实例，
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
+
+runtime wheel 提供 `taichi_forge_runtime.aot`，仅用 Python 标准库和共库 C API
+消费普通 kernel/CGraph，无需 NumPy、DSL 前端或 CPython shim。导入本身不会加载
+原生库或初始化设备。导出下方的示例模块后，可用匹配 runtime wheel 执行
+`python examples/aot_sdk/consume.py cuda MODULE`；脚本初始化数组并验证前向和显式
+反向结果，不导入生产端源码。
+
+显式创建 `aot.Runtime("cpu" | "cuda" | "vulkan")`，通过 `runtime.load_module(path)`
+加载模块，`runtime.ndarray("f32", shape)` 创建数组。`element_shape=(2,)` 表示向量
+元素，矩阵使用两维 element_shape。`write(buffer)`、`read_into(writable_buffer)`
+同步传输连续主机字节，`read()` 返回 bytes。`Scalar("f64", value)` 显式指定标量
+位宽；普通 Python int/float 对应 i32/f32。
+
+`module.kernel(name)(*args, gradients={index: ndarray})` 和
+`module.graph(name)(args_by_name, gradients={name: ndarray})` 调用导出入口。
+不需要梯度的入口可省略 `gradients`；梯度不会自动清零或播种。`entry.bind(...)`
+冻结 Python 参数描述符，供 `call()` 重复提交；它仍是普通执行，不代表 GPU Graph
+捕获。入口保留模块，提交保留代码和数组直到完成；关闭数组/模块会先等待。runtime
+上下文管理器等待并关闭子资源，随后调用旧对象会报错。建议显式管理寿命。
+
+可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
+选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、原生 recording、
+provider 和外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
+后端的前向/反向与两种 AOT/JIT 加载顺序。
 
 安装后的 `examples/aot_sdk` 包含导出脚本及独立消费程序。`SDK`、`MODULE`
 请使用绝对路径：

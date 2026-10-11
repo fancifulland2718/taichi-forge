@@ -179,15 +179,30 @@ def _external_runtime_roots():
     return list(spec.submodule_search_locations)
 
 
+def _shared_runtime_loader():
+    # Historical monolithic installations need no runtime resource package.
+    try:
+        return importlib.import_module("taichi_forge_runtime._native")
+    except ModuleNotFoundError as error:
+        if error.name in ("taichi_forge_runtime", "taichi_forge_runtime._native"):
+            return None
+        raise
+
+
 def _native_runtime_dirs():
     package_lib = os.path.join(package_root, "_lib")
+    shared = _shared_runtime_loader()
+    loaded = shared.loaded_path() if shared is not None else None
     candidates = [
         os.environ.get("TAICHI_NATIVE_RUNTIME_DIR", ""),
+        os.path.dirname(loaded) if loaded else "",
         os.path.join(package_lib, "runtime_native"),
         os.path.join(package_lib, "core"),
     ]
     for root in _external_runtime_roots():
-        auditwheel_lib_dir = os.path.join(os.path.dirname(root), os.path.basename(root) + ".libs")
+        auditwheel_lib_dir = os.path.join(
+            os.path.dirname(root), os.path.basename(root) + ".libs"
+        )
         candidates.extend(
             [
                 os.path.join(root, "native"),
@@ -200,10 +215,21 @@ def _native_runtime_dirs():
 
 
 def _runtime_bitcode_dir():
-    candidates = [os.environ.get("TAICHI_RUNTIME_DIR", ""), os.path.join(package_root, "_lib", "runtime")]
+    shared = _shared_runtime_loader()
+    selected = shared.selected_runtime_dir() if shared is not None else None
+    if selected is not None:
+        return selected
+    candidates = [
+        os.environ.get("TAICHI_RUNTIME_DIR", ""),
+        os.path.join(package_root, "_lib", "runtime"),
+    ]
     for root in _external_runtime_roots():
-        candidates.extend([os.path.join(root, "runtime"), os.path.join(root, "_lib", "runtime")])
+        candidates.extend(
+            [os.path.join(root, "runtime"), os.path.join(root, "_lib", "runtime")]
+        )
     for path in _dedupe_existing_dirs(candidates):
+        if shared is not None:
+            return shared.configure_runtime_dir(path)
         return path
     return os.path.join(package_root, "_lib", "runtime")
 
@@ -421,12 +447,13 @@ def _prepare_native_runtime():
                 continue
             _native_load_trace(f"loading native runtime: {lib_path}")
             startup_profile_mark("native_runtime.load.begin")
-            if get_os_name() == "win":
+            shared = _shared_runtime_loader()
+            if shared is not None:
+                handle = shared.load_library(lib_path)
+            elif get_os_name() == "win":
                 handle = ctypes.WinDLL(lib_path)  # pylint: disable=no-member
             else:
-                flags = getattr(os, "RTLD_LOCAL", 0) | getattr(
-                    os, "RTLD_NOW", 2
-                )
+                flags = getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2)
                 handle = ctypes.CDLL(lib_path, mode=flags)
             _validate_native_runtime_bootstrap(handle, lib_path)
             # Keep the explicit loader reference alive for the complete Python

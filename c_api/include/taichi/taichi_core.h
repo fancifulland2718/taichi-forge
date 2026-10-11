@@ -854,6 +854,9 @@ typedef union TiScalarValue {
 // Structure `TiScalar` (1.5.0)
 //
 // A typed scalar value.
+// Numeric types use their corresponding value width. For compatibility, F16
+// scalar arguments contain a float32 bit pattern in value.x32; F16 array and
+// tensor elements still use 16-bit IEEE half storage.
 typedef struct TiScalar {
   TiDataType type;
   TiScalarValue value;

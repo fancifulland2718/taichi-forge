@@ -42,6 +42,7 @@ function(ti_configure_c_api_target TARGET)
         PRIVATE
             ${PROJECT_SOURCE_DIR}
             ${PROJECT_SOURCE_DIR}/external/spdlog/include
+            ${PROJECT_SOURCE_DIR}/external/FP16/include
             ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include
             ${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include
             ${PROJECT_SOURCE_DIR}/external/volk

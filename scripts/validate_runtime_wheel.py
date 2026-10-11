@@ -23,6 +23,18 @@ PROJECT = "taichi-forge-runtime"
 PACKAGE = "taichi_forge_runtime"
 MANIFEST = f"{PACKAGE}/_lib/runtime_native/cuda_runtime_major.txt"
 EXPORT_MANIFEST = f"{PACKAGE}/_lib/runtime_native/taichi_runtime.exports.json"
+AOT_CONSUMER_FILES = (
+    f"{PACKAGE}/_native.py",
+    f"{PACKAGE}/aot/__init__.py",
+    f"{PACKAGE}/aot/_runtime.py",
+    f"{PACKAGE}/aot/_c_api.py",
+)
+AOT_CONSUMER_SYMBOLS = frozenset({
+    "ti_get_last_error", "ti_set_last_error", "ti_create_runtime", "ti_destroy_runtime", "ti_wait",
+    "ti_allocate_memory", "ti_free_memory", "ti_copy_memory_from_host_ext", "ti_copy_memory_to_host_ext",
+    "ti_load_aot_module", "ti_destroy_aot_module", "ti_get_aot_module_kernel", "ti_get_aot_module_compute_graph",
+    "ti_launch_kernel_with_gradients_ext", "ti_launch_compute_graph_with_gradients_ext",
+})
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 FORBIDDEN_VENDOR_RUNTIME = re.compile(
     r"(?:"
@@ -267,12 +279,14 @@ def _validate_export_manifest(zf: ZipFile, names: list[str], platform: str) -> d
     requested_set = set(requested)
     actual_set = set(actual)
     required_count = payload.get("shim_required_runtime_symbol_count")
+    public_count = payload.get("public_c_api_symbol_count", 0)
     direct_count = payload.get("shim_direct_runtime_symbol_count")
     odr_count = payload.get("shim_shared_odr_symbol_count")
     raw_count = payload.get("raw_defined_symbol_count")
     limit = payload.get("configured_export_limit")
     counts = (
         required_count,
+        public_count,
         raw_count,
         limit,
         payload.get("exported_symbol_count"),
@@ -295,7 +309,10 @@ def _validate_export_manifest(zf: ZipFile, names: list[str], platform: str) -> d
         raise RuntimeError("Runtime actual export count is inconsistent")
     if payload["implicit_exported_symbol_count"] != len(actual_set - requested_set):
         raise RuntimeError("Runtime implicit export count is inconsistent")
-    if payload["dropped_raw_symbol_count"] != raw_count - required_count:
+    public_exports = {symbol for symbol in requested_set if re.fullmatch(r"_?ti_[A-Za-z0-9_]+", symbol)}
+    if public_count != len(public_exports):
+        raise RuntimeError("Runtime public C API export count is inconsistent")
+    if payload["dropped_raw_symbol_count"] != raw_count - required_count - public_count:
         raise RuntimeError("Runtime dropped export count is inconsistent")
     if not requested_set.issubset(actual_set):
         raise RuntimeError("Runtime binary is missing requested exports")
@@ -724,6 +741,15 @@ def inspect_runtime_wheel(
         if len(native_runtimes) != 1:
             raise RuntimeError(f"Expected one platform native runtime in {wheel.name}, " f"found {native_runtimes}")
         export_manifest = _validate_export_manifest(zf, names, platform)
+        if Version(version).release >= (0, 6, 4):
+            missing_files = [name for name in AOT_CONSUMER_FILES if names.count(name) != 1]
+            prefix = "_" if platform == "macos" else ""
+            missing_symbols = {prefix + name for name in AOT_CONSUMER_SYMBOLS} - set(export_manifest["actual_exports"])
+            if missing_files or missing_symbols:
+                raise RuntimeError(
+                    f"Runtime wheel lacks the lightweight AOT consumer: files={missing_files}, "
+                    f"C API exports={sorted(missing_symbols)}"
+                )
         if (
             required_export_manifest_schema is not None
             and export_manifest["schema_version"] != required_export_manifest_schema

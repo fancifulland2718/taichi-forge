@@ -56,6 +56,8 @@ def _write_runtime_wheel(
     include_optix_providers: bool = True,
     include_cudss_provider: bool = True,
     include_optional_runtime_providers: bool = True,
+    include_aot_consumer: bool = True,
+    include_c_api: bool = True,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -76,6 +78,9 @@ def _write_runtime_wheel(
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
+        if Version(version).release >= (0, 6, 4) and include_aot_consumer:
+            for name in validate_runtime_wheel.AOT_CONSUMER_FILES:
+                zf.writestr(name, "# lightweight consumer\n")
         if include_optix_providers and Version(version) >= Version("0.6.3") and platform != "macos":
             provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
             for optix_abi in (93, 105, 118):
@@ -166,6 +171,12 @@ def _write_runtime_wheel(
                     for symbol in actual
                     if "taichi_forge_runtime_bootstrap_v1" not in symbol
                 ]
+            c_api = []
+            if Version(version).release >= (0, 6, 4) and include_c_api:
+                prefix = "_" if platform == "macos" else ""
+                c_api = [prefix + name for name in validate_runtime_wheel.AOT_CONSUMER_SYMBOLS]
+                requested.extend(c_api)
+                actual.extend(c_api)
             requested.sort()
             actual.sort()
             requested_digest = hashlib.sha256("\n".join(requested).encode("utf-8")).hexdigest()
@@ -178,7 +189,8 @@ def _write_runtime_wheel(
                 "binary_audit_kind": audit_kind,
                 "forbidden_export_families": [],
                 "private_abi_collision_probe_symbols": ["taichi_runtime_anchor"],
-                "raw_defined_symbol_count": 5,
+                "raw_defined_symbol_count": 5 + len(c_api),
+                "public_c_api_symbol_count": len(c_api),
                 "shim_direct_runtime_symbol_count": (
                     2 if include_bootstrap_export else 1
                 ),
@@ -410,6 +422,21 @@ def test_publication_conflicts_do_not_stage_partial_upload(tmp_path, monkeypatch
     with pytest.raises((RuntimeError, HTTPError)):
         check_pypi_version_available.prepare_upload(tmp_path, output, "https://pypi.org/pypi")
     assert not output.exists()
+
+
+@pytest.mark.parametrize("platform,tag", [("windows", "win_amd64"), ("manylinux", "manylinux_2_27_x86_64"),
+                                         ("macos", "macosx_11_0_arm64")])
+@pytest.mark.parametrize("missing", [None, "python", "c_api"])
+def test_runtime_064_requires_lightweight_aot_payload(tmp_path, platform, tag, missing):
+    wheel = tmp_path / f"taichi_forge_runtime-0.6.4rc1-py3-none-{tag}.whl"
+    _write_runtime_wheel(wheel, platform=platform, version="0.6.4rc1", cuda_major=13,
+                         dependency_class="driver-only", include_aot_consumer=missing != "python",
+                         include_c_api=missing != "c_api")
+    if missing:
+        with pytest.raises(RuntimeError, match="lightweight AOT consumer"):
+            validate_runtime_wheel.inspect_runtime_wheel(wheel)
+    else:
+        assert validate_runtime_wheel.inspect_runtime_wheel(wheel).version == "0.6.4rc1"
 
 
 def test_runtime_repair_discovers_versioned_windows_cudart(tmp_path):
@@ -1129,6 +1156,7 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "linux")
     monkeypatch.setattr(runtime_utils, "_native_runtime_dirs", lambda: [str(tmp_path)])
+    monkeypatch.setattr(runtime_utils, "_shared_runtime_loader", lambda: None)
     monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", False)
     monkeypatch.setattr(runtime_utils, "_loaded_native_runtime_path", None)
     monkeypatch.setattr(runtime_utils, "_native_library_handles", [])

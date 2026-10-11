@@ -16,8 +16,24 @@ Standard Windows/Linux wheels also include the basic AMDGPU backend. Selecting
 linker. HIP libraries are loaded optionally, never bundled or mandatory native
 imports. CPU/CUDA/Vulkan use does not require ROCm.
 
-It intentionally does not expose the public `taichi_forge` Python API. The
-Python package imports `taichi_forge_runtime` only to locate native resources.
+The `taichi_forge_runtime.aot` module loads and executes exported kernels and
+ordinary CGraphs without the Python DSL, NumPy or a CPython shim. Its Python
+implementation uses only the standard library and the public C API in the same
+native core used by JIT. Importing the module does not load native libraries or
+probe devices; `aot.Runtime("cpu" | "cuda" | "vulkan")` selects the backend.
+Existing wheels without this entrypoint need a matching newer runtime build.
+
+This is not a compiler-free runtime: CPU/CUDA bitcode still needs bundled LLVM,
+and GPU drivers may compile device code during loading. Native Graph recordings,
+providers, structure bindings and external-memory imports are not exposed by
+this Python consumer yet. See `docs/forge/aot_sdk.en.md` in the source repository
+for deployment contracts and `examples/aot_sdk/consume.py` for a source-free
+forward/explicit-gradient example.
+
+The JIT `taichi_forge` API remains in the separate frontend distribution. Mixed
+installations select one native binary and bitcode resource directory per
+process. Independently created AOT and JIT runtimes own their own mutable state;
+sharing a library does not make their array handles interchangeable.
 
 The Windows wheel also includes the `taichi_runtime.lib` import library so the
 CPython shim wheels can link against the already-published runtime package

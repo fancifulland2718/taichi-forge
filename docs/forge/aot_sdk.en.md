@@ -58,11 +58,44 @@ The consumer still links `TaichiForge::c_api`; the CMake package selects
 `taichi_runtime` and the manifest records `native_library` and
 `build_features.runtime_c_api`. Python is required to build the matching shim
 and its private export contract, but the C/C++ consumer does not load Python.
-`TI_WITH_RUNTIME_C_API` defaults to `OFF`; this configuration is not implied by
-installing an existing runtime wheel. Keep the shim and native library paired.
+`TI_WITH_RUNTIME_C_API` defaults to `OFF` for standalone CMake configuration;
+the 0.6.4 runtime-wheel build enables it. Previously built wheels may lack the
+C API. Keep the shim and native library paired.
 Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
+
+The runtime wheel includes `taichi_forge_runtime.aot`, a Python consumer using
+the standard library and this shared C API. Ordinary kernel/CGraph execution
+does not need NumPy, the DSL frontend or the CPython shim. Import alone does not
+load native libraries or initialize a device. After exporting the example
+module below, run `python examples/aot_sdk/consume.py cuda MODULE` with a matching
+runtime wheel; the script initializes arrays and verifies forward and reverse
+results without importing the producer.
+
+Create an explicit `aot.Runtime("cpu" | "cuda" | "vulkan")`, then use
+`runtime.load_module(path)` and `runtime.ndarray("f32", shape)`.
+`element_shape=(2,)` makes a vector ndarray; matrices use two element dimensions.
+`write(buffer)` and `read_into(writable_buffer)` transfer contiguous host bytes
+synchronously; `read()` returns bytes. `Scalar("f64", value)` selects a scalar
+width, while plain Python integers/floats mean i32/f32.
+
+`module.kernel(name)(*args, gradients={index: ndarray})` and
+`module.graph(name)(args_by_name, gradients={name: ndarray})` execute exported
+entries. Omit `gradients` for entries that do not need them. Gradients are neither
+cleared nor seeded automatically. `entry.bind(...)` freezes Python argument
+descriptors for repeated `call()` submissions; this is ordinary execution,
+not a captured GPU Graph.
+
+Entries retain their module; submissions retain code and arrays until completion.
+Closing an array/module waits before retiring it. The runtime context manager
+waits and closes its children; later calls on them fail. Prefer explicit lifetime
+management to GC timing. Optional `library_path` and `runtime_path` select the
+shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
+core/resource set. The Python consumer currently excludes structure arrays,
+textures, native recordings, providers and external-memory imports; the C/C++
+capabilities below are separate. Windows x64 checks cover all three backends,
+forward/reverse work and both AOT/JIT loading orders.
 
 The installed `examples/aot_sdk` directory contains an exporter and standalone
 consumer. Use absolute paths for `SDK` and `MODULE`:

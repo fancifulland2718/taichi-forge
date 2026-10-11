@@ -2,6 +2,7 @@
 #include <atomic>
 #include <limits>
 #include <unordered_set>
+#include "fp16.h"
 
 #include "taichi_core_impl.h"
 #include "taichi_opengl_impl.h"
@@ -76,6 +77,36 @@ thread_local ErrorCache thread_error_cache;
 
 constexpr uint32_t kTiNdShapeDimensionCapacity =
     sizeof(((TiNdShape *)nullptr)->dims) / sizeof(uint32_t);
+
+// Kernel and Graph entrypoints must decode the same public scalar ABI. Copy
+// bytes to preserve signed integers and avoid aliasing-dependent union reads.
+template <typename F>
+bool with_scalar_value(const TiScalar &scalar, F &&consume) {
+  switch (scalar.type) {
+#define SCALAR_CASE(id, type, field)                         \
+  case TI_DATA_TYPE_##id: {                                  \
+    type value;                                              \
+    std::memcpy(&value, &scalar.value.field, sizeof(value)); \
+    consume(value);                                          \
+    return true;                                             \
+  }
+    SCALAR_CASE(I8, int8_t, x8);
+    SCALAR_CASE(I16, int16_t, x16);
+    SCALAR_CASE(I32, int32_t, x32);
+    SCALAR_CASE(I64, int64_t, x64);
+    SCALAR_CASE(U8, uint8_t, x8);
+    SCALAR_CASE(U16, uint16_t, x16);
+    SCALAR_CASE(U32, uint32_t, x32);
+    SCALAR_CASE(U64, uint64_t, x64);
+    // Preserve the legacy C API convention: f16 scalars use float32 storage.
+    SCALAR_CASE(F16, float, x32);
+    SCALAR_CASE(F32, float, x32);
+    SCALAR_CASE(F64, double, x64);
+#undef SCALAR_CASE
+    default:
+      return false;
+  }
+}
 
 uint32_t ti_tensor_value_capacity(TiDataType type) {
   switch (type) {
@@ -991,6 +1022,10 @@ void ti_launch_kernel_with_bindings_ext(
   Runtime &runtime2 = *((Runtime *)runtime);
   const auto &kernel_binding = runtime2.get_kernel(kernel);
   auto ti_kernel = kernel_binding.kernel;
+  if (arg_count != ti_kernel->args_type->elements().size()) {
+    throw MemoryBindingError(
+        "Argument count does not match the exported kernel ABI");
+  }
 
   if (binding_count) TI_CAPI_ARGUMENT_NULL(bindings);
   if (binding_count > arg_count) {
@@ -1065,31 +1100,25 @@ void ti_launch_kernel_with_bindings_ext(
     const auto &arg = args[i];
     switch (arg.type) {
       case TI_ARGUMENT_TYPE_SCALAR: {
-        switch (arg.value.scalar.type) {
-          case TI_DATA_TYPE_I16: {
-            int16_t arg_val;
-            std::memcpy(&arg_val, &arg.value.scalar.value.x16, sizeof(arg_val));
-            builder.set_arg({(int)i}, arg_val);
-            break;
-          }
-          case TI_DATA_TYPE_U16: {
-            uint16_t arg_val = arg.value.scalar.value.x16;
-            builder.set_arg({(int)i}, arg_val);
-            break;
-          }
-          case TI_DATA_TYPE_F16: {
-            float arg_val;
-            std::memcpy(&arg_val, &arg.value.scalar.value.x32, sizeof(arg_val));
-            // FIXME: temporary workaround for f16
-            builder.set_arg_float({(int)i}, arg_val);
-            break;
-          }
-          default: {
-            ti_set_last_error(
-                TI_ERROR_ARGUMENT_OUT_OF_RANGE,
-                ("args[" + std::to_string(i) + "].value.scalar.type").c_str());
-            return;
-          }
+        if (!with_scalar_value(arg.value.scalar, [&](auto value) {
+              const auto type =
+                  arg.value.scalar.type == TI_DATA_TYPE_F16
+                      ? taichi::lang::PrimitiveType::f16
+                      : taichi::lang::get_data_type<decltype(value)>();
+              if (type != taichi::lang::DataType(
+                              ti_kernel->args_type->get_element_type({int(i)}))) {
+                throw MemoryBindingError(
+                    "Scalar type does not match the exported kernel ABI");
+              }
+              if (arg.value.scalar.type == TI_DATA_TYPE_F16)
+                builder.set_arg_float({(int)i}, value);
+              else
+                builder.set_arg({(int)i}, value);
+            })) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) + "].value.scalar.type").c_str());
+          return;
         }
         break;
       }
@@ -1351,36 +1380,35 @@ void ti_launch_compute_graph_with_bindings_ext(
     const auto &arg = args[i];
     switch (arg.argument.type) {
       case TI_ARGUMENT_TYPE_SCALAR: {
-        switch (arg.argument.value.scalar.type) {
-          case TI_DATA_TYPE_I16: {
-            int16_t arg_val;
-            std::memcpy(&arg_val, &arg.argument.value.scalar.value.x16,
-                        sizeof(arg_val));
-            arg_map.emplace(std::make_pair(
-                arg.name, taichi::lang::aot::IValue::create<int16_t>(arg_val)));
-            break;
-          }
-          case TI_DATA_TYPE_U16: {
-            uint16_t arg_val = arg.argument.value.scalar.value.x16;
-            arg_map.emplace(std::make_pair(
-                arg.name,
-                taichi::lang::aot::IValue::create<uint16_t>(arg_val)));
-            break;
-          }
-          case TI_DATA_TYPE_F16: {
-            float arg_val;
-            std::memcpy(&arg_val, &arg.argument.value.scalar.value.x32,
-                        sizeof(arg_val));
-            arg_map.emplace(std::make_pair(
-                arg.name, taichi::lang::aot::IValue::create<float>(arg_val)));
-            break;
-          }
-          default: {
-            ti_set_last_error(
-                TI_ERROR_ARGUMENT_OUT_OF_RANGE,
-                ("args[" + std::to_string(i) + "].value.scalar.type").c_str());
-            return;
-          }
+        if (!with_scalar_value(arg.argument.value.scalar, [&](auto value) {
+              const bool half =
+                  arg.argument.value.scalar.type == TI_DATA_TYPE_F16;
+              const auto type =
+                  half ? taichi::lang::PrimitiveType::f16
+                       : taichi::lang::get_data_type<decltype(value)>();
+              const auto expected = graph.args.find(arg.name);
+              if (expected == graph.args.end() ||
+                  expected->second.tag != taichi::lang::aot::ArgKind::kScalar ||
+                  expected->second.dtype() != type) {
+                throw MemoryBindingError(
+                    "Scalar type or name does not match the exported Graph "
+                    "ABI");
+              }
+              // Graph IValues carry raw bits, unlike the C API's legacy f16
+              // scalar representation. Convert before the shared Graph binder.
+              if (half)
+                arg_map.emplace(
+                    arg.name,
+                    taichi::lang::aot::IValue::create(
+                        fp16_ieee_from_fp32_value(static_cast<float>(value))));
+              else
+                arg_map.emplace(arg.name,
+                                taichi::lang::aot::IValue::create(value));
+            })) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) + "].value.scalar.type").c_str());
+          return;
         }
         break;
       }
