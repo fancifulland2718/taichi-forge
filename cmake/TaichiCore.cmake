@@ -781,7 +781,10 @@ add_subdirectory(taichi/runtime/gfx)
 
 if (TI_WITH_OPENGL OR TI_WITH_VULKAN OR TI_WITH_DX11 OR TI_WITH_METAL)
   target_link_libraries(${CORE_LIBRARY_NAME} PRIVATE spirv_codegen)
-  target_link_libraries(${CORE_LIBRARY_NAME} PRIVATE gfx_runtime)
+  # Public headers expose GfxRuntime, whose layout depends on this target's
+  # compile definitions (notably TI_WITH_VULKAN_POINTER). Consumers such as
+  # the standalone C API must compile with the same layout as its constructor.
+  target_link_libraries(${CORE_LIBRARY_NAME} PUBLIC gfx_runtime)
 endif()
 
 if (TI_WITH_OPENGL OR TI_WITH_DX11 OR TI_WITH_METAL)
