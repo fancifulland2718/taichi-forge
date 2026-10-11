@@ -76,6 +76,24 @@ struct CUDAKernelArtifact {
   }
 };
 
+// A frozen compiler target, independent of the device used by a JIT session.
+// LLVM's target tables validate both the processor and feature names.
+struct CUDACodegenTarget {
+  std::string mcpu;
+  std::string mattrs;
+
+  std::string identity() const {
+    return mcpu + "|" + mattrs;
+  }
+};
+
+CUDAKernelArtifact compile_cuda_kernel_artifact(
+    std::unique_ptr<llvm::Module> &module,
+    const CompileConfig &config,
+    const CUDACodegenTarget &target,
+    int max_reg,
+    JITModuleRole role);
+
 class JITModuleCUDA : public JITModule {
  private:
   friend class JITSessionCUDA;
@@ -190,13 +208,8 @@ class JITSessionCUDA : public JITSession {
   }
 
  private:
-  CUDAKernelArtifact build_canonical_artifact(
-      std::unique_ptr<llvm::Module> &module,
-      int max_reg,
-      JITModuleRole role);
   CUDAKernelArtifact select_artifact(CUDAKernelArtifact artifact);
   void *load_artifact(const CUDAKernelArtifact &artifact);
-  std::vector<char> emit_module_to_ptx(std::unique_ptr<llvm::Module> &module);
   std::optional<std::string> artifact_provider_configuration_identity_;
 };
 

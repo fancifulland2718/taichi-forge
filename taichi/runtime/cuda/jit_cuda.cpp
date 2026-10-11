@@ -8,6 +8,7 @@
 #include <cstdlib>
 
 #include "llvm/IR/Metadata.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 
 namespace taichi::lang {
 
@@ -76,10 +77,17 @@ const char *cuda_artifact_role_name(JITModuleRole role) {
 
 std::string convert(std::string new_name);
 
+static std::vector<char> emit_module_to_ptx(
+    std::unique_ptr<llvm::Module> &module,
+    const CompileConfig &config,
+    const CUDACodegenTarget &codegen_target);
+
 JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
                                        int max_reg,
                                        JITModuleRole role) {
-  auto artifact = build_canonical_artifact(M, max_reg, role);
+  auto &context = CUDAContext::get_instance();
+  const CUDACodegenTarget target{context.get_mcpu(), context.get_mattrs()};
+  auto artifact = compile_cuda_kernel_artifact(M, config_, target, max_reg, role);
   if (this->config_.print_kernel_asm) {
     static FileSequenceWriter writer("taichi_kernel_nvptx_{:04d}.ptx",
                                      "module NVPTX");
@@ -115,8 +123,10 @@ JITSessionCUDA::~JITSessionCUDA() {
   modules.clear();
 }
 
-CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
+CUDAKernelArtifact compile_cuda_kernel_artifact(
     std::unique_ptr<llvm::Module> &module,
+    const CompileConfig &config,
+    const CUDACodegenTarget &target,
     int max_reg,
     JITModuleRole role) {
   CUDAKernelArtifact artifact;
@@ -133,10 +143,9 @@ CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
     function.setName(convert(function.getName().str()));
   }
   artifact.entry_names = cuda_kernel_entry_names(*module);
-  const auto options = LLVMModuleOptions::read(*module, config_);
-  artifact.payload = emit_module_to_ptx(module);
-  artifact.target_identity = CUDAContext::get_instance().get_mcpu() + "|" +
-                             CUDAContext::get_instance().get_mattrs();
+  const auto options = LLVMModuleOptions::read(*module, config);
+  artifact.payload = emit_module_to_ptx(module, config, target);
+  artifact.target_identity = target.identity();
   artifact.provider_identity = "llvm_nvptx";
   artifact.max_registers = max_reg;
   artifact.fast_math = options.fast_math;
@@ -330,10 +339,12 @@ std::string convert(std::string new_name) {
   return new_name;
 }
 
-std::vector<char> JITSessionCUDA::emit_module_to_ptx(
-    std::unique_ptr<llvm::Module> &module) {
+static std::vector<char> emit_module_to_ptx(
+    std::unique_ptr<llvm::Module> &module,
+    const CompileConfig &config,
+    const CUDACodegenTarget &codegen_target) {
   TI_AUTO_PROF
-  const auto module_options = LLVMModuleOptions::read(*module, config_);
+  const auto module_options = LLVMModuleOptions::read(*module, config);
   // Part of this function is borrowed from Halide::CodeGen_PTX_Dev.cpp
   if (llvm::verifyModule(*module, &llvm::errs())) {
     module->print(llvm::errs(), nullptr);
@@ -342,13 +353,15 @@ std::vector<char> JITSessionCUDA::emit_module_to_ptx(
 
   using namespace llvm;
 
-  if (this->config_.print_kernel_llvm_ir) {
+  if (config.print_kernel_llvm_ir) {
     static FileSequenceWriter writer("taichi_kernel_cuda_llvm_ir_{:04d}.ll",
                                      "unoptimized LLVM IR (CUDA)");
     writer.write(module.get());
   }
 
   llvm::Triple triple(module->getTargetTriple());
+  TI_ERROR_IF(triple.getArch() != llvm::Triple::nvptx64,
+              "CUDA artifact requires an nvptx64 module target");
 
   // Allocate target machine
 
@@ -356,6 +369,36 @@ std::vector<char> JITSessionCUDA::emit_module_to_ptx(
   const llvm::Target *target =
       TargetRegistry::lookupTarget(triple.str(), err_str);
   TI_ERROR_UNLESS(target, err_str);
+
+  // Query LLVM's compiled-in table rather than accepting an unknown CPU or
+  // feature that LLVM would otherwise diagnose and ignore. No GPU is queried.
+  std::unique_ptr<llvm::MCSubtargetInfo> target_info(
+      target->createMCSubtargetInfo(triple.str(), "", ""));
+  TI_ERROR_IF(!target_info || codegen_target.mcpu.empty() ||
+                  !target_info->isCPUStringValid(codegen_target.mcpu),
+              "Unsupported CUDA code-generation target {}",
+              codegen_target.mcpu);
+  llvm::SmallVector<llvm::StringRef, 8> features;
+  llvm::StringRef(codegen_target.mattrs).split(features, ',', -1, false);
+  for (auto feature : features) {
+    TI_ERROR_IF(feature.size() < 2 ||
+                    (feature.front() != '+' && feature.front() != '-'),
+                "CUDA target feature must have an explicit sign: {}",
+                feature.str());
+    bool known = false;
+    for (const auto &supported : target_info->getAllProcessorFeatures()) {
+      if (feature.drop_front() == supported.Key) {
+        known = true;
+        break;
+      }
+    }
+    TI_ERROR_IF(!known, "Unsupported CUDA target feature {}", feature.str());
+  }
+  // A cached/module-level target must not override the frozen export target.
+  for (auto &function : *module) {
+    function.addFnAttr("target-cpu", codegen_target.mcpu);
+    function.addFnAttr("target-features", codegen_target.mattrs);
+  }
 
   TargetOptions options;
   if (module_options.fast_math) {
@@ -377,7 +420,7 @@ std::vector<char> JITSessionCUDA::emit_module_to_ptx(
   options.GuaranteedTailCallOpt = 0;
 
   std::unique_ptr<TargetMachine> target_machine(target->createTargetMachine(
-      triple.str(), CUDAContext::get_instance().get_mcpu(), cuda_mattrs(),
+      triple.str(), codegen_target.mcpu, codegen_target.mattrs,
       options, llvm::Reloc::PIC_, llvm::CodeModel::Small,
       llvm::CodeGenOptLevel::Aggressive));
 
@@ -452,7 +495,7 @@ std::vector<char> JITSessionCUDA::emit_module_to_ptx(
     emit_pm.run(*module);
   }
 
-  if (this->config_.print_kernel_llvm_ir_optimized) {
+  if (config.print_kernel_llvm_ir_optimized) {
     static FileSequenceWriter writer(
         "taichi_kernel_cuda_llvm_ir_optimized_{:04d}.ll",
         "optimized LLVM IR (CUDA)");
