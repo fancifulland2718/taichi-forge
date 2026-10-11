@@ -50,8 +50,13 @@ class BasicBlockSimplify : public IRVisitor {
   StructForStmt *current_struct_for;
   CompileConfig config;
   DelayedIRModifier modifier;
-  std::unordered_map<Stmt *, std::vector<std::pair<int, GlobalLoadStmt *>>>
-      global_loads_;
+  struct LoadCandidate {
+    GlobalLoadStmt *load;
+    int checked_through;
+  };
+  // One still-valid representative per address and result type. An intervening
+  // write invalidates all older representatives of that address as well.
+  std::unordered_map<Stmt *, std::vector<LoadCandidate>> global_loads_;
 
   BasicBlockSimplify(Block *block,
                      std::set<int> &visited,
@@ -100,74 +105,46 @@ class BasicBlockSimplify : public IRVisitor {
 
   void visit(GlobalLoadStmt *stmt) override {
     auto &candidates = global_loads_[stmt->src];
-    if (is_done(stmt)) {
-      candidates.emplace_back(current_stmt_id, stmt);
-      return;
-    }
-    // Load reuse requires pointer identity. Index only previous loads of that
-    // pointer instead of scanning unrelated statements for every array element.
-    // Keep candidate order and the intervening-write checks unchanged.
-    for (auto [i, bstmt] : candidates) {
-      if (stmt->ret_type == bstmt->ret_type) {
-        auto &bstmt_data = *bstmt;
-        if (typeid(bstmt_data) == typeid(*stmt)) {
-          auto bstmt_ = bstmt->as<GlobalLoadStmt>();
-          bool same = stmt->src == bstmt_->src;
-          if (same) {
-            // no store to the var?
-            bool has_store = false;
-            auto advanced_optimization = config.advanced_optimization;
-            for (int j = i + 1; j < current_stmt_id; j++) {
-              if (!advanced_optimization) {
-                auto *intervening = block->statements[j].get();
-                // Abstract pointers only carry activation intent. Actual
-                // activation is emitted at their memory uses by lower_access;
-                // merely computing another address does not invalidate a load.
-                const bool abstract_pointer =
-                    intervening->is<GlobalPtrStmt>() ||
-                    intervening->is<MatrixOfGlobalPtrStmt>();
-                if (intervening->is_container_statement() ||
-                    (intervening->has_global_side_effect() &&
-                     !abstract_pointer)) {
-                  has_store = true;
-                  break;
-                }
-                continue;
-              }
-              if (!irpass::analysis::gather_statements(
-                       block->statements[j].get(),
-                       [&](Stmt *s) {
-                         if (auto store = s->cast<GlobalStoreStmt>())
-                           return irpass::analysis::maybe_same_address(
-                               store->dest, stmt->src);
-                         else if (auto atomic = s->cast<AtomicOpStmt>())
-                           return irpass::analysis::maybe_same_address(
-                               atomic->dest, stmt->src);
-                         // Abstract addresses carry activation intent, not a
-                         // write. Inspect container bodies recursively, but
-                         // never assume an otherwise unknown effect is pure
-                         // (internal/external calls and sparse deactivation
-                         // can invalidate a previously loaded value).
-                         return s->has_global_side_effect() &&
-                                !s->is_container_statement() &&
-                                !s->is<GlobalPtrStmt>() &&
-                                !s->is<MatrixOfGlobalPtrStmt>();
-                       })
-                       .empty()) {
-                has_store = true;
-                break;
-              }
-            }
-            if (!has_store) {
-              stmt->replace_usages_with(bstmt);
-              modifier.erase(stmt);
-              return;
-            }
-          }
+    for (auto &candidate : candidates) {
+      if (candidate.load->ret_type != stmt->ret_type) {
+        continue;
+      }
+      bool has_store = is_done(stmt) || candidate.load->src != stmt->src;
+      // Reused loads extend the checked interval. Never rescan its prefix on
+      // the next load; this state is discarded after every delayed IR edit.
+      for (int j = candidate.checked_through + 1;
+           !has_store && j < current_stmt_id; ++j) {
+        auto *intervening = block->statements[j].get();
+        if (!config.advanced_optimization) {
+          const bool abstract_pointer = intervening->is<GlobalPtrStmt>() ||
+                                        intervening->is<MatrixOfGlobalPtrStmt>();
+          has_store = intervening->is_container_statement() ||
+                      (intervening->has_global_side_effect() &&
+                       !abstract_pointer);
+        } else {
+          has_store = irpass::analysis::any_statement(intervening, [&](Stmt *s) {
+            if (auto store = s->cast<GlobalStoreStmt>())
+              return irpass::analysis::maybe_same_address(store->dest, stmt->src);
+            if (auto atomic = s->cast<AtomicOpStmt>())
+              return irpass::analysis::maybe_same_address(atomic->dest, stmt->src);
+            // Preserve unknown effects and inspect container bodies. Abstract
+            // pointers carry activation intent; lower_access emits the effect.
+            return s->has_global_side_effect() && !s->is_container_statement() &&
+                   !s->is<GlobalPtrStmt>() && !s->is<MatrixOfGlobalPtrStmt>();
+          });
         }
       }
+      candidate.checked_through = current_stmt_id;
+      if (!has_store) {
+        stmt->replace_usages_with(candidate.load);
+        modifier.erase(stmt);
+        return;
+      }
+      candidate.load = stmt;
+      set_done(stmt);
+      return;
     }
-    candidates.emplace_back(current_stmt_id, stmt);
+    candidates.push_back({stmt, current_stmt_id});
     set_done(stmt);
   }
 

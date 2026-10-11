@@ -104,6 +104,10 @@ std::pair<std::unordered_set<SNode *>, std::unordered_set<SNode *>>
 gather_snode_read_writes(IRNode *root);
 std::vector<Stmt *> gather_statements(IRNode *root,
                                       const std::function<bool(Stmt *)> &test);
+
+// Read-only existential query. Stops traversal after the first match and does
+// not allocate a result vector. The predicate must not mutate the IR.
+bool any_statement(IRNode *root, const std::function<bool(Stmt *)> &test);
 void gather_uniquely_accessed_bit_structs(IRNode *root, AnalysisManager *amgr);
 std::tuple<std::unordered_map<const SNode *, GlobalPtrStmt *>,
            std::unordered_map<std::vector<int>,

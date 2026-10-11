@@ -31,6 +31,39 @@ class StmtSearcher : public BasicStmtVisitor {
 };
 
 namespace irpass::analysis {
+bool any_statement(IRNode *root, const std::function<bool(Stmt *)> &test) {
+  class AnyStmtSearcher : public BasicStmtVisitor {
+   public:
+    const std::function<bool(Stmt *)> &test;
+    bool found{false};
+
+    explicit AnyStmtSearcher(const std::function<bool(Stmt *)> &predicate)
+        : test(predicate) {
+      allow_undefined_visitor = true;
+      invoke_default_visitor = true;
+    }
+
+    using BasicStmtVisitor::visit;
+
+    void visit(Stmt *stmt) override {
+      if (!found) {
+        found = test(stmt);
+      }
+    }
+
+    void visit(Block *block) override {
+      for (auto &stmt : block->statements) {
+        if (found) {
+          break;
+        }
+        stmt->accept(this);
+      }
+    }
+  } searcher(test);
+  root->accept(&searcher);
+  return searcher.found;
+}
+
 std::vector<Stmt *> gather_statements(IRNode *root,
                                       const std::function<bool(Stmt *)> &test) {
   return StmtSearcher::run(root, test);

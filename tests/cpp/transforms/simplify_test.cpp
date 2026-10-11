@@ -10,6 +10,57 @@ namespace taichi::lang {
 
 // Basic tests within a basic block
 
+TEST(Simplify, ExistentialQueryStopsAcrossNestedBranches) {
+  auto block = std::make_unique<Block>();
+  auto condition = block->push_back<ConstStmt>(TypedConstant(1));
+  auto branch = block->push_back<IfStmt>(condition)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  branch->set_false_statements(std::make_unique<Block>());
+  auto match = branch->true_statements->push_back<ConstStmt>(TypedConstant(2));
+  auto skipped = branch->false_statements->push_back<ConstStmt>(TypedConstant(3));
+  auto tail = block->push_back<ConstStmt>(TypedConstant(4));
+  std::vector<Stmt *> seen;
+  EXPECT_TRUE(irpass::analysis::any_statement(block.get(), [&](Stmt *stmt) {
+    seen.push_back(stmt);
+    return stmt == match;
+  }));
+  EXPECT_EQ(std::count(seen.begin(), seen.end(), skipped), 0);
+  EXPECT_EQ(std::count(seen.begin(), seen.end(), tail), 0);
+  EXPECT_FALSE(irpass::analysis::any_statement(block.get(), [](Stmt *) {
+    return false;
+  }));
+}
+
+TEST(Simplify, RepeatedLoadIntervalsRetireInvalidCandidates) {
+  for (bool advanced : {false, true}) {
+    auto block = std::make_unique<Block>();
+    auto ptr = block->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+    auto one = block->push_back<ConstStmt>(TypedConstant(1));
+    std::vector<Stmt *> values, expected;
+    for (int epoch = 0; epoch < 16; ++epoch) {
+      auto representative = block->push_back<GlobalLoadStmt>(ptr);
+      values.push_back(representative);
+      expected.push_back(representative);
+      for (int i = 0; i < 8; ++i) {
+        // Pure intervening operations must not invalidate the representative.
+        block->push_back<BinaryOpStmt>(BinaryOpType::add, one, one);
+        values.push_back(block->push_back<GlobalLoadStmt>(ptr));
+        expected.push_back(representative);
+      }
+      block->push_back<AtomicOpStmt>(AtomicOpType::add, ptr, one);
+    }
+    auto result = block->push_back<ReturnStmt>(values);
+    CompileConfig config;
+    config.advanced_optimization = advanced;
+    irpass::type_check(block.get(), config);
+    irpass::simplify(block.get(), config);
+    for (int i = 0; i < expected.size(); ++i) {
+      EXPECT_EQ(result->operand(i), expected[i]);
+    }
+    EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+  }
+}
+
 TEST(Simplify, FastLocalCSERewritesDependentExpressionsAndBranches) {
   auto block = std::make_unique<Block>();
   auto input = block->push_back<ArgLoadStmt>(
