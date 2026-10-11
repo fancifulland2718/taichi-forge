@@ -33,7 +33,14 @@ void *DeviceMemoryPool::allocate_with_cache(
     const LlvmDevice::LlvmRuntimeAllocParams &params) {
   std::lock_guard<std::mutex> _(mut_allocation_);
 
-  void *ret = allocator_->allocate(device, params);
+  auto *allocator = allocator_.get();
+  if (arch_ == Arch::cuda) {
+    auto &owned = device_allocators_[device];
+    if (!owned)
+      owned = std::make_unique<CachingAllocator>(merge_upon_release_);
+    allocator = owned.get();
+  }
+  void *ret = allocator->allocate(device, params);
   ++allocate_count_;
   bytes_allocated_total_ += params.size;
   return ret;
@@ -62,6 +69,23 @@ void DeviceMemoryPool::release(std::size_t size, void *ptr, bool release_raw) {
   bytes_released_total_ += size;
 }
 
+void DeviceMemoryPool::release_cached(LlvmDevice *device,
+                                      std::size_t size,
+                                      void *ptr) {
+  std::lock_guard<std::mutex> lock(mut_allocation_);
+  const auto owned = device_allocators_.find(device);
+  if (owned != device_allocators_.end()) {
+    owned->second->release(size, static_cast<uint64_t *>(ptr));
+  }
+  ++release_count_;
+  bytes_released_total_ += size;
+}
+
+void DeviceMemoryPool::release_device_cache(LlvmDevice *device) {
+  std::lock_guard<std::mutex> lock(mut_allocation_);
+  device_allocators_.erase(device);
+}
+
 DeviceMemoryPoolStats DeviceMemoryPool::get_stats() {
   std::lock_guard<std::mutex> _(mut_allocation_);
   DeviceMemoryPoolStats s;
@@ -80,6 +104,12 @@ DeviceMemoryPoolStats DeviceMemoryPool::get_stats() {
     s.cache_miss_count = allocator_->cache_miss_count();
     s.cached_blocks = allocator_->cached_block_count();
     s.cached_bytes = allocator_->cached_bytes();
+  }
+  for (const auto &entry : device_allocators_) {
+    s.cache_hit_count += entry.second->cache_hit_count();
+    s.cache_miss_count += entry.second->cache_miss_count();
+    s.cached_blocks += entry.second->cached_block_count();
+    s.cached_bytes += entry.second->cached_bytes();
   }
   return s;
 }
@@ -162,6 +192,7 @@ void DeviceMemoryPool::reset() {
     deallocate_raw_memory(ptr.first);
   }
   allocator_ = std::make_unique<CachingAllocator>(merge_upon_release_);
+  device_allocators_.clear();
 }
 
 DeviceMemoryPool::~DeviceMemoryPool() {

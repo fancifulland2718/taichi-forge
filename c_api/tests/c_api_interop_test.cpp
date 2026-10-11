@@ -12,6 +12,27 @@
 
 #ifdef TI_WITH_LLVM
 #ifdef TI_WITH_CUDA
+TEST_F(CapiTest, CudaRuntimeRetirementPreservesPeer) {
+  if (!ti::is_arch_available(TI_ARCH_CUDA)) GTEST_SKIP();
+  ti::Runtime peer(TI_ARCH_CUDA);
+  auto values = peer.allocate_ndarray<int>({4}, {}, true);
+  values.write(std::vector<int>{3, 7, 11, 19});
+  {
+    ti::Runtime transient(TI_ARCH_CUDA);
+    auto temporary = transient.allocate_ndarray<int>({4}, {}, true);
+    temporary.write(std::vector<int>{1, 2, 3, 4});
+    transient.wait();
+    ASSERT_TAICHI_SUCCESS();
+  }
+  // This also executes the peer's internal runtime error-query kernel.
+  peer.wait();
+  ASSERT_TAICHI_SUCCESS();
+  std::vector<int> output(4);
+  values.read(output);
+  ASSERT_TAICHI_SUCCESS();
+  EXPECT_EQ(output, (std::vector<int>{3, 7, 11, 19}));
+}
+
 TEST_F(CapiTest, CudaDefaultStreamContract) {
   void *stream = reinterpret_cast<void *>(uintptr_t(1));
   ti_get_cuda_stream(&stream);

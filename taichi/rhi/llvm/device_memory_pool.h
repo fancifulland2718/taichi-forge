@@ -39,6 +39,8 @@ class TI_DLL_EXPORT DeviceMemoryPool {
                             const LlvmDevice::LlvmRuntimeAllocParams &params);
   void *allocate(std::size_t size, std::size_t alignment, bool managed = false);
   void release(std::size_t size, void *ptr, bool release_raw = false);
+  void release_cached(LlvmDevice *device, std::size_t size, void *ptr);
+  void release_device_cache(LlvmDevice *device);
   void reset();
   explicit DeviceMemoryPool(bool merge_upon_release);
   DeviceMemoryPool(Arch arch, bool merge_upon_release);
@@ -58,6 +60,9 @@ class TI_DLL_EXPORT DeviceMemoryPool {
   std::mutex mut_allocation_;
   bool merge_upon_release_ = true;
   Arch arch_{Arch::cuda};
+  // CUDA fallback cache blocks belong to the allocating runtime's arena.
+  // Never lend such a block to another Device or retain it past its clear().
+  std::map<LlvmDevice *, std::unique_ptr<CachingAllocator>> device_allocators_;
 
   // R1.c counters; updated under mut_allocation_.
   uint64_t allocate_count_{0};

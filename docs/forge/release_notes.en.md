@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA runtime retirement preserves another runtime's live allocations instead
+  of resetting the process-wide memory pool. Fallback allocation caches are
+  scoped to their Device and discarded on retirement; cache reuse no longer
+  reads an erased iterator. Small independent-runtime C API tests verify that
+  the surviving runtime continues querying and reading data.
 - Fix producer-side field storage after AOT export: subsequent JIT calls,
   ordinary Graph preparation and host field access allocate missing storage
   once from the existing layout. CPU/CUDA export-only trees remain unallocated;

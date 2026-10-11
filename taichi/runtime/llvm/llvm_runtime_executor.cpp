@@ -1518,8 +1518,12 @@ void LlvmRuntimeExecutor::finalize() {
 
     // Reset memory pool
     if (backend_calls_safe) {
-      // Release only the pool owned by this backend. CUDA keeps its original pool.
-      DeviceMemoryPool::get_instance(config_.arch).reset();
+      // CUDA allocations and fallback cache entries are retired by their
+      // Device. Resetting the process pool here would free another runtime's
+      // live raw chunks. AMDGPU retains its existing single-runtime path.
+      if (config_.arch == Arch::amdgpu) {
+        DeviceMemoryPool::get_instance(config_.arch).reset();
+      }
 
       // Release unused memory from cuda memory pool.
       synchronize();

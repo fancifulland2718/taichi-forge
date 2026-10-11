@@ -9,8 +9,9 @@ CachingAllocator::CachingAllocator(bool merge_upon_release)
 
 void CachingAllocator::merge_and_insert(uint8_t *ptr, std::size_t size) {
   // merge with right block
-  if (ptr_map_[ptr + size]) {
-    std::size_t tmp = ptr_map_[ptr + size];
+  const auto right = ptr_map_.find(ptr + size);
+  if (right != ptr_map_.end()) {
+    std::size_t tmp = right->second;
     mem_blocks_.erase(std::make_pair(tmp, ptr + size));
     ptr_map_.erase(ptr + size);
     size += tmp;
@@ -47,8 +48,8 @@ uint64_t *CachingAllocator::allocate(
       ptr_map_.insert(std::make_pair(remaining_head, remaining_sz));
     }
     ret = reinterpret_cast<uint64_t *>(it_blk->second);
-    mem_blocks_.erase(it_blk);
     ptr_map_.erase(it_blk->second);
+    mem_blocks_.erase(it_blk);
     ++cache_hit_count_;
 
   } else {

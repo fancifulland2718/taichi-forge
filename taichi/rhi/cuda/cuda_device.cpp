@@ -67,8 +67,7 @@ void CudaDevice::AllocationRecord::release() {
       // This updates only host-side cache metadata and remains safe after a
       // context-fatal error. Raw CUDA chunks intentionally remain
       // process-owned because same-context recovery is not supported.
-      DeviceMemoryPool::get_instance().release(
-          size, static_cast<uint64_t *>(ptr), false);
+      DeviceMemoryPool::get_instance().release_cached(owner, size, ptr);
     } else if (!use_preallocated) {
       if (owner == nullptr || owner->backend_calls_safe()) {
         DeviceMemoryPool::get_instance().release(size, ptr, true);
@@ -475,6 +474,7 @@ void CudaDevice::clear() {
     return;
   }
   allocations_.clear();
+  DeviceMemoryPool::get_instance().release_device_cache(this);
   collect_graph_memory_pools();
 }
 
