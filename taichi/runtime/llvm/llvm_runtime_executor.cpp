@@ -1745,6 +1745,36 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
   }
 }
 
+bool LlvmRuntimeExecutor::destroy_dense_aot_snode_tree(
+    const LlvmOfflineCache::FieldCacheData &field) {
+  if (!config_.demote_dense_struct_fors ||
+      !std::all_of(field.snode_metas.begin(), field.snode_metas.end(),
+                   [](const auto &node) {
+                     return node.type == SNodeType::root ||
+                            node.type == SNodeType::dense ||
+                            node.type == SNodeType::place;
+                   })) {
+    return false;
+  }
+  const auto state = active_snode_tree_runtime_states_.find(field.tree_id);
+  TI_ERROR_IF(state == active_snode_tree_runtime_states_.end() ||
+                  state->second.generation != field.tree_generation,
+              "Cannot retire an unowned LLVM AOT SNode tree {}", field.tree_id);
+  get_runtime_jit_module()->call<void *, int, std::uint64_t>(
+      "runtime_unregister_snode_tree_state", llvm_runtime_, field.tree_id,
+      field.tree_generation);
+  // Unregistration is itself a device task. Complete it before returning the
+  // allocation to the pool, so a later module cannot reuse it while in flight.
+  synchronize();
+  active_snode_tree_runtime_states_.erase(state);
+  auto alloc = snode_tree_allocs_.find(field.tree_id);
+  TI_ASSERT(alloc != snode_tree_allocs_.end());
+  llvm_device()->dealloc_memory(alloc->second);
+  snode_tree_allocs_.erase(alloc);
+  snode_tree_buffer_manager_->destroy(field.tree_id);
+  return true;
+}
+
 void LlvmRuntimeExecutor::destroy_snode_tree(SNodeTree *snode_tree) {
   if (arch_is_cpu(config_.arch)) {
     std::vector<SNode *> snodes;

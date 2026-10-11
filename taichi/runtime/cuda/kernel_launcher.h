@@ -172,6 +172,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   Handle register_llvm_kernel_graph_gated(
       const LLVM::CompiledKernelData &compiled);
   void retire_snode_tree(int tree_id) override;
+  void retire_all_kernels() override;
   std::size_t debug_registered_kernel_count() override;
   std::vector<ArtifactQualification> qualify_llvm_kernel_artifacts(
       const LLVM::CompiledKernelData &compiled);

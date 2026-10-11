@@ -178,6 +178,42 @@ class AotAutodiffTest : public CapiTest {
         }
       }
     }
+    if (arch == TI_ARCH_X64 || arch == TI_ARCH_CUDA) {
+      // Retirement waits for submitted work and releases this module's dense
+      // roots. The same producer IDs can then be loaded in the same runtime.
+      graph["seed"] = 0.5f;
+      graph.launch();
+      module.destroy();
+      ASSERT_TAICHI_SUCCESS();
+      std::vector<float> actual(8);
+      output.read(actual);
+      for (int i = 0; i < 4; ++i) {
+        const float x = i + 1;
+        EXPECT_FLOAT_EQ(actual[i + 4], 0.5f * (3 * x * x + 2));
+      }
+      for (float seed : {-0.25f, 0.75f}) {
+        auto reloaded = runtime.load_aot_module(path);
+        ASSERT_TRUE(reloaded.is_valid());
+        auto fresh_readback = reloaded.get_kernel("readback");
+        fresh_readback.push_arg(output);
+        fresh_readback.launch();
+        runtime.wait();
+        output.read(actual);
+        EXPECT_EQ(actual, std::vector<float>(8, 0));
+        auto reloaded_graph = reloaded.get_compute_graph("differentiate");
+        reloaded_graph["seed"] = seed;
+        reloaded_graph["out"] = output;
+        reloaded_graph.launch();
+        reloaded.destroy();
+        ASSERT_TAICHI_SUCCESS();
+        output.read(actual);
+        for (int i = 0; i < 4; ++i) {
+          const float x = i + 1;
+          EXPECT_FLOAT_EQ(actual[i], x * x * x + 2 * x);
+          EXPECT_FLOAT_EQ(actual[i + 4], seed * (3 * x * x + 2));
+        }
+      }
+    }
     if (arch == TI_ARCH_VULKAN) {
       // Every artifact uses local roots [0, N), but independently loaded
       // modules must retain distinct primal and adjoint storage.

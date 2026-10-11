@@ -19,7 +19,10 @@ Ptr SNodeTreeBufferManager::allocate(std::size_t size,
 }
 
 void SNodeTreeBufferManager::destroy(SNodeTree *snode_tree) {
-  const int tree_id = snode_tree->id();
+  destroy(snode_tree->id());
+}
+
+void SNodeTreeBufferManager::destroy(int tree_id) {
   auto alloc_it = snode_tree_id_to_device_alloc_.find(tree_id);
   TI_ASSERT(alloc_it != snode_tree_id_to_device_alloc_.end());
   auto devalloc = alloc_it->second;

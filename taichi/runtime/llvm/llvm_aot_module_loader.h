@@ -21,6 +21,7 @@ class LlvmAotModule final : public aot::Module {
   explicit LlvmAotModule(const std::string &module_path,
                          LlvmRuntimeExecutor *executor,
                          std::unique_ptr<LLVM::KernelLauncher> kernel_launcher);
+  ~LlvmAotModule() override;
 
   Arch arch() const override {
     return executor_->get_config().arch;

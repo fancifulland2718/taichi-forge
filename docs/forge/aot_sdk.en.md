@@ -53,8 +53,12 @@ work uses them; ordinary CGraph support does not imply native recording support.
 
 Current CPU/CUDA field artifacts embed producer resource IDs. Modules with
 overlapping tree IDs require separate runtimes; a conflicting load is rejected
-before tree initialization. Vulkan dense AOT resources use module-local mappings
-and support independently loaded modules in the same runtime.
+before tree initialization. Destroying a CPU/CUDA module waits for submitted
+work, retires its executable registrations and releases its demoted dense
+trees, allowing a later module to reuse those IDs. Sparse/list-managed tree
+storage still lives until runtime teardown. Vulkan dense AOT resources use
+module-local mappings and support independently loaded modules in the same
+runtime. Always destroy modules before their runtime.
 
 CUDA exporters can select `ti.aot.Module(artifact_format="ptx")`, or pass
 `--artifact-format ptx` to the example exporter. The default remains LLVM

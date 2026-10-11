@@ -46,8 +46,11 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 原生 recording 支持。
 
 当前 CPU/CUDA field 产物仍内嵌生产端资源 ID。tree ID 重叠的模块需使用独立
-runtime，冲突加载会在 tree 初始化前拒绝。Vulkan dense AOT 资源已使用模块局部
-映射，支持在同一 runtime 中独立加载多个模块。
+runtime，冲突加载会在 tree 初始化前拒绝。CPU/CUDA 模块关闭会等待已提交工作完成，
+退休其代码注册并释放已降为普通循环的 dense tree，后续加载可复用这些 ID。
+sparse/依赖 element list 的 tree 存储仍保留到 runtime 关闭。Vulkan dense AOT
+资源已使用模块局部映射，支持在同一 runtime 中独立加载多个模块。模块必须先于
+所属 runtime 关闭。
 
 CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令也支持
 `--artifact-format ptx`；默认仍为 LLVM bitcode。PTX 在生产端完成用户 kernel

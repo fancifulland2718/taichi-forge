@@ -1718,6 +1718,20 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   return handle;
 }
 
+void KernelLauncher::retire_all_kernels() {
+  auto submission_lock = CUDAContext::get_instance().get_submission_lock_guard();
+  std::unique_lock<std::shared_mutex> registration_lock(registration_mutex());
+  auto *executor = get_runtime_executor();
+  for (auto it = contexts_.begin(); it != contexts_.end();) {
+    auto *module = it->second->jit_module;
+    it = contexts_.erase(it);
+    executor->remove_jit_module(module);
+  }
+  std::lock_guard<std::mutex> sparse_lock(sparse_list_mutex_);
+  sparse_list_states_.clear();
+  sparse_listgen_telemetry_.clear();
+}
+
 void KernelLauncher::retire_snode_tree(int tree_id) {
   auto submission_lock =
       CUDAContext::get_instance().get_submission_lock_guard();

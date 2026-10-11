@@ -36,6 +36,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
   void retire_snode_tree(int tree_id) override;
+  void retire_all_kernels() override;
   std::size_t debug_registered_kernel_count() override;
   void debug_reset_sparse_listgen_statistics() override;
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(

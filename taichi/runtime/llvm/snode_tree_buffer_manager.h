@@ -22,6 +22,7 @@ class SNodeTreeBufferManager {
                uint64 *result_buffer);
 
   void destroy(SNodeTree *snode_tree);
+  void destroy(int tree_id);
 
   std::size_t get_size(int snode_tree_id) const;
 

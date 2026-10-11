@@ -369,6 +369,18 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
   return *compiled.get_handle();
 }
 
+void KernelLauncher::retire_all_kernels() {
+  std::unique_lock<std::mutex> execution_lock(execution_mutex_);
+  std::unique_lock<std::shared_mutex> registration_lock(registration_mutex());
+  auto *executor = get_runtime_executor();
+  for (auto it = contexts_.begin(); it != contexts_.end();) {
+    auto *module = it->second->jit_module;
+    it = contexts_.erase(it);
+    executor->remove_jit_module(module);
+  }
+  sparse_listgen_telemetry_.clear();
+}
+
 void KernelLauncher::retire_snode_tree(int tree_id) {
   std::unique_lock<std::mutex> execution_lock(execution_mutex_);
   std::unique_lock<std::shared_mutex> registration_lock(registration_mutex());

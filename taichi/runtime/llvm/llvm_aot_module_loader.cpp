@@ -77,6 +77,26 @@ LlvmAotModule::LlvmAotModule(
   read_from_binary_file(graphs_, graph_path);
 }
 
+LlvmAotModule::~LlvmAotModule() {
+  // C API modules must be destroyed before their runtime. Finish their submitted
+  // kernels before dropping executable modules, retained launch buffers or roots.
+  try {
+    executor_->synchronize();
+    kernel_launcher_->retire_all_kernels();
+    for (int tree_id : initialized_snode_tree_ids) {
+      LlvmOfflineCache::FieldCacheData field;
+      TI_ASSERT(cache_reader_->get_field_cache(field, tree_id));
+      executor_->destroy_dense_aot_snode_tree(field);
+    }
+  } catch (const std::exception &error) {
+    TI_WARN("Failed to retire LLVM AOT resources: {}", error.what());
+  } catch (const std::string &error) {
+    TI_WARN("Failed to retire LLVM AOT resources: {}", error);
+  } catch (...) {
+    TI_WARN("Failed to retire LLVM AOT resources");
+  }
+}
+
 FunctionType LlvmAotModule::convert_module_to_function(
     const LLVM::CompiledKernelData &compiled) {
   auto *launcher = kernel_launcher_.get();

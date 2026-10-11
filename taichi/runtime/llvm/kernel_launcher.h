@@ -34,6 +34,12 @@ class KernelLauncher : public lang::KernelLauncher {
   virtual Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) = 0;
 
+  // AOT launchers own all their registrations. The caller must first wait for
+  // submitted work; ordinary Program launchers retain their existing lifetime.
+  virtual void retire_all_kernels() {
+    TI_NOT_IMPLEMENTED;
+  }
+
  protected:
   Handle make_handle() {
     TI_ERROR_IF(launch_id_counter_ == std::numeric_limits<int>::max(),
