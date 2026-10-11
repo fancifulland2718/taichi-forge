@@ -1065,6 +1065,21 @@ ti_copy_memory_device_to_device(TiRuntime runtime,
                                 const TiMemorySlice *dst_memory,
                                 const TiMemorySlice *src_memory);
 
+// Forge 0.6.4: synchronous transfers between host and device memory.
+// Nonempty transfers wait for prior work on this runtime and complete before
+// returning. The device allocation need not be host-mappable. The host pointer
+// must address at least slice.size bytes and must not alias the device slice.
+// A zero-size slice is a validated no-op and permits a null host pointer.
+// External producers must complete their work before calling these functions.
+TI_DLL_EXPORT void TI_API_CALL
+ti_copy_memory_from_host_ext(TiRuntime runtime,
+                             const TiMemorySlice *dst_memory,
+                             const void *src);
+TI_DLL_EXPORT void TI_API_CALL
+ti_copy_memory_to_host_ext(TiRuntime runtime,
+                           void *dst,
+                           const TiMemorySlice *src_memory);
+
 // Function `ti_copy_image_device_to_device` (Device Command)
 //
 // Copies the image data in a contiguous subsection of the device image to

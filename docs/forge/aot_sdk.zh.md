@@ -87,6 +87,12 @@ C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用�
 句柄或已释放句柄，会在访问后端内存前报告参数错误；复制切片必须在声明的分配
 容量内。应用仍需保持 buffer 存活至在途工作结束，并在释放前解除 host 映射。
 
+`ti_copy_memory_from_host_ext` 和 `ti_copy_memory_to_host_ext` 在 CPU/CUDA/Vulkan
+上提供显式、同步的主机传输，设备分配不必开启 host 映射标志。接口检查设备切片、
+等待此前 runtime 工作完成，并在传输完成后返回。主机缓冲区必须有足够字节且不能
+与设备切片重叠；空切片在检查后不执行传输。CPU/CUDA 也已接通设备间复制；重叠
+切片无效。不同导入句柄指向同一外部存储时，应用仍须负责避免重叠。
+
 固定连续 AoS 的 `StructNdarray` 已接通 CPU、CUDA、Vulkan 导出，包含嵌套结构、
 向量和矩阵成员。成员数值类型仍受目标能力约束；例如 Vulkan 使用 8/16 位整数时，
 须在 `caps` 声明 `spirv_has_int8`、`spirv_has_int16`、

@@ -100,6 +100,15 @@ error before backend memory access. Copy slices must fit within the declared
 allocation size. Applications must still retain buffers until submitted work
 finishes and unmap mapped memory before releasing it.
 
+`ti_copy_memory_from_host_ext` and `ti_copy_memory_to_host_ext` provide explicit
+synchronous host transfers on CPU/CUDA/Vulkan, including allocations without
+host mapping flags. They validate the device slice, wait for prior runtime work
+and complete the transfer before returning. The host buffer must contain enough
+bytes and must not alias the device slice. Empty slices are validated no-ops.
+Device-to-device copies are also available on CPU/CUDA; overlapping slices are
+invalid. Separate imported handles that alias external storage remain the
+caller's responsibility.
+
 Fixed contiguous AoS `StructNdarray` elements can be exported on CPU, CUDA and
 Vulkan, including nested structures and vector/matrix members. Integer/float
 types still require the target capabilities; for example, Vulkan modules using

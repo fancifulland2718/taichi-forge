@@ -44,6 +44,11 @@ TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
     TiMemorySlice source{a, 0, 16}, target{b, 0, 16};
     ti_copy_memory_device_to_device(right, &target, &source);
     EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+    int host[4]{};
+    ti_copy_memory_from_host_ext(right, &source, host);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+    ti_copy_memory_to_host_ext(right, host, &source);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
 
 #ifdef TI_WITH_LLVM
     if (arch == TI_ARCH_X64 || arch == TI_ARCH_ARM64) {
@@ -121,10 +126,14 @@ TEST_F(CapiTest, ImportedMemoryCapacityAndRetirement) {
   ti_copy_memory_device_to_device(runtime, &dst, &src);
   EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "capacity");
   EXPECT_EQ(target[0], 9);
-  // The CPU C API does not implement device-to-device copy. Invalid slices
-  // are rejected before that backend boundary; the original bytes stay intact.
+  // Invalid slices leave the original bytes intact; valid imports can copy.
   for (int value : target)
     EXPECT_EQ(value, 9);
+  src.offset = 0;
+  ti_copy_memory_device_to_device(runtime, &dst, &src);
+  ASSERT_TAICHI_SUCCESS();
+  for (int i = 0; i < 4; ++i)
+    EXPECT_EQ(target[i], source[i]);
   ti_free_memory(runtime, a);
   ti_free_memory(runtime, b);
   ASSERT_TAICHI_SUCCESS();
@@ -137,6 +146,65 @@ TEST_F(CapiTest, ImportedMemoryCapacityAndRetirement) {
 #else
   GTEST_SKIP() << "CPU interop requires LLVM support";
 #endif
+}
+
+TEST_F(CapiTest, BulkMemoryTransfers) {
+  for (TiArch arch :
+       {TI_ARCH_X64, TI_ARCH_ARM64, TI_ARCH_CUDA, TI_ARCH_VULKAN}) {
+    if (!ti::is_arch_available(arch))
+      continue;
+    SCOPED_TRACE(int(arch));
+    ti::Runtime runtime(arch);
+    // Device allocations need no host mapping flags. Exercise byte offsets as
+    // well as ordinary typed-array ranges, with unchanged sentinel bytes.
+    ti::Memory a = runtime.allocate_memory(32);
+    ti::Memory b = runtime.allocate_memory(32);
+    uint8_t input[32], output[32]{};
+    for (int i = 0; i < 32; ++i)
+      input[i] = uint8_t(i + 17);
+    TiMemorySlice whole_a = a.slice(), whole_b = b.slice();
+    ti_copy_memory_from_host_ext(runtime, &whole_a, input);
+    ti_copy_memory_from_host_ext(runtime, &whole_b, output);
+    ASSERT_TAICHI_SUCCESS();
+    TiMemorySlice src{a, 3, 13}, dst{b, 9, 13};
+    ti_copy_memory_device_to_device(runtime, &dst, &src);
+    ASSERT_TAICHI_SUCCESS();
+    // No explicit wait: readback orders after the earlier device command.
+    ti_copy_memory_to_host_ext(runtime, output, &whole_b);
+    ASSERT_TAICHI_SUCCESS();
+    for (int i = 0; i < 32; ++i)
+      EXPECT_EQ(output[i], i >= 9 && i < 22 ? input[i - 6] : 0);
+    ti_copy_memory_from_host_ext(runtime, &dst, input);
+    ti_copy_memory_to_host_ext(runtime, output, &dst);
+    ASSERT_TAICHI_SUCCESS();
+    for (int i = 0; i < 13; ++i)
+      EXPECT_EQ(output[i], input[i]);
+
+    TiMemorySlice overlap{a, 4, 13};
+    ti_copy_memory_device_to_device(runtime, &overlap, &src);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "overlap");
+    ti_copy_memory_device_to_device(runtime, &src, &src);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "overlap");
+    TiMemorySlice empty{a, 32, 0};
+    ti_copy_memory_from_host_ext(runtime, &empty, nullptr);
+    ti_copy_memory_to_host_ext(runtime, nullptr, &empty);
+    ti_copy_memory_device_to_device(runtime, &empty, &empty);
+    ASSERT_TAICHI_SUCCESS();
+    ti_copy_memory_from_host_ext(runtime, &src, nullptr);
+    EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_NULL);
+    ti_copy_memory_to_host_ext(runtime, nullptr, &src);
+    EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_NULL);
+    TiMemorySlice bad{a, UINT64_MAX, 13};
+    ti_copy_memory_from_host_ext(runtime, &bad, input);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "capacity");
+    ti_copy_memory_to_host_ext(runtime, output, &bad);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "capacity");
+    a.destroy();
+    ti_copy_memory_from_host_ext(runtime, &src, input);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "live allocation");
+    ti_copy_memory_to_host_ext(runtime, output, &src);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "live allocation");
+  }
 }
 
 TEST_F(CapiTest, TestBehaviorCreateRuntime) {

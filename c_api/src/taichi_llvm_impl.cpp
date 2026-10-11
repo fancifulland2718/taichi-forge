@@ -117,7 +117,7 @@ TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
 void LlvmRuntime::buffer_copy(const taichi::lang::DevicePtr &dst,
                               const taichi::lang::DevicePtr &src,
                               size_t size) {
-  TI_NOT_IMPLEMENTED;
+  get().memcpy_internal(dst, src, size);
 }
 
 void LlvmRuntime::flush() {

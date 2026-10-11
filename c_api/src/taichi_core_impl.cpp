@@ -583,6 +583,77 @@ void ti_destroy_sampler(TiRuntime runtime, TiSampler sampler) {
   TI_CAPI_TRY_CATCH_END();
 }
 
+namespace {
+taichi::lang::DevicePtr resolve_memory_slice(Runtime &runtime,
+                                             const TiMemorySlice &slice) {
+  const auto allocation = runtime.get_memory(slice.memory);
+  if (slice.offset > allocation.size ||
+      slice.size > allocation.size - slice.offset ||
+      slice.size > std::numeric_limits<size_t>::max()) {
+    throw MemoryBindingError("Memory slice exceeds its allocation capacity");
+  }
+  return allocation.allocation.get_ptr(slice.offset);
+}
+
+void check_transfer_result(taichi::lang::RhiResult result) {
+  using taichi::lang::RhiResult;
+  switch (result) {
+    case RhiResult::success:
+      break;
+    case RhiResult::out_of_memory:
+      ti_set_last_error(TI_ERROR_OUT_OF_MEMORY,
+                        "Host transfer allocation failed");
+      break;
+    case RhiResult::not_supported:
+      ti_set_last_error(TI_ERROR_NOT_SUPPORTED,
+                        "Host transfer is not supported");
+      break;
+    case RhiResult::invalid_usage:
+      ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, "Invalid host transfer");
+      break;
+    default:
+      ti_set_last_error(TI_ERROR_INVALID_STATE, "Host transfer failed");
+      break;
+  }
+}
+}  // namespace
+
+void ti_copy_memory_from_host_ext(TiRuntime runtime,
+                                  const TiMemorySlice *dst_memory,
+                                  const void *src) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(dst_memory);
+  TI_CAPI_ARGUMENT_NULL(dst_memory->memory);
+  auto &runtime2 = *reinterpret_cast<Runtime *>(runtime);
+  auto dst = resolve_memory_slice(runtime2, *dst_memory);
+  if (dst_memory->size == 0)
+    return;
+  TI_CAPI_ARGUMENT_NULL(src);
+  size_t size = dst_memory->size;
+  runtime2.wait();
+  check_transfer_result(runtime2.get().upload_data(&dst, &src, &size));
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_copy_memory_to_host_ext(TiRuntime runtime,
+                                void *dst,
+                                const TiMemorySlice *src_memory) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(src_memory);
+  TI_CAPI_ARGUMENT_NULL(src_memory->memory);
+  auto &runtime2 = *reinterpret_cast<Runtime *>(runtime);
+  auto src = resolve_memory_slice(runtime2, *src_memory);
+  if (src_memory->size == 0)
+    return;
+  TI_CAPI_ARGUMENT_NULL(dst);
+  size_t size = src_memory->size;
+  runtime2.wait();
+  check_transfer_result(runtime2.get().readback_data(&src, &dst, &size));
+  TI_CAPI_TRY_CATCH_END();
+}
+
 void ti_copy_memory_device_to_device(TiRuntime runtime,
                                      const TiMemorySlice *dst_memory,
                                      const TiMemorySlice *src_memory) {
@@ -599,16 +670,15 @@ void ti_copy_memory_device_to_device(TiRuntime runtime,
   }
 
   Runtime *runtime2 = (Runtime *)runtime;
-  const auto dst_allocation = runtime2->get_memory(dst_memory->memory);
-  const auto src_allocation = runtime2->get_memory(src_memory->memory);
-  if (dst_memory->offset > dst_allocation.size ||
-      dst_memory->size > dst_allocation.size - dst_memory->offset ||
-      src_memory->offset > src_allocation.size ||
-      src_memory->size > src_allocation.size - src_memory->offset) {
-    throw MemoryBindingError("Memory slice exceeds its allocation capacity");
+  auto dst = resolve_memory_slice(*runtime2, *dst_memory);
+  auto src = resolve_memory_slice(*runtime2, *src_memory);
+  if (dst_memory->size == 0)
+    return;
+  if (dst.alloc_id == src.alloc_id &&
+      dst.offset < src.offset + src_memory->size &&
+      src.offset < dst.offset + dst_memory->size) {
+    throw MemoryBindingError("Device memory copy slices must not overlap");
   }
-  auto dst = dst_allocation.allocation.get_ptr(dst_memory->offset);
-  auto src = src_allocation.allocation.get_ptr(src_memory->offset);
   runtime2->buffer_copy(dst, src, dst_memory->size);
   TI_CAPI_TRY_CATCH_END();
 }
