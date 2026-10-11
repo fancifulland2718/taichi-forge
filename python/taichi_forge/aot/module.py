@@ -83,12 +83,6 @@ class KernelTemplate:
 
     @staticmethod
     def _ndarray_keygen(v, anno, arg_name):
-        if isinstance(v, StructNdarray):
-            raise TaichiCompilationError(
-                f"AOT ndarray template argument {arg_name} does not support "
-                "StructNdarray; use a scalar/vector/matrix ndarray"
-            )
-
         if isinstance(v, Ndarray):
             if v.layout != Layout.AOS:
                 raise TaichiCompilationError(
@@ -127,6 +121,10 @@ class KernelTemplate:
         if not hasattr(element_type, "to_string"):
             element_type = kernel_impl.to_taichi_type(v.dtype)
         dtype_name = element_type.to_string()
+        if isinstance(v, StructNdarray):
+            # Avoid exporting unbounded filesystem names for nested structures.
+            # The full structural spelling remains the hash input.
+            dtype_name = "struct_" + hashlib.sha256(dtype_name.encode()).hexdigest()
         if hasattr(element_type, "get_shape"):
             element_shape = tuple(element_type.get_shape())
         elif hasattr(element_type, "shape") and callable(element_type.shape):

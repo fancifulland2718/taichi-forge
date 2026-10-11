@@ -5,6 +5,7 @@
 #include <iterator>
 
 #include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/aot/graph_artifact.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
@@ -76,7 +77,10 @@ LlvmAotModule::LlvmAotModule(
   snode_tree_ids_ = cache_reader_->get_snode_tree_ids();
 
   const std::string graph_path = fmt::format("{}/graphs.tcb", module_path);
-  read_from_binary_file(graphs_, graph_path);
+  if (!aot::load_struct_graph_artifact(
+          *io::VirtualDir::from_fs_dir(module_path), graphs_)) {
+    read_from_binary_file(graphs_, graph_path);
+  }
   const bool relocatable = metadata.resource_binding == "dense_v1";
   // Validate the complete resource closure before reserving or allocating any
   // tree. Legacy artifacts retain their original ID collision contract.

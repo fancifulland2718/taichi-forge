@@ -7573,6 +7573,13 @@ void export_lang(py::module &m) {
 
   m.def("data_type_size", data_type_size);
   m.def("data_type_alignment", data_type_alignment);
+  m.def("data_type_struct_members", [](DataType dt) {
+    std::vector<std::pair<std::string, DataType>> members;
+    for (const auto &member : dt->as<StructType>()->elements()) {
+      members.emplace_back(member.name, DataType(member.type));
+    }
+    return members;
+  });
   m.def("data_type_element_offset",
         [](DataType dt, const std::vector<int> &indices) {
           return dt.ptr_removed()->as<StructType>()->get_element_offset(indices);

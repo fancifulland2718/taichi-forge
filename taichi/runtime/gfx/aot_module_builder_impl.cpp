@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "taichi/aot/module_data.h"
+#include "taichi/aot/graph_artifact.h"
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
 #include "taichi/runtime/gfx/aot_graph_data.h"
 
@@ -137,7 +138,10 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
   }
 
   {
-    std::string json = liong::json::print(liong::json::serialize(graphs_));
+    aot::write_struct_graph_artifact(graphs_, output_dir);
+    const aot::GraphMap empty;
+    std::string json = liong::json::print(liong::json::serialize(
+        aot::has_struct_graph_arguments(graphs_) ? empty : graphs_));
     std::fstream f(output_dir + "/graphs.json",
                    std::ios::trunc | std::ios::out);
     f.write(json.data(), json.size());

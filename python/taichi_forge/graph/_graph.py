@@ -20,7 +20,7 @@ from taichi_forge._contracts import (
 )
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang import enums, impl, kernel_impl, ops
-from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
+from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray, StructNdarray
 from taichi_forge.lang._storage_view import (
     DenseNdarrayView,
     StorageDescription,
@@ -5193,7 +5193,7 @@ class _GraphRunContext:
                     else:
                         flattened[k] = state.arr
                 elif isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
-                    if runtime_storage_backend:
+                    if runtime_storage_backend and not isinstance(v, StructNdarray):
                         flattened[k] = (
                             v.arr,
                             v._runtime_storage_argument(ndarray_consumer, ndarray_mode),
@@ -20092,11 +20092,6 @@ def _make_arg_ndarray(kwargs: Dict[str, Any]):
         raise TaichiRuntimeError(
             "Graph ndarray tensor elements support vector (rank 1) and "
             f"matrix (rank 2) types only, but got shape {descriptor.shape}."
-        )
-    if descriptor.category == "struct":
-        raise TaichiRuntimeError(
-            "Graph StructNdarray arguments are not supported by the current "
-            "serialized Graph schema."
         )
     return _ti_core.Arg(ArgKind.NDARRAY, name, descriptor.logical_type, ndim, [])
 

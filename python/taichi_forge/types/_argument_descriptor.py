@@ -222,6 +222,13 @@ def describe_symbolic_arg(symbolic_arg):
 
 
 def python_compound_type(descriptor):
+    if descriptor.category == "struct":
+        from taichi_forge.lang.struct import StructType
+
+        return StructType(**{
+            name: python_compound_type(describe_element_type(dtype))
+            for name, dtype in _ti_core.data_type_struct_members(descriptor.logical_type)
+        })
     if descriptor.category != "tensor":
         return descriptor.logical_type
     if descriptor.shape is None or None in descriptor.shape:

@@ -1,4 +1,5 @@
 #include "taichi/aot/module_builder.h"
+#include "taichi/aot/graph_artifact.h"
 #include "taichi/program/kernel.h"
 
 namespace taichi::lang {
@@ -49,7 +50,12 @@ void AotModuleBuilder::load(const std::string &output_dir) {
 
 void AotModuleBuilder::dump_graph(std::string output_dir) const {
   const std::string graph_file = fmt::format("{}/graphs.tcb", output_dir);
-  write_to_binary_file(graphs_, graph_file);
+  aot::write_struct_graph_artifact(graphs_, output_dir);
+  // Old readers see no exports they cannot represent; ordinary artifacts keep
+  // their existing binary representation and remain readable by old loaders.
+  const aot::GraphMap empty;
+  write_to_binary_file(aot::has_struct_graph_arguments(graphs_) ? empty : graphs_,
+                       graph_file);
 }
 
 void AotModuleBuilder::add_graph(const std::string &name,

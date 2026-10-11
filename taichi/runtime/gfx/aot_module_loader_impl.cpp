@@ -5,6 +5,7 @@
 
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/aot/graph_data.h"
+#include "taichi/aot/graph_artifact.h"
 
 namespace taichi::lang {
 namespace gfx {
@@ -182,6 +183,13 @@ class AotModuleImpl : public aot::Module {
     }
 
     {
+      try {
+        if (aot::load_struct_graph_artifact(*dir, graphs_)) return;
+      } catch (const std::exception &e) {
+        mark_corrupted();
+        TI_WARN("Invalid GFX AOT Graph v2 metadata: {}", e.what());
+        return;
+      }
       std::vector<uint8_t> graphs_json{};
       bool succ = dir->load_file("graphs.json", graphs_json) != 0;
 

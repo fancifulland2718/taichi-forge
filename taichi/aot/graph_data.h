@@ -65,6 +65,9 @@ struct Arg {
   // Texture: element_shape carries [width, height, depth] info
   //          dtype_id carries channel_format info
   PrimitiveTypeID dtype_id;
+  // Kept outside legacy Arg serialization. Versioned AOT graph artifacts store
+  // structure types once per named binding and restore them on load.
+  const StructType *struct_dtype{nullptr};
   size_t field_dim;
   std::vector<int> element_shape;
 
@@ -114,6 +117,13 @@ struct Arg {
       field_dim = dim;
     }
     DataType scalar_dtype = dtype;
+    if (dtype->is<StructType>()) {
+      TI_ERROR_IF(tag != ArgKind::kNdarray || !element_shape.empty(),
+                  "Graph structure types require a scalar-shaped ndarray element");
+      struct_dtype = dtype->as<StructType>();
+      dtype_id = PrimitiveTypeID::unknown;
+      return;
+    }
     if (dtype->is<TensorType>()) {
       TI_ERROR_IF(tag == ArgKind::kScalar,
                   "Scalar Graph argument {} cannot use a TensorType dtype",
@@ -140,6 +150,7 @@ struct Arg {
   }
 
   DataType dtype() const {
+    if (struct_dtype) return DataType(struct_dtype);
     return PrimitiveType::get(dtype_id);
   }
 
@@ -158,6 +169,7 @@ struct Arg {
   bool operator==(const Arg &other) const {
     return tag == other.tag && name == other.name &&
            field_dim == other.field_dim && dtype_id == other.dtype_id &&
+           struct_dtype == other.struct_dtype &&
            element_shape == other.element_shape &&
            num_channels == other.num_channels &&
            texture_format == other.texture_format;

@@ -32,6 +32,16 @@ class KernelImpl : public aot::Kernel {
         TI_ASSERT(array_type != nullptr);
         parameter.needs_grad = array_type->elements().size() >
                                TypeFactory::GRAD_PTR_POS_IN_NDARRAY;
+        auto payload = DataType(array_type->get_element_type(
+            {TypeFactory::DATA_PTR_POS_IN_NDARRAY})).ptr_removed();
+        if (payload->is<taichi::lang::StructType>()) {
+          parameter = CallableBase::Parameter(
+              array_type, attrib.is_array, attrib.is_argpack, 0,
+              static_cast<int>(attrib.field_dim), {}, attrib.format,
+              parameter.needs_grad);
+          parameter.name = attrib.name;
+          parameter.ptype = attrib.ptype;
+        }
       }
       nested_parameters.emplace(indices, std::move(parameter));
     }

@@ -43,6 +43,15 @@ std::size_t DataType::hash() const {
     return ret + DataType(tensor_type->get_element_type()).hash();
   } else if (auto pointer = ptr_->cast<PointerType>()) {
     return 10007 + DataType(pointer->get_pointee_type()).hash();
+  } else if (auto structure = ptr_->cast<StructType>()) {
+    std::size_t ret = 20011;
+    hashing::hash_combine(ret, structure->get_layout());
+    for (const auto &member : structure->elements()) {
+      hashing::hash_combine(ret, member.name);
+      hashing::hash_combine(ret, member.offset);
+      hashing::hash_combine(ret, DataType(member.type).hash());
+    }
+    return ret;
   } else {
     TI_NOT_IMPLEMENTED
   }

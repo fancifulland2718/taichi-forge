@@ -615,6 +615,11 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
   auto *args_type = dispatch.jit_callable()->args_type;
   for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
     const auto &symbolic_arg = dispatch.symbolic_args[i];
+    if (symbolic_arg.struct_dtype != nullptr) {
+      plan.cpu_fast_path = false;
+      plan.args.clear();
+      return plan;
+    }
     CompiledGraphRuntimeArgPlan arg_plan;
     arg_plan.tag = symbolic_arg.tag;
     arg_plan.name = symbolic_arg.name;
@@ -847,6 +852,13 @@ CompiledGraph::CompiledGraph(
     : dispatches(std::move(compiled_dispatches)),
       snode_tree_dependencies(
           collect_snode_tree_dependencies(dispatches)) {
+  for (const auto &dispatch : dispatches) {
+    for (const auto &arg : dispatch.symbolic_args) {
+      const auto [it, inserted] = args.emplace(arg.name, arg);
+      TI_ERROR_IF(!inserted && it->second != arg,
+                  "Graph argument {} has conflicting dispatch types", arg.name);
+    }
+  }
 }
 
 CompiledGraph::CompiledGraph(
@@ -1613,6 +1625,9 @@ make_cuda_graph_signature(const CompiledGraph &graph,
         declared_it->second.tag != kv.second.tag) {
       return std::nullopt;
     }
+    // Fixed AoS structures use the ordinary argument path. Native CUDA graph
+    // signatures currently encode a primitive dtype and cannot represent them.
+    if (declared_it->second.struct_dtype != nullptr) return std::nullopt;
 
     CudaGraphArgSignatureEntry entry;
     entry.name = kv.first;
