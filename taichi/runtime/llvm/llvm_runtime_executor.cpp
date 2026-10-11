@@ -633,6 +633,11 @@ void *LlvmRuntimeExecutor::get_snode_tree_root_ptr(int tree_id) {
   return get_device_alloc_info_ptr(tree->second);
 }
 
+bool LlvmRuntimeExecutor::has_snode_tree_runtime_state(int tree_id) const {
+  return active_snode_tree_runtime_states_.find(tree_id) !=
+         active_snode_tree_runtime_states_.end();
+}
+
 void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     const LlvmOfflineCache::FieldCacheData &field_cache_data,
     uint64 *result_buffer) {
@@ -648,6 +653,10 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   const std::uint64_t tree_generation = field_cache_data.tree_generation;
 
   TI_ERROR_IF(tree_id < 0, "LLVM SNode tree id must be non-negative.");
+  TI_ERROR_IF(has_snode_tree_runtime_state(tree_id),
+              "LLVM SNode tree id {} is already active; this artifact requires "
+              "a separate runtime until resource relocation is supported.",
+              tree_id);
   TI_ERROR_IF(tree_generation == 0,
               "LLVM SNode tree generation must be non-zero.");
   TI_ERROR_IF(snode_metas.empty(), "LLVM SNode tree has no SNodes.");

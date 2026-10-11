@@ -986,7 +986,9 @@ class AotModule {
   }
   inline void destroy() {
     if (should_destroy_) {
-      ti_destroy_aot_module(aot_module_);
+      if (aot_module_ != TI_NULL_HANDLE) {
+        ti_destroy_aot_module(aot_module_);
+      }
       aot_module_ = TI_NULL_HANDLE;
       should_destroy_ = false;
     }

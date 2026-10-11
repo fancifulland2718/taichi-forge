@@ -50,3 +50,8 @@ printed by this small example are diagnostics, not application benchmarks.
 Native Graph recordings, providers and their external dependencies are not
 serialized by this AOT path. Keep buffers, modules and the runtime alive while
 work uses them; ordinary CGraph support does not imply native recording support.
+
+Current CPU/CUDA field artifacts embed producer resource IDs. Modules with
+overlapping tree IDs require separate runtimes; a conflicting load is rejected
+before tree initialization. Vulkan dense AOT resources use module-local mappings
+and support independently loaded modules in the same runtime.

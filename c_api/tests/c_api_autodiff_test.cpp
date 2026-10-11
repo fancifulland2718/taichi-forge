@@ -135,6 +135,24 @@ class AotAutodiffTest : public CapiTest {
     ASSERT_TAICHI_SUCCESS();
     readback.push_arg(output);
     graph["out"] = output;
+    if (arch == TI_ARCH_X64 || arch == TI_ARCH_CUDA) {
+      graph["seed"] = 1.0f;
+      graph.launch();
+      runtime.wait();
+      ASSERT_TAICHI_SUCCESS();
+      std::vector<float> preserved(8), actual(8);
+      output.read(preserved);
+      // Reject conflicting producer IDs before replacing runtime state.
+      auto conflicting = runtime.load_aot_module(path);
+      EXPECT_FALSE(conflicting.is_valid());
+      conflicting.destroy();  // Preserve the original failed-load error.
+      EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_STATE, "conflicts");
+      readback.launch();
+      runtime.wait();
+      ASSERT_TAICHI_SUCCESS();
+      output.read(actual);
+      EXPECT_EQ(actual, preserved);
+    }
     for (bool use_graph : {false, true}) {
       for (float seed : {1.0f, -0.5f, 0.0f}) {
         if (use_graph) {

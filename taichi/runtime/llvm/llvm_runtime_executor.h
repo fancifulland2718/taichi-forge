@@ -53,6 +53,8 @@ class LlvmRuntimeExecutor {
                            uint64 **result_buffer_ptr);
 
   // SNodeTree Allocation
+  bool has_snode_tree_runtime_state(int tree_id) const;
+
   void initialize_llvm_runtime_snodes(
       const LlvmOfflineCache::FieldCacheData &field_cache_data,
       uint64 *result_buffer);

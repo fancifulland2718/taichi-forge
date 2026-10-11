@@ -44,3 +44,7 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 此 AOT 路径不序列化 native Graph recording、provider 及其外部依赖。
 在途工作结束前需保持 buffer、模块和 runtime 存活；普通 CGraph 支持不等于
 原生 recording 支持。
+
+当前 CPU/CUDA field 产物仍内嵌生产端资源 ID。tree ID 重叠的模块需使用独立
+runtime，冲突加载会在 tree 初始化前拒绝。Vulkan dense AOT 资源已使用模块局部
+映射，支持在同一 runtime 中独立加载多个模块。
