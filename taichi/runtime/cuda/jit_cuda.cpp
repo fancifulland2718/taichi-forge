@@ -6,6 +6,7 @@
 #include "taichi/util/environ_config.h"
 
 #include <cstdlib>
+#include <cstdint>
 
 #include "llvm/IR/Metadata.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -220,7 +221,10 @@ void *JITSessionCUDA::load_artifact(const CUDAKernelArtifact &artifact) {
   // Insert options
   if (artifact.kind == CUDAArtifactKind::ptx && max_registers != 0) {
     options[num_options] = CU_JIT_MAX_REGISTERS;
-    option_values[num_options] = &max_registers;
+    // Integer options are encoded in the pointer slot itself. Only buffer
+    // options and CU_JIT_WALL_TIME take addresses of host storage.
+    option_values[num_options] =
+        reinterpret_cast<void *>(static_cast<std::uintptr_t>(max_registers));
     num_options++;
   }
 
@@ -232,13 +236,15 @@ void *JITSessionCUDA::load_artifact(const CUDAKernelArtifact &artifact) {
     option_values[num_options] = info_log.data();
     num_options++;
     options[num_options] = CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES;
-    option_values[num_options] = &info_log_capacity;
+    option_values[num_options] =
+        reinterpret_cast<void *>(static_cast<std::uintptr_t>(info_log_capacity));
     num_options++;
     options[num_options] = CU_JIT_ERROR_LOG_BUFFER;
     option_values[num_options] = error_log.data();
     num_options++;
     options[num_options] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES;
-    option_values[num_options] = &error_log_capacity;
+    option_values[num_options] =
+        reinterpret_cast<void *>(static_cast<std::uintptr_t>(error_log_capacity));
     num_options++;
   }
 

@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Correct CUDA driver JIT option encoding for register limits and diagnostic
+  buffer lengths. Explicit register limits now reach the shared JIT/PTX AOT
+  loader as integer values instead of host addresses.
 - Restore the Windows C API build with the split runtime's object dependencies
   and stable Graph texture ownership. CUDA stream interop reports the existing
   legacy-default-stream contract and rejects unsupported non-default streams.

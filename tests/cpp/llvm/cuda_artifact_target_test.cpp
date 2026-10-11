@@ -6,6 +6,7 @@
 #include "llvm/Support/TargetSelect.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
+#include "taichi/platform/cuda/detect_cuda.h"
 
 namespace taichi::lang {
 namespace {
@@ -89,6 +90,58 @@ TEST(CUDAArtifactTarget, PascalTargetCanEmitSynchronizedWarpShuffle) {
   const std::string ptx(artifact.payload.data(), artifact.code_size());
   EXPECT_NE(ptx.find(".target sm_60"), std::string::npos);
   EXPECT_NE(ptx.find("shfl.sync"), std::string::npos);
+}
+
+TEST(CUDAArtifactTarget, DriverLoaderHonorsRegisterLimit) {
+  if (!is_cuda_api_available() ||
+      !CUDADriver::get_instance().nvidia_extensions_available() ||
+      CUDAContext::get_instance().get_compute_capability() < 80) {
+    GTEST_SKIP();
+  }
+  // Keep enough values live to make the explicit register limit observable.
+  // This exercises the shared JIT/AOT loader, not LLVM register allocation.
+  std::string ptx =
+      ".version 7.0\n.target sm_80\n.address_size 64\n"
+      ".visible .entry register_probe(.param .u64 address) {\n"
+      ".reg .b64 p;\n.reg .f32 f<65>;\nld.param.u64 p, [address];\n";
+  for (int i = 0; i < 64; ++i) {
+    ptx += fmt::format("ld.volatile.global.f32 f{}, [p+{}];\n", i, i * 4);
+  }
+  ptx += "mov.f32 f64, 0f00000000;\n";
+  for (int i = 0; i < 64; ++i) {
+    ptx += fmt::format("add.rn.f32 f64, f64, f{};\n", i);
+  }
+  ptx += "st.global.f32 [p], f64;\nret;\n}\n";
+  CUDAKernelArtifact artifact;
+  artifact.payload.assign(ptx.begin(), ptx.end());
+  artifact.payload.push_back('\0');
+  artifact.entry_names = {"register_probe"};
+  artifact.target_identity = "sm_80|+ptx70";
+  artifact.provider_identity = "register_limit_test";
+  artifact.max_registers = 32;
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  // add_artifact needs no LLVM context or runtime bootstrap.
+  JITSessionCUDA session(nullptr, config, llvm::DataLayout(""));
+  auto *module = session.add_artifact(artifact);
+  auto *function = module->lookup_function("register_probe");
+  int registers = 0;
+  auto &driver = CUDADriver::get_instance();
+  driver.kernel_get_attribute(&registers, CU_FUNC_ATTRIBUTE_NUM_REGS, function);
+  EXPECT_GT(registers, 0);
+  EXPECT_LE(registers, 32);
+
+  void *device_data = nullptr;
+  driver.malloc(&device_data, 64 * sizeof(float));
+  auto release = [&](void *ptr) { driver.mem_free(ptr); };
+  std::unique_ptr<void, decltype(release)> allocation(device_data, release);
+  std::vector<float> values(64, 1.0f);
+  driver.memcpy_host_to_device(device_data, values.data(), 64 * sizeof(float));
+  module->launch("register_probe", 1, 1, 0, {&device_data},
+                  {static_cast<int>(sizeof(device_data))});
+  driver.memcpy_device_to_host(values.data(), device_data, sizeof(float));
+  EXPECT_FLOAT_EQ(values[0], 64.0f);
+  EXPECT_TRUE(session.remove_module(module));
 }
 
 }  // namespace taichi::lang
