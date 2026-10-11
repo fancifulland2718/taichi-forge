@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
@@ -77,6 +78,13 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
 void LlvmAotModuleBuilder::dump(const std::string &output_dir,
                                 const std::string &filename) const {
   LlvmOfflineCacheFileWriter writer;
+  LlvmOfflineCache exported;
+  // dump() must preserve the producer for another directory/archive or a later
+  // add(). Copy metadata now; clone and transform only the current kernel
+  // below.
+  exported.fields = cache_.fields;
+  for (const auto &[name, kernel] : cache_.kernels)
+    exported.kernels.emplace(name, kernel.clone_metadata());
   LLVM::LlvmAotMetadata metadata;
   metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
   metadata.kernel_format = artifact_format_;
@@ -102,76 +110,83 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     int local_id = 0;
     for (auto &[producer, local] : tree_mapping)
       local = local_id++;
-    decltype(cache_.fields) fields;
-    for (auto &[producer, field] : cache_.fields) {
+    decltype(exported.fields) fields;
+    for (auto &[producer, field] : exported.fields) {
       field.tree_id = tree_mapping.at(producer);
       fields.emplace(field.tree_id, std::move(field));
     }
-    cache_.fields = std::move(fields);
+    exported.fields = std::move(fields);
     metadata.resource_binding = "dense_v1";
   }
-  for (auto &[name, kernel] : cache_.kernels) {
+  auto prepare_module = [&](LlvmOfflineCache::KernelCacheData &kernel) {
+    auto module = llvm::CloneModule(
+        *cache_.kernels.at(kernel.kernel_key).compiled_data.module);
     if (relocatable) {
-      LLVM::remap_aot_tree_id_symbols(*kernel.compiled_data.module,
-                                      tree_mapping);
+      LLVM::remap_aot_tree_id_symbols(*module, tree_mapping);
       for (int &id : kernel.used_snode_tree_ids)
         id = tree_mapping.at(id);
     } else {
       // Sparse/list-managed and legacy targets retain their embedded-ID ABI.
-      LLVM::resolve_aot_tree_ids(*kernel.compiled_data.module, tree_mapping);
+      LLVM::resolve_aot_tree_ids(*module, tree_mapping);
     }
-  }
-  writer.set_data(std::move(cache_));
+    return module;
+  };
+  writer.set_data(std::move(exported));
   if (LLVM::is_cuda_aot_artifact_format(artifact_format_)) {
 #if defined(TI_WITH_CUDA)
     metadata.schema_version = LLVM::kCudaPtxAotSchemaVersion;
     const CUDACodegenTarget target{
         fmt::format("sm_{}", caps_.get(DeviceCapability::cuda_compute_capability)),
         fmt::format("+ptx{}", caps_.get(DeviceCapability::cuda_ptx_version))};
-    writer.dump(output_dir, LlvmOfflineCache::Format::CUDAArtifact, false,
-                [&](const std::string &prefix,
-                    LlvmOfflineCache::KernelCacheData &kernel) {
-      auto &compiled = kernel.compiled_data;
-      const int max_reg = compiled.cuda_max_registers < 0
-                              ? compile_config_.gpu_max_reg
-                              : compiled.cuda_max_registers;
-      auto &item = metadata.cuda_artifacts[kernel.kernel_key];
-      if (relocatable) {
-        LLVM::prepare_ptx_tree_relocations(*compiled.module);
-      }
-      auto artifact = compile_cuda_kernel_artifact(
-          compiled.module, compile_config_, target, max_reg,
-          JITModuleRole::user_kernel);
-      if (artifact_format_ == "cubin") {
-        artifact = cuda::compile_cuda_aot_cubin(std::move(artifact), compile_config_);
-        metadata.cuda_cubin_providers[kernel.kernel_key] = artifact.provider_identity;
-      }
-      const auto path = prefix + "." + artifact_format_;
-      std::ofstream out(path, std::ios::binary | std::ios::trunc);
-      TI_ERROR_IF(!out, "Cannot write CUDA AOT artifact {}", path);
-      out.write(artifact.payload.data(), artifact.code_size());
-      out.close();
-      TI_ERROR_IF(!out, "Failed to write CUDA AOT artifact {}", path);
-      item.sha256 = LLVM::aot_artifact_sha256(
-          llvm::StringRef(artifact.payload.data(), artifact.code_size()));
-      item.size = artifact.code_size();
-      item.entry_names = artifact.entry_names;
-      item.tree_relocations = artifact.aot_tree_relocations;
-      item.target_identity = artifact.target_identity;
-      item.max_registers = artifact.max_registers;
-      item.fast_math = artifact.fast_math;
-      item.llvm_opt_level = artifact.llvm_opt_level;
-      if (relocatable || artifact_format_ == "cubin")
-        item.contract_sha256 = LLVM::aot_cuda_contract_sha256(item);
-      return artifact.code_size();
-    });
+    writer.dump(
+        output_dir, LlvmOfflineCache::Format::CUDAArtifact, false,
+        [&](const std::string &prefix,
+            LlvmOfflineCache::KernelCacheData &kernel) {
+          auto &compiled = kernel.compiled_data;
+          const int max_reg = compiled.cuda_max_registers < 0
+                                  ? compile_config_.gpu_max_reg
+                                  : compiled.cuda_max_registers;
+          auto &item = metadata.cuda_artifacts[kernel.kernel_key];
+          if (relocatable) {
+            LLVM::prepare_ptx_tree_relocations(*compiled.module);
+          }
+          auto artifact = compile_cuda_kernel_artifact(
+              compiled.module, compile_config_, target, max_reg,
+              JITModuleRole::user_kernel);
+          if (artifact_format_ == "cubin") {
+            artifact = cuda::compile_cuda_aot_cubin(std::move(artifact),
+                                                    compile_config_);
+            metadata.cuda_cubin_providers[kernel.kernel_key] =
+                artifact.provider_identity;
+          }
+          const auto path = prefix + "." + artifact_format_;
+          std::ofstream out(path, std::ios::binary | std::ios::trunc);
+          TI_ERROR_IF(!out, "Cannot write CUDA AOT artifact {}", path);
+          out.write(artifact.payload.data(), artifact.code_size());
+          out.close();
+          TI_ERROR_IF(!out, "Failed to write CUDA AOT artifact {}", path);
+          item.sha256 = LLVM::aot_artifact_sha256(
+              llvm::StringRef(artifact.payload.data(), artifact.code_size()));
+          item.size = artifact.code_size();
+          item.entry_names = artifact.entry_names;
+          item.tree_relocations = artifact.aot_tree_relocations;
+          item.target_identity = artifact.target_identity;
+          item.max_registers = artifact.max_registers;
+          item.fast_math = artifact.fast_math;
+          item.llvm_opt_level = artifact.llvm_opt_level;
+          if (relocatable || artifact_format_ == "cubin")
+            item.contract_sha256 = LLVM::aot_cuda_contract_sha256(item);
+          return artifact.code_size();
+        },
+        prepare_module);
     metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
         taichi::join_path(output_dir, "metadata.tcb")));
 #else
     TI_ERROR("PTX export requires a build with CUDA support");
 #endif
   } else {
-    writer.dump(output_dir, LlvmOfflineCache::Format::BC);
+    writer.dump(output_dir, LlvmOfflineCache::Format::BC, false, {},
+                prepare_module);
   }
   if (relocatable) {
     metadata.schema_version = LLVM::kRelocatableLlvmAotSchemaVersion;

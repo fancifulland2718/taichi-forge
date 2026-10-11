@@ -50,6 +50,11 @@ lifetimes. The entries below describe the changes.
   initial sequence format does not yet export mathematical primitives,
   providers, structured control or rendering resources.
 
+- Repeated LLVM AOT `save()`/`archive()` preserves kernels and dense resource
+  mappings, including when more entries are added between exports. Export
+  transforms one temporary IR module at a time and keeps the builder's original
+  compiled entries intact; deployed code and its runtime cost are unchanged.
+
 - Fixed Vulkan nested ArgPack descriptor layout failures. Compute pipelines
   preserve the module-wide descriptor contract for older shaders; new ArgPack
   code emits the ordinary argument buffer only when it is used. Graphics/ray

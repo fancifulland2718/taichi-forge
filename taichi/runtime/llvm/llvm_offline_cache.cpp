@@ -332,13 +332,15 @@ std::unique_ptr<llvm::Module> LlvmOfflineCacheFileReader::load_module(
   return nullptr;
 }
 
-void LlvmOfflineCacheFileWriter::dump(const std::string &path,
-                                      LlvmOfflineCache::Format format,
-                                      bool merge_with_old,
-                                      std::function<size_t(
-                                          const std::string &,
-                                          LlvmOfflineCache::KernelCacheData &)>
-                                          emit_device_artifact) {
+void LlvmOfflineCacheFileWriter::dump(
+    const std::string &path,
+    LlvmOfflineCache::Format format,
+    bool merge_with_old,
+    std::function<size_t(const std::string &,
+                         LlvmOfflineCache::KernelCacheData &)>
+        emit_device_artifact,
+    std::function<std::unique_ptr<llvm::Module>(
+        LlvmOfflineCache::KernelCacheData &)> prepare_module) {
   TI_ERROR_IF(format == Format::CUDAArtifact && (!emit_device_artifact || merge_with_old),
               "CUDA AOT requires an artifact writer without cache merging");
   auto write_llvm_module =
@@ -361,6 +363,14 @@ void LlvmOfflineCacheFileWriter::dump(const std::string &path,
     std::size_t size = 0;  // bytes
     std::string filename_prefix = taichi::join_path(path, k);
     {
+      // Exporters can supply one private, transformed module at a time. Keep
+      // metadata for the final index without retaining every cloned IR body.
+      auto release_module = make_cleanup([&] {
+        if (prepare_module)
+          v.compiled_data.module.reset();
+      });
+      if (prepare_module)
+        v.compiled_data.module = prepare_module(v);
       mangle_offloaded_task_name(k, v.compiled_data);
       auto &data = v.compiled_data;
       auto *mod = data.module.get();
@@ -501,11 +511,21 @@ void LlvmOfflineCacheFileWriter::clean_cache(const std::string &path,
 
 LlvmOfflineCache::KernelCacheData LlvmOfflineCache::KernelCacheData::clone()
     const {
+  auto result = clone_metadata();
+  if (compiled_data.module)
+    result.compiled_data.module = llvm::CloneModule(*compiled_data.module);
+  return result;
+}
+
+LlvmOfflineCache::KernelCacheData
+LlvmOfflineCache::KernelCacheData::clone_metadata() const {
   LlvmOfflineCache::KernelCacheData result;
   result.kernel_key = kernel_key;
   result.args = args;
   result.rets = rets;
-  result.compiled_data = compiled_data.clone();
+  result.compiled_data = LLVMCompiledKernel{compiled_data.tasks, nullptr,
+                                            compiled_data.module_context_owner,
+                                            compiled_data.cuda_max_registers};
   result.used_snode_tree_ids = used_snode_tree_ids;
   result.graph_metadata = graph_metadata;
   result.size = size;

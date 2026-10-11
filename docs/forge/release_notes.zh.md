@@ -42,6 +42,10 @@
   LLVM AOT 已通过 Vulkan 使用的同一虚拟目录层按需读取归档，无需解压到磁盘。
   此首批顺序格式尚未导出数学 primitive、provider、结构控制或渲染资源。
 
+- LLVM AOT 重复 `save()`/`archive()` 不再丢失内核或破坏 dense 资源映射，也支持
+  两次导出之间增加入口。导出逐个处理临时 IR 副本，保留 builder 的原始编译结果；
+  已交付代码及其运行成本保持不变。
+
 - 修复 Vulkan 嵌套 ArgPack 的 descriptor 布局不匹配。compute pipeline 保留旧
   shader 的模块级描述符合同，新 ArgPack 编译只在实际使用时声明普通参数 buffer；
   graphics/ray 继续按入口反射。

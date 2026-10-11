@@ -35,7 +35,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
  private:
   LLVM::CompiledKernelData::InternalData compile_kernel(Kernel *kernel);
 
-  mutable LlvmOfflineCache cache_;
+  LlvmOfflineCache cache_;
   KernelCompilationManager &compilation_manager_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;

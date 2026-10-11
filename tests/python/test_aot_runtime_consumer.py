@@ -71,11 +71,13 @@ def test_lightweight_aot_consumer_and_jit_coexistence(tmp_path):
             ]
         ),
     )
-    # Emit once: the LLVM producer currently consumes its compiled IR on dump.
-    # The directory and archive checks must read the identical generation.
+    module.save(tmp_path)
+    original = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    }
     module.archive(str(tmp_path / "packed.tcm"))
     with ZipFile(tmp_path / "packed.tcm") as archive:
-        archive.extractall(tmp_path)
+        assert {name: archive.read(name) for name in archive.namelist()} == original
 
     root = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()

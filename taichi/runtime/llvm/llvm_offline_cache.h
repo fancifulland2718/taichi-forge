@@ -54,6 +54,7 @@ struct LlvmOfflineCache {
     ~KernelCacheData() = default;
 
     KernelCacheData clone() const;
+    KernelCacheData clone_metadata() const;
     LLVM::CompiledKernelData::InternalData convert_to_llvm_ckd_data() const;
     // Consume an owned cache result without cloning its context-bound module.
     LLVM::CompiledKernelData::InternalData take_llvm_ckd_data() &&;
@@ -238,7 +239,9 @@ class LlvmOfflineCacheFileWriter {
             bool merge_with_old = false,
             std::function<size_t(const std::string &,
                                  LlvmOfflineCache::KernelCacheData &)>
-                emit_device_artifact = {});
+                emit_device_artifact = {},
+            std::function<std::unique_ptr<llvm::Module>(
+                LlvmOfflineCache::KernelCacheData &)> prepare_module = {});
 
   void set_no_mangle() {
     mangled_ = true;
