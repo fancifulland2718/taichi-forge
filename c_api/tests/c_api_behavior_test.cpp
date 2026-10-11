@@ -4,12 +4,16 @@
 #include "gtest/gtest.h"
 #include "c_api_test_utils.h"
 #include "taichi/cpp/taichi.hpp"
+#ifdef TI_WITH_LLVM
 #include "taichi/taichi_cpu.h"
+#endif
+#ifdef TI_WITH_CUDA
 #include "taichi/taichi_cuda.h"
+#endif
 #include "c_api/tests/gtest_fixture.h"
 
 TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
-  for (TiArch arch : {TI_ARCH_X64, TI_ARCH_CUDA, TI_ARCH_VULKAN}) {
+  for (TiArch arch : {TI_ARCH_X64, TI_ARCH_ARM64, TI_ARCH_CUDA, TI_ARCH_VULKAN}) {
     if (!ti::is_arch_available(arch))
       continue;
     SCOPED_TRACE(int(arch));
@@ -41,7 +45,8 @@ TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
     ti_copy_memory_device_to_device(right, &target, &source);
     EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
 
-    if (arch == TI_ARCH_X64) {
+#ifdef TI_WITH_LLVM
+    if (arch == TI_ARCH_X64 || arch == TI_ARCH_ARM64) {
       auto *values = static_cast<int *>(ti_map_memory(right, b));
       ASSERT_NE(values, nullptr);
       values[0] = 29;
@@ -53,7 +58,10 @@ TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
       ti_export_cpu_memory(right, b, &exported);
       ASSERT_TAICHI_SUCCESS();
       EXPECT_EQ(static_cast<int *>(exported.ptr)[0], 29);
-    } else if (arch == TI_ARCH_CUDA) {
+    }
+#endif
+#ifdef TI_WITH_CUDA
+    if (arch == TI_ARCH_CUDA) {
       TiCudaMemoryInteropInfo exported{};
       ti_export_cuda_memory(right, a, &exported);
       EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
@@ -62,6 +70,7 @@ TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
       ASSERT_TAICHI_SUCCESS();
       EXPECT_GE(exported.size, 16);  // CUDA may round physical allocations.
     }
+#endif
 
     ti_free_memory(left, a);
     ASSERT_TAICHI_SUCCESS();
@@ -95,6 +104,7 @@ TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
 }
 
 TEST_F(CapiTest, ImportedMemoryCapacityAndRetirement) {
+#ifdef TI_WITH_LLVM
   if (!ti::is_arch_available(TI_ARCH_X64))
     GTEST_SKIP();
   ti::Runtime runtime(TI_ARCH_X64);
@@ -124,6 +134,9 @@ TEST_F(CapiTest, ImportedMemoryCapacityAndRetirement) {
   TiCpuMemoryInteropInfo exported{};
   ti_export_cpu_memory(runtime, a, &exported);
   EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "live allocation");
+#else
+  GTEST_SKIP() << "CPU interop requires LLVM support";
+#endif
 }
 
 TEST_F(CapiTest, TestBehaviorCreateRuntime) {

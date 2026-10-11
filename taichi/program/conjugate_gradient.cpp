@@ -87,6 +87,13 @@ struct CudaSolverChunkReplayState {
   bool disabled{false};
   std::string unavailable_reason{"not_built"};
 
+  std::uint64_t executable_count() const {
+    return static_cast<std::uint64_t>(
+        std::count_if(entries.begin(), entries.end(), [](const auto &entry) {
+          return entry.executable != nullptr;
+        }));
+  }
+
   ~CudaSolverChunkReplayState() {
     CUDAContext::get_instance().make_current();
     CUDADriver::get_instance().stream_synchronize(nullptr);
@@ -124,6 +131,10 @@ struct CudaSolverConditionalReplayState {
   bool disabled{false};
   std::string unavailable_reason{"not_built"};
 
+  std::uint64_t executable_count() const {
+    return entry.executable != nullptr ? 1 : 0;
+  }
+
   ~CudaSolverConditionalReplayState() {
     CUDAContext::get_instance().make_current();
     CUDADriver::get_instance().stream_synchronize(nullptr);
@@ -146,8 +157,18 @@ struct CudaSolverConditionalReplayState {
 
 #else
 
-struct CudaSolverChunkReplayState {};
-struct CudaSolverConditionalReplayState {};
+struct CudaSolverChunkReplayState {
+  std::string unavailable_reason{"cuda_backend_unavailable"};
+
+  std::uint64_t executable_count() const {
+    return 0;
+  }
+};
+struct CudaSolverConditionalReplayState {
+  std::uint64_t executable_count() const {
+    return 0;
+  }
+};
 
 #endif
 
@@ -1942,14 +1963,11 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
       last_convergence_observation_boundaries_;
   if (solver_chunk_replay_state_) {
     result.solver_replay_executable_count =
-        static_cast<std::uint64_t>(std::count_if(
-            solver_chunk_replay_state_->entries.begin(),
-            solver_chunk_replay_state_->entries.end(),
-            [](const auto &entry) { return entry.executable != nullptr; }));
+        solver_chunk_replay_state_->executable_count();
   }
-  if (solver_conditional_replay_state_ &&
-      solver_conditional_replay_state_->entry.executable != nullptr) {
-    ++result.solver_replay_executable_count;
+  if (solver_conditional_replay_state_) {
+    result.solver_replay_executable_count +=
+        solver_conditional_replay_state_->executable_count();
   }
   if (execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent) {
     result.solver_execution_policy = "host_check_every_k";

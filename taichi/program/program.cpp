@@ -17,6 +17,7 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
 #include "taichi/util/environ_config.h"

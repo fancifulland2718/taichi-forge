@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 
 namespace taichi::lang::cuda::detail {
 

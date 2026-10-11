@@ -1,7 +1,9 @@
 #include "gtest/gtest.h"
 #include "c_api_test_utils.h"
 #include "taichi/cpp/taichi.hpp"
+#ifdef TI_WITH_LLVM
 #include "taichi/taichi_cpu.h"
+#endif
 #include "c_api/tests/gtest_fixture.h"
 
 #include <cstring>
@@ -105,7 +107,7 @@ class AotStructNdarrayTest : public CapiTest {
     named[0] = {"records", args[0]};
     check_marker();
     {
-      ti::Runtime peer(TI_ARCH_X64);
+      ti::Runtime peer(arch);
       ti_launch_kernel_with_bindings_ext(peer, kernel, 2, args, 1, &binding);
       EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "runtime");
       ti_launch_compute_graph_with_bindings_ext(peer, graph, 2, named, 1,
@@ -122,7 +124,8 @@ class AotStructNdarrayTest : public CapiTest {
     }
     named[0] = {"records", args[0]};
     check_marker();
-    if (arch == TI_ARCH_X64) {
+#ifdef TI_WITH_LLVM
+    if (arch == TI_ARCH_X64 || arch == TI_ARCH_ARM64) {
       std::vector<uint8_t> unaligned(bytes.size() + 1);
       TiMemory imported =
           ti_import_cpu_memory(runtime, unaligned.data() + 1, bytes.size());
@@ -135,6 +138,7 @@ class AotStructNdarrayTest : public CapiTest {
       named[0] = {"records", args[0]};
       check_marker();
     }
+#endif
     for (int step = 0; step < 3; ++step) {
       if (step == 0)
         ti_launch_kernel_with_bindings_ext(runtime, kernel, 2, args, 1,
