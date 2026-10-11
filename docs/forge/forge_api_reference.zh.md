@@ -1853,8 +1853,9 @@ schema-1 的二进制 Graph artifact 需要重新生成；已有 metadata 检查
 GFX AOT artifact 现在显式保存稠密 SNodeTree layout identity。metadata.json 会记录每个
 artifact-local root buffer 的大小、每个 field 所属的 tree id，以及每个 kernel 已排序的 tree
 依赖。C API loader 会分配全部已序列化 root，并把记录的 tree 数传给 kernel 注册，不再假定
-只有一个 root。artifact-local id 必须连续，且不编码进程内 tree generation；若 runtime 存在
-destroy 后留下的 tree 空洞，构建时会明确拒绝，不生成含糊 artifact。旧 C++
+只有一个 root。builder 保留导出 kernel、Graph 和显式命名 field 的资源闭包，并将生产端
+tree ID（包括 destroy 后的空洞）压紧为连续的 artifact-local ID。loader 将这些 ID 绑定到
+每个模块独立拥有的 root；artifact ID 不编码进程内 tree generation。旧 C++
 get_root_size() 视图仍返回第一棵 root；多 tree loader 必须使用 get_root_sizes()。
 该合同仍只支持稠密 AOT field，不包含稀疏 SNode AOT。
 
