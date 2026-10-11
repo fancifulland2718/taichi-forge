@@ -35,4 +35,20 @@ TEST(ExecutionPlan, RejectsUnsupportedOrAmbiguousDescriptions) {
         << document;
   }
 }
+
+TEST(ExecutionPlan, NativeCompactRetainsAllSymbolicDependencies) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"compact","values":"x","flags":"active","output":"selected","count":"n"}]})");
+  ASSERT_EQ(plan.operations.size(), 1);
+  const auto &compact = std::get<ExecutionPlan::Compact>(plan.operations[0]);
+  EXPECT_EQ(compact.values, "x");
+  EXPECT_EQ(compact.flags, "active");
+  EXPECT_EQ(compact.output, "selected");
+  EXPECT_EQ(compact.count, "n");
+  EXPECT_EQ(plan.arguments,
+            (std::vector<std::string>{"active", "n", "selected", "x"}));
+  EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"compact","values":"x","flags":"active","output":"selected"}]})"),
+               std::invalid_argument);
+}
 }  // namespace taichi::lang::aot

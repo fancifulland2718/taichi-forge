@@ -5,6 +5,7 @@
 #include <limits>
 #include "taichi/aot/execution_plan.h"
 #include "taichi/runtime/fixed_execution.h"
+#include "taichi/runtime/native_operation.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -325,19 +326,22 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   struct Storage {
     DevicePtr pointer;
     uint64_t size;
+    uint64_t element_bytes;
   };
   auto storage = [&](const std::string &name, uint64_t offset) {
     const auto &arg = *arguments.at(name);
     if (arg.type != TI_ARGUMENT_TYPE_NDARRAY)
       throw MemoryBindingError("Execution memory operations require ndarrays");
     const auto &array = arg.value.ndarray;
-    const auto bytes = capi::validated_ndarray_bytes(rt, array);
+    uint64_t element_bytes = 0;
+    const auto bytes = capi::validated_ndarray_bytes(rt, array, &element_bytes);
     if (offset > bytes)
       throw MemoryBindingError(
           "Execution memory offset exceeds ndarray extent");
     const auto allocation = rt.get_memory(array.memory);
     prepared->memories.push_back(array.memory);
-    return Storage{allocation.allocation.get_ptr(offset), bytes - offset};
+    return Storage{allocation.allocation.get_ptr(offset), bytes - offset,
+                   element_bytes};
   };
   std::vector<FixedExecution::Operation> operations;
   for (const auto &operation : plan.operations) {
@@ -385,6 +389,62 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         throw MemoryBindingError("Execution copy slices must not overlap");
       operations.emplace_back(FixedExecution::BufferCopy{
           dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
+    } else if (const auto *compact =
+                   std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
+      const std::array<std::string, 4> names{compact->values, compact->flags,
+                                             compact->output, compact->count};
+      const std::array<Storage, 4> buffers{
+          storage(names[0], 0), storage(names[1], 0), storage(names[2], 0),
+          storage(names[3], 0)};
+      const auto &values = arguments.at(names[0])->value.ndarray;
+      const auto &flags = arguments.at(names[1])->value.ndarray;
+      const auto &output = arguments.at(names[2])->value.ndarray;
+      const auto &count = arguments.at(names[3])->value.ndarray;
+      if (values.shape.dim_count != 1 || flags.shape.dim_count != 1 ||
+          output.shape.dim_count != 1 ||
+          flags.shape.dims[0] != values.shape.dims[0] ||
+          output.shape.dims[0] < values.shape.dims[0] ||
+          flags.elem_type != TI_DATA_TYPE_I32 || flags.elem_shape.dim_count ||
+          count.elem_type != TI_DATA_TYPE_I32 || count.elem_shape.dim_count ||
+          count.shape.dim_count > 1 ||
+          (count.shape.dim_count == 1 && count.shape.dims[0] < 1) ||
+          values.elem_type != output.elem_type ||
+          values.elem_shape.dim_count != output.elem_shape.dim_count)
+        throw MemoryBindingError(
+            "Compact requires matching 1D records, i32 flags and a writable "
+            "i32 count");
+      for (uint32_t i = 0; i < values.elem_shape.dim_count; ++i) {
+        if (values.elem_shape.dims[i] != output.elem_shape.dims[i])
+          throw MemoryBindingError(
+              "Compact input and output element shapes differ");
+      }
+      const std::array<uint64_t, 4> sizes{buffers[0].size, buffers[1].size,
+                                          buffers[0].size, sizeof(int32_t)};
+      for (size_t i = 0; i < buffers.size(); ++i) {
+        if (rt.get_memory(arguments.at(names[i])->value.ndarray.memory)
+                .base_offset %
+            4)
+          throw MemoryBindingError("Compact storage must be 4-byte aligned");
+        for (size_t j = 0; j < i; ++j) {
+          const auto a = buffers[i].pointer;
+          const auto b = buffers[j].pointer;
+          if ((i >= 2 || j >= 2) && sizes[i] && sizes[j] &&
+              a.alloc_id == b.alloc_id &&
+              (a.offset <= b.offset ? b.offset - a.offset < sizes[i]
+                                    : a.offset - b.offset < sizes[j]))
+            throw MemoryBindingError(
+                "Compact writable ranges must not overlap");
+        }
+      }
+      try {
+        operations.emplace_back(prepare_compact_operation(
+            rt.arch, rt.get(),
+            {buffers[0].pointer, buffers[1].pointer, buffers[2].pointer,
+             buffers[3].pointer, values.shape.dims[0],
+             static_cast<size_t>(buffers[0].element_bytes)}));
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
     } else {
       const auto &fill = std::get<aot::ExecutionPlan::Fill>(operation);
       const auto dst = storage(fill.destination, fill.offset);
@@ -427,6 +487,22 @@ void ti_get_prepared_execution_info_ext(TiRuntime runtime,
   *info = rt.prepared_registry().get(execution).info;
   TI_CAPI_TRY_CATCH_END();
 }
+uint64_t ti_get_prepared_execution_workspace_bytes_ext(
+    TiRuntime runtime,
+    TiPreparedExecution execution) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  if (!runtime || !execution) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "runtime or execution");
+    return 0;
+  }
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &prepared = rt.prepared_registry().get(execution);
+  return prepared.native ? prepared.native->workspace_bytes() : 0;
+  TI_CAPI_TRY_CATCH_END();
+  return 0;
+}
+
 void ti_destroy_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);

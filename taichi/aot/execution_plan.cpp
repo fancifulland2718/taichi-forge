@@ -82,6 +82,14 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         arguments.insert(copy.destination);
         arguments.insert(copy.source);
         plan.operations.emplace_back(std::move(copy));
+      } else if (kind == "compact") {
+        fields(step, {"kind", "values", "flags", "output", "count"});
+        Compact compact{name(step["values"]), name(step["flags"]),
+                        name(step["output"]), name(step["count"])};
+        for (const auto &slot :
+             {compact.values, compact.flags, compact.output, compact.count})
+          arguments.insert(slot);
+        plan.operations.emplace_back(std::move(compact));
       } else if (kind == "fill32") {
         fields(step, {"kind", "destination", "value", "offset", "size_bytes"});
         auto value = integer(step["value"]);

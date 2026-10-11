@@ -295,6 +295,17 @@ void driver_sparse_gmres_scalar_f32(void *initial_residual_squared,
                                     bool limit_reached,
                                     void *stream);
 
+std::size_t driver_compact_workspace_bytes(int num_items);
+void driver_prepare_compact();
+void driver_compact_with_workspace(void *values,
+                                   void *flags,
+                                   void *output,
+                                   void *count,
+                                   int num_items,
+                                   int item_words,
+                                   void *workspace,
+                                   void *stream);
+
 std::size_t driver_compact_strided(void *values,
                                    void *flags,
                                    void *output,

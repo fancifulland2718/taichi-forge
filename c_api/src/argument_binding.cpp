@@ -143,7 +143,9 @@ taichi::lang::DataType primitive_type(TiDataType type) {
   }
 }
 
-uint64_t validate_array_storage(Runtime &runtime, const TiNdArray &array) {
+uint64_t validate_array_storage(Runtime &runtime,
+                                const TiNdArray &array,
+                                uint64_t *element_bytes = nullptr) {
   if (array.shape.dim_count > kTiNdShapeDimensionCapacity ||
       array.elem_shape.dim_count > kTiNdShapeDimensionCapacity) {
     throw MemoryBindingError("Ndarray rank exceeds the C API shape capacity");
@@ -163,6 +165,8 @@ uint64_t validate_array_storage(Runtime &runtime, const TiNdArray &array) {
       }
       bytes *= extent;
     }
+    if (shape == &array.elem_shape && element_bytes)
+      *element_bytes = bytes;
   }
   const auto memory = runtime.get_memory(array.memory);
   if (memory.size < bytes)
@@ -254,8 +258,10 @@ bool validate_gradient_parameter(
 }  // namespace
 
 namespace capi {
-uint64_t validated_ndarray_bytes(Runtime &runtime, const TiNdArray &array) {
-  return validate_array_storage(runtime, array);
+uint64_t validated_ndarray_bytes(Runtime &runtime,
+                                 const TiNdArray &array,
+                                 uint64_t *element_bytes) {
+  return validate_array_storage(runtime, array, element_bytes);
 }
 
 std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(

@@ -8,6 +8,7 @@
 
 namespace taichi::lang {
 class LaunchContextBuilder;
+class NativeOperation;
 namespace aot {
 class Kernel;
 }
@@ -34,7 +35,10 @@ class FixedExecution {
     std::size_t bytes;
     std::uint32_t value;
   };
-  using Operation = std::variant<Dispatch, BufferCopy, BufferFill>;
+  using Operation = std::variant<Dispatch,
+                                 BufferCopy,
+                                 BufferFill,
+                                 std::shared_ptr<NativeOperation>>;
 
   FixedExecution(Arch arch,
                  Device &device,
@@ -46,6 +50,7 @@ class FixedExecution {
   void run();
   std::uint32_t execution_kind() const;
   std::size_t argument_bytes() const;
+  std::size_t workspace_bytes() const;
 
  private:
   struct State;

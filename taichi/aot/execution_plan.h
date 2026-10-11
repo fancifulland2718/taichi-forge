@@ -28,7 +28,13 @@ struct ExecutionPlan {
     std::uint64_t offset{0};
     std::optional<std::uint64_t> bytes;
   };
-  using Operation = std::variant<Kernel, Copy, Fill>;
+  struct Compact {
+    std::string values;
+    std::string flags;
+    std::string output;
+    std::string count;
+  };
+  using Operation = std::variant<Kernel, Copy, Fill, Compact>;
   std::vector<Operation> operations;
   std::vector<std::string> arguments;
 

@@ -37,10 +37,14 @@
   prepared 对象失效。尚未覆盖混合 provider 或通用新场景特化，详见
   [AOT SDK 合同](aot_sdk.zh.md)。
 
-- 带版本的 `ExecutionPlan` 可持久化已导出 kernel 与设备 copy/32 位 fill 的顺序，
+- 带版本的 `ExecutionPlan` 可持久化已导出 kernel 与设备 copy/32 位 fill/稳定 compact 的顺序，
   绑定后准备成一个 CPU/CUDA/Vulkan 原生执行对象；目录和 `.tcm` 均保存描述。
   LLVM AOT 已通过 Vulkan 使用的同一虚拟目录层按需读取归档，无需解压到磁盘。
-  此首批顺序格式尚未导出数学 primitive、provider、结构控制或渲染资源。
+  此首批顺序格式尚未导出其他数学 primitive、provider、结构控制或渲染资源。
+
+- AOT compact 为每份执行对象独立管理工作区，保留记录顺序，空选择也刷新计数。
+  CPU/CUDA/Vulkan 已验证变化谓词重放、独立绑定、退休和后续 gather kernel 的显式
+  梯度。工作区字节可与参数/代码分开查询；compact 本身不提供自动导数。
 
 - LLVM AOT 重复 `save()`/`archive()` 不再丢失内核或破坏 dense 资源映射，也支持
   两次导出之间增加入口。导出逐个处理临时 IR 副本，保留 builder 的原始编译结果；

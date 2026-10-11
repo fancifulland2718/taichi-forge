@@ -17,7 +17,7 @@ def _unique_fields(pairs):
 
 
 class ExecutionPlan:
-    """Version 1 ordered kernels, byte copies and 32-bit pattern fills.
+    """Version 1 kernels, copies, 32-bit fills and stable compaction.
 
     Arguments are symbolic names bound to a loaded module and arrays/scalars at
     prepare time. Preparation records native commands without executing kernels
@@ -71,6 +71,9 @@ class ExecutionPlan:
             elif kind == "fill32":
                 required, optional = {"kind", "destination", "value"}, {"offset", "size_bytes"}
                 names = ("destination",)
+            elif kind == "compact":
+                required, optional = {"kind", "values", "flags", "output", "count"}, set()
+                names = ("values", "flags", "output", "count")
             else:
                 raise ValueError(f"Unsupported execution operation: {kind}")
             if not required <= set(op) or set(op) - required - optional:

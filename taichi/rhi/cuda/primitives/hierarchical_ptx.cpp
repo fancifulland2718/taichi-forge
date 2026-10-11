@@ -929,22 +929,62 @@ std::size_t driver_zero_strided(void *dst,
   return 0;
 }
 
-std::size_t driver_compact_strided(void *values,
-                                   void *flags,
-                                   void *output,
-                                   void *count,
-                                   int num_items,
-                                   int item_words,
-                                   std::size_t values_offset,
-                                   std::size_t values_stride,
-                                   std::size_t flags_offset,
-                                   std::size_t flags_stride,
-                                   std::size_t output_offset,
-                                   std::size_t output_stride,
-                                   std::size_t count_offset,
-                                   void *stream,
-                                   PrimitiveWorkspaceArena *workspace_arena,
-                                   bool reuse_prefix) {
+namespace {
+struct CompactWorkspaceLayout {
+  std::size_t tiles;
+  std::size_t tile_counts_offset;
+  std::size_t compact_bytes;
+  std::size_t scan_offset;
+  std::size_t scan_bytes;
+  std::size_t bytes;
+};
+
+CompactWorkspaceLayout compact_workspace_layout(int num_items) {
+  TI_ERROR_IF(num_items < 0, "CUDA compact requires a non-negative size");
+  if (num_items == 0)
+    return {};
+  const auto prefix_bytes =
+      static_cast<std::size_t>(num_items) * sizeof(std::int32_t);
+  CompactWorkspaceLayout layout;
+  layout.tiles = (static_cast<std::size_t>(num_items) + kScanTileItems - 1u) /
+                 kScanTileItems;
+  layout.tile_counts_offset = (prefix_bytes + 255u) & ~std::size_t{255u};
+  layout.compact_bytes =
+      layout.tile_counts_offset + layout.tiles * sizeof(std::int32_t);
+  layout.scan_offset = (layout.compact_bytes + 255u) & ~std::size_t{255u};
+  layout.scan_bytes = driver_scan_workspace_bytes(
+      static_cast<int>(layout.tiles), CudaTransformValueType::i32);
+  layout.bytes = layout.scan_offset + layout.scan_bytes;
+  return layout;
+}
+}  // namespace
+
+std::size_t driver_compact_workspace_bytes(int num_items) {
+  return compact_workspace_layout(num_items).bytes;
+}
+
+void driver_prepare_compact() {
+  (void)kernels();
+}
+
+static std::size_t compact_strided_impl(
+    void *values,
+    void *flags,
+    void *output,
+    void *count,
+    int num_items,
+    int item_words,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t flags_offset,
+    std::size_t flags_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    std::size_t count_offset,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena,
+    bool reuse_prefix,
+    void *fixed_workspace) {
   TI_ERROR_IF(num_items < 0 || item_words <= 0,
               "CUDA Driver compact received an invalid size.");
   const std::size_t item_bytes =
@@ -958,26 +998,18 @@ std::size_t driver_compact_strided(void *values,
     return driver_zero_strided(count, 1, CudaTransformValueType::i32,
                                count_offset, sizeof(std::int32_t), stream);
   }
-  const std::size_t prefix_bytes =
-      static_cast<std::size_t>(num_items) * sizeof(std::int32_t);
-  const std::size_t tile_count =
-      (static_cast<std::size_t>(num_items) + kScanTileItems - 1u) /
-      kScanTileItems;
-  const std::size_t tile_counts_offset =
-      (prefix_bytes + 255u) & ~std::size_t{255u};
-  TI_ERROR_IF(tile_count >
-                  (std::numeric_limits<std::size_t>::max() -
-                   tile_counts_offset) /
-                      sizeof(std::int32_t),
-              "CUDA Driver compact workspace size overflow.");
-  const std::size_t required_bytes =
-      tile_counts_offset + tile_count * sizeof(std::int32_t);
-  auto workspace = acquire_workspace(workspace_arena,
-                                     PrimitiveWorkspaceFamily::compact, stream);
-  workspace->ensure(required_bytes);
-  auto *workspace_base = static_cast<std::uint8_t *>(workspace->data());
+  const auto layout = compact_workspace_layout(num_items);
+  const auto tile_count = layout.tiles;
+  std::optional<PrimitiveWorkspaceArena::Lease<DriverWorkspace>> workspace;
+  if (!fixed_workspace) {
+    workspace.emplace(acquire_workspace(
+        workspace_arena, PrimitiveWorkspaceFamily::compact, stream));
+    (*workspace)->ensure(layout.compact_bytes);
+  }
+  auto *workspace_base = static_cast<std::uint8_t *>(
+      fixed_workspace ? fixed_workspace : (*workspace)->data());
   void *prefix = workspace_base;
-  void *tile_counts = workspace_base + tile_counts_offset;
+  void *tile_counts = workspace_base + layout.tile_counts_offset;
   void *flags_arg = flags;
   std::uint64_t flags_offset_arg = flags_offset;
   std::uint64_t flags_stride_arg = flags_stride;
@@ -993,12 +1025,20 @@ std::size_t driver_compact_strided(void *values,
     CUDAContext::get_instance().launch(
         kernels().compact_rank_tiles, "cuda_driver_compact_rank_tiles",
         rank_args, {}, tile_grid, kBlockDim, 0, stream);
-    scan_bytes = tile_count > 1
-                     ? driver_inclusive_scan_strided(
-                           tile_counts, static_cast<int>(tile_count),
-                           CudaTransformValueType::i32, 0,
-                           sizeof(std::int32_t), false, stream, workspace_arena)
-                     : 0;
+    if (tile_count > 1) {
+      if (fixed_workspace) {
+        driver_inclusive_scan_with_workspace(
+            tile_counts, static_cast<int>(tile_count),
+            CudaTransformValueType::i32, workspace_base + layout.scan_offset,
+            stream);
+        scan_bytes = layout.scan_bytes;
+      } else {
+        scan_bytes = driver_inclusive_scan_strided(
+            tile_counts, static_cast<int>(tile_count),
+            CudaTransformValueType::i32, 0, sizeof(std::int32_t), false, stream,
+            workspace_arena);
+      }
+    }
   }
 
   void *values_arg = values;
@@ -1020,7 +1060,47 @@ std::size_t driver_compact_strided(void *values,
   CUDAContext::get_instance().launch(
       kernels().compact_scatter_tiled, "cuda_driver_compact_scatter",
       scatter_args, {}, grid, kBlockDim, 0, stream);
-  return workspace->allocated_bytes() + scan_bytes;
+  return fixed_workspace ? layout.bytes
+                         : (*workspace)->allocated_bytes() + scan_bytes;
+}
+
+std::size_t driver_compact_strided(void *values,
+                                   void *flags,
+                                   void *output,
+                                   void *count,
+                                   int num_items,
+                                   int item_words,
+                                   std::size_t values_offset,
+                                   std::size_t values_stride,
+                                   std::size_t flags_offset,
+                                   std::size_t flags_stride,
+                                   std::size_t output_offset,
+                                   std::size_t output_stride,
+                                   std::size_t count_offset,
+                                   void *stream,
+                                   PrimitiveWorkspaceArena *workspace_arena,
+                                   bool reuse_prefix) {
+  return compact_strided_impl(
+      values, flags, output, count, num_items, item_words, values_offset,
+      values_stride, flags_offset, flags_stride, output_offset, output_stride,
+      count_offset, stream, workspace_arena, reuse_prefix, nullptr);
+}
+
+void driver_compact_with_workspace(void *values,
+                                   void *flags,
+                                   void *output,
+                                   void *count,
+                                   int num_items,
+                                   int item_words,
+                                   void *workspace,
+                                   void *stream) {
+  TI_ERROR_IF(num_items > 0 && !workspace,
+              "CUDA compact requires prepared workspace");
+  const auto item_bytes =
+      static_cast<std::size_t>(item_words) * sizeof(std::uint32_t);
+  compact_strided_impl(values, flags, output, count, num_items, item_words, 0,
+                       item_bytes, 0, sizeof(std::int32_t), 0, item_bytes, 0,
+                       stream, nullptr, false, workspace);
 }
 
 std::size_t driver_bucket_builder_strided(

@@ -1221,6 +1221,11 @@ TI_DLL_EXPORT void TI_API_CALL
 ti_get_prepared_execution_info_ext(TiRuntime runtime,
                                    TiPreparedExecution execution,
                                    TiPreparedExecutionInfo *info);
+// Known scratch allocation bytes owned by this prepared execution. Excludes
+// borrowed arrays, code, descriptors and driver-internal recording metadata.
+TI_DLL_EXPORT uint64_t TI_API_CALL
+ti_get_prepared_execution_workspace_bytes_ext(TiRuntime runtime,
+                                              TiPreparedExecution execution);
 // Completes submitted work before retirement. Destroy invalidated executions
 // too; automatic dependency invalidation does not consume the public handle.
 TI_DLL_EXPORT void TI_API_CALL

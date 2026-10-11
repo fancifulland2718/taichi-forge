@@ -178,6 +178,7 @@ class Api:
             ),
             "ti_destroy_prepared_ext": ([Handle, Handle], None),
             "ti_get_prepared_execution_info_ext": ([Handle, Handle, C.POINTER(PreparedInfo)], None),
+            "ti_get_prepared_execution_workspace_bytes_ext": ([Handle, Handle], C.c_uint64),
             "ti_launch_kernel_with_gradients_ext": (
                 [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Gradient)],
                 None,

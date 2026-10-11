@@ -504,6 +504,9 @@ class PreparedCall(_Resource):
                 dispatch_count=native.dispatch_count,
                 execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands")[native.execution_kind],
                 argument_bytes=native.argument_bytes,
+                workspace_bytes=runtime._api.call(
+                    runtime._api.ti_get_prepared_execution_workspace_bytes_ext, runtime._handle, self._handle
+                ),
                 launches=native.launches,
             )
 

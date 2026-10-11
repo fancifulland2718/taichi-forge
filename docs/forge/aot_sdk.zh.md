@@ -120,7 +120,7 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 诊断，不代表实际应用性能。
 
 `ExecutionPlan` 提供版本 1 的持久化顺序描述，覆盖已导出的 kernel、设备内存复制和
-32 位位模式填充。生产端先导出引用的 kernel，再添加描述：
+32 位位模式填充及稳定压缩。生产端先导出引用的 kernel，再添加描述：
 
 ```python
 from taichi_forge_runtime.aot import ExecutionPlan
@@ -150,10 +150,20 @@ CPU/CUDA 的 LLVM 模块和 Vulkan 模块均可直接加载 `.tcm`。加载器�
 及 `size_bytes`；区域不能重叠。`fill32` 的 `value` 是 uint32 位模式，默认覆盖目标
 逻辑剩余区域，可指定 `offset/size_bytes`；起点和大小必须为 4 字节倍数。Vulkan
 copy 也遵守 4 字节对齐要求。此处内存操作接收 primitive/tensor ndarray；仅存在于
-复制/填充中的数组同样参与所有权和失效检查。改变数组内容可复用，改变绑定/形状需
+原生操作中的数组同样参与所有权和失效检查。改变数组内容可复用，改变绑定/形状需
 重新准备。两组 prepared 绑定独立；它们共享的实际数组仍由应用决定是否允许并发。
 
-任意 JIT native Graph、数学 primitive/provider、结构控制和渲染资源尚不由此格式
+`compact` 使用 `values`、`flags`、`output`、`count` 四个参数名，按原顺序复制
+i32 flag 非零的记录；每次重放都写 i32 count，包括空输入。values/output 为元素
+类型和形状一致的 1D primitive/tensor ndarray，每条记录字节数须为 4 的倍数；
+output 容量覆盖全部输入。flags 与输入等长；count 为标量 ndarray 或非空 1D 数组
+（仅写首项）。写入区域不得与输入或其他写入区域重叠。仅写有效前缀，其余输出保持。
+CPU/CUDA/Vulkan 的每份 prepared 实例独立拥有工作区；`prepared.info` 的
+`workspace_bytes` 报告其字节数，不包含借入数组、代码及驱动元数据。C/C++ 对应
+`ti_get_prepared_execution_workspace_bytes_ext`。选择操作没有自动导数；已验证的
+梯度组合是先压缩整数索引，再调用已导出的 gather kernel 及其显式 backward。
+
+任意 JIT native Graph、其他数学 primitive/provider、结构控制和渲染资源尚不由此格式
 自动导出；未知操作或版本明确报错。buffer、模块和 runtime 的在途寿命合同同上。
 
 C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用其他 runtime 的

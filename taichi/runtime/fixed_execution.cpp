@@ -4,7 +4,10 @@
 #include <cstring>
 #include <functional>
 #include <stdexcept>
+#include <limits>
+#include <unordered_set>
 #include "taichi/aot/graph_data.h"
+#include "taichi/runtime/native_operation.h"
 #include "taichi/program/launch_context_builder.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -25,6 +28,9 @@ namespace taichi::lang {
 struct FixedExecution::State {
   std::uint32_t kind{0};
   std::size_t bytes{0};
+  std::size_t workspace_bytes{0};
+  // Destroy backend recordings before their retained workspace owners.
+  std::vector<std::shared_ptr<NativeOperation>> native_operations;
 #ifdef TI_WITH_LLVM
   struct CpuStep {
     cpu::KernelLauncher *launcher{nullptr};
@@ -78,6 +84,7 @@ FixedExecution::FixedExecution(Arch arch,
   if (operations.empty())
     throw std::invalid_argument("Fixed execution requires a nonempty batch");
   // Validate every descriptor before preparing backend state or commands.
+  std::unordered_set<const NativeOperation *> owners;
   for (const auto &operation : operations) {
     if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
       if (!dispatch->kernel || !dispatch->context ||
@@ -96,12 +103,25 @@ FixedExecution::FixedExecution(Arch arch,
       if (copy->source.device != &device || copy->destination.device != &device)
         throw std::invalid_argument(
             "Fixed copy storage belongs to another device");
-    } else {
-      const auto &fill = std::get<BufferFill>(operation);
-      if (fill.destination.device != &device || fill.destination.offset % 4 ||
-          fill.bytes % 4)
+    } else if (const auto *fill = std::get_if<BufferFill>(&operation)) {
+      if (fill->destination.device != &device || fill->destination.offset % 4 ||
+          fill->bytes % 4)
         throw std::invalid_argument(
             "Fixed fill requires aligned 32-bit storage");
+    } else {
+      const auto &native =
+          std::get<std::shared_ptr<NativeOperation>>(operation);
+      if (!native || native->arch() != arch || &native->device() != &device)
+        throw std::invalid_argument(
+            "Fixed native operation belongs to another execution device");
+      if (owners.insert(native.get()).second) {
+        state_->native_operations.push_back(native);
+        if (native->workspace_bytes() >
+            std::numeric_limits<std::size_t>::max() - state_->workspace_bytes)
+          throw std::invalid_argument(
+              "Native workspace accounting overflows address space");
+        state_->workspace_bytes += native->workspace_bytes();
+      }
     }
   }
 #ifdef TI_WITH_LLVM
@@ -120,6 +140,11 @@ FixedExecution::FixedExecution(Arch arch,
         steps.back().launches.push_back(
             launcher->prepare_launch(loaded->handle(), *dispatch->context));
         state_->bytes += dispatch->context->arg_buffer_size;
+      } else if (const auto *native =
+                     std::get_if<std::shared_ptr<NativeOperation>>(
+                         &operation)) {
+        state_->cpu_steps.push_back(
+            {nullptr, {}, [native = *native] { native->run_cpu(); }});
       } else {
         State::CpuStep step;
         if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
@@ -160,6 +185,13 @@ FixedExecution::FixedExecution(Arch arch,
         if (!launcher)
           throw std::invalid_argument("Fixed CUDA entry is not registered");
         native.push_back({launcher, loaded->handle(), dispatch->context, {}});
+      } else if (const auto *external =
+                     std::get_if<std::shared_ptr<NativeOperation>>(
+                         &operation)) {
+        native.push_back(
+            {nullptr, {}, nullptr, [external = *external](void *stream) {
+               external->record_cuda(stream);
+             }});
       } else if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
         auto *dst = cuda_pointer(copy->destination);
         auto *src = cuda_pointer(copy->source);
@@ -201,6 +233,18 @@ FixedExecution::FixedExecution(Arch arch,
               "Fixed Vulkan entries must share a runtime");
         gfx_runtime = &loaded->runtime();
         native.push_back({{loaded->handle(), dispatch->context}, {}});
+      } else if (const auto *external =
+                     std::get_if<std::shared_ptr<NativeOperation>>(
+                         &operation)) {
+        gfx::GfxRuntime::GraphRecordingOperation op;
+        op.inline_recording = true;
+        op.external = [external = *external](Device *device,
+                                             CommandList *commands) {
+          commands->memory_barrier();
+          external->record_vulkan(device, commands);
+          commands->memory_barrier();
+        };
+        native.push_back(std::move(op));
       } else {
         gfx::GfxRuntime::GraphRecordingOperation op;
         op.inline_recording = true;
@@ -267,5 +311,8 @@ std::uint32_t FixedExecution::execution_kind() const {
 }
 std::size_t FixedExecution::argument_bytes() const {
   return state_->bytes;
+}
+std::size_t FixedExecution::workspace_bytes() const {
+  return state_->workspace_bytes;
 }
 }  // namespace taichi::lang

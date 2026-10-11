@@ -1,4 +1,5 @@
 #include "taichi/program/program.h"
+#include "taichi/runtime/native_operation.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
 
@@ -44,6 +45,7 @@ struct VulkanResourceSetRing {
   std::vector<std::unique_ptr<ShaderResourceSet>> sets;
   size_t cursor{0};
   size_t capacity{0};
+  bool exact_capacity{false};
 
   void reset() {
     sets.clear();
@@ -53,13 +55,16 @@ struct VulkanResourceSetRing {
   }
 
   void ensure_device(Device *dev, size_t requested = 1) {
+    const auto needed = exact_capacity
+                            ? requested
+                            : vulkan_resource_replay_ring_capacity(requested);
     if (device == dev) {
-      capacity = std::max(capacity, vulkan_resource_replay_ring_capacity(requested));
+      capacity = std::max(capacity, needed);
       return;
     }
     reset();
     device = dev;
-    capacity = vulkan_resource_replay_ring_capacity(requested);
+    capacity = needed;
   }
 
   void rewind_for(size_t requested) {
@@ -7923,6 +7928,8 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
   plan.workspace_bytes = scan_workspace_bytes(plan.levels, plan.item_size);
   if (cache.has_workspace_allocs() &&
       cache.needs_workspace_realloc(plan.workspace_bytes)) {
+    TI_ERROR_IF(!program,
+                "Fixed Vulkan scan storage cannot grow after preparation");
     program->synchronize();
   }
   cache.ensure_workspace(plan.workspace_bytes);
@@ -8235,6 +8242,103 @@ size_t enqueue_vulkan_i32_scan(Program *program,
 }
 
 }  // namespace
+
+namespace gfx {
+namespace {
+class FixedVulkanCompact final : public NativeOperation {
+ public:
+  FixedVulkanCompact(Device &device, CompactOperation operation)
+      : device_(device), operation_(operation) {
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return operation_.size * sizeof(std::int32_t) + scan_.allocated_bytes();
+  }
+  void prepare() {
+    if (!operation_.size)
+      return;
+    const auto prefix_bytes = operation_.size * sizeof(std::int32_t);
+    Device::AllocParams params{};
+    params.size = prefix_bytes;
+    params.usage = AllocUsage::Storage;
+    auto [prefix, status] = device_.allocate_memory_unique(params);
+    TI_ERROR_IF(status != RhiResult::success,
+                "Failed to allocate fixed compact prefix");
+    prefix_ = std::move(prefix);
+    flags_pipeline_ = create_pipeline(&device_, kCompactI32FlagsSpv,
+                                      "vulkan_compact_i32_flags");
+    scatter_pipeline_ = create_pipeline(&device_, kCompactI32ScatterSpv,
+                                        "vulkan_compact_i32_scatter");
+    flags_bindings_.reset(device_.create_resource_set());
+    flags_bindings_->rw_buffer(0, operation_.flags, prefix_bytes);
+    flags_bindings_->rw_buffer(1, prefix_->get_ptr(0), prefix_bytes);
+    scatter_bindings_.reset(device_.create_resource_set());
+    const auto value_bytes = operation_.size * operation_.item_bytes;
+    scatter_bindings_->rw_buffer(0, operation_.values, value_bytes);
+    scatter_bindings_->rw_buffer(1, operation_.flags, prefix_bytes);
+    scatter_bindings_->rw_buffer(2, prefix_->get_ptr(0), prefix_bytes);
+    scatter_bindings_->rw_buffer(3, operation_.output, value_bytes);
+    scatter_bindings_->rw_buffer(4, operation_.count, sizeof(std::int32_t));
+    scan_.ensure_device(&device_);
+    // This instance records once and keeps its exact sets until retirement.
+    // The mutable JIT replay ring's reserve is unnecessary for a fixed frame.
+    for (auto *ring :
+         {&scan_.scan_small_bindings, &scan_.scan_small_strided_bindings,
+          &scan_.scan_block_bindings, &scan_.scan_block_strided_bindings_ring,
+          &scan_.scan_add_bindings, &scan_.scan_add_strided_bindings_ring})
+      ring->exact_capacity = true;
+    scan_plan_ =
+        prepare_vulkan_i32_scan(nullptr, scan_, *prefix_, operation_.size);
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    if (!operation_.size) {
+      commands->buffer_fill(operation_.count, sizeof(std::int32_t), 0);
+      return;
+    }
+    const auto flag_groups = static_cast<std::uint32_t>(
+        (operation_.size + kBlockSize - 1) / kBlockSize);
+    const auto words =
+        operation_.size * (operation_.item_bytes / sizeof(std::uint32_t));
+    const auto word_groups =
+        static_cast<std::uint32_t>((words + kBlockSize - 1) / kBlockSize);
+    dispatch_pipeline(commands, flags_pipeline_.get(), flags_bindings_.get(),
+                      flag_groups, 1, 1, nullptr);
+    commands->buffer_barrier(*prefix_);
+    record_vulkan_i32_scan(device, commands, scan_plan_, false);
+    dispatch_pipeline(commands, scatter_pipeline_.get(),
+                      scatter_bindings_.get(), word_groups, 1, 1, nullptr);
+    commands->buffer_barrier(operation_.output);
+    commands->buffer_barrier(operation_.count);
+  }
+
+ private:
+  Device &device_;
+  CompactOperation operation_;
+  DeviceAllocationUnique prefix_;
+  VulkanScanCache scan_;
+  VulkanScanDispatchPlan scan_plan_;
+  std::unique_ptr<Pipeline> flags_pipeline_, scatter_pipeline_;
+  std::unique_ptr<ShaderResourceSet> flags_bindings_, scatter_bindings_;
+};
+}  // namespace
+
+std::shared_ptr<NativeOperation> prepare_vulkan_compact_operation(
+    Device &device,
+    const CompactOperation &operation) {
+  if (operation.size >
+      std::numeric_limits<std::uint32_t>::max() / (operation.item_bytes / 4))
+    throw std::invalid_argument(
+        "Vulkan compact exceeds its uint32 shader index ABI");
+  auto result = std::make_shared<FixedVulkanCompact>(device, operation);
+  result->prepare();
+  return result;
+}
+}  // namespace gfx
 
 bool Program::vulkan_radix_sort_available() const {
   return compile_config().arch == Arch::vulkan;

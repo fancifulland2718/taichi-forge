@@ -144,7 +144,7 @@ deployment has not been validated by this check. Initialization/loading timings
 printed by this small example are diagnostics, not application benchmarks.
 
 `ExecutionPlan` provides a version 1 persistent sequence of exported kernels,
-device buffer copies and 32-bit pattern fills. Export the referenced kernels
+device buffer copies, 32-bit pattern fills and stable compaction. Export the referenced kernels
 before adding the description:
 
 ```python
@@ -180,12 +180,26 @@ ranges. `fill32.value` is a uint32 bit pattern; optional `offset/size_bytes`
 select a region, defaulting to the remaining logical destination. Fill offsets
 and sizes require 4-byte alignment; Vulkan copies also require that alignment.
 Memory operations accept primitive/tensor ndarrays, including ownership checks
-for arrays referenced only by copy/fill. Contents can change between replays;
+for arrays referenced only by native operations. Contents can change between replays;
 new storage identities or shapes require preparation again. Separate prepared
 bindings are independent, but application-owned arrays may still alias.
 
+The `compact` operation has `values`, `flags`, `output` and `count` argument
+names. It stably copies records whose i32 flag is nonzero, and writes the i32
+count on every replay, including empty input. Values/output are matching 1D
+primitive or tensor ndarrays with a record width divisible by four bytes;
+output capacity must cover all input records. Flags have one entry per record;
+count is a scalar ndarray or a nonempty 1D ndarray (only its first item is
+written). Writable ranges must not overlap input or each other. Only the
+selected prefix is written; the remaining output is unchanged. CPU/CUDA/Vulkan
+use independent owned scratch per prepared instance; `prepared.info` reports
+`workspace_bytes`, excluding borrowed arrays, code and driver metadata. C/C++
+can query the same count with `ti_get_prepared_execution_workspace_bytes_ext`.
+Selection has no automatic derivative. A tested composition compacts integer
+indices, then runs an exported gather kernel and its explicit backward kernel.
+
 This format does not automatically export arbitrary JIT native Graphs,
-mathematical primitives/providers, structured control or rendering resources.
+other mathematical primitives/providers, structured control or rendering resources.
 Unknown versions and operations report errors. The buffer/module/runtime
 in-flight lifetime contract above still applies.
 
