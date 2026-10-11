@@ -49,6 +49,36 @@ C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用�
 句柄或已释放句柄，会在访问后端内存前报告参数错误；复制切片必须在声明的分配
 容量内。应用仍需保持 buffer 存活至在途工作结束，并在释放前解除 host 映射。
 
+固定连续 AoS 的 `StructNdarray` 已接通 CPU、CUDA、Vulkan 导出，包含嵌套结构、
+向量和矩阵成员。成员数值类型仍受目标能力约束；例如 Vulkan 使用 8/16 位整数时，
+须在 `caps` 声明 `spirv_has_int8`、`spirv_has_int16`、
+`spirv_has_int8_storage`、`spirv_has_int16_storage`。
+
+初始化时通过 `ti_get_kernel_ndarray_layout_ext` 或
+`ti_get_compute_graph_ndarray_layout_ext` 获取模块拥有的 `TiNdArrayLayout`。
+使用 `ti_get_ndarray_layout_info_ext` 和 `ti_get_ndarray_layout_member_ext`
+查询版本、元素步长、对齐及叶成员的点分路径、标量类型、tensor shape 和字节偏移。
+应用按此目标布局组织数据，不能假定宿主 C/C++ struct 的 padding 相同。
+
+内存与外层 shape 仍放入原 `TiArgument` 的 ndarray，设置
+`elem_type=TI_DATA_TYPE_UNKNOWN`、空 `elem_shape`；将查询所得布局与版本填入
+`TiNdArrayBinding` / `TiNamedNdArrayBinding`，调用
+`ti_launch_kernel_with_bindings_ext` / `ti_launch_compute_graph_with_bindings_ext`。
+仅设置 `UNKNOWN` 不构成结构绑定。调用复用不可变布局，无需逐次传递或递归重建成员表。
+同一绑定入口的可选 `gradient` 指针支持已有标量/向量/矩阵 ndarray 梯度，原梯度入口兼容。
+
+错误布局/版本/维度、短缓冲区、未对齐的导入存储、跨 runtime 或已退休句柄，在结构
+dispatch 前报错；Graph 会在第一项 dispatch 前检查全部结构与梯度绑定。kernel、Graph、
+布局句柄和成员路径字符串随所属模块关闭而失效，重载后需重新查询。描述符只须在调用
+期间有效，设备存储须保留到工作完成；先关闭模块再关闭 runtime，宿主侧生命周期变更
+与使用需要串行协调。
+
+含结构的 Graph 使用 `graphs.v2.json`；仅标量/tensor 数组的 Graph 保留旧表示。
+新 loader 同时读取两种格式，旧 loader 不能消费结构 Graph。本范围是直接调用与普通
+CGraph，不包含任意 stride/切片、指针成员、结构梯度或 native Graph capture。
+Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重绑定、退休，以及
+同一 Graph 中结构前向工作与显式绑定的普通 ndarray 反向微分组合。
+
 仅包含 dense field 与 serial/range task 的 CPU/CUDA 导出使用 schema 5
 （`resource_binding="dense_v1"`）。模块压紧所需资源闭包，在 field 分配前预留独立
 的 runtime ID。同一产物可在一个 runtime 中加载多份，前向和梯度存储彼此独立。

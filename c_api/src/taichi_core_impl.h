@@ -33,6 +33,7 @@
 #include "taichi/rhi/device.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/module_loader.h"
+#include "taichi/aot/struct_layout.h"
 #include "taichi/common/virtual_dir.h"
 
 #define TI_CAPI_NOT_SUPPORTED(x) ti_set_last_error(TI_ERROR_NOT_SUPPORTED, #x);
@@ -128,14 +129,34 @@ class MetalRuntime;
 
 class Runtime {
  public:
+  struct KernelBinding {
+    class AotModule *owner;
+    taichi::lang::aot::Kernel *kernel;
+    std::unordered_map<uint32_t, TiNdArrayLayout> layouts;
+  };
+  struct GraphBinding {
+    class AotModule *owner;
+    taichi::lang::aot::CompiledGraph *graph;
+    std::unordered_map<std::string, TiNdArrayLayout> layouts;
+  };
+  struct LayoutBinding {
+    class AotModule *owner;
+    taichi::lang::aot::StructLayout layout;
+  };
   struct MemoryAllocation {
     taichi::lang::DeviceAllocation allocation;
     uint64_t size;
+    // External pointer/binding offset; owned RHI allocations are naturally
+    // aligned. Captured once on import, without querying the driver at launch.
+    uint64_t base_offset{0};
   };
 
  private:
   mutable std::mutex memory_mutex_;
   std::unordered_map<TiMemory, MemoryAllocation> memories_;
+  std::unordered_map<TiKernel, KernelBinding> kernels_;
+  std::unordered_map<TiComputeGraph, GraphBinding> graphs_;
+  std::unordered_map<TiNdArrayLayout, LayoutBinding> layouts_;
 
  protected:
   // 32 is a magic number in `taichi/inc/constants.h`.
@@ -175,8 +196,18 @@ class Runtime {
   // process-unique opaque handle is never reinterpreted as an RHI slot ID.
   TiMemory register_memory(taichi::lang::DeviceAllocation allocation,
                             uint64_t size,
-                            bool release_on_failure = true);
+                            bool release_on_failure = true,
+                            uint64_t base_offset = 0);
   MemoryAllocation get_memory(TiMemory memory) const;
+  static std::uintptr_t new_handle_token();
+  TiKernel register_kernel(KernelBinding binding);
+  TiComputeGraph register_graph(GraphBinding binding);
+  TiNdArrayLayout register_layout(class AotModule *owner,
+                                  taichi::lang::DataType type);
+  const KernelBinding &get_kernel(TiKernel kernel) const;
+  const GraphBinding &get_graph(TiComputeGraph graph) const;
+  const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
+  void retire_module(class AotModule *owner);
 
   virtual TiImage allocate_image(const taichi::lang::ImageParams &params) {
     TI_NOT_IMPLEMENTED
@@ -217,10 +248,19 @@ class AotModule {
   std::unordered_map<std::string,
                      std::unique_ptr<taichi::lang::aot::CompiledGraph>>
       loaded_cgraphs_;
+  std::unordered_map<std::string, TiKernel> kernel_handles_;
+  std::unordered_map<std::string, TiComputeGraph> graph_handles_;
+  std::unordered_map<const taichi::lang::Type *, TiNdArrayLayout> layout_handles_;
+
+  TiNdArrayLayout layout_handle(taichi::lang::DataType type);
 
  public:
   AotModule(Runtime &runtime,
             std::unique_ptr<taichi::lang::aot::Module> aot_module);
+  ~AotModule();
+
+  TiKernel get_kernel_handle(const std::string &name);
+  TiComputeGraph get_graph_handle(const std::string &name);
 
   taichi::lang::aot::Kernel *get_kernel(const std::string &name);
   taichi::lang::aot::CompiledGraph *get_cgraph(const std::string &name);
@@ -254,8 +294,9 @@ struct devalloc_cast_t {
     Runtime &runtime,
     const taichi::lang::DeviceAllocation &devalloc,
     uint64_t size,
-    bool release_on_failure = true) {
-  return runtime.register_memory(devalloc, size, release_on_failure);
+    bool release_on_failure = true,
+    uint64_t base_offset = 0) {
+  return runtime.register_memory(devalloc, size, release_on_failure, base_offset);
 }
 
 [[maybe_unused]] taichi::lang::DeviceAllocation devimg2devalloc(

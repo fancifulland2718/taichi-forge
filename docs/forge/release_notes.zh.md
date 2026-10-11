@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 固定 AoS `StructNdarray` 已支持 CPU/CUDA/Vulkan 的 AOT 直接执行和普通 CGraph，
+  包含 CUDA PTX。模块拥有的目标布局描述符可与已有 ndarray 梯度绑定组合，Graph
+  dispatch 前检查全部绑定。独立小夹具覆盖嵌套混合类型、重绑定与退休；结构梯度、
+  任意 view 和 native capture 不在此范围。详见 [SDK 合同](aot_sdk.zh.md)。
 - C API 内存句柄现在绑定所属 runtime 的存活分配，包含导入内存。跨 runtime 或
   已释放的句柄会在访问后端前报告参数错误；设备复制的切片按声明容量检查边界，
   避免 offset 算术溢出。既有 `TiMemory`、`TiNdArray`、`TiArgument` 布局保持。

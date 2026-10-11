@@ -313,6 +313,10 @@ typedef struct TiKernel_t *TiKernel;
 // target in a predefined order.
 typedef struct TiComputeGraph_t *TiComputeGraph;
 
+// Forge 0.6.4: immutable fixed-AoS layout owned by an AOT module. Valid until
+// that module is destroyed; obtain it once from an exported argument.
+typedef struct TiNdArrayLayout_t *TiNdArrayLayout;
+
 // Enumeration `TiError` (1.4.0)
 //
 // Errors reported by the Taichi C-API.
@@ -553,6 +557,44 @@ typedef struct TiNamedNdArrayGradientBinding {
   const char *name;
   TiNdArray gradient;
 } TiNamedNdArrayGradientBinding;
+
+// Version 1 describes contiguous AoS structures. Query once at setup and pack
+// records using the reported offsets/stride, not a host compiler's struct ABI.
+typedef struct TiNdArrayLayoutInfo {
+  uint32_t version;
+  uint32_t member_count;
+  uint64_t element_stride;
+  uint64_t alignment;
+} TiNdArrayLayoutInfo;
+
+typedef struct TiNdArrayLayoutMember {
+  // Module-owned dotted path. Valid until the owning module is destroyed.
+  const char *path;
+  TiDataType scalar_type;
+  TiNdShape element_shape;
+  uint64_t offset;
+  uint64_t size;
+  uint64_t alignment;
+} TiNdArrayLayoutMember;
+
+// Additive argument bindings compose layouts and gradients in one entrypoint.
+// A structure binding uses the ordinary TiArgument ndarray's memory/shape,
+// with elem_type=TI_DATA_TYPE_UNKNOWN and empty elem_shape. Version must equal
+// the queried layout version. Structure gradients are not supported.
+// For a primitive/tensor gradient, leave layout null and version zero.
+typedef struct TiNdArrayBinding {
+  uint32_t argument_index;
+  uint32_t layout_version;
+  TiNdArrayLayout layout;
+  const TiNdArray *gradient;
+} TiNdArrayBinding;
+
+typedef struct TiNamedNdArrayBinding {
+  const char *name;
+  uint32_t layout_version;
+  TiNdArrayLayout layout;
+  const TiNdArray *gradient;
+} TiNamedNdArrayBinding;
 
 // BitField `TiImageUsageFlags` (1.4.0)
 //
@@ -1083,6 +1125,29 @@ TI_DLL_EXPORT void TI_API_CALL ti_launch_compute_graph_with_gradients_ext(
     TiRuntime runtime, TiComputeGraph compute_graph, uint32_t arg_count,
     const TiNamedArgument *args, uint32_t gradient_count,
     const TiNamedNdArrayGradientBinding *gradients);
+
+TI_DLL_EXPORT TiNdArrayLayout TI_API_CALL ti_get_kernel_ndarray_layout_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t argument_index);
+TI_DLL_EXPORT TiNdArrayLayout TI_API_CALL ti_get_compute_graph_ndarray_layout_ext(
+    TiRuntime runtime, TiComputeGraph graph, const char *name);
+TI_DLL_EXPORT void TI_API_CALL ti_get_ndarray_layout_info_ext(
+    TiRuntime runtime, TiNdArrayLayout layout, TiNdArrayLayoutInfo *info);
+TI_DLL_EXPORT void TI_API_CALL ti_get_ndarray_layout_member_ext(
+    TiRuntime runtime, TiNdArrayLayout layout, uint32_t index,
+    TiNdArrayLayoutMember *member);
+
+// All bindings, including every dispatch of a Graph, are validated before
+// submission. Memory, layouts, kernels and Graphs must belong to this runtime.
+// Descriptors are read during this call; device storage must remain alive until
+// completion. Module destruction retires its layout and callable handles.
+TI_DLL_EXPORT void TI_API_CALL ti_launch_kernel_with_bindings_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t binding_count,
+    const TiNdArrayBinding *bindings);
+TI_DLL_EXPORT void TI_API_CALL ti_launch_compute_graph_with_bindings_ext(
+    TiRuntime runtime, TiComputeGraph graph, uint32_t arg_count,
+    const TiNamedArgument *args, uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings);
 
 // Function `ti_flush` (1.4.0)
 //

@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fixed AoS `StructNdarray` AOT exports now support CPU/CUDA/Vulkan direct
+  execution and ordinary CGraphs, including CUDA PTX. Module-owned target layout
+  descriptors compose with existing ndarray gradient bindings; complete binding
+  checks precede Graph dispatch. Nested mixed-type records, rebinding and
+  retirement are covered by small independent consumers. Structure gradients,
+  arbitrary views and native capture remain outside this scope. See the
+  [SDK contract](aot_sdk.en.md).
 - C API memory handles now identify live allocations in their owning runtime,
   including imported memory. Foreign and retired handles report an argument
   error before backend access, and device-copy slices are checked against the

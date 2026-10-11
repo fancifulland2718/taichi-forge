@@ -57,6 +57,46 @@ error before backend memory access. Copy slices must fit within the declared
 allocation size. Applications must still retain buffers until submitted work
 finishes and unmap mapped memory before releasing it.
 
+Fixed contiguous AoS `StructNdarray` elements can be exported on CPU, CUDA and
+Vulkan, including nested structures and vector/matrix members. Integer/float
+types still require the target capabilities; for example, Vulkan modules using
+8/16-bit integers must declare `spirv_has_int8`, `spirv_has_int16`,
+`spirv_has_int8_storage` and `spirv_has_int16_storage` in `caps`.
+
+Obtain a module-owned `TiNdArrayLayout` once with
+`ti_get_kernel_ndarray_layout_ext` or
+`ti_get_compute_graph_ndarray_layout_ext`. Query its version, element stride,
+alignment and leaf members with `ti_get_ndarray_layout_info_ext` and
+`ti_get_ndarray_layout_member_ext`. Members report dotted paths, scalar types,
+tensor shapes and byte offsets. Pack data using this target layout; host C/C++
+structs are not assumed to have the same padding.
+
+Pass memory and outer shape through the existing `TiArgument` ndarray, setting
+`elem_type=TI_DATA_TYPE_UNKNOWN` and an empty `elem_shape`. Supply the queried
+layout and version in `TiNdArrayBinding` or `TiNamedNdArrayBinding`, then call
+`ti_launch_kernel_with_bindings_ext` or
+`ti_launch_compute_graph_with_bindings_ext`. `UNKNOWN` alone is not a structure
+binding. Calls reuse immutable layouts without resending or recursively
+rebuilding member tables. The same bindings accept primitive/tensor ndarray
+gradients through an optional `gradient` pointer. Older gradient entrypoints
+remain compatible.
+
+Wrong layout/version/rank, short buffers, misaligned imported storage, foreign
+runtime handles and retired handles fail before structure dispatch. Graphs
+validate all structure and gradient bindings before the first dispatch. Kernel,
+Graph and layout handles, including member path strings, expire with their
+module; query new handles after reloading. Descriptors need only survive the
+launch call; device memory must survive completion. Destroy modules before
+their runtime and serialize host-side module/binding lifetime changes with use.
+
+Structure Graphs use `graphs.v2.json`; primitive/tensor-only Graphs retain the
+old representation. New loaders read both; old loaders cannot consume structure
+Graph exports. This covers direct calls and ordinary CGraphs, not arbitrary
+strides/slices, pointer members, structure gradients or native Graph capture.
+Small Windows CPU/CUDA/Vulkan and CUDA PTX consumers verify nested mixed-type
+records, rebinding, retirement, and Graphs combining structure forward work
+with explicitly bound primitive-array reverse differentiation.
+
 CPU/CUDA exports containing only dense fields and serial/range tasks use schema
 5 (`resource_binding="dense_v1"`). The module compacts its required resource
 closure and reserves independent runtime IDs before field allocation. Two

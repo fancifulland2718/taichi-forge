@@ -188,7 +188,8 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cpu_memory(TiRuntime runtime,
       cpu_device.import_memory(ptr, memory_size);
 
   // prepare memory object
-  out = devalloc2devmem(*llvm_runtime, device_alloc, memory_size);
+  out = devalloc2devmem(*llvm_runtime, device_alloc, memory_size, true,
+                        reinterpret_cast<uintptr_t>(ptr));
 #else
   TI_NOT_IMPLEMENTED;
 #endif  // TI_WITH_LLVM
@@ -247,7 +248,8 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cuda_memory(TiRuntime runtime,
       cuda_device.import_memory(ptr, memory_size);
 
   // prepare memory object
-  out = devalloc2devmem(*llvm_runtime, device_alloc, memory_size);
+  out = devalloc2devmem(*llvm_runtime, device_alloc, memory_size, true,
+                        reinterpret_cast<uintptr_t>(ptr));
 #else
   TI_NOT_IMPLEMENTED;
 #endif

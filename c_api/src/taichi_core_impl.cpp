@@ -174,22 +174,15 @@ void Runtime::free_memory(TiMemory devmem) {
 
 TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
                                   uint64_t size,
-                                  bool release_on_failure) {
+                                  bool release_on_failure,
+                                  uint64_t base_offset) {
   TI_ASSERT(allocation.device == &get());
   try {
     // Never reuse a token, including across runtime destruction. Refuse the
     // machine's exhausted handle space instead of wrapping into a live token.
-    static std::atomic<std::uintptr_t> next{1};
-    auto token = next.load(std::memory_order_relaxed);
-    do {
-      if (token == std::numeric_limits<std::uintptr_t>::max()) {
-        throw std::bad_alloc();
-      }
-    } while (!next.compare_exchange_weak(token, token + 1,
-                                         std::memory_order_relaxed));
-    const auto handle = reinterpret_cast<TiMemory>(token);
+    const auto handle = reinterpret_cast<TiMemory>(new_handle_token());
     std::lock_guard<std::mutex> lock(memory_mutex_);
-    memories_.emplace(handle, MemoryAllocation{allocation, size});
+    memories_.emplace(handle, MemoryAllocation{allocation, size, base_offset});
     return handle;
   } catch (...) {
     // RHI import paths allocate their own wrapper too. Retire that wrapper;
@@ -748,9 +741,9 @@ TiKernel ti_get_aot_module_kernel(TiAotModule aot_module, const char *name) {
   TI_CAPI_ARGUMENT_NULL_RV(aot_module);
   TI_CAPI_ARGUMENT_NULL_RV(name);
 
-  taichi::lang::aot::Kernel *kernel = nullptr;
+  TiKernel kernel = TI_NULL_HANDLE;
   try {
-    kernel = ((AotModule *)aot_module)->get_kernel(name);
+    kernel = ((AotModule *)aot_module)->get_kernel_handle(name);
   } catch (const taichi::lang::aot::ArtifactLoadError &e) {
     ti_set_last_error(TI_ERROR_CORRUPTED_DATA, e.what());
     return TI_NULL_HANDLE;
@@ -761,7 +754,7 @@ TiKernel ti_get_aot_module_kernel(TiAotModule aot_module, const char *name) {
     return TI_NULL_HANDLE;
   }
 
-  out = (TiKernel)kernel;
+  out = kernel;
   TI_CAPI_TRY_CATCH_END();
   return out;
 }
@@ -773,9 +766,9 @@ TiComputeGraph ti_get_aot_module_compute_graph(TiAotModule aot_module,
   TI_CAPI_ARGUMENT_NULL_RV(aot_module);
   TI_CAPI_ARGUMENT_NULL_RV(name);
 
-  taichi::lang::aot::CompiledGraph *cgraph = nullptr;
+  TiComputeGraph cgraph = TI_NULL_HANDLE;
   try {
-    cgraph = ((AotModule *)aot_module)->get_cgraph(name);
+    cgraph = ((AotModule *)aot_module)->get_graph_handle(name);
   } catch (const taichi::lang::aot::ArtifactLoadError &e) {
     ti_set_last_error(TI_ERROR_CORRUPTED_DATA, e.what());
     return TI_NULL_HANDLE;
@@ -786,7 +779,7 @@ TiComputeGraph ti_get_aot_module_compute_graph(TiAotModule aot_module,
     return TI_NULL_HANDLE;
   }
 
-  out = (TiComputeGraph)cgraph;
+  out = cgraph;
   TI_CAPI_TRY_CATCH_END();
   return out;
 }
@@ -796,6 +789,41 @@ namespace {
 bool gradient_error(const std::string &message) {
   ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, message.c_str());
   return false;
+}
+
+void validate_struct_argument(Runtime &runtime, const TiArgument &argument,
+                              TiNdArrayLayout provided, TiNdArrayLayout expected,
+                              uint32_t version, size_t ndim) {
+  const auto &layout = runtime.get_layout(provided);
+  const auto &required = runtime.get_layout(expected);
+  if (version != taichi::lang::aot::StructLayout::kVersion ||
+      layout.type != required.type || layout.stride != required.stride) {
+    throw MemoryBindingError("Structure layout/version does not match exported ABI");
+  }
+  if (argument.type != TI_ARGUMENT_TYPE_NDARRAY) {
+    throw MemoryBindingError("Structure binding requires an ndarray argument");
+  }
+  const auto &array = argument.value.ndarray;
+  if (array.elem_type != TI_DATA_TYPE_UNKNOWN || array.elem_shape.dim_count != 0 ||
+      array.shape.dim_count != ndim || array.shape.dim_count > kTiNdShapeDimensionCapacity) {
+    throw MemoryBindingError("Structure ndarray type or rank does not match exported ABI");
+  }
+  uint64_t bytes = layout.stride;
+  for (uint32_t i = 0; i < array.shape.dim_count; ++i) {
+    const auto extent = array.shape.dims[i];
+    if (extent > std::numeric_limits<int>::max() ||
+        (extent != 0 && bytes > std::numeric_limits<uint64_t>::max() / extent)) {
+      throw MemoryBindingError("Structure ndarray shape overflows native indexing");
+    }
+    bytes *= extent;
+  }
+  const auto memory = runtime.get_memory(array.memory);
+  if (memory.size < bytes) {
+    throw MemoryBindingError("Structure ndarray buffer is smaller than its declared shape");
+  }
+  if (memory.base_offset % layout.alignment != 0) {
+    throw MemoryBindingError("Imported memory does not satisfy structure alignment");
+  }
 }
 
 bool same_ndarray_shape(const TiNdShape &a, const TiNdShape &b) {
@@ -859,6 +887,27 @@ void ti_launch_kernel_with_gradients_ext(
     const TiArgument *args, uint32_t gradient_count,
     const TiNdArrayGradientBinding *gradients) {
   TI_CAPI_TRY_CATCH_BEGIN();
+  if (gradient_count) TI_CAPI_ARGUMENT_NULL(gradients);
+  if (gradient_count > arg_count) {
+    gradient_error("Too many gradient bindings");
+    return;
+  }
+  std::vector<TiNdArrayBinding> bindings;
+  bindings.reserve(gradient_count);
+  for (uint32_t i = 0; i < gradient_count; ++i) {
+    bindings.push_back({gradients[i].argument_index, 0, TI_NULL_HANDLE,
+                        &gradients[i].gradient});
+  }
+  ti_launch_kernel_with_bindings_ext(runtime, kernel, arg_count, args,
+                                     gradient_count, bindings.data());
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_launch_kernel_with_bindings_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t binding_count,
+    const TiNdArrayBinding *bindings) {
+  TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(kernel);
   if (arg_count > 0) {
@@ -869,7 +918,46 @@ void ti_launch_kernel_with_gradients_ext(
     return;
   }
 
-  auto ti_kernel = (taichi::lang::aot::Kernel *)kernel;
+  Runtime &runtime2 = *((Runtime *)runtime);
+  const auto &kernel_binding = runtime2.get_kernel(kernel);
+  auto ti_kernel = kernel_binding.kernel;
+
+  if (binding_count) TI_CAPI_ARGUMENT_NULL(bindings);
+  if (binding_count > arg_count) {
+    gradient_error("Too many ndarray bindings");
+    return;
+  }
+  std::vector<const TiNdArrayBinding *> bound_args(arg_count, nullptr);
+  std::vector<TiNdArrayGradientBinding> gradient_bindings;
+  gradient_bindings.reserve(binding_count);
+  for (uint32_t i = 0; i < binding_count; ++i) {
+    const auto &binding = bindings[i];
+    const auto index = binding.argument_index;
+    if (index >= arg_count || bound_args[index]) {
+      throw MemoryBindingError("Duplicate or out-of-range ndarray binding");
+    }
+    bound_args[index] = &binding;
+    auto expected = kernel_binding.layouts.find(index);
+    if (expected == kernel_binding.layouts.end()) {
+      if (binding.layout || binding.layout_version != 0 || !binding.gradient) {
+        throw MemoryBindingError("Unexpected structure layout binding");
+      }
+    } else if (binding.gradient) {
+      throw MemoryBindingError("Structure ndarray gradients are not supported");
+    }
+    if (binding.gradient) gradient_bindings.push_back({index, *binding.gradient});
+  }
+  for (const auto &[index, expected] : kernel_binding.layouts) {
+    if (index >= arg_count || !bound_args[index]) {
+      throw MemoryBindingError("Missing structure ndarray layout binding");
+    }
+    const auto &binding = *bound_args[index];
+    validate_struct_argument(runtime2, args[index], binding.layout, expected,
+                              binding.layout_version,
+                              ti_kernel->nested_parameters.at({int(index)}).total_dim);
+  }
+  const auto gradient_count = gradient_bindings.size();
+  const auto *gradients = gradient_bindings.data();
 
   if (gradient_count > 0) TI_CAPI_ARGUMENT_NULL(gradients);
   std::vector<const TiNdArray *> gradient_args(arg_count, nullptr);
@@ -900,7 +988,6 @@ void ti_launch_kernel_with_gradients_ext(
             index < arg_count ? gradient_args[index] : nullptr)) return;
   }
 
-  Runtime &runtime2 = *((Runtime *)runtime);
   taichi::lang::LaunchContextBuilder builder(ti_kernel);
   std::vector<std::unique_ptr<taichi::lang::DeviceAllocation>> devallocs;
 
@@ -1055,6 +1142,26 @@ void ti_launch_compute_graph_with_gradients_ext(
     const TiNamedArgument *args, uint32_t gradient_count,
     const TiNamedNdArrayGradientBinding *gradients) {
   TI_CAPI_TRY_CATCH_BEGIN();
+  if (gradient_count) TI_CAPI_ARGUMENT_NULL(gradients);
+  if (gradient_count > arg_count) {
+    gradient_error("Too many Graph gradient bindings");
+    return;
+  }
+  std::vector<TiNamedNdArrayBinding> bindings;
+  bindings.reserve(gradient_count);
+  for (uint32_t i = 0; i < gradient_count; ++i) {
+    bindings.push_back({gradients[i].name, 0, TI_NULL_HANDLE, &gradients[i].gradient});
+  }
+  ti_launch_compute_graph_with_bindings_ext(runtime, compute_graph, arg_count,
+                                           args, gradient_count, bindings.data());
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_launch_compute_graph_with_bindings_ext(
+    TiRuntime runtime, TiComputeGraph compute_graph, uint32_t arg_count,
+    const TiNamedArgument *args, uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings) {
+  TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(compute_graph);
   if (arg_count > 0) {
@@ -1066,8 +1173,9 @@ void ti_launch_compute_graph_with_gradients_ext(
   }
 
 
-  if (gradient_count > 0) TI_CAPI_ARGUMENT_NULL(gradients);
-  auto &graph = *(taichi::lang::aot::CompiledGraph *)compute_graph;
+  Runtime &runtime2 = *((Runtime *)runtime);
+  const auto &graph_binding = runtime2.get_graph(compute_graph);
+  auto &graph = *graph_binding.graph;
   std::unordered_map<std::string, const TiArgument *> named_args;
   for (uint32_t i = 0; i < arg_count; ++i) {
     TI_CAPI_ARGUMENT_NULL(args[i].name);
@@ -1076,6 +1184,43 @@ void ti_launch_compute_graph_with_gradients_ext(
       return;
     }
   }
+  if (binding_count) TI_CAPI_ARGUMENT_NULL(bindings);
+  if (binding_count > arg_count) {
+    gradient_error("Too many Graph ndarray bindings");
+    return;
+  }
+  std::unordered_map<std::string, const TiNamedNdArrayBinding *> bound_args;
+  std::vector<TiNamedNdArrayGradientBinding> gradient_bindings;
+  gradient_bindings.reserve(binding_count);
+  for (uint32_t i = 0; i < binding_count; ++i) {
+    const auto &binding = bindings[i];
+    TI_CAPI_ARGUMENT_NULL(binding.name);
+    auto arg = named_args.find(binding.name);
+    if (arg == named_args.end() || !bound_args.emplace(binding.name, &binding).second) {
+      throw MemoryBindingError("Unknown or duplicate Graph ndarray binding");
+    }
+    auto expected = graph_binding.layouts.find(binding.name);
+    if (expected == graph_binding.layouts.end()) {
+      if (binding.layout || binding.layout_version != 0 || !binding.gradient) {
+        throw MemoryBindingError("Unexpected Graph structure layout binding");
+      }
+    } else if (binding.gradient) {
+      throw MemoryBindingError("Structure ndarray gradients are not supported");
+    }
+    if (binding.gradient) gradient_bindings.push_back({binding.name, *binding.gradient});
+  }
+  for (const auto &[name, expected] : graph_binding.layouts) {
+    auto arg = named_args.find(name);
+    auto bound = bound_args.find(name);
+    if (arg == named_args.end() || bound == bound_args.end()) {
+      throw MemoryBindingError("Missing Graph structure ndarray layout binding");
+    }
+    const auto &binding = *bound->second;
+    validate_struct_argument(runtime2, *arg->second, binding.layout, expected,
+                              binding.layout_version, graph.args.at(name).field_dim);
+  }
+  const auto gradient_count = gradient_bindings.size();
+  const auto *gradients = gradient_bindings.data();
   std::unordered_map<std::string, const TiNdArray *> gradient_args;
   for (uint32_t i = 0; i < gradient_count; ++i) {
     TI_CAPI_ARGUMENT_NULL(gradients[i].name);
@@ -1122,7 +1267,6 @@ void ti_launch_compute_graph_with_gradients_ext(
   std::vector<taichi::lang::Ndarray> gradient_arrays;
   gradient_arrays.reserve(gradient_count);
   std::unordered_map<std::string, const taichi::lang::Ndarray *> gradient_views;
-  Runtime &runtime2 = *((Runtime *)runtime);
   std::unordered_map<std::string, taichi::lang::aot::IValue> arg_map{};
   std::vector<taichi::lang::Ndarray> ndarrays;
   ndarrays.reserve(arg_count);
@@ -1212,6 +1356,14 @@ void ti_launch_compute_graph_with_gradients_ext(
         std::vector<int> elem_shape(
             ndarray.elem_shape.dims,
             ndarray.elem_shape.dims + ndarray.elem_shape.dim_count);
+
+        auto structure = graph_binding.layouts.find(arg.name);
+        if (structure != graph_binding.layouts.end()) {
+          ndarrays.emplace_back(devalloc, runtime2.get_layout(structure->second).type,
+                                 shape, ExternalArrayLayout::kAOS);
+          arg_map.emplace(arg.name, taichi::lang::aot::IValue::create(ndarrays.back()));
+          break;
+        }
 
         const taichi::lang::DataType *prim_ty;
         switch (ndarray.elem_type) {

@@ -19,6 +19,7 @@ endfunction()
 
 set(TAICHI_C_API_NAME taichi_c_api)
 list(APPEND C_API_SOURCE "c_api/src/taichi_core_impl.cpp")
+list(APPEND C_API_SOURCE "c_api/src/aot_bindings.cpp")
 list(APPEND C_API_PUBLIC_HEADERS
   "c_api/include/taichi/taichi_platform.h"
   "c_api/include/taichi/taichi_core.h"

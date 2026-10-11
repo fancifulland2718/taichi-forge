@@ -231,7 +231,8 @@ TiMemory ti_import_vulkan_memory(
       vk_runtime.vk_device(), interop_info->buffer, interop_info->usage);
   taichi::lang::DeviceAllocation devalloc = vk_runtime.import_vkbuffer(
       buffer, interop_info->size, interop_info->memory, interop_info->offset);
-  out = devalloc2devmem(*runtime2, devalloc, interop_info->size);
+  out = devalloc2devmem(*runtime2, devalloc, interop_info->size, true,
+                        interop_info->offset);
   TI_CAPI_TRY_CATCH_END();
   return out;
 }
