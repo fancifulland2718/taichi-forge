@@ -92,7 +92,7 @@ ArgPack 和 GPU sparse topology 任务仍需后续资源/控制扩展。产物�
 句柄，消费者加载代码后再准备。
 
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
-选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、混合原生 recording、
+选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、任意 native Graph、
 provider 和外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
 后端的前向/反向与两种 AOT/JIT 加载顺序。
 
@@ -119,10 +119,42 @@ Windows x64 开发 SDK 已通过 CPU/CUDA/Vulkan 直接 kernel 和普通 CGraph
 Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、加载耗时用于
 诊断，不代表实际应用性能。
 
-此 AOT 路径不序列化 native Graph recording、provider 及其外部依赖。
-在途工作结束前需保持 buffer、模块和 runtime 存活；普通 CGraph 支持不等于
-混合原生 recording 支持。上面的固定准备 API 可录制已加载普通 kernel，不代表
-可以序列化或重建混合 native/provider recipe。
+`ExecutionPlan` 提供版本 1 的持久化顺序描述，覆盖已导出的 kernel、设备内存复制和
+32 位位模式填充。生产端先导出引用的 kernel，再添加描述：
+
+```python
+from taichi_forge_runtime.aot import ExecutionPlan
+
+exported.add_execution_plan("step", ExecutionPlan([
+    {"kind": "kernel", "entry": "forward", "arguments": ["x", "scratch"]},
+    {"kind": "copy", "source": "scratch", "destination": "y"},
+    {"kind": "fill32", "destination": "scratch", "value": 0},
+]))
+exported.save("module")
+# consumer：loaded 是 runtime.load_module(...) 的返回值。
+prepared = loaded.prepare_execution("step", {"x": x, "scratch": scratch, "y": y})
+prepared.run()
+runtime.wait()
+```
+
+描述保存到模块的 `executions/`，目录和 `.tcm` 均保留它；也可用
+`ExecutionPlan.save/load` 单独保存。C/C++ 可将同一 JSON 文档传给
+`ti_prepare_execution_plan_ext`，使用命名参数和 `TiNamedNdArrayBinding` 显式梯度。
+准备阶段验证全部参数、范围和操作，再记录原生命令；不执行数学工作或修改缓冲。
+暖态通过一个 prepared handle 提交，不重新解析 JSON 或逐节点调用 Python。
+
+CPU/CUDA 的 LLVM 模块和 Vulkan 模块均可直接加载 `.tcm`。加载器保留压缩归档字节，
+按需读取内核载荷，不需要将整个归档展开到临时目录。
+
+`copy` 默认复制 source 的逻辑剩余字节，可指定 `source_offset`、`destination_offset`
+及 `size_bytes`；区域不能重叠。`fill32` 的 `value` 是 uint32 位模式，默认覆盖目标
+逻辑剩余区域，可指定 `offset/size_bytes`；起点和大小必须为 4 字节倍数。Vulkan
+copy 也遵守 4 字节对齐要求。此处内存操作接收 primitive/tensor ndarray；仅存在于
+复制/填充中的数组同样参与所有权和失效检查。改变数组内容可复用，改变绑定/形状需
+重新准备。两组 prepared 绑定独立；它们共享的实际数组仍由应用决定是否允许并发。
+
+任意 JIT native Graph、数学 primitive/provider、结构控制和渲染资源尚不由此格式
+自动导出；未知操作或版本明确报错。buffer、模块和 runtime 的在途寿命合同同上。
 
 C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用其他 runtime 的
 句柄或已释放句柄，会在访问后端内存前报告参数错误；复制切片必须在声明的分配

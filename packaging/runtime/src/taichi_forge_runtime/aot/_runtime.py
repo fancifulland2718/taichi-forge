@@ -1,8 +1,9 @@
 """AOT resource owners and ordinary entry binding, independent of the DSL.
 
 This consumer covers ordinary kernels/CGraphs and primitive or tensor ndarrays.
-Native recordings, providers, structure arrays and external-memory imports are
-not exposed here yet. Host transfers are explicit; kernel calls use device
+Fixed recordings support loaded kernels and native buffer copy/fill operations;
+providers, structure arrays and external-memory imports are not exposed here
+yet. Host transfers are explicit; kernel calls use device
 allocations directly. Close resources explicitly or use Runtime as a context
 manager. ``bind()`` reuses Python argument descriptors across submissions.
 """
@@ -143,7 +144,9 @@ class Runtime:
             if "\0" in path:
                 raise ValueError("AOT module path contains NUL")
             handle = self._api.call(self._api.ti_load_aot_module, self._handle, os.fsencode(path))
-            return Module(self, handle)
+            module = Module(self, handle)
+            module._source_path = Path(path)
+            return module
 
     def ndarray(self, dtype, shape, *, element_shape=()):
         with self._lock:
@@ -338,6 +341,32 @@ class Module(_Resource):
     """Own loaded code and module-local resources; entries retain this owner."""
 
     _kind = "module"
+
+    def execution_plan(self, name):
+        """Read a named persistent plan from a directory or .tcm module."""
+        from urllib.parse import quote
+        from ._plan import ExecutionPlan
+
+        with self._runtime._lock:
+            self._check()
+            _name(name)
+            relative = "executions/" + quote(name, safe="-_.") + ".json"
+            if self._source_path.is_dir():
+                return ExecutionPlan.load(self._source_path / relative)
+            from zipfile import ZipFile
+
+            with ZipFile(self._source_path) as archive:
+                return ExecutionPlan.from_json(archive.read(relative))
+
+    def prepare_execution(self, plan, arguments, *, gradients=None):
+        """Prepare a named or explicit ExecutionPlan for repeated native replay."""
+        from ._plan import ExecutionPlan
+
+        if isinstance(plan, str):
+            plan = self.execution_plan(plan)
+        if not isinstance(plan, ExecutionPlan):
+            raise TypeError("Expected an ExecutionPlan or an exported plan name")
+        return plan.prepare(self, arguments, gradients=gradients)
 
     def kernel(self, name):
         with self._runtime._lock:

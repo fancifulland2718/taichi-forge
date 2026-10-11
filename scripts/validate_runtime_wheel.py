@@ -28,6 +28,7 @@ AOT_CONSUMER_FILES = (
     f"{PACKAGE}/aot/__init__.py",
     f"{PACKAGE}/aot/_runtime.py",
     f"{PACKAGE}/aot/_c_api.py",
+    f"{PACKAGE}/aot/_plan.py",
 )
 AOT_CONSUMER_SYMBOLS = frozenset({
     "ti_get_last_error", "ti_set_last_error", "ti_create_runtime", "ti_destroy_runtime", "ti_wait",
@@ -36,6 +37,7 @@ AOT_CONSUMER_SYMBOLS = frozenset({
     "ti_launch_kernel_with_gradients_ext", "ti_launch_compute_graph_with_gradients_ext",
     "ti_prepare_kernel_ext", "ti_prepare_compute_graph_ext", "ti_launch_prepared_ext",
     "ti_destroy_prepared_ext", "ti_get_prepared_execution_info_ext",
+    "ti_prepare_execution_plan_ext",
 })
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 FORBIDDEN_VENDOR_RUNTIME = re.compile(

@@ -2,7 +2,6 @@ import datetime
 import hashlib
 import os
 from contextlib import contextmanager
-from glob import glob
 from pathlib import Path
 from shutil import rmtree
 from tempfile import mkdtemp
@@ -297,6 +296,7 @@ class Module:
         self._arch = arch
         self._kernels = []
         self._exported_kernels = {}
+        self._execution_plans = {}
         self._fields = {}
         rtm = impl.get_runtime()
         rtm._finalize_root_fb_for_aot()
@@ -404,6 +404,28 @@ class Module:
         self._aot_builder.add_graph(name, graph._compiled_graph)
         self._content += ["cgraph:" + name]
 
+    def add_execution_plan(self, name, plan):
+        """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
+
+        Export referenced kernels first. The plan owns no live Python callback,
+        Graph definition or device handle; the consumer binds arrays and records
+        native execution at its cold boundary.
+        """
+        from taichi_forge_runtime.aot import ExecutionPlan
+
+        if not isinstance(name, str) or not name or "\0" in name:
+            raise ValueError("Execution plan name must be a nonempty string without NUL")
+        if not isinstance(plan, ExecutionPlan):
+            raise TypeError("Expected an ExecutionPlan")
+        snapshot = ExecutionPlan.from_json(plan.to_json())
+        missing = set(snapshot.kernel_entries) - self._exported_kernels.keys()
+        if missing:
+            raise ValueError("Execution plan references unexported kernels: " + ", ".join(sorted(missing)))
+        if name in self._execution_plans:
+            raise ValueError("Duplicate execution plan export: " + name)
+        self._execution_plans[name] = snapshot
+        self._content.append("execution:" + name)
+
     @contextmanager
     def add_kernel_template(self, kernel_fn):
         """Add a taichi kernel (with template parameters) to the AOT module.
@@ -450,6 +472,11 @@ class Module:
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir.as_posix()
         self._aot_builder.dump(filepath, "")
+        if self._execution_plans:
+            directory = output_dir / "executions"
+            directory.mkdir(exist_ok=True)
+            for name, plan in self._execution_plans.items():
+                plan.save(directory / (quote(name, safe="-_.") + ".json"))
         with open(f"{filepath}/__content__", "w") as f:
             f.write("\n".join(self._content))
         with open(f"{filepath}/__version__", "w") as f:
@@ -473,7 +500,9 @@ class Module:
 
         # Package all artifacts into a zip archive and attach contend data.
         with ZipFile(tcm_path, "w") as z:
-            for path in glob(f"{temp_dir}/*", recursive=True):
+            for path in sorted(Path(temp_dir).rglob("*")):
+                if not path.is_file():
+                    continue
                 os.utime(path, (fixed_time, fixed_time))
                 z.write(path, Path.relative_to(Path(path), temp_dir))
 

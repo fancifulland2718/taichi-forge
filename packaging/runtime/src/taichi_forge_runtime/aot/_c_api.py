@@ -172,6 +172,10 @@ class Api:
                 Handle,
             ),
             "ti_launch_prepared_ext": ([Handle, Handle], None),
+            "ti_prepare_execution_plan_ext": (
+                [Handle, Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
+                Handle,
+            ),
             "ti_destroy_prepared_ext": ([Handle, Handle], None),
             "ti_get_prepared_execution_info_ext": ([Handle, Handle, C.POINTER(PreparedInfo)], None),
             "ti_launch_kernel_with_gradients_ext": (

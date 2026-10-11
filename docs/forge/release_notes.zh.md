@@ -37,6 +37,11 @@
   prepared 对象失效。尚未覆盖混合 provider 或通用新场景特化，详见
   [AOT SDK 合同](aot_sdk.zh.md)。
 
+- 带版本的 `ExecutionPlan` 可持久化已导出 kernel 与设备 copy/32 位 fill 的顺序，
+  绑定后准备成一个 CPU/CUDA/Vulkan 原生执行对象；目录和 `.tcm` 均保存描述。
+  LLVM AOT 已通过 Vulkan 使用的同一虚拟目录层按需读取归档，无需解压到磁盘。
+  此首批顺序格式尚未导出数学 primitive、provider、结构控制或渲染资源。
+
 - 修复 Vulkan 嵌套 ArgPack 的 descriptor 布局不匹配。compute pipeline 保留旧
   shader 的模块级描述符合同，新 ArgPack 编译只在实际使用时声明普通参数 buffer；
   graphics/ray 继续按入口反射。

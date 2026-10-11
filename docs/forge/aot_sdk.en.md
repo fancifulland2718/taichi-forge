@@ -113,7 +113,7 @@ waits and closes its children; later calls on them fail. Prefer explicit lifetim
 management to GC timing. Optional `library_path` and `runtime_path` select the
 shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
 core/resource set. The Python consumer currently excludes structure arrays,
-textures, mixed native recordings, providers and external-memory imports; the C/C++
+textures, arbitrary native Graphs, providers and external-memory imports; the C/C++
 capabilities below are separate. Windows x64 checks cover all three backends,
 forward/reverse work and both AOT/JIT loading orders.
 
@@ -143,10 +143,51 @@ embeds LLVM and has no Python or external LLVM DLL import. Linux/macOS SDK
 deployment has not been validated by this check. Initialization/loading timings
 printed by this small example are diagnostics, not application benchmarks.
 
-Native Graph recordings, providers and their external dependencies are not
-serialized by this AOT path. Keep buffers, modules and the runtime alive while
-work uses them. The fixed preparation API above records loaded ordinary kernels;
-it does not serialize or rebuild mixed native/provider recipes.
+`ExecutionPlan` provides a version 1 persistent sequence of exported kernels,
+device buffer copies and 32-bit pattern fills. Export the referenced kernels
+before adding the description:
+
+```python
+from taichi_forge_runtime.aot import ExecutionPlan
+
+exported.add_execution_plan("step", ExecutionPlan([
+    {"kind": "kernel", "entry": "forward", "arguments": ["x", "scratch"]},
+    {"kind": "copy", "source": "scratch", "destination": "y"},
+    {"kind": "fill32", "destination": "scratch", "value": 0},
+]))
+exported.save("module")
+# Consumer: loaded is the result of runtime.load_module(...).
+prepared = loaded.prepare_execution("step", {"x": x, "scratch": scratch, "y": y})
+prepared.run()
+runtime.wait()
+```
+
+Descriptions live under `executions/` in directory and `.tcm` modules, or can be
+saved separately with `ExecutionPlan.save/load`. C/C++ passes the same JSON
+document to `ti_prepare_execution_plan_ext`, with named arguments and explicit
+gradients through `TiNamedNdArrayBinding`. Preparation checks all bindings, ranges
+and operations before recording native commands; it executes no mathematical
+work or buffer modification. Warm replay submits one prepared handle without
+parsing JSON or calling Python for each node.
+
+CPU/CUDA LLVM modules and Vulkan modules can load directly from `.tcm` files.
+The loader retains compressed archive bytes and reads kernel payloads on demand;
+it does not extract the whole archive to a temporary directory.
+
+`copy` defaults to the source's remaining logical bytes; optional
+`source_offset`, `destination_offset` and `size_bytes` select nonoverlapping
+ranges. `fill32.value` is a uint32 bit pattern; optional `offset/size_bytes`
+select a region, defaulting to the remaining logical destination. Fill offsets
+and sizes require 4-byte alignment; Vulkan copies also require that alignment.
+Memory operations accept primitive/tensor ndarrays, including ownership checks
+for arrays referenced only by copy/fill. Contents can change between replays;
+new storage identities or shapes require preparation again. Separate prepared
+bindings are independent, but application-owned arrays may still alias.
+
+This format does not automatically export arbitrary JIT native Graphs,
+mathematical primitives/providers, structured control or rendering resources.
+Unknown versions and operations report errors. The buffer/module/runtime
+in-flight lifetime contract above still applies.
 
 Memory handles returned by C API allocation/import functions belong to that
 runtime. Using another runtime's handle or a freed handle reports an argument

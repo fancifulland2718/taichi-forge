@@ -42,6 +42,14 @@ lifetimes. The entries below describe the changes.
   cover mixed providers or generic scene specialization; see the
   [AOT SDK contract](aot_sdk.en.md).
 
+- A versioned `ExecutionPlan` can persist exported kernels interleaved with
+  device buffer copies and 32-bit fills, then prepare one native CPU/CUDA/Vulkan
+  execution with fixed bindings. Descriptions are included in directory and
+  `.tcm` modules. LLVM AOT now reads archives through the same lazy virtual
+  directory layer as Vulkan, without extracting the archive to disk. This
+  initial sequence format does not yet export mathematical primitives,
+  providers, structured control or rendering resources.
+
 - Fixed Vulkan nested ArgPack descriptor layout failures. Compute pipelines
   preserve the module-wide descriptor contract for older shaders; new ArgPack
   code emits the ordinary argument buffer only when it is used. Graphics/ray

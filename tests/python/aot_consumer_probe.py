@@ -65,6 +65,10 @@ def main(arch, module_path, order):
 
     runtime = aot.Runtime(arch)
     module = runtime.load_module(module_path)
+    if order == "pure":
+        from aot_execution_probe import check_execution
+
+        check_execution(runtime, module_path)
     x, y, dx, dy = [runtime.ndarray("f32", 4) for _ in range(4)]
     x.write(floats([1, 2, 3, 4]))
     forward, backward = module.kernel("forward"), module.kernel("backward")

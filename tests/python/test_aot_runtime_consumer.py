@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from zipfile import ZipFile
 
 import pytest
 import taichi_forge as ti
@@ -58,7 +59,23 @@ def test_lightweight_aot_consumer_and_jit_coexistence(tmp_path):
     builder.dispatch(forward, x, y)
     builder.dispatch(forward.grad, x, y)
     module.add_graph("differentiate", builder.compile())
-    module.save(tmp_path)
+    module.add_execution_plan(
+        "snapshot",
+        ti.aot.ExecutionPlan(
+            [
+                {"kind": "fill32", "destination": "dx", "value": 0},
+                {"kind": "fill32", "destination": "dy", "value": 1065353216},
+                {"kind": "kernel", "entry": "forward", "arguments": ["x", "y"]},
+                {"kind": "copy", "source": "y", "destination": "snapshot"},
+                {"kind": "kernel", "entry": "backward", "arguments": ["x", "y"]},
+            ]
+        ),
+    )
+    # Emit once: the LLVM producer currently consumes its compiled IR on dump.
+    # The directory and archive checks must read the identical generation.
+    module.archive(str(tmp_path / "packed.tcm"))
+    with ZipFile(tmp_path / "packed.tcm") as archive:
+        archive.extractall(tmp_path)
 
     root = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()
