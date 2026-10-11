@@ -29,6 +29,7 @@ See [external providers](external_hardware_providers.en.md),
 | Task | Start here |
 | --- | --- |
 | Run a kernel and reuse a Graph | [Quick start](quickstart.en.md) |
+| Deploy AOT without Python | [Standalone C/C++ SDK](aot_sdk.en.md) |
 | Select the basic AMD GPU backend | [ROCm/HIP setup and limits](rocm_backend.en.md) |
 | Find a public symbol or supported input | [API reference](forge_api_reference.en.md) |
 | Choose initialization/compile settings | [Options](forge_options.en.md), [compile/cache](cache_compile.en.md), [trade-offs](compilation_tradeoffs.en.md) |

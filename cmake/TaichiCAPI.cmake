@@ -217,6 +217,8 @@ else()
   install_taichi_c_api(Distribute c_api)
 endif()
 
+include(cmake/TaichiSDK.cmake)
+
 if(TI_WITH_STATIC_C_API)
     # Traditional C++ static library is simply an archive of various .o files, resulting in a huge
     # file mixed with thousands of resolved or unresolved symbols.

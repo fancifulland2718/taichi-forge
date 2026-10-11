@@ -26,6 +26,7 @@ vendor 库及 Vulkan shader 编译 addon 另有显式依赖。
 | 任务 | 文档 |
 | --- | --- |
 | 执行 kernel 并复用 Graph | [快速开始](quickstart.zh.md) |
+| 脱离 Python 部署 AOT | [独立 C/C++ SDK](aot_sdk.zh.md) |
 | 选择基础 AMD GPU 后端 | [ROCm/HIP 配置与限制](rocm_backend.zh.md) |
 | 查找公共符号与输入限制 | [API 参考](forge_api_reference.zh.md) |
 | 选择初始化与编译配置 | [配置项](forge_options.zh.md)、[编译缓存](cache_compile.zh.md)、[取舍](compilation_tradeoffs.zh.md) |
