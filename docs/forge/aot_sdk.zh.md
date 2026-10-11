@@ -45,12 +45,17 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 在途工作结束前需保持 buffer、模块和 runtime 存活；普通 CGraph 支持不等于
 原生 recording 支持。
 
-当前 CPU/CUDA field 产物仍内嵌生产端资源 ID。tree ID 重叠的模块需使用独立
-runtime，冲突加载会在 tree 初始化前拒绝。CPU/CUDA 模块关闭会等待已提交工作完成，
-退休其代码注册并释放已降为普通循环的 dense tree，后续加载可复用这些 ID。
-sparse/依赖 element list 的 tree 存储仍保留到 runtime 关闭。Vulkan dense AOT
-资源已使用模块局部映射，支持在同一 runtime 中独立加载多个模块。模块必须先于
-所属 runtime 关闭。
+仅包含 dense field 与 serial/range task 的 CPU/CUDA 导出使用 schema 5
+（`resource_binding="dense_v1"`）。模块压紧所需资源闭包，在 field 分配前预留独立
+的 runtime ID。同一产物可在一个 runtime 中加载多份，前向和梯度存储彼此独立。
+bitcode 在生成设备代码前解析显式 tree 符号；PTX 在暴露 kernel 前绑定一次模块
+常量。kernel 参数和普通 Graph 布局不变。
+
+CPU/CUDA 模块关闭会等待已提交工作完成，退休代码注册，释放已降为普通循环的
+dense tree 及预留 ID。旧产物和需要 sparse/list/mesh/quantized 操作的模块仍使用
+生产端 ID；ID 重叠时需使用独立 runtime，冲突在初始化前拒绝。sparse/依赖 element
+list 的 tree 存储仍保留到 runtime 关闭。Vulkan dense AOT 也使用模块局部映射。
+模块必须先于所属 runtime 关闭。
 
 CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令也支持
 `--artifact-format ptx`；默认仍为 LLVM bitcode。PTX 在生产端完成用户 kernel
@@ -61,10 +66,11 @@ CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令
 capability 80、PTX 7.0，面向 Ampere 及更新设备；已知部署设备时可指定更具体的
 目标，例如 compute capability 120 使用 PTX 8.7。选择更高目标会缩小可用设备
 范围。导出专用的
-`compile_options` 已固化到 PTX 中。schema 4 记录目标、入口、寄存器上限、数值
+`compile_options` 已固化到 PTX 中。schema 4/5 记录目标、入口、寄存器上限、数值
 策略和载荷校验和，并将载荷与启动元数据绑定。缺失或损坏的 PTX 不会回退读取旧
 bitcode；同一模块内失败的 kernel 查询保持失败，替换产物后需重新加载模块。
-旧 schema 2 文本和 schema 3 bitcode 仍可读取。
+schema 5 还会校验 dense 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
+及 schema 4 PTX 仍可读取。
 
 Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、
 反向和普通 CGraph 部署。这不代表已获得运行加速，也不改变上述 field 资源及

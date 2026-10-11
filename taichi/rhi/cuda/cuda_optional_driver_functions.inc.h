@@ -2,6 +2,13 @@
 // Capability checks gate every call site before invoking these wrappers.
 
 PER_CUDA_OPTIONAL_FUNCTION(stream_query, cuStreamQuery, void *);
+// Needed only by relocatable PTX AOT, not by ordinary kernel launches.
+PER_CUDA_OPTIONAL_FUNCTION(module_get_global,
+                           cuModuleGetGlobal_v2,
+                           void **,
+                           std::size_t *,
+                           void *,
+                           const char *);
 
 PER_CUDA_OPTIONAL_FUNCTION(mem_pool_create,
                            cuMemPoolCreate,

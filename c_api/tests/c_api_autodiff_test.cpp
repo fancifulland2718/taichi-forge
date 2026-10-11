@@ -118,7 +118,7 @@ class AotAutodiffTest : public CapiTest {
     ASSERT_TAICHI_SUCCESS();
   }
 
-  void run_field(TiArch arch) {
+  void run_field(TiArch arch, bool relocatable = true) {
     if (!ti::is_arch_available(arch))
       GTEST_SKIP();
     const char *path = std::getenv("TAICHI_AOT_FOLDER_PATH");
@@ -135,7 +135,7 @@ class AotAutodiffTest : public CapiTest {
     ASSERT_TAICHI_SUCCESS();
     readback.push_arg(output);
     graph["out"] = output;
-    if (arch == TI_ARCH_X64 || arch == TI_ARCH_CUDA) {
+    if (!relocatable && (arch == TI_ARCH_X64 || arch == TI_ARCH_CUDA)) {
       graph["seed"] = 1.0f;
       graph.launch();
       runtime.wait();
@@ -178,6 +178,41 @@ class AotAutodiffTest : public CapiTest {
         }
       }
     }
+    if (relocatable) {
+      // Every artifact uses local roots [0, N), but independently loaded
+      // modules must retain distinct primal and adjoint storage.
+      graph["seed"] = 1.0f;
+      graph.launch();
+      for (float seed : {-0.5f, 0.25f}) {
+        auto second = runtime.load_aot_module(path);
+        ASSERT_TRUE(second.is_valid());
+        ASSERT_TAICHI_SUCCESS();
+        auto second_graph = second.get_compute_graph("differentiate");
+        second_graph["seed"] = seed;
+        second_graph["out"] = output;
+        second_graph.launch();
+        runtime.wait();
+        ASSERT_TAICHI_SUCCESS();
+        std::vector<float> actual(8);
+        output.read(actual);
+        for (int i = 0; i < 4; ++i) {
+          const float x = i + 1;
+          EXPECT_FLOAT_EQ(actual[i + 4], seed * (3 * x * x + 2));
+        }
+        // Closing a loaded peer after a submitted read also exercises the
+        // cold synchronization and resource-ID reuse path.
+        second_graph.launch();
+        second.destroy();
+        readback.launch();
+        runtime.wait();
+        ASSERT_TAICHI_SUCCESS();
+        output.read(actual);
+        for (int i = 0; i < 4; ++i) {
+          const float x = i + 1;
+          EXPECT_FLOAT_EQ(actual[i + 4], 3 * x * x + 2);
+        }
+      }
+    }
     if (arch == TI_ARCH_X64 || arch == TI_ARCH_CUDA) {
       // Retirement waits for submitted work and releases this module's dense
       // roots. The same producer IDs can then be loaded in the same runtime.
@@ -211,39 +246,6 @@ class AotAutodiffTest : public CapiTest {
           const float x = i + 1;
           EXPECT_FLOAT_EQ(actual[i], x * x * x + 2 * x);
           EXPECT_FLOAT_EQ(actual[i + 4], seed * (3 * x * x + 2));
-        }
-      }
-    }
-    if (arch == TI_ARCH_VULKAN) {
-      // Every artifact uses local roots [0, N), but independently loaded
-      // modules must retain distinct primal and adjoint storage.
-      graph["seed"] = 1.0f;
-      graph.launch();
-      for (float seed : {-0.5f, 0.25f}) {
-        auto second = runtime.load_aot_module(path);
-        auto second_graph = second.get_compute_graph("differentiate");
-        second_graph["seed"] = seed;
-        second_graph["out"] = output;
-        second_graph.launch();
-        runtime.wait();
-        ASSERT_TAICHI_SUCCESS();
-        std::vector<float> actual(8);
-        output.read(actual);
-        for (int i = 0; i < 4; ++i) {
-          const float x = i + 1;
-          EXPECT_FLOAT_EQ(actual[i + 4], seed * (3 * x * x + 2));
-        }
-        // Closing a loaded peer after a submitted read also exercises the
-        // cold synchronization and resource-ID reuse path.
-        second_graph.launch();
-        second.destroy();
-        readback.launch();
-        runtime.wait();
-        ASSERT_TAICHI_SUCCESS();
-        output.read(actual);
-        for (int i = 0; i < 4; ++i) {
-          const float x = i + 1;
-          EXPECT_FLOAT_EQ(actual[i + 4], 3 * x * x + 2);
         }
       }
     }
@@ -283,4 +285,11 @@ TEST_F(AotAutodiffTest, CpuMemoryRetirement) {
     array.destroy();
     ASSERT_TAICHI_SUCCESS();
   }
+}
+
+TEST_F(AotAutodiffTest, FieldCpuLegacy) {
+  run_field(TI_ARCH_X64, false);
+}
+TEST_F(AotAutodiffTest, FieldCudaLegacy) {
+  run_field(TI_ARCH_CUDA, false);
 }

@@ -44,7 +44,7 @@ class LlvmAotModule final : public aot::Module {
   }
 
   size_t get_num_snode_trees() {
-    return cache_reader_->get_num_snode_trees();
+    return snode_tree_ids_.size();
   }
 
   const std::vector<int> &get_snode_tree_ids() const {
@@ -93,6 +93,8 @@ class LlvmAotModule final : public aot::Module {
   LlvmAotMetadata metadata_;
   std::unordered_map<std::string, std::string> artifact_failures_;
   std::vector<int> snode_tree_ids_;
+  std::map<int, int> tree_bindings_;
+  std::vector<int> reserved_tree_ids_;
 
   // To prevent repeated SNodeTree initialization
   std::unordered_set<int> initialized_snode_tree_ids;

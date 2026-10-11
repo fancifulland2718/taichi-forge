@@ -51,14 +51,21 @@ Native Graph recordings, providers and their external dependencies are not
 serialized by this AOT path. Keep buffers, modules and the runtime alive while
 work uses them; ordinary CGraph support does not imply native recording support.
 
-Current CPU/CUDA field artifacts embed producer resource IDs. Modules with
-overlapping tree IDs require separate runtimes; a conflicting load is rejected
-before tree initialization. Destroying a CPU/CUDA module waits for submitted
-work, retires its executable registrations and releases its demoted dense
-trees, allowing a later module to reuse those IDs. Sparse/list-managed tree
-storage still lives until runtime teardown. Vulkan dense AOT resources use
-module-local mappings and support independently loaded modules in the same
-runtime. Always destroy modules before their runtime.
+CPU/CUDA exports containing only dense fields and serial/range tasks use schema
+5 (`resource_binding="dense_v1"`). The module compacts its required resource
+closure and reserves independent runtime IDs before field allocation. Two
+instances of the same artifact can coexist in one runtime, with independent
+primal and gradient storage. Bitcode resolves explicit tree symbols before code
+generation; PTX binds per-module constants once before exposing a kernel. The
+kernel argument and ordinary Graph layouts are unchanged.
+
+Destroying a CPU/CUDA module waits for submitted work, retires its executable
+registrations and releases its demoted dense trees and reservations. Legacy
+artifacts and modules requiring sparse/list/mesh/quantized operations retain
+producer IDs; overlapping IDs require separate runtimes and are rejected before
+initialization. Sparse/list-managed storage still lives until runtime teardown.
+Vulkan dense AOT resources also use module-local mappings. Always destroy
+modules before their runtime.
 
 CUDA exporters can select `ti.aot.Module(artifact_format="ptx")`, or pass
 `--artifact-format ptx` to the example exporter. The default remains LLVM
@@ -72,11 +79,12 @@ example. The default target is compute capability 80 with PTX 7.0 (Ampere and
 newer); select the deployment device explicitly for a more specific target.
 For example, compute capability 120 uses PTX 8.7. Selecting a
 newer target narrows the device range. Export-only `compile_options` are baked
-into PTX. Schema 4 records the target, entry points, register limit, numerical
+into PTX. Schemas 4/5 record the target, entry points, register limit, numerical
 policy and payload checksum, and binds the payloads to their launch metadata.
 Missing or damaged PTX never falls back to a stale bitcode file. A failed kernel
 lookup remains failed within that module; reload the module after replacing
-an artifact. Legacy schema 2 text and schema 3 bitcode remain readable.
+an artifact. Schema 5 additionally checks the dense resource relocation contract.
+Legacy schema 2 text, schema 3 bitcode and schema 4 PTX remain readable.
 
 PTX deployment was checked on Windows CUDA with dense-field and scalar/vector/
 matrix ndarray forward/reverse kernels and ordinary CGraphs. This does not

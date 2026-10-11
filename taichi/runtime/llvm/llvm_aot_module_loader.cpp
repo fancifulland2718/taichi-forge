@@ -7,6 +7,7 @@
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
+#include "taichi/runtime/llvm/aot_snode_relocation.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
@@ -41,10 +42,11 @@ LlvmAotModule::LlvmAotModule(
 
   if (metadata.kernel_format == "ptx") {
     TI_ERROR_IF(arch() != Arch::cuda, "CUDA PTX artifacts require a CUDA runtime");
-    TI_ERROR_IF(aot_artifact_sha256(read_aot_artifact(
-                    taichi::join_path(module_path, "metadata.tcb"))) !=
-                    metadata.abi_sha256,
-                "CUDA PTX AOT launch ABI checksum mismatch");
+  }
+  if (metadata.kernel_format == "ptx" || !metadata.resource_binding.empty()) {
+    TI_ERROR_IF(aot_artifact_sha256(read_aot_artifact(taichi::join_path(
+                    module_path, "metadata.tcb"))) != metadata.abi_sha256,
+                "LLVM AOT launch ABI checksum mismatch");
   }
 
   // Select exactly the declared representation. Missing/corrupt payloads must
@@ -75,6 +77,63 @@ LlvmAotModule::LlvmAotModule(
 
   const std::string graph_path = fmt::format("{}/graphs.tcb", module_path);
   read_from_binary_file(graphs_, graph_path);
+  const bool relocatable = metadata.resource_binding == "dense_v1";
+  // Validate the complete resource closure before reserving or allocating any
+  // tree. Legacy artifacts retain their original ID collision contract.
+  for (std::size_t i = 0; i < snode_tree_ids_.size(); ++i) {
+    const int id = snode_tree_ids_[i];
+    LlvmOfflineCache::FieldCacheData field;
+    TI_ERROR_IF(
+        !cache_reader_->get_field_cache(field, id) || field.tree_id != id,
+        "Invalid LLVM AOT field metadata for tree {}", id);
+    if (relocatable) {
+      TI_ERROR_IF(id != i ||
+                      !executor_->get_config().demote_dense_struct_fors ||
+                      field.tree_generation == 0 || field.snode_metas.empty(),
+                  "Invalid relocatable LLVM AOT dense tree {}", id);
+      std::vector<bool> seen(field.snode_metas.size(), false);
+      bool found_root = false;
+      for (const auto &node : field.snode_metas) {
+        TI_ERROR_IF(
+            (node.type != SNodeType::root && node.type != SNodeType::dense &&
+             node.type != SNodeType::place) ||
+                node.runtime_local_id < 0 ||
+                std::size_t(node.runtime_local_id) >= seen.size() ||
+                seen[node.runtime_local_id],
+            "Invalid relocatable LLVM AOT dense node in tree {}", id);
+        seen[node.runtime_local_id] = true;
+        found_root |= node.type == SNodeType::root &&
+                      node.id == field.root_id &&
+                      node.runtime_local_id == field.root_runtime_local_id;
+      }
+      TI_ERROR_IF(!found_root, "Missing relocatable LLVM AOT root in tree {}",
+                  id);
+    } else {
+      TI_ERROR_IF(executor_->has_snode_tree_binding(id),
+                  "LLVM AOT SNode tree id {} conflicts with an active module; "
+                  "load this artifact in a separate runtime.",
+                  id);
+    }
+  }
+  if (relocatable) {
+    reserved_tree_ids_ =
+        executor_->reserve_aot_snode_tree_ids(snode_tree_ids_.size());
+  } else {
+    // Even native callers that defer field allocation must not let a second
+    // module claim an ID already owned by this artifact.
+    reserved_tree_ids_ = snode_tree_ids_;
+    executor_->reserve_aot_snode_tree_ids(reserved_tree_ids_);
+  }
+  try {
+    for (std::size_t i = 0; i < snode_tree_ids_.size(); ++i) {
+      tree_bindings_.emplace(snode_tree_ids_[i], relocatable
+                                                     ? reserved_tree_ids_[i]
+                                                     : snode_tree_ids_[i]);
+    }
+  } catch (...) {
+    executor_->release_aot_snode_tree_ids(reserved_tree_ids_);
+    throw;
+  }
 }
 
 LlvmAotModule::~LlvmAotModule() {
@@ -83,11 +142,15 @@ LlvmAotModule::~LlvmAotModule() {
   try {
     executor_->synchronize();
     kernel_launcher_->retire_all_kernels();
-    for (int tree_id : initialized_snode_tree_ids) {
+    for (const auto &[logical, physical] : tree_bindings_) {
+      if (!is_snode_tree_initialized(physical))
+        continue;
       LlvmOfflineCache::FieldCacheData field;
-      TI_ASSERT(cache_reader_->get_field_cache(field, tree_id));
+      TI_ASSERT(cache_reader_->get_field_cache(field, logical));
+      field.tree_id = physical;
       executor_->destroy_dense_aot_snode_tree(field);
     }
+    executor_->release_aot_snode_tree_ids(reserved_tree_ids_);
   } catch (const std::exception &error) {
     TI_WARN("Failed to retire LLVM AOT resources: {}", error.what());
   } catch (const std::string &error) {
@@ -123,12 +186,34 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
                                      snode_tree_ids_.end(), tree_id),
                 "LLVM AOT kernel {} is missing SNodeTree {}", name, tree_id);
   }
+  if (!metadata_.resource_binding.empty()) {
+    TI_ERROR_IF(
+        !std::is_sorted(loaded.used_snode_tree_ids.begin(),
+                        loaded.used_snode_tree_ids.end()) ||
+            std::adjacent_find(loaded.used_snode_tree_ids.begin(),
+                               loaded.used_snode_tree_ids.end()) !=
+                loaded.used_snode_tree_ids.end(),
+        "Relocatable LLVM AOT tree dependencies must be sorted and unique");
+    for (const auto &task : loaded.compiled_data.tasks) {
+      TI_ERROR_IF(task.task_type != OffloadedTaskType::serial &&
+                      task.task_type != OffloadedTaskType::range_for,
+                  "Relocatable LLVM AOT requires demoted dense tasks");
+    }
+    if (loaded.compiled_data.module) {
+      std::map<int, int> bindings;
+      for (int id : loaded.used_snode_tree_ids)
+        bindings.emplace(id, tree_bindings_.at(id));
+      resolve_aot_tree_ids(*loaded.compiled_data.module, bindings);
+    }
+    for (int &id : loaded.used_snode_tree_ids)
+      id = tree_bindings_.at(id);
+  }
   return loaded;
 }
 
 std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel(
     const std::string &name) {
-  if (metadata_.kernel_format != "ptx") {
+  if (metadata_.kernel_format != "ptx" && metadata_.resource_binding.empty()) {
     return make_new_kernel_impl(name);
   }
   const auto failed = artifact_failures_.find(name);
@@ -145,8 +230,8 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel(
     // artifact failure path as decoding and allocation exceptions.
     diagnostic = error;
   }
-  auto message = fmt::format("Failed to load CUDA PTX AOT kernel {}: {}",
-                              name, diagnostic);
+  auto message =
+      fmt::format("Failed to load LLVM AOT kernel {}: {}", name, diagnostic);
   artifact_failures_.emplace(name, message);
   throw aot::ArtifactLoadError(message);
 }
@@ -162,6 +247,10 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     TI_ERROR_IF(it == metadata_.cuda_artifacts.end(),
                 "Missing CUDA PTX AOT manifest for kernel {}", name);
     const auto &item = it->second;
+    TI_ERROR_IF(!metadata_.resource_binding.empty() &&
+                    item.contract_sha256 != aot_cuda_contract_sha256(item),
+                "CUDA PTX AOT resource contract checksum mismatch for {}",
+                name);
     auto bytes = read_aot_artifact(taichi::join_path(module_path_, name + ".ptx"));
     TI_ERROR_IF(bytes.empty() || bytes.size() != item.size ||
                     aot_artifact_sha256(bytes) != item.sha256 ||
@@ -192,10 +281,23 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     artifact.max_registers = item.max_registers;
     artifact.fast_math = item.fast_math;
     artifact.llvm_opt_level = item.llvm_opt_level;
+    std::map<int, int> bindings;
+    for (int id : item.tree_relocations) {
+      const auto binding = tree_bindings_.find(id);
+      TI_ERROR_IF(
+          metadata_.resource_binding.empty() ||
+              binding == tree_bindings_.end() ||
+              !std::binary_search(kernel_cache.used_snode_tree_ids.begin(),
+                                  kernel_cache.used_snode_tree_ids.end(),
+                                  binding->second) ||
+              !bindings.emplace(id, binding->second).second,
+          "Invalid CUDA PTX AOT resource relocation {}", id);
+    }
     auto data = std::move(kernel_cache).take_llvm_ckd_data();
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
     TI_ASSERT(launcher != nullptr);
-    const auto handle = launcher->register_cuda_artifact_kernel(data, artifact);
+    const auto handle =
+        launcher->register_cuda_artifact_kernel(data, artifact, bindings);
     FunctionType fn = [handle, launcher](LaunchContextBuilder &ctx) {
       launcher->launch_llvm_kernel(handle, ctx);
     };
@@ -227,6 +329,7 @@ std::unique_ptr<aot::Field> LlvmAotModule::make_new_field(
   LlvmOfflineCache::FieldCacheData loaded;
   auto ok = cache_reader_->get_field_cache(loaded, snode_tree_id);
   TI_ERROR_IF(!ok, "Failed to load field with id={}", snode_tree_id);
+  loaded.tree_id = tree_bindings_.at(snode_tree_id);
 
   return std::make_unique<llvm_aot::FieldImpl>(std::move(loaded));
 }

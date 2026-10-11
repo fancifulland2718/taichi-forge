@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -53,6 +54,7 @@ struct CUDAKernelArtifact {
   JITModuleRole role{JITModuleRole::user_kernel};
   std::vector<char> payload;
   std::vector<std::string> entry_names;
+  std::vector<int> aot_tree_relocations;
   std::string target_identity;
   std::string provider_identity;
   int max_registers{0};
@@ -130,6 +132,8 @@ class JITModuleCUDA : public JITModule {
     TI_ASSERT(func != nullptr);
     return func;
   }
+
+  void bind_aot_tree_ids(const std::map<int, int> &bindings);
 
   void call(const std::string &name,
             const std::vector<void *> &arg_pointers,

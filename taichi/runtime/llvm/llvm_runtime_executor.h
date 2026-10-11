@@ -56,6 +56,10 @@ class LlvmRuntimeExecutor {
 
   // SNodeTree Allocation
   bool has_snode_tree_runtime_state(int tree_id) const;
+  bool has_snode_tree_binding(int tree_id) const;
+  std::vector<int> reserve_aot_snode_tree_ids(std::size_t count);
+  void reserve_aot_snode_tree_ids(const std::vector<int> &ids);
+  void release_aot_snode_tree_ids(const std::vector<int> &ids);
 
   void initialize_llvm_runtime_snodes(
       const LlvmOfflineCache::FieldCacheData &field_cache_data,
@@ -214,6 +218,7 @@ class LlvmRuntimeExecutor {
   std::uint64_t snode_tree_runtime_directory_growth_events_{0};
   std::unordered_map<int, ActiveSNodeTreeRuntimeState>
       active_snode_tree_runtime_states_;
+  std::unordered_set<int> reserved_aot_snode_tree_ids_;
   DeviceAllocationUnique preallocated_runtime_objects_allocs_ = nullptr;
   DeviceAllocationUnique preallocated_runtime_memory_allocs_ = nullptr;
   std::unordered_map<DeviceAllocationId, DeviceAllocation>

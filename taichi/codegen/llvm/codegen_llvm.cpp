@@ -11,6 +11,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
+#include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/program/extension.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
@@ -529,8 +530,7 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
         StructCompilerLLVM::get_llvm_element_type(module.get(), snode);
     element_size = tlctx->get_type_size(element_ty);
   }
-  common.set("snode_tree_id",
-             tlctx->get_constant(snode->get_snode_tree_id()));
+  common.set("snode_tree_id", get_runtime_tree_id(snode->get_snode_tree_id()));
   common.set("runtime_local_id",
              tlctx->get_constant(snode->runtime_local_id));
   common.set("snode_id", tlctx->get_constant(snode->id));
@@ -3334,6 +3334,14 @@ llvm::Value *TaskCodeGenLLVM::get_cuda_root_binding() {
                                     "cuda_snode_root_binding");
 }
 
+llvm::Value *TaskCodeGenLLVM::get_runtime_tree_id(int snode_tree_id) {
+  if (compile_config.llvm_aot_relocatable_roots) {
+    return LLVM::emit_aot_tree_id(*module, *builder, snode_tree_id,
+                                  compile_config.arch == Arch::cuda);
+  }
+  return tlctx->get_constant(snode_tree_id);
+}
+
 llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
   TI_ASSERT(func != nullptr);
   auto &function_roots = root_lookup_cache[func];
@@ -3373,7 +3381,7 @@ llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
     }
   } else {
     root = call("LLVMRuntime_get_snode_tree_root_unchecked", get_runtime(),
-                tlctx->get_constant(snode_tree_id));
+                get_runtime_tree_id(snode_tree_id));
   }
   function_roots.emplace(snode_tree_id, root);
   return root;

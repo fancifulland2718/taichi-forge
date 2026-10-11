@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CPU/CUDA dense field 的 AOT schema 5 在加载时绑定模块局部资源，同一 runtime
+  可独立加载多个实例，前向及梯度存储互不影响。bitcode 与 CUDA PTX 已验证
+  关闭/重载及普通 Graph；优化后不再使用的 PTX 重定位常量会被清除。
+  sparse/依赖 element list 的资源仍沿用原有绑定合同。
 - 修正 CUDA driver JIT 的寄存器上限和诊断缓冲区长度传参；显式寄存器限制现在
   按整数值传入 JIT/PTX AOT 共用加载路径，避免将宿主变量地址误作选项值。
 - 修复 Windows C API 对分离 runtime 对象库的链接及 Graph 纹理对象所有权，恢复

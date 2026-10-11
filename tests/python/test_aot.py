@@ -818,6 +818,47 @@ def test_llvm_aot_declares_bitcode_payload(tmp_path):
         assert caps == {"cuda_compute_capability": 80, "cuda_ptx_version": 70}
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_llvm_aot_dense_resource_contract(tmp_path):
+    value = ti.field(ti.f32, shape=4)
+    # Materialize storage first: compile-only AOT trees have no producer-side
+    # allocation. This test isolates the AOT/JIT compilation request contract.
+    ti.lang.impl.get_runtime().materialize()
+
+    @ti.kernel
+    def fill():
+        for i in value:
+            value[i] = i + 3
+
+    module = ti.aot.Module()
+    module.add_kernel(fill)
+    module.save(tmp_path)
+    metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
+    assert metadata["schema_version"] == 5
+    assert metadata["resource_binding"] == "dense_v1"
+    assert metadata["abi_sha256"] == hashlib.sha256((tmp_path / "metadata.tcb").read_bytes()).hexdigest()
+    # The AOT-only code contract must not leak into normal JIT compilation.
+    fill()
+    assert list(value.to_numpy()) == [3, 4, 5, 6]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, demote_dense_struct_fors=False)
+def test_llvm_aot_list_resources_retain_legacy_contract(tmp_path):
+    value = ti.field(ti.i32, shape=4)
+
+    @ti.kernel
+    def fill():
+        for i in value:
+            value[i] = i + 1
+
+    module = ti.aot.Module()
+    module.add_kernel(fill)
+    module.save(tmp_path)
+    metadata = json.loads((tmp_path / "aot_metadata.json").read_text())
+    assert metadata["schema_version"] == 3
+    assert not metadata["resource_binding"]
+
+
 def test_cuda_aot_capability_argument_validation():
     assert (
         ti.DeviceCapability.cuda_compute_capability(86)

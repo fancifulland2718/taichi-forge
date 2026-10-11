@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU/CUDA dense-field AOT schema 5 binds module-local resources at load time.
+  Independent instances can share one runtime without sharing primal/gradient
+  storage; close/reload and ordinary Graph replay are verified for bitcode and
+  CUDA PTX. Unused PTX relocation constants are removed after optimization.
+  Sparse/list-managed resources retain their legacy binding contract.
 - Correct CUDA driver JIT option encoding for register limits and diagnostic
   buffer lengths. Explicit register limits now reach the shared JIT/PTX AOT
   loader as integer values instead of host addresses.
@@ -47,7 +52,7 @@ lifetimes. The entries below describe the changes.
 - AOT exports explicit `kernel.grad` targets, including kernel templates and
   bound methods. Dense-field reverse kernels and ordinary AOT Graph replay are
   verified through separate C API processes on CPU, CUDA and Vulkan. LLVM AOT
-  includes referenced field layouts automatically and preserves nonconsecutive
+  includes referenced field layouts automatically and handles nonconsecutive
   tree IDs; Python Tape orchestration and Vulkan autodiff stacks are not added.
 - ZIP-backed artifact sources own the compressed bytes and decompress requested
   entries individually, avoiding an expanded copy of every archive entry.

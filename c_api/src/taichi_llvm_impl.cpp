@@ -104,12 +104,7 @@ TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
       dynamic_cast<taichi::lang::LLVM::LlvmAotModule *>(aot_module.get());
   TI_ASSERT(llvm_aot_module != nullptr);
   const auto tree_ids = llvm_aot_module->get_snode_tree_ids();
-  // Check every embedded producer ID before initializing any runtime tree.
-  for (int tree_id : tree_ids) {
-    TI_ERROR_IF(executor_->has_snode_tree_runtime_state(tree_id),
-                "LLVM AOT SNode tree id {} conflicts with an active module; "
-                "load this artifact in a separate runtime.", tree_id);
-  }
+  // The module has already validated and reserved its resource mapping.
   for (int tree_id : tree_ids) {
     auto *snode_tree = aot_module->get_snode_tree(std::to_string(tree_id));
     taichi::lang::LLVM::allocate_aot_snode_tree_type(

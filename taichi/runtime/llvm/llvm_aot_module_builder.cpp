@@ -9,6 +9,7 @@
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
+#include "taichi/runtime/llvm/aot_snode_relocation.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #endif
@@ -70,10 +71,51 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
 void LlvmAotModuleBuilder::dump(const std::string &output_dir,
                                 const std::string &filename) const {
   LlvmOfflineCacheFileWriter writer;
-  writer.set_data(std::move(cache_));
   LLVM::LlvmAotMetadata metadata;
   metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
   metadata.kernel_format = artifact_format_;
+  bool relocatable =
+      !cache_.fields.empty() && compile_config_.demote_dense_struct_fors &&
+      (arch_is_cpu(compile_config_.arch) || compile_config_.arch == Arch::cuda);
+  std::map<int, int> tree_mapping;
+  for (const auto &[id, field] : cache_.fields) {
+    tree_mapping.emplace(id, id);
+    for (const auto &node : field.snode_metas) {
+      relocatable &= node.type == SNodeType::root ||
+                     node.type == SNodeType::dense ||
+                     node.type == SNodeType::place;
+    }
+  }
+  for (const auto &[name, kernel] : cache_.kernels) {
+    for (const auto &task : kernel.compiled_data.tasks) {
+      relocatable &= task.task_type == OffloadedTaskType::serial ||
+                     task.task_type == OffloadedTaskType::range_for;
+    }
+  }
+  if (relocatable) {
+    int local_id = 0;
+    for (auto &[producer, local] : tree_mapping)
+      local = local_id++;
+    decltype(cache_.fields) fields;
+    for (auto &[producer, field] : cache_.fields) {
+      field.tree_id = tree_mapping.at(producer);
+      fields.emplace(field.tree_id, std::move(field));
+    }
+    cache_.fields = std::move(fields);
+    metadata.resource_binding = "dense_v1";
+  }
+  for (auto &[name, kernel] : cache_.kernels) {
+    if (relocatable) {
+      LLVM::remap_aot_tree_id_symbols(*kernel.compiled_data.module,
+                                      tree_mapping);
+      for (int &id : kernel.used_snode_tree_ids)
+        id = tree_mapping.at(id);
+    } else {
+      // Sparse/list-managed and legacy targets retain their embedded-ID ABI.
+      LLVM::resolve_aot_tree_ids(*kernel.compiled_data.module, tree_mapping);
+    }
+  }
+  writer.set_data(std::move(cache_));
   if (artifact_format_ == "ptx") {
 #if defined(TI_WITH_CUDA)
     metadata.schema_version = LLVM::kCudaPtxAotSchemaVersion;
@@ -87,6 +129,10 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       const int max_reg = compiled.cuda_max_registers < 0
                               ? compile_config_.gpu_max_reg
                               : compiled.cuda_max_registers;
+      auto &item = metadata.cuda_artifacts[kernel.kernel_key];
+      if (relocatable) {
+        LLVM::prepare_ptx_tree_relocations(*compiled.module);
+      }
       const auto artifact = compile_cuda_kernel_artifact(
           compiled.module, compile_config_, target, max_reg,
           JITModuleRole::user_kernel);
@@ -95,15 +141,17 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       out.write(artifact.payload.data(), artifact.code_size());
       out.close();
       TI_ERROR_IF(!out, "Failed to write CUDA AOT artifact {}.ptx", prefix);
-      auto &item = metadata.cuda_artifacts[kernel.kernel_key];
       item.sha256 = LLVM::aot_artifact_sha256(
           llvm::StringRef(artifact.payload.data(), artifact.code_size()));
       item.size = artifact.code_size();
       item.entry_names = artifact.entry_names;
+      item.tree_relocations = artifact.aot_tree_relocations;
       item.target_identity = artifact.target_identity;
       item.max_registers = artifact.max_registers;
       item.fast_math = artifact.fast_math;
       item.llvm_opt_level = artifact.llvm_opt_level;
+      if (relocatable)
+        item.contract_sha256 = LLVM::aot_cuda_contract_sha256(item);
       return artifact.code_size();
     });
     metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
@@ -113,6 +161,11 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
 #endif
   } else {
     writer.dump(output_dir, LlvmOfflineCache::Format::BC);
+  }
+  if (relocatable) {
+    metadata.schema_version = LLVM::kRelocatableLlvmAotSchemaVersion;
+    metadata.abi_sha256 = LLVM::aot_artifact_sha256(
+        LLVM::read_aot_artifact(taichi::join_path(output_dir, "metadata.tcb")));
   }
   if (compile_config_.arch == Arch::cuda) {
     for (const auto capability : {
@@ -203,9 +256,12 @@ void LlvmAotModuleBuilder::add_field_per_backend(const std::string &identifier,
 
 LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
     Kernel *kernel) {
+  auto config = compile_config_;
+  config.llvm_aot_relocatable_roots =
+      arch_is_cpu(config.arch) || config.arch == Arch::cuda;
   const auto request = resolve_kernel_compile_request(
-      compile_config_, caps_, kernel->get_compile_tier_override(),
-      CompilePurpose::aot, compile_options_);
+      config, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
+      compile_options_);
   const auto &ckd = compilation_manager_.load_or_compile(
       request.config(), request.device_caps(), *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));

@@ -7,6 +7,7 @@
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/platform/cuda/detect_cuda.h"
+#include "taichi/runtime/llvm/aot_snode_relocation.h"
 
 namespace taichi::lang {
 namespace {
@@ -90,6 +91,57 @@ TEST(CUDAArtifactTarget, PascalTargetCanEmitSynchronizedWarpShuffle) {
   const std::string ptx(artifact.payload.data(), artifact.code_size());
   EXPECT_NE(ptx.find(".target sm_60"), std::string::npos);
   EXPECT_NE(ptx.find("shfl.sync"), std::string::npos);
+}
+
+TEST(CUDAArtifactTarget, RelocatableConstantSurvivesOptimizationAndBinds) {
+  if (!is_cuda_api_available() ||
+      !CUDADriver::get_instance().nvidia_extensions_available() ||
+      CUDAContext::get_instance().get_compute_capability() < 80)
+    GTEST_SKIP();
+  llvm::LLVMContext context;
+  auto module = make_cuda_artifact_fixture(context);
+  module->getNamedMetadata("nvvm.annotations")->clearOperands();
+  module->getFunction("target_entry")->eraseFromParent();
+  auto *type =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                              {llvm::PointerType::get(context, 1)}, false);
+  auto *entry = llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage,
+                                       "target_entry", *module);
+  llvm::IRBuilder<> builder(llvm::BasicBlock::Create(context, "entry", entry));
+  auto *id = LLVM::emit_aot_tree_id(*module, builder, 7, true);
+  LLVM::emit_aot_tree_id(*module, builder, 9,
+                         true);  // Dead after optimization.
+  builder.CreateStore(id, entry->getArg(0));
+  builder.CreateRetVoid();
+  module->getNamedMetadata("nvvm.annotations")
+      ->addOperand(llvm::MDNode::get(
+          context, {llvm::ValueAsMetadata::get(entry),
+                    llvm::MDString::get(context, "kernel"),
+                    llvm::ConstantAsMetadata::get(builder.getInt32(1))}));
+  EXPECT_EQ(LLVM::prepare_ptx_tree_relocations(*module),
+            (std::vector<int>{7, 9}));
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  config.llvm_opt_level = 3;
+  auto artifact = compile_cuda_kernel_artifact(
+      module, config, {"sm_80", "+ptx70"}, 0, JITModuleRole::user_kernel);
+  JITSessionCUDA session(nullptr, config, llvm::DataLayout(""));
+  auto *loaded = static_cast<JITModuleCUDA *>(session.add_artifact(artifact));
+  EXPECT_EQ(artifact.aot_tree_relocations, std::vector<int>{7});
+  EXPECT_EQ(std::string(artifact.payload.data()).find("__ti_aot_tree_id_9"),
+            std::string::npos);
+  loaded->bind_aot_tree_ids({{7, 29}});
+  auto &driver = CUDADriver::get_instance();
+  void *device_data = nullptr;
+  driver.malloc(&device_data, sizeof(int32_t));
+  auto release = [&](void *ptr) { driver.mem_free(ptr); };
+  std::unique_ptr<void, decltype(release)> allocation(device_data, release);
+  loaded->launch("target_entry", 1, 1, 0, {&device_data},
+                 {static_cast<int>(sizeof(device_data))});
+  int32_t actual = -1;
+  driver.memcpy_device_to_host(&actual, device_data, sizeof(actual));
+  EXPECT_EQ(actual, 29);  // Not the producer's placeholder value 7.
+  EXPECT_TRUE(session.remove_module(loaded));
 }
 
 TEST(CUDAArtifactTarget, DriverLoaderHonorsRegisterLimit) {

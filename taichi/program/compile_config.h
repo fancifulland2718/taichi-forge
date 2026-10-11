@@ -50,6 +50,9 @@ struct CompileConfig {
   // performance on first cold launch. Does NOT affect SPIR-V opt (use
   // external_optimization_level for that). Included in the offline-cache key.
   int llvm_opt_level;
+  // Internal AOT code contract, not an optimization tier or a JIT default.
+  // Explicit tree-ID symbols survive serialization until resource binding.
+  bool llvm_aot_relocatable_roots{false};
   // D2: compile-time optimization tier.
   // "fast"     - lowers backend optimizer level for faster cold compile
   //              (LLVM O0/O1 floor by backend; SPIR-V optimizer level 0).

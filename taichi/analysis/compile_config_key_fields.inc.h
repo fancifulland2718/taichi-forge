@@ -9,6 +9,7 @@
   CACHE_FIELD(opt_level);
   CACHE_FIELD(external_optimization_level);
   CACHE_FIELD(llvm_opt_level);
+  CACHE_FIELD(llvm_aot_relocatable_roots);
   CACHE_FIELD(compile_tier);
   CACHE_FIELD(tiered_full_simplify);
   CACHE_FIELD(full_simplify_global_iter_cap);

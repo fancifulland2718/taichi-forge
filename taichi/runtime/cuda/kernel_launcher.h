@@ -164,7 +164,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const LLVM::CompiledKernelData &compiled) override;
   Handle register_cuda_artifact_kernel(
       const LLVM::CompiledKernelData::InternalData &metadata,
-      const CUDAKernelArtifact &artifact);
+      const CUDAKernelArtifact &artifact,
+      const std::map<int, int> &tree_bindings = {});
   // Register a private variant whose offloaded task entries uniformly test a
   // device gate before executing. The source kernel and ordinary registration
   // remain untouched, so only internal masked CUDA Graph replay pays the

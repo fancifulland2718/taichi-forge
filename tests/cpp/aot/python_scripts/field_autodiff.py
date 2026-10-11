@@ -43,6 +43,16 @@ def main(arch, compile_options=None, artifact_format=None):
     module = ti.aot.Module(compile_options=compile_options, artifact_format=artifact_format)
     for kernel in (initialize, evaluate, evaluate.grad, readback):
         module.add_kernel(kernel)
+    if arch in (ti.cpu, ti.cuda):
+        @ti.real_func
+        def field_value(i: ti.i32) -> ti.f32:
+            return y[i] + x.grad[i]
+
+        @ti.kernel
+        def get_scalar(i: ti.i32) -> ti.f32:
+            return field_value(i)
+
+        module.add_kernel(get_scalar)
     graph = ti.graph.GraphBuilder()
     graph.dispatch(initialize, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "seed", ti.f32))
     graph.dispatch(evaluate)

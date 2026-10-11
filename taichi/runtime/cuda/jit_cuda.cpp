@@ -3,6 +3,7 @@
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
+#include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/util/environ_config.h"
 
 #include <cstdlib>
@@ -14,6 +15,25 @@
 namespace taichi::lang {
 
 #if defined(TI_WITH_CUDA)
+
+void JITModuleCUDA::bind_aot_tree_ids(const std::map<int, int> &bindings) {
+  if (bindings.empty())
+    return;
+  auto &driver = CUDADriver::get_instance();
+  TI_ERROR_IF(!driver.module_get_global.available(),
+              "CUDA driver does not support PTX AOT resource binding");
+  CUDAContext::get_instance().make_current();
+  for (const auto &[logical, physical] : bindings) {
+    const auto symbol = LLVM::aot_tree_id_symbol(logical);
+    void *address = nullptr;
+    std::size_t size = 0;
+    driver.module_get_global(&address, &size, module_, symbol.c_str());
+    TI_ERROR_IF(!address || size != sizeof(int32_t) || physical < 0,
+                "Invalid CUDA AOT resource relocation {}", symbol);
+    int32_t value = physical;
+    driver.memcpy_host_to_device(address, &value, sizeof(value));
+  }
+}
 
 namespace {
 
@@ -81,7 +101,8 @@ std::string convert(std::string new_name);
 static std::vector<char> emit_module_to_ptx(
     std::unique_ptr<llvm::Module> &module,
     const CompileConfig &config,
-    const CUDACodegenTarget &codegen_target);
+    const CUDACodegenTarget &codegen_target,
+    std::vector<int> &tree_relocations);
 
 JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
                                        int max_reg,
@@ -156,7 +177,8 @@ CUDAKernelArtifact compile_cuda_kernel_artifact(
   }
   artifact.entry_names = cuda_kernel_entry_names(*module);
   const auto options = LLVMModuleOptions::read(*module, config);
-  artifact.payload = emit_module_to_ptx(module, config, target);
+  artifact.payload =
+      emit_module_to_ptx(module, config, target, artifact.aot_tree_relocations);
   artifact.target_identity = target.identity();
   artifact.provider_identity = "llvm_nvptx";
   artifact.max_registers = max_reg;
@@ -359,7 +381,8 @@ std::string convert(std::string new_name) {
 static std::vector<char> emit_module_to_ptx(
     std::unique_ptr<llvm::Module> &module,
     const CompileConfig &config,
-    const CUDACodegenTarget &codegen_target) {
+    const CUDACodegenTarget &codegen_target,
+    std::vector<int> &tree_relocations) {
   TI_AUTO_PROF
   const auto module_options = LLVMModuleOptions::read(*module, config);
   // Part of this function is borrowed from Halide::CodeGen_PTX_Dev.cpp
@@ -496,6 +519,10 @@ static std::vector<char> emit_module_to_ptx(
     opts.run_post_gep_passes = true;
     run_module_opt_pipeline(*module, target_machine.get(), opts);
   }
+
+  // Inlining can remove StructMeta and leave externally visible relocation
+  // constants with no users. Do not emit or bind those dead resources.
+  tree_relocations = LLVM::prepare_ptx_tree_relocations(*module);
 
   // Emit PTX via the Legacy PassManager — `addPassesToEmitFile` still
   // requires it in LLVM 19/20+ (codegen has not yet been ported).

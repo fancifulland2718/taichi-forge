@@ -1662,7 +1662,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
 
 KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
     const LLVM::CompiledKernelData::InternalData &metadata,
-    const CUDAKernelArtifact &artifact) {
+    const CUDAKernelArtifact &artifact,
+    const std::map<int, int> &tree_bindings) {
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
   auto handle = make_handle();
   auto ctx = std::make_shared<Context>();
@@ -1673,6 +1674,7 @@ KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
   auto *executor = get_runtime_executor();
   auto *module = executor->create_cuda_artifact_module(artifact);
   try {
+    static_cast<JITModuleCUDA *>(module)->bind_aot_tree_ids(tree_bindings);
     bind_cuda_native_functions(module, ctx->offloaded_tasks);
     ctx->jit_module = module;
     TI_ASSERT(contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second);

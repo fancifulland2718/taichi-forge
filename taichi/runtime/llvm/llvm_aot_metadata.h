@@ -15,6 +15,7 @@ inline constexpr char kLlvmAotMetadataFilename[] = "aot_metadata.json";
 // stale .ll beside a newer .bc. Binary task/Graph layouts are unchanged.
 inline constexpr std::uint32_t kLlvmAotSchemaVersion = 3;
 inline constexpr std::uint32_t kCudaPtxAotSchemaVersion = 4;
+inline constexpr std::uint32_t kRelocatableLlvmAotSchemaVersion = 5;
 
 struct CudaAotArtifactMetadata {
   std::string sha256;
@@ -24,9 +25,18 @@ struct CudaAotArtifactMetadata {
   int max_registers{-1};
   bool fast_math{false};
   int llvm_opt_level{-1};
+  std::vector<int> tree_relocations;
+  std::string contract_sha256;
 
-  TI_IO_DEF(sha256, size, entry_names, target_identity, max_registers,
-            fast_math, llvm_opt_level);
+  TI_IO_DEF(sha256,
+            size,
+            entry_names,
+            target_identity,
+            max_registers,
+            fast_math,
+            llvm_opt_level,
+            tree_relocations,
+            contract_sha256);
 };
 
 struct LlvmAotMetadata {
@@ -37,20 +47,33 @@ struct LlvmAotMetadata {
   // Schema 4 binds PTX to the serialized launch ABI, with per-kernel hashes.
   std::string abi_sha256;
   std::map<std::string, CudaAotArtifactMetadata> cuda_artifacts;
+  std::string resource_binding;
 
-  TI_IO_DEF(schema_version, required_caps, kernel_format, abi_sha256,
-            cuda_artifacts);
+  TI_IO_DEF(schema_version,
+            required_caps,
+            kernel_format,
+            abi_sha256,
+            cuda_artifacts,
+            resource_binding);
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   TI_ERROR_IF(metadata.schema_version != 2 &&
                   metadata.schema_version != kLlvmAotSchemaVersion &&
-                  metadata.schema_version != kCudaPtxAotSchemaVersion,
-              "LLVM AOT artifact schema {} is incompatible with runtime "
-              "schema {}. Rebuild the artifact with the current Forge AOT "
+                  metadata.schema_version != kCudaPtxAotSchemaVersion &&
+                  metadata.schema_version != kRelocatableLlvmAotSchemaVersion,
+              "LLVM AOT artifact schema {} is incompatible with this runtime. "
+              "Rebuild the artifact with the current Forge AOT "
               "compiler.",
-              metadata.schema_version, kLlvmAotSchemaVersion);
-  if (metadata.schema_version == 2) {
+              metadata.schema_version);
+  if (metadata.schema_version == kRelocatableLlvmAotSchemaVersion) {
+    TI_ERROR_IF(
+        metadata.resource_binding != "dense_v1" ||
+            (metadata.kernel_format != "bc" &&
+             metadata.kernel_format != "ptx") ||
+            metadata.abi_sha256.size() != 64,
+        "Relocatable LLVM AOT requires dense_v1, BC/PTX and an ABI checksum");
+  } else if (metadata.schema_version == 2) {
     TI_ERROR_IF(!metadata.kernel_format.empty() && metadata.kernel_format != "ll",
                 "Legacy LLVM AOT schema 2 requires text kernel format.");
   } else if (metadata.schema_version == kCudaPtxAotSchemaVersion) {
@@ -62,6 +85,9 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                 "Unsupported or missing LLVM AOT kernel format '{}'.",
                 metadata.kernel_format);
   }
+  TI_ERROR_IF(metadata.schema_version != kRelocatableLlvmAotSchemaVersion &&
+                  !metadata.resource_binding.empty(),
+              "Legacy LLVM AOT cannot declare resource relocation");
 }
 
 inline void validate_cuda_aot_metadata(const LlvmAotMetadata &metadata,
