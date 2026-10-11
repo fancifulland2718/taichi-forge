@@ -51,4 +51,18 @@ TEST(ExecutionPlan, NativeCompactRetainsAllSymbolicDependencies) {
     {"kind":"compact","values":"x","flags":"active","output":"selected"}]})"),
                std::invalid_argument);
 }
+
+TEST(ExecutionPlan, SortHasOptionalPayloadWithoutImplicitArguments) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"sort","keys":"x"},
+    {"kind":"sort","keys":"x","values":"indices"}]})");
+  ASSERT_EQ(plan.operations.size(), 2);
+  EXPECT_FALSE(std::get<ExecutionPlan::Sort>(plan.operations[0]).values);
+  EXPECT_EQ(*std::get<ExecutionPlan::Sort>(plan.operations[1]).values,
+            "indices");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"indices", "x"}));
+  EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"sort","keys":"x","descending":true}]})"),
+               std::invalid_argument);
+}
 }  // namespace taichi::lang::aot

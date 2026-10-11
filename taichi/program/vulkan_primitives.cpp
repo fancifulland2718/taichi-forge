@@ -18394,70 +18394,32 @@ std::size_t Program::vulkan_grouped_reduce_ndarray(Ndarray *keys,
   return bucket_workspace;
 }
 
-std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
-                                                   Ndarray *values,
-                                                   int key_type,
-                                                   int value_type,
-                                                   std::size_t key_offset,
-                                                   std::size_t value_offset) {
-  auto native_ndarray_submission_guard =
-      acquire_runtime_resource_submission_guard();
-  const bool cpu_profile_enabled = vulkan_sort_cpu_profile_enabled();
-  VulkanSortCpuProfileSample front_profile;
-  VulkanSortCpuProfileSample *front =
-      cpu_profile_enabled ? &front_profile : nullptr;
-  const double total_start = front ? profile_time_us() : 0.0;
-  if (front) {
-    front->sort_calls++;
-  }
-  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
-              "Vulkan native radix sort is only available on Vulkan.");
-  TI_ERROR_IF(!keys, "Vulkan native radix sort received null keys ndarray.");
-  TI_ERROR_IF(keys->shape.size() != 1,
-              "Vulkan native radix sort expects a 1D ndarray.");
-  const size_t key_size = vulkan_sort_key_type_size(key_type);
-  TI_ERROR_IF(key_size == 0,
-              "Vulkan native radix sort received an unsupported key type.");
-  TI_ERROR_IF(keys->get_element_size() != key_size,
-              "Vulkan native radix sort key dtype does not match the "
-              "requested key type.");
-  const bool use_values = values != nullptr;
-  const size_t expected_value_size =
-      use_values ? vulkan_scan_value_type_size(value_type) : sizeof(uint32_t);
-  size_t value_size = expected_value_size;
-  if (use_values) {
-    TI_ERROR_IF(values->shape.size() != 1,
-                "Vulkan native radix sort values must be a 1D ndarray.");
-    TI_ERROR_IF(values->get_nelement() != keys->get_nelement(),
-                "Vulkan native radix sort keys and values must have the same "
-                "length.");
-    TI_ERROR_IF(expected_value_size == 0,
-                "Vulkan native radix sort received an unsupported value type.");
-    value_size = values->get_element_size();
-    TI_ERROR_IF(value_size == 0 || value_size % sizeof(uint32_t) != 0,
-                "Vulkan native radix sort value payload must be 4-byte aligned.");
-  }
+namespace {
+struct VulkanSortRecording {
+  std::function<void(Device *, CommandList *)> record;
+  VulkanCommandReplayKey key;
+};
 
-  const size_t n = keys->get_nelement();
-  if (n <= 1) {
-    if (front) {
-      front->total_call_us += profile_time_us() - total_start;
-      g_vulkan_sort_cpu_profile.merge(front_profile);
-    }
-    return 0;
-  }
-  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
-              "Vulkan native radix sort currently supports at most "
-              "UINT32_MAX items.");
-
-  Device *device = program_impl_->get_compute_device();
-  TI_ERROR_IF(!device, "Vulkan native radix sort requires a compute device.");
-  double start = front ? profile_time_us() : 0.0;
-  auto cache_lease = get_cache(this, device);
-  auto &cache = *cache_lease;
-  if (front) {
-    front->get_cache_us += profile_time_us() - start;
-  }
+VulkanSortRecording prepare_vulkan_sort_recording(
+    Program *program,
+    Device *device,
+    VulkanRadixSortCache &cache,
+    const SortOperation &operation,
+    int value_type,
+    bool profiler_scopes,
+    bool cpu_profile_enabled,
+    VulkanSortCpuProfileSample *front) {
+  const auto n = operation.size;
+  const auto key_type = static_cast<int>(operation.key_type);
+  const auto key_size = vulkan_sort_key_type_size(key_type);
+  const bool use_values = operation.values.device != nullptr;
+  const auto value_size =
+      use_values ? operation.value_bytes : sizeof(std::uint32_t);
+  const auto expected_value_size =
+      use_values ? operation.value_scalar_bytes : sizeof(std::uint32_t);
+  const auto key_offset = operation.keys.offset;
+  const auto value_offset = operation.values.offset;
+  double start = 0;
   const bool use_radix8 = cache.radix8_enabled;
   const bool raw_value_payload =
       use_values && value_size != expected_value_size;
@@ -18478,7 +18440,9 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
     if (front) {
       start = profile_time_us();
     }
-    synchronize();
+    TI_ERROR_IF(!program,
+                "Fixed Vulkan sort storage cannot grow after preparation");
+    program->synchronize();
     if (front) {
       front->realloc_sync_calls++;
       front->realloc_sync_us += profile_time_us() - start;
@@ -18501,14 +18465,13 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                             kRadix8PartitionSize);
   const bool signed_keys = key_type == 1;
   const bool wide_keys = key_type >= 3;
-  const bool profiler_scopes = profiler != nullptr;
   TI_ERROR_IF(key_offset % key_size != 0,
               "Vulkan native radix sort key offset must align to key type size.");
   TI_ERROR_IF(use_values && value_offset % value_size != 0,
               "Vulkan native radix sort value offset must align to value type size.");
-  DeviceAllocation key_alloc = keys->ndarray_alloc_;
+  DeviceAllocation key_alloc = operation.keys;
   DeviceAllocation value_alloc =
-      use_values ? values->ndarray_alloc_ : kDeviceNullAllocation;
+      use_values ? DeviceAllocation(operation.values) : kDeviceNullAllocation;
   const size_t key_bytes = n * sizeof(uint32_t);
   const size_t user_key_bytes = n * key_size;
   const size_t index_bytes = n * sizeof(uint32_t);
@@ -18539,14 +18502,13 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
     start = profile_time_us();
   }
   auto record_sort =
-      [&, groups, n, key_type, signed_keys, wide_keys,
-       use_index_sort, use_values, key_alloc, value_alloc, key_offset, value_offset, key_bytes,
+      [&cache, groups, n, key_type, signed_keys, wide_keys, use_index_sort,
+       use_values, key_alloc, value_alloc, key_offset, value_offset, key_bytes,
        user_key_bytes, index_bytes, value_bytes, table_bytes, chunk_groups,
        chunk_table_bytes, raw64_values, inline_chunk_offsets, use_radix8,
-       radix8_partitions,
-       radix8_global_hist_bytes, radix8_partition_hist_bytes,
-       lambda_profile, profiler_scopes](
-          Device *op_device, CommandList *cmdlist) {
+       radix8_partitions, radix8_global_hist_bytes, radix8_partition_hist_bytes,
+       lambda_profile,
+       profiler_scopes](Device *op_device, CommandList *cmdlist) {
         auto scope_name = [profiler_scopes](const char *name) {
           return profiler_scopes ? name : nullptr;
         };
@@ -19232,12 +19194,94 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                 cache.capacity * cache.value_bytes_per_item);
   push_vulkan_command_key_range(command_key, cache.key_high, 0,
                                 cache.capacity * sizeof(uint32_t));
+  return {std::move(record_sort), std::move(command_key)};
+}
+}  // namespace
+
+std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
+                                                   Ndarray *values,
+                                                   int key_type,
+                                                   int value_type,
+                                                   std::size_t key_offset,
+                                                   std::size_t value_offset) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  const bool cpu_profile_enabled = vulkan_sort_cpu_profile_enabled();
+  VulkanSortCpuProfileSample front_profile;
+  VulkanSortCpuProfileSample *front =
+      cpu_profile_enabled ? &front_profile : nullptr;
+  const double total_start = front ? profile_time_us() : 0.0;
+  if (front) {
+    front->sort_calls++;
+  }
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native radix sort is only available on Vulkan.");
+  TI_ERROR_IF(!keys, "Vulkan native radix sort received null keys ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1,
+              "Vulkan native radix sort expects a 1D ndarray.");
+  const size_t key_size = vulkan_sort_key_type_size(key_type);
+  TI_ERROR_IF(key_size == 0,
+              "Vulkan native radix sort received an unsupported key type.");
+  TI_ERROR_IF(keys->get_element_size() != key_size,
+              "Vulkan native radix sort key dtype does not match the "
+              "requested key type.");
+  const bool use_values = values != nullptr;
+  const size_t expected_value_size =
+      use_values ? vulkan_scan_value_type_size(value_type) : sizeof(uint32_t);
+  size_t value_size = expected_value_size;
+  if (use_values) {
+    TI_ERROR_IF(values->shape.size() != 1,
+                "Vulkan native radix sort values must be a 1D ndarray.");
+    TI_ERROR_IF(values->get_nelement() != keys->get_nelement(),
+                "Vulkan native radix sort keys and values must have the same "
+                "length.");
+    TI_ERROR_IF(expected_value_size == 0,
+                "Vulkan native radix sort received an unsupported value type.");
+    value_size = values->get_element_size();
+    TI_ERROR_IF(
+        value_size == 0 || value_size % sizeof(uint32_t) != 0,
+        "Vulkan native radix sort value payload must be 4-byte aligned.");
+  }
+
+  const size_t n = keys->get_nelement();
+  if (n <= 1) {
+    if (front) {
+      front->total_call_us += profile_time_us() - total_start;
+      g_vulkan_sort_cpu_profile.merge(front_profile);
+    }
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native radix sort currently supports at most "
+              "UINT32_MAX items.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native radix sort requires a compute device.");
+  double start = front ? profile_time_us() : 0.0;
+  auto cache_lease = get_cache(this, device);
+  auto &cache = *cache_lease;
+  if (front) {
+    front->get_cache_us += profile_time_us() - start;
+  }
+  const bool profiler_scopes = profiler != nullptr;
+  const SortOperation operation{
+      keys->ndarray_alloc_.get_ptr(key_offset),
+      values ? values->ndarray_alloc_.get_ptr(value_offset) : DevicePtr{},
+      n,
+      static_cast<NativeSortKeyType>(key_type),
+      use_values ? value_size : 0,
+      use_values ? expected_value_size : 0};
+  auto recording = prepare_vulkan_sort_recording(this, device, cache, operation,
+                                                 value_type, profiler_scopes,
+                                                 cpu_profile_enabled, front);
+  if (front)
+    start = profile_time_us();
   const bool command_replay_profiler_disabled =
       profiler_scopes || cpu_profile_enabled;
-  if (!cache.command_replay.submit_or_record(this, device, command_key,
+  if (!cache.command_replay.submit_or_record(this, device, recording.key,
                                              command_replay_profiler_disabled,
-                                             record_sort)) {
-    program_impl_->enqueue_compute_op_lambda(record_sort, {});
+                                             recording.record)) {
+    program_impl_->enqueue_compute_op_lambda(recording.record, {});
   }
   if (front) {
     front->enqueue_us += profile_time_us() - start;
@@ -19258,6 +19302,56 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
   }
   return cache.cached_bytes;
 }
+
+namespace gfx {
+namespace {
+class FixedVulkanSort final : public NativeOperation {
+ public:
+  explicit FixedVulkanSort(Device &device) : device_(device) {
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return cache_.allocated_bytes();
+  }
+  void prepare(const SortOperation &operation) {
+    if (operation.size <= 1)
+      return;
+    cache_.ensure_device_only(&device_);
+    const auto value_type = operation.value_scalar_bytes == 8 ? 3 : 0;
+    recording_ =
+        prepare_vulkan_sort_recording(nullptr, &device_, cache_, operation,
+                                      value_type, false, false, nullptr);
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    if (recording_.record)
+      recording_.record(device, commands);
+  }
+
+ private:
+  Device &device_;
+  VulkanRadixSortCache cache_;
+  VulkanSortRecording recording_;
+};
+}  // namespace
+
+std::shared_ptr<NativeOperation> prepare_vulkan_sort_operation(
+    Device &device,
+    const SortOperation &operation) {
+  if (operation.value_bytes &&
+      operation.size > std::numeric_limits<std::uint32_t>::max() /
+                           (operation.value_bytes / 4))
+    throw std::invalid_argument(
+        "Vulkan sort exceeds its uint32 payload index ABI");
+  auto result = std::make_shared<FixedVulkanSort>(device);
+  result->prepare(operation);
+  return result;
+}
+}  // namespace gfx
 
 std::size_t Program::vulkan_radix_sort_u32_dense_field(SNode *keys,
                                                        SNode *values,

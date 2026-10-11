@@ -120,7 +120,7 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 诊断，不代表实际应用性能。
 
 `ExecutionPlan` 提供版本 1 的持久化顺序描述，覆盖已导出的 kernel、设备内存复制和
-32 位位模式填充及稳定压缩。生产端先导出引用的 kernel，再添加描述：
+32 位位模式填充、稳定排序及稳定压缩。生产端先导出引用的 kernel，再添加描述：
 
 ```python
 from taichi_forge_runtime.aot import ExecutionPlan
@@ -162,6 +162,14 @@ CPU/CUDA/Vulkan 的每份 prepared 实例独立拥有工作区；`prepared.info`
 `workspace_bytes` 报告其字节数，不包含借入数组、代码及驱动元数据。C/C++ 对应
 `ti_get_prepared_execution_workspace_bytes_ext`。选择操作没有自动导数；已验证的
 梯度组合是先压缩整数索引，再调用已导出的 gather kernel 及其显式 backward。
+
+`{"kind": "sort", "keys": "keys", "values": "indices"}` 对键和可选 payload 原地
+稳定升序排序。键为 1D 标量 i32/u32/f32/i64/u64/f64；payload 等长，每条记录字节数
+为 4 的倍数，键和 payload 区域不能重叠。NaN 排在最后；相等键（包括正负零）保留
+输入顺序和原始位模式。空/单元素输入不需要工作区，其余输入由 CPU/CUDA/Vulkan
+执行对象持有工作区并在重放中复用。排序不提供自动导数；显式整数排列可进入已导出
+的 gather/backward。`prepared.info["dispatch_count"]` 统计已导出 kernel 入口数，
+不代表 native 算法内部 shader 的实际 dispatch 数。
 
 任意 JIT native Graph、其他数学 primitive/provider、结构控制和渲染资源尚不由此格式
 自动导出；未知操作或版本明确报错。buffer、模块和 runtime 的在途寿命合同同上。

@@ -389,6 +389,66 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         throw MemoryBindingError("Execution copy slices must not overlap");
       operations.emplace_back(FixedExecution::BufferCopy{
           dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
+    } else if (const auto *sort =
+                   std::get_if<aot::ExecutionPlan::Sort>(&operation)) {
+      const auto keys = storage(sort->keys, 0);
+      const auto &array = arguments.at(sort->keys)->value.ndarray;
+      if (array.shape.dim_count != 1 || array.elem_shape.dim_count)
+        throw MemoryBindingError("Sort requires 1D scalar keys");
+      NativeSortKeyType key_type;
+      switch (array.elem_type) {
+        case TI_DATA_TYPE_U32:
+          key_type = NativeSortKeyType::u32;
+          break;
+        case TI_DATA_TYPE_I32:
+          key_type = NativeSortKeyType::i32;
+          break;
+        case TI_DATA_TYPE_F32:
+          key_type = NativeSortKeyType::f32;
+          break;
+        case TI_DATA_TYPE_U64:
+          key_type = NativeSortKeyType::u64;
+          break;
+        case TI_DATA_TYPE_I64:
+          key_type = NativeSortKeyType::i64;
+          break;
+        case TI_DATA_TYPE_F64:
+          key_type = NativeSortKeyType::f64;
+          break;
+        default:
+          throw MemoryBindingError("Sort keys require i32/u32/f32/i64/u64/f64");
+      }
+      if (rt.get_memory(array.memory).base_offset % keys.element_bytes)
+        throw MemoryBindingError("Sort key storage is misaligned");
+      SortOperation descriptor{keys.pointer, {}, array.shape.dims[0], key_type};
+      if (sort->values) {
+        const auto values = storage(*sort->values, 0);
+        const auto &payload = arguments.at(*sort->values)->value.ndarray;
+        if (payload.shape.dim_count != 1 ||
+            payload.shape.dims[0] != array.shape.dims[0] ||
+            !values.element_bytes || values.element_bytes % 4 ||
+            rt.get_memory(payload.memory).base_offset % 4)
+          throw MemoryBindingError(
+              "Sort payload requires matching 1D raw-word records");
+        if (keys.size && values.size &&
+            keys.pointer.alloc_id == values.pointer.alloc_id &&
+            (keys.pointer.offset <= values.pointer.offset
+                 ? values.pointer.offset - keys.pointer.offset < keys.size
+                 : keys.pointer.offset - values.pointer.offset < values.size))
+          throw MemoryBindingError(
+              "Sort key and payload ranges must not overlap");
+        descriptor.values = values.pointer;
+        descriptor.value_bytes = static_cast<size_t>(values.element_bytes);
+        descriptor.value_scalar_bytes = descriptor.value_bytes;
+        for (uint32_t i = 0; i < payload.elem_shape.dim_count; ++i)
+          descriptor.value_scalar_bytes /= payload.elem_shape.dims[i];
+      }
+      try {
+        operations.emplace_back(
+            prepare_sort_operation(rt.arch, rt.get(), descriptor));
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
     } else if (const auto *compact =
                    std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
       const std::array<std::string, 4> names{compact->values, compact->flags,

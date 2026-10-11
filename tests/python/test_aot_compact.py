@@ -38,6 +38,9 @@ def test_source_free_aot_compact_and_explicit_gradient(tmp_path):
     module.add_kernel(evaluate)
     module.add_kernel(evaluate.grad, name="backward")
     module.add_execution_plan(
+        "stable_order", ti.aot.ExecutionPlan([{"kind": "sort", "keys": "keys", "values": "values"}])
+    )
+    module.add_execution_plan(
         "selected_energy",
         ti.aot.ExecutionPlan(
             [
@@ -68,3 +71,15 @@ def test_source_free_aot_compact_and_explicit_gradient(tmp_path):
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    if arch == "vulkan":
+        # Exercise the same extracted recording body without radix8/subgroups;
+        # this is the portable shader route, not another scene-size matrix.
+        environment.update(TI_VULKAN_SORT_ENABLE_RADIX8="0", TI_VULKAN_SORT_ENABLE_SUBGROUP_RANK="0")
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("aot_sort_probe.py")), arch, str(tmp_path / "compact.tcm")],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr

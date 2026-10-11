@@ -17,7 +17,7 @@ def _unique_fields(pairs):
 
 
 class ExecutionPlan:
-    """Version 1 kernels, copies, 32-bit fills and stable compaction.
+    """Version 1 kernels, copies, fills, stable sort and compaction.
 
     Arguments are symbolic names bound to a loaded module and arrays/scalars at
     prepare time. Preparation records native commands without executing kernels
@@ -74,13 +74,16 @@ class ExecutionPlan:
             elif kind == "compact":
                 required, optional = {"kind", "values", "flags", "output", "count"}, set()
                 names = ("values", "flags", "output", "count")
+            elif kind == "sort":
+                required, optional = {"kind", "keys"}, {"values"}
+                names = ("keys", "values") if "values" in op else ("keys",)
             else:
                 raise ValueError(f"Unsupported execution operation: {kind}")
             if not required <= set(op) or set(op) - required - optional:
                 raise ValueError(f"Invalid {kind} operation fields")
             for name in names:
                 _name(op[name])
-            for key in optional & set(op):
+            for key in (optional & set(op)) - set(names):
                 if type(op[key]) is not int or not 0 <= op[key] <= 0x7FFFFFFFFFFFFFFF:
                     raise ValueError("Execution sizes and offsets require nonnegative int64 values")
             if kind == "kernel":

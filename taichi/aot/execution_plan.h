@@ -34,7 +34,11 @@ struct ExecutionPlan {
     std::string output;
     std::string count;
   };
-  using Operation = std::variant<Kernel, Copy, Fill, Compact>;
+  struct Sort {
+    std::string keys;
+    std::optional<std::string> values;
+  };
+  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort>;
   std::vector<Operation> operations;
   std::vector<std::string> arguments;
 

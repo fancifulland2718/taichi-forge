@@ -28,6 +28,9 @@ def check(arch, path):
 
     with aot.Runtime(arch) as runtime:
         module = runtime.load_module(path)
+        from aot_sort_probe import check_sort
+
+        check_sort(runtime, module)
         frames = []
         for n in (17, 4097):
             bindings = {name: runtime.ndarray("f32", n) for name in ("x", "y", "dx", "dy")}

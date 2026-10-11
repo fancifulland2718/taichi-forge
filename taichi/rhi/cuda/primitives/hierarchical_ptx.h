@@ -450,4 +450,16 @@ std::size_t driver_stable_radix_sort_strided(
     void *stream,
     PrimitiveWorkspaceArena *workspace_arena);
 
+void driver_prepare_sort();
+std::size_t driver_stable_sort_workspace_bytes(int num_items,
+                                               CudaDriverSortKeyType key_type,
+                                               int value_words);
+void driver_stable_sort_with_workspace(void *keys,
+                                       void *values,
+                                       int num_items,
+                                       CudaDriverSortKeyType key_type,
+                                       int value_words,
+                                       void *workspace,
+                                       void *stream);
+
 }  // namespace taichi::lang::cuda

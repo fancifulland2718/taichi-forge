@@ -43,7 +43,7 @@ lifetimes. The entries below describe the changes.
   [AOT SDK contract](aot_sdk.en.md).
 
 - A versioned `ExecutionPlan` can persist exported kernels interleaved with
-  device buffer copies, 32-bit fills and stable compact, then prepare one native CPU/CUDA/Vulkan
+  device buffer copies, 32-bit fills, stable sort and compact, then prepare one native CPU/CUDA/Vulkan
   execution with fixed bindings. Descriptions are included in directory and
   `.tcm` modules. LLVM AOT now reads archives through the same lazy virtual
   directory layer as Vulkan, without extracting the archive to disk. This
@@ -55,6 +55,11 @@ lifetimes. The entries below describe the changes.
   changing predicates, independent bindings, retirement and a subsequent
   gather kernel's explicit gradient. Scratch bytes are queryable separately
   from arguments and compiled code; compact itself has no automatic derivative.
+
+- AOT stable sort supports 32/64-bit integer and floating keys, with optional
+  scalar/tensor payloads and NaNs last. CUDA uses the existing radix kernels
+  with independently owned scratch; Vulkan shares command preparation with JIT.
+  The consumer needs no Python compiler. Sort does not add an automatic derivative.
 
 - Repeated LLVM AOT `save()`/`archive()` preserves kernels and dense resource
   mappings, including when more entries are added between exports. Export

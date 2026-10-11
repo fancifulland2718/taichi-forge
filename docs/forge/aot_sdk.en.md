@@ -144,7 +144,7 @@ deployment has not been validated by this check. Initialization/loading timings
 printed by this small example are diagnostics, not application benchmarks.
 
 `ExecutionPlan` provides a version 1 persistent sequence of exported kernels,
-device buffer copies, 32-bit pattern fills and stable compaction. Export the referenced kernels
+device buffer copies, 32-bit pattern fills, stable sort and compaction. Export the referenced kernels
 before adding the description:
 
 ```python
@@ -197,6 +197,17 @@ use independent owned scratch per prepared instance; `prepared.info` reports
 can query the same count with `ti_get_prepared_execution_workspace_bytes_ext`.
 Selection has no automatic derivative. A tested composition compacts integer
 indices, then runs an exported gather kernel and its explicit backward kernel.
+
+`{"kind": "sort", "keys": "keys", "values": "indices"}` sorts keys and optional
+payloads in place, in stable ascending order. Keys are 1D scalar
+i32/u32/f32/i64/u64/f64; payloads have the same length and a record width
+divisible by four bytes. Key and payload ranges cannot overlap. NaNs sort last;
+equal keys, including signed zeros, retain their input order and original bits.
+Empty and single-item inputs require no scratch. Native CPU/CUDA/Vulkan execution
+owns the scratch for larger inputs; replay reuses it. There is no automatic sort
+derivative: an explicit integer permutation can feed an exported gather/backward
+pair. `prepared.info["dispatch_count"]` counts exported kernel entries, not the
+internal shader dispatches of native algorithms.
 
 This format does not automatically export arbitrary JIT native Graphs,
 other mathematical primitives/providers, structured control or rendering resources.

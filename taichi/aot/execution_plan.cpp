@@ -82,6 +82,16 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         arguments.insert(copy.destination);
         arguments.insert(copy.source);
         plan.operations.emplace_back(std::move(copy));
+      } else if (kind == "sort") {
+        fields(step, {"kind", "keys", "values"});
+        Sort sort{name(step["keys"]), std::nullopt};
+        arguments.insert(sort.keys);
+        if (auto found = step.obj.inner.find("values");
+            found != step.obj.inner.end()) {
+          sort.values = name(found->second);
+          arguments.insert(*sort.values);
+        }
+        plan.operations.emplace_back(std::move(sort));
       } else if (kind == "compact") {
         fields(step, {"kind", "values", "flags", "output", "count"});
         Compact compact{name(step["values"]), name(step["flags"]),

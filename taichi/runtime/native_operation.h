@@ -36,6 +36,24 @@ struct CompactOperation {
   std::size_t item_bytes;
 };
 
+enum class NativeSortKeyType { u32, i32, f32, u64, i64, f64 };
+
+struct SortOperation {
+  DevicePtr keys;
+  DevicePtr values;  // A null device denotes keys-only sorting.
+  std::size_t size;
+  NativeSortKeyType key_type;
+  std::size_t value_bytes{0};
+  std::size_t value_scalar_bytes{0};
+};
+
+// Ascending, stable, in-place sort. Floating NaNs sort last and equal keys
+// preserve their input order. Payloads are copied as raw records.
+std::shared_ptr<NativeOperation> prepare_sort_operation(
+    Arch arch,
+    Device &device,
+    const SortOperation &operation);
+
 // Stable selection by a nonzero i32 predicate. Count is written on every
 // replay, including empty input. Preparation submits no mathematical work.
 std::shared_ptr<NativeOperation> prepare_compact_operation(
@@ -47,6 +65,9 @@ namespace gfx {
 std::shared_ptr<NativeOperation> prepare_vulkan_compact_operation(
     Device &device,
     const CompactOperation &operation);
+std::shared_ptr<NativeOperation> prepare_vulkan_sort_operation(
+    Device &device,
+    const SortOperation &operation);
 }
 
 }  // namespace taichi::lang

@@ -2009,37 +2009,25 @@ void driver_sparse_bsr_spmv_f32(void *row_offsets,
       {}, grid, kBlockDim, 0, stream);
 }
 
-std::size_t driver_stable_radix_sort_strided(
-    void *keys,
-    void *values,
-    int num_items,
-    CudaDriverSortKeyType key_type,
-    int value_words,
-    std::size_t keys_offset,
-    std::size_t keys_stride,
-    std::size_t values_offset,
-    std::size_t values_stride,
-    bool has_values,
-    int nan_policy,
-    void *stream,
-    PrimitiveWorkspaceArena *workspace_arena) {
-  TI_ERROR_IF(num_items < 0 || (has_values && value_words <= 0),
-              "CUDA Driver stable sort received an invalid size.");
-  TI_ERROR_IF(nan_policy != 0 && nan_policy != 1,
-              "CUDA Driver stable sort received an invalid NaN policy.");
-  const std::size_t key_size = sort_key_type_size(key_type);
-  const std::size_t key_words = key_size / sizeof(std::uint32_t);
-  const std::size_t value_size =
-      static_cast<std::size_t>(std::max(value_words, 0)) *
-      sizeof(std::uint32_t);
-  TI_ERROR_IF((num_items > 0 && (!keys || (has_values && !values))) ||
-                  keys_stride < key_size ||
-                  (has_values && values_stride < value_size),
-              "CUDA Driver stable sort received an invalid pointer or stride.");
-  if (num_items <= 1) {
-    return 0;
-  }
-
+namespace {
+struct SortWorkspaceLayout {
+  std::size_t sortable_a_offset;
+  std::size_t sortable_b_offset;
+  std::size_t indices_a_offset;
+  std::size_t indices_b_offset;
+  std::size_t local_ranks_offset;
+  std::uint32_t radix_block_count;
+  std::array<std::uint32_t, 8> histogram_counts;
+  std::array<std::size_t, 8> histogram_offsets;
+  std::size_t histogram_level_count;
+  std::size_t keys_output_offset;
+  std::size_t values_output_offset;
+  std::size_t cursor;
+};
+SortWorkspaceLayout sort_workspace_layout(int num_items,
+                                          std::size_t key_size,
+                                          std::size_t value_size,
+                                          bool has_values) {
   const std::size_t n = static_cast<std::size_t>(num_items);
   auto checked_bytes = [n](std::size_t item_size) {
     TI_ERROR_IF(item_size != 0 &&
@@ -2105,10 +2093,76 @@ std::size_t driver_stable_radix_sort_strided(
   const std::size_t values_output_offset =
       has_values ? reserve(checked_bytes(value_size)) : cursor;
 
-  auto workspace = acquire_workspace(
-      workspace_arena, PrimitiveWorkspaceFamily::ordering, stream);
-  workspace->ensure(cursor);
-  auto *base = static_cast<std::uint8_t *>(workspace->data());
+  return {sortable_a_offset,  sortable_b_offset,    indices_a_offset,
+          indices_b_offset,   local_ranks_offset,   radix_block_count,
+          histogram_counts,   histogram_offsets,    histogram_level_count,
+          keys_output_offset, values_output_offset, cursor};
+}
+}  // namespace
+
+void driver_prepare_sort() {
+  (void)kernels();
+}
+
+std::size_t driver_stable_sort_workspace_bytes(int num_items,
+                                               CudaDriverSortKeyType key_type,
+                                               int value_words) {
+  TI_ERROR_IF(num_items < 0 || value_words < 0,
+              "Invalid CUDA sort workspace size");
+  if (num_items <= 1)
+    return 0;
+  return sort_workspace_layout(num_items, sort_key_type_size(key_type),
+                               static_cast<std::size_t>(value_words) * 4,
+                               value_words != 0)
+      .cursor;
+}
+
+static std::size_t stable_radix_sort_impl(
+    void *keys,
+    void *values,
+    int num_items,
+    CudaDriverSortKeyType key_type,
+    int value_words,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    bool has_values,
+    int nan_policy,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena,
+    void *fixed_workspace) {
+  TI_ERROR_IF(num_items < 0 || (has_values && value_words <= 0),
+              "CUDA Driver stable sort received an invalid size.");
+  TI_ERROR_IF(nan_policy != 0 && nan_policy != 1,
+              "CUDA Driver stable sort received an invalid NaN policy.");
+  const std::size_t key_size = sort_key_type_size(key_type);
+  const std::size_t key_words = key_size / sizeof(std::uint32_t);
+  const std::size_t value_size =
+      static_cast<std::size_t>(std::max(value_words, 0)) *
+      sizeof(std::uint32_t);
+  TI_ERROR_IF((num_items > 0 && (!keys || (has_values && !values))) ||
+                  keys_stride < key_size ||
+                  (has_values && values_stride < value_size),
+              "CUDA Driver stable sort received an invalid pointer or stride.");
+  if (num_items <= 1) {
+    return 0;
+  }
+
+  const auto [sortable_a_offset, sortable_b_offset, indices_a_offset,
+              indices_b_offset, local_ranks_offset, radix_block_count,
+              histogram_counts, histogram_offsets, histogram_level_count,
+              keys_output_offset, values_output_offset, cursor] =
+      sort_workspace_layout(num_items, key_size, value_size, has_values);
+
+  std::optional<PrimitiveWorkspaceArena::Lease<DriverWorkspace>> workspace;
+  if (!fixed_workspace) {
+    workspace.emplace(acquire_workspace(
+        workspace_arena, PrimitiveWorkspaceFamily::ordering, stream));
+    (*workspace)->ensure(cursor);
+  }
+  auto *base = static_cast<std::uint8_t *>(
+      fixed_workspace ? fixed_workspace : (*workspace)->data());
   void *sortable_a = base + sortable_a_offset;
   void *sortable_b = base + sortable_b_offset;
   void *indices_a = base + indices_a_offset;
@@ -2242,7 +2296,41 @@ std::size_t driver_stable_radix_sort_strided(
     launch_copy(values_output, values, values_offset, values_stride,
                 static_cast<std::uint32_t>(value_words));
   }
-  return workspace->allocated_bytes();
+  return fixed_workspace ? cursor : (*workspace)->allocated_bytes();
+}
+std::size_t driver_stable_radix_sort_strided(
+    void *keys,
+    void *values,
+    int num_items,
+    CudaDriverSortKeyType key_type,
+    int value_words,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    bool has_values,
+    int nan_policy,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena) {
+  return stable_radix_sort_impl(keys, values, num_items, key_type, value_words,
+                                keys_offset, keys_stride, values_offset,
+                                values_stride, has_values, nan_policy, stream,
+                                workspace_arena, nullptr);
+}
+
+void driver_stable_sort_with_workspace(void *keys,
+                                       void *values,
+                                       int num_items,
+                                       CudaDriverSortKeyType key_type,
+                                       int value_words,
+                                       void *workspace,
+                                       void *stream) {
+  TI_ERROR_IF(num_items > 1 && !workspace,
+              "CUDA sort requires prepared workspace");
+  stable_radix_sort_impl(keys, values, num_items, key_type, value_words, 0,
+                         sort_key_type_size(key_type), 0,
+                         static_cast<std::size_t>(value_words) * 4,
+                         value_words != 0, 0, stream, nullptr, workspace);
 }
 
 }  // namespace taichi::lang::cuda
