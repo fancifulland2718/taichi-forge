@@ -164,15 +164,6 @@ LlvmAotModule::~LlvmAotModule() {
   }
 }
 
-FunctionType LlvmAotModule::convert_module_to_function(
-    const LLVM::CompiledKernelData &compiled) {
-  auto *launcher = kernel_launcher_.get();
-  auto handle = kernel_launcher_->register_llvm_kernel(compiled);
-  return [handle, launcher](LaunchContextBuilder &ctx) {
-    launcher->launch_llvm_kernel(handle, ctx);
-  };
-}
-
 LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
     const std::string &name) {
   TI_ASSERT(cache_reader_ != nullptr);
@@ -316,21 +307,20 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     TI_ASSERT(launcher != nullptr);
     const auto handle =
         launcher->register_cuda_artifact_kernel(data, artifact, bindings);
-    FunctionType fn = [handle, launcher](LaunchContextBuilder &ctx) {
-      launcher->launch_llvm_kernel(handle, ctx);
-    };
-    return std::make_unique<llvm_aot::KernelImpl>(std::move(fn), kernel_name, data);
+    return std::make_unique<llvm_aot::KernelImpl>(
+        launcher, handle, arch(), kernel_name, data);
 #else
     TI_ERROR("CUDA device artifacts require a build with CUDA support");
 #endif
   }
   LLVM::CompiledKernelData compiled{
       arch(), std::move(kernel_cache).take_llvm_ckd_data()};
-  auto fn = convert_module_to_function(compiled);
+  const auto handle = kernel_launcher_->register_llvm_kernel(compiled);
   // The launcher owns the executable. The callable retains its parameter/return
   // ABI, not an additional LLVM module for the entire AOT module lifetime.
   return std::make_unique<llvm_aot::KernelImpl>(
-      std::move(fn), kernel_name, compiled.get_internal_data());
+      kernel_launcher_.get(), handle, arch(), kernel_name,
+      compiled.get_internal_data());
 }
 
 std::unique_ptr<aot::Field> LlvmAotModule::make_new_field(
