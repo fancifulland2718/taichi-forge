@@ -87,13 +87,33 @@ cleared nor seeded automatically. `entry.bind(...)` freezes Python argument
 descriptors for repeated `call()` submissions; this is ordinary execution,
 not a captured GPU Graph.
 
+`entry.prepare(...)` (or `bound_call.prepare()`) prepares immutable native
+execution without running the kernels. CPU uses resolved function entries and
+one ordered batch, CUDA uses a CUDA Graph, and Vulkan reuses fixed commands.
+Call the resulting object repeatedly, inspect its `info`, and `close()` it when
+finished. Array contents may change; changing scalar values, shapes or storage
+identities requires a new prepared object. Preparation is explicit because its
+cold cost may not amortize for a one-shot call. No silent backend fallback occurs.
+Explicit ndarray gradients use the same bindings as ordinary execution.
+Add `--prepared` to the Python consumer example to exercise this route.
+Closing a dependency completes submitted work and invalidates its prepared
+objects; unrelated executions remain usable. Warm replay checks a native handle
+without re-marshalling arguments or scanning every array owner.
+
+The corresponding C API is `ti_prepare_kernel_ext` /
+`ti_prepare_compute_graph_ext` with `TiNdArrayBinding` /
+`TiNamedNdArrayBinding`, followed by `ti_launch_prepared_ext` and
+`ti_destroy_prepared_ext`. This slice covers ordinary no-return kernel batches;
+textures, ArgPacks and GPU sparse topology tasks require later resource/control
+extensions. It does not serialize device Graph handles into the artifact.
+
 Entries retain their module; submissions retain code and arrays until completion.
 Closing an array/module waits before retiring it. The runtime context manager
 waits and closes its children; later calls on them fail. Prefer explicit lifetime
 management to GC timing. Optional `library_path` and `runtime_path` select the
 shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
 core/resource set. The Python consumer currently excludes structure arrays,
-textures, native recordings, providers and external-memory imports; the C/C++
+textures, mixed native recordings, providers and external-memory imports; the C/C++
 capabilities below are separate. Windows x64 checks cover all three backends,
 forward/reverse work and both AOT/JIT loading orders.
 

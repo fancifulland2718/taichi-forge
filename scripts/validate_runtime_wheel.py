@@ -34,6 +34,8 @@ AOT_CONSUMER_SYMBOLS = frozenset({
     "ti_allocate_memory", "ti_free_memory", "ti_copy_memory_from_host_ext", "ti_copy_memory_to_host_ext",
     "ti_load_aot_module", "ti_destroy_aot_module", "ti_get_aot_module_kernel", "ti_get_aot_module_compute_graph",
     "ti_launch_kernel_with_gradients_ext", "ti_launch_compute_graph_with_gradients_ext",
+    "ti_prepare_kernel_ext", "ti_prepare_compute_graph_ext", "ti_launch_prepared_ext",
+    "ti_destroy_prepared_ext", "ti_get_prepared_execution_info_ext",
 })
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 FORBIDDEN_VENDOR_RUNTIME = re.compile(

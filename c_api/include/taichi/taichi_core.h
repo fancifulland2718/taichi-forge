@@ -313,6 +313,19 @@ typedef struct TiKernel_t *TiKernel;
 // target in a predefined order.
 typedef struct TiComputeGraph_t *TiComputeGraph;
 
+// Forge 0.6.4: immutable native execution with fixed bindings. Runtime-local;
+// closing any bound memory or its module invalidates future launches.
+typedef struct TiPreparedExecution_t *TiPreparedExecution;
+
+typedef struct TiPreparedExecutionInfo {
+  uint32_t dispatch_count;
+  // 0: CPU ordered native batch; 1: CUDA Graph; 2: Vulkan fixed commands.
+  uint32_t execution_kind;
+  // Known persistent argument image bytes, excluding driver/internal metadata.
+  uint64_t argument_bytes;
+  uint64_t launches;
+} TiPreparedExecutionInfo;
+
 // Forge 0.6.4: immutable fixed-AoS layout owned by an AOT module. Valid until
 // that module is destroyed; obtain it once from an exported argument.
 typedef struct TiNdArrayLayout_t *TiNdArrayLayout;
@@ -1166,6 +1179,37 @@ TI_DLL_EXPORT void TI_API_CALL ti_launch_compute_graph_with_bindings_ext(
     TiRuntime runtime, TiComputeGraph graph, uint32_t arg_count,
     const TiNamedArgument *args, uint32_t binding_count,
     const TiNamedNdArrayBinding *bindings);
+
+// Prepare without running mathematical work. Descriptors are copied during
+// preparation. Scalar values, shapes and storage identities are immutable;
+// storage contents may change between launches. No silent fallback occurs.
+// This initial route supports ordinary no-return CPU/CUDA/Vulkan kernel
+// batches with ndarray/explicit gradient bindings; GPU sparse topology tasks,
+// textures and ArgPacks are not admitted by this extension yet.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_kernel_ext(TiRuntime runtime,
+                      TiKernel kernel,
+                      uint32_t arg_count,
+                      const TiArgument *args,
+                      uint32_t binding_count,
+                      const TiNdArrayBinding *bindings);
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_compute_graph_ext(TiRuntime runtime,
+                             TiComputeGraph graph,
+                             uint32_t arg_count,
+                             const TiNamedArgument *args,
+                             uint32_t binding_count,
+                             const TiNamedNdArrayBinding *bindings);
+TI_DLL_EXPORT void TI_API_CALL
+ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_prepared_execution_info_ext(TiRuntime runtime,
+                                   TiPreparedExecution execution,
+                                   TiPreparedExecutionInfo *info);
+// Completes submitted work before retirement. Destroy invalidated executions
+// too; automatic dependency invalidation does not consume the public handle.
+TI_DLL_EXPORT void TI_API_CALL
+ti_destroy_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
 
 // Function `ti_flush` (1.4.0)
 //

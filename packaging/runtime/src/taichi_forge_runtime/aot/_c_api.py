@@ -99,6 +99,28 @@ class NamedGradient(C.Structure):
     _fields_ = [("name", C.c_char_p), ("gradient", NdArray)]
 
 
+class Binding(C.Structure):
+    _fields_ = [
+        ("argument_index", UInt),
+        ("layout_version", UInt),
+        ("layout", Handle),
+        ("gradient", C.POINTER(NdArray)),
+    ]
+
+
+class NamedBinding(C.Structure):
+    _fields_ = [("name", C.c_char_p), ("layout_version", UInt), ("layout", Handle), ("gradient", C.POINTER(NdArray))]
+
+
+class PreparedInfo(C.Structure):
+    _fields_ = [
+        ("dispatch_count", UInt),
+        ("execution_kind", UInt),
+        ("argument_bytes", C.c_uint64),
+        ("launches", C.c_uint64),
+    ]
+
+
 class MemoryAllocateInfo(C.Structure):
     _fields_ = [
         ("size", C.c_uint64),
@@ -144,6 +166,14 @@ class Api:
             "ti_destroy_aot_module": ([Handle], None),
             "ti_get_aot_module_kernel": ([Handle, C.c_char_p], Handle),
             "ti_get_aot_module_compute_graph": ([Handle, C.c_char_p], Handle),
+            "ti_prepare_kernel_ext": ([Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding)], Handle),
+            "ti_prepare_compute_graph_ext": (
+                [Handle, Handle, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
+                Handle,
+            ),
+            "ti_launch_prepared_ext": ([Handle, Handle], None),
+            "ti_destroy_prepared_ext": ([Handle, Handle], None),
+            "ti_get_prepared_execution_info_ext": ([Handle, Handle, C.POINTER(PreparedInfo)], None),
             "ti_launch_kernel_with_gradients_ext": (
                 [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Gradient)],
                 None,

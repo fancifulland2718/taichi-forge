@@ -125,6 +125,7 @@ struct Error {
 
 namespace capi {
 class MetalRuntime;
+class PreparedExecutionRegistry;
 }  // namespace capi
 
 class Runtime {
@@ -157,6 +158,8 @@ class Runtime {
   std::unordered_map<TiKernel, KernelBinding> kernels_;
   std::unordered_map<TiComputeGraph, GraphBinding> graphs_;
   std::unordered_map<TiNdArrayLayout, LayoutBinding> layouts_;
+  std::recursive_mutex submission_mutex_;
+  std::shared_ptr<capi::PreparedExecutionRegistry> prepared_;
 
  protected:
   // 32 is a magic number in `taichi/inc/constants.h`.
@@ -208,6 +211,13 @@ class Runtime {
   const GraphBinding &get_graph(TiComputeGraph graph) const;
   const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
   void retire_module(class AotModule *owner);
+  std::recursive_mutex &submission_mutex() {
+    return submission_mutex_;
+  }
+  capi::PreparedExecutionRegistry &prepared_registry();
+  void retire_prepared_memory(TiMemory memory);
+  void retire_prepared_module(class AotModule *owner);
+  void clear_prepared();
 
   virtual TiImage allocate_image(const taichi::lang::ImageParams &params) {
     TI_NOT_IMPLEMENTED

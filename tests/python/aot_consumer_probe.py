@@ -104,6 +104,54 @@ def main(arch, module_path, order):
     raises(aot.AotError, lambda: forward(x, y))  # Missing explicit adjoints.
     wrong_gradient = runtime.ndarray("f32", 3)
     raises(aot.AotError, lambda: forward(x, y, gradients={0: wrong_gradient, 1: dy}))
+    y.write(floats([-91] * 4))
+    dx.write(floats([0] * 4))
+    dy.write(floats([1] * 4))
+    prepared = graph.prepare({"x": x, "y": y}, gradients={"x": dx, "y": dy})
+    assert read(y) == [-91] * 4 and read(dx) == [0] * 4  # Preparation runs no user work.
+    expected_kind = {"cpu": "cpu_batch", "cuda": "cuda_graph", "vulkan": "vulkan_commands"}[arch]
+    assert prepared.info["execution_kind"] == expected_kind
+    assert prepared.info["dispatch_count"] == 2 and prepared.info["launches"] == 0
+    for shift in range(3):
+        values = [i + shift for i in (1, 2, 3, 4)]
+        x.write(floats(values))
+        dx.write(floats([0] * 4))
+        dy.write(floats([0.25] * 4))
+        prepared()
+        assert read(y) == [v * v + 2 * v for v in values]
+        assert read(dx) == [(2 * v + 2) * 0.25 for v in values]
+    assert prepared.info["launches"] == 3
+    # A fixed scalar image is independent of the temporary host descriptors.
+    fixed_scalar = module.kernel("adjust").bind(0.5, 2, tensor)
+    fixed = fixed_scalar.prepare()
+    fixed_scalar._arguments[0].value.scalar.value.x32 = 0
+    fixed()
+    assert read(tensor) == [2, 1, 2.5, 1.5, 3, 2]
+    with aot.Runtime(arch) as other:
+        raises(
+            aot.AotError, lambda: other._api.call(other._api.ti_launch_prepared_ext, other._handle, prepared._handle)
+        )
+    # Releasing one dependency invalidates only its dependents. Native handles
+    # remain destroyable; an unrelated prepared batch continues to replay.
+    fixed()
+    tensor.close()
+    raises(aot.AotError, fixed)
+    fixed.close()
+    prepared()
+    temporary_module = runtime.load_module(module_path)
+    temporary = temporary_module.graph("differentiate").prepare({"x": x, "y": y}, gradients={"x": dx, "y": dy})
+    temporary()
+    temporary_module.close()  # Also retires work already submitted.
+    raises(aot.AotError, temporary)
+    temporary.close()
+    # Native preparation failure must not poison later valid preparations.
+    raises(aot.AotError, lambda: forward.prepare(x, y))
+    with forward.prepare(x, y, gradients={0: dx, 1: dy}) as one:
+        assert one.info["dispatch_count"] == 1
+        one()
+    prepared.close()
+    raises(RuntimeError, prepared)
+    tensor = runtime.ndarray("f32", 3, element_shape=(2,))
     with aot.Runtime(arch) as other:
         foreign = other.ndarray("f32", 4)
         raises(ValueError, lambda: forward.bind(foreign, y))
@@ -116,6 +164,8 @@ def main(arch, module_path, order):
         assert empty_memory.size == 0
     empty = runtime.ndarray("f32", 0)
     module.kernel("adjust")(0.5, 2, runtime.ndarray("f32", 0, element_shape=(2,)))
+    with module.kernel("adjust").prepare(0.5, 2, runtime.ndarray("f32", 0, element_shape=(2,))) as empty_call:
+        empty_call()
     empty.write(b"")
     assert empty.read() == b""
     if arch == "cpu":
@@ -166,9 +216,10 @@ def main(arch, module_path, order):
     x.write(floats([1, 2, 3, 4]))
     dx.write(floats([0] * 4))
     dy.write(floats([1] * 4))
-    module.graph("differentiate")({"x": x, "y": y}, gradients={"x": dx, "y": dy})
+    pending = module.graph("differentiate").prepare({"x": x, "y": y}, gradients={"x": dx, "y": dy})
+    pending()
     reference = weakref.ref(runtime)
-    del runtime, module, x, y, dx, dy
+    del runtime, module, x, y, dx, dy, pending
     gc.collect()
     assert reference() is None
     print(f"AOT consumer passed: {arch} {order}")

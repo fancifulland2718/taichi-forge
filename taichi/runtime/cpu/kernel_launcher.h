@@ -32,6 +32,25 @@ class KernelLauncher : public LLVM::KernelLauncher {
  public:
   explicit KernelLauncher(Config config);
 
+  // Immutable bindings over already registered code. The caller retains code
+  // and argument storage and serializes their retirement with batch execution.
+  class PreparedLaunch {
+   public:
+    PreparedLaunch() = default;
+    PreparedLaunch(PreparedLaunch &&) = default;
+    PreparedLaunch &operator=(PreparedLaunch &&) = default;
+    PreparedLaunch(const PreparedLaunch &) = delete;
+    PreparedLaunch &operator=(const PreparedLaunch &) = delete;
+
+   private:
+    friend class KernelLauncher;
+    std::shared_ptr<const Context> registration_;
+    RuntimeContext context_{};
+    std::vector<char> arguments_;
+  };
+  PreparedLaunch prepare_launch(Handle handle, LaunchContextBuilder &ctx);
+  void launch_prepared(std::vector<PreparedLaunch> &launches);
+
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
@@ -46,6 +65,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const override;
 
  private:
+  void bind_runtime_context(const Context &registration,
+                            LaunchContextBuilder &context);
   // A CPU kernel can contain multiple offloaded tasks that share LLVM runtime
   // scratch/list state. The ThreadPool queues individual parallel-for jobs,
   // not whole kernels, so two host callers could otherwise interleave those

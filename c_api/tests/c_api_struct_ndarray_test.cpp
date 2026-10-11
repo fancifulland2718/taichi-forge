@@ -143,9 +143,17 @@ class AotStructNdarrayTest : public CapiTest {
       if (step == 0)
         ti_launch_kernel_with_bindings_ext(runtime, kernel, 2, args, 1,
                                            &binding);
-      else
+      else if (step == 1)
         ti_launch_compute_graph_with_bindings_ext(runtime, graph, 2, named, 1,
                                                   &named_binding);
+      else {
+        auto prepared = ti_prepare_compute_graph_ext(runtime, graph, 2, named,
+                                                     1, &named_binding);
+        ASSERT_NE(prepared, nullptr);
+        ASSERT_TAICHI_SUCCESS();
+        ti_launch_prepared_ext(runtime, prepared);
+        ti_destroy_prepared_ext(runtime, prepared);
+      }
       ASSERT_TAICHI_SUCCESS();
       runtime.wait();
       std::vector<float> values(4);

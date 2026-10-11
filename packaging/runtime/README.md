@@ -22,9 +22,12 @@ implementation uses only the standard library and the public C API in the same
 native core used by JIT. Importing the module does not load native libraries or
 probe devices; `aot.Runtime("cpu" | "cuda" | "vulkan")` selects the backend.
 Existing wheels without this entrypoint need a matching newer runtime build.
+`entry.prepare(...)` provides explicit fixed native execution: a CPU batch,
+CUDA Graph or Vulkan fixed commands. Prepare once and replay with unchanged
+bindings; array contents can change. Preparation executes no user kernels.
 
 This is not a compiler-free runtime: CPU/CUDA bitcode still needs bundled LLVM,
-and GPU drivers may compile device code during loading. Native Graph recordings,
+and GPU drivers may compile device code during loading. Mixed native recordings,
 providers, structure bindings and external-memory imports are not exposed by
 this Python consumer yet. See `docs/forge/aot_sdk.en.md` in the source repository
 for deployment contracts and `examples/aot_sdk/consume.py` for a source-free

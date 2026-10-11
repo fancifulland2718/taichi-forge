@@ -178,6 +178,32 @@ class AotAutodiffTest : public CapiTest {
         }
       }
     }
+    // Module-owned primal/adjoint roots also work with fixed native replay.
+    TiNamedArgument fixed_args[2]{};
+    fixed_args[0].name = "seed";
+    fixed_args[0].argument.type = TI_ARGUMENT_TYPE_F32;
+    fixed_args[0].argument.value.f32 = -0.25f;
+    fixed_args[1].name = "out";
+    fixed_args[1].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+    fixed_args[1].argument.value.ndarray = output.ndarray();
+    auto prepared =
+        ti_prepare_compute_graph_ext(runtime, graph, 2, fixed_args, 0, nullptr);
+    ASSERT_NE(prepared, nullptr);
+    ASSERT_TAICHI_SUCCESS();
+    for (int replay = 0; replay < 2; ++replay) {
+      ti_launch_prepared_ext(runtime, prepared);
+      runtime.wait();
+      ASSERT_TAICHI_SUCCESS();
+      std::vector<float> actual(8);
+      output.read(actual);
+      for (int i = 0; i < 4; ++i) {
+        const float x = i + 1;
+        EXPECT_FLOAT_EQ(actual[i], x * x * x + 2 * x);
+        EXPECT_FLOAT_EQ(actual[i + 4], -0.25f * (3 * x * x + 2));
+      }
+    }
+    ti_destroy_prepared_ext(runtime, prepared);
+    ASSERT_TAICHI_SUCCESS();
     if (relocatable) {
       // Every artifact uses local roots [0, N), but independently loaded
       // modules must retain distinct primal and adjoint storage.

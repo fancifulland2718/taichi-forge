@@ -80,79 +80,15 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     TI_ASSERT(iter != contexts_.end());
     launcher_ctx = iter->second;
   }
-  auto *executor = get_runtime_executor();
 
-  ctx.get_context().runtime = executor->get_llvm_runtime();
   // For taichi ndarrays, context.array_ptrs saves pointer to its
   // |DeviceAllocation|, CPU backend actually want to use the raw ptr here.
-  const auto &parameters = launcher_ctx->parameters;
+  auto *executor = get_runtime_executor();
   {
     const auto attribution_start =
         attribute ? LaunchClock::now() : LaunchClock::time_point{};
     TI_COMPILE_PROFILER("cpu_launch_bind_args");
-    for (int i = 0; i < (int)parameters.size(); i++) {
-      const auto &kv = parameters[i];
-      const auto &key = kv.first;
-      const auto &parameter = kv.second;
-      std::vector<int> data_ptr_idx = key;
-      data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
-      std::vector<int> grad_ptr_idx = key;
-      grad_ptr_idx.push_back(TypeFactory::GRAD_PTR_POS_IN_NDARRAY);
-
-      if (parameter.is_array && ctx.device_allocation_type[key] ==
-                                    LaunchContextBuilder::DevAllocType::kNone) {
-        ctx.set_ndarray_ptrs(key, (uint64)ctx.array_ptrs[data_ptr_idx],
-                             (uint64)ctx.array_ptrs[grad_ptr_idx]);
-      }
-      if (parameter.is_array &&
-          ctx.device_allocation_type[key] !=
-              LaunchContextBuilder::DevAllocType::kNone &&
-          ctx.array_runtime_sizes[key] > 0) {
-        const auto alloc_type = ctx.device_allocation_type[key];
-        uint64 host_ptr = 0;
-        if (alloc_type ==
-            LaunchContextBuilder::DevAllocType::kDenseStorage) {
-          const auto &binding = ctx.get_resolved_dense_storage(key);
-          auto *base = reinterpret_cast<char *>(
-              executor->get_device_alloc_info_ptr(binding.allocation));
-          host_ptr = reinterpret_cast<uint64>(base + binding.byte_offset);
-        } else {
-          DeviceAllocation *ptr =
-              static_cast<DeviceAllocation *>(ctx.array_ptrs[data_ptr_idx]);
-          host_ptr =
-              (uint64)executor->get_device_alloc_info_ptr(*ptr);
-        }
-        ctx.set_array_device_allocation_type(
-            key, LaunchContextBuilder::DevAllocType::kNone);
-
-        auto grad_ptr = alloc_type ==
-                                LaunchContextBuilder::DevAllocType::kDenseStorage
-                            ? nullptr
-                            : ctx.array_ptrs[grad_ptr_idx];
-        uint64 host_ptr_grad =
-            grad_ptr == nullptr
-                ? 0
-                : (uint64)executor->get_device_alloc_info_ptr(
-                      *static_cast<DeviceAllocation *>(grad_ptr));
-        ctx.set_ndarray_ptrs(key, host_ptr, host_ptr_grad);
-      }
-      if (parameter.is_argpack) {
-        data_ptr_idx = key;
-        data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_ARGPACK);
-        auto *argpack = ctx.argpack_ptrs[key];
-        auto argpack_ptr = argpack->get_device_allocation();
-        uint64 host_ptr =
-            (uint64)executor->get_device_alloc_info_ptr(argpack_ptr);
-        if (key.size() == 1) {
-          ctx.set_argpack_ptr(key, host_ptr);
-        } else {
-          auto key_parent = key;
-          key_parent.pop_back();
-          auto *argpack_parent = ctx.argpack_ptrs[key_parent];
-          argpack_parent->set_arg_nested_argpack_ptr(key.back(), host_ptr);
-        }
-      }
-    }
+    bind_runtime_context(*launcher_ctx, ctx);
     if (attribute) {
       launch_attribution_.argument_binding_ns.fetch_add(
           elapsed_ns(attribution_start), std::memory_order_relaxed);
@@ -311,6 +247,108 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
               CLOCKS_PER_SEC,
           std::memory_order_relaxed);
     }
+  }
+}
+
+void KernelLauncher::bind_runtime_context(const Context &registration,
+                                          LaunchContextBuilder &ctx) {
+  auto *executor = get_runtime_executor();
+  ctx.get_context().runtime = executor->get_llvm_runtime();
+  const auto &parameters = registration.parameters;
+  for (int i = 0; i < (int)parameters.size(); i++) {
+    const auto &kv = parameters[i];
+    const auto &key = kv.first;
+    const auto &parameter = kv.second;
+    std::vector<int> data_ptr_idx = key;
+    data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+    std::vector<int> grad_ptr_idx = key;
+    grad_ptr_idx.push_back(TypeFactory::GRAD_PTR_POS_IN_NDARRAY);
+
+    if (parameter.is_array && ctx.device_allocation_type[key] ==
+                                  LaunchContextBuilder::DevAllocType::kNone) {
+      ctx.set_ndarray_ptrs(key, (uint64)ctx.array_ptrs[data_ptr_idx],
+                           (uint64)ctx.array_ptrs[grad_ptr_idx]);
+    }
+    if (parameter.is_array &&
+        ctx.device_allocation_type[key] !=
+            LaunchContextBuilder::DevAllocType::kNone &&
+        ctx.array_runtime_sizes[key] > 0) {
+      const auto alloc_type = ctx.device_allocation_type[key];
+      uint64 host_ptr = 0;
+      if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
+        const auto &binding = ctx.get_resolved_dense_storage(key);
+        auto *base = reinterpret_cast<char *>(
+            executor->get_device_alloc_info_ptr(binding.allocation));
+        host_ptr = reinterpret_cast<uint64>(base + binding.byte_offset);
+      } else {
+        DeviceAllocation *ptr =
+            static_cast<DeviceAllocation *>(ctx.array_ptrs[data_ptr_idx]);
+        host_ptr = (uint64)executor->get_device_alloc_info_ptr(*ptr);
+      }
+      ctx.set_array_device_allocation_type(
+          key, LaunchContextBuilder::DevAllocType::kNone);
+
+      auto grad_ptr =
+          alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage
+              ? nullptr
+              : ctx.array_ptrs[grad_ptr_idx];
+      uint64 host_ptr_grad =
+          grad_ptr == nullptr ? 0
+                              : (uint64)executor->get_device_alloc_info_ptr(
+                                    *static_cast<DeviceAllocation *>(grad_ptr));
+      ctx.set_ndarray_ptrs(key, host_ptr, host_ptr_grad);
+    }
+    if (parameter.is_argpack) {
+      data_ptr_idx = key;
+      data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_ARGPACK);
+      auto *argpack = ctx.argpack_ptrs[key];
+      auto argpack_ptr = argpack->get_device_allocation();
+      uint64 host_ptr =
+          (uint64)executor->get_device_alloc_info_ptr(argpack_ptr);
+      if (key.size() == 1) {
+        ctx.set_argpack_ptr(key, host_ptr);
+      } else {
+        auto key_parent = key;
+        key_parent.pop_back();
+        auto *argpack_parent = ctx.argpack_ptrs[key_parent];
+        argpack_parent->set_arg_nested_argpack_ptr(key.back(), host_ptr);
+      }
+    }
+  }
+}
+
+KernelLauncher::PreparedLaunch KernelLauncher::prepare_launch(
+    Handle handle,
+    LaunchContextBuilder &ctx) {
+  std::lock_guard<std::mutex> execution_lock(execution_mutex_);
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  const auto found = contexts_.find(handle.get_launch_id());
+  TI_ERROR_IF(found == contexts_.end(),
+              "Prepared CPU entry is no longer registered");
+  TI_ERROR_IF(ctx.result_buffer_size || !ctx.argpack_ptrs.empty(),
+              "Prepared CPU execution does not support returns or ArgPacks");
+  PreparedLaunch result;
+  result.registration_ = found->second;
+  bind_runtime_context(*result.registration_, ctx);
+  result.context_ = ctx.get_context();
+  if (ctx.arg_buffer_size) {
+    result.arguments_.assign(
+        ctx.get_context().arg_buffer,
+        ctx.get_context().arg_buffer + ctx.arg_buffer_size);
+  }
+  result.context_.arg_buffer = result.arguments_.data();
+  result.context_.result_buffer = nullptr;
+  return result;
+}
+
+void KernelLauncher::launch_prepared(std::vector<PreparedLaunch> &launches) {
+  // One lock for the entire ordered batch. Function addresses and ndarray
+  // pointers were resolved before publication; warm replay does no ABI work.
+  std::lock_guard<std::mutex> execution_lock(execution_mutex_);
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  for (auto &launch : launches) {
+    for (auto task : launch.registration_->task_funcs)
+      task(&launch.context_);
   }
 }
 

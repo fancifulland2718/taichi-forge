@@ -76,8 +76,23 @@ runtime wheel 提供 `taichi_forge_runtime.aot`，仅用 Python 标准库和共�
 捕获。入口保留模块，提交保留代码和数组直到完成；关闭数组/模块会先等待。runtime
 上下文管理器等待并关闭子资源，随后调用旧对象会报错。建议显式管理寿命。
 
+`entry.prepare(...)`（或 `bound_call.prepare()`）准备不可变的原生执行对象，准备
+过程不会执行 kernel。CPU 复用已解析函数入口并有序批执行，CUDA 使用 CUDA Graph，
+Vulkan 复用固定命令。返回对象可重复调用、读取 `info`，使用完后 `close()`。
+数组内容可以变化；标量值、形状或存储身份变化需要重新准备。准备有冷成本，单次
+调用未必能摊销，因此入口显式选择，失败不会静默回退。显式 ndarray 梯度绑定与
+普通执行相同。关闭依赖会完成在途工作并使关联 prepared 对象失效，不影响无关
+执行对象；暖态只查原生句柄，不重新装箱参数或扫描全部数组 owner。
+公开 Python 消费示例添加 `--prepared` 即可验证此路径。
+
+对应 C API 为 `ti_prepare_kernel_ext` / `ti_prepare_compute_graph_ext`，使用
+`TiNdArrayBinding` / `TiNamedNdArrayBinding`，随后调用 `ti_launch_prepared_ext`
+和 `ti_destroy_prepared_ext`。本批覆盖无 host 返回值的普通 kernel 批次；纹理、
+ArgPack 和 GPU sparse topology 任务仍需后续资源/控制扩展。产物不保存设备 Graph
+句柄，消费者加载代码后再准备。
+
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
-选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、原生 recording、
+选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、混合原生 recording、
 provider 和外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
 后端的前向/反向与两种 AOT/JIT 加载顺序。
 

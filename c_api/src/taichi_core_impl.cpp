@@ -139,6 +139,8 @@ TiMemory Runtime::allocate_memory(
   return devalloc2devmem(*this, devalloc, params.size);
 }
 void Runtime::free_memory(TiMemory devmem) {
+  std::lock_guard<std::recursive_mutex> submission_lock(submission_mutex());
+  retire_prepared_memory(devmem);
   std::lock_guard<std::mutex> lock(memory_mutex_);
   const auto found = memories_.find(devmem);
   if (found == memories_.end()) {
@@ -351,6 +353,7 @@ TiRuntime ti_create_runtime(TiArch arch, uint32_t device_index) {
 void ti_destroy_runtime(TiRuntime runtime) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
+  ((Runtime *)runtime)->clear_prepared();
   delete (Runtime *)runtime;
   TI_CAPI_TRY_CATCH_END();
 }
@@ -777,7 +780,11 @@ void ti_destroy_aot_module(TiAotModule aot_module) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(aot_module);
 
-  delete (AotModule *)aot_module;
+  auto *module = reinterpret_cast<AotModule *>(aot_module);
+  std::lock_guard<std::recursive_mutex> lock(
+      module->runtime().submission_mutex());
+  module->runtime().retire_prepared_module(module);
+  delete module;
   TI_CAPI_TRY_CATCH_END();
 }
 
@@ -872,9 +879,10 @@ void ti_launch_kernel_with_bindings_ext(
     const TiNdArrayBinding *bindings) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
-  auto bound =
-      capi::bind_kernel_arguments(*reinterpret_cast<Runtime *>(runtime), kernel,
-                                  arg_count, args, binding_count, bindings);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto bound = capi::bind_kernel_arguments(rt, kernel, arg_count, args,
+                                           binding_count, bindings);
   if (bound)
     bound->kernel->launch(*bound->context);
   TI_CAPI_TRY_CATCH_END();
@@ -914,8 +922,9 @@ void ti_launch_compute_graph_with_bindings_ext(
     const TiNamedNdArrayBinding *bindings) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
-  auto bound = capi::bind_graph_arguments(*reinterpret_cast<Runtime *>(runtime),
-                                          compute_graph, arg_count, args,
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto bound = capi::bind_graph_arguments(rt, compute_graph, arg_count, args,
                                           binding_count, bindings);
   if (bound)
     bound->graph->run(bound->arguments, bound->gradients);

@@ -168,7 +168,8 @@ class Runtime:
                 return
             self.wait()
             # Retire code and module-local storage before external arguments.
-            for kind, handle in sorted(self._resources, key=lambda item: item[0] != "module"):
+            priority = {"prepared": 0, "module": 1, "memory": 2}
+            for kind, handle in sorted(self._resources, key=lambda item: priority[item[0]]):
                 self._destroy_resource(kind, handle)
             self._api.call(self._api.ti_destroy_runtime, self._handle)
             self._handle = None
@@ -178,6 +179,8 @@ class Runtime:
             return
         if kind == "module":
             self._api.call(self._api.ti_destroy_aot_module, handle)
+        elif kind == "prepared":
+            self._api.call(self._api.ti_destroy_prepared_ext, self._handle, handle)
         else:
             self._api.call(self._api.ti_free_memory, self._handle, handle)
         self._resources.remove((kind, handle))
@@ -405,6 +408,76 @@ class BoundCall:
 
     __call__ = run
 
+    def prepare(self):
+        """Build native fixed execution without running the bound kernels."""
+        runtime = self._entry._module._runtime
+        with runtime._lock:
+            for owner in self._owners:
+                owner._check()
+            graph = isinstance(self._entry, Graph)
+            binding_type = abi.NamedBinding if graph else abi.Binding
+            bindings = (binding_type * len(self._gradients))(
+                *[
+                    binding_type(
+                        gradient.name if graph else gradient.argument_index,
+                        0,
+                        None,
+                        C.pointer(gradient.gradient),
+                    )
+                    for gradient in self._gradients
+                ]
+            )
+            function = runtime._api.ti_prepare_compute_graph_ext if graph else runtime._api.ti_prepare_kernel_ext
+            handle = runtime._api.call(
+                function,
+                runtime._handle,
+                self._entry._handle,
+                len(self._arguments),
+                self._arguments,
+                len(bindings),
+                bindings,
+            )
+            return PreparedCall(runtime, handle, self._owners)
+
+
+class PreparedCall(_Resource):
+    """Immutable native batch; replay resolves no names or Python arguments.
+
+    Change array contents in place, or prepare a new object for new bindings.
+    Explicitly closing a module/array invalidates its dependent executions.
+    """
+
+    _kind = "prepared"
+
+    def __init__(self, runtime, handle, owners):
+        self._owners = owners
+        super().__init__(runtime, handle)
+
+    def run(self):
+        runtime = self._runtime
+        with runtime._lock:
+            self._check()
+            runtime._pending.add(self)
+            runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
+
+    __call__ = run
+
+    @property
+    def info(self):
+        runtime = self._runtime
+        with runtime._lock:
+            self._check()
+            native = abi.PreparedInfo()
+            runtime._api.call(
+                runtime._api.ti_get_prepared_execution_info_ext, runtime._handle, self._handle, C.byref(native)
+            )
+            return dict(
+                dispatch_count=native.dispatch_count,
+                execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands")[native.execution_kind],
+                argument_bytes=native.argument_bytes,
+                launches=native.launches,
+            )
+
 
 class Kernel:
     def __init__(self, module, handle):
@@ -429,6 +502,9 @@ class Kernel:
 
     def run(self, *arguments, gradients=None):
         self.bind(*arguments, gradients=gradients).run()
+
+    def prepare(self, *arguments, gradients=None):
+        return self.bind(*arguments, gradients=gradients).prepare()
 
     __call__ = run
 

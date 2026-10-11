@@ -70,6 +70,10 @@ class KernelImpl : public aot::Kernel {
     return handle_;
   }
 
+  GfxRuntime &runtime() const {
+    return *runtime_;
+  }
+
  private:
   GfxRuntime *const runtime_;
   GfxRuntime::KernelHandle handle_;
