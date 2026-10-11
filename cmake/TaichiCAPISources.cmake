@@ -2,7 +2,8 @@
 include_guard(GLOBAL)
 
 function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
-    set(_sources c_api/src/taichi_core_impl.cpp c_api/src/aot_bindings.cpp)
+    set(_sources c_api/src/taichi_core_impl.cpp c_api/src/aot_bindings.cpp
+        c_api/src/argument_binding.cpp)
     set(_headers
         c_api/include/taichi/taichi_platform.h
         c_api/include/taichi/taichi_core.h

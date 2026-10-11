@@ -93,6 +93,14 @@ def main(arch, module_path, order):
     raises(ValueError, lambda: forward.bind(x, y, gradients={3: dx}))
     raises(aot.AotError, lambda: module.kernel("adjust")(0.5, 2))
     raises(aot.AotError, lambda: module.kernel("adjust")(aot.Scalar("f64", 0.5), 2, tensor))
+    raises(aot.AotError, lambda: module.kernel("adjust")(0.5, 2, runtime.ndarray("i32", 3, element_shape=(2,))))
+    raises(aot.AotError, lambda: module.kernel("adjust")(0.5, 2, runtime.ndarray("f32", 6)))
+    oversized = module.kernel("adjust").bind(0.5, 2, tensor)
+    oversized._arguments[2].value.ndarray.shape.dims[0] = 4
+    raises(aot.AotError, oversized)
+    oversized._arguments[2].value.ndarray.shape.dims[0] = 0xFFFFFFFF
+    raises(aot.AotError, oversized)
+    assert read(tensor) == [9] * 6  # Invalid descriptors execute no work.
     raises(aot.AotError, lambda: forward(x, y))  # Missing explicit adjoints.
     wrong_gradient = runtime.ndarray("f32", 3)
     raises(aot.AotError, lambda: forward(x, y, gradients={0: wrong_gradient, 1: dy}))
