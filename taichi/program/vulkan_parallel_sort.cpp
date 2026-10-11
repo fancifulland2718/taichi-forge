@@ -67,9 +67,11 @@ std::uint64_t Program::create_vulkan_parallel_sort_plan(
   VkPhysicalDeviceProperties2 properties2{};
   properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
   properties2.pNext = &subgroup;
-  TI_ERROR_IF(!vkGetPhysicalDeviceProperties2,
-              "Parallel Sort requires Vulkan 1.1 subgroup properties.");
-  vkGetPhysicalDeviceProperties2(dev->vk_physical_device(), &properties2);
+  TI_ERROR_IF(
+      !dev->vk_device().instance_functions().vkGetPhysicalDeviceProperties2,
+      "Parallel Sort requires Vulkan 1.1 subgroup properties.");
+  dev->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+      dev->vk_physical_device(), &properties2);
   TI_ERROR_IF(!(subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ||
                   !(subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT),
               "Parallel Sort requires compute subgroup shuffle support.");

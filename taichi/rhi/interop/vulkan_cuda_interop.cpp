@@ -234,7 +234,8 @@ void release_vulkan_interop_device(VulkanDevice *vk_dev) {
 }
 
 #if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(_MSC_VER)
-HANDLE get_device_mem_handle(VkDeviceMemory &mem, VkDevice device) {
+HANDLE get_device_mem_handle(VkDeviceMemory &mem,
+                             const vkapi::DeviceHandle &device) {
   HANDLE handle;
 
   VkMemoryGetWin32HandleInfoKHR memory_get_win32_handle_info = {};
@@ -246,8 +247,8 @@ HANDLE get_device_mem_handle(VkDeviceMemory &mem, VkDevice device) {
       VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 
   auto fpGetMemoryWin32HandleKHR =
-      (PFN_vkGetMemoryWin32HandleKHR)vkGetDeviceProcAddr(
-          device, "vkGetMemoryWin32HandleKHR");
+      (PFN_vkGetMemoryWin32HandleKHR)device.instance_functions()
+          .vkGetDeviceProcAddr(device, "vkGetMemoryWin32HandleKHR");
 
   if (fpGetMemoryWin32HandleKHR == nullptr) {
     TI_ERROR("vkGetMemoryWin32HandleKHR is nullptr");
@@ -262,7 +263,8 @@ HANDLE get_device_mem_handle(VkDeviceMemory &mem, VkDevice device) {
   return handle;
 }
 #else
-int get_device_mem_handle(VkDeviceMemory &mem, VkDevice device) {
+int get_device_mem_handle(VkDeviceMemory &mem,
+                          const vkapi::DeviceHandle &device) {
   int fd;
 
   VkMemoryGetFdInfoKHR memory_get_fd_info = {};
@@ -273,7 +275,8 @@ int get_device_mem_handle(VkDeviceMemory &mem, VkDevice device) {
       VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
 
   auto fpGetMemoryFdKHR =
-      (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR");
+      (PFN_vkGetMemoryFdKHR)device.instance_functions().vkGetDeviceProcAddr(
+          device, "vkGetMemoryFdKHR");
 
   if (fpGetMemoryFdKHR == nullptr) {
     TI_ERROR("vkGetMemoryFdKHR is nullptr");
@@ -288,13 +291,15 @@ int get_device_mem_handle(VkDeviceMemory &mem, VkDevice device) {
 #endif
 
 #if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(_MSC_VER)
-HANDLE get_device_semaphore_handle(VkSemaphore semaphore, VkDevice device) {
+HANDLE get_device_semaphore_handle(VkSemaphore semaphore,
+                                   const vkapi::DeviceHandle &device) {
   VkSemaphoreGetWin32HandleInfoKHR info{};
   info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR;
   info.semaphore = semaphore;
   info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
   auto get_handle = reinterpret_cast<PFN_vkGetSemaphoreWin32HandleKHR>(
-      vkGetDeviceProcAddr(device, "vkGetSemaphoreWin32HandleKHR"));
+      device.instance_functions().vkGetDeviceProcAddr(
+          device, "vkGetSemaphoreWin32HandleKHR"));
   TI_ERROR_IF(get_handle == nullptr,
               "vkGetSemaphoreWin32HandleKHR is unavailable");
   HANDLE handle = nullptr;
@@ -303,13 +308,15 @@ HANDLE get_device_semaphore_handle(VkSemaphore semaphore, VkDevice device) {
   return handle;
 }
 #else
-int get_device_semaphore_handle(VkSemaphore semaphore, VkDevice device) {
+int get_device_semaphore_handle(VkSemaphore semaphore,
+                                const vkapi::DeviceHandle &device) {
   VkSemaphoreGetFdInfoKHR info{};
   info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
   info.semaphore = semaphore;
   info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
   auto get_fd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
-      vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR"));
+      device.instance_functions().vkGetDeviceProcAddr(device,
+                                                      "vkGetSemaphoreFdKHR"));
   TI_ERROR_IF(get_fd == nullptr, "vkGetSemaphoreFdKHR is unavailable");
   int fd = -1;
   TI_ERROR_IF(get_fd(device, &info, &fd) != VK_SUCCESS,
@@ -503,7 +510,7 @@ ImportedVulkanMemory get_cuda_memory_pointer(VkDeviceMemory mem,
                                              VkDeviceSize mem_size,
                                              VkDeviceSize offset,
                                              VkDeviceSize buffer_size,
-                                             VkDevice device,
+                                             const vkapi::DeviceHandle &device,
                                              bool is_dedicated = false) {
   auto handle = get_device_mem_handle(mem, device);
   ScopedExternalHandle handle_guard(handle);

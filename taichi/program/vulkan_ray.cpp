@@ -44,7 +44,7 @@ void check_ray_storage(const storage::DenseStorageDescriptor &value,
 // Kernel/transfer producers, previous AS builds and queries may precede this
 // command on the same runtime queue. buffer_copy itself inserts no dependency.
 // Also order reuse of provider-owned geometry, AS storage and build scratch.
-void geometry_reuse_barrier(VkCommandBuffer commands) {
+void geometry_reuse_barrier(const vkapi::IVkCommandBuffer &commands) {
   VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
   barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
                           VK_ACCESS_TRANSFER_WRITE_BIT |
@@ -54,8 +54,8 @@ void geometry_reuse_barrier(VkCommandBuffer commands) {
                           VK_ACCESS_TRANSFER_WRITE_BIT |
                           VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
                           VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-  vkCmdPipelineBarrier(
-      commands,
+  commands->device.functions().vkCmdPipelineBarrier(
+      commands->buffer,
       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
           VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
       VK_PIPELINE_STAGE_TRANSFER_BIT |
@@ -154,8 +154,10 @@ class RayQueryPipelines {
 };
 
 template <typename Function>
-Function load_vulkan_device_function(VkDevice device, const char *name) {
-  auto function = reinterpret_cast<Function>(vkGetDeviceProcAddr(device, name));
+Function load_vulkan_device_function(const vkapi::DeviceHandle &device,
+                                     const char *name) {
+  auto function = reinterpret_cast<Function>(
+      device.instance_functions().vkGetDeviceProcAddr(device, name));
   TI_ERROR_IF(function == nullptr,
               "Vulkan ray provider could not load required function '{}'.",
               name);
@@ -223,7 +225,8 @@ class VulkanTriangleRayScene {
     VkPhysicalDeviceProperties2 properties{};
     properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     properties.pNext = &as_properties;
-    vkGetPhysicalDeviceProperties2(device_->vk_physical_device(), &properties);
+    device_->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+        device_->vk_physical_device(), &properties);
     scratch_alignment_ =
         as_properties.minAccelerationStructureScratchOffsetAlignment;
     TI_ERROR_IF(scratch_alignment_ == 0,
@@ -283,7 +286,7 @@ class VulkanTriangleRayScene {
     auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
     auto command_buffer = vk_commands->vk_command_buffer();
 
-    geometry_reuse_barrier(command_buffer->buffer);
+    geometry_reuse_barrier(command_buffer);
     command_list->buffer_copy(vertex_buffer_.get_ptr(), source_vertices,
                               vertex_bytes_);
     command_list->buffer_copy(index_buffer_.get_ptr(), source_indices,
@@ -294,7 +297,7 @@ class VulkanTriangleRayScene {
     input_barrier.srcAccessMask =
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
     input_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(
+    command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer,
         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
@@ -312,10 +315,11 @@ class VulkanTriangleRayScene {
     blas_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     blas_barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     blas_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(command_buffer->buffer,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         0, 1, &blas_barrier, 0, nullptr, 0, nullptr);
+    command_buffer->device.functions().vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
+        &blas_barrier, 0, nullptr, 0, nullptr);
 
     const auto tlas_geometry = make_tlas_geometry();
     auto tlas_build = make_tlas_build_info(tlas_geometry);
@@ -329,10 +333,11 @@ class VulkanTriangleRayScene {
     query_barrier.srcAccessMask =
         VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     query_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(command_buffer->buffer,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &query_barrier, 0, nullptr, 0, nullptr);
+    command_buffer->device.functions().vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &query_barrier, 0, nullptr,
+        0, nullptr);
 
     retain_build_resources(command_buffer);
   }
@@ -342,7 +347,7 @@ class VulkanTriangleRayScene {
     auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
     auto command_buffer = vk_commands->vk_command_buffer();
 
-    geometry_reuse_barrier(command_buffer->buffer);
+    geometry_reuse_barrier(command_buffer);
     command_list->buffer_copy(vertex_buffer_.get_ptr(), source_vertices,
                               vertex_bytes_);
 
@@ -351,7 +356,7 @@ class VulkanTriangleRayScene {
     input_barrier.srcAccessMask =
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
     input_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(
+    command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer,
         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
@@ -372,10 +377,11 @@ class VulkanTriangleRayScene {
     VkMemoryBarrier blas_barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     blas_barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     blas_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(command_buffer->buffer,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         0, 1, &blas_barrier, 0, nullptr, 0, nullptr);
+    command_buffer->device.functions().vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
+        &blas_barrier, 0, nullptr, 0, nullptr);
     const auto tlas_geometry = make_tlas_geometry();
     auto tlas_build = make_tlas_build_info(tlas_geometry);
     const VkAccelerationStructureBuildRangeInfoKHR tlas_range{1, 0, 0, 0};
@@ -388,10 +394,11 @@ class VulkanTriangleRayScene {
     query_barrier.srcAccessMask =
         VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     query_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(command_buffer->buffer,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                         &query_barrier, 0, nullptr, 0, nullptr);
+    command_buffer->device.functions().vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &query_barrier, 0, nullptr,
+        0, nullptr);
 
     retain_build_resources(command_buffer);
   }
@@ -739,7 +746,8 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
     VkPhysicalDeviceProperties2 properties{};
     properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     properties.pNext = &as_properties;
-    vkGetPhysicalDeviceProperties2(device_->vk_physical_device(), &properties);
+    device_->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+        device_->vk_physical_device(), &properties);
     scratch_alignment_ =
         as_properties.minAccelerationStructureScratchOffsetAlignment;
     TI_ERROR_IF(scratch_alignment_ == 0,
@@ -827,7 +835,7 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
     auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
     auto command_buffer = vk_commands->vk_command_buffer();
 
-    geometry_reuse_barrier(command_buffer->buffer);
+    geometry_reuse_barrier(command_buffer);
 
     command_list->buffer_copy(vertex_buffer_.get_ptr(), source_vertices,
                               vertex_bytes_);
@@ -840,9 +848,10 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
     input_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     input_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     input_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(command_buffer->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         0, 1, &input_barrier, 0, nullptr, 0, nullptr);
+    command_buffer->device.functions().vkCmdPipelineBarrier(
+        command_buffer->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
+        &input_barrier, 0, nullptr, 0, nullptr);
 
     const auto geometry = make_geometry();
     auto build = make_build_info(
@@ -859,7 +868,7 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
         VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     completion_barrier.dstAccessMask =
         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(
+    command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
@@ -1046,7 +1055,8 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     VkPhysicalDeviceProperties2 properties{};
     properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     properties.pNext = &as_properties;
-    vkGetPhysicalDeviceProperties2(device_->vk_physical_device(), &properties);
+    device_->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+        device_->vk_physical_device(), &properties);
     scratch_alignment_ =
         as_properties.minAccelerationStructureScratchOffsetAlignment;
     TI_ERROR_IF(scratch_alignment_ == 0,
@@ -1144,7 +1154,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
 
     auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
     auto command_buffer = vk_commands->vk_command_buffer();
-    geometry_reuse_barrier(command_buffer->buffer);
+    geometry_reuse_barrier(command_buffer);
 
     const auto instance_vk_buffer =
         device_->get_vkbuffer(instance_buffer_.get_ptr());
@@ -1153,8 +1163,9 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     for (std::size_t offset = 0; offset < instance_bytes_;) {
       const std::size_t chunk =
           std::min(kMaxUpdateBytes, instance_bytes_ - offset);
-      vkCmdUpdateBuffer(command_buffer->buffer, instance_vk_buffer->buffer,
-                        offset, chunk, bytes + offset);
+      command_buffer->device.functions().vkCmdUpdateBuffer(
+          command_buffer->buffer, instance_vk_buffer->buffer, offset, chunk,
+          bytes + offset);
       offset += chunk;
     }
 
@@ -1163,7 +1174,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     input_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     input_barrier.dstAccessMask =
         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(
+    command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
         &input_barrier, 0, nullptr, 0, nullptr);
@@ -1208,7 +1219,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
                           VK_ACCESS_SHADER_WRITE_BIT |
                           VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
                           VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    vkCmdPipelineBarrier(
+    command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -1236,7 +1247,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     VkMemoryBarrier packed{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     packed.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     packed.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(
+    command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &packed,
         0, nullptr, 0, nullptr);
@@ -1277,11 +1288,10 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     // queues the existing runtime-ordered graphics semaphore supplies it;
     // an AS_BUILD stage is not legal on a graphics-only queue family.
     if (!graphics_queue || device_->graphics_queue() == device_->compute_queue()) {
-      vkCmdPipelineBarrier(
+      command_buffer->device.functions().vkCmdPipelineBarrier(
           command_buffer->buffer,
           VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-          consumer_stages, 0, 1, &barrier, 0, nullptr, 0,
-          nullptr);
+          consumer_stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
     retain(command_buffer);
   }
@@ -1314,7 +1324,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     VkMemoryBarrier query_barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     query_barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     query_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(
+    command_buffer->device.functions().vkCmdPipelineBarrier(
         command_buffer->buffer,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
@@ -1519,7 +1529,8 @@ Program::vulkan_ray_query_properties() const {
   VkPhysicalDeviceProperties2 properties2{};
   properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
   properties2.pNext = &properties;
-  vkGetPhysicalDeviceProperties2(device->vk_physical_device(), &properties2);
+  device->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+      device->vk_physical_device(), &properties2);
   result["max_geometry_count"] = properties.maxGeometryCount;
   result["max_instance_count"] = properties.maxInstanceCount;
   result["max_primitive_count"] = properties.maxPrimitiveCount;

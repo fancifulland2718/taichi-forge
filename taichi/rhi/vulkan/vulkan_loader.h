@@ -23,8 +23,12 @@ class TI_DLL_EXPORT VulkanLoader {
   bool check_vulkan_device();
 
   void load_instance(VkInstance instance_);
-  void load_device(VkDevice device_);
   bool init(PFN_vkGetInstanceProcAddr get_proc_addr = nullptr);
+  // Serializes cold instance/device creation and imports while Volk's
+  // instance entry points are selected. Submission uses immutable tables.
+  std::mutex &creation_mutex() {
+    return creation_mutex_;
+  }
   PFN_vkVoidFunction load_function(const char *name);
   VkInstance get_instance() {
     return vulkan_instance_;
@@ -33,6 +37,7 @@ class TI_DLL_EXPORT VulkanLoader {
 
  private:
   std::once_flag init_flag_;
+  std::mutex creation_mutex_;
   bool initialized_{false};
 
   VulkanLoader();
@@ -42,7 +47,6 @@ class TI_DLL_EXPORT VulkanLoader {
 #endif
 
   VkInstance vulkan_instance_{VK_NULL_HANDLE};
-  VkDevice vulkan_device_{VK_NULL_HANDLE};
 };
 
 TI_DLL_EXPORT bool is_vulkan_api_available();

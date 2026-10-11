@@ -174,9 +174,8 @@ void *VulkanPipelineCache::data() noexcept {
     constexpr int kMaxSnapshotAttempts = 3;
     for (int attempt = 0; attempt < kMaxSnapshotAttempts; ++attempt) {
       size_t queried_size = 0;
-      VkResult result = vkGetPipelineCacheData(device_->vk_device(),
-                                                cache_->cache, &queried_size,
-                                                nullptr);
+      VkResult result = device_->vk_device().functions().vkGetPipelineCacheData(
+          device_->vk_device(), cache_->cache, &queried_size, nullptr);
       if (result != VK_SUCCESS) {
         char message[128];
         std::snprintf(message, sizeof(message),
@@ -193,8 +192,8 @@ void *VulkanPipelineCache::data() noexcept {
 
       std::vector<uint8_t> snapshot(queried_size);
       size_t written_size = snapshot.size();
-      result = vkGetPipelineCacheData(device_->vk_device(), cache_->cache,
-                                      &written_size, snapshot.data());
+      result = device_->vk_device().functions().vkGetPipelineCacheData(
+          device_->vk_device(), cache_->cache, &written_size, snapshot.data());
       if (result == VK_SUCCESS) {
         snapshot.resize(written_size);
         data_shadow_.swap(snapshot);
@@ -235,7 +234,8 @@ VulkanPipeline::VulkanPipeline(const Params &params)
   create_compute_pipeline(params);
 
   for (VkShaderModule shader_module : shader_modules_) {
-    vkDestroyShaderModule(device_, shader_module, kNoVkAllocCallbacks);
+    device_.functions().vkDestroyShaderModule(device_, shader_module,
+                                              kNoVkAllocCallbacks);
   }
   shader_modules_.clear();
 }
@@ -303,21 +303,23 @@ VkPipelineStageFlags VulkanPipeline::acceleration_structure_stages(
 
 VulkanPipeline::~VulkanPipeline() {
   for (VkShaderModule shader_module : shader_modules_) {
-    vkDestroyShaderModule(device_, shader_module, kNoVkAllocCallbacks);
+    device_.functions().vkDestroyShaderModule(device_, shader_module,
+                                              kNoVkAllocCallbacks);
   }
   shader_modules_.clear();
 }
 
-VkShaderModule VulkanPipeline::create_shader_module(VkDevice device,
-                                                    const SpirvCodeView &code) {
+VkShaderModule VulkanPipeline::create_shader_module(
+    const vkapi::DeviceHandle &device,
+    const SpirvCodeView &code) {
   VkShaderModuleCreateInfo create_info{};
   create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
   create_info.codeSize = code.size;
   create_info.pCode = code.data;
 
   VkShaderModule shader_module;
-  VkResult res = vkCreateShaderModule(device, &create_info, kNoVkAllocCallbacks,
-                                      &shader_module);
+  VkResult res = device.functions().vkCreateShaderModule(
+      device, &create_info, kNoVkAllocCallbacks, &shader_module);
   RHI_THROW_UNLESS(res == VK_SUCCESS,
                    std::runtime_error("vkCreateShaderModule failed"));
   return shader_module;
@@ -1293,7 +1295,7 @@ VulkanCommandList::VulkanCommandList(VulkanDevice *ti_device,
     info.pInheritanceInfo = &inheritance;
   }
 
-  vkBeginCommandBuffer(buffer->buffer, &info);
+  buffer->device.functions().vkBeginCommandBuffer(buffer->buffer, &info);
 }
 
 VulkanCommandList::~VulkanCommandList() {
@@ -1301,7 +1303,7 @@ VulkanCommandList::~VulkanCommandList() {
     // Cold preparation may discard a list without ever submitting it. Return
     // an initial, not still-recording, buffer to the pool; vkBeginCommandBuffer
     // cannot implicitly reset a buffer left in the recording state.
-    vkResetCommandBuffer(buffer_->buffer, 0);
+    buffer_->device.functions().vkResetCommandBuffer(buffer_->buffer, 0);
   }
   if (profiler_sampler_reservations_ != 0) {
     ti_device_->profiler_discard_reserved_samplers(
@@ -1321,16 +1323,17 @@ void VulkanCommandList::bind_pipeline(Pipeline *p) noexcept {
             ? pipeline->graphics_pipeline_dynamic(current_renderpass_desc_)
             : pipeline->graphics_pipeline(current_renderpass_desc_,
                                           current_renderpass_);
-    vkCmdBindPipeline(buffer_->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      vk_pipeline->pipeline);
+    buffer_->device.functions().vkCmdBindPipeline(
+        buffer_->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        vk_pipeline->pipeline);
 
     apply_raster_viewport_and_scissor();
-    vkCmdSetLineWidth(buffer_->buffer, 1.0f);
+    buffer_->device.functions().vkCmdSetLineWidth(buffer_->buffer, 1.0f);
     buffer_->refs.push_back(vk_pipeline);
   } else {
     auto vk_pipeline = pipeline->pipeline();
-    vkCmdBindPipeline(buffer_->buffer, pipeline->bind_point(),
-                      vk_pipeline->pipeline);
+    buffer_->device.functions().vkCmdBindPipeline(
+        buffer_->buffer, pipeline->bind_point(), vk_pipeline->pipeline);
     buffer_->refs.push_back(vk_pipeline);
   }
 
@@ -1386,11 +1389,12 @@ RhiResult VulkanCommandList::bind_shader_resources(ShaderResourceSet *res,
   {
     std::lock_guard<std::mutex> descriptor_set_lock(vk_set->mutex);
     ++vk_set->recording_use_count;
-    vkCmdBindDescriptorSets(buffer_->buffer, bind_point, pipeline_layout,
-                            /*firstSet=*/set_index,
-                            /*descriptorSetCount=*/1, &vk_set->set,
-                            /*dynamicOffsetCount=*/0,
-                            /*pDynamicOffsets=*/nullptr);
+    buffer_->device.functions().vkCmdBindDescriptorSets(
+        buffer_->buffer, bind_point, pipeline_layout,
+        /*firstSet=*/set_index,
+        /*descriptorSetCount=*/1, &vk_set->set,
+        /*dynamicOffsetCount=*/0,
+        /*pDynamicOffsets=*/nullptr);
   }
   buffer_->descriptor_sets_in_use.push_back(vk_set);
   buffer_->refs.push_back(vk_set);
@@ -1413,15 +1417,16 @@ RhiResult VulkanCommandList::bind_raster_resources(
     }
 
     vkapi::IVkBuffer index_buffer = res->index_binding.buffer;
-    vkCmdBindIndexBuffer(buffer_->buffer, index_buffer->buffer,
-                         res->index_binding.offset, res->index_type);
+    buffer_->device.functions().vkCmdBindIndexBuffer(
+        buffer_->buffer, index_buffer->buffer, res->index_binding.offset,
+        res->index_type);
     buffer_->refs.push_back(index_buffer);
   }
 
   for (auto &[binding, buffer] : res->vertex_buffers) {
     VkDeviceSize offset_vk = buffer.offset;
-    vkCmdBindVertexBuffers(buffer_->buffer, binding, 1, &buffer.buffer->buffer,
-                           &offset_vk);
+    buffer_->device.functions().vkCmdBindVertexBuffers(
+        buffer_->buffer, binding, 1, &buffer.buffer->buffer, &offset_vk);
     buffer_->refs.push_back(buffer.buffer);
   }
 
@@ -1541,7 +1546,7 @@ void VulkanCommandList::buffer_transition(
     return;
   }
 
-  vkCmdPipelineBarrier(
+  buffer_->device.functions().vkCmdPipelineBarrier(
       buffer_->buffer, source_stage, destination_stage,
       /*dependencyFlags=*/0, /*memoryBarrierCount=*/0, nullptr,
       /*bufferMemoryBarrierCount=*/1,
@@ -1566,7 +1571,7 @@ void VulkanCommandList::memory_barrier() noexcept {
       (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-  vkCmdPipelineBarrier(
+  buffer_->device.functions().vkCmdPipelineBarrier(
       buffer_->buffer,
       /*srcStageMask=*/
       VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1604,8 +1609,9 @@ void VulkanCommandList::buffer_copy(DevicePtr dst,
 
   auto src_buffer = ti_device_->get_vkbuffer(src);
   auto dst_buffer = ti_device_->get_vkbuffer(dst);
-  vkCmdCopyBuffer(buffer_->buffer, src_buffer->buffer, dst_buffer->buffer,
-                  /*regionCount=*/1, &copy_region);
+  buffer_->device.functions().vkCmdCopyBuffer(
+      buffer_->buffer, src_buffer->buffer, dst_buffer->buffer,
+      /*regionCount=*/1, &copy_region);
   buffer_->refs.push_back(src_buffer);
   buffer_->refs.push_back(dst_buffer);
 }
@@ -1628,7 +1634,8 @@ void VulkanCommandList::buffer_fill(DevicePtr ptr,
     size = VK_WHOLE_SIZE;
   }
 
-  vkCmdFillBuffer(buffer_->buffer, buffer->buffer, ptr.offset, size, data);
+  buffer_->device.functions().vkCmdFillBuffer(buffer_->buffer, buffer->buffer,
+                                              ptr.offset, size, data);
   buffer_->refs.push_back(buffer);
 }
 
@@ -1640,8 +1647,8 @@ void VulkanCommandList::push_constants(const void *data,
   TI_ASSERT(size <= 128);
   VkPipelineLayout pipeline_layout =
       current_pipeline_->pipeline_layout()->layout;
-  vkCmdPushConstants(buffer_->buffer, pipeline_layout, VK_SHADER_STAGE_ALL, 0,
-                     size, data);
+  buffer_->device.functions().vkCmdPushConstants(
+      buffer_->buffer, pipeline_layout, VK_SHADER_STAGE_ALL, 0, size, data);
 }
 
 RhiResult VulkanCommandList::dispatch(uint32_t x,
@@ -1653,7 +1660,7 @@ RhiResult VulkanCommandList::dispatch(uint32_t x,
       z > dev_props.limits.maxComputeWorkGroupCount[2]) {
     return RhiResult::not_supported;
   }
-  vkCmdDispatch(buffer_->buffer, x, y, z);
+  buffer_->device.functions().vkCmdDispatch(buffer_->buffer, x, y, z);
   return RhiResult::success;
 }
 
@@ -1675,8 +1682,8 @@ RhiResult VulkanCommandList::dispatch_indirect(DevicePtr indirect) noexcept {
   }
 
   auto indirect_buffer = ti_device_->get_vkbuffer(indirect);
-  vkCmdDispatchIndirect(buffer_->buffer, indirect_buffer->buffer,
-                        indirect.offset);
+  buffer_->device.functions().vkCmdDispatchIndirect(
+      buffer_->buffer, indirect_buffer->buffer, indirect.offset);
   buffer_->refs.push_back(indirect_buffer);
   return RhiResult::success;
 }
@@ -1711,7 +1718,8 @@ RhiResult VulkanCommandList::begin_conditional(DevicePtr predicate,
   info.offset = predicate.offset;
   info.flags =
       inverted ? VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT : 0;
-  vkCmdBeginConditionalRenderingEXT(buffer_->buffer, &info);
+  buffer_->device.functions().vkCmdBeginConditionalRenderingEXT(buffer_->buffer,
+                                                                &info);
   buffer_->refs.push_back(predicate_buffer);
   conditional_active_ = true;
   return RhiResult::success;
@@ -1724,7 +1732,7 @@ RhiResult VulkanCommandList::end_conditional() noexcept {
   if (!conditional_active_) {
     return RhiResult::invalid_usage;
   }
-  vkCmdEndConditionalRenderingEXT(buffer_->buffer);
+  buffer_->device.functions().vkCmdEndConditionalRenderingEXT(buffer_->buffer);
   conditional_active_ = false;
   return RhiResult::success;
 }
@@ -1743,7 +1751,8 @@ VkCommandBuffer VulkanCommandList::begin_external_compute(
 void VulkanCommandList::execute_secondary(vkapi::IVkCommandBuffer buffer) {
   buffer_->refs.push_back(buffer);
   current_pipeline_ = nullptr;
-  vkCmdExecuteCommands(buffer_->buffer, 1, &buffer->buffer);
+  buffer_->device.functions().vkCmdExecuteCommands(buffer_->buffer, 1,
+                                                   &buffer->buffer);
 }
 
 std::function<void(CommandList *)> VulkanCommandList::finalize_secondary(
@@ -1892,7 +1901,8 @@ void VulkanCommandList::begin_renderpass_impl(
       rp_desc.depth_attachment = VK_FORMAT_UNDEFINED;
     }
 
-    vkCmdBeginRenderingKHR(buffer_->buffer, &render_info);
+    buffer_->device.functions().vkCmdBeginRenderingKHR(buffer_->buffer,
+                                                       &render_info);
 
     return;
   }
@@ -1945,15 +1955,15 @@ void VulkanCommandList::begin_renderpass_impl(
   begin_info.clearValueCount = clear_values.size();
   begin_info.pClearValues = clear_values.data();
 
-  vkCmdBeginRenderPass(buffer_->buffer, &begin_info,
-                       VK_SUBPASS_CONTENTS_INLINE);
+  buffer_->device.functions().vkCmdBeginRenderPass(buffer_->buffer, &begin_info,
+                                                   VK_SUBPASS_CONTENTS_INLINE);
   buffer_->refs.push_back(current_renderpass_);
   buffer_->refs.push_back(current_framebuffer_);
 }
 
 void VulkanCommandList::end_renderpass() {
   if (ti_device_->vk_caps().dynamic_rendering) {
-    vkCmdEndRenderingKHR(buffer_->buffer);
+    buffer_->device.functions().vkCmdEndRenderingKHR(buffer_->buffer);
 
     if (0) {
       std::vector<VkImageMemoryBarrier> memory_barriers(
@@ -1978,46 +1988,49 @@ void VulkanCommandList::end_renderpass() {
         barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
       }
 
-      vkCmdPipelineBarrier(buffer_->buffer,
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                           VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                           /*dependencyFlags=*/0, /*memoryBarrierCount=*/0,
-                           /*pMemoryBarriers=*/nullptr,
-                           /*bufferMemoryBarrierCount=*/0,
-                           /*pBufferMemoryBarriers=*/nullptr,
-                           /*imageMemoryBarrierCount=*/memory_barriers.size(),
-                           /*pImageMemoryBarriers=*/memory_barriers.data());
+      buffer_->device.functions().vkCmdPipelineBarrier(
+          buffer_->buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+          /*dependencyFlags=*/0, /*memoryBarrierCount=*/0,
+          /*pMemoryBarriers=*/nullptr,
+          /*bufferMemoryBarrierCount=*/0,
+          /*pBufferMemoryBarriers=*/nullptr,
+          /*imageMemoryBarrierCount=*/memory_barriers.size(),
+          /*pImageMemoryBarriers=*/memory_barriers.data());
     }
     current_dynamic_targets_.clear();
 
     return;
   }
 
-  vkCmdEndRenderPass(buffer_->buffer);
+  buffer_->device.functions().vkCmdEndRenderPass(buffer_->buffer);
 
   current_renderpass_ = VK_NULL_HANDLE;
   current_framebuffer_ = VK_NULL_HANDLE;
 }
 
 void VulkanCommandList::draw(uint32_t num_verticies, uint32_t start_vertex) {
-  vkCmdDraw(buffer_->buffer, num_verticies, /*instanceCount=*/1, start_vertex,
-            /*firstInstance=*/0);
+  buffer_->device.functions().vkCmdDraw(buffer_->buffer, num_verticies,
+                                        /*instanceCount=*/1, start_vertex,
+                                        /*firstInstance=*/0);
 }
 
 void VulkanCommandList::draw_instance(uint32_t num_verticies,
                                       uint32_t num_instances,
                                       uint32_t start_vertex,
                                       uint32_t start_instance) {
-  vkCmdDraw(buffer_->buffer, num_verticies, num_instances, start_vertex,
-            start_instance);
+  buffer_->device.functions().vkCmdDraw(buffer_->buffer, num_verticies,
+                                        num_instances, start_vertex,
+                                        start_instance);
 }
 
 void VulkanCommandList::draw_indexed(uint32_t num_indicies,
                                      int32_t vertex_offset,
                                      uint32_t start_index) {
-  vkCmdDrawIndexed(buffer_->buffer, num_indicies, /*instanceCount=*/1,
-                   start_index, vertex_offset,
-                   /*firstInstance=*/0);
+  buffer_->device.functions().vkCmdDrawIndexed(buffer_->buffer, num_indicies,
+                                               /*instanceCount=*/1, start_index,
+                                               vertex_offset,
+                                               /*firstInstance=*/0);
 }
 
 void VulkanCommandList::draw_indexed_instance(uint32_t num_indicies,
@@ -2025,8 +2038,9 @@ void VulkanCommandList::draw_indexed_instance(uint32_t num_indicies,
                                               int32_t vertex_offset,
                                               uint32_t start_index,
                                               uint32_t start_instance) {
-  vkCmdDrawIndexed(buffer_->buffer, num_indicies, num_instances, start_index,
-                   vertex_offset, start_instance);
+  buffer_->device.functions().vkCmdDrawIndexed(buffer_->buffer, num_indicies,
+                                               num_instances, start_index,
+                                               vertex_offset, start_instance);
 }
 
 namespace {
@@ -2097,8 +2111,8 @@ RhiResult VulkanCommandList::draw_indirect(DevicePtr indirect,
     return result;
   }
   auto buffer = ti_device_->get_vkbuffer(indirect);
-  vkCmdDrawIndirect(buffer_->buffer, buffer->buffer, indirect.offset,
-                    draw_count, stride);
+  buffer_->device.functions().vkCmdDrawIndirect(
+      buffer_->buffer, buffer->buffer, indirect.offset, draw_count, stride);
   buffer_->refs.push_back(buffer);
   return RhiResult::success;
 }
@@ -2118,8 +2132,8 @@ RhiResult VulkanCommandList::draw_indexed_indirect(
     return result;
   }
   auto buffer = ti_device_->get_vkbuffer(indirect);
-  vkCmdDrawIndexedIndirect(buffer_->buffer, buffer->buffer, indirect.offset,
-                           draw_count, stride);
+  buffer_->device.functions().vkCmdDrawIndexedIndirect(
+      buffer_->buffer, buffer->buffer, indirect.offset, draw_count, stride);
   buffer_->refs.push_back(buffer);
   return RhiResult::success;
 }
@@ -2147,13 +2161,13 @@ RhiResult VulkanCommandList::draw_indirect_count(
   auto indirect_buffer = ti_device_->get_vkbuffer(indirect);
   auto count_buffer = ti_device_->get_vkbuffer(count);
   if (ti_device_->vk_caps().vk_api_version >= VK_API_VERSION_1_2) {
-    vkCmdDrawIndirectCount(buffer_->buffer, indirect_buffer->buffer,
-                           indirect.offset, count_buffer->buffer, count.offset,
-                           max_draw_count, stride);
+    buffer_->device.functions().vkCmdDrawIndirectCount(
+        buffer_->buffer, indirect_buffer->buffer, indirect.offset,
+        count_buffer->buffer, count.offset, max_draw_count, stride);
   } else {
-    vkCmdDrawIndirectCountKHR(buffer_->buffer, indirect_buffer->buffer,
-                              indirect.offset, count_buffer->buffer,
-                              count.offset, max_draw_count, stride);
+    buffer_->device.functions().vkCmdDrawIndirectCountKHR(
+        buffer_->buffer, indirect_buffer->buffer, indirect.offset,
+        count_buffer->buffer, count.offset, max_draw_count, stride);
   }
   buffer_->refs.push_back(indirect_buffer);
   buffer_->refs.push_back(count_buffer);
@@ -2183,11 +2197,11 @@ RhiResult VulkanCommandList::draw_indexed_indirect_count(
   auto indirect_buffer = ti_device_->get_vkbuffer(indirect);
   auto count_buffer = ti_device_->get_vkbuffer(count);
   if (ti_device_->vk_caps().vk_api_version >= VK_API_VERSION_1_2) {
-    vkCmdDrawIndexedIndirectCount(
+    buffer_->device.functions().vkCmdDrawIndexedIndirectCount(
         buffer_->buffer, indirect_buffer->buffer, indirect.offset,
         count_buffer->buffer, count.offset, max_draw_count, stride);
   } else {
-    vkCmdDrawIndexedIndirectCountKHR(
+    buffer_->device.functions().vkCmdDrawIndexedIndirectCountKHR(
         buffer_->buffer, indirect_buffer->buffer, indirect.offset,
         count_buffer->buffer, count.offset, max_draw_count, stride);
   }
@@ -2202,8 +2216,8 @@ RhiResult VulkanCommandList::draw_mesh_tasks(uint32_t group_count_x,
                                               bool task_shader) noexcept {
   const auto &caps = ti_device_->vk_caps();
   if (!caps.mesh_shader || (task_shader && !caps.task_shader) ||
-      vkCmdDrawMeshTasksEXT == nullptr || current_pipeline_ == nullptr ||
-      !current_pipeline_->is_graphics() ||
+      device_.functions().vkCmdDrawMeshTasksEXT == nullptr ||
+      current_pipeline_ == nullptr || !current_pipeline_->is_graphics() ||
       current_renderpass_ == VK_NULL_HANDLE || group_count_x == 0 ||
       group_count_y == 0 || group_count_z == 0) {
     return RhiResult::not_supported;
@@ -2219,8 +2233,8 @@ RhiResult VulkanCommandList::draw_mesh_tasks(uint32_t group_count_x,
       group_count_z > limits[2] || total > total_limit) {
     return RhiResult::invalid_usage;
   }
-  vkCmdDrawMeshTasksEXT(buffer_->buffer, group_count_x, group_count_y,
-                        group_count_z);
+  buffer_->device.functions().vkCmdDrawMeshTasksEXT(
+      buffer_->buffer, group_count_x, group_count_y, group_count_z);
   return RhiResult::success;
 }
 
@@ -2306,8 +2320,9 @@ void VulkanCommandList::image_transition(DeviceAllocation img,
   barrier.srcAccessMask = access.at(old_layout);
   barrier.dstAccessMask = access.at(new_layout);
 
-  vkCmdPipelineBarrier(buffer_->buffer, source_stage, destination_stage, 0, 0,
-                       nullptr, 0, nullptr, 1, &barrier);
+  buffer_->device.functions().vkCmdPipelineBarrier(
+      buffer_->buffer, source_stage, destination_stage, 0, 0, nullptr, 0,
+      nullptr, 1, &barrier);
   buffer_->refs.push_back(image);
 }
 
@@ -2344,8 +2359,9 @@ void VulkanCommandList::buffer_to_image(DeviceAllocation dst_img,
   auto [image, view, format] = ti_device_->get_vk_image(dst_img);
   auto buffer = ti_device_->get_vkbuffer(src_buf);
 
-  vkCmdCopyBufferToImage(buffer_->buffer, buffer->buffer, image->image,
-                         image_layout_ti_to_vk(img_layout), 1, &copy_info);
+  buffer_->device.functions().vkCmdCopyBufferToImage(
+      buffer_->buffer, buffer->buffer, image->image,
+      image_layout_ti_to_vk(img_layout), 1, &copy_info);
   buffer_->refs.push_back(image);
   buffer_->refs.push_back(buffer);
 }
@@ -2360,9 +2376,9 @@ void VulkanCommandList::image_to_buffer(DevicePtr dst_buf,
   auto [image, view, format] = ti_device_->get_vk_image(src_img);
   auto buffer = ti_device_->get_vkbuffer(dst_buf);
 
-  vkCmdCopyImageToBuffer(buffer_->buffer, image->image,
-                         image_layout_ti_to_vk(img_layout), buffer->buffer, 1,
-                         &copy_info);
+  buffer_->device.functions().vkCmdCopyImageToBuffer(
+      buffer_->buffer, image->image, image_layout_ti_to_vk(img_layout),
+      buffer->buffer, 1, &copy_info);
   buffer_->refs.push_back(image);
   buffer_->refs.push_back(buffer);
 }
@@ -2392,9 +2408,10 @@ void VulkanCommandList::copy_image(DeviceAllocation dst_img,
   auto [dst_vk_image, dst_view, dst_format] = ti_device_->get_vk_image(dst_img);
   auto [src_vk_image, src_view, src_format] = ti_device_->get_vk_image(src_img);
 
-  vkCmdCopyImage(buffer_->buffer, src_vk_image->image,
-                 image_layout_ti_to_vk(src_img_layout), dst_vk_image->image,
-                 image_layout_ti_to_vk(dst_img_layout), 1, &copy);
+  buffer_->device.functions().vkCmdCopyImage(
+      buffer_->buffer, src_vk_image->image,
+      image_layout_ti_to_vk(src_img_layout), dst_vk_image->image,
+      image_layout_ti_to_vk(dst_img_layout), 1, &copy);
 
   buffer_->refs.push_back(dst_vk_image);
   buffer_->refs.push_back(src_vk_image);
@@ -2434,10 +2451,11 @@ void VulkanCommandList::blit_image(DeviceAllocation dst_img,
   auto [dst_vk_image, dst_view, dst_format] = ti_device_->get_vk_image(dst_img);
   auto [src_vk_image, src_view, src_format] = ti_device_->get_vk_image(src_img);
 
-  vkCmdBlitImage(buffer_->buffer, src_vk_image->image,
-                 image_layout_ti_to_vk(src_img_layout), dst_vk_image->image,
-                 image_layout_ti_to_vk(dst_img_layout), 1, &blit,
-                 params.linear_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+  buffer_->device.functions().vkCmdBlitImage(
+      buffer_->buffer, src_vk_image->image,
+      image_layout_ti_to_vk(src_img_layout), dst_vk_image->image,
+      image_layout_ti_to_vk(dst_img_layout), 1, &blit,
+      params.linear_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
 
   buffer_->refs.push_back(dst_vk_image);
   buffer_->refs.push_back(src_vk_image);
@@ -2445,7 +2463,7 @@ void VulkanCommandList::blit_image(DeviceAllocation dst_img,
 
 void VulkanCommandList::set_line_width(float width) {
   if (ti_device_->vk_caps().wide_line) {
-    vkCmdSetLineWidth(buffer_->buffer, width);
+    buffer_->device.functions().vkCmdSetLineWidth(buffer_->buffer, width);
   }
 }
 
@@ -2462,7 +2480,7 @@ vkapi::IVkRenderPass VulkanCommandList::current_renderpass() {
 vkapi::IVkCommandBuffer VulkanCommandList::finalize() {
   if (!finalized_) {
     TI_ASSERT(!conditional_active_);
-    vkEndCommandBuffer(buffer_->buffer);
+    buffer_->device.functions().vkEndCommandBuffer(buffer_->buffer);
     finalized_ = true;
   }
   return buffer_;
@@ -2578,7 +2596,7 @@ VulkanDevice::VulkanDevice()
 
 void VulkanDevice::init_vulkan_structs(Params &params) {
   instance_ = params.instance;
-  device_ = params.device;
+  device_ = vkapi::DeviceHandle(params.instance, params.device);
   physical_device_ = params.physical_device;
   compute_queue_ = params.compute_queue;
   compute_queue_family_index_ = params.compute_queue_family_index;
@@ -2592,7 +2610,8 @@ void VulkanDevice::init_vulkan_structs(Params &params) {
                "Failed to allocate initial descriptor pool");
   }
 
-  vkGetPhysicalDeviceProperties(physical_device_, &vk_device_properties_);
+  device_.instance_functions().vkGetPhysicalDeviceProperties(
+      physical_device_, &vk_device_properties_);
 }
 
 VulkanDevice::~VulkanDevice() {
@@ -2607,7 +2626,7 @@ VulkanDevice::~VulkanDevice() {
   // the most proper fix but is less intrusive compared to other
   // approaches.
   if (backend_calls_safe()) {
-    const VkResult wait_result = vkDeviceWaitIdle(device_);
+    const VkResult wait_result = device_.functions().vkDeviceWaitIdle(device_);
     if (wait_result != VK_SUCCESS) {
       try {
         BackendRuntimeError error(
@@ -2873,7 +2892,8 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
     info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR;
     info.buffer = alloc.buffer->buffer;
     info.pNext = nullptr;
-    alloc.addr = vkGetBufferDeviceAddressKHR(device_, &info);
+    alloc.addr =
+        device_.functions().vkGetBufferDeviceAddressKHR(device_, &info);
   }
 
   *out_devalloc = DeviceAllocation{this, (uint64_t)&alloc};
@@ -2893,10 +2913,10 @@ bool VulkanDevice::image_blit_supported(BufferFormat source_format,
   }
   VkFormatProperties source_properties{};
   VkFormatProperties destination_properties{};
-  vkGetPhysicalDeviceFormatProperties(physical_device_, source_vk_format,
-                                      &source_properties);
-  vkGetPhysicalDeviceFormatProperties(physical_device_, destination_vk_format,
-                                      &destination_properties);
+  device_.instance_functions().vkGetPhysicalDeviceFormatProperties(
+      physical_device_, source_vk_format, &source_properties);
+  device_.instance_functions().vkGetPhysicalDeviceFormatProperties(
+      physical_device_, destination_vk_format, &destination_properties);
   const VkFormatFeatureFlags source_required =
       VK_FORMAT_FEATURE_BLIT_SRC_BIT |
       (linear_filter ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT : 0);
@@ -2935,9 +2955,9 @@ RhiResult VulkanDevice::map_internal(AllocationInternal &alloc_int,
     }
     alloc_int.mapped = (uint8_t *)(alloc_int.mapped) + offset;
   } else {
-    res = vkMapMemory(device_, alloc_int.alloc_info.deviceMemory,
-                      alloc_int.alloc_info.offset + offset, size, 0,
-                      &alloc_int.mapped);
+    res = device_.functions().vkMapMemory(
+        device_, alloc_int.alloc_info.deviceMemory,
+        alloc_int.alloc_info.offset + offset, size, 0, &alloc_int.mapped);
     if (res == VK_SUCCESS && alloc_int.host_read) {
       const VkDeviceSize atom =
           vk_device_properties_.limits.nonCoherentAtomSize;
@@ -2955,7 +2975,7 @@ RhiResult VulkanDevice::map_internal(AllocationInternal &alloc_int,
       range.memory = alloc_int.alloc_info.deviceMemory;
       range.offset = range_begin;
       range.size = range_end - range_begin;
-      vkInvalidateMappedMemoryRanges(device_, 1, &range);
+      device_.functions().vkInvalidateMappedMemoryRanges(device_, 1, &range);
     }
   }
 
@@ -3055,9 +3075,10 @@ void VulkanDevice::unmap(DeviceAllocation alloc) {
       range.memory = alloc_int.alloc_info.deviceMemory;
       range.offset = range_begin;
       range.size = range_end - range_begin;
-      vkFlushMappedMemoryRanges(device_, 1, &range);
+      device_.functions().vkFlushMappedMemoryRanges(device_, 1, &range);
     }
-    vkUnmapMemory(device_, alloc_int.alloc_info.deviceMemory);
+    device_.functions().vkUnmapMemory(device_,
+                                      alloc_int.alloc_info.deviceMemory);
   }
 
   alloc_int.mapped = nullptr;
@@ -3202,21 +3223,23 @@ Stream *VulkanDevice::get_compute_stream() {
 uint32_t VulkanDevice::queue_timestamp_valid_bits(
     uint32_t queue_family_index) const {
   uint32_t count = 0;
-  vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &count, nullptr);
+  device_.instance_functions().vkGetPhysicalDeviceQueueFamilyProperties(
+      physical_device_, &count, nullptr);
   if (queue_family_index >= count) {
     return 0;
   }
   std::vector<VkQueueFamilyProperties> properties(count);
-  vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &count,
-                                           properties.data());
+  device_.instance_functions().vkGetPhysicalDeviceQueueFamilyProperties(
+      physical_device_, &count, properties.data());
   return properties[queue_family_index].timestampValidBits;
 }
 
 void VulkanCommandList::begin_profiler_scope(const std::string &kernel_name) {
   auto pool = vkapi::create_query_pool(ti_device_->vk_device());
-  vkCmdResetQueryPool(buffer_->buffer, pool->query_pool, 0, 2);
-  vkCmdWriteTimestamp(buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                      pool->query_pool, 0);
+  buffer_->device.functions().vkCmdResetQueryPool(buffer_->buffer,
+                                                  pool->query_pool, 0, 2);
+  buffer_->device.functions().vkCmdWriteTimestamp(
+      buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, pool->query_pool, 0);
   profiler_scopes_.push_back({kernel_name, pool});
 }
 
@@ -3227,8 +3250,8 @@ void VulkanCommandList::end_profiler_scope() {
   profiler_scopes_.pop_back();
   auto pool = scope.query_pool;
   ti_device_->profiler_reserve_samplers(1);
-  vkCmdWriteTimestamp(buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                      pool->query_pool, 1);
+  buffer_->device.functions().vkCmdWriteTimestamp(
+      buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, pool->query_pool, 1);
   buffer_->refs.push_back(pool);
   completed_profiler_samplers_.push_back(
       {std::move(scope.kernel_name), pool, nullptr});
@@ -3242,9 +3265,11 @@ void VulkanCommandList::write_runtime_timestamp(
     bool reset) {
   TI_ERROR_IF(!query_pool, "Vulkan runtime timestamp query pool is null");
   if (reset) {
-    vkCmdResetQueryPool(buffer_->buffer, query_pool->query_pool, 0, 2);
+    buffer_->device.functions().vkCmdResetQueryPool(
+        buffer_->buffer, query_pool->query_pool, 0, 2);
   }
-  vkCmdWriteTimestamp(buffer_->buffer, stage, query_pool->query_pool, query);
+  buffer_->device.functions().vkCmdWriteTimestamp(
+      buffer_->buffer, stage, query_pool->query_pool, query);
   buffer_->refs.push_back(query_pool);
 }
 
@@ -3269,7 +3294,7 @@ void VulkanDevice::profiler_collect_samplers(
     auto query_pool = sampler.query_pool->query_pool;
 
     uint64_t t[2];
-    const VkResult query_result = vkGetQueryPoolResults(
+    const VkResult query_result = vk_device().functions().vkGetQueryPoolResults(
         vk_device(), query_pool, 0, 2, sizeof(uint64_t) * 2, &t,
         sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
     if (query_result != VK_SUCCESS) {
@@ -3340,8 +3365,8 @@ void VulkanDevice::profiler_sync() {
     VkResult result = VK_SUCCESS;
     {
       ScopedBackendWaitTelemetry wait_scope(&backend_wait_telemetry_);
-      result = vkWaitForFences(fence->device, /*fenceCount=*/1,
-                               &fence->fence, VK_TRUE, UINT64_MAX);
+      result = fence->device.functions().vkWaitForFences(
+          fence->device, /*fenceCount=*/1, &fence->fence, VK_TRUE, UINT64_MAX);
     }
     if (result != VK_SUCCESS) {
       raise_backend_error(static_cast<std::int64_t>(result),
@@ -3464,8 +3489,9 @@ void VulkanCommandList::apply_raster_viewport_and_scissor() {
   viewport.maxDepth = 1.0f;
   VkRect2D scissor{/*offset=*/{viewport_x_, viewport_y_},
                    /*extent=*/{viewport_width_, viewport_height_}};
-  vkCmdSetViewport(buffer_->buffer, 0, 1, &viewport);
-  vkCmdSetScissor(buffer_->buffer, 0, 1, &scissor);
+  buffer_->device.functions().vkCmdSetViewport(buffer_->buffer, 0, 1,
+                                               &viewport);
+  buffer_->device.functions().vkCmdSetScissor(buffer_->buffer, 0, 1, &scissor);
 }
 
 VulkanQueueSubmissionSnapshot
@@ -3486,7 +3512,8 @@ bool VulkanStreamSemaphoreObject::is_ready() const {
     fault_reporter_->throw_if_submission_disallowed("Vulkan fence query");
   }
   std::lock_guard<std::mutex> lock(fence_ref->mutex);
-  VkResult res = vkGetFenceStatus(fence_ref->device, fence_ref->fence);
+  VkResult res = fence_ref->device.functions().vkGetFenceStatus(
+      fence_ref->device, fence_ref->fence);
   if (res == VK_SUCCESS) {
     return true;
   }
@@ -3513,8 +3540,9 @@ bool VulkanStreamSemaphoreObject::wait() const {
   VkResult result = VK_SUCCESS;
   {
     ScopedBackendWaitTelemetry wait_scope(wait_telemetry_);
-    result = vkWaitForFences(fence_ref->device, /*fenceCount=*/1,
-                             &fence_ref->fence, VK_TRUE, UINT64_MAX);
+    result = fence_ref->device.functions().vkWaitForFences(
+        fence_ref->device, /*fenceCount=*/1, &fence_ref->fence, VK_TRUE,
+        UINT64_MAX);
   }
   if (result != VK_SUCCESS) {
     BackendRuntimeError error(Arch::vulkan,
@@ -3557,8 +3585,8 @@ void VulkanStream::retire_completed_cmdbuffers() {
   still_submitted.reserve(submitted_cmdbuffers_.size());
   for (auto &tracked : submitted_cmdbuffers_) {
     std::lock_guard<std::mutex> lock(tracked.fence->mutex);
-    VkResult res = vkGetFenceStatus(tracked.fence->device,
-                                    tracked.fence->fence);
+    VkResult res = tracked.fence->device.functions().vkGetFenceStatus(
+        tracked.fence->device, tracked.fence->fence);
     if (res == VK_SUCCESS) {
       completed_fences.push_back(tracked.fence);
       continue;
@@ -3593,8 +3621,9 @@ void VulkanStream::apply_in_flight_backpressure() {
   {
     std::lock_guard<std::mutex> lock(oldest_fence->mutex);
     ScopedBackendWaitTelemetry wait_scope(device_.backend_wait_telemetry());
-    result = vkWaitForFences(oldest_fence->device, /*fenceCount=*/1,
-                             &oldest_fence->fence, VK_TRUE, UINT64_MAX);
+    result = oldest_fence->device.functions().vkWaitForFences(
+        oldest_fence->device, /*fenceCount=*/1, &oldest_fence->fence, VK_TRUE,
+        UINT64_MAX);
   }
   if (result != VK_SUCCESS) {
     device_.raise_backend_error(
@@ -3704,8 +3733,9 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   VkResult submit_result = VK_SUCCESS;
   {
     auto queue_lock = device_.acquire_queue_lock(queue_);
-    submit_result = vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
-                                  /*fence=*/fence->fence);
+    submit_result = device_.vk_device().functions().vkQueueSubmit(
+        queue_, /*submitCount=*/1, &submit_info,
+        /*fence=*/fence->fence);
     if (submit_result == VK_SUCCESS) {
       device_.queue_tail_fence_locked(queue_) = fence;
     } else {
@@ -3806,7 +3836,7 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
   VkResult submit_result = VK_SUCCESS;
   {
     auto queue_lock = device_.acquire_queue_lock(queue_);
-    submit_result = vkQueueSubmit(
+    submit_result = device_.vk_device().functions().vkQueueSubmit(
         queue_, static_cast<std::uint32_t>(submit_infos.size()),
         submit_infos.data(), submission_batch_fence_->fence);
     if (submit_result == VK_SUCCESS) {
@@ -3878,8 +3908,9 @@ void VulkanStream::command_sync() {
       {
         ScopedBackendWaitTelemetry wait_scope(
             device_.backend_wait_telemetry());
-        result = vkWaitForFences(fence->device, /*fenceCount=*/1,
-                                 &fence->fence, VK_TRUE, UINT64_MAX);
+        result = fence->device.functions().vkWaitForFences(
+            fence->device, /*fenceCount=*/1, &fence->fence, VK_TRUE,
+            UINT64_MAX);
       }
       if (result != VK_SUCCESS) {
         device_.raise_backend_error(
@@ -4095,7 +4126,8 @@ DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,
     info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     info.buffer = buffer->buffer;
     info.pNext = nullptr;
-    alloc_int.addr = vkGetBufferDeviceAddress(device_, &info);
+    alloc_int.addr =
+        device_.functions().vkGetBufferDeviceAddress(device_, &info);
   }
 
   alloc_int.alloc_info.size = size;
@@ -4137,7 +4169,8 @@ DeviceAllocation VulkanDevice::create_image(const ImageParams &params) {
       TI_ERROR_IF(params.format != BufferFormat::depth32f || params.dimension != ImageDimension::d2D,
                   "Comparison sampling requires a 2D depth32f image");
       VkFormatProperties properties{};
-      vkGetPhysicalDeviceFormatProperties(physical_device_, VK_FORMAT_D32_SFLOAT, &properties);
+      device_.instance_functions().vkGetPhysicalDeviceFormatProperties(
+          physical_device_, VK_FORMAT_D32_SFLOAT, &properties);
       TI_ERROR_IF(!(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
                   "Vulkan device cannot sample depth32f images");
     }
@@ -4147,7 +4180,8 @@ DeviceAllocation VulkanDevice::create_image(const ImageParams &params) {
       TI_ERROR_IF(result != RhiResult::success,
                   "Unsupported Vulkan sampler image format");
       VkFormatProperties properties{};
-      vkGetPhysicalDeviceFormatProperties(physical_device_, format, &properties);
+      device_.instance_functions().vkGetPhysicalDeviceFormatProperties(
+          physical_device_, format, &properties);
       TI_ERROR_IF(!(properties.optimalTilingFeatures &
                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT),
                   "Vulkan image format does not support linear mip or "
@@ -4567,9 +4601,10 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(
 
 void VulkanDevice::update_descriptor_sets_locked(
     const std::vector<VkWriteDescriptorSet> &desc_writes) {
-  vkUpdateDescriptorSets(device_, desc_writes.size(), desc_writes.data(),
-                         /*descriptorCopyCount=*/0,
-                         /*pDescriptorCopies=*/nullptr);
+  device_.functions().vkUpdateDescriptorSets(device_, desc_writes.size(),
+                                             desc_writes.data(),
+                                             /*descriptorCopyCount=*/0,
+                                             /*pDescriptorCopies=*/nullptr);
 }
 
 void VulkanDevice::create_vma_allocator() {
@@ -4581,52 +4616,8 @@ void VulkanDevice::create_vma_allocator() {
 
   VmaVulkanFunctions vk_vma_functions{};
   vk_vma_functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
-  vk_vma_functions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
-
-  // Let VMA grab the functions by itself
-  /*
-  volkLoadDeviceTable(&table, device_);
-  vk_vma_functions.vkGetPhysicalDeviceProperties =
-      PFN_vkGetPhysicalDeviceProperties(vkGetInstanceProcAddr(
-          volkGetLoadedInstance(), "vkGetPhysicalDeviceProperties"));
-  vk_vma_functions.vkGetPhysicalDeviceMemoryProperties =
-      PFN_vkGetPhysicalDeviceMemoryProperties(vkGetInstanceProcAddr(
-          volkGetLoadedInstance(), "vkGetPhysicalDeviceMemoryProperties"));
-  vk_vma_functions.vkAllocateMemory = table.vkAllocateMemory;
-  vk_vma_functions.vkFreeMemory = table.vkFreeMemory;
-  vk_vma_functions.vkMapMemory = table.vkMapMemory;
-  vk_vma_functions.vkUnmapMemory = table.vkUnmapMemory;
-  vk_vma_functions.vkFlushMappedMemoryRanges = table.vkFlushMappedMemoryRanges;
-  vk_vma_functions.vkInvalidateMappedMemoryRanges =
-      table.vkInvalidateMappedMemoryRanges;
-  vk_vma_functions.vkBindBufferMemory = table.vkBindBufferMemory;
-  vk_vma_functions.vkBindImageMemory = table.vkBindImageMemory;
-  vk_vma_functions.vkGetBufferMemoryRequirements =
-      table.vkGetBufferMemoryRequirements;
-  vk_vma_functions.vkGetImageMemoryRequirements =
-      table.vkGetImageMemoryRequirements;
-  vk_vma_functions.vkCreateBuffer = table.vkCreateBuffer;
-  vk_vma_functions.vkDestroyBuffer = table.vkDestroyBuffer;
-  vk_vma_functions.vkCreateImage = table.vkCreateImage;
-  vk_vma_functions.vkDestroyImage = table.vkDestroyImage;
-  vk_vma_functions.vkCmdCopyBuffer = table.vkCmdCopyBuffer;
-  vk_vma_functions.vkGetBufferMemoryRequirements2KHR =
-      table.vkGetBufferMemoryRequirements2KHR;
-  vk_vma_functions.vkGetImageMemoryRequirements2KHR =
-      table.vkGetImageMemoryRequirements2KHR;
-  vk_vma_functions.vkBindBufferMemory2KHR = table.vkBindBufferMemory2KHR;
-  vk_vma_functions.vkBindImageMemory2KHR = table.vkBindImageMemory2KHR;
-  vk_vma_functions.vkGetPhysicalDeviceMemoryProperties2KHR =
-      (PFN_vkGetPhysicalDeviceMemoryProperties2KHR)(std::max(
-          vkGetInstanceProcAddr(volkGetLoadedInstance(),
-                                "vkGetPhysicalDeviceMemoryProperties2KHR"),
-          vkGetInstanceProcAddr(volkGetLoadedInstance(),
-                                "vkGetPhysicalDeviceMemoryProperties2")));
-  vk_vma_functions.vkGetDeviceBufferMemoryRequirements =
-      table.vkGetDeviceBufferMemoryRequirements;
-  vk_vma_functions.vkGetDeviceImageMemoryRequirements =
-      table.vkGetDeviceImageMemoryRequirements;
-  */
+  vk_vma_functions.vkGetDeviceProcAddr =
+      device_.instance_functions().vkGetDeviceProcAddr;
 
   allocatorInfo.pVulkanFunctions = &vk_vma_functions;
 
@@ -4638,7 +4629,8 @@ void VulkanDevice::create_vma_allocator() {
   vmaCreateAllocator(&allocatorInfo, &allocator_);
 
   VkPhysicalDeviceMemoryProperties properties;
-  vkGetPhysicalDeviceMemoryProperties(physical_device_, &properties);
+  device_.instance_functions().vkGetPhysicalDeviceMemoryProperties(
+      physical_device_, &properties);
 
   std::vector<VkExternalMemoryHandleTypeFlags> flags(
       properties.memoryTypeCount);
@@ -4826,12 +4818,16 @@ void VulkanSurface::create_swap_chain() {
       };
 
   VkSurfaceCapabilitiesKHR capabilities;
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device_->vk_physical_device(),
-                                            surface_, &capabilities);
+  device_->vk_device()
+      .instance_functions()
+      .vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device_->vk_physical_device(),
+                                                 surface_, &capabilities);
   VkBool32 supported = false;
-  vkGetPhysicalDeviceSurfaceSupportKHR(device_->vk_physical_device(),
-                                       device_->graphics_queue_family_index(),
-                                       surface_, &supported);
+  device_->vk_device()
+      .instance_functions()
+      .vkGetPhysicalDeviceSurfaceSupportKHR(
+          device_->vk_physical_device(), device_->graphics_queue_family_index(),
+          surface_, &supported);
 
   if (!supported) {
     RHI_LOG_ERROR("Selected queue does not support presenting");
@@ -4839,24 +4835,34 @@ void VulkanSurface::create_swap_chain() {
   }
 
   uint32_t formatCount;
-  vkGetPhysicalDeviceSurfaceFormatsKHR(device_->vk_physical_device(), surface_,
-                                       &formatCount, nullptr);
+  device_->vk_device()
+      .instance_functions()
+      .vkGetPhysicalDeviceSurfaceFormatsKHR(device_->vk_physical_device(),
+                                            surface_, &formatCount, nullptr);
   std::vector<VkSurfaceFormatKHR> surface_formats(formatCount);
-  vkGetPhysicalDeviceSurfaceFormatsKHR(device_->vk_physical_device(), surface_,
-                                       &formatCount, surface_formats.data());
+  device_->vk_device()
+      .instance_functions()
+      .vkGetPhysicalDeviceSurfaceFormatsKHR(device_->vk_physical_device(),
+                                            surface_, &formatCount,
+                                            surface_formats.data());
 
   VkSurfaceFormatKHR surface_format = choose_surface_format(surface_formats);
 
   uint32_t present_mode_count;
   std::vector<VkPresentModeKHR> present_modes;
-  vkGetPhysicalDeviceSurfacePresentModesKHR(
-      device_->vk_physical_device(), surface_, &present_mode_count, nullptr);
+  device_->vk_device()
+      .instance_functions()
+      .vkGetPhysicalDeviceSurfacePresentModesKHR(device_->vk_physical_device(),
+                                                 surface_, &present_mode_count,
+                                                 nullptr);
 
   if (present_mode_count != 0) {
     present_modes.resize(present_mode_count);
-    vkGetPhysicalDeviceSurfacePresentModesKHR(device_->vk_physical_device(),
-                                              surface_, &present_mode_count,
-                                              present_modes.data());
+    device_->vk_device()
+        .instance_functions()
+        .vkGetPhysicalDeviceSurfacePresentModesKHR(
+            device_->vk_physical_device(), surface_, &present_mode_count,
+            present_modes.data());
   }
   VkPresentModeKHR present_mode =
       choose_swap_present_mode(
@@ -4904,18 +4910,19 @@ void VulkanSurface::create_swap_chain() {
   createInfo.clipped = VK_TRUE;
   createInfo.oldSwapchain = VK_NULL_HANDLE;
 
-  if (vkCreateSwapchainKHR(device_->vk_device(), &createInfo,
-                           kNoVkAllocCallbacks, &swapchain_) != VK_SUCCESS) {
+  if (device_->vk_device().functions().vkCreateSwapchainKHR(
+          device_->vk_device(), &createInfo, kNoVkAllocCallbacks,
+          &swapchain_) != VK_SUCCESS) {
     RHI_LOG_ERROR("Failed to create swapchain");
     return;
   }
 
   uint32_t num_images;
-  vkGetSwapchainImagesKHR(device_->vk_device(), swapchain_, &num_images,
-                          nullptr);
+  device_->vk_device().functions().vkGetSwapchainImagesKHR(
+      device_->vk_device(), swapchain_, &num_images, nullptr);
   std::vector<VkImage> swapchain_images(num_images);
-  vkGetSwapchainImagesKHR(device_->vk_device(), swapchain_, &num_images,
-                          swapchain_images.data());
+  device_->vk_device().functions().vkGetSwapchainImagesKHR(
+      device_->vk_device(), swapchain_, &num_images, swapchain_images.data());
 
   auto [result, image_format] = buffer_format_vk_to_ti(surface_format.format);
   RHI_ASSERT(result == RhiResult::success);
@@ -4965,7 +4972,8 @@ void VulkanSurface::destroy_swap_chain() {
   image_available_.clear();
   present_waits_by_image_.clear();
   swapchain_images_.clear();
-  vkDestroySwapchainKHR(device_->vk_device(), swapchain_, nullptr);
+  device_->vk_device().functions().vkDestroySwapchainKHR(device_->vk_device(),
+                                                         swapchain_, nullptr);
   swapchain_ = VK_NULL_HANDLE;
 }
 
@@ -5061,7 +5069,7 @@ SurfaceImage VulkanSurface::acquire_surface_image() {
     {
       ScopedBackendWaitTelemetry wait_scope(
           device_->backend_wait_telemetry());
-      res = vkAcquireNextImageKHR(
+      res = device_->vk_device().functions().vkAcquireNextImageKHR(
           device_->vk_device(), swapchain_, uint64_t(4 * 1e9),
           image_available->semaphore, VK_NULL_HANDLE, &image_index_);
     }
@@ -5095,7 +5103,7 @@ bool VulkanSurface::try_acquire_surface_image(SurfaceImage *surface_image) {
   }
 
   auto image_available = image_available_[image_available_index_];
-  VkResult res = vkAcquireNextImageKHR(
+  VkResult res = device_->vk_device().functions().vkAcquireNextImageKHR(
       device_->vk_device(), swapchain_, 0, image_available->semaphore,
       VK_NULL_HANDLE, &image_index_);
   if (res == VK_NOT_READY || res == VK_TIMEOUT) {
@@ -5193,7 +5201,8 @@ void VulkanSurface::present_surface_image(
     // Presentation has no fence in our stream completion domain. This also
     // invalidates the compute tail when both roles share the same queue.
     device_->queue_tail_fence_locked(device_->graphics_queue()).reset();
-    present_result = vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
+    present_result = device_->vk_device().functions().vkQueuePresentKHR(
+        device_->graphics_queue(), &presentInfo);
   }
   handle_surface_result(present_result, "presenting a swapchain image");
   if (surface_image.image_index < present_waits_by_image_.size()) {
@@ -5243,10 +5252,11 @@ class VulkanStreamGpuTimingObject final : public StreamGpuTimingObject {
     }
 
     std::uint64_t timestamps[2]{};
-    const VkResult query_result = vkGetQueryPoolResults(
-        device_->vk_device(), query_pool_->query_pool, 0, 2,
-        sizeof(timestamps), timestamps, sizeof(std::uint64_t),
-        VK_QUERY_RESULT_64_BIT);
+    const VkResult query_result =
+        device_->vk_device().functions().vkGetQueryPoolResults(
+            device_->vk_device(), query_pool_->query_pool, 0, 2,
+            sizeof(timestamps), timestamps, sizeof(std::uint64_t),
+            VK_QUERY_RESULT_64_BIT);
     if (query_result == VK_NOT_READY) {
       result.status = "not_ready";
       return result;

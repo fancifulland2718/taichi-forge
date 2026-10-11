@@ -288,6 +288,8 @@ VulkanDeviceCreator::VulkanDeviceCreator(
   if (!VulkanLoader::instance().init()) {
     throw std::runtime_error("Error loading vulkan");
   }
+  std::lock_guard<std::mutex> creation_lock(
+      VulkanLoader::instance().creation_mutex());
 
   ti_device_ = std::make_unique<VulkanDevice>();
   uint32_t vk_api_version;
@@ -336,13 +338,15 @@ VulkanDeviceCreator::VulkanDeviceCreator(
 }
 
 VulkanDeviceCreator::~VulkanDeviceCreator() {
+  const auto device_dispatch = ti_device_->vk_device();
   ti_device_.reset();
   if (params_.enable_validation_layer) {
     destroy_debug_utils_messenger_ext(instance_, debug_messenger_,
                                       kNoVkAllocCallbacks);
   }
-  vkDestroyDevice(device_, kNoVkAllocCallbacks);
-  vkDestroyInstance(instance_, kNoVkAllocCallbacks);
+  device_dispatch.functions().vkDestroyDevice(device_, kNoVkAllocCallbacks);
+  device_dispatch.instance_functions().vkDestroyInstance(instance_,
+                                                         kNoVkAllocCallbacks);
 }
 
 void VulkanDeviceCreator::create_instance(uint32_t vk_api_version,
@@ -1478,22 +1482,24 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(vkCreateDevice(physical_device_, &create_info,
                                                  kNoVkAllocCallbacks, &device_),
                                   "failed to create logical device");
-  VulkanLoader::instance().load_device(device_);
+  const auto get_device_queue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+      vkGetDeviceProcAddr(device_, "vkGetDeviceQueue"));
 
   // Entry points are optional for ordinary compute/graphics devices. Missing
   // RT symbols disable only this feature, not creation of the Vulkan backend.
   if (ti_device_->vk_caps().ray_tracing_pipeline &&
-      (!vkCreateRayTracingPipelinesKHR || !vkGetRayTracingShaderGroupHandlesKHR ||
-       !vkCmdTraceRaysKHR)) {
+      (!vkGetDeviceProcAddr(device_, "vkCreateRayTracingPipelinesKHR") ||
+       !vkGetDeviceProcAddr(device_, "vkGetRayTracingShaderGroupHandlesKHR") ||
+       !vkGetDeviceProcAddr(device_, "vkCmdTraceRaysKHR"))) {
     ti_device_->vk_caps().ray_tracing_pipeline = false;
   }
 
   if (queue_family_indices_.compute_family.has_value()) {
-    vkGetDeviceQueue(device_, queue_family_indices_.compute_family.value(), 0,
+    get_device_queue(device_, queue_family_indices_.compute_family.value(), 0,
                      &compute_queue_);
   }
   if (queue_family_indices_.graphics_family.has_value()) {
-    vkGetDeviceQueue(device_, queue_family_indices_.graphics_family.value(), 0,
+    get_device_queue(device_, queue_family_indices_.graphics_family.value(), 0,
                      &graphics_queue_);
   }
 

@@ -22,10 +22,10 @@ void publish_shader_writes(VulkanCommandList *commands) {
   barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
                           VK_ACCESS_SHADER_READ_BIT |
                           VK_ACCESS_SHADER_WRITE_BIT;
-  vkCmdPipelineBarrier(commands->vk_command_buffer()->buffer,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0,
-                       nullptr, 0, nullptr);
+  commands->vk_command_buffer()->device.functions().vkCmdPipelineBarrier(
+      commands->vk_command_buffer()->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0,
+      nullptr);
 }
 
 const std::uint32_t kRecordRaygen[] =

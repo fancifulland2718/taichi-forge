@@ -43,9 +43,8 @@ bool pointer_over_edge_region(const ImGuiIO &io,
 }  // namespace
 
 PFN_vkVoidFunction load_vk_function_for_gui(const char *name, void *userData) {
-  auto result = VulkanLoader::instance().load_function(name);
-
-  return result;
+  const auto *device = static_cast<VulkanDevice *>(userData);
+  return vkGetInstanceProcAddr(device->vk_instance(), name);
 }
 
 Gui::Gui(AppContext *app_context,
@@ -88,9 +87,9 @@ void Gui::init_render_resources(VkRenderPass render_pass) {
       static_cast<taichi::lang::vulkan::VulkanDevice &>(app_context_->device());
 
   // imgui 1.91+: ImGui_ImplVulkan_LoadFunctions takes api_version as first arg.
-  ImGui_ImplVulkan_LoadFunctions(
-      device.vk_caps().vk_api_version,
-      load_vk_function_for_gui);  // this is because we're using volk.
+  ImGui_ImplVulkan_LoadFunctions(device.vk_caps().vk_api_version,
+                                 load_vk_function_for_gui,
+                                 &device);  // this is because we're using volk.
 
   ImGui_ImplVulkan_InitInfo init_info = {};
   init_info.ApiVersion = device.vk_caps().vk_api_version;
@@ -133,10 +132,11 @@ void Gui::create_descriptor_pool() {
   pool_info.maxSets = 1000 * IM_ARRAYSIZE(pool_sizes);
   pool_info.poolSizeCount = (uint32_t)IM_ARRAYSIZE(pool_sizes);
   pool_info.pPoolSizes = pool_sizes;
-  [[maybe_unused]] VkResult err = vkCreateDescriptorPool(
+  const auto &device =
       static_cast<taichi::lang::vulkan::VulkanDevice &>(app_context_->device())
-          .vk_device(),
-      &pool_info, VK_NULL_HANDLE, &descriptor_pool_);
+          .vk_device();
+  [[maybe_unused]] VkResult err = device.functions().vkCreateDescriptorPool(
+      device, &pool_info, VK_NULL_HANDLE, &descriptor_pool_);
 }
 
 void Gui::prepare_for_next_frame() {
@@ -378,10 +378,11 @@ Gui::~Gui() {
 #endif
   }
   if (descriptor_pool_ != VK_NULL_HANDLE) {
-    vkDestroyDescriptorPool(
-        static_cast<taichi::lang::vulkan::VulkanDevice &>(app_context_->device())
-            .vk_device(),
-        descriptor_pool_, nullptr);
+    const auto &device = static_cast<taichi::lang::vulkan::VulkanDevice &>(
+                             app_context_->device())
+                             .vk_device();
+    device.functions().vkDestroyDescriptorPool(device, descriptor_pool_,
+                                               nullptr);
     descriptor_pool_ = VK_NULL_HANDLE;
   }
   ImGui::DestroyContext(imgui_context_);

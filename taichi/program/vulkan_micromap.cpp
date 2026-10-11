@@ -8,8 +8,9 @@
 namespace taichi::lang {
 namespace {
 template <typename T>
-T load(VkDevice device, const char *name) {
-  auto fn = reinterpret_cast<T>(vkGetDeviceProcAddr(device, name));
+T load(const vkapi::DeviceHandle &device, const char *name) {
+  auto fn = reinterpret_cast<T>(
+      device.instance_functions().vkGetDeviceProcAddr(device, name));
   TI_ERROR_IF(!fn, "Vulkan opacity micromap requires '{}'.", name);
   return fn;
 }
@@ -73,7 +74,8 @@ void VulkanOpacityMicromap::build(const std::string &data,
   VkPhysicalDeviceProperties2 properties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
   properties.pNext = &limits;
-  vkGetPhysicalDeviceProperties2(device_->vk_physical_device(), &properties);
+  device_->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+      device_->vk_physical_device(), &properties);
   Counts build_counts, used_counts;
   std::vector<VkMicromapTriangleEXT> entries(descriptors.size() / 8);
   if (!entries.empty()) {
@@ -128,9 +130,10 @@ void VulkanOpacityMicromap::build(const std::string &data,
               "Cannot record Vulkan micromap import.");
   auto command_buffer = static_cast<vulkan::VulkanCommandList *>(commands.get())
                             ->vk_command_buffer();
-  const auto device = device_->vk_device();
+  const auto &device = device_->vk_device();
   auto barrier2 = reinterpret_cast<PFN_vkCmdPipelineBarrier2>(
-      vkGetDeviceProcAddr(device, "vkCmdPipelineBarrier2KHR"));
+      device.instance_functions().vkGetDeviceProcAddr(
+          device, "vkCmdPipelineBarrier2KHR"));
   if (!barrier2) {
     barrier2 = load<PFN_vkCmdPipelineBarrier2>(device, "vkCmdPipelineBarrier2");
   }

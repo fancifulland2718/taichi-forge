@@ -360,6 +360,53 @@ TEST(VulkanDeviceCapabilityTest,
   EXPECT_GE(spirv_decoration_count(module, spv::DecorationNonUniform), 4u);
 }
 
+TEST(VulkanDeviceTest, IndependentDevicesKeepDispatchAlive) {
+  if (!vulkan::is_vulkan_api_available()) {
+    GTEST_SKIP() << "No Vulkan compute device";
+  }
+  const auto fill_and_read = [](vulkan::VulkanDevice *device, uint32_t value) {
+    Device::AllocParams params;
+    params.size = 4 * sizeof(uint32_t);
+    params.host_read = params.host_write = true;
+    params.usage = AllocUsage::Storage;
+    auto [allocation, allocated] = device->allocate_memory_unique(params);
+    ASSERT_EQ(allocated, RhiResult::success);
+    auto *stream = device->get_compute_stream();
+    auto [commands, recorded] = stream->new_command_list_unique();
+    ASSERT_EQ(recorded, RhiResult::success);
+    commands->buffer_fill(allocation->get_ptr(), params.size, value);
+    ASSERT_TRUE(stream->submit_synced(commands.get()));
+    void *mapped = nullptr;
+    ASSERT_EQ(device->map(*allocation, &mapped), RhiResult::success);
+    for (size_t i = 0; i < 4; ++i) {
+      EXPECT_EQ(static_cast<uint32_t *>(mapped)[i], value);
+    }
+    device->unmap(*allocation);
+  };
+
+  for (bool destroy_first : {false, true}) {
+    auto first = std::make_unique<vulkan::VulkanDeviceCreator>(
+        vulkan::VulkanDeviceCreator::Params{});
+    fill_and_read(first->device(), 3);
+    auto second = std::make_unique<vulkan::VulkanDeviceCreator>(
+        vulkan::VulkanDeviceCreator::Params{});
+    // Each runtime retains its own driver table, including resource deleters.
+    EXPECT_NE(&first->device()->vk_device().functions(),
+              &second->device()->vk_device().functions());
+    std::thread first_work([&] { fill_and_read(first->device(), 7); });
+    std::thread second_work([&] { fill_and_read(second->device(), 11); });
+    first_work.join();
+    second_work.join();
+    if (destroy_first) {
+      first.reset();
+      fill_and_read(second->device(), 13);
+    } else {
+      second.reset();
+      fill_and_read(first->device(), 17);
+    }
+  }
+}
+
 TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
   if (!vulkan::is_vulkan_api_available()) {
     return;

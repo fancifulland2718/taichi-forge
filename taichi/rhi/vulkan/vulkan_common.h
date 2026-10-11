@@ -10,6 +10,11 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #endif
 
+// Each runtime owns its device dispatch table. Keep accidental uses of Volk's
+// process-global device pointers from compiling.
+#ifndef VOLK_IMPLEMENTATION
+#define VOLK_NO_DEVICE_PROTOTYPES
+#endif
 #include <volk.h>
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES 1

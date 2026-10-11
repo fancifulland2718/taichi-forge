@@ -868,7 +868,10 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     color_types.push_back(is_float_sampled_texture_format(format) ? 1 : (is_signed(type) ? 2 : 3));
     VkFormatProperties properties{};
     const auto vk_format = std::get<2>(device->get_vk_image(allocation));
-    vkGetPhysicalDeviceFormatProperties(device->vk_physical_device(), vk_format, &properties);
+    device->vk_device()
+        .instance_functions()
+        .vkGetPhysicalDeviceFormatProperties(device->vk_physical_device(),
+                                             vk_format, &properties);
     TI_ERROR_IF((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0,
                 "Texture format cannot be a color attachment on this device");
     textures.push_back(target);
@@ -892,8 +895,12 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     for (std::size_t i = 0; i < colors.size(); ++i) {
       if (native_pipeline->color_attachment_blends(i)) {
         VkFormatProperties properties{};
-        vkGetPhysicalDeviceFormatProperties(device->vk_physical_device(),
-            std::get<2>(device->get_vk_image(color_allocations[i])), &properties);
+        device->vk_device()
+            .instance_functions()
+            .vkGetPhysicalDeviceFormatProperties(
+                device->vk_physical_device(),
+                std::get<2>(device->get_vk_image(color_allocations[i])),
+                &properties);
         TI_ERROR_IF(color_types[i] != 1 ||
                         !(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT),
                     "Blending requires a blendable floating-point or normalized color attachment");
@@ -1728,16 +1735,17 @@ class PreparedGraphicsGraphCommand final : public gfx::ExternalGraphCommand {
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(buffer->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1, &barrier,
-                         0, nullptr, 0, nullptr);
+    buffer->device.functions().vkCmdPipelineBarrier(
+        buffer->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1, &barrier, 0, nullptr, 0,
+        nullptr);
     packet_->state->record(static_cast<GraphicsDevice *>(device), commands);
     // Also order read-before-write reuse of vertex/uniform buffers in a later
     // compute operation (including the next replay of this immutable frame).
-    vkCmdPipelineBarrier(buffer->buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+    buffer->device.functions().vkCmdPipelineBarrier(
+        buffer->buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 1, &barrier, 0, nullptr, 0, nullptr);
   }
 
  private:

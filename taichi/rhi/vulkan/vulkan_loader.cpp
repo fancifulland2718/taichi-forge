@@ -118,11 +118,7 @@ bool VulkanLoader::init(PFN_vkGetInstanceProcAddr get_proc_addr) {
 
 void VulkanLoader::load_instance(VkInstance instance) {
   vulkan_instance_ = instance;
-  volkLoadInstance(instance);
-}
-void VulkanLoader::load_device(VkDevice device) {
-  vulkan_device_ = device;
-  volkLoadDevice(device);
+  volkLoadInstanceOnly(instance);
 }
 
 PFN_vkVoidFunction VulkanLoader::load_function(const char *name) {

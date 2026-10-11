@@ -26,8 +26,9 @@ VulkanRuntimeImported::Workaround::Workaround(
           params.get_proc_addr)) {
     throw std::runtime_error("Error loading vulkan");
   }
+  std::lock_guard<std::mutex> creation_lock(
+      taichi::lang::vulkan::VulkanLoader::instance().creation_mutex());
   taichi::lang::vulkan::VulkanLoader::instance().load_instance(params.instance);
-  taichi::lang::vulkan::VulkanLoader::instance().load_device(params.device);
   vk_device.vk_caps().vk_api_version = api_version;
   // FIXME: (penguinliong) Workaround missing vulkan caps from import.
   vk_device.vk_caps().external_memory = true;

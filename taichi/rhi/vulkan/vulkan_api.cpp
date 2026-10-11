@@ -7,19 +7,27 @@
 
 namespace vkapi {
 
+DeviceHandle::DeviceHandle(VkInstance instance, VkDevice device)
+    : device_(device) {
+  auto tables = std::make_shared<Tables>();
+  volkLoadInstanceTable(&tables->instance, instance);
+  volkLoadDeviceTable(&tables->device, device);
+  tables_ = std::move(tables);
+}
+
 DeviceObjVkDescriptorSetLayout::~DeviceObjVkDescriptorSetLayout() {
-  vkDestroyDescriptorSetLayout(device, layout, nullptr);
+  device.functions().vkDestroyDescriptorSetLayout(device, layout, nullptr);
 }
 
 DeviceObjVkDescriptorPool::~DeviceObjVkDescriptorPool() {
-  vkDestroyDescriptorPool(device, pool, nullptr);
+  device.functions().vkDestroyDescriptorPool(device, pool, nullptr);
 }
 
 DeviceObjVkDescriptorSet::~DeviceObjVkDescriptorSet() {
 }
 
 DeviceObjVkCommandPool::~DeviceObjVkCommandPool() {
-  vkDestroyCommandPool(device, pool, nullptr);
+  device.functions().vkDestroyCommandPool(device, pool, nullptr);
 }
 
 DeviceObjVkCommandBuffer::~DeviceObjVkCommandBuffer() {
@@ -37,19 +45,19 @@ DeviceObjVkCommandBuffer::~DeviceObjVkCommandBuffer() {
 }
 
 DeviceObjVkRenderPass::~DeviceObjVkRenderPass() {
-  vkDestroyRenderPass(device, renderpass, nullptr);
+  device.functions().vkDestroyRenderPass(device, renderpass, nullptr);
 }
 
 DeviceObjVkPipelineLayout::~DeviceObjVkPipelineLayout() {
-  vkDestroyPipelineLayout(device, layout, nullptr);
+  device.functions().vkDestroyPipelineLayout(device, layout, nullptr);
 }
 
 DeviceObjVkPipeline::~DeviceObjVkPipeline() {
-  vkDestroyPipeline(device, pipeline, nullptr);
+  device.functions().vkDestroyPipeline(device, pipeline, nullptr);
 }
 
 DeviceObjVkSampler::~DeviceObjVkSampler() {
-  vkDestroySampler(device, sampler, nullptr);
+  device.functions().vkDestroySampler(device, sampler, nullptr);
 }
 
 DeviceObjVkImage::~DeviceObjVkImage() {
@@ -59,23 +67,23 @@ DeviceObjVkImage::~DeviceObjVkImage() {
 }
 
 DeviceObjVkImageView::~DeviceObjVkImageView() {
-  vkDestroyImageView(device, view, nullptr);
+  device.functions().vkDestroyImageView(device, view, nullptr);
 }
 
 DeviceObjVkFramebuffer::~DeviceObjVkFramebuffer() {
-  vkDestroyFramebuffer(device, framebuffer, nullptr);
+  device.functions().vkDestroyFramebuffer(device, framebuffer, nullptr);
 }
 
 DeviceObjVkSemaphore::~DeviceObjVkSemaphore() {
-  vkDestroySemaphore(device, semaphore, nullptr);
+  device.functions().vkDestroySemaphore(device, semaphore, nullptr);
 }
 
 DeviceObjVkFence::~DeviceObjVkFence() {
-  vkDestroyFence(device, fence, nullptr);
+  device.functions().vkDestroyFence(device, fence, nullptr);
 }
 
 DeviceObjVkPipelineCache::~DeviceObjVkPipelineCache() {
-  vkDestroyPipelineCache(device, cache, nullptr);
+  device.functions().vkDestroyPipelineCache(device, cache, nullptr);
 }
 
 DeviceObjVkBuffer::~DeviceObjVkBuffer() {
@@ -85,30 +93,28 @@ DeviceObjVkBuffer::~DeviceObjVkBuffer() {
 }
 
 DeviceObjVkBufferView::~DeviceObjVkBufferView() {
-  vkDestroyBufferView(device, view, nullptr);
+  device.functions().vkDestroyBufferView(device, view, nullptr);
 }
 
 DeviceObjVkAccelerationStructureKHR::~DeviceObjVkAccelerationStructureKHR() {
-  PFN_vkDestroyAccelerationStructureKHR destroy_raytracing_pipeline_khr =
-      PFN_vkDestroyAccelerationStructureKHR(vkGetInstanceProcAddr(
-          taichi::lang::vulkan::VulkanLoader::instance().get_instance(),
-          "vkDestroyAccelerationStructureKHR"));
+  auto destroy_raytracing_pipeline_khr =
+      device.functions().vkDestroyAccelerationStructureKHR;
 
   if (destroy_raytracing_pipeline_khr != nullptr && accel != VK_NULL_HANDLE) {
     destroy_raytracing_pipeline_khr(device, accel, nullptr);
   }
 }
 DeviceObjVkQueryPool::~DeviceObjVkQueryPool() {
-  vkDestroyQueryPool(device, query_pool, nullptr);
+  device.functions().vkDestroyQueryPool(device, query_pool, nullptr);
 }
 
-IDeviceObj create_device_obj(VkDevice device) {
+IDeviceObj create_device_obj(const DeviceHandle &device) {
   IDeviceObj obj = std::make_shared<DeviceObj>();
   obj->device = device;
   return obj;
 }
 
-IVkSemaphore create_semaphore(VkDevice device,
+IVkSemaphore create_semaphore(const DeviceHandle &device,
                               VkSemaphoreCreateFlags flags,
                               void *pnext) {
   IVkSemaphore obj = std::make_shared<DeviceObjVkSemaphore>();
@@ -119,12 +125,15 @@ IVkSemaphore create_semaphore(VkDevice device,
   info.pNext = pnext;
   info.flags = flags;
 
-  VkResult res = vkCreateSemaphore(device, &info, nullptr, &obj->semaphore);
+  VkResult res = device.functions().vkCreateSemaphore(device, &info, nullptr,
+                                                      &obj->semaphore);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create semaphore");
   return obj;
 }
 
-IVkFence create_fence(VkDevice device, VkFenceCreateFlags flags, void *pnext) {
+IVkFence create_fence(const DeviceHandle &device,
+                      VkFenceCreateFlags flags,
+                      void *pnext) {
   IVkFence obj = std::make_shared<DeviceObjVkFence>();
   obj->device = device;
 
@@ -133,31 +142,32 @@ IVkFence create_fence(VkDevice device, VkFenceCreateFlags flags, void *pnext) {
   info.pNext = pnext;
   info.flags = flags;
 
-  VkResult res = vkCreateFence(device, &info, nullptr, &obj->fence);
+  VkResult res =
+      device.functions().vkCreateFence(device, &info, nullptr, &obj->fence);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create fence");
   return obj;
 }
 
 IVkDescriptorSetLayout create_descriptor_set_layout(
-    VkDevice device,
+    const DeviceHandle &device,
     VkDescriptorSetLayoutCreateInfo *create_info) {
   IVkDescriptorSetLayout obj =
       std::make_shared<DeviceObjVkDescriptorSetLayout>();
   obj->device = device;
-  VkResult res =
-      vkCreateDescriptorSetLayout(device, create_info, nullptr, &obj->layout);
+  VkResult res = device.functions().vkCreateDescriptorSetLayout(
+      device, create_info, nullptr, &obj->layout);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res,
                                   "failed to create descriptor set layout");
   return obj;
 }
 
 IVkDescriptorPool create_descriptor_pool(
-    VkDevice device,
+    const DeviceHandle &device,
     VkDescriptorPoolCreateInfo *create_info) {
   IVkDescriptorPool obj = std::make_shared<DeviceObjVkDescriptorPool>();
   obj->device = device;
-  VkResult res =
-      vkCreateDescriptorPool(device, create_info, nullptr, &obj->pool);
+  VkResult res = device.functions().vkCreateDescriptorPool(device, create_info,
+                                                           nullptr, &obj->pool);
   if (res != VK_SUCCESS) {
     // All failure condition listed in spec are OOM
     return nullptr;
@@ -180,15 +190,15 @@ IVkDescriptorSet allocate_descriptor_sets(IVkDescriptorPool pool,
   info.descriptorSetCount = 1;
   info.pSetLayouts = &layout->layout;
 
-  if (vkAllocateDescriptorSets(pool->device, &info, &obj->set) ==
-      VK_ERROR_OUT_OF_POOL_MEMORY) {
+  if (pool->device.functions().vkAllocateDescriptorSets(
+          pool->device, &info, &obj->set) == VK_ERROR_OUT_OF_POOL_MEMORY) {
     return nullptr;
   }
 
   return obj;
 }
 
-IVkCommandPool create_command_pool(VkDevice device,
+IVkCommandPool create_command_pool(const DeviceHandle &device,
                                    VkCommandPoolCreateFlags flags,
                                    uint32_t queue_family_index) {
   IVkCommandPool obj = std::make_shared<DeviceObjVkCommandPool>();
@@ -201,7 +211,8 @@ IVkCommandPool create_command_pool(VkDevice device,
   info.flags = flags;
   info.queueFamilyIndex = queue_family_index;
 
-  VkResult res = vkCreateCommandPool(device, &info, nullptr, &obj->pool);
+  VkResult res = device.functions().vkCreateCommandPool(device, &info, nullptr,
+                                                        &obj->pool);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create command pool");
 
   return obj;
@@ -227,7 +238,8 @@ IVkCommandBuffer allocate_command_buffer(IVkCommandPool pool,
     info.level = level;
     info.commandBufferCount = 1;
 
-    VkResult res = vkAllocateCommandBuffers(pool->device, &info, &cmdbuf);
+    VkResult res = pool->device.functions().vkAllocateCommandBuffers(
+        pool->device, &info, &cmdbuf);
     if (res != VK_SUCCESS) {
       return nullptr;
     }
@@ -242,18 +254,18 @@ IVkCommandBuffer allocate_command_buffer(IVkCommandPool pool,
   return obj;
 }
 
-IVkRenderPass create_render_pass(VkDevice device,
+IVkRenderPass create_render_pass(const DeviceHandle &device,
                                  VkRenderPassCreateInfo *create_info) {
   IVkRenderPass obj = std::make_shared<DeviceObjVkRenderPass>();
   obj->device = device;
-  VkResult res =
-      vkCreateRenderPass(device, create_info, nullptr, &obj->renderpass);
+  VkResult res = device.functions().vkCreateRenderPass(
+      device, create_info, nullptr, &obj->renderpass);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create render pass");
   return obj;
 }
 
 IVkPipelineLayout create_pipeline_layout(
-    VkDevice device,
+    const DeviceHandle &device,
     std::vector<IVkDescriptorSetLayout> &set_layouts,
     uint32_t push_constant_range_count,
     VkPushConstantRange *push_constant_ranges) {
@@ -275,13 +287,14 @@ IVkPipelineLayout create_pipeline_layout(
   info.pushConstantRangeCount = push_constant_range_count;
   info.pPushConstantRanges = push_constant_ranges;
 
-  VkResult res = vkCreatePipelineLayout(device, &info, nullptr, &obj->layout);
+  VkResult res = device.functions().vkCreatePipelineLayout(
+      device, &info, nullptr, &obj->layout);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create pipeline layout");
 
   return obj;
 }
 
-IVkPipelineCache create_pipeline_cache(VkDevice device,
+IVkPipelineCache create_pipeline_cache(const DeviceHandle &device,
                                        VkPipelineCacheCreateFlags flags,
                                        size_t initial_size,
                                        const void *initial_data) {
@@ -295,7 +308,8 @@ IVkPipelineCache create_pipeline_cache(VkDevice device,
   info.initialDataSize = initial_size;
   info.pInitialData = initial_data;
 
-  VkResult res = vkCreatePipelineCache(device, &info, nullptr, &obj->cache);
+  VkResult res = device.functions().vkCreatePipelineCache(device, &info,
+                                                          nullptr, &obj->cache);
   if (res != VK_SUCCESS) {
     char message[128];
     std::snprintf(message, sizeof(message),
@@ -308,7 +322,7 @@ IVkPipelineCache create_pipeline_cache(VkDevice device,
   return obj;
 }
 
-IVkPipeline create_compute_pipeline(VkDevice device,
+IVkPipeline create_compute_pipeline(const DeviceHandle &device,
                                     VkPipelineCreateFlags flags,
                                     VkPipelineShaderStageCreateInfo &stage,
                                     IVkPipelineLayout layout,
@@ -337,16 +351,16 @@ IVkPipeline create_compute_pipeline(VkDevice device,
   if (cache) {
     cache_lock = std::unique_lock<std::mutex>(cache->mutex);
   }
-  VkResult res =
-      vkCreateComputePipelines(device, cache ? cache->cache : VK_NULL_HANDLE, 1,
-                               &info, nullptr, &obj->pipeline);
+  VkResult res = device.functions().vkCreateComputePipelines(
+      device, cache ? cache->cache : VK_NULL_HANDLE, 1, &info, nullptr,
+      &obj->pipeline);
   RHI_THROW_UNLESS(res == VK_SUCCESS,
                    std::runtime_error("vkCreateComputePipelines failed"));
 
   return obj;
 }
 
-IVkPipeline create_graphics_pipeline(VkDevice device,
+IVkPipeline create_graphics_pipeline(const DeviceHandle &device,
                                      VkGraphicsPipelineCreateInfo *create_info,
                                      IVkRenderPass renderpass,
                                      IVkPipelineLayout layout,
@@ -373,16 +387,16 @@ IVkPipeline create_graphics_pipeline(VkDevice device,
   if (cache) {
     cache_lock = std::unique_lock<std::mutex>(cache->mutex);
   }
-  VkResult res =
-      vkCreateGraphicsPipelines(device, cache ? cache->cache : VK_NULL_HANDLE,
-                                1, create_info, nullptr, &obj->pipeline);
+  VkResult res = device.functions().vkCreateGraphicsPipelines(
+      device, cache ? cache->cache : VK_NULL_HANDLE, 1, create_info, nullptr,
+      &obj->pipeline);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create graphics pipeline");
 
   return obj;
 }
 
 IVkPipeline create_graphics_pipeline_dynamic(
-    VkDevice device,
+    const DeviceHandle &device,
     VkGraphicsPipelineCreateInfo *create_info,
     VkPipelineRenderingCreateInfoKHR *rendering_info,
     IVkPipelineLayout layout,
@@ -409,16 +423,16 @@ IVkPipeline create_graphics_pipeline_dynamic(
   if (cache) {
     cache_lock = std::unique_lock<std::mutex>(cache->mutex);
   }
-  VkResult res =
-      vkCreateGraphicsPipelines(device, cache ? cache->cache : VK_NULL_HANDLE,
-                                1, create_info, nullptr, &obj->pipeline);
+  VkResult res = device.functions().vkCreateGraphicsPipelines(
+      device, cache ? cache->cache : VK_NULL_HANDLE, 1, create_info, nullptr,
+      &obj->pipeline);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create graphics pipeline");
 
   return obj;
 }
 
 IVkPipeline create_raytracing_pipeline(
-    VkDevice device,
+    const DeviceHandle &device,
     VkRayTracingPipelineCreateInfoKHR *create_info,
     IVkPipelineLayout layout,
     std::vector<IVkPipeline> &pipeline_libraries,
@@ -441,7 +455,7 @@ IVkPipeline create_raytracing_pipeline(
     create_info->basePipelineIndex = 0;
   }
 
-  if (!vkCreateRayTracingPipelinesKHR) {
+  if (!device.functions().vkCreateRayTracingPipelinesKHR) {
     RHI_LOG_ERROR("Ray-tracing pipeline entry point is unavailable");
     return nullptr;
   }
@@ -450,7 +464,7 @@ IVkPipeline create_raytracing_pipeline(
   if (cache) {
     cache_lock = std::unique_lock<std::mutex>(cache->mutex);
   }
-  VkResult res = vkCreateRayTracingPipelinesKHR(
+  VkResult res = device.functions().vkCreateRayTracingPipelinesKHR(
       device, deferredOperation, cache ? cache->cache : VK_NULL_HANDLE, 1,
       create_info, nullptr, &obj->pipeline);
   RHI_THROW_UNLESS(
@@ -461,18 +475,20 @@ IVkPipeline create_raytracing_pipeline(
   return obj;
 }
 
-IVkSampler create_sampler(VkDevice device, const VkSamplerCreateInfo &info) {
+IVkSampler create_sampler(const DeviceHandle &device,
+                          const VkSamplerCreateInfo &info) {
   IVkSampler sampler = std::make_shared<DeviceObjVkSampler>();
   sampler->device = device;
 
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(
-      vkCreateSampler(device, &info, nullptr, &sampler->sampler),
+      device.functions().vkCreateSampler(device, &info, nullptr,
+                                         &sampler->sampler),
       "failed to create texture sampler!");
 
   return sampler;
 }
 
-IVkImage create_image(VkDevice device,
+IVkImage create_image(const DeviceHandle &device,
                       VmaAllocator allocator,
                       VkImageCreateInfo *image_info,
                       VmaAllocationCreateInfo *alloc_info) {
@@ -495,7 +511,7 @@ IVkImage create_image(VkDevice device,
   return image;
 }
 
-IVkImage create_image(VkDevice device,
+IVkImage create_image(const DeviceHandle &device,
                       VkImage image,
                       VkFormat format,
                       VkImageType type,
@@ -518,7 +534,7 @@ IVkImage create_image(VkDevice device,
   return obj;
 }
 
-IVkImageView create_image_view(VkDevice device,
+IVkImageView create_image_view(const DeviceHandle &device,
                                IVkImage image,
                                VkImageViewCreateInfo *create_info) {
   IVkImageView view = std::make_shared<DeviceObjVkImageView>();
@@ -529,7 +545,8 @@ IVkImageView create_image_view(VkDevice device,
 
   create_info->image = image->image;
 
-  VkResult res = vkCreateImageView(device, create_info, nullptr, &view->view);
+  VkResult res = device.functions().vkCreateImageView(device, create_info,
+                                                      nullptr, &view->view);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create image view");
 
   return view;
@@ -563,14 +580,14 @@ IVkFramebuffer create_framebuffer(VkFramebufferCreateFlags flags,
   info.height = height;
   info.layers = layers;
 
-  VkResult res = vkCreateFramebuffer(renderpass->device, &info, nullptr,
-                                     &obj->framebuffer);
+  VkResult res = renderpass->device.functions().vkCreateFramebuffer(
+      renderpass->device, &info, nullptr, &obj->framebuffer);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create framebuffer");
 
   return obj;
 }
 
-IVkBuffer create_buffer(VkDevice device,
+IVkBuffer create_buffer(const DeviceHandle &device,
                         VmaAllocator allocator,
                         VkBufferCreateInfo *buffer_info,
                         VmaAllocationCreateInfo *alloc_info) {
@@ -590,7 +607,7 @@ IVkBuffer create_buffer(VkDevice device,
   return buffer;
 }
 
-IVkBuffer create_buffer(VkDevice device,
+IVkBuffer create_buffer(const DeviceHandle &device,
                         VkBuffer buffer,
                         VkBufferUsageFlags usage) {
   IVkBuffer obj = std::make_shared<DeviceObjVkBuffer>();
@@ -622,8 +639,8 @@ IVkBufferView create_buffer_view(IVkBuffer buffer,
   info.offset = offset;
   info.range = range;
 
-  VkResult res =
-      vkCreateBufferView(buffer->device, &info, nullptr, &view->view);
+  VkResult res = buffer->device.functions().vkCreateBufferView(
+      buffer->device, &info, nullptr, &view->view);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create buffer view");
 
   return view;
@@ -653,10 +670,8 @@ IVkAccelerationStructureKHR create_acceleration_structure(
   info.type = type;
   info.deviceAddress = 0;
 
-  PFN_vkCreateAccelerationStructureKHR create_acceleration_structure_khr =
-      PFN_vkCreateAccelerationStructureKHR(vkGetInstanceProcAddr(
-          taichi::lang::vulkan::VulkanLoader::instance().get_instance(),
-          "vkCreateAccelerationStructureKHR"));
+  auto create_acceleration_structure_khr =
+      buffer->device.functions().vkCreateAccelerationStructureKHR;
 
   if (create_acceleration_structure_khr == nullptr) {
     return nullptr;
@@ -669,7 +684,7 @@ IVkAccelerationStructureKHR create_acceleration_structure(
   return obj;
 }
 
-IVkQueryPool create_query_pool(VkDevice device) {
+IVkQueryPool create_query_pool(const DeviceHandle &device) {
   VkQueryPoolCreateInfo info{};
   info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
   info.pNext = nullptr;
@@ -677,7 +692,8 @@ IVkQueryPool create_query_pool(VkDevice device) {
   info.queryType = VK_QUERY_TYPE_TIMESTAMP;
 
   VkQueryPool query_pool;
-  VkResult res = vkCreateQueryPool(device, &info, nullptr, &query_pool);
+  VkResult res =
+      device.functions().vkCreateQueryPool(device, &info, nullptr, &query_pool);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create query pool");
 
   IVkQueryPool obj = std::make_shared<DeviceObjVkQueryPool>();

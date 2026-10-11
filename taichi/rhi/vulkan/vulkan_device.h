@@ -507,7 +507,7 @@ class VulkanPipeline : public Pipeline {
       const std::vector<VertexInputBinding> &vertex_inputs,
       const std::vector<VertexInputAttribute> &vertex_attrs);
 
-  static VkShaderModule create_shader_module(VkDevice device,
+  static VkShaderModule create_shader_module(const vkapi::DeviceHandle &device,
                                              const SpirvCodeView &code);
 
   struct GraphicsPipelineTemplate {
@@ -530,7 +530,7 @@ class VulkanPipeline : public Pipeline {
   };
 
   VulkanDevice &ti_device_;          // not owned
-  VkDevice device_{VK_NULL_HANDLE};  // not owned
+  vkapi::DeviceHandle device_;       // not owned
 
   std::string name_;
 
@@ -719,7 +719,7 @@ class VulkanCommandList : public CommandList {
   bool finalized_{false};
   VulkanDevice *ti_device_;
   VulkanStream *stream_;
-  VkDevice device_;
+  vkapi::DeviceHandle device_;
   vkapi::IVkCommandBuffer buffer_;
   VulkanPipeline *current_pipeline_{nullptr};
   bool conditional_active_{false};
@@ -1128,7 +1128,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     return instance_;
   }
 
-  VkDevice vk_device() const {
+  const vkapi::DeviceHandle &vk_device() const {
     return device_;
   }
 
@@ -1360,7 +1360,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   VkPhysicalDeviceProperties vk_device_properties_;
 
   VkInstance instance_{VK_NULL_HANDLE};
-  VkDevice device_{VK_NULL_HANDLE};
+  vkapi::DeviceHandle device_;
   VkPhysicalDevice physical_device_{VK_NULL_HANDLE};
   VmaAllocator allocator_{nullptr};
   VmaAllocator allocator_export_{nullptr};

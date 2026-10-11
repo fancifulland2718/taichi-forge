@@ -128,7 +128,8 @@ VulkanPipeline::VulkanPipeline(const Params &params,
   // here; the layout/cache/pipeline members already have shared RAII owners.
   const auto release_modules = [&] {
     for (auto module : shader_modules_) {
-      vkDestroyShaderModule(device_, module, kNoVkAllocCallbacks);
+      device_.functions().vkDestroyShaderModule(device_, module,
+                                                kNoVkAllocCallbacks);
     }
     shader_modules_.clear();
   };
@@ -155,7 +156,7 @@ VulkanPipeline::VulkanPipeline(const Params &params,
     }
     ray_group_handles_.resize(checked_mul(
         groups.size(), caps.ray_tracing_properties.shaderGroupHandleSize));
-    if (vkGetRayTracingShaderGroupHandlesKHR(
+    if (device_.functions().vkGetRayTracingShaderGroupHandlesKHR(
             device_, pipeline_->pipeline, 0, info.groupCount,
             ray_group_handles_.size(),
             ray_group_handles_.data()) != VK_SUCCESS) {
@@ -289,9 +290,10 @@ void VulkanShaderBindingTable::record_initialization(
       VK_QUEUE_FAMILY_IGNORED;
   barrier.buffer = buffer_->buffer;
   barrier.size = VK_WHOLE_SIZE;
-  vkCmdPipelineBarrier(command_buffer->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0,
-                       nullptr, 1, &barrier, 0, nullptr);
+  command_buffer->device.functions().vkCmdPipelineBarrier(
+      command_buffer->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0, nullptr, 1, &barrier,
+      0, nullptr);
   // buffer_copy retains the staging Vk allocation until command retirement.
   // No persistent upload buffer and no completion wait are required here.
   staging_.reset();
@@ -322,12 +324,12 @@ void record_ray_program_begin(VulkanCommandList &commands) {
       VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
   barrier.dstAccessMask =
       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-  vkCmdPipelineBarrier(commands.vk_command_buffer()->buffer,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_TRANSFER_BIT |
-                           VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1,
-                       &barrier, 0, nullptr, 0, nullptr);
+  commands.vk_command_buffer()->device.functions().vkCmdPipelineBarrier(
+      commands.vk_command_buffer()->buffer,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+          VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1, &barrier, 0, nullptr,
+      0, nullptr);
 }
 
 void record_ray_program_end(VulkanCommandList &commands) {
@@ -341,7 +343,7 @@ void record_ray_program_end(VulkanCommandList &commands) {
   // The execution dependency also orders RT AS/geometry reads before a later
   // build/refit overwrites the same storage; no readback or host wait is
   // needed.
-  vkCmdPipelineBarrier(
+  commands.vk_command_buffer()->device.functions().vkCmdPipelineBarrier(
       commands.vk_command_buffer()->buffer,
       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
@@ -355,8 +357,9 @@ void VulkanCommandList::trace_rays(const VulkanShaderBindingTable &sbt,
                                    std::uint32_t depth) {
   const VkStridedDeviceAddressRegionKHR callable{};
   buffer_->refs.push_back(sbt.buffer());
-  vkCmdTraceRaysKHR(buffer_->buffer, &sbt.raygen(), &sbt.miss(), &sbt.hit(),
-                    &callable, width, height, depth);
+  buffer_->device.functions().vkCmdTraceRaysKHR(
+      buffer_->buffer, &sbt.raygen(), &sbt.miss(), &sbt.hit(), &callable, width,
+      height, depth);
 }
 
 }  // namespace taichi::lang::vulkan

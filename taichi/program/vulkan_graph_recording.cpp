@@ -104,11 +104,15 @@ bool FixedGraphRecording::supports_graphics_queue(Program &program) {
     return false;
   }
   std::uint32_t count = 0;
-  vkGetPhysicalDeviceQueueFamilyProperties(device->vk_physical_device(), &count,
-                                          nullptr);
+  device->vk_device()
+      .instance_functions()
+      .vkGetPhysicalDeviceQueueFamilyProperties(device->vk_physical_device(),
+                                                &count, nullptr);
   std::vector<VkQueueFamilyProperties> families(count);
-  vkGetPhysicalDeviceQueueFamilyProperties(device->vk_physical_device(), &count,
-                                          families.data());
+  device->vk_device()
+      .instance_functions()
+      .vkGetPhysicalDeviceQueueFamilyProperties(device->vk_physical_device(),
+                                                &count, families.data());
   const auto index = device->graphics_queue_family_index();
   return index < count && (families[index].queueFlags & VK_QUEUE_COMPUTE_BIT);
 }

@@ -305,9 +305,11 @@ std::shared_ptr<PreparedVulkanRayLaunch> Program::prepare_vulkan_ray_launch(
     auto &set = resource_set(input.set, input.binding);
     if (input.storage) {
       VkFormatProperties properties{};
-      vkGetPhysicalDeviceFormatProperties(
-          device->vk_physical_device(),
-          std::get<2>(device->get_vk_image(allocation)), &properties);
+      device->vk_device()
+          .instance_functions()
+          .vkGetPhysicalDeviceFormatProperties(
+              device->vk_physical_device(),
+              std::get<2>(device->get_vk_image(allocation)), &properties);
       TI_ERROR_IF(!(properties.optimalTilingFeatures &
                     VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT),
                   "Ray storage Texture format lacks storage-image support");
