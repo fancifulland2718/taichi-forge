@@ -79,7 +79,7 @@ def test_aot_bind_id():
                     assert arg_1["ptype"] == 1
 
 
-@test_utils.test(arch=[ti.opengl, ti.vulkan])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan, ti.opengl])
 def test_save():
     density = ti.field(float, shape=(4, 4))
 
@@ -89,12 +89,19 @@ def test_save():
             density[i, j] = 1
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = os.path.join(tmpdir, "new module", "nested")
         m = ti.aot.Module()
         m.add_field("density", density)
         m.add_kernel(init)
         m.save(tmpdir)
-        with open(os.path.join(tmpdir, "metadata.json")) as json_file:
-            json.load(json_file)
+        assert os.path.isfile(os.path.join(tmpdir, "__content__"))
+        if ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda):
+            # LLVM's authoritative metadata is binary; metadata.json is a
+            # diagnostic dump, not the GFX JSON schema.
+            assert os.path.getsize(os.path.join(tmpdir, "metadata.tcb")) > 0
+        else:
+            with open(os.path.join(tmpdir, "metadata.json")) as json_file:
+                json.load(json_file)
 
 
 @test_utils.test(arch=[ti.opengl, ti.vulkan])

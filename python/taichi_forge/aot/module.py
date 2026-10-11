@@ -3,7 +3,7 @@ import hashlib
 import os
 from contextlib import contextmanager
 from glob import glob
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from shutil import rmtree
 from tempfile import mkdtemp
 from urllib.parse import quote
@@ -430,7 +430,9 @@ class Module:
         Args:
           filepath (str): path to a folder to store aot files.
         """
-        filepath = str(PurePosixPath(Path(filepath)))
+        output_dir = Path(filepath)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = output_dir.as_posix()
         self._aot_builder.dump(filepath, "")
         with open(f"{filepath}/__content__", "w") as f:
             f.write("\n".join(self._content))
