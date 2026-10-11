@@ -7,6 +7,27 @@ Forge Python to export modules; the consumer links `TaichiForge::c_api` and does
 not import Python. CPU/CUDA still use the supplied LLVM runtime and compiler.
 This is a full SDK, not a compiler-free runtime.
 
+A Vulkan-only SDK can also be built without LLVM, CUDA or Python. Configure a
+separate build directory with the following options, then build `taichi_c_api`
+and install the `TaichiSDK` component as below:
+
+```sh
+cmake -S . -B BUILD_VULKAN -DCMAKE_BUILD_TYPE=Release \
+  -DTI_WITH_LLVM=OFF -DTI_WITH_CUDA=OFF -DTI_WITH_CUDA_TOOLKIT=OFF \
+  -DTI_WITH_PYTHON=OFF -DTI_WITH_SPLIT_PYTHON_RUNTIME=OFF \
+  -DTI_WITH_OPENGL=OFF -DTI_WITH_METAL=OFF -DTI_WITH_GGUI=OFF \
+  -DTI_WITH_VULKAN=ON -DTI_WITH_C_API=ON \
+  -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/absolute/path/BUILD_VULKAN/bin
+```
+
+Use an absolute output path belonging to that build to keep its binaries
+separate from other configurations. The smaller SDK uses the same Vulkan AOT
+artifacts and public C API. Windows x64 checks cover direct/ordinary Graph
+forward and reverse execution, dense fields, fixed structure arrays, memory
+ownership and module retirement. This build still contains parts of the Forge
+compiler and needs Vulkan driver pipeline compilation. It provides no CPU/CUDA
+runtime; it does not expand native Graph or sparse deployment support.
+
 From an already configured matching Forge build:
 
 ```sh

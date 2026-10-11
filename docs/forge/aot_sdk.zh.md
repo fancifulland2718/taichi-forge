@@ -6,6 +6,24 @@
 消费端链接 `TaichiForge::c_api`，无需导入 Python。CPU/CUDA 仍使用随 SDK
 提供的 LLVM runtime 与编译器。这是一份完整 SDK，不是无编译器 runtime。
 
+也可以构建不包含 LLVM、CUDA 和 Python 的 Vulkan-only SDK。在独立构建目录
+使用以下选项，然后按下文构建 `taichi_c_api` 并安装 `TaichiSDK` 组件：
+
+```sh
+cmake -S . -B BUILD_VULKAN -DCMAKE_BUILD_TYPE=Release \
+  -DTI_WITH_LLVM=OFF -DTI_WITH_CUDA=OFF -DTI_WITH_CUDA_TOOLKIT=OFF \
+  -DTI_WITH_PYTHON=OFF -DTI_WITH_SPLIT_PYTHON_RUNTIME=OFF \
+  -DTI_WITH_OPENGL=OFF -DTI_WITH_METAL=OFF -DTI_WITH_GGUI=OFF \
+  -DTI_WITH_VULKAN=ON -DTI_WITH_C_API=ON \
+  -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/absolute/path/BUILD_VULKAN/bin
+```
+
+输出路径需替换为该构建目录内的绝对路径，避免覆盖其他配置的二进制文件。
+这个较小的 SDK 复用同一份 Vulkan AOT 产物和公共 C API。Windows x64 已验证
+直接执行与普通 Graph 的前向、反向、dense field、固定结构数组、内存归属和
+模块退休。构建仍包含 Forge 的部分编译器代码，也仍需要 Vulkan 驱动编译
+pipeline；不提供 CPU/CUDA runtime，不扩展 native Graph 或稀疏部署的支持面。
+
 使用已配置好且版本匹配的 Forge 构建目录：
 
 ```sh
