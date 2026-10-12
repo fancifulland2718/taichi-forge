@@ -213,6 +213,34 @@ CPU/CUDA/Vulkan 用例覆盖前向计算、显式反向及上述所有权转换�
 `ti_get_native_operation_capabilities_ext`。注册与选择发生在共用的原生准备层，
 重放使用已准备对象，不再查询注册表。上述注册不代表外部 provider 已接通。
 
+生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
+版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号
+参数名及 columns 合同。例如：
+
+```python
+exported.add_primitive("runs", "unique", key_dtype="i32",
+                       keys="keys", output="first_keys", count="run_count",
+                       values="payload", unique_values="first_payload",
+                       indices="first_indices")
+# 轻量消费端：准备时绑定外部数组，随后重放。
+prepared = module.execution_plan("runs").prepare(module, bindings)
+prepared()
+```
+
+unique 接受一维标量 i32/u32/i64/u64 键，处理所绑定键数组的整个长度，保留每个连续
+相等段的首项，不排序。keys/output/count 默认即为这些参数名；payload 输入/输出须
+成对指定，沿用 compact 的标量/向量/矩阵记录合同。可选 `indices` 写出 i32 首元素
+索引。输出容量须覆盖键长度；每次重写 count，空输入写 0，输出尾部不变。改变长度
+须另行准备实例；此配方暂不提供独立固定前缀 `size` 选项。
+
+导出端展开为已有边界 kernel 和注册的 compact，同一模块按 dtype/索引变体共用
+helper；准备时重建私有 i32 flags 和可选起始索引。消费端无需 Python 配方或新的
+unique 后端算法，CPU 批次、CUDA capture 和 Vulkan inline 使用同一展开计划。
+原生能力查询 `"unique"` 仍为空，因为它是 kernel/compact 组合。Vulkan 64 位键须
+显式设置 `Module(caps=["spirv_has_int64"])` 且设备支持。选择本身没有自动导数；
+Windows CPU/CUDA/Vulkan 已验证索引配合显式 gather 前向/反向、内容更新、整数边界、
+payload、空输入及在途退休。
+
 任意 JIT native Graph、其他数学 primitive/provider、结构控制和渲染资源尚不由此格式
 自动导出；未知操作或版本明确报错。buffer、模块和 runtime 的在途寿命合同同上。
 

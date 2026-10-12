@@ -426,6 +426,24 @@ class Module:
         self._execution_plans[name] = snapshot
         self._content.append("execution:" + name)
 
+    def add_primitive(self, name, kind, *, version=1, **options):
+        """Export a registered primitive recipe and its selected helper kernels.
+
+        Version 1 provides ``sort``, ``compact`` and consecutive ``unique``.
+        Options name symbolic array bindings; unique additionally accepts
+        ``key_dtype`` (i32/u32/i64/u64) and optional ``indices`` output. Unique
+        processes the entire bound key extent, keeps the first item of each
+        run, and does not sort. See the AOT guide for payload and count bindings.
+
+        Backend support comes from the shared native factory registry. Export
+        does not allocate device scratch or execute the primitive. Preparation
+        validates actual storage and reconstructs private resources. Returns
+        the frozen ExecutionPlan, also saved under ``name`` in this module.
+        """
+        from taichi_forge.aot._primitive_exports import export_primitive
+
+        return export_primitive(self, name, kind, version, options)
+
     @contextmanager
     def add_kernel_template(self, kernel_fn):
         """Add a taichi kernel (with template parameters) to the AOT module.

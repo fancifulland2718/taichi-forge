@@ -266,6 +266,41 @@ and selection happen in the shared native preparation layer; replay uses the
 already prepared object and performs no registry lookup. These registrations do
 not imply external-provider support.
 
+The producer exports registered recipes through
+`module.add_primitive(name, kind, version=1, **options)`. Version 1 supports
+`sort`, `compact` and consecutive `unique`. Sort/compact use the symbolic
+bindings and columns described above. For example:
+
+```python
+exported.add_primitive("runs", "unique", key_dtype="i32",
+                       keys="keys", output="first_keys", count="run_count",
+                       values="payload", unique_values="first_payload",
+                       indices="first_indices")
+# Lightweight consumer: bind external arrays once, then replay.
+prepared = module.execution_plan("runs").prepare(module, bindings)
+prepared()
+```
+
+Unique accepts 1D scalar i32/u32/i64/u64 keys. It processes the whole bound key
+extent, keeps the first item of each consecutive run and does not sort. Keys,
+output and count default to those argument names. Payload input/output must be
+specified together and follow compact's scalar/vector/matrix record contract.
+Optional `indices` writes i32 first-element indices. Outputs cover the key
+extent; count is rewritten every replay, including zero for empty input. Output
+tails remain unchanged. A new extent requires another prepared instance. This
+recipe does not yet expose a separate fixed-prefix `size` option.
+
+Export expands the recipe into the existing boundary kernel and registered
+compact operation. Modules share helpers by dtype/index variant; preparation
+reconstructs private i32 flags and optional starting indices. The consumer needs
+no Python recipe or new unique backend algorithm. CPU batches, CUDA capture and
+Vulkan inline recording use the expanded plan. The native capability query for
+`"unique"` remains empty: this is a kernel/compact composition. Vulkan 64-bit
+keys require `Module(caps=["spirv_has_int64"])` and a compatible device.
+Selection has no automatic derivative. Windows CPU/CUDA/Vulkan checks cover
+explicit gather forward/reverse through these indices, content changes, integer
+boundaries, payloads, empty input and in-flight retirement.
+
 This format does not automatically export arbitrary JIT native Graphs,
 other mathematical primitives/providers, structured control or rendering resources.
 Unknown versions and operations report errors. The buffer/module/runtime

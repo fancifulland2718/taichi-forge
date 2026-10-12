@@ -41,6 +41,7 @@
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/prepared_primitive.h"
+#include "taichi/runtime/native_operation_registry.h"
 #include "taichi/program/matrix.h"
 #include "taichi/program/runtime_statistics.h"
 #include "taichi/program/storage_view.h"
@@ -717,6 +718,14 @@ void export_lang(py::module &m) {
 
   m.def("arch_name", arch_name);
   m.def("arch_from_name", arch_from_name);
+  m.def("native_operation_capabilities",
+        [](Arch arch, const std::string &kind, std::uint32_t version) {
+          if (kind.empty() || kind.find('\0') != std::string::npos || !version)
+            throw std::invalid_argument("Invalid native operation identity");
+          const auto *capability =
+              native_operation_registry().find(kind, version, arch);
+          return capability ? static_cast<std::uint32_t>(capability->mode) : 0u;
+        });
 
   py::enum_<SNodeType>(m, "SNodeType", py::arithmetic())
 #define PER_SNODE(x) .value(#x, SNodeType::x)
