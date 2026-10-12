@@ -172,6 +172,37 @@ class Runtime:
             flags = self._api.call(self._api.ti_get_native_operation_capabilities_ext, self._handle, kind, version)
         return frozenset(name for bit, name in ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline")) if flags & bit)
 
+    def configure_provider(self, provider, *, adapter_path, library_path=None):
+        """Set library locations for subsequent preparation on this owner.
+
+        No code is loaded here. Existing prepared graphs retain their leases.
+        ``adapter_path=None`` removes this owner's setting; ``library_path=None``
+        uses the adapter's platform vendor search. Explicit paths are resolved
+        now so later working-directory changes cannot redirect preparation.
+        """
+        provider = _name(provider)
+
+        def path(value):
+            if value is None:
+                return None
+            value = os.fspath(value)
+            if not isinstance(value, str) or not value or "\0" in value:
+                raise ValueError("Provider paths must be nonempty strings without NUL")
+            return os.fsencode(Path(value).expanduser().resolve())
+
+        adapter_path, library_path = path(adapter_path), path(library_path)
+        if adapter_path is None and library_path is not None:
+            raise ValueError("Removing a provider cannot specify a vendor library")
+        with self._lock:
+            self._check()
+            self._api.call(
+                self._api.ti_configure_native_provider_ext,
+                self._handle,
+                provider,
+                adapter_path,
+                library_path,
+            )
+
     def probe_native_operation(self, kind, *, version=1):
         """Cold optional-dependency check; may load a library, never a plan.
 

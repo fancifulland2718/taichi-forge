@@ -8,6 +8,7 @@
 #include <utility>
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_operation_description.h"
+#include "taichi/runtime/native_provider.h"
 
 namespace taichi::lang {
 
@@ -32,6 +33,17 @@ struct NativeOperationAvailability {
   std::uint32_t library_version{0};
 };
 
+struct NativePreparationContext {
+  NativePreparationContext(Arch arch,
+                           Device &device,
+                           NativeProviderLocations locations = {})
+      : arch(arch), device(device), providers(std::move(locations)) {
+  }
+  Arch arch;
+  Device &device;
+  NativeProviderSession providers;
+};
+
 // Build privately, then publish as const. No static registration side effects,
 // replacement, implicit device probing or warm-path lookup. Descriptors and factories
 // are an internal C++ contract, not an ABI for independently built plugins.
@@ -45,6 +57,12 @@ class NativeOperationRegistry {
   template <typename Descriptor>
   using Factory = std::function<
       std::shared_ptr<NativeResource>(Arch, Device &, const Descriptor &)>;
+  using ContextProbe =
+      std::function<NativeOperationAvailability(NativeProviderSession &)>;
+  template <typename Descriptor>
+  using ContextFactory =
+      std::function<std::shared_ptr<NativeResource>(NativePreparationContext &,
+                                                    const Descriptor &)>;
   template <typename Descriptor>
   using Binder = std::function<Descriptor(const NativeOperationBindings &)>;
   template <typename Descriptor>
@@ -115,6 +133,14 @@ class NativeOperationRegistry {
       Device &device,
       const DecodedOperation &resource,
       const NativeOperationBindings &bindings) const;
+  std::shared_ptr<NativeOperation> prepare(
+      NativePreparationContext &context,
+      const DecodedOperation &operation,
+      const NativeOperationBindings &bindings) const;
+  std::shared_ptr<NativeResource> prepare_resource(
+      NativePreparationContext &context,
+      const DecodedOperation &resource,
+      const NativeOperationBindings &bindings) const;
 
   template <typename Descriptor>
   void define(Validator<Descriptor> validate,
@@ -136,11 +162,30 @@ class NativeOperationRegistry {
                         Probe probe = {}) {
     if (!factory)
       throw std::invalid_argument("Native operation requires a factory");
+    // Built-ins without deployment dependencies use the same factory path.
+    register_context_factory<Descriptor>(
+        arch, mode,
+        [factory = std::move(factory)](NativePreparationContext &context,
+                                       const Descriptor &value) {
+          return factory(context.arch, context.device, value);
+        },
+        probe ? ContextProbe([probe = std::move(probe)](
+                                 NativeProviderSession &) { return probe(); })
+              : ContextProbe{});
+  }
+
+  template <typename Descriptor>
+  void register_context_factory(Arch arch,
+                                NativeOperationMode mode,
+                                ContextFactory<Descriptor> factory,
+                                ContextProbe probe = {}) {
+    if (!factory)
+      throw std::invalid_argument("Native operation requires a factory");
     register_impl(
         Descriptor::kind, Descriptor::version, typeid(Descriptor), arch, mode,
-        [arch, factory = std::move(factory)](Device &device,
-                                             const void *value) {
-          return factory(arch, device, *static_cast<const Descriptor *>(value));
+        [factory = std::move(factory)](NativePreparationContext &context,
+                                       const void *value) {
+          return factory(context, *static_cast<const Descriptor *>(value));
         },
         std::move(probe));
   }
@@ -149,9 +194,16 @@ class NativeOperationRegistry {
   std::shared_ptr<NativeOperation> prepare(Arch arch,
                                            Device &device,
                                            const Descriptor &value) const {
+    NativePreparationContext context(arch, device);
+    return prepare(context, value);
+  }
+
+  template <typename Descriptor>
+  std::shared_ptr<NativeOperation> prepare(NativePreparationContext &context,
+                                           const Descriptor &value) const {
     return std::dynamic_pointer_cast<NativeOperation>(
         prepare_impl(Descriptor::kind, Descriptor::version, typeid(Descriptor),
-                     arch, device, &value, NativeObjectKind::operation));
+                     context, &value, NativeObjectKind::operation));
   }
 
   const NativeOperationCapability *find(const std::string &kind,
@@ -165,16 +217,23 @@ class NativeOperationRegistry {
       std::uint32_t version,
       Arch arch,
       NativeObjectKind object_kind = NativeObjectKind::operation) const;
+  NativeOperationAvailability probe(
+      const std::string &kind,
+      std::uint32_t version,
+      Arch arch,
+      NativeProviderSession &providers,
+      NativeObjectKind object_kind = NativeObjectKind::operation) const;
 
  private:
   using Key = std::pair<std::string, std::uint32_t>;
   using ErasedValidator = std::function<void(Device &, const void *)>;
   using ErasedFactory =
-      std::function<std::shared_ptr<NativeResource>(Device &, const void *)>;
+      std::function<std::shared_ptr<NativeResource>(NativePreparationContext &,
+                                                    const void *)>;
   struct Backend {
     NativeOperationCapability capability;
     ErasedFactory factory;
-    Probe probe;
+    ContextProbe probe;
   };
   struct Definition {
     std::type_index type;
@@ -216,11 +275,10 @@ class NativeOperationRegistry {
                      Arch arch,
                      NativeOperationMode mode,
                      ErasedFactory factory,
-                     Probe probe);
+                     ContextProbe probe);
   const Definition &definition(const Key &key, std::type_index type) const;
   std::shared_ptr<NativeResource> prepare_bound(
-      Arch arch,
-      Device &device,
+      NativePreparationContext &context,
       const DecodedOperation &object,
       const NativeOperationBindings &bindings,
       NativeObjectKind kind) const;
@@ -228,8 +286,7 @@ class NativeOperationRegistry {
       const std::string &kind,
       std::uint32_t version,
       std::type_index type,
-      Arch arch,
-      Device &device,
+      NativePreparationContext &context,
       const void *value,
       NativeObjectKind object_kind) const;
 };

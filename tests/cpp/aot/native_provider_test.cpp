@@ -173,6 +173,53 @@ TEST_F(NativeProvider, ChecksExecutionTableSizeVersionAndErrors) {
   EXPECT_EQ(runtime->execution_api<ExecutionApi>().value(runtime->handle()), 7);
 }
 
+TEST_F(NativeProvider, PreparationSnapshotsLocationsAndProbesOnce) {
+  NativeProviderLocations locations{
+      {"stub", {TI_TEST_RUNTIME_PROVIDER_PATH, "chosen-vendor"}},
+      {"unused", {"missing-unused-adapter", "missing-unused-vendor"}}};
+  std::shared_ptr<NativeProviderRuntime> retained;
+  {
+    NativeProviderSession first(locations);
+    locations.at("stub").library_path = "another-vendor";
+    NativeProviderSession second(locations);
+    EXPECT_EQ(stats().probes, baseline.probes);
+    EXPECT_EQ(first.probe(definition).library_path, "chosen-vendor");
+    EXPECT_EQ(first.probe(definition).library_path, "chosen-vendor");
+    EXPECT_EQ(stats().probes - baseline.probes, 1);
+    EXPECT_EQ(second.probe(definition).library_path, "another-vendor");
+    EXPECT_EQ(stats().probes - baseline.probes, 2);
+    retained = first.runtime(definition);
+    EXPECT_EQ(first.runtime(definition), retained);
+    EXPECT_EQ(stats().creates - baseline.creates, 1);
+    EXPECT_EQ(retained->info().library_path, "chosen-vendor");
+    EXPECT_EQ(stats().probes - baseline.probes, 2);
+    auto conflicting = definition;
+    conflicting.supported_version_family = "wrong-family";
+    expect_error([&] { first.probe(conflicting); },
+                 TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH);
+  }
+  EXPECT_EQ(stats().live, 1);
+  EXPECT_EQ(retained->execution_api<ExecutionApi>().value(retained->handle()),
+            42);
+  retained.reset();
+  EXPECT_EQ(stats().live, 0);
+  EXPECT_EQ(stats().destroys - baseline.destroys, 1);
+}
+
+TEST_F(NativeProvider, PreparationRejectsMissingOrMalformedLocations) {
+  NativeProviderSession empty;
+  expect_error([&] { empty.probe(definition); },
+               TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_UNAVAILABLE);
+  EXPECT_THROW(validate_native_provider_location("", {"adapter", "vendor"}),
+               std::invalid_argument);
+  EXPECT_THROW(validate_native_provider_location("stub", {"", "vendor"}),
+               std::invalid_argument);
+  EXPECT_THROW(validate_native_provider_location(
+                   "stub", {"adapter", std::string("bad\0path", 8)}),
+               std::invalid_argument);
+  EXPECT_EQ(stats().probes, baseline.probes);
+}
+
 TEST_F(NativeProvider, FailedDestructionRetainsAdapterInsteadOfThrowing) {
   auto runtime = load()->create_runtime();
   const auto handle = runtime->handle();

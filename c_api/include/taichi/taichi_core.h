@@ -1206,6 +1206,19 @@ typedef enum TiNativeOperationCapabilityFlagBitsExt {
   TI_NATIVE_OPERATION_CAPABILITY_VULKAN_INLINE_BIT_EXT = 4,
 } TiNativeOperationCapabilityFlagBitsExt;
 
+// Configure a provider location for subsequent probes/preparations on this
+// runtime only. Copies strings without loading code. Existing prepared objects
+// retain their original provider leases. A null adapter_path removes the entry;
+// a null/empty library_path selects the adapter's platform-default vendor
+// search. Use absolute paths for deterministic deployment. Vendor ABI identity
+// remains defined by the registered operation, not by this location
+// configuration.
+TI_DLL_EXPORT void TI_API_CALL
+ti_configure_native_provider_ext(TiRuntime runtime,
+                                 const char *provider,
+                                 const char *adapter_path,
+                                 const char *library_path);
+
 // Query the compiled factory for an exact operation kind/version and this
 // runtime's backend, without loading code or allocating operation resources.
 // Returns zero for an unregistered kind, version or backend. A nonzero result

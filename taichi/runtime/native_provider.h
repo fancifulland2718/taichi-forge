@@ -2,8 +2,11 @@
 
 #include <atomic>
 #include <memory>
+#include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <type_traits>
 
 #include "taichi/external_runtime/forge_runtime_provider.h"
@@ -136,6 +139,44 @@ class NativeProviderRuntime {
   std::shared_ptr<NativeProviderModule> module_;
   TiForgeRuntimeProviderRuntime runtime_{nullptr};
   NativeProviderRuntimeInfo info_;
+};
+
+struct NativeProviderLocation {
+  std::string adapter_path;
+  // Empty requests the adapter's platform-default vendor search.
+  std::string library_path;
+};
+using NativeProviderLocations = std::map<std::string, NativeProviderLocation>;
+
+void validate_native_provider_location(const std::string &provider,
+                                       const NativeProviderLocation &location);
+
+// One cold preparation owns a configuration snapshot and a lazy dependency
+// cache. Unused entries never load code. The session is not a process-wide
+// registry; prepared plans retain runtime/module leases after it is destroyed.
+class NativeProviderSession {
+ public:
+  explicit NativeProviderSession(NativeProviderLocations locations = {});
+  const NativeProviderRuntimeInfo &probe(
+      const NativeProviderDefinition &definition);
+  // The C ABI runtime is parameterized only by its library location. Share one
+  // owner per preparation; individual vendor plans remain independent.
+  std::shared_ptr<NativeProviderRuntime> runtime(
+      const NativeProviderDefinition &definition);
+
+ private:
+  struct Entry {
+    std::shared_ptr<NativeProviderModule> module;
+    std::string library_path;
+    std::optional<NativeProviderRuntimeInfo> facts;
+    std::shared_ptr<NativeProviderRuntime> runtime;
+  };
+  Entry &resolve(const NativeProviderDefinition &definition);
+  NativeProviderLocations locations_;
+  // Include the expected contract so conflicting definitions never reuse a
+  // module whose identity was checked against a different query or family.
+  using Key = std::tuple<std::string, std::string, std::string>;
+  std::map<Key, Entry> entries_;
 };
 
 }  // namespace taichi::lang

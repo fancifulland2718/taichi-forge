@@ -115,8 +115,16 @@ std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare(
     Device &device,
     const DecodedOperation &operation,
     const NativeOperationBindings &bindings) const {
-  return std::dynamic_pointer_cast<NativeOperation>(prepare_bound(
-      arch, device, operation, bindings, NativeObjectKind::operation));
+  NativePreparationContext context(arch, device);
+  return prepare(context, operation, bindings);
+}
+
+std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare(
+    NativePreparationContext &context,
+    const DecodedOperation &operation,
+    const NativeOperationBindings &bindings) const {
+  return std::dynamic_pointer_cast<NativeOperation>(
+      prepare_bound(context, operation, bindings, NativeObjectKind::operation));
 }
 
 std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_resource(
@@ -124,13 +132,19 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_resource(
     Device &device,
     const DecodedOperation &resource,
     const NativeOperationBindings &bindings) const {
-  return prepare_bound(arch, device, resource, bindings,
-                       NativeObjectKind::resource);
+  NativePreparationContext context(arch, device);
+  return prepare_resource(context, resource, bindings);
+}
+
+std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_resource(
+    NativePreparationContext &context,
+    const DecodedOperation &resource,
+    const NativeOperationBindings &bindings) const {
+  return prepare_bound(context, resource, bindings, NativeObjectKind::resource);
 }
 
 std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_bound(
-    Arch arch,
-    Device &device,
+    NativePreparationContext &context,
     const DecodedOperation &operation,
     const NativeOperationBindings &bindings,
     NativeObjectKind kind) const {
@@ -145,7 +159,7 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_bound(
       throw std::invalid_argument("Missing native operation storage: " + port);
   const auto value = operation.bind_(bindings);
   return prepare_impl(operation.kind_, operation.version_, operation.type_,
-                      arch, device, value.get(), kind);
+                      context, value.get(), kind);
 }
 
 void NativeOperationRegistry::define_impl(const std::string &kind,
@@ -182,7 +196,7 @@ void NativeOperationRegistry::register_impl(const std::string &kind,
                                             Arch arch,
                                             NativeOperationMode mode,
                                             ErasedFactory factory,
-                                            Probe probe) {
+                                            ContextProbe probe) {
   const Key key{kind, version};
   definition(key, type);
   if (!((mode == NativeOperationMode::cpu && arch_is_cpu(arch)) ||
@@ -227,13 +241,23 @@ NativeOperationAvailability NativeOperationRegistry::probe(
     std::uint32_t version,
     Arch arch,
     NativeObjectKind object_kind) const {
+  NativeProviderSession providers;
+  return probe(kind, version, arch, providers, object_kind);
+}
+
+NativeOperationAvailability NativeOperationRegistry::probe(
+    const std::string &kind,
+    std::uint32_t version,
+    Arch arch,
+    NativeProviderSession &providers,
+    NativeObjectKind object_kind) const {
   const auto found = definitions_.find({kind, version});
   if (found == definitions_.end() || found->second.kind != object_kind)
     return {};
   const auto backend = found->second.backends.find(arch);
   if (backend == found->second.backends.end())
     return {};
-  return backend->second.probe ? backend->second.probe()
+  return backend->second.probe ? backend->second.probe(providers)
                                : NativeOperationAvailability{true, 0};
 }
 
@@ -241,10 +265,11 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_impl(
     const std::string &kind,
     std::uint32_t version,
     std::type_index type,
-    Arch arch,
-    Device &device,
+    NativePreparationContext &context,
     const void *value,
     NativeObjectKind object_kind) const {
+  const auto arch = context.arch;
+  auto &device = context.device;
   const auto &entry = definition({kind, version}, type);
   if (entry.kind != object_kind)
     throw std::invalid_argument(
@@ -255,10 +280,11 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_impl(
                                 " v" + std::to_string(version) + " on " +
                                 arch_name(arch));
   entry.validate(device, value);
-  if (backend->second.probe && !backend->second.probe().available)
+  if (backend->second.probe &&
+      !backend->second.probe(context.providers).available)
     throw std::invalid_argument("Native operation provider unavailable: " +
                                 kind);
-  auto result = backend->second.factory(device, value);
+  auto result = backend->second.factory(context, value);
   if (!result || result->arch() != arch || &result->device() != &device)
     throw std::invalid_argument(
         "Native operation factory returned an invalid owner: " + kind);

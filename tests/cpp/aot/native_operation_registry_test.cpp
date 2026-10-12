@@ -302,6 +302,34 @@ TEST(NativeOperationRegistry, OptionalProviderProbeIsColdAndPrecedesFactory) {
   EXPECT_EQ(probes, cold_probes);
   EXPECT_EQ(runs, 2);
 }
+TEST(NativeOperationRegistry, ContextFactoryReceivesThePreparationSession) {
+  cpu::CpuDevice device;
+  NativeOperationRegistry registry;
+  int runs = 0, retired = 0;
+  NativeProviderSession *probed = nullptr;
+  registry.define<TestDescriptor>([](Device &, const TestDescriptor &) {});
+  registry.register_context_factory<TestDescriptor>(
+      host_arch(), NativeOperationMode::cpu,
+      [&](NativePreparationContext &context, const TestDescriptor &) {
+        EXPECT_EQ(probed, &context.providers);
+        return std::make_shared<TestOperation>(context.arch, context.device,
+                                               runs, retired);
+      },
+      [&](NativeProviderSession &providers) {
+        probed = &providers;
+        return NativeOperationAvailability{true, 0};
+      });
+  NativePreparationContext first(host_arch(), device);
+  auto operation = registry.prepare(first, TestDescriptor{});
+  EXPECT_EQ(probed, &first.providers);
+  NativePreparationContext second(host_arch(), device);
+  auto another = registry.prepare(second, TestDescriptor{});
+  EXPECT_EQ(probed, &second.providers);
+  operation->run_cpu();
+  another->run_cpu();
+  EXPECT_EQ(runs, 2);
+}
+
 struct ResourceDescriptor {
   static constexpr const char *kind = "test.resource";
   static constexpr std::uint32_t version = 1;

@@ -180,4 +180,56 @@ NativeProviderRuntime::~NativeProviderRuntime() {
   }
 }
 
+void validate_native_provider_location(const std::string &provider,
+                                       const NativeProviderLocation &location) {
+  if (provider.empty() || provider.find('\0') != std::string::npos ||
+      location.adapter_path.empty() ||
+      location.adapter_path.find('\0') != std::string::npos ||
+      location.library_path.find('\0') != std::string::npos) {
+    throw std::invalid_argument(
+        "Provider name and adapter path must be nonempty; paths cannot contain "
+        "NUL");
+  }
+}
+
+NativeProviderSession::NativeProviderSession(NativeProviderLocations locations)
+    : locations_(std::move(locations)) {
+  for (const auto &[provider, location] : locations_)
+    validate_native_provider_location(provider, location);
+}
+
+NativeProviderSession::Entry &NativeProviderSession::resolve(
+    const NativeProviderDefinition &definition) {
+  const Key key{definition.provider_id, definition.query_symbol,
+                definition.supported_version_family};
+  if (const auto found = entries_.find(key); found != entries_.end())
+    return found->second;
+  const auto configured = locations_.find(definition.provider_id);
+  if (configured == locations_.end())
+    throw NativeProviderError(
+        TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_UNAVAILABLE,
+        "Provider location is not configured: " + definition.provider_id);
+  const auto &location = configured->second;
+  auto module = NativeProviderModule::load(definition, location.adapter_path);
+  return entries_
+      .emplace(key, Entry{std::move(module), location.library_path, {}})
+      .first->second;
+}
+
+const NativeProviderRuntimeInfo &NativeProviderSession::probe(
+    const NativeProviderDefinition &definition) {
+  auto &entry = resolve(definition);
+  if (!entry.facts)
+    entry.facts = entry.module->probe(entry.library_path);
+  return *entry.facts;
+}
+
+std::shared_ptr<NativeProviderRuntime> NativeProviderSession::runtime(
+    const NativeProviderDefinition &definition) {
+  auto &entry = resolve(definition);
+  if (!entry.runtime)
+    entry.runtime = entry.module->create_runtime(entry.library_path);
+  return entry.runtime;
+}
+
 }  // namespace taichi::lang

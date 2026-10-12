@@ -36,6 +36,7 @@
 #include "taichi/aot/module_loader.h"
 #include "taichi/aot/struct_layout.h"
 #include "taichi/common/virtual_dir.h"
+#include "taichi/runtime/native_provider.h"
 
 #define TI_CAPI_NOT_SUPPORTED(x) ti_set_last_error(TI_ERROR_NOT_SUPPORTED, #x);
 #define TI_CAPI_NOT_SUPPORTED_IF(x)                \
@@ -165,6 +166,7 @@ class Runtime {
   std::unordered_set<class AotModule *> modules_;
   std::recursive_mutex submission_mutex_;
   std::shared_ptr<capi::PreparedExecutionRegistry> prepared_;
+  taichi::lang::NativeProviderLocations native_provider_locations_;
 
  protected:
   // 32 is a magic number in `taichi/inc/constants.h`.
@@ -225,6 +227,13 @@ class Runtime {
     return submission_mutex_;
   }
   capi::PreparedExecutionRegistry &prepared_registry();
+  const taichi::lang::NativeProviderLocations &native_provider_locations()
+      const {
+    return native_provider_locations_;
+  }
+  void configure_native_provider(
+      std::string provider,
+      std::optional<taichi::lang::NativeProviderLocation> location);
   void retire_prepared_memory(TiMemory memory);
   void retire_prepared_module(class AotModule *owner);
   void clear_prepared(bool synchronize = true);

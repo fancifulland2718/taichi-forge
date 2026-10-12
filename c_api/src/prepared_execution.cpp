@@ -344,6 +344,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   prepared->owner = &mod;
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
+  NativePreparationContext preparation(rt.arch, rt.get(),
+                                       rt.native_provider_locations());
   std::set<std::pair<std::string, std::uint32_t>> probed;
   std::map<const aot::ExecutionPlan::Native *,
            NativeOperationRegistry::DecodedOperation>
@@ -354,7 +356,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
       auto request = native_operation_registry().decode(*native, kind);
       if (probed.emplace(request.kind(), request.version()).second &&
           !native_operation_registry()
-               .probe(request.kind(), request.version(), rt.arch, kind)
+               .probe(request.kind(), request.version(), rt.arch,
+                      preparation.providers, kind)
                .available)
         throw MemoryBindingError(native->provider + "/" + native->operation +
                                  " provider unavailable on this runtime");
@@ -438,7 +441,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
             std::get_if<NativeOperationDescription>(&resource.value)) {
       try {
         auto object = native_operation_registry().prepare_resource(
-            rt.arch, rt.get(), decoded.at(native), native_inputs(*native));
+            preparation, decoded.at(native), native_inputs(*native));
         const auto bytes = object->workspace_bytes();
         if (bytes > std::numeric_limits<uint64_t>::max() -
                         prepared->native_resource_workspace_bytes)
@@ -504,7 +507,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                    std::get_if<aot::ExecutionPlan::Native>(&operation)) {
       try {
         operations.emplace_back(native_operation_registry().prepare(
-            rt.arch, rt.get(), decoded.at(native), native_inputs(*native)));
+            preparation, decoded.at(native), native_inputs(*native)));
       } catch (const std::invalid_argument &error) {
         throw MemoryBindingError(error.what());
       }
@@ -641,6 +644,41 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   return TI_NULL_HANDLE;
 }
 
+void Runtime::configure_native_provider(
+    std::string provider,
+    std::optional<taichi::lang::NativeProviderLocation> location) {
+  if (provider.empty() || provider.find('\0') != std::string::npos)
+    throw MemoryBindingError("Provider name must be nonempty without NUL");
+  if (location) {
+    try {
+      taichi::lang::validate_native_provider_location(provider, *location);
+    } catch (const std::invalid_argument &error) {
+      throw MemoryBindingError(error.what());
+    }
+    native_provider_locations_.insert_or_assign(std::move(provider),
+                                                std::move(*location));
+  } else {
+    native_provider_locations_.erase(provider);
+  }
+}
+
+void ti_configure_native_provider_ext(TiRuntime runtime,
+                                      const char *provider,
+                                      const char *adapter_path,
+                                      const char *library_path) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(provider);
+  TI_CAPI_INVALID_ARGUMENT(!adapter_path && library_path && *library_path);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  std::optional<taichi::lang::NativeProviderLocation> location;
+  if (adapter_path)
+    location = {adapter_path, library_path ? library_path : ""};
+  rt.configure_native_provider(provider, std::move(location));
+  TI_CAPI_TRY_CATCH_END();
+}
+
 TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
                                                  const char *kind,
                                                  uint32_t version) {
@@ -689,7 +727,9 @@ void ti_probe_native_operation_ext(
   const auto &registry = taichi::lang::native_operation_registry();
   const auto *capability = registry.find(kind, version, rt.arch);
   if (capability) {
-    const auto status = registry.probe(kind, version, rt.arch);
+    taichi::lang::NativeProviderSession providers(
+        rt.native_provider_locations());
+    const auto status = registry.probe(kind, version, rt.arch, providers);
     availability->capabilities = static_cast<TiFlags>(capability->mode);
     availability->available = status.available ? TI_TRUE : TI_FALSE;
     availability->library_version = status.library_version;
