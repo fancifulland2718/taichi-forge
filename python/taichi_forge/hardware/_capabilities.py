@@ -959,12 +959,16 @@ def _runtime_facts():
     backend = None
     if program is not None:
         backend = _ti_core.arch_name(impl.current_cfg().arch)
+    # with_cuda/with_vulkan are device probes, not build flags. In particular,
+    # with_vulkan initializes the loader and enumerates devices even when the
+    # caller only requested a CUDA provider. Reuse the probe-free native contract.
+    features = _ti_core.get_runtime_contract_manifest()["features"]
     return (
         program is not None,
         backend,
         {
-            "cuda": bool(_ti_core.with_cuda()),
-            "vulkan": bool(_ti_core.with_vulkan()),
+            "cuda": bool(features["cuda"]),
+            "vulkan": bool(features["vulkan"]),
         },
     )
 

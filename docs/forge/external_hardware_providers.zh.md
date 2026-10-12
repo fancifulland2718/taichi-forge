@@ -10,6 +10,10 @@ Taichi Forge 的官方 runtime wheel 始终保持 driver-only。可选 CUDA/vend
 本文是安装与部署指南。安装 library 本身不会选择执行路线；下列有界 operation 已有显式
 retained-provider API，而 discovery probe 始终不执行算法。
 
+`ti.hardware.report().compiled_backends` 表示原生构建包含的后端，不表示设备可用性。
+被动报告不会初始化 CUDA 或 Vulkan 设备；显式探测一个外部 provider 也不会枚举无关
+后端的设备。能否实际执行仍由 runtime 初始化和具体 workload 检查决定。
+
 ## 支持状态与调用边界
 
 | Library | Forge 状态 | 安装责任方 | Forge 发现方式 | 调用位置 |

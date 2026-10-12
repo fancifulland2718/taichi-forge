@@ -740,6 +740,13 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
         raise AssertionError("passive reports must not invoke a native D1 probe")
 
     monkeypatch.setattr(_capabilities, "_native_external_probe", reject_implicit_probe)
+
+    def reject_device_probe():
+        raise AssertionError("compiled backend facts must not initialize device drivers")
+
+    build_features = ti_core.get_runtime_contract_manifest()["features"]
+    monkeypatch.setattr(ti_core, "with_cuda", reject_device_probe)
+    monkeypatch.setattr(ti_core, "with_vulkan", reject_device_probe)
     monkeypatch.setattr(
         _capabilities,
         "_native_external_status",
@@ -762,6 +769,7 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
     assert report.backend is None
     assert report.external_components_probed is False
     assert set(report.compiled_backends) == {"cuda", "vulkan"}
+    assert dict(report.compiled_backends) == {name: bool(build_features[name]) for name in ("cuda", "vulkan")}
     assert len(report.operations) == len(ti.hardware.operations())
 
     by_id = {operation.descriptor.operation_id: operation for operation in report.operations}
@@ -779,6 +787,29 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
     assert cublas.provider_version is None
     assert cublas.last_error is None
     assert cublas.failure_scope is None
+
+
+def test_explicit_provider_probe_does_not_probe_backend_devices(monkeypatch):
+    ti.reset()
+    build_features = ti_core.get_runtime_contract_manifest()["features"]
+    requests = []
+
+    def reject_device_probe():
+        raise AssertionError("provider discovery must not initialize backend devices")
+
+    def selected_probe(provider_id):
+        requests.append(provider_id)
+        return {"provider_id": provider_id, **_native_probe_payload("available", "none")}
+
+    monkeypatch.setattr(ti_core, "with_cuda", reject_device_probe)
+    monkeypatch.setattr(ti_core, "with_vulkan", reject_device_probe)
+    monkeypatch.setattr(_capabilities, "_native_external_probe", selected_probe)
+    report = ti.hardware.probe("cufft")
+
+    assert requests == (["cufft"] if build_features["cuda"] else [])
+    assert report.runtime_initialized is False
+    assert report.external_components_probed is bool(build_features["cuda"])
+    assert dict(report.compiled_backends) == {name: bool(build_features[name]) for name in ("cuda", "vulkan")}
 
 
 def test_passive_report_observes_an_already_loaded_provider(monkeypatch):

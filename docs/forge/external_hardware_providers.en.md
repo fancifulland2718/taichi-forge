@@ -13,6 +13,11 @@ This page is an installation and deployment guide. Installing a library alone
 does not select an execution route. Forge exposes explicit retained-provider
 APIs for the bounded operations below; discovery probes remain non-executing.
 
+`ti.hardware.report().compiled_backends` contains native build flags, not device
+availability. Passive reports do not initialize CUDA or Vulkan devices; probing
+one external provider does not enumerate unrelated backend devices. Runtime
+initialization and workload-specific checks still determine whether it can run.
+
 ## Support status and call boundary
 
 | Library | Forge status | Installation owner | Forge discovery | Call position |
