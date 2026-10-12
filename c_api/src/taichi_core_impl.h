@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 // Taichi runtime is not necessarily using the same 3rd-party headers as the
 // user codes. For C-API implementations we only use the internal headers.
@@ -158,6 +159,7 @@ class Runtime {
   std::unordered_map<TiKernel, KernelBinding> kernels_;
   std::unordered_map<TiComputeGraph, GraphBinding> graphs_;
   std::unordered_map<TiNdArrayLayout, LayoutBinding> layouts_;
+  std::unordered_set<class AotModule *> modules_;
   std::recursive_mutex submission_mutex_;
   std::shared_ptr<capi::PreparedExecutionRegistry> prepared_;
 
@@ -211,13 +213,17 @@ class Runtime {
   const GraphBinding &get_graph(TiComputeGraph graph) const;
   const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
   void retire_module(class AotModule *owner);
+  void register_module(class AotModule *owner);
+  // Explicit borrower retirement: recordings before code and buffers. The
+  // Program finalizer has already synchronized and passes false.
+  void retire_resources(bool synchronize);
   std::recursive_mutex &submission_mutex() {
     return submission_mutex_;
   }
   capi::PreparedExecutionRegistry &prepared_registry();
   void retire_prepared_memory(TiMemory memory);
   void retire_prepared_module(class AotModule *owner);
-  void clear_prepared();
+  void clear_prepared(bool synchronize = true);
 
   virtual TiImage allocate_image(const taichi::lang::ImageParams &params) {
     TI_NOT_IMPLEMENTED

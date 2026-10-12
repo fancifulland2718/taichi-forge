@@ -196,6 +196,34 @@ void check_program_retirement(Arch arch) {
 TEST(RuntimeClientRegistry, CpuProgramRetiresBeforeDeviceDestruction) {
   check_program_retirement(host_arch());
 }
+
+TEST(RuntimeClientRegistry, ConcurrentProgramFinalizationWaitsForClient) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  std::promise<void> entered, release, second_started;
+  auto release_future = release.get_future();
+  int retired = 0;
+  auto client = std::make_shared<TestClient>([&] {
+    program.finalize();  // Same-thread reentry must not drain twice.
+    entered.set_value();
+    release_future.wait();
+    ++retired;
+  });
+  program.retain_runtime_client(client);
+  auto first = std::async(std::launch::async, [&] { program.finalize(); });
+  entered.get_future().wait();
+  auto second = std::async(std::launch::async, [&] {
+    second_started.set_value();
+    program.finalize();
+  });
+  second_started.get_future().wait();
+  EXPECT_EQ(second.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  release.set_value();
+  first.get();
+  second.get();
+  EXPECT_EQ(retired, 1);
+}
 #endif
 #ifdef TI_WITH_CUDA
 TEST(RuntimeClientRegistry, CudaProgramRetiresBeforeDeviceDestruction) {

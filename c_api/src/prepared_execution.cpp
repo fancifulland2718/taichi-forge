@@ -128,12 +128,12 @@ class PreparedExecutionRegistry {
   void retire_module(AotModule *module) {
     retire(modules_, module);
   }
-  void clear() {
-    if (!entries_.empty())
+  void clear(bool synchronize) {
+    if (synchronize && !entries_.empty())
       runtime_.wait();
-    entries_.clear();
     modules_.clear();
     memories_.clear();
+    entries_.clear();
   }
 
  private:
@@ -193,10 +193,10 @@ void Runtime::retire_prepared_module(AotModule *owner) {
   if (prepared_)
     prepared_->retire_module(owner);
 }
-void Runtime::clear_prepared() {
+void Runtime::clear_prepared(bool synchronize) {
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
   if (prepared_)
-    prepared_->clear();
+    prepared_->clear(synchronize);
 }
 
 TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,

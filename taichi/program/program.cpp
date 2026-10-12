@@ -8996,10 +8996,28 @@ void Program::detach_runtime_client(RuntimeClient *client) {
   }
 }
 
+gfx::GfxRuntime *Program::get_gfx_runtime_for_borrowing() {
+#ifdef TI_WITH_VULKAN
+  auto *impl = dynamic_cast<GfxProgramImpl *>(program_impl_.get());
+  return impl ? impl->get_runtime() : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
 void Program::finalize() {
-  if (finalized_) {
+  std::lock_guard<std::recursive_mutex> finalization_lock(
+      runtime_finalization_mutex_);
+  if (finalized_ || runtime_finalization_in_progress_) {
     return;
   }
+  runtime_finalization_in_progress_ = true;
+  struct FinalizingScope {
+    bool &active;
+    ~FinalizingScope() {
+      active = false;
+    }
+  } finalizing_scope{runtime_finalization_in_progress_};
 
   runtime_fault_domain_->begin_finalizing();
 

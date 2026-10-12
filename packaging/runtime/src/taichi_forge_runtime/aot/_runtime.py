@@ -110,6 +110,7 @@ class Runtime:
 
     def __init__(self, arch="cpu", *, device_index=0, library_path=None, runtime_path=None):
         self._lock = threading.RLock()
+        self._borrower = None
         self._handle = None
         # Keep native registrations independently of Python wrapper lifetimes.
         # Cyclic GC can finalize a runtime and its pending argument owners in
@@ -133,8 +134,24 @@ class Runtime:
         if not self._handle:
             raise RuntimeError("Native AOT runtime creation returned no handle")
 
+    @classmethod
+    def _from_borrowed(cls, client, library_path):
+        result = cls.__new__(cls)
+        result._lock = result._borrower = client
+        result._handle = None
+        result._resources, result._pending = set(), set()
+        try:
+            result._api = abi.Api(library_path)
+            result.arch = str(client.arch).split(".")[-1]
+            result._handle = client.handle
+            result._check()
+        except BaseException:
+            client.close()
+            raise
+        return result
+
     def _check(self):
-        if self._handle is None:
+        if self._handle is None or (self._borrower is not None and self._borrower.closed):
             raise RuntimeError("AOT runtime is closed")
 
     def native_operation_capabilities(self, kind, *, version=1):
@@ -184,6 +201,14 @@ class Runtime:
         with self._lock:
             if self._handle is None:
                 return
+            if self._borrower is not None:
+                try:
+                    self._borrower.close()
+                finally:
+                    self._handle = None
+                    self._resources.clear()
+                    self._pending.clear()
+                return
             self.wait()
             # Retire code and module-local storage before external arguments.
             priority = {"prepared": 0, "module": 1, "memory": 2}
@@ -191,6 +216,9 @@ class Runtime:
                 self._destroy_resource(kind, handle)
             self._api.call(self._api.ti_destroy_runtime, self._handle)
             self._handle = None
+
+    def _invalidate_runtime(self):
+        self.close()
 
     def _destroy_resource(self, kind, handle):
         if (kind, handle) not in self._resources:
@@ -232,6 +260,8 @@ class _Resource:
     def close(self):
         runtime = self._runtime
         with runtime._lock:
+            if runtime._borrower is not None and runtime._borrower.closed:
+                runtime.close()
             if self._handle is None or (self._kind, self._handle) not in runtime._resources:
                 self._handle = None
                 return

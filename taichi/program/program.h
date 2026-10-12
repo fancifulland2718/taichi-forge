@@ -53,6 +53,7 @@ enum class CudaAsyncTileAdmissionReason : std::uint8_t;
 }
 
 namespace gfx {
+class GfxRuntime;
 class ExternalGraphCommand;
 class FixedGraphRecording;
 struct GraphRecordingSource;
@@ -653,6 +654,9 @@ class TI_DLL_EXPORT Program {
       runtime_fault_domain_->throw_if_submission_disallowed(operation);
     }
   }
+  bool runtime_submission_allowed() const noexcept {
+    return runtime_fault_domain_->submission_allowed();
+  }
   bool runtime_has_fatal_fault() const noexcept {
     return runtime_fault_domain_->has_fatal_fault();
   }
@@ -1197,6 +1201,7 @@ class TI_DLL_EXPORT Program {
   // caller must retire its backend payload before detaching.
   void retain_runtime_client(const std::shared_ptr<RuntimeClient> &client);
   void detach_runtime_client(RuntimeClient *client);
+  gfx::GfxRuntime *get_gfx_runtime_for_borrowing();
   // Delayed resource owners use the typed token and helpers below to
   // serialize reclamation against Program destruction. Once invalidated, the
   // Program registries own final teardown and late callers become no-ops.
@@ -4709,6 +4714,10 @@ class TI_DLL_EXPORT Program {
   // One gate covers a submission containing any combination of high-level
   // resources. Separate per-type gates would require fragile lock ordering.
   std::recursive_mutex runtime_resource_submission_mutex_;
+  // Finalization may wait for native borrowers with the Python GIL released.
+  // Serialize concurrent finalizers without changing the submission mutex.
+  std::recursive_mutex runtime_finalization_mutex_;
+  bool runtime_finalization_in_progress_{false};
   bool argpack_resources_open_{true};
   std::unordered_map<const ArgPack *, ArgPackResourceView> argpack_views_;
   ArgPackInflightLeaseMap argpack_inflight_leases_;

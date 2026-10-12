@@ -29,6 +29,10 @@ option(TI_WITH_SPLIT_PYTHON_RUNTIME
 option(TI_WITH_RUNTIME_C_API
        "Include the public AOT C API in the shared native runtime"
        OFF)
+if(TI_WITH_RUNTIME_C_API)
+    set_property(SOURCE taichi/python/export_lang.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS TI_WITH_RUNTIME_C_API)
+endif()
 set(TI_PREBUILT_PYTHON_RUNTIME_DIR ""
     CACHE PATH "Directory containing a prebuilt split Python runtime library for shim-only builds")
 set(TI_PYTHON_INSTALL_PACKAGE ""

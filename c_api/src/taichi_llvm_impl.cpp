@@ -24,8 +24,9 @@ LlvmRuntime::LlvmRuntime(taichi::Arch arch) : Runtime(arch) {
   cfg_ = std::make_unique<taichi::lang::CompileConfig>();
   cfg_->arch = arch;
 
-  executor_ =
+  owned_executor_ =
       std::make_unique<taichi::lang::LlvmRuntimeExecutor>(*cfg_.get(), nullptr);
+  executor_ = owned_executor_.get();
 
   // materialize_runtime() takes in a uint64_t** (pointer object's address) and
   // modifies the address it points to.
@@ -37,8 +38,15 @@ LlvmRuntime::LlvmRuntime(taichi::Arch arch) : Runtime(arch) {
   executor_->materialize_runtime(nullptr /*kNoProfiler*/, &result_buffer);
 }
 
+LlvmRuntime::LlvmRuntime(taichi::lang::LlvmRuntimeExecutor &executor,
+                         taichi::uint64 *buffer)
+    : Runtime(executor.get_config().arch),
+      executor_(&executor),
+      result_buffer(buffer) {
+}
+
 LlvmRuntime::~LlvmRuntime() {
-  executor_.reset();
+  owned_executor_.reset();
   cfg_.reset();
 }
 
@@ -73,9 +81,9 @@ TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
 
   if (taichi::arch_is_cpu(config.arch)) {
     taichi::lang::cpu::KernelLauncher::Config cfg;
-    cfg.executor = executor_.get();
+    cfg.executor = executor_;
     taichi::lang::LLVM::AotModuleParams aot_params;
-    aot_params.executor_ = executor_.get();
+    aot_params.executor_ = executor_;
     aot_params.kernel_launcher =
         std::make_unique<taichi::lang::cpu::KernelLauncher>(std::move(cfg));
     aot_params.module_path = module_path;
@@ -84,9 +92,9 @@ TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
 #ifdef TI_WITH_CUDA
     TI_ASSERT(config.arch == taichi::Arch::cuda);
     taichi::lang::cuda::KernelLauncher::Config cfg;
-    cfg.executor = executor_.get();
+    cfg.executor = executor_;
     taichi::lang::LLVM::AotModuleParams aot_params;
-    aot_params.executor_ = executor_.get();
+    aot_params.executor_ = executor_;
     aot_params.kernel_launcher =
         std::make_unique<taichi::lang::cuda::KernelLauncher>(std::move(cfg));
     aot_params.module_path = module_path;

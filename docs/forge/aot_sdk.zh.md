@@ -57,6 +57,30 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
 
+已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
+或 Vulkan GFX runtime、设备和分配器：
+
+```python
+import taichi_forge as ti
+
+ti.init(arch=ti.cuda)
+with ti.aot.borrow_runtime() as runtime:
+    module = runtime.load_module("simulation.tcm")
+    output = runtime.ndarray("i32", 17)
+    call = module.kernel("advance").prepare(output)
+    call()
+    ti.sync()
+```
+
+请使用与传入参数签名匹配的已导出入口。借用对象管理自己的模块、数组和录制，
+关闭后 JIT Program 仍可使用。`ti.reset()` 或原生 Program finalize 会在设备销毁前
+退休借用者；保留的旧包装对象随后拒绝执行，仍可安全关闭。每个借用者有独立的
+资源登记，JIT ndarray 或另一消费对象的数组不会自动成为有效参数；零拷贝导入
+仍需独立的存储登记接口。普通 `aot.Runtime(arch)` 构造器继续创建独立运行时。
+借用需要匹配的 Python shim 和包含 C API 的 split 原生库，不增加独立 AOT 消费端
+的前端依赖。Windows CPU/CUDA/Vulkan 验收覆盖普通/固定执行、显式梯度、模块状态
+隔离、GC 和并发 finalize。
+
 runtime wheel 提供 `taichi_forge_runtime.aot`，仅用 Python 标准库和共库 C API
 消费普通 kernel/CGraph，无需 NumPy、DSL 前端或 CPython shim。导入本身不会加载
 原生库或初始化设备。导出下方的示例模块后，可用匹配 runtime wheel 执行

@@ -29,6 +29,10 @@ class GfxProgramImpl : public ProgramImpl {
 
   void finalize() override;
 
+  gfx::GfxRuntime *get_runtime() {
+    return runtime_.get();
+  }
+
   StreamSemaphore flush() override {
     return runtime_->flush();
   }

@@ -42,6 +42,9 @@
 #include "taichi/program/ndarray.h"
 #include "taichi/program/prepared_primitive.h"
 #include "taichi/runtime/native_operation_registry.h"
+#ifdef TI_WITH_RUNTIME_C_API
+#include "taichi/runtime/aot_runtime_client.h"
+#endif
 #include "taichi/program/matrix.h"
 #include "taichi/program/runtime_statistics.h"
 #include "taichi/program/storage_view.h"
@@ -588,6 +591,27 @@ py::dict primitive_workspace_snapshot_to_dict(
 }  // namespace
 
 void export_lang(py::module &m) {
+#ifdef TI_WITH_RUNTIME_C_API
+  using lang::AotRuntimeClient;
+  py::class_<AotRuntimeClient, std::shared_ptr<AotRuntimeClient>>(
+      m, "_AotRuntimeClient")
+      .def("__enter__", &AotRuntimeClient::enter,
+           py::call_guard<py::gil_scoped_release>())
+      .def("__exit__",
+           [](AotRuntimeClient &client, py::handle, py::handle, py::handle) {
+             py::gil_scoped_release release;
+             client.leave();
+           })
+      .def("close", &AotRuntimeClient::close,
+           py::call_guard<py::gil_scoped_release>())
+      .def_property_readonly("closed", &AotRuntimeClient::closed)
+      .def_property_readonly("handle", &AotRuntimeClient::handle)
+      .def_property_readonly("device_identity",
+                             &AotRuntimeClient::device_identity)
+      .def_property_readonly("arch", &AotRuntimeClient::arch);
+  m.def("_borrow_aot_runtime", &AotRuntimeClient::create,
+        py::call_guard<py::gil_scoped_release>());
+#endif
   m.def("_compile_graph_segmented_reduce_values",
         [](lang::Program &program, lang::Kernel *reduction,
            const std::vector<lang::aot::Arg> &reduction_args,
@@ -1956,7 +1980,8 @@ void export_lang(py::module &m) {
              Timelines::get_instance().save(fn);
            })
       .def("print_memory_profiler_info", &Program::print_memory_profiler_info)
-      .def("finalize", &Program::finalize)
+      .def("finalize", &Program::finalize,
+           py::call_guard<py::gil_scoped_release>())
       .def("get_total_compilation_time", &Program::get_total_compilation_time)
       .def("get_snode_num_dynamically_allocated",
            &Program::get_snode_num_dynamically_allocated)

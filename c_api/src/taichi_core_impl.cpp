@@ -182,6 +182,7 @@ Runtime::MemoryAllocation Runtime::get_memory(TiMemory memory) const {
 AotModule::AotModule(Runtime &runtime,
                      std::unique_ptr<taichi::lang::aot::Module> aot_module)
     : runtime_(&runtime), aot_module_(std::move(aot_module)) {
+  runtime.register_module(this);
 }
 
 taichi::lang::aot::Kernel *AotModule::get_kernel(const std::string &name) {

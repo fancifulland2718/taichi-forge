@@ -84,6 +84,7 @@ const taichi::lang::aot::StructLayout &Runtime::get_layout(
   return found->second.layout;
 }
 void Runtime::retire_module(AotModule *owner) {
+  modules_.erase(owner);
   auto retire = [owner](auto &items) {
     for (auto it = items.begin(); it != items.end();) {
       if (it->second.owner == owner)
@@ -95,6 +96,40 @@ void Runtime::retire_module(AotModule *owner) {
   retire(kernels_);
   retire(graphs_);
   retire(layouts_);
+}
+
+void Runtime::register_module(AotModule *owner) {
+  modules_.insert(owner);
+}
+
+void Runtime::retire_resources(bool synchronize) {
+  std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+  std::exception_ptr failure;
+  auto cleanup = [&](auto &&fn) {
+    try {
+      fn();
+    } catch (...) {
+      if (!failure)
+        failure = std::current_exception();
+    }
+  };
+  if (synchronize)
+    cleanup([&] { wait(); });
+  cleanup([&] { clear_prepared(false); });
+  while (!modules_.empty()) {
+    auto *module = *modules_.begin();
+    modules_.erase(module);
+    delete module;
+  }
+  decltype(memories_) memories;
+  {
+    std::lock_guard<std::mutex> memory_lock(memory_mutex_);
+    memories.swap(memories_);
+  }
+  for (const auto &[handle, memory] : memories)
+    cleanup([&] { get().dealloc_memory(memory.allocation); });
+  if (failure)
+    std::rethrow_exception(failure);
 }
 
 AotModule::~AotModule() {

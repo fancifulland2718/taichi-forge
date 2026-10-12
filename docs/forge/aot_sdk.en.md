@@ -65,6 +65,34 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
+When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
+its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:
+
+```python
+import taichi_forge as ti
+
+ti.init(arch=ti.cuda)
+with ti.aot.borrow_runtime() as runtime:
+    module = runtime.load_module("simulation.tcm")
+    output = runtime.ndarray("i32", 17)
+    call = module.kernel("advance").prepare(output)
+    call()
+    ti.sync()
+```
+
+Use an exported entry whose signature matches the supplied arguments. The
+borrower owns its modules, arrays and recordings. Closing it retires those
+resources and leaves the JIT Program usable. `ti.reset()` or native Program
+finalization retires borrowers before destroying the backend; retained wrappers
+then reject execution and can still be closed. Each borrower has a separate
+resource namespace. JIT ndarrays and arrays from another consumer are not
+automatically accepted as bindings; registered zero-copy imports require a
+separate storage interface. The ordinary `aot.Runtime(arch)` constructor remains
+independent. Borrowing requires a matching Python shim and split native library
+built with the C API; it does not add a frontend dependency to standalone AOT
+consumption. Windows CPU/CUDA/Vulkan checks cover direct and fixed execution,
+explicit gradients, module state isolation, GC and concurrent finalization.
+
 The runtime wheel includes `taichi_forge_runtime.aot`, a Python consumer using
 the standard library and this shared C API. Ordinary kernel/CGraph execution
 does not need NumPy, the DSL frontend or the CPython shim. Import alone does not

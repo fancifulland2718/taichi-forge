@@ -17,6 +17,8 @@ namespace capi {
 class LlvmRuntime : public Runtime {
  public:
   LlvmRuntime(taichi::Arch arch);
+  LlvmRuntime(taichi::lang::LlvmRuntimeExecutor &executor,
+              taichi::uint64 *result_buffer);
   virtual ~LlvmRuntime();
 
   void check_runtime_error();
@@ -39,7 +41,8 @@ class LlvmRuntime : public Runtime {
 
  private:
   std::unique_ptr<taichi::lang::CompileConfig> cfg_{nullptr};
-  std::unique_ptr<taichi::lang::LlvmRuntimeExecutor> executor_{nullptr};
+  std::unique_ptr<taichi::lang::LlvmRuntimeExecutor> owned_executor_;
+  taichi::lang::LlvmRuntimeExecutor *executor_{nullptr};
   taichi::uint64 *result_buffer{nullptr};
 };
 
