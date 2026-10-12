@@ -17,6 +17,11 @@ std::shared_ptr<NativeOperation> prepare_cuda_dot_f32_operation(
     Device &device,
     const DotF32Operation &operation);
 NativeOperationAvailability probe_cuda_dot_f32_operation();
+std::shared_ptr<NativeResource> prepare_cuda_blas_context(
+    Arch arch,
+    Device &device,
+    const BlasContextDescription &description);
+NativeOperationAvailability probe_cuda_blas_context();
 #endif
 
 std::array<std::size_t, 3> gemm_f32_element_counts(const GemmF32Operation &op) {
@@ -35,6 +40,23 @@ std::array<std::size_t, 3> gemm_f32_element_counts(const GemmF32Operation &op) {
 }
 
 void register_blas_operations(NativeOperationRegistry &registry) {
+  registry.define<BlasContextDescription>(
+      [](Device &, const BlasContextDescription &) {},
+      NativeObjectKind::resource);
+  registry.register_schema<BlasContextDescription>(
+      "cublas", "context", {},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<BlasContextDescription> {
+        operation_json::fields(parameters, {});
+        return [](const NativeOperationBindings &) {
+          return BlasContextDescription{};
+        };
+      });
+#ifdef TI_WITH_CUDA
+  registry.register_factory<BlasContextDescription>(
+      Arch::cuda, NativeOperationMode::cuda_capture, prepare_cuda_blas_context,
+      probe_cuda_blas_context);
+#endif
   registry.define<GemmF32Operation>(
       [](Device &device, const GemmF32Operation &op) {
         gemm_f32_element_counts(op);
@@ -70,7 +92,7 @@ void register_blas_operations(NativeOperationRegistry &registry) {
         return [descriptor](const NativeOperationBindings &bindings) mutable {
           auto matrix = [&](const char *port, std::size_t rows,
                             std::size_t cols) {
-            const auto &value = bindings.at(port);
+            const auto &value = bindings.at(port).array();
             if (value.scalar_type != PrimitiveType::f32 ||
                 !value.element_shape.empty() ||
                 value.shape != std::vector<std::uint64_t>{rows, cols} ||
@@ -90,10 +112,13 @@ void register_blas_operations(NativeOperationRegistry &registry) {
               matrix("b", result.transpose_b ? result.columns : result.inner,
                      result.transpose_b ? result.inner : result.columns);
           result.output = matrix("output", result.rows, result.columns);
+          if (const auto context = bindings.find("context");
+              context != bindings.end())
+            result.context = context->second.resource<NativeResource>();
           return result;
         };
       },
-      "gemm_f32");
+      "gemm_f32", {"context"});
 #ifdef TI_WITH_CUDA
   registry.register_factory<GemmF32Operation>(
       Arch::cuda, NativeOperationMode::cuda_capture,
@@ -119,7 +144,7 @@ void register_blas_operations(NativeOperationRegistry &registry) {
           throw std::invalid_argument("Dot extent overflows storage size");
         return [size](const NativeOperationBindings &bindings) {
           auto array = [&](const char *port, bool scalar) {
-            const auto &value = bindings.at(port);
+            const auto &value = bindings.at(port).array();
             const auto shape = std::vector<std::uint64_t>{scalar ? 1 : size};
             if (value.scalar_type != PrimitiveType::f32 ||
                 !value.element_shape.empty() ||
@@ -131,11 +156,16 @@ void register_blas_operations(NativeOperationRegistry &registry) {
                   "Dot requires compact f32 vectors and a scalar output");
             return value.pointer;
           };
-          return DotF32Operation{array("x", false), array("y", false),
+          DotF32Operation result{array("x", false), array("y", false),
                                  array("output", true),
                                  static_cast<std::size_t>(size)};
+          if (const auto context = bindings.find("context");
+              context != bindings.end())
+            result.context = context->second.resource<NativeResource>();
+          return result;
         };
-      });
+      },
+      {}, {"context"});
 #ifdef TI_WITH_CUDA
   registry.register_factory<DotF32Operation>(
       Arch::cuda, NativeOperationMode::cuda_capture,

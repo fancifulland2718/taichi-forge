@@ -7,18 +7,16 @@
 #include <stdexcept>
 #include <vector>
 #include "taichi/rhi/device.h"
+#include "taichi/runtime/native_resource.h"
 
 namespace taichi::lang {
 
 // Prepared backend commands own their scratch and recording state. The
 // enclosing execution retains input/output leases and retires submitted work
 // before releasing this object.
-class NativeOperation {
+class NativeOperation : public NativeResource {
  public:
-  virtual ~NativeOperation() = default;
-  virtual Arch arch() const = 0;
-  virtual Device &device() const = 0;
-  virtual std::size_t workspace_bytes() const = 0;
+  ~NativeOperation() override = default;
   virtual void run_cpu() {
     throw std::invalid_argument("Native operation has no CPU implementation");
   }
@@ -92,6 +90,7 @@ struct GemmF32Operation {
   float beta{0};
   bool transpose_a{false};
   bool transpose_b{false};
+  std::shared_ptr<NativeResource> context;
 };
 
 std::array<std::size_t, 3> gemm_f32_element_counts(const GemmF32Operation &op);

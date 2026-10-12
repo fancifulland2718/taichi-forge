@@ -25,6 +25,10 @@ std::vector<std::string> dependencies(
     for (const auto &dimension : array->shape)
       if (const auto *ref = std::get_if<ExecutionResources::Extent>(&dimension))
         result.push_back(ref->array);
+  } else if (const auto *native =
+                 std::get_if<NativeOperationDescription>(&resource.value)) {
+    for (const auto &[port, slot] : native->bindings)
+      result.push_back(slot);
   } else {
     result.push_back(
         std::get<ExecutionResources::Extent>(resource.value).array);
@@ -41,7 +45,15 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
       throw std::invalid_argument("Execution resources must be an array");
     for (const auto &value : found->second.arr.inner) {
       const auto kind = name(value["kind"]);
-      Resource resource{name(value["name"]), name(value["dtype"]), Array{}};
+      Resource resource{name(value["name"]), {}, Array{}};
+      if (kind == "native") {
+        auto description = value;
+        description.obj.inner.erase("name");
+        resource.value = NativeOperationDescription::parse(description);
+        result.declarations.push_back(std::move(resource));
+        continue;
+      }
+      resource.dtype = name(value["dtype"]);
       if (kind == "ndarray") {
         fields(value, {"kind", "name", "dtype", "shape", "element_shape"});
         if (!value["shape"].is_arr())
@@ -113,7 +125,9 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
     references[i] = dependencies(declarations[i]);
     for (const auto &ref : references[i]) {
       if (const auto parent = indices.find(ref); parent != indices.end()) {
-        if (!std::holds_alternative<Array>(declarations[parent->second].value))
+        if (!std::holds_alternative<NativeOperationDescription>(
+                declarations[i].value) &&
+            !std::holds_alternative<Array>(declarations[parent->second].value))
           throw std::invalid_argument(
               "Execution shape reference requires an ndarray: " + ref);
         ++indegree[i];
@@ -131,6 +145,12 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
     throw std::invalid_argument("Execution resource dependency cycle");
 
   for (const auto &[primal, gradient] : gradients) {
+    for (const auto *ref : {&primal, &gradient})
+      if (const auto found = indices.find(*ref);
+          found != indices.end() &&
+          !std::holds_alternative<Array>(declarations[found->second].value))
+        throw std::invalid_argument(
+            "Execution gradient reference requires an ndarray: " + *ref);
     arguments.insert(primal);
     arguments.insert(gradient);
   }
@@ -147,6 +167,11 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
     } else if (!needed[found->second]) {
       needed[found->second] = true;
       const auto &refs = references[found->second];
+      if (std::holds_alternative<NativeOperationDescription>(
+              declarations[found->second].value))
+        for (const auto &ref : refs)
+          if (const auto parent = indices.find(ref); parent != indices.end())
+            materialize[parent->second] = true;
       pending.insert(pending.end(), refs.begin(), refs.end());
     }
   }

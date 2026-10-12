@@ -444,6 +444,37 @@ bindings, invalid layout/alias rollback and in-flight close/reset. An exported
 energy/reverse kernel with an explicit dot adjoint checks input gradients;
 automatic differentiation of the external call is not provided.
 
+Native resources use the same registered envelope in `resources`, with an added
+`name`. The CUDA `cublas/context` constructor (version 1, empty parameters and
+bindings) creates a reusable handle for one prepared instance:
+
+```python
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cublas", "operation": "gemm_f32", "version": 1,
+    "parameters": {"rows": 17, "columns": 9, "inner": 13},
+    "bindings": {"a": "a", "b": "b", "output": "c", "context": "blas"},
+}], resources=[{
+    "kind": "native", "name": "blas", "provider": "cublas", "operation": "context",
+    "version": 1, "parameters": {}, "bindings": {},
+}])
+```
+
+Additional GEMM/dot operations can reference `"blas"` through their optional
+`context` port. Each preparation reconstructs its own context; omitting that port
+preserves independent handles. Sharing is explicit and does not imply faster
+preparation. Pointer modes are set while recording, not while replaying. The
+Windows CUDA checks include alternating GEMM/device-dot/GEMM capture, independent
+frames, explicit gradients and rollback/retirement.
+
+Resource dependencies participate in the same required closure as arrays. Unused
+native resources are not probed or created; required constructors are decoded
+before private allocation, then created in dependency order. Commands retire
+before native resources, which retire before private arrays. Resources are not
+dispatchable operations and cannot bind kernel arguments or gradients. This is
+an internal registered resource contract, not automatic reconstruction of every
+external provider plan. Known resource scratch contributes once to
+`workspace_bytes`; opaque vendor memory remains excluded.
+
 The producer exports registered recipes through
 `module.add_primitive(name, kind, version=1, **options)`. Version 1 supports
 `sort`, `compact` and consecutive `unique`. Sort/compact use the symbolic

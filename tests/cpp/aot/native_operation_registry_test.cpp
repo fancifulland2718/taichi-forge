@@ -217,7 +217,7 @@ TEST(NativeOperationRegistry, SchemaDecodesColdAndUsesTheExistingTypedFactory) {
     operation_json::fields(parameters, {"bytes"});
     const auto bytes = operation_json::integer(parameters["bytes"]);
     return [bytes](const NativeOperationBindings &bindings) {
-      return TestDescriptor{bindings.at("input").bytes == bytes};
+      return TestDescriptor{bindings.at("input").array().bytes == bytes};
     };
   };
   registry.register_schema<TestDescriptor>(
@@ -231,7 +231,7 @@ TEST(NativeOperationRegistry, SchemaDecodesColdAndUsesTheExistingTypedFactory) {
   EXPECT_EQ(probes, 0);
   EXPECT_EQ(factories, 0);
   NativeOperationBindings bindings{
-      {"input", {{}, 12, PrimitiveType::f32, {3}, {}}}};
+      {"input", NativeArrayBinding{{}, 12, PrimitiveType::f32, {3}, {}}}};
   auto op = registry.prepare(host_arch(), device, decoded, bindings);
   EXPECT_EQ(factories, 1);
   EXPECT_EQ(probes, 1);
@@ -240,7 +240,7 @@ TEST(NativeOperationRegistry, SchemaDecodesColdAndUsesTheExistingTypedFactory) {
   EXPECT_EQ(runs, 3);
   EXPECT_EQ(decodes, 1);
   EXPECT_EQ(probes, 1);
-  bindings.at("input").bytes = 8;
+  bindings.at("input") = NativeArrayBinding{{}, 8, PrimitiveType::f32, {2}, {}};
   EXPECT_THROW(registry.prepare(host_arch(), device, decoded, bindings),
                std::invalid_argument);
   EXPECT_EQ(factories, 1);
@@ -301,6 +301,105 @@ TEST(NativeOperationRegistry, OptionalProviderProbeIsColdAndPrecedesFactory) {
   prepared->run_cpu();
   EXPECT_EQ(probes, cold_probes);
   EXPECT_EQ(runs, 2);
+}
+struct ResourceDescriptor {
+  static constexpr const char *kind = "test.resource";
+  static constexpr std::uint32_t version = 1;
+  int id;
+  std::shared_ptr<NativeResource> parent;
+};
+
+class TestResource final : public NativeResource {
+ public:
+  TestResource(Device &device,
+               ResourceDescriptor value,
+               std::vector<int> &retired)
+      : device_(device), value_(std::move(value)), retired_(retired) {
+  }
+  ~TestResource() override {
+    retired_.push_back(value_.id);
+  }
+  Arch arch() const override {
+    return host_arch();
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return 7;
+  }
+
+ private:
+  Device &device_;
+  ResourceDescriptor value_;
+  std::vector<int> &retired_;
+};
+
+TEST(NativeOperationRegistry,
+     ResourcesUseTheSameRegistryAndRetainDependencies) {
+  cpu::CpuDevice device;
+  std::vector<int> retired;
+  int factories = 0;
+  NativeOperationRegistry registry;
+  registry.define<ResourceDescriptor>(
+      [](Device &device, const ResourceDescriptor &value) {
+        if (value.parent && &value.parent->device() != &device)
+          throw std::invalid_argument("foreign resource");
+      },
+      NativeObjectKind::resource);
+  registry.register_factory<ResourceDescriptor>(
+      host_arch(), NativeOperationMode::cpu,
+      [&](Arch, Device &device, const ResourceDescriptor &value) {
+        ++factories;
+        return std::make_shared<TestResource>(device, value, retired);
+      });
+  registry.register_schema<ResourceDescriptor>(
+      "test", "resource", {},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<ResourceDescriptor> {
+        const auto id = static_cast<int>(parameters["id"]);
+        return [id](const NativeOperationBindings &bindings) {
+          const auto parent = bindings.find("parent");
+          return ResourceDescriptor{
+              id, parent == bindings.end()
+                      ? nullptr
+                      : parent->second.resource<TestResource>()};
+        };
+      },
+      {}, {"parent"});
+  auto root = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"test","operation":"resource","version":1,
+      "parameters":{"id":1},"bindings":{}})"));
+  EXPECT_THROW(registry.decode(root), std::invalid_argument);
+  EXPECT_TRUE(registry.capabilities().empty());
+  EXPECT_EQ(registry.find(ResourceDescriptor::kind, 1, host_arch()), nullptr);
+  EXPECT_FALSE(
+      registry.probe(ResourceDescriptor::kind, 1, host_arch()).available);
+  EXPECT_TRUE(registry
+                  .probe(ResourceDescriptor::kind, 1, host_arch(),
+                         NativeObjectKind::resource)
+                  .available);
+  const auto decoded = registry.decode(root, NativeObjectKind::resource);
+  EXPECT_EQ(factories, 0);
+  EXPECT_THROW(registry.prepare(host_arch(), device, decoded, {}),
+               std::invalid_argument);
+  auto parent = registry.prepare_resource(host_arch(), device, decoded, {});
+  std::weak_ptr<NativeResource> weak = parent;
+  NativeOperationBindings bindings{{"parent", parent}};
+  EXPECT_THROW(bindings.at("parent").array(), std::invalid_argument);
+  root.parameters = liong::json::parse_complete(R"({"id":2})");
+  root.bindings.emplace("parent", "root_slot");
+  const auto child_description =
+      registry.decode(root, NativeObjectKind::resource);
+  auto child = registry.prepare_resource(host_arch(), device, child_description,
+                                         bindings);
+  EXPECT_EQ(factories, 2);
+  bindings.clear();
+  parent.reset();
+  EXPECT_FALSE(weak.expired());
+  child.reset();
+  EXPECT_TRUE(weak.expired());
+  EXPECT_EQ(retired, (std::vector<int>{2, 1}));
 }
 #endif
 }  // namespace

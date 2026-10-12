@@ -69,7 +69,7 @@ void register_fft_operation(NativeOperationRegistry &registry) {
             fft_c2c_element_count(descriptor) * 2 * sizeof(float);
         return [descriptor, bytes](const NativeOperationBindings &bindings) {
           auto buffer = [&](const char *port) {
-            const auto &value = bindings.at(port);
+            const auto &value = bindings.at(port).array();
             if (value.scalar_type != PrimitiveType::f32 ||
                 value.element_shape != std::vector<std::uint64_t>{2} ||
                 value.base_offset % 8 || value.pointer.offset % 8)

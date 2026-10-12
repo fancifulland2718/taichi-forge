@@ -153,6 +153,35 @@ def test_execution_resource_dependency_walk_is_iterative():
     assert plan.argument_names == ("r257",)
 
 
+def test_native_resource_closure_and_kind_validation():
+    def native(name, **bindings):
+        return dict(
+            kind="native", name=name, provider="test", operation="plan", version=1, parameters={}, bindings=bindings
+        )
+
+    op = {key: value for key, value in native("op", plan="child", output="y").items() if key != "name"}
+    resources = [
+        native("child", context="parent", input="scratch"),
+        native("parent"),
+        dict(kind="ndarray", name="scratch", dtype="f32", shape=[{"array": "x", "axis": 0}]),
+        native("unused", missing="not_required"),
+    ]
+    plan = ExecutionPlan([op], resources=resources)
+    assert plan.argument_names == ("x", "y")
+    assert ExecutionPlan.from_json(plan.to_json()).argument_names == plan.argument_names
+    with pytest.raises(ValueError, match="gradient reference"):
+        ExecutionPlan([op], resources=resources, gradients={"parent": "scratch"})
+    for bad in (
+        [native("child", cycle="child")],
+        [native("child")] * 2,
+        [dict(native("child"), version=True)],
+        [dict(native("child"), dtype="f32")],
+        [native("parent"), dict(kind="ndarray", name="child", dtype="f32", shape=[{"array": "parent", "axis": 0}])],
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([op], resources=bad)
+
+
 def test_fft_description_preserves_direction_and_static_shape():
     plan = ExecutionPlan(
         [

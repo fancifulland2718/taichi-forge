@@ -85,7 +85,7 @@ def test_aot_cublas_mixed_execution_and_explicit_adjoint(tmp_path):
                 provider="cublas",
                 operation="gemm_f32",
                 version=1,
-                bindings={name: step[name] for name in ("a", "b", "output")},
+                bindings={**{name: step[name] for name in ("a", "b", "output")}, "context": "blas"},
                 parameters={key: value for key, value in step.items() if key not in ("kind", "a", "b", "output")},
             )
             if step["kind"] == "gemm_f32"
@@ -96,6 +96,15 @@ def test_aot_cublas_mixed_execution_and_explicit_adjoint(tmp_path):
     plan = ti.aot.ExecutionPlan(
         steps,
         resources=[
+            {
+                "kind": "native",
+                "name": "blas",
+                "provider": "cublas",
+                "operation": "context",
+                "version": 1,
+                "parameters": {},
+                "bindings": {},
+            },
             {"kind": "ndarray", "name": "dc", "dtype": "f32", "shape": [17, 9]},
             {"kind": "ndarray", "name": "dloss", "dtype": "f32", "shape": [1]},
         ],

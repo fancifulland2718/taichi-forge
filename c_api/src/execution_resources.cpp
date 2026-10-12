@@ -93,6 +93,9 @@ ExecutionResourceBindings bind_execution_resources(
   // Resolve the entire metadata closure before allocating any private buffer.
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     const auto &recipe = resources.declarations[resources.order[pos]];
+    if (std::holds_alternative<taichi::lang::NativeOperationDescription>(
+            recipe.value))
+      continue;
     auto &argument = result.arguments[pos];
     const auto dtype = scalar_type(recipe.dtype);
     if (const auto *desc = std::get_if<Recipes::Array>(&recipe.value)) {
@@ -158,7 +161,9 @@ ExecutionResourceBindings bind_execution_resources(
 
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     auto &argument = result.arguments[pos];
-    if (resources.materialize[resources.order[pos]] &&
+    if (std::holds_alternative<Recipes::Array>(
+            resources.declarations[resources.order[pos]].value) &&
+        resources.materialize[resources.order[pos]] &&
         argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
       if (!result.storage)
         result.storage = std::make_unique<ExecutionResourceStorage>(runtime);

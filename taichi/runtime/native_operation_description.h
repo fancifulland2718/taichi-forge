@@ -5,9 +5,13 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <variant>
+#include <memory>
+#include <stdexcept>
 #include "taichi/common/json.h"
 #include "taichi/ir/type.h"
 #include "taichi/rhi/device.h"
+#include "taichi/runtime/native_resource.h"
 
 namespace taichi::lang {
 
@@ -32,12 +36,39 @@ struct NativeOperationDescription {
 // The enclosing executor owns storage leases through completion.
 struct NativeArrayBinding {
   DevicePtr pointer;
-  std::uint64_t bytes;
+  std::uint64_t bytes{0};
   DataType scalar_type;
   std::vector<std::uint64_t> shape;
   std::vector<std::uint64_t> element_shape;
   std::uint64_t base_offset{0};
 };
-using NativeOperationBindings = std::map<std::string, NativeArrayBinding>;
+class NativeBinding {
+ public:
+  NativeBinding(NativeArrayBinding array) : value_(std::move(array)) {
+  }
+  NativeBinding(std::shared_ptr<NativeResource> resource)
+      : value_(std::move(resource)) {
+    if (!std::get<std::shared_ptr<NativeResource>>(value_))
+      throw std::invalid_argument("Native resource binding is null");
+  }
+  const NativeArrayBinding &array() const {
+    const auto *value = std::get_if<NativeArrayBinding>(&value_);
+    if (!value)
+      throw std::invalid_argument("Native binding requires an ndarray");
+    return *value;
+  }
+  template <typename Resource>
+  std::shared_ptr<Resource> resource() const {
+    const auto *value = std::get_if<std::shared_ptr<NativeResource>>(&value_);
+    auto result = value ? std::dynamic_pointer_cast<Resource>(*value) : nullptr;
+    if (!result)
+      throw std::invalid_argument("Native resource binding type mismatch");
+    return result;
+  }
+
+ private:
+  std::variant<NativeArrayBinding, std::shared_ptr<NativeResource>> value_;
+};
+using NativeOperationBindings = std::map<std::string, NativeBinding>;
 
 }  // namespace taichi::lang

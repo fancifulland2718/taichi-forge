@@ -359,6 +359,31 @@ Windows cuBLAS 13.3 验证覆盖重复写回、空输入、独立绑定、非法
 在途关闭/reset；导出的 energy/反向 kernel 加显式点积伴随核对输入梯度，不提供
 外部调用的自动微分。
 
+原生资源在 `resources` 中使用同一注册式外壳，另加 `name`。CUDA 的
+`cublas/context` 构造项（version 1，参数和绑定均为空）为一次准备创建可复用 handle：
+
+```python
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cublas", "operation": "gemm_f32", "version": 1,
+    "parameters": {"rows": 17, "columns": 9, "inner": 13},
+    "bindings": {"a": "a", "b": "b", "output": "c", "context": "blas"},
+}], resources=[{
+    "kind": "native", "name": "blas", "provider": "cublas", "operation": "context",
+    "version": 1, "parameters": {}, "bindings": {},
+}])
+```
+
+其他 GEMM/dot 操作可通过可选 `context` 端口引用同一个 `"blas"`。每次准备独立
+重建 context，省略该端口保持各操作独立 handle。共享是显式选择，不保证缩短准备
+耗时；pointer mode 只在录制时设置，重放不设置。Windows CUDA 验证覆盖交替
+GEMM/设备点积/GEMM 捕获、独立帧、显式梯度以及回滚/退休。
+
+资源依赖进入与数组相同的所需依赖闭包。未使用的原生资源不探测、不创建；所需构造项
+在私有分配前解码，再按依赖顺序创建。先退休命令，再退休原生资源，最后释放私有数组。
+资源不能当作可执行操作，也不能绑定 kernel 参数或梯度。这是内部注册式资源合同，
+不代表所有外部 provider plan 均已可重建。已知资源 scratch 只计入一次
+`workspace_bytes`，不透明 vendor 内存仍不计入。
+
 生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
 版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号
 参数名及 columns 合同。例如：

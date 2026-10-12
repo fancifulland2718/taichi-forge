@@ -44,7 +44,7 @@ class NativeOperationRegistry {
   using Validator = std::function<void(Device &, const Descriptor &)>;
   template <typename Descriptor>
   using Factory = std::function<
-      std::shared_ptr<NativeOperation>(Arch, Device &, const Descriptor &)>;
+      std::shared_ptr<NativeResource>(Arch, Device &, const Descriptor &)>;
   template <typename Descriptor>
   using Binder = std::function<Descriptor(const NativeOperationBindings &)>;
   template <typename Descriptor>
@@ -67,6 +67,7 @@ class NativeOperationRegistry {
     std::string kind_;
     std::uint32_t version_{0};
     std::type_index type_{typeid(void)};
+    NativeObjectKind object_kind_{NativeObjectKind::operation};
     std::vector<std::string> ports_;
     std::function<std::shared_ptr<const void>(const NativeOperationBindings &)>
         bind_;
@@ -77,7 +78,8 @@ class NativeOperationRegistry {
                        std::string operation,
                        std::vector<std::string> ports,
                        Decoder<Descriptor> decode,
-                       std::string legacy_kind = {}) {
+                       std::string legacy_kind = {},
+                       std::vector<std::string> optional_ports = {}) {
     if (!decode)
       throw std::invalid_argument("Native schema requires a decoder");
     register_schema_impl(
@@ -95,10 +97,12 @@ class NativeOperationRegistry {
                 return std::make_shared<Descriptor>(bind(bindings));
               };
         },
-        std::move(legacy_kind));
+        std::move(legacy_kind), std::move(optional_ports));
   }
 
-  DecodedOperation decode(const NativeOperationDescription &description) const;
+  DecodedOperation decode(
+      const NativeOperationDescription &description,
+      NativeObjectKind kind = NativeObjectKind::operation) const;
   std::optional<NativeOperationDescription> lower_legacy(
       const liong::json::JsonValue &description) const;
   std::shared_ptr<NativeOperation> prepare(
@@ -106,16 +110,23 @@ class NativeOperationRegistry {
       Device &device,
       const DecodedOperation &operation,
       const NativeOperationBindings &bindings) const;
+  std::shared_ptr<NativeResource> prepare_resource(
+      Arch arch,
+      Device &device,
+      const DecodedOperation &resource,
+      const NativeOperationBindings &bindings) const;
 
   template <typename Descriptor>
-  void define(Validator<Descriptor> validate) {
+  void define(Validator<Descriptor> validate,
+              NativeObjectKind kind = NativeObjectKind::operation) {
     if (!validate)
       throw std::invalid_argument("Native operation requires a validator");
     define_impl(
         Descriptor::kind, Descriptor::version, typeid(Descriptor),
         [validate = std::move(validate)](Device &device, const void *value) {
           validate(device, *static_cast<const Descriptor *>(value));
-        });
+        },
+        kind);
   }
 
   template <typename Descriptor>
@@ -138,8 +149,9 @@ class NativeOperationRegistry {
   std::shared_ptr<NativeOperation> prepare(Arch arch,
                                            Device &device,
                                            const Descriptor &value) const {
-    return prepare_impl(Descriptor::kind, Descriptor::version,
-                        typeid(Descriptor), arch, device, &value);
+    return std::dynamic_pointer_cast<NativeOperation>(
+        prepare_impl(Descriptor::kind, Descriptor::version, typeid(Descriptor),
+                     arch, device, &value, NativeObjectKind::operation));
   }
 
   const NativeOperationCapability *find(const std::string &kind,
@@ -148,15 +160,17 @@ class NativeOperationRegistry {
   std::vector<NativeOperationCapability> capabilities() const;
   // Explicit cold probe: may load a dependency, never creates a plan or work
   // buffer. Capability enumeration and prepared replay never invoke it.
-  NativeOperationAvailability probe(const std::string &kind,
-                                    std::uint32_t version,
-                                    Arch arch) const;
+  NativeOperationAvailability probe(
+      const std::string &kind,
+      std::uint32_t version,
+      Arch arch,
+      NativeObjectKind object_kind = NativeObjectKind::operation) const;
 
  private:
   using Key = std::pair<std::string, std::uint32_t>;
   using ErasedValidator = std::function<void(Device &, const void *)>;
   using ErasedFactory =
-      std::function<std::shared_ptr<NativeOperation>(Device &, const void *)>;
+      std::function<std::shared_ptr<NativeResource>(Device &, const void *)>;
   struct Backend {
     NativeOperationCapability capability;
     ErasedFactory factory;
@@ -166,6 +180,7 @@ class NativeOperationRegistry {
     std::type_index type;
     ErasedValidator validate;
     std::map<Arch, Backend> backends;
+    NativeObjectKind kind;
   };
   std::map<Key, Definition> definitions_;
   using ErasedBinder = std::function<std::shared_ptr<const void>(
@@ -177,6 +192,7 @@ class NativeOperationRegistry {
     std::type_index type;
     std::vector<std::string> ports;
     ErasedDecoder decode;
+    std::vector<std::string> optional_ports;
   };
   std::map<NativeOperationDescription::Key, Schema> schemas_;
   std::map<std::string, NativeOperationDescription::Key> legacy_schemas_;
@@ -186,12 +202,14 @@ class NativeOperationRegistry {
                             std::type_index type,
                             std::vector<std::string> ports,
                             ErasedDecoder decode,
-                            std::string legacy_kind);
+                            std::string legacy_kind,
+                            std::vector<std::string> optional_ports);
 
   void define_impl(const std::string &kind,
                    std::uint32_t version,
                    std::type_index type,
-                   ErasedValidator validate);
+                   ErasedValidator validate,
+                   NativeObjectKind object_kind);
   void register_impl(const std::string &kind,
                      std::uint32_t version,
                      std::type_index type,
@@ -200,12 +218,20 @@ class NativeOperationRegistry {
                      ErasedFactory factory,
                      Probe probe);
   const Definition &definition(const Key &key, std::type_index type) const;
-  std::shared_ptr<NativeOperation> prepare_impl(const std::string &kind,
-                                                std::uint32_t version,
-                                                std::type_index type,
-                                                Arch arch,
-                                                Device &device,
-                                                const void *value) const;
+  std::shared_ptr<NativeResource> prepare_bound(
+      Arch arch,
+      Device &device,
+      const DecodedOperation &object,
+      const NativeOperationBindings &bindings,
+      NativeObjectKind kind) const;
+  std::shared_ptr<NativeResource> prepare_impl(
+      const std::string &kind,
+      std::uint32_t version,
+      std::type_index type,
+      Arch arch,
+      Device &device,
+      const void *value,
+      NativeObjectKind object_kind) const;
 };
 
 const NativeOperationRegistry &native_operation_registry();

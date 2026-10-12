@@ -6,6 +6,7 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include "taichi/runtime/native_operation_description.h"
 
 namespace liong::json {
 struct JsonValue;
@@ -27,7 +28,7 @@ struct ExecutionResources {
   struct Resource {
     std::string name;
     std::string dtype;
-    std::variant<Array, Extent> value;
+    std::variant<Array, Extent, NativeOperationDescription> value;
   };
 
   std::vector<Resource> declarations;

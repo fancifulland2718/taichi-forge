@@ -105,6 +105,57 @@ def main(mode, artifact):
             zero()
             assert read(scalar) == [0]
         zero.close()
+
+        # One handle switches HOST/DEVICE/HOST modes while recording, without
+        # moving device results through the host or sharing across frames.
+        context = dict(
+            kind="native", name="blas", provider="cublas", operation="context", version=1, parameters={}, bindings={}
+        )
+        unused = dict(context, name="unused", provider="missing.provider")
+        matrices = {name: runtime.ndarray("f32", (1, 1)) for name in ("a", "b", "c")}
+        write(matrices["a"], [2])
+        write(matrices["b"], [3])
+        gemm = dict(
+            kind="native",
+            provider="cublas",
+            operation="gemm_f32",
+            version=1,
+            parameters=dict(rows=1, columns=1, inner=1),
+            bindings=dict(a="a", b="b", output="c", context="blas"),
+        )
+        dot = description(37)
+        dot["bindings"]["context"] = "blas"
+        mixed = ExecutionPlan(
+            [gemm, dot, dict(gemm, parameters=dict(rows=1, columns=1, inner=1, alpha=2, beta=1))],
+            resources=[context, unused],
+        ).prepare(module, dict(args, **matrices))
+        for _ in range(2):
+            mixed()
+            near(read(matrices["c"]), [18])
+            near(read(scalar), [sum(v * v for v in y)])
+        mixed.close()
+        # Constructors cannot be executed and operations cannot be resources.
+        raises(lambda: ExecutionPlan([{k: v for k, v in context.items() if k != "name"}]).prepare(module, {}))
+        bad_resource = dict(gemm, name="blas")
+        bad_resource["bindings"] = {key: value for key, value in gemm["bindings"].items() if key != "context"}
+        raises(lambda: ExecutionPlan([dot], resources=[bad_resource]).prepare(module, dict(args, **matrices)))
+        before_matrix = read(matrices["c"])
+        raises(
+            lambda: ExecutionPlan(
+                [gemm, dot, {"kind": "kernel", "entry": "missing", "arguments": []}], resources=[context]
+            ).prepare(module, dict(args, **matrices))
+        )
+        assert read(matrices["c"]) == before_matrix
+        raises(
+            lambda: ExecutionPlan([{"kind": "fill32", "destination": "blas", "value": 0}], resources=[context]).prepare(
+                module, {}
+            )
+        )
+        raises(
+            lambda: ExecutionPlan(
+                [{"kind": "kernel", "entry": "energy", "arguments": ["blas", "loss"]}], resources=[context]
+            ).prepare(module, {"loss": left["loss"]})
+        )
         wrong_type = runtime.ndarray("i32", 37)
         wrong_shape = runtime.ndarray("f32", (1, 37))
         for invalid in (dict(args, x=wrong_type), dict(args, x=wrong_shape), dict(args, dot=left["x"])):

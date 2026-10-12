@@ -3,6 +3,7 @@
 
 def external_arguments(resources, gradients, arguments):
     from ._runtime import _name
+    from ._native import NATIVE_FIELDS, native_references
 
     if not isinstance(resources, list) or not isinstance(gradients, dict):
         raise ValueError("Execution resources must be a list and gradients a name mapping")
@@ -27,18 +28,23 @@ def external_arguments(resources, gradients, arguments):
             required, optional = {"kind", "name", "dtype", "shape"}, {"element_shape"}
         elif kind == "extent":
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
+        elif kind == "native":
+            required, optional = NATIVE_FIELDS | {"name"}, set()
         else:
             raise ValueError(f"Unsupported execution resource kind: {kind}")
         if not required <= set(resource) or set(resource) - required - optional:
             raise ValueError(f"Invalid {kind} resource fields")
         name = resource["name"]
         _name(name)
-        _name(resource["dtype"])
+        if kind != "native":
+            _name(resource["dtype"])
         if name in by_name:
             raise ValueError(f"Duplicate execution resource: {name}")
         by_name[name] = resource
         refs = references[name] = []
-        if kind == "ndarray":
+        if kind == "native":
+            refs.extend(native_references(resource))
+        elif kind == "ndarray":
             shape, element_shape = resource["shape"], resource.get("element_shape", [])
             if not isinstance(shape, list) or not isinstance(element_shape, list):
                 raise ValueError("Execution resource shapes must be arrays")
@@ -60,7 +66,7 @@ def external_arguments(resources, gradients, arguments):
     for name, refs in references.items():
         for parent in refs:
             if parent in by_name:
-                if by_name[parent]["kind"] != "ndarray":
+                if by_name[name]["kind"] != "native" and by_name[parent]["kind"] != "ndarray":
                     raise ValueError(f"Execution shape reference requires an ndarray: {parent}")
                 indegree[name] += 1
                 dependents[parent].append(name)
@@ -76,6 +82,9 @@ def external_arguments(resources, gradients, arguments):
     for primal, gradient in gradients.items():
         _name(primal)
         _name(gradient)
+        for name in (primal, gradient):
+            if name in by_name and by_name[name]["kind"] != "ndarray":
+                raise ValueError(f"Execution gradient reference requires an ndarray: {name}")
         arguments.update((primal, gradient))
     pending, seen, external = list(arguments), set(), set()
     for name in pending:

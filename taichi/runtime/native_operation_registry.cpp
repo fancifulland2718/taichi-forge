@@ -9,7 +9,8 @@ void NativeOperationRegistry::register_schema_impl(
     std::type_index type,
     std::vector<std::string> ports,
     ErasedDecoder decode,
-    std::string legacy_kind) {
+    std::string legacy_kind,
+    std::vector<std::string> optional_ports) {
   using operation_json::name;
   name(liong::json::JsonValue(std::get<0>(key)));
   name(liong::json::JsonValue(std::get<1>(key)));
@@ -20,17 +21,23 @@ void NativeOperationRegistry::register_schema_impl(
     if (!unique.insert(port).second)
       throw std::invalid_argument("Duplicate native schema binding: " + port);
   }
+  for (const auto &port : optional_ports) {
+    name(liong::json::JsonValue(port));
+    if (!unique.insert(port).second)
+      throw std::invalid_argument("Duplicate native schema binding: " + port);
+  }
   if (schemas_.count(key) ||
       (!legacy_kind.empty() && legacy_schemas_.count(legacy_kind)))
     throw std::invalid_argument("Duplicate native operation schema");
   if (!legacy_kind.empty()) {
     name(liong::json::JsonValue(legacy_kind));
-    if (unique.count("kind"))
+    if (unique.count("kind") ||
+        definition(definition_key, type).kind != NativeObjectKind::operation)
       throw std::invalid_argument("Legacy native binding conflicts with kind");
   }
-  auto inserted =
-      schemas_.emplace(key, Schema{std::move(definition_key), type,
-                                   std::move(ports), std::move(decode)});
+  auto inserted = schemas_.emplace(
+      key, Schema{std::move(definition_key), type, std::move(ports),
+                  std::move(decode), std::move(optional_ports)});
   try {
     if (!legacy_kind.empty())
       legacy_schemas_.emplace(std::move(legacy_kind), std::move(key));
@@ -41,26 +48,35 @@ void NativeOperationRegistry::register_schema_impl(
 }
 
 NativeOperationRegistry::DecodedOperation NativeOperationRegistry::decode(
-    const NativeOperationDescription &description) const {
+    const NativeOperationDescription &description,
+    NativeObjectKind object_kind) const {
   const auto found = schemas_.find(description.key());
   if (found == schemas_.end())
     throw std::invalid_argument(
         "Unregistered native operation schema: " + description.provider + "/" +
         description.operation);
   const auto &schema = found->second;
-  if (description.bindings.size() != schema.ports.size())
+  if (definition(schema.definition, schema.type).kind != object_kind)
     throw std::invalid_argument(
-        "Native operation binding set does not match its schema");
+        "Native operation/resource schema kind mismatch");
   for (const auto &port : schema.ports) {
     if (!description.bindings.count(port))
       throw std::invalid_argument("Missing native operation binding: " + port);
-    operation_json::name(liong::json::JsonValue(description.bindings.at(port)));
   }
   DecodedOperation result;
   result.kind_ = schema.definition.first;
   result.version_ = schema.definition.second;
   result.type_ = schema.type;
-  result.ports_ = schema.ports;
+  result.object_kind_ = object_kind;
+  for (const auto &[port, slot] : description.bindings) {
+    if (std::find(schema.ports.begin(), schema.ports.end(), port) ==
+            schema.ports.end() &&
+        std::find(schema.optional_ports.begin(), schema.optional_ports.end(),
+                  port) == schema.optional_ports.end())
+      throw std::invalid_argument("Unknown native schema binding: " + port);
+    operation_json::name(liong::json::JsonValue(slot));
+    result.ports_.push_back(port);
+  }
   try {
     result.bind_ = schema.decode(description.parameters);
   } catch (const std::exception &error) {
@@ -84,6 +100,13 @@ std::optional<NativeOperationDescription> NativeOperationRegistry::lower_legacy(
     result.bindings.emplace(port, operation_json::name(description[port]));
     result.parameters.obj.inner.erase(port);
   }
+  for (const auto &port : schemas_.at(found->second).optional_ports) {
+    if (const auto input = description.obj.inner.find(port);
+        input != description.obj.inner.end()) {
+      result.bindings.emplace(port, operation_json::name(input->second));
+      result.parameters.obj.inner.erase(port);
+    }
+  }
   return result;
 }
 
@@ -92,6 +115,28 @@ std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare(
     Device &device,
     const DecodedOperation &operation,
     const NativeOperationBindings &bindings) const {
+  return std::dynamic_pointer_cast<NativeOperation>(prepare_bound(
+      arch, device, operation, bindings, NativeObjectKind::operation));
+}
+
+std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_resource(
+    Arch arch,
+    Device &device,
+    const DecodedOperation &resource,
+    const NativeOperationBindings &bindings) const {
+  return prepare_bound(arch, device, resource, bindings,
+                       NativeObjectKind::resource);
+}
+
+std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_bound(
+    Arch arch,
+    Device &device,
+    const DecodedOperation &operation,
+    const NativeOperationBindings &bindings,
+    NativeObjectKind kind) const {
+  if (operation.object_kind_ != kind)
+    throw std::invalid_argument(
+        "Native operation/resource binding kind mismatch");
   if (!operation.bind_ || bindings.size() != operation.ports_.size())
     throw std::invalid_argument(
         "Native operation storage set does not match its schema");
@@ -100,18 +145,19 @@ std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare(
       throw std::invalid_argument("Missing native operation storage: " + port);
   const auto value = operation.bind_(bindings);
   return prepare_impl(operation.kind_, operation.version_, operation.type_,
-                      arch, device, value.get());
+                      arch, device, value.get(), kind);
 }
 
 void NativeOperationRegistry::define_impl(const std::string &kind,
                                           std::uint32_t version,
                                           std::type_index type,
-                                          ErasedValidator validate) {
+                                          ErasedValidator validate,
+                                          NativeObjectKind object_kind) {
   if (kind.empty() || kind.find('\0') != std::string::npos || !version)
     throw std::invalid_argument("Native operation requires a kind and version");
   if (!definitions_
            .emplace(Key{kind, version},
-                    Definition{type, std::move(validate), {}})
+                    Definition{type, std::move(validate), {}, object_kind})
            .second)
     throw std::invalid_argument("Duplicate native operation definition: " +
                                 kind);
@@ -158,7 +204,8 @@ const NativeOperationCapability *NativeOperationRegistry::find(
     std::uint32_t version,
     Arch arch) const {
   const auto found = definitions_.find({kind, version});
-  if (found == definitions_.end())
+  if (found == definitions_.end() ||
+      found->second.kind != NativeObjectKind::operation)
     return nullptr;
   const auto backend = found->second.backends.find(arch);
   return backend == found->second.backends.end() ? nullptr
@@ -169,17 +216,19 @@ std::vector<NativeOperationCapability> NativeOperationRegistry::capabilities()
     const {
   std::vector<NativeOperationCapability> result;
   for (const auto &[key, definition] : definitions_)
-    for (const auto &[arch, backend] : definition.backends)
-      result.push_back(backend.capability);
+    if (definition.kind == NativeObjectKind::operation)
+      for (const auto &[arch, backend] : definition.backends)
+        result.push_back(backend.capability);
   return result;
 }
 
 NativeOperationAvailability NativeOperationRegistry::probe(
     const std::string &kind,
     std::uint32_t version,
-    Arch arch) const {
+    Arch arch,
+    NativeObjectKind object_kind) const {
   const auto found = definitions_.find({kind, version});
-  if (found == definitions_.end())
+  if (found == definitions_.end() || found->second.kind != object_kind)
     return {};
   const auto backend = found->second.backends.find(arch);
   if (backend == found->second.backends.end())
@@ -188,14 +237,18 @@ NativeOperationAvailability NativeOperationRegistry::probe(
                                : NativeOperationAvailability{true, 0};
 }
 
-std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare_impl(
+std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_impl(
     const std::string &kind,
     std::uint32_t version,
     std::type_index type,
     Arch arch,
     Device &device,
-    const void *value) const {
+    const void *value,
+    NativeObjectKind object_kind) const {
   const auto &entry = definition({kind, version}, type);
+  if (entry.kind != object_kind)
+    throw std::invalid_argument(
+        "Native operation/resource factory kind mismatch");
   const auto backend = entry.backends.find(arch);
   if (backend == entry.backends.end())
     throw std::invalid_argument("No native operation factory for " + kind +
@@ -209,6 +262,14 @@ std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare_impl(
   if (!result || result->arch() != arch || &result->device() != &device)
     throw std::invalid_argument(
         "Native operation factory returned an invalid owner: " + kind);
+  if (object_kind == NativeObjectKind::operation &&
+      !std::dynamic_pointer_cast<NativeOperation>(result))
+    throw std::invalid_argument("Native factory did not return an operation: " +
+                                kind);
+  if (object_kind == NativeObjectKind::resource &&
+      std::dynamic_pointer_cast<NativeOperation>(result))
+    throw std::invalid_argument(
+        "Native resource factory returned an operation: " + kind);
   return result;
 }
 

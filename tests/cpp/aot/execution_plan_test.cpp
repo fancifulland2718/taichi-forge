@@ -209,4 +209,27 @@ TEST(ExecutionPlan, RejectsInvalidResourceGraphsBeforeBinding) {
     EXPECT_THROW(ExecutionPlan::parse(prefix + resources + "}"),
                  std::invalid_argument);
 }
+
+TEST(ExecutionPlan, NativeResourcesShareTheRequiredDependencyClosure) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,
+    "resources":[
+      {"kind":"native","name":"child","provider":"test","operation":"plan","version":1,
+       "parameters":{},"bindings":{"context":"parent","input":"scratch"}},
+      {"kind":"native","name":"parent","provider":"test","operation":"context","version":1,
+       "parameters":{},"bindings":{}},
+      {"kind":"ndarray","name":"scratch","dtype":"f32","shape":[{"array":"x","axis":0}]},
+      {"kind":"native","name":"unused","provider":"missing","operation":"unknown","version":1,
+       "parameters":{},"bindings":{"input":"not_required"}}],
+    "operations":[{"kind":"native","provider":"test","operation":"run","version":1,
+                   "parameters":{},"bindings":{"plan":"child","output":"y"}}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x", "y"}));
+  EXPECT_EQ(plan.resources.order, (std::vector<std::size_t>{1, 2, 0}));
+  EXPECT_EQ(plan.resources.materialize,
+            (std::vector<bool>{true, true, true, false}));
+  const auto cyclic = R"({"version":1,"resources":[
+    {"kind":"native","name":"x","provider":"test","operation":"plan","version":1,
+     "parameters":{},"bindings":{"parent":"x"}}],
+    "operations":[{"kind":"fill32","destination":"y","value":0}]})";
+  EXPECT_THROW(ExecutionPlan::parse(cyclic), std::invalid_argument);
+}
 }  // namespace taichi::lang::aot

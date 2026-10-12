@@ -23,12 +23,24 @@ struct PreparedExecution {
   bool live{false};
   // Declared before backend recordings so owned buffers are destroyed last.
   std::unique_ptr<ExecutionResourceStorage> resources;
+  std::vector<std::shared_ptr<NativeResource>> native_resources;
+  uint64_t native_resource_workspace_bytes{0};
   // The backend consumes these cold descriptors before they are released.
   std::unique_ptr<BoundKernelArguments> kernel_arguments;
   std::unique_ptr<BoundGraphArguments> graph_arguments;
   std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
   std::vector<std::unique_ptr<BoundKernelArguments>> plan_arguments;
   std::unique_ptr<FixedExecution> native;
+
+  void release_native_resources() {
+    while (!native_resources.empty())
+      native_resources.pop_back();
+    native_resource_workspace_bytes = 0;
+  }
+  ~PreparedExecution() {
+    native.reset();
+    release_native_resources();
+  }
 
   void release_source_bindings() {
     contexts.clear();
@@ -81,6 +93,7 @@ struct PreparedExecution {
   void invalidate() {
     live = false;
     native.reset();
+    release_native_resources();
     release_source_bindings();
     resources.reset();
   }
@@ -335,22 +348,29 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   std::map<const aot::ExecutionPlan::Native *,
            NativeOperationRegistry::DecodedOperation>
       decoded;
+  auto preflight = [&](const aot::ExecutionPlan::Native *native,
+                       NativeObjectKind kind) {
+    try {
+      auto request = native_operation_registry().decode(*native, kind);
+      if (probed.emplace(request.kind(), request.version()).second &&
+          !native_operation_registry()
+               .probe(request.kind(), request.version(), rt.arch, kind)
+               .available)
+        throw MemoryBindingError(native->provider + "/" + native->operation +
+                                 " provider unavailable on this runtime");
+      decoded.emplace(native, std::move(request));
+    } catch (const std::invalid_argument &error) {
+      throw MemoryBindingError(error.what());
+    }
+  };
+  for (const auto index : plan.resources.order)
+    if (const auto *native = std::get_if<NativeOperationDescription>(
+            &plan.resources.declarations[index].value))
+      preflight(native, NativeObjectKind::resource);
   for (const auto &operation : plan.operations) {
     if (const auto *native =
-            std::get_if<aot::ExecutionPlan::Native>(&operation)) {
-      try {
-        auto request = native_operation_registry().decode(*native);
-        if (probed.emplace(request.kind(), request.version()).second &&
-            !native_operation_registry()
-                 .probe(request.kind(), request.version(), rt.arch)
-                 .available)
-          throw MemoryBindingError(native->provider + "/" + native->operation +
-                                   " provider unavailable on this runtime");
-        decoded.emplace(native, std::move(request));
-      } catch (const std::invalid_argument &error) {
-        throw MemoryBindingError(error.what());
-      }
-    }
+            std::get_if<aot::ExecutionPlan::Native>(&operation))
+      preflight(native, NativeObjectKind::operation);
   }
   auto resource_bindings =
       capi::bind_execution_resources(rt, plan.resources, arguments, layouts);
@@ -361,7 +381,11 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     uint64_t element_bytes;
   };
   auto storage = [&](const std::string &name, uint64_t offset) {
-    const auto &arg = *arguments.at(name);
+    const auto found = arguments.find(name);
+    if (found == arguments.end())
+      throw MemoryBindingError(
+          "Execution storage requires an ndarray binding: " + name);
+    const auto &arg = *found->second;
     if (arg.type != TI_ARGUMENT_TYPE_NDARRAY)
       throw MemoryBindingError("Execution memory operations require ndarrays");
     const auto &array = arg.value.ndarray;
@@ -376,6 +400,57 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                    element_bytes};
   };
   std::map<std::string, NativeArrayBinding> native_arrays;
+  std::map<std::string, std::shared_ptr<NativeResource>> native_objects;
+  auto native_inputs = [&](const NativeOperationDescription &description) {
+    NativeOperationBindings inputs;
+    for (const auto &[port, slot] : description.bindings) {
+      if (const auto object = native_objects.find(slot);
+          object != native_objects.end()) {
+        inputs.emplace(port, object->second);
+        continue;
+      }
+      auto found = native_arrays.find(slot);
+      if (found == native_arrays.end()) {
+        const auto view = storage(slot, 0);
+        const auto &array = arguments.at(slot)->value.ndarray;
+        found =
+            native_arrays
+                .emplace(
+                    slot,
+                    NativeArrayBinding{
+                        view.pointer,
+                        view.size,
+                        capi::ndarray_scalar_type(array.elem_type),
+                        {array.shape.dims,
+                         array.shape.dims + array.shape.dim_count},
+                        {array.elem_shape.dims,
+                         array.elem_shape.dims + array.elem_shape.dim_count},
+                        rt.get_memory(array.memory).base_offset})
+                .first;
+      }
+      inputs.emplace(port, found->second);
+    }
+    return inputs;
+  };
+  for (const auto index : plan.resources.order) {
+    const auto &resource = plan.resources.declarations[index];
+    if (const auto *native =
+            std::get_if<NativeOperationDescription>(&resource.value)) {
+      try {
+        auto object = native_operation_registry().prepare_resource(
+            rt.arch, rt.get(), decoded.at(native), native_inputs(*native));
+        const auto bytes = object->workspace_bytes();
+        if (bytes > std::numeric_limits<uint64_t>::max() -
+                        prepared->native_resource_workspace_bytes)
+          throw MemoryBindingError("Native resource workspace size overflow");
+        prepared->native_resource_workspace_bytes += bytes;
+        prepared->native_resources.push_back(object);
+        native_objects.emplace(resource.name, std::move(object));
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
+    }
+  }
   std::vector<FixedExecution::Operation> operations;
   for (const auto &operation : plan.operations) {
     if (const auto *kernel =
@@ -388,6 +463,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
       std::vector<TiNdArrayBinding> kernel_bindings;
       for (std::size_t i = 0; i < kernel->arguments.size(); ++i) {
         const auto &name = kernel->arguments[i];
+        if (native_objects.count(name))
+          throw MemoryBindingError(
+              "Kernel arguments cannot bind native resources: " + name);
         kernel_args.push_back(*arguments.at(name));
         if (auto binding = layouts.find(name); binding != layouts.end()) {
           used_bindings.insert(name);
@@ -424,32 +502,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
           dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
     } else if (const auto *native =
                    std::get_if<aot::ExecutionPlan::Native>(&operation)) {
-      NativeOperationBindings inputs;
-      for (const auto &[port, slot] : native->bindings) {
-        auto found = native_arrays.find(slot);
-        if (found == native_arrays.end()) {
-          const auto view = storage(slot, 0);
-          const auto &array = arguments.at(slot)->value.ndarray;
-          found =
-              native_arrays
-                  .emplace(
-                      slot,
-                      NativeArrayBinding{
-                          view.pointer,
-                          view.size,
-                          capi::ndarray_scalar_type(array.elem_type),
-                          {array.shape.dims,
-                           array.shape.dims + array.shape.dim_count},
-                          {array.elem_shape.dims,
-                           array.elem_shape.dims + array.elem_shape.dim_count},
-                          rt.get_memory(array.memory).base_offset})
-                  .first;
-        }
-        inputs.emplace(port, found->second);
-      }
       try {
         operations.emplace_back(native_operation_registry().prepare(
-            rt.arch, rt.get(), decoded.at(native), inputs));
+            rt.arch, rt.get(), decoded.at(native), native_inputs(*native)));
       } catch (const std::invalid_argument &error) {
         throw MemoryBindingError(error.what());
       }
@@ -673,7 +728,12 @@ uint64_t ti_get_prepared_execution_workspace_bytes_ext(
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   const auto &prepared = rt.prepared_registry().get(execution);
-  return prepared.native ? prepared.native->workspace_bytes() : 0;
+  const auto operations =
+      prepared.native ? prepared.native->workspace_bytes() : 0;
+  if (operations > std::numeric_limits<uint64_t>::max() -
+                       prepared.native_resource_workspace_bytes)
+    throw MemoryBindingError("Prepared workspace size overflow");
+  return operations + prepared.native_resource_workspace_bytes;
   TI_CAPI_TRY_CATCH_END();
   return 0;
 }
