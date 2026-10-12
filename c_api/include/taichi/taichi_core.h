@@ -1216,13 +1216,30 @@ ti_get_native_operation_capabilities_ext(TiRuntime runtime,
                                          const char *kind,
                                          uint32_t version);
 
+typedef struct TiNativeOperationAvailabilityExt {
+  TiFlags capabilities;
+  TiBool available;
+  // Provider-specific numeric library version; zero for built-ins/unavailable.
+  uint32_t library_version;
+} TiNativeOperationAvailabilityExt;
+
+// Explicit cold dependency probe. May load a vendor library but does not create
+// provider plans or operation storage. Missing optional providers return false;
+// an unknown operation/backend also has zero capabilities. Concrete descriptors
+// and deployment device compatibility are still checked during preparation.
+TI_DLL_EXPORT void TI_API_CALL
+ti_probe_native_operation_ext(TiRuntime runtime,
+                              const char *kind,
+                              uint32_t version,
+                              TiNativeOperationAvailabilityExt *availability);
+
 // Version 1 persistent execution description: ordered loaded kernels, native
-// buffer copy/fill32, sort and compact. JSON is consumed only during
-// preparation. Named slots refer to supplied arguments; memory operations use
-// primitive or tensor ndarray storage. All descriptors/ranges are checked
-// before recording, and the result shares the ownership and replay contract
-// above. No provider, control-region or live callback is silently substituted
-// for an unknown kind.
+// buffer copy/fill32, sort, compact and fft_c2c_f32. JSON is consumed only
+// during preparation. Named slots refer to supplied arguments; memory
+// operations use primitive or tensor ndarray storage. All descriptors/ranges
+// are checked before recording, and the result shares the ownership and replay
+// contract above. No provider, control-region or live callback is silently
+// substituted for an unknown kind.
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
 ti_prepare_execution_plan_ext(TiRuntime runtime,
                               TiAotModule module,

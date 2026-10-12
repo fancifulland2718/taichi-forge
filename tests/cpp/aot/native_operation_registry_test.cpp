@@ -173,6 +173,44 @@ TEST(NativeOperationRegistry, RejectsNullOrForeignFactoryResults) {
   EXPECT_EQ(runs, 0);
   EXPECT_EQ(retired, 2);
 }
+
+TEST(NativeOperationRegistry, OptionalProviderProbeIsColdAndPrecedesFactory) {
+  cpu::CpuDevice device;
+  NativeOperationRegistry registry;
+  bool available = false;
+  int probes = 0, factories = 0, runs = 0, retired = 0;
+  registry.define<TestDescriptor>([](Device &, const TestDescriptor &) {});
+  registry.register_factory<TestDescriptor>(
+      host_arch(), NativeOperationMode::cpu,
+      [&](Arch arch, Device &device, const TestDescriptor &) {
+        ++factories;
+        return std::make_shared<TestOperation>(arch, device, runs, retired);
+      },
+      [&] {
+        ++probes;
+        return NativeOperationAvailability{available, available ? 12001u : 0u};
+      });
+  EXPECT_NE(registry.find(TestDescriptor::kind, 1, host_arch()), nullptr);
+  EXPECT_EQ(registry.capabilities().size(), 1);
+  EXPECT_EQ(probes, 0);
+  EXPECT_FALSE(registry.probe("unrelated", 1, host_arch()).available);
+  EXPECT_EQ(probes, 0);
+  EXPECT_FALSE(registry.probe(TestDescriptor::kind, 1, host_arch()).available);
+  EXPECT_THROW(registry.prepare(host_arch(), device, TestDescriptor{}),
+               std::invalid_argument);
+  EXPECT_EQ(factories, 0);
+  available = true;
+  EXPECT_EQ(
+      registry.probe(TestDescriptor::kind, 1, host_arch()).library_version,
+      12001);
+  auto prepared = registry.prepare(host_arch(), device, TestDescriptor{});
+  EXPECT_EQ(factories, 1);
+  const auto cold_probes = probes;
+  prepared->run_cpu();
+  prepared->run_cpu();
+  EXPECT_EQ(probes, cold_probes);
+  EXPECT_EQ(runs, 2);
+}
 #endif
 }  // namespace
 }  // namespace taichi::lang

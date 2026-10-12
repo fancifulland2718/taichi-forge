@@ -169,6 +169,30 @@ class Runtime:
             flags = self._api.call(self._api.ti_get_native_operation_capabilities_ext, self._handle, kind, version)
         return frozenset(name for bit, name in ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline")) if flags & bit)
 
+    def probe_native_operation(self, kind, *, version=1):
+        """Cold optional-dependency check; may load a library, never a plan.
+
+        Missing providers report available=False. A successful probe does not
+        qualify every device/layout; preparation validates the actual binding.
+        Replay does not repeat this query. Library versions are provider-specific.
+        """
+        kind = _name(kind)
+        if type(version) is not int or not 1 <= version <= 0xFFFFFFFF:
+            raise ValueError("Operation version must be a positive uint32")
+        with self._lock:
+            self._check()
+            result = abi.NativeOperationAvailability()
+            self._api.call(self._api.ti_probe_native_operation_ext, self._handle, kind, version, C.byref(result))
+        return {
+            "available": bool(result.available),
+            "capabilities": frozenset(
+                name
+                for bit, name in ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline"))
+                if result.capabilities & bit
+            ),
+            "library_version": result.library_version or None,
+        }
+
     def load_module(self, path):
         with self._lock:
             self._check()

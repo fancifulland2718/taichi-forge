@@ -33,7 +33,8 @@ void NativeOperationRegistry::register_impl(const std::string &kind,
                                             std::type_index type,
                                             Arch arch,
                                             NativeOperationMode mode,
-                                            ErasedFactory factory) {
+                                            ErasedFactory factory,
+                                            Probe probe) {
   const Key key{kind, version};
   definition(key, type);
   if (!((mode == NativeOperationMode::cpu && arch_is_cpu(arch)) ||
@@ -43,8 +44,9 @@ void NativeOperationRegistry::register_impl(const std::string &kind,
         "Native operation composition mode/backend mismatch");
   if (!definitions_.at(key)
            .backends
-           .emplace(arch,
-                    Backend{{kind, version, arch, mode}, std::move(factory)})
+           .emplace(arch, Backend{{kind, version, arch, mode},
+                                  std::move(factory),
+                                  std::move(probe)})
            .second)
     throw std::invalid_argument("Duplicate native operation backend: " + kind);
 }
@@ -70,6 +72,20 @@ std::vector<NativeOperationCapability> NativeOperationRegistry::capabilities()
   return result;
 }
 
+NativeOperationAvailability NativeOperationRegistry::probe(
+    const std::string &kind,
+    std::uint32_t version,
+    Arch arch) const {
+  const auto found = definitions_.find({kind, version});
+  if (found == definitions_.end())
+    return {};
+  const auto backend = found->second.backends.find(arch);
+  if (backend == found->second.backends.end())
+    return {};
+  return backend->second.probe ? backend->second.probe()
+                               : NativeOperationAvailability{true, 0};
+}
+
 std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare_impl(
     const std::string &kind,
     std::uint32_t version,
@@ -84,6 +100,9 @@ std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare_impl(
                                 " v" + std::to_string(version) + " on " +
                                 arch_name(arch));
   entry.validate(device, value);
+  if (backend->second.probe && !backend->second.probe().available)
+    throw std::invalid_argument("Native operation provider unavailable: " +
+                                kind);
   auto result = backend->second.factory(device, value);
   if (!result || result->arch() != arch || &result->device() != &device)
     throw std::invalid_argument(
@@ -96,6 +115,7 @@ const NativeOperationRegistry &native_operation_registry() {
     NativeOperationRegistry result;
     register_compact_operation(result);
     register_sort_operation(result);
+    register_fft_operation(result);
     return result;
   }();
   return registry;

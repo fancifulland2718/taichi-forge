@@ -24,13 +24,20 @@ struct NativeOperationCapability {
   NativeOperationMode mode;
 };
 
+struct NativeOperationAvailability {
+  bool available{false};
+  // Zero denotes an unversioned built-in or an unavailable dependency.
+  std::uint32_t library_version{0};
+};
+
 // Build privately, then publish as const. No static registration side effects,
-// replacement, device probing or warm-path lookup. Descriptors and factories
+// replacement, implicit device probing or warm-path lookup. Descriptors and factories
 // are an internal C++ contract, not an ABI for independently built plugins.
 // A factory prepares without submitting work; its result owns scratch and any
 // provider/code leases. FixedExecution retains it until recordings retire.
 class NativeOperationRegistry {
  public:
+  using Probe = std::function<NativeOperationAvailability()>;
   template <typename Descriptor>
   using Validator = std::function<void(Device &, const Descriptor &)>;
   template <typename Descriptor>
@@ -51,7 +58,8 @@ class NativeOperationRegistry {
   template <typename Descriptor>
   void register_factory(Arch arch,
                         NativeOperationMode mode,
-                        Factory<Descriptor> factory) {
+                        Factory<Descriptor> factory,
+                        Probe probe = {}) {
     if (!factory)
       throw std::invalid_argument("Native operation requires a factory");
     register_impl(
@@ -59,7 +67,8 @@ class NativeOperationRegistry {
         [arch, factory = std::move(factory)](Device &device,
                                              const void *value) {
           return factory(arch, device, *static_cast<const Descriptor *>(value));
-        });
+        },
+        std::move(probe));
   }
 
   template <typename Descriptor>
@@ -74,6 +83,11 @@ class NativeOperationRegistry {
                                         std::uint32_t version,
                                         Arch arch) const;
   std::vector<NativeOperationCapability> capabilities() const;
+  // Explicit cold probe: may load a dependency, never creates a plan or work
+  // buffer. Capability enumeration and prepared replay never invoke it.
+  NativeOperationAvailability probe(const std::string &kind,
+                                    std::uint32_t version,
+                                    Arch arch) const;
 
  private:
   using Key = std::pair<std::string, std::uint32_t>;
@@ -83,6 +97,7 @@ class NativeOperationRegistry {
   struct Backend {
     NativeOperationCapability capability;
     ErasedFactory factory;
+    Probe probe;
   };
   struct Definition {
     std::type_index type;
@@ -100,7 +115,8 @@ class NativeOperationRegistry {
                      std::type_index type,
                      Arch arch,
                      NativeOperationMode mode,
-                     ErasedFactory factory);
+                     ErasedFactory factory,
+                     Probe probe);
   const Definition &definition(const Key &key, std::type_index type) const;
   std::shared_ptr<NativeOperation> prepare_impl(const std::string &kind,
                                                 std::uint32_t version,
@@ -115,5 +131,6 @@ const NativeOperationRegistry &native_operation_registry();
 // Explicit entry points keep registration deterministic under static linking.
 void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
+void register_fft_operation(NativeOperationRegistry &registry);
 
 }  // namespace taichi::lang

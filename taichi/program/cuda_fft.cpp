@@ -12,6 +12,8 @@
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/runtime/native_operation_registry.h"
 
 namespace taichi::lang {
 namespace {
@@ -380,8 +382,10 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
   }
 
   ~CudaFftPlan() {
+    // Standalone AOT plans have no Program fault domain. Their prepared owner
+    // retires them before the device; existing JIT plans retain their fault gate.
     const bool provider_calls_safe =
-        fault_domain_ && !fault_domain_->has_fatal_fault();
+        !fault_domain_ || !fault_domain_->has_fatal_fault();
     if (provider_calls_safe) {
       try {
         auto cuda_submission_guard =
@@ -491,6 +495,98 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
   std::vector<std::unique_ptr<CudaFftPlan>> children_;
   std::mutex mutex_;
 };
+
+namespace {
+class AotCudaFftOperation final : public NativeOperation {
+ public:
+  AotCudaFftOperation(Device &device,
+                      CufftPlanDescriptor descriptor,
+                      void *input,
+                      void *output,
+                      bool inverse)
+      : device_(device),
+        plan_(std::move(descriptor), true, nullptr),
+        input_(input),
+        output_(output),
+        direction_(inverse ? kCufftInverse : kCufftForward) {
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return plan_.workspace_bytes();
+  }
+  void record_cuda(void *stream) override {
+    plan_.execute(input_, output_, direction_, static_cast<CUstream>(stream));
+  }
+
+ private:
+  Device &device_;
+  CudaFftPlan plan_;
+  void *input_;
+  void *output_;
+  int direction_;
+};
+}  // namespace
+
+NativeOperationAvailability probe_cuda_fft_operation() {
+  if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
+    return {};
+  auto &driver = CUFFTDriver::get_instance();
+  if (!driver.load_cufft())
+    return {};
+  return {true,
+          static_cast<std::uint32_t>(driver.capabilities().library_version)};
+}
+
+std::shared_ptr<NativeOperation> prepare_cuda_fft_operation(
+    Arch,
+    Device &device,
+    const FftC2COperation &operation) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda_device)
+    throw std::invalid_argument("cuFFT requires a CUDA device");
+  const auto max_int =
+      static_cast<std::size_t>((std::numeric_limits<int>::max)());
+  if (operation.dimensions.size() > 3 || operation.batch_count > max_int)
+    throw std::invalid_argument(
+        "cuFFT PlanMany requires rank 1-3 and int32 batch count");
+  const auto count = fft_c2c_element_count(operation);
+  const auto plane = count / operation.batch_count;
+  if (plane > max_int)
+    throw std::invalid_argument(
+        "cuFFT PlanMany compact batch distance exceeds int32");
+  std::vector<int> dimensions(operation.dimensions.begin(),
+                              operation.dimensions.end());
+  CufftPlanDescriptor descriptor{dimensions,
+                                 dimensions,
+                                 1,
+                                 static_cast<int>(plane),
+                                 dimensions,
+                                 1,
+                                 static_cast<int>(plane),
+                                 static_cast<int>(operation.batch_count),
+                                 CufftTransformKind::c2c};
+  auto map = [&](DevicePtr ptr) {
+    return static_cast<char *>(cuda_device->get_memory_addr(ptr)) + ptr.offset;
+  };
+  auto *input = map(operation.input);
+  auto *output = map(operation.output);
+  const auto a = reinterpret_cast<std::uintptr_t>(input);
+  const auto b = reinterpret_cast<std::uintptr_t>(output);
+  const auto bytes = count * 2 * sizeof(float);
+  if (!a || !b || a % 8 || b % 8 || (a != b && (a < b ? b - a : a - b) < bytes))
+    throw std::invalid_argument(
+        "cuFFT requires aligned, identical or disjoint storage");
+  auto &cuda = CUDAContext::get_instance();
+  auto submission_guard = cuda.get_submission_lock_guard();
+  auto context_guard = cuda.get_guard();
+  return std::make_shared<AotCudaFftOperation>(
+      device, std::move(descriptor), input, output, operation.inverse);
+}
 
 std::uint64_t Program::create_cuda_cufft_plan_1d(std::size_t length,
                                                  std::size_t batch_count,

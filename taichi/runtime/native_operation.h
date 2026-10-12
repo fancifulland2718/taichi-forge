@@ -56,6 +56,25 @@ struct SortOperation {
   std::size_t value_scalar_bytes{0};
 };
 
+// Compact row-major interleaved complex f32 values. The inverse is
+// unnormalized. Each prepared object owns its provider plan/workspace; exact
+// in-place input and output are allowed, partial overlap is not.
+struct FftC2COperation {
+  static constexpr const char *kind = "fft_c2c_f32";
+  static constexpr std::uint32_t version = 1;
+  DevicePtr input;
+  DevicePtr output;
+  std::vector<std::size_t> dimensions;
+  std::size_t batch_count{1};
+  bool inverse{false};
+};
+
+std::size_t fft_c2c_element_count(const FftC2COperation &operation);
+std::shared_ptr<NativeOperation> prepare_fft_operation(
+    Arch arch,
+    Device &device,
+    const FftC2COperation &operation);
+
 // Ascending, stable, in-place sort. Floating NaNs sort last and equal keys
 // preserve their input order. Payloads are copied as raw records.
 std::shared_ptr<NativeOperation> prepare_sort_operation(

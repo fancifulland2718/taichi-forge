@@ -48,6 +48,31 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         arguments.insert(copy.destination);
         arguments.insert(copy.source);
         plan.operations.emplace_back(std::move(copy));
+      } else if (kind == "fft_c2c_f32") {
+        fields(step, {"kind", "input", "output", "dimensions", "batch_count",
+                      "direction"});
+        Fft fft{name(step["input"]), name(step["output"]), {}};
+        const auto &dimensions = step["dimensions"];
+        if (!dimensions.is_arr() || dimensions.arr.inner.empty())
+          throw std::invalid_argument(
+              "FFT dimensions must be a nonempty array");
+        for (const auto &axis : dimensions.arr.inner) {
+          auto extent = integer(axis);
+          if (!extent)
+            throw std::invalid_argument("FFT dimensions must be positive");
+          fft.dimensions.push_back(extent);
+        }
+        fft.batch_count = optional_integer(step, "batch_count").value_or(1);
+        if (!fft.batch_count)
+          throw std::invalid_argument("FFT batch count must be positive");
+        const auto direction = name(step["direction"]);
+        if (direction != "forward" && direction != "inverse")
+          throw std::invalid_argument(
+              "FFT direction must be forward or inverse");
+        fft.inverse = direction == "inverse";
+        arguments.insert(fft.input);
+        arguments.insert(fft.output);
+        plan.operations.emplace_back(std::move(fft));
       } else if (kind == "sort") {
         fields(step, {"kind", "keys", "values"});
         Sort sort{name(step["keys"]), std::nullopt};

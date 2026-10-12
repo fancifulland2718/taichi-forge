@@ -53,6 +53,27 @@ TEST(ExecutionPlan, NativeCompactRetainsAllSymbolicDependencies) {
                std::invalid_argument);
 }
 
+TEST(ExecutionPlan, FftPreservesExplicitDirectionAndDimensions) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"fft_c2c_f32","input":"x","output":"y","dimensions":[3,5],"batch_count":2,"direction":"inverse"}]})");
+  const auto &fft = std::get<ExecutionPlan::Fft>(plan.operations[0]);
+  EXPECT_EQ(fft.dimensions, (std::vector<std::uint64_t>{3, 5}));
+  EXPECT_EQ(fft.batch_count, 2);
+  EXPECT_TRUE(fft.inverse);
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x", "y"}));
+  for (const auto *fields :
+       {R"("dimensions":[],"direction":"forward")",
+        R"("dimensions":[true],"direction":"forward")",
+        R"("dimensions":[1],"direction":"adjoint")",
+        R"("dimensions":[1],"direction":"forward","batch_count":0)"})
+    EXPECT_THROW(
+        ExecutionPlan::parse(
+            std::string(
+                R"({"version":1,"operations":[{"kind":"fft_c2c_f32","input":"x","output":"y",)") +
+            fields + "}]}"),
+        std::invalid_argument);
+}
+
 TEST(ExecutionPlan, SortHasOptionalPayloadWithoutImplicitArguments) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"sort","keys":"x"},

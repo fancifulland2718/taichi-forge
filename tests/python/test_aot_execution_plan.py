@@ -26,6 +26,10 @@ def test_execution_plan_snapshot_and_roundtrip(tmp_path):
         '{"version":1,"operations":[{"kind":"kernel","entry":"x","arguments":[],"hidden":1}]}',
         '{"version":1,"operations":[{"kind":"copy","source":"x","destination":"y","size_bytes":-1}]}',
         '{"version":1,"operations":[{"kind":"fill32","destination":"x","value":4294967296}]}',
+        '{"version":1,"operations":[{"kind":"fft_c2c_f32","input":"x","output":"y","dimensions":[],"direction":"forward"}]}',
+        '{"version":1,"operations":[{"kind":"fft_c2c_f32","input":"x","output":"y","dimensions":[true],"direction":"forward"}]}',
+        '{"version":1,"operations":[{"kind":"fft_c2c_f32","input":"x","output":"y","dimensions":[2],"direction":"forward","batch_count":false}]}',
+        '{"version":1,"operations":[{"kind":"fft_c2c_f32","input":"x","output":"y","dimensions":[2],"direction":"adjoint"}]}',
         '{"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[]}]}',
         '{"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x"}]}]}',
         '{"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x","output":"y"}],"values":"z","output":"w"}]}',
@@ -80,3 +84,22 @@ def test_execution_resource_dependency_walk_is_iterative():
     ]
     plan = ExecutionPlan([{"kind": "fill32", "destination": "r0", "value": 0}], resources=resources)
     assert plan.argument_names == ("r257",)
+
+
+def test_fft_description_preserves_direction_and_static_shape():
+    plan = ExecutionPlan(
+        [
+            {
+                "kind": "fft_c2c_f32",
+                "input": "x",
+                "output": "y",
+                "dimensions": [3, 5],
+                "batch_count": 2,
+                "direction": "inverse",
+            }
+        ]
+    )
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("x", "y")
+    assert restored.kernel_entries == ()
+    assert json.loads(restored.to_json())["operations"][0]["dimensions"] == [3, 5]

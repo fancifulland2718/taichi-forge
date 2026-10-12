@@ -117,7 +117,7 @@ ArgPack 和 GPU sparse topology 任务仍需后续资源/控制扩展。产物�
 
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
 选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、任意 native Graph、
-provider 和外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
+未列出的 provider 和外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
 后端的前向/反向与两种 AOT/JIT 加载顺序。
 
 安装后的 `examples/aot_sdk` 包含导出脚本及独立消费程序。`SDK`、`MODULE`
@@ -144,7 +144,7 @@ Linux/macOS SDK 部署尚未通过此次验证。小示例打印的初始化、�
 诊断，不代表实际应用性能。
 
 `ExecutionPlan` 提供版本 1 的持久化顺序描述，覆盖已导出的 kernel、设备内存复制和
-32 位位模式填充、稳定排序及稳定压缩。生产端先导出引用的 kernel，再添加描述：
+32 位位模式填充、稳定排序、稳定压缩及下文的 FFT 切片。生产端先导出引用的 kernel，再添加描述：
 
 ```python
 from taichi_forge_runtime.aot import ExecutionPlan
@@ -235,7 +235,42 @@ CPU/CUDA/Vulkan 用例覆盖前向计算、显式反向及上述所有权转换�
 `"vulkan_inline"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配
 工作区，具体 dtype、布局和设备要求仍在准备时检查。对应 C API 为
 `ti_get_native_operation_capabilities_ext`。注册与选择发生在共用的原生准备层，
-重放使用已准备对象，不再查询注册表。上述注册不代表外部 provider 已接通。
+重放使用已准备对象，不再查询注册表。注册不代表可选 provider 已安装。
+
+`runtime.probe_native_operation(kind, version=1)` 在分配操作数组前显式检查可选
+依赖，返回 `available`、`capabilities` 和 provider 自己定义的 `library_version`
+（内建操作或库不可用时为 `None`）。冷探测可能加载动态库，但不创建 plan/workspace。
+未注册操作没有能力；已注册但缺库的 provider 保留编译能力并报告 `available=False`，
+不影响无关操作。具体设备/布局仍在准备时检查。C/C++ 对应
+`ti_probe_native_operation_ext` 和 `TiNativeOperationAvailabilityExt`。
+
+CUDA 当前注册 `fft_c2c_f32`，通过外部 cuFFT 执行紧凑行优先、实虚交错的 f32
+复数 ndarray（`element_shape=(2,)`）：
+
+```python
+exported.add_execution_plan("fft", ExecutionPlan([
+    {"kind": "fft_c2c_f32", "input": "source", "output": "frequency",
+     "dimensions": [16, 32], "batch_count": 2, "direction": "forward"},
+]))
+```
+
+数组恰好包含 `batch_count * product(dimensions)` 个复数元素。`batch_count`
+默认 1，`direction` 必须为 `"forward"` 或 `"inverse"`。逆变换不归一化，需要时
+另乘变换尺寸的倒数。支持完全原地执行，拒绝部分重叠。cuFFT 适配器沿用现有
+PlanMany 的 rank 1–3 及 int32 维度/批次距离 ABI；本切片不包括 strided 布局、
+实数变换、双精度或 callback。CPU/Vulkan 在此切片没有 FFT 工厂。
+
+每个 prepared 实例独占 vendor plan/workspace；准备不执行 FFT、不改动传入缓冲。
+kernel/FFT 混合顺序一次捕获为 CUDA Graph，重放不重复发现 provider 或创建计划。
+`workspace_bytes` 包含 vendor 报告的 scratch，小变换可能为零，不包含不透明的
+vendor 管理对象。关闭依赖在完成后退休对应 recording 和 plan。
+`info.dispatch_count` 计数导出的 kernel 入口，不包含 vendor 内部的 GPU kernel。
+
+cuFFT 由应用单独安装，并对进程加载器可见（例如 Windows `PATH` 或显式预加载
+动态库）；Forge 不打包 vendor DLL。Windows cuFFT 12.2 / RTX 5090 验证覆盖
+rank 1–3、批次、原地执行、独立 workspace、失败回滚和借用 owner reset。
+导出的 scale/FFT/energy 链还用解析梯度核对显式组装的伴随，不表示自动 FFT AD。
+变换与 Graph 合同见 [NVIDIA cuFFT 文档](https://docs.nvidia.com/cuda/cufft/index.html)。
 
 生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
 版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号

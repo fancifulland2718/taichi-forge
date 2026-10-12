@@ -42,7 +42,14 @@ struct ExecutionPlan {
     std::string keys;
     std::optional<std::string> values;
   };
-  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort>;
+  struct Fft {
+    std::string input;
+    std::string output;
+    std::vector<std::uint64_t> dimensions;
+    std::uint64_t batch_count{1};
+    bool inverse{false};
+  };
+  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Fft>;
   std::vector<Operation> operations;
   std::vector<std::string> arguments;
   ExecutionResources resources;

@@ -95,6 +95,9 @@ class ExecutionPlan:
             elif kind == "sort":
                 required, optional = {"kind", "keys"}, {"values"}
                 names = ("keys", "values") if "values" in op else ("keys",)
+            elif kind == "fft_c2c_f32":
+                required = {"kind", "input", "output", "dimensions", "direction"}
+                optional, names = {"batch_count"}, ("input", "output")
             else:
                 raise ValueError(f"Unsupported execution operation: {kind}")
             if not required <= set(op) or set(op) - required - optional:
@@ -116,6 +119,17 @@ class ExecutionPlan:
             elif kind == "fill32":
                 if type(op["value"]) is not int or not 0 <= op["value"] <= 0xFFFFFFFF:
                     raise ValueError("fill32 value must be a uint32 bit pattern")
+            elif kind == "fft_c2c_f32":
+                dimensions = op["dimensions"]
+                if (
+                    not isinstance(dimensions, list)
+                    or not dimensions
+                    or any(type(axis) is not int or not 0 < axis <= 0x7FFFFFFFFFFFFFFF for axis in dimensions)
+                    or op.get("batch_count", 1) == 0
+                ):
+                    raise ValueError("FFT requires positive int64 dimensions and batch count")
+                if op["direction"] not in ("forward", "inverse"):
+                    raise ValueError("FFT direction must be forward or inverse")
             elif kind == "compact" and "columns" in op:
                 if not isinstance(op["columns"], list) or not op["columns"]:
                     raise ValueError("Compact columns must be a nonempty array")

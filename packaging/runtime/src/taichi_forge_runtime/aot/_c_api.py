@@ -121,6 +121,10 @@ class PreparedInfo(C.Structure):
     ]
 
 
+class NativeOperationAvailability(C.Structure):
+    _fields_ = [("capabilities", UInt), ("available", UInt), ("library_version", UInt)]
+
+
 class MemoryAllocateInfo(C.Structure):
     _fields_ = [
         ("size", C.c_uint64),
@@ -151,6 +155,7 @@ class Api:
             "ti_set_last_error": ([C.c_int32, C.c_char_p], None),
             "ti_create_runtime": ([UInt, UInt], Handle),
             "ti_get_native_operation_capabilities_ext": ([Handle, C.c_char_p, UInt], UInt),
+            "ti_probe_native_operation_ext": ([Handle, C.c_char_p, UInt, C.POINTER(NativeOperationAvailability)], None),
             "ti_get_prepared_execution_resource_bytes_ext": ([Handle, Handle], C.c_uint64),
             "ti_destroy_runtime": ([Handle], None),
             "ti_wait": ([Handle], None),

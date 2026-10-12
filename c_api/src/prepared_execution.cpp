@@ -328,6 +328,17 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
 
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = &mod;
+  // Optional providers are admitted before allocating private plan resources.
+  // There is no dependency probing on replay, nor on unrelated operations.
+  if (std::any_of(plan.operations.begin(), plan.operations.end(),
+                  [](const auto &op) {
+                    return std::holds_alternative<aot::ExecutionPlan::Fft>(op);
+                  }) &&
+      !native_operation_registry()
+           .probe(FftC2COperation::kind, 1, rt.arch)
+           .available)
+    throw MemoryBindingError(
+        "FFT C2C f32 provider unavailable on this runtime");
   auto resource_bindings =
       capi::bind_execution_resources(rt, plan.resources, arguments, layouts);
   prepared->resources = std::move(resource_bindings.storage);
@@ -397,6 +408,40 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         throw MemoryBindingError("Execution copy slices must not overlap");
       operations.emplace_back(FixedExecution::BufferCopy{
           dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
+    } else if (const auto *fft =
+                   std::get_if<aot::ExecutionPlan::Fft>(&operation)) {
+      const auto input = storage(fft->input, 0);
+      const auto output = storage(fft->output, 0);
+      for (const auto *name : {&fft->input, &fft->output}) {
+        const auto &array = arguments.at(*name)->value.ndarray;
+        if (array.elem_type != TI_DATA_TYPE_F32 ||
+            array.elem_shape.dim_count != 1 || array.elem_shape.dims[0] != 2 ||
+            rt.get_memory(array.memory).base_offset % 8)
+          throw MemoryBindingError(
+              "FFT requires aligned interleaved complex f32 vector(2) "
+              "ndarrays");
+      }
+      FftC2COperation descriptor{
+          input.pointer, output.pointer, {}, 1, fft->inverse};
+      if (fft->batch_count > std::numeric_limits<std::size_t>::max())
+        throw MemoryBindingError("FFT batch count overflows address space");
+      descriptor.batch_count = static_cast<std::size_t>(fft->batch_count);
+      for (auto dimension : fft->dimensions) {
+        if (dimension > std::numeric_limits<std::size_t>::max())
+          throw MemoryBindingError("FFT dimension overflows address space");
+        descriptor.dimensions.push_back(static_cast<std::size_t>(dimension));
+      }
+      try {
+        const auto bytes =
+            fft_c2c_element_count(descriptor) * 2 * sizeof(float);
+        if (input.size != bytes || output.size != bytes)
+          throw std::invalid_argument(
+              "FFT dimensions/batch do not match ndarray storage");
+        operations.emplace_back(
+            prepare_fft_operation(rt.arch, rt.get(), descriptor));
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
     } else if (const auto *sort =
                    std::get_if<aot::ExecutionPlan::Sort>(&operation)) {
       const auto keys = storage(sort->keys, 0);
@@ -557,6 +602,33 @@ TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
   return capability ? static_cast<TiFlags>(capability->mode) : 0;
   TI_CAPI_TRY_CATCH_END();
   return 0;
+}
+
+void ti_probe_native_operation_ext(
+    TiRuntime runtime,
+    const char *kind,
+    uint32_t version,
+    TiNativeOperationAvailabilityExt *availability) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(availability);
+  *availability = {};
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(kind);
+  if (!*kind || !version) {
+    ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, "operation kind or version");
+    return;
+  }
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &registry = taichi::lang::native_operation_registry();
+  const auto *capability = registry.find(kind, version, rt.arch);
+  if (capability) {
+    const auto status = registry.probe(kind, version, rt.arch);
+    availability->capabilities = static_cast<TiFlags>(capability->mode);
+    availability->available = status.available ? TI_TRUE : TI_FALSE;
+    availability->library_version = status.library_version;
+  }
+  TI_CAPI_TRY_CATCH_END();
 }
 
 void ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {

@@ -141,7 +141,7 @@ waits and closes its children; later calls on them fail. Prefer explicit lifetim
 management to GC timing. Optional `library_path` and `runtime_path` select the
 shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
 core/resource set. The Python consumer currently excludes structure arrays,
-textures, arbitrary native Graphs, providers and external-memory imports; the C/C++
+textures, arbitrary native Graphs, unlisted providers and external-memory imports; the C/C++
 capabilities below are separate. Windows x64 checks cover all three backends,
 forward/reverse work and both AOT/JIT loading orders.
 
@@ -172,7 +172,7 @@ deployment has not been validated by this check. Initialization/loading timings
 printed by this small example are diagnostics, not application benchmarks.
 
 `ExecutionPlan` provides a version 1 persistent sequence of exported kernels,
-device buffer copies, 32-bit pattern fills, stable sort and compaction. Export the referenced kernels
+device buffer copies, 32-bit pattern fills, stable sort, compaction and the FFT slice below. Export the referenced kernels
 before adding the description:
 
 ```python
@@ -292,7 +292,52 @@ Concrete dtype, layout and device requirements are still checked at preparation.
 The C API equivalent is `ti_get_native_operation_capabilities_ext`. Registration
 and selection happen in the shared native preparation layer; replay uses the
 already prepared object and performs no registry lookup. These registrations do
-not imply external-provider support.
+not imply that an optional provider is installed.
+
+`runtime.probe_native_operation(kind, version=1)` explicitly checks optional
+dependencies before allocating operation arrays. It returns `available`,
+`capabilities` and a provider-specific `library_version` (`None` for built-ins or
+unavailable libraries). This cold call may load a vendor library, but creates no
+plan/workspace. Unregistered operations have no capabilities; a registered
+provider with a missing library keeps its compiled capabilities and reports
+`available=False`. Unrelated operations remain usable. Concrete device/layout
+admission still happens during preparation. C/C++ uses
+`ti_probe_native_operation_ext` and `TiNativeOperationAvailabilityExt`.
+
+CUDA currently registers `fft_c2c_f32`, using external cuFFT for compact,
+row-major interleaved complex f32 ndarrays (`element_shape=(2,)`):
+
+```python
+exported.add_execution_plan("fft", ExecutionPlan([
+    {"kind": "fft_c2c_f32", "input": "source", "output": "frequency",
+     "dimensions": [16, 32], "batch_count": 2, "direction": "forward"},
+]))
+```
+
+Bind arrays with exactly `batch_count * product(dimensions)` complex elements.
+`batch_count` defaults to 1; `direction` must be `"forward"` or `"inverse"`.
+Inverse transforms are unnormalized; scale by the reciprocal transform size
+when needed. Exact in-place storage is supported; partial overlap is rejected.
+The cuFFT adapter retains its existing PlanMany rank 1–3 and int32 dimension/
+batch-distance ABI. This slice excludes strided layouts, real transforms,
+double precision and callbacks. CPU/Vulkan have no FFT factory in this slice.
+
+Each prepared instance owns an independent vendor plan/workspace. Preparation
+does not execute FFTs or change supplied buffers; mixed kernel/FFT sequences
+capture once and replay as a CUDA Graph without provider discovery or plan
+creation on every call. `workspace_bytes` includes vendor-reported scratch and
+may be zero for small transforms; opaque vendor bookkeeping is not included.
+Closing a dependency retires its recording and plan after completion.
+`info.dispatch_count` counts exported kernel entries, excluding vendor-internal
+GPU kernels.
+
+Install cuFFT separately and make it visible to the process loader (for example,
+Windows `PATH`, or an explicitly preloaded library). Forge does not bundle the
+vendor DLL. Windows cuFFT 12.2 / RTX 5090 checks cover ranks 1–3, batches,
+in-place execution, independent workspaces, rollback and borrowed-owner reset.
+An exported scale/FFT/energy chain also checks an explicitly assembled adjoint
+against an analytic gradient; this does not add automatic FFT differentiation.
+See NVIDIA's [cuFFT transform and Graph contracts](https://docs.nvidia.com/cuda/cufft/index.html).
 
 The producer exports registered recipes through
 `module.add_primitive(name, kind, version=1, **options)`. Version 1 supports
