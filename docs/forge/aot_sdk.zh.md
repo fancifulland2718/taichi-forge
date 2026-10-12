@@ -418,7 +418,7 @@ runtime.configure_provider("cutensor", adapter_path=None)
 provider 不加载。重配置只影响后续探测/准备，已有 prepared 保留原库与资源 lease。
 借用同一 JIT device 的 runtime 也分别持有配置；路径不写入产物。
 
-此配置作用于已注册的 adapter 工厂，目前包括下文 cuTENSOR 操作；不会注册任意
+此配置作用于已注册的 adapter 工厂，目前包括下文 cuTENSOR 与 cuSPARSELt 操作；不会注册任意
 厂商符号、改变既有 cuBLAS/cuFFT 内建寻址，也不自动导出 JIT recording。
 
 CUDA cuTENSOR 重建复用既有 provider C ABI 与同一原生操作/资源注册表。选择可选
@@ -468,6 +468,49 @@ Windows CUDA/cuTENSOR 2.7 已验证无 DSL 的独立消费端和借用 JIT owner
 导出的能量/反向 kernel 配合显式收缩伴随、输出置换、C/D 原址重合、独立帧、非法
 绑定回滚、重配置和在途 close/reset。这不提供 cuTENSOR 调用的自动求导、任意 JIT
 recording 导出，也不代表所有 tensor 拓扑和设备均已验证。
+
+CUDA cuSPARSELt 使用同一配置与资源链路。安装其可选 SDK adapter 后调用
+`runtime.configure_provider("cusparselt", ...)`。版本 1 的
+`cusparselt/matmul_plan_f16` 资源持有计划、压缩 A 和 scratch；`compress_f16`
+写入该存储，后序 `matmul_f16` 操作复用它：
+
+```python
+def lt(operation, bindings, **parameters):
+    return {"kind": "native", "provider": "cusparselt", "operation": operation,
+            "version": 1, "bindings": bindings, "parameters": parameters}
+
+plan = ExecutionPlan([
+    lt("compress_f16", {"plan": "weights", "a": "a"}),
+    lt("matmul_f16", {"plan": "weights", "b": "b", "c": "c", "d": "d"},
+       alpha=0.75, beta=0.25),
+    lt("matmul_f16", {"plan": "weights", "b": "b", "c": "c", "d": "e"},
+       alpha=-0.5, beta=0.5),
+], resources=[dict(lt("matmul_plan_f16", {}, m=32, n=48, k=64), name="weights")])
+```
+
+输入为紧凑行主序 f16：A(m,k)、B(n,k)、C/D(m,n)，计算
+`D = alpha * A @ B.T + beta * C`，f32 累加、f16 输出。A 须已满足逐行 2:4 稀疏
+规则；Forge 不隐式剪枝，也不读回数据检查数值。adapter 要求 m/n/k 为正且是 16
+的倍数。`alignment_bytes` 默认 16，须为二次幂且各绑定指针对齐满足要求。D 可与
+C 原址重合，不得与 B 重叠；C/D 部分重叠拒绝。
+
+计划参数还支持 `algorithm_id`（默认 -1，使用厂商默认算法）、`split_k`、
+`split_k_mode`、`split_k_buffers`（省略时保持厂商默认）及布尔值 `relu`（默认
+false）。这些显式物理配置复用既有 configured-plan adapter ABI，不兼容的设置
+在准备时失败，不隐式改成另一配置；开启 ReLU 后作用于每个乘法输出。
+
+无条件执行序列须先压缩该计划，再读取其压缩存储。每次准备独立地在录制前检查，
+暖态重放不查询初始化状态。每次重放沿声明序列执行，因此一次压缩可供多个乘法
+使用，不必重复压缩；准备过程不推进数学计算。当前格式要求压缩在重放序列中，
+尚未暴露“跨多次重放只初始化一次”的持久快照。未来结构化 AOT 支持条件初始化时，
+还需按控制流验证初始化关系。
+
+每个 prepared 实例独占压缩数据和 scratch，已知字节数只计入一次 `workspace_bytes`，
+不随使用次数增加，不包含不透明厂商存储。Windows CUDA/cuSPARSELt 0.9.1 已验证
+无 DSL/借用消费、合法稀疏输入更新、共享压缩、固定稀疏结构的显式 f32 伴随、ReLU、
+C/D 反馈、独立实例、未初始化读取/别名回滚和在途 close/reset。显式伴随不对稀疏
+结构选择或 f16 舍入求导。CPU/Vulkan 不声明这些 CUDA 操作，任意 recording 导出
+仍是独立待办。
 
 生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
 版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号

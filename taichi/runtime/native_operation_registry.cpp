@@ -307,6 +307,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_fft_operation(result);
     register_blas_operations(result);
     register_cutensor_operations(result);
+    register_cusparselt_operations(result);
     return result;
   }();
   return registry;

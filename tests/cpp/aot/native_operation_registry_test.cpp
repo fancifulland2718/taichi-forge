@@ -74,6 +74,27 @@ TEST(NativeOperationRegistry, CutensorDescriptionsValidateWithoutLoadingCode) {
   }
 }
 
+TEST(NativeOperationRegistry,
+     CusparseLtDescriptionsValidateWithoutLoadingCode) {
+  auto description = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cusparselt","operation":"matmul_plan_f16","version":1,"bindings":{},"parameters":{"m":32,"n":48,"k":64}})"));
+  const auto &registry = native_operation_registry();
+  EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  for (const auto *patch :
+       {R"({"m":0})", R"({"n":17})", R"({"k":-1})", R"({"alignment_bytes":3})",
+        R"({"alignment_bytes":4294967296})", R"({"algorithm_id":-2})",
+        R"({"split_k":0.0})", R"({"relu":1})",
+        R"({"m":9223372036854775792})"}) {
+    auto invalid = description;
+    for (const auto &[name, value] :
+         liong::json::parse_complete(patch).obj.inner)
+      invalid.parameters.obj.inner[name] = value;
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, RejectsAmbiguousDefinitionsBeforePublication) {
   NativeOperationRegistry registry;
   NativeOperationRegistry::Factory<TestDescriptor> factory =

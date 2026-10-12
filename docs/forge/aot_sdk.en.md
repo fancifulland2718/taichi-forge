@@ -514,8 +514,8 @@ load. Reconfiguration affects later probes/preparations; existing prepared objec
 retain their original library/resource leases. Borrowed runtimes sharing one JIT
 device have independent configuration. Paths are not serialized into artifacts.
 
-This configures registered adapter-backed factories, currently the cuTENSOR
-operations below. It does not register arbitrary vendor symbols, change existing
+This configures registered adapter-backed factories, currently the cuTENSOR and
+cuSPARSELt operations below. It does not register arbitrary vendor symbols, change existing
 built-in cuBLAS/cuFFT discovery, or automatically export JIT recordings.
 
 CUDA cuTENSOR reconstruction uses the existing provider C ABI and the same
@@ -573,6 +573,56 @@ explicit contraction adjoints, output permutation, exact C/D aliasing,
 independent frames, invalid-binding rollback, reconfiguration and in-flight
 close/reset. This does not provide automatic differentiation of cuTENSOR calls,
 arbitrary JIT recording export, or qualification of every tensor topology/device.
+
+CUDA cuSPARSELt uses the same configuration and resource path. Install its optional
+SDK adapter and call `runtime.configure_provider("cusparselt", ...)`. A version 1
+`cusparselt/matmul_plan_f16` resource owns the plan, compressed A and scratch;
+`compress_f16` writes that storage, and subsequent `matmul_f16` operations reuse it:
+
+```python
+def lt(operation, bindings, **parameters):
+    return {"kind": "native", "provider": "cusparselt", "operation": operation,
+            "version": 1, "bindings": bindings, "parameters": parameters}
+
+plan = ExecutionPlan([
+    lt("compress_f16", {"plan": "weights", "a": "a"}),
+    lt("matmul_f16", {"plan": "weights", "b": "b", "c": "c", "d": "d"},
+       alpha=0.75, beta=0.25),
+    lt("matmul_f16", {"plan": "weights", "b": "b", "c": "c", "d": "e"},
+       alpha=-0.5, beta=0.5),
+], resources=[dict(lt("matmul_plan_f16", {}, m=32, n=48, k=64), name="weights")])
+```
+
+Inputs are packed row-major f16: A(m,k), B(n,k), and C/D(m,n). The operation is
+`D = alpha * A @ B.T + beta * C`, with f32 accumulation and f16 output. A must
+already satisfy row-wise 2:4 sparsity; Forge neither prunes it nor reads it back
+to validate values. The adapter requires positive m/n/k divisible by 16. Default
+`alignment_bytes=16` must be a power of two satisfied by bound pointers. D may
+exactly alias C but must not overlap B; partial C/D overlap is rejected.
+
+Plan parameters also accept `algorithm_id` (default -1 for the vendor default),
+`split_k`, `split_k_mode`, `split_k_buffers` (omission keeps vendor defaults), and
+boolean `relu` (default false). These explicit physical choices use the existing
+configured-plan adapter ABI; incompatible choices fail at preparation and are
+not silently retuned. ReLU is applied to each matmul output when enabled.
+
+The unconditional sequence must compress a plan before reading its compressed
+storage. This is checked before recording, independently for each preparation;
+no initialization check is added to replay. Each replay follows the declared
+sequence, so one compression can feed multiple multiplies without duplicate
+compression. Preparation does not advance the mathematical work. The current
+format requires compression in the replay sequence: a persistent snapshot
+initialized once across replays is not yet exposed. Conditional initialization
+will need control-flow validation when structured AOT plans are supported.
+
+Each prepared instance owns independent compressed data and scratch. Their known
+bytes contribute once to `workspace_bytes`, regardless of the number of uses;
+opaque vendor storage remains excluded. Windows CUDA/cuSPARSELt 0.9.1 checks cover
+DSL-free and borrowed consumers, changing valid sparse inputs, shared compression,
+fixed-pattern explicit f32 adjoints, ReLU, C/D feedback, independent instances,
+uninitialized-read/alias rollback and in-flight close/reset. The explicit adjoint
+does not differentiate sparsity selection or f16 rounding. CPU/Vulkan do not
+advertise these CUDA operations. Arbitrary recording export remains separate.
 
 The producer exports registered recipes through
 `module.add_primitive(name, kind, version=1, **options)`. Version 1 supports
