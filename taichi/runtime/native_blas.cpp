@@ -1,4 +1,5 @@
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_blas.h"
 #include "taichi/common/operation_json.h"
 
 #include <cmath>
@@ -11,6 +12,11 @@ std::shared_ptr<NativeOperation> prepare_cuda_gemm_f32_operation(
     Device &device,
     const GemmF32Operation &operation);
 NativeOperationAvailability probe_cuda_gemm_f32_operation();
+std::shared_ptr<NativeOperation> prepare_cuda_dot_f32_operation(
+    Arch arch,
+    Device &device,
+    const DotF32Operation &operation);
+NativeOperationAvailability probe_cuda_dot_f32_operation();
 #endif
 
 std::array<std::size_t, 3> gemm_f32_element_counts(const GemmF32Operation &op) {
@@ -28,7 +34,7 @@ std::array<std::size_t, 3> gemm_f32_element_counts(const GemmF32Operation &op) {
           product(op.rows, op.columns)};
 }
 
-void register_gemm_operation(NativeOperationRegistry &registry) {
+void register_blas_operations(NativeOperationRegistry &registry) {
   registry.define<GemmF32Operation>(
       [](Device &device, const GemmF32Operation &op) {
         gemm_f32_element_counts(op);
@@ -92,6 +98,48 @@ void register_gemm_operation(NativeOperationRegistry &registry) {
   registry.register_factory<GemmF32Operation>(
       Arch::cuda, NativeOperationMode::cuda_capture,
       prepare_cuda_gemm_f32_operation, probe_cuda_gemm_f32_operation);
+#endif
+
+  registry.define<DotF32Operation>(
+      [](Device &device, const DotF32Operation &op) {
+        if (op.size > std::numeric_limits<std::size_t>::max() / sizeof(float))
+          throw std::invalid_argument("Dot extent overflows storage size");
+        if (op.x.device != &device || op.y.device != &device ||
+            op.output.device != &device)
+          throw std::invalid_argument("Dot storage belongs to another device");
+      });
+  registry.register_schema<DotF32Operation>(
+      "cublas", "dot_f32", {"x", "y", "output"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<DotF32Operation> {
+        using namespace operation_json;
+        fields(parameters, {"size"});
+        const auto size = integer(parameters["size"]);
+        if (size > std::numeric_limits<std::size_t>::max() / sizeof(float))
+          throw std::invalid_argument("Dot extent overflows storage size");
+        return [size](const NativeOperationBindings &bindings) {
+          auto array = [&](const char *port, bool scalar) {
+            const auto &value = bindings.at(port);
+            const auto shape = std::vector<std::uint64_t>{scalar ? 1 : size};
+            if (value.scalar_type != PrimitiveType::f32 ||
+                !value.element_shape.empty() ||
+                (value.shape != shape && !(scalar && value.shape.empty())) ||
+                value.bytes != (scalar ? 1 : size) * sizeof(float) ||
+                value.base_offset % sizeof(float) ||
+                value.pointer.offset % sizeof(float))
+              throw std::invalid_argument(
+                  "Dot requires compact f32 vectors and a scalar output");
+            return value.pointer;
+          };
+          return DotF32Operation{array("x", false), array("y", false),
+                                 array("output", true),
+                                 static_cast<std::size_t>(size)};
+        };
+      });
+#ifdef TI_WITH_CUDA
+  registry.register_factory<DotF32Operation>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      prepare_cuda_dot_f32_operation, probe_cuda_dot_f32_operation);
 #endif
 }
 

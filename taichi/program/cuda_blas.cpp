@@ -7,6 +7,7 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_blas.h"
 
 namespace taichi::lang {
 namespace {
@@ -43,7 +44,8 @@ void validate_matrix(Ndarray *array,
               "CUDA cuBLAS {} must belong to the active runtime.", name);
 }
 
-cublasHandle_t create_gemm_handle() {
+cublasHandle_t create_blas_handle(
+    cublasPointerMode_t pointer_mode = CUBLAS_POINTER_MODE_HOST) {
   auto &driver = CUBLASDriver::get_instance();
   TI_ERROR_IF(!driver.load_cublas(),
               "CUDA cuBLAS could not load a compatible shared library.");
@@ -54,7 +56,7 @@ cublasHandle_t create_gemm_handle() {
   const auto stream = driver.cubSetStream.call(handle, nullptr);
   const auto pointers =
       stream == CUBLAS_STATUS_SUCCESS
-          ? driver.cubSetPointerMode.call(handle, CUBLAS_POINTER_MODE_HOST)
+          ? driver.cubSetPointerMode.call(handle, pointer_mode)
           : stream;
   if (stream != CUBLAS_STATUS_SUCCESS || pointers != CUBLAS_STATUS_SUCCESS) {
     driver.cubDestroy.call(handle);
@@ -85,21 +87,12 @@ void execute_gemm(cublasHandle_t handle,
               "CUDA cuBLAS SGEMM failed (status {}).", status);
 }
 
-class AotCudaGemmOperation final : public NativeOperation {
+class CudaBlasOperation : public NativeOperation {
  public:
-  AotCudaGemmOperation(Device &device,
-                       GemmF32Operation op,
-                       const float *a,
-                       const float *b,
-                       float *output)
-      : device_(device),
-        op_(op),
-        a_(a),
-        b_(b),
-        output_(output),
-        handle_(create_gemm_handle()) {
+  CudaBlasOperation(Device &device, cublasPointerMode_t pointer_mode)
+      : device_(device), handle_(create_blas_handle(pointer_mode)) {
   }
-  ~AotCudaGemmOperation() override {
+  ~CudaBlasOperation() override {
     // FixedExecution retires the captured graph before this handle. cuBLAS may
     // retain opaque allocations associated with its handle/capture.
     auto &cuda = CUDAContext::get_instance();
@@ -107,8 +100,7 @@ class AotCudaGemmOperation final : public NativeOperation {
     auto guard = cuda.get_guard();
     const auto status = CUBLASDriver::get_instance().cubDestroy.call(handle_);
     TI_WARN_IF(status != CUBLAS_STATUS_SUCCESS,
-               "CUDA cuBLAS GEMM handle destruction returned status {}.",
-               status);
+               "CUDA cuBLAS handle destruction returned status {}.", status);
   }
   Arch arch() const override {
     return Arch::cuda;
@@ -121,11 +113,33 @@ class AotCudaGemmOperation final : public NativeOperation {
     // cannot be queried through the basic cuBLAS API.
     return 0;
   }
-  void record_cuda(void *stream) override {
+
+ protected:
+  void bind_stream(void *stream) {
     const auto status = CUBLASDriver::get_instance().cubSetStream.call(
         handle_, static_cast<CUstream>(stream));
     TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
                 "CUDA cuBLAS capture stream setup failed (status {}).", status);
+  }
+  Device &device_;
+  cublasHandle_t handle_;
+};
+
+class CudaGemmOperation final : public CudaBlasOperation {
+ public:
+  CudaGemmOperation(Device &device,
+                    GemmF32Operation op,
+                    const float *a,
+                    const float *b,
+                    float *output)
+      : CudaBlasOperation(device, CUBLAS_POINTER_MODE_HOST),
+        op_(op),
+        a_(a),
+        b_(b),
+        output_(output) {
+  }
+  void record_cuda(void *stream) override {
+    bind_stream(stream);
     execute_gemm(handle_, static_cast<int>(op_.rows),
                  static_cast<int>(op_.columns), static_cast<int>(op_.inner), a_,
                  b_, output_, op_.alpha, op_.beta, op_.transpose_a,
@@ -133,17 +147,41 @@ class AotCudaGemmOperation final : public NativeOperation {
   }
 
  private:
-  Device &device_;
   GemmF32Operation op_;
   const float *a_;
   const float *b_;
   float *output_;
-  cublasHandle_t handle_;
 };
 
-}  // namespace
+class CudaDotOperation final : public CudaBlasOperation {
+ public:
+  CudaDotOperation(Device &device,
+                   int size,
+                   const float *x,
+                   const float *y,
+                   float *output)
+      : CudaBlasOperation(device, CUBLAS_POINTER_MODE_DEVICE),
+        size_(size),
+        x_(x),
+        y_(y),
+        output_(output) {
+  }
+  void record_cuda(void *stream) override {
+    bind_stream(stream);
+    const auto status = CUBLASDriver::get_instance().cubSdot.call(
+        handle_, size_, x_, 1, y_, 1, output_);
+    TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
+                "CUDA cuBLAS SDOT failed (status {}).", status);
+  }
 
-NativeOperationAvailability probe_cuda_gemm_f32_operation() {
+ private:
+  int size_;
+  const float *x_;
+  const float *y_;
+  float *output_;
+};
+
+NativeOperationAvailability probe_cuda_blas() {
   if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
     return {};
   auto &driver = CUBLASDriver::get_instance();
@@ -157,7 +195,28 @@ NativeOperationAvailability probe_cuda_gemm_f32_operation() {
           ? caps.library_version_major * 10000 +
                 caps.library_version_minor * 100 + caps.library_version_patch
           : 0;
-  return {caps.gemm_f32_available, static_cast<std::uint32_t>(version)};
+  return {driver.cubCreate.available() && driver.cubDestroy.available() &&
+              driver.cubSetStream.available() &&
+              driver.cubSetPointerMode.available(),
+          static_cast<std::uint32_t>(version)};
+}
+
+}  // namespace
+
+NativeOperationAvailability probe_cuda_gemm_f32_operation() {
+  auto result = probe_cuda_blas();
+  if (result.available)
+    result.available = CUBLASDriver::get_instance().cubSgemm.available();
+  return result;
+}
+
+NativeOperationAvailability probe_cuda_dot_f32_operation() {
+  auto result = probe_cuda_blas();
+  if (result.available) {
+    auto &driver = CUBLASDriver::get_instance();
+    result.available = driver.cubSdot.available();
+  }
+  return result;
 }
 
 std::shared_ptr<NativeOperation> prepare_cuda_gemm_f32_operation(
@@ -191,7 +250,41 @@ std::shared_ptr<NativeOperation> prepare_cuda_gemm_f32_operation(
   auto &cuda = CUDAContext::get_instance();
   auto lock = cuda.get_submission_lock_guard();
   auto guard = cuda.get_guard();
-  return std::make_shared<AotCudaGemmOperation>(device, op, a, b, output);
+  return std::make_shared<CudaGemmOperation>(device, op, a, b, output);
+}
+
+std::shared_ptr<NativeOperation> prepare_cuda_dot_f32_operation(
+    Arch,
+    Device &device,
+    const DotF32Operation &op) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda_device)
+    throw std::invalid_argument("cuBLAS requires a CUDA device");
+  if (op.size > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+    throw std::invalid_argument("cuBLAS SDOT size must fit int32");
+  auto map = [&](DevicePtr ptr) {
+    auto *base = static_cast<char *>(cuda_device->get_memory_addr(ptr));
+    return reinterpret_cast<float *>(base ? base + ptr.offset : nullptr);
+  };
+  auto *x = map(op.x);
+  auto *y = map(op.y);
+  auto *output = map(op.output);
+  const auto dst = reinterpret_cast<std::uintptr_t>(output);
+  if (!dst || dst % sizeof(float))
+    throw std::invalid_argument("Dot requires aligned output storage");
+  for (const auto *pointer : {x, y}) {
+    const auto src = reinterpret_cast<std::uintptr_t>(pointer);
+    if ((op.size && !src) || src % sizeof(float) ||
+        (op.size && (src <= dst ? dst - src < op.size * sizeof(float)
+                                : src - dst < sizeof(float))))
+      throw std::invalid_argument(
+          "Dot requires aligned storage and output disjoint from inputs");
+  }
+  auto &cuda = CUDAContext::get_instance();
+  auto lock = cuda.get_submission_lock_guard();
+  auto guard = cuda.get_guard();
+  return std::make_shared<CudaDotOperation>(device, static_cast<int>(op.size),
+                                            x, y, output);
 }
 
 std::size_t Program::cuda_cublas_gemm_f32(Ndarray *a,
@@ -228,7 +321,7 @@ std::size_t Program::cuda_cublas_gemm_f32(Ndarray *a,
   std::lock_guard<std::mutex> provider_lock(cuda_cublas_gemm_mutex_);
   auto handle = static_cast<cublasHandle_t>(cuda_cublas_gemm_handle_);
   if (!handle) {
-    handle = create_gemm_handle();
+    handle = create_blas_handle();
     cuda_cublas_gemm_handle_ = handle;
   }
 

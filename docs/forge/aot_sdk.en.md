@@ -339,9 +339,9 @@ resources. Parameters are frozen values without process addresses. The common
 reader/binder does not interpret vendor mathematics. A native registration owns
 parameter/layout/alias validation and uses the existing typed factory; warm replay
 retains no JSON interpreter. Currently registered schemas are version 1 of
-`cublas/gemm_f32` and `cufft/fft_c2c_f32`. Their parameters match the legacy forms
-below after removing `kind` and storage names. Registered lowering preserves those
-legacy forms.
+`cublas/gemm_f32`, `cublas/dot_f32` and `cufft/fft_c2c_f32`. GEMM/FFT parameters
+match the legacy forms below after removing `kind` and storage names. Registered
+lowering preserves those legacy forms; dot uses the common envelope directly.
 
 Descriptions can be saved/read without a native library. Preparation checks the
 concrete schema, backend and dependencies before allocating private buffers. This
@@ -419,6 +419,30 @@ beta, independent frames, rollback, in-flight close and borrowed-owner reset.
 An exported energy/reverse kernel plus explicit GEMM adjoints validates gradients
 with respect to A and B. This does not provide automatic differentiation of the
 external operation or qualify every vendor version/device.
+
+The same cuBLAS registration also reconstructs a device-output f32 dot product:
+
+```python
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cublas", "operation": "dot_f32", "version": 1,
+    "parameters": {"size": 37},
+    "bindings": {"x": "left", "y": "right", "output": "dot"},
+}])
+```
+
+Inputs are compact scalar f32 vectors of shape `(size,)`; the f32 output has
+shape `()` or `(1,)` and cannot overlap either input. Read-only inputs may
+alias. `size` is nonnegative and must fit the loaded SDOT int32 API. Empty input
+writes zero on every replay. `runtime.probe_native_operation("dot_f32")` reports
+this operation independently. CPU/Vulkan have no factory for it.
+
+The prepared handle uses device pointer mode, so subsequent Graph kernels can
+consume the scalar without a host read or synchronization. Preparation does not
+change the output. It shares the handle retirement and workspace accounting above.
+Windows cuBLAS 13.3 checks cover repeated device writes, empty input, independent
+bindings, invalid layout/alias rollback and in-flight close/reset. An exported
+energy/reverse kernel with an explicit dot adjoint checks input gradients;
+automatic differentiation of the external call is not provided.
 
 The producer exports registered recipes through
 `module.add_primitive(name, kind, version=1, **options)`. Version 1 supports

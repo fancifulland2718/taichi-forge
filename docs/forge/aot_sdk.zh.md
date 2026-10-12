@@ -272,8 +272,9 @@ plan = ti.aot.ExecutionPlan([operation])
 `bindings` 的键是操作端口，值是执行计划中的参数或私有资源名称。`parameters`
 保存无进程地址的冻结参数。通用 reader/binder 不识别各库的数学参数；同一原生
 注册项负责参数、布局/别名检查并调用既有 typed 工厂，暖态不保留 JSON 解释器。
-目前注册 `cublas/gemm_f32` 和 `cufft/fft_c2c_f32` 的 version 1，参数分别与下文
-旧写法中移除 `kind` 和存储名称后的字段相同；旧写法继续通过注册式转换兼容。
+目前注册 `cublas/gemm_f32`、`cublas/dot_f32` 和 `cufft/fft_c2c_f32` 的 version 1。
+GEMM/FFT 参数与下文旧写法中移除 `kind` 和存储名称后的字段相同，旧写法继续通过
+注册式转换兼容；点积直接使用通用外壳。
 
 描述可在无原生库的 Python 环境中保存和读取，具体 schema/后端/依赖在准备时检查，
 错误先于私有缓冲分配报告。新入口不自动导出任意 JIT recording，也不是按 DLL
@@ -336,6 +337,27 @@ cuBLAS 及其加载依赖继续由应用管理。本机 Windows cuBLAS 13.3 / RT
 所选 vendor 包的实际依赖闭包。测试覆盖四种转置、非零 beta、独立绑定、回滚、在途
 关闭及 borrowed owner reset；导出 energy/反向 kernel 并组合显式 GEMM 伴随，
 核对 A/B 梯度。这不是外部操作的自动 AD，也不代表所有版本与设备均已资格化。
+
+同一 cuBLAS 注册路径还可重建设备输出的 f32 点积：
+
+```python
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cublas", "operation": "dot_f32", "version": 1,
+    "parameters": {"size": 37},
+    "bindings": {"x": "left", "y": "right", "output": "dot"},
+}])
+```
+
+输入是形状 `(size,)` 的紧凑标量 f32 向量；f32 输出形状为 `()` 或 `(1,)`，
+不能与任一输入重叠，只读输入可以互相别名。`size` 非负且满足当前 SDOT int32
+接口；空输入每次重放写零。通过 `runtime.probe_native_operation("dot_f32")`
+独立查询本操作，CPU/Vulkan 没有相应工厂。
+
+准备的 handle 使用 device pointer mode，后续 Graph kernel 可直接消费设备标量，
+不需要 host 读回或同步。准备不改输出，handle 退休和 workspace 记账沿用上述合同。
+Windows cuBLAS 13.3 验证覆盖重复写回、空输入、独立绑定、非法布局/别名回滚及
+在途关闭/reset；导出的 energy/反向 kernel 加显式点积伴随核对输入梯度，不提供
+外部调用的自动微分。
 
 生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
 版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号

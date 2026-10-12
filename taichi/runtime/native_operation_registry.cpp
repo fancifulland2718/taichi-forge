@@ -218,7 +218,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_compact_operation(result);
     register_sort_operation(result);
     register_fft_operation(result);
-    register_gemm_operation(result);
+    register_blas_operations(result);
     return result;
   }();
   return registry;

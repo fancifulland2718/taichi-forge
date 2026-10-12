@@ -214,6 +214,6 @@ const NativeOperationRegistry &native_operation_registry();
 void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
 void register_fft_operation(NativeOperationRegistry &registry);
-void register_gemm_operation(NativeOperationRegistry &registry);
+void register_blas_operations(NativeOperationRegistry &registry);
 
 }  // namespace taichi::lang
