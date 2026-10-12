@@ -5,11 +5,19 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 #include "taichi/rhi/device.h"
 #include "taichi/runtime/native_resource.h"
 
 namespace taichi::lang {
+
+// Cold facts for one unconditional recording sequence, never replay state.
+// Structured control must intersect facts at joins instead of treating a
+// recorded conditional write as unconditional initialization.
+struct NativeRecordingState {
+  std::unordered_set<const NativeResource *> initialized;
+};
 
 // Prepared backend commands own their scratch and recording state. The
 // enclosing execution retains input/output leases and retires submitted work
@@ -17,6 +25,8 @@ namespace taichi::lang {
 class NativeOperation : public NativeResource {
  public:
   ~NativeOperation() override = default;
+  virtual void validate_recording(NativeRecordingState &) const {
+  }
   virtual void run_cpu() {
     throw std::invalid_argument("Native operation has no CPU implementation");
   }

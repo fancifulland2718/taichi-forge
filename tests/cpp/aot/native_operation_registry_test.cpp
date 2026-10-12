@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 #include <limits>
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/fixed_execution.h"
 #include "taichi/common/operation_json.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
@@ -147,6 +148,54 @@ class TestOperation final : public NativeOperation {
   Device &device_;
   int &runs_, &retired_;
 };
+
+TEST(NativeOperationRegistry, RecordingInitializationIsLocalAndPrecedesWork) {
+  cpu::CpuDevice device;
+  int runs = 0, retired = 0;
+  TestOperation marker(host_arch(), device, runs, retired);
+  class SequenceOperation final : public NativeOperation {
+   public:
+    SequenceOperation(NativeResource &marker, bool write, int &runs)
+        : marker_(marker), write_(write), runs_(runs) {
+    }
+    Arch arch() const override {
+      return marker_.arch();
+    }
+    Device &device() const override {
+      return marker_.device();
+    }
+    std::size_t workspace_bytes() const override {
+      return 0;
+    }
+    void run_cpu() override {
+      ++runs_;
+    }
+    void validate_recording(NativeRecordingState &state) const override {
+      if (write_)
+        state.initialized.insert(&marker_);
+      else if (!state.initialized.count(&marker_))
+        throw std::invalid_argument("read before initialization");
+    }
+
+   private:
+    NativeResource &marker_;
+    bool write_;
+    int &runs_;
+  };
+  auto writer = std::make_shared<SequenceOperation>(marker, true, runs);
+  auto reader = std::make_shared<SequenceOperation>(marker, false, runs);
+  std::vector<FixedExecution::Operation> bad{reader, writer};
+  EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, bad),
+               std::invalid_argument);
+  EXPECT_EQ(runs, 0);
+  FixedExecution good(host_arch(), device, nullptr, {writer, reader, reader});
+  EXPECT_EQ(runs, 0);
+  good.run();
+  good.run();
+  EXPECT_EQ(runs, 6);
+  EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, bad),
+               std::invalid_argument);
+}
 
 TEST(NativeOperationRegistry,
      QueriesAreColdAndPreparedObjectsOwnTheirLifetime) {

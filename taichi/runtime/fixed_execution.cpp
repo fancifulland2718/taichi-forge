@@ -85,6 +85,7 @@ FixedExecution::FixedExecution(Arch arch,
     throw std::invalid_argument("Fixed execution requires a nonempty batch");
   // Validate every descriptor before preparing backend state or commands.
   std::unordered_set<const NativeOperation *> owners;
+  NativeRecordingState recording_state;
   for (const auto &operation : operations) {
     if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
       if (!dispatch->kernel || !dispatch->context ||
@@ -114,6 +115,7 @@ FixedExecution::FixedExecution(Arch arch,
       if (!native || native->arch() != arch || &native->device() != &device)
         throw std::invalid_argument(
             "Fixed native operation belongs to another execution device");
+      native->validate_recording(recording_state);
       if (owners.insert(native.get()).second) {
         state_->native_operations.push_back(native);
         if (native->workspace_bytes() >
