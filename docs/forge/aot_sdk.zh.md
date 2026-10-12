@@ -178,6 +178,34 @@ CPU/CUDA/Vulkan 的每份 prepared 实例独立拥有工作区；`prepared.info`
 的 gather/backward。`prepared.info["dispatch_count"]` 统计已导出 kernel 入口数，
 不代表 native 算法内部 shader 的实际 dispatch 数。
 
+执行计划可声明私有 `resources`。例如，按外部 `output` 数组的第 0 维重建临时数组，
+SDK 调用者无需分配该临时数组：
+
+```python
+plan = aot.ExecutionPlan(
+    [{"kind": "fill32", "destination": "scratch", "value": 0},
+     {"kind": "copy", "source": "scratch", "destination": "output"}],
+    resources=[{"kind": "ndarray", "name": "scratch", "dtype": "f32",
+                "shape": [{"array": "output", "axis": 0}]}],
+)
+```
+
+shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用正整数常量
+`element_shape`。`"extent"` 资源通过 `name`、`dtype`、`array`、`axis` 绑定形状派生
+标量，支持 i32/u32/i64/u64；仍遵守原 C API rank 和 native 索引约束。准备阶段先
+解析所需依赖闭包，再分配数组。未使用的声明、仅用于推导形状的中间数组不分配设备
+存储；只提供形状的外部数组在准备后不再被持有。依赖环、重复名称、与外部绑定冲突
+会报错。`plan.argument_names` 列出实际外部参数，包括形状来源和声明的梯度。
+
+计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
+导出的显式梯度，复用普通 kernel 的绑定检查，不为 native 操作自动生成导数。同一
+primal 不得再由调用者重复指定梯度。内部数组初始未初始化，所需清零、复制必须写成
+计划操作，以便重放时得到预期状态。每次准备独立持有数组，重绑定/resize 创建新实例；
+准备失败、模块关闭及在途缓冲退休时，均先退休相关命令再释放内部数组。
+`prepared.info["resource_bytes"]` 单列这部分请求分配的字节数（空数组各占 1 字节），
+与算法 `workspace_bytes` 分开，均不代表分配器/驱动的全部开销。Windows 上小规模
+CPU/CUDA/Vulkan 用例覆盖前向计算、显式反向及上述所有权转换。
+
 分配操作缓冲前可查询 `runtime.native_operation_capabilities("compact", version=1)`
 （也支持 `"sort"`）。返回集合按当前 runtime 后端包含 `"cpu"`、`"cuda_capture"` 或
 `"vulkan_inline"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配

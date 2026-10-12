@@ -7,6 +7,13 @@
 #include "taichi/program/texture.h"
 
 namespace capi {
+struct NdArrayStorageLayout {
+  uint64_t bytes;
+  uint64_t element_bytes;
+  uint32_t alignment;
+};
+NdArrayStorageLayout ndarray_storage_layout(const TiNdArray &array);
+
 // Validate primitive/tensor storage and return its declared logical byte size.
 uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,

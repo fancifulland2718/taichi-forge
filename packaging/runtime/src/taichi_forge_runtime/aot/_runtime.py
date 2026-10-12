@@ -1,7 +1,7 @@
 """AOT resource owners and ordinary entry binding, independent of the DSL.
 
 This consumer covers ordinary kernels/CGraphs and primitive or tensor ndarrays.
-Fixed recordings support loaded kernels and native buffer copy/fill operations;
+Fixed recordings support loaded kernels, declared native operations and private arrays;
 providers, structure arrays and external-memory imports are not exposed here
 yet. Host transfers are explicit; kernel calls use device
 allocations directly. Close resources explicitly or use Runtime as a context
@@ -521,6 +521,9 @@ class PreparedCall(_Resource):
                 argument_bytes=native.argument_bytes,
                 workspace_bytes=runtime._api.call(
                     runtime._api.ti_get_prepared_execution_workspace_bytes_ext, runtime._handle, self._handle
+                ),
+                resource_bytes=runtime._api.call(
+                    runtime._api.ti_get_prepared_execution_resource_bytes_ext, runtime._handle, self._handle
                 ),
                 launches=native.launches,
             )

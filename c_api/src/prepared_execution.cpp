@@ -1,4 +1,5 @@
 #include "argument_binding.h"
+#include "execution_resources.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -19,6 +20,8 @@ struct PreparedExecution {
   std::vector<TiMemory> memories;
   TiPreparedExecutionInfo info{};
   bool live{false};
+  // Declared before backend recordings so owned buffers are destroyed last.
+  std::unique_ptr<ExecutionResourceStorage> resources;
   // The backend consumes these cold descriptors before they are released.
   std::unique_ptr<BoundKernelArguments> kernel_arguments;
   std::unique_ptr<BoundGraphArguments> graph_arguments;
@@ -78,6 +81,7 @@ struct PreparedExecution {
     live = false;
     native.reset();
     release_source_bindings();
+    resources.reset();
   }
 };
 
@@ -324,6 +328,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
 
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = &mod;
+  auto resource_bindings =
+      capi::bind_execution_resources(rt, plan.resources, arguments, layouts);
+  prepared->resources = std::move(resource_bindings.storage);
   struct Storage {
     DevicePtr pointer;
     uint64_t size;
@@ -515,6 +522,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");
+  if (prepared->resources)
+    prepared->resources->remove_owned_dependencies(prepared->memories);
   prepared->prepare_operations(rt, operations);
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
@@ -594,4 +603,20 @@ void ti_destroy_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   rt.prepared_registry().destroy(execution);
   TI_CAPI_TRY_CATCH_END();
+}
+
+uint64_t ti_get_prepared_execution_resource_bytes_ext(
+    TiRuntime runtime,
+    TiPreparedExecution execution) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  if (!runtime || !execution) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "runtime or execution");
+    return 0;
+  }
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &prepared = rt.prepared_registry().get(execution);
+  return prepared.resources ? prepared.resources->bytes() : 0;
+  TI_CAPI_TRY_CATCH_END();
+  return 0;
 }

@@ -17,15 +17,19 @@ def _unique_fields(pairs):
 
 
 class ExecutionPlan:
-    """Version 1 kernels, copies, fills, stable sort and compaction.
+    """Version 1 kernels, native operations and private resource reconstruction.
 
     Arguments are symbolic names bound to a loaded module and arrays/scalars at
     prepare time. Preparation records native commands without executing kernels
     or modifying buffers. Rebind by preparing another independent instance.
     """
 
-    def __init__(self, operations):
+    def __init__(self, operations, *, resources=None, gradients=None):
         document = {"version": 1, "operations": list(operations)}
+        if resources is not None:
+            document["resources"] = list(resources)
+        if gradients is not None:
+            document["gradients"] = gradients
         # Own a snapshot, including nested arrays; caller mutations cannot alter
         # a saved plan. This module remains usable without a native library.
         self._json = json.dumps(document, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -34,11 +38,19 @@ class ExecutionPlan:
     @classmethod
     def from_json(cls, document):
         value = json.loads(document, object_pairs_hook=_unique_fields)
-        if not isinstance(value, dict) or set(value) != {"version", "operations"}:
+        if (
+            not isinstance(value, dict)
+            or not {"version", "operations"} <= set(value)
+            or set(value) - {"version", "operations", "resources", "gradients"}
+        ):
             raise ValueError("Execution plan requires version and operations")
         if type(value["version"]) is not int or value["version"] != 1:
             raise ValueError("Unsupported execution plan version")
-        return cls(value["operations"])
+        if "resources" in value and not isinstance(value["resources"], list):
+            raise ValueError("Execution resources must be a list")
+        if "gradients" in value and not isinstance(value["gradients"], dict):
+            raise ValueError("Execution gradients must be a name mapping")
+        return cls(value["operations"], resources=value.get("resources"), gradients=value.get("gradients"))
 
     @classmethod
     def load(cls, path):
@@ -52,8 +64,10 @@ class ExecutionPlan:
 
     def _validate(self, document):
         from ._runtime import _name
+        from ._resources import external_arguments
 
         kernels = []
+        arguments = set()
         operations = document["operations"]
         if not operations:
             raise ValueError("Execution plan requires a nonempty operation array")
@@ -87,6 +101,8 @@ class ExecutionPlan:
                 raise ValueError(f"Invalid {kind} operation fields")
             for name in names:
                 _name(op[name])
+                if name != "entry":
+                    arguments.add(op[name])
             for key in (optional & set(op)) - set(names):
                 if type(op[key]) is not int or not 0 <= op[key] <= 0x7FFFFFFFFFFFFFFF:
                     raise ValueError("Execution sizes and offsets require nonnegative int64 values")
@@ -95,6 +111,7 @@ class ExecutionPlan:
                     raise ValueError("Kernel arguments must be a list of names")
                 for name in op["arguments"]:
                     _name(name)
+                    arguments.add(name)
                 kernels.append(op["entry"])
             elif kind == "fill32":
                 if type(op["value"]) is not int or not 0 <= op["value"] <= 0xFFFFFFFF:
@@ -107,7 +124,13 @@ class ExecutionPlan:
                         raise ValueError("Each compact column requires values and output names")
                     _name(column["values"])
                     _name(column["output"])
+                    arguments.update((column["values"], column["output"]))
         self.kernel_entries = tuple(dict.fromkeys(kernels))
+        self.argument_names = external_arguments(
+            document.get("resources", []), document.get("gradients", {}), arguments
+        )
+
+        self._retained_argument_names = frozenset(arguments).intersection(self.argument_names)
 
     def prepare(self, module, arguments, *, gradients=None):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
@@ -120,7 +143,10 @@ class ExecutionPlan:
             owners = [module]
             native = (abi.NamedArgument * len(arguments))(
                 *[
-                    abi.NamedArgument(_name(name), _argument(runtime, value, owners))
+                    abi.NamedArgument(
+                        _name(name),
+                        _argument(runtime, value, owners if name in self._retained_argument_names else []),
+                    )
                     for name, value in arguments.items()
                 ]
             )

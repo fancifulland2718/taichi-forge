@@ -1243,6 +1243,12 @@ ti_get_prepared_execution_info_ext(TiRuntime runtime,
 TI_DLL_EXPORT uint64_t TI_API_CALL
 ti_get_prepared_execution_workspace_bytes_ext(TiRuntime runtime,
                                               TiPreparedExecution execution);
+// Requested bytes for private arrays reconstructed from execution resources.
+// Empty arrays reserve one byte. Excludes algorithm scratch and allocator or
+// driver overhead. Arrays are released after dependent recordings retire.
+TI_DLL_EXPORT uint64_t TI_API_CALL
+ti_get_prepared_execution_resource_bytes_ext(TiRuntime runtime,
+                                             TiPreparedExecution execution);
 // Completes submitted work before retirement. Destroy invalidated executions
 // too; automatic dependency invalidation does not consume the public handle.
 TI_DLL_EXPORT void TI_API_CALL

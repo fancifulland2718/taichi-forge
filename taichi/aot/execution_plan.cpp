@@ -4,50 +4,15 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
-#include "taichi/common/json.h"
+#include "taichi/aot/execution_plan_json.h"
 
 namespace taichi::lang::aot {
-namespace {
-using liong::json::JsonValue;
-
-void fields(const JsonValue &object,
-            std::initializer_list<const char *> allowed) {
-  if (!object.is_obj())
-    throw std::invalid_argument("Execution plan entries must be objects");
-  for (const auto &[name, value] : object.obj.inner) {
-    if (std::find(allowed.begin(), allowed.end(), name) == allowed.end())
-      throw std::invalid_argument("Unknown execution plan field: " + name);
-  }
-}
-
-std::string name(const JsonValue &value) {
-  if (!value.is_str() || value.str.empty() ||
-      value.str.find('\0') != std::string::npos)
-    throw std::invalid_argument(
-        "Execution plan names must be nonempty strings without NUL");
-  return value.str;
-}
-
-std::uint64_t integer(const JsonValue &value) {
-  if (value.ty != liong::json::L_JSON_INT || value.num_int < 0)
-    throw std::invalid_argument(
-        "Execution plan sizes and offsets must be nonnegative integers");
-  return static_cast<std::uint64_t>(value.num_int);
-}
-
-std::optional<std::uint64_t> optional_integer(const JsonValue &object,
-                                              const char *key) {
-  auto found = object.obj.inner.find(key);
-  return found == object.obj.inner.end()
-             ? std::nullopt
-             : std::optional(integer(found->second));
-}
-}  // namespace
+using namespace execution_json;
 
 ExecutionPlan ExecutionPlan::parse(const std::string &json) {
   try {
     const auto root = liong::json::parse_complete(json);
-    fields(root, {"version", "operations"});
+    fields(root, {"version", "operations", "resources", "gradients"});
     if (integer(root["version"]) != 1)
       throw std::invalid_argument("Unsupported execution plan version");
     const auto &steps = root["operations"];
@@ -56,6 +21,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
       throw std::invalid_argument(
           "Execution plan needs a nonempty operation array");
     ExecutionPlan plan;
+    plan.resources = ExecutionResources::parse(root);
     std::set<std::string> arguments;
     for (const auto &step : steps.arr.inner) {
       const auto kind = name(step["kind"]);
@@ -134,6 +100,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
                                     kind);
       }
     }
+    plan.resources.analyze(arguments);
     plan.arguments.assign(arguments.begin(), arguments.end());
     return plan;
   } catch (const std::exception &error) {

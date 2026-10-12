@@ -219,6 +219,42 @@ derivative: an explicit integer permutation can feed an exported gather/backward
 pair. `prepared.info["dispatch_count"]` counts exported kernel entries, not the
 internal shader dispatches of native algorithms.
 
+Execution plans may declare private `resources`. For example, a temporary with
+the first dimension of an external `output` array can be reconstructed without
+exposing its allocation to the SDK caller:
+
+```python
+plan = aot.ExecutionPlan(
+    [{"kind": "fill32", "destination": "scratch", "value": 0},
+     {"kind": "copy", "source": "scratch", "destination": "output"}],
+    resources=[{"kind": "ndarray", "name": "scratch", "dtype": "f32",
+                "shape": [{"array": "output", "axis": 0}]}],
+)
+```
+
+Dimensions may be literal uint32 values or `{array, axis}` references; tensor
+records use a literal positive `element_shape`. A resource of kind `"extent"`
+with `name`, `dtype`, `array` and `axis` binds a derived scalar (i32/u32/i64/u64).
+The existing C API rank and native indexing constraints still apply. Preparation
+resolves the required dependency closure before allocating arrays. Unused
+declarations and arrays used only for shape inference allocate no device storage;
+shape-only external arrays are not retained after preparation. Invalid cycles,
+duplicate names and conflicting external bindings are errors. `plan.argument_names`
+reports the external slots, including shape sources and declared gradients.
+
+Declare `gradients={"primal_name": "gradient_name"}` on the plan to bind private
+or external arrays to exported explicit gradients. This reuses ordinary kernel
+binding checks and supplies no automatic derivative for native operations. A
+caller-supplied gradient for the same primal is rejected. Arrays are initially
+uninitialized: express required clears or copies as plan operations so replay
+has the intended state. Each preparation owns independent arrays; rebinding or
+resizing prepares another instance. Private arrays retire after their commands,
+including failed preparation, module closure and in-flight buffer retirement.
+`prepared.info["resource_bytes"]` reports their requested allocation bytes
+(one byte per empty array), separately from algorithm `workspace_bytes` and
+excluding allocator/driver overhead. Small Windows CPU/CUDA/Vulkan checks cover
+primal computation, explicit reverse gradients and these ownership transitions.
+
 Before allocating operation buffers, query
 `runtime.native_operation_capabilities("compact", version=1)` (also `"sort"`).
 The returned set contains `"cpu"`, `"cuda_capture"` or `"vulkan_inline"` for the

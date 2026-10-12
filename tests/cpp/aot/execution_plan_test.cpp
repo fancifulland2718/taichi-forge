@@ -84,4 +84,35 @@ TEST(ExecutionPlan, CompactColumnsShareOnePredicateAndCount) {
        R"({"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x","output":"y"}],"values":"z","output":"w"}]})"})
     EXPECT_THROW(ExecutionPlan::parse(description), std::invalid_argument);
 }
+TEST(ExecutionPlan, ReconstructsOnlyLiveResourceStorageAndShapeClosure) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,
+    "resources":[
+      {"kind":"ndarray","name":"scratch","dtype":"f32","shape":[{"array":"shape_only","axis":0}]},
+      {"kind":"extent","name":"n","dtype":"i32","array":"scratch","axis":0},
+      {"kind":"ndarray","name":"shape_only","dtype":"f32","shape":[{"array":"x","axis":0},3]},
+      {"kind":"ndarray","name":"unused","dtype":"f32","shape":[{"array":"not_required","axis":0}]},
+      {"kind":"ndarray","name":"dx","dtype":"f32","shape":[{"array":"scratch","axis":0}]}],
+    "gradients":{"scratch":"dx"},
+    "operations":[{"kind":"kernel","entry":"forward","arguments":["scratch","n","y"]}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x", "y"}));
+  EXPECT_EQ(plan.resources.order, (std::vector<std::size_t>{2, 0, 1, 4}));
+  EXPECT_EQ(plan.resources.materialize,
+            (std::vector<bool>{true, true, false, false, true}));
+}
+
+TEST(ExecutionPlan, RejectsInvalidResourceGraphsBeforeBinding) {
+  const std::string prefix =
+      R"({"version":1,"operations":[{"kind":"fill32","destination":"x","value":0}],"resources":)";
+  for (
+      const auto *resources :
+      {R"(null)",
+       R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[true]}])",
+       R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[],"element_shape":[0]}])",
+       R"([{"kind":"extent","name":"n","dtype":"f32","array":"x","axis":0}])",
+       R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[]},{"kind":"ndarray","name":"x","dtype":"f32","shape":[]}])",
+       R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[{"array":"y","axis":0}]},{"kind":"ndarray","name":"y","dtype":"f32","shape":[{"array":"x","axis":0}]}])",
+       R"([{"kind":"extent","name":"n","dtype":"i32","array":"input","axis":0},{"kind":"ndarray","name":"x","dtype":"f32","shape":[{"array":"n","axis":0}]}])"})
+    EXPECT_THROW(ExecutionPlan::parse(prefix + resources + "}"),
+                 std::invalid_argument);
+}
 }  // namespace taichi::lang::aot

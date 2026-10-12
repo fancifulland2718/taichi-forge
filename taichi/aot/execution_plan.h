@@ -5,6 +5,7 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include "taichi/aot/execution_resources.h"
 
 namespace taichi::lang::aot {
 // Versioned persistent operations, independent of live definitions, runtime
@@ -44,6 +45,7 @@ struct ExecutionPlan {
   using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort>;
   std::vector<Operation> operations;
   std::vector<std::string> arguments;
+  ExecutionResources resources;
 
   static ExecutionPlan parse(const std::string &json);
 };

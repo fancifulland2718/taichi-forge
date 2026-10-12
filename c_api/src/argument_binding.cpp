@@ -143,9 +143,7 @@ taichi::lang::DataType primitive_type(TiDataType type) {
   }
 }
 
-uint64_t validate_array_storage(Runtime &runtime,
-                                const TiNdArray &array,
-                                uint64_t *element_bytes = nullptr) {
+capi::NdArrayStorageLayout array_storage_layout(const TiNdArray &array) {
   if (array.shape.dim_count > kTiNdShapeDimensionCapacity ||
       array.elem_shape.dim_count > kTiNdShapeDimensionCapacity) {
     throw MemoryBindingError("Ndarray rank exceeds the C API shape capacity");
@@ -153,6 +151,7 @@ uint64_t validate_array_storage(Runtime &runtime,
   const auto type = primitive_type(array.elem_type);
   const auto scalar_bytes = taichi::lang::data_type_size(type);
   uint64_t bytes = scalar_bytes;
+  uint64_t element_bytes = scalar_bytes;
   // Check element shape even for an empty logical array. Zero element extents
   // are not valid tensor types; zero array extents are valid empty ndarrays.
   for (const auto *shape : {&array.elem_shape, &array.shape}) {
@@ -165,16 +164,25 @@ uint64_t validate_array_storage(Runtime &runtime,
       }
       bytes *= extent;
     }
-    if (shape == &array.elem_shape && element_bytes)
-      *element_bytes = bytes;
+    if (shape == &array.elem_shape)
+      element_bytes = bytes;
   }
+  return {bytes, element_bytes, static_cast<uint32_t>(scalar_bytes)};
+}
+
+uint64_t validate_array_storage(Runtime &runtime,
+                                const TiNdArray &array,
+                                uint64_t *element_bytes = nullptr) {
+  const auto layout = array_storage_layout(array);
   const auto memory = runtime.get_memory(array.memory);
-  if (memory.size < bytes)
+  if (memory.size < layout.bytes)
     throw MemoryBindingError(
         "Ndarray buffer is smaller than its declared shape");
-  if (memory.base_offset % scalar_bytes)
+  if (memory.base_offset % layout.alignment)
     throw MemoryBindingError("Imported ndarray memory is not scalar aligned");
-  return bytes;
+  if (element_bytes)
+    *element_bytes = layout.element_bytes;
+  return layout.bytes;
 }
 
 void validate_kernel_array(Runtime &runtime,
@@ -262,6 +270,10 @@ uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,
                                  uint64_t *element_bytes) {
   return validate_array_storage(runtime, array, element_bytes);
+}
+
+NdArrayStorageLayout ndarray_storage_layout(const TiNdArray &array) {
+  return array_storage_layout(array);
 }
 
 std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
