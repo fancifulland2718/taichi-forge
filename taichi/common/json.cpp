@@ -29,6 +29,9 @@
 // JSON serialization/deserialization.
 // @PENGUINLIONG
 #include <sstream>
+#include <charconv>
+#include <cmath>
+#include <locale>
 // #include "gft/log.hpp"
 #include "taichi/common/json.h"
 
@@ -118,50 +121,50 @@ struct Tokenizer {
       }
 
       // Try parse numbers.
-      if (c == '+' || c == '-' || (c >= '0' && c <= '9')) {
+      if (c == '-' || (c >= '0' && c <= '9')) {
+        const char *beg = pos;
+        auto digit = [&] { return pos != end && *pos >= '0' && *pos <= '9'; };
+        auto digits = [&] {
+          if (!digit())
+            throw JsonException("json number requires a digit");
+          do {
+            ++pos;
+          } while (digit());
+        };
+        if (*pos == '-')
+          ++pos;
+        if (pos != end && *pos == '0')
+          ++pos;
+        else
+          digits();
         out.ty = L_JSON_TOKEN_INT;
-        const int STATE_INTEGRAL = 0;
-        const int STATE_FRACTION = 1;
-        const int STATE_EXPONENT = 2;
-        int state = STATE_INTEGRAL;
-        do {
-          c = *pos;
-          if (state == STATE_INTEGRAL) {
-            if (c == '.') {
-              state = STATE_FRACTION;
-              ss.put(c);
-              continue;
-            }
-            if (c == 'e') {
-              state = STATE_EXPONENT;
-              ss.put(c);
-              continue;
-            }
-            if (c != '+' && c != '-' && (c < '0' || c > '9')) {
-              break;
-            }
-          } else if (state == STATE_FRACTION) {
-            out.ty = L_JSON_TOKEN_FLOAT;
-            if (c == 'e') {
-              state = STATE_EXPONENT;
-              ss.put(c);
-              continue;
-            }
-            if (c < '0' || c > '9') {
-              break;
-            }
-          } else if (state == STATE_EXPONENT) {
-            out.ty = L_JSON_TOKEN_FLOAT;
-            if (c != '+' && c != '-' && (c < '0' || c > '9')) {
-              break;
-            }
-          }
-          ss.put(c);
-        } while (++pos != end);
+        if (pos != end && *pos == '.') {
+          out.ty = L_JSON_TOKEN_FLOAT;
+          ++pos;
+          digits();
+        }
+        if (pos != end && (*pos == 'e' || *pos == 'E')) {
+          out.ty = L_JSON_TOKEN_FLOAT;
+          ++pos;
+          if (pos != end && (*pos == '+' || *pos == '-'))
+            ++pos;
+          digits();
+        }
+        if (pos != end && *pos != ',' && *pos != ']' && *pos != '}' &&
+            *pos != ' ' && *pos != '\t' && *pos != '\r' && *pos != '\n')
+          throw JsonException("invalid character in json number");
         if (out.ty == L_JSON_TOKEN_INT) {
-          out.num_int = std::atoll(ss.str().c_str());
-        } else if (out.ty == L_JSON_TOKEN_FLOAT) {
-          out.num_float = std::atof(ss.str().c_str());
+          const auto result = std::from_chars(beg, pos, out.num_int);
+          if (result.ec != std::errc{} || result.ptr != pos)
+            throw JsonException("json integer is outside int64 range");
+        } else {
+          // Classic locale keeps JSON's decimal point independent of the host.
+          // Floating from_chars is not available on all supported C++17 libs.
+          std::istringstream number(std::string(beg, pos));
+          number.imbue(std::locale::classic());
+          number >> out.num_float;
+          if (number.fail() || !std::isfinite(out.num_float))
+            throw JsonException("json number is outside double range");
         }
         return true;
       }
@@ -237,6 +240,7 @@ struct Tokenizer {
           return true;
         }
       }
+      throw JsonException("invalid json token");
     }
     out.ty = L_JSON_TOKEN_UNDEFINED;
     return false;
