@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -74,6 +75,30 @@ std::shared_ptr<NativeOperation> prepare_fft_operation(
     Arch arch,
     Device &device,
     const FftC2COperation &operation);
+
+// Compact row-major C = alpha * op(A) * op(B) + beta * C. Dimensions describe
+// op(A) and op(B); transposition changes the physical input shapes. Output
+// cannot overlap either input. Scalars and transposes are frozen at prepare.
+struct GemmF32Operation {
+  static constexpr const char *kind = "gemm_f32";
+  static constexpr std::uint32_t version = 1;
+  DevicePtr a;
+  DevicePtr b;
+  DevicePtr output;
+  std::size_t rows;
+  std::size_t columns;
+  std::size_t inner;
+  float alpha{1};
+  float beta{0};
+  bool transpose_a{false};
+  bool transpose_b{false};
+};
+
+std::array<std::size_t, 3> gemm_f32_element_counts(const GemmF32Operation &op);
+std::shared_ptr<NativeOperation> prepare_gemm_f32_operation(
+    Arch arch,
+    Device &device,
+    const GemmF32Operation &operation);
 
 // Ascending, stable, in-place sort. Floating NaNs sort last and equal keys
 // preserve their input order. Payloads are copied as raw records.

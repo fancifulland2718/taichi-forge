@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include "taichi/common/json.h"
@@ -35,5 +37,33 @@ inline std::optional<std::uint64_t> optional_integer(const JsonValue &object,
   return found == object.obj.inner.end()
              ? std::nullopt
              : std::optional(integer(found->second));
+}
+inline float optional_f32(const JsonValue &object,
+                          const char *key,
+                          float fallback) {
+  const auto found = object.obj.inner.find(key);
+  if (found == object.obj.inner.end())
+    return fallback;
+  const auto &value = found->second;
+  if (value.ty != liong::json::L_JSON_FLOAT &&
+      value.ty != liong::json::L_JSON_INT)
+    throw std::invalid_argument("Execution scalars must be finite f32 numbers");
+  const double number = value.ty == liong::json::L_JSON_FLOAT
+                            ? value.num_float
+                            : static_cast<double>(value.num_int);
+  if (!std::isfinite(number) ||
+      std::abs(number) > (std::numeric_limits<float>::max)())
+    throw std::invalid_argument("Execution scalars must be finite f32 numbers");
+  return static_cast<float>(number);
+}
+inline bool optional_bool(const JsonValue &object,
+                          const char *key,
+                          bool fallback = false) {
+  const auto found = object.obj.inner.find(key);
+  if (found == object.obj.inner.end())
+    return fallback;
+  if (found->second.ty != liong::json::L_JSON_BOOLEAN)
+    throw std::invalid_argument("Execution flags must be booleans");
+  return found->second.b;
 }
 }  // namespace taichi::lang::aot::execution_json

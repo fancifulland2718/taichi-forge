@@ -5,6 +5,8 @@
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/runtime/native_operation_registry.h"
 
 namespace taichi::lang {
 namespace {
@@ -41,7 +43,156 @@ void validate_matrix(Ndarray *array,
               "CUDA cuBLAS {} must belong to the active runtime.", name);
 }
 
+cublasHandle_t create_gemm_handle() {
+  auto &driver = CUBLASDriver::get_instance();
+  TI_ERROR_IF(!driver.load_cublas(),
+              "CUDA cuBLAS could not load a compatible shared library.");
+  cublasHandle_t handle = nullptr;
+  const auto created = driver.cubCreate.call(&handle);
+  TI_ERROR_IF(created != CUBLAS_STATUS_SUCCESS || !handle,
+              "CUDA cuBLAS failed to create a handle (status {}).", created);
+  const auto stream = driver.cubSetStream.call(handle, nullptr);
+  const auto pointers =
+      stream == CUBLAS_STATUS_SUCCESS
+          ? driver.cubSetPointerMode.call(handle, CUBLAS_POINTER_MODE_HOST)
+          : stream;
+  if (stream != CUBLAS_STATUS_SUCCESS || pointers != CUBLAS_STATUS_SUCCESS) {
+    driver.cubDestroy.call(handle);
+    TI_ERROR("CUDA cuBLAS handle setup failed (stream {}, pointer mode {}).",
+             stream, pointers);
+  }
+  return handle;
+}
+
+void execute_gemm(cublasHandle_t handle,
+                  int m,
+                  int n,
+                  int k,
+                  const float *a,
+                  const float *b,
+                  float *output,
+                  float alpha,
+                  float beta,
+                  bool transpose_a = false,
+                  bool transpose_b = false) {
+  // Row-major C = op(A) * op(B) is column-major C^T = op(B)^T * op(A)^T
+  // over the same compact allocations. Leading dimensions are physical widths.
+  const auto status = CUBLASDriver::get_instance().cubSgemm.call(
+      handle, transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N,
+      transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N, n, m, k, &alpha, b,
+      transpose_b ? k : n, a, transpose_a ? m : k, &beta, output, n);
+  TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
+              "CUDA cuBLAS SGEMM failed (status {}).", status);
+}
+
+class AotCudaGemmOperation final : public NativeOperation {
+ public:
+  AotCudaGemmOperation(Device &device,
+                       GemmF32Operation op,
+                       const float *a,
+                       const float *b,
+                       float *output)
+      : device_(device),
+        op_(op),
+        a_(a),
+        b_(b),
+        output_(output),
+        handle_(create_gemm_handle()) {
+  }
+  ~AotCudaGemmOperation() override {
+    // FixedExecution retires the captured graph before this handle. cuBLAS may
+    // retain opaque allocations associated with its handle/capture.
+    auto &cuda = CUDAContext::get_instance();
+    auto lock = cuda.get_submission_lock_guard();
+    auto guard = cuda.get_guard();
+    const auto status = CUBLASDriver::get_instance().cubDestroy.call(handle_);
+    TI_WARN_IF(status != CUBLAS_STATUS_SUCCESS,
+               "CUDA cuBLAS GEMM handle destruction returned status {}.",
+               status);
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    // Known Forge-owned scratch only; vendor-private handle/capture storage
+    // cannot be queried through the basic cuBLAS API.
+    return 0;
+  }
+  void record_cuda(void *stream) override {
+    const auto status = CUBLASDriver::get_instance().cubSetStream.call(
+        handle_, static_cast<CUstream>(stream));
+    TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
+                "CUDA cuBLAS capture stream setup failed (status {}).", status);
+    execute_gemm(handle_, static_cast<int>(op_.rows),
+                 static_cast<int>(op_.columns), static_cast<int>(op_.inner), a_,
+                 b_, output_, op_.alpha, op_.beta, op_.transpose_a,
+                 op_.transpose_b);
+  }
+
+ private:
+  Device &device_;
+  GemmF32Operation op_;
+  const float *a_;
+  const float *b_;
+  float *output_;
+  cublasHandle_t handle_;
+};
+
 }  // namespace
+
+NativeOperationAvailability probe_cuda_gemm_f32_operation() {
+  if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
+    return {};
+  auto &driver = CUBLASDriver::get_instance();
+  if (!driver.load_cublas())
+    return {};
+  const auto caps = driver.capabilities();
+  // Encode the public major/minor/patch properties without creating a handle.
+  const auto version =
+      caps.library_version_major >= 0 && caps.library_version_minor >= 0 &&
+              caps.library_version_patch >= 0
+          ? caps.library_version_major * 10000 +
+                caps.library_version_minor * 100 + caps.library_version_patch
+          : 0;
+  return {caps.gemm_f32_available, static_cast<std::uint32_t>(version)};
+}
+
+std::shared_ptr<NativeOperation> prepare_cuda_gemm_f32_operation(
+    Arch,
+    Device &device,
+    const GemmF32Operation &op) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda_device)
+    throw std::invalid_argument("cuBLAS requires a CUDA device");
+  for (auto extent : {op.rows, op.columns, op.inner})
+    if (extent > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+      throw std::invalid_argument("cuBLAS SGEMM dimensions must fit int32");
+  const auto counts = gemm_f32_element_counts(op);
+  auto map = [&](DevicePtr ptr) {
+    auto *base = static_cast<char *>(cuda_device->get_memory_addr(ptr));
+    return reinterpret_cast<float *>(base ? base + ptr.offset : nullptr);
+  };
+  auto *a = map(op.a);
+  auto *b = map(op.b);
+  auto *output = map(op.output);
+  const auto dst = reinterpret_cast<std::uintptr_t>(output);
+  for (const auto &[pointer, count] :
+       {std::pair{a, counts[0]}, std::pair{b, counts[1]}}) {
+    const auto src = reinterpret_cast<std::uintptr_t>(pointer);
+    if (!src || !dst || src % sizeof(float) || dst % sizeof(float) ||
+        (src <= dst ? dst - src < count * sizeof(float)
+                    : src - dst < counts[2] * sizeof(float)))
+      throw std::invalid_argument(
+          "GEMM requires aligned storage and output disjoint from inputs");
+  }
+  auto &cuda = CUDAContext::get_instance();
+  auto lock = cuda.get_submission_lock_guard();
+  auto guard = cuda.get_guard();
+  return std::make_shared<AotCudaGemmOperation>(device, op, a, b, output);
+}
 
 std::size_t Program::cuda_cublas_gemm_f32(Ndarray *a,
                                           Ndarray *b,
@@ -75,31 +226,9 @@ std::size_t Program::cuda_cublas_gemm_f32(Ndarray *a,
       CUDAContext::get_instance().get_submission_lock_guard();
   auto context_guard = CUDAContext::get_instance().get_guard();
   std::lock_guard<std::mutex> provider_lock(cuda_cublas_gemm_mutex_);
-  auto &cublas = CUBLASDriver::get_instance();
-  TI_ERROR_IF(!cublas.is_loaded() && !cublas.load_cublas(),
-              "CUDA cuBLAS could not load a compatible shared library.");
-
   auto handle = static_cast<cublasHandle_t>(cuda_cublas_gemm_handle_);
   if (!handle) {
-    const auto create_status = cublas.cubCreate.call(&handle);
-    TI_ERROR_IF(create_status != CUBLAS_STATUS_SUCCESS || !handle,
-                "CUDA cuBLAS failed to create a handle (status {}).",
-                create_status);
-    const auto stream_status = cublas.cubSetStream.call(handle, nullptr);
-    const auto pointer_status =
-        stream_status == CUBLAS_STATUS_SUCCESS
-            ? cublas.cubSetPointerMode.call(handle, CUBLAS_POINTER_MODE_HOST)
-            : stream_status;
-    if (stream_status != CUBLAS_STATUS_SUCCESS ||
-        pointer_status != CUBLAS_STATUS_SUCCESS) {
-      const auto destroy_status = cublas.cubDestroy.call(handle);
-      TI_WARN_IF(destroy_status != CUBLAS_STATUS_SUCCESS,
-                 "CUDA cuBLAS cleanup after handle setup returned status {}.",
-                 destroy_status);
-      TI_ERROR("CUDA cuBLAS failed to bind the runtime stream or host scalar "
-               "mode (stream status {}, pointer status {}).",
-               stream_status, pointer_status);
-    }
+    handle = create_gemm_handle();
     cuda_cublas_gemm_handle_ = handle;
   }
 
@@ -110,13 +239,7 @@ std::size_t Program::cuda_cublas_gemm_f32(Ndarray *a,
   TI_ERROR_IF(!a_ptr || !b_ptr || !output_ptr,
               "CUDA cuBLAS GEMM received a null device pointer.");
 
-  // cuBLAS is column-major. Row-major C = A * B is the equivalent
-  // column-major C^T = B^T * A^T over the same compact allocations.
-  const auto status = cublas.cubSgemm.call(
-      handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b_ptr, n, a_ptr, k,
-      &beta, output_ptr, n);
-  TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
-              "CUDA cuBLAS SGEMM failed (status {}).", status);
+  execute_gemm(handle, m, n, k, a_ptr, b_ptr, output_ptr, alpha, beta);
   auto leases = acquire_ndarray_leases({a, b, output});
   pin_ndarray_launch_leases(leases);
   mark_runtime_submission_pending();

@@ -49,7 +49,19 @@ struct ExecutionPlan {
     std::uint64_t batch_count{1};
     bool inverse{false};
   };
-  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Fft>;
+  struct Gemm {
+    std::string a;
+    std::string b;
+    std::string output;
+    std::uint64_t rows;
+    std::uint64_t columns;
+    std::uint64_t inner;
+    float alpha{1};
+    float beta{0};
+    bool transpose_a{false};
+    bool transpose_b{false};
+  };
+  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Fft, Gemm>;
   std::vector<Operation> operations;
   std::vector<std::string> arguments;
   ExecutionResources resources;

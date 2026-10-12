@@ -339,6 +339,42 @@ An exported scale/FFT/energy chain also checks an explicitly assembled adjoint
 against an analytic gradient; this does not add automatic FFT differentiation.
 See NVIDIA's [cuFFT transform and Graph contracts](https://docs.nvidia.com/cuda/cufft/index.html).
 
+CUDA also registers `gemm_f32` using external cuBLAS:
+
+```python
+plan = ExecutionPlan([
+    {"kind": "gemm_f32", "a": "a", "b": "b", "output": "c",
+     "rows": 17, "columns": 9, "inner": 13, "alpha": 1.25, "beta": 0.25},
+])
+```
+
+It computes `C = alpha * op(A) * op(B) + beta * C` on compact row-major scalar
+f32 matrices. `alpha=1`, `beta=0`, `transpose_a=False` and `transpose_b=False`
+are the defaults. Logical dimensions are `(rows, inner)`, `(inner, columns)` and
+`(rows, columns)`; a transposed input must have the reversed physical shape.
+Dimensions are positive and must fit the cuBLAS SGEMM int32 ABI. Scalars must
+be finite f32 values. Output cannot overlap either input; inputs may share
+storage. Strided/batched layouts, other dtypes and cuBLASLt algorithm selection
+are outside this operation. CPU/Vulkan do not register this factory.
+
+Shapes, transposes and host scalars are frozen during preparation. Each prepared
+instance owns an independent handle; preparation captures without executing the
+GEMM or modifying application buffers. Replay launches the retained CUDA Graph,
+with no per-call cuBLAS lookup or handle setup. Retirement destroys the Graph
+before the handle. cuBLAS destruction may itself synchronize the device; it is
+a cold retirement cost. `workspace_bytes` reports known Forge-owned scratch,
+**excluding unknown cuBLAS handle/capture allocations**; zero does not mean the
+provider uses no memory. See NVIDIA's [cuBLAS Graph and resource contracts](https://docs.nvidia.com/cuda/cublas/index.html#cuda-graphs-support).
+
+cuBLAS and its loader dependencies remain application-managed. In the Windows
+cuBLAS 13.3 / RTX 5090 check, even SGEMM loaded both `cublas64_13.dll` and
+`cublasLt64_13.dll`; include the selected vendor package's actual dependency
+closure in deployment sizing. Checks cover four transpose combinations, nonzero
+beta, independent frames, rollback, in-flight close and borrowed-owner reset.
+An exported energy/reverse kernel plus explicit GEMM adjoints validates gradients
+with respect to A and B. This does not provide automatic differentiation of the
+external operation or qualify every vendor version/device.
+
 The producer exports registered recipes through
 `module.add_primitive(name, kind, version=1, **options)`. Version 1 supports
 `sort`, `compact` and consecutive `unique`. Sort/compact use the symbolic

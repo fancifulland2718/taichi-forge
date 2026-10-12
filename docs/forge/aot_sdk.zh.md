@@ -272,6 +272,35 @@ rank 1–3、批次、原地执行、独立 workspace、失败回滚和借用 ow
 导出的 scale/FFT/energy 链还用解析梯度核对显式组装的伴随，不表示自动 FFT AD。
 变换与 Graph 合同见 [NVIDIA cuFFT 文档](https://docs.nvidia.com/cuda/cufft/index.html)。
 
+CUDA 还通过外部 cuBLAS 注册 `gemm_f32`：
+
+```python
+plan = ExecutionPlan([
+    {"kind": "gemm_f32", "a": "a", "b": "b", "output": "c",
+     "rows": 17, "columns": 9, "inner": 13, "alpha": 1.25, "beta": 0.25},
+])
+```
+
+它对紧凑行优先、标量 f32 矩阵计算 `C = alpha * op(A) * op(B) + beta * C`。
+默认 `alpha=1`、`beta=0`、`transpose_a=False`、`transpose_b=False`。逻辑形状
+分别为 `(rows, inner)`、`(inner, columns)`、`(rows, columns)`；转置输入的实际
+存储形状必须反过来。维度为正并满足 cuBLAS SGEMM 的 int32 ABI，标量为有限 f32。
+输出不能与任一输入重叠，两个输入可以共享存储。不含 strided/batched 布局、其他
+dtype 或 cuBLASLt 算法选择；CPU/Vulkan 不注册本工厂。
+
+形状、转置和 host 标量在准备期冻结；每份 prepared 独占 handle。准备只捕获，
+不执行 GEMM 或改写应用缓冲；重放提交既有 CUDA Graph，不逐次查找 cuBLAS 或
+设置 handle。退休先释放 Graph 再释放 handle；cuBLAS 析构本身可能同步设备，
+属于冷退休成本。`workspace_bytes` 只报告已知的 Forge scratch，**不包含大小未知
+的 cuBLAS handle/capture 存储**，零不表示 provider 没有内存开销。参见
+[NVIDIA cuBLAS Graph 与资源合同](https://docs.nvidia.com/cuda/cublas/index.html#cuda-graphs-support)。
+
+cuBLAS 及其加载依赖继续由应用管理。本机 Windows cuBLAS 13.3 / RTX 5090 验证中，
+仅调用 SGEMM 也加载了 `cublas64_13.dll` 和 `cublasLt64_13.dll`，部署体积应计入
+所选 vendor 包的实际依赖闭包。测试覆盖四种转置、非零 beta、独立绑定、回滚、在途
+关闭及 borrowed owner reset；导出 energy/反向 kernel 并组合显式 GEMM 伴随，
+核对 A/B 梯度。这不是外部操作的自动 AD，也不代表所有版本与设备均已资格化。
+
 生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
 版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号
 参数名及 columns 合同。例如：

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes as C
 import json
+import math
 from pathlib import Path
 
 
@@ -98,6 +99,10 @@ class ExecutionPlan:
             elif kind == "fft_c2c_f32":
                 required = {"kind", "input", "output", "dimensions", "direction"}
                 optional, names = {"batch_count"}, ("input", "output")
+            elif kind == "gemm_f32":
+                required = {"kind", "a", "b", "output", "rows", "columns", "inner"}
+                optional = {"alpha", "beta", "transpose_a", "transpose_b"}
+                names = ("a", "b", "output")
             else:
                 raise ValueError(f"Unsupported execution operation: {kind}")
             if not required <= set(op) or set(op) - required - optional:
@@ -107,6 +112,8 @@ class ExecutionPlan:
                 if name != "entry":
                     arguments.add(op[name])
             for key in (optional & set(op)) - set(names):
+                if kind == "gemm_f32":
+                    continue
                 if type(op[key]) is not int or not 0 <= op[key] <= 0x7FFFFFFFFFFFFFFF:
                     raise ValueError("Execution sizes and offsets require nonnegative int64 values")
             if kind == "kernel":
@@ -119,6 +126,18 @@ class ExecutionPlan:
             elif kind == "fill32":
                 if type(op["value"]) is not int or not 0 <= op["value"] <= 0xFFFFFFFF:
                     raise ValueError("fill32 value must be a uint32 bit pattern")
+            elif kind == "gemm_f32":
+                if any(
+                    type(op[key]) is not int or not 0 < op[key] <= 0x7FFFFFFFFFFFFFFF
+                    for key in ("rows", "columns", "inner")
+                ):
+                    raise ValueError("GEMM requires positive int64 dimensions")
+                for key, default in (("alpha", 1.0), ("beta", 0.0)):
+                    value = op.get(key, default)
+                    if type(value) not in (int, float) or not math.isfinite(C.c_float(value).value):
+                        raise ValueError("GEMM scalars must be finite f32 numbers")
+                if any(type(op.get(key, False)) is not bool for key in ("transpose_a", "transpose_b")):
+                    raise ValueError("GEMM transpose flags must be booleans")
             elif kind == "fft_c2c_f32":
                 dimensions = op["dimensions"]
                 if (

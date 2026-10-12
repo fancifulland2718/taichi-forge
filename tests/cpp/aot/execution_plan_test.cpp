@@ -74,6 +74,32 @@ TEST(ExecutionPlan, FftPreservesExplicitDirectionAndDimensions) {
         std::invalid_argument);
 }
 
+TEST(ExecutionPlan, GemmPreservesScalarsAndPhysicalTransposeContract) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"gemm_f32","a":"x","b":"y","output":"z","rows":17,
+     "columns":9,"inner":13,"alpha":-0.75,"beta":2,"transpose_b":true}]})");
+  const auto &gemm = std::get<ExecutionPlan::Gemm>(plan.operations[0]);
+  EXPECT_EQ(gemm.rows, 17);
+  EXPECT_EQ(gemm.columns, 9);
+  EXPECT_EQ(gemm.inner, 13);
+  EXPECT_FLOAT_EQ(gemm.alpha, -0.75f);
+  EXPECT_FLOAT_EQ(gemm.beta, 2);
+  EXPECT_FALSE(gemm.transpose_a);
+  EXPECT_TRUE(gemm.transpose_b);
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x", "y", "z"}));
+  for (const auto *extra : {R"(,"alpha":true)", R"(,"beta":1e100)",
+                            R"(,"transpose_a":1)", R"(,"transpose_b":"N")"})
+    EXPECT_THROW(
+        ExecutionPlan::parse(
+            std::string(
+                R"({"version":1,"operations":[{"kind":"gemm_f32","a":"x","b":"y","output":"z","rows":2,"columns":3,"inner":4)") +
+            extra + "}]}"),
+        std::invalid_argument);
+  EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"gemm_f32","a":"x","b":"y","output":"z","rows":0,"columns":3,"inner":4}]})"),
+               std::invalid_argument);
+}
+
 TEST(ExecutionPlan, SortHasOptionalPayloadWithoutImplicitArguments) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"sort","keys":"x"},

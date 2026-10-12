@@ -40,6 +40,36 @@ def test_execution_plan_rejects_ambiguous_contracts(document):
         ExecutionPlan.from_json(document)
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"rows": 0},
+        {"inner": True},
+        {"columns": -1},
+        {"alpha": True},
+        {"beta": 1e100},
+        {"transpose_a": 1},
+        {"transpose_b": "N"},
+    ],
+)
+def test_gemm_description_rejects_invalid_scalar_shape_and_transpose(invalid):
+    op = dict(kind="gemm_f32", a="a", b="b", output="c", rows=17, columns=9, inner=13)
+    with pytest.raises(ValueError):
+        ExecutionPlan([dict(op, **invalid)])
+
+
+def test_gemm_description_snapshot_and_roundtrip():
+    op = dict(
+        kind="gemm_f32", a="a", b="b", output="c", rows=17, columns=9, inner=13, alpha=-0.75, beta=2, transpose_b=True
+    )
+    plan = ExecutionPlan([op])
+    op["transpose_b"] = False
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("a", "b", "c")
+    assert restored.kernel_entries == ()
+    assert json.loads(restored.to_json())["operations"][0]["transpose_b"] is True
+
+
 def test_execution_resources_have_only_external_slots_and_snapshot_metadata():
     resources = [
         {"kind": "ndarray", "name": "temporary", "dtype": "f32", "shape": [{"array": "shape_only", "axis": 0}]},

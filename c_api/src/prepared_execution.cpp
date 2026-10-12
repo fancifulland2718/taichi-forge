@@ -330,15 +330,18 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   prepared->owner = &mod;
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
-  if (std::any_of(plan.operations.begin(), plan.operations.end(),
-                  [](const auto &op) {
-                    return std::holds_alternative<aot::ExecutionPlan::Fft>(op);
-                  }) &&
-      !native_operation_registry()
-           .probe(FftC2COperation::kind, 1, rt.arch)
-           .available)
-    throw MemoryBindingError(
-        "FFT C2C f32 provider unavailable on this runtime");
+  std::unordered_set<std::string> probed;
+  for (const auto &operation : plan.operations) {
+    const char *kind = nullptr;
+    if (std::holds_alternative<aot::ExecutionPlan::Fft>(operation))
+      kind = FftC2COperation::kind;
+    else if (std::holds_alternative<aot::ExecutionPlan::Gemm>(operation))
+      kind = GemmF32Operation::kind;
+    if (kind && probed.insert(kind).second &&
+        !native_operation_registry().probe(kind, 1, rt.arch).available)
+      throw MemoryBindingError(std::string(kind) +
+                               " provider unavailable on this runtime");
+  }
   auto resource_bindings =
       capi::bind_execution_resources(rt, plan.resources, arguments, layouts);
   prepared->resources = std::move(resource_bindings.storage);
@@ -408,6 +411,45 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         throw MemoryBindingError("Execution copy slices must not overlap");
       operations.emplace_back(FixedExecution::BufferCopy{
           dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
+    } else if (const auto *gemm =
+                   std::get_if<aot::ExecutionPlan::Gemm>(&operation)) {
+      for (auto extent : {gemm->rows, gemm->columns, gemm->inner})
+        if (extent > std::numeric_limits<std::size_t>::max())
+          throw MemoryBindingError("GEMM dimension overflows address space");
+      const auto a = storage(gemm->a, 0);
+      const auto b = storage(gemm->b, 0);
+      const auto output = storage(gemm->output, 0);
+      auto matrix = [&](const std::string &name, uint64_t rows, uint64_t cols) {
+        const auto &array = arguments.at(name)->value.ndarray;
+        if (array.elem_type != TI_DATA_TYPE_F32 || array.elem_shape.dim_count ||
+            array.shape.dim_count != 2 || array.shape.dims[0] != rows ||
+            array.shape.dims[1] != cols ||
+            rt.get_memory(array.memory).base_offset % sizeof(float))
+          throw MemoryBindingError(
+              "GEMM requires aligned compact scalar f32 matrices matching "
+              "the physical shape and transpose flags");
+      };
+      matrix(gemm->a, gemm->transpose_a ? gemm->inner : gemm->rows,
+             gemm->transpose_a ? gemm->rows : gemm->inner);
+      matrix(gemm->b, gemm->transpose_b ? gemm->columns : gemm->inner,
+             gemm->transpose_b ? gemm->inner : gemm->columns);
+      matrix(gemm->output, gemm->rows, gemm->columns);
+      GemmF32Operation descriptor{a.pointer,
+                                  b.pointer,
+                                  output.pointer,
+                                  static_cast<std::size_t>(gemm->rows),
+                                  static_cast<std::size_t>(gemm->columns),
+                                  static_cast<std::size_t>(gemm->inner),
+                                  gemm->alpha,
+                                  gemm->beta,
+                                  gemm->transpose_a,
+                                  gemm->transpose_b};
+      try {
+        operations.emplace_back(
+            prepare_gemm_f32_operation(rt.arch, rt.get(), descriptor));
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
     } else if (const auto *fft =
                    std::get_if<aot::ExecutionPlan::Fft>(&operation)) {
       const auto input = storage(fft->input, 0);

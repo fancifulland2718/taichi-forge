@@ -628,7 +628,7 @@ class CUBLASDriver : protected CUDADriverBase {
   bool load_cublas();
 
   inline bool is_loaded() {
-    return cublas_loaded_;
+    return cublas_loaded_.load(std::memory_order_acquire);
   }
 
   CUBLASProviderCapabilities capabilities() const {
@@ -641,8 +641,9 @@ class CUBLASDriver : protected CUDADriverBase {
 
  private:
   CUBLASDriver();
+  std::mutex load_lock_;
   std::mutex lock_;
-  bool cublas_loaded_{false};
+  std::atomic<bool> cublas_loaded_{false};
   CUDADriverFunction<int, int *> cub_get_property_;
   CUBLASProviderCapabilities capabilities_;
 };

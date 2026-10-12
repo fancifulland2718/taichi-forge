@@ -669,15 +669,17 @@ CUBLASDriver &CUBLASDriver::get_instance() {
 }
 
 bool CUBLASDriver::load_cublas() {
+  std::lock_guard<std::mutex> load_guard(load_lock_);
+  if (cublas_loaded_.load(std::memory_order_acquire))
+    return true;
   /* To be compatible with torch environment, please libcublas.so.11 other than
    * libcublas.so. When using libcublas.so, the system cublas will be loaded and
    * it would confict with torch's cublas. When using libcublas.so.11, the
    * torch's cublas will be loaded.
    */
   const int cuda_version = CUDADriver::get_instance().get_version_major();
-  cublas_loaded_ = try_load_lib_any_version(
-      "cublas", "64_", {cuda_version, cuda_version - 1, 11, 10});
-  if (!cublas_loaded_) {
+  if (!try_load_lib_any_version("cublas", "64_",
+                                {cuda_version, cuda_version - 1, 11, 10})) {
     return false;
   }
 #define PER_CUBLAS_FUNCTION(name, symbol_name, ...) \
@@ -714,7 +716,8 @@ bool CUBLASDriver::load_cublas() {
       cubCreate.available() && cubDestroy.available() &&
       cubSetStream.available() && cubSetPointerMode.available() &&
       cubSgemm.available();
-  return cublas_loaded_;
+  cublas_loaded_.store(true, std::memory_order_release);
+  return true;
 }
 
 CUFFTDriver::CUFFTDriver() {

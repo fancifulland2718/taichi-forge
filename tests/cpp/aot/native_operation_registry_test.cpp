@@ -1,4 +1,5 @@
 #include "gtest/gtest.h"
+#include <limits>
 #include "taichi/runtime/native_operation_registry.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
@@ -80,6 +81,22 @@ TEST(NativeOperationRegistry, RejectsAmbiguousDefinitionsBeforePublication) {
                    host_arch(), NativeOperationMode::cpu, factory),
                std::invalid_argument);
   ASSERT_EQ(registry.capabilities().size(), 1);
+}
+
+TEST(NativeOperationRegistry, GemmRejectsOverflowAndInvalidScalars) {
+  GemmF32Operation op{{}, {}, {}, 17, 9, 13};
+  EXPECT_EQ(gemm_f32_element_counts(op),
+            (std::array<std::size_t, 3>{221, 117, 153}));
+  op.rows = std::numeric_limits<std::size_t>::max();
+  EXPECT_THROW(gemm_f32_element_counts(op), std::invalid_argument);
+  op.rows = 0;
+  EXPECT_THROW(gemm_f32_element_counts(op), std::invalid_argument);
+  op.rows = 17;
+  op.alpha = std::numeric_limits<float>::infinity();
+  EXPECT_THROW(gemm_f32_element_counts(op), std::invalid_argument);
+  op.alpha = 1;
+  op.beta = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_THROW(gemm_f32_element_counts(op), std::invalid_argument);
 }
 
 #ifdef TI_WITH_LLVM

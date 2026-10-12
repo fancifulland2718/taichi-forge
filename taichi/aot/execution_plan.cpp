@@ -48,6 +48,25 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         arguments.insert(copy.destination);
         arguments.insert(copy.source);
         plan.operations.emplace_back(std::move(copy));
+      } else if (kind == "gemm_f32") {
+        fields(step, {"kind", "a", "b", "output", "rows", "columns", "inner",
+                      "alpha", "beta", "transpose_a", "transpose_b"});
+        Gemm gemm{name(step["a"]),
+                  name(step["b"]),
+                  name(step["output"]),
+                  integer(step["rows"]),
+                  integer(step["columns"]),
+                  integer(step["inner"]),
+                  optional_f32(step, "alpha", 1),
+                  optional_f32(step, "beta", 0),
+                  optional_bool(step, "transpose_a"),
+                  optional_bool(step, "transpose_b")};
+        if (!gemm.rows || !gemm.columns || !gemm.inner)
+          throw std::invalid_argument("GEMM dimensions must be positive");
+        arguments.insert(gemm.a);
+        arguments.insert(gemm.b);
+        arguments.insert(gemm.output);
+        plan.operations.emplace_back(std::move(gemm));
       } else if (kind == "fft_c2c_f32") {
         fields(step, {"kind", "input", "output", "dimensions", "batch_count",
                       "direction"});
