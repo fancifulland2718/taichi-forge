@@ -7,6 +7,17 @@
 namespace taichi::lang {
 void RuntimeClientRegistry::attach(
     const std::shared_ptr<RuntimeClient> &client) {
+  attach_impl(client, false);
+}
+
+void RuntimeClientRegistry::retain(
+    const std::shared_ptr<RuntimeClient> &client) {
+  attach_impl(client, true);
+}
+
+void RuntimeClientRegistry::attach_impl(
+    const std::shared_ptr<RuntimeClient> &client,
+    bool retain) {
   if (!client)
     throw std::invalid_argument("Cannot attach an empty runtime client");
   std::lock_guard<std::mutex> guard(mutex_);
@@ -14,16 +25,32 @@ void RuntimeClientRegistry::attach(
     throw std::runtime_error("Runtime owner has retired");
   clients_.erase(
       std::remove_if(clients_.begin(), clients_.end(),
-                     [](const auto &entry) { return entry.expired(); }),
+                     [](const auto &entry) { return entry.weak.expired(); }),
       clients_.end());
   for (const auto &entry : clients_)
-    if (entry.lock() == client)
+    if (entry.identity == client.get())
       throw std::invalid_argument("Runtime client is already attached");
-  clients_.push_back(client);
+  clients_.push_back({client.get(), client, retain ? client : nullptr});
+}
+
+void RuntimeClientRegistry::detach(RuntimeClient *client) {
+  Entry released{};
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
+    const auto found = std::find_if(
+        clients_.begin(), clients_.end(),
+        [client](const auto &entry) { return entry.identity == client; });
+    if (found != clients_.end()) {
+      released = std::move(*found);
+      clients_.erase(found);
+    }
+  }
+  // A last owner may run arbitrary native cleanup; never release it under the
+  // registry mutex. Entries already moved into retire() remain retained there.
 }
 
 void RuntimeClientRegistry::retire() {
-  std::vector<std::weak_ptr<RuntimeClient>> clients;
+  std::vector<Entry> clients;
   {
     std::unique_lock<std::mutex> guard(mutex_);
     if (state_ == State::retiring) {
@@ -43,7 +70,7 @@ void RuntimeClientRegistry::retire() {
   // A failed client cannot prevent the remaining clients from retiring.
   std::exception_ptr failure;
   for (const auto &entry : clients) {
-    if (auto client = entry.lock()) {
+    if (auto client = entry.weak.lock()) {
       try {
         client->retire();
       } catch (...) {
@@ -52,6 +79,7 @@ void RuntimeClientRegistry::retire() {
       }
     }
   }
+  clients.clear();
   {
     std::lock_guard<std::mutex> guard(mutex_);
     state_ = State::closed;

@@ -23,6 +23,10 @@ class RuntimeClient {
 class RuntimeClientRegistry {
  public:
   void attach(const std::shared_ptr<RuntimeClient> &client);
+  // Borrowers whose wrapper can disappear during owner teardown stay alive
+  // until explicit close/detach or the owner's retirement callback completes.
+  void retain(const std::shared_ptr<RuntimeClient> &client);
+  void detach(RuntimeClient *client);
   void retire();
   bool closed() const;
 
@@ -32,7 +36,13 @@ class RuntimeClientRegistry {
   State state_{State::open};
   std::thread::id retiring_thread_;
   std::condition_variable retired_;
-  std::vector<std::weak_ptr<RuntimeClient>> clients_;
+  struct Entry {
+    RuntimeClient *identity;
+    std::weak_ptr<RuntimeClient> weak;
+    std::shared_ptr<RuntimeClient> retained;
+  };
+  std::vector<Entry> clients_;
+  void attach_impl(const std::shared_ptr<RuntimeClient> &client, bool retain);
 };
 
 }  // namespace taichi::lang

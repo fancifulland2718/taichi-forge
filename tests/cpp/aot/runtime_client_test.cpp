@@ -20,8 +20,13 @@ namespace taichi::lang {
 namespace {
 class TestClient : public RuntimeClient {
  public:
-  explicit TestClient(std::function<void()> retire)
-      : retire_(std::move(retire)) {
+  explicit TestClient(std::function<void()> retire,
+                      std::function<void()> destroy = {})
+      : retire_(std::move(retire)), destroy_(std::move(destroy)) {
+  }
+  ~TestClient() override {
+    if (destroy_)
+      destroy_();
   }
   void retire() override {
     retire_();
@@ -29,6 +34,7 @@ class TestClient : public RuntimeClient {
 
  private:
   std::function<void()> retire_;
+  std::function<void()> destroy_;
 };
 }  // namespace
 
@@ -70,6 +76,41 @@ TEST(RuntimeClientRegistry, FailureDoesNotBlockRemainingClients) {
   EXPECT_THROW(registry.retire(), std::runtime_error);
   EXPECT_EQ(retired, 2);
   EXPECT_NO_THROW(registry.retire());
+}
+
+TEST(RuntimeClientRegistry, RetainedBorrowerSurvivesWrapperRelease) {
+  RuntimeClientRegistry registry;
+  int retired = 0;
+  auto client = std::make_shared<TestClient>([&] { ++retired; });
+  std::weak_ptr<TestClient> weak = client;
+  registry.retain(client);
+  EXPECT_THROW(registry.attach(client), std::invalid_argument);
+  client.reset();
+  EXPECT_FALSE(weak.expired());
+  registry.retire();
+  EXPECT_EQ(retired, 1);
+  EXPECT_TRUE(weak.expired());
+}
+
+TEST(RuntimeClientRegistry, ExplicitCloseDetachesRetainedBorrower) {
+  RuntimeClientRegistry registry;
+  int retired = 0;
+  bool destroyed = false;
+  auto client = std::make_shared<TestClient>([&] { ++retired; },
+                                             [&] {
+                                               EXPECT_FALSE(registry.closed());
+                                               destroyed = true;
+                                             });
+  std::weak_ptr<TestClient> weak = client;
+  registry.retain(client);
+  client->retire();
+  auto *identity = client.get();
+  client.reset();
+  registry.detach(identity);
+  EXPECT_TRUE(destroyed);
+  EXPECT_TRUE(weak.expired());
+  registry.retire();
+  EXPECT_EQ(retired, 1);
 }
 
 TEST(RuntimeClientRegistry, CleanupRunsOutsideRegistryLock) {
@@ -134,8 +175,16 @@ void check_program_retirement(Arch arch) {
     ++retired;
   });
   program.attach_runtime_client(client);
+  int retained_retired = 0;
+  auto retained = std::make_shared<TestClient>([&] { ++retained_retired; });
+  std::weak_ptr<TestClient> retained_weak = retained;
+  program.retain_runtime_client(retained);
+  retained.reset();
+  EXPECT_FALSE(retained_weak.expired());
   program.finalize();
   EXPECT_EQ(retired, 1);
+  EXPECT_EQ(retained_retired, 1);
+  EXPECT_TRUE(retained_weak.expired());
   program.finalize();
   EXPECT_EQ(retired, 1);
   EXPECT_THROW(program.attach_runtime_client(client), std::exception);

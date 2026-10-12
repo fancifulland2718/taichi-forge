@@ -8978,6 +8978,24 @@ void Program::attach_runtime_client(
   runtime_clients_->attach(client);
 }
 
+void Program::retain_runtime_client(
+    const std::shared_ptr<RuntimeClient> &client) {
+  auto guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("retain runtime client");
+  if (!runtime_clients_) {
+    runtime_clients_ = std::make_unique<RuntimeClientRegistry>();
+  }
+  runtime_clients_->retain(client);
+}
+
+void Program::detach_runtime_client(RuntimeClient *client) {
+  // The borrower holds its own lifecycle lock and the existing submission
+  // guard. Finalization invokes callbacks without either registry lock held.
+  if (runtime_clients_) {
+    runtime_clients_->detach(client);
+  }
+}
+
 void Program::finalize() {
   if (finalized_) {
     return;

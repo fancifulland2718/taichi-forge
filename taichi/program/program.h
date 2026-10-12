@@ -1193,6 +1193,10 @@ class TI_DLL_EXPORT Program {
   // Explicit runtime borrowers retire before the backend device is destroyed.
   // Registration does not retain the client or affect ordinary submissions.
   void attach_runtime_client(const std::shared_ptr<RuntimeClient> &client);
+  // Explicit borrower ownership, released by detach or finalization. The
+  // caller must retire its backend payload before detaching.
+  void retain_runtime_client(const std::shared_ptr<RuntimeClient> &client);
+  void detach_runtime_client(RuntimeClient *client);
   // Delayed resource owners use the typed token and helpers below to
   // serialize reclamation against Program destruction. Once invalidated, the
   // Program registries own final teardown and late callers become no-ops.
