@@ -1200,12 +1200,29 @@ ti_prepare_compute_graph_ext(TiRuntime runtime,
                              const TiNamedArgument *args,
                              uint32_t binding_count,
                              const TiNamedNdArrayBinding *bindings);
-// Version 1 persistent execution description: ordered loaded kernels and native
-// buffer copy/fill32 operations. JSON is consumed only during preparation.
-// Named slots refer to supplied arguments; memory operations use primitive or
-// tensor ndarray storage. All descriptors/ranges are checked before recording,
-// and the result shares the ownership and replay contract above. No provider,
-// control-region or live callback is silently substituted for an unknown kind.
+typedef enum TiNativeOperationCapabilityFlagBitsExt {
+  TI_NATIVE_OPERATION_CAPABILITY_CPU_BIT_EXT = 1,
+  TI_NATIVE_OPERATION_CAPABILITY_CUDA_CAPTURE_BIT_EXT = 2,
+  TI_NATIVE_OPERATION_CAPABILITY_VULKAN_INLINE_BIT_EXT = 4,
+} TiNativeOperationCapabilityFlagBitsExt;
+
+// Query the compiled factory for an exact operation kind/version and this
+// runtime's backend, without loading code or allocating operation resources.
+// Returns zero for an unregistered kind, version or backend. A nonzero result
+// describes composition support, not admission of every dtype/layout/device;
+// preparation still validates concrete descriptors and device requirements.
+TI_DLL_EXPORT TiFlags TI_API_CALL
+ti_get_native_operation_capabilities_ext(TiRuntime runtime,
+                                         const char *kind,
+                                         uint32_t version);
+
+// Version 1 persistent execution description: ordered loaded kernels, native
+// buffer copy/fill32, sort and compact. JSON is consumed only during
+// preparation. Named slots refer to supplied arguments; memory operations use
+// primitive or tensor ndarray storage. All descriptors/ranges are checked
+// before recording, and the result shares the ownership and replay contract
+// above. No provider, control-region or live callback is silently substituted
+// for an unknown kind.
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
 ti_prepare_execution_plan_ext(TiRuntime runtime,
                               TiAotModule module,

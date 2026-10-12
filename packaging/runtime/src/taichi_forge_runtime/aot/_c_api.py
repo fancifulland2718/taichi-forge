@@ -150,6 +150,7 @@ class Api:
             "ti_get_last_error": ([C.POINTER(C.c_uint64), C.c_void_p], C.c_int32),
             "ti_set_last_error": ([C.c_int32, C.c_char_p], None),
             "ti_create_runtime": ([UInt, UInt], Handle),
+            "ti_get_native_operation_capabilities_ext": ([Handle, C.c_char_p, UInt], UInt),
             "ti_destroy_runtime": ([Handle], None),
             "ti_wait": ([Handle], None),
             "ti_allocate_memory": ([Handle, C.POINTER(MemoryAllocateInfo)], Handle),

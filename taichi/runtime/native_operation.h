@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -29,6 +30,8 @@ class NativeOperation {
 };
 
 struct CompactOperation {
+  static constexpr const char *kind = "compact";
+  static constexpr std::uint32_t version = 1;
   struct Column {
     DevicePtr values;
     DevicePtr output;
@@ -43,6 +46,8 @@ struct CompactOperation {
 enum class NativeSortKeyType { u32, i32, f32, u64, i64, f64 };
 
 struct SortOperation {
+  static constexpr const char *kind = "sort";
+  static constexpr std::uint32_t version = 1;
   DevicePtr keys;
   DevicePtr values;  // A null device denotes keys-only sorting.
   std::size_t size;

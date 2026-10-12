@@ -39,6 +39,7 @@ AOT_CONSUMER_SYMBOLS = frozenset({
     "ti_destroy_prepared_ext", "ti_get_prepared_execution_info_ext",
     "ti_prepare_execution_plan_ext",
     "ti_get_prepared_execution_workspace_bytes_ext",
+    "ti_get_native_operation_capabilities_ext",
 })
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 FORBIDDEN_VENDOR_RUNTIME = re.compile(

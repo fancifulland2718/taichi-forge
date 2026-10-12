@@ -80,6 +80,13 @@ def check(arch, path):
     from taichi_forge_runtime import aot
 
     with aot.Runtime(arch) as runtime:
+        mode = {"cuda": "cuda_capture", "vulkan": "vulkan_inline"}.get(arch, "cpu")
+        for kind in ("compact", "sort"):
+            assert runtime.native_operation_capabilities(kind) == {mode}
+            assert not runtime.native_operation_capabilities(kind, version=2)
+        assert not runtime.native_operation_capabilities("missing.provider")
+        for version in (0, -1, 1 << 32, True):
+            raises(ValueError, lambda: runtime.native_operation_capabilities("compact", version=version))
         module = runtime.load_module(path)
         from aot_sort_probe import check_sort
 

@@ -6,6 +6,7 @@
 #include "taichi/aot/execution_plan.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_operation_registry.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -518,6 +519,35 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
+}
+
+TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
+                                                 const char *kind,
+                                                 uint32_t version) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  if (!runtime || !kind) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "runtime or operation kind");
+    return 0;
+  }
+  if (!*kind || !version) {
+    ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, "operation kind or version");
+    return 0;
+  }
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto *capability =
+      taichi::lang::native_operation_registry().find(kind, version, rt.arch);
+  static_assert(static_cast<TiFlags>(taichi::lang::NativeOperationMode::cpu) ==
+                TI_NATIVE_OPERATION_CAPABILITY_CPU_BIT_EXT);
+  static_assert(
+      static_cast<TiFlags>(taichi::lang::NativeOperationMode::cuda_capture) ==
+      TI_NATIVE_OPERATION_CAPABILITY_CUDA_CAPTURE_BIT_EXT);
+  static_assert(
+      static_cast<TiFlags>(taichi::lang::NativeOperationMode::vulkan_inline) ==
+      TI_NATIVE_OPERATION_CAPABILITY_VULKAN_INLINE_BIT_EXT);
+  return capability ? static_cast<TiFlags>(capability->mode) : 0;
+  TI_CAPI_TRY_CATCH_END();
+  return 0;
 }
 
 void ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {

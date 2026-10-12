@@ -137,6 +137,21 @@ class Runtime:
         if self._handle is None:
             raise RuntimeError("AOT runtime is closed")
 
+    def native_operation_capabilities(self, kind, *, version=1):
+        """Registered composition modes for this backend and operation version.
+
+        This cold query does not load operation code or allocate scratch. Empty
+        means unregistered. Concrete shapes, dtypes and device requirements are
+        still checked at prepare time. It does not probe external providers.
+        """
+        kind = _name(kind)
+        if type(version) is not int or not 1 <= version <= 0xFFFFFFFF:
+            raise ValueError("Operation version must be a positive uint32")
+        with self._lock:
+            self._check()
+            flags = self._api.call(self._api.ti_get_native_operation_capabilities_ext, self._handle, kind, version)
+        return frozenset(name for bit, name in ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline")) if flags & bit)
+
     def load_module(self, path):
         with self._lock:
             self._check()

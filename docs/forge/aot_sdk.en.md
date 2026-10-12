@@ -219,6 +219,17 @@ derivative: an explicit integer permutation can feed an exported gather/backward
 pair. `prepared.info["dispatch_count"]` counts exported kernel entries, not the
 internal shader dispatches of native algorithms.
 
+Before allocating operation buffers, query
+`runtime.native_operation_capabilities("compact", version=1)` (also `"sort"`).
+The returned set contains `"cpu"`, `"cuda_capture"` or `"vulkan_inline"` for the
+registered implementation on this runtime's backend; an unknown kind/version
+returns an empty set. The query loads no operation code and allocates no scratch.
+Concrete dtype, layout and device requirements are still checked at preparation.
+The C API equivalent is `ti_get_native_operation_capabilities_ext`. Registration
+and selection happen in the shared native preparation layer; replay uses the
+already prepared object and performs no registry lookup. These registrations do
+not imply external-provider support.
+
 This format does not automatically export arbitrary JIT native Graphs,
 other mathematical primitives/providers, structured control or rendering resources.
 Unknown versions and operations report errors. The buffer/module/runtime

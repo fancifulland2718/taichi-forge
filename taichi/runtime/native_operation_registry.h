@@ -1,0 +1,119 @@
+#pragma once
+
+#include <functional>
+#include <map>
+#include <string>
+#include <typeindex>
+#include <utility>
+#include "taichi/runtime/native_operation.h"
+
+namespace taichi::lang {
+
+// Composition modes implemented by FixedExecution. Registration says which
+// compiled implementation exists, not whether every device/descriptor is valid.
+enum class NativeOperationMode : std::uint32_t {
+  cpu = 1,
+  cuda_capture = 2,
+  vulkan_inline = 4,
+};
+
+struct NativeOperationCapability {
+  std::string kind;
+  std::uint32_t version;
+  Arch arch;
+  NativeOperationMode mode;
+};
+
+// Build privately, then publish as const. No static registration side effects,
+// replacement, device probing or warm-path lookup. Descriptors and factories
+// are an internal C++ contract, not an ABI for independently built plugins.
+// A factory prepares without submitting work; its result owns scratch and any
+// provider/code leases. FixedExecution retains it until recordings retire.
+class NativeOperationRegistry {
+ public:
+  template <typename Descriptor>
+  using Validator = std::function<void(Device &, const Descriptor &)>;
+  template <typename Descriptor>
+  using Factory = std::function<
+      std::shared_ptr<NativeOperation>(Arch, Device &, const Descriptor &)>;
+
+  template <typename Descriptor>
+  void define(Validator<Descriptor> validate) {
+    if (!validate)
+      throw std::invalid_argument("Native operation requires a validator");
+    define_impl(
+        Descriptor::kind, Descriptor::version, typeid(Descriptor),
+        [validate = std::move(validate)](Device &device, const void *value) {
+          validate(device, *static_cast<const Descriptor *>(value));
+        });
+  }
+
+  template <typename Descriptor>
+  void register_factory(Arch arch,
+                        NativeOperationMode mode,
+                        Factory<Descriptor> factory) {
+    if (!factory)
+      throw std::invalid_argument("Native operation requires a factory");
+    register_impl(
+        Descriptor::kind, Descriptor::version, typeid(Descriptor), arch, mode,
+        [arch, factory = std::move(factory)](Device &device,
+                                             const void *value) {
+          return factory(arch, device, *static_cast<const Descriptor *>(value));
+        });
+  }
+
+  template <typename Descriptor>
+  std::shared_ptr<NativeOperation> prepare(Arch arch,
+                                           Device &device,
+                                           const Descriptor &value) const {
+    return prepare_impl(Descriptor::kind, Descriptor::version,
+                        typeid(Descriptor), arch, device, &value);
+  }
+
+  const NativeOperationCapability *find(const std::string &kind,
+                                        std::uint32_t version,
+                                        Arch arch) const;
+  std::vector<NativeOperationCapability> capabilities() const;
+
+ private:
+  using Key = std::pair<std::string, std::uint32_t>;
+  using ErasedValidator = std::function<void(Device &, const void *)>;
+  using ErasedFactory =
+      std::function<std::shared_ptr<NativeOperation>(Device &, const void *)>;
+  struct Backend {
+    NativeOperationCapability capability;
+    ErasedFactory factory;
+  };
+  struct Definition {
+    std::type_index type;
+    ErasedValidator validate;
+    std::map<Arch, Backend> backends;
+  };
+  std::map<Key, Definition> definitions_;
+
+  void define_impl(const std::string &kind,
+                   std::uint32_t version,
+                   std::type_index type,
+                   ErasedValidator validate);
+  void register_impl(const std::string &kind,
+                     std::uint32_t version,
+                     std::type_index type,
+                     Arch arch,
+                     NativeOperationMode mode,
+                     ErasedFactory factory);
+  const Definition &definition(const Key &key, std::type_index type) const;
+  std::shared_ptr<NativeOperation> prepare_impl(const std::string &kind,
+                                                std::uint32_t version,
+                                                std::type_index type,
+                                                Arch arch,
+                                                Device &device,
+                                                const void *value) const;
+};
+
+const NativeOperationRegistry &native_operation_registry();
+
+// Explicit entry points keep registration deterministic under static linking.
+void register_compact_operation(NativeOperationRegistry &registry);
+void register_sort_operation(NativeOperationRegistry &registry);
+
+}  // namespace taichi::lang

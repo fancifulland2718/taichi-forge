@@ -1,4 +1,4 @@
-#include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_operation_registry.h"
 
 #include <algorithm>
 #include <array>
@@ -155,12 +155,7 @@ class CudaSort final : public SortBase {
   void *workspace_pointer_{nullptr};
 };
 #endif
-}  // namespace
-
-std::shared_ptr<NativeOperation> prepare_sort_operation(
-    Arch arch,
-    Device &device,
-    const SortOperation &operation) {
+void validate_sort(Device &device, const SortOperation &operation) {
   const auto type = static_cast<int>(operation.key_type);
   const std::size_t key_bytes = type >= 3 ? 8 : 4;
   if (type < 0 || type > 5 ||
@@ -178,56 +173,85 @@ std::shared_ptr<NativeOperation> prepare_sort_operation(
               (key_bytes + operation.value_bytes + sizeof(std::uint32_t)))
     throw std::invalid_argument(
         "Sort exceeds its key, record or i32 index ABI");
+}
+
+template <typename Map>
+void map_sort(SortBase &result, const SortOperation &operation, Map map) {
+  const std::size_t key_bytes =
+      static_cast<int>(operation.key_type) >= 3 ? 8 : 4;
   const std::array<DevicePtr, 2> bindings{operation.keys, operation.values};
   const std::array<std::size_t, 2> sizes{
       operation.size * key_bytes, operation.size * operation.value_bytes};
-  auto validate = [&](SortBase &result) {
-    const auto a = reinterpret_cast<std::uintptr_t>(result.pointers[0]);
-    const auto b = reinterpret_cast<std::uintptr_t>(result.pointers[1]);
-    if (!a || a % key_bytes || (operation.values.device && (!b || b % 4)) ||
-        sizes[0] > std::numeric_limits<std::uintptr_t>::max() - a ||
-        sizes[1] > std::numeric_limits<std::uintptr_t>::max() - b ||
-        (sizes[0] && sizes[1] &&
-         (a <= b ? b - a < sizes[0] : a - b < sizes[1])))
-      throw std::invalid_argument(
-          "Sort key and payload ranges must be aligned and nonoverlapping");
-  };
+  for (std::size_t i = 0; i < bindings.size(); ++i)
+    if (bindings[i].device)
+      result.pointers[i] = map(bindings[i], sizes[i]);
+  const auto a = reinterpret_cast<std::uintptr_t>(result.pointers[0]);
+  const auto b = reinterpret_cast<std::uintptr_t>(result.pointers[1]);
+  if (!a || a % key_bytes || (operation.values.device && (!b || b % 4)) ||
+      sizes[0] > std::numeric_limits<std::uintptr_t>::max() - a ||
+      sizes[1] > std::numeric_limits<std::uintptr_t>::max() - b ||
+      (sizes[0] && sizes[1] && (a <= b ? b - a < sizes[0] : a - b < sizes[1])))
+    throw std::invalid_argument(
+        "Sort key and payload ranges must be aligned and nonoverlapping");
+}
+
 #ifdef TI_WITH_LLVM
-  if (arch_is_cpu(arch)) {
-    auto *cpu_device = dynamic_cast<cpu::CpuDevice *>(&device);
-    if (!cpu_device)
-      throw std::invalid_argument("Sort requires a CPU device");
-    auto result = std::make_shared<CpuSort>(arch, device, operation);
-    for (std::size_t i = 0; i < bindings.size(); ++i)
-      if (bindings[i].device && cpu_device->map_range_for_cpu_native(
-                                    bindings[i], sizes[i],
-                                    &result->pointers[i]) != RhiResult::success)
-        throw std::invalid_argument("Sort CPU storage range is invalid");
-    validate(*result);
-    result->prepare(key_bytes);
-    return result;
-  }
+std::shared_ptr<NativeOperation>
+prepare_cpu_sort(Arch arch, Device &device, const SortOperation &operation) {
+  auto *cpu_device = dynamic_cast<cpu::CpuDevice *>(&device);
+  if (!cpu_device)
+    throw std::invalid_argument("Sort requires a CPU device");
+  auto result = std::make_shared<CpuSort>(arch, device, operation);
+  map_sort(*result, operation, [&](DevicePtr ptr, std::size_t bytes) {
+    void *mapped = nullptr;
+    if (cpu_device->map_range_for_cpu_native(ptr, bytes, &mapped) !=
+        RhiResult::success)
+      throw std::invalid_argument("Sort CPU storage range is invalid");
+    return mapped;
+  });
+  result->prepare(static_cast<int>(operation.key_type) >= 3 ? 8 : 4);
+  return result;
+}
 #endif
 #ifdef TI_WITH_CUDA
-  if (arch == Arch::cuda) {
-    auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
-    if (!cuda_device)
-      throw std::invalid_argument("Sort requires a CUDA device");
-    auto result = std::make_shared<CudaSort>(arch, device, operation);
-    for (std::size_t i = 0; i < bindings.size(); ++i)
-      if (bindings[i].device)
-        result->pointers[i] =
-            static_cast<char *>(cuda_device->get_memory_addr(bindings[i])) +
-            bindings[i].offset;
-    validate(*result);
-    result->prepare();
-    return result;
-  }
+std::shared_ptr<NativeOperation>
+prepare_cuda_sort(Arch arch, Device &device, const SortOperation &operation) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda_device)
+    throw std::invalid_argument("Sort requires a CUDA device");
+  auto result = std::make_shared<CudaSort>(arch, device, operation);
+  map_sort(*result, operation, [&](DevicePtr ptr, std::size_t) {
+    return static_cast<char *>(cuda_device->get_memory_addr(ptr)) + ptr.offset;
+  });
+  result->prepare();
+  return result;
+}
+#endif
+}  // namespace
+
+void register_sort_operation(NativeOperationRegistry &registry) {
+  registry.define<SortOperation>(validate_sort);
+#ifdef TI_WITH_LLVM
+  registry.register_factory<SortOperation>(
+      host_arch(), NativeOperationMode::cpu, prepare_cpu_sort);
+#endif
+#ifdef TI_WITH_CUDA
+  registry.register_factory<SortOperation>(
+      Arch::cuda, NativeOperationMode::cuda_capture, prepare_cuda_sort);
 #endif
 #ifdef TI_WITH_VULKAN
-  if (arch == Arch::vulkan)
-    return gfx::prepare_vulkan_sort_operation(device, operation);
+  registry.register_factory<SortOperation>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](Arch, Device &device, const SortOperation &operation) {
+        return gfx::prepare_vulkan_sort_operation(device, operation);
+      });
 #endif
-  throw std::invalid_argument("Sort requires CPU, CUDA or Vulkan");
+}
+
+std::shared_ptr<NativeOperation> prepare_sort_operation(
+    Arch arch,
+    Device &device,
+    const SortOperation &operation) {
+  return native_operation_registry().prepare(arch, device, operation);
 }
 }  // namespace taichi::lang

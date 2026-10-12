@@ -178,6 +178,13 @@ CPU/CUDA/Vulkan 的每份 prepared 实例独立拥有工作区；`prepared.info`
 的 gather/backward。`prepared.info["dispatch_count"]` 统计已导出 kernel 入口数，
 不代表 native 算法内部 shader 的实际 dispatch 数。
 
+分配操作缓冲前可查询 `runtime.native_operation_capabilities("compact", version=1)`
+（也支持 `"sort"`）。返回集合按当前 runtime 后端包含 `"cpu"`、`"cuda_capture"` 或
+`"vulkan_inline"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配
+工作区，具体 dtype、布局和设备要求仍在准备时检查。对应 C API 为
+`ti_get_native_operation_capabilities_ext`。注册与选择发生在共用的原生准备层，
+重放使用已准备对象，不再查询注册表。上述注册不代表外部 provider 已接通。
+
 任意 JIT native Graph、其他数学 primitive/provider、结构控制和渲染资源尚不由此格式
 自动导出；未知操作或版本明确报错。buffer、模块和 runtime 的在途寿命合同同上。
 

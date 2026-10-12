@@ -1,4 +1,4 @@
-#include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_operation_registry.h"
 
 #include <algorithm>
 #include <cstring>
@@ -181,12 +181,7 @@ class CudaCompact final : public CompactBase {
   void *workspace_pointer_{nullptr};
 };
 #endif
-}  // namespace
-
-std::shared_ptr<NativeOperation> prepare_compact_operation(
-    Arch arch,
-    Device &device,
-    const CompactOperation &operation) {
+void validate_compact(Device &device, const CompactOperation &operation) {
   if (operation.size > std::numeric_limits<std::int32_t>::max() ||
       operation.columns.empty())
     throw std::invalid_argument("Compact requires columns and an i32 count");
@@ -213,44 +208,89 @@ std::shared_ptr<NativeOperation> prepare_compact_operation(
                       binding.offset + sizes[i], bool(i % 2)});
   }
   validate_ranges(std::move(ranges));
-#ifdef TI_WITH_LLVM
-  if (arch_is_cpu(arch)) {
-    auto *cpu_device = dynamic_cast<cpu::CpuDevice *>(&device);
-    if (!cpu_device)
-      throw std::invalid_argument("Compact requires a CPU device");
-    auto result = std::make_shared<CpuCompact>(arch, device, operation);
-    result->pointers.resize(bindings.size());
-    for (std::size_t i = 0; i < bindings.size(); ++i) {
-      if (cpu_device->map_range_for_cpu_native(bindings[i], sizes[i],
-                                               &result->pointers[i]) !=
-          RhiResult::success)
-        throw std::invalid_argument("Compact CPU storage range is invalid");
-    }
-    validate_pointers(result->pointers, sizes);
-    result->prepare();
-    return result;
+}
+
+template <typename Map>
+void map_compact(CompactBase &result,
+                 const CompactOperation &operation,
+                 Map map) {
+  std::vector<std::size_t> sizes;
+  result.pointers.reserve(2 + 2 * operation.columns.size());
+  sizes.reserve(2 + 2 * operation.columns.size());
+  auto append = [&](DevicePtr ptr, std::size_t bytes) {
+    result.pointers.push_back(map(ptr, bytes));
+    sizes.push_back(bytes);
+  };
+  append(operation.flags, operation.size * sizeof(std::int32_t));
+  append(operation.count, sizeof(std::int32_t));
+  for (const auto &column : operation.columns) {
+    append(column.values, operation.size * column.item_bytes);
+    append(column.output, operation.size * column.item_bytes);
   }
+  validate_pointers(result.pointers, sizes);
+}
+
+#ifdef TI_WITH_LLVM
+std::shared_ptr<NativeOperation> prepare_cpu_compact(
+    Arch arch,
+    Device &device,
+    const CompactOperation &operation) {
+  auto *cpu_device = dynamic_cast<cpu::CpuDevice *>(&device);
+  if (!cpu_device)
+    throw std::invalid_argument("Compact requires a CPU device");
+  auto result = std::make_shared<CpuCompact>(arch, device, operation);
+  map_compact(*result, operation, [&](DevicePtr ptr, std::size_t bytes) {
+    void *mapped = nullptr;
+    if (cpu_device->map_range_for_cpu_native(ptr, bytes, &mapped) !=
+        RhiResult::success)
+      throw std::invalid_argument("Compact CPU storage range is invalid");
+    return mapped;
+  });
+  result->prepare();
+  return result;
+}
 #endif
 #ifdef TI_WITH_CUDA
-  if (arch == Arch::cuda) {
-    auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
-    if (!cuda_device)
-      throw std::invalid_argument("Compact requires a CUDA device");
-    auto result = std::make_shared<CudaCompact>(arch, device, operation);
-    result->pointers.resize(bindings.size());
-    for (std::size_t i = 0; i < bindings.size(); ++i)
-      result->pointers[i] =
-          static_cast<char *>(cuda_device->get_memory_addr(bindings[i])) +
-          bindings[i].offset;
-    validate_pointers(result->pointers, sizes);
-    result->prepare();
-    return result;
-  }
+std::shared_ptr<NativeOperation> prepare_cuda_compact(
+    Arch arch,
+    Device &device,
+    const CompactOperation &operation) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda_device)
+    throw std::invalid_argument("Compact requires a CUDA device");
+  auto result = std::make_shared<CudaCompact>(arch, device, operation);
+  map_compact(*result, operation, [&](DevicePtr ptr, std::size_t) {
+    return static_cast<char *>(cuda_device->get_memory_addr(ptr)) + ptr.offset;
+  });
+  result->prepare();
+  return result;
+}
+#endif
+}  // namespace
+
+void register_compact_operation(NativeOperationRegistry &registry) {
+  registry.define<CompactOperation>(validate_compact);
+#ifdef TI_WITH_LLVM
+  registry.register_factory<CompactOperation>(
+      host_arch(), NativeOperationMode::cpu, prepare_cpu_compact);
+#endif
+#ifdef TI_WITH_CUDA
+  registry.register_factory<CompactOperation>(
+      Arch::cuda, NativeOperationMode::cuda_capture, prepare_cuda_compact);
 #endif
 #ifdef TI_WITH_VULKAN
-  if (arch == Arch::vulkan)
-    return gfx::prepare_vulkan_compact_operation(device, operation);
+  registry.register_factory<CompactOperation>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](Arch, Device &device, const CompactOperation &operation) {
+        return gfx::prepare_vulkan_compact_operation(device, operation);
+      });
 #endif
-  throw std::invalid_argument("Compact requires CPU, CUDA or Vulkan");
+}
+
+std::shared_ptr<NativeOperation> prepare_compact_operation(
+    Arch arch,
+    Device &device,
+    const CompactOperation &operation) {
+  return native_operation_registry().prepare(arch, device, operation);
 }
 }  // namespace taichi::lang

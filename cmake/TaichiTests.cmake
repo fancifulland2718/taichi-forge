@@ -23,6 +23,7 @@ file(GLOB_RECURSE TAICHI_TESTS_SOURCE
         "tests/cpp/offline_cache/*.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/struct_layout_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/execution_plan_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cpp")
 
 if (TI_WITH_OPENGL OR TI_WITH_VULKAN)
     file(GLOB TAICHI_TESTS_GFX_UTILS_SOURCE
