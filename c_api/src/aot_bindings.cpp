@@ -127,7 +127,8 @@ void Runtime::retire_resources(bool synchronize) {
     memories.swap(memories_);
   }
   for (const auto &[handle, memory] : memories)
-    cleanup([&] { get().dealloc_memory(memory.allocation); });
+    if (!memory.storage_owner)
+      cleanup([&] { get().dealloc_memory(memory.allocation); });
   if (failure)
     std::rethrow_exception(failure);
 }

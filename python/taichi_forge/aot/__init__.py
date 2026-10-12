@@ -15,8 +15,8 @@ def borrow_runtime():
 
     Requires a matching split runtime with the C API. The returned consumer
     owns its AOT resources; closing it leaves the JIT Program alive. Resetting
-    the Program retires all its borrowers. JIT ndarray imports are separate
-    from this owner bridge and are not accepted as raw pointer bindings.
+    the Program retires all its borrowers. ``runtime.import_ndarray(array)``
+    retains an explicit zero-copy storage lease on an existing JIT ndarray.
     """
     from taichi_forge._lib import core, utils
     from taichi_forge.lang import impl
@@ -28,9 +28,21 @@ def borrow_runtime():
     runtime = impl.get_runtime()
     runtime.materialize()
     client = factory(runtime.prog)
-    result = Runtime._from_borrowed(client, utils._loaded_native_runtime_path)
+    result = Runtime._from_borrowed(client, utils._loaded_native_runtime_path, ndarray_importer=_import_ndarray)
     runtime.register_runtime_object(result)
     return result
+
+
+def _import_ndarray(client, array):
+    # Keep frontend type knowledge on the producer side. The standalone AOT
+    # consumer has no dependency on the DSL or on numpy.
+    from taichi_forge.lang._ndarray import Ndarray, StructNdarray
+
+    if not isinstance(array, Ndarray) or isinstance(array, StructNdarray):
+        raise TypeError("AOT import requires a scalar or tensor JIT ndarray")
+    if array.arr is None:
+        raise RuntimeError("Cannot import an ndarray after its runtime was reset")
+    return client.import_ndarray(array.arr)
 
 
 def __getattr__(name):

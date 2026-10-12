@@ -1,9 +1,10 @@
 """AOT resource owners and ordinary entry binding, independent of the DSL.
 
 This consumer covers ordinary kernels/CGraphs and primitive or tensor ndarrays.
-Fixed recordings support loaded kernels, declared native operations and private arrays;
-providers, structure arrays and external-memory imports are not exposed here
-yet. Host transfers are explicit; kernel calls use device
+Fixed recordings support loaded kernels, declared native operations and private arrays.
+Explicit JIT borrowers can import scalar/tensor ndarrays with storage leases;
+structure arrays and arbitrary external-memory imports are not exposed here.
+Host transfers are explicit; kernel calls use device
 allocations directly. Close resources explicitly or use Runtime as a context
 manager. ``bind()`` reuses Python argument descriptors across submissions.
 """
@@ -111,6 +112,7 @@ class Runtime:
     def __init__(self, arch="cpu", *, device_index=0, library_path=None, runtime_path=None):
         self._lock = threading.RLock()
         self._borrower = None
+        self._ndarray_importer = None
         self._handle = None
         # Keep native registrations independently of Python wrapper lifetimes.
         # Cyclic GC can finalize a runtime and its pending argument owners in
@@ -135,9 +137,10 @@ class Runtime:
             raise RuntimeError("Native AOT runtime creation returned no handle")
 
     @classmethod
-    def _from_borrowed(cls, client, library_path):
+    def _from_borrowed(cls, client, library_path, *, ndarray_importer=None):
         result = cls.__new__(cls)
         result._lock = result._borrower = client
+        result._ndarray_importer = ndarray_importer
         result._handle = None
         result._resources, result._pending = set(), set()
         try:
@@ -220,6 +223,35 @@ class Runtime:
             self._check()
             self._api.call(self._api.ti_wait, self._handle)
             self._pending.clear()
+
+    def import_ndarray(self, array):
+        """Retain a zero-copy JIT ndarray through an explicit borrowed owner.
+
+        This cold operation shares storage, not a Python array wrapper. The
+        imported view remains live if the source wrapper is collected. Closing
+        this view drops its lease and retires its prepared users; Program reset
+        retires all borrowed views before backend teardown. Import ``array.grad``
+        separately when binding an exported explicit gradient.
+        """
+        with self._lock:
+            self._check()
+            if self._ndarray_importer is None:
+                raise RuntimeError("JIT ndarray import requires ti.aot.borrow_runtime()")
+            handle, size, dtype, shape, element_shape = self._ndarray_importer(self._borrower, array)
+            memory = None
+            try:
+                code, _, width = _dtype(dtype)
+                shape, element_shape = _shape(shape), _shape(element_shape)
+                if size != math.prod(shape) * math.prod(element_shape) * width:
+                    raise ValueError("Imported ndarray layout disagrees with its storage extent")
+                memory = _Memory._from_import(self, handle, size)
+                return NdArray(memory, dtype, code, shape, element_shape)
+            except BaseException:
+                if memory is None:
+                    self._api.call(self._api.ti_free_memory, self._handle, handle)
+                else:
+                    memory.close()
+                raise
 
     def close(self):
         with self._lock:
@@ -317,6 +349,13 @@ class _Memory(_Resource):
         info = abi.MemoryAllocateInfo(max(size, 1), False, False, False, 1)
         handle = runtime._api.call(runtime._api.ti_allocate_memory, runtime._handle, C.byref(info))
         super().__init__(runtime, handle)
+
+    @classmethod
+    def _from_import(cls, runtime, handle, size):
+        result = cls.__new__(cls)
+        result.size = size
+        _Resource.__init__(result, runtime, handle)
+        return result
 
 
 class NdArray:

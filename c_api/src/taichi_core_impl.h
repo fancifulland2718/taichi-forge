@@ -151,6 +151,9 @@ class Runtime {
     // External pointer/binding offset; owned RHI allocations are naturally
     // aligned. Captured once on import, without querying the driver at launch.
     uint64_t base_offset{0};
+    // A same-device storage lease owned by another API. Drop this reference
+    // after recordings retire; never deallocate its RHI allocation directly.
+    std::shared_ptr<void> storage_owner;
   };
 
  private:
@@ -202,7 +205,8 @@ class Runtime {
   TiMemory register_memory(taichi::lang::DeviceAllocation allocation,
                             uint64_t size,
                             bool release_on_failure = true,
-                            uint64_t base_offset = 0);
+                            uint64_t base_offset = 0,
+                            std::shared_ptr<void> storage_owner = {});
   MemoryAllocation get_memory(TiMemory memory) const;
   static std::uintptr_t new_handle_token();
   TiKernel register_kernel(KernelBinding binding);

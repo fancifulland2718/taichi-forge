@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <exception>
+#include <limits>
 #include "taichi/program/program.h"
 #include "taichi_core_impl.h"
 #ifdef TI_WITH_LLVM
@@ -167,5 +168,53 @@ std::uintptr_t AotRuntimeClient::device_identity() const {
 }
 Arch AotRuntimeClient::arch() const {
   return state_->arch;
+}
+
+AotRuntimeClient::NdarrayImport AotRuntimeClient::import_ndarray(
+    const Ndarray *array) {
+  enter();
+  try {
+    auto &state = *state_;
+    if (state.closed || !state.runtime || !state.scopes.back().owns_lock())
+      throw std::runtime_error("AOT runtime is closed");
+    if (!array)
+      throw std::invalid_argument("AOT import requires a live JIT ndarray");
+    // Check the owner's live map before dereferencing the source pointer.
+    state.program->validate_ndarrays_for_external_submission(&array, 1);
+    auto lease = state.program->acquire_ndarray_external_lease(
+        array->runtime_resource_handle());
+    const auto element_shape = lease->get_element_shape();
+    if (lease->layout == ExternalArrayLayout::kSOA && !element_shape.empty())
+      throw std::invalid_argument(
+          "AOT ndarray import requires compact AOS layout");
+    const auto dtype = lease->get_element_data_type();
+    if (!dtype->is<PrimitiveType>())
+      throw std::invalid_argument(
+          "AOT ndarray import requires scalar or tensor elements");
+    if (lease->shape.size() > 16 || element_shape.size() > 16)
+      throw std::invalid_argument(
+          "AOT ndarray rank exceeds the C API dimension capacity");
+    const auto width = lease->get_element_size();
+    const auto count = lease->get_nelement();
+    if (!width || count > std::numeric_limits<std::uint64_t>::max() / width)
+      throw std::invalid_argument("AOT ndarray extent overflows address space");
+    const auto bytes = static_cast<std::uint64_t>(width) * count;
+    NdarrayImport result{0, bytes, dtype->to_string(), lease->shape,
+                         element_shape};
+    const auto allocation = lease->get_device_allocation();
+    if (allocation.device != &state.runtime->get())
+      throw std::invalid_argument(
+          "AOT ndarray storage belongs to another device");
+    auto owner =
+        std::make_shared<Program::NdarrayResourceLease>(std::move(lease));
+    const auto handle = state.runtime->register_memory(allocation, bytes, false,
+                                                       0, std::move(owner));
+    std::get<0>(result) = reinterpret_cast<std::uintptr_t>(handle);
+    leave();
+    return result;
+  } catch (...) {
+    leave();
+    throw;
+  }
 }
 }  // namespace taichi::lang

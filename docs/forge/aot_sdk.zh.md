@@ -64,9 +64,10 @@ recording/provider 支持边界仍然适用。
 import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
+jit_output = ti.ndarray(ti.i32, 17)
 with ti.aot.borrow_runtime() as runtime:
     module = runtime.load_module("simulation.tcm")
-    output = runtime.ndarray("i32", 17)
+    output = runtime.import_ndarray(jit_output)
     call = module.kernel("advance").prepare(output)
     call()
     ti.sync()
@@ -75,11 +76,24 @@ with ti.aot.borrow_runtime() as runtime:
 请使用与传入参数签名匹配的已导出入口。借用对象管理自己的模块、数组和录制，
 关闭后 JIT Program 仍可使用。`ti.reset()` 或原生 Program finalize 会在设备销毁前
 退休借用者；保留的旧包装对象随后拒绝执行，仍可安全关闭。每个借用者有独立的
-资源登记，JIT ndarray 或另一消费对象的数组不会自动成为有效参数；零拷贝导入
-仍需独立的存储登记接口。普通 `aot.Runtime(arch)` 构造器继续创建独立运行时。
+资源登记，JIT ndarray 或另一消费对象的数组不会自动成为有效参数。
+普通 `aot.Runtime(arch)` 构造器继续创建独立运行时。
 借用需要匹配的 Python shim 和包含 C API 的 split 原生库，不增加独立 AOT 消费端
 的前端依赖。Windows CPU/CUDA/Vulkan 验收覆盖普通/固定执行、显式梯度、模块状态
 隔离、GC 和并发 finalize。
+
+借用者通过 `runtime.import_ndarray(jit_array)` 显式导入同一 Program 的紧凑
+scalar/vector/matrix ndarray。导入返回可用于普通/固定 AOT 调用的数组视图，复用
+原设备存储；JIT 和 AOT 的读写共享数据及 owner 的提交顺序，不产生设备复制。
+需要显式反向时，另行导入 `jit_array.grad` 并使用既有 `gradients` 绑定，导入不会
+自动清零、播种或推导梯度。形状和 dtype 从原生存储读取。
+
+视图持有 generation 校验后的原生存储租约；原 Python ndarray 被 GC 后仍有效。
+关闭视图会先完成其在途工作并退休关联 AOT 录制，再释放租约，不销毁仍有其他
+owner 的存储。`ti.reset()` 则使全部旧视图失效。当前不接受 StructNdarray、SOA
+tensor、其他 Program 或任意外部指针；独立 Runtime 不提供该 JIT 导入能力。
+Windows CPU/CUDA/Vulkan 已验证 JIT→AOT→JIT 顺序、显式梯度、tensor、两个借用者、
+源包装 GC 和在途 reset。这是共享存储能力，不扩大 provider 的操作覆盖。
 
 runtime wheel 提供 `taichi_forge_runtime.aot`，仅用 Python 标准库和共库 C API
 消费普通 kernel/CGraph，无需 NumPy、DSL 前端或 CPython shim。导入本身不会加载
@@ -117,7 +131,7 @@ ArgPack 和 GPU sparse topology 任务仍需后续资源/控制扩展。产物�
 
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
 选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、任意 native Graph、
-未列出的 provider 和外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
+未列出的 provider 和任意外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
 后端的前向/反向与两种 AOT/JIT 加载顺序。
 
 安装后的 `examples/aot_sdk` 包含导出脚本及独立消费程序。`SDK`、`MODULE`

@@ -72,9 +72,10 @@ its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:
 import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
+jit_output = ti.ndarray(ti.i32, 17)
 with ti.aot.borrow_runtime() as runtime:
     module = runtime.load_module("simulation.tcm")
-    output = runtime.ndarray("i32", 17)
+    output = runtime.import_ndarray(jit_output)
     call = module.kernel("advance").prepare(output)
     call()
     ti.sync()
@@ -86,12 +87,29 @@ resources and leaves the JIT Program usable. `ti.reset()` or native Program
 finalization retires borrowers before destroying the backend; retained wrappers
 then reject execution and can still be closed. Each borrower has a separate
 resource namespace. JIT ndarrays and arrays from another consumer are not
-automatically accepted as bindings; registered zero-copy imports require a
-separate storage interface. The ordinary `aot.Runtime(arch)` constructor remains
+automatically accepted as bindings. The ordinary `aot.Runtime(arch)` constructor remains
 independent. Borrowing requires a matching Python shim and split native library
 built with the C API; it does not add a frontend dependency to standalone AOT
 consumption. Windows CPU/CUDA/Vulkan checks cover direct and fixed execution,
 explicit gradients, module state isolation, GC and concurrent finalization.
+
+Borrowers can explicitly import compact scalar/vector/matrix ndarrays from the
+same Program with `runtime.import_ndarray(jit_array)`. The returned view works
+with ordinary and prepared AOT calls and shares the original device storage.
+JIT and AOT observe the same data and owner submission order without a device
+copy. Import `jit_array.grad` separately for explicit `gradients` bindings;
+importing does not clear, seed or derive gradients. Shape and dtype come from
+native storage metadata.
+
+The view retains a generation-checked native storage lease and remains valid
+after the source Python ndarray is collected. Closing it completes in-flight
+work, retires associated AOT recordings and drops the lease; storage retained by
+other owners stays live. `ti.reset()` invalidates all old views. StructNdarray,
+SOA tensors, another Program and arbitrary external pointers are not accepted.
+Standalone Runtime instances cannot import JIT storage. Windows CPU/CUDA/Vulkan
+checks cover JIT→AOT→JIT ordering, explicit gradients, tensors, two borrowers,
+source-wrapper GC and in-flight reset. This adds shared storage, not provider
+operation coverage.
 
 The runtime wheel includes `taichi_forge_runtime.aot`, a Python consumer using
 the standard library and this shared C API. Ordinary kernel/CGraph execution
@@ -141,7 +159,7 @@ waits and closes its children; later calls on them fail. Prefer explicit lifetim
 management to GC timing. Optional `library_path` and `runtime_path` select the
 shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
 core/resource set. The Python consumer currently excludes structure arrays,
-textures, arbitrary native Graphs, unlisted providers and external-memory imports; the C/C++
+textures, arbitrary native Graphs, unlisted providers and arbitrary external-memory imports; the C/C++
 capabilities below are separate. Windows x64 checks cover all three backends,
 forward/reverse work and both AOT/JIT loading orders.
 
