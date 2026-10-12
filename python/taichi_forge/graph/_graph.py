@@ -6947,6 +6947,7 @@ class _CompiledWhileGraphNode:
         )
         self._last_report = None
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
+        self._native_region_jit_cache = None
         self._vulkan_chunk_limits = {}
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _while_upgrade_status(
@@ -8032,6 +8033,11 @@ class _CompiledWhileGraphNode:
             self._native_jit_cache.retire_snode_tree_runtime_state()
         else:
             self._native_jit_cache.clear_runtime_state()
+        if self._native_region_jit_cache is not None:
+            if preserve_executables:
+                self._native_region_jit_cache.retire_snode_tree_runtime_state()
+            else:
+                self._native_region_jit_cache.clear_runtime_state()
         self._condition.invalidate_runtime(preserve_executables=preserve_executables)
         for node in self._chunks.values():
             node.invalidate_runtime(preserve_executables=preserve_executables)
@@ -8052,6 +8058,13 @@ class _CompiledWhileGraphNode:
     def debug_graph_stats(self):
         chunk_stats = tuple(node.debug_graph_stats for node in self._chunks.values())
         condition_stats = (self._condition.debug_graph_stats,)
+        if self._native_region_jit_cache is not None:
+            return (
+                self._native_region_jit_cache._debug_graph_stats(),
+                self._native_jit_cache._debug_graph_stats(),
+                *condition_stats,
+                *chunk_stats,
+            )
         if self._vulkan_nested is not None or self._cuda_nested is not None:
             return (
                 self._native_jit_cache._debug_graph_stats(),
@@ -8076,6 +8089,13 @@ class _CompiledWhileGraphNode:
     def snapshot_graph_stats(self):
         chunk_stats = tuple(node.snapshot_graph_stats for node in self._chunks.values())
         condition_stats = (self._condition.snapshot_graph_stats,)
+        if self._native_region_jit_cache is not None:
+            return (
+                self._native_region_jit_cache._debug_graph_stats(False),
+                self._native_jit_cache._debug_graph_stats(False),
+                *condition_stats,
+                *chunk_stats,
+            )
         if self._vulkan_nested is not None or self._cuda_nested is not None:
             return (
                 self._native_jit_cache._debug_graph_stats(False),
@@ -13058,6 +13078,107 @@ class _GraphSpec:
         }
 
 
+class _CudaWhileSubmissionRegion:
+    """Materialized straight-line prefix, one WHILE, and suffix in one root."""
+
+    def __init__(self, before, control, after):
+        self.nodes = (*before, control, *after)
+        self.control = control
+        # Keep retry/capture state separate from the standalone loop: failed
+        # preparation of a prefix must not poison a valid fallback body.
+        if control._native_region_jit_cache is None:
+            control._native_region_jit_cache = _ti_core.CompiledGraphJITCache()
+        body = (control._chunks[1],) if control.max_iterations else ()
+        prefix = (*before, control._condition)
+        parts = (*prefix, *body, *after)
+        builder = _new_runtime_graph_builder(())
+        for node in parts:
+            dispatches = node.recording_dispatches
+            for dispatch, ir_node in zip(dispatches, _recording_dispatch_ir_nodes(node, len(dispatches))):
+                _record_backend_dispatch(builder, "cuda", dispatch, ir_node)
+        self.compiled_graph = builder.compile()
+        self.prefix_count = sum(node.dispatch_count for node in prefix)
+        self.suffix_count = sum(node.dispatch_count for node in after)
+        self.runtime_arg_names = frozenset().union(*(node.recording_runtime_arg_names for node in parts))
+
+    def run(self, context, temporaries=None):
+        control = self.control
+        predicate = getattr(context.runtime_args()[control.predicate], "arr", None)
+        if predicate is not None and self.compiled_graph.jit_submit_bounded_cuda_region_cached(
+            context.compile_config(),
+            context.flattened_args(self.runtime_arg_names),
+            control._native_region_jit_cache,
+            predicate,
+            control.max_iterations,
+            self.prefix_count,
+            self.suffix_count,
+        ):
+            control._last_report = None
+            return
+        # Failed preparation has not launched user work; retain the original
+        # submission contract when this device/binding cannot capture a region.
+        for node in self.nodes:
+            if node is control:
+                node.run_for_submission(context, temporaries)
+            else:
+                node.run(context, temporaries)
+
+
+def _cuda_while_submission_regions(nodes):
+    if impl.current_cfg().arch != _ti_core.Arch.cuda:
+        return ()
+
+    def plain(node):
+        return (
+            isinstance(node, _CompiledCGraphNode)
+            and node.dispatch_count > 0
+            and len(node.recording_dispatches) == node.dispatch_count
+            and not node.source_native_count
+            and not node.composer_applied_groups
+            and not node.parallel_dispatch_groups
+            and all(item.dispatch_packet is None for item in node.recording_dispatches)
+            and all(
+                not isinstance(item, DispatchNode) or item.bounded_domain is None
+                for item in _recording_dispatch_ir_nodes(node, node.dispatch_count)
+            )
+        )
+
+    def eligible(node):
+        return (
+            isinstance(node, _CompiledWhileGraphNode)
+            and node.supports_native_submission
+            and not node._has_nested_control
+            and node._cuda_control_lowering == "cuda_conditional_graph"
+            and plain(node._condition)
+            and (node.max_iterations == 0 or plain(node._chunks[1]))
+        )
+
+    regions = []
+    cursor = 0
+    while cursor < len(nodes):
+        control_index = cursor
+        while control_index < len(nodes) and plain(nodes[control_index]):
+            control_index += 1
+        if control_index == len(nodes) or not eligible(nodes[control_index]):
+            regions.extend(nodes[cursor : control_index + 1])
+            cursor = control_index + 1
+            continue
+        end = control_index + 1
+        while end < len(nodes) and plain(nodes[end]):
+            end += 1
+        regions.append(
+            _CudaWhileSubmissionRegion(
+                nodes[cursor:control_index], nodes[control_index], nodes[control_index + 1 : end]
+            )
+        )
+        cursor = end
+    return (
+        tuple(regions)
+        if any(isinstance(node, _CudaWhileSubmissionRegion) for node in regions)
+        else ()
+    )
+
+
 class _GraphExecutable:
     def __init__(self, spec, fixed_runtime_args=None):
         self.spec = spec
@@ -13073,6 +13194,21 @@ class _GraphExecutable:
             if isinstance(node, _CompiledWhileGraphNode)
         }
         self._submission_steps = self._build_submission_steps(self.spec.nodes)
+        # Flatten semantic containers before materialization, including a step
+        # embedded in a parent Graph. The original nodes still own leases and
+        # invalidation; each WHILE owns both standalone and region caches.
+        flattened = []
+
+        def flatten(node):
+            if isinstance(node, _CompiledSequentialRegionNode):
+                for child in node.nodes:
+                    flatten(child)
+            else:
+                flattened.append(node)
+
+        for node in self.spec.nodes:
+            flatten(node)
+        self._cuda_submission_regions = _cuda_while_submission_regions(flattened)
 
     def _build_submission_steps(self, nodes):
         steps = []
@@ -13161,6 +13297,13 @@ class _GraphExecutable:
                 native_actions=prepared.native_actions,
             )
         try:
+            if telemetry is None and self._cuda_submission_regions:
+                for node in self._cuda_submission_regions:
+                    if _is_structured_control_node(node):
+                        node.run_for_submission(context, temporaries)
+                    else:
+                        node.run(context, temporaries)
+                return
             for (
                 run,
                 telemetry_entries,

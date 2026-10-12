@@ -871,7 +871,9 @@ struct TI_DLL_EXPORT CompiledGraph {
       CompiledGraphJITCache &cache,
       Ndarray *predicate,
       int max_iterations,
-      bool continue_while_nonzero) const;
+      bool continue_while_nonzero,
+      std::size_t prefix_dispatch_count = 0,
+      std::size_t suffix_dispatch_count = 0) const;
   bool jit_run_bounded_cuda_masked_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

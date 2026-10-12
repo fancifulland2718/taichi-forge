@@ -6775,6 +6775,23 @@ void export_lang(py::module &m) {
            py::arg("cache"), py::arg("predicate"),
            py::arg("max_iterations"),
            py::arg("continue_while_nonzero"))
+      .def("jit_submit_bounded_cuda_region_cached",
+           [with_graph_arguments](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &predicate, int max_iterations,
+                           std::size_t prefix_dispatch_count,
+                           std::size_t suffix_dispatch_count) {
+             return with_graph_arguments(self, pyargs, [&](const auto &args) {
+               return self->jit_run_bounded_cuda_cached(
+                   compile_config, args, cache, &predicate, max_iterations, true,
+                   prefix_dispatch_count, suffix_dispatch_count);
+             });
+           },
+           py::arg("compile_config"), py::arg("args"), py::arg("cache"),
+           py::arg("predicate"), py::arg("max_iterations"),
+           py::arg("prefix_dispatch_count"), py::arg("suffix_dispatch_count"))
       .def("jit_run_bounded_cuda_masked_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

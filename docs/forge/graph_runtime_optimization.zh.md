@@ -150,6 +150,16 @@ Sequential 控制区域只有一个 owner，组成树；当前结构化深度上
 
 ## 按需完成票据
 
+CUDA 普通 `submit()` 会在物化时将合格的 flat WHILE 与相邻普通 kernel 段
+组成同一个 CUDA 根图。前段和首次条件计算先执行，收尾依赖 conditional 节点完成；
+包括零轮循环在内，整个区域只调用一次 `cuGraphLaunch`。Sequential step 嵌入父 Graph
+时同样适用。绑定、物化代次失效、存储 lease 和完成票据保持原合同，应用无需另建提交管理器。
+
+当前要求 conditional Graph 路线及普通 kernel dispatch。原生 provider 命令、
+indirect/bounded dispatch、嵌套控制，以及显式选择融合或并行的段保留原执行边界。
+`run()` 和 `submit(..., telemetry=...)` 保留控制观测边界，遥测耗时描述该带观测路径，
+不能代替单根图路径的测量。区域准备失败会在用户工作启动前回退；执行失败不会重跑 step。
+
 `ticket = graph.submit(bindings)` 返回该 invocation 的完成票据。
 `ticket.done()` 查询，`ticket.wait()` 等待完成。CPU 工作通常已完成，短 GPU 工作也可能在返回前完成。
 

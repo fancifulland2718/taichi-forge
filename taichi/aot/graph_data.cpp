@@ -1348,6 +1348,8 @@ struct CompiledGraphCudaState {
   std::vector<std::array<std::size_t, 3>> nested_inner_boundaries;
   std::vector<int> nested_inner_max_iterations;
   int conditional_type{-1};
+  std::size_t conditional_prefix_dispatch_count{0};
+  std::size_t conditional_suffix_dispatch_count{0};
   int conditional_default_branch{-1};
   std::vector<int> conditional_branch_dispatch_counts;
   std::vector<CudaDeferredReplayResources> deferred_resources;
@@ -1505,6 +1507,8 @@ struct CompiledGraphCudaState {
     masked_branch_dispatch_counts.clear();
     masked_selector_allocation = kDeviceNullAllocation;
     conditional_type = -1;
+    conditional_prefix_dispatch_count = 0;
+    conditional_suffix_dispatch_count = 0;
     conditional_default_branch = -1;
     conditional_branch_dispatch_counts.clear();
     void *stream = capture_stream == nullptr ? nullptr : capture_stream->get();
@@ -4708,6 +4712,8 @@ bool try_run_cuda_bounded_graph(
     Ndarray &predicate,
     int max_iterations,
     bool continue_while_nonzero,
+    std::size_t prefix_dispatch_count,
+    std::size_t suffix_dispatch_count,
     RuntimeStatistics *statistics) {
   auto *state = get_cuda_graph_state(cache);
   if (state->diagnostics_enabled) {
@@ -4722,10 +4728,20 @@ bool try_run_cuda_bounded_graph(
     state->retire();
     return false;
   };
-  if (compile_config.debug || graph.dispatches.empty() ||
-      max_iterations <= 0 || predicate.get_nelement() != 1 ||
+  if (compile_config.debug || graph.dispatches.empty() || max_iterations < 0 ||
+      prefix_dispatch_count > graph.dispatches.size() ||
+      suffix_dispatch_count > graph.dispatches.size() - prefix_dispatch_count ||
+      predicate.get_nelement() != 1 ||
       predicate.get_element_data_type() != PrimitiveType::i32 ||
       predicate.owning_program() != &program) {
+    return structural_fallback();
+  }
+  if (std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
+                  [](const auto &dispatch) {
+                    return !dispatch.ti_kernel ||
+                           dispatch.cuda_capture_command ||
+                           dispatch.cuda_bounded_dispatch.has_value();
+                  })) {
     return structural_fallback();
   }
 
@@ -4743,7 +4759,7 @@ bool try_run_cuda_bounded_graph(
       driver.graph_create.available() &&
       driver.graph_conditional_handle_create.available() &&
       driver.graph_add_node.available() &&
-      driver.graph_get_nodes.available() &&
+      driver.stream_get_capture_info_v2.available() &&
       driver.graph_instantiate_with_flags.available() &&
       driver.graph_launch.available() && driver.graph_destroy.available() &&
       driver.graph_exec_destroy.available();
@@ -4763,9 +4779,12 @@ bool try_run_cuda_bounded_graph(
     return structural_fallback();
   }
   state = select_cuda_graph_replay_slot_by_signature(
-      cache, signature->entries,
-      [](const CompiledGraphCudaState &candidate) {
-        return candidate.conditional_mode && candidate.conditional_type == -1;
+      cache, signature->entries, [&](const CompiledGraphCudaState &candidate) {
+        return candidate.conditional_mode && candidate.conditional_type == -1 &&
+               candidate.conditional_prefix_dispatch_count ==
+                   prefix_dispatch_count &&
+               candidate.conditional_suffix_dispatch_count ==
+                   suffix_dispatch_count;
       });
   if (state->graph_exec && state->signature != signature->entries) {
     state = allocate_cuda_replay_slot_for_miss(cache, state,
@@ -4823,6 +4842,8 @@ bool try_run_cuda_bounded_graph(
   };
 
   if (state->conditional_mode && state->conditional_type == -1 &&
+      state->conditional_prefix_dispatch_count == prefix_dispatch_count &&
+      state->conditional_suffix_dispatch_count == suffix_dispatch_count &&
       state->graph_exec &&
       state->conditional_predicate_allocation == predicate_allocation &&
       state->signature == signature->entries) {
@@ -4859,9 +4880,11 @@ bool try_run_cuda_bounded_graph(
   }
   const bool structurally_compatible =
       state->conditional_mode && state->conditional_type == -1 &&
+      state->conditional_prefix_dispatch_count == prefix_dispatch_count &&
+      state->conditional_suffix_dispatch_count == suffix_dispatch_count &&
       state->graph_exec &&
-      cuda_graph_signatures_are_structurally_compatible(
-          state->signature, signature->entries);
+      cuda_graph_signatures_are_structurally_compatible(state->signature,
+                                                        signature->entries);
   if (structurally_compatible) {
     std::vector<std::vector<uint8_t>> host_arg_buffers;
     if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
@@ -4973,6 +4996,7 @@ bool try_run_cuda_bounded_graph(
         *state, handle_error, "conditional handle create");
   }
   driver.stream_synchronize(capture_stream);
+  void *setter_node = nullptr;
   {
     auto capture_lock =
         CUDAContext::get_instance().get_graph_capture_lock_guard();
@@ -4983,11 +5007,27 @@ bool try_run_cuda_bounded_graph(
       return handle_cuda_graph_driver_failure(
           *state, begin_error, "conditional setter capture begin");
     }
-    CudaStreamCaptureGuard capture_guard(capture_stream);
+    CudaStreamCaptureGuard capture_guard(capture_stream,
+                                         /*borrowed_graph=*/true);
     try {
+      for (std::size_t i = 0; i < prefix_dispatch_count; ++i) {
+        const auto &packet = state->packets[i];
+        packet.launcher->capture_cuda_graph_launch(packet.packet,
+                                                   capture_stream);
+      }
       cuda::driver_graph_set_conditional(
           state->conditional_control, conditional_handle, capture_stream,
           /*reset_iteration=*/true);
+      std::uint32_t status = 0;
+      const void **dependencies = nullptr;
+      std::size_t count = 0;
+      driver.stream_get_capture_info_v2(capture_stream, &status, nullptr,
+                                        nullptr, &dependencies, &count);
+      if (count != 1 || dependencies == nullptr) {
+        capture_guard.abort();
+        return structural_fallback();
+      }
+      setter_node = const_cast<void *>(dependencies[0]);
     } catch (...) {
       if (state->diagnostics_enabled) {
         ++state->stats.capture_exceptions;
@@ -5002,23 +5042,6 @@ bool try_run_cuda_bounded_graph(
       return handle_cuda_graph_driver_failure(
           *state, end_error, "conditional setter capture end");
     }
-  }
-
-  std::size_t parent_node_count = 0;
-  const auto count_error = driver.graph_get_nodes.call(
-      parent_graph.get(), nullptr, &parent_node_count);
-  if (count_error != CUDA_SUCCESS || parent_node_count != 1) {
-    return handle_cuda_graph_driver_failure(
-        *state, count_error, "conditional setter node query");
-  }
-  void *setter_node = nullptr;
-  std::size_t setter_node_count = 1;
-  const auto nodes_error = driver.graph_get_nodes.call(
-      parent_graph.get(), &setter_node, &setter_node_count);
-  if (nodes_error != CUDA_SUCCESS || setter_node_count != 1 ||
-      setter_node == nullptr) {
-    return handle_cuda_graph_driver_failure(
-        *state, nodes_error, "conditional setter node fetch");
   }
 
   TaichiCudaGraphNodeParams node_params{};
@@ -5048,9 +5071,11 @@ bool try_run_cuda_bounded_graph(
     return handle_cuda_graph_driver_failure(
         *state, begin_error, "conditional body capture begin");
   }
-  CudaStreamCaptureGuard capture_guard(capture_stream);
+  CudaStreamCaptureGuard capture_guard(capture_stream, /*borrowed_graph=*/true);
+  const auto body_end = state->packets.size() - suffix_dispatch_count;
   try {
-    for (const auto &packet : state->packets) {
+    for (std::size_t i = prefix_dispatch_count; i < body_end; ++i) {
+      const auto &packet = state->packets[i];
       packet.launcher->capture_cuda_graph_launch(packet.packet,
                                                  capture_stream);
     }
@@ -5070,6 +5095,36 @@ bool try_run_cuda_bounded_graph(
     return handle_cuda_graph_driver_failure(
         *state, end_error, "conditional body capture end");
   }
+  if (suffix_dispatch_count != 0) {
+    // Conditional graphs cannot be child graphs: append to the same root.
+    const auto suffix_begin_error = driver.stream_begin_capture_to_graph.call(
+        capture_stream, parent_graph.get(), &conditional_node, nullptr, 1,
+        CU_STREAM_CAPTURE_MODE_RELAXED);
+    if (suffix_begin_error != CUDA_SUCCESS) {
+      return handle_cuda_graph_driver_failure(
+          *state, suffix_begin_error, "conditional suffix capture begin");
+    }
+    CudaStreamCaptureGuard suffix_guard(capture_stream,
+                                        /*borrowed_graph=*/true);
+    try {
+      for (std::size_t i = body_end; i < state->packets.size(); ++i) {
+        const auto &packet = state->packets[i];
+        packet.launcher->capture_cuda_graph_launch(packet.packet,
+                                                   capture_stream);
+      }
+    } catch (...) {
+      suffix_guard.abort();
+      state->retire();
+      throw;
+    }
+    CUgraph captured_parent = nullptr;
+    const auto suffix_end_error = suffix_guard.end(&captured_parent);
+    if (suffix_end_error != CUDA_SUCCESS ||
+        captured_parent != parent_graph.get()) {
+      return handle_cuda_graph_driver_failure(*state, suffix_end_error,
+                                              "conditional suffix capture end");
+    }
+  }
   const auto instantiate_error = driver.graph_instantiate_with_flags.call(
       state->graph_exec.put(), parent_graph.get(), 0);
   if (instantiate_error != CUDA_SUCCESS || !state->graph_exec) {
@@ -5079,6 +5134,8 @@ bool try_run_cuda_bounded_graph(
 
   state->conditional_handle = conditional_handle;
   state->conditional_mode = true;
+  state->conditional_prefix_dispatch_count = prefix_dispatch_count;
+  state->conditional_suffix_dispatch_count = suffix_dispatch_count;
   state->retry.record_success();
   state->has_captured_once = true;
   state->stats.last_path = CompiledGraphExecutionPath::cuda_capture;
@@ -6863,7 +6920,9 @@ bool CompiledGraph::jit_run_bounded_cuda_cached(
     CompiledGraphJITCache &cache,
     Ndarray *predicate,
     int max_iterations,
-    bool continue_while_nonzero) const try {
+    bool continue_while_nonzero,
+    std::size_t prefix_dispatch_count,
+    std::size_t suffix_dispatch_count) const try {
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch != Arch::cuda || predicate == nullptr) {
     return false;
@@ -6916,8 +6975,8 @@ bool CompiledGraph::jit_run_bounded_cuda_cached(
   }
   if (!try_run_cuda_bounded_graph(
           *this, compile_config, args, cache, *program, *predicate,
-          max_iterations, continue_while_nonzero,
-          &program->runtime_statistics())) {
+          max_iterations, continue_while_nonzero, prefix_dispatch_count,
+          suffix_dispatch_count, &program->runtime_statistics())) {
     return false;
   }
   program->mark_runtime_submission(

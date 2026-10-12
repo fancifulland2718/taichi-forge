@@ -184,6 +184,22 @@ that the device stopped issuing all encoded work.
 
 ## Opt-in completion tickets
 
+On CUDA, ordinary `submit()` materializes an eligible flat WHILE together with
+adjacent plain kernel segments in one CUDA root graph. The prefix and first
+condition evaluation precede the conditional node; the suffix depends on its
+completion. This uses one `cuGraphLaunch`, including for zero iterations, and
+also applies when a sequential step is embedded in a parent Graph. Existing
+bindings, generation invalidation, storage leases and completion tickets retain
+their contracts; applications need no additional submission manager.
+
+This currently requires the conditional-Graph route and ordinary kernel
+dispatches. Native provider commands, indirect/bounded dispatch, nested control,
+and explicitly fused or parallel segments retain their existing execution
+boundaries. `run()` and `submit(..., telemetry=...)` retain control-observation
+boundaries; telemetry timings therefore describe that instrumented path, not
+the single-root path. Failed region preparation falls back before user work is
+launched; an execution failure does not rerun the step.
+
 `ticket = graph.submit(bindings)` returns a completion ticket for that
 invocation. `ticket.done()` queries completion; `ticket.wait()` waits for it.
 CPU work may already be complete, and short GPU work can finish before return.
