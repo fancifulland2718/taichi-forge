@@ -53,6 +53,31 @@ if(TI_WITH_DX12)
 endif()
 
 add_executable(${TESTS_NAME} ${TAICHI_TESTS_SOURCE})
+if(WIN32 OR LINUX)
+    # Exercise the real dynamic-library boundary without a GPU or vendor SDK.
+    # Keep the stub out of production objects and install components.
+    add_library(taichi_runtime_provider_test_stub SHARED
+        tests/native/runtime_provider_stub.cpp)
+    target_compile_features(taichi_runtime_provider_test_stub PRIVATE cxx_std_17)
+    target_compile_definitions(taichi_runtime_provider_test_stub PRIVATE
+        TI_FORGE_RUNTIME_PROVIDER_BUILD)
+    target_include_directories(taichi_runtime_provider_test_stub PRIVATE
+        ${PROJECT_SOURCE_DIR})
+    target_sources(${TESTS_NAME} PRIVATE tests/cpp/aot/native_provider_test.cpp)
+    set_property(SOURCE tests/cpp/aot/native_provider_test.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS
+        TI_TEST_RUNTIME_PROVIDER_PATH="$<TARGET_FILE:taichi_runtime_provider_test_stub>")
+    add_dependencies(${TESTS_NAME} taichi_runtime_provider_test_stub)
+    if(TARGET taichi_forge_cutensor_provider)
+        foreach(_provider IN ITEMS cutensor cusparselt amgx)
+            string(TOUPPER "${_provider}" _provider_upper)
+            set_property(SOURCE tests/cpp/aot/native_provider_test.cpp APPEND PROPERTY
+                COMPILE_DEFINITIONS
+                TI_TEST_${_provider_upper}_PROVIDER_PATH="$<TARGET_FILE:taichi_forge_${_provider}_provider>")
+            add_dependencies(${TESTS_NAME} taichi_forge_${_provider}_provider)
+        endforeach()
+    endif()
+endif()
 if (WIN32)
     # Output the executable to build/ instead of build/Debug/...
     set(TESTS_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
