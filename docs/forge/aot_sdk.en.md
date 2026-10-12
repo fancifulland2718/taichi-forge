@@ -65,6 +65,25 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
+Optional cuTENSOR, cuSPARSELt and AmgX adapters have separate SDK components.
+Enable their build targets, then build and install only the selected adapter:
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS=ON
+cmake --build BUILD --target taichi_forge_cutensor_provider
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
+```
+
+Replace `cutensor` with `cusparselt` or `amgx` for the other components. Each
+installs an adapter into `bin/hardware_providers` on Windows or
+`lib/hardware_providers` on Linux, the common provider C ABI header, the Forge
+license and `share/taichi/providers/<provider>.json` with file sizes and SHA256
+hashes. The base `sdk_manifest.json` remains separate. The CMake package exposes
+`TaichiForge_PROVIDER_DIR` and `TaichiForge_PROVIDER_MANIFEST_DIR`. Compatible
+vendor libraries and their dependencies remain application-managed. Installing
+an adapter makes its existing C ABI available; AOT plan reconstruction additionally
+requires a registered operation/resource schema and its qualified backend path.
+
 When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
 its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:
 

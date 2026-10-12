@@ -57,6 +57,23 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
 
+可选的 cuTENSOR、cuSPARSELt 和 AmgX adapter 各自有独立 SDK 安装组件。
+启用构建目标后，只构建和安装选中的 adapter：
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS=ON
+cmake --build BUILD --target taichi_forge_cutensor_provider
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
+```
+
+另外两个组件将 `cutensor` 替换为 `cusparselt` 或 `amgx`。每个组件安装 adapter
+到 Windows 的 `bin/hardware_providers` 或 Linux 的 `lib/hardware_providers`，
+并包含公共 provider C ABI 头文件、Forge 许可证以及记录文件大小和 SHA256 的
+`share/taichi/providers/<provider>.json`。基础 `sdk_manifest.json` 单独保留。
+CMake package 提供 `TaichiForge_PROVIDER_DIR` 和 `TaichiForge_PROVIDER_MANIFEST_DIR`。
+兼容的厂商库及其依赖仍由应用管理。安装 adapter 后可使用其既有 C ABI；AOT plan
+重建还需要注册对应的操作/资源 schema，并通过该后端的实际资格验证。
+
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
 或 Vulkan GFX runtime、设备和分配器：
 

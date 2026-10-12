@@ -1,0 +1,17 @@
+# Separate from sdk_manifest.json so installing one optional component neither
+# overwrites the base SDK manifest nor claims other providers were installed.
+set(_prefix "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+set(_files "")
+set(_separator "")
+set(_total 0)
+foreach(_relative IN ITEMS "@_ti_provider_binary@"
+        "include/taichi/forge_runtime_provider.h" "licenses/LICENSE")
+    file(SHA256 "${_prefix}/${_relative}" _sha)
+    file(SIZE "${_prefix}/${_relative}" _size)
+    math(EXPR _total "${_total} + ${_size}")
+    string(APPEND _files "${_separator}\n    {\"path\":\"${_relative}\",\"bytes\":${_size},\"sha256\":\"${_sha}\"}")
+    set(_separator ",")
+endforeach()
+file(MAKE_DIRECTORY "${_prefix}/share/taichi/providers")
+file(WRITE "${_prefix}/share/taichi/providers/@provider@.json"
+"{\n  \"schema_version\":1,\n  \"component\":\"@_ti_provider_component@\",\n  \"provider_id\":\"@provider@\",\n  \"adapter\":\"@_ti_provider_binary@\",\n  \"external_requirements\":[\"compatible vendor runtime and its dependencies\",\"GPU driver\",\"platform C/C++ runtime\"],\n  \"installed_payload_bytes\":${_total},\n  \"files\":[${_files}\n  ]\n}\n")
