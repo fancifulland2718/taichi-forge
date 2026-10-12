@@ -6,6 +6,15 @@
 #include <future>
 #include <stdexcept>
 #include "gtest/gtest.h"
+#if defined(TI_WITH_LLVM) || defined(TI_WITH_VULKAN)
+#include "taichi/program/program.h"
+#endif
+#ifdef TI_WITH_CUDA
+#include "taichi/platform/cuda/detect_cuda.h"
+#endif
+#ifdef TI_WITH_VULKAN
+#include "taichi/rhi/vulkan/vulkan_loader.h"
+#endif
 
 namespace taichi::lang {
 namespace {
@@ -100,4 +109,57 @@ TEST(RuntimeClientRegistry, ConcurrentRetirementWaitsForClientCompletion) {
   first.get();
   second.get();
 }
+#if defined(TI_WITH_LLVM) || defined(TI_WITH_VULKAN)
+namespace {
+void check_program_retirement(Arch arch) {
+  Program program(arch);
+  program.materialize_runtime();
+  auto *device = program.get_compute_device();
+  Device::AllocParams params;
+  params.size = 64;
+  params.usage = AllocUsage::Storage;
+  DeviceAllocation allocation;
+  ASSERT_EQ(device->allocate_memory(params, &allocation), RhiResult::success);
+  int retired = 0;
+  auto client = std::make_shared<TestClient>([&] {
+    EXPECT_EQ(program.runtime_fault_snapshot().state,
+              RuntimeLifecycleState::kFinalizing);
+    // The finalizer itself may drain backend work. Other threads must still
+    // fail admission while its callbacks run.
+    std::async(std::launch::async, [&] {
+      EXPECT_THROW(program.ensure_runtime_submission_allowed("retirement test"),
+                   std::exception);
+    }).get();
+    device->dealloc_memory(allocation);
+    ++retired;
+  });
+  program.attach_runtime_client(client);
+  program.finalize();
+  EXPECT_EQ(retired, 1);
+  program.finalize();
+  EXPECT_EQ(retired, 1);
+  EXPECT_THROW(program.attach_runtime_client(client), std::exception);
+}
+}  // namespace
+#endif
+
+#ifdef TI_WITH_LLVM
+TEST(RuntimeClientRegistry, CpuProgramRetiresBeforeDeviceDestruction) {
+  check_program_retirement(host_arch());
+}
+#endif
+#ifdef TI_WITH_CUDA
+TEST(RuntimeClientRegistry, CudaProgramRetiresBeforeDeviceDestruction) {
+  if (!is_cuda_api_available())
+    GTEST_SKIP() << "CUDA device unavailable";
+  check_program_retirement(Arch::cuda);
+}
+#endif
+#ifdef TI_WITH_VULKAN
+TEST(RuntimeClientRegistry, VulkanProgramRetiresBeforeDeviceDestruction) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan device unavailable";
+  check_program_retirement(Arch::vulkan);
+}
+#endif
 }  // namespace taichi::lang

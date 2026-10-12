@@ -99,6 +99,8 @@ struct SNodeMetadataStatistics {
 class Ndarray;
 class SparseMatrix;
 class Program;
+class RuntimeClient;
+class RuntimeClientRegistry;
 namespace storage {
 class DenseStorageDescriptor;
 }
@@ -1188,6 +1190,9 @@ class TI_DLL_EXPORT Program {
   std::weak_ptr<void> weak_lifetime_token() const noexcept {
     return lifetime_token_;
   }
+  // Explicit runtime borrowers retire before the backend device is destroyed.
+  // Registration does not retain the client or affect ordinary submissions.
+  void attach_runtime_client(const std::shared_ptr<RuntimeClient> &client);
   // Delayed resource owners use the typed token and helpers below to
   // serialize reclamation against Program destruction. Once invalidated, the
   // Program registries own final teardown and late callers become no-ops.
@@ -4536,6 +4541,7 @@ class TI_DLL_EXPORT Program {
 
   std::unique_ptr<ProgramImpl> program_impl_;
   std::shared_ptr<ProgramLifetimeToken> lifetime_token_;
+  std::unique_ptr<RuntimeClientRegistry> runtime_clients_;
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
   RuntimeTraceRecorder runtime_trace_;

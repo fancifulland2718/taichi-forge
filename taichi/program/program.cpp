@@ -5,6 +5,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/program/extension.h"
 #include "taichi/program/kernel_compile_request.h"
+#include "taichi/runtime/runtime_client.h"
 #include "taichi/codegen/cpu/codegen_cpu.h"
 #include "taichi/struct/struct.h"
 #include "taichi/runtime/program_impls/opengl/opengl_program.h"
@@ -8967,6 +8968,16 @@ uint64 Program::fetch_result_uint64(int i) {
   return program_impl_->fetch_result_uint64(i, result_buffer);
 }
 
+void Program::attach_runtime_client(
+    const std::shared_ptr<RuntimeClient> &client) {
+  auto guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("attach runtime client");
+  if (!runtime_clients_) {
+    runtime_clients_ = std::make_unique<RuntimeClientRegistry>();
+  }
+  runtime_clients_->attach(client);
+}
+
 void Program::finalize() {
   if (finalized_) {
     return;
@@ -9055,6 +9066,11 @@ void Program::finalize() {
     release_completed_external_dense_storage_leases();
     release_completed_vulkan_native_resources();
   }
+  best_effort("retire attached runtime clients", [&] {
+    if (runtime_clients_) {
+      runtime_clients_->retire();
+    }
+  });
   best_effort("clear primitive workspace arena",
               [&] { primitive_workspace_arena_.clear(); });
   if (compile_config().arch == Arch::vulkan) {
