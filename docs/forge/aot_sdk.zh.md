@@ -401,6 +401,74 @@ GEMM/设备点积/GEMM 捕获、独立帧、显式梯度以及回滚/退休。
 不代表所有外部 provider plan 均已可重建。已知资源 scratch 只计入一次
 `workspace_bytes`，不透明 vendor 内存仍不计入。
 
+使用 adapter 的操作从 runtime owner 取得库位置：
+
+```python
+runtime.configure_provider("cutensor", adapter_path=adapter_file,
+                           library_path=vendor_file)
+status = runtime.probe_native_operation("cutensor_contract_f32")
+# 不再需要时移除此 owner 的配置：
+runtime.configure_provider("cutensor", adapter_path=None)
+```
+
+配置只保存路径，不加载代码。Python 在配置时解析显式路径；省略 `library_path`
+使用 adapter 的厂商库搜索。C/C++ 对应 `ti_configure_native_provider_ext`，建议传入
+绝对路径。每次准备取得配置快照，每个所需 adapter 合同只探测一次，其依赖计划共享
+一个 provider runtime；计划和 workspace 仍归该 prepared 实例独有。未使用的
+provider 不加载。重配置只影响后续探测/准备，已有 prepared 保留原库与资源 lease。
+借用同一 JIT device 的 runtime 也分别持有配置；路径不写入产物。
+
+此配置作用于已注册的 adapter 工厂，目前包括下文 cuTENSOR 操作；不会注册任意
+厂商符号、改变既有 cuBLAS/cuFFT 内建寻址，也不自动导出 JIT recording。
+
+CUDA cuTENSOR 重建复用既有 provider C ABI 与同一原生操作/资源注册表。选择可选
+cuTENSOR SDK adapter，并按上文配置兼容的外部厂商库。以下例子通过命名计划执行
+紧凑 f32 收缩 `D = alpha * A @ B + beta * C`：
+
+```python
+def tensor(shape, modes):
+    return {"shape": list(shape), "modes": [ord(mode) for mode in modes]}
+
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cutensor", "operation": "contract_f32", "version": 1,
+    "parameters": {"alpha": 1.0, "beta": 0.0},
+    "bindings": {"plan": "contraction", "a": "a", "b": "b", "c": "c", "d": "d"},
+}], resources=[{
+    "kind": "native", "name": "contraction", "provider": "cutensor",
+    "operation": "contraction_plan_f32", "version": 1, "bindings": {},
+    "parameters": {
+        "a": tensor((5, 7), "ik"), "b": tensor((7, 3), "kj"),
+        "c": tensor((5, 3), "ij"), "d": tensor((5, 3), "ij"),
+        "compute_mode": "f32", "workspace_preference": "default",
+    },
+}])
+# 生产端：exported.add_execution_plan("contract", plan)。
+# 消费端：module.execution_plan("contract").prepare(module, bindings)。
+```
+
+版本 1 接受各维为正的紧凑标量 f32 数组。mode 标签为 signed int32，在单个 tensor
+内不重复，同一标签在各 tensor 中的长度一致。mode 定义收缩/置换语义，存储仍为
+紧凑行主序。四个数组端口均须绑定，包括 beta 为零时的 C。D 不得与 A/B 重叠；
+形状与 mode 完全相同时可与 C 原址重合，部分重叠拒绝。形状与标量参数在准备时固定；
+可原址改动数组内容，改变绑定或设置须重新准备。
+
+`compute_mode` 支持默认 `f32` 或 `tf32`；workspace preference 支持 `min`、
+`default`、`max`。`alignment_bytes` 默认 256，须为二次幂且各指针对齐满足要求。
+`workspace_limit_bytes=0` 使用 adapter 的 workspace 估算，正值限制计划请求的
+workspace；算法无法支持的设置由 provider 明确拒绝。沿用 adapter 既有 rank 限制，
+Forge 不新增更低的人为上限。
+
+准备创建厂商计划和 scratch，再将收缩与周围 AOT kernel 捕获为一个 CUDA Graph；
+不执行收缩、不改写输出。重放不查询 provider、不创建计划。计划持有 provider runtime、
+adapter 和厂商库，直至依赖命令退休。已知 scratch 只计入一次
+`prepared.info["workspace_bytes"]`，不包含不透明厂商分配。CPU/Vulkan 不声明此
+CUDA provider 操作的能力。
+
+Windows CUDA/cuTENSOR 2.7 已验证无 DSL 的独立消费端和借用 JIT owner、前向收缩、
+导出的能量/反向 kernel 配合显式收缩伴随、输出置换、C/D 原址重合、独立帧、非法
+绑定回滚、重配置和在途 close/reset。这不提供 cuTENSOR 调用的自动求导、任意 JIT
+recording 导出，也不代表所有 tensor 拓扑和设备均已验证。
+
 生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
 版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号
 参数名及 columns 合同。例如：

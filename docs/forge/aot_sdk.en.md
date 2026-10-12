@@ -494,6 +494,86 @@ an internal registered resource contract, not automatic reconstruction of every
 external provider plan. Known resource scratch contributes once to
 `workspace_bytes`; opaque vendor memory remains excluded.
 
+Adapter-backed operations take library locations from the runtime owner:
+
+```python
+runtime.configure_provider("cutensor", adapter_path=adapter_file,
+                           library_path=vendor_file)
+status = runtime.probe_native_operation("cutensor_contract_f32")
+# Remove this owner's setting when no longer needed:
+runtime.configure_provider("cutensor", adapter_path=None)
+```
+
+Configuration copies paths without loading code. Python resolves explicit paths
+when configured; omitting `library_path` uses the adapter's vendor-library search.
+C/C++ uses `ti_configure_native_provider_ext`; prefer absolute paths there.
+Each preparation snapshots the configuration, probes each required adapter
+contract once, and shares one provider runtime across its dependent plans. Plans
+and workspaces remain local to that prepared instance. Unused providers do not
+load. Reconfiguration affects later probes/preparations; existing prepared objects
+retain their original library/resource leases. Borrowed runtimes sharing one JIT
+device have independent configuration. Paths are not serialized into artifacts.
+
+This configures registered adapter-backed factories, currently the cuTENSOR
+operations below. It does not register arbitrary vendor symbols, change existing
+built-in cuBLAS/cuFFT discovery, or automatically export JIT recordings.
+
+CUDA cuTENSOR reconstruction uses the existing provider C ABI and the same
+native operation/resource registry. Select the optional cuTENSOR SDK adapter and
+configure a compatible external vendor library as above. For example, a packed
+f32 contraction `D = alpha * A @ B + beta * C` uses a named plan:
+
+```python
+def tensor(shape, modes):
+    return {"shape": list(shape), "modes": [ord(mode) for mode in modes]}
+
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cutensor", "operation": "contract_f32", "version": 1,
+    "parameters": {"alpha": 1.0, "beta": 0.0},
+    "bindings": {"plan": "contraction", "a": "a", "b": "b", "c": "c", "d": "d"},
+}], resources=[{
+    "kind": "native", "name": "contraction", "provider": "cutensor",
+    "operation": "contraction_plan_f32", "version": 1, "bindings": {},
+    "parameters": {
+        "a": tensor((5, 7), "ik"), "b": tensor((7, 3), "kj"),
+        "c": tensor((5, 3), "ij"), "d": tensor((5, 3), "ij"),
+        "compute_mode": "f32", "workspace_preference": "default",
+    },
+}])
+# Producer: exported.add_execution_plan("contract", plan).
+# Consumer: module.execution_plan("contract").prepare(module, bindings).
+```
+
+Version 1 accepts compact scalar f32 arrays with positive extents. Signed int32
+mode labels must be unique within each tensor and have consistent extents across
+tensors. Modes describe the contraction/permutation; storage remains packed in
+row-major order. All four array ports are required, including C when beta is zero.
+D must be disjoint from A/B; it may exactly alias C when shapes and modes match.
+Partial overlaps are rejected. Shapes and scalar parameters are fixed at
+preparation; change contents in place or prepare again for new bindings/settings.
+
+`compute_mode` accepts `f32` (default) or `tf32`; workspace preference accepts
+`min`, `default` or `max`. `alignment_bytes` defaults to 256 and must be a power of
+two satisfied by every bound pointer. `workspace_limit_bytes=0` uses the adapter's
+workspace estimate; a positive value caps the requested plan workspace. The
+provider may reject a configuration its algorithms cannot support. The adapter's
+existing rank limit also applies; Forge adds no lower arbitrary limit.
+
+Preparation creates the vendor plan and scratch, then captures contractions with
+the surrounding AOT kernels into one CUDA Graph. It does not execute the
+contraction or mutate its outputs. Replays perform no provider lookup or plan
+creation. Plans retain their provider runtime, adapter and vendor library until
+dependent commands retire. Known scratch is counted once in
+`prepared.info["workspace_bytes"]`; opaque vendor allocations are excluded.
+CPU/Vulkan do not advertise this CUDA provider operation.
+
+Windows CUDA with cuTENSOR 2.7 checks standalone consumers without the DSL and
+borrowed JIT owners, forward contraction, exported energy/reverse kernels with
+explicit contraction adjoints, output permutation, exact C/D aliasing,
+independent frames, invalid-binding rollback, reconfiguration and in-flight
+close/reset. This does not provide automatic differentiation of cuTENSOR calls,
+arbitrary JIT recording export, or qualification of every tensor topology/device.
+
 The producer exports registered recipes through
 `module.add_primitive(name, kind, version=1, **options)`. Version 1 supports
 `sort`, `compact` and consecutive `unique`. Sort/compact use the symbolic

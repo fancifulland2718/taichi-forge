@@ -53,6 +53,26 @@ TEST(NativeOperationRegistry, ReportsOnlyCompiledBackendComposition) {
     EXPECT_EQ(capability.mode, found->mode);
   }
 }
+TEST(NativeOperationRegistry, CutensorDescriptionsValidateWithoutLoadingCode) {
+  auto description = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cutensor","operation":"contraction_plan_f32","version":1,"bindings":{},"parameters":{"a":{"shape":[2,3],"modes":[0,2]},"b":{"shape":[3,4],"modes":[2,1]},"c":{"shape":[2,4],"modes":[0,1]},"d":{"shape":[2,4],"modes":[0,1]}}})"));
+  const auto &registry = native_operation_registry();
+  EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  for (const auto *tensor :
+       {R"({"shape":[],"modes":[]})", R"({"shape":[0,3],"modes":[0,2]})",
+        R"({"shape":[2,3],"modes":[0,0]})",
+        R"({"shape":[2,3],"modes":[0,2147483648]})",
+        R"({"shape":[2,3],"modes":[0.0,2]})",
+        R"({"shape":[2,5],"modes":[0,2]})",
+        R"({"shape":[2,9223372036854775807],"modes":[0,2]})"}) {
+    auto invalid = description;
+    invalid.parameters.obj.inner["a"] = liong::json::parse_complete(tensor);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, RejectsAmbiguousDefinitionsBeforePublication) {
   NativeOperationRegistry registry;
   NativeOperationRegistry::Factory<TestDescriptor> factory =
