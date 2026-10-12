@@ -304,7 +304,8 @@ void driver_compact_with_workspace(void *values,
                                    int num_items,
                                    int item_words,
                                    void *workspace,
-                                   void *stream);
+                                   void *stream,
+                                   bool reuse_prefix = false);
 
 std::size_t driver_compact_strided(void *values,
                                    void *flags,

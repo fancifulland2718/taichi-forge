@@ -198,6 +198,16 @@ can query the same count with `ti_get_prepared_execution_workspace_bytes_ext`.
 Selection has no automatic derivative. A tested composition compacts integer
 indices, then runs an exported gather kernel and its explicit backward kernel.
 
+Several columns can share the same selection with
+`{"kind": "compact", "flags": "active", "count": "n", "columns":
+[{"values": "keys", "output": "selected_keys"},
+ {"values": "payload", "output": "selected_payload"}]}`.
+Use either `columns` or the single-column `values/output` shorthand. GPU columns
+share one predicate prefix and scan workspace; CPU prepares one selection index
+array and copies columns in separate passes. Input columns may share read-only
+ranges; writable ranges must remain disjoint across all columns. The known
+scratch report includes the CPU selection array.
+
 `{"kind": "sort", "keys": "keys", "values": "indices"}` sorts keys and optional
 payloads in place, in stable ascending order. Keys are 1D scalar
 i32/u32/f32/i64/u64/f64; payloads have the same length and a record width

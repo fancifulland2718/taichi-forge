@@ -163,6 +163,13 @@ CPU/CUDA/Vulkan 的每份 prepared 实例独立拥有工作区；`prepared.info`
 `ti_get_prepared_execution_workspace_bytes_ext`。选择操作没有自动导数；已验证的
 梯度组合是先压缩整数索引，再调用已导出的 gather kernel 及其显式 backward。
 
+多列可用同一次选择：`{"kind": "compact", "flags": "active", "count": "n",
+"columns": [{"values": "keys", "output": "selected_keys"},
+{"values": "payload", "output": "selected_payload"}]}`。`columns` 与单列
+`values/output` 简写二选一。GPU 多列共用一次谓词前缀和 scan 工作区；CPU 生成一次
+选中索引，再逐列复制。输入可共用只读区域，各列写入区域须与全部输入/写入保持不
+重叠；已知 scratch 统计包含 CPU 选中索引数组。
+
 `{"kind": "sort", "keys": "keys", "values": "indices"}` 对键和可选 payload 原地
 稳定升序排序。键为 1D 标量 i32/u32/f32/i64/u64/f64；payload 等长，每条记录字节数
 为 4 的倍数，键和 payload 区域不能重叠。NaN 排在最后；相等键（包括正负零）保留

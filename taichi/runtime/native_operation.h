@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 #include "taichi/rhi/device.h"
 
 namespace taichi::lang {
@@ -28,12 +29,15 @@ class NativeOperation {
 };
 
 struct CompactOperation {
-  DevicePtr values;
+  struct Column {
+    DevicePtr values;
+    DevicePtr output;
+    std::size_t item_bytes;
+  };
+  std::vector<Column> columns;
   DevicePtr flags;
-  DevicePtr output;
   DevicePtr count;
   std::size_t size;
-  std::size_t item_bytes;
 };
 
 enum class NativeSortKeyType { u32, i32, f32, u64, i64, f64 };

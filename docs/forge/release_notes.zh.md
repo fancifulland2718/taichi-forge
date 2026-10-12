@@ -45,6 +45,7 @@
 - AOT compact 为每份执行对象独立管理工作区，保留记录顺序，空选择也刷新计数。
   CPU/CUDA/Vulkan 已验证变化谓词重放、独立绑定、退休和后续 gather kernel 的显式
   梯度。工作区字节可与参数/代码分开查询；compact 本身不提供自动导数。
+  多列可共用同一次选择和 GPU 前缀/scan 工作区。
 
 - AOT 稳定排序支持 32/64 位整数和浮点键、可选标量/tensor payload，NaN 排在最后。
   CUDA 复用既有 radix kernel 并独立管理工作区；Vulkan 与 JIT 共用命令准备。

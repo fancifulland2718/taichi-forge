@@ -8248,7 +8248,7 @@ namespace {
 class FixedVulkanCompact final : public NativeOperation {
  public:
   FixedVulkanCompact(Device &device, CompactOperation operation)
-      : device_(device), operation_(operation) {
+      : device_(device), operation_(std::move(operation)) {
   }
   Arch arch() const override {
     return Arch::vulkan;
@@ -8277,13 +8277,16 @@ class FixedVulkanCompact final : public NativeOperation {
     flags_bindings_.reset(device_.create_resource_set());
     flags_bindings_->rw_buffer(0, operation_.flags, prefix_bytes);
     flags_bindings_->rw_buffer(1, prefix_->get_ptr(0), prefix_bytes);
-    scatter_bindings_.reset(device_.create_resource_set());
-    const auto value_bytes = operation_.size * operation_.item_bytes;
-    scatter_bindings_->rw_buffer(0, operation_.values, value_bytes);
-    scatter_bindings_->rw_buffer(1, operation_.flags, prefix_bytes);
-    scatter_bindings_->rw_buffer(2, prefix_->get_ptr(0), prefix_bytes);
-    scatter_bindings_->rw_buffer(3, operation_.output, value_bytes);
-    scatter_bindings_->rw_buffer(4, operation_.count, sizeof(std::int32_t));
+    for (const auto &column : operation_.columns) {
+      auto bindings = device_.create_resource_set_unique();
+      const auto value_bytes = operation_.size * column.item_bytes;
+      bindings->rw_buffer(0, column.values, value_bytes);
+      bindings->rw_buffer(1, operation_.flags, prefix_bytes);
+      bindings->rw_buffer(2, prefix_->get_ptr(0), prefix_bytes);
+      bindings->rw_buffer(3, column.output, value_bytes);
+      bindings->rw_buffer(4, operation_.count, sizeof(std::int32_t));
+      scatter_bindings_.push_back(std::move(bindings));
+    }
     scan_.ensure_device(&device_);
     // This instance records once and keeps its exact sets until retirement.
     // The mutable JIT replay ring's reserve is unnecessary for a fixed frame.
@@ -8302,17 +8305,20 @@ class FixedVulkanCompact final : public NativeOperation {
     }
     const auto flag_groups = static_cast<std::uint32_t>(
         (operation_.size + kBlockSize - 1) / kBlockSize);
-    const auto words =
-        operation_.size * (operation_.item_bytes / sizeof(std::uint32_t));
-    const auto word_groups =
-        static_cast<std::uint32_t>((words + kBlockSize - 1) / kBlockSize);
     dispatch_pipeline(commands, flags_pipeline_.get(), flags_bindings_.get(),
                       flag_groups, 1, 1, nullptr);
     commands->buffer_barrier(*prefix_);
     record_vulkan_i32_scan(device, commands, scan_plan_, false);
-    dispatch_pipeline(commands, scatter_pipeline_.get(),
-                      scatter_bindings_.get(), word_groups, 1, 1, nullptr);
-    commands->buffer_barrier(operation_.output);
+    for (std::size_t c = 0; c < operation_.columns.size(); ++c) {
+      const auto &column = operation_.columns[c];
+      const auto words =
+          operation_.size * (column.item_bytes / sizeof(std::uint32_t));
+      const auto word_groups =
+          static_cast<std::uint32_t>((words + kBlockSize - 1) / kBlockSize);
+      dispatch_pipeline(commands, scatter_pipeline_.get(),
+                        scatter_bindings_[c].get(), word_groups, 1, 1, nullptr);
+      commands->buffer_barrier(column.output);
+    }
     commands->buffer_barrier(operation_.count);
   }
 
@@ -8323,17 +8329,19 @@ class FixedVulkanCompact final : public NativeOperation {
   VulkanScanCache scan_;
   VulkanScanDispatchPlan scan_plan_;
   std::unique_ptr<Pipeline> flags_pipeline_, scatter_pipeline_;
-  std::unique_ptr<ShaderResourceSet> flags_bindings_, scatter_bindings_;
+  std::unique_ptr<ShaderResourceSet> flags_bindings_;
+  std::vector<std::unique_ptr<ShaderResourceSet>> scatter_bindings_;
 };
 }  // namespace
 
 std::shared_ptr<NativeOperation> prepare_vulkan_compact_operation(
     Device &device,
     const CompactOperation &operation) {
-  if (operation.size >
-      std::numeric_limits<std::uint32_t>::max() / (operation.item_bytes / 4))
-    throw std::invalid_argument(
-        "Vulkan compact exceeds its uint32 shader index ABI");
+  for (const auto &column : operation.columns)
+    if (operation.size >
+        std::numeric_limits<std::uint32_t>::max() / (column.item_bytes / 4))
+      throw std::invalid_argument(
+          "Vulkan compact exceeds its uint32 shader index ABI");
   auto result = std::make_shared<FixedVulkanCompact>(device, operation);
   result->prepare();
   return result;

@@ -41,9 +41,10 @@ TEST(ExecutionPlan, NativeCompactRetainsAllSymbolicDependencies) {
     {"kind":"compact","values":"x","flags":"active","output":"selected","count":"n"}]})");
   ASSERT_EQ(plan.operations.size(), 1);
   const auto &compact = std::get<ExecutionPlan::Compact>(plan.operations[0]);
-  EXPECT_EQ(compact.values, "x");
+  ASSERT_EQ(compact.columns.size(), 1);
+  EXPECT_EQ(compact.columns[0].values, "x");
   EXPECT_EQ(compact.flags, "active");
-  EXPECT_EQ(compact.output, "selected");
+  EXPECT_EQ(compact.columns[0].output, "selected");
   EXPECT_EQ(compact.count, "n");
   EXPECT_EQ(plan.arguments,
             (std::vector<std::string>{"active", "n", "selected", "x"}));
@@ -64,5 +65,23 @@ TEST(ExecutionPlan, SortHasOptionalPayloadWithoutImplicitArguments) {
   EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"sort","keys":"x","descending":true}]})"),
                std::invalid_argument);
+}
+
+TEST(ExecutionPlan, CompactColumnsShareOnePredicateAndCount) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"compact","flags":"active","count":"n","columns":[
+      {"values":"keys","output":"selected_keys"},
+      {"values":"values","output":"selected_values"}]}]})");
+  const auto &compact = std::get<ExecutionPlan::Compact>(plan.operations[0]);
+  ASSERT_EQ(compact.columns.size(), 2);
+  EXPECT_EQ(compact.columns[1].values, "values");
+  EXPECT_EQ(compact.columns[1].output, "selected_values");
+  EXPECT_EQ(plan.arguments.size(), 6);
+  for (
+      const auto *description :
+      {R"({"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[]}]})",
+       R"({"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x"}]}]})",
+       R"({"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x","output":"y"}],"values":"z","output":"w"}]})"})
+    EXPECT_THROW(ExecutionPlan::parse(description), std::invalid_argument);
 }
 }  // namespace taichi::lang::aot

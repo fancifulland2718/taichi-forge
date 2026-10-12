@@ -55,6 +55,7 @@ lifetimes. The entries below describe the changes.
   changing predicates, independent bindings, retirement and a subsequent
   gather kernel's explicit gradient. Scratch bytes are queryable separately
   from arguments and compiled code; compact itself has no automatic derivative.
+  Multiple columns can share one selection and GPU prefix/scan workspace.
 
 - AOT stable sort supports 32/64-bit integer and floating keys, with optional
   scalar/tensor payloads and NaNs last. CUDA uses the existing radix kernels

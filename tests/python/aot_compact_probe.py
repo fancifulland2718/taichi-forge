@@ -22,6 +22,59 @@ def compact_plan(aot):
     )
 
 
+def check_columns(aot, runtime, module):
+    columns = [
+        {"values": "values", "output": "output"},
+        {"values": "vectors", "output": "selected_vectors"},
+        {"values": "values", "output": "duplicate_read"},
+    ]
+    plan = aot.ExecutionPlan([{"kind": "compact", "flags": "flags", "count": "count", "columns": columns}])
+    for n in (0, 17, 4097):
+        width = 3 if n == 4097 else 2
+        bindings = {name: runtime.ndarray("i32", n) for name in ("values", "flags", "output", "duplicate_read")}
+        bindings.update(
+            {name: runtime.ndarray("f32", n, element_shape=(width,)) for name in ("vectors", "selected_vectors")}
+        )
+        bindings["count"] = runtime.ndarray("i32", 1)
+        write(bindings["count"], [-99])
+        with compact_plan(aot).prepare(
+            module, {name: bindings[name] for name in ("values", "flags", "output", "count")}
+        ) as one:
+            with plan.prepare(module, bindings) as combined:
+                # GPU columns share one prefix/scan workspace. CPU uses one
+                # selection array so each payload is copied in a linear pass.
+                if runtime.arch in ("x64", "arm64"):
+                    assert combined.info["workspace_bytes"] == n * 4
+                else:
+                    assert combined.info["workspace_bytes"] == one.info["workspace_bytes"]
+                assert read(bindings["count"]) == [-99]
+                for step in range(3):
+                    values = [i * 7 + step for i in range(n)]
+                    flags = [0 if step == 1 else i % 3 - 1 for i in range(n)]
+                    vectors = [float(i * width + lane + step) for i in range(n) for lane in range(width)]
+                    for name, data in (("values", values), ("flags", flags), ("vectors", vectors)):
+                        write(bindings[name], data)
+                    for name in ("output", "duplicate_read", "selected_vectors"):
+                        write(bindings[name], [-91] * (bindings[name].nbytes // 4))
+                    combined()
+                    selected = [i for i, flag in enumerate(flags) if flag]
+                    assert read(bindings["count"]) == [len(selected)]
+                    expected = [values[i] for i in selected] + [-91] * (n - len(selected))
+                    assert read(bindings["output"]) == read(bindings["duplicate_read"]) == expected
+                    expected_vectors = [v for i in selected for v in vectors[width * i : width * (i + 1)]]
+                    assert read(bindings["selected_vectors"]) == expected_vectors + [-91] * (
+                        width * (n - len(selected))
+                    )
+                if n:
+                    for alias in (bindings["output"], bindings["flags"], bindings["values"]):
+                        # Validate cross-column write/write and write/read
+                        # overlap, while duplicate read columns above remain legal.
+                        raises(aot.AotError, lambda: plan.prepare(module, {**bindings, "duplicate_read": alias}))
+                        assert read(bindings["output"]) == expected
+        for value in bindings.values():
+            value.close()
+
+
 def check(arch, path):
     sys.meta_path.insert(0, NoFrontend())
     from taichi_forge_runtime import aot
@@ -31,6 +84,7 @@ def check(arch, path):
         from aot_sort_probe import check_sort
 
         check_sort(runtime, module)
+        check_columns(aot, runtime, module)
         frames = []
         for n in (17, 4097):
             bindings = {name: runtime.ndarray("f32", n) for name in ("x", "y", "dx", "dy")}

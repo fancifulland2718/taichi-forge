@@ -93,12 +93,31 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         }
         plan.operations.emplace_back(std::move(sort));
       } else if (kind == "compact") {
-        fields(step, {"kind", "values", "flags", "output", "count"});
-        Compact compact{name(step["values"]), name(step["flags"]),
-                        name(step["output"]), name(step["count"])};
-        for (const auto &slot :
-             {compact.values, compact.flags, compact.output, compact.count})
-          arguments.insert(slot);
+        fields(step, {"kind", "values", "flags", "output", "count", "columns"});
+        Compact compact{{}, name(step["flags"]), name(step["count"])};
+        auto add_column = [&](const JsonValue &column) {
+          compact.columns.push_back(
+              {name(column["values"]), name(column["output"])});
+          arguments.insert(compact.columns.back().values);
+          arguments.insert(compact.columns.back().output);
+        };
+        if (auto found = step.obj.inner.find("columns");
+            found != step.obj.inner.end()) {
+          if (step.obj.inner.count("values") ||
+              step.obj.inner.count("output") || !found->second.is_arr() ||
+              found->second.arr.inner.empty())
+            throw std::invalid_argument(
+                "Compact columns must be nonempty and cannot use scalar "
+                "shorthand");
+          for (const auto &column : found->second.arr.inner) {
+            fields(column, {"values", "output"});
+            add_column(column);
+          }
+        } else {
+          add_column(step);
+        }
+        arguments.insert(compact.flags);
+        arguments.insert(compact.count);
         plan.operations.emplace_back(std::move(compact));
       } else if (kind == "fill32") {
         fields(step, {"kind", "destination", "value", "offset", "size_bytes"});

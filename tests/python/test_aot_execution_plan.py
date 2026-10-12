@@ -26,6 +26,9 @@ def test_execution_plan_snapshot_and_roundtrip(tmp_path):
         '{"version":1,"operations":[{"kind":"kernel","entry":"x","arguments":[],"hidden":1}]}',
         '{"version":1,"operations":[{"kind":"copy","source":"x","destination":"y","size_bytes":-1}]}',
         '{"version":1,"operations":[{"kind":"fill32","destination":"x","value":4294967296}]}',
+        '{"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[]}]}',
+        '{"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x"}]}]}',
+        '{"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x","output":"y"}],"values":"z","output":"w"}]}',
     ],
 )
 def test_execution_plan_rejects_ambiguous_contracts(document):

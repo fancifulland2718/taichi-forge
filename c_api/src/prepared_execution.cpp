@@ -451,57 +451,50 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
       }
     } else if (const auto *compact =
                    std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
-      const std::array<std::string, 4> names{compact->values, compact->flags,
-                                             compact->output, compact->count};
-      const std::array<Storage, 4> buffers{
-          storage(names[0], 0), storage(names[1], 0), storage(names[2], 0),
-          storage(names[3], 0)};
-      const auto &values = arguments.at(names[0])->value.ndarray;
-      const auto &flags = arguments.at(names[1])->value.ndarray;
-      const auto &output = arguments.at(names[2])->value.ndarray;
-      const auto &count = arguments.at(names[3])->value.ndarray;
-      if (values.shape.dim_count != 1 || flags.shape.dim_count != 1 ||
-          output.shape.dim_count != 1 ||
-          flags.shape.dims[0] != values.shape.dims[0] ||
-          output.shape.dims[0] < values.shape.dims[0] ||
-          flags.elem_type != TI_DATA_TYPE_I32 || flags.elem_shape.dim_count ||
-          count.elem_type != TI_DATA_TYPE_I32 || count.elem_shape.dim_count ||
-          count.shape.dim_count > 1 ||
-          (count.shape.dim_count == 1 && count.shape.dims[0] < 1) ||
-          values.elem_type != output.elem_type ||
-          values.elem_shape.dim_count != output.elem_shape.dim_count)
-        throw MemoryBindingError(
-            "Compact requires matching 1D records, i32 flags and a writable "
-            "i32 count");
-      for (uint32_t i = 0; i < values.elem_shape.dim_count; ++i) {
-        if (values.elem_shape.dims[i] != output.elem_shape.dims[i])
-          throw MemoryBindingError(
-              "Compact input and output element shapes differ");
-      }
-      const std::array<uint64_t, 4> sizes{buffers[0].size, buffers[1].size,
-                                          buffers[0].size, sizeof(int32_t)};
-      for (size_t i = 0; i < buffers.size(); ++i) {
-        if (rt.get_memory(arguments.at(names[i])->value.ndarray.memory)
+      auto compact_storage = [&](const std::string &name) {
+        auto result = storage(name, 0);
+        if (rt.get_memory(arguments.at(name)->value.ndarray.memory)
                 .base_offset %
             4)
           throw MemoryBindingError("Compact storage must be 4-byte aligned");
-        for (size_t j = 0; j < i; ++j) {
-          const auto a = buffers[i].pointer;
-          const auto b = buffers[j].pointer;
-          if ((i >= 2 || j >= 2) && sizes[i] && sizes[j] &&
-              a.alloc_id == b.alloc_id &&
-              (a.offset <= b.offset ? b.offset - a.offset < sizes[i]
-                                    : a.offset - b.offset < sizes[j]))
+        return result;
+      };
+      const auto flag_storage = compact_storage(compact->flags);
+      const auto count_storage = compact_storage(compact->count);
+      const auto &flags = arguments.at(compact->flags)->value.ndarray;
+      const auto &count = arguments.at(compact->count)->value.ndarray;
+      if (flags.shape.dim_count != 1 || flags.elem_type != TI_DATA_TYPE_I32 ||
+          flags.elem_shape.dim_count || count.elem_type != TI_DATA_TYPE_I32 ||
+          count.elem_shape.dim_count || count.shape.dim_count > 1 ||
+          (count.shape.dim_count == 1 && count.shape.dims[0] < 1))
+        throw MemoryBindingError(
+            "Compact requires 1D i32 flags and a writable i32 count");
+      CompactOperation descriptor{
+          {}, flag_storage.pointer, count_storage.pointer, flags.shape.dims[0]};
+      for (const auto &column : compact->columns) {
+        const auto source = compact_storage(column.values);
+        const auto destination = compact_storage(column.output);
+        const auto &values = arguments.at(column.values)->value.ndarray;
+        const auto &output = arguments.at(column.output)->value.ndarray;
+        if (values.shape.dim_count != 1 || output.shape.dim_count != 1 ||
+            values.shape.dims[0] != flags.shape.dims[0] ||
+            output.shape.dims[0] < values.shape.dims[0] ||
+            values.elem_type != output.elem_type ||
+            values.elem_shape.dim_count != output.elem_shape.dim_count)
+          throw MemoryBindingError(
+              "Compact requires matching 1D records and sufficient output "
+              "capacity");
+        for (uint32_t i = 0; i < values.elem_shape.dim_count; ++i)
+          if (values.elem_shape.dims[i] != output.elem_shape.dims[i])
             throw MemoryBindingError(
-                "Compact writable ranges must not overlap");
-        }
+                "Compact input and output element shapes differ");
+        descriptor.columns.push_back(
+            {source.pointer, destination.pointer,
+             static_cast<size_t>(source.element_bytes)});
       }
       try {
-        operations.emplace_back(prepare_compact_operation(
-            rt.arch, rt.get(),
-            {buffers[0].pointer, buffers[1].pointer, buffers[2].pointer,
-             buffers[3].pointer, values.shape.dims[0],
-             static_cast<size_t>(buffers[0].element_bytes)}));
+        operations.emplace_back(
+            prepare_compact_operation(rt.arch, rt.get(), descriptor));
       } catch (const std::invalid_argument &error) {
         throw MemoryBindingError(error.what());
       }

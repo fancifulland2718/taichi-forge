@@ -72,8 +72,12 @@ class ExecutionPlan:
                 required, optional = {"kind", "destination", "value"}, {"offset", "size_bytes"}
                 names = ("destination",)
             elif kind == "compact":
-                required, optional = {"kind", "values", "flags", "output", "count"}, set()
-                names = ("values", "flags", "output", "count")
+                if "columns" in op:
+                    required, names = {"kind", "flags", "count", "columns"}, ("flags", "count")
+                else:
+                    required = {"kind", "values", "flags", "output", "count"}
+                    names = ("values", "flags", "output", "count")
+                optional = set()
             elif kind == "sort":
                 required, optional = {"kind", "keys"}, {"values"}
                 names = ("keys", "values") if "values" in op else ("keys",)
@@ -95,6 +99,14 @@ class ExecutionPlan:
             elif kind == "fill32":
                 if type(op["value"]) is not int or not 0 <= op["value"] <= 0xFFFFFFFF:
                     raise ValueError("fill32 value must be a uint32 bit pattern")
+            elif kind == "compact" and "columns" in op:
+                if not isinstance(op["columns"], list) or not op["columns"]:
+                    raise ValueError("Compact columns must be a nonempty array")
+                for column in op["columns"]:
+                    if not isinstance(column, dict) or set(column) != {"values", "output"}:
+                        raise ValueError("Each compact column requires values and output names")
+                    _name(column["values"])
+                    _name(column["output"])
         self.kernel_entries = tuple(dict.fromkeys(kernels))
 
     def prepare(self, module, arguments, *, gradients=None):

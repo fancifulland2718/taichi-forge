@@ -1093,14 +1093,15 @@ void driver_compact_with_workspace(void *values,
                                    int num_items,
                                    int item_words,
                                    void *workspace,
-                                   void *stream) {
+                                   void *stream,
+                                   bool reuse_prefix) {
   TI_ERROR_IF(num_items > 0 && !workspace,
               "CUDA compact requires prepared workspace");
   const auto item_bytes =
       static_cast<std::size_t>(item_words) * sizeof(std::uint32_t);
   compact_strided_impl(values, flags, output, count, num_items, item_words, 0,
                        item_bytes, 0, sizeof(std::int32_t), 0, item_bytes, 0,
-                       stream, nullptr, false, workspace);
+                       stream, nullptr, reuse_prefix, workspace);
 }
 
 std::size_t driver_bucket_builder_strided(

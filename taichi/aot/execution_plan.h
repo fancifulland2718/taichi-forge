@@ -29,9 +29,12 @@ struct ExecutionPlan {
     std::optional<std::uint64_t> bytes;
   };
   struct Compact {
-    std::string values;
+    struct Column {
+      std::string values;
+      std::string output;
+    };
+    std::vector<Column> columns;
     std::string flags;
-    std::string output;
     std::string count;
   };
   struct Sort {
