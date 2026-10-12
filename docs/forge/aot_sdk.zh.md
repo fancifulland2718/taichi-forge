@@ -258,6 +258,28 @@ CPU/CUDA/Vulkan 用例覆盖前向计算、显式反向及上述所有权转换�
 不影响无关操作。具体设备/布局仍在准备时检查。C/C++ 对应
 `ti_probe_native_operation_ext` 和 `TiNativeOperationAvailabilityExt`。
 
+外部操作也支持统一的版本化描述，参数和绑定规则由已注册 provider 解码：
+
+```python
+operation = {
+    "kind": "native", "provider": "cublas", "operation": "gemm_f32", "version": 1,
+    "parameters": {"rows": 17, "columns": 9, "inner": 13, "alpha": 1.25},
+    "bindings": {"a": "left", "b": "right", "output": "result"},
+}
+plan = ti.aot.ExecutionPlan([operation])
+```
+
+`bindings` 的键是操作端口，值是执行计划中的参数或私有资源名称。`parameters`
+保存无进程地址的冻结参数。通用 reader/binder 不识别各库的数学参数；同一原生
+注册项负责参数、布局/别名检查并调用既有 typed 工厂，暖态不保留 JSON 解释器。
+目前注册 `cublas/gemm_f32` 和 `cufft/fft_c2c_f32` 的 version 1，参数分别与下文
+旧写法中移除 `kind` 和存储名称后的字段相同；旧写法继续通过注册式转换兼容。
+
+描述可在无原生库的 Python 环境中保存和读取，具体 schema/后端/依赖在准备时检查，
+错误先于私有缓冲分配报告。新入口不自动导出任意 JIT recording，也不是按 DLL
+符号名调用任意函数的接口；其他操作仍需注册可重建合同。已验证的精度、Graph 和
+显式反向边界保持如下，不因描述通用化扩大到整个 vendor 库。
+
 CUDA 当前注册 `fft_c2c_f32`，通过外部 cuFFT 执行紧凑行优先、实虚交错的 f32
 复数 ndarray（`element_shape=(2,)`）：
 

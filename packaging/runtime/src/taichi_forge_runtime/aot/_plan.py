@@ -103,6 +103,9 @@ class ExecutionPlan:
                 required = {"kind", "a", "b", "output", "rows", "columns", "inner"}
                 optional = {"alpha", "beta", "transpose_a", "transpose_b"}
                 names = ("a", "b", "output")
+            elif kind == "native":
+                required = {"kind", "provider", "operation", "version", "parameters", "bindings"}
+                optional, names = set(), ()
             else:
                 raise ValueError(f"Unsupported execution operation: {kind}")
             if not required <= set(op) or set(op) - required - optional:
@@ -116,7 +119,18 @@ class ExecutionPlan:
                     continue
                 if type(op[key]) is not int or not 0 <= op[key] <= 0x7FFFFFFFFFFFFFFF:
                     raise ValueError("Execution sizes and offsets require nonnegative int64 values")
-            if kind == "kernel":
+            if kind == "native":
+                _name(op["provider"])
+                _name(op["operation"])
+                if type(op["version"]) is not int or not 0 < op["version"] <= 0xFFFFFFFF:
+                    raise ValueError("Native operation version must be a positive uint32")
+                if not isinstance(op["parameters"], dict) or not isinstance(op["bindings"], dict):
+                    raise ValueError("Native parameters and bindings must be objects")
+                for port, slot in op["bindings"].items():
+                    _name(port)
+                    _name(slot)
+                    arguments.add(slot)
+            elif kind == "kernel":
                 if not isinstance(op["arguments"], list):
                     raise ValueError("Kernel arguments must be a list of names")
                 for name in op["arguments"]:

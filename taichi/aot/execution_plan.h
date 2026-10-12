@@ -6,6 +6,7 @@
 #include <variant>
 #include <vector>
 #include "taichi/aot/execution_resources.h"
+#include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang::aot {
 // Versioned persistent operations, independent of live definitions, runtime
@@ -42,26 +43,8 @@ struct ExecutionPlan {
     std::string keys;
     std::optional<std::string> values;
   };
-  struct Fft {
-    std::string input;
-    std::string output;
-    std::vector<std::uint64_t> dimensions;
-    std::uint64_t batch_count{1};
-    bool inverse{false};
-  };
-  struct Gemm {
-    std::string a;
-    std::string b;
-    std::string output;
-    std::uint64_t rows;
-    std::uint64_t columns;
-    std::uint64_t inner;
-    float alpha{1};
-    float beta{0};
-    bool transpose_a{false};
-    bool transpose_b{false};
-  };
-  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Fft, Gemm>;
+  using Native = NativeOperationDescription;
+  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Native>;
   std::vector<Operation> operations;
   std::vector<std::string> arguments;
   ExecutionResources resources;

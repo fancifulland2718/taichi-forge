@@ -2,10 +2,12 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <typeindex>
 #include <utility>
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang {
 
@@ -43,6 +45,67 @@ class NativeOperationRegistry {
   template <typename Descriptor>
   using Factory = std::function<
       std::shared_ptr<NativeOperation>(Arch, Device &, const Descriptor &)>;
+  template <typename Descriptor>
+  using Binder = std::function<Descriptor(const NativeOperationBindings &)>;
+  template <typename Descriptor>
+  using Decoder =
+      std::function<Binder<Descriptor>(const liong::json::JsonValue &)>;
+
+  // Decoding owns immutable parameters and resolves a registered typed binder.
+  // It never probes a dependency, allocates device memory or creates a plan.
+  class DecodedOperation {
+   public:
+    const std::string &kind() const {
+      return kind_;
+    }
+    std::uint32_t version() const {
+      return version_;
+    }
+
+   private:
+    friend class NativeOperationRegistry;
+    std::string kind_;
+    std::uint32_t version_{0};
+    std::type_index type_{typeid(void)};
+    std::vector<std::string> ports_;
+    std::function<std::shared_ptr<const void>(const NativeOperationBindings &)>
+        bind_;
+  };
+
+  template <typename Descriptor>
+  void register_schema(std::string provider,
+                       std::string operation,
+                       std::vector<std::string> ports,
+                       Decoder<Descriptor> decode,
+                       std::string legacy_kind = {}) {
+    if (!decode)
+      throw std::invalid_argument("Native schema requires a decoder");
+    register_schema_impl(
+        {std::move(provider), std::move(operation), Descriptor::version},
+        {Descriptor::kind, Descriptor::version}, typeid(Descriptor),
+        std::move(ports),
+        [decode = std::move(decode)](const liong::json::JsonValue &parameters) {
+          auto bind = decode(parameters);
+          if (!bind)
+            throw std::invalid_argument(
+                "Native schema returned an empty binder");
+          return
+              [bind = std::move(bind)](const NativeOperationBindings &bindings)
+                  -> std::shared_ptr<const void> {
+                return std::make_shared<Descriptor>(bind(bindings));
+              };
+        },
+        std::move(legacy_kind));
+  }
+
+  DecodedOperation decode(const NativeOperationDescription &description) const;
+  std::optional<NativeOperationDescription> lower_legacy(
+      const liong::json::JsonValue &description) const;
+  std::shared_ptr<NativeOperation> prepare(
+      Arch arch,
+      Device &device,
+      const DecodedOperation &operation,
+      const NativeOperationBindings &bindings) const;
 
   template <typename Descriptor>
   void define(Validator<Descriptor> validate) {
@@ -105,6 +168,25 @@ class NativeOperationRegistry {
     std::map<Arch, Backend> backends;
   };
   std::map<Key, Definition> definitions_;
+  using ErasedBinder = std::function<std::shared_ptr<const void>(
+      const NativeOperationBindings &)>;
+  using ErasedDecoder =
+      std::function<ErasedBinder(const liong::json::JsonValue &)>;
+  struct Schema {
+    Key definition;
+    std::type_index type;
+    std::vector<std::string> ports;
+    ErasedDecoder decode;
+  };
+  std::map<NativeOperationDescription::Key, Schema> schemas_;
+  std::map<std::string, NativeOperationDescription::Key> legacy_schemas_;
+
+  void register_schema_impl(NativeOperationDescription::Key key,
+                            Key definition_key,
+                            std::type_index type,
+                            std::vector<std::string> ports,
+                            ErasedDecoder decode,
+                            std::string legacy_kind);
 
   void define_impl(const std::string &kind,
                    std::uint32_t version,

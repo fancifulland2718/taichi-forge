@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <unordered_set>
+#include <set>
 #include <limits>
 #include "taichi/aot/execution_plan.h"
 #include "taichi/runtime/fixed_execution.h"
@@ -330,17 +331,26 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   prepared->owner = &mod;
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
-  std::unordered_set<std::string> probed;
+  std::set<std::pair<std::string, std::uint32_t>> probed;
+  std::map<const aot::ExecutionPlan::Native *,
+           NativeOperationRegistry::DecodedOperation>
+      decoded;
   for (const auto &operation : plan.operations) {
-    const char *kind = nullptr;
-    if (std::holds_alternative<aot::ExecutionPlan::Fft>(operation))
-      kind = FftC2COperation::kind;
-    else if (std::holds_alternative<aot::ExecutionPlan::Gemm>(operation))
-      kind = GemmF32Operation::kind;
-    if (kind && probed.insert(kind).second &&
-        !native_operation_registry().probe(kind, 1, rt.arch).available)
-      throw MemoryBindingError(std::string(kind) +
-                               " provider unavailable on this runtime");
+    if (const auto *native =
+            std::get_if<aot::ExecutionPlan::Native>(&operation)) {
+      try {
+        auto request = native_operation_registry().decode(*native);
+        if (probed.emplace(request.kind(), request.version()).second &&
+            !native_operation_registry()
+                 .probe(request.kind(), request.version(), rt.arch)
+                 .available)
+          throw MemoryBindingError(native->provider + "/" + native->operation +
+                                   " provider unavailable on this runtime");
+        decoded.emplace(native, std::move(request));
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
+    }
   }
   auto resource_bindings =
       capi::bind_execution_resources(rt, plan.resources, arguments, layouts);
@@ -365,6 +375,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     return Storage{allocation.allocation.get_ptr(offset), bytes - offset,
                    element_bytes};
   };
+  std::map<std::string, NativeArrayBinding> native_arrays;
   std::vector<FixedExecution::Operation> operations;
   for (const auto &operation : plan.operations) {
     if (const auto *kernel =
@@ -411,76 +422,34 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         throw MemoryBindingError("Execution copy slices must not overlap");
       operations.emplace_back(FixedExecution::BufferCopy{
           dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
-    } else if (const auto *gemm =
-                   std::get_if<aot::ExecutionPlan::Gemm>(&operation)) {
-      for (auto extent : {gemm->rows, gemm->columns, gemm->inner})
-        if (extent > std::numeric_limits<std::size_t>::max())
-          throw MemoryBindingError("GEMM dimension overflows address space");
-      const auto a = storage(gemm->a, 0);
-      const auto b = storage(gemm->b, 0);
-      const auto output = storage(gemm->output, 0);
-      auto matrix = [&](const std::string &name, uint64_t rows, uint64_t cols) {
-        const auto &array = arguments.at(name)->value.ndarray;
-        if (array.elem_type != TI_DATA_TYPE_F32 || array.elem_shape.dim_count ||
-            array.shape.dim_count != 2 || array.shape.dims[0] != rows ||
-            array.shape.dims[1] != cols ||
-            rt.get_memory(array.memory).base_offset % sizeof(float))
-          throw MemoryBindingError(
-              "GEMM requires aligned compact scalar f32 matrices matching "
-              "the physical shape and transpose flags");
-      };
-      matrix(gemm->a, gemm->transpose_a ? gemm->inner : gemm->rows,
-             gemm->transpose_a ? gemm->rows : gemm->inner);
-      matrix(gemm->b, gemm->transpose_b ? gemm->columns : gemm->inner,
-             gemm->transpose_b ? gemm->inner : gemm->columns);
-      matrix(gemm->output, gemm->rows, gemm->columns);
-      GemmF32Operation descriptor{a.pointer,
-                                  b.pointer,
-                                  output.pointer,
-                                  static_cast<std::size_t>(gemm->rows),
-                                  static_cast<std::size_t>(gemm->columns),
-                                  static_cast<std::size_t>(gemm->inner),
-                                  gemm->alpha,
-                                  gemm->beta,
-                                  gemm->transpose_a,
-                                  gemm->transpose_b};
-      try {
-        operations.emplace_back(
-            prepare_gemm_f32_operation(rt.arch, rt.get(), descriptor));
-      } catch (const std::invalid_argument &error) {
-        throw MemoryBindingError(error.what());
-      }
-    } else if (const auto *fft =
-                   std::get_if<aot::ExecutionPlan::Fft>(&operation)) {
-      const auto input = storage(fft->input, 0);
-      const auto output = storage(fft->output, 0);
-      for (const auto *name : {&fft->input, &fft->output}) {
-        const auto &array = arguments.at(*name)->value.ndarray;
-        if (array.elem_type != TI_DATA_TYPE_F32 ||
-            array.elem_shape.dim_count != 1 || array.elem_shape.dims[0] != 2 ||
-            rt.get_memory(array.memory).base_offset % 8)
-          throw MemoryBindingError(
-              "FFT requires aligned interleaved complex f32 vector(2) "
-              "ndarrays");
-      }
-      FftC2COperation descriptor{
-          input.pointer, output.pointer, {}, 1, fft->inverse};
-      if (fft->batch_count > std::numeric_limits<std::size_t>::max())
-        throw MemoryBindingError("FFT batch count overflows address space");
-      descriptor.batch_count = static_cast<std::size_t>(fft->batch_count);
-      for (auto dimension : fft->dimensions) {
-        if (dimension > std::numeric_limits<std::size_t>::max())
-          throw MemoryBindingError("FFT dimension overflows address space");
-        descriptor.dimensions.push_back(static_cast<std::size_t>(dimension));
+    } else if (const auto *native =
+                   std::get_if<aot::ExecutionPlan::Native>(&operation)) {
+      NativeOperationBindings inputs;
+      for (const auto &[port, slot] : native->bindings) {
+        auto found = native_arrays.find(slot);
+        if (found == native_arrays.end()) {
+          const auto view = storage(slot, 0);
+          const auto &array = arguments.at(slot)->value.ndarray;
+          found =
+              native_arrays
+                  .emplace(
+                      slot,
+                      NativeArrayBinding{
+                          view.pointer,
+                          view.size,
+                          capi::ndarray_scalar_type(array.elem_type),
+                          {array.shape.dims,
+                           array.shape.dims + array.shape.dim_count},
+                          {array.elem_shape.dims,
+                           array.elem_shape.dims + array.elem_shape.dim_count},
+                          rt.get_memory(array.memory).base_offset})
+                  .first;
+        }
+        inputs.emplace(port, found->second);
       }
       try {
-        const auto bytes =
-            fft_c2c_element_count(descriptor) * 2 * sizeof(float);
-        if (input.size != bytes || output.size != bytes)
-          throw std::invalid_argument(
-              "FFT dimensions/batch do not match ndarray storage");
-        operations.emplace_back(
-            prepare_fft_operation(rt.arch, rt.get(), descriptor));
+        operations.emplace_back(native_operation_registry().prepare(
+            rt.arch, rt.get(), decoded.at(native), inputs));
       } catch (const std::invalid_argument &error) {
         throw MemoryBindingError(error.what());
       }

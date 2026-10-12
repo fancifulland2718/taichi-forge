@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 #include <limits>
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/common/operation_json.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
@@ -189,6 +190,79 @@ TEST(NativeOperationRegistry, RejectsNullOrForeignFactoryResults) {
   }
   EXPECT_EQ(runs, 0);
   EXPECT_EQ(retired, 2);
+}
+
+TEST(NativeOperationRegistry, SchemaDecodesColdAndUsesTheExistingTypedFactory) {
+  cpu::CpuDevice device;
+  NativeOperationRegistry registry;
+  int decodes = 0, probes = 0, factories = 0, runs = 0, retired = 0;
+  registry.define<TestDescriptor>([](Device &, const TestDescriptor &value) {
+    if (!value.valid)
+      throw std::invalid_argument("Invalid test storage");
+  });
+  registry.register_factory<TestDescriptor>(
+      host_arch(), NativeOperationMode::cpu,
+      [&](Arch arch, Device &device, const TestDescriptor &) {
+        ++factories;
+        return std::make_shared<TestOperation>(arch, device, runs, retired);
+      },
+      [&] {
+        ++probes;
+        return NativeOperationAvailability{true, 1};
+      });
+  NativeOperationRegistry::Decoder<TestDescriptor> decoder =
+      [&](const liong::json::JsonValue &parameters)
+      -> NativeOperationRegistry::Binder<TestDescriptor> {
+    ++decodes;
+    operation_json::fields(parameters, {"bytes"});
+    const auto bytes = operation_json::integer(parameters["bytes"]);
+    return [bytes](const NativeOperationBindings &bindings) {
+      return TestDescriptor{bindings.at("input").bytes == bytes};
+    };
+  };
+  registry.register_schema<TestDescriptor>(
+      "test.provider", "consume", {"input"}, decoder, "legacy.consume");
+  const auto description =
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"test.provider","operation":"consume","version":1,
+          "parameters":{"bytes":12},"bindings":{"input":"caller_name"}})"));
+  const auto decoded = registry.decode(description);
+  EXPECT_EQ(decodes, 1);
+  EXPECT_EQ(probes, 0);
+  EXPECT_EQ(factories, 0);
+  NativeOperationBindings bindings{
+      {"input", {{}, 12, PrimitiveType::f32, {3}, {}}}};
+  auto op = registry.prepare(host_arch(), device, decoded, bindings);
+  EXPECT_EQ(factories, 1);
+  EXPECT_EQ(probes, 1);
+  for (int i = 0; i < 3; ++i)
+    op->run_cpu();
+  EXPECT_EQ(runs, 3);
+  EXPECT_EQ(decodes, 1);
+  EXPECT_EQ(probes, 1);
+  bindings.at("input").bytes = 8;
+  EXPECT_THROW(registry.prepare(host_arch(), device, decoded, bindings),
+               std::invalid_argument);
+  EXPECT_EQ(factories, 1);
+  EXPECT_THROW(registry.prepare(host_arch(), device, decoded, {}),
+               std::invalid_argument);
+  auto invalid = description;
+  invalid.bindings.emplace("extra", "x");
+  EXPECT_THROW(registry.decode(invalid), std::invalid_argument);
+  invalid = description;
+  invalid.provider = "other.provider";
+  EXPECT_THROW(registry.decode(invalid), std::invalid_argument);
+  EXPECT_THROW(registry.register_schema<TestDescriptor>(
+                   "test.provider", "consume", {"input"}, decoder),
+               std::invalid_argument);
+  auto legacy = registry.lower_legacy(liong::json::parse_complete(
+      R"({"kind":"legacy.consume","input":"caller_name","bytes":12})"));
+  ASSERT_TRUE(legacy.has_value());
+  EXPECT_EQ(legacy->key(), description.key());
+  EXPECT_EQ(legacy->bindings, description.bindings);
+  EXPECT_NO_THROW(registry.decode(*legacy));
+  op.reset();
+  EXPECT_EQ(retired, 1);
 }
 
 TEST(NativeOperationRegistry, OptionalProviderProbeIsColdAndPrecedesFactory) {

@@ -1,6 +1,108 @@
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/common/operation_json.h"
+#include <set>
 
 namespace taichi::lang {
+void NativeOperationRegistry::register_schema_impl(
+    NativeOperationDescription::Key key,
+    Key definition_key,
+    std::type_index type,
+    std::vector<std::string> ports,
+    ErasedDecoder decode,
+    std::string legacy_kind) {
+  using operation_json::name;
+  name(liong::json::JsonValue(std::get<0>(key)));
+  name(liong::json::JsonValue(std::get<1>(key)));
+  definition(definition_key, type);
+  std::set<std::string> unique;
+  for (const auto &port : ports) {
+    name(liong::json::JsonValue(port));
+    if (!unique.insert(port).second)
+      throw std::invalid_argument("Duplicate native schema binding: " + port);
+  }
+  if (schemas_.count(key) ||
+      (!legacy_kind.empty() && legacy_schemas_.count(legacy_kind)))
+    throw std::invalid_argument("Duplicate native operation schema");
+  if (!legacy_kind.empty()) {
+    name(liong::json::JsonValue(legacy_kind));
+    if (unique.count("kind"))
+      throw std::invalid_argument("Legacy native binding conflicts with kind");
+  }
+  auto inserted =
+      schemas_.emplace(key, Schema{std::move(definition_key), type,
+                                   std::move(ports), std::move(decode)});
+  try {
+    if (!legacy_kind.empty())
+      legacy_schemas_.emplace(std::move(legacy_kind), std::move(key));
+  } catch (...) {
+    schemas_.erase(inserted.first);
+    throw;
+  }
+}
+
+NativeOperationRegistry::DecodedOperation NativeOperationRegistry::decode(
+    const NativeOperationDescription &description) const {
+  const auto found = schemas_.find(description.key());
+  if (found == schemas_.end())
+    throw std::invalid_argument(
+        "Unregistered native operation schema: " + description.provider + "/" +
+        description.operation);
+  const auto &schema = found->second;
+  if (description.bindings.size() != schema.ports.size())
+    throw std::invalid_argument(
+        "Native operation binding set does not match its schema");
+  for (const auto &port : schema.ports) {
+    if (!description.bindings.count(port))
+      throw std::invalid_argument("Missing native operation binding: " + port);
+    operation_json::name(liong::json::JsonValue(description.bindings.at(port)));
+  }
+  DecodedOperation result;
+  result.kind_ = schema.definition.first;
+  result.version_ = schema.definition.second;
+  result.type_ = schema.type;
+  result.ports_ = schema.ports;
+  try {
+    result.bind_ = schema.decode(description.parameters);
+  } catch (const std::exception &error) {
+    throw std::invalid_argument(description.provider + "/" +
+                                description.operation + ": " + error.what());
+  }
+  return result;
+}
+
+std::optional<NativeOperationDescription> NativeOperationRegistry::lower_legacy(
+    const liong::json::JsonValue &description) const {
+  const auto kind = operation_json::name(description["kind"]);
+  const auto found = legacy_schemas_.find(kind);
+  if (found == legacy_schemas_.end())
+    return std::nullopt;
+  NativeOperationDescription result;
+  std::tie(result.provider, result.operation, result.version) = found->second;
+  result.parameters = description;
+  result.parameters.obj.inner.erase("kind");
+  for (const auto &port : schemas_.at(found->second).ports) {
+    result.bindings.emplace(port, operation_json::name(description[port]));
+    result.parameters.obj.inner.erase(port);
+  }
+  return result;
+}
+
+std::shared_ptr<NativeOperation> NativeOperationRegistry::prepare(
+    Arch arch,
+    Device &device,
+    const DecodedOperation &operation,
+    const NativeOperationBindings &bindings) const {
+  if (!operation.bind_ || bindings.size() != operation.ports_.size())
+    throw std::invalid_argument(
+        "Native operation storage set does not match its schema");
+  for (const auto &port : operation.ports_)
+    if (!bindings.count(port))
+      throw std::invalid_argument("Missing native operation storage: " + port);
+  const auto value = operation.bind_(bindings);
+  return prepare_impl(operation.kind_, operation.version_, operation.type_,
+                      arch, device, value.get());
+}
+
 void NativeOperationRegistry::define_impl(const std::string &kind,
                                           std::uint32_t version,
                                           std::type_index type,

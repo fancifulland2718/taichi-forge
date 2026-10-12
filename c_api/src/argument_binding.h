@@ -13,6 +13,7 @@ struct NdArrayStorageLayout {
   uint32_t alignment;
 };
 NdArrayStorageLayout ndarray_storage_layout(const TiNdArray &array);
+taichi::lang::DataType ndarray_scalar_type(TiDataType type);
 
 // Validate primitive/tensor storage and return its declared logical byte size.
 uint64_t validated_ndarray_bytes(Runtime &runtime,

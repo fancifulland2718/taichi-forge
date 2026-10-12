@@ -266,6 +266,10 @@ bool validate_gradient_parameter(
 }  // namespace
 
 namespace capi {
+taichi::lang::DataType ndarray_scalar_type(TiDataType type) {
+  return primitive_type(type);
+}
+
 uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,
                                  uint64_t *element_bytes) {

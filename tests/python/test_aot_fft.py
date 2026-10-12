@@ -72,6 +72,21 @@ def test_aot_cufft_mixed_execution_and_explicit_adjoint(tmp_path):
         },
         {"kind": "kernel", "entry": "scale_grad", "arguments": ["x", "temporary"]},
     ]
+    steps = [
+        (
+            dict(
+                kind="native",
+                provider="cufft",
+                operation="fft_c2c_f32",
+                version=1,
+                bindings={name: step[name] for name in ("input", "output")},
+                parameters={key: value for key, value in step.items() if key not in ("kind", "input", "output")},
+            )
+            if step["kind"] == "fft_c2c_f32"
+            else step
+        )
+        for step in steps
+    ]
     resources = [
         {"kind": "ndarray", "name": name, "dtype": "f32", "element_shape": [2], "shape": [{"array": "x", "axis": 0}]}
         for name in ("temporary", "dtemporary", "dfrequency")

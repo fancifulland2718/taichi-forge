@@ -1,7 +1,17 @@
 #include "gtest/gtest.h"
 #include "taichi/aot/execution_plan.h"
+#include "taichi/runtime/native_operation_registry.h"
+#include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+namespace {
+void validate_provider_description(const std::string &document) {
+  const auto plan = ExecutionPlan::parse(document);
+  native_operation_registry().decode(
+      std::get<ExecutionPlan::Native>(plan.operations.at(0)));
+}
+}  // namespace
+
 TEST(ExecutionPlan, PreservesOrderedOperationsAndSymbolicBindings) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"kernel","entry":"forward","arguments":["x","scratch"]},
@@ -56,10 +66,15 @@ TEST(ExecutionPlan, NativeCompactRetainsAllSymbolicDependencies) {
 TEST(ExecutionPlan, FftPreservesExplicitDirectionAndDimensions) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"fft_c2c_f32","input":"x","output":"y","dimensions":[3,5],"batch_count":2,"direction":"inverse"}]})");
-  const auto &fft = std::get<ExecutionPlan::Fft>(plan.operations[0]);
-  EXPECT_EQ(fft.dimensions, (std::vector<std::uint64_t>{3, 5}));
-  EXPECT_EQ(fft.batch_count, 2);
-  EXPECT_TRUE(fft.inverse);
+  const auto &fft = std::get<ExecutionPlan::Native>(plan.operations[0]);
+  EXPECT_EQ(fft.provider, "cufft");
+  EXPECT_EQ(fft.operation, "fft_c2c_f32");
+  EXPECT_EQ(fft.bindings.at("input"), "x");
+  EXPECT_EQ(fft.parameters["dimensions"].arr.inner[0].num_int, 3);
+  EXPECT_EQ(fft.parameters["dimensions"].arr.inner[1].num_int, 5);
+  EXPECT_EQ(fft.parameters["batch_count"].num_int, 2);
+  EXPECT_EQ(fft.parameters["direction"].str, "inverse");
+  EXPECT_NO_THROW(native_operation_registry().decode(fft));
   EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x", "y"}));
   for (const auto *fields :
        {R"("dimensions":[],"direction":"forward")",
@@ -67,7 +82,7 @@ TEST(ExecutionPlan, FftPreservesExplicitDirectionAndDimensions) {
         R"("dimensions":[1],"direction":"adjoint")",
         R"("dimensions":[1],"direction":"forward","batch_count":0)"})
     EXPECT_THROW(
-        ExecutionPlan::parse(
+        validate_provider_description(
             std::string(
                 R"({"version":1,"operations":[{"kind":"fft_c2c_f32","input":"x","output":"y",)") +
             fields + "}]}"),
@@ -78,24 +93,28 @@ TEST(ExecutionPlan, GemmPreservesScalarsAndPhysicalTransposeContract) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"gemm_f32","a":"x","b":"y","output":"z","rows":17,
      "columns":9,"inner":13,"alpha":-0.75,"beta":2,"transpose_b":true}]})");
-  const auto &gemm = std::get<ExecutionPlan::Gemm>(plan.operations[0]);
-  EXPECT_EQ(gemm.rows, 17);
-  EXPECT_EQ(gemm.columns, 9);
-  EXPECT_EQ(gemm.inner, 13);
-  EXPECT_FLOAT_EQ(gemm.alpha, -0.75f);
-  EXPECT_FLOAT_EQ(gemm.beta, 2);
-  EXPECT_FALSE(gemm.transpose_a);
-  EXPECT_TRUE(gemm.transpose_b);
+  const auto &gemm = std::get<ExecutionPlan::Native>(plan.operations[0]);
+  EXPECT_EQ(gemm.provider, "cublas");
+  EXPECT_EQ(gemm.operation, "gemm_f32");
+  EXPECT_EQ(gemm.parameters["rows"].num_int, 17);
+  EXPECT_EQ(gemm.parameters["columns"].num_int, 9);
+  EXPECT_EQ(gemm.parameters["inner"].num_int, 13);
+  EXPECT_FLOAT_EQ(operation_json::optional_f32(gemm.parameters, "alpha", 1),
+                  -0.75f);
+  EXPECT_FLOAT_EQ(operation_json::optional_f32(gemm.parameters, "beta", 0), 2);
+  EXPECT_FALSE(operation_json::optional_bool(gemm.parameters, "transpose_a"));
+  EXPECT_TRUE(operation_json::optional_bool(gemm.parameters, "transpose_b"));
+  EXPECT_NO_THROW(native_operation_registry().decode(gemm));
   EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x", "y", "z"}));
   for (const auto *extra : {R"(,"alpha":true)", R"(,"beta":1e100)",
                             R"(,"transpose_a":1)", R"(,"transpose_b":"N")"})
     EXPECT_THROW(
-        ExecutionPlan::parse(
+        validate_provider_description(
             std::string(
                 R"({"version":1,"operations":[{"kind":"gemm_f32","a":"x","b":"y","output":"z","rows":2,"columns":3,"inner":4)") +
             extra + "}]}"),
         std::invalid_argument);
-  EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
+  EXPECT_THROW(validate_provider_description(R"({"version":1,"operations":[
     {"kind":"gemm_f32","a":"x","b":"y","output":"z","rows":0,"columns":3,"inner":4}]})"),
                std::invalid_argument);
 }
@@ -112,6 +131,34 @@ TEST(ExecutionPlan, SortHasOptionalPayloadWithoutImplicitArguments) {
   EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"sort","keys":"x","descending":true}]})"),
                std::invalid_argument);
+}
+
+TEST(ExecutionPlan, NativeEnvelopeHasNoHardcodedProviderOrOperationList) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
+    {"kind":"native","provider":"application.library","operation":"custom_operation",
+     "version":7,"bindings":{"input":"x","output":"scratch"},
+     "parameters":{"nested":{"policy":"frozen"},"axes":[2,3]}}],
+    "resources":[{"kind":"ndarray","name":"scratch","dtype":"f32","shape":[3]}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x"}));
+  ASSERT_EQ(plan.resources.materialize, (std::vector<bool>{true}));
+  const auto &native = std::get<ExecutionPlan::Native>(plan.operations[0]);
+  EXPECT_EQ(native.provider, "application.library");
+  EXPECT_EQ(native.version, 7);
+  EXPECT_EQ(native.parameters["nested"]["policy"].str, "frozen");
+  EXPECT_THROW(native_operation_registry().decode(native),
+               std::invalid_argument);
+  for (const auto *extra :
+       {R"("version":0,"parameters":{},"bindings":{})",
+        R"("version":true,"parameters":{},"bindings":{})",
+        R"("version":1,"parameters":[],"bindings":{})",
+        R"("version":1,"parameters":{},"bindings":{"input":""})",
+        R"("version":1,"parameters":{},"bindings":{},"callback":1)"})
+    EXPECT_THROW(
+        ExecutionPlan::parse(
+            std::string(
+                R"({"version":1,"operations":[{"kind":"native","provider":"x","operation":"y",)") +
+            extra + "}]}"),
+        std::invalid_argument);
 }
 
 TEST(ExecutionPlan, CompactColumnsShareOnePredicateAndCount) {

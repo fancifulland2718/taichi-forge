@@ -322,6 +322,33 @@ provider with a missing library keeps its compiled capabilities and reports
 admission still happens during preparation. C/C++ uses
 `ti_probe_native_operation_ext` and `TiNativeOperationAvailabilityExt`.
 
+External operations also accept a common versioned envelope. Registered providers
+decode their own parameters and binding contracts:
+
+```python
+operation = {
+    "kind": "native", "provider": "cublas", "operation": "gemm_f32", "version": 1,
+    "parameters": {"rows": 17, "columns": 9, "inner": 13, "alpha": 1.25},
+    "bindings": {"a": "left", "b": "right", "output": "result"},
+}
+plan = ti.aot.ExecutionPlan([operation])
+```
+
+Binding keys are operation ports; values name execution arguments or private
+resources. Parameters are frozen values without process addresses. The common
+reader/binder does not interpret vendor mathematics. A native registration owns
+parameter/layout/alias validation and uses the existing typed factory; warm replay
+retains no JSON interpreter. Currently registered schemas are version 1 of
+`cublas/gemm_f32` and `cufft/fft_c2c_f32`. Their parameters match the legacy forms
+below after removing `kind` and storage names. Registered lowering preserves those
+legacy forms.
+
+Descriptions can be saved/read without a native library. Preparation checks the
+concrete schema, backend and dependencies before allocating private buffers. This
+does not automatically export arbitrary JIT recordings or invoke arbitrary DLL
+symbols; other operations still need registered reconstruction contracts. The
+qualified precision, Graph and explicit-adjoint boundaries below remain unchanged.
+
 CUDA currently registers `fft_c2c_f32`, using external cuFFT for compact,
 row-major interleaved complex f32 ndarrays (`element_shape=(2,)`):
 

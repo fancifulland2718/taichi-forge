@@ -76,6 +76,23 @@ def test_aot_cublas_mixed_execution_and_explicit_adjoint(tmp_path):
             "transpose_a": True,
         },
     ]
+    # Export the new common envelope. The consumer's direct transpose/alias
+    # cases below retain legacy syntax, exercising both through one factory.
+    steps = [
+        (
+            dict(
+                kind="native",
+                provider="cublas",
+                operation="gemm_f32",
+                version=1,
+                bindings={name: step[name] for name in ("a", "b", "output")},
+                parameters={key: value for key, value in step.items() if key not in ("kind", "a", "b", "output")},
+            )
+            if step["kind"] == "gemm_f32"
+            else step
+        )
+        for step in steps
+    ]
     plan = ti.aot.ExecutionPlan(
         steps,
         resources=[

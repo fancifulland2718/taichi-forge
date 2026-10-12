@@ -5,6 +5,7 @@
 #include <set>
 #include <stdexcept>
 #include "taichi/aot/execution_plan_json.h"
+#include "taichi/runtime/native_operation_registry.h"
 
 namespace taichi::lang::aot {
 using namespace execution_json;
@@ -48,50 +49,11 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         arguments.insert(copy.destination);
         arguments.insert(copy.source);
         plan.operations.emplace_back(std::move(copy));
-      } else if (kind == "gemm_f32") {
-        fields(step, {"kind", "a", "b", "output", "rows", "columns", "inner",
-                      "alpha", "beta", "transpose_a", "transpose_b"});
-        Gemm gemm{name(step["a"]),
-                  name(step["b"]),
-                  name(step["output"]),
-                  integer(step["rows"]),
-                  integer(step["columns"]),
-                  integer(step["inner"]),
-                  optional_f32(step, "alpha", 1),
-                  optional_f32(step, "beta", 0),
-                  optional_bool(step, "transpose_a"),
-                  optional_bool(step, "transpose_b")};
-        if (!gemm.rows || !gemm.columns || !gemm.inner)
-          throw std::invalid_argument("GEMM dimensions must be positive");
-        arguments.insert(gemm.a);
-        arguments.insert(gemm.b);
-        arguments.insert(gemm.output);
-        plan.operations.emplace_back(std::move(gemm));
-      } else if (kind == "fft_c2c_f32") {
-        fields(step, {"kind", "input", "output", "dimensions", "batch_count",
-                      "direction"});
-        Fft fft{name(step["input"]), name(step["output"]), {}};
-        const auto &dimensions = step["dimensions"];
-        if (!dimensions.is_arr() || dimensions.arr.inner.empty())
-          throw std::invalid_argument(
-              "FFT dimensions must be a nonempty array");
-        for (const auto &axis : dimensions.arr.inner) {
-          auto extent = integer(axis);
-          if (!extent)
-            throw std::invalid_argument("FFT dimensions must be positive");
-          fft.dimensions.push_back(extent);
-        }
-        fft.batch_count = optional_integer(step, "batch_count").value_or(1);
-        if (!fft.batch_count)
-          throw std::invalid_argument("FFT batch count must be positive");
-        const auto direction = name(step["direction"]);
-        if (direction != "forward" && direction != "inverse")
-          throw std::invalid_argument(
-              "FFT direction must be forward or inverse");
-        fft.inverse = direction == "inverse";
-        arguments.insert(fft.input);
-        arguments.insert(fft.output);
-        plan.operations.emplace_back(std::move(fft));
+      } else if (kind == "native") {
+        auto native = NativeOperationDescription::parse(step);
+        for (const auto &[port, slot] : native.bindings)
+          arguments.insert(slot);
+        plan.operations.emplace_back(std::move(native));
       } else if (kind == "sort") {
         fields(step, {"kind", "keys", "values"});
         Sort sort{name(step["keys"]), std::nullopt};
@@ -140,8 +102,13 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         arguments.insert(fill.destination);
         plan.operations.emplace_back(std::move(fill));
       } else {
-        throw std::invalid_argument("Unsupported execution plan operation: " +
-                                    kind);
+        auto native = native_operation_registry().lower_legacy(step);
+        if (!native)
+          throw std::invalid_argument("Unsupported execution plan operation: " +
+                                      kind);
+        for (const auto &[port, slot] : native->bindings)
+          arguments.insert(slot);
+        plan.operations.emplace_back(std::move(*native));
       }
     }
     plan.resources.analyze(arguments);

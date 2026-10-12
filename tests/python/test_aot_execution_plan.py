@@ -17,6 +17,43 @@ def test_execution_plan_snapshot_and_roundtrip(tmp_path):
     assert json.loads(restored.to_json())["operations"][0]["arguments"] == ["x"]
 
 
+def test_native_description_is_provider_owned_and_has_symbolic_resources():
+    op = dict(
+        kind="native",
+        provider="application.library",
+        operation="custom_operation",
+        version=7,
+        parameters={"nested": {"policy": "frozen"}},
+        bindings={"input": "x", "output": "scratch"},
+    )
+    plan = ExecutionPlan([op], resources=[{"kind": "ndarray", "name": "scratch", "dtype": "f32", "shape": [3]}])
+    op["parameters"]["nested"]["policy"] = "changed"
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("x",)
+    assert restored.kernel_entries == ()
+    assert json.loads(restored.to_json())["operations"][0]["parameters"]["nested"]["policy"] == "frozen"
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"version": 0},
+        {"version": True},
+        {"version": 1 << 32},
+        {"parameters": []},
+        {"bindings": {"input": ""}},
+        {"bindings": {"": "x"}},
+        {"provider": ""},
+        {"operation": "bad\0name"},
+        {"callback": "python.function"},
+    ],
+)
+def test_native_description_rejects_invalid_envelopes(invalid):
+    op = dict(kind="native", provider="library", operation="operation", version=1, parameters={}, bindings={})
+    with pytest.raises(ValueError):
+        ExecutionPlan([dict(op, **invalid)])
+
+
 @pytest.mark.parametrize(
     "document",
     [
