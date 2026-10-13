@@ -122,6 +122,27 @@ def test_graph_export_resource_identity_is_local_and_configuration_stable():
     assert context.resources[0]["parameters"] == dict(rows=5)
 
 
+def test_graph_export_stages_frozen_data_and_resource_initialization():
+    from types import SimpleNamespace
+    from taichi_forge.aot._graph_export import _ExportContext
+
+    context = _ExportContext(SimpleNamespace(_exported_kernels={}), set())
+    owner = object()
+    data = b"\0\0\x80\x3f"
+    name = context.data_resource(owner, data, dtype="f32", shape=[1])
+    assert context.data_resource(owner, data, dtype="f32", shape=[1]) == name
+    assert len(context.data_payloads) == 1
+    context.initialize_native_once(name, "test", "setup", bindings=dict(array=name))
+    context.initialize_native_once(name, "test", "setup", bindings=dict(array=name))
+    assert len(context.initialization) == 1 and not context.operations
+    with pytest.raises(ValueError, match="initialization changed"):
+        context.initialize_native_once(name, "test", "setup", bindings=dict(array="other"))
+    with pytest.raises(ValueError, match="reconstruction changed"):
+        context.data_resource(owner, b"\0\0\0\0", dtype="f32", shape=[1])
+    with pytest.raises(TypeError, match="immutable"):
+        context.data_resource(object(), bytearray(data), dtype="f32", shape=[1])
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_graph_export_compile_failure_cannot_publish_partial_artifact(tmp_path):
     @ti.kernel

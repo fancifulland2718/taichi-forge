@@ -316,6 +316,7 @@ class CusparseLtMatmulPlan:
         self._alignment_bytes = alignment_bytes
         self._capture_leases = 0
         self._capture_mode = None
+        self._aot_initial_a = None
         self._preparation_only = _preparation_only
         self._configuration = None
         self._algorithm_count = None
@@ -384,8 +385,20 @@ class CusparseLtMatmulPlan:
             self, "cuSPARSELt plan belongs to a previous Taichi runtime generation"
         )
 
-    def compress(self, a):
-        """Compress an already-valid 2:4 sparse A matrix with shape (m, k)."""
+    @property
+    def aot_data_bytes(self):
+        """Host bytes explicitly retained for portable snapshot export."""
+        return len(self._aot_initial_a) if self._aot_initial_a is not None else 0
+
+    def compress(self, a, *, retain_aot_data=False):
+        """Compress valid 2:4 A; optionally retain its bytes for AOT export.
+
+        The opt-in performs one cold device readback. Later changes to A do not
+        change the saved epoch. Recompression or close releases the old data.
+        """
+
+        if type(retain_aot_data) is not bool:
+            raise TypeError("retain_aot_data must be a boolean")
 
         with self.provider._lock, self._lock:
             self._validate_lifetime()
@@ -399,6 +412,9 @@ class CusparseLtMatmulPlan:
             if self._compression_buffer is not None:
                 resources.append(self._compression_buffer)
             with external_cuda_submission(self._runtime_prog, resources) as submission:
+                # Program's recursive submission guard covers both sampling and
+                # compression, including synchronization of preceding writes.
+                snapshot = a.to_numpy().tobytes() if retain_aot_data else None
                 compression_pointer = (
                     0
                     if self._compression_buffer is None
@@ -414,6 +430,7 @@ class CusparseLtMatmulPlan:
                     0,
                 )
                 self._compressed_ready = False
+                self._aot_initial_a = None
                 try:
                     result = submission.invoke(
                         self.provider._execution_api.compress_sparse_a,
@@ -424,6 +441,7 @@ class CusparseLtMatmulPlan:
                 except RuntimeError as exc:
                     raise TaichiRuntimeError(str(exc)) from exc
             self._compressed_ready = True
+            self._aot_initial_a = snapshot
         return self
 
     def execute(self, b, c, d, *, alpha=1.0, beta=0.0):
@@ -512,6 +530,7 @@ class CusparseLtMatmulPlan:
             raise TaichiRuntimeError(str(exc)) from exc
         self._handle = None
         self._compressed_a = self._compression_buffer = self._workspace = None
+        self._aot_initial_a = None
         self._compressed_ready = False
 
     destroy = close

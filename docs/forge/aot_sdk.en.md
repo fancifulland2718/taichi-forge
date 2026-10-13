@@ -903,9 +903,37 @@ Graph. The description preserves each compression epoch, shared-A groups,
 coefficients, alignment and configured algorithm/split-K/ReLU facts. A group
 compresses once before its products; separate recordings retain their individual
 compression steps even when they use the same resource. Unknown plan subclasses
-are rejected. Snapshot recordings have no portable raw-A payload, so automatic
-export rejects them before adding kernels; use the explicit initialization plan
-above for fixed weights. Export never reads back live compressed vendor buffers.
+are rejected.
+
+For a portable snapshot recording, explicitly retain raw A at compression time:
+
+```python
+plan.compress(weights, retain_aot_data=True)
+builder.append_native(plan.record(b="b", c="c", d="d"))
+module.add_execution_plan("step", builder.compile())
+```
+
+The opt-in performs one cold readback under the same Program submission guard as
+compression. `plan.aot_data_bytes` reports retained host payload bytes, separately
+from device workspace; the default retains zero bytes and adds no readback.
+Recompression replaces that retained epoch, and starting a refreshing recording
+or closing the plan releases its reference. Changes to the original A after
+compression do not affect the exported snapshot. An exported module keeps its
+own reference, so it remains savable after producer retirement.
+
+Graph export stages the immutable bytes through the shared data-resource path,
+with no device sampling. It emits one initialization compression per shared plan,
+followed by the original replay operations. Multiple exports/content-identical
+payloads share one artifact entry. Each consumer preparation owns its raw A and
+compressed state; initialization retires raw A and compression scratch when no
+replay dependency needs them. B/C remain live external bindings. Export preflight
+or backend compilation failure publishes no data payloads. Without the opt-in,
+snapshot export still reports the missing raw-A payload; the explicit
+initialization plan above remains available. Vendor compressed buffers are
+never serialized. Bounded Windows CUDA/cuSPARSELt 0.9.1 checks cover source
+mutation/retirement, repeated/shared export, separate instances, explicit dense
+addend adjoints, initialization retirement and in-flight close/reset. This does
+not introduce automatic differentiation of compression or sparsity selection.
 
 CUDA AmgX uses the same provider configuration, resource registry and external
 adapter C ABI. Configure `"amgx"` with its SDK adapter and an application-supplied

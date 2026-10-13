@@ -724,8 +724,27 @@ C/D 反馈、独立实例、未初始化读取/别名回滚和在途 close/reset
 动态刷新型 cuSPARSELt recording 可直接从顺序 Graph 导出，保留每个压缩阶段、共享 A
 分组、系数、alignment，以及配置后的 algorithm/split-K/ReLU 参数。分组先压缩一次
 再执行各乘法；同资源上的独立 recording 仍保留各自的压缩，未知 plan 子类明确拒绝。
-snapshot recording 没有可持久化的原始 A 数据，因此自动导出会在添加 kernel 前报错；
-固定权重使用上述显式初始化计划。导出不会回读当前厂商压缩缓冲。
+可移植 snapshot recording 需要在压缩时显式保留原始 A：
+
+```python
+plan.compress(weights, retain_aot_data=True)
+builder.append_native(plan.record(b="b", c="c", d="d"))
+module.add_execution_plan("step", builder.compile())
+```
+
+该选项在与压缩相同的 Program 提交锁内做一次冷读回；`plan.aot_data_bytes` 单列
+保留的主机数据字节，不混入设备 workspace。默认值不保留数据、不增加读回。
+再次压缩会替换保留代次，开始 refresh recording 或关闭 plan 会释放其引用。
+压缩后修改原 A 不改变导出快照；已导出模块持有自己的引用，生产端退休后仍可保存。
+
+Graph 导出把不可变字节暂存到公共数据资源事务，不在导出时采样设备；同一共享 plan
+只生成一次初始化压缩，重放保留原有操作。重复导出、相同内容的数据共用一个产物条目。
+每份消费端 preparation 独占 raw A 和压缩状态；初始化后，不再被重放依赖的 raw A
+及压缩 scratch 退休，B/C 继续作为可更新的外部绑定。导出预检或后端编译失败不会
+发布数据条目。不启用保留选项时，snapshot 自动导出仍报告缺少原始 A，也可继续使用
+上述显式初始化计划。厂商压缩缓冲不参与序列化。Windows CUDA/cuSPARSELt 0.9.1
+小规模验证覆盖源修改/退休、共享与重复导出、独立实例、dense addend 的显式伴随、
+初始化退休及在途 close/reset；不引入压缩或稀疏结构选择的自动求导。
 
 CUDA AmgX 复用相同的 provider 配置、资源注册表和外部 adapter C ABI。为 `"amgx"`
 配置对应 SDK adapter 与应用提供的兼容厂商库。标量 CSR 资源及操作的版本均为 1：

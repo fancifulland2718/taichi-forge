@@ -1,6 +1,7 @@
 """Cold Graph lowering into the shared, pointer-free execution description."""
 
 import ctypes
+import hashlib
 import json
 import struct
 
@@ -18,6 +19,10 @@ class _ExportContext:
 
     def __init__(self, module, reserved_names):
         self.operations = []
+        self.initialization = []
+        self._initialization_resources = {}
+        self.data_payloads = {}
+        self._data_keys = {}
         self.resources = []
         self.kernels = {}
         self._resource_owners = {}
@@ -98,6 +103,23 @@ class _ExportContext:
             )
             self.private_bindings[name] = owner
 
+    def data_resource(self, owner, data, *, dtype, shape, element_shape=()):
+        """Stage already frozen data; never sample a live owner during export."""
+        if type(data) is not bytes:
+            raise TypeError("AOT resource data must be an immutable byte snapshot")
+        previous = self._data_keys.get(id(data))
+        if previous is None:
+            key = hashlib.sha256(data).hexdigest()
+            if key in self.data_payloads and self.data_payloads[key] != data:
+                raise ValueError("AOT data digest collision")
+            self.data_payloads[key] = data
+            self._data_keys[id(data)] = (data, key)
+        else:
+            key = previous[1]
+        return self._resource(
+            owner, dict(kind="ndarray", dtype=dtype, shape=shape, element_shape=element_shape, initial_data=key)
+        )
+
     def binding(self, name):
         if name in self._scalar_values:
             raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")
@@ -153,18 +175,30 @@ class _ExportContext:
             )
 
     def native(self, provider, operation, *, bindings, parameters=None, version=1):
-        self.operations.append(
-            _snapshot(
-                dict(
-                    kind="native",
-                    provider=provider,
-                    operation=operation,
-                    version=version,
-                    parameters=parameters or {},
-                    bindings={port: self.binding(slot) for port, slot in bindings.items()},
-                )
+        self.operations.append(self._native_description(provider, operation, bindings, parameters, version))
+
+    def _native_description(self, provider, operation, bindings, parameters, version):
+        return _snapshot(
+            dict(
+                kind="native",
+                provider=provider,
+                operation=operation,
+                version=version,
+                parameters=parameters or {},
+                bindings={port: self.binding(slot) for port, slot in bindings.items()},
             )
         )
+
+    def initialize_native_once(self, resource, provider, operation, *, bindings, parameters=None, version=1):
+        """One consistent setup per shared resource, outside replay."""
+        description = self._native_description(provider, operation, bindings, parameters, version)
+        previous = self._initialization_resources.get(resource)
+        if previous is not None:
+            if previous != description:
+                raise ValueError("AOT resource initialization changed within one export")
+            return
+        self._initialization_resources[resource] = description
+        self.initialization.append(description)
 
     def kernel(self, kernel, args, label=""):
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
@@ -336,6 +370,7 @@ def export_graph(module, graph, *, gradients=None):
 
         plan = ExecutionPlan(
             context.operations,
+            initialization=context.initialization or None,
             resources=context.resources,
             gradients=mapped_gradients or None,
             constraints=export_constraints(spec, context.binding) or None,
@@ -344,6 +379,11 @@ def export_graph(module, graph, *, gradients=None):
         # input to some other kernel. Resource recipes must cover the full use.
         if set(plan.argument_names) != set(spec.runtime_arg_names) | (gradient_names - context.private_bindings.keys()):
             raise TaichiRuntimeError("AOT Graph reconstruction changed the public binding contract")
+        for key in plan.data_entries:
+            if key not in context.data_payloads:
+                raise TaichiRuntimeError("AOT Graph reconstruction omitted an initial data payload")
+            if key in module._data_payloads and module._data_payloads[key] != context.data_payloads[key]:
+                raise ValueError("AOT data digest collision")
         try:
             for name, kernel in context.kernels.items():
                 module._aot_builder.add(name, kernel)
@@ -354,4 +394,5 @@ def export_graph(module, graph, *, gradients=None):
             raise
         module._exported_kernels.update(context.kernels)
         module._content.extend("kernel:" + name for name in context.kernels)
+        module._data_payloads.update({key: context.data_payloads[key] for key in plan.data_entries})
         return plan

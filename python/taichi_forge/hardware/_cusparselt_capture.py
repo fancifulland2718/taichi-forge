@@ -46,6 +46,7 @@ class _PlanLease:
                 # Capture itself does not produce data, and Python does not track
                 # Graph executions. Explicit execute must not assume readiness.
                 plan._compressed_ready = False
+                plan._aot_initial_a = None
             plan._capture_mode = mode
             plan._capture_leases += 1
             self.plan = plan
@@ -325,17 +326,22 @@ class CusparseLtCaptureRecording(BackendCommandRecording):
     def _export_aot(self, context):
         if type(self.plan) is not CusparseLtMatmulPlan:
             raise TaichiRuntimeError("AOT cuSPARSELt plan variants require their own reconstruction contract")
-        if not self.recompress:
-            raise TaichiRuntimeError(
-                "AOT cuSPARSELt snapshot recording needs an explicit raw-A initialization payload; "
-                "use ExecutionPlan initialization or a refreshing recording"
-            )
         with self.plan.provider._lock, self.plan._lock:
             self.plan._validate_lifetime()
+            if not self.recompress and self.plan._aot_initial_a is None:
+                raise TaichiRuntimeError(
+                    "AOT cuSPARSELt snapshot recording needs an explicit raw-A initialization payload; "
+                    "call compress(A, retain_aot_data=True) before recording"
+                )
             plan = context.resource(
                 self.plan, "cusparselt", "matmul_plan_f16", parameters=self.plan._aot_plan_parameters
             )
-            context.native("cusparselt", "compress_f16", bindings=dict(plan=plan, a=self._public_names[-1]))
+            if self.recompress:
+                context.native("cusparselt", "compress_f16", bindings=dict(plan=plan, a=self._public_names[-1]))
+            else:
+                initial = self.plan._aot_initial_a
+                a = context.data_resource(initial, initial, dtype="f16", shape=[self.plan.m, self.plan.k])
+                context.initialize_native_once(plan, "cusparselt", "compress_f16", bindings=dict(plan=plan, a=a))
             for index in range(self.matmul_count):
                 b, c, d = self._public_names[3 * index : 3 * index + 3]
                 context.native(
