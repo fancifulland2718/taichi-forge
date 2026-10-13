@@ -55,6 +55,8 @@
 
 - CUDA reduction 策略重建恢复私有输入/输出端点及其别名，直接和分阶段策略不再把
   私有数组错误地暴露为公开参数；仍只重建选中策略需要的 scratch。
+  `GraphBuilder.reduce()` 同时正确登记仅由 helper 使用的私有端点，覆盖 reduction
+  之间的私有中间数组。
 
 - AOT 混合执行按每个 kernel 的已编译 `needs_grad` ABI 绑定 ndarray 梯度，普通
   helper 可共用同一 primal；整个计划未使用的梯度仍报错。CPU/CUDA/Vulkan 验证

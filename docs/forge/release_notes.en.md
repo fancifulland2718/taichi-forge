@@ -72,6 +72,8 @@ lifetimes. The entries below describe the changes.
 - Rebuilding a selected CUDA reduction recipe now restores private input/output
   bindings and their aliases. Direct and staged recipes keep the public argument
   set unchanged and allocate only their own selected scratch resources.
+  `GraphBuilder.reduce()` also binds declared private endpoints when they are
+  used only by helpers, including reduction-to-reduction intermediate storage.
 
 - Mixed AOT execution plans bind ndarray gradients only to dispatches whose
   compiled ABI declares `needs_grad`. Ordinary helper kernels can share the

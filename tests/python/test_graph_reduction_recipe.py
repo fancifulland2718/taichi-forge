@@ -211,6 +211,48 @@ def test_graph_reduction_materialization_preserves_private_endpoint_aliases():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_reduction_chain_binds_its_declared_private_bridge(tmp_path):
+    count = 257
+    values, output = _reduction_arguments(ti.i32)
+    builder = ti.graph.GraphBuilder()
+    bridge = builder.private_ndarray("bridge", ti.i32, 1)
+    builder.reduce(values, bridge, count=count)
+    builder.reduce(bridge, output, count=1)
+    graph = builder.compile()
+    assert set(graph._spec.runtime_arg_names) == {"values", "output"}
+    arrays = dict(values=ti.ndarray(ti.i32, count), output=ti.ndarray(ti.i32, 1))
+    arrays["values"].from_numpy(np.arange(count, dtype=np.int32))
+    graph.run(graph.bind(arrays))
+    expected = count * (count - 1) // 2
+    assert arrays["output"].to_numpy()[0] == expected
+
+    search = compileiq_recipe_search(graph)
+    selected_id = next(
+        recipe for recipe in search.recipe_ids
+        if search.recipe_manifest(recipe).get("reduction_recipe_manifest", {}).get("strategy")
+        == "block_partial_finalize"
+    )
+    module = ti.aot.Module()
+    with search.materialize(dict(domain_fingerprint=search.domain_fingerprint, recipe_id=selected_id)) as materialized:
+        selected = materialized.executor
+        assert set(selected._spec.runtime_arg_names) == {"values", "output"}
+        selected.run(selected.bind(arrays))
+        assert arrays["output"].to_numpy()[0] == expected
+        module.add_execution_plan("step", selected)
+    graph.close()
+    artifact = tmp_path / "chain.tcm"
+    module.archive(str(artifact))
+    with ti.aot.borrow_runtime() as runtime:
+        loaded = runtime.load_module(artifact)
+        imported = {name: runtime.import_ndarray(value) for name, value in arrays.items()}
+        prepared = loaded.prepare_execution("step", imported)
+        for value in (2, 3):
+            arrays["values"].fill(value)
+            prepared()
+            assert arrays["output"].to_numpy()[0] == count * value
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_graph_reduction_requires_explicit_floating_point_equivalence():
     with pytest.raises(ValueError, match="requires explicit"):
         _build_reduction_graph(ti.f32, 1024)

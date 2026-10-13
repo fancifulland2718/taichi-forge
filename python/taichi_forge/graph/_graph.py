@@ -16828,6 +16828,7 @@ class GraphBuilder:
 
         operation_start = len(self._runtime_graph_recipe_operations)
 
+        self._bind_declared_private_args((values, output))
         source = append_typed_graph_reduction(
             self,
             values,
