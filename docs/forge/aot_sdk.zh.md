@@ -290,11 +290,23 @@ C/C++ 使用 `ti_initialize_prepared_ext` 或首次 launch 的自动路径。重
 别名和 owner reset。
 
 分配操作缓冲前可查询 `runtime.native_operation_capabilities("compact", version=1)`
-（也支持 `"sort"`）。返回集合按当前 runtime 后端包含 `"cpu"`、`"cuda_capture"` 或
-`"vulkan_inline"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配
+（也支持 `"sort"`）。返回集合按当前 runtime 后端包含 `"cpu"`、`"cuda_capture"`、
+`"vulkan_inline"` 或 `"cuda_synchronous"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配
 工作区，具体 dtype、布局和设备要求仍在准备时检查。对应 C API 为
 `ti_get_native_operation_capabilities_ext`。注册与选择发生在共用的原生准备层，
 重放使用已准备对象，不再查询注册表。注册不代表可选 provider 已安装。
+
+`cuda_synchronous` 用于不能 capture 或不暴露执行 stream 的原生 provider 动作。
+执行器将相邻可录制操作合成 CUDA Graph 片段，在 owner 提交锁内调用外部动作，
+并在两侧等待当前 context 完成；连续同步动作省去重复的前置等待。末尾普通图
+仍可异步提交，`runtime.wait()` 完成整批工作。这类 prepared 报告
+`execution_kind="cuda_mixed"`；纯 capture 保留单图路径。暖态不调用 Python 回调
+或符号绑定器。外部动作在提交后失败时，执行器等待其工作，跳过剩余序列，并禁止
+该实例再次重放。
+
+这项组合能力仍需对应 provider 的 schema、资源重建与数值资格，不能代称库全面
+支持 capture。当前 context 的等待语义见 NVIDIA
+[cuCtxSynchronize](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__CTX.html)。
 
 `runtime.probe_native_operation(kind, version=1)` 在分配操作数组前显式检查可选
 依赖，返回 `available`、`capabilities` 和 provider 自己定义的 `library_version`

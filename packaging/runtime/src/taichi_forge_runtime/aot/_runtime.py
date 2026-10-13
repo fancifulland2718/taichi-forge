@@ -50,6 +50,8 @@ _DTYPES = {
     "u64": (11, "Q"),
 }
 
+_NATIVE_OPERATION_MODES = ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline"), (8, "cuda_synchronous"))
+
 
 def _dtype(name):
     try:
@@ -170,7 +172,7 @@ class Runtime:
         with self._lock:
             self._check()
             flags = self._api.call(self._api.ti_get_native_operation_capabilities_ext, self._handle, kind, version)
-        return frozenset(name for bit, name in ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline")) if flags & bit)
+        return frozenset(name for bit, name in _NATIVE_OPERATION_MODES if flags & bit)
 
     def configure_provider(self, provider, *, adapter_path, library_path=None):
         """Set library locations for subsequent preparation on this owner.
@@ -219,11 +221,7 @@ class Runtime:
             self._api.call(self._api.ti_probe_native_operation_ext, self._handle, kind, version, C.byref(result))
         return {
             "available": bool(result.available),
-            "capabilities": frozenset(
-                name
-                for bit, name in ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline"))
-                if result.capabilities & bit
-            ),
+            "capabilities": frozenset(name for bit, name in _NATIVE_OPERATION_MODES if result.capabilities & bit),
             "library_version": result.library_version or None,
         }
 
@@ -659,7 +657,7 @@ class PreparedCall(_Resource):
             )
             return dict(
                 dispatch_count=native.dispatch_count,
-                execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands")[native.execution_kind],
+                execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands", "cuda_mixed")[native.execution_kind],
                 argument_bytes=native.argument_bytes,
                 workspace_bytes=runtime._api.call(
                     runtime._api.ti_get_prepared_execution_workspace_bytes_ext, runtime._handle, self._handle

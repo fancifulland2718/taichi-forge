@@ -354,7 +354,8 @@ gradients, independent snapshots, source retirement, aliases and owner reset.
 
 Before allocating operation buffers, query
 `runtime.native_operation_capabilities("compact", version=1)` (also `"sort"`).
-The returned set contains `"cpu"`, `"cuda_capture"` or `"vulkan_inline"` for the
+The returned set contains `"cpu"`, `"cuda_capture"`, `"vulkan_inline"`, or
+`"cuda_synchronous"` for the
 registered implementation on this runtime's backend; an unknown kind/version
 returns an empty set. The query loads no operation code and allocates no scratch.
 Concrete dtype, layout and device requirements are still checked at preparation.
@@ -362,6 +363,22 @@ The C API equivalent is `ti_get_native_operation_capabilities_ext`. Registration
 and selection happen in the shared native preparation layer; replay uses the
 already prepared object and performs no registry lookup. These registrations do
 not imply that an optional provider is installed.
+
+`cuda_synchronous` is for a native provider action that cannot be captured or
+does not expose its execution stream. The native executor records adjacent
+capture-compatible operations as CUDA Graph segments and invokes the action
+under the owner submission lock, with context completion on both sides.
+Consecutive synchronous actions avoid a duplicate incoming wait. An ordinary
+trailing graph remains asynchronous; `runtime.wait()` completes the whole batch.
+Such a prepared batch reports `execution_kind="cuda_mixed"`. Pure capture batches
+retain the single-graph path. Replay invokes no Python callback or symbolic binder.
+If an action fails after submitting work, the executor waits, skips the remaining
+sequence and rejects further replay of that instance.
+
+This composition capability still requires a registered provider-specific schema,
+resource reconstruction and numeric qualification. NVIDIA documents the
+context-wide wait in
+[cuCtxSynchronize](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__CTX.html).
 
 `runtime.probe_native_operation(kind, version=1)` explicitly checks optional
 dependencies before allocating operation arrays. It returns `available`,

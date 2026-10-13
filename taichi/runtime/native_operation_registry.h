@@ -12,14 +12,6 @@
 
 namespace taichi::lang {
 
-// Composition modes implemented by FixedExecution. Registration says which
-// compiled implementation exists, not whether every device/descriptor is valid.
-enum class NativeOperationMode : std::uint32_t {
-  cpu = 1,
-  cuda_capture = 2,
-  vulkan_inline = 4,
-};
-
 struct NativeOperationCapability {
   std::string kind;
   std::uint32_t version;

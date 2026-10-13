@@ -12,6 +12,14 @@
 
 namespace taichi::lang {
 
+// The composition contract of an operation, independent of its provider.
+enum class NativeOperationMode : std::uint32_t {
+  cpu = 1,
+  cuda_capture = 2,
+  vulkan_inline = 4,
+  cuda_synchronous = 8,
+};
+
 // Cold facts for one unconditional recording sequence, never replay state.
 // Structured control must intersect facts at joins instead of treating a
 // recorded conditional write as unconditional initialization.
@@ -25,6 +33,15 @@ struct NativeRecordingState {
 class NativeOperation : public NativeResource {
  public:
   ~NativeOperation() override = default;
+  virtual NativeOperationMode execution_mode() const {
+    if (arch_is_cpu(arch()))
+      return NativeOperationMode::cpu;
+    if (arch() == Arch::cuda)
+      return NativeOperationMode::cuda_capture;
+    if (arch() == Arch::vulkan)
+      return NativeOperationMode::vulkan_inline;
+    throw std::invalid_argument("Unsupported native operation backend");
+  }
   virtual void validate_recording(NativeRecordingState &) const {
   }
   virtual void run_cpu() {
@@ -32,6 +49,13 @@ class NativeOperation : public NativeResource {
   }
   virtual void record_cuda(void *stream) {
     throw std::invalid_argument("Native operation has no CUDA recording");
+  }
+  // Host invocation under the CUDA owner lock, between whole-context fences.
+  // May enqueue work on private streams in the owner's context. Never called
+  // while recording; callbacks into Python are not part of this contract.
+  virtual void run_cuda_synchronous() {
+    throw std::invalid_argument(
+        "Native operation has no synchronous CUDA implementation");
   }
   virtual void record_vulkan(Device *device, CommandList *commands) {
     throw std::invalid_argument("Native operation has no Vulkan recording");

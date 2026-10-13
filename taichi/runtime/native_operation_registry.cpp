@@ -201,6 +201,7 @@ void NativeOperationRegistry::register_impl(const std::string &kind,
   definition(key, type);
   if (!((mode == NativeOperationMode::cpu && arch_is_cpu(arch)) ||
         (mode == NativeOperationMode::cuda_capture && arch == Arch::cuda) ||
+        (mode == NativeOperationMode::cuda_synchronous && arch == Arch::cuda) ||
         (mode == NativeOperationMode::vulkan_inline && arch == Arch::vulkan)))
     throw std::invalid_argument(
         "Native operation composition mode/backend mismatch");
@@ -292,6 +293,11 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_impl(
       !std::dynamic_pointer_cast<NativeOperation>(result))
     throw std::invalid_argument("Native factory did not return an operation: " +
                                 kind);
+  if (object_kind == NativeObjectKind::operation &&
+      std::static_pointer_cast<NativeOperation>(result)->execution_mode() !=
+          backend->second.capability.mode)
+    throw std::invalid_argument(
+        "Native operation factory changed its composition mode: " + kind);
   if (object_kind == NativeObjectKind::resource &&
       std::dynamic_pointer_cast<NativeOperation>(result))
     throw std::invalid_argument(

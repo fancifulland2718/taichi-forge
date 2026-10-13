@@ -6,6 +6,9 @@
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_device.h"
+#endif
 
 namespace taichi::lang {
 namespace {
@@ -18,6 +21,115 @@ struct ConflictingDescriptor {
   static constexpr const char *kind = TestDescriptor::kind;
   static constexpr std::uint32_t version = TestDescriptor::version;
 };
+
+#ifdef TI_WITH_CUDA
+TEST(NativeOperationRegistry,
+     SynchronousCudaActionsRespectPrivateStreamsAndFailure) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  std::array<DeviceAllocationUnique, 3> arrays;
+  std::array<void *, 3> pointers;
+  for (int i = 0; i < 3; ++i) {
+    auto allocation = device.allocate_memory_unique({16 * sizeof(uint32_t)});
+    ASSERT_EQ(allocation.second, RhiResult::success);
+    arrays[i] = std::move(allocation.first);
+    pointers[i] = device.get_memory_addr(*arrays[i]);
+    driver.memsetd32(pointers[i], 8, 16);
+  }
+  int calls = 0;
+  class Copy final : public NativeOperation {
+   public:
+    Copy(Device &device,
+         void *source,
+         void *destination,
+         int &calls,
+         bool fail = false)
+        : device_(device),
+          source_(source),
+          destination_(destination),
+          calls_(calls),
+          fail_(fail) {
+      CUDADriver::get_instance().stream_create(&stream_,
+                                               CU_STREAM_NON_BLOCKING);
+    }
+    ~Copy() override {
+      CUDADriver::get_instance().stream_destroy(stream_);
+    }
+    Arch arch() const override {
+      return Arch::cuda;
+    }
+    Device &device() const override {
+      return device_;
+    }
+    std::size_t workspace_bytes() const override {
+      return 0;
+    }
+    NativeOperationMode execution_mode() const override {
+      return NativeOperationMode::cuda_synchronous;
+    }
+    void run_cuda_synchronous() override {
+      ++calls_;
+      CUDADriver::get_instance().memcpy_device_to_device_async(
+          destination_, source_, 64, stream_);
+      if (fail_)
+        throw std::runtime_error("provider failed after submission");
+    }
+
+   private:
+    Device &device_;
+    void *source_, *destination_, *stream_{nullptr};
+    int &calls_;
+    bool fail_;
+  };
+  auto copy = std::make_shared<Copy>(device, pointers[0], pointers[1], calls);
+  auto fill = [&](int index, uint32_t value) {
+    return FixedExecution::BufferFill{arrays[index]->get_ptr(), 64, value};
+  };
+  auto read = [&](int index, uint32_t expected) {
+    std::array<uint32_t, 16> values;
+    driver.memcpy_device_to_host(values.data(), pointers[index], 64);
+    for (auto value : values)
+      EXPECT_EQ(value, expected);
+  };
+  FixedExecution mixed(Arch::cuda, device, nullptr,
+                       {fill(0, 7), fill(2, 0), copy,
+                        FixedExecution::BufferCopy{arrays[2]->get_ptr(),
+                                                   arrays[1]->get_ptr(), 64}});
+  EXPECT_EQ(mixed.execution_kind(), 3);
+  EXPECT_EQ(calls, 0);
+  read(0, 8);
+  for (int i = 0; i < 3; ++i) {
+    mixed.run();
+    read(2, 7);
+  }
+  EXPECT_EQ(calls, 3);
+  auto second = std::make_shared<Copy>(device, pointers[1], pointers[2], calls);
+  FixedExecution only_actions(Arch::cuda, device, nullptr, {copy, second});
+  driver.memsetd32(pointers[0], 13, 16);
+  only_actions.run();
+  read(2, 13);
+  auto failing =
+      std::make_shared<Copy>(device, pointers[0], pointers[1], calls, true);
+  FixedExecution failure(Arch::cuda, device, nullptr,
+                         {fill(0, 11), failing, fill(2, 99)});
+  EXPECT_THROW(failure.run(), std::runtime_error);
+  read(1, 11);
+  read(2, 13);
+  const auto after_failure = calls;
+  EXPECT_THROW(failure.run(), std::runtime_error);
+  EXPECT_EQ(calls, after_failure);
+  NativeOperationRegistry registry;
+  registry.define<TestDescriptor>([](Device &, const TestDescriptor &) {});
+  registry.register_factory<TestDescriptor>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [&](Arch, Device &, const TestDescriptor &) { return copy; });
+  EXPECT_THROW(registry.prepare(Arch::cuda, device, TestDescriptor{}),
+               std::invalid_argument);
+}
+#endif
 
 TEST(NativeOperationRegistry, ReportsOnlyCompiledBackendComposition) {
   const auto &registry = native_operation_registry();

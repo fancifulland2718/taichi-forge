@@ -16,6 +16,7 @@ PER_CUDA_FUNCTION(device_get_default_mem_pool, cuDeviceGetDefaultMemPool, void *
 PER_CUDA_FUNCTION(context_create, cuCtxCreate_v2, void*, int, void *);
 PER_CUDA_FUNCTION(context_set_current, cuCtxSetCurrent, void *);
 PER_CUDA_FUNCTION(context_get_current, cuCtxGetCurrent, void **);
+PER_CUDA_FUNCTION(context_synchronize, cuCtxSynchronize);
 PER_CUDA_FUNCTION(primary_context_retain, cuDevicePrimaryCtxRetain, void **, int);
 PER_CUDA_FUNCTION(context_set_limit, cuCtxSetLimit, int, std::size_t);
 

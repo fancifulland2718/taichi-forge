@@ -16,6 +16,7 @@
 #endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
@@ -41,6 +42,10 @@ struct FixedExecution::State {
 #endif
 #ifdef TI_WITH_CUDA
   std::unique_ptr<cuda::FixedGraph> cuda_graph;
+  using CudaStep = std::variant<std::unique_ptr<cuda::FixedGraph>,
+                                std::shared_ptr<NativeOperation>>;
+  std::vector<CudaStep> cuda_steps;
+  bool cuda_failed{false};
 #endif
 #ifdef TI_WITH_VULKAN
   std::unique_ptr<gfx::GraphReplayRegistration> vulkan_graph;
@@ -117,6 +122,15 @@ FixedExecution::FixedExecution(Arch arch,
       if (!native || native->arch() != arch || &native->device() != &device)
         throw std::invalid_argument(
             "Fixed native operation belongs to another execution device");
+      const auto mode = native->execution_mode();
+      if (!((arch_is_cpu(arch) && mode == NativeOperationMode::cpu) ||
+            (arch == Arch::cuda &&
+             (mode == NativeOperationMode::cuda_capture ||
+              mode == NativeOperationMode::cuda_synchronous)) ||
+            (arch == Arch::vulkan &&
+             mode == NativeOperationMode::vulkan_inline)))
+        throw std::invalid_argument(
+            "Fixed native operation mode/backend mismatch");
       native->validate_recording(recording_state);
       if (owners.insert(native.get()).second) {
         state_->native_operations.push_back(native);
@@ -182,6 +196,17 @@ FixedExecution::FixedExecution(Arch arch,
 #ifdef TI_WITH_CUDA
   if (arch == Arch::cuda) {
     std::vector<cuda::FixedGraph::Dispatch> native;
+    auto flush = [&]() {
+      if (native.empty())
+        return;
+      auto graph = std::make_unique<cuda::FixedGraph>(native);
+      if (graph->argument_bytes() >
+          std::numeric_limits<std::size_t>::max() - state_->bytes)
+        throw std::invalid_argument("Fixed CUDA argument size overflow");
+      state_->bytes += graph->argument_bytes();
+      state_->cuda_steps.emplace_back(std::move(graph));
+      native.clear();
+    };
     for (const auto &operation : operations) {
       if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
         auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
@@ -194,6 +219,12 @@ FixedExecution::FixedExecution(Arch arch,
       } else if (const auto *external =
                      std::get_if<std::shared_ptr<NativeOperation>>(
                          &operation)) {
+        if ((*external)->execution_mode() ==
+            NativeOperationMode::cuda_synchronous) {
+          flush();
+          state_->cuda_steps.emplace_back(*external);
+          continue;
+        }
         native.push_back(
             {nullptr, {}, nullptr, [external = *external](void *stream) {
                external->record_cuda(stream);
@@ -222,9 +253,14 @@ FixedExecution::FixedExecution(Arch arch,
              }});
       }
     }
-    state_->cuda_graph = std::make_unique<cuda::FixedGraph>(native);
-    state_->kind = 1;
-    state_->bytes = state_->cuda_graph->argument_bytes();
+    if (state_->cuda_steps.empty()) {
+      state_->cuda_graph = std::make_unique<cuda::FixedGraph>(native);
+      state_->kind = 1;
+      state_->bytes = state_->cuda_graph->argument_bytes();
+    } else {
+      flush();
+      state_->kind = 3;
+    }
     if (sequence_state)
       *sequence_state = std::move(recording_state);
     return;
@@ -310,6 +346,42 @@ void FixedExecution::run() {
 #ifdef TI_WITH_CUDA
   if (state_->cuda_graph)
     state_->cuda_graph->run();
+  if (!state_->cuda_steps.empty()) {
+    if (state_->cuda_failed)
+      throw std::runtime_error(
+          "Synchronous CUDA execution failed; prepare a new instance");
+    auto &cuda = CUDAContext::get_instance();
+    auto guard = cuda.get_guard();
+    auto lock = cuda.get_submission_lock_guard();
+    auto &driver = CUDADriver::get_instance();
+    bool idle = false;
+    try {
+      for (const auto &step : state_->cuda_steps) {
+        if (const auto *graph =
+                std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step)) {
+          (*graph)->run();
+          idle = false;
+        } else {
+          if (!idle)
+            driver.context_synchronize();
+          try {
+            std::get<std::shared_ptr<NativeOperation>>(step)
+                ->run_cuda_synchronous();
+          } catch (...) {
+            // A provider can enqueue work before reporting an error. Complete
+            // it before allowing owner retirement; preserve the original error.
+            driver.context_synchronize.call();
+            throw;
+          }
+          driver.context_synchronize();
+          idle = true;
+        }
+      }
+    } catch (...) {
+      state_->cuda_failed = true;
+      throw;
+    }
+  }
 #endif
 #ifdef TI_WITH_VULKAN
   if (state_->vulkan_graph)
