@@ -17961,7 +17961,30 @@ class GraphBuilder:
                 )
         self._active_bounded_publication = None
         self._flush_graph_builder()
-        self._nodes.append(_CompiledNativeGraphNode(executable))
+        compiled = _CompiledNativeGraphNode(executable)
+        if action is not None and action.backend_command_recording is None:
+            # Public provider ports can refer to storage owned by the enclosing
+            # Graph. Keep the provider's symbolic schema intact, but carry the
+            # enclosing declarations into the compiled node's binding frame.
+            for _, symbols in action.dispatches:
+                for symbol in symbols:
+                    declared = self._declared_private_bindings.get(symbol.name)
+                    if declared is None:
+                        continue
+                    expected, requirement = declared
+                    if symbol is not expected:
+                        raise TaichiRuntimeError(
+                            f"Graph private binding {symbol.name!r} must use the "
+                            "symbol returned by private_ndarray()"
+                        )
+                    previous = compiled.fixed_runtime_args.get(symbol.name)
+                    if previous is not None and previous is not requirement:
+                        raise TaichiRuntimeError(
+                            f"Graph internal fixed binding {symbol.name!r} is already defined"
+                        )
+                    compiled.fixed_runtime_args[symbol.name] = requirement
+                    self._aot_graph_plan.mark_internal_fixed_bindings()
+        self._nodes.append(compiled)
         return self
 
     @staticmethod

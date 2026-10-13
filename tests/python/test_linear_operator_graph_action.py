@@ -136,6 +136,41 @@ def _dense_2x2_operator(values):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_linear_operator_uses_enclosing_graph_private_ports():
+    weights = np.arange(1, 18, dtype=np.float32) / 8
+    operator = _diagonal_operator(weights)
+    source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1)
+    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+
+    def build():
+        builder = ti.graph.GraphBuilder()
+        private = builder.private_ndarray("intermediate", ti.f32, (17,))
+        builder.private_ndarray("unused", ti.f32, (1,))
+        builder.append_native(operator.graph_action(source, private))
+        builder.append_native(operator.graph_action(private, output))
+        return builder.compile()
+
+    first, second = build(), build()
+    assert first._spec.runtime_arg_names == {"source", "output"}
+    assert "intermediate" in first._spec.fixed_runtime_args
+    assert "unused" not in first._spec.fixed_runtime_args
+    assert first._spec.fixed_runtime_args["intermediate"] is not second._spec.fixed_runtime_args["intermediate"]
+    x, y = ti.ndarray(ti.f32, 17), ti.ndarray(ti.f32, 17)
+    for graph, value in ((first, 2), (second, -3), (first, 0.5)):
+        x.fill(value)
+        graph.run({"source": x, "output": y})
+        np.testing.assert_allclose(y.to_numpy(), value * weights * weights)
+    first.close()
+    second.close()
+
+    invalid = ti.graph.GraphBuilder()
+    invalid.private_ndarray("intermediate", ti.f32, (17,))
+    impostor = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "intermediate", ti.f32, ndim=1)
+    with pytest.raises(ti.TaichiRuntimeError, match="symbol returned by private_ndarray"):
+        invalid.append_native(operator.graph_action(source, impostor))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_linear_operator_graph_action_reuses_provider_generation_and_dense_storage(
     monkeypatch,
 ):
