@@ -65,6 +65,7 @@ class LaunchContextBuilder {
     const storage::DenseStorageDescriptor *descriptor{nullptr};
     const storage::RuntimeStorageArgument *runtime_argument{nullptr};
     storage::ResolvedDenseBinding resolved;
+    storage::ResolvedDenseBinding resolved_gradient;
   };
 
   struct AccelerationStructureResourceRef {
@@ -234,7 +235,12 @@ class LaunchContextBuilder {
   void set_arg_resolved_dense_storage(
       const std::vector<int> &arg_id,
       const storage::DenseStorageDescriptor &descriptor,
-      const storage::ResolvedDenseBinding &binding);
+      const storage::ResolvedDenseBinding &binding,
+      const storage::ResolvedDenseBinding *gradient = nullptr);
+  const storage::ResolvedDenseBinding *get_resolved_dense_storage_gradient(
+      const std::vector<int> &arg_id) const;
+  const storage::ResolvedDenseBinding *find_resolved_dense_storage_buffer(
+      const std::vector<int> &buffer_id) const;
   void set_resolved_dense_storage(
       std::size_t resource_index,
       const storage::ResolvedDenseBinding &binding);

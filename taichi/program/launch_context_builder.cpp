@@ -481,6 +481,7 @@ void LaunchContextBuilder::set_arg_dense_storage(
     ref.descriptor = &descriptor;
     ref.runtime_argument = nullptr;
     ref.resolved = {};
+    ref.resolved_gradient = {};
   }
 
   const std::size_t index_rank = descriptor.index_rank();
@@ -522,7 +523,8 @@ void LaunchContextBuilder::set_resolved_dense_storage(
 void LaunchContextBuilder::set_arg_resolved_dense_storage(
     const std::vector<int> &arg_id,
     const storage::DenseStorageDescriptor &descriptor,
-    const storage::ResolvedDenseBinding &binding) {
+    const storage::ResolvedDenseBinding &binding,
+    const storage::ResolvedDenseBinding *gradient) {
   set_arg_dense_storage(arg_id, descriptor);
   const int arg_offset = args_type->get_element_offset(arg_id);
   const auto found = std::find_if(
@@ -531,6 +533,47 @@ void LaunchContextBuilder::set_arg_resolved_dense_storage(
   TI_ASSERT(found != dense_storage_ptrs.end());
   set_resolved_dense_storage(
       static_cast<std::size_t>(found - dense_storage_ptrs.begin()), binding);
+  found->resolved_gradient =
+      gradient ? *gradient : storage::ResolvedDenseBinding{};
+}
+
+const storage::ResolvedDenseBinding *
+LaunchContextBuilder::get_resolved_dense_storage_gradient(
+    const std::vector<int> &arg_id) const {
+  const int arg_offset = args_type->get_element_offset(arg_id);
+  for (const auto &ref : dense_storage_ptrs)
+    if (ref.arg_offset == arg_offset)
+      return ref.resolved_gradient.valid ? &ref.resolved_gradient : nullptr;
+  return nullptr;
+}
+
+const storage::ResolvedDenseBinding *
+LaunchContextBuilder::find_resolved_dense_storage_buffer(
+    const std::vector<int> &buffer_id) const {
+  if (dense_storage_ptrs.empty())
+    return nullptr;
+  auto arg_id = buffer_id;
+  bool gradient = false;
+  auto parameter = kernel_->nested_parameters.find(arg_id);
+  if (parameter == kernel_->nested_parameters.end()) {
+    if (arg_id.empty())
+      return nullptr;
+    const auto component = arg_id.back();
+    if (component != TypeFactory::DATA_PTR_POS_IN_NDARRAY &&
+        component != TypeFactory::GRAD_PTR_POS_IN_NDARRAY)
+      return nullptr;
+    gradient = component == TypeFactory::GRAD_PTR_POS_IN_NDARRAY;
+    arg_id.pop_back();
+    parameter = kernel_->nested_parameters.find(arg_id);
+  }
+  const auto allocation = device_allocation_type.find(arg_id);
+  if (parameter == kernel_->nested_parameters.end() ||
+      !parameter->second.is_array ||
+      allocation == device_allocation_type.end() ||
+      allocation->second != DevAllocType::kDenseStorage)
+    return nullptr;
+  return gradient ? get_resolved_dense_storage_gradient(arg_id)
+                  : &get_resolved_dense_storage(arg_id);
 }
 
 const storage::ResolvedDenseBinding &
@@ -548,6 +591,7 @@ LaunchContextBuilder::get_resolved_dense_storage(
 void LaunchContextBuilder::clear_resolved_dense_storage() noexcept {
   for (auto &ref : dense_storage_ptrs) {
     ref.resolved = {};
+    ref.resolved_gradient = {};
   }
 }
 

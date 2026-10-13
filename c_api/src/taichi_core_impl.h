@@ -155,6 +155,9 @@ class Runtime {
     // A same-device storage lease owned by another API. Drop this reference
     // after recordings retire; never deallocate its RHI allocation directly.
     std::shared_ptr<void> storage_owner;
+    // Logical offset within the RHI allocation, independent of an imported
+    // VkDeviceMemory binding offset. Used by internal execution-plan views.
+    uint64_t byte_offset{0};
   };
 
  private:
@@ -205,10 +208,11 @@ class Runtime {
   // Adopts an RHI allocation, including imported allocation wrappers. The
   // process-unique opaque handle is never reinterpreted as an RHI slot ID.
   TiMemory register_memory(taichi::lang::DeviceAllocation allocation,
-                            uint64_t size,
-                            bool release_on_failure = true,
-                            uint64_t base_offset = 0,
-                            std::shared_ptr<void> storage_owner = {});
+                           uint64_t size,
+                           bool release_on_failure = true,
+                           uint64_t base_offset = 0,
+                           std::shared_ptr<void> storage_owner = {},
+                           uint64_t byte_offset = 0);
   MemoryAllocation get_memory(TiMemory memory) const;
   static std::uintptr_t new_handle_token();
   TiKernel register_kernel(KernelBinding binding);

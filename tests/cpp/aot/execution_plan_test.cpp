@@ -463,4 +463,39 @@ TEST(ExecutionPlan, NativeResourcesShareTheRequiredDependencyClosure) {
     "operations":[{"kind":"fill32","destination":"y","value":0}]})";
   EXPECT_THROW(ExecutionPlan::parse(cyclic), std::invalid_argument);
 }
+TEST(ExecutionPlan, ViewStorageClosureIsSeparateFromShapeMetadata) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,"resources":[
+    {"kind":"ndarray_view","name":"selected","array":"middle","offset":1,"shape":[5]},
+    {"kind":"ndarray_view","name":"middle","array":"parent","offset":2,"shape":[10]},
+    {"kind":"ndarray","name":"parent","dtype":"f32","shape":[16]},
+    {"kind":"ndarray_view","name":"metadata","array":"shape_parent","offset":0,"shape":[5]},
+    {"kind":"ndarray","name":"shape_parent","dtype":"f32","shape":[1024]},
+    {"kind":"ndarray","name":"scratch","dtype":"f32","shape":[{"array":"metadata","axis":0}]},
+    {"kind":"native","name":"plan","provider":"test","operation":"plan","version":1,
+     "parameters":{},"bindings":{"input":"selected"}}],
+    "operations":[{"kind":"fill32","destination":"scratch","value":0},
+                  {"kind":"native","provider":"test","operation":"run","version":1,
+                   "parameters":{},"bindings":{"plan":"plan"}}]})");
+  EXPECT_TRUE(plan.arguments.empty());
+  EXPECT_EQ(plan.resources.materialize,
+            (std::vector<bool>{true, true, true, false, false, true, true}));
+  EXPECT_EQ(plan.replay_bindings,
+            (std::set<std::string>{"scratch", "plan", "selected", "middle",
+                                   "parent"}));
+}
+
+TEST(ExecutionPlan, ViewDescriptionsRejectCyclesAndReinterpretation) {
+  const std::string prefix =
+      R"({"version":1,"operations":[{"kind":"fill32","destination":"v","value":0}],"resources":[)";
+  for (
+      const auto *resource :
+      {R"({"kind":"ndarray_view","name":"v","array":"v","offset":0,"shape":[1]})",
+       R"({"kind":"ndarray_view","name":"v","array":"p","offset":0,"shape":[1],"dtype":"i32"})",
+       R"({"kind":"ndarray_view","name":"v","array":"p","offset":-1,"shape":[1]})",
+       R"({"kind":"ndarray_view","name":"v","array":"p","offset":0,"shape":[1]},
+         {"kind":"scalar","name":"p","dtype":"i32","bits":"00000001"})"}) {
+    EXPECT_THROW(ExecutionPlan::parse(prefix + resource + "]}"),
+                 std::invalid_argument);
+  }
+}
 }  // namespace taichi::lang::aot

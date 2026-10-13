@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <unordered_set>
 #include "fp16.h"
 
@@ -433,12 +434,80 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
       case TI_ARGUMENT_TYPE_NDARRAY: {
         TI_CAPI_ARGUMENT_NULL_RV(args[i].value.ndarray.memory);
 
-        // Don't allocate it on stack. `DeviceAllocation` is referred to by
-        // `GfxRuntime::launch_kernel`.
-        std::unique_ptr<taichi::lang::DeviceAllocation> devalloc =
-            std::make_unique<taichi::lang::DeviceAllocation>(
-                devmem2devalloc(runtime2, arg.value.ndarray.memory));
         const TiNdArray &ndarray = arg.value.ndarray;
+
+        const auto memory = runtime2.get_memory(ndarray.memory);
+        const auto gradient_memory =
+            gradient_args[i]
+                ? std::optional{runtime2.get_memory(gradient_args[i]->memory)}
+                : std::nullopt;
+        if (memory.byte_offset ||
+            (gradient_memory && gradient_memory->byte_offset)) {
+          namespace storage = taichi::lang::storage;
+          const auto layout = ndarray_storage_layout(ndarray);
+          if (memory.byte_offset > std::numeric_limits<int64_t>::max())
+            throw MemoryBindingError(
+                "Execution view offset exceeds dense indexing");
+          storage::DenseStorageLayoutSpec spec;
+          spec.scalar_type = ndarray_scalar_type(ndarray.elem_type);
+          spec.byte_offset = static_cast<int64_t>(memory.byte_offset);
+          spec.index_shape.assign(ndarray.shape.dims,
+                                  ndarray.shape.dims + ndarray.shape.dim_count);
+          spec.element_shape.assign(
+              ndarray.elem_shape.dims,
+              ndarray.elem_shape.dims + ndarray.elem_shape.dim_count);
+          auto strides = [](const std::vector<int64_t> &shape, uint64_t bytes) {
+            std::vector<int64_t> result(shape.size());
+            for (std::size_t axis = shape.size(); axis-- > 0;) {
+              if (bytes > std::numeric_limits<int64_t>::max())
+                throw MemoryBindingError(
+                    "Execution view stride exceeds dense indexing");
+              result[axis] = static_cast<int64_t>(bytes);
+              if (shape[axis] && bytes > std::numeric_limits<uint64_t>::max() /
+                                             static_cast<uint64_t>(shape[axis]))
+                throw MemoryBindingError(
+                    "Execution view stride overflows address space");
+              bytes *= static_cast<uint64_t>(shape[axis]);
+            }
+            return result;
+          };
+          spec.index_strides_bytes =
+              strides(spec.index_shape, layout.element_bytes);
+          spec.element_strides_bytes =
+              strides(spec.element_shape,
+                      taichi::lang::data_type_size(spec.scalar_type));
+          auto built = storage::build_dense_storage_descriptor(
+              storage::StorageOwnerRef::external_managed(
+                  reinterpret_cast<std::uintptr_t>(ndarray.memory), 1, 1),
+              storage::StorageSourceKind::kExternalDense, spec);
+          if (!built)
+            throw MemoryBindingError(
+                "Execution view has an unsupported dense layout");
+          auto descriptor = std::make_unique<storage::DenseStorageDescriptor>(
+              std::move(*built.descriptor));
+          storage::ResolvedDenseBinding resolved;
+          resolved.allocation = memory.allocation;
+          resolved.byte_offset = memory.byte_offset;
+          resolved.byte_size = layout.bytes;
+          resolved.runtime_signature =
+              reinterpret_cast<std::uintptr_t>(ndarray.memory);
+          resolved.valid = true;
+          storage::ResolvedDenseBinding gradient;
+          if (gradient_args[i]) {
+            const auto &grad_memory = *gradient_memory;
+            gradient.allocation = grad_memory.allocation;
+            gradient.byte_offset = grad_memory.byte_offset;
+            gradient.byte_size = layout.bytes;
+            gradient.runtime_signature =
+                reinterpret_cast<std::uintptr_t>(gradient_args[i]->memory);
+            gradient.valid = true;
+          }
+          builder.set_arg_resolved_dense_storage(
+              {static_cast<int>(i)}, *descriptor, resolved,
+              gradient.valid ? &gradient : nullptr);
+          result->views.push_back(std::move(descriptor));
+          break;
+        }
 
         if (ndarray.shape.dim_count > kTiNdShapeDimensionCapacity) {
           ti_set_last_error(
@@ -458,10 +527,14 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
         std::vector<int> shape(ndarray.shape.dims,
                                ndarray.shape.dims + ndarray.shape.dim_count);
 
+        // GFX launch contexts retain these allocation descriptors until cold
+        // recording completes. Offset views use the dense descriptor above.
+        auto devalloc =
+            std::make_unique<taichi::lang::DeviceAllocation>(memory.allocation);
         std::unique_ptr<taichi::lang::DeviceAllocation> gradalloc;
-        if (gradient_args[i]) {
+        if (gradient_memory) {
           gradalloc = std::make_unique<taichi::lang::DeviceAllocation>(
-              devmem2devalloc(runtime2, gradient_args[i]->memory));
+              gradient_memory->allocation);
         }
         builder.set_arg_ndarray_impl({(int)i}, (intptr_t)devalloc.get(), shape,
                                      (intptr_t)gradalloc.get());

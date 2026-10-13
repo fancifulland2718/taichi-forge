@@ -34,10 +34,17 @@ struct ExecutionResources {
     // Exact C API scalar payload, independent of JSON numeric precision.
     std::uint64_t bits;
   };
+  struct View {
+    std::string array;
+    // Packed records, not scalar components or bytes. Element layout is
+    // inherited from the parent; a view never reinterprets its dtype.
+    std::uint64_t offset{0};
+    std::vector<Dimension> shape;
+  };
   struct Resource {
     std::string name;
     std::string dtype;
-    std::variant<Array, Extent, NativeOperationDescription, Scalar> value;
+    std::variant<Array, Extent, NativeOperationDescription, Scalar, View> value;
   };
 
   std::vector<Resource> declarations;

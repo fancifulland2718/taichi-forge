@@ -673,8 +673,16 @@ class HostDeviceContextBlitter {
             addr += host_ctx_.get_resolved_dense_storage(indices).byte_offset;
           }
           uint64_t grad_addr = 0;
-          if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray &&
-              host_ctx_.array_ptrs[array_arg.grad_ptr_indices] != nullptr) {
+          if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
+            if (const auto *gradient =
+                    host_ctx_.get_resolved_dense_storage_gradient(indices))
+              grad_addr =
+                  device_->get_memory_physical_pointer(gradient->allocation) +
+                  gradient->byte_offset;
+          } else if (alloc_type ==
+                         LaunchContextBuilder::DevAllocType::kNdarray &&
+                     host_ctx_.array_ptrs[array_arg.grad_ptr_indices] !=
+                         nullptr) {
             auto grad_alloc =
                 *(DeviceAllocation *)(
                     host_ctx_.array_ptrs[array_arg.grad_ptr_indices]);
@@ -1956,6 +1964,14 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
             any_arrays[array_arg.data_ptr_indices] = devalloc;
             ndarrays_in_use_.insert(devalloc.alloc_id);
             if (alloc_type ==
+                LaunchContextBuilder::DevAllocType::kDenseStorage) {
+              if (const auto *gradient =
+                      host_ctx.get_resolved_dense_storage_gradient(indices)) {
+                any_arrays[array_arg.grad_ptr_indices] = gradient->allocation;
+                ndarrays_in_use_.insert(gradient->allocation.alloc_id);
+              }
+            }
+            if (alloc_type ==
                 LaunchContextBuilder::DevAllocType::kNdarray) {
               auto grad_it =
                   host_ctx.array_ptrs.find(array_arg.grad_ptr_indices);
@@ -2153,15 +2169,13 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
         continue;
       }
       if (bind.kind == CompiledTaichiKernel::BufferBindingKind::ExtArrRw) {
-        if (host_ctx.device_allocation_type[bind.buffer.root_id] ==
-            LaunchContextBuilder::DevAllocType::kDenseStorage) {
-          const auto &binding =
-              host_ctx.get_resolved_dense_storage(bind.buffer.root_id);
-          if (binding.byte_size == 0) {
-            bindings->rw_buffer(bind.binding, binding.allocation);
+        if (const auto *binding = host_ctx.find_resolved_dense_storage_buffer(
+                bind.buffer.root_id)) {
+          if (binding->byte_size == 0) {
+            bindings->rw_buffer(bind.binding, binding->allocation);
           } else {
-            bindings->rw_buffer(bind.binding, binding.device_ptr(),
-                                binding.byte_size);
+            bindings->rw_buffer(bind.binding, binding->device_ptr(),
+                                binding->byte_size);
           }
         } else {
           bindings->rw_buffer(bind.binding,
@@ -2406,6 +2420,13 @@ bool GfxRuntime::GraphReplayExecutable::refresh_prepared_cache(
         }
         cache.any_arrays[array_arg.indices] = devalloc;
         cache.any_arrays[array_arg.data_ptr_indices] = devalloc;
+
+        if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
+          if (const auto *gradient =
+                  pd.host_ctx->get_resolved_dense_storage_gradient(
+                      array_arg.indices))
+            cache.any_arrays[array_arg.grad_ptr_indices] = gradient->allocation;
+        }
 
         if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray) {
           auto grad_it =
@@ -2713,15 +2734,14 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
         break;
       }
       case CompiledTaichiKernel::BufferBindingKind::ExtArrRw:
-        if (pd.host_ctx->device_allocation_type[bind.buffer.root_id] ==
-            LaunchContextBuilder::DevAllocType::kDenseStorage) {
-          const auto &binding =
-              pd.host_ctx->get_resolved_dense_storage(bind.buffer.root_id);
-          if (binding.byte_size == 0) {
-            bindings->rw_buffer(bind.binding, binding.allocation);
+        if (const auto *binding =
+                pd.host_ctx->find_resolved_dense_storage_buffer(
+                    bind.buffer.root_id)) {
+          if (binding->byte_size == 0) {
+            bindings->rw_buffer(bind.binding, binding->allocation);
           } else {
-            bindings->rw_buffer(bind.binding, binding.device_ptr(),
-                                binding.byte_size);
+            bindings->rw_buffer(bind.binding, binding->device_ptr(),
+                                binding->byte_size);
           }
         } else {
           bindings->rw_buffer(bind.binding,
@@ -3612,8 +3632,21 @@ bool GfxRuntime::try_launch_graph(
         push_runtime_structure(binding.allocation, binding.byte_offset,
                                binding.byte_size);
         key.push_back(binding.runtime_signature);
-        key.push_back(0xA003u);
-        structure_key.push_back(0xA003u);
+        if (const auto *gradient =
+                dispatch.host_ctx->get_resolved_dense_storage_gradient(
+                    array_arg.indices)) {
+          ndarrays_in_use_.insert(gradient->allocation.alloc_id);
+          key.push_back(0xA004u);
+          structure_key.push_back(0xA004u);
+          push_graph_allocation_key(key, gradient->allocation,
+                                    gradient->byte_offset, gradient->byte_size);
+          push_runtime_structure(gradient->allocation, gradient->byte_offset,
+                                 gradient->byte_size);
+          key.push_back(gradient->runtime_signature);
+        } else {
+          key.push_back(0xA003u);
+          structure_key.push_back(0xA003u);
+        }
       } else if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray) {
         auto data_it =
             dispatch.host_ctx->array_ptrs.find(array_arg.data_ptr_indices);

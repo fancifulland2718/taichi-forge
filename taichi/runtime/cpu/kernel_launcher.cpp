@@ -275,11 +275,19 @@ void KernelLauncher::bind_runtime_context(const Context &registration,
         ctx.array_runtime_sizes[key] > 0) {
       const auto alloc_type = ctx.device_allocation_type[key];
       uint64 host_ptr = 0;
+      uint64 dense_gradient = 0;
       if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
         const auto &binding = ctx.get_resolved_dense_storage(key);
         auto *base = reinterpret_cast<char *>(
             executor->get_device_alloc_info_ptr(binding.allocation));
         host_ptr = reinterpret_cast<uint64>(base + binding.byte_offset);
+        if (const auto *gradient =
+                ctx.get_resolved_dense_storage_gradient(key)) {
+          auto *grad_base = reinterpret_cast<char *>(
+              executor->get_device_alloc_info_ptr(gradient->allocation));
+          dense_gradient =
+              reinterpret_cast<uint64>(grad_base + gradient->byte_offset);
+        }
       } else {
         DeviceAllocation *ptr =
             static_cast<DeviceAllocation *>(ctx.array_ptrs[data_ptr_idx]);
@@ -293,7 +301,7 @@ void KernelLauncher::bind_runtime_context(const Context &registration,
               ? nullptr
               : ctx.array_ptrs[grad_ptr_idx];
       uint64 host_ptr_grad =
-          grad_ptr == nullptr ? 0
+          grad_ptr == nullptr ? dense_gradient
                               : (uint64)executor->get_device_alloc_info_ptr(
                                     *static_cast<DeviceAllocation *>(grad_ptr));
       ctx.set_ndarray_ptrs(key, host_ptr, host_ptr_grad);

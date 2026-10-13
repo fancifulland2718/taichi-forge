@@ -244,7 +244,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 39。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 40。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -282,7 +282,7 @@ Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 39。
+仍需自己的重建合同。需配套 private ABI 40。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -328,7 +328,7 @@ module.add_execution_plan("stateful_apply", graph, snapshot_state=True)
 
 CPU/CUDA/Vulkan 测试覆盖多 dispatch 方阵及显式伴随 provider、非零状态、新旧数值发布、
 组合、独立消费者交错执行和退休。block/derived view、活 field 与 SolvePlan 控制仍需
-重建合同。资源角色及一致快照要求配套 private ABI 39，不给消费端增加 provider 库依赖。
+重建合同。资源角色及一致快照要求配套 private ABI 40，不给消费端增加 provider 库依赖。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -406,7 +406,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 39）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 40）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
@@ -446,6 +446,29 @@ prepare 对选中数据各读取、校验一次，核对精确字节数并在录
 仍可用。重放不读归档、不计算哈希、不再次上传，模块不缓存展开后的主机数据。
 这是共用资源基础，并不等于任意 live operator/provider 状态均已自动序列化。
 小型 CPU/CUDA/Vulkan 测试覆盖独立消费者、显式梯度、尾部字节、空数据及在途退休。
+
+连续 packed 数组切片可以重建为零复制视图，不分配或复制设备存储。视图继承父数组的
+标量 dtype 和 element shape：
+
+```python
+resources = [
+    {"kind": "ndarray_view", "name": "part", "array": "input",
+     "offset": 4, "shape": [16]},
+]
+```
+
+`offset` 以父视图中的 packed 元素为单位，包含一个 tensor 元素的全部分量；`shape`
+指定视图逻辑维度，也支持 owned ndarray 的 extent 引用。准备阶段或更早检查范围、
+溢出、布局和依赖循环。视图不重新解释 dtype，不引入任意 stride，也不描述 Struct
+存储。父数组可以是外部数组、带初始数据的私有数组或另一个视图。通过视图实际使用的
+父存储会跨初始化和重放保活；仅用于形状的引用不分配设备存储，也不成为重放存储依赖。
+关闭外部父数组会使相关 preparation 失效。
+
+kernel、copy、fill 和合格的原生操作使用所选范围。显式梯度绑定可以指向独立视图，
+其父数组与偏移可与 primal 不同；导出的 kernel 仍须声明相应梯度 ABI。CPU/CUDA/Vulkan
+测试覆盖实际 `.grad`、嵌套视图、tensor 元素、reshape、空视图、原生 sort、别名拒绝和
+退休。视图本身不增加设备分配或重放复制。需配套 private ABI 40。此公共资源能力与
+operator derived view 的自动导出分别接入。
 
 计划可以将一次性初始化与重放分开：
 

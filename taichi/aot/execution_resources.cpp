@@ -17,6 +17,24 @@ std::uint32_t word(const JsonValue &value) {
 ExecutionResources::Extent extent(const JsonValue &value) {
   return {name(value["array"]), word(value["axis"])};
 }
+std::vector<ExecutionResources::Dimension> shape(const JsonValue &value) {
+  if (!value.is_arr())
+    throw std::invalid_argument("Execution resource shape must be an array");
+  std::vector<ExecutionResources::Dimension> result;
+  for (const auto &dimension : value.arr.inner) {
+    if (dimension.is_obj()) {
+      fields(dimension, {"array", "axis"});
+      result.emplace_back(extent(dimension));
+    } else {
+      result.emplace_back(word(dimension));
+    }
+  }
+  return result;
+}
+bool is_array(const ExecutionResources::Resource &resource) {
+  return std::holds_alternative<ExecutionResources::Array>(resource.value) ||
+         std::holds_alternative<ExecutionResources::View>(resource.value);
+}
 ExecutionResources::Scalar scalar(const std::string &dtype,
                                   const JsonValue &value) {
   std::size_t digits = 0;
@@ -47,11 +65,14 @@ ExecutionResources::Scalar scalar(const std::string &dtype,
 std::vector<std::string> dependencies(
     const ExecutionResources::Resource &resource) {
   std::vector<std::string> result;
+  const std::vector<ExecutionResources::Dimension> *dimensions = nullptr;
   if (const auto *array =
           std::get_if<ExecutionResources::Array>(&resource.value)) {
-    for (const auto &dimension : array->shape)
-      if (const auto *ref = std::get_if<ExecutionResources::Extent>(&dimension))
-        result.push_back(ref->array);
+    dimensions = &array->shape;
+  } else if (const auto *view =
+                 std::get_if<ExecutionResources::View>(&resource.value)) {
+    result.push_back(view->array);
+    dimensions = &view->shape;
   } else if (const auto *native =
                  std::get_if<NativeOperationDescription>(&resource.value)) {
     for (const auto &[port, slot] : native->bindings)
@@ -60,6 +81,10 @@ std::vector<std::string> dependencies(
                  std::get_if<ExecutionResources::Extent>(&resource.value)) {
     result.push_back(ref->array);
   }
+  if (dimensions)
+    for (const auto &dimension : *dimensions)
+      if (const auto *ref = std::get_if<ExecutionResources::Extent>(&dimension))
+        result.push_back(ref->array);
   return result;
 }
 }  // namespace
@@ -80,14 +105,19 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
         result.declarations.push_back(std::move(resource));
         continue;
       }
+      if (kind == "ndarray_view") {
+        fields(value, {"kind", "name", "array", "offset", "shape"});
+        resource.value = View{name(value["array"]), integer(value["offset"]),
+                              shape(value["shape"])};
+        result.declarations.push_back(std::move(resource));
+        continue;
+      }
       resource.dtype = name(value["dtype"]);
       if (kind == "ndarray") {
         fields(value, {"kind", "name", "dtype", "shape", "element_shape",
                        "zero_initialize", "initial_data"});
-        if (!value["shape"].is_arr())
-          throw std::invalid_argument(
-              "Execution resource shape must be an array");
         auto &array = std::get<Array>(resource.value);
+        array.shape = shape(value["shape"]);
         array.zero_initialize = optional_bool(value, "zero_initialize");
         if (const auto data = value.obj.inner.find("initial_data");
             data != value.obj.inner.end()) {
@@ -99,14 +129,6 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
             throw std::invalid_argument(
                 "Execution initial_data requires a lowercase SHA-256 key and "
                 "no zero initialization");
-        }
-        for (const auto &dimension : value["shape"].arr.inner) {
-          if (dimension.is_obj()) {
-            fields(dimension, {"array", "axis"});
-            array.shape.emplace_back(extent(dimension));
-          } else {
-            array.shape.emplace_back(word(dimension));
-          }
         }
         if (auto shape = value.obj.inner.find("element_shape");
             shape != value.obj.inner.end()) {
@@ -170,7 +192,7 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
       if (const auto parent = indices.find(ref); parent != indices.end()) {
         if (!std::holds_alternative<NativeOperationDescription>(
                 declarations[i].value) &&
-            !std::holds_alternative<Array>(declarations[parent->second].value))
+            !is_array(declarations[parent->second]))
           throw std::invalid_argument(
               "Execution shape reference requires an ndarray: " + ref);
         ++indegree[i];
@@ -190,8 +212,7 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
   for (const auto &[primal, gradient] : gradients) {
     for (const auto *ref : {&primal, &gradient})
       if (const auto found = indices.find(*ref);
-          found != indices.end() &&
-          !std::holds_alternative<Array>(declarations[found->second].value))
+          found != indices.end() && !is_array(declarations[found->second]))
         throw std::invalid_argument(
             "Execution gradient reference requires an ndarray: " + *ref);
     arguments.insert(primal);
@@ -200,6 +221,22 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
   materialize.assign(count, false);
   for (std::size_t i = 0; i < count; ++i)
     materialize[i] = arguments.count(declarations[i].name) != 0;
+  // Propagate storage demand separately from shape-only reachability. Walk in
+  // reverse topological order so nested views keep every storage ancestor.
+  for (auto it = ready.rbegin(); it != ready.rend(); ++it) {
+    if (const auto *native =
+            std::get_if<NativeOperationDescription>(&declarations[*it].value)) {
+      if (materialize[*it])
+        for (const auto &[port, slot] : native->bindings)
+          if (const auto parent = indices.find(slot); parent != indices.end())
+            materialize[parent->second] = true;
+    } else if (const auto *view = std::get_if<View>(&declarations[*it].value)) {
+      if (materialize[*it])
+        if (const auto parent = indices.find(view->array);
+            parent != indices.end())
+          materialize[parent->second] = true;
+    }
+  }
   std::vector<bool> needed(count, false);
   std::vector<std::string> pending(arguments.begin(), arguments.end());
   arguments.clear();
@@ -210,11 +247,6 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
     } else if (!needed[found->second]) {
       needed[found->second] = true;
       const auto &refs = references[found->second];
-      if (std::holds_alternative<NativeOperationDescription>(
-              declarations[found->second].value))
-        for (const auto &ref : refs)
-          if (const auto parent = indices.find(ref); parent != indices.end())
-            materialize[parent->second] = true;
       pending.insert(pending.end(), refs.begin(), refs.end());
     }
   }
@@ -237,11 +269,14 @@ std::set<std::string> ExecutionResources::runtime_bindings(
     const auto name = pending[i];
     if (const auto gradient = gradients.find(name); gradient != gradients.end())
       add(gradient->second);
-    if (const auto resource = by_name.find(name); resource != by_name.end())
+    if (const auto resource = by_name.find(name); resource != by_name.end()) {
       if (const auto *native =
               std::get_if<NativeOperationDescription>(&resource->second->value))
         for (const auto &[port, slot] : native->bindings)
           add(slot);
+      if (const auto *view = std::get_if<View>(&resource->second->value))
+        add(view->array);
+    }
   }
   return roots;
 }

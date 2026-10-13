@@ -16,6 +16,8 @@ class ExecutionResourceStorage {
   ExecutionResourceStorage &operator=(const ExecutionResourceStorage &) =
       delete;
   TiMemory allocate(uint64_t bytes);
+  // Non-owning aliases; the execution resource closure retains their parents.
+  TiMemory view(TiMemory parent, uint64_t offset, uint64_t bytes);
   uint64_t bytes() const {
     return bytes_;
   }

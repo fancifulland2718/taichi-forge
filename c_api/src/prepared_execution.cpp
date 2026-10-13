@@ -477,8 +477,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
           "Execution memory offset exceeds ndarray extent");
     const auto allocation = rt.get_memory(array.memory);
     prepared->memories.push_back(array.memory);
-    return Storage{allocation.allocation.get_ptr(offset), bytes - offset,
-                   element_bytes};
+    return Storage{
+        allocation.allocation.get_ptr(allocation.byte_offset + offset),
+        bytes - offset, element_bytes};
   };
   std::map<std::string, NativeArrayBinding> native_arrays;
   std::map<std::string, std::shared_ptr<NativeResource>> native_objects;
@@ -774,7 +775,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");
-  if (initialization_count) {
+  {
     for (const auto &name : plan.replay_bindings) {
       if (const auto object = native_objects.find(name);
           object != native_objects.end()) {
@@ -782,8 +783,12 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         continue;
       }
       const auto &argument = *arguments.at(name);
-      if (argument.type == TI_ARGUMENT_TYPE_NDARRAY)
+      if (argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
         prepared->replay_memories.insert(argument.value.ndarray.memory);
+        // A view's public storage ancestor may not appear as a direct kernel
+        // argument. Retiring that ancestor must still invalidate this plan.
+        prepared->memories.push_back(argument.value.ndarray.memory);
+      }
       if (const auto binding = layouts.find(name);
           binding != layouts.end() && binding->second->gradient)
         prepared->replay_memories.insert(binding->second->gradient->memory);

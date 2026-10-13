@@ -8,6 +8,8 @@ def retained_arguments(resources, gradients, arguments):
     for name in pending:
         resource = by_name.get(name, {})
         refs = list(resource.get("bindings", {}).values()) if resource.get("kind") == "native" else []
+        if resource.get("kind") == "ndarray_view":
+            refs.append(resource["array"])
         if name in gradients:
             refs.append(gradients[name])
         for ref in refs:
@@ -48,6 +50,8 @@ def external_arguments(resources, gradients, arguments):
             }
         elif kind == "extent":
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
+        elif kind == "ndarray_view":
+            required, optional = {"kind", "name", "array", "offset", "shape"}, set()
         elif kind == "scalar":
             required, optional = {"kind", "name", "dtype", "bits"}, set()
         elif kind == "native":
@@ -58,7 +62,7 @@ def external_arguments(resources, gradients, arguments):
             raise ValueError(f"Invalid {kind} resource fields")
         name = resource["name"]
         _name(name)
-        if kind != "native":
+        if kind not in ("native", "ndarray_view"):
             _name(resource["dtype"])
         if name in by_name:
             raise ValueError(f"Duplicate execution resource: {name}")
@@ -66,7 +70,13 @@ def external_arguments(resources, gradients, arguments):
         refs = references[name] = []
         if kind == "native":
             refs.extend(native_references(resource))
-        elif kind == "ndarray":
+        elif kind in ("ndarray", "ndarray_view"):
+            if kind == "ndarray_view":
+                _name(resource["array"])
+                refs.append(resource["array"])
+                offset = resource["offset"]
+                if type(offset) is not int or not 0 <= offset <= 0xFFFFFFFFFFFFFFFF:
+                    raise ValueError("Execution view offset must fit uint64")
             if type(resource.get("zero_initialize", False)) is not bool:
                 raise ValueError("Execution zero_initialize must be a boolean")
             if "initial_data" in resource:
@@ -112,7 +122,7 @@ def external_arguments(resources, gradients, arguments):
     for name, refs in references.items():
         for parent in refs:
             if parent in by_name:
-                if by_name[name]["kind"] != "native" and by_name[parent]["kind"] != "ndarray":
+                if by_name[name]["kind"] != "native" and by_name[parent]["kind"] not in ("ndarray", "ndarray_view"):
                     raise ValueError(f"Execution shape reference requires an ndarray: {parent}")
                 indegree[name] += 1
                 dependents[parent].append(name)
@@ -129,7 +139,7 @@ def external_arguments(resources, gradients, arguments):
         _name(primal)
         _name(gradient)
         for name in (primal, gradient):
-            if name in by_name and by_name[name]["kind"] != "ndarray":
+            if name in by_name and by_name[name]["kind"] not in ("ndarray", "ndarray_view"):
                 raise ValueError(f"Execution gradient reference requires an ndarray: {name}")
         arguments.update((primal, gradient))
     pending, seen, external = list(arguments), set(), set()

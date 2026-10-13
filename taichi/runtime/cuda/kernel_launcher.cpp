@@ -869,8 +869,17 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
         const auto &binding = ctx.get_resolved_dense_storage(key);
         auto *base = reinterpret_cast<char *>(
             executor->get_device_alloc_info_ptr(binding.allocation));
+        uint64 gradient_pointer = 0;
+        if (const auto *gradient =
+                ctx.get_resolved_dense_storage_gradient(key)) {
+          auto *grad_base = reinterpret_cast<char *>(
+              executor->get_device_alloc_info_ptr(gradient->allocation));
+          gradient_pointer =
+              reinterpret_cast<uint64>(grad_base + gradient->byte_offset);
+        }
         ctx.set_ndarray_ptrs(
-            key, reinterpret_cast<uint64>(base + binding.byte_offset), 0);
+            key, reinterpret_cast<uint64>(base + binding.byte_offset),
+            gradient_pointer);
       } else {
         return false;
       }
@@ -1469,7 +1478,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
             executor->get_device_alloc_info_ptr(binding.allocation));
         device_ptrs[data_ptr_idx] = base + binding.byte_offset;
         device_ptrs[grad_ptr_idx] = nullptr;
-        ctx.set_ndarray_ptrs(key, (uint64)device_ptrs[data_ptr_idx], 0);
+        if (const auto *gradient =
+                ctx.get_resolved_dense_storage_gradient(key)) {
+          auto *grad_base = reinterpret_cast<char *>(
+              executor->get_device_alloc_info_ptr(gradient->allocation));
+          device_ptrs[grad_ptr_idx] = grad_base + gradient->byte_offset;
+        }
+        ctx.set_ndarray_ptrs(key, (uint64)device_ptrs[data_ptr_idx],
+                             (uint64)device_ptrs[grad_ptr_idx]);
       } else if (arr_sz > 0) {
         // Ndarray
         DeviceAllocation *ptr = static_cast<DeviceAllocation *>(data_ptr);

@@ -155,7 +155,8 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
                                   uint64_t size,
                                   bool release_on_failure,
                                   uint64_t base_offset,
-                                  std::shared_ptr<void> storage_owner) {
+                                  std::shared_ptr<void> storage_owner,
+                                  uint64_t byte_offset) {
   TI_ASSERT(allocation.device == &get());
   try {
     // Never reuse a token, including across runtime destruction. Refuse the
@@ -163,7 +164,7 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
     const auto handle = reinterpret_cast<TiMemory>(new_handle_token());
     std::lock_guard<std::mutex> lock(memory_mutex_);
     memories_.emplace(handle, MemoryAllocation{allocation, size, base_offset,
-                                               storage_owner});
+                                               storage_owner, byte_offset});
     return handle;
   } catch (...) {
     // RHI import paths allocate their own wrapper too. Retire that wrapper;

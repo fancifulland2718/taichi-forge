@@ -27,6 +27,8 @@ struct BoundKernelArguments {
   taichi::lang::aot::Kernel *kernel{nullptr};
   std::vector<TiMemory> memories;
   std::vector<std::unique_ptr<taichi::lang::DeviceAllocation>> allocations;
+  std::vector<std::unique_ptr<taichi::lang::storage::DenseStorageDescriptor>>
+      views;
   std::unique_ptr<taichi::lang::LaunchContextBuilder> context;
 };
 

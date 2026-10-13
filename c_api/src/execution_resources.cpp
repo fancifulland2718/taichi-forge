@@ -46,6 +46,34 @@ void ExecutionResourceStorage::remove_owned_dependencies(
       dependencies.end());
 }
 
+TiMemory ExecutionResourceStorage::view(TiMemory parent,
+                                        uint64_t offset,
+                                        uint64_t bytes) {
+  const auto source = runtime_.get_memory(parent);
+  if (offset > source.size || bytes > source.size - offset ||
+      offset > std::numeric_limits<uint64_t>::max() - source.base_offset ||
+      offset > std::numeric_limits<uint64_t>::max() - source.byte_offset)
+    throw MemoryBindingError("Execution view exceeds its parent storage");
+  // The nonempty owner marks this handle as a non-owning alias. Borrowed JIT
+  // storage keeps its real lease too. ExecutionPlan's transitive dependency
+  // closure is responsible for retaining ordinary owned/external parents.
+  auto owner = source.storage_owner;
+  if (!owner)
+    owner = std::make_shared<int>(0);
+  auto memory = runtime_.register_memory(
+      source.allocation, bytes, false, source.base_offset + offset,
+      std::move(owner), source.byte_offset + offset);
+  try {
+    sizes_.emplace(memory, 0);
+    memories_.push_back(memory);
+  } catch (...) {
+    sizes_.erase(memory);
+    runtime_.free_memory(memory);
+    throw;
+  }
+  return memory;
+}
+
 void ExecutionResourceStorage::retain(
     const std::unordered_set<TiMemory> &memories) {
   for (std::size_t i = memories_.size(); i-- > 0;) {
@@ -90,18 +118,23 @@ ExecutionResourceBindings bind_execution_resources(
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
   std::vector<uint64_t> sizes(resources.order.size());
+  std::vector<uint64_t> view_offsets(resources.order.size());
   std::map<std::string, std::vector<std::uint8_t>> payloads;
   std::unordered_set<const TiArgument *> local, validated_sources;
-  auto resolve = [&](const Recipes::Extent &ref) {
-    const auto found = arguments.find(ref.array);
+  auto array_source = [&](const std::string &name) -> const TiNdArray & {
+    const auto found = arguments.find(name);
     if (found == arguments.end() ||
         found->second->type != TI_ARGUMENT_TYPE_NDARRAY)
       throw MemoryBindingError("Execution shape source is not an ndarray: " +
-                               ref.array);
+                               name);
     const auto &array = found->second->value.ndarray;
     if (!local.count(found->second) &&
         validated_sources.insert(found->second).second)
       validated_ndarray_bytes(runtime, array);
+    return array;
+  };
+  auto resolve = [&](const Recipes::Extent &ref) {
+    const auto &array = array_source(ref.array);
     if (ref.axis >= array.shape.dim_count)
       throw MemoryBindingError("Execution shape axis exceeds array rank: " +
                                ref.array);
@@ -114,8 +147,34 @@ ExecutionResourceBindings bind_execution_resources(
             recipe.value))
       continue;
     auto &argument = result.arguments[pos];
-    const auto dtype = scalar_type(recipe.dtype);
-    if (const auto *desc = std::get_if<Recipes::Array>(&recipe.value)) {
+    const auto *view = std::get_if<Recipes::View>(&recipe.value);
+    const auto dtype =
+        view ? array_source(view->array).elem_type : scalar_type(recipe.dtype);
+    if (view) {
+      argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+      auto &array = argument.value.ndarray;
+      array = array_source(view->array);
+      const auto parent = ndarray_storage_layout(array);
+      constexpr auto rank_capacity =
+          sizeof(array.shape.dims) / sizeof(uint32_t);
+      if (view->shape.size() > rank_capacity)
+        throw MemoryBindingError(
+            "Execution view rank exceeds the C API shape capacity");
+      array.memory = TI_NULL_HANDLE;
+      array.shape.dim_count = static_cast<uint32_t>(view->shape.size());
+      for (std::size_t axis = 0; axis < view->shape.size(); ++axis) {
+        const auto &dimension = view->shape[axis];
+        const auto *literal = std::get_if<uint32_t>(&dimension);
+        array.shape.dims[axis] =
+            literal ? *literal : resolve(std::get<Recipes::Extent>(dimension));
+      }
+      sizes[pos] = ndarray_storage_layout(array).bytes;
+      if (view->offset > parent.bytes / parent.element_bytes)
+        throw MemoryBindingError("Execution view offset exceeds parent shape");
+      view_offsets[pos] = view->offset * parent.element_bytes;
+      if (sizes[pos] > parent.bytes - view_offsets[pos])
+        throw MemoryBindingError("Execution view shape exceeds parent shape");
+    } else if (const auto *desc = std::get_if<Recipes::Array>(&recipe.value)) {
       argument.type = TI_ARGUMENT_TYPE_NDARRAY;
       auto &array = argument.value.ndarray;
       constexpr auto rank_capacity =
@@ -232,6 +291,17 @@ ExecutionResourceBindings bind_execution_resources(
   std::vector<std::size_t> upload_sizes;
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     auto &argument = result.arguments[pos];
+    if (const auto *view = std::get_if<Recipes::View>(
+            &resources.declarations[resources.order[pos]].value)) {
+      if (resources.materialize[resources.order[pos]]) {
+        if (!result.storage)
+          result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
+        argument.value.ndarray.memory = result.storage->view(
+            arguments.at(view->array)->value.ndarray.memory, view_offsets[pos],
+            sizes[pos]);
+      }
+      continue;
+    }
     if (std::holds_alternative<Recipes::Array>(
             resources.declarations[resources.order[pos]].value) &&
         resources.materialize[resources.order[pos]] &&
