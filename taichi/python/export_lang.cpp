@@ -3694,7 +3694,7 @@ void export_lang(py::module &m) {
            py::arg("handle"), py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarrays_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
-              const py::sequence &dsts) {
+              const py::sequence &dsts, bool snapshot) {
              TI_ERROR_IF(
                  srcs.size() != static_cast<std::size_t>(py::len(dsts)),
                  "copy_ndarrays_to_host received {} sources and {} "
@@ -3729,8 +3729,10 @@ void export_lang(py::module &m) {
              py::gil_scoped_release release;
              program->copy_ndarrays_to_host(
                  const_srcs.data(), host_ptrs.data(), bytes.data(),
-                 const_srcs.size());
-           })
+                 const_srcs.size(), snapshot);
+           },
+           py::arg("sources"), py::arg("destinations"), py::kw_only(),
+           py::arg("snapshot") = false)
       .def("copy_graph_observations_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {
@@ -9648,6 +9650,28 @@ void export_lang(py::module &m) {
             for (const auto &[name, value] : record.fixed_ndarrays()) {
               result[py::str(name)] =
                   py::cast(value, py::return_value_policy::reference);
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "_fixed_ndarray_roles",
+          [](const LinearOperatorRecordableKernel &record) {
+            py::dict result;
+            for (const auto &[name, role] : record.fixed_ndarray_roles()) {
+              const char *label = nullptr;
+              switch (role) {
+                case LinearOperatorRecordableKernel::NdarrayRole::topology:
+                  label = "topology";
+                  break;
+                case LinearOperatorRecordableKernel::NdarrayRole::numeric:
+                  label = "numeric";
+                  break;
+                case LinearOperatorRecordableKernel::NdarrayRole::workspace:
+                  label = "workspace";
+                  break;
+              }
+              TI_ASSERT(label);
+              result[py::str(name)] = label;
             }
             return result;
           })

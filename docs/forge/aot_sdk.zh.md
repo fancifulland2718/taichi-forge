@@ -244,7 +244,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 38。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 39。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -282,7 +282,7 @@ Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 38。
+仍需自己的重建合同。需配套 private ABI 39。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -290,7 +290,7 @@ tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar
 sum 伴随播种，再执行真实 `.grad` kernel。这不自动生成 reduction 导数，也不表示
 所有 memory recipe、LinearOperator/SolvePlan 或结构控制已完整支持。
 
-`LinearOperator.from_kernel` provider 及其 sum、scale、shift、compose、adjoint、
+`LinearOperator.from_kernel` 和不依赖 field 的 `from_graph` provider 及其 sum、scale、shift、compose、adjoint、
 parameterized_affine 组合可显式固定代次，同时保留符号输入/输出端口：
 
 ```python
@@ -311,8 +311,24 @@ Windows CPU/CUDA/Vulkan 已验证矩形前向/转置、嵌套 affine/compose/sum
 发布、独立工作区、两份独立消费实例、导入别名、
 重新准备与生产/消费端退休。此处导出的是用户提供的显式伴随，不会自动生成 provider
 导数。默认 `update_policy="rebind"` 继续跟随兼容数值发布，导出不会静默把它冻结。
-block/derived view、`from_graph` 活状态/工作区与 SolvePlan 控制仍需各自的重建合同。此 Python
-扩展复用 ABI 38，不给独立消费端增加 provider 库依赖。
+`from_graph` 保留有序 dispatch、固定 i32 参数和原生 topology/numeric/workspace 角色。
+只读 provider 可按默认选项导出。provider workspace 可能包含非零、可变状态，需明确
+选择在导出边界保存其当前内容：
+
+```python
+module.add_execution_plan("stateful_apply", graph, snapshot_state=True)
+```
+
+导出在同一次原生提交锁范围内等待既有工作完成，并批量复制所选 provider 数组。
+前向、伴随及组合叶子共享的 allocation 只采样一次。每份消费准备独立分配并初始化数组，
+同一准备内部的别名仍指向同一资源。导出后生产端继续执行不会改变 artifact；重新准备
+从导出状态开始。JIT action 的固定代次仍共享 provider 活 workspace，本身不执行此状态
+快照；只有按声明重建的组合 scratch 才零初始化。该选项不会冻结活 SNode field，也不
+自动批准其他未支持的资源类型。
+
+CPU/CUDA/Vulkan 测试覆盖多 dispatch 方阵及显式伴随 provider、非零状态、新旧数值发布、
+组合、独立消费者交错执行和退休。block/derived view、活 field 与 SolvePlan 控制仍需
+重建合同。资源角色及一致快照要求配套 private ABI 39，不给消费端增加 provider 库依赖。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -390,7 +406,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 38）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 39）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已

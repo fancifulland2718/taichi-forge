@@ -296,7 +296,7 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 38
+explicit reverse kernels and retirement. This requires matching private ABI 39
 components. Reduction/helper capacity, layout and disjointness certificates are
 preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
@@ -346,7 +346,7 @@ tensor layout, imported aliases and retirement. Graph export translates qualifie
 scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
 aliases and removing duplicate constraints. Custom binding executors, storage
 plans and lifetime validators still need their own reconstruction contract.
-Use matching private ABI 38 components.
+Use matching private ABI 39 components.
 
 Selected CUDA typed reductions can now export direct and block-partial/finalize
 recipes, preserving the chosen kernels, fixed counts, labels, private partials
@@ -356,7 +356,7 @@ the f32 chain uses an explicit sum adjoint followed by a real `.grad` kernel.
 This does not synthesize a reduction derivative, qualify every memory recipe,
 or provide full LinearOperator/SolvePlan or structured-control export.
 
-For `LinearOperator.from_kernel` providers and their sum, scale, shift,
+For `LinearOperator.from_kernel` and field-free `from_graph` providers and their sum, scale, shift,
 composition, adjoint and parameterized-affine combinations, explicitly pin their
 generations while keeping symbolic input/output ports:
 
@@ -384,9 +384,30 @@ scratch, two independent consumers, imported aliases, re-preparation and
 producer/consumer retirement. This exports an explicitly supplied adjoint, not an
 automatically generated provider derivative. The default `update_policy="rebind"`
 continues to follow compatible publications and is not silently frozen by export.
-Block/derived views, `from_graph` live state/workspace and SolvePlan control still
-need their own reconstruction contracts. This Python extension uses existing ABI 38;
-it adds no provider library to the standalone consumer.
+`from_graph` preserves its ordered dispatches, fixed i32 parameters and native
+topology/numeric/workspace roles. Read-only providers export with the default
+options. A provider workspace can hold nonzero, mutable state; explicitly choose
+its current contents at the export boundary:
+
+```python
+module.add_execution_plan("stateful_apply", graph, snapshot_state=True)
+```
+
+This waits for preceding work and copies all selected provider arrays under one
+native submission lock. Shared allocations are sampled once across forward,
+adjoint and composition leaves. Each consumer preparation initializes independent
+arrays; aliases within that preparation keep referring to the same resource.
+Later producer execution cannot change the artifact, and preparing it again
+starts from the exported state. Pinning a JIT action still shares its provider's
+live workspace; it does not take this state snapshot. Only declared composition
+scratch uses zero initialization. The flag does not freeze live SNode fields or
+qualify unsupported resource types.
+
+CPU/CUDA/Vulkan tests cover multi-dispatch square and explicit-adjoint providers,
+nonzero state, old/new numeric publications, compositions, interleaved independent
+consumers and retirement. Block/derived views, live fields and SolvePlan control
+still need reconstruction contracts. Resource roles and coherent snapshots require
+matching private ABI 39 components; no provider library is added to the consumer.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -489,7 +510,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 38). Small
+elements. Use matching Python/native components (current private ABI 39). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.

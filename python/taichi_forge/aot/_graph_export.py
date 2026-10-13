@@ -17,7 +17,8 @@ def _snapshot(value):
 class _ExportContext:
     """One export transaction; object identities never become artifact data."""
 
-    def __init__(self, module, reserved_names):
+    def __init__(self, module, reserved_names, *, snapshot_state=False):
+        self.snapshot_state = snapshot_state
         self.operations = []
         self.initialization = []
         self._initialization_resources = {}
@@ -60,7 +61,7 @@ class _ExportContext:
             ),
         )
 
-    def _resource(self, owner, description):
+    def _resource(self, owner, description, *, name=None):
         """Share only an identical producer resource, with an identical description."""
         if owner is None:
             raise ValueError("AOT reconstruction requires a resource owner identity")
@@ -71,7 +72,7 @@ class _ExportContext:
             if frozen != description:
                 raise ValueError("AOT resource reconstruction changed within one export")
             return name
-        name = self._name("resource")
+        name = name or self._name("resource")
         self._resource_owners[id(owner)] = (owner, name, description)
         self.resources.append(dict(description, name=name))
         return name
@@ -106,7 +107,7 @@ class _ExportContext:
             )
             self.private_bindings[name] = owner
 
-    def data_resource(self, owner, data, *, dtype, shape, element_shape=()):
+    def data_resource(self, owner, data, *, dtype, shape, element_shape=(), name=None):
         """Stage already frozen data; never sample a live owner during export."""
         if type(data) is not bytes:
             raise TypeError("AOT resource data must be an immutable byte snapshot")
@@ -120,7 +121,9 @@ class _ExportContext:
         else:
             key = previous[1]
         return self._resource(
-            owner, dict(kind="ndarray", dtype=dtype, shape=shape, element_shape=element_shape, initial_data=key)
+            owner,
+            dict(kind="ndarray", dtype=dtype, shape=shape, element_shape=element_shape, initial_data=key),
+            name=name,
         )
 
     def binding(self, name):
@@ -128,16 +131,15 @@ class _ExportContext:
             raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")
         return self._private_names.get(name, name)
 
-    def provider_data_binding(self, name, owner):
-        """Snapshot a qualified immutable generation, once per native allocation."""
-        import numpy as np
-
+    def provider_data_binding(self, name, owner, *, mutable=False):
+        """Declare qualified provider storage; sample the complete closure once."""
         from taichi_forge.graph._native import ProviderOwnedNdarrayBinding
         from taichi_forge.lang import impl
-        from taichi_forge.lang.util import to_numpy_type
 
+        if mutable and not self.snapshot_state:
+            raise TaichiRuntimeError("AOT provider workspace requires explicit snapshot_state=True at export")
         if type(owner) is not ProviderOwnedNdarrayBinding or owner._runtime_prog is not impl.get_runtime().prog:
-            raise TaichiRuntimeError("AOT provider data requires a live immutable generation binding")
+            raise TaichiRuntimeError("AOT provider data requires a live qualified generation binding")
         identity = owner._runtime_allocation_identity
         cached = self._provider_data.get(identity)
         array = owner.arr
@@ -145,11 +147,7 @@ class _ExportContext:
         if tuple(array.total_shape()) != shape:
             raise TaichiRuntimeError("AOT provider data currently requires scalar arrays")
         if cached is None:
-            if not self._provider_data:
-                impl.get_runtime().sync()
-            host = np.empty(shape, dtype=to_numpy_type(array.element_data_type()))
-            owner._runtime_prog.copy_ndarray_to_host(array, host)
-            resource = self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape)
+            resource = self._name("resource")
             self._provider_data[identity] = (owner, resource, dtype, shape)
         else:
             _, resource, previous_dtype, previous_shape = cached
@@ -159,6 +157,25 @@ class _ExportContext:
             raise TaichiRuntimeError("AOT provider data binding changed within one export")
         self.private_bindings[name] = owner
         self._private_names[name] = resource
+
+    def materialize_provider_data(self):
+        """Complete and read all selected allocations under one submission lock."""
+        import numpy as np
+
+        from taichi_forge.lang import impl
+        from taichi_forge.lang.util import to_numpy_type
+
+        pending = tuple(self._provider_data.values())
+        if not pending:
+            return
+        arrays = [owner.arr for owner, _, _, _ in pending]
+        hosts = [
+            np.empty(shape, dtype=to_numpy_type(array.element_data_type()))
+            for array, (_, _, _, shape) in zip(arrays, pending)
+        ]
+        impl.get_runtime().prog.copy_ndarrays_to_host(arrays, hosts, snapshot=True)
+        for (owner, name, dtype, shape), host in zip(pending, hosts):
+            self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, name=name)
 
     def kernel_binding(self, arg):
         if arg.name not in self._scalar_values:
@@ -374,7 +391,7 @@ def _node(context, node):
         raise TaichiRuntimeError("AOT execution Graph has unreconstructed fixed bindings")
 
 
-def export_graph(module, graph, *, gradients=None):
+def export_graph(module, graph, *, gradients=None, snapshot_state=False):
     """Preflight the entire region before publishing any module definitions."""
     with graph._lifecycle_lock:
         graph._check_runtime_valid()
@@ -386,7 +403,11 @@ def export_graph(module, graph, *, gradients=None):
         if getattr(spec, "_binding_executor_factory", None) is not None or getattr(spec, "_storage_plans", ()):
             raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         gradient_names = set((gradients or {}).values())
-        context = _ExportContext(module, set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names)
+        context = _ExportContext(
+            module,
+            set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names,
+            snapshot_state=snapshot_state,
+        )
         context.declare_private_bindings(spec.fixed_runtime_args)
         # Dispatch actions may already be flattened into ordinary physical
         # kernels. Reconstruct their concrete binding contracts before lowering
@@ -409,6 +430,7 @@ def export_graph(module, graph, *, gradients=None):
             for lease in spec.lifetime_leases
         ):
             raise TaichiRuntimeError("AOT execution Graph requires the selected binding validation recipe")
+        context.materialize_provider_data()
         mapped_gradients = {}
         for primal, gradient in (gradients or {}).items():
             if primal in context._scalar_values or gradient in context._scalar_values:

@@ -159,6 +159,8 @@ class LinearOperatorRecordableKernel {
       std::unordered_map<std::string, std::int32_t>;
   using FixedNdarrayArguments =
       std::vector<std::pair<std::string, Ndarray *>>;
+  enum class NdarrayRole { topology, numeric, workspace };
+  using FixedNdarrayRoles = std::unordered_map<std::string, NdarrayRole>;
 
   LinearOperatorRecordableKernel(
       Program *program,
@@ -173,6 +175,7 @@ class LinearOperatorRecordableKernel {
       const aot::CompiledGraph *graph,
       FixedI32Arguments fixed_i32,
       FixedNdarrayArguments fixed_ndarrays,
+      FixedNdarrayRoles fixed_ndarray_roles,
       std::vector<SNodeTreeDependency> state_dependencies,
       OperatorResourceStamp stamp,
       std::shared_ptr<void> generation_owner);
@@ -185,6 +188,7 @@ class LinearOperatorRecordableKernel {
   Ndarray *numeric() const;
   const FixedI32Arguments &fixed_i32() const;
   const FixedNdarrayArguments &fixed_ndarrays() const;
+  const FixedNdarrayRoles &fixed_ndarray_roles() const;
   const std::vector<SNodeTreeDependency> &state_dependencies() const;
   OperatorResourceStamp resource_stamp() const;
 
@@ -197,6 +201,7 @@ class LinearOperatorRecordableKernel {
   Ndarray *numeric_{nullptr};
   FixedI32Arguments fixed_i32_;
   FixedNdarrayArguments fixed_ndarrays_;
+  FixedNdarrayRoles fixed_ndarray_roles_;
   std::vector<SNodeTreeDependency> state_dependencies_;
   OperatorResourceStamp stamp_;
   std::shared_ptr<void> generation_owner_;

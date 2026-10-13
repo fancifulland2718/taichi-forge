@@ -10217,7 +10217,8 @@ void Program::copy_ndarray_to_host(Ndarray *src,
 void Program::copy_ndarrays_to_host(const Ndarray *const *srcs,
                                     void *const *dsts,
                                     const std::size_t *bytes,
-                                    std::size_t count) {
+                                    std::size_t count,
+                                    bool snapshot) {
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   TI_ERROR_IF(count > 0 && (!srcs || !dsts || !bytes),
@@ -10247,6 +10248,12 @@ void Program::copy_ndarrays_to_host(const Ndarray *const *srcs,
   }
   if (total_bytes == 0) {
     return;
+  }
+  // Keep completion and every read in the same submission critical section.
+  // A Python-side synchronize followed by separate copies permits another
+  // thread to submit a state update between arrays in one exported snapshot.
+  if (snapshot) {
+    synchronize();
   }
   ScopedRuntimeTransferStatistics transfer_statistics(
       this, RuntimeTransferKind::kDeviceToHost, total_bytes);

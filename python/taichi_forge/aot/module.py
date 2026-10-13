@@ -418,7 +418,7 @@ class Module:
             raise ValueError("AOT data digest collision")
         return key
 
-    def add_execution_plan(self, name, plan, *, gradients=None):
+    def add_execution_plan(self, name, plan, *, gradients=None, snapshot_state=False):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
         An ExecutionPlan requires its kernels to be exported first. A compiled
@@ -428,12 +428,18 @@ class Module:
         publication. The resulting plan owns no live Python callback,
         Graph definition or device handle; the consumer binds arrays and records
         native execution at its cold boundary.
+
+        ``snapshot_state=True`` explicitly snapshots qualified provider workspace
+        at export. Each prepared consumer owns an independent initialized copy.
+        This does not export live fields or unsupported resource recipes.
         """
         from taichi_forge_runtime.aot import ExecutionPlan
         from taichi_forge.graph._graph import Graph
 
         if not isinstance(name, str) or not name or "\0" in name:
             raise ValueError("Execution plan name must be a nonempty string without NUL")
+        if type(snapshot_state) is not bool:
+            raise TypeError("snapshot_state must be a bool")
         if self._graph_export_failed:
             raise TaichiRuntimeError("A Graph kernel export failed; create a new AOT module")
         if name in self._execution_plans:
@@ -441,11 +447,13 @@ class Module:
         if isinstance(plan, Graph):
             from taichi_forge.aot._graph_export import export_graph
 
-            plan = export_graph(self, plan, gradients=gradients)
+            plan = export_graph(self, plan, gradients=gradients, snapshot_state=snapshot_state)
         elif not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or compiled Graph")
         elif gradients is not None:
             raise ValueError("Specify gradients on the ExecutionPlan itself")
+        elif snapshot_state:
+            raise ValueError("snapshot_state requires a compiled Graph")
         snapshot = ExecutionPlan.from_json(plan.to_json())
         missing = set(snapshot.kernel_entries) - self._exported_kernels.keys()
         if missing:

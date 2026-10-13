@@ -2911,6 +2911,7 @@ LinearOperatorRecordableKernel::LinearOperatorRecordableKernel(
     const aot::CompiledGraph *graph,
     FixedI32Arguments fixed_i32,
     FixedNdarrayArguments fixed_ndarrays,
+    FixedNdarrayRoles fixed_ndarray_roles,
     std::vector<SNodeTreeDependency> state_dependencies,
     OperatorResourceStamp stamp,
     std::shared_ptr<void> generation_owner)
@@ -2918,6 +2919,7 @@ LinearOperatorRecordableKernel::LinearOperatorRecordableKernel(
       graph_(graph),
       fixed_i32_(std::move(fixed_i32)),
       fixed_ndarrays_(std::move(fixed_ndarrays)),
+      fixed_ndarray_roles_(std::move(fixed_ndarray_roles)),
       state_dependencies_(std::move(state_dependencies)),
       stamp_(stamp),
       generation_owner_(std::move(generation_owner)) {
@@ -2925,6 +2927,13 @@ LinearOperatorRecordableKernel::LinearOperatorRecordableKernel(
                   !generation_owner_,
               "Recordable LinearOperator Graph actions require a live "
               "Program, non-empty Graph, and immutable generation.");
+  TI_ERROR_IF(fixed_ndarrays_.size() != fixed_ndarray_roles_.size(),
+              "Recordable Graph resource roles must cover every fixed array.");
+  for (const auto &[name, value] : fixed_ndarrays_) {
+    TI_ERROR_IF(!value || !fixed_ndarray_roles_.count(name),
+                "Recordable Graph array '{}' requires storage and a role.",
+                name);
+  }
   for (const auto &dispatch : graph_->dispatches) {
     TI_ERROR_IF(!dispatch.ti_kernel,
                 "Recordable LinearOperator Graph actions require JIT "
@@ -2964,6 +2973,11 @@ LinearOperatorRecordableKernel::fixed_i32() const {
 const LinearOperatorRecordableKernel::FixedNdarrayArguments &
 LinearOperatorRecordableKernel::fixed_ndarrays() const {
   return fixed_ndarrays_;
+}
+
+const LinearOperatorRecordableKernel::FixedNdarrayRoles &
+LinearOperatorRecordableKernel::fixed_ndarray_roles() const {
+  return fixed_ndarray_roles_;
 }
 
 const std::vector<SNodeTreeDependency> &
@@ -3551,8 +3565,8 @@ ExperimentalPreconditionerPlanHandle::recordable_kernel(
   }
   return std::make_shared<LinearOperatorRecordableKernel>(
       record->program(), record->graph(), record->fixed_i32(),
-      record->fixed_ndarrays(), record->state_dependencies(),
-      record->resource_stamp(), std::move(owner));
+      record->fixed_ndarrays(), record->fixed_ndarray_roles(),
+      record->state_dependencies(), record->resource_stamp(), std::move(owner));
 }
 
 std::unique_ptr<ExperimentalPreconditionerSession>
@@ -4239,6 +4253,7 @@ using GraphNdarrayArguments =
 struct GraphActionOwnedResource {
   std::string name;
   Ndarray *value{nullptr};
+  LinearOperatorRecordableKernel::NdarrayRole role;
 };
 
 struct GraphActionNumericSpec {
@@ -4640,22 +4655,26 @@ class CompiledGraphActionProvider {
                           : OperatorExecutionKind::compiled_graph,
         has_adjoint_);
 
-    auto snapshot_fixed = [&](const GraphNdarrayArguments &arguments) {
-      for (const auto &[name, source] : arguments) {
-        Ndarray *owned = program_->create_ndarray(
-            source->get_element_data_type(), source->shape, source->layout,
-            false);
-        try {
-          program_->copy_ndarray_fast(owned, const_cast<Ndarray *>(source));
-          definition_->fixed_ndarrays.push_back({name, owned});
-        } catch (...) {
-          program_->delete_ndarray(owned);
-          throw;
-        }
-      }
-    };
-    snapshot_fixed(topology);
-    snapshot_fixed(workspace);
+    auto snapshot_fixed =
+        [&](const GraphNdarrayArguments &arguments,
+            LinearOperatorRecordableKernel::NdarrayRole role) {
+          for (const auto &[name, source] : arguments) {
+            Ndarray *owned =
+                program_->create_ndarray(source->get_element_data_type(),
+                                         source->shape, source->layout, false);
+            try {
+              program_->copy_ndarray_fast(owned, const_cast<Ndarray *>(source));
+              definition_->fixed_ndarrays.push_back({name, owned, role});
+            } catch (...) {
+              program_->delete_ndarray(owned);
+              throw;
+            }
+          }
+        };
+    snapshot_fixed(topology,
+                   LinearOperatorRecordableKernel::NdarrayRole::topology);
+    snapshot_fixed(workspace,
+                   LinearOperatorRecordableKernel::NdarrayRole::workspace);
     for (const auto &[name, source] : numeric) {
       definition_->numeric_specs.push_back(
           {name, source->get_element_data_type(), source->shape,
@@ -4718,18 +4737,21 @@ class CompiledGraphActionProvider {
         "into an outer Graph yet; rebuild the provider with direct "
         "dispatches.");
     LinearOperatorRecordableKernel::FixedNdarrayArguments fixed_ndarrays;
+    LinearOperatorRecordableKernel::FixedNdarrayRoles fixed_ndarray_roles;
     fixed_ndarrays.reserve(definition_->fixed_ndarrays.size() +
                            current_generation_->numeric_ndarrays.size());
     for (const auto &resource : definition_->fixed_ndarrays) {
       fixed_ndarrays.emplace_back(resource.name, resource.value);
+      fixed_ndarray_roles.emplace(resource.name, resource.role);
     }
     for (const auto &resource : current_generation_->numeric_ndarrays) {
       fixed_ndarrays.emplace_back(resource.name, resource.value);
+      fixed_ndarray_roles.emplace(resource.name, resource.role);
     }
     return std::make_shared<LinearOperatorRecordableKernel>(
         program_, &graph, definition_->fixed_i32, std::move(fixed_ndarrays),
-        state_dependencies_, current_generation_->stamp,
-        current_generation_);
+        std::move(fixed_ndarray_roles), state_dependencies_,
+        current_generation_->stamp, current_generation_);
   }
 
   void update_numeric(
@@ -4843,7 +4865,9 @@ class CompiledGraphActionProvider {
         try {
           program_->copy_ndarray_fast(owned,
                                       const_cast<Ndarray *>(&source));
-          owned_resources.push_back({spec.name, owned});
+          owned_resources.push_back(
+              {spec.name, owned,
+               LinearOperatorRecordableKernel::NdarrayRole::numeric});
         } catch (...) {
           program_->delete_ndarray(owned);
           throw;

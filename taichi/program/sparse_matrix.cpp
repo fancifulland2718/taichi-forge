@@ -1346,15 +1346,23 @@ CompiledGraphLinearOperator::recordable_kernel() const {
       "inlined into an outer Graph yet; rebuild the provider with direct "
       "dispatches.");
   LinearOperatorRecordableKernel::FixedNdarrayArguments fixed_ndarrays;
+  LinearOperatorRecordableKernel::FixedNdarrayRoles fixed_ndarray_roles;
   fixed_ndarrays.reserve(
       owned_ndarray_arguments_.size() +
       current_record_generation_->numeric_arguments.size());
   for (const auto &argument : owned_ndarray_arguments_) {
     fixed_ndarrays.emplace_back(argument.name, argument.value);
+    fixed_ndarray_roles.emplace(
+        argument.name,
+        argument.role == NdarrayRole::workspace
+            ? LinearOperatorRecordableKernel::NdarrayRole::workspace
+            : LinearOperatorRecordableKernel::NdarrayRole::topology);
   }
   for (const auto &argument :
        current_record_generation_->numeric_arguments) {
     fixed_ndarrays.emplace_back(argument.name, argument.value);
+    fixed_ndarray_roles.emplace(
+        argument.name, LinearOperatorRecordableKernel::NdarrayRole::numeric);
   }
   const OperatorResourceStamp stamp{
       reinterpret_cast<std::uintptr_t>(program_),
@@ -1364,8 +1372,8 @@ CompiledGraphLinearOperator::recordable_kernel() const {
       numeric_version_,
       matrix_id()};
   return std::make_shared<LinearOperatorRecordableKernel>(
-      program_, graph_.get(), fixed_i32_arguments_,
-      std::move(fixed_ndarrays), state_dependencies_, stamp,
+      program_, graph_.get(), fixed_i32_arguments_, std::move(fixed_ndarrays),
+      std::move(fixed_ndarray_roles), state_dependencies_, stamp,
       current_record_generation_);
 }
 

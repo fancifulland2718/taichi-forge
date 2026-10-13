@@ -2326,6 +2326,7 @@ class _LinearOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable)
                     )
                 ),
                 tuple(record._state_dependencies),
+                tuple(sorted(dict(record._fixed_ndarray_roles).items())),
                 dispatch_schema,
             )
         topology = record._topology

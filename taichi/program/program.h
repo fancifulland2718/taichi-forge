@@ -1353,7 +1353,8 @@ class TI_DLL_EXPORT Program {
   void copy_ndarrays_to_host(const Ndarray *const *srcs,
                              void *const *dsts,
                              const std::size_t *bytes,
-                             std::size_t count);
+                             std::size_t count,
+                             bool snapshot = false);
   void copy_graph_observations_to_host(const Ndarray *const *srcs,
                                        void *const *dsts,
                                        const std::size_t *bytes,
