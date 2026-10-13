@@ -1,10 +1,12 @@
 """Cold Graph lowering into the shared, pointer-free execution description."""
 
+import ctypes
 import json
+import struct
 
 from taichi_forge._lib import core
 from taichi_forge.lang.exception import TaichiRuntimeError
-from taichi_forge_runtime.aot import ExecutionPlan
+from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
 def _snapshot(value):
@@ -25,6 +27,9 @@ class _ExportContext:
         self.reconstructed_binding_validators = set()
         self.private_bindings = {}
         self._private_names = {}
+        self._scalar_values = {}
+        self._scalar_symbols = {}
+        self._scalar_resources = {}
 
     def _name(self, kind):
         index = self._indices.get(kind, 0)
@@ -63,11 +68,16 @@ class _ExportContext:
         self.resources.append(dict(description, name=name))
         return name
 
-    def declare_private_arrays(self, bindings):
+    def declare_private_bindings(self, bindings):
         from taichi_forge.graph._ir import InternalNdarrayRequirement
         from taichi_forge.lang.util import cook_dtype
 
         for name, owner in bindings.items():
+            if type(owner) in (bool, int, float):
+                # The final spec value is the shared binding frame. Source
+                # nodes may retain equal but nonidentical earlier values.
+                self.private_bindings[name] = self._scalar_values[name] = owner
+                continue
             if not isinstance(owner, InternalNdarrayRequirement):
                 continue
             dtype = cook_dtype(owner.dtype)
@@ -89,19 +99,57 @@ class _ExportContext:
             self.private_bindings[name] = owner
 
     def binding(self, name):
+        if name in self._scalar_values:
+            raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")
         return self._private_names.get(name, name)
+
+    def kernel_binding(self, arg):
+        if arg.name not in self._scalar_values:
+            return self.binding(arg.name)
+        if arg.tag != core.ArgKind.SCALAR:
+            raise TaichiRuntimeError("AOT fixed scalar is used as a non-scalar argument")
+        dtype = str(arg.dtype())
+        symbol = (arg.name, dtype)
+        if symbol in self._scalar_symbols:
+            return self._scalar_symbols[symbol]
+        value = self._scalar_values[arg.name]
+        try:
+            if dtype in ("f16", "f32"):
+                # F32 matches Graph's C++ cast, including overflow to infinity;
+                # F16 also uses a float32 payload in the AOT scalar ABI.
+                value = ctypes.c_float(float(value)).value
+            resource = Scalar(dtype, value).resource(arg.name)
+        except (ValueError, TypeError, OverflowError, struct.error) as error:
+            raise TaichiRuntimeError(f"AOT fixed scalar {arg.name!r} cannot be encoded as {dtype}") from error
+        identity = (dtype, resource["bits"])
+        name = self._scalar_resources.get(identity)
+        if name is None:
+            name = self._name("resource")
+            self._scalar_resources[identity] = name
+            resource["name"] = name
+            self.resources.append(resource)
+        self._scalar_symbols[symbol] = name
+        return name
 
     def declared_bindings(self, bindings):
         return {
             name: owner
             for name, owner in bindings.items()
-            if name in self.private_bindings and self.private_bindings[name] is owner
+            if name in self.private_bindings
+            and (
+                self.private_bindings[name] is owner
+                or (
+                    name in self._scalar_values
+                    and type(owner) in (bool, int, float)
+                    and owner == self._scalar_values[name]
+                )
+            )
         }
 
-    def require_private_arrays(self, bindings):
+    def require_private_bindings(self, bindings):
         if len(self.declared_bindings(bindings)) != len(bindings):
             raise TaichiRuntimeError(
-                "AOT fixed bindings require a reconstruction description; live arrays/scalars are not declarations"
+                "AOT fixed bindings require a reconstruction description; live arrays and unsupported values are not declarations"
             )
 
     def native(self, provider, operation, *, bindings, parameters=None, version=1):
@@ -128,7 +176,7 @@ class _ExportContext:
             name = self._name("kernel")
             self._kernel_names[id(kernel)] = name
             self.kernels[name] = kernel
-        self.operations.append(dict(kind="kernel", entry=name, arguments=[self.binding(arg.name) for arg in args]))
+        self.operations.append(dict(kind="kernel", entry=name, arguments=[self.kernel_binding(arg) for arg in args]))
 
 
 def _native(context, executable):
@@ -137,6 +185,8 @@ def _native(context, executable):
         raise TaichiRuntimeError(f"AOT native Graph needs a reconstruction description: {type(executable).__name__}")
     if action.temporary_bindings:
         raise TaichiRuntimeError("AOT native Graph temporary bindings require a resource recipe")
+    if any(name in context._scalar_values for name in action.fixed_bindings):
+        raise TaichiRuntimeError("AOT native fixed scalars require a typed reconstruction recipe")
     recording = action.backend_command_recording
     # Subclasses must explicitly qualify their own semantics. Inheriting the
     # base export of a callback/epilogue variant would silently lose work.
@@ -171,7 +221,7 @@ def _sequence(context, sequence):
         or sequence._derived_runtime_arg_names
     ):
         raise TaichiRuntimeError("AOT sequence requires explicit control/private resource reconstruction")
-    context.require_private_arrays(sequence._fixed_runtime_args)
+    context.require_private_bindings(sequence._fixed_runtime_args)
     for item in sequence._items:
         if item[0] != "dispatch":
             raise TaichiRuntimeError(f"AOT sequence cannot reconstruct {item[0]!r} yet")
@@ -205,7 +255,7 @@ def _node(context, node):
     if any(dispatch.dispatch_packet is not None for dispatch in node.recording_dispatches):
         raise TaichiRuntimeError("AOT execution Graph does not yet reconstruct indirect dispatch")
     if not node.source_native_count:
-        context.require_private_arrays(node.fixed_runtime_args)
+        context.require_private_bindings(node.fixed_runtime_args)
         if len(node.recording_dispatches) != node.dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete symbolic dispatch metadata")
         dispatches = node.compiled_graph._physical_jit_dispatch_sources
@@ -265,7 +315,7 @@ def export_graph(module, graph, *, gradients=None):
             raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         gradient_names = set((gradients or {}).values())
         context = _ExportContext(module, set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names)
-        context.declare_private_arrays(spec.fixed_runtime_args)
+        context.declare_private_bindings(spec.fixed_runtime_args)
         for node in graph._spec.nodes:
             _node(context, node)
         if any(
@@ -279,6 +329,8 @@ def export_graph(module, graph, *, gradients=None):
             raise TaichiRuntimeError("AOT execution Graph requires the selected binding validation recipe")
         mapped_gradients = {}
         for primal, gradient in (gradients or {}).items():
+            if primal in context._scalar_values or gradient in context._scalar_values:
+                raise TaichiRuntimeError("AOT gradient bindings require ndarrays")
             primal, gradient = context.binding(primal), context.binding(gradient)
             if primal in mapped_gradients and mapped_gradients[primal] != gradient:
                 raise TaichiRuntimeError("AOT aliases of one primal must share the same gradient resource")

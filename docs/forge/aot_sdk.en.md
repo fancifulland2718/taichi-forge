@@ -275,10 +275,19 @@ now export as private resources with one-time zero initialization. Symbols shari
 the same declaration retain one allocation, including kernel/provider and explicit
 gradient bindings. Every consumer preparation owns fresh state; this reconstructs
 the declaration, not the contents of an already executed producer. Live fixed arrays
-and fixed scalars still require separate reconstruction contracts. Small
+still require separate reconstruction contracts. Small
 CPU/CUDA/Vulkan tests cover accumulation, explicit reverse kernels, aliases and
 re-preparation; a CUDA GEMM sequence covers a private intermediate and its explicit
 input adjoint after producer closure.
+
+Fixed built-in Python scalars now use the final Graph binding frame and each
+physical dispatch's argument dtype. Equal typed bit payloads share one constant
+description; different dtypes remain distinct. Three-backend tests cover integer
+counts, coefficients and explicit reverse kernels, with exact wide integers and
+negative zero. A CPU JIT Graph comparison also checks merged zero and F32 overflow.
+Custom numeric objects and native recordings without a typed scalar reconstruction
+contract still fail during export preflight. Labels and structured helper recipes
+continue to require their own reconstruction contract.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -380,7 +389,7 @@ Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
 elements. Matching Python/native components require private ABI 34. Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
-Automatic export of Graph fixed scalars still needs a symbolic type contract.
+Ordinary Graph fixed scalars use this same resource format during automatic export.
 
 Declare `gradients={"primal_name": "gradient_name"}` on the plan to bind private
 or external arrays to exported explicit gradients. This reuses ordinary kernel

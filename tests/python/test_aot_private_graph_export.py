@@ -104,7 +104,7 @@ def test_aot_private_graph_rejects_live_storage_before_publication():
     builder.dispatch(copy, source, output)
     graph = builder.compile()
     module = ti.aot.Module()
-    with pytest.raises(ti.TaichiRuntimeError, match="live arrays/scalars"):
+    with pytest.raises(ti.TaichiRuntimeError, match="live arrays"):
         module.add_execution_plan("invalid", graph)
     assert not module._content and not module._exported_kernels and not module._execution_plans
     graph.close()
@@ -116,9 +116,9 @@ def test_aot_private_array_feeds_native_recording(tmp_path):
         pytest.skip("cuBLAS required")
 
     @ti.kernel
-    def produce(x: ti.types.ndarray(ti.f32, ndim=2), a: ti.types.ndarray(ti.f32, ndim=2)):
+    def produce(x: ti.types.ndarray(ti.f32, ndim=2), a: ti.types.ndarray(ti.f32, ndim=2), factor: ti.f32):
         for i, k in a:
-            a[i, k] = 2 * x[i, k]
+            a[i, k] = factor * x[i, k]
 
     @ti.kernel
     def adjoint(b: ti.types.ndarray(ti.f32, ndim=2), dx: ti.types.ndarray(ti.f32, ndim=2)):
@@ -131,7 +131,9 @@ def test_aot_private_array_feeds_native_recording(tmp_path):
     builder = ti.graph.GraphBuilder()
     private = builder.private_ndarray("a", ti.f32, (5, 7))
     public = {key: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, key, ti.f32, ndim=2) for key in ("x", "b", "dx")}
-    builder.dispatch(produce, public["x"], private)
+    factor = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "factor", ti.f32)
+    builder._bind_internal_runtime_arg(factor, 2.0)
+    builder.dispatch(produce, public["x"], private, factor)
     recording = ti.hardware.linalg.CublasGemmRecording(5, 3, 7, output="y")
     builder.append_native(recording)
     builder.dispatch(adjoint, public["b"], public["dx"])

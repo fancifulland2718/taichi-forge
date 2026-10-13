@@ -53,11 +53,15 @@
 
 - Graph 自动导出可重建声明式私有 ndarray，保留 kernel/provider 参数间的共享
   分配身份和梯度别名。各 preparation 从全新状态开始，暂不自动保存 live 数组
-  快照或重建固定 scalar。
+  快照。
 
 - ExecutionPlan 资源支持通过 `Scalar.resource(name)` 声明不可变 typed scalar。
   精确位载荷保留宽整数与负零，复用普通 kernel 参数绑定，不分配私有设备存储。
   该公共资源扩展将 private ABI 更新为 34。
+
+- Graph 自动导出可按最终绑定值和物理参数类型重建固定内建标量，按 dtype 与位载荷
+  共用常量描述，保留宽整数和带符号的零，不增加 kernel 或设备分配。原生 recording
+  的 scalar 绑定仍需自己的 typed 重建合同。
 
 - 普通 CUDA FFT recording 可导出共享原生计划，覆盖批量 C2C/R2C/C2R 和显式物理
   布局；同计划的正反变换保留一份 workspace。小规模独立/借用消费测试覆盖显式谱

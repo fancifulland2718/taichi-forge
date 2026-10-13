@@ -230,9 +230,15 @@ CUDA Graph handle，也不保证不同 AOT 目标生成完全相同的机器码�
 Graph 实例拥有的 ndarray 声明（`private_ndarray` / `GraphOwnedNdarray`）可导出为
 首次清零的私有资源。同一声明的多个符号共享一份分配，kernel/provider 参数和显式
 梯度绑定统一映射。每份消费端 preparation 拥有全新状态；这里重建声明，不复制已
-执行过的生产端数组内容。固定的 live 数组和固定 scalar 仍需单独重建合同。
+执行过的生产端数组内容。固定的 live 数组仍需单独重建合同。
 CPU/CUDA/Vulkan 小规模测试覆盖状态累积、显式反向、别名与重新准备；CUDA GEMM
 序列另验证私有中间量和生产端关闭后的显式输入伴随。
+
+固定的 Python 内建标量按 Graph 最终绑定值及每个物理 dispatch 的参数 dtype
+自动导出。相同类型和位载荷共用常量描述，不同 dtype 保持区分。三后端已验证
+计数、系数、显式反向 kernel，以及宽整数和负零；CPU 另与真实 JIT Graph 对照
+合并后的零及 F32 溢出。自定义数值对象、缺少 typed scalar 重建合同的原生 recording
+仍在导出预检期拒绝；标签和结构化 helper recipe 仍需各自的重建合同。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -308,7 +314,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
 配套 private ABI 34。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
-退休；CPU 另覆盖窄整数及 F16/F64。Graph 固定 scalar 的自动导出仍需符号类型合同。
+退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
 导出的显式梯度，复用普通 kernel 的绑定检查，不为 native 操作自动生成导数。同一
