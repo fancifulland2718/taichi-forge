@@ -214,7 +214,8 @@ prepared()
 
 当前自动路径覆盖 CPU/CUDA/Vulkan 的顺序 scalar/ndarray kernel dispatch，以及 CUDA
 `CublasGemmRecording`、`CutensorCaptureRecording`，以及使用普通 `CufftPlan1D` /
-`CufftPlanND` 的 `CufftRecording`。普通 Sequential 前后段保留次序。
+`CufftPlanND` 的 `CufftRecording`，以及动态刷新型 `CusparseLtCaptureRecording`
+（含共享 A 分组）。普通 Sequential 前后段保留次序。
 provider 自己提供描述以恢复原 compute/workspace 策略，同一 plan 的多次使用共用一份
 重建资源，不同 plan 对象保持独立。不序列化 vendor handle、函数地址、DLL 路径或 Python
 回调。同模块内重复导出会复用 kernel 特化；后端编译仍遵守模块的 AOT 目标和选项，
@@ -608,6 +609,12 @@ Windows CUDA/cuSPARSELt 0.9.1 已验证无 DSL/借用消费、合法稀疏输入
 C/D 反馈、独立实例、未初始化读取/别名回滚和在途 close/reset。显式伴随不对稀疏
 结构选择或 f16 舍入求导。CPU/Vulkan 不声明这些 CUDA 操作，任意 recording 导出
 仍是独立待办。
+
+动态刷新型 cuSPARSELt recording 可直接从顺序 Graph 导出，保留每个压缩阶段、共享 A
+分组、系数、alignment，以及配置后的 algorithm/split-K/ReLU 参数。分组先压缩一次
+再执行各乘法；同资源上的独立 recording 仍保留各自的压缩，未知 plan 子类明确拒绝。
+snapshot recording 没有可持久化的原始 A 数据，因此自动导出会在添加 kernel 前报错；
+固定权重使用上述显式初始化计划。导出不会回读当前厂商压缩缓冲。
 
 CUDA AmgX 复用相同的 provider 配置、资源注册表和外部 adapter C ABI。为 `"amgx"`
 配置对应 SDK adapter 与应用提供的兼容厂商库。标量 CSR 资源及操作的版本均为 1：

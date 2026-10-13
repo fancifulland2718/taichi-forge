@@ -327,6 +327,13 @@ class CusparseLtMatmulPlan:
                 from taichi_forge.hardware._cusparselt_config import _read
 
                 self._configuration, self._algorithm_count = _read(provider, handle)
+            self._aot_plan_parameters = dict(m=m, n=n, k=k, alignment_bytes=alignment_bytes)
+            if self._configuration is not None:
+                self._aot_plan_parameters.update(
+                    (name, self._configuration[name])
+                    for name in ("algorithm_id", "split_k", "split_k_mode", "split_k_buffers")
+                )
+                self._aot_plan_parameters["relu"] = self._configuration["activation"] == "relu"
             if (
                 _expected_configuration is not None
                 and self._configuration != _expected_configuration

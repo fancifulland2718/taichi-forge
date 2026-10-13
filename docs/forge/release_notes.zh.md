@@ -47,6 +47,10 @@
   布局；同计划的正反变换保留一份 workspace。小规模独立/借用消费测试覆盖显式谱
   伴随及退休；callback/separable 变体仍需独立合同。
 
+- 动态刷新型 cuSPARSELt recording 复用相同自动导出合同，保留共享压缩、
+  algorithm/split-K/ReLU 配置和显式固定结构伴随。snapshot 仍使用手写执行计划，
+  显式描述原始权重初始化。
+
 - 带版本的 `ExecutionPlan` 可持久化已导出 kernel 与设备 copy/32 位 fill/稳定 sort/compact 的顺序，
   绑定后准备成一个 CPU/CUDA/Vulkan 原生执行对象；目录和 `.tcm` 均保存描述。
   LLVM AOT 已通过 Vulkan 使用的同一虚拟目录层按需读取归档，无需解压到磁盘。

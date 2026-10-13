@@ -55,6 +55,11 @@ lifetimes. The entries below describe the changes.
   one plan retain one workspace. Small standalone/borrowed checks cover explicit
   spectral adjoints and retirement; callback/separable variants remain excluded.
 
+- Refreshing cuSPARSELt recordings use the same automatic export contract,
+  preserving shared compression, algorithm/split-K/ReLU configuration and
+  explicit fixed-pattern adjoints. Snapshots still use handwritten execution
+  plans with explicit raw-weight initialization.
+
 - A versioned `ExecutionPlan` can persist exported kernels interleaved with
   device buffer copies, 32-bit fills, stable sort and compact, then prepare one native CPU/CUDA/Vulkan
   execution with fixed bindings. Descriptions are included in directory and

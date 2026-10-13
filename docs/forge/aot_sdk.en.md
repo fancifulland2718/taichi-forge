@@ -251,7 +251,8 @@ prepared()
 
 The current automatic path covers sequential scalar/ndarray kernel dispatches
 on CPU/CUDA/Vulkan, CUDA `CublasGemmRecording`, `CutensorCaptureRecording`, and
-`CufftRecording` with ordinary `CufftPlan1D`/`CufftPlanND` plans.
+`CufftRecording` with ordinary `CufftPlan1D`/`CufftPlanND` plans, and refreshing
+`CusparseLtCaptureRecording` (including shared-A groups).
 Ordinary Sequential prefixes/suffixes preserve order. Provider-owned descriptions
 reconstruct the original compute/workspace policy and share one resource for
 multiple uses of the same plan; distinct plan objects remain independent.
@@ -745,6 +746,15 @@ live B updates, ReLU, C/D feedback, independent instances,
 uninitialized-read/alias rollback and in-flight close/reset. The explicit adjoint
 does not differentiate sparsity selection or f16 rounding. CPU/Vulkan do not
 advertise these CUDA operations. Arbitrary recording export remains separate.
+
+Refreshing cuSPARSELt recordings can also be exported directly from a sequential
+Graph. The description preserves each compression epoch, shared-A groups,
+coefficients, alignment and configured algorithm/split-K/ReLU facts. A group
+compresses once before its products; separate recordings retain their individual
+compression steps even when they use the same resource. Unknown plan subclasses
+are rejected. Snapshot recordings have no portable raw-A payload, so automatic
+export rejects them before adding kernels; use the explicit initialization plan
+above for fixed weights. Export never reads back live compressed vendor buffers.
 
 CUDA AmgX uses the same provider configuration, resource registry and external
 adapter C ABI. Configure `"amgx"` with its SDK adapter and an application-supplied
