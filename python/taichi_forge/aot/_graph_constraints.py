@@ -5,7 +5,7 @@ import json
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
-def export_constraints(spec, binding):
+def export_constraints(spec, binding, *, additional=()):
     constraints = {}
 
     def add(value):
@@ -44,4 +44,6 @@ def export_constraints(spec, binding):
     for left, right in spec.memory_disjoint_pairs:
         left, right = sorted((binding(left), binding(right)))
         add(dict(kind="disjoint", left=left, right=right))
+    for requirement in additional:
+        add(requirement)
     return list(constraints.values())

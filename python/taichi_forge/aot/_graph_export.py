@@ -30,6 +30,9 @@ class _ExportContext:
         self._names = set(reserved_names) | set(module._exported_kernels)
         self._kernel_names = {id(kernel): name for name, kernel in module._exported_kernels.items()}
         self.reconstructed_binding_validators = set()
+        self.reconstructed_argument_binders = set()
+        self.binding_constraints = []
+        self._provider_data = {}
         self.private_bindings = {}
         self._private_names = {}
         self._scalar_values = {}
@@ -124,6 +127,38 @@ class _ExportContext:
         if name in self._scalar_values:
             raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")
         return self._private_names.get(name, name)
+
+    def provider_data_binding(self, name, owner):
+        """Snapshot a qualified immutable generation, once per native allocation."""
+        import numpy as np
+
+        from taichi_forge.graph._native import ProviderOwnedNdarrayBinding
+        from taichi_forge.lang import impl
+        from taichi_forge.lang.util import to_numpy_type
+
+        if type(owner) is not ProviderOwnedNdarrayBinding or owner._runtime_prog is not impl.get_runtime().prog:
+            raise TaichiRuntimeError("AOT provider data requires a live immutable generation binding")
+        identity = owner._runtime_allocation_identity
+        cached = self._provider_data.get(identity)
+        array = owner.arr
+        dtype, shape = str(array.element_data_type()), tuple(array.shape)
+        if tuple(array.total_shape()) != shape:
+            raise TaichiRuntimeError("AOT provider data currently requires scalar arrays")
+        if cached is None:
+            if not self._provider_data:
+                impl.get_runtime().sync()
+            host = np.empty(shape, dtype=to_numpy_type(array.element_data_type()))
+            owner._runtime_prog.copy_ndarray_to_host(array, host)
+            resource = self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape)
+            self._provider_data[identity] = (owner, resource, dtype, shape)
+        else:
+            _, resource, previous_dtype, previous_shape = cached
+            if (dtype, shape) != (previous_dtype, previous_shape):
+                raise TaichiRuntimeError("AOT provider allocation changed its data description")
+        if name in self.private_bindings and self.private_bindings[name] is not owner:
+            raise TaichiRuntimeError("AOT provider data binding changed within one export")
+        self.private_bindings[name] = owner
+        self._private_names[name] = resource
 
     def kernel_binding(self, arg):
         if arg.name not in self._scalar_values:
@@ -289,7 +324,13 @@ def _node(context, node):
         raise TaichiRuntimeError("AOT execution Graph does not yet reconstruct bounded dispatch")
     if any(dispatch.dispatch_packet is not None for dispatch in node.recording_dispatches):
         raise TaichiRuntimeError("AOT execution Graph does not yet reconstruct indirect dispatch")
-    if not node.source_native_count:
+    if any(
+        manifest.execution_kind not in ("kernel_dispatch", "backend_command")
+        for manifest in node.native_action_manifests
+    ):
+        raise TaichiRuntimeError("AOT execution Graph contains an unsupported native execution kind")
+    command_count = sum(manifest.execution_kind == "backend_command" for manifest in node.native_action_manifests)
+    if not command_count:
         context.require_private_bindings(node.fixed_runtime_args)
         if len(node.recording_dispatches) != node.dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete symbolic dispatch metadata")
@@ -322,7 +363,7 @@ def _node(context, node):
         else:
             raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct recipe {item[0]!r}")
     if (
-        native_count != node.source_native_count
+        native_count != command_count
         or kernel_count != len(node.recording_dispatches)
         or native_count + kernel_count != node.dispatch_count
     ):
@@ -347,10 +388,20 @@ def export_graph(module, graph, *, gradients=None):
         gradient_names = set((gradients or {}).values())
         context = _ExportContext(module, set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names)
         context.declare_private_bindings(spec.fixed_runtime_args)
+        # Dispatch actions may already be flattened into ordinary physical
+        # kernels. Reconstruct their concrete binding contracts before lowering
+        # those kernels, without regenerating the selected dispatch recipe.
+        for lease in spec.lifetime_leases:
+            exporter = type(lease).__dict__.get("_export_aot_bindings")
+            if exporter is not None:
+                exporter(lease, context)
         for node in graph._spec.nodes:
             _node(context, node)
         if any(
-            callable(getattr(lease, "bind_graph_arguments", None))
+            (
+                callable(getattr(lease, "bind_graph_arguments", None))
+                and id(lease) not in context.reconstructed_argument_binders
+            )
             or (
                 callable(getattr(lease, "validate_graph_bindings", None))
                 and id(lease) not in context.reconstructed_binding_validators
@@ -373,7 +424,7 @@ def export_graph(module, graph, *, gradients=None):
             initialization=context.initialization or None,
             resources=context.resources,
             gradients=mapped_gradients or None,
-            constraints=export_constraints(spec, context.binding) or None,
+            constraints=export_constraints(spec, context.binding, additional=context.binding_constraints) or None,
         )
         # An opaque provider workspace must not accidentally become a public
         # input to some other kernel. Resource recipes must cover the full use.

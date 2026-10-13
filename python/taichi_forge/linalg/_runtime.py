@@ -1927,7 +1927,7 @@ class LinearOperator:
 
         return PreparedOperatorPlan(self, input, out, adjoint=adjoint)
 
-    def graph_action(self, input, output, *, adjoint=False):
+    def graph_action(self, input, output, *, adjoint=False, update_policy="rebind"):
         """Return a recordable f32 Graph action for this operator apply.
 
         ``input`` and ``output`` are symbolic one-dimensional ndarray Graph
@@ -1940,14 +1940,26 @@ class LinearOperator:
         actually uses. A topology, schema, state-tree, or runtime-generation
         change still invalidates the compiled Graph and fails closed instead
         of rebuilding implicitly.
+
+        ``update_policy="pinned"`` selects one immutable provider generation
+        when the action is compiled, retaining symbolic input/output ports.
+        This currently requires a from_kernel provider. Its fixed data can be
+        exported with an AOT execution plan; publication of new numeric values
+        requires a new action to adopt them. Pinning itself does not copy data.
         """
         self._ensure_valid()
         if not isinstance(adjoint, bool):
             raise TypeError("adjoint must be bool")
+        if update_policy not in ("rebind", "pinned"):
+            raise ValueError("update_policy must be 'rebind' or 'pinned'")
         if self.dtype != f32:
             raise TaichiRuntimeError(
                 "LinearOperator Graph actions currently require f32"
             )
+        if update_policy == "pinned":
+            from taichi_forge.linalg._pinned_graph_operator import PinnedOperatorGraphNode
+
+            return PinnedOperatorGraphNode(self, input, output, adjoint)
         if self._composition_spec is not None:
             return _LinearOperatorCompositionGraphNode(self, input, output, adjoint)
         if not self._handle._supports_recordable_kernel():

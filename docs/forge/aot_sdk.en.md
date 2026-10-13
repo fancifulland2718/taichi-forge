@@ -356,6 +356,34 @@ the f32 chain uses an explicit sum adjoint followed by a real `.grad` kernel.
 This does not synthesize a reduction derivative, qualify every memory recipe,
 or provide full LinearOperator/SolvePlan or structured-control export.
 
+For a `LinearOperator.from_kernel` provider, explicitly pin its generation while
+keeping symbolic input/output ports:
+
+```python
+builder.append_native(operator.graph_action(x, y, update_policy="pinned"))
+builder.append_native(operator.graph_action(y, dx, adjoint=True, update_policy="pinned"))
+graph = builder.compile()
+module.add_execution_plan("apply_and_adjoint", graph)
+```
+
+The action selects its numeric/topology generation when compiled. Later numeric
+publications do not change it; create a new action to select another generation.
+Pinning adds no device allocation or host readback. Export synchronizes and copies
+the selected immutable arrays into ordinary artifact data, once per allocation
+within that export. Shared data entries and kernel definitions are deduplicated;
+each preparation owns its reconstructed arrays. Input/output contents remain live,
+and Graph-private intermediate ports remain private. The consumer validates exact
+scalar f32 vector extents and disjoint input/output storage during preparation.
+
+Windows CPU/CUDA/Vulkan tests cover a rectangular forward/transpose pair, numeric
+publication, two independent consumers, imported aliases, re-preparation and
+producer/consumer retirement. This exports an explicitly supplied adjoint, not an
+automatically generated provider derivative. The default `update_policy="rebind"`
+continues to follow compatible publications and is not silently frozen by export.
+Composition, `from_graph` live state/workspace and SolvePlan control still need
+their own reconstruction contracts. This Python extension uses existing ABI 38;
+it adds no provider library to the standalone consumer.
+
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
 too. This does not synthesize derivatives of native provider calls.
