@@ -94,6 +94,28 @@ struct PlanLease {
   }
 };
 
+struct CompressionScratch {
+  DeviceAllocationUnique allocation;
+  uint64_t address{0};
+  explicit CompressionScratch(Device &device, std::size_t bytes) {
+    if (!bytes)
+      return;
+    auto result = device.allocate_memory_unique({bytes});
+    if (result.second != RhiResult::success)
+      throw std::runtime_error(
+          "cuSPARSELt compression scratch allocation failed");
+    allocation = std::move(result.first);
+    address = reinterpret_cast<uint64_t>(
+        static_cast<cuda::CudaDevice &>(device).get_memory_addr(*allocation));
+  }
+  ~CompressionScratch() {
+    auto &cuda = CUDAContext::get_instance();
+    auto lock = cuda.get_submission_lock_guard();
+    auto guard = cuda.get_guard();
+    allocation.reset();
+  }
+};
+
 class CudaPlan final : public CusparseLtPlanResource {
  public:
   CudaPlan(Device &device,
@@ -114,14 +136,25 @@ class CudaPlan final : public CusparseLtPlanResource {
     return device_;
   }
   std::size_t workspace_bytes() const override {
-    return bytes_;
+    return bytes_ + (compression_scratch_.expired() ? 0 : sizes_[1]);
   }
-  void compress(uint64_t a, void *stream) {
+  std::shared_ptr<CompressionScratch> compression_scratch() {
+    auto &cuda = CUDAContext::get_instance();
+    auto lock = cuda.get_submission_lock_guard();
+    auto guard = cuda.get_guard();
+    auto scratch = compression_scratch_.lock();
+    if (!scratch) {
+      scratch = std::make_shared<CompressionScratch>(device_, sizes_[1]);
+      compression_scratch_ = scratch;
+    }
+    return scratch;
+  }
+  void compress(uint64_t a, uint64_t scratch, void *stream) {
     TiForgeCusparseLtCompressDesc desc{sizeof(desc),
                                        0,
                                        a,
                                        addresses_[0],
-                                       addresses_[1],
+                                       scratch,
                                        sizes_[1],
                                        reinterpret_cast<uint64_t>(stream)};
     plan_->runtime->check(plan_->api.compress_sparse_a(plan_->handle, &desc),
@@ -151,6 +184,9 @@ class CudaPlan final : public CusparseLtPlanResource {
   std::unique_ptr<PlanLease> plan_;
   std::array<DeviceAllocationUnique, 3> buffers_;
   std::array<uint64_t, 3> sizes_{}, addresses_{};
+  // Operations own the shared scratch. Snapshot initialization can retire it
+  // while retaining the compressed values and matmul workspace in this plan.
+  std::weak_ptr<CompressionScratch> compression_scratch_;
   std::size_t bytes_{0};
 };
 
@@ -194,7 +230,7 @@ CudaPlan::CudaPlan(Device &device,
     if (sizes_[i] > std::numeric_limits<std::size_t>::max() - bytes_)
       throw std::runtime_error("cuSPARSELt storage size overflows");
     bytes_ += static_cast<std::size_t>(sizes_[i]);
-    if (!sizes_[i])
+    if (!sizes_[i] || i == 1)
       continue;
     auto allocation =
         device_.allocate_memory_unique({static_cast<std::size_t>(sizes_[i])});
@@ -204,12 +240,13 @@ CudaPlan::CudaPlan(Device &device,
     addresses_[i] = reinterpret_cast<uint64_t>(
         static_cast<cuda::CudaDevice &>(device_).get_memory_addr(*buffers_[i]));
   }
+  bytes_ -= static_cast<std::size_t>(sizes_[1]);
 }
 
 class CudaCompression final : public NativeOperation {
  public:
   CudaCompression(std::shared_ptr<CudaPlan> plan, uint64_t a)
-      : plan_(std::move(plan)), a_(a) {
+      : plan_(std::move(plan)), scratch_(plan_->compression_scratch()), a_(a) {
   }
   Arch arch() const override {
     return Arch::cuda;
@@ -224,11 +261,12 @@ class CudaCompression final : public NativeOperation {
     state.initialized.insert(plan_.get());
   }
   void record_cuda(void *stream) override {
-    plan_->compress(a_, stream);
+    plan_->compress(a_, scratch_->address, stream);
   }
 
  private:
   std::shared_ptr<CudaPlan> plan_;
+  std::shared_ptr<CompressionScratch> scratch_;
   uint64_t a_;
 };
 

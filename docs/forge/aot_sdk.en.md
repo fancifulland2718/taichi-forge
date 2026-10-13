@@ -643,16 +643,25 @@ storage. This is checked before recording, independently for each preparation;
 no initialization check is added to replay. Each replay follows the declared
 sequence, so one compression can feed multiple multiplies without duplicate
 compression. Preparation does not advance the mathematical work. The example
-above refreshes on every replay. The common initialization phase can describe
-one-time compression; cuSPARSELt snapshot scratch retirement is still being
-qualified separately. Conditional initialization will need control-flow
-validation when structured AOT plans are supported.
+above refreshes on every replay. For fixed weights, move the `compress_f16`
+operation into `initialization=[...]` and leave the multiplies in `operations`.
+`prepared.initialize()` samples A and waits; A can then be changed or closed if
+no replay operation/resource needs it. A new preparation creates a new snapshot.
+Conditional initialization will need control-flow validation when structured
+AOT plans are supported.
 
 Each prepared instance owns independent compressed data and scratch. Their known
 bytes contribute once to `workspace_bytes`, regardless of the number of uses;
-opaque vendor storage remains excluded. Windows CUDA/cuSPARSELt 0.9.1 checks cover
+opaque vendor storage remains excluded. Compression operations share one scratch
+lease per plan. If compression occurs only during initialization, that scratch
+retires with the initialization commands; if replay compresses too, it remains
+live. Compressed values and matmul workspace persist. An explicit adjoint that
+needs dense A must retain it or declare a private array copied during initialization;
+the runtime does not invent a gradient-specific weight representation.
+Windows CUDA/cuSPARSELt 0.9.1 checks cover
 DSL-free and borrowed consumers, changing valid sparse inputs, shared compression,
-fixed-pattern explicit f32 adjoints, ReLU, C/D feedback, independent instances,
+fixed-pattern explicit f32 adjoints, one-time snapshots, scratch retirement,
+live B updates, ReLU, C/D feedback, independent instances,
 uninitialized-read/alias rollback and in-flight close/reset. The explicit adjoint
 does not differentiate sparsity selection or f16 rounding. CPU/Vulkan do not
 advertise these CUDA operations. Arbitrary recording export remains separate.

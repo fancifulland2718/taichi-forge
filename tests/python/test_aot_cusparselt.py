@@ -75,6 +75,10 @@ def test_cusparselt_aot_shared_compression_and_explicit_adjoint(tmp_path):
     module.add_kernel(energy)
     module.add_kernel(adjoint)
     module.add_execution_plan("shared_a", ti.aot.ExecutionPlan(operations, resources=[plan_resource()]))
+    from tests.python.aot_cusparselt_snapshot_probe import snapshot_plans
+
+    for name, plan in snapshot_plans().items():
+        module.add_execution_plan(name, plan)
     artifact = tmp_path / "cusparselt.tcm"
     module.archive(str(artifact))
     for mode in ("standalone", "borrowed"):

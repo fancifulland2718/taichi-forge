@@ -40,6 +40,16 @@ struct PreparedExecution {
       native_resources.pop_back();
     native_resource_workspace_bytes = 0;
   }
+  void refresh_resource_workspace_bytes() {
+    uint64_t total = 0;
+    for (const auto &resource : native_resources) {
+      const auto bytes = resource->workspace_bytes();
+      if (bytes > std::numeric_limits<uint64_t>::max() - total)
+        throw MemoryBindingError("Native resource workspace size overflow");
+      total += bytes;
+    }
+    native_resource_workspace_bytes = total;
+  }
   ~PreparedExecution() {
     initialization.reset();
     native.reset();
@@ -80,6 +90,7 @@ struct PreparedExecution {
     info.argument_bytes =
         native->argument_bytes() +
         (initialization ? initialization->argument_bytes() : 0);
+    refresh_resource_workspace_bytes();
     release_source_bindings();
     live = true;
   }
@@ -123,9 +134,7 @@ struct PreparedExecution {
       for (std::size_t i = native_resources.size(); i-- > 0;)
         if (!replay_resources.count(native_resources[i].get()))
           native_resources.erase(native_resources.begin() + i);
-      native_resource_workspace_bytes = 0;
-      for (const auto &resource : native_resources)
-        native_resource_workspace_bytes += resource->workspace_bytes();
+      refresh_resource_workspace_bytes();
       if (resources)
         resources->retain(replay_memories);
       info.argument_bytes = native->argument_bytes();
@@ -511,11 +520,6 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
       try {
         auto object = native_operation_registry().prepare_resource(
             preparation, decoded.at(native), native_inputs(*native));
-        const auto bytes = object->workspace_bytes();
-        if (bytes > std::numeric_limits<uint64_t>::max() -
-                        prepared->native_resource_workspace_bytes)
-          throw MemoryBindingError("Native resource workspace size overflow");
-        prepared->native_resource_workspace_bytes += bytes;
         prepared->native_resources.push_back(object);
         native_objects.emplace(resource.name, std::move(object));
       } catch (const std::invalid_argument &error) {

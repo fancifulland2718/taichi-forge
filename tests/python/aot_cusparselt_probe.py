@@ -153,6 +153,10 @@ def main(mode, artifact, adapter, vendor):
             near(read(small["c"]), expected)
         feedback.close()
 
+        from tests.python.aot_cusparselt_snapshot_probe import check_snapshots
+
+        snapshot_arrays, snapshot = check_snapshots(runtime, module)
+
         runtime.configure_provider("cusparselt", adapter_path=None)
         assert not runtime.probe_native_operation(kind)["available"]
         raises(lambda: plan.prepare(module, left))
@@ -165,11 +169,14 @@ def main(mode, artifact, adapter, vendor):
         another()
         check(right, reference(*other))
         another()
+        snapshot()
         if mode == "borrowed":
             ti.reset()
         else:
             module.close()
         raises(another)
+        raises(snapshot)
+        snapshot.close()
         another.close()
     if mode == "standalone":
         assert "taichi_forge" not in sys.modules
