@@ -26,6 +26,9 @@ struct ExecutionResources {
     std::vector<std::uint32_t> element_shape;
     // Cold allocation policy; runs once before explicit initialization/replay.
     bool zero_initialize{false};
+    // SHA-256 key of packed initial bytes in the module's data directory.
+    // Each materialization receives independent mutable device storage.
+    std::string initial_data;
   };
   struct Scalar {
     // Exact C API scalar payload, independent of JSON numeric precision.

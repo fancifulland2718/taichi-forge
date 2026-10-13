@@ -82,6 +82,7 @@ TiDataType scalar_type(const std::string &name) {
 
 ExecutionResourceBindings bind_execution_resources(
     Runtime &runtime,
+    taichi::lang::aot::Module &module,
     const taichi::lang::aot::ExecutionResources &resources,
     std::unordered_map<std::string, const TiArgument *> &arguments,
     std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts) {
@@ -89,6 +90,7 @@ ExecutionResourceBindings bind_execution_resources(
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
   std::vector<uint64_t> sizes(resources.order.size());
+  std::map<std::string, std::vector<std::uint8_t>> payloads;
   std::unordered_set<const TiArgument *> local, validated_sources;
   auto resolve = [&](const Recipes::Extent &ref) {
     const auto found = arguments.find(ref.array);
@@ -135,13 +137,25 @@ ExecutionResourceBindings bind_execution_resources(
       std::copy(desc->element_shape.begin(), desc->element_shape.end(),
                 array.elem_shape.dims);
       sizes[pos] = ndarray_storage_layout(array).bytes;
-      if (desc->zero_initialize) {
-        // Only private allocations may expose padding to the internal fill.
+      if (!desc->initial_data.empty() &&
+          resources.materialize[resources.order[pos]]) {
+        const auto found = payloads.find(desc->initial_data);
+        if (found == payloads.end())
+          payloads.emplace(desc->initial_data,
+                           module.load_data(desc->initial_data, sizes[pos]));
+        else if (found->second.size() != sizes[pos])
+          throw MemoryBindingError(
+              "Execution initial data size differs between resource "
+              "declarations");
+      }
+      if (desc->zero_initialize ||
+          (!desc->initial_data.empty() && sizes[pos])) {
+        // Only private allocations may expose padding to fills and uploads.
         // Keep the logical ndarray extent unchanged, including empty arrays.
         const auto bytes = std::max<uint64_t>(1, sizes[pos]);
         if (bytes > std::numeric_limits<uint64_t>::max() - 3)
           throw MemoryBindingError(
-              "Execution zero initialization size overflow");
+              "Execution resource initialization size overflow");
         sizes[pos] = (bytes + 3) & ~uint64_t(3);
       }
     } else if (const auto *constant =
@@ -206,6 +220,16 @@ ExecutionResourceBindings bind_execution_resources(
     layouts[primal] = &result.gradients.back();
   }
 
+  // Vulkan buffer transfers require four-byte extents. Keep artifact hashes
+  // and size checks over logical bytes; initialize only owned tail padding.
+  for (auto &[key, bytes] : payloads) {
+    if (bytes.size() > std::numeric_limits<std::size_t>::max() - 3)
+      throw MemoryBindingError("Execution initial data size overflow");
+    bytes.resize((bytes.size() + 3) & ~std::size_t(3), 0);
+  }
+  std::vector<taichi::lang::DevicePtr> destinations;
+  std::vector<const void *> sources;
+  std::vector<std::size_t> upload_sizes;
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     auto &argument = result.arguments[pos];
     if (std::holds_alternative<Recipes::Array>(
@@ -220,7 +244,29 @@ ExecutionResourceBindings bind_execution_resources(
               .zero_initialize)
         result.zero_initializations.push_back(
             {argument.value.ndarray.memory, sizes[pos]});
+      const auto &key = std::get<Recipes::Array>(
+                            resources.declarations[resources.order[pos]].value)
+                            .initial_data;
+      if (!key.empty() && sizes[pos]) {
+        destinations.push_back(runtime.get_memory(argument.value.ndarray.memory)
+                                   .allocation.get_ptr());
+        sources.push_back(payloads.at(key).data());
+        upload_sizes.push_back(static_cast<std::size_t>(sizes[pos]));
+      }
     }
+  }
+  // Upload only owned initial state, before any provider can inspect it. The
+  // RHI transfer owns/synchronizes staging, so host payloads retire here. Batch
+  // Vulkan copies in one submission; chunk only at the RHI count ABI limit.
+  for (std::size_t offset = 0; offset < destinations.size();) {
+    const auto count = static_cast<int>(std::min<std::size_t>(
+        destinations.size() - offset, std::numeric_limits<int>::max()));
+    if (runtime.get().upload_data(destinations.data() + offset,
+                                  sources.data() + offset,
+                                  upload_sizes.data() + offset,
+                                  count) != taichi::lang::RhiResult::success)
+      throw MemoryBindingError("Unable to upload execution initial data");
+    offset += count;
   }
   return result;
 }

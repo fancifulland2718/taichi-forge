@@ -41,7 +41,11 @@ def external_arguments(resources, gradients, arguments):
             raise ValueError("Execution resource entries must be objects")
         kind = resource.get("kind")
         if kind == "ndarray":
-            required, optional = {"kind", "name", "dtype", "shape"}, {"element_shape", "zero_initialize"}
+            required, optional = {"kind", "name", "dtype", "shape"}, {
+                "element_shape",
+                "zero_initialize",
+                "initial_data",
+            }
         elif kind == "extent":
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
         elif kind == "scalar":
@@ -65,6 +69,17 @@ def external_arguments(resources, gradients, arguments):
         elif kind == "ndarray":
             if type(resource.get("zero_initialize", False)) is not bool:
                 raise ValueError("Execution zero_initialize must be a boolean")
+            if "initial_data" in resource:
+                key = resource["initial_data"]
+                if (
+                    not isinstance(key, str)
+                    or len(key) != 64
+                    or any(c not in "0123456789abcdef" for c in key)
+                    or resource.get("zero_initialize", False)
+                ):
+                    raise ValueError(
+                        "Execution initial_data requires a lowercase SHA-256 key and no zero initialization"
+                    )
             shape, element_shape = resource["shape"], resource.get("element_shape", [])
             if not isinstance(shape, list) or not isinstance(element_shape, list):
                 raise ValueError("Execution resource shapes must be arrays")

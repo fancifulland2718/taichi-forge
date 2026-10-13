@@ -197,6 +197,17 @@ class ExecutionPlan:
 
         resources, gradients = document.get("resources", []), document.get("gradients", {})
         self._retained_argument_names = retained_arguments(resources, gradients, arguments)
+        self.data_entries = tuple(
+            sorted(
+                {
+                    resource["initial_data"]
+                    for resource in resources
+                    if resource["kind"] == "ndarray"
+                    and "initial_data" in resource
+                    and resource["name"] in self._retained_argument_names
+                }
+            )
+        )
         from ._constraints import validate_constraints
 
         validate_constraints(document.get("constraints", []), self._retained_argument_names)

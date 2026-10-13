@@ -63,6 +63,10 @@ class LlvmAotModule final : public aot::Module {
       const std::string &name) override;
 
  protected:
+  const io::VirtualDir *data_source() const override {
+    return directory_.get();
+  }
+
   LlvmOfflineCache::KernelCacheData load_kernel_from_cache(
       const std::string &name);
 

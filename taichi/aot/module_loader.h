@@ -13,6 +13,10 @@
 #include "taichi/ir/snode.h"
 #include "taichi/aot/graph_data.h"
 
+namespace taichi::io {
+struct VirtualDir;
+}
+
 namespace taichi::lang {
 
 struct RuntimeContext;
@@ -100,6 +104,11 @@ class TI_DLL_EXPORT Module {
   KernelTemplate *get_kernel_template(const std::string &name);
   Field *get_snode_tree(const std::string &name);
 
+  // Read and verify only a selected immutable data payload. No expanded host
+  // payload cache is retained by the module; consumers own the returned bytes.
+  std::vector<std::uint8_t> load_data(const std::string &sha256,
+                                      std::uint64_t expected_bytes) const;
+
   virtual std::unique_ptr<aot::CompiledGraph> get_graph(
       const std::string &name) {
     TI_NOT_IMPLEMENTED;
@@ -115,6 +124,9 @@ class TI_DLL_EXPORT Module {
   }
 
  protected:
+  virtual const io::VirtualDir *data_source() const {
+    return nullptr;
+  }
   virtual std::unique_ptr<Kernel> make_new_kernel(const std::string &name) = 0;
   virtual std::unique_ptr<KernelTemplate> make_new_kernel_template(
       const std::string &name) = 0;

@@ -1,4 +1,6 @@
 #include "taichi/aot/module_loader.h"
+#include "taichi/common/virtual_dir.h"
+#include "picosha2.h"
 
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #include "taichi/runtime/dx12/aot_module_loader_impl.h"
@@ -66,6 +68,26 @@ Kernel *Module::get_kernel(const std::string &name) {
   auto *kptr = k.get();
   loaded_kernels_[name] = std::move(k);
   return kptr;
+}
+
+std::vector<std::uint8_t> Module::load_data(
+    const std::string &sha256,
+    std::uint64_t expected_bytes) const {
+  if (sha256.size() != 64 ||
+      sha256.find_first_not_of("0123456789abcdef") != std::string::npos)
+    throw ArtifactLoadError("Invalid AOT data payload key");
+  const auto *source = data_source();
+  const auto path = "data/" + sha256 + ".bin";
+  std::size_t size = 0;
+  if (!source || !source->get_file_size(path, size) || size != expected_bytes)
+    throw ArtifactLoadError(
+        "AOT data payload is missing or has an incompatible size: " + sha256);
+  std::vector<std::uint8_t> bytes(size);
+  if (source->load_file(path, bytes.data(), size) != size ||
+      picosha2::hash256_hex_string(bytes) != sha256)
+    throw ArtifactLoadError("AOT data payload failed integrity validation: " +
+                            sha256);
+  return bytes;
 }
 
 KernelTemplate *Module::get_kernel_template(const std::string &name) {

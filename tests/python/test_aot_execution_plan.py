@@ -321,6 +321,28 @@ def test_native_resource_closure_and_kind_validation():
             ExecutionPlan([op], resources=bad)
 
 
+def test_initial_data_tracks_only_materialized_array_closure():
+    key = "a" * 64
+    resources = [
+        dict(kind="ndarray", name="weights", dtype="f32", shape=[dict(array="shape_only", axis=0)], initial_data=key),
+        dict(kind="ndarray", name="shape_only", dtype="f32", shape=[17], initial_data="b" * 64),
+        dict(kind="ndarray", name="unused", dtype="f32", shape=[17], initial_data="c" * 64),
+    ]
+    operations = [dict(kind="copy", source="weights", destination="out")]
+    plan = ExecutionPlan(operations, resources=resources)
+    assert plan.argument_names == ("out",)
+    assert plan.data_entries == (key,)
+    assert ExecutionPlan.from_json(plan.to_json()).data_entries == (key,)
+    for bad in (None, 1, "", "../data", "G" * 64, "A" * 64):
+        with pytest.raises(ValueError, match="initial_data"):
+            ExecutionPlan(operations, resources=[dict(resources[0], initial_data=bad), resources[1]])
+    with pytest.raises(ValueError, match="initial_data"):
+        ExecutionPlan(
+            [dict(kind="copy", source="weights", destination="out")],
+            resources=[dict(resources[0], zero_initialize=True), resources[1]],
+        )
+
+
 def test_fft_description_preserves_direction_and_static_shape():
     plan = ExecutionPlan(
         [

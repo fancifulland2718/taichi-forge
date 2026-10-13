@@ -289,6 +289,30 @@ TEST(ExecutionPlan, ScalarResourcesPreserveBitsWithoutStorageDependencies) {
                  std::invalid_argument);
 }
 
+TEST(ExecutionPlan, InitialDataIsSelectedWithItsArrayStorage) {
+  const std::string digest(64, 'a');
+  const auto plan = ExecutionPlan::parse(
+      R"({"version":1,"operations":[{"kind":"copy","source":"weights","destination":"out"}],"resources":[)"
+      R"({"kind":"ndarray","name":"weights","dtype":"f32","shape":[{"array":"shape_only","axis":0}],"initial_data":")" +
+      digest +
+      R"("},{"kind":"ndarray","name":"shape_only","dtype":"f32","shape":[17],"initial_data":")" +
+      digest + R"("}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out"}));
+  EXPECT_EQ(plan.resources.materialize, (std::vector<bool>{true, false}));
+  EXPECT_EQ(
+      std::get<ExecutionResources::Array>(plan.resources.declarations[0].value)
+          .initial_data,
+      digest);
+  const std::string prefix =
+      R"({"version":1,"operations":[{"kind":"copy","source":"x","destination":"out"}],"resources":[{"kind":"ndarray","name":"x","dtype":"f32","shape":[17],"initial_data":)";
+  for (const auto &value :
+       {std::string("null"), std::string("1"), std::string("\"../data\""),
+        std::string("\"\""), "\"" + std::string(64, 'G') + "\"",
+        "\"" + digest + "\",\"zero_initialize\":true"})
+    EXPECT_THROW(ExecutionPlan::parse(prefix + value + "}]}"),
+                 std::invalid_argument);
+}
+
 TEST(ExecutionPlan, BindingConstraintsPreserveOnlySelectedBindingRequirements) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,
     "resources":[{"kind":"ndarray","name":"scratch","dtype":"f32","shape":[17]}],

@@ -376,6 +376,10 @@ class AotModuleImpl : public aot::Module {
     return true;
   }
 
+  const io::VirtualDir *data_source() const override {
+    return source_.get();
+  }
+
   std::shared_ptr<const io::VirtualDir> source_;
   TaichiAotData ti_aot_data_;
   DeviceCapabilityConfig required_caps_;

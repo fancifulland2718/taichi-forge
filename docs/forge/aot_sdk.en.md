@@ -296,7 +296,7 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 36
+explicit reverse kernels and retirement. This requires matching private ABI 37
 components. Reduction/helper capacity, layout and disjointness certificates are
 preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
@@ -334,7 +334,7 @@ tensor layout, imported aliases and retirement. Graph export translates qualifie
 scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
 aliases and removing duplicate constraints. Custom binding executors, storage
 plans and lifetime validators still need their own reconstruction contract.
-Use matching private ABI 36 components.
+Use matching private ABI 37 components.
 
 Selected CUDA typed reductions can now export direct and block-partial/finalize
 recipes, preserving the chosen kernels, fixed counts, labels, private partials
@@ -445,7 +445,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 36). Small
+elements. Use matching Python/native components (current private ABI 37). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.
@@ -470,6 +470,37 @@ supports odd byte counts using existing native fills and adds no user shader.
 Shape-only and unused arrays still allocate nothing. These bytes are separate from
 algorithm `workspace_bytes` and exclude allocator/driver overhead. Small Windows CPU/CUDA/Vulkan checks cover
 primal computation, explicit reverse gradients and these ownership transitions.
+
+Artifact data can supply the initial contents of a private ndarray:
+
+```python
+key = module.add_data(packed_weights)  # producer: any buffer-protocol object
+weights = dict(kind="ndarray", name="weights", dtype="f32", shape=[17],
+               initial_data=key)
+module.add_execution_plan("step", aot.ExecutionPlan(operations, resources=[weights]))
+```
+
+`add_data()` snapshots the bytes and returns their lowercase SHA-256 key. The
+caller supplies packed data matching the declared dtype and shape; no dtype or
+byte-order conversion is performed. Export requires every selected payload to be
+registered. Directory and `.tcm` artifacts store identical bytes once under
+`data/<key>.bin`; unused registrations and shape-only declarations add no payload.
+Use a fresh directory for `save()` when producing a distribution; it does not
+clean files left by previous exports. `archive()` uses a fresh staging directory.
+
+Preparation reads and verifies each selected payload once, checks its exact byte
+count, and uploads it before recording user operations. It executes no user kernel
+or provider computation. Separate preparations own independent **mutable** arrays,
+even when they refer to the same data entry. Nonempty private capacities and
+uploads round up to four bytes for native transfer alignment, without changing
+logical shapes or stored bytes. Empty payloads are valid. Data cannot be combined
+with `zero_initialize=True`. Explicit initialization may subsequently overwrite it.
+Missing, truncated or corrupted selected data rejects preparation; already prepared
+instances and unrelated entries remain usable. There is no archive read, hashing
+or upload during replay, and expanded host payloads are not cached by the module.
+This is shared resource infrastructure, not automatic serialization of arbitrary
+live operator/provider state. Small CPU/CUDA/Vulkan tests cover separate consumers,
+explicit gradients, byte tails, empty data and in-flight retirement.
 
 Plans can separate one-time initialization from replay:
 

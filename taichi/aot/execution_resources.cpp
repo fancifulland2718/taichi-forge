@@ -83,12 +83,23 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
       resource.dtype = name(value["dtype"]);
       if (kind == "ndarray") {
         fields(value, {"kind", "name", "dtype", "shape", "element_shape",
-                       "zero_initialize"});
+                       "zero_initialize", "initial_data"});
         if (!value["shape"].is_arr())
           throw std::invalid_argument(
               "Execution resource shape must be an array");
         auto &array = std::get<Array>(resource.value);
         array.zero_initialize = optional_bool(value, "zero_initialize");
+        if (const auto data = value.obj.inner.find("initial_data");
+            data != value.obj.inner.end()) {
+          array.initial_data = name(data->second);
+          if (array.initial_data.size() != 64 ||
+              array.initial_data.find_first_not_of("0123456789abcdef") !=
+                  std::string::npos ||
+              array.zero_initialize)
+            throw std::invalid_argument(
+                "Execution initial_data requires a lowercase SHA-256 key and "
+                "no zero initialization");
+        }
         for (const auto &dimension : value["shape"].arr.inner) {
           if (dimension.is_obj()) {
             fields(dimension, {"array", "axis"});

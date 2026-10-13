@@ -297,6 +297,7 @@ class Module:
         self._kernels = []
         self._exported_kernels = {}
         self._execution_plans = {}
+        self._data_payloads = {}
         self._graph_export_failed = False
         self._fields = {}
         rtm = impl.get_runtime()
@@ -404,6 +405,19 @@ class Module:
         self._aot_builder.add_graph(name, graph._compiled_graph)
         self._content += ["cgraph:" + name]
 
+    def add_data(self, data):
+        """Snapshot packed bytes for ndarray initial_data; return their SHA-256 key.
+
+        Identical payloads share one artifact entry. Only payloads referenced by
+        exported plans are saved. Device arrays remain private to each preparation.
+        """
+        snapshot = memoryview(data).tobytes()
+        key = hashlib.sha256(snapshot).hexdigest()
+        previous = self._data_payloads.setdefault(key, snapshot)
+        if previous != snapshot:
+            raise ValueError("AOT data digest collision")
+        return key
+
     def add_execution_plan(self, name, plan, *, gradients=None):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
@@ -436,6 +450,9 @@ class Module:
         missing = set(snapshot.kernel_entries) - self._exported_kernels.keys()
         if missing:
             raise ValueError("Execution plan references unexported kernels: " + ", ".join(sorted(missing)))
+        missing_data = set(snapshot.data_entries) - self._data_payloads.keys()
+        if missing_data:
+            raise ValueError("Execution plan references unexported data: " + ", ".join(sorted(missing_data)))
         self._execution_plans[name] = snapshot
         self._content.append("execution:" + name)
         return snapshot
@@ -506,6 +523,12 @@ class Module:
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir.as_posix()
         self._aot_builder.dump(filepath, "")
+        data_entries = {key for plan in self._execution_plans.values() for key in plan.data_entries}
+        if data_entries:
+            directory = output_dir / "data"
+            directory.mkdir(exist_ok=True)
+            for key in sorted(data_entries):
+                (directory / (key + ".bin")).write_bytes(self._data_payloads[key])
         if self._execution_plans:
             directory = output_dir / "executions"
             directory.mkdir(exist_ok=True)

@@ -43,6 +43,7 @@ struct ExecutionResourceBindings {
 };
 ExecutionResourceBindings bind_execution_resources(
     Runtime &runtime,
+    taichi::lang::aot::Module &module,
     const taichi::lang::aot::ExecutionResources &resources,
     std::unordered_map<std::string, const TiArgument *> &arguments,
     std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts);

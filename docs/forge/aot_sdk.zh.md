@@ -244,7 +244,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 36。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 37。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -274,7 +274,7 @@ Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 36。
+仍需自己的重建合同。需配套 private ABI 37。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -358,7 +358,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 36）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 37）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
@@ -374,6 +374,30 @@ primal 不得再由调用者重复指定梯度。内部数组默认未初始化�
 现有原生填充，不增加用户 shader。仅供推导形状和未使用的数组仍不分配。这些字节与
 算法 `workspace_bytes` 分开，均不代表分配器/驱动的全部开销。Windows 上小规模
 CPU/CUDA/Vulkan 用例覆盖前向计算、显式反向及上述所有权转换。
+
+产物数据可以提供私有 ndarray 的初始内容：
+
+```python
+key = module.add_data(packed_weights)  # 导出端：支持 buffer protocol 的对象
+weights = dict(kind="ndarray", name="weights", dtype="f32", shape=[17],
+               initial_data=key)
+module.add_execution_plan("step", aot.ExecutionPlan(operations, resources=[weights]))
+```
+
+`add_data()` 保存字节快照并返回小写 SHA-256 键。调用者提供与 dtype、shape 匹配的
+紧凑数据；接口不转换 dtype 或字节序。导出要求选中的数据均已注册。目录和 `.tcm`
+在 `data/<key>.bin` 中各保存相同内容一次；未使用的注册及仅供形状推导的声明不会
+增加数据条目。制作发行产物时，`save()` 请使用新目录，它不清理之前导出留下的文件；
+`archive()` 自带独立临时目录。
+
+prepare 对选中数据各读取、校验一次，核对精确字节数并在录制用户操作前上传；不执行
+用户 kernel 或 provider 计算。即使引用相同条目，不同 prepare 也拥有独立的**可修改**
+数组。非空私有容量和上传长度按原生传输要求补齐到 4 字节，逻辑形状及归档字节保持
+不变；空数据也可使用。`initial_data` 不能与 `zero_initialize=True` 同时声明；后续
+显式初始化可以覆盖它。选中数据缺失、截短或损坏会使准备失败，已准备实例和无关入口
+仍可用。重放不读归档、不计算哈希、不再次上传，模块不缓存展开后的主机数据。
+这是共用资源基础，并不等于任意 live operator/provider 状态均已自动序列化。
+小型 CPU/CUDA/Vulkan 测试覆盖独立消费者、显式梯度、尾部字节、空数据及在途退休。
 
 计划可以将一次性初始化与重放分开：
 

@@ -453,8 +453,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
             std::get_if<aot::ExecutionPlan::Native>(&operation))
       preflight(native, NativeObjectKind::operation);
   }
-  auto resource_bindings =
-      capi::bind_execution_resources(rt, plan.resources, arguments, layouts);
+  auto resource_bindings = capi::bind_execution_resources(
+      rt, mod.get(), plan.resources, arguments, layouts);
   prepared->resources = std::move(resource_bindings.storage);
   struct Storage {
     DevicePtr pointer;
