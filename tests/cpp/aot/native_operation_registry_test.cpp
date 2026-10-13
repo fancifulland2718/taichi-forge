@@ -317,6 +317,39 @@ TEST(NativeOperationRegistry, AmgxDescriptionsValidateWithoutLoadingCode) {
   }
 }
 
+TEST(NativeOperationRegistry, BlasVectorDescriptionsAndBackendRegistration) {
+  const auto &registry = native_operation_registry();
+  for (const auto *kind : {"axpy_f32", "scal_f32", "nrm2_f32"}) {
+    auto description = NativeOperationDescription::parse(liong::json::parse_complete(
+        R"({"kind":"native","provider":"cublas","operation":"scal_f32","version":1,"parameters":{"size":2147483648},"bindings":{"x":"x","context":"shared"}})"));
+    description.operation = kind;
+    if (description.operation == "axpy_f32")
+      description.bindings.emplace("y", "y");
+    if (description.operation == "nrm2_f32")
+      description.bindings.emplace("output", "result");
+    else
+      description.bindings.emplace("alpha", "device_alpha");
+    // Decoding is independent of device allocation or optional library load.
+    EXPECT_NO_THROW(registry.decode(description));
+    for (const auto *patch : {R"({"size":-1})", R"({"size":1.5})",
+                              R"({"size":9223372036854775807})",
+                              R"({"alpha":true})", R"({"unknown":1})"}) {
+      auto invalid = description;
+      for (const auto &[name, value] :
+           liong::json::parse_complete(patch).obj.inner)
+        invalid.parameters.obj.inner[name] = value;
+      EXPECT_THROW(registry.decode(invalid), std::invalid_argument);
+    }
+    EXPECT_EQ(registry.find(kind, 1, host_arch()), nullptr);
+    EXPECT_EQ(registry.find(kind, 1, Arch::vulkan), nullptr);
+#ifdef TI_WITH_CUDA
+    ASSERT_NE(registry.find(kind, 1, Arch::cuda), nullptr);
+    EXPECT_EQ(registry.find(kind, 1, Arch::cuda)->mode,
+              NativeOperationMode::cuda_capture);
+#endif
+  }
+}
+
 TEST(NativeOperationRegistry, GemmRejectsOverflowAndInvalidScalars) {
   GemmF32Operation op{{}, {}, {}, 17, 9, 13};
   EXPECT_EQ(gemm_f32_element_counts(op),

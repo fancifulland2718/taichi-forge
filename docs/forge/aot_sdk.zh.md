@@ -244,7 +244,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 40。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 41。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -282,7 +282,7 @@ Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 40。
+仍需自己的重建合同。需配套 private ABI 41。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -333,7 +333,7 @@ Graph 私有数组及组合 scratch 上的连续视图；即使只有子视图�
 CPU/CUDA/Vulkan 已验证矩形块、显式伴随、compose 内嵌 block、独立准备、数值发布，以及
 独立/借用消费端退休。既有 backend/provider 可录制性及 affine view 限制仍适用，不表示
 任意叶算子均可作为 block，也不自动生成导数。活 field 与 SolvePlan 控制仍需重建合同。
-资源角色及一致快照要求配套 private ABI 40，不给消费端增加 provider 库依赖。
+资源角色及一致快照要求配套 private ABI 41，不给消费端增加 provider 库依赖。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -411,7 +411,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 40）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 41）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
@@ -472,7 +472,7 @@ resources = [
 kernel、copy、fill 和合格的原生操作使用所选范围。显式梯度绑定可以指向独立视图，
 其父数组与偏移可与 primal 不同；导出的 kernel 仍须声明相应梯度 ABI。CPU/CUDA/Vulkan
 测试覆盖实际 `.grad`、嵌套视图、tensor 元素、reshape、空视图、原生 sort、别名拒绝和
-退休。视图本身不增加设备分配或重放复制。需配套 private ABI 40。此公共资源能力与
+退休。视图本身不增加设备分配或重放复制。需配套 private ABI 41。此公共资源能力与
 operator derived view 的自动导出分别接入。
 
 计划可以将一次性初始化与重放分开：
@@ -543,7 +543,8 @@ plan = ti.aot.ExecutionPlan([operation])
 `bindings` 的键是操作端口，值是执行计划中的参数或私有资源名称。`parameters`
 保存无进程地址的冻结参数。通用 reader/binder 不识别各库的数学参数；同一原生
 注册项负责参数、布局/别名检查并调用既有 typed 工厂，暖态不保留 JSON 解释器。
-目前注册 `cublas/gemm_f32`、`cublas/dot_f32` 和 `cufft/fft_c2c_f32` 的 version 1。
+已注册的 version 1 schema 包括 `cublas/gemm_f32`、`cublas/dot_f32`、下述 cuBLAS
+向量操作和 `cufft/fft_c2c_f32` 等。
 GEMM/FFT 参数与下文旧写法中移除 `kind` 和存储名称后的字段相同，旧写法继续通过
 注册式转换兼容；点积直接使用通用外壳。
 
@@ -637,8 +638,9 @@ plan = ExecutionPlan([{
 ```
 
 输入是形状 `(size,)` 的紧凑标量 f32 向量；f32 输出形状为 `()` 或 `(1,)`，
-不能与任一输入重叠，只读输入可以互相别名。`size` 非负且满足当前 SDOT int32
-接口；空输入每次重放写零。通过 `runtime.probe_native_operation("dot_f32")`
+不能与任一输入重叠，只读输入可以互相别名。`size` 非负；有可选 64 位入口时优先使用，
+缺少该入口时才要求符合 SDOT int32 接口。空输入每次重放写零。通过
+`runtime.probe_native_operation("dot_f32")`
 独立查询本操作，CPU/Vulkan 没有相应工厂。
 
 准备的 handle 使用 device pointer mode，后续 Graph kernel 可直接消费设备标量，
@@ -646,6 +648,33 @@ plan = ExecutionPlan([{
 Windows cuBLAS 13.3 验证覆盖重复写回、空输入、独立绑定、非法布局/别名回滚及
 在途关闭/reset；导出的 energy/反向 kernel 加显式点积伴随核对输入梯度，不提供
 外部调用的自动微分。
+
+另外三个 version 1 cuBLAS 操作复用同一注册式外壳：
+
+| 操作 | 必需绑定 | 行为 |
+| --- | --- | --- |
+| `axpy_f32` | `x`、`y` | `y = alpha * x + y` |
+| `scal_f32` | `x` | `x = alpha * x` |
+| `nrm2_f32` | `x`、`output` | 欧氏范数写入设备标量 |
+
+均接受非负 `size` 参数、形状 `(size,)` 的紧凑标量 f32 向量和可选 `context` 绑定。
+AXPY/SCAL 接受有限 f32 的 `alpha` 参数（默认 1），或形状为 `()` / `(1,)` 的 f32
+设备标量 `alpha` 绑定；同时指定两种形式在准备时拒绝。设备系数每次重放读取当前值，
+不经过 host 读回。NRM2 输出采用同样的标量形状；空输入每次覆盖写零，空 AXPY/SCAL
+不修改向量存储。
+
+支持 packed array view。写入区域必须与只读输入不重叠，包括部分重叠：AXPY 的
+`x`/`y` 不可重叠，device alpha 不可覆盖被修改的向量，NRM2 输出不可覆盖 `x`；只读
+输入之间可以别名。校验在 capture 前完成，不执行操作。有可选 64 位向量入口时优先
+使用，缺少时回退 int32 接口，不添加人为规模上限。参见
+[cuBLAS 整数接口与指针模式合同](https://docs.nvidia.com/cuda/cublas/index.html)。
+
+这些操作仅有 CUDA 工厂。Windows cuBLAS 13.3 验证覆盖独立/借用消费端的独立帧、
+设备系数变化、共享 HOST/DEVICE pointer mode、视图、非法绑定回滚、空输入和退休。
+导出的 energy/反向 kernel 与显式向量伴随核对梯度，不提供外部操作的自动微分。
+测试用小规模数据执行 64 位入口，未验证数十亿元素分配或旧 vendor 库兼容性。
+需配套 private ABI 41。本项为持久计划提供可复用操作；全部 solver 或 JIT recording
+自动导出仍需各自的合同。
 
 原生资源在 `resources` 中使用同一注册式外壳，另加 `name`。CUDA 的
 `cublas/context` 构造项（version 1，参数和绑定均为空）为一次准备创建可复用 handle：
@@ -661,7 +690,7 @@ plan = ExecutionPlan([{
 }])
 ```
 
-其他 GEMM/dot 操作可通过可选 `context` 端口引用同一个 `"blas"`。每次准备独立
+其他 GEMM/dot/向量操作可通过可选 `context` 端口引用同一个 `"blas"`。每次准备独立
 重建 context，省略该端口保持各操作独立 handle。共享是显式选择，不保证缩短准备
 耗时；pointer mode 只在录制时设置，重放不设置。Windows CUDA 验证覆盖交替
 GEMM/设备点积/GEMM 捕获、独立帧、显式梯度以及回滚/退休。

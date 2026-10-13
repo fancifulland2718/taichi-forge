@@ -688,6 +688,12 @@ bool CUBLASDriver::load_cublas() {
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cublas_functions.inc.h"
 #undef PER_CUBLAS_FUNCTION
+#define PER_CUBLAS_OPTIONAL_FUNCTION(name, symbol_name, ...) \
+  name.set(loader_->load_function_optional(#symbol_name));   \
+  name.set_lock(&lock_);                                     \
+  name.set_names(#name, #symbol_name);
+#include "taichi/rhi/cuda/cublas_optional_functions.inc.h"
+#undef PER_CUBLAS_OPTIONAL_FUNCTION
   cub_get_property_.set(loader_->load_function_optional("cublasGetProperty"));
   cub_get_property_.set_lock(&lock_);
   cub_get_property_.set_names("cub_get_property_", "cublasGetProperty");

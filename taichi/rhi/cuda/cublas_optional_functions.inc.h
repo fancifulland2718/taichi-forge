@@ -1,0 +1,33 @@
+// CUDA 12+ vector entry points; absence must not disable older cuBLAS users.
+PER_CUBLAS_OPTIONAL_FUNCTION(cubSaxpy64,
+                             cublasSaxpy_v2_64,
+                             cublasHandle_t,
+                             std::int64_t,
+                             const float *,
+                             const float *,
+                             std::int64_t,
+                             float *,
+                             std::int64_t);
+PER_CUBLAS_OPTIONAL_FUNCTION(cubSscal64,
+                             cublasSscal_v2_64,
+                             cublasHandle_t,
+                             std::int64_t,
+                             const float *,
+                             float *,
+                             std::int64_t);
+PER_CUBLAS_OPTIONAL_FUNCTION(cubSnrm264,
+                             cublasSnrm2_v2_64,
+                             cublasHandle_t,
+                             std::int64_t,
+                             const float *,
+                             std::int64_t,
+                             float *);
+PER_CUBLAS_OPTIONAL_FUNCTION(cubSdot64,
+                             cublasSdot_v2_64,
+                             cublasHandle_t,
+                             std::int64_t,
+                             const float *,
+                             std::int64_t,
+                             const float *,
+                             std::int64_t,
+                             float *);

@@ -625,6 +625,11 @@ class CUBLASDriver : protected CUDADriverBase {
 #include "taichi/rhi/cuda/cublas_functions.inc.h"
 #undef PER_CUBLAS_FUNCTION
 
+#define PER_CUBLAS_OPTIONAL_FUNCTION(name, symbol_name, ...) \
+  CUDADriverFunction<__VA_ARGS__> name;
+#include "taichi/rhi/cuda/cublas_optional_functions.inc.h"
+#undef PER_CUBLAS_OPTIONAL_FUNCTION
+
   bool load_cublas();
 
   inline bool is_loaded() {

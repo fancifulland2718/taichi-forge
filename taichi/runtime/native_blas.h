@@ -21,4 +21,36 @@ struct DotF32Operation {
   std::shared_ptr<NativeResource> context;
 };
 
+// Alpha is either a finite host constant or a live device scalar. Mutation
+// operands are explicit; output overlap with read-only inputs is rejected.
+struct AxpyF32Operation {
+  static constexpr const char *kind = "axpy_f32";
+  static constexpr std::uint32_t version = 1;
+  DevicePtr x;
+  DevicePtr y;
+  std::size_t size{0};
+  float alpha{1};
+  DevicePtr device_alpha;
+  std::shared_ptr<NativeResource> context;
+};
+
+struct ScalF32Operation {
+  static constexpr const char *kind = "scal_f32";
+  static constexpr std::uint32_t version = 1;
+  DevicePtr x;
+  std::size_t size{0};
+  float alpha{1};
+  DevicePtr device_alpha;
+  std::shared_ptr<NativeResource> context;
+};
+
+struct Nrm2F32Operation {
+  static constexpr const char *kind = "nrm2_f32";
+  static constexpr std::uint32_t version = 1;
+  DevicePtr x;
+  DevicePtr output;
+  std::size_t size{0};
+  std::shared_ptr<NativeResource> context;
+};
+
 }  // namespace taichi::lang

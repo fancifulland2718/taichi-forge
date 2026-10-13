@@ -1,6 +1,7 @@
 #include "taichi/program/program.h"
 
 #include <limits>
+#include <type_traits>
 
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -198,29 +199,177 @@ class CudaGemmOperation final : public CudaBlasOperation {
 class CudaDotOperation final : public CudaBlasOperation {
  public:
   CudaDotOperation(Device &device,
-                   int size,
+                   std::int64_t size,
+                   bool wide,
                    const float *x,
                    const float *y,
                    float *output,
                    const std::shared_ptr<NativeResource> &context)
       : CudaBlasOperation(device, context, CUBLAS_POINTER_MODE_DEVICE),
         size_(size),
+        wide_(wide),
         x_(x),
         y_(y),
         output_(output) {
   }
   void record_cuda(void *stream) override {
     bind_stream(stream);
-    const auto status = CUBLASDriver::get_instance().cubSdot.call(
-        handle_, size_, x_, 1, y_, 1, output_);
+    auto &driver = CUBLASDriver::get_instance();
+    const auto status =
+        wide_ ? driver.cubSdot64.call(handle_, size_, x_, 1, y_, 1, output_)
+              : driver.cubSdot.call(handle_, static_cast<int>(size_), x_, 1, y_,
+                                    1, output_);
     TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
                 "CUDA cuBLAS SDOT failed (status {}).", status);
   }
 
  private:
-  int size_;
+  std::int64_t size_;
+  bool wide_;
   const float *x_;
   const float *y_;
+  float *output_;
+};
+
+bool use_wide_vector(std::size_t size, bool available) {
+  if (!available &&
+      size > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+    throw std::invalid_argument(
+        "cuBLAS vector size requires the optional 64-bit entry point");
+  return available;
+}
+
+float *vector_address(cuda::CudaDevice &device,
+                      DevicePtr pointer,
+                      std::size_t size) {
+  auto *base = static_cast<char *>(device.get_memory_addr(pointer));
+  auto *address =
+      reinterpret_cast<float *>(base ? base + pointer.offset : nullptr);
+  if ((size && !address) ||
+      reinterpret_cast<std::uintptr_t>(address) % sizeof(float))
+    throw std::invalid_argument(
+        "cuBLAS requires aligned vector/scalar storage");
+  return address;
+}
+
+void disjoint_vectors(const float *left,
+                      std::size_t left_size,
+                      const float *right,
+                      std::size_t right_size) {
+  const auto a = reinterpret_cast<std::uintptr_t>(left);
+  const auto b = reinterpret_cast<std::uintptr_t>(right);
+  if (left_size && right_size &&
+      (a <= b ? b - a < left_size * sizeof(float)
+              : a - b < right_size * sizeof(float)))
+    throw std::invalid_argument(
+        "cuBLAS writable storage must be disjoint from read-only inputs");
+}
+
+template <typename Operation>
+class CudaScaledVectorOperation final : public CudaBlasOperation {
+ public:
+  CudaScaledVectorOperation(Device &device,
+                            Operation op,
+                            bool wide,
+                            float *x,
+                            float *y,
+                            const float *alpha)
+      : CudaBlasOperation(
+            device,
+            op.context,
+            alpha ? CUBLAS_POINTER_MODE_DEVICE : CUBLAS_POINTER_MODE_HOST),
+        op_(std::move(op)),
+        wide_(wide),
+        x_(x),
+        y_(y),
+        alpha_(alpha) {
+  }
+  void record_cuda(void *stream) override {
+    bind_stream(stream);
+    auto &driver = CUBLASDriver::get_instance();
+    const float *alpha = alpha_ ? alpha_ : &op_.alpha;
+    const auto size = static_cast<std::int64_t>(op_.size);
+    std::uint32_t status;
+    if constexpr (std::is_same_v<Operation, AxpyF32Operation>) {
+      status = wide_
+                   ? driver.cubSaxpy64.call(handle_, size, alpha, x_, 1, y_, 1)
+                   : driver.cubSaxpy.call(handle_, static_cast<int>(size),
+                                          alpha, x_, 1, y_, 1);
+    } else {
+      status = wide_ ? driver.cubSscal64.call(handle_, size, alpha, x_, 1)
+                     : driver.cubSscal.call(handle_, static_cast<int>(size),
+                                            alpha, x_, 1);
+    }
+    TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
+                "CUDA cuBLAS {} failed (status {}).", Operation::kind, status);
+  }
+
+ private:
+  Operation op_;
+  bool wide_;
+  float *x_;
+  float *y_;
+  const float *alpha_;
+};
+
+template <typename Operation>
+std::shared_ptr<NativeOperation> prepare_scaled_vector(Device &device,
+                                                       const Operation &op) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda_device)
+    throw std::invalid_argument("cuBLAS requires a CUDA device");
+  auto &driver = CUBLASDriver::get_instance();
+  bool wide;
+  float *x = vector_address(*cuda_device, op.x, op.size);
+  float *y = nullptr;
+  float *written = x;
+  if constexpr (std::is_same_v<Operation, AxpyF32Operation>) {
+    wide = use_wide_vector(op.size, driver.cubSaxpy64.available());
+    y = written = vector_address(*cuda_device, op.y, op.size);
+    disjoint_vectors(x, op.size, y, op.size);
+  } else {
+    wide = use_wide_vector(op.size, driver.cubSscal64.available());
+  }
+  const float *alpha = nullptr;
+  if (op.device_alpha.device) {
+    alpha = vector_address(*cuda_device, op.device_alpha, 1);
+    disjoint_vectors(alpha, 1, written, op.size);
+  }
+  auto &cuda = CUDAContext::get_instance();
+  auto lock = cuda.get_submission_lock_guard();
+  auto guard = cuda.get_guard();
+  return std::make_shared<CudaScaledVectorOperation<Operation>>(
+      device, op, wide, x, y, alpha);
+}
+
+class CudaNrm2Operation final : public CudaBlasOperation {
+ public:
+  CudaNrm2Operation(Device &device,
+                    const Nrm2F32Operation &op,
+                    bool wide,
+                    const float *x,
+                    float *output)
+      : CudaBlasOperation(device, op.context, CUBLAS_POINTER_MODE_DEVICE),
+        size_(static_cast<std::int64_t>(op.size)),
+        wide_(wide),
+        x_(x),
+        output_(output) {
+  }
+  void record_cuda(void *stream) override {
+    bind_stream(stream);
+    auto &driver = CUBLASDriver::get_instance();
+    const auto status =
+        wide_ ? driver.cubSnrm264.call(handle_, size_, x_, 1, output_)
+              : driver.cubSnrm2.call(handle_, static_cast<int>(size_), x_, 1,
+                                     output_);
+    TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
+                "CUDA cuBLAS NRM2 failed (status {}).", status);
+  }
+
+ private:
+  std::int64_t size_;
+  bool wide_;
+  const float *x_;
   float *output_;
 };
 
@@ -259,6 +408,27 @@ NativeOperationAvailability probe_cuda_dot_f32_operation() {
     auto &driver = CUBLASDriver::get_instance();
     result.available = driver.cubSdot.available();
   }
+  return result;
+}
+
+NativeOperationAvailability probe_cuda_axpy_f32_operation() {
+  auto result = probe_cuda_blas();
+  if (result.available)
+    result.available = CUBLASDriver::get_instance().cubSaxpy.available();
+  return result;
+}
+
+NativeOperationAvailability probe_cuda_scal_f32_operation() {
+  auto result = probe_cuda_blas();
+  if (result.available)
+    result.available = CUBLASDriver::get_instance().cubSscal.available();
+  return result;
+}
+
+NativeOperationAvailability probe_cuda_nrm2_f32_operation() {
+  auto result = probe_cuda_blas();
+  if (result.available)
+    result.available = CUBLASDriver::get_instance().cubSnrm2.available();
   return result;
 }
 
@@ -319,8 +489,8 @@ std::shared_ptr<NativeOperation> prepare_cuda_dot_f32_operation(
   auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
   if (!cuda_device)
     throw std::invalid_argument("cuBLAS requires a CUDA device");
-  if (op.size > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
-    throw std::invalid_argument("cuBLAS SDOT size must fit int32");
+  const bool wide = use_wide_vector(
+      op.size, CUBLASDriver::get_instance().cubSdot64.available());
   auto map = [&](DevicePtr ptr) {
     auto *base = static_cast<char *>(cuda_device->get_memory_addr(ptr));
     return reinterpret_cast<float *>(base ? base + ptr.offset : nullptr);
@@ -342,8 +512,41 @@ std::shared_ptr<NativeOperation> prepare_cuda_dot_f32_operation(
   auto &cuda = CUDAContext::get_instance();
   auto lock = cuda.get_submission_lock_guard();
   auto guard = cuda.get_guard();
-  return std::make_shared<CudaDotOperation>(device, static_cast<int>(op.size),
-                                            x, y, output, op.context);
+  return std::make_shared<CudaDotOperation>(device,
+                                            static_cast<std::int64_t>(op.size),
+                                            wide, x, y, output, op.context);
+}
+
+std::shared_ptr<NativeOperation> prepare_cuda_axpy_f32_operation(
+    Arch,
+    Device &device,
+    const AxpyF32Operation &op) {
+  return prepare_scaled_vector(device, op);
+}
+
+std::shared_ptr<NativeOperation> prepare_cuda_scal_f32_operation(
+    Arch,
+    Device &device,
+    const ScalF32Operation &op) {
+  return prepare_scaled_vector(device, op);
+}
+
+std::shared_ptr<NativeOperation> prepare_cuda_nrm2_f32_operation(
+    Arch,
+    Device &device,
+    const Nrm2F32Operation &op) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda_device)
+    throw std::invalid_argument("cuBLAS requires a CUDA device");
+  const bool wide = use_wide_vector(
+      op.size, CUBLASDriver::get_instance().cubSnrm264.available());
+  const auto *x = vector_address(*cuda_device, op.x, op.size);
+  auto *output = vector_address(*cuda_device, op.output, 1);
+  disjoint_vectors(x, op.size, output, 1);
+  auto &cuda = CUDAContext::get_instance();
+  auto lock = cuda.get_submission_lock_guard();
+  auto guard = cuda.get_guard();
+  return std::make_shared<CudaNrm2Operation>(device, op, wide, x, output);
 }
 
 std::size_t Program::cuda_cublas_gemm_f32(Ndarray *a,

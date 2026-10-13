@@ -296,7 +296,7 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 40
+explicit reverse kernels and retirement. This requires matching private ABI 41
 components. Reduction/helper capacity, layout and disjointness certificates are
 preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
@@ -346,7 +346,7 @@ tensor layout, imported aliases and retirement. Graph export translates qualifie
 scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
 aliases and removing duplicate constraints. Custom binding executors, storage
 plans and lifetime validators still need their own reconstruction contract.
-Use matching private ABI 40 components.
+Use matching private ABI 41 components.
 
 Selected CUDA typed reductions can now export direct and block-partial/finalize
 recipes, preserving the chosen kernels, fixed counts, labels, private partials
@@ -415,7 +415,7 @@ numeric publications and retirement in standalone and borrowed consumers. Existi
 backend/provider recordability and affine-view restrictions still apply; this does
 not qualify arbitrary block leaves or add automatic derivatives. Live fields and
 SolvePlan control still need reconstruction contracts. Resource roles and coherent snapshots require
-matching private ABI 40 components; no provider library is added to the consumer.
+matching private ABI 41 components; no provider library is added to the consumer.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -518,7 +518,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 40). Small
+elements. Use matching Python/native components (current private ABI 41). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.
@@ -600,7 +600,7 @@ Explicit gradient bindings may name separate views with different parent offsets
 the exported kernel must still declare its gradient ABI. CPU/CUDA/Vulkan tests
 cover actual `.grad`, nested views, tensor elements, reshape, empty views, native
 sort, alias rejection and retirement. No additional device allocation or replay
-copy is introduced by a view. Use matching private ABI 40 components. This common
+copy is introduced by a view. Use matching private ABI 41 components. This common
 resource support is separate from automatic export of operator-derived views.
 
 Plans can separate one-time initialization from replay:
@@ -689,8 +689,9 @@ Binding keys are operation ports; values name execution arguments or private
 resources. Parameters are frozen values without process addresses. The common
 reader/binder does not interpret vendor mathematics. A native registration owns
 parameter/layout/alias validation and uses the existing typed factory; warm replay
-retains no JSON interpreter. Currently registered schemas are version 1 of
-`cublas/gemm_f32`, `cublas/dot_f32` and `cufft/fft_c2c_f32`. GEMM/FFT parameters
+retains no JSON interpreter. Examples of registered version 1 schemas include
+`cublas/gemm_f32`, `cublas/dot_f32`, the cuBLAS vector operations below, and
+`cufft/fft_c2c_f32`. GEMM/FFT parameters
 match the legacy forms below after removing `kind` and storage names. Registered
 lowering preserves those legacy forms; dot uses the common envelope directly.
 
@@ -804,7 +805,8 @@ plan = ExecutionPlan([{
 
 Inputs are compact scalar f32 vectors of shape `(size,)`; the f32 output has
 shape `()` or `(1,)` and cannot overlap either input. Read-only inputs may
-alias. `size` is nonnegative and must fit the loaded SDOT int32 API. Empty input
+alias. `size` is nonnegative. The optional 64-bit entry point is preferred when
+available; otherwise `size` must fit the loaded SDOT int32 API. Empty input
 writes zero on every replay. `runtime.probe_native_operation("dot_f32")` reports
 this operation independently. CPU/Vulkan have no factory for it.
 
@@ -815,6 +817,40 @@ Windows cuBLAS 13.3 checks cover repeated device writes, empty input, independen
 bindings, invalid layout/alias rollback and in-flight close/reset. An exported
 energy/reverse kernel with an explicit dot adjoint checks input gradients;
 automatic differentiation of the external call is not provided.
+
+Three additional version 1 cuBLAS operations use the same registered envelope:
+
+| Operation | Required bindings | Behavior |
+| --- | --- | --- |
+| `axpy_f32` | `x`, `y` | `y = alpha * x + y` |
+| `scal_f32` | `x` | `x = alpha * x` |
+| `nrm2_f32` | `x`, `output` | Write the Euclidean norm to a device scalar |
+
+All take the nonnegative `size` parameter, compact scalar f32 vectors of shape
+`(size,)`, and an optional `context` binding. AXPY/SCAL accept a finite f32 `alpha`
+parameter (default 1), or an `alpha` binding to an f32 device scalar of shape `()`
+or `(1,)`. Supplying both forms is rejected at preparation. Device coefficients
+are read on each replay without a host round trip. NRM2 uses the same scalar
+output shapes and overwrites the output with zero for empty input; empty AXPY and
+SCAL do not mutate vector storage.
+
+Packed array views are accepted. Writable storage must be disjoint from read-only
+inputs, including partial overlaps: AXPY rejects overlapping `x`/`y`, device alpha
+must not overlap the mutated vector, and NRM2 output must not overlap `x`.
+Read-only inputs may alias each other. These checks run before capture, without
+executing the operations. The optional 64-bit vector APIs are preferred, with
+int32 fallback when absent; no arbitrary vector-size limit is added. See the
+[cuBLAS integer and pointer-mode contracts](https://docs.nvidia.com/cuda/cublas/index.html).
+
+These CUDA operations have no CPU/Vulkan factory. Windows cuBLAS 13.3 checks cover
+independent standalone/borrowed frames, changing device coefficients, shared
+HOST/DEVICE pointer modes, views, invalid-binding rollback, empty inputs and
+retirement. An exported energy/reverse kernel and explicit vector adjoint check
+gradients; external operations are not automatically differentiated. The tests
+exercise the 64-bit entry points at small sizes, not multi-billion-element
+allocations or compatibility with older vendor libraries. Use matching private
+ABI 41 components. This supplies reusable operations for persistent plans;
+automatic export of every solver or JIT recording remains a separate contract.
 
 Native resources use the same registered envelope in `resources`, with an added
 `name`. The CUDA `cublas/context` constructor (version 1, empty parameters and
@@ -831,7 +867,7 @@ plan = ExecutionPlan([{
 }])
 ```
 
-Additional GEMM/dot operations can reference `"blas"` through their optional
+Additional GEMM/dot/vector operations can reference `"blas"` through their optional
 `context` port. Each preparation reconstructs its own context; omitting that port
 preserves independent handles. Sharing is explicit and does not imply faster
 preparation. Pointer modes are set while recording, not while replaying. The

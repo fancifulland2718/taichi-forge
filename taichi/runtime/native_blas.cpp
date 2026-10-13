@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <limits>
+#include <type_traits>
 
 namespace taichi::lang {
 #ifdef TI_WITH_CUDA
@@ -17,12 +18,101 @@ std::shared_ptr<NativeOperation> prepare_cuda_dot_f32_operation(
     Device &device,
     const DotF32Operation &operation);
 NativeOperationAvailability probe_cuda_dot_f32_operation();
+std::shared_ptr<NativeOperation>
+prepare_cuda_axpy_f32_operation(Arch, Device &, const AxpyF32Operation &);
+std::shared_ptr<NativeOperation>
+prepare_cuda_scal_f32_operation(Arch, Device &, const ScalF32Operation &);
+std::shared_ptr<NativeOperation>
+prepare_cuda_nrm2_f32_operation(Arch, Device &, const Nrm2F32Operation &);
+NativeOperationAvailability probe_cuda_axpy_f32_operation();
+NativeOperationAvailability probe_cuda_scal_f32_operation();
+NativeOperationAvailability probe_cuda_nrm2_f32_operation();
 std::shared_ptr<NativeResource> prepare_cuda_blas_context(
     Arch arch,
     Device &device,
     const BlasContextDescription &description);
 NativeOperationAvailability probe_cuda_blas_context();
 #endif
+
+namespace {
+
+std::size_t vector_size(const liong::json::JsonValue &parameters) {
+  const auto size = operation_json::integer(parameters["size"]);
+  if (size > std::numeric_limits<std::size_t>::max() / sizeof(float))
+    throw std::invalid_argument("BLAS vector extent overflows storage size");
+  return static_cast<std::size_t>(size);
+}
+
+DevicePtr vector_binding(const NativeOperationBindings &bindings,
+                         const char *port,
+                         std::size_t size,
+                         bool scalar = false) {
+  const auto &value = bindings.at(port).array();
+  if (value.scalar_type != PrimitiveType::f32 || !value.element_shape.empty() ||
+      (value.shape != std::vector<std::uint64_t>{size} &&
+       !(scalar && value.shape.empty())) ||
+      value.bytes != size * sizeof(float) ||
+      value.base_offset % sizeof(float) || value.pointer.offset % sizeof(float))
+    throw std::invalid_argument(
+        "BLAS requires aligned compact f32 vectors and scalar bindings");
+  return value.pointer;
+}
+
+std::shared_ptr<NativeResource> vector_context(
+    const NativeOperationBindings &bindings) {
+  const auto context = bindings.find("context");
+  return context == bindings.end() ? nullptr
+                                   : context->second.resource<NativeResource>();
+}
+
+template <typename Operation>
+void register_scaled_vector(NativeOperationRegistry &registry) {
+  registry.define<Operation>([](Device &device, const Operation &op) {
+    if (op.size > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
+        !std::isfinite(op.alpha))
+      throw std::invalid_argument("BLAS vector size or host alpha is invalid");
+    if (op.x.device != &device ||
+        (op.device_alpha.device && op.device_alpha.device != &device))
+      throw std::invalid_argument("BLAS storage belongs to another device");
+    if constexpr (std::is_same_v<Operation, AxpyF32Operation>) {
+      if (op.y.device != &device)
+        throw std::invalid_argument("BLAS storage belongs to another device");
+    }
+  });
+  std::vector<std::string> ports{"x"};
+  if constexpr (std::is_same_v<Operation, AxpyF32Operation>)
+    ports.push_back("y");
+  registry.register_schema<Operation>(
+      "cublas", Operation::kind, std::move(ports),
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<Operation> {
+        operation_json::fields(parameters, {"size", "alpha"});
+        const auto size = vector_size(parameters);
+        const auto alpha = operation_json::optional_f32(parameters, "alpha", 1);
+        const bool explicit_alpha = parameters.obj.inner.count("alpha") != 0;
+        return [size, alpha,
+                explicit_alpha](const NativeOperationBindings &bindings) {
+          Operation result;
+          result.size = size;
+          result.alpha = alpha;
+          result.x = vector_binding(bindings, "x", size);
+          if constexpr (std::is_same_v<Operation, AxpyF32Operation>)
+            result.y = vector_binding(bindings, "y", size);
+          if (bindings.count("alpha")) {
+            if (explicit_alpha)
+              throw std::invalid_argument(
+                  "BLAS alpha must be either a host parameter or a device "
+                  "binding");
+            result.device_alpha = vector_binding(bindings, "alpha", 1, true);
+          }
+          result.context = vector_context(bindings);
+          return result;
+        };
+      },
+      {}, {"context", "alpha"});
+}
+
+}  // namespace
 
 std::array<std::size_t, 3> gemm_f32_element_counts(const GemmF32Operation &op) {
   if (!op.rows || !op.columns || !op.inner || !std::isfinite(op.alpha) ||
@@ -139,30 +229,12 @@ void register_blas_operations(NativeOperationRegistry &registry) {
           -> NativeOperationRegistry::Binder<DotF32Operation> {
         using namespace operation_json;
         fields(parameters, {"size"});
-        const auto size = integer(parameters["size"]);
-        if (size > std::numeric_limits<std::size_t>::max() / sizeof(float))
-          throw std::invalid_argument("Dot extent overflows storage size");
+        const auto size = vector_size(parameters);
         return [size](const NativeOperationBindings &bindings) {
-          auto array = [&](const char *port, bool scalar) {
-            const auto &value = bindings.at(port).array();
-            const auto shape = std::vector<std::uint64_t>{scalar ? 1 : size};
-            if (value.scalar_type != PrimitiveType::f32 ||
-                !value.element_shape.empty() ||
-                (value.shape != shape && !(scalar && value.shape.empty())) ||
-                value.bytes != (scalar ? 1 : size) * sizeof(float) ||
-                value.base_offset % sizeof(float) ||
-                value.pointer.offset % sizeof(float))
-              throw std::invalid_argument(
-                  "Dot requires compact f32 vectors and a scalar output");
-            return value.pointer;
-          };
-          DotF32Operation result{array("x", false), array("y", false),
-                                 array("output", true),
-                                 static_cast<std::size_t>(size)};
-          if (const auto context = bindings.find("context");
-              context != bindings.end())
-            result.context = context->second.resource<NativeResource>();
-          return result;
+          return DotF32Operation{vector_binding(bindings, "x", size),
+                                 vector_binding(bindings, "y", size),
+                                 vector_binding(bindings, "output", 1, true),
+                                 size, vector_context(bindings)};
         };
       },
       {}, {"context"});
@@ -170,6 +242,40 @@ void register_blas_operations(NativeOperationRegistry &registry) {
   registry.register_factory<DotF32Operation>(
       Arch::cuda, NativeOperationMode::cuda_capture,
       prepare_cuda_dot_f32_operation, probe_cuda_dot_f32_operation);
+#endif
+
+  register_scaled_vector<AxpyF32Operation>(registry);
+  register_scaled_vector<ScalF32Operation>(registry);
+  registry.define<Nrm2F32Operation>([](Device &device,
+                                       const Nrm2F32Operation &op) {
+    if (op.size > std::numeric_limits<std::size_t>::max() / sizeof(float))
+      throw std::invalid_argument("BLAS vector extent overflows storage size");
+    if (op.x.device != &device || op.output.device != &device)
+      throw std::invalid_argument("BLAS storage belongs to another device");
+  });
+  registry.register_schema<Nrm2F32Operation>(
+      "cublas", "nrm2_f32", {"x", "output"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<Nrm2F32Operation> {
+        operation_json::fields(parameters, {"size"});
+        const auto size = vector_size(parameters);
+        return [size](const NativeOperationBindings &bindings) {
+          return Nrm2F32Operation{vector_binding(bindings, "x", size),
+                                  vector_binding(bindings, "output", 1, true),
+                                  size, vector_context(bindings)};
+        };
+      },
+      {}, {"context"});
+#ifdef TI_WITH_CUDA
+  registry.register_factory<AxpyF32Operation>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      prepare_cuda_axpy_f32_operation, probe_cuda_axpy_f32_operation);
+  registry.register_factory<ScalF32Operation>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      prepare_cuda_scal_f32_operation, probe_cuda_scal_f32_operation);
+  registry.register_factory<Nrm2F32Operation>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      prepare_cuda_nrm2_f32_operation, probe_cuda_nrm2_f32_operation);
 #endif
 }
 
