@@ -362,14 +362,22 @@ reports the external slots, including shape sources and declared gradients.
 Declare `gradients={"primal_name": "gradient_name"}` on the plan to bind private
 or external arrays to exported explicit gradients. This reuses ordinary kernel
 binding checks and supplies no automatic derivative for native operations. A
-caller-supplied gradient for the same primal is rejected. Arrays are initially
-uninitialized: express required clears or copies as plan operations so replay
-has the intended state. Each preparation owns independent arrays; rebinding or
-resizing prepares another instance. Private arrays retire after their commands,
+caller-supplied gradient for the same primal is rejected. Arrays default to
+uninitialized storage: express required per-replay clears or copies as operations.
+An ndarray resource may set `"zero_initialize": true` to start at zero once per
+prepared instance, before explicit `initialization` and the first replay. Preparing
+records that work without executing it; `prepared.initialize()` or the first launch
+performs it. Later launches preserve the array's contents. Native resource factories
+must defer data-dependent work until an initialization or replay operation.
+Each preparation owns independent arrays; rebinding or resizing prepares another
+instance. Private arrays retire after their commands,
 including failed preparation, module closure and in-flight buffer retirement.
 `prepared.info["resource_bytes"]` reports their requested allocation bytes
-(one byte per empty array), separately from algorithm `workspace_bytes` and
-excluding allocator/driver overhead. Small Windows CPU/CUDA/Vulkan checks cover
+(one byte per empty array by default). Zero-initialized private allocations round
+that physical capacity up to four bytes, without changing logical shapes; this
+supports odd byte counts using existing native fills and adds no user shader.
+Shape-only and unused arrays still allocate nothing. These bytes are separate from
+algorithm `workspace_bytes` and exclude allocator/driver overhead. Small Windows CPU/CUDA/Vulkan checks cover
 primal computation, explicit reverse gradients and these ownership transitions.
 
 Plans can separate one-time initialization from replay:

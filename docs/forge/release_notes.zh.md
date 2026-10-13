@@ -47,6 +47,10 @@
   重复导出复用定义；尚无重建合同的存储/绑定策略明确拒绝。CPU/CUDA/Vulkan 小规模
   验证覆盖显式伴随与运行时数组别名。
 
+- AOT 私有 ndarray 可用 `zero_initialize: true` 在初始化/重放之前清零一次，后续
+  保留状态；奇数字节数利用自有存储补齐，不增加 shader。内部资源布局变化要求
+  Python/native 组件配套使用 private ABI 33。
+
 - 普通 CUDA FFT recording 可导出共享原生计划，覆盖批量 C2C/R2C/C2R 和显式物理
   布局；同计划的正反变换保留一份 workspace。小规模独立/借用消费测试覆盖显式谱
   伴随及退休；callback/separable 变体仍需独立合同。

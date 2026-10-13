@@ -295,11 +295,16 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
 导出的显式梯度，复用普通 kernel 的绑定检查，不为 native 操作自动生成导数。同一
-primal 不得再由调用者重复指定梯度。内部数组初始未初始化，所需清零、复制必须写成
-计划操作，以便重放时得到预期状态。每次准备独立持有数组，重绑定/resize 创建新实例；
+primal 不得再由调用者重复指定梯度。内部数组默认未初始化，每次重放所需清零、复制应
+写成操作。ndarray 资源可设 `"zero_initialize": true`，在每份实例的显式
+`initialization` 和首次重放之前清零一次。prepare 只录制；`prepared.initialize()`
+或首次 launch 执行清零，后续调用保留内容。原生资源 factory 须将依赖数据的工作延后
+到初始化或重放 operation。每次准备独立持有数组，重绑定/resize 创建新实例；
 准备失败、模块关闭及在途缓冲退休时，均先退休相关命令再释放内部数组。
-`prepared.info["resource_bytes"]` 单列这部分请求分配的字节数（空数组各占 1 字节），
-与算法 `workspace_bytes` 分开，均不代表分配器/驱动的全部开销。Windows 上小规模
+`prepared.info["resource_bytes"]` 单列请求分配字节数（空数组默认各占 1 字节）。设置
+首次清零的自有缓冲将该物理容量向上对齐到 4 字节，逻辑形状不变；奇数字节数也复用
+现有原生填充，不增加用户 shader。仅供推导形状和未使用的数组仍不分配。这些字节与
+算法 `workspace_bytes` 分开，均不代表分配器/驱动的全部开销。Windows 上小规模
 CPU/CUDA/Vulkan 用例覆盖前向计算、显式反向及上述所有权转换。
 
 计划可以将一次性初始化与重放分开：

@@ -41,7 +41,7 @@ def external_arguments(resources, gradients, arguments):
             raise ValueError("Execution resource entries must be objects")
         kind = resource.get("kind")
         if kind == "ndarray":
-            required, optional = {"kind", "name", "dtype", "shape"}, {"element_shape"}
+            required, optional = {"kind", "name", "dtype", "shape"}, {"element_shape", "zero_initialize"}
         elif kind == "extent":
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
         elif kind == "native":
@@ -61,6 +61,8 @@ def external_arguments(resources, gradients, arguments):
         if kind == "native":
             refs.extend(native_references(resource))
         elif kind == "ndarray":
+            if type(resource.get("zero_initialize", False)) is not bool:
+                raise ValueError("Execution zero_initialize must be a boolean")
             shape, element_shape = resource["shape"], resource.get("element_shape", [])
             if not isinstance(shape, list) or not isinstance(element_shape, list):
                 raise ValueError("Execution resource shapes must be arrays")

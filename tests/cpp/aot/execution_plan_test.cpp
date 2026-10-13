@@ -227,6 +227,7 @@ TEST(ExecutionPlan, RejectsInvalidResourceGraphsBeforeBinding) {
       const auto *resources :
       {R"(null)",
        R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[true]}])",
+       R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[17],"zero_initialize":1}])",
        R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[],"element_shape":[0]}])",
        R"([{"kind":"extent","name":"n","dtype":"f32","array":"x","axis":0}])",
        R"([{"kind":"ndarray","name":"x","dtype":"f32","shape":[]},{"kind":"ndarray","name":"x","dtype":"f32","shape":[]}])",
@@ -234,6 +235,23 @@ TEST(ExecutionPlan, RejectsInvalidResourceGraphsBeforeBinding) {
        R"([{"kind":"extent","name":"n","dtype":"i32","array":"input","axis":0},{"kind":"ndarray","name":"x","dtype":"f32","shape":[{"array":"n","axis":0}]}])"})
     EXPECT_THROW(ExecutionPlan::parse(prefix + resources + "}"),
                  std::invalid_argument);
+}
+
+TEST(ExecutionPlan, ZeroInitializationDoesNotMaterializeShapeOnlyResources) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,
+    "resources":[
+      {"kind":"ndarray","name":"state","dtype":"i8","shape":[{"array":"shape","axis":0}],"zero_initialize":true},
+      {"kind":"ndarray","name":"shape","dtype":"f32","shape":[17,3],"zero_initialize":true},
+      {"kind":"ndarray","name":"unused","dtype":"f32","shape":[123456789],"zero_initialize":true}],
+    "operations":[{"kind":"copy","source":"state","destination":"out"}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out"}));
+  EXPECT_EQ(plan.resources.order, (std::vector<std::size_t>{1, 0}));
+  EXPECT_EQ(plan.resources.materialize,
+            (std::vector<bool>{true, false, false}));
+  EXPECT_TRUE(
+      std::get<ExecutionResources::Array>(plan.resources.declarations[0].value)
+          .zero_initialize);
+  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"out", "state"}));
 }
 
 TEST(ExecutionPlan, NativeResourcesShareTheRequiredDependencyClosure) {

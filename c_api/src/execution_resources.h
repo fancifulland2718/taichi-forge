@@ -32,9 +32,14 @@ class ExecutionResourceStorage {
 // These host descriptors disappear after FixedExecution copies bindings.
 // Only storage moves into the prepared owner.
 struct ExecutionResourceBindings {
+  struct ZeroInitialization {
+    TiMemory memory;
+    uint64_t bytes;
+  };
   std::unique_ptr<ExecutionResourceStorage> storage;
   std::vector<TiArgument> arguments;
   std::vector<TiNamedNdArrayBinding> gradients;
+  std::vector<ZeroInitialization> zero_initializations;
 };
 ExecutionResourceBindings bind_execution_resources(
     Runtime &runtime,

@@ -55,11 +55,13 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
       }
       resource.dtype = name(value["dtype"]);
       if (kind == "ndarray") {
-        fields(value, {"kind", "name", "dtype", "shape", "element_shape"});
+        fields(value, {"kind", "name", "dtype", "shape", "element_shape",
+                       "zero_initialize"});
         if (!value["shape"].is_arr())
           throw std::invalid_argument(
               "Execution resource shape must be an array");
         auto &array = std::get<Array>(resource.value);
+        array.zero_initialize = optional_bool(value, "zero_initialize");
         for (const auto &dimension : value["shape"].arr.inner) {
           if (dimension.is_obj()) {
             fields(dimension, {"array", "axis"});

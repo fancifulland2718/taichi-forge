@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// CompileConfig provenance changes the private object layout shared by shim
-// and runtime. Reject older pairs before constructing any config objects.
-inline constexpr int kForgeNativeAbiRevision = 32;
+// AOT resource initialization changes private description layouts shared by
+// native components. Reject older pairs before crossing the C++ boundary.
+inline constexpr int kForgeNativeAbiRevision = 33;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

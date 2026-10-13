@@ -528,6 +528,14 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     }
   }
   std::vector<FixedExecution::Operation> operations;
+  for (const auto &zero : resource_bindings.zero_initializations) {
+    const auto allocation = rt.get_memory(zero.memory);
+    operations.emplace_back(
+        FixedExecution::BufferFill{allocation.allocation.get_ptr(0),
+                                   static_cast<std::size_t>(zero.bytes), 0});
+  }
+  const auto initialization_count =
+      operations.size() + plan.initialization.size();
   for (const auto *step : steps) {
     const auto &operation = *step;
     if (const auto *kernel =
@@ -710,7 +718,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");
-  if (!plan.initialization.empty()) {
+  if (initialization_count) {
     for (const auto &name : plan.replay_bindings) {
       if (const auto object = native_objects.find(name);
           object != native_objects.end()) {
@@ -727,7 +735,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   }
   if (prepared->resources)
     prepared->resources->remove_owned_dependencies(prepared->memories);
-  const auto split = operations.begin() + plan.initialization.size();
+  const auto split = operations.begin() + initialization_count;
   const std::vector<FixedExecution::Operation> initializers(operations.begin(),
                                                             split);
   operations.erase(operations.begin(), split);

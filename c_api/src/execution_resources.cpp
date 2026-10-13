@@ -135,6 +135,15 @@ ExecutionResourceBindings bind_execution_resources(
       std::copy(desc->element_shape.begin(), desc->element_shape.end(),
                 array.elem_shape.dims);
       sizes[pos] = ndarray_storage_layout(array).bytes;
+      if (desc->zero_initialize) {
+        // Only private allocations may expose padding to the internal fill.
+        // Keep the logical ndarray extent unchanged, including empty arrays.
+        const auto bytes = std::max<uint64_t>(1, sizes[pos]);
+        if (bytes > std::numeric_limits<uint64_t>::max() - 3)
+          throw MemoryBindingError(
+              "Execution zero initialization size overflow");
+        sizes[pos] = (bytes + 3) & ~uint64_t(3);
+      }
     } else {
       const auto extent = resolve(std::get<Recipes::Extent>(recipe.value));
       argument.type = TI_ARGUMENT_TYPE_SCALAR;
@@ -183,6 +192,11 @@ ExecutionResourceBindings bind_execution_resources(
       if (!result.storage)
         result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
       argument.value.ndarray.memory = result.storage->allocate(sizes[pos]);
+      if (std::get<Recipes::Array>(
+              resources.declarations[resources.order[pos]].value)
+              .zero_initialize)
+        result.zero_initializations.push_back(
+            {argument.value.ndarray.memory, sizes[pos]});
     }
   }
   return result;

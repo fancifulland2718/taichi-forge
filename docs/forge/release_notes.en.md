@@ -55,6 +55,11 @@ lifetimes. The entries below describe the changes.
   repeated exports, and rejects unreconstructed storage or binding policies.
   Small CPU/CUDA/Vulkan tests cover explicit adjoints and runtime array aliases.
 
+- Private AOT ndarray resources can request `zero_initialize: true`. They clear
+  once before initialization/replay and retain state across launches; odd byte
+  counts use padded owned storage without another shader. The changed internal
+  resource layout requires matching Python/native components at private ABI 33.
+
 - Ordinary CUDA FFT recordings now export shared native plans, including
   batched C2C/R2C/C2R and explicit physical layouts. Forward/inverse uses of
   one plan retain one workspace. Small standalone/borrowed checks cover explicit

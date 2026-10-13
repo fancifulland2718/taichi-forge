@@ -17,6 +17,18 @@ def test_execution_plan_snapshot_and_roundtrip(tmp_path):
     assert json.loads(restored.to_json())["operations"][0]["arguments"] == ["x"]
 
 
+def test_execution_zero_initialization_is_a_strict_resource_policy():
+    resource = dict(kind="ndarray", name="state", dtype="i8", shape=[17], zero_initialize=True)
+    operation = dict(kind="copy", source="state", destination="out")
+    plan = ExecutionPlan([operation], resources=[resource])
+    assert plan.argument_names == ("out",)
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert json.loads(restored.to_json())["resources"][0]["zero_initialize"] is True
+    for invalid in (1, 0, "true", None, [], {}):
+        with pytest.raises(ValueError, match="boolean"):
+            ExecutionPlan([operation], resources=[dict(resource, zero_initialize=invalid)])
+
+
 def test_initialization_version_and_runtime_closure():
     initial = [dict(kind="copy", source="input", destination="weights")]
     plan = ExecutionPlan(

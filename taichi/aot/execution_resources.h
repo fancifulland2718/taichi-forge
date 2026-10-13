@@ -24,6 +24,8 @@ struct ExecutionResources {
   struct Array {
     std::vector<Dimension> shape;
     std::vector<std::uint32_t> element_shape;
+    // Cold allocation policy; runs once before explicit initialization/replay.
+    bool zero_initialize{false};
   };
   struct Resource {
     std::string name;
