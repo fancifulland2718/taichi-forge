@@ -22,6 +22,7 @@ class _ExportContext:
         self._indices = {}
         self._names = set(reserved_names) | set(module._exported_kernels)
         self._kernel_names = {id(kernel): name for name, kernel in module._exported_kernels.items()}
+        self.reconstructed_binding_validators = set()
 
     def _name(self, kind):
         index = self._indices.get(kind, 0)
@@ -101,6 +102,17 @@ def _native(context, executable):
         raise TaichiRuntimeError("AOT recording export must contain an operation")
     if recreated != set(action.fixed_bindings):
         raise TaichiRuntimeError("AOT recording did not reconstruct all private bindings")
+    from taichi_forge.hardware._native_adapter import HardwareRecordingExecutable
+
+    validate = getattr(executable, "validate_graph_bindings", None)
+    if (
+        getattr(validate, "__func__", None) is HardwareRecordingExecutable.validate_graph_bindings
+        and executable._recording is recording
+    ):
+        # The standard wrapper only forwards to the exact recording whose
+        # concrete export contract just succeeded. Additional validation from
+        # a custom executable or an unrelated lease still needs its own recipe.
+        context.reconstructed_binding_validators.add(id(executable))
     return dict(action.fixed_bindings)
 
 
@@ -138,13 +150,7 @@ def _node(context, node):
         return
     if not isinstance(node, _CompiledCGraphNode):
         raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct {type(node).__name__} yet")
-    if (
-        node.composer_applied_groups
-        or node.parallel_dispatch_groups
-        or node.temporary_actions
-        or node.derived_runtime_arg_names
-        or node.physical_dispatch_count != node.dispatch_count
-    ):
+    if node.parallel_dispatch_groups or node.temporary_actions or node.derived_runtime_arg_names:
         raise TaichiRuntimeError("AOT execution Graph requires the selected composition/resource recipe")
     ir_nodes = node.ir_node.children if isinstance(node.ir_node, SequentialRegion) else (node.ir_node,)
     if any(isinstance(item, DispatchNode) and item.bounded_domain is not None for item in ir_nodes):
@@ -154,11 +160,14 @@ def _node(context, node):
     if not node.source_native_count:
         if node.fixed_runtime_args or len(node.recording_dispatches) != node.dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete symbolic dispatch metadata")
-        if any(isinstance(item, DispatchNode) and item.dispatch_label for item in ir_nodes):
-            raise TaichiRuntimeError("AOT execution Graph does not yet preserve dispatch labels")
-        for dispatch in node.recording_dispatches:
-            context.kernel(dispatch.kernel, dispatch.args)
+        dispatches = node.compiled_graph._physical_jit_dispatch_sources
+        if len(dispatches) != node.physical_dispatch_count:
+            raise TaichiRuntimeError("AOT execution Graph lacks complete physical dispatch metadata")
+        for dispatch in dispatches:
+            context.kernel(*dispatch)
         return
+    if node.composer_applied_groups or node.physical_dispatch_count != node.dispatch_count:
+        raise TaichiRuntimeError("AOT mixed Graph requires the selected composition recipe")
     # Capture-native commands coexist with kernels inside one CGraph. Only the
     # frozen operation sequence retains their ordering; dispatches alone omit them.
     recreated = {}
@@ -199,10 +208,26 @@ def export_graph(module, graph, *, gradients=None):
             raise TaichiRuntimeError("AOT execution Graph and module backends must match")
         if graph._workspace_lane_capacity != 1 or graph._qualified_fusion_selector is not None:
             raise TaichiRuntimeError("AOT execution Graph needs a fixed single-frame execution recipe")
+        spec = graph._spec
+        if (
+            getattr(spec, "_binding_executor_factory", None) is not None
+            or getattr(spec, "_storage_plans", ())
+            or spec.memory_recipe_binding_names
+        ):
+            raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         gradient_names = set((gradients or {}).values())
         context = _ExportContext(module, set(graph._spec.runtime_arg_names) | gradient_names)
         for node in graph._spec.nodes:
             _node(context, node)
+        if any(
+            callable(getattr(lease, "bind_graph_arguments", None))
+            or (
+                callable(getattr(lease, "validate_graph_bindings", None))
+                and id(lease) not in context.reconstructed_binding_validators
+            )
+            for lease in spec.lifetime_leases
+        ):
+            raise TaichiRuntimeError("AOT execution Graph requires the selected binding validation recipe")
         plan = ExecutionPlan(context.operations, resources=context.resources, gradients=gradients)
         # An opaque provider workspace must not accidentally become a public
         # input to some other kernel. Resource recipes must cover the full use.

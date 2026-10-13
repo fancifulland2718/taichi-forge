@@ -261,6 +261,15 @@ Kernel specializations are deduplicated across exports in one module. Backend
 compilation still follows the module's AOT target/options; exporting a JIT Graph
 does not make those target-dependent costs disappear.
 
+Ordinary map compositions export the materialized physical kernel sequence,
+including fused IR and its argument remapping, rather than the original source
+dispatches. Repeated export shares those kernel definitions. CPU/CUDA/Vulkan
+checks cover explicit adjoints, runtime array aliases, and consumption after
+closing the producer. Custom storage/executor selections and binding proofs still
+need reconstruction descriptions; export rejects them instead of dropping their
+constraints. This preserves the selected map transformation, not a serialized
+CUDA Graph handle or a guarantee of identical target machine code.
+
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
 too. This does not synthesize derivatives of native provider calls. Windows

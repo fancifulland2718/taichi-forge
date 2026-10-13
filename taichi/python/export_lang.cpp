@@ -6587,6 +6587,30 @@ void export_lang(py::module &m) {
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
       .def_property_readonly(
+          "_physical_jit_dispatch_sources",
+          [](const py::object &owner) {
+            const auto &graph = owner.cast<const aot::CompiledGraph &>();
+            TI_ERROR_IF(!graph.cuda_parallel_dispatch_groups.empty(),
+                        "Parallel Graph dispatch requires an execution recipe");
+            py::list sources;
+            for (const auto &dispatch : graph.dispatches) {
+              TI_ERROR_IF(
+                  !dispatch.ti_kernel || dispatch.indirect_dispatch_arg ||
+                      dispatch.cuda_bounded_dispatch ||
+                      dispatch.cpu_bounded_dispatch ||
+                      dispatch.cuda_capture_command,
+                  "Graph dispatch requires a non-kernel execution recipe");
+              // Export the selected physical IR, not its logical source
+              // lineage. Retain the graph so synthetic kernels survive producer
+              // close.
+              sources.append(py::make_tuple(
+                  py::cast(dispatch.ti_kernel,
+                           py::return_value_policy::reference_internal, owner),
+                  dispatch.symbolic_args, dispatch.dispatch_label));
+            }
+            return sources;
+          })
+      .def_property_readonly(
           "_owned_jit_dispatch_sources", [](const py::object &owner) {
             const auto &graph = owner.cast<const aot::CompiledGraph &>();
             py::list sources;

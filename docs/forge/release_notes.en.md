@@ -50,6 +50,11 @@ lifetimes. The entries below describe the changes.
   adjoints and independent consumers after producer retirement. Structured
   control and unregistered recording recipes remain separate coverage work.
 
+- Automatic AOT Graph export now retains selected ordinary map compositions.
+  It exports physical fused kernels with their argument remapping, deduplicates
+  repeated exports, and rejects unreconstructed storage or binding policies.
+  Small CPU/CUDA/Vulkan tests cover explicit adjoints and runtime array aliases.
+
 - Ordinary CUDA FFT recordings now export shared native plans, including
   batched C2C/R2C/C2R and explicit physical layouts. Forward/inverse uses of
   one plan retain one workspace. Small standalone/borrowed checks cover explicit

@@ -221,6 +221,12 @@ provider 自己提供描述以恢复原 compute/workspace 策略，同一 plan �
 回调。同模块内重复导出会复用 kernel 特化；后端编译仍遵守模块的 AOT 目标和选项，
 导出现有 JIT Graph 不代表消除了这些目标相关的编译成本。
 
+普通 map 组合按物化后的物理 kernel 顺序导出，保留融合 IR 和参数映射，不重新导出
+融合前的源 dispatch；重复导出复用这些 kernel 定义。CPU/CUDA/Vulkan 已验证显式
+伴随、运行时数组别名及生产端关闭后的消费。自定义存储/执行器选择和绑定证明仍需
+重建描述，导出时明确拒绝，不能丢掉约束。这里保留的是已选 map 变换，不是序列化
+CUDA Graph handle，也不保证不同 AOT 目标生成完全相同的机器码。
+
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
 Windows CPU/CUDA/Vulkan 已验证独立/借用消费的前向和反向；cuBLAS/cuTENSOR 已验证
