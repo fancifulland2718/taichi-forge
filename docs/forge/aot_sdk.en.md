@@ -286,8 +286,19 @@ description; different dtypes remain distinct. Three-backend tests cover integer
 counts, coefficients and explicit reverse kernels, with exact wide integers and
 negative zero. A CPU JIT Graph comparison also checks merged zero and F32 overflow.
 Custom numeric objects and native recordings without a typed scalar reconstruction
-contract still fail during export preflight. Labels and structured helper recipes
-continue to require their own reconstruction contract.
+contract still fail during export preflight. Structured helper recipes continue
+to require their own reconstruction contract.
+
+Kernel dispatch labels are preserved by automatic export and by the optional
+`"label"` field on a kernel operation. Labels belong to individual operations:
+reusing a kernel under different labels does not duplicate its compiled code.
+Preparation forwards them to the common launch context. Fixed replay does not
+thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
+strings without NUL or line breaks, with no fixed length limit. Small
+CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
+explicit reverse kernels and retirement. This requires matching private ABI 35
+components. Capacity, layout and disjointness certificates on reduction/helper
+recipes still require reconstruction; label support does not bypass those checks.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -297,7 +308,7 @@ consumers. cuBLAS/cuTENSOR checks include complete mixed sequences, explicit
 coefficient/input adjoints, shared and independent plans, source-owner retirement
 before consumption, and in-flight consumer close/reset.
 
-Unsupported recording types/subclasses, structured control, observations, labels,
+Unsupported recording types/subclasses, structured control, observations,
 bounded/indirect dispatch and selected composition/private-resource recipes
 without a reconstruction contract are rejected during preflight, before adding
 kernel definitions. They are not silently replaced by a baseline recipe. If a
@@ -386,7 +397,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Matching Python/native components require private ABI 34. Small
+elements. Use matching Python/native components (current private ABI 35). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.

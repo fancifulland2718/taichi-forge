@@ -94,7 +94,7 @@ class ExecutionPlan:
                 raise ValueError("Execution operations must be objects")
             kind = op.get("kind")
             if kind == "kernel":
-                required, optional = {"kind", "entry", "arguments"}, set()
+                required, optional = {"kind", "entry", "arguments"}, {"label"}
                 names = ("entry",)
             elif kind == "copy":
                 required = {"kind", "source", "destination"}
@@ -132,6 +132,11 @@ class ExecutionPlan:
                 if name != "entry":
                     arguments.add(op[name])
             for key in (optional & set(op)) - set(names):
+                if kind == "kernel" and key == "label":
+                    _name(op[key])
+                    if "\n" in op[key] or "\r" in op[key]:
+                        raise ValueError("Dispatch labels cannot contain line breaks")
+                    continue
                 if kind == "gemm_f32":
                     continue
                 if type(op[key]) is not int or not 0 <= op[key] <= 0x7FFFFFFFFFFFFFFF:

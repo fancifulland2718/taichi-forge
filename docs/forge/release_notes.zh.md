@@ -43,6 +43,11 @@
   CUDA 混合序列另验证显式伴随及生产端退休后的独立消费。结构控制和未注册 recording
   配方仍需继续补齐。
 
+- AOT 执行计划可保留每次 kernel dispatch 的标签，不重复生成 kernel 定义，准备时
+  使用共用标签上下文；固定重放不会因此自动开启逐 kernel 计时。标签移除了人为的
+  字节长度上限，仍拒绝 NUL 和换行。CPU/CUDA/Vulkan 小规模验证覆盖长标签、显式
+  反向及消费者退休；Python/native 组件须配对使用 private ABI 35。
+
 - Graph 自动 AOT 导出保留已选的普通 map 组合，导出物理融合 kernel 及参数映射，
   重复导出复用定义；尚无重建合同的存储/绑定策略明确拒绝。CPU/CUDA/Vulkan 小规模
   验证覆盖显式伴随与运行时数组别名。

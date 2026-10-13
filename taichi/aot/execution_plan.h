@@ -17,6 +17,7 @@ struct ExecutionPlan {
   struct Kernel {
     std::string entry;
     std::vector<std::string> arguments;
+    std::string label;
   };
   struct Copy {
     std::string destination;

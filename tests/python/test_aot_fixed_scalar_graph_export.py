@@ -43,6 +43,7 @@ def test_aot_fixed_scalar_graph_preserves_values_types_and_reverse(tmp_path):
 
     arch = "cpu" if ti.lang.impl.current_cfg().arch == ti.cpu else str(ti.lang.impl.current_cfg().arch).split(".")[-1]
     module = ti.aot.Module(caps=["spirv_has_int64"] if arch == "vulkan" else [])
+    forward_label = "solver/" + "阶段/" * 64 + "前向"
     for name, gain_value in (("negative", -1.75), ("positive", 0.5)):
         builder = ti.graph.GraphBuilder(_map_recipe="map2")
         public = {key: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, key, ti.f32, ndim=1) for key in ("x", "y", "dx", "dy")}
@@ -56,16 +57,16 @@ def test_aot_fixed_scalar_graph_preserves_values_types_and_reverse(tmp_path):
         count = first._bind_internal_scalar("count", ti.u32, 17)
         zero = first._bind_internal_scalar("zero", ti.f32, 0.0)
         offset = first._bind_internal_scalar("first_offset", ti.i32, 0)
-        first.dispatch(seed, public["dx"], public["dy"], n)
-        first.dispatch(forward, public["x"], public["y"], n, gain)
-        first.dispatch(forward.grad, public["x"], public["y"], n, same_gain)
-        first.dispatch(encode, encoded, wide, signed, zero, count, offset)
+        first.dispatch(seed, public["dx"], public["dy"], n, label="solver/seed")
+        first.dispatch(forward, public["x"], public["y"], n, gain, label=forward_label)
+        first.dispatch(forward.grad, public["x"], public["y"], n, same_gain, label="solver/reverse")
+        first.dispatch(encode, encoded, wide, signed, zero, count, offset, label="encode/first")
         builder.append(first)
         last = builder.create_sequential()
         # Equal values merge, with the final fixed frame retaining negative zero.
         zero = last._bind_internal_scalar("zero", ti.f32, -0.0)
         offset = last._bind_internal_scalar("last_offset", ti.i32, 4)
-        last.dispatch(encode, encoded, wide, signed, zero, count, offset)
+        last.dispatch(encode, encoded, wide, signed, zero, count, offset, label="encode/last")
         builder.append(last)
         graph = builder.compile()
         assert math.copysign(1, graph._spec.fixed_runtime_args["zero"]) == -1
@@ -90,7 +91,17 @@ def test_aot_fixed_scalar_graph_preserves_values_types_and_reverse(tmp_path):
         assert len(module._exported_kernels) == before
         plan = module.add_execution_plan(name, graph, gradients=dict(x="dx", y="dy"))
         assert plan.argument_names == ("dx", "dy", "encoded", "x", "y")
-        resources = json.loads(plan.to_json())["resources"]
+        document = json.loads(plan.to_json())
+        steps = document["operations"]
+        assert [step["label"] for step in steps] == [
+            "solver/seed",
+            forward_label,
+            "solver/reverse",
+            "encode/first",
+            "encode/last",
+        ]
+        assert steps[-1]["entry"] == steps[-2]["entry"], "Labels must not duplicate compiled code"
+        resources = document["resources"]
         assert all(r["kind"] == "scalar" for r in resources)
         payloads = [(r["dtype"], r["bits"]) for r in resources]
         assert len(set(payloads)) == len(payloads), "Identical typed values share one description"
@@ -112,6 +123,22 @@ def test_aot_fixed_scalar_graph_preserves_values_types_and_reverse(tmp_path):
             timeout=90,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_labeled_reduction_still_requires_memory_contract_reconstruction():
+    builder = ti.graph.GraphBuilder()
+    values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
+    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+    builder.reduce(values, output, count=17)
+    graph = builder.compile()
+    assert graph._spec.memory_layout_requirements
+    assert graph._spec.memory_disjoint_pairs
+    module = ti.aot.Module()
+    with pytest.raises(ti.TaichiRuntimeError, match="storage/binding recipe"):
+        module.add_execution_plan("reduction", graph)
+    assert not module._exported_kernels
+    graph.close()
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

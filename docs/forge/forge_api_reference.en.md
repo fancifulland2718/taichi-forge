@@ -2447,8 +2447,10 @@ ordinary direct call, `ti.profiler.dispatch_label("phase=...")` is a nestable,
 thread-local context manager. Labeled kernel-profiler and optional NVTX names
 retain the original task name and append `tf.task=<task_id> label=<label>`.
 Labels reject NUL and line breaks; there is no fixed byte-length limit.
-Dispatch labels are currently JIT-only; `AOT Module.add_graph()` rejects a
-labeled Graph instead of silently removing its observability metadata.
+`AOT Module.add_graph()` still rejects labeled Graphs. The separate
+[`Module.add_execution_plan()`](aot_sdk.en.md) path preserves kernel labels in
+its persistent operations and preparation context, without automatically enabling
+per-kernel profiling during fixed replay.
 
 ### Direct-kernel `TaskLaunchPolicy`
 

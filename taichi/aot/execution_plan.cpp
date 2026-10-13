@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include "taichi/aot/execution_plan_json.h"
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/system/profiler_annotation.h"
 
 namespace taichi::lang::aot {
 using namespace execution_json;
@@ -34,8 +35,15 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
       for (const auto &step : steps.arr.inner) {
         const auto kind = name(step["kind"]);
         if (kind == "kernel") {
-          fields(step, {"kind", "entry", "arguments"});
-          Kernel kernel{name(step["entry"]), {}};
+          fields(step, {"kind", "entry", "arguments", "label"});
+          Kernel kernel{name(step["entry"]), {}, {}};
+          if (auto found = step.obj.inner.find("label");
+              found != step.obj.inner.end()) {
+            kernel.label = name(found->second);
+            if (!is_valid_dispatch_label(kernel.label))
+              throw std::invalid_argument(
+                  "Dispatch labels cannot contain NUL or line breaks");
+          }
           if (!step["arguments"].is_arr() ||
               step["arguments"].arr.inner.size() >
                   std::numeric_limits<std::uint32_t>::max())

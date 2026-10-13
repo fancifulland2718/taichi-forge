@@ -238,7 +238,14 @@ CPU/CUDA/Vulkan 小规模测试覆盖状态累积、显式反向、别名与重�
 自动导出。相同类型和位载荷共用常量描述，不同 dtype 保持区分。三后端已验证
 计数、系数、显式反向 kernel，以及宽整数和负零；CPU 另与真实 JIT Graph 对照
 合并后的零及 F32 溢出。自定义数值对象、缺少 typed scalar 重建合同的原生 recording
-仍在导出预检期拒绝；标签和结构化 helper recipe 仍需各自的重建合同。
+仍在导出预检期拒绝；结构化 helper recipe 仍需各自的重建合同。
+
+kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"` 字段持久化。
+标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
+launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
+标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 35。
+reduction/helper 的容量、布局和 disjoint 证明仍需重建，标签支持不会绕过这些检查。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -246,7 +253,7 @@ Windows CPU/CUDA/Vulkan 已验证独立/借用消费的前向和反向；cuBLAS/
 完整混合序列、显式输入梯度、共享与独立 plan、生产端 owner 关闭后消费，以及在途
 consumer close/reset。
 
-未覆盖的 recording 类型/子类、结构控制、观察点、label、bounded/indirect dispatch、
+未覆盖的 recording 类型/子类、结构控制、观察点、bounded/indirect dispatch、
 缺少重建合同的选中组合策略/私有资源在预检期报错，先于添加 kernel 定义，不静默替换为
 baseline。若后续后端编译失败，该模块不能保存，须新建模块，避免发布不完整产物。
 `add_graph` 仍导出普通 CGraph 格式；此路径用 `prepare_execution` 消费，轻量消费端与
@@ -313,7 +320,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套 private ABI 34。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 35）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已

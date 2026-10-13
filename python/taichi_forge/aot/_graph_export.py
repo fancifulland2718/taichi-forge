@@ -167,8 +167,6 @@ class _ExportContext:
         )
 
     def kernel(self, kernel, args, label=""):
-        if label:
-            raise TaichiRuntimeError("AOT execution Graph does not yet preserve dispatch labels")
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
             raise TaichiRuntimeError("AOT execution Graph currently requires scalar or ndarray kernel bindings")
         name = self._kernel_names.get(id(kernel))
@@ -176,7 +174,10 @@ class _ExportContext:
             name = self._name("kernel")
             self._kernel_names[id(kernel)] = name
             self.kernels[name] = kernel
-        self.operations.append(dict(kind="kernel", entry=name, arguments=[self.kernel_binding(arg) for arg in args]))
+        operation = dict(kind="kernel", entry=name, arguments=[self.kernel_binding(arg) for arg in args])
+        if label:
+            operation["label"] = label
+        self.operations.append(operation)
 
 
 def _native(context, executable):

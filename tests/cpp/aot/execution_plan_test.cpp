@@ -289,6 +289,30 @@ TEST(ExecutionPlan, ScalarResourcesPreserveBitsWithoutStorageDependencies) {
                  std::invalid_argument);
 }
 
+TEST(ExecutionPlan, KernelLabelsBelongToDispatches) {
+  const auto plan = ExecutionPlan::parse(R"({"version":2,
+    "initialization":[{"kind":"kernel","entry":"shared","arguments":["x"],"label":"init"}],
+    "operations":[{"kind":"kernel","entry":"shared","arguments":["x"],"label":"solver/forward"},
+                  {"kind":"kernel","entry":"shared","arguments":["x"],"label":"solver/reverse"},
+                  {"kind":"kernel","entry":"shared","arguments":["x"]}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x"}));
+  EXPECT_EQ(std::get<ExecutionPlan::Kernel>(plan.initialization[0]).label,
+            "init");
+  EXPECT_EQ(std::get<ExecutionPlan::Kernel>(plan.operations[0]).label,
+            "solver/forward");
+  EXPECT_EQ(std::get<ExecutionPlan::Kernel>(plan.operations[1]).label,
+            "solver/reverse");
+  EXPECT_TRUE(
+      std::get<ExecutionPlan::Kernel>(plan.operations[2]).label.empty());
+  const std::string prefix =
+      R"({"version":1,"operations":[{"kind":"kernel","entry":"k","arguments":[],"label":)";
+  for (const auto *label :
+       {"null", "true", "1", "[]", "{}", R"("")", R"("invalid\u0000label")",
+        R"("invalid\nlabel")", R"("invalid\rlabel")"})
+    EXPECT_THROW(ExecutionPlan::parse(prefix + label + "}]}"),
+                 std::invalid_argument);
+}
+
 TEST(ExecutionPlan, NativeResourcesShareTheRequiredDependencyClosure) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,
     "resources":[

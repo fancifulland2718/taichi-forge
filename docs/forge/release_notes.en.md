@@ -55,6 +55,13 @@ lifetimes. The entries below describe the changes.
   repeated exports, and rejects unreconstructed storage or binding policies.
   Small CPU/CUDA/Vulkan tests cover explicit adjoints and runtime array aliases.
 
+- AOT execution plans now preserve per-kernel dispatch labels without duplicating
+  compiled kernel definitions. Preparation uses the common label context; this
+  does not enable per-kernel profiling on fixed replay. Long labels no longer
+  have an arbitrary byte limit, while NUL and line breaks remain invalid.
+  Small CPU/CUDA/Vulkan checks cover long labels, explicit reverse kernels and
+  consumer retirement. Matching Python/native components use private ABI 35.
+
 - Private AOT ndarray resources can request `zero_initialize: true`. They clear
   once before initialization/replay and retain state across launches; odd byte
   counts use padded owned storage without another shader. The changed internal

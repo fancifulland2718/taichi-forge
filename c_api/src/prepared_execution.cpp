@@ -566,6 +566,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
           kernel_bindings.data());
       if (!bound)
         return TI_NULL_HANDLE;
+      bound->context->append_dispatch_label(kernel->label);
       prepared->memories.insert(prepared->memories.end(),
                                 bound->memories.begin(), bound->memories.end());
       operations.emplace_back(

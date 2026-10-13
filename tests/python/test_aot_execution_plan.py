@@ -17,6 +17,25 @@ def test_execution_plan_snapshot_and_roundtrip(tmp_path):
     assert json.loads(restored.to_json())["operations"][0]["arguments"] == ["x"]
 
 
+def test_kernel_labels_are_per_dispatch_metadata():
+    long_label = "solver/" + "阶段/" * 128 + "前向"
+    step = dict(kind="kernel", entry="shared", arguments=["x"], label=long_label)
+    plan = ExecutionPlan([step, dict(step, label="solver/reverse")], initialization=[dict(step, label="initialize")])
+    step["label"] = "mutated"
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.kernel_entries == ("shared",)
+    assert restored.argument_names == ("x",)
+    document = json.loads(restored.to_json())
+    assert [op["label"] for op in document["operations"]] == [long_label, "solver/reverse"]
+    assert document["initialization"][0]["label"] == "initialize"
+    for invalid in (None, True, 1, "", "invalid\0label", "bad\nlabel", "bad\rlabel", [], {}):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(step, label=invalid)])
+    # Labels are kernel dispatch metadata, not arbitrary provider parameters.
+    with pytest.raises(ValueError):
+        ExecutionPlan([dict(kind="fill32", destination="x", value=0, label="invalid")])
+
+
 def test_execution_zero_initialization_is_a_strict_resource_policy():
     resource = dict(kind="ndarray", name="state", dtype="i8", shape=[17], zero_initialize=True)
     operation = dict(kind="copy", source="state", destination="out")

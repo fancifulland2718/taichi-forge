@@ -2013,8 +2013,9 @@ capabilities 与 backend 下稳定；不承诺跨 backend、跨配置或跨版�
 thread-local 的 `ti.profiler.dispatch_label("phase=...")`。带标签的 kernel-profiler 与可选
 NVTX 名称保留原 task name，并追加 `tf.task=<task_id> label=<label>`。标签不能包含 NUL
 或换行，不设固定字节长度上限。
-dispatch label 当前仅用于 JIT；`AOT Module.add_graph()` 会明确拒绝带标签 Graph，不会静默
-移除可观测元数据。
+`AOT Module.add_graph()` 仍明确拒绝带标签 Graph。
+[`Module.add_execution_plan()`](aot_sdk.zh.md) 路径可在持久化操作和准备上下文中保留
+kernel 标签，但不会自动开启固定重放中的逐 kernel 计时。
 
 ### Direct kernel 的 `TaskLaunchPolicy`
 
