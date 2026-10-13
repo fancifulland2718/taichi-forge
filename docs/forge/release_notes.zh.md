@@ -53,6 +53,9 @@
   重放不增加检查。小规模测试覆盖真实反向 kernel、空数组、tensor 布局与退休；
   helper 自动导出仍是后续接线，当前 Python/native 组件需配套 private ABI 36。
 
+- CUDA reduction 策略重建恢复私有输入/输出端点及其别名，直接和分阶段策略不再把
+  私有数组错误地暴露为公开参数；仍只重建选中策略需要的 scratch。
+
 - Graph 自动 AOT 导出保留已选的普通 map 组合，导出物理融合 kernel 及参数映射，
   重复导出复用定义；尚无重建合同的存储/绑定策略明确拒绝。CPU/CUDA/Vulkan 小规模
   验证覆盖显式伴随与运行时数组别名。

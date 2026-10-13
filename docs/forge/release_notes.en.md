@@ -69,6 +69,10 @@ lifetimes. The entries below describe the changes.
   empty arrays, tensor layouts and retirement. Helper automatic export remains
   separate work; matching Python/native components now require private ABI 36.
 
+- Rebuilding a selected CUDA reduction recipe now restores private input/output
+  bindings and their aliases. Direct and staged recipes keep the public argument
+  set unchanged and allocate only their own selected scratch resources.
+
 - Private AOT ndarray resources can request `zero_initialize: true`. They clear
   once before initialization/replay and retain state across launches; odd byte
   counts use padded owned storage without another shader. The changed internal

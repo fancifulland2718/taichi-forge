@@ -10862,7 +10862,7 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
     return tuple(selected_by_route[route] for route in routes), selected
 
 
-def _record_frozen_recipe_dispatch(builder, node, kernel_cpp, args, label):
+def _restore_frozen_recipe_bindings(builder, node, args):
     # Reconstruct only bindings still consumed by this dispatch. Copying the
     # entire old fixed frame would also retain workspaces of replaced recipes.
     # The frozen declaration object preserves private aliases and lifetime.
@@ -10870,6 +10870,10 @@ def _record_frozen_recipe_dispatch(builder, node, kernel_cpp, args, label):
         name = getattr(symbolic, "name", None)
         if name in node.fixed_runtime_args:
             builder._bind_internal_runtime_arg(symbolic, node.fixed_runtime_args[name])
+
+
+def _record_frozen_recipe_dispatch(builder, node, kernel_cpp, args, label):
+    _restore_frozen_recipe_bindings(builder, node, args)
     builder._record_dispatch(kernel_cpp, list(args), label)
 
 
@@ -10953,6 +10957,9 @@ def _replay_recipe_cgraph_node(
             continue
         if kind == "graph_reduction":
             _, source, label = operation
+            # Inputs/outputs may be private aliases. Restore only these stable
+            # endpoints; the chosen recipe declares its own scratch and counts.
+            _restore_frozen_recipe_bindings(builder, node, (source.values, source.output))
             rewriter = assembly.operation_rewriter(source)
             if rewriter is None:
                 source.materialize(

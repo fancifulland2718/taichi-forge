@@ -163,6 +163,54 @@ def test_graph_reduction_compileiq_materializes_complete_typed_domain():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_reduction_materialization_preserves_private_endpoint_aliases():
+    count = 257
+
+    @ti.kernel
+    def produce(x: ti.types.ndarray(ti.i32, ndim=1), private: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in range(count):
+            private[i] = x[i] + 1
+
+    @ti.kernel
+    def publish(private: ti.types.ndarray(ti.i32, ndim=1), output: ti.types.ndarray(ti.i32, ndim=1)):
+        output[0] = private[0]
+
+    builder = ti.graph.GraphBuilder()
+    values = builder.private_ndarray("private_values", ti.i32, count)
+    result = builder.private_ndarray("private_result", ti.i32, 1)
+    aliases = []
+    for symbol in (values, result):
+        alias = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, symbol.name + "_alias", ti.i32, ndim=1)
+        builder._bind_internal_runtime_arg(alias, builder._declared_private_bindings[symbol.name][1])
+        aliases.append(alias)
+    public = {name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1) for name in ("x", "output")}
+    builder.dispatch(produce, public["x"], values)
+    builder.reduce(*aliases, count=count)
+    builder.dispatch(publish, result, public["output"])
+    graph = builder.compile()
+    search = compileiq_recipe_search(graph)
+    staged = next(
+        recipe for recipe in search.recipe_ids
+        if search.recipe_manifest(recipe).get("reduction_recipe_manifest", {}).get("strategy")
+        == "block_partial_finalize"
+    )
+    arrays = dict(x=ti.ndarray(ti.i32, count), output=ti.ndarray(ti.i32, 1))
+    for recipe in (search.baseline_recipe_id, staged):
+        with search.materialize(dict(domain_fingerprint=search.domain_fingerprint, recipe_id=recipe)) as materialized:
+            selected = materialized.executor
+            assert set(selected._spec.runtime_arg_names) == {"x", "output"}
+            for symbol, alias in zip((values, result), aliases):
+                assert selected._spec.fixed_runtime_args[symbol.name] is selected._spec.fixed_runtime_args[alias.name]
+            bindings = selected.bind(arrays)
+            for shift in (0, 3):
+                source = np.arange(count, dtype=np.int32) + shift
+                arrays["x"].from_numpy(source)
+                selected.run(bindings)
+                assert arrays["output"].to_numpy()[0] == (source + 1).sum()
+    graph.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_graph_reduction_requires_explicit_floating_point_equivalence():
     with pytest.raises(ValueError, match="requires explicit"):
         _build_reduction_graph(ti.f32, 1024)
