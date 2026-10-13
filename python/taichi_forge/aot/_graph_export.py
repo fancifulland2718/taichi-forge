@@ -23,6 +23,8 @@ class _ExportContext:
         self._names = set(reserved_names) | set(module._exported_kernels)
         self._kernel_names = {id(kernel): name for name, kernel in module._exported_kernels.items()}
         self.reconstructed_binding_validators = set()
+        self.private_bindings = {}
+        self._private_names = {}
 
     def _name(self, kind):
         index = self._indices.get(kind, 0)
@@ -33,19 +35,23 @@ class _ExportContext:
         return name
 
     def resource(self, owner, provider, operation, *, parameters, bindings=None, version=1):
-        """Share only an identical producer resource, with an identical description."""
-        if owner is None:
-            raise ValueError("AOT reconstruction requires a resource owner identity")
-        description = _snapshot(
+        return self._resource(
+            owner,
             dict(
                 kind="native",
                 provider=provider,
                 operation=operation,
                 version=version,
                 parameters=parameters,
-                bindings=bindings or {},
-            )
+                bindings={port: self.binding(slot) for port, slot in (bindings or {}).items()},
+            ),
         )
+
+    def _resource(self, owner, description):
+        """Share only an identical producer resource, with an identical description."""
+        if owner is None:
+            raise ValueError("AOT reconstruction requires a resource owner identity")
+        description = _snapshot(description)
         previous = self._resource_owners.get(id(owner))
         if previous is not None:
             _, name, frozen = previous
@@ -57,6 +63,47 @@ class _ExportContext:
         self.resources.append(dict(description, name=name))
         return name
 
+    def declare_private_arrays(self, bindings):
+        from taichi_forge.graph._ir import InternalNdarrayRequirement
+        from taichi_forge.lang.util import cook_dtype
+
+        for name, owner in bindings.items():
+            if not isinstance(owner, InternalNdarrayRequirement):
+                continue
+            dtype = cook_dtype(owner.dtype)
+            element_type = str(dtype.element_type())
+            if element_type not in {"f16", "f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}:
+                raise TaichiRuntimeError("AOT private ndarray requires a supported scalar element type")
+            if core.data_type_size(dtype) != owner.element_bytes:
+                raise TaichiRuntimeError("AOT private ndarray element size differs from its declaration")
+            self._private_names[name] = self._resource(
+                owner,
+                dict(
+                    kind="ndarray",
+                    dtype=element_type,
+                    shape=owner.shape,
+                    element_shape=dtype.shape(),
+                    zero_initialize=True,
+                ),
+            )
+            self.private_bindings[name] = owner
+
+    def binding(self, name):
+        return self._private_names.get(name, name)
+
+    def declared_bindings(self, bindings):
+        return {
+            name: owner
+            for name, owner in bindings.items()
+            if name in self.private_bindings and self.private_bindings[name] is owner
+        }
+
+    def require_private_arrays(self, bindings):
+        if len(self.declared_bindings(bindings)) != len(bindings):
+            raise TaichiRuntimeError(
+                "AOT fixed bindings require a reconstruction description; live arrays/scalars are not declarations"
+            )
+
     def native(self, provider, operation, *, bindings, parameters=None, version=1):
         self.operations.append(
             _snapshot(
@@ -66,7 +113,7 @@ class _ExportContext:
                     operation=operation,
                     version=version,
                     parameters=parameters or {},
-                    bindings=bindings,
+                    bindings={port: self.binding(slot) for port, slot in bindings.items()},
                 )
             )
         )
@@ -81,7 +128,7 @@ class _ExportContext:
             name = self._name("kernel")
             self._kernel_names[id(kernel)] = name
             self.kernels[name] = kernel
-        self.operations.append(dict(kind="kernel", entry=name, arguments=[arg.name for arg in args]))
+        self.operations.append(dict(kind="kernel", entry=name, arguments=[self.binding(arg.name) for arg in args]))
 
 
 def _native(context, executable):
@@ -100,7 +147,7 @@ def _native(context, executable):
     recreated = set(exporter(recording, context))
     if len(context.operations) == before:
         raise TaichiRuntimeError("AOT recording export must contain an operation")
-    if recreated != set(action.fixed_bindings):
+    if recreated | context.declared_bindings(action.fixed_bindings).keys() != set(action.fixed_bindings):
         raise TaichiRuntimeError("AOT recording did not reconstruct all private bindings")
     from taichi_forge.hardware._native_adapter import HardwareRecordingExecutable
 
@@ -120,11 +167,11 @@ def _sequence(context, sequence):
     if (
         sequence._has_indirect_dispatch
         or sequence._structured_depth
-        or sequence._fixed_runtime_args
         or sequence._temporary_actions
         or sequence._derived_runtime_arg_names
     ):
         raise TaichiRuntimeError("AOT sequence requires explicit control/private resource reconstruction")
+    context.require_private_arrays(sequence._fixed_runtime_args)
     for item in sequence._items:
         if item[0] != "dispatch":
             raise TaichiRuntimeError(f"AOT sequence cannot reconstruct {item[0]!r} yet")
@@ -158,7 +205,8 @@ def _node(context, node):
     if any(dispatch.dispatch_packet is not None for dispatch in node.recording_dispatches):
         raise TaichiRuntimeError("AOT execution Graph does not yet reconstruct indirect dispatch")
     if not node.source_native_count:
-        if node.fixed_runtime_args or len(node.recording_dispatches) != node.dispatch_count:
+        context.require_private_arrays(node.fixed_runtime_args)
+        if len(node.recording_dispatches) != node.dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete symbolic dispatch metadata")
         dispatches = node.compiled_graph._physical_jit_dispatch_sources
         if len(dispatches) != node.physical_dispatch_count:
@@ -170,7 +218,7 @@ def _node(context, node):
         raise TaichiRuntimeError("AOT mixed Graph requires the selected composition recipe")
     # Capture-native commands coexist with kernels inside one CGraph. Only the
     # frozen operation sequence retains their ordering; dispatches alone omit them.
-    recreated = {}
+    recreated = context.declared_bindings(node.fixed_runtime_args)
     native_count, kernel_count = 0, 0
     for item in node.recipe_operations:
         if item[0] == "native":
@@ -216,7 +264,8 @@ def export_graph(module, graph, *, gradients=None):
         ):
             raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         gradient_names = set((gradients or {}).values())
-        context = _ExportContext(module, set(graph._spec.runtime_arg_names) | gradient_names)
+        context = _ExportContext(module, set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names)
+        context.declare_private_arrays(spec.fixed_runtime_args)
         for node in graph._spec.nodes:
             _node(context, node)
         if any(
@@ -228,10 +277,16 @@ def export_graph(module, graph, *, gradients=None):
             for lease in spec.lifetime_leases
         ):
             raise TaichiRuntimeError("AOT execution Graph requires the selected binding validation recipe")
-        plan = ExecutionPlan(context.operations, resources=context.resources, gradients=gradients)
+        mapped_gradients = {}
+        for primal, gradient in (gradients or {}).items():
+            primal, gradient = context.binding(primal), context.binding(gradient)
+            if primal in mapped_gradients and mapped_gradients[primal] != gradient:
+                raise TaichiRuntimeError("AOT aliases of one primal must share the same gradient resource")
+            mapped_gradients[primal] = gradient
+        plan = ExecutionPlan(context.operations, resources=context.resources, gradients=mapped_gradients or None)
         # An opaque provider workspace must not accidentally become a public
         # input to some other kernel. Resource recipes must cover the full use.
-        if set(plan.argument_names) != set(graph._spec.runtime_arg_names) | gradient_names:
+        if set(plan.argument_names) != set(spec.runtime_arg_names) | (gradient_names - context.private_bindings.keys()):
             raise TaichiRuntimeError("AOT Graph reconstruction changed the public binding contract")
         try:
             for name, kernel in context.kernels.items():

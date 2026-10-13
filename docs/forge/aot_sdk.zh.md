@@ -227,6 +227,13 @@ provider 自己提供描述以恢复原 compute/workspace 策略，同一 plan �
 重建描述，导出时明确拒绝，不能丢掉约束。这里保留的是已选 map 变换，不是序列化
 CUDA Graph handle，也不保证不同 AOT 目标生成完全相同的机器码。
 
+Graph 实例拥有的 ndarray 声明（`private_ndarray` / `GraphOwnedNdarray`）可导出为
+首次清零的私有资源。同一声明的多个符号共享一份分配，kernel/provider 参数和显式
+梯度绑定统一映射。每份消费端 preparation 拥有全新状态；这里重建声明，不复制已
+执行过的生产端数组内容。固定的 live 数组和固定 scalar 仍需单独重建合同。
+CPU/CUDA/Vulkan 小规模测试覆盖状态累积、显式反向、别名与重新准备；CUDA GEMM
+序列另验证私有中间量和生产端关闭后的显式输入伴随。
+
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
 Windows CPU/CUDA/Vulkan 已验证独立/借用消费的前向和反向；cuBLAS/cuTENSOR 已验证

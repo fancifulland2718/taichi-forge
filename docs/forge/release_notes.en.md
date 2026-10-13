@@ -60,6 +60,11 @@ lifetimes. The entries below describe the changes.
   counts use padded owned storage without another shader. The changed internal
   resource layout requires matching Python/native components at private ABI 33.
 
+- Automatic Graph export now reconstructs declared private ndarrays, preserving
+  shared allocation identity and gradient aliases across kernel/provider bindings.
+  Independent preparations start with fresh state; live array snapshots and fixed
+  scalars remain outside this automatic reconstruction contract.
+
 - Ordinary CUDA FFT recordings now export shared native plans, including
   batched C2C/R2C/C2R and explicit physical layouts. Forward/inverse uses of
   one plan retain one workspace. Small standalone/borrowed checks cover explicit

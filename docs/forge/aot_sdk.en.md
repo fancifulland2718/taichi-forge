@@ -270,6 +270,16 @@ need reconstruction descriptions; export rejects them instead of dropping their
 constraints. This preserves the selected map transformation, not a serialized
 CUDA Graph handle or a guarantee of identical target machine code.
 
+Graph-instance-owned ndarray declarations (`private_ndarray` / `GraphOwnedNdarray`)
+now export as private resources with one-time zero initialization. Symbols sharing
+the same declaration retain one allocation, including kernel/provider and explicit
+gradient bindings. Every consumer preparation owns fresh state; this reconstructs
+the declaration, not the contents of an already executed producer. Live fixed arrays
+and fixed scalars still require separate reconstruction contracts. Small
+CPU/CUDA/Vulkan tests cover accumulation, explicit reverse kernels, aliases and
+re-preparation; a CUDA GEMM sequence covers a private intermediate and its explicit
+input adjoint after producer closure.
+
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
 too. This does not synthesize derivatives of native provider calls. Windows
