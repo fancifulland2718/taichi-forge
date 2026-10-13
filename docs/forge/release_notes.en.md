@@ -66,8 +66,8 @@ lifetimes. The entries below describe the changes.
   binding pairs, checked once before provider creation or command recording.
   CPU/CUDA address ranges and Vulkan memory/buffer bindings detect overlapping
   imports without adding replay checks. Focused tests cover actual reverse kernels,
-  empty arrays, tensor layouts and retirement. Helper automatic export remains
-  separate work; matching Python/native components now require private ABI 36.
+  empty arrays, tensor layouts and retirement. Matching Python/native components
+  now require private ABI 36.
 
 - Rebuilding a selected CUDA reduction recipe now restores private input/output
   bindings and their aliases. Direct and staged recipes keep the public argument
@@ -78,6 +78,12 @@ lifetimes. The entries below describe the changes.
   same primal arrays; gradients unused by the entire plan remain errors.
   CPU/CUDA/Vulkan checks cover actual reverse kernels before and after ordinary
   copies, without adding checks to replay.
+
+- Automatic Graph export preserves qualified packed-array helper constraints
+  and selected CUDA direct/block-partial reduction recipes, including private
+  aliases, fixed counts and partial storage. i32/f32 tests cover independent
+  preparations and explicit adjoints; custom storage/binding recipes and full
+  LinearOperator/SolvePlan export remain outside this qualified slice.
 
 - Private AOT ndarray resources can request `zero_initialize: true`. They clear
   once before initialization/replay and retain state across launches; odd byte

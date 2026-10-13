@@ -126,7 +126,7 @@ def test_aot_fixed_scalar_graph_preserves_values_types_and_reverse(tmp_path):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_aot_labeled_reduction_still_requires_memory_contract_reconstruction():
+def test_aot_labeled_reduction_preserves_memory_contracts():
     builder = ti.graph.GraphBuilder()
     values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
@@ -135,9 +135,12 @@ def test_aot_labeled_reduction_still_requires_memory_contract_reconstruction():
     assert graph._spec.memory_layout_requirements
     assert graph._spec.memory_disjoint_pairs
     module = ti.aot.Module()
-    with pytest.raises(ti.TaichiRuntimeError, match="storage/binding recipe"):
-        module.add_execution_plan("reduction", graph)
-    assert not module._exported_kernels
+    plan = module.add_execution_plan("reduction", graph)
+    constraints = json.loads(plan.to_json())["constraints"]
+    assert len(constraints) == 3
+    assert {value["array"] for value in constraints if value["kind"] == "array_layout"} == {"values", "output"}
+    assert dict(kind="disjoint", left="output", right="values") in constraints
+    assert all(operation.get("label") for operation in json.loads(plan.to_json())["operations"])
     graph.close()
 
 

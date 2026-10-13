@@ -245,7 +245,8 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
 及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 36。
-reduction/helper 的容量、布局和 disjoint 证明仍需重建，标签支持不会绕过这些检查。
+reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
+配方仍在预检期拒绝。
 
 手写执行计划可持久化冷准备时的数组绑定要求：
 
@@ -271,7 +272,15 @@ Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者
 约束在创建 provider 状态和录制命令之前检查，失败不执行用户 kernel；固定重放
 不增加约束检查，改变绑定须重新 prepare，继续遵守现有 owner/退休合同。struct
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
-tensor 布局、导入别名和退休。helper 要求的自动导出尚未接通。需配套 private ABI 36。
+tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
+要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
+仍需自己的重建合同。需配套 private ABI 36。
+
+已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
+物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
+小规模 i32/f32 测试覆盖独立 preparation、生产端与消费者退休；f32 链路使用显式
+sum 伴随播种，再执行真实 `.grad` kernel。这不自动生成 reduction 导数，也不表示
+所有 memory recipe、LinearOperator/SolvePlan 或结构控制已完整支持。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。

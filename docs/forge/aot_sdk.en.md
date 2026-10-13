@@ -297,8 +297,8 @@ thereby enable individual kernel-profiler or NVTX events. Labels must be nonempt
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
 explicit reverse kernels and retirement. This requires matching private ABI 36
-components. Capacity, layout and disjointness certificates on reduction/helper
-recipes still require reconstruction; label support does not bypass those checks.
+components. Reduction/helper capacity, layout and disjointness certificates are
+preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
 Handwritten execution plans can persist cold array-binding requirements:
 
@@ -330,8 +330,19 @@ provider state. Failures execute no user kernels. Fixed replay performs no new
 constraint checks; changed bindings require another preparation, retaining the
 existing owner/retirement contract. Struct and affine views need their own layout
 contract. CPU/CUDA/Vulkan tests cover actual reverse kernels, zero-length arrays,
-tensor layout, imported aliases and retirement. Automatic export of helper
-requirements is not yet supported. Use matching private ABI 36 components.
+tensor layout, imported aliases and retirement. Graph export translates qualified
+scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
+aliases and removing duplicate constraints. Custom binding executors, storage
+plans and lifetime validators still need their own reconstruction contract.
+Use matching private ABI 36 components.
+
+Selected CUDA typed reductions can now export direct and block-partial/finalize
+recipes, preserving the chosen kernels, fixed counts, labels, private partials
+and binding requirements. Repeated export reuses kernel definitions. Small i32
+and f32 tests cover independent preparations and producer/consumer retirement;
+the f32 chain uses an explicit sum adjoint followed by a real `.grad` kernel.
+This does not synthesize a reduction derivative, qualify every memory recipe,
+or provide full LinearOperator/SolvePlan or structured-control export.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations

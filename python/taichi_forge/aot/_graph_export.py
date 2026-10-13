@@ -308,11 +308,7 @@ def export_graph(module, graph, *, gradients=None):
         if graph._workspace_lane_capacity != 1 or graph._qualified_fusion_selector is not None:
             raise TaichiRuntimeError("AOT execution Graph needs a fixed single-frame execution recipe")
         spec = graph._spec
-        if (
-            getattr(spec, "_binding_executor_factory", None) is not None
-            or getattr(spec, "_storage_plans", ())
-            or spec.memory_recipe_binding_names
-        ):
+        if getattr(spec, "_binding_executor_factory", None) is not None or getattr(spec, "_storage_plans", ()):
             raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         gradient_names = set((gradients or {}).values())
         context = _ExportContext(module, set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names)
@@ -336,7 +332,14 @@ def export_graph(module, graph, *, gradients=None):
             if primal in mapped_gradients and mapped_gradients[primal] != gradient:
                 raise TaichiRuntimeError("AOT aliases of one primal must share the same gradient resource")
             mapped_gradients[primal] = gradient
-        plan = ExecutionPlan(context.operations, resources=context.resources, gradients=mapped_gradients or None)
+        from ._graph_constraints import export_constraints
+
+        plan = ExecutionPlan(
+            context.operations,
+            resources=context.resources,
+            gradients=mapped_gradients or None,
+            constraints=export_constraints(spec, context.binding) or None,
+        )
         # An opaque provider workspace must not accidentally become a public
         # input to some other kernel. Resource recipes must cover the full use.
         if set(plan.argument_names) != set(spec.runtime_arg_names) | (gradient_names - context.private_bindings.keys()):

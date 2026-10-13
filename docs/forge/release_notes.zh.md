@@ -51,7 +51,7 @@
 - AOT 执行计划可持久化紧凑数组布局要求与 disjoint 绑定对，在创建 provider 和录制
   命令之前检查一次。CPU/CUDA 地址范围与 Vulkan memory/buffer 绑定可识别重叠导入，
   重放不增加检查。小规模测试覆盖真实反向 kernel、空数组、tensor 布局与退休；
-  helper 自动导出仍是后续接线，当前 Python/native 组件需配套 private ABI 36。
+  当前 Python/native 组件需配套 private ABI 36。
 
 - CUDA reduction 策略重建恢复私有输入/输出端点及其别名，直接和分阶段策略不再把
   私有数组错误地暴露为公开参数；仍只重建选中策略需要的 scratch。
@@ -59,6 +59,10 @@
 - AOT 混合执行按每个 kernel 的已编译 `needs_grad` ABI 绑定 ndarray 梯度，普通
   helper 可共用同一 primal；整个计划未使用的梯度仍报错。CPU/CUDA/Vulkan 验证
   普通 copy 与真实反向 kernel 混排，重放不增加检查。
+
+- Graph 自动导出保留已资格的紧凑数组 helper 约束与选中的 CUDA direct/分阶段
+  reduction，包括私有别名、固定 count 和 partial 存储。i32/f32 验证独立准备与
+  显式伴随；自定义存储/绑定配方及完整 LinearOperator/SolvePlan 仍待补齐。
 
 - Graph 自动 AOT 导出保留已选的普通 map 组合，导出物理融合 kernel 及参数映射，
   重复导出复用定义；尚无重建合同的存储/绑定策略明确拒绝。CPU/CUDA/Vulkan 小规模
