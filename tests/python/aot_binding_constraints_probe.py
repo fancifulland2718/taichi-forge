@@ -82,13 +82,35 @@ def main(mode, arch, artifact):
         frame = frames[0]
         write(frame["y"], [99] * 17)
         short = runtime.ndarray("f32", (16,))
-        failure(lambda: module.prepare_execution("differentiate", dict(frame, x=short)), "smaller")
+        failure(lambda: module.prepare_execution("differentiate", dict(frame, x=short)), "exact shape")
+        long = runtime.ndarray("f32", (18,))
+        failure(lambda: module.prepare_execution("differentiate", dict(frame, x=long)), "exact shape")
+        long.close()
         failure(lambda: module.prepare_execution("differentiate", dict(frame, y=frame["x"])), "disjoint")
         alias = imported(runtime, frame["x"], arch)
         assert alias._memory._handle != frame["x"]._memory._handle
         failure(lambda: module.prepare_execution("differentiate", dict(frame, y=alias)), "disjoint")
         alias.close()
         assert read(frame["y"]) == [99] * 17, "Failed preparation must execute no kernels"
+
+        # Identity is physical storage plus typed shape, not allocation handles.
+        alias = imported(runtime, frame["x"], arch, known_memory=arch != "vulkan")
+        for output in (frame["x"], alias, frame["y"]):
+            write(frame["x"], [2] * 17)
+            with module.prepare_execution("same_or_disjoint", dict(x=frame["x"], y=output)) as in_place:
+                in_place()
+                assert read(output) == [7] * 17
+                in_place()
+                assert read(output) == ([17] if output is not frame["y"] else [7]) * 17
+        reshaped = NdArray(alias._memory, "f32", alias._code, (1, 17), ())
+        failure(lambda: module.prepare_execution("alias_only", dict(x=frame["x"], y=reshaped)), "same view")
+        tensor_view = NdArray(alias._memory, "f32", alias._code, (1,), (17,))
+        failure(lambda: module.prepare_execution("alias_only", dict(x=frame["x"], y=tensor_view)), "same view")
+        integer = runtime.ndarray("i32", (17,))
+        retyped = NdArray(alias._memory, "i32", integer._code, (17,), ())
+        failure(lambda: module.prepare_execution("alias_only", dict(x=frame["x"], y=retyped)), "same view")
+        integer.close()
+        alias.close()
 
         if arch == "vulkan":
             # Missing VkDeviceMemory identity is not evidence of disjointness.
@@ -102,6 +124,11 @@ def main(mode, arch, artifact):
             right = imported(runtime, parent, arch, offset=68, size=68)
             failure(lambda: module.prepare_execution("aligned", dict(x=overlapping, y=frame["y"])), "alignment")
             failure(lambda: module.prepare_execution("differentiate", dict(frame, x=left, y=overlapping)), "disjoint")
+            failure(lambda: module.prepare_execution("same_or_disjoint", dict(x=left, y=overlapping)), "same view")
+            with module.prepare_execution("same_or_disjoint", dict(x=left, y=right)) as adjacent_alias:
+                write(left, [2] * 17)
+                adjacent_alias()
+                assert read(right) == [7] * 17
             adjacent = module.prepare_execution("differentiate", dict(frame, x=left, y=right))
             write(left, [2] * 17)
             adjacent()

@@ -55,6 +55,16 @@ bool NativeStorageRange::proven_disjoint(
          disjoint(memory_offset, bytes, other.memory_offset, other.bytes);
 }
 
+bool NativeStorageRange::proven_same_range(
+    const NativeStorageRange &other) const noexcept {
+  if (!device || device != other.device || bytes != other.bytes)
+    return false;
+  if (buffer && buffer == other.buffer)
+    return buffer_offset == other.buffer_offset;
+  return memory && memory == other.memory &&
+         memory_offset == other.memory_offset;
+}
+
 NativeStorageRange resolve_native_storage_range(Arch arch,
                                                 DevicePtr pointer,
                                                 std::uint64_t bytes) {
@@ -125,6 +135,8 @@ void validate_native_array_layout(
       array.element_shape != required.element_shape)
     throw std::invalid_argument(
         "Array layout does not match its required shape");
+  if (required.exact_shape && array.shape != required.minimum_shape)
+    throw std::invalid_argument("Array does not have the required exact shape");
   for (std::size_t i = 0; i < array.shape.size(); ++i)
     if (array.shape[i] < required.minimum_shape[i])
       throw std::invalid_argument("Array shape is smaller than required");

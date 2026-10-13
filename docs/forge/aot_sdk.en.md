@@ -296,7 +296,7 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 37
+explicit reverse kernels and retirement. This requires matching private ABI 38
 components. Reduction/helper capacity, layout and disjointness certificates are
 preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
@@ -325,6 +325,18 @@ memory identity cannot prove disjointness between different buffers. Imported
 storage must describe its actual backing allocation; independent aliases created
 by external virtual-memory mappings are not tracked.
 
+Use `exact_shape` in place of `minimum_shape` when every index extent must match
+exactly; the two fields are mutually exclusive. A disjoint constraint may set
+`allow_same_view=True` for an operation that supports in-place execution. This
+also accepts the identical physical byte range with matching scalar dtype,
+index shape and element shape; partial overlap or merely equal byte counts do
+not qualify. The default remains strict disjointness. Native copy/provider
+restrictions still apply independently. These are declared operation contracts,
+not fixed array-size limits. Small three-backend checks cover oversized/undersized
+arrays, in-place replay, distinct imports of the same storage, and metadata or
+partial-overlap rejection; Vulkan additionally checks different buffers bound
+to the same device memory.
+
 Preparation validates these requirements before recording commands or creating
 provider state. Failures execute no user kernels. Fixed replay performs no new
 constraint checks; changed bindings require another preparation, retaining the
@@ -334,7 +346,7 @@ tensor layout, imported aliases and retirement. Graph export translates qualifie
 scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
 aliases and removing duplicate constraints. Custom binding executors, storage
 plans and lifetime validators still need their own reconstruction contract.
-Use matching private ABI 37 components.
+Use matching private ABI 38 components.
 
 Selected CUDA typed reductions can now export direct and block-partial/finalize
 recipes, preserving the chosen kernels, fixed counts, labels, private partials
@@ -445,7 +457,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 37). Small
+elements. Use matching Python/native components (current private ABI 38). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.

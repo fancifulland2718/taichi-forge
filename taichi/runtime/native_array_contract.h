@@ -16,6 +16,7 @@ struct NativeStorageRange {
   std::uint64_t bytes{0};
 
   bool proven_disjoint(const NativeStorageRange &other) const noexcept;
+  bool proven_same_range(const NativeStorageRange &other) const noexcept;
 };
 
 NativeStorageRange resolve_native_storage_range(Arch arch,
@@ -30,6 +31,8 @@ struct NativeArrayLayoutRequirement {
   std::vector<std::uint64_t> element_shape;
   std::uint64_t record_bytes{0};
   std::uint64_t alignment{0};
+  // minimum_shape becomes an equality requirement when selected explicitly.
+  bool exact_shape{false};
 };
 
 void validate_native_array_layout(const NativeArrayBinding &array,

@@ -20,11 +20,17 @@ def validate_constraints(constraints, used):
         if not isinstance(constraint, dict):
             raise ValueError("Execution constraints must be objects")
         if constraint.get("kind") == "array_layout":
-            required = {"kind", "array", "minimum_shape", "record_bytes", "alignment"}
-            if not required <= set(constraint) or set(constraint) - required - {"element_shape"}:
+            required = {"kind", "array", "record_bytes", "alignment"}
+            if not required <= set(constraint) or set(constraint) - required - {
+                "element_shape",
+                "minimum_shape",
+                "exact_shape",
+            }:
                 raise ValueError("Invalid array layout constraint fields")
+            if ("minimum_shape" in constraint) == ("exact_shape" in constraint):
+                raise ValueError("Array layout requires either minimum_shape or exact_shape")
             binding(constraint["array"])
-            for key in ("minimum_shape", "element_shape"):
+            for key in ("minimum_shape", "exact_shape", "element_shape"):
                 shape = constraint.get(key, [])
                 if not isinstance(shape, list):
                     raise ValueError("Constraint shape must be a list")
@@ -33,8 +39,10 @@ def validate_constraints(constraints, used):
             integer(constraint["record_bytes"], positive=True)
             integer(constraint["alignment"], positive=True)
         elif constraint.get("kind") == "disjoint":
-            if set(constraint) != {"kind", "left", "right"}:
+            if set(constraint) - {"allow_same_view"} != {"kind", "left", "right"}:
                 raise ValueError("Invalid disjoint constraint fields")
+            if type(constraint.get("allow_same_view", False)) is not bool:
+                raise ValueError("allow_same_view must be a boolean")
             binding(constraint["left"])
             binding(constraint["right"])
         else:

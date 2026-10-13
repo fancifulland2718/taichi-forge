@@ -244,7 +244,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 37。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 38。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -269,12 +269,20 @@ CPU/CUDA 地址范围或 Vulkan buffer/memory 绑定，可识别不同导入分�
 Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者须描述真实底层
 分配；外部虚拟内存映射另外创建的独立别名不在此追踪范围。
 
+各索引维必须恰好匹配时，用 `exact_shape` 替代 `minimum_shape`，两者互斥。
+对本身支持原地执行的操作，disjoint 约束可设 `allow_same_view=True`，额外允许
+物理字节范围、scalar dtype、索引形状和 element shape 全部相同的视图；部分重叠或
+仅字节数相等仍不合格。默认继续严格不重叠，原生 copy/provider 自身约束也继续检查。
+这是操作声明的合同，不是固定数组规模上限。三后端小用例覆盖过长/过短、原地重放、
+同一存储的不同导入，以及形状/dtype/部分重叠拒绝；Vulkan 另测绑定到同一设备内存的
+不同 buffer。
+
 约束在创建 provider 状态和录制命令之前检查，失败不执行用户 kernel；固定重放
 不增加约束检查，改变绑定须重新 prepare，继续遵守现有 owner/退休合同。struct
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 37。
+仍需自己的重建合同。需配套 private ABI 38。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -358,7 +366,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 37）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 38）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已

@@ -55,6 +55,7 @@ struct ExecutionPlan {
   struct Disjoint {
     std::string left;
     std::string right;
+    bool allow_same_view{false};
   };
   using Constraint = std::variant<ArrayLayout, Disjoint>;
   std::vector<Constraint> constraints;

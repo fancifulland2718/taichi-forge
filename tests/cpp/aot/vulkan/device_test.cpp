@@ -480,7 +480,15 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
   EXPECT_NE(first.buffer, range(1).buffer);
   EXPECT_EQ(first.memory, range(1).memory);
   EXPECT_FALSE(first.proven_disjoint(range(1)));
+  EXPECT_TRUE(first.proven_same_range(range(1)));
   EXPECT_TRUE(first.proven_disjoint(range(2)));
+  EXPECT_FALSE(first.proven_same_range(range(2)));
+  auto shifted = storage.imports[1].get_ptr(4);
+  const auto partial = resolve_native_storage_range(Arch::vulkan, shifted, 60);
+  const auto prefix = resolve_native_storage_range(
+      Arch::vulkan, storage.imports[0].get_ptr(), 60);
+  EXPECT_FALSE(prefix.proven_disjoint(partial));
+  EXPECT_FALSE(prefix.proven_same_range(partial));
   auto tail = storage.imports[1].get_ptr();
   tail.offset = 48;
   EXPECT_THROW(resolve_native_storage_range(Arch::vulkan, tail, 17),

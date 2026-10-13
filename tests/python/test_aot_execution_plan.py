@@ -84,6 +84,24 @@ def test_binding_constraints_snapshot_closure_and_validation():
             ExecutionPlan.from_json(json.dumps(document))
 
 
+def test_exact_shape_and_same_view_constraints_are_explicit():
+    operations = [dict(kind="copy", source="x", destination="y")]
+    layout = dict(kind="array_layout", array="x", exact_shape=[17], record_bytes=4, alignment=4)
+    pair = dict(kind="disjoint", left="x", right="y", allow_same_view=True)
+    plan = ExecutionPlan(operations, constraints=[layout, pair])
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert json.loads(restored.to_json())["constraints"] == [layout, pair]
+    for patch in (dict(minimum_shape=[17]), dict(exact_shape=None), dict(exact_shape=[True]), dict(exact_shape=[-1])):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, constraints=[dict(layout, **patch)])
+    missing = {k: v for k, v in layout.items() if k != "exact_shape"}
+    with pytest.raises(ValueError):
+        ExecutionPlan(operations, constraints=[missing])
+    for bad in (1, None, "true", [], {}):
+        with pytest.raises(ValueError, match="boolean"):
+            ExecutionPlan(operations, constraints=[dict(pair, allow_same_view=bad)])
+
+
 def test_scalar_resource_bits_roundtrip_and_validation():
     cases = (
         ("i8", -128, "80"),

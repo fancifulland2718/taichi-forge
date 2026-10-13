@@ -371,6 +371,52 @@ TEST(ExecutionPlan,
   EXPECT_FALSE(a.proven_disjoint(alias));
 }
 
+TEST(ExecutionPlan, ExactShapesAndOptionalSameViewRemainColdRequirements) {
+  const std::string prefix =
+      R"({"version":1,"operations":[{"kind":"copy","source":"x","destination":"y"}],"constraints":)";
+  const auto plan = ExecutionPlan::parse(prefix + R"([
+    {"kind":"array_layout","array":"x","exact_shape":[17],"record_bytes":4,"alignment":4},
+    {"kind":"disjoint","left":"x","right":"y","allow_same_view":true}]})");
+  const auto &required =
+      std::get<ExecutionPlan::ArrayLayout>(plan.constraints[0]).required;
+  EXPECT_TRUE(required.exact_shape);
+  EXPECT_EQ(required.minimum_shape, (std::vector<std::uint64_t>{17}));
+  EXPECT_TRUE(
+      std::get<ExecutionPlan::Disjoint>(plan.constraints[1]).allow_same_view);
+  for (
+      const auto *constraint :
+      {R"({"kind":"array_layout","array":"x","record_bytes":4,"alignment":4})",
+       R"({"kind":"array_layout","array":"x","exact_shape":[17],"minimum_shape":[17],"record_bytes":4,"alignment":4})",
+       R"({"kind":"array_layout","array":"x","exact_shape":null,"record_bytes":4,"alignment":4})",
+       R"({"kind":"array_layout","array":"x","exact_shape":[true],"record_bytes":4,"alignment":4})",
+       R"({"kind":"disjoint","left":"x","right":"y","allow_same_view":1})",
+       R"({"kind":"disjoint","left":"x","right":"y","allow_same_view":null})"})
+    EXPECT_THROW(ExecutionPlan::parse(prefix + "[" + constraint + "]}"),
+                 std::invalid_argument);
+
+  auto *device = reinterpret_cast<Device *>(std::uintptr_t(1));
+  NativeStorageRange a{device, 1, 32, 4, 0, 16};
+  auto alias = a;
+  alias.buffer = 5;
+  EXPECT_TRUE(
+      a.proven_same_range(alias));  // Same memory through another buffer.
+  alias.memory_offset++;
+  EXPECT_FALSE(a.proven_same_range(alias));
+  alias.memory_offset--;
+  alias.bytes++;
+  EXPECT_FALSE(a.proven_same_range(alias));
+  alias.bytes--;
+  alias.memory = 0;
+  EXPECT_FALSE(a.proven_same_range(alias));
+  alias.buffer = a.buffer;
+  EXPECT_TRUE(
+      a.proven_same_range(alias));  // Same buffer needs no memory import.
+  alias.buffer_offset++;
+  EXPECT_FALSE(a.proven_same_range(alias));
+  alias.device = nullptr;
+  EXPECT_FALSE(a.proven_same_range(alias));
+}
+
 TEST(ExecutionPlan, KernelLabelsBelongToDispatches) {
   const auto plan = ExecutionPlan::parse(R"({"version":2,
     "initialization":[{"kind":"kernel","entry":"shared","arguments":["x"],"label":"init"}],

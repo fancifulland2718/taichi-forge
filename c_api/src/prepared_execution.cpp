@@ -527,10 +527,21 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                                      layout->required);
       } else {
         const auto &pair = std::get<aot::ExecutionPlan::Disjoint>(constraint);
-        if (!storage_range(pair.left).proven_disjoint(
-                storage_range(pair.right)))
-          throw std::invalid_argument("Cannot prove array bindings disjoint: " +
-                                      pair.left + " and " + pair.right);
+        const auto &left = storage_range(pair.left);
+        const auto &right = storage_range(pair.right);
+        bool accepted = left.proven_disjoint(right);
+        if (!accepted && pair.allow_same_view &&
+            left.proven_same_range(right)) {
+          const auto &a = array_binding(pair.left);
+          const auto &b = array_binding(pair.right);
+          accepted = a.scalar_type == b.scalar_type && a.shape == b.shape &&
+                     a.element_shape == b.element_shape;
+        }
+        if (!accepted)
+          throw std::invalid_argument(
+              std::string("Cannot prove array bindings disjoint") +
+              (pair.allow_same_view ? " or the same view: " : ": ") +
+              pair.left + " and " + pair.right);
       }
     } catch (const std::invalid_argument &error) {
       throw MemoryBindingError(error.what());

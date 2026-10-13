@@ -162,12 +162,20 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
       for (const auto &constraint : found->second.arr.inner) {
         const auto kind = name(constraint["kind"]);
         if (kind == "array_layout") {
-          fields(constraint, {"kind", "array", "minimum_shape", "element_shape",
-                              "record_bytes", "alignment"});
+          fields(constraint, {"kind", "array", "minimum_shape", "exact_shape",
+                              "element_shape", "record_bytes", "alignment"});
           ArrayLayout layout;
           layout.array = binding(constraint["array"]);
+          layout.required.exact_shape =
+              constraint.obj.inner.count("exact_shape");
+          if (layout.required.exact_shape ==
+              (constraint.obj.inner.count("minimum_shape") != 0))
+            throw std::invalid_argument(
+                "Array layout requires either minimum_shape or exact_shape");
           layout.required.minimum_shape =
-              shape(constraint["minimum_shape"], false);
+              shape(constraint[layout.required.exact_shape ? "exact_shape"
+                                                           : "minimum_shape"],
+                    false);
           if (constraint.obj.inner.count("element_shape"))
             layout.required.element_shape =
                 shape(constraint["element_shape"], true);
@@ -178,9 +186,10 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
                 "Record size and alignment must be positive");
           plan.constraints.emplace_back(std::move(layout));
         } else if (kind == "disjoint") {
-          fields(constraint, {"kind", "left", "right"});
-          plan.constraints.emplace_back(Disjoint{binding(constraint["left"]),
-                                                 binding(constraint["right"])});
+          fields(constraint, {"kind", "left", "right", "allow_same_view"});
+          plan.constraints.emplace_back(Disjoint{
+              binding(constraint["left"]), binding(constraint["right"]),
+              optional_bool(constraint, "allow_same_view")});
         } else {
           throw std::invalid_argument("Unsupported execution constraint: " +
                                       kind);

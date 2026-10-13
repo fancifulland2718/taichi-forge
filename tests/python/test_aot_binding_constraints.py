@@ -19,11 +19,17 @@ def test_aot_binding_constraints_forward_reverse_and_import_aliases(tmp_path):
         for i in range(17):
             y[i] = x[i] * x[i] + 2 * x[i]
 
+    @ti.kernel
+    def inplace(x: ti.types.ndarray(ti.f32, ndim=1), y: ti.types.ndarray(ti.f32, ndim=1)):
+        for i in range(17):
+            y[i] = 2 * x[i] + 3
+
     module = ti.aot.Module()
     module.add_kernel(forward)
     module.add_kernel(forward.grad, name="backward")
+    module.add_kernel(inplace)
     constraints = [
-        dict(kind="array_layout", array=name, minimum_shape=[17], record_bytes=4, alignment=4)
+        dict(kind="array_layout", array=name, exact_shape=[17], record_bytes=4, alignment=4)
         for name in ("x", "y", "dx", "dy")
     ]
     constraints.extend(
@@ -59,6 +65,24 @@ def test_aot_binding_constraints_forward_reverse_and_import_aliases(tmp_path):
                 for name in ("x", "y")
             ]
             + [dict(kind="disjoint", left="x", right="y")],
+        ),
+    )
+    same_view = dict(kind="disjoint", left="x", right="y", allow_same_view=True)
+    module.add_execution_plan(
+        "same_or_disjoint",
+        ti.aot.ExecutionPlan(
+            [dict(kind="kernel", entry="inplace", arguments=["x", "y"])],
+            constraints=[
+                dict(kind="array_layout", array=name, exact_shape=[17], record_bytes=4, alignment=4)
+                for name in ("x", "y")
+            ]
+            + [same_view],
+        ),
+    )
+    module.add_execution_plan(
+        "alias_only",
+        ti.aot.ExecutionPlan(
+            [dict(kind="fill32", destination=name, value=0) for name in ("x", "y")], constraints=[same_view]
         ),
     )
     for name, minimum, record_bytes, alignment in (
