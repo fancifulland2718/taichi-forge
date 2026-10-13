@@ -1674,6 +1674,7 @@ class LinearOperator:
                 identity_f32,
                 self.shape[0],
                 topology,
+                adjoint=identity_f32,
                 traits=OperatorTraits.spd(),
             )
             identity_handle = identity_operator._handle
