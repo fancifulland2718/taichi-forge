@@ -47,15 +47,17 @@ std::string escape_trace_component(const std::string &value) {
 
 }  // namespace
 
-void validate_dispatch_label(const std::string &label) {
-  constexpr std::size_t kMaximumDispatchLabelBytes = 128;
-  TI_ERROR_IF(label.size() > kMaximumDispatchLabelBytes,
-              "Dispatch labels may contain at most {} UTF-8 bytes, got {}",
-              kMaximumDispatchLabelBytes, label.size());
+bool is_valid_dispatch_label(const std::string &label) noexcept {
   for (unsigned char c : label) {
-    TI_ERROR_IF(c == 0 || c == '\n' || c == '\r',
-                "Dispatch labels cannot contain NUL or line breaks");
+    if (c == 0 || c == '\n' || c == '\r')
+      return false;
   }
+  return true;
+}
+
+void validate_dispatch_label(const std::string &label) {
+  TI_ERROR_IF(!is_valid_dispatch_label(label),
+              "Dispatch labels cannot contain NUL or line breaks");
 }
 
 std::string push_dispatch_label(std::string label) {

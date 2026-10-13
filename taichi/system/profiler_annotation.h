@@ -12,6 +12,7 @@ void restore_dispatch_label(std::string label);
 const std::string *current_dispatch_label() noexcept;
 
 void validate_dispatch_label(const std::string &label);
+bool is_valid_dispatch_label(const std::string &label) noexcept;
 
 // Keep the historical task name first so existing profiler aggregation by
 // kernel-name prefix remains valid while Nsight/NVTX users gain a stable task

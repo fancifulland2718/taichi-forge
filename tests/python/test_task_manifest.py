@@ -223,14 +223,15 @@ def test_graph_dispatch_labels_map_manifest_and_profiler_events():
         value[None] += 1
 
     builder = ti.graph.GraphBuilder()
-    builder.dispatch(increment, label="sweep=3/color=red")
+    long_label = "phase/" + "nested/" * 32 + "sweep=3/color=red"
+    builder.dispatch(increment, label=long_label)
     builder.dispatch(increment, label="sweep=3/color=black")
     graph = builder.compile()
 
     manifest = graph.task_manifest()
     assert {task.dispatch_index for task in manifest} == {0, 1}
     assert {task.dispatch_label for task in manifest} == {
-        "sweep=3/color=red",
+        long_label,
         "sweep=3/color=black",
     }
     assert all(task.source_dispatch_count == 1 for task in manifest)
@@ -245,17 +246,20 @@ def test_graph_dispatch_labels_map_manifest_and_profiler_events():
 
     if impl.current_cfg().arch == ti_core.Arch.cuda:
         assert graph._graph_stats[0]["attempts"] == 0
+        # Labels alone preserve native replay. Select ordinary replay explicitly
+        # when checking per-task profiler events rather than captured launches.
+        graph._instance._backend_executable._jit_cache._set_stable_replay_optimization(False)
     ti.profiler.clear_kernel_profiler_info()
     graph.run({})
     assert value[None] == 2
     if impl.current_cfg().arch == ti_core.Arch.cuda:
         stats = graph._graph_stats[0]
-        assert stats["attempts"] == 0
+        assert stats["last_fallback_reason"] == "runtime_mode"
         assert stats["captures"] == 0
         assert stats["exact_replays"] == 0
     names = _profile_names()
     assert any(
-        "tf.task=" in name and "label=sweep=3/color=red" in name for name in names
+        "tf.task=" in name and "label=" + long_label in name for name in names
     )
     assert any(
         "tf.task=" in name and "label=sweep=3/color=black" in name for name in names
@@ -294,12 +298,12 @@ def test_scoped_dispatch_label_is_nested_and_default_path_stays_plain():
 
 
 def test_dispatch_label_validation():
-    with pytest.raises(RuntimeError, match="at most 128 UTF-8 bytes"):
-        with ti.profiler.dispatch_label("x" * 129):
-            pass
-    with pytest.raises(RuntimeError, match="line breaks"):
-        with ti.profiler.dispatch_label("phase=one\nphase=two"):
-            pass
+    with ti.profiler.dispatch_label("阶段/" * 128):
+        pass
+    for label in ("phase=one\nphase=two", "bad\0label", "bad\rlabel"):
+        with pytest.raises(RuntimeError, match="line breaks"):
+            with ti.profiler.dispatch_label(label):
+                pass
     with pytest.raises(TypeError, match="expects a string"):
         with ti.profiler.dispatch_label(3):
             pass
