@@ -5520,11 +5520,21 @@ class _CompiledNativeGraphNode:
                     *self.temporary_runtime_arg_names,
                 )
             )
-            complete = recorder_names == self.recording_runtime_arg_names
+            # A private parent can be consumed through a declared derived
+            # view without becoming a redundant physical kernel argument.
+            dependencies = dict(self.action_manifest.binding_dependencies)
+            required_names = set(recorder_names)
+            pending = list(recorder_names)
+            for name in pending:
+                for parent in dependencies.get(name, ()):
+                    if parent not in required_names:
+                        required_names.add(parent)
+                        pending.append(parent)
+            complete = required_names == self.recording_runtime_arg_names
             valid_subset = (
                 self.recordable_action.allows_unused_public_bindings
                 and recorder_names <= self.recording_runtime_arg_names
-                and required_private_names <= recorder_names
+                and required_private_names <= required_names
             )
             if not complete and not valid_subset:
                 raise TaichiRuntimeError(
@@ -17966,7 +17976,9 @@ class GraphBuilder:
             # Public provider ports can refer to storage owned by the enclosing
             # Graph. Keep the provider's symbolic schema intact, but carry the
             # enclosing declarations into the compiled node's binding frame.
-            for _, symbols in action.dispatches:
+            symbol_groups = [executable.graph_binding_symbols]
+            symbol_groups.extend(symbols for _, symbols in action.dispatches)
+            for symbols in symbol_groups:
                 for symbol in symbols:
                     declared = self._declared_private_bindings.get(symbol.name)
                     if declared is None:

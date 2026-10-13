@@ -192,6 +192,7 @@ class NativeActionManifest:
     fragmentation_reason: str = "none"
     physical_plan_id: str = ""
     source_contract_json: str = ""
+    binding_dependencies: tuple = ()
 
     def to_dict(self, *, _static_resources=None):
         if _static_resources is None:
@@ -224,6 +225,10 @@ class NativeActionManifest:
             ),
             "fixed_binding_names": self.fixed_binding_names,
             "temporary_bindings": self.temporary_bindings,
+            **(
+                {"binding_dependencies": self.binding_dependencies}
+                if self.binding_dependencies else {}
+            ),
             "lifetime_lease_count": self.lifetime_lease_count,
             "execution_kind": self.execution_kind,
             "recording_kind": self.recording_kind,
@@ -689,6 +694,14 @@ class BoundedPublicationTarget:
             raise ValueError("Bounded publication requires Graph-owned packet state")
 
 
+def _freeze_binding_dependencies(dependencies):
+    if not isinstance(dependencies, Mapping):
+        raise TypeError("Graph binding dependencies must be a mapping")
+    if any(isinstance(parents, (str, bytes)) for parents in dependencies.values()):
+        raise TypeError("Graph binding dependency parents must be sequences of names")
+    return MappingProxyType({name: tuple(parents) for name, parents in dependencies.items()})
+
+
 class RecordableGraphAction:
     """Optional provider-neutral lowering contract for a native node.
 
@@ -698,6 +711,11 @@ class RecordableGraphAction:
     when the advertised capabilities permit it. Provider-owned fixed bindings
     are injected by the runtime and never become public Graph arguments.
     """
+
+    @property
+    def binding_dependencies(self):
+        """Parents needed to derive a binding, frozen before Graph lowering."""
+        return MappingProxyType({})
 
     @property
     def capabilities(self):
@@ -761,6 +779,7 @@ class DispatchGraphAction(RecordableGraphAction):
         backends=("cpu", "cuda", "vulkan"),
         conditional_body_safe=True,
         fixed_bindings=None,
+        binding_dependencies=None,
         allow_unused_public_bindings=False,
         update_policy="rebind",
         synchronization_domain="runtime_ordered",
@@ -779,6 +798,9 @@ class DispatchGraphAction(RecordableGraphAction):
         if any(not isinstance(name, str) or not name for name in bindings):
             raise ValueError("Recordable action fixed binding names must be nonempty")
         self._fixed_bindings = MappingProxyType(bindings)
+        self._binding_dependencies = _freeze_binding_dependencies(
+            {} if binding_dependencies is None else binding_dependencies
+        )
         self._allows_unused_public_bindings = bool(
             allow_unused_public_bindings
         )
@@ -794,6 +816,10 @@ class DispatchGraphAction(RecordableGraphAction):
     @property
     def fixed_bindings(self):
         return self._fixed_bindings
+
+    @property
+    def binding_dependencies(self):
+        return self._binding_dependencies
 
     @property
     def allows_unused_public_bindings(self):
@@ -981,6 +1007,15 @@ class NativeGraphExecutable:
         return ()
 
     @property
+    def graph_binding_symbols(self):
+        """Original symbols for logical ports not directly used by a dispatch.
+
+        Retain private_ndarray() identity when only derived views reach kernels.
+        These are cold objects, never serialized into the action manifest.
+        """
+        return ()
+
+    @property
     def derived_runtime_arg_schema(self):
         """Private bindings derived from public arguments at submission.
 
@@ -1151,6 +1186,7 @@ def native_action_manifest(
     if action is None:
         capabilities = RecordableActionCapabilities(backends=())
         fixed_binding_names = ()
+        binding_dependencies = ()
         temporary_bindings = ()
         dispatch_count = 0
         update_policy = "opaque"
@@ -1165,6 +1201,35 @@ def native_action_manifest(
             )
         fixed_binding_names = tuple(sorted(action.fixed_bindings))
         temporary_bindings = tuple(sorted(action.temporary_bindings.items()))
+        dependency_map = _freeze_binding_dependencies(action.binding_dependencies)
+        declared = (
+            set(binding_names) | set(derived_binding_names)
+            | set(fixed_binding_names) | set(action.temporary_bindings)
+        )
+        if not dependency_map.keys() <= set(derived_binding_names):
+            raise TaichiRuntimeError("Graph binding dependencies must describe declared derived bindings")
+        for parents in dependency_map.values():
+            if not parents or any(not isinstance(parent, str) or parent not in declared for parent in parents):
+                raise TaichiRuntimeError("Graph binding dependency references an undeclared parent")
+        # Validate the complete declaration, even if a particular dispatch does
+        # not use every derived binding. No recursion or arbitrary depth limit.
+        remaining = {
+            name: set(parents) & dependency_map.keys()
+            for name, parents in dependency_map.items()
+        }
+        children = {name: [] for name in remaining}
+        for child, parents in remaining.items():
+            for parent in parents:
+                children[parent].append(child)
+        ready = [name for name, parents in remaining.items() if not parents]
+        for parent in ready:
+            for child in children[parent]:
+                remaining[child].remove(parent)
+                if not remaining[child]:
+                    ready.append(child)
+        if len(ready) != len(remaining):
+            raise TaichiRuntimeError("Graph binding dependency cycle")
+        binding_dependencies = tuple(sorted(dependency_map.items()))
         dispatch_count = len(tuple(action.dispatches))
         update_policy = capabilities.update_policy
         synchronization_domain = capabilities.synchronization_domain
@@ -1226,7 +1291,7 @@ def native_action_manifest(
         )
     )
     return NativeActionManifest(
-        schema_version=4,
+        schema_version=5 if binding_dependencies else 4,
         name=name,
         recordable=action is not None,
         opaque=bool(getattr(ir_node, "opaque", action is None)),
@@ -1243,6 +1308,7 @@ def native_action_manifest(
         temporaries=temporaries,
         fixed_binding_names=fixed_binding_names,
         temporary_bindings=temporary_bindings,
+        binding_dependencies=binding_dependencies,
         lifetime_lease_count=len(tuple(executable.lifetime_leases)),
         execution_kind=execution_kind,
         recording_kind=recording_kind,

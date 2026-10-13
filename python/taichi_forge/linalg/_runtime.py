@@ -2082,6 +2082,11 @@ class _OperatorGraphPorts:
         self._output_name = output_arg.name
         self._adjoint = adjoint
         self._graph_binding_views = {}
+        self._graph_binding_symbols = (input_arg, output_arg)
+
+    @property
+    def graph_binding_symbols(self):
+        return self._graph_binding_symbols
 
     def _port_extents(self):
         return (
@@ -2429,6 +2434,7 @@ class _LinearOperatorCompositionGraphAction(DispatchGraphAction):
         fixed_bindings,
         temporary_bindings,
         temporary_requirements,
+        binding_dependencies=None,
         allow_unused_public_bindings=False,
     ):
         super().__init__(
@@ -2436,6 +2442,7 @@ class _LinearOperatorCompositionGraphAction(DispatchGraphAction):
             backends=("cpu", "cuda", "vulkan"),
             conditional_body_safe=True,
             fixed_bindings=fixed_bindings,
+            binding_dependencies=binding_dependencies,
             allow_unused_public_bindings=allow_unused_public_bindings,
             update_policy="rebind",
             synchronization_domain="runtime_ordered",
@@ -2872,11 +2879,16 @@ class _LinearOperatorCompositionGraphExecutable(_OperatorGraphPorts, NativeGraph
             requirement_by_name[requirement.name] = requirement
         self._children = tuple(children)
         self._temporary_requirements = tuple(requirement_by_name.values())
+        binding_dependencies = {}
+        for child in children:
+            binding_dependencies.update(child.recordable_action.binding_dependencies)
+        binding_dependencies.update({name: (parent,) for name, parent, *_ in self._block_bindings})
         self._action = _LinearOperatorCompositionGraphAction(
             dispatches,
             fixed_bindings=fixed,
             temporary_bindings=temporary_bindings,
             temporary_requirements=self._temporary_requirements,
+            binding_dependencies=binding_dependencies,
             allow_unused_public_bindings=bool(derived_runtime_bindings),
         )
         self._runtime_arg_schema = (

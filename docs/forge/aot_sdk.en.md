@@ -357,7 +357,7 @@ This does not synthesize a reduction derivative, qualify every memory recipe,
 or provide full LinearOperator/SolvePlan or structured-control export.
 
 For `LinearOperator.from_kernel` and field-free `from_graph` providers and their sum, scale, shift,
-composition, adjoint and parameterized-affine combinations, explicitly pin their
+composition, adjoint, parameterized-affine and recordable `block_diagonal` combinations, explicitly pin their
 generations while keeping symbolic input/output ports:
 
 ```python
@@ -405,8 +405,16 @@ qualify unsupported resource types.
 
 CPU/CUDA/Vulkan tests cover multi-dispatch square and explicit-adjoint providers,
 nonzero state, old/new numeric publications, compositions, interleaved independent
-consumers and retirement. Block/derived views, live fields and SolvePlan control
-still need reconstruction contracts. Resource roles and coherent snapshots require
+consumers and retirement. Nested blocks reconstruct packed views over public ports,
+Graph-private arrays and composition scratch through the common `ndarray_view`
+resource. Parent dependencies stay explicit even when only child views reach
+kernels; repeated sequential embedding shares descriptions and storage. The views
+add no buffer copies or kernel definitions. CPU/CUDA/Vulkan tests cover rectangular
+blocks, explicit adjoints, blocks inside compositions, independent preparations,
+numeric publications and retirement in standalone and borrowed consumers. Existing
+backend/provider recordability and affine-view restrictions still apply; this does
+not qualify arbitrary block leaves or add automatic derivatives. Live fields and
+SolvePlan control still need reconstruction contracts. Resource roles and coherent snapshots require
 matching private ABI 40 components; no provider library is added to the consumer.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`

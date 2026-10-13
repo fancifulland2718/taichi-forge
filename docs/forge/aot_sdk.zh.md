@@ -291,7 +291,7 @@ sum 伴随播种，再执行真实 `.grad` kernel。这不自动生成 reduction
 所有 memory recipe、LinearOperator/SolvePlan 或结构控制已完整支持。
 
 `LinearOperator.from_kernel` 和不依赖 field 的 `from_graph` provider 及其 sum、scale、shift、compose、adjoint、
-parameterized_affine 组合可显式固定代次，同时保留符号输入/输出端口：
+parameterized_affine 及可录制 `block_diagonal` 组合可显式固定代次，同时保留符号输入/输出端口：
 
 ```python
 builder.append_native(operator.graph_action(x, y, update_policy="pinned"))
@@ -327,8 +327,13 @@ module.add_execution_plan("stateful_apply", graph, snapshot_state=True)
 自动批准其他未支持的资源类型。
 
 CPU/CUDA/Vulkan 测试覆盖多 dispatch 方阵及显式伴随 provider、非零状态、新旧数值发布、
-组合、独立消费者交错执行和退休。block/derived view、活 field 与 SolvePlan 控制仍需
-重建合同。资源角色及一致快照要求配套 private ABI 40，不给消费端增加 provider 库依赖。
+组合、独立消费者交错执行和退休。嵌套 block 通过公共 `ndarray_view` 资源重建公共端口、
+Graph 私有数组及组合 scratch 上的连续视图；即使只有子视图出现在 kernel 参数中，也保留
+明确的父依赖。重复嵌入 Sequential 共享描述和存储，视图不增加 buffer 复制或 kernel 定义。
+CPU/CUDA/Vulkan 已验证矩形块、显式伴随、compose 内嵌 block、独立准备、数值发布，以及
+独立/借用消费端退休。既有 backend/provider 可录制性及 affine view 限制仍适用，不表示
+任意叶算子均可作为 block，也不自动生成导数。活 field 与 SolvePlan 控制仍需重建合同。
+资源角色及一致快照要求配套 private ABI 40，不给消费端增加 provider 库依赖。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。

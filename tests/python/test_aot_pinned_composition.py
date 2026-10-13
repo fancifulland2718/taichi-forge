@@ -8,11 +8,10 @@ import subprocess
 import sys
 
 import numpy as np
-import pytest
 import taichi_forge as ti
 from tests import test_utils
 from tests.python.test_aot_pinned_operator import operator_graph
-from tests.python.test_linear_operator_graph_action import _diagonal_operator, _rectangular_operator
+from tests.python.test_linear_operator_graph_action import _rectangular_operator
 
 
 def diagonal_with_adjoint(values):
@@ -130,11 +129,3 @@ def test_pinned_composition_exports_numeric_and_coefficient_epochs(tmp_path, mon
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr
-
-
-@test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_pinned_composition_rejects_undeclared_derived_views():
-    block = _diagonal_operator([1, 2], traits=ti.linalg.OperatorTraits.spd())
-    operator = ti.linalg.block_diagonal([block, block])
-    with pytest.raises(ti.TaichiRuntimeError, match="derived views"):
-        operator_graph(operator)

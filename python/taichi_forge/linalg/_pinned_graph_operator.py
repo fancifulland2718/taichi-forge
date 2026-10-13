@@ -19,14 +19,19 @@ from taichi_forge.linalg._runtime import (
 
 def _qualify_pinned_source(source):
     """Retain authoritative resource roles; live fields need a separate recipe."""
-    if source.derived_runtime_arg_schema:
-        raise TaichiRuntimeError("Pinned symbolic operator derived views require a reconstruction contract")
     pending = [source]
     roles = {}
+    view_sources = []
+    derived = set()
     while pending:
         executable = pending.pop()
         if type(executable) is _LinearOperatorCompositionGraphExecutable:
-            pending.extend(executable._children)
+            # Parents must bind before nested block children. Ordinary sums
+            # and compositions can also contain blocks over private scratch.
+            pending.extend(reversed(executable._children))
+            if executable._block_bindings:
+                view_sources.append(executable)
+                derived.update(item[0] for item in executable._block_bindings)
         elif type(executable) is _LinearOperatorGraphExecutable:
             record = executable._record
             if record._state_dependencies:
@@ -43,14 +48,16 @@ def _qualify_pinned_source(source):
                 roles[name] = role
         else:
             raise TaichiRuntimeError("Pinned symbolic operator provider requires an explicit generation contract")
-    return roles
+    if derived != {binding.name for binding in source.derived_runtime_arg_schema}:
+        raise TaichiRuntimeError("Pinned symbolic operator derived views require a reconstruction contract")
+    return roles, tuple(view_sources)
 
 
 class PinnedOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
     def __init__(self, operator, input_arg, output_arg, adjoint):
         self._init_graph_ports(operator, input_arg, output_arg, adjoint)
         source = operator.graph_action(input_arg, output_arg, adjoint=adjoint).compile()
-        self._provider_roles = _qualify_pinned_source(source)
+        self._provider_roles, self._view_sources = _qualify_pinned_source(source)
         prepared = source._bind_provider_generation()
         action = source.recordable_action
         if not prepared.replacements.keys() <= action.fixed_bindings.keys():
@@ -70,6 +77,8 @@ class PinnedOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
             backends=action.capabilities.backends,
             conditional_body_safe=action.capabilities.conditional_body_safe,
             fixed_bindings=fixed,
+            binding_dependencies=action.binding_dependencies,
+            allow_unused_public_bindings=bool(source.derived_runtime_arg_schema),
             update_policy="immutable",
         )
 
@@ -79,11 +88,22 @@ class PinnedOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
     def bind_graph_arguments(self, runtime_args):
         replacements = {}
         self._bind_dense_ports(runtime_args, replacements)
+        if self._view_sources:
+            augmented = dict(runtime_args)
+            augmented.update(replacements)
+            for source in self._view_sources:
+                views = source._bind_block_subviews(augmented)
+                replacements.update(views)
+                augmented.update(views)
         return PreparedGraphBindings(replacements, self._generation_owners)
 
     @property
     def runtime_arg_schema(self):
         return self._source.runtime_arg_schema
+
+    @property
+    def derived_runtime_arg_schema(self):
+        return self._source.derived_runtime_arg_schema
 
     @property
     def resource_effects(self):
@@ -122,6 +142,10 @@ class PinnedOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
                 context.provider_data_binding(name, owner, mutable=role == "workspace")
             elif type(owner) not in (int, float) and not isinstance(owner, GraphOwnedNdarray):
                 raise TaichiRuntimeError("Pinned operator has an unsupported fixed binding")
+        for source in self._view_sources:
+            for binding in source._block_bindings:
+                name, parent, _, offset, extent = binding
+                context.view_binding(name, parent, offset, (extent,), owner=binding)
         for name, extent in self._port_extents():
             context.binding_constraints.append(
                 dict(

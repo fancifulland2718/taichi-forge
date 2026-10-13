@@ -32,6 +32,7 @@ class _ExportContext:
         self._kernel_names = {id(kernel): name for name, kernel in module._exported_kernels.items()}
         self.reconstructed_binding_validators = set()
         self.reconstructed_argument_binders = set()
+        self.reconstructed_derived_bindings = set()
         self.binding_constraints = []
         self._provider_data = {}
         self.private_bindings = {}
@@ -130,6 +131,15 @@ class _ExportContext:
         if name in self._scalar_values:
             raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")
         return self._private_names.get(name, name)
+
+    def view_binding(self, name, parent, offset, shape, *, owner):
+        if name in self.private_bindings and self.private_bindings[name] is not owner:
+            raise TaichiRuntimeError("AOT derived view conflicts with an existing private binding")
+        self._private_names[name] = self._resource(
+            owner, dict(kind="ndarray_view", array=self.binding(parent), offset=offset, shape=shape)
+        )
+        self.private_bindings[name] = owner
+        self.reconstructed_derived_bindings.add(name)
 
     def provider_data_binding(self, name, owner, *, mutable=False):
         """Declare qualified provider storage; sample the complete closure once."""
@@ -305,7 +315,7 @@ def _sequence(context, sequence):
         sequence._has_indirect_dispatch
         or sequence._structured_depth
         or sequence._temporary_actions
-        or sequence._derived_runtime_arg_names
+        or set(sequence._derived_runtime_arg_names) - context.reconstructed_derived_bindings
     ):
         raise TaichiRuntimeError("AOT sequence requires explicit control/private resource reconstruction")
     context.require_private_bindings(sequence._fixed_runtime_args)
@@ -328,13 +338,17 @@ def _node(context, node):
             _node(context, child)
         return
     if isinstance(node, _CompiledNativeGraphNode):
-        if node.derived_runtime_arg_names:
+        if set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings:
             raise TaichiRuntimeError("AOT native derived bindings require a reconstruction recipe")
         _native(context, node.executable)
         return
     if not isinstance(node, _CompiledCGraphNode):
         raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct {type(node).__name__} yet")
-    if node.parallel_dispatch_groups or node.temporary_actions or node.derived_runtime_arg_names:
+    if (
+        node.parallel_dispatch_groups
+        or node.temporary_actions
+        or set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings
+    ):
         raise TaichiRuntimeError("AOT execution Graph requires the selected composition/resource recipe")
     ir_nodes = node.ir_node.children if isinstance(node.ir_node, SequentialRegion) else (node.ir_node,)
     if any(isinstance(item, DispatchNode) and item.bounded_domain is not None for item in ir_nodes):
