@@ -11,11 +11,23 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <tuple>
+#include <type_traits>
 #include <vector>
 
 namespace taichi::lang {
 
 namespace {
+
+template <typename Function>
+struct DriverArguments;
+template <typename... Args>
+struct DriverArguments<CUDADriverFunction<Args...>> {
+  using Tuple = std::tuple<Args...>;
+};
+template <std::size_t Index, typename Function>
+using DriverArgument =
+    std::tuple_element_t<Index, typename DriverArguments<Function>::Tuple>;
 
 class ControllableTelemetryMutex {
  public:
@@ -63,6 +75,53 @@ TEST(CUDAVersion, ReportsTheBundledLibdeviceCompatibilityVersion) {
   const auto version = get_cuda_version_string();
   EXPECT_FALSE(version.empty());
   EXPECT_EQ(version.find_first_not_of("0123456789."), std::string::npos);
+}
+
+TEST(CUSPARSEDriverABI, DescriptorExtentsMatchTheVendorContract) {
+  // cuSPARSE Generic API extents are signed 64-bit even with 32-bit indices.
+  // Legacy routines such as Xcoo2csr intentionally retain their int ABI.
+  using Csr = decltype(CUSPARSEDriver::cpCreateCsr);
+  using Coo = decltype(CUSPARSEDriver::cpCreateCoo);
+  using SparseVector = decltype(CUSPARSEDriver::cpCreateSpVec);
+  using DenseVector = decltype(CUSPARSEDriver::cpCreateDnVec);
+  using CsrGet = decltype(CUSPARSEDriver::cpCsrGet);
+  using GetSize = decltype(CUSPARSEDriver::cpGetSize);
+  EXPECT_TRUE((std::is_same_v<DriverArgument<1, Csr>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<2, Csr>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<3, Csr>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<1, Coo>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<2, Coo>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<3, Coo>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<1, SparseVector>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<2, SparseVector>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<1, DenseVector>, std::int64_t>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<1, CsrGet>, std::int64_t *>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<2, CsrGet>, std::int64_t *>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<3, CsrGet>, std::int64_t *>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<1, GetSize>, std::int64_t *>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<2, GetSize>, std::int64_t *>));
+  EXPECT_TRUE((std::is_same_v<DriverArgument<3, GetSize>, std::int64_t *>));
+}
+
+TEST(CUSPARSEDriverABI, WideExtentsReachTheDynamicCallWithoutAllocation) {
+  using Function = decltype(CUSPARSEDriver::cpCreateDnVec);
+  // Do not call a deliberately mismatched function pointer on a broken build.
+  if constexpr (std::is_same_v<DriverArgument<1, Function>, std::int64_t>) {
+    Function function;
+    auto callback = +[](cusparseDnVecDescr_t *, std::int64_t size, void *,
+                        cudaDataType) -> uint32_t {
+      return size == (std::int64_t{1} << 33) + 17 || size == -1 ? 0 : 1;
+    };
+    std::mutex mutex;
+    function.set(reinterpret_cast<void *>(callback));
+    function.set_lock(&mutex);
+    EXPECT_EQ(function.call(nullptr, (std::int64_t{1} << 33) + 17, nullptr,
+                            CUDA_R_32F),
+              0);
+    EXPECT_EQ(function.call(nullptr, -1, nullptr, CUDA_R_32F), 0);
+  } else {
+    FAIL() << "cuSPARSE vector extents are narrowed before the vendor call";
+  }
 }
 
 TEST(CUDADriverCompatibility, MapsAndGatesMUSADriverSurface) {

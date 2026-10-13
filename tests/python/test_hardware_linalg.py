@@ -173,6 +173,9 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
 
     fill(builder)
     matrix = builder.build()
+    # Also exercise signed 64-bit extent outputs from cusparseCsrGet.
+    assert matrix[0, 0] == 2.0
+    assert matrix[3, 3] == 5.0
     input_values = np.array([1.0, -2.0, 0.5, 3.0], dtype=np.float32)
     expected = np.array([1.0, -5.75, 3.5, 15.0], dtype=np.float32)
     input_array = ti.ndarray(ti.f32, shape=n)

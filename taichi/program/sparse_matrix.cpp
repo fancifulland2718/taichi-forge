@@ -3263,7 +3263,7 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::addition(
     const float beta) const {
 #if defined(TI_WITH_CUDA)
   // Get information of this matrix: A
-  size_t nrows_A = 0, ncols_A = 0, nnz_A = 0;
+  std::int64_t nrows_A = 0, ncols_A = 0, nnz_A = 0;
   void *drow_offsets_A = nullptr, *dcol_indices_A = nullptr,
        *dvalues_A = nullptr;
   cusparseIndexType_t csrRowOffsetsType_A, csrColIndType_A;
@@ -3276,7 +3276,7 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::addition(
       &dvalues_A, &csrRowOffsetsType_A, &csrColIndType_A, &idxBase_A,
       &valueType_A);
   // Get information of other matrix: B
-  size_t nrows_B = 0, ncols_B = 0, nnz_B = 0;
+  std::int64_t nrows_B = 0, ncols_B = 0, nnz_B = 0;
   void *drow_offsets_B = nullptr, *dcol_indices_B = nullptr,
        *dvalues_B = nullptr;
   cusparseIndexType_t csrRowOffsetsType_B, csrColIndType_B;
@@ -3442,7 +3442,7 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::gemm(const CuSparseMatrix &other,
       CUSPARSE_SPGEMM_DEFAULT, spgemm_desc, &buffer_size2, d_buffer2);
 
   // 7. get info of matrix C
-  size_t nrows_C, cols_C, nnz_C;
+  std::int64_t nrows_C, cols_C, nnz_C;
   CUSPARSEDriver::get_instance().cpGetSize(mat_C, &nrows_C, &cols_C, &nnz_C);
 
   // 8. allocate matric C
@@ -3486,7 +3486,7 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::transpose() const {
 #if defined(TI_WITH_CUDA)
   cusparseHandle_t handle;
   CUSPARSEDriver::get_instance().cpCreate(&handle);
-  size_t nrows_A, ncols_A, nnz;
+  std::int64_t nrows_A, ncols_A, nnz;
   void *d_csr_val = nullptr, *d_csr_val_AT = nullptr;
   int *d_csr_row_ptr = nullptr, *d_csr_col_ind = nullptr;
   int *d_csr_row_ptr_AT = nullptr, *d_csr_col_ptr_AT = nullptr;
@@ -5764,7 +5764,7 @@ void CuSparseMatrix::nd_spmv_kernel(Program *prog,
 const std::string CuSparseMatrix::to_string() const {
   std::ostringstream ostr;
 #ifdef TI_WITH_CUDA
-  size_t rows, cols, nnz;
+  std::int64_t rows, cols, nnz;
   float *dR;
   int *dC, *dV;
   cusparseIndexType_t row_type, column_type;
@@ -5796,7 +5796,7 @@ const std::string CuSparseMatrix::to_string() const {
 float CuSparseMatrix::get_element(int row, int col) const {
   float res = 0.0f;
 #ifdef TI_WITH_CUDA
-  size_t rows, cols, nnz;
+  std::int64_t rows, cols, nnz;
   float *dR;
   int *dC, *dV;
   cusparseIndexType_t row_type, column_type;
@@ -5831,7 +5831,7 @@ float CuSparseMatrix::get_element(int row, int col) const {
 
 void CuSparseMatrix::mmwrite(const std::string &filename) {
 #ifdef TI_WITH_CUDA
-  size_t rows, cols, nnz;
+  std::int64_t rows, cols, nnz;
   float *dR;
   int *dC, *dV;
   cusparseIndexType_t row_type, column_type;

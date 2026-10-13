@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- cuSPARSE generic CSR/COO and dense/sparse vector descriptors now use the
+  vendor's signed 64-bit extent ABI, including CSR extent queries. This fixes
+  narrowing in the dynamic calls; it does not expand the public `SparseMatrix`
+  index/storage contract or claim full cuSPARSE AOT coverage. Use matching
+  Python/native components (private ABI 42).
+
 - The runtime wheel now includes a stdlib-only `taichi_forge_runtime.aot`
   consumer sharing JIT's native library. Ordinary AOT kernels and CGraphs can
   explicitly prepare fixed CPU batches, CUDA Graphs and Vulkan commands with
