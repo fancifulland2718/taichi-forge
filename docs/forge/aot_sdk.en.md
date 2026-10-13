@@ -335,7 +335,11 @@ requirements is not yet supported. Use matching private ABI 36 components.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
-too. This does not synthesize derivatives of native provider calls. Windows
+too. This does not synthesize derivatives of native provider calls.
+Plans pass each gradient only to kernel arguments compiled with `needs_grad`;
+ordinary kernels may also read or write that primal. A gradient used by no
+kernel in the plan is rejected during preparation. Standalone kernel calls
+retain their strict per-kernel gradient contract. Windows
 CPU/CUDA/Vulkan checks cover forward/reverse execution in standalone and borrowed
 consumers. cuBLAS/cuTENSOR checks include complete mixed sequences, explicit
 coefficient/input adjoints, shared and independent plans, source-owner retirement

@@ -56,6 +56,10 @@
 - CUDA reduction 策略重建恢复私有输入/输出端点及其别名，直接和分阶段策略不再把
   私有数组错误地暴露为公开参数；仍只重建选中策略需要的 scratch。
 
+- AOT 混合执行按每个 kernel 的已编译 `needs_grad` ABI 绑定 ndarray 梯度，普通
+  helper 可共用同一 primal；整个计划未使用的梯度仍报错。CPU/CUDA/Vulkan 验证
+  普通 copy 与真实反向 kernel 混排，重放不增加检查。
+
 - Graph 自动 AOT 导出保留已选的普通 map 组合，导出物理融合 kernel 及参数映射，
   重复导出复用定义；尚无重建合同的存储/绑定策略明确拒绝。CPU/CUDA/Vulkan 小规模
   验证覆盖显式伴随与运行时数组别名。

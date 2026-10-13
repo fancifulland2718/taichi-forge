@@ -581,6 +581,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                                  kernel->entry);
       std::vector<TiArgument> kernel_args;
       std::vector<TiNdArrayBinding> kernel_bindings;
+      const auto &parameters = rt.get_kernel(handle).kernel->nested_parameters;
       for (std::size_t i = 0; i < kernel->arguments.size(); ++i) {
         const auto &name = kernel->arguments[i];
         if (native_objects.count(name))
@@ -588,8 +589,16 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
               "Kernel arguments cannot bind native resources: " + name);
         kernel_args.push_back(*arguments.at(name));
         if (auto binding = layouts.find(name); binding != layouts.end()) {
-          used_bindings.insert(name);
           const auto &value = *binding->second;
+          const auto parameter = parameters.find({static_cast<int>(i)});
+          // A plan-wide primal may also be read by ordinary helper kernels.
+          // Supply its gradient only where the compiled dispatch ABI uses it.
+          // Keep malformed/structure bindings for the common validator, and
+          // reject gradients unused by every dispatch at the end of prepare.
+          if (value.gradient && !value.layout && value.layout_version == 0 &&
+              (parameter == parameters.end() || !parameter->second.needs_grad))
+            continue;
+          used_bindings.insert(name);
           kernel_bindings.push_back({static_cast<uint32_t>(i),
                                      value.layout_version, value.layout,
                                      value.gradient});

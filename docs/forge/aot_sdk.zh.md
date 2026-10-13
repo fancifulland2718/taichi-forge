@@ -275,6 +275,9 @@ tensor 布局、导入别名和退休。helper 要求的自动导出尚未接通
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
+计划仅向已编译 ABI 声明 `needs_grad` 的 kernel 参数传递梯度，同一 primal 也可被
+普通 kernel 读写；整个计划都未使用的梯度在准备时报错。独立 kernel 调用仍遵守
+严格的单 kernel 梯度合同。
 Windows CPU/CUDA/Vulkan 已验证独立/借用消费的前向和反向；cuBLAS/cuTENSOR 已验证
 完整混合序列、显式输入梯度、共享与独立 plan、生产端 owner 关闭后消费，以及在途
 consumer close/reset。

@@ -73,6 +73,12 @@ lifetimes. The entries below describe the changes.
   bindings and their aliases. Direct and staged recipes keep the public argument
   set unchanged and allocate only their own selected scratch resources.
 
+- Mixed AOT execution plans bind ndarray gradients only to dispatches whose
+  compiled ABI declares `needs_grad`. Ordinary helper kernels can share the
+  same primal arrays; gradients unused by the entire plan remain errors.
+  CPU/CUDA/Vulkan checks cover actual reverse kernels before and after ordinary
+  copies, without adding checks to replay.
+
 - Private AOT ndarray resources can request `zero_initialize: true`. They clear
   once before initialization/replay and retain state across launches; odd byte
   counts use padded owned storage without another shader. The changed internal
