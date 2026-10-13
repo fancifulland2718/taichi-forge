@@ -937,6 +937,12 @@ CGraph，不包含任意 stride/切片、指针成员、结构梯度或 native G
 Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重绑定、退休，以及
 同一 Graph 中结构前向工作与显式绑定的普通 ndarray 反向微分组合。
 
+Vulkan 模块可导出在 `Module()` 之后创建的 dense field，也可复用无关 field 创建前
+已编译的 kernel。归档只包含导出 kernel 或显式 `add_field()` 引用的布局；仅使用
+ndarray 的模块不保留 field 根存储。实际引用的树必须保持存活直到导出完成。该行为
+保留模块局部存储及显式梯度执行，不会保存生产端 field 内容，也不代表已支持
+operator 活 field 状态的自动导出。
+
 仅包含 dense field 与 serial/range task 的 CPU/CUDA bitcode 和 CUDA PTX 导出
 使用 schema 5（`resource_binding="dense_v1"`）；CUDA cubin 使用 schema 6 和同一
 资源绑定合同。模块压紧所需资源闭包，在 field 分配前预留独立

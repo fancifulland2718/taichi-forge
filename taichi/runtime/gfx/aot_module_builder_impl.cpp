@@ -41,16 +41,6 @@ AotModuleBuilderImpl::AotModuleBuilderImpl(
   for (const auto &pair : caps.to_inner()) {
     ti_aot_data_.required_caps[to_string(pair.first)] = pair.second;
   }
-  ti_aot_data_.root_buffer_sizes.reserve(compiled_structs.size());
-  for (std::size_t tree_id = 0; tree_id < compiled_structs.size(); ++tree_id) {
-    const auto &compiled = compiled_structs[tree_id];
-    // Producer IDs may contain retired slots. Only the exported resource
-    // closure is required to be active; dump assigns its compact module IDs.
-    ti_aot_data_.root_buffer_sizes.push_back(compiled.root ? compiled.root_size : 0);
-  }
-  if (!ti_aot_data_.root_buffer_sizes.empty()) {
-    ti_aot_data_.root_buffer_size = ti_aot_data_.root_buffer_sizes.front();
-  }
 }
 
 std::string AotModuleBuilderImpl::write_spv_file(
@@ -163,15 +153,18 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
   const auto &compiled = spirv_ckd.get_internal_data();
-  TI_ERROR_IF(
-      compiled.metadata.num_snode_trees !=
-          ti_aot_data_.root_buffer_sizes.size(),
-      "GFX AOT kernel '{}' was compiled for {} SNodeTrees, but the artifact "
-      "contains {} layouts.",
-      identifier,
-      compiled.metadata.num_snode_trees,
-      ti_aot_data_.root_buffer_sizes.size());
-  const AotKernelMetadata metadata{compiled.metadata.num_snode_trees,
+  // Global tree counts are compilation-time observations, not dependencies.
+  // A module may add fields later or reuse kernels compiled before unrelated
+  // layouts were created. Validate its actual closure; dump() assigns compact
+  // module-local IDs and the final count without retaining unused layouts.
+  for (int tree_id : compiled.metadata.used_snode_tree_ids) {
+    TI_ERROR_IF(tree_id < 0 ||
+                    static_cast<size_t>(tree_id) >= compiled_structs_.size() ||
+                    !compiled_structs_[tree_id].root,
+                "GFX AOT kernel '{}' references inactive SNodeTree {}.",
+                identifier, tree_id);
+  }
+  const AotKernelMetadata metadata{/*num_snode_trees=*/0,
                                    compiled.metadata.used_snode_tree_ids};
   const auto identity = kernel_identity(compiled.metadata.kernel_attribs, metadata);
   const auto existing = kernel_identities_.find(identity);

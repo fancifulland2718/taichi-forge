@@ -1182,6 +1182,13 @@ Small Windows CPU/CUDA/Vulkan and CUDA PTX consumers verify nested mixed-type
 records, rebinding, retirement, and Graphs combining structure forward work
 with explicitly bound primitive-array reverse differentiation.
 
+Vulkan modules can export dense fields created after `Module()` and reuse kernels
+compiled before unrelated fields were created. The archive includes only layouts
+referenced by exported kernels or explicit `add_field()` entries; ndarray-only
+modules retain no field roots. Referenced trees must remain active until export
+finishes. This preserves module-local storage and explicit gradient execution;
+it does not snapshot producer field contents or export live operator field state.
+
 CPU/CUDA bitcode and CUDA PTX exports containing only dense fields and
 serial/range tasks use schema 5 (`resource_binding="dense_v1"`); CUDA cubin uses
 schema 6 with the same resource binding. The module compacts its required resource
