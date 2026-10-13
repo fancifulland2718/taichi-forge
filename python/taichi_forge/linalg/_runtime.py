@@ -1944,9 +1944,11 @@ class LinearOperator:
 
         ``update_policy="pinned"`` selects one immutable provider generation
         when the action is compiled, retaining symbolic input/output ports.
-        This currently requires a from_kernel provider. Its fixed data can be
-        exported with an AOT execution plan; publication of new numeric values
-        requires a new action to adopt them. Pinning itself does not copy data.
+        This supports from_kernel providers and their compositions without
+        derived views. Fixed data and coefficients can be exported with an AOT
+        execution plan; publication of new values requires a new action to adopt
+        them. Each Graph owns its composition workspace. Pinning does not copy
+        provider data.
         """
         self._ensure_valid()
         if not isinstance(adjoint, bool):
@@ -2053,9 +2055,11 @@ def _validate_graph_dense_vector_disjoint(descriptions, message):
     raise TaichiRuntimeError(f"{message} ({alias})")
 
 
-class _LinearOperatorGraphExecutable(NativeGraphExecutable):
-    def __init__(self, operator, input_arg, output_arg, adjoint):
-        from taichi_forge.graph._graph import Arg, ArgKind
+class _OperatorGraphPorts:
+    """Dense public port handling, independent of provider generation policy."""
+
+    def _init_graph_ports(self, operator, input_arg, output_arg, adjoint):
+        from taichi_forge.graph._graph import ArgKind
 
         for value, role in ((input_arg, "input"), (output_arg, "output")):
             if (
@@ -2077,6 +2081,40 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
         self._input_name = input_arg.name
         self._output_name = output_arg.name
         self._adjoint = adjoint
+        self._graph_binding_views = {}
+
+    def _port_extents(self):
+        return (
+            (self._input_name, self._operator.shape[0 if self._adjoint else 1]),
+            (self._output_name, self._operator.shape[1 if self._adjoint else 0]),
+        )
+
+    def _bind_dense_ports(self, runtime_args, replacements):
+        for name, extent in self._port_extents():
+            _, view = _cached_graph_dense_vector_binding(
+                self._graph_binding_views, name, runtime_args[name], extent
+            )
+            if view is not None:
+                replacements[name] = view
+
+    def validate_graph_bindings(self, runtime_args):
+        descriptions = []
+        for name, extent in self._port_extents():
+            description, _ = _cached_graph_dense_vector_binding(
+                self._graph_binding_views, name, runtime_args[name], extent
+            )
+            descriptions.append(description)
+        _validate_graph_dense_vector_disjoint(
+            descriptions,
+            "LinearOperator Graph input and output must be proven disjoint",
+        )
+
+
+class _LinearOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
+    def __init__(self, operator, input_arg, output_arg, adjoint):
+        from taichi_forge.graph._graph import Arg, ArgKind
+
+        self._init_graph_ports(operator, input_arg, output_arg, adjoint)
         self._record = operator._handle._recordable_kernel(adjoint)
         self._expected_stamp = tuple(self._record._resource_stamp())
         self._record_signature = self._compatible_record_signature(self._record)
@@ -2199,7 +2237,6 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             *state_effects,
         )
         self._fallback_operator = operator.adjoint() if adjoint else operator
-        self._graph_binding_views = {}
         # One immutable publication per executable, never a history of provider
         # generations. Submission owners pin the exact record they received.
         self._provider_binding_cache = (
@@ -2361,40 +2398,9 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
     def bind_graph_arguments(self, runtime_args):
         prepared = self._bind_provider_generation()
         replacements = dict(prepared.replacements)
-        expected = (
-            (self._input_name, self._operator.shape[0 if self._adjoint else 1]),
-            (self._output_name, self._operator.shape[1 if self._adjoint else 0]),
-        )
-        for name, extent in expected:
-            _, view = _cached_graph_dense_vector_binding(
-                self._graph_binding_views,
-                name,
-                runtime_args[name],
-                extent,
-            )
-            if view is not None:
-                replacements[name] = view
+        self._bind_dense_ports(runtime_args, replacements)
         return PreparedGraphBindings(
             replacements, prepared.submission_owners
-        )
-
-    def validate_graph_bindings(self, runtime_args):
-        expected = (
-            (self._input_name, self._operator.shape[0 if self._adjoint else 1]),
-            (self._output_name, self._operator.shape[1 if self._adjoint else 0]),
-        )
-        descriptions = []
-        for name, extent in expected:
-            description, _ = _cached_graph_dense_vector_binding(
-                self._graph_binding_views,
-                name,
-                runtime_args[name],
-                extent,
-            )
-            descriptions.append(description)
-        _validate_graph_dense_vector_disjoint(
-            descriptions,
-            "LinearOperator Graph input and output must be proven disjoint",
         )
 
 
@@ -2476,7 +2482,7 @@ def _merge_linear_operator_graph_fixed_bindings(executables):
     return fixed
 
 
-class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
+class _LinearOperatorCompositionGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
     def __init__(self, operator, input_arg, output_arg, adjoint):
         from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
         from taichi_forge.linalg._composition_kernels import (
@@ -2485,28 +2491,7 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             scale_f32,
         )
 
-        for value, role in ((input_arg, "input"), (output_arg, "output")):
-            if (
-                getattr(value, "tag", None) != ArgKind.NDARRAY
-                or value.dtype() != f32
-                or int(value.field_dim) != 1
-                or tuple(value.element_shape) != ()
-            ):
-                raise TaichiRuntimeError(
-                    f"LinearOperator Graph {role} must be a symbolic scalar "
-                    "f32 1-D ndarray"
-                )
-        if input_arg.name == output_arg.name:
-            raise TaichiRuntimeError(
-                "LinearOperator Graph input and output must use distinct "
-                "symbolic resources"
-            )
-
-        self._operator = operator
-        self._input_name = input_arg.name
-        self._output_name = output_arg.name
-        self._adjoint = adjoint
-        self._graph_binding_views = {}
+        self._init_graph_ports(operator, input_arg, output_arg, adjoint)
         self._expected_stamp = tuple(operator._handle._resource_stamp())
         prefix = f"__linear_operator_composition_{id(self):x}"
         spec = operator._composition_spec
@@ -3000,25 +2985,7 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
     def bind_graph_arguments(self, runtime_args):
         prepared = self._bind_provider_generation()
         replacements = dict(prepared.replacements)
-        expected = (
-            (
-                self._input_name,
-                self._operator.shape[0 if self._adjoint else 1],
-            ),
-            (
-                self._output_name,
-                self._operator.shape[1 if self._adjoint else 0],
-            ),
-        )
-        for name, extent in expected:
-            _, view = _cached_graph_dense_vector_binding(
-                self._graph_binding_views,
-                name,
-                runtime_args[name],
-                extent,
-            )
-            if view is not None:
-                replacements[name] = view
+        self._bind_dense_ports(runtime_args, replacements)
         replacements.update(self._bind_block_subviews(runtime_args))
         augmented_runtime_args = dict(runtime_args)
         augmented_runtime_args.update(replacements)
@@ -3110,31 +3077,6 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             )
             replacements[name] = view
         return replacements
-
-    def validate_graph_bindings(self, runtime_args):
-        expected = (
-            (
-                self._input_name,
-                self._operator.shape[0 if self._adjoint else 1],
-            ),
-            (
-                self._output_name,
-                self._operator.shape[1 if self._adjoint else 0],
-            ),
-        )
-        descriptions = []
-        for name, extent in expected:
-            description, _ = _cached_graph_dense_vector_binding(
-                self._graph_binding_views,
-                name,
-                runtime_args[name],
-                extent,
-            )
-            descriptions.append(description)
-        _validate_graph_dense_vector_disjoint(
-            descriptions,
-            "LinearOperator Graph input and output must be proven disjoint",
-        )
 
 
 class _LinearOperatorCompositionGraphNode(NativeGraphNode):

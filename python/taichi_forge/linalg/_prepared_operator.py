@@ -9,6 +9,21 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32
 
 
+def _operator_graph_workspace(source):
+    """Declare instance-local storage using the existing operator workspace ABI."""
+    from taichi_forge.graph._graph import GraphOwnedNdarray
+
+    workspace = {}
+    workspace_bytes = 0
+    requirements = {item.name: item for item in source.temporary_requirements}
+    for requirement in requirements.values():
+        if requirement.storage_kind != "f32" or requirement.alignment > 256:
+            raise TaichiRuntimeError("Prepared operator requires the existing f32 Graph workspace contract")
+        workspace[requirement.name] = GraphOwnedNdarray(f32, (requirement.bytes // 4,))
+        workspace_bytes += requirement.bytes
+    return workspace, workspace_bytes
+
+
 class _PinnedOperatorExecutable(NativeGraphExecutable):
     def __init__(self, snapshot, namespace):
         from taichi_forge.graph._graph import Arg, ArgKind
@@ -83,7 +98,7 @@ class _PinnedOperatorNode(NativeGraphNode):
 
 class _OperatorSnapshot:
     def __init__(self, operator, input, output, adjoint):
-        from taichi_forge.graph._graph import Arg, ArgKind, GraphOwnedNdarray
+        from taichi_forge.graph._graph import Arg, ArgKind
 
         self.program = impl.get_runtime().prog
         args = (Arg(ArgKind.NDARRAY, "input", f32, ndim=1), Arg(ArgKind.NDARRAY, "output", f32, ndim=1))
@@ -105,16 +120,9 @@ class _OperatorSnapshot:
         bindings = dict(action.fixed_bindings)
         bindings.update(actual)
         bindings.update(prepared.replacements)
-        workspace_bytes = 0
         # Reuse Graph-owned, instance-local workspace instead of allocating
         # plan-private scratch shared by independently compiled Graphs.
-        requirements = {item.name: item for item in source.temporary_requirements}
-        workspace = {}
-        for name, requirement in requirements.items():
-            if requirement.storage_kind != "f32" or requirement.alignment > 256:
-                raise TaichiRuntimeError("Prepared operator requires the existing f32 Graph workspace contract")
-            workspace[name] = GraphOwnedNdarray(f32, (requirement.bytes // 4,))
-            workspace_bytes += requirement.bytes
+        workspace, workspace_bytes = _operator_graph_workspace(source)
         for symbol, name in action.temporary_bindings.items():
             bindings[symbol] = workspace[name]
         self.dispatches = tuple(action.dispatches)

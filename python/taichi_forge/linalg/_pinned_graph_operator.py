@@ -1,30 +1,92 @@
 """Symbolic operator ports over an explicitly pinned provider generation."""
 
-from taichi_forge.graph._native import DispatchGraphAction, NativeGraphNode, ProviderOwnedNdarrayBinding
+from taichi_forge.graph._ir import GraphAccess, NativeCallNode, ResourceEffect
+from taichi_forge.graph._native import (
+    DispatchGraphAction,
+    NativeGraphExecutable,
+    NativeGraphNode,
+    PreparedGraphBindings,
+    ProviderOwnedNdarrayBinding,
+)
 from taichi_forge.lang.exception import TaichiRuntimeError
-from taichi_forge.linalg._runtime import _LinearOperatorGraphExecutable
+from taichi_forge.linalg._prepared_operator import _operator_graph_workspace
+from taichi_forge.linalg._runtime import (
+    _LinearOperatorCompositionGraphExecutable,
+    _LinearOperatorGraphExecutable,
+    _OperatorGraphPorts,
+)
 
 
-class PinnedOperatorGraphExecutable(_LinearOperatorGraphExecutable):
+def _qualify_pinned_source(source):
+    """Keep derived views and live/writable provider state out of data snapshots."""
+    if source.derived_runtime_arg_schema:
+        raise TaichiRuntimeError("Pinned symbolic operator derived views require a reconstruction contract")
+    pending = [source]
+    while pending:
+        executable = pending.pop()
+        if type(executable) is _LinearOperatorCompositionGraphExecutable:
+            pending.extend(executable._children)
+        elif type(executable) is _LinearOperatorGraphExecutable:
+            if executable._record._graph_dispatches or executable._record._state_dependencies:
+                raise TaichiRuntimeError("Pinned symbolic operators currently require from_kernel leaves")
+        else:
+            raise TaichiRuntimeError("Pinned symbolic operator provider requires an explicit generation contract")
+
+
+class PinnedOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
     def __init__(self, operator, input_arg, output_arg, adjoint):
-        if operator._composition_spec is not None or not operator._handle._supports_recordable_kernel():
-            raise TaichiRuntimeError("Pinned symbolic operator actions currently require a from_kernel provider")
-        if adjoint and not operator.capabilities.adjoint_apply:
-            raise TaichiRuntimeError("LinearOperator provider does not expose an adjoint action")
-        super().__init__(operator, input_arg, output_arg, adjoint)
-        if self._record._graph_dispatches or self._record._state_dependencies:
-            raise TaichiRuntimeError("Pinned symbolic operator actions currently require a from_kernel provider")
+        self._init_graph_ports(operator, input_arg, output_arg, adjoint)
+        source = operator.graph_action(input_arg, output_arg, adjoint=adjoint).compile()
+        _qualify_pinned_source(source)
+        prepared = source._bind_provider_generation()
+        action = source.recordable_action
+        if not prepared.replacements.keys() <= action.fixed_bindings.keys():
+            raise TaichiRuntimeError("Pinned operator generation changed its fixed binding schema")
+        fixed = dict(action.fixed_bindings)
+        fixed.update(prepared.replacements)
+        workspace, self._workspace_bytes = _operator_graph_workspace(source)
+        for name, requirement in action.temporary_bindings.items():
+            fixed[name] = workspace[requirement]
+        self._source = source
+        self._generation_owners = tuple(prepared.submission_owners)
+        self._effects = tuple(source.resource_effects) + tuple(
+            ResourceEffect(owner, GraphAccess.READ_WRITE, runtime_bound=False) for owner in workspace.values()
+        )
         self._action = DispatchGraphAction(
-            self._action.dispatches,
-            backends=self._action.capabilities.backends,
-            conditional_body_safe=True,
-            fixed_bindings=self._action.fixed_bindings,
+            action.dispatches,
+            backends=action.capabilities.backends,
+            conditional_body_safe=action.capabilities.conditional_body_safe,
+            fixed_bindings=fixed,
             update_policy="immutable",
         )
 
-    def _current_compatible_record(self):
+    def validate_graph_lifetime(self):
         self._operator._ensure_valid()
-        return self._record
+
+    def bind_graph_arguments(self, runtime_args):
+        replacements = {}
+        self._bind_dense_ports(runtime_args, replacements)
+        return PreparedGraphBindings(replacements, self._generation_owners)
+
+    @property
+    def runtime_arg_schema(self):
+        return self._source.runtime_arg_schema
+
+    @property
+    def resource_effects(self):
+        return self._effects
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def graph_ir_node(self):
+        if not self._workspace_bytes:
+            return self._source.graph_ir_node
+        return NativeCallNode(
+            name="pinned_operator_composition", effects=self._effects, bindings=self.runtime_arg_schema, opaque=True
+        )
 
     def run(self, runtime_args):
         # Calling the operator's ordinary apply here would select its current
@@ -33,19 +95,18 @@ class PinnedOperatorGraphExecutable(_LinearOperatorGraphExecutable):
 
     @property
     def debug_info(self):
-        return dict(super().debug_info, update_policy="pinned")
+        return dict(self._source.debug_info, update_policy="pinned", graph_workspace_bytes=self._workspace_bytes)
 
     def _export_aot_bindings(self, context):
+        from taichi_forge.graph._graph import GraphOwnedNdarray
+
         self.validate_graph_lifetime()
         for name, owner in self._action.fixed_bindings.items():
             if isinstance(owner, ProviderOwnedNdarrayBinding):
                 context.provider_data_binding(name, owner)
-            elif type(owner) is not int:
+            elif type(owner) not in (int, float) and not isinstance(owner, GraphOwnedNdarray):
                 raise TaichiRuntimeError("Pinned operator has an unsupported fixed binding")
-        for name, extent in (
-            (self._input_name, self._operator.shape[0 if self._adjoint else 1]),
-            (self._output_name, self._operator.shape[1 if self._adjoint else 0]),
-        ):
+        for name, extent in self._port_extents():
             context.binding_constraints.append(
                 dict(
                     kind="array_layout",

@@ -290,7 +290,8 @@ tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar
 sum 伴随播种，再执行真实 `.grad` kernel。这不自动生成 reduction 导数，也不表示
 所有 memory recipe、LinearOperator/SolvePlan 或结构控制已完整支持。
 
-`LinearOperator.from_kernel` provider 可显式固定代次，同时保留符号输入/输出端口：
+`LinearOperator.from_kernel` provider 及其 sum、scale、shift、compose、adjoint、
+parameterized_affine 组合可显式固定代次，同时保留符号输入/输出端口：
 
 ```python
 builder.append_native(operator.graph_action(x, y, update_policy="pinned"))
@@ -299,16 +300,18 @@ graph = builder.compile()
 module.add_execution_plan("apply_and_adjoint", graph)
 ```
 
-action 在编译时选择数值/拓扑代次；之后发布新数值不会改变它，需新建 action 才采用
-新代次。固定代次本身不增加设备分配或 host 读回。导出会同步并把选中的不可变数组
+action 在编译时选择数值/拓扑及系数代次；之后发布新值不会改变它，需新建 action 才
+采用新代次。固定代次本身不复制 provider 数据或进行 host 读回。每份 Graph/AOT 准备
+独立拥有组合工作区，工作区按声明重建，不导出其中的内容。导出会同步并把选中的不可变数组
 复制为普通 artifact data，同次导出中每个 allocation 只读取一次；共享数据项和 kernel
 定义去重，每份准备独立持有重建数组。输入/输出内容仍可更新，Graph 私有中间端口
 仍保持私有。消费端在准备阶段验证精确的标量 f32 向量尺寸与输入/输出存储不重叠。
 
-Windows CPU/CUDA/Vulkan 已验证矩形前向/转置、数值发布、两份独立消费实例、导入别名、
+Windows CPU/CUDA/Vulkan 已验证矩形前向/转置、嵌套 affine/compose/sum/shift、数值与系数
+发布、独立工作区、两份独立消费实例、导入别名、
 重新准备与生产/消费端退休。此处导出的是用户提供的显式伴随，不会自动生成 provider
 导数。默认 `update_policy="rebind"` 继续跟随兼容数值发布，导出不会静默把它冻结。
-组合算子、`from_graph` 活状态/工作区与 SolvePlan 控制仍需各自的重建合同。此 Python
+block/derived view、`from_graph` 活状态/工作区与 SolvePlan 控制仍需各自的重建合同。此 Python
 扩展复用 ABI 38，不给独立消费端增加 provider 库依赖。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray

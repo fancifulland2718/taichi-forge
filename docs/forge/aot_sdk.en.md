@@ -356,8 +356,9 @@ the f32 chain uses an explicit sum adjoint followed by a real `.grad` kernel.
 This does not synthesize a reduction derivative, qualify every memory recipe,
 or provide full LinearOperator/SolvePlan or structured-control export.
 
-For a `LinearOperator.from_kernel` provider, explicitly pin its generation while
-keeping symbolic input/output ports:
+For `LinearOperator.from_kernel` providers and their sum, scale, shift,
+composition, adjoint and parameterized-affine combinations, explicitly pin their
+generations while keeping symbolic input/output ports:
 
 ```python
 builder.append_native(operator.graph_action(x, y, update_policy="pinned"))
@@ -366,22 +367,25 @@ graph = builder.compile()
 module.add_execution_plan("apply_and_adjoint", graph)
 ```
 
-The action selects its numeric/topology generation when compiled. Later numeric
-publications do not change it; create a new action to select another generation.
-Pinning adds no device allocation or host readback. Export synchronizes and copies
+The action selects its numeric/topology and coefficient generations when compiled.
+Later publications do not change it; create a new action to select new generations.
+Pinning neither copies provider data nor reads it back to the host. Each Graph or
+AOT preparation owns its composition scratch; scratch is reconstructed without
+exporting its contents. Export synchronizes and copies
 the selected immutable arrays into ordinary artifact data, once per allocation
 within that export. Shared data entries and kernel definitions are deduplicated;
 each preparation owns its reconstructed arrays. Input/output contents remain live,
 and Graph-private intermediate ports remain private. The consumer validates exact
 scalar f32 vector extents and disjoint input/output storage during preparation.
 
-Windows CPU/CUDA/Vulkan tests cover a rectangular forward/transpose pair, numeric
-publication, two independent consumers, imported aliases, re-preparation and
+Windows CPU/CUDA/Vulkan tests cover rectangular forward/transpose pairs, nested
+affine/compose/sum/shift operators, numeric and coefficient publications, independent
+scratch, two independent consumers, imported aliases, re-preparation and
 producer/consumer retirement. This exports an explicitly supplied adjoint, not an
 automatically generated provider derivative. The default `update_policy="rebind"`
 continues to follow compatible publications and is not silently frozen by export.
-Composition, `from_graph` live state/workspace and SolvePlan control still need
-their own reconstruction contracts. This Python extension uses existing ABI 38;
+Block/derived views, `from_graph` live state/workspace and SolvePlan control still
+need their own reconstruction contracts. This Python extension uses existing ABI 38;
 it adds no provider library to the standalone consumer.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
