@@ -3,6 +3,7 @@
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/runtime/native_array_contract.h"
 #include "tests/cpp/aot/gfx_utils.h"
 
 #if defined(TI_WITH_CUDA)
@@ -410,6 +411,80 @@ TEST(VulkanDeviceTest, IndependentDevicesKeepDispatchAlive) {
       fill_and_read(first->device(), 17);
     }
   }
+}
+
+TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
+  if (!vulkan::is_vulkan_api_available()) {
+    GTEST_SKIP() << "No Vulkan compute device";
+  }
+  vulkan::VulkanDeviceCreator creator({});
+  auto *device = creator.device();
+  const auto &handle = device->vk_device();
+  const auto &vk = handle.functions();
+  // Retire RHI imports first, then the external buffers and their shared
+  // memory.
+  struct Storage {
+    vulkan::VulkanDevice *device;
+    std::array<VkBuffer, 3> buffers{};
+    VkDeviceMemory memory{VK_NULL_HANDLE};
+    std::vector<DeviceAllocation> imports;
+    ~Storage() {
+      for (auto allocation : imports)
+        device->dealloc_memory(allocation);
+      const auto &handle = device->vk_device();
+      for (auto buffer : buffers)
+        if (buffer)
+          handle.functions().vkDestroyBuffer(handle, buffer, nullptr);
+      if (memory)
+        handle.functions().vkFreeMemory(handle, memory, nullptr);
+    }
+  } storage{device};
+  VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  info.size = 64;
+  info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  for (auto &buffer : storage.buffers)
+    ASSERT_EQ(vk.vkCreateBuffer(handle, &info, nullptr, &buffer), VK_SUCCESS);
+  VkMemoryRequirements requirements{};
+  vk.vkGetBufferMemoryRequirements(handle, storage.buffers[0], &requirements);
+  VkPhysicalDeviceMemoryProperties properties{};
+  handle.instance_functions().vkGetPhysicalDeviceMemoryProperties(
+      device->vk_physical_device(), &properties);
+  uint32_t memory_type = 0;
+  while (memory_type < properties.memoryTypeCount &&
+         !(requirements.memoryTypeBits & (uint32_t(1) << memory_type)))
+    ++memory_type;
+  ASSERT_LT(memory_type, properties.memoryTypeCount);
+  const auto stride = ((requirements.size + requirements.alignment - 1) /
+                       requirements.alignment) *
+                      requirements.alignment;
+  VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  allocation.allocationSize = 2 * stride;
+  allocation.memoryTypeIndex = memory_type;
+  ASSERT_EQ(vk.vkAllocateMemory(handle, &allocation, nullptr, &storage.memory),
+            VK_SUCCESS);
+  for (std::size_t i = 0; i < storage.buffers.size(); ++i) {
+    const VkDeviceSize offset = i == 2 ? stride : 0;
+    ASSERT_EQ(vk.vkBindBufferMemory(handle, storage.buffers[i], storage.memory,
+                                    offset),
+              VK_SUCCESS);
+    storage.imports.push_back(device->import_vkbuffer(
+        vkapi::create_buffer(handle, storage.buffers[i], info.usage), info.size,
+        storage.memory, offset));
+  }
+  const auto range = [&](std::size_t i) {
+    return resolve_native_storage_range(Arch::vulkan,
+                                        storage.imports[i].get_ptr(), 64);
+  };
+  const auto first = range(0);
+  EXPECT_NE(first.buffer, range(1).buffer);
+  EXPECT_EQ(first.memory, range(1).memory);
+  EXPECT_FALSE(first.proven_disjoint(range(1)));
+  EXPECT_TRUE(first.proven_disjoint(range(2)));
+  auto tail = storage.imports[1].get_ptr();
+  tail.offset = 48;
+  EXPECT_THROW(resolve_native_storage_range(Arch::vulkan, tail, 17),
+               std::invalid_argument);
 }
 
 TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {

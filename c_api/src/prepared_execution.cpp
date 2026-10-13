@@ -482,6 +482,60 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   };
   std::map<std::string, NativeArrayBinding> native_arrays;
   std::map<std::string, std::shared_ptr<NativeResource>> native_objects;
+  auto array_binding =
+      [&](const std::string &slot) -> const NativeArrayBinding & {
+    auto found = native_arrays.find(slot);
+    if (found == native_arrays.end()) {
+      const auto view = storage(slot, 0);
+      const auto &array = arguments.at(slot)->value.ndarray;
+      found =
+          native_arrays
+              .emplace(slot,
+                       NativeArrayBinding{
+                           view.pointer,
+                           view.size,
+                           capi::ndarray_scalar_type(array.elem_type),
+                           {array.shape.dims,
+                            array.shape.dims + array.shape.dim_count},
+                           {array.elem_shape.dims,
+                            array.elem_shape.dims + array.elem_shape.dim_count},
+                           rt.get_memory(array.memory).base_offset})
+              .first;
+    }
+    return found->second;
+  };
+  std::map<std::string, NativeStorageRange> storage_ranges;
+  auto storage_range =
+      [&](const std::string &slot) -> const NativeStorageRange & {
+    auto found = storage_ranges.find(slot);
+    if (found == storage_ranges.end()) {
+      const auto &array = array_binding(slot);
+      found = storage_ranges
+                  .emplace(slot, resolve_native_storage_range(
+                                     rt.arch, array.pointer, array.bytes))
+                  .first;
+    }
+    return found->second;
+  };
+  // Resolve certificates before creating provider state or recording commands.
+  // These maps disappear after prepare; replay carries only frozen bindings.
+  for (const auto &constraint : plan.constraints) {
+    try {
+      if (const auto *layout =
+              std::get_if<aot::ExecutionPlan::ArrayLayout>(&constraint)) {
+        validate_native_array_layout(array_binding(layout->array),
+                                     layout->required);
+      } else {
+        const auto &pair = std::get<aot::ExecutionPlan::Disjoint>(constraint);
+        if (!storage_range(pair.left).proven_disjoint(
+                storage_range(pair.right)))
+          throw std::invalid_argument("Cannot prove array bindings disjoint: " +
+                                      pair.left + " and " + pair.right);
+      }
+    } catch (const std::invalid_argument &error) {
+      throw MemoryBindingError(error.what());
+    }
+  }
   auto native_inputs = [&](const NativeOperationDescription &description) {
     NativeOperationBindings inputs;
     for (const auto &[port, slot] : description.bindings) {
@@ -490,26 +544,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         inputs.emplace(port, object->second);
         continue;
       }
-      auto found = native_arrays.find(slot);
-      if (found == native_arrays.end()) {
-        const auto view = storage(slot, 0);
-        const auto &array = arguments.at(slot)->value.ndarray;
-        found =
-            native_arrays
-                .emplace(
-                    slot,
-                    NativeArrayBinding{
-                        view.pointer,
-                        view.size,
-                        capi::ndarray_scalar_type(array.elem_type),
-                        {array.shape.dims,
-                         array.shape.dims + array.shape.dim_count},
-                        {array.elem_shape.dims,
-                         array.elem_shape.dims + array.elem_shape.dim_count},
-                        rt.get_memory(array.memory).base_offset})
-                .first;
-      }
-      inputs.emplace(port, found->second);
+      inputs.emplace(port, array_binding(slot));
     }
     return inputs;
   };

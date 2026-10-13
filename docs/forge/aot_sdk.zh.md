@@ -244,8 +244,34 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 35。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 36。
 reduction/helper 的容量、布局和 disjoint 证明仍需重建，标签支持不会绕过这些检查。
+
+手写执行计划可持久化冷准备时的数组绑定要求：
+
+```python
+plan = ExecutionPlan(
+    [{"kind": "copy", "source": "x", "destination": "y"}],
+    constraints=[
+        {"kind": "array_layout", "array": "x", "minimum_shape": [17],
+         "element_shape": [], "record_bytes": 4, "alignment": 4},
+        {"kind": "disjoint", "left": "x", "right": "y"},
+    ],
+)
+```
+
+`array_layout` 要求紧凑 scalar/AoS ndarray，rank 与 element shape 一致，各索引维
+不小于 `minimum_shape`，每条 record 的字节数相等且满足基址对齐。`element_shape`
+省略时为 `[]`，dtype 仍由 kernel/provider 检查；允许零长度索引维。只能约束选中
+执行及其保留资源/梯度已使用的绑定，不会为此额外保留无关数组。`disjoint` 比较
+CPU/CUDA 地址范围或 Vulkan buffer/memory 绑定，可识别不同导入分配句柄的重叠。
+Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者须描述真实底层
+分配；外部虚拟内存映射另外创建的独立别名不在此追踪范围。
+
+约束在创建 provider 状态和录制命令之前检查，失败不执行用户 kernel；固定重放
+不增加约束检查，改变绑定须重新 prepare，继续遵守现有 owner/退休合同。struct
+及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
+tensor 布局、导入别名和退休。helper 要求的自动导出尚未接通。需配套 private ABI 36。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -320,7 +346,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 35）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 36）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已

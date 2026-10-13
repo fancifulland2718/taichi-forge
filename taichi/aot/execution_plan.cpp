@@ -15,7 +15,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
   try {
     const auto root = liong::json::parse_complete(json);
     fields(root, {"version", "operations", "resources", "gradients",
-                  "initialization"});
+                  "initialization", "constraints"});
     const auto version = integer(root["version"]);
     if (version != 1 && version != 2)
       throw std::invalid_argument("Unsupported execution plan version");
@@ -135,6 +135,58 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     plan.replay_bindings = plan.resources.runtime_bindings(arguments);
     if (has_initialization)
       parse_steps(root["initialization"], plan.initialization);
+    if (const auto found = root.obj.inner.find("constraints");
+        found != root.obj.inner.end()) {
+      if (!found->second.is_arr())
+        throw std::invalid_argument("Execution constraints must be an array");
+      const auto used = plan.resources.runtime_bindings(arguments);
+      auto binding = [&](const JsonValue &value) {
+        auto result = name(value);
+        if (!used.count(result))
+          throw std::invalid_argument("Constraint references unused binding: " +
+                                      result);
+        return result;
+      };
+      auto shape = [&](const JsonValue &value, bool positive) {
+        if (!value.is_arr())
+          throw std::invalid_argument("Constraint shape must be an array");
+        std::vector<std::uint64_t> result;
+        for (const auto &axis : value.arr.inner) {
+          const auto dimension = integer(axis);
+          if (positive && !dimension)
+            throw std::invalid_argument("Element extents must be positive");
+          result.push_back(dimension);
+        }
+        return result;
+      };
+      for (const auto &constraint : found->second.arr.inner) {
+        const auto kind = name(constraint["kind"]);
+        if (kind == "array_layout") {
+          fields(constraint, {"kind", "array", "minimum_shape", "element_shape",
+                              "record_bytes", "alignment"});
+          ArrayLayout layout;
+          layout.array = binding(constraint["array"]);
+          layout.required.minimum_shape =
+              shape(constraint["minimum_shape"], false);
+          if (constraint.obj.inner.count("element_shape"))
+            layout.required.element_shape =
+                shape(constraint["element_shape"], true);
+          layout.required.record_bytes = integer(constraint["record_bytes"]);
+          layout.required.alignment = integer(constraint["alignment"]);
+          if (!layout.required.record_bytes || !layout.required.alignment)
+            throw std::invalid_argument(
+                "Record size and alignment must be positive");
+          plan.constraints.emplace_back(std::move(layout));
+        } else if (kind == "disjoint") {
+          fields(constraint, {"kind", "left", "right"});
+          plan.constraints.emplace_back(Disjoint{binding(constraint["left"]),
+                                                 binding(constraint["right"])});
+        } else {
+          throw std::invalid_argument("Unsupported execution constraint: " +
+                                      kind);
+        }
+      }
+    }
     plan.resources.analyze(arguments);
     plan.arguments.assign(arguments.begin(), arguments.end());
     return plan;

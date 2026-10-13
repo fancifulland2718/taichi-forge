@@ -7,6 +7,7 @@
 #include <variant>
 #include <vector>
 #include "taichi/aot/execution_resources.h"
+#include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang::aot {
@@ -47,6 +48,16 @@ struct ExecutionPlan {
   };
   using Native = NativeOperationDescription;
   using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Native>;
+  struct ArrayLayout {
+    std::string array;
+    NativeArrayLayoutRequirement required;
+  };
+  struct Disjoint {
+    std::string left;
+    std::string right;
+  };
+  using Constraint = std::variant<ArrayLayout, Disjoint>;
+  std::vector<Constraint> constraints;
   std::vector<Operation> operations;
   std::vector<Operation> initialization;
   // Runtime dependencies exclude shape-only references resolved at prepare.

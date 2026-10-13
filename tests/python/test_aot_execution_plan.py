@@ -48,6 +48,42 @@ def test_execution_zero_initialization_is_a_strict_resource_policy():
             ExecutionPlan([operation], resources=[dict(resource, zero_initialize=invalid)])
 
 
+def test_binding_constraints_snapshot_closure_and_validation():
+    operations = [
+        dict(kind="copy", source="x", destination="scratch"),
+        dict(kind="copy", source="scratch", destination="y"),
+    ]
+    resources = [dict(kind="ndarray", name="scratch", dtype="f32", shape=[17])]
+    layout = dict(kind="array_layout", array="x", minimum_shape=[17], record_bytes=4, alignment=4)
+    constraints = [layout, dict(kind="disjoint", left="scratch", right="y")]
+    plan = ExecutionPlan(operations, resources=resources, constraints=constraints)
+    layout["minimum_shape"][0] = 1
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("x", "y")
+    assert restored._replay_argument_names == {"x", "scratch", "y"}
+    assert json.loads(restored.to_json())["constraints"][0]["minimum_shape"] == [17]
+    for patch in (
+        dict(minimum_shape=None),
+        dict(minimum_shape=[True]),
+        dict(minimum_shape=[-1]),
+        dict(minimum_shape=[1 << 63]),
+        dict(record_bytes=0),
+        dict(record_bytes=True),
+        dict(alignment=0),
+        dict(element_shape=[0]),
+        dict(element_shape="2"),
+        dict(unknown=1),
+        dict(array="unused"),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=resources, constraints=[dict(layout, **patch)])
+    for bad in (None, {}, [None], [dict(kind="unknown")], [dict(kind="disjoint", left="x", right="unused")]):
+        document = json.loads(plan.to_json())
+        document["constraints"] = bad
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(document))
+
+
 def test_scalar_resource_bits_roundtrip_and_validation():
     cases = (
         ("i8", -128, "80"),

@@ -25,7 +25,7 @@ class ExecutionPlan:
     or modifying buffers. Rebind by preparing another independent instance.
     """
 
-    def __init__(self, operations, *, resources=None, gradients=None, initialization=None):
+    def __init__(self, operations, *, resources=None, gradients=None, initialization=None, constraints=None):
         document = {"version": 1 if initialization is None else 2, "operations": list(operations)}
         if initialization is not None:
             document["initialization"] = list(initialization)
@@ -33,6 +33,8 @@ class ExecutionPlan:
             document["resources"] = list(resources)
         if gradients is not None:
             document["gradients"] = gradients
+        if constraints is not None:
+            document["constraints"] = list(constraints)
         # Own a snapshot, including nested arrays; caller mutations cannot alter
         # a saved plan. This module remains usable without a native library.
         self._json = json.dumps(document, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -44,7 +46,7 @@ class ExecutionPlan:
         if (
             not isinstance(value, dict)
             or not {"version", "operations"} <= set(value)
-            or set(value) - {"version", "operations", "resources", "gradients", "initialization"}
+            or set(value) - {"version", "operations", "resources", "gradients", "initialization", "constraints"}
         ):
             raise ValueError("Execution plan requires version and operations")
         if type(value["version"]) is not int or value["version"] not in (1, 2):
@@ -57,11 +59,14 @@ class ExecutionPlan:
             raise ValueError("Execution resources must be a list")
         if "gradients" in value and not isinstance(value["gradients"], dict):
             raise ValueError("Execution gradients must be a name mapping")
+        if "constraints" in value and not isinstance(value["constraints"], list):
+            raise ValueError("Execution constraints must be a list")
         return cls(
             value["operations"],
             resources=value.get("resources"),
             gradients=value.get("gradients"),
             initialization=value.get("initialization"),
+            constraints=value.get("constraints"),
         )
 
     @classmethod
@@ -192,6 +197,9 @@ class ExecutionPlan:
 
         resources, gradients = document.get("resources", []), document.get("gradients", {})
         self._retained_argument_names = retained_arguments(resources, gradients, arguments)
+        from ._constraints import validate_constraints
+
+        validate_constraints(document.get("constraints", []), self._retained_argument_names)
         self._replay_argument_names = retained_arguments(
             resources, gradients, replay if "initialization" in document else arguments
         )

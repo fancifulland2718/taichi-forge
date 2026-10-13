@@ -289,6 +289,64 @@ TEST(ExecutionPlan, ScalarResourcesPreserveBitsWithoutStorageDependencies) {
                  std::invalid_argument);
 }
 
+TEST(ExecutionPlan, BindingConstraintsPreserveOnlySelectedBindingRequirements) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,
+    "resources":[{"kind":"ndarray","name":"scratch","dtype":"f32","shape":[17]}],
+    "operations":[{"kind":"copy","source":"x","destination":"scratch"},
+                  {"kind":"copy","source":"scratch","destination":"y"}],
+    "constraints":[{"kind":"array_layout","array":"x","minimum_shape":[17],"record_bytes":4,"alignment":4},
+                   {"kind":"disjoint","left":"scratch","right":"y"}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x", "y"}));
+  EXPECT_EQ(plan.constraints.size(), 2);
+  const auto &layout =
+      std::get<ExecutionPlan::ArrayLayout>(plan.constraints[0]);
+  EXPECT_EQ(layout.array, "x");
+  EXPECT_EQ(layout.required.minimum_shape, (std::vector<std::uint64_t>{17}));
+  EXPECT_TRUE(layout.required.element_shape.empty());
+  EXPECT_EQ(layout.required.record_bytes, 4);
+  EXPECT_EQ(layout.required.alignment, 4);
+  EXPECT_EQ(std::get<ExecutionPlan::Disjoint>(plan.constraints[1]).left,
+            "scratch");
+  const std::string prefix =
+      R"({"version":1,"operations":[{"kind":"copy","source":"x","destination":"y"}],"constraints":)";
+  for (
+      const auto *constraints :
+      {"null", "{}", R"([{"kind":"disjoint","left":"x","right":"unused"}])",
+       R"([{"kind":"disjoint","left":"x","right":"y","unknown":1}])",
+       R"([{"kind":"array_layout","array":"x","minimum_shape":[-1],"record_bytes":4,"alignment":4}])",
+       R"([{"kind":"array_layout","array":"x","minimum_shape":[true],"record_bytes":4,"alignment":4}])",
+       R"([{"kind":"array_layout","array":"x","minimum_shape":[17],"record_bytes":0,"alignment":4}])",
+       R"([{"kind":"array_layout","array":"x","minimum_shape":[17],"record_bytes":4,"alignment":0}])",
+       R"([{"kind":"array_layout","array":"x","minimum_shape":[17],"element_shape":[0],"record_bytes":4,"alignment":4}])",
+       R"([{"kind":"unknown"}])"})
+    EXPECT_THROW(ExecutionPlan::parse(prefix + constraints + "}"),
+                 std::invalid_argument);
+}
+
+TEST(ExecutionPlan,
+     PhysicalRangesDoNotConfuseImportedHandlesWithStorageIdentity) {
+  auto *device = reinterpret_cast<Device *>(std::uintptr_t(1));
+  NativeStorageRange a{device, 1, 32, 4, 0, 16};
+  NativeStorageRange alias{device, 1, 40, 5, 0, 16};
+  EXPECT_FALSE(
+      a.proven_disjoint(alias));  // Two buffers bound to overlapping memory.
+  alias.memory_offset = 48;
+  EXPECT_TRUE(a.proven_disjoint(alias));
+  alias.memory = 2;
+  EXPECT_TRUE(a.proven_disjoint(alias));
+  alias.memory = 0;
+  EXPECT_FALSE(a.proven_disjoint(alias));  // No proof for an unknown import.
+  alias.buffer = a.buffer;
+  EXPECT_FALSE(
+      a.proven_disjoint(alias));  // Same raw buffer, different imports.
+  alias.buffer_offset = 16;
+  EXPECT_TRUE(a.proven_disjoint(alias));
+  alias.bytes = 0;
+  EXPECT_TRUE(a.proven_disjoint(alias));
+  alias.device = nullptr;
+  EXPECT_FALSE(a.proven_disjoint(alias));
+}
+
 TEST(ExecutionPlan, KernelLabelsBelongToDispatches) {
   const auto plan = ExecutionPlan::parse(R"({"version":2,
     "initialization":[{"kind":"kernel","entry":"shared","arguments":["x"],"label":"init"}],

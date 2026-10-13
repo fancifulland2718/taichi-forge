@@ -60,7 +60,14 @@ lifetimes. The entries below describe the changes.
   does not enable per-kernel profiling on fixed replay. Long labels no longer
   have an arbitrary byte limit, while NUL and line breaks remain invalid.
   Small CPU/CUDA/Vulkan checks cover long labels, explicit reverse kernels and
-  consumer retirement. Matching Python/native components use private ABI 35.
+  consumer retirement. This introduced private ABI 35; use the matching current revision.
+
+- AOT execution plans can persist packed-array layout requirements and disjoint
+  binding pairs, checked once before provider creation or command recording.
+  CPU/CUDA address ranges and Vulkan memory/buffer bindings detect overlapping
+  imports without adding replay checks. Focused tests cover actual reverse kernels,
+  empty arrays, tensor layouts and retirement. Helper automatic export remains
+  separate work; matching Python/native components now require private ABI 36.
 
 - Private AOT ndarray resources can request `zero_initialize: true`. They clear
   once before initialization/replay and retain state across launches; odd byte

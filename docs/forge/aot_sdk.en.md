@@ -296,9 +296,42 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 35
+explicit reverse kernels and retirement. This requires matching private ABI 36
 components. Capacity, layout and disjointness certificates on reduction/helper
 recipes still require reconstruction; label support does not bypass those checks.
+
+Handwritten execution plans can persist cold array-binding requirements:
+
+```python
+plan = ExecutionPlan(
+    [{"kind": "copy", "source": "x", "destination": "y"}],
+    constraints=[
+        {"kind": "array_layout", "array": "x", "minimum_shape": [17],
+         "element_shape": [], "record_bytes": 4, "alignment": 4},
+        {"kind": "disjoint", "left": "x", "right": "y"},
+    ],
+)
+```
+
+`array_layout` requires a packed scalar/AoS ndarray, matching rank and element
+shape, index extents at least `minimum_shape`, exact bytes per record, and the
+specified base alignment. `element_shape` defaults to `[]`; dtype requirements
+still come from the kernel/provider. Empty index extents are allowed. These
+requirements apply only to bindings already used by the selected execution or
+its retained resources/gradients; they do not retain unrelated arrays.
+`disjoint` compares CPU/CUDA address ranges or Vulkan buffer/memory bindings,
+including overlapping imports with different allocation handles. Missing Vulkan
+memory identity cannot prove disjointness between different buffers. Imported
+storage must describe its actual backing allocation; independent aliases created
+by external virtual-memory mappings are not tracked.
+
+Preparation validates these requirements before recording commands or creating
+provider state. Failures execute no user kernels. Fixed replay performs no new
+constraint checks; changed bindings require another preparation, retaining the
+existing owner/retirement contract. Struct and affine views need their own layout
+contract. CPU/CUDA/Vulkan tests cover actual reverse kernels, zero-length arrays,
+tensor layout, imported aliases and retirement. Automatic export of helper
+requirements is not yet supported. Use matching private ABI 36 components.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -397,7 +430,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 35). Small
+elements. Use matching Python/native components (current private ABI 36). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.
