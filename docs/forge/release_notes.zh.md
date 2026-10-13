@@ -34,13 +34,20 @@
 - runtime wheel 现提供仅依赖标准库的 `taichi_forge_runtime.aot` 消费入口，与 JIT
   共用原生库。普通 AOT kernel/CGraph 可显式准备为 CPU 批次、CUDA Graph 或 Vulkan
   固定命令，支持显式 ndarray 梯度。准备不执行用户 kernel；关闭代码/存储会使相关
-  prepared 对象失效。尚未覆盖混合 provider 或通用新场景特化，详见
+  prepared 对象失效。尚未覆盖全部 provider 或通用新场景特化，详见
   [AOT SDK 合同](aot_sdk.zh.md)。
+
+- `Module.add_execution_plan(name, graph)` 可经共用重建注册表自动导出顺序 kernel
+  Graph 与已资格的 CUDA cuBLAS GEMM/cuTENSOR recording，复用 kernel 特化和共享
+  provider 资源，不持久化活 handle。CPU/CUDA/Vulkan 小规模测试覆盖显式反向 kernel；
+  CUDA 混合序列另验证显式伴随及生产端退休后的独立消费。结构控制和未注册 recording
+  配方仍需继续补齐。
 
 - 带版本的 `ExecutionPlan` 可持久化已导出 kernel 与设备 copy/32 位 fill/稳定 sort/compact 的顺序，
   绑定后准备成一个 CPU/CUDA/Vulkan 原生执行对象；目录和 `.tcm` 均保存描述。
   LLVM AOT 已通过 Vulkan 使用的同一虚拟目录层按需读取归档，无需解压到磁盘。
-  此首批顺序格式尚未导出其他数学 primitive、provider、结构控制或渲染资源。
+  该格式通过注册的操作/资源工厂扩展 provider；未注册的 primitive、结构控制和
+  渲染资源仍需各自的重建合同。
 
 - AOT compact 为每份执行对象独立管理工作区，保留记录顺序，空选择也刷新计数。
   CPU/CUDA/Vulkan 已验证变化谓词重放、独立绑定、退休和后续 gather kernel 的显式

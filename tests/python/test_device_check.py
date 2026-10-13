@@ -448,5 +448,5 @@ def test_native_graph_aot_rejects_native_nodes():
     graph = builder.compile()
 
     module = ti.aot.Module()
-    with pytest.raises(Exception, match="Native graph replay is JIT-only"):
+    with pytest.raises(Exception, match="Module.add_execution_plan"):
         module.add_graph("native_check", graph)

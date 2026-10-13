@@ -39,16 +39,25 @@ lifetimes. The entries below describe the changes.
   explicitly prepare fixed CPU batches, CUDA Graphs and Vulkan commands with
   explicit ndarray gradients. Preparation executes no user kernels; closing
   bound code/storage invalidates its dependent executions. This does not yet
-  cover mixed providers or generic scene specialization; see the
+  cover every provider or generic scene specialization; see the
   [AOT SDK contract](aot_sdk.en.md).
+
+- `Module.add_execution_plan(name, graph)` can now export sequential kernel
+  Graphs and the qualified CUDA cuBLAS GEMM/cuTENSOR recordings through the shared
+  reconstruction registry. It deduplicates kernel specializations and shared
+  provider resources without persisting live handles. Small CPU/CUDA/Vulkan
+  tests cover explicit reverse kernels; CUDA mixed sequences also cover explicit
+  adjoints and independent consumers after producer retirement. Structured
+  control and unregistered recording recipes remain separate coverage work.
 
 - A versioned `ExecutionPlan` can persist exported kernels interleaved with
   device buffer copies, 32-bit fills, stable sort and compact, then prepare one native CPU/CUDA/Vulkan
   execution with fixed bindings. Descriptions are included in directory and
   `.tcm` modules. LLVM AOT now reads archives through the same lazy virtual
   directory layer as Vulkan, without extracting the archive to disk. This
-  initial sequence format does not yet export other mathematical primitives,
-  providers, structured control or rendering resources.
+  format uses registered operation/resource factories for additional provider
+  slices. Unregistered primitives, structured control and rendering resources
+  still require their own reconstruction contracts.
 
 - AOT compact owns per-execution scratch, preserves record order, and refreshes
   counts even for empty selections. CPU/CUDA/Vulkan tests cover replay with

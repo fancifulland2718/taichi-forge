@@ -297,6 +297,7 @@ class Module:
         self._kernels = []
         self._exported_kernels = {}
         self._execution_plans = {}
+        self._graph_export_failed = False
         self._fields = {}
         rtm = impl.get_runtime()
         rtm._finalize_root_fb_for_aot()
@@ -397,34 +398,47 @@ class Module:
         if getattr(graph, "_contains_native_nodes", False):
             raise TaichiRuntimeError(
                 "AOT Module.add_graph() does not serialize Forge native graph "
-                "nodes. Native graph replay is JIT-only and limited to "
-                "DSL-defined native methods; AOT graph export currently "
-                "supports ordinary kernel CGraphs only."
+                "nodes into the CGraph format. Use Module.add_execution_plan(name, graph) "
+                "for recordings with an AOT reconstruction contract."
             )
         self._aot_builder.add_graph(name, graph._compiled_graph)
         self._content += ["cgraph:" + name]
 
-    def add_execution_plan(self, name, plan):
+    def add_execution_plan(self, name, plan, *, gradients=None):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
-        Export referenced kernels first. The plan owns no live Python callback,
+        An ExecutionPlan requires its kernels to be exported first. A compiled
+        Graph instead exports its referenced kernels and supported native
+        recordings automatically; optional gradients map primal array names to
+        their gradient bindings. Unsupported control/resource recipes fail before
+        publication. The resulting plan owns no live Python callback,
         Graph definition or device handle; the consumer binds arrays and records
         native execution at its cold boundary.
         """
         from taichi_forge_runtime.aot import ExecutionPlan
+        from taichi_forge.graph._graph import Graph
 
         if not isinstance(name, str) or not name or "\0" in name:
             raise ValueError("Execution plan name must be a nonempty string without NUL")
-        if not isinstance(plan, ExecutionPlan):
-            raise TypeError("Expected an ExecutionPlan")
+        if self._graph_export_failed:
+            raise TaichiRuntimeError("A Graph kernel export failed; create a new AOT module")
+        if name in self._execution_plans:
+            raise ValueError("Duplicate execution plan export: " + name)
+        if isinstance(plan, Graph):
+            from taichi_forge.aot._graph_export import export_graph
+
+            plan = export_graph(self, plan, gradients=gradients)
+        elif not isinstance(plan, ExecutionPlan):
+            raise TypeError("Expected an ExecutionPlan or compiled Graph")
+        elif gradients is not None:
+            raise ValueError("Specify gradients on the ExecutionPlan itself")
         snapshot = ExecutionPlan.from_json(plan.to_json())
         missing = set(snapshot.kernel_entries) - self._exported_kernels.keys()
         if missing:
             raise ValueError("Execution plan references unexported kernels: " + ", ".join(sorted(missing)))
-        if name in self._execution_plans:
-            raise ValueError("Duplicate execution plan export: " + name)
         self._execution_plans[name] = snapshot
         self._content.append("execution:" + name)
+        return snapshot
 
     def add_primitive(self, name, kind, *, version=1, **options):
         """Export a registered primitive recipe and its selected helper kernels.
@@ -486,6 +500,8 @@ class Module:
         Args:
           filepath (str): path to a folder to store aot files.
         """
+        if self._graph_export_failed:
+            raise TaichiRuntimeError("A Graph kernel export failed; create a new AOT module")
         output_dir = Path(filepath)
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir.as_posix()
@@ -507,6 +523,8 @@ class Module:
             end with `.tcm`.
         """
         assert filepath.endswith(".tcm"), "AOT module artifact archive must ends with .tcm"
+        if self._graph_export_failed:
+            raise TaichiRuntimeError("A Graph kernel export failed; create a new AOT module")
         tcm_path = Path(filepath).absolute()
         assert tcm_path.parent.exists(), "Output directory doesn't exist"
 

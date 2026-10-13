@@ -235,6 +235,47 @@ and operations before recording native commands; it executes no mathematical
 work or buffer modification. Warm replay submits one prepared handle without
 parsing JSON or calling Python for each node.
 
+`add_execution_plan(name, graph, gradients=None)` also accepts a compiled Forge
+Graph. It exports the referenced kernel specializations and qualified native
+recordings into this same execution format, and returns the frozen `ExecutionPlan`:
+
+```python
+# Producer: builder contains ordinary dispatches and supported append_native calls.
+graph = builder.compile()
+plan = exported.add_execution_plan("step", graph)
+exported.archive("step.tcm")
+# Consumer: use the execution-plan API, with the original public binding names.
+prepared = loaded.prepare_execution("step", bindings)
+prepared()
+```
+
+The current automatic path covers sequential scalar/ndarray kernel dispatches
+on CPU/CUDA/Vulkan, CUDA `CublasGemmRecording`, and CUDA `CutensorCaptureRecording`.
+Ordinary Sequential prefixes/suffixes preserve order. Provider-owned descriptions
+reconstruct the original compute/workspace policy and share one resource for
+multiple uses of the same plan; distinct plan objects remain independent.
+No vendor handle, function address, DLL path or Python callback is serialized.
+Kernel specializations are deduplicated across exports in one module. Backend
+compilation still follows the module's AOT target/options; exporting a JIT Graph
+does not make those target-dependent costs disappear.
+
+For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
+binds their ndarray gradients. Export the gradient clearing/seeding operations
+too. This does not synthesize derivatives of native provider calls. Windows
+CPU/CUDA/Vulkan checks cover forward/reverse execution in standalone and borrowed
+consumers. cuBLAS/cuTENSOR checks include complete mixed sequences, explicit
+coefficient/input adjoints, shared and independent plans, source-owner retirement
+before consumption, and in-flight consumer close/reset.
+
+Unsupported recording types/subclasses, structured control, observations, labels,
+bounded/indirect dispatch and selected composition/private-resource recipes
+without a reconstruction contract are rejected during preflight, before adding
+kernel definitions. They are not silently replaced by a baseline recipe. If a
+backend compilation subsequently fails, the module cannot be saved: create a new
+module to avoid publishing a partial artifact. `add_graph` still exports the
+ordinary CGraph format; this new path is consumed through `prepare_execution`.
+The standalone consumer and native executor are shared with handwritten plans.
+
 CPU/CUDA LLVM modules and Vulkan modules can load directly from `.tcm` files.
 The loader retains compressed archive bytes and reads kernel payloads on demand;
 it does not extract the whole archive to a temporary directory.

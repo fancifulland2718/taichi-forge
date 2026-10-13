@@ -401,6 +401,9 @@ class CutensorContractionPlan:
         self._tensors = tensors
         self._alignment_bytes = alignment_bytes
         self._compute = compute
+        # Persist the original policy, not a guess based on selected workspace.
+        self._workspace_preference = workspace_preference
+        self._workspace_limit_bytes = workspace_limit_bytes
         self._capture_leases = 0
         self._preparation_only = _preparation_only
         self.workspace_estimate_bytes = int(info.workspace_estimate_bytes)

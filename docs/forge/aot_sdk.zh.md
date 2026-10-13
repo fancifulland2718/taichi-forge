@@ -198,6 +198,39 @@ runtime.wait()
 准备阶段验证全部参数、范围和操作，再记录原生命令；不执行数学工作或修改缓冲。
 暖态通过一个 prepared handle 提交，不重新解析 JSON 或逐节点调用 Python。
 
+`add_execution_plan(name, graph, gradients=None)` 也可接收已编译的 Forge Graph，
+自动把引用的 kernel 特化及已具备重建合同的 native recording 导出为同一种执行描述，
+返回冻结的 `ExecutionPlan`：
+
+```python
+# 生产端：builder 含普通 dispatch 与已支持的 append_native 调用。
+graph = builder.compile()
+plan = exported.add_execution_plan("step", graph)
+exported.archive("step.tcm")
+# 消费端：沿用原公开绑定名，通过执行计划入口消费。
+prepared = loaded.prepare_execution("step", bindings)
+prepared()
+```
+
+当前自动路径覆盖 CPU/CUDA/Vulkan 的顺序 scalar/ndarray kernel dispatch，以及 CUDA
+`CublasGemmRecording`、`CutensorCaptureRecording`。普通 Sequential 前后段保留次序。
+provider 自己提供描述以恢复原 compute/workspace 策略，同一 plan 的多次使用共用一份
+重建资源，不同 plan 对象保持独立。不序列化 vendor handle、函数地址、DLL 路径或 Python
+回调。同模块内重复导出会复用 kernel 特化；后端编译仍遵守模块的 AOT 目标和选项，
+导出现有 JIT Graph 不代表消除了这些目标相关的编译成本。
+
+Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
+梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
+Windows CPU/CUDA/Vulkan 已验证独立/借用消费的前向和反向；cuBLAS/cuTENSOR 已验证
+完整混合序列、显式输入梯度、共享与独立 plan、生产端 owner 关闭后消费，以及在途
+consumer close/reset。
+
+未覆盖的 recording 类型/子类、结构控制、观察点、label、bounded/indirect dispatch、
+缺少重建合同的选中组合策略/私有资源在预检期报错，先于添加 kernel 定义，不静默替换为
+baseline。若后续后端编译失败，该模块不能保存，须新建模块，避免发布不完整产物。
+`add_graph` 仍导出普通 CGraph 格式；此路径用 `prepare_execution` 消费，轻量消费端与
+原生执行器和手写执行计划共用。
+
 CPU/CUDA 的 LLVM 模块和 Vulkan 模块均可直接加载 `.tcm`。加载器保留压缩归档字节，
 按需读取内核载荷，不需要将整个归档展开到临时目录。
 

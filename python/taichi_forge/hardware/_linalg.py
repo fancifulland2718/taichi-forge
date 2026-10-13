@@ -132,6 +132,21 @@ class CublasGemmRecording(BackendCommandRecording):
             ResourceEffect(self.output, output_access),
         )
 
+    def _export_aot(self, context):
+        context.native(
+            "cublas",
+            "gemm_f32",
+            bindings=dict(a=self.a, b=self.b, output=self.output),
+            parameters=dict(
+                rows=self.rows,
+                columns=self.columns,
+                inner=self.inner,
+                alpha=self.alpha,
+                beta=self.beta,
+            ),
+        )
+        return ()
+
     @staticmethod
     def _validate_array(value, name, shape):
         if not isinstance(value, Ndarray):

@@ -202,6 +202,35 @@ class CutensorCaptureRecording(BackendCommandRecording):
             for i, name in enumerate(self.binding_names)
         )
 
+    def _export_aot(self, context):
+        plan = self.plan
+        if type(plan) is not CutensorContractionPlan:
+            raise TaichiRuntimeError(
+                "cuTENSOR plan variant needs its own AOT reconstruction contract"
+            )
+        with plan.provider._lock, plan._lock:
+            plan._validate_lifetime()
+            parameters = {
+                key: dict(shape=shape, modes=modes)
+                for key, (shape, modes, _) in zip("abcd", plan._tensors)
+            }
+            parameters.update(
+                compute_mode=plan._compute,
+                alignment_bytes=plan._alignment_bytes,
+                workspace_preference=plan._workspace_preference,
+                workspace_limit_bytes=plan._workspace_limit_bytes,
+            )
+            resource = context.resource(
+                plan, "cutensor", "contraction_plan_f32", parameters=parameters
+            )
+        context.native(
+            "cutensor",
+            "contract_f32",
+            bindings=dict(plan=resource, **dict(zip("abcd", self.binding_names[:4]))),
+            parameters=dict(alpha=self.alpha, beta=self.beta),
+        )
+        return self.binding_names[4:]
+
     def _graph_provider_memory_report(self):
         from taichi_forge.hardware._memory import (
             HardwareMemoryComponent,

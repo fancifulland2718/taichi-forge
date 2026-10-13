@@ -298,6 +298,12 @@ class BackendCommandRecording:
     generation/lifetime enforcement. Qualified BindingVersions reuse it;
     changing a binding creates a new packet. This is not device command-buffer
     replay and does not change ``replay_mode``.
+
+    A concrete recording may define ``_export_aot(context)`` to describe its
+    operations and resources through the common cold exporter. It must neither
+    submit work nor read device data. It returns the private binding names fully
+    recreated by those resources. Subclasses must explicitly supply their own
+    hook; an inherited description cannot certify extra callback/plan semantics.
     """
 
     backend: str
