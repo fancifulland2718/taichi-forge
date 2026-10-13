@@ -250,7 +250,8 @@ prepared()
 ```
 
 The current automatic path covers sequential scalar/ndarray kernel dispatches
-on CPU/CUDA/Vulkan, CUDA `CublasGemmRecording`, and CUDA `CutensorCaptureRecording`.
+on CPU/CUDA/Vulkan, CUDA `CublasGemmRecording`, `CutensorCaptureRecording`, and
+`CufftRecording` with ordinary `CufftPlan1D`/`CufftPlanND` plans.
 Ordinary Sequential prefixes/suffixes preserve order. Provider-owned descriptions
 reconstruct the original compute/workspace policy and share one resource for
 multiple uses of the same plan; distinct plan objects remain independent.
@@ -458,7 +459,7 @@ does not automatically export arbitrary JIT recordings or invoke arbitrary DLL
 symbols; other operations still need registered reconstruction contracts. The
 qualified precision, Graph and explicit-adjoint boundaries below remain unchanged.
 
-CUDA currently registers `fft_c2c_f32`, using external cuFFT for compact,
+The original CUDA `fft_c2c_f32` operation uses external cuFFT for compact,
 row-major interleaved complex f32 ndarrays (`element_shape=(2,)`):
 
 ```python
@@ -473,8 +474,9 @@ Bind arrays with exactly `batch_count * product(dimensions)` complex elements.
 Inverse transforms are unnormalized; scale by the reciprocal transform size
 when needed. Exact in-place storage is supported; partial overlap is rejected.
 The cuFFT adapter retains its existing PlanMany rank 1–3 and int32 dimension/
-batch-distance ABI. This slice excludes strided layouts, real transforms,
-double precision and callbacks. CPU/Vulkan have no FFT factory in this slice.
+batch-distance ABI. This original operation excludes strided layouts and real
+transforms; the shared-plan interface below supports them. Double precision and
+callbacks are not supported. CPU/Vulkan have no AOT FFT factory in this slice.
 
 Each prepared instance owns an independent vendor plan/workspace. Preparation
 does not execute FFTs or change supplied buffers; mixed kernel/FFT sequences
@@ -484,6 +486,26 @@ may be zero for small transforms; opaque vendor bookkeeping is not included.
 Closing a dependency retires its recording and plan after completion.
 `info.dispatch_count` counts exported kernel entries, excluding vendor-internal
 GPU kernels.
+
+For shared plans, register a native resource `cufft/plan_f32` with `dimensions`,
+`transform` (`c2c`, `r2c`, `c2r`), optional `batch_count` (default 1), and optional
+`input_layout`/`output_layout`. An explicit layout contains `embed`, `stride` and
+`batch_distance`, measured in real or complex elements for that port. Omitted
+layouts are compact, including the last-axis half spectrum for real transforms.
+Then use `cufft/execute_f32`, binding `plan`, `input`, `output` and declaring
+`direction`. R2C requires forward; C2R requires inverse. C2R may overwrite its
+half-spectrum input. All inverses remain unnormalized.
+
+This interface accepts f32 scalar storage (interleaved complex components) or
+complex `vector(2)` storage with exactly the physical span implied by the plan.
+Input/output must be disjoint. Multiple executions of one resource share its
+plan/workspace; separate prepared instances remain independent, and scratch is
+accounted once. `Module.add_execution_plan(name, graph)` uses this representation
+for ordinary cuFFT recordings, preserving frozen creation layouts and plan
+identity. Callback, separable and unqualified plan subclasses need their own
+export contract and are rejected before kernel export. Tested automatic exports
+cover batched 1D C2C, padded/strided 2D C2C, 3D R2C/C2R, explicit spectral-energy
+adjoints, nonzero shared workspace and standalone/borrowed owner retirement.
 
 Install cuFFT separately and make it visible to the process loader (for example,
 Windows `PATH`, or an explicitly preloaded library). Forge does not bundle the

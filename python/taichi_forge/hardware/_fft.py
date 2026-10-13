@@ -258,6 +258,21 @@ class CufftRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.plan._validate_lifetime()
 
+    def _export_aot(self, context):
+        if type(self.plan) not in (CufftPlan1D, CufftPlanND):
+            raise TaichiRuntimeError("AOT cuFFT plan variants require their own reconstruction contract")
+        self.validate_graph_lifetime()
+        if self.plan._aot_plan_parameters is None:
+            raise TaichiRuntimeError("AOT cuFFT callbacks and separable recipes require explicit reconstruction")
+        plan = context.resource(self.plan, "cufft", "plan_f32", parameters=self.plan._aot_plan_parameters)
+        context.native(
+            "cufft",
+            "execute_f32",
+            bindings=dict(plan=plan, input=self.input, output=self.output),
+            parameters=dict(direction=self.direction),
+        )
+        return ()
+
     def memory_report(self):
         return self.plan.memory_report()
 
@@ -317,6 +332,25 @@ class _CufftPlanBase:
         )
         self._input_compact = input_compact
         self._output_compact = output_compact
+        # Capture the native creation parameters once. Public convenience fields
+        # can be reassigned later; that does not alter an existing vendor plan.
+        self._aot_plan_parameters = None
+        if not (_separable or _cross_batch or _store_callback is not None):
+            self._aot_plan_parameters = dict(
+                dimensions=self.dimensions,
+                batch_count=self.batch_count,
+                transform=self.transform,
+                input_layout=dict(
+                    embed=self.input_layout.embed,
+                    stride=self.input_layout.stride,
+                    batch_distance=self.input_layout.batch_distance,
+                ),
+                output_layout=dict(
+                    embed=self.output_layout.embed,
+                    stride=self.output_layout.stride,
+                    batch_distance=self.output_layout.batch_distance,
+                ),
+            )
         self.input_storage_scalars = (
             (self.batch_count - 1) * self.input_layout.batch_distance + input_span
         ) * (1 if transform == "r2c" else 2)

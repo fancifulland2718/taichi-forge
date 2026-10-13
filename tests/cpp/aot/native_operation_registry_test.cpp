@@ -22,6 +22,44 @@ struct ConflictingDescriptor {
   static constexpr std::uint32_t version = TestDescriptor::version;
 };
 
+TEST(NativeOperationRegistry, FftPlansDecodeWithoutLoadingProvider) {
+  const auto &registry = native_operation_registry();
+  auto description =
+      NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cufft","operation":"plan_f32","version":1,
+      "parameters":{"dimensions":[2,3,5],"batch_count":2,"transform":"r2c"},
+      "bindings":{}})"));
+  EXPECT_EQ(registry.decode(description, NativeObjectKind::resource).kind(),
+            "cufft_plan_f32");
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  for (
+      const auto *parameters :
+      {R"({"dimensions":[],"transform":"c2c"})",
+       R"({"dimensions":[1,1,1,1],"transform":"c2c"})",
+       R"({"dimensions":[0],"transform":"c2c"})",
+       R"({"dimensions":[2147483648],"transform":"c2c"})",
+       R"({"dimensions":[65536,65536],"transform":"c2c"})",
+       R"({"dimensions":[7],"batch_count":0,"transform":"c2c"})",
+       R"({"dimensions":[7],"transform":"f64"})",
+       R"({"dimensions":[7],"transform":"c2c","callback":"lost"})",
+       R"({"dimensions":[7],"transform":"c2c","input_layout":{"embed":[6],"stride":1,"batch_distance":7}})",
+       R"({"dimensions":[7],"transform":"c2c","input_layout":{"embed":[7,7],"stride":1,"batch_distance":49}})",
+       R"({"dimensions":[7],"transform":"c2c","input_layout":{"embed":[7],"stride":0,"batch_distance":7}})"}) {
+    description.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+                 std::invalid_argument)
+        << parameters;
+  }
+  description = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cufft","operation":"execute_f32","version":1,
+      "parameters":{"direction":"inverse"},
+      "bindings":{"plan":"p","input":"x","output":"y"}})"));
+  EXPECT_EQ(registry.decode(description).kind(), "cufft_execute_f32");
+  description.parameters =
+      liong::json::parse_complete(R"({"direction":"backward"})");
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+}
+
 #ifdef TI_WITH_CUDA
 TEST(NativeOperationRegistry,
      SynchronousCudaActionsRespectPrivateStreamsAndFailure) {

@@ -14,6 +14,7 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_fft.h"
 
 namespace taichi::lang {
 namespace {
@@ -497,6 +498,78 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
 };
 
 namespace {
+class AotCudaFftPlan final : public FftPlanResource {
+ public:
+  AotCudaFftPlan(Device &device, FftPlanDescription description)
+      : FftPlanResource(std::move(description)), device_(device) {
+    const auto &input = description_.input_layout;
+    const auto &output = description_.output_layout;
+    CufftPlanDescriptor descriptor{
+        description_.dimensions,
+        input.embed,
+        input.stride,
+        input.batch_distance,
+        output.embed,
+        output.stride,
+        output.batch_distance,
+        description_.batch_count,
+        validate_transform_kind(static_cast<int>(description_.transform))};
+    const auto counts = cufft_scalar_counts(descriptor);
+    // Validate byte arithmetic before the vendor allocates any workspace.
+    checked_multiply(counts.input, sizeof(float), "input bytes");
+    checked_multiply(counts.output, sizeof(float), "output bytes");
+    plan_ = std::make_unique<CudaFftPlan>(std::move(descriptor), true, nullptr);
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return plan_->workspace_bytes();
+  }
+  CudaFftPlan &plan() const {
+    return *plan_;
+  }
+
+ private:
+  Device &device_;
+  std::unique_ptr<CudaFftPlan> plan_;
+};
+
+class AotCudaFftExecution final : public NativeOperation {
+ public:
+  AotCudaFftExecution(std::shared_ptr<AotCudaFftPlan> plan,
+                      void *input,
+                      void *output,
+                      bool inverse)
+      : plan_(std::move(plan)),
+        input_(input),
+        output_(output),
+        direction_(inverse ? kCufftInverse : kCufftForward) {
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return plan_->device();
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;  // The resource owner accounts for shared workspace once.
+  }
+  void record_cuda(void *stream) override {
+    plan_->plan().execute(input_, output_, direction_,
+                          static_cast<CUstream>(stream));
+  }
+
+ private:
+  std::shared_ptr<AotCudaFftPlan> plan_;
+  void *input_;
+  void *output_;
+  int direction_;
+};
+
 class AotCudaFftOperation final : public NativeOperation {
  public:
   AotCudaFftOperation(Device &device,
@@ -540,6 +613,58 @@ NativeOperationAvailability probe_cuda_fft_operation() {
     return {};
   return {true,
           static_cast<std::uint32_t>(driver.capabilities().library_version)};
+}
+
+std::shared_ptr<NativeResource> prepare_cuda_fft_plan(
+    Arch,
+    Device &device,
+    const FftPlanDescription &description) {
+  if (!dynamic_cast<cuda::CudaDevice *>(&device))
+    throw std::invalid_argument("cuFFT requires a CUDA device");
+  auto &cuda = CUDAContext::get_instance();
+  auto submission_guard = cuda.get_submission_lock_guard();
+  auto context_guard = cuda.get_guard();
+  return std::make_shared<AotCudaFftPlan>(device, description);
+}
+
+std::shared_ptr<NativeOperation> prepare_cuda_fft_execution(
+    Arch,
+    Device &device,
+    const FftExecuteOperation &operation) {
+  auto *cuda_device = dynamic_cast<cuda::CudaDevice *>(&device);
+  auto plan = std::dynamic_pointer_cast<AotCudaFftPlan>(operation.plan);
+  if (!cuda_device || !plan || &plan->device() != &device)
+    throw std::invalid_argument("cuFFT requires an owner-local CUDA plan");
+  const auto transform = plan->description().transform;
+  const auto &counts = plan->plan().scalar_counts();
+  auto map = [&](const NativeArrayBinding &array, std::size_t scalars,
+                 bool complex) {
+    const std::size_t alignment = complex ? 2 * sizeof(float) : sizeof(float);
+    if (array.scalar_type != PrimitiveType::f32 ||
+        (!array.element_shape.empty() &&
+         (!complex || array.element_shape != std::vector<uint64_t>{2})) ||
+        array.bytes != scalars * sizeof(float) ||
+        array.base_offset % alignment || array.pointer.offset % alignment)
+      throw std::invalid_argument(
+          "cuFFT storage type, extent or alignment does not match plan");
+    auto *pointer =
+        static_cast<char *>(cuda_device->get_memory_addr(array.pointer)) +
+        array.pointer.offset;
+    if (!pointer || reinterpret_cast<std::uintptr_t>(pointer) % alignment)
+      throw std::invalid_argument("cuFFT storage must be nonnull and aligned");
+    return pointer;
+  };
+  auto *input =
+      map(operation.input, counts.input, transform != FftTransformKind::r2c);
+  auto *output =
+      map(operation.output, counts.output, transform != FftTransformKind::c2r);
+  const auto a = reinterpret_cast<std::uintptr_t>(input);
+  const auto b = reinterpret_cast<std::uintptr_t>(output);
+  if (a <= b ? b - a < operation.input.bytes : a - b < operation.output.bytes)
+    throw std::invalid_argument(
+        "cuFFT plan execution requires disjoint input and output storage");
+  return std::make_shared<AotCudaFftExecution>(std::move(plan), input, output,
+                                               operation.inverse);
 }
 
 std::shared_ptr<NativeOperation> prepare_cuda_fft_operation(

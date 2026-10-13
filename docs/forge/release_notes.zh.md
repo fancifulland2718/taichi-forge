@@ -43,6 +43,10 @@
   CUDA 混合序列另验证显式伴随及生产端退休后的独立消费。结构控制和未注册 recording
   配方仍需继续补齐。
 
+- 普通 CUDA FFT recording 可导出共享原生计划，覆盖批量 C2C/R2C/C2R 和显式物理
+  布局；同计划的正反变换保留一份 workspace。小规模独立/借用消费测试覆盖显式谱
+  伴随及退休；callback/separable 变体仍需独立合同。
+
 - 带版本的 `ExecutionPlan` 可持久化已导出 kernel 与设备 copy/32 位 fill/稳定 sort/compact 的顺序，
   绑定后准备成一个 CPU/CUDA/Vulkan 原生执行对象；目录和 `.tcm` 均保存描述。
   LLVM AOT 已通过 Vulkan 使用的同一虚拟目录层按需读取归档，无需解压到磁盘。

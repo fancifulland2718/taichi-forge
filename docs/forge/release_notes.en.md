@@ -50,6 +50,11 @@ lifetimes. The entries below describe the changes.
   adjoints and independent consumers after producer retirement. Structured
   control and unregistered recording recipes remain separate coverage work.
 
+- Ordinary CUDA FFT recordings now export shared native plans, including
+  batched C2C/R2C/C2R and explicit physical layouts. Forward/inverse uses of
+  one plan retain one workspace. Small standalone/borrowed checks cover explicit
+  spectral adjoints and retirement; callback/separable variants remain excluded.
+
 - A versioned `ExecutionPlan` can persist exported kernels interleaved with
   device buffer copies, 32-bit fills, stable sort and compact, then prepare one native CPU/CUDA/Vulkan
   execution with fixed bindings. Descriptions are included in directory and

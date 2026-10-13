@@ -213,7 +213,8 @@ prepared()
 ```
 
 当前自动路径覆盖 CPU/CUDA/Vulkan 的顺序 scalar/ndarray kernel dispatch，以及 CUDA
-`CublasGemmRecording`、`CutensorCaptureRecording`。普通 Sequential 前后段保留次序。
+`CublasGemmRecording`、`CutensorCaptureRecording`，以及使用普通 `CufftPlan1D` /
+`CufftPlanND` 的 `CufftRecording`。普通 Sequential 前后段保留次序。
 provider 自己提供描述以恢复原 compute/workspace 策略，同一 plan 的多次使用共用一份
 重建资源，不同 plan 对象保持独立。不序列化 vendor handle、函数地址、DLL 路径或 Python
 回调。同模块内重复导出会复用 kernel 特化；后端编译仍遵守模块的 AOT 目标和选项，
@@ -384,14 +385,31 @@ exported.add_execution_plan("fft", ExecutionPlan([
 数组恰好包含 `batch_count * product(dimensions)` 个复数元素。`batch_count`
 默认 1，`direction` 必须为 `"forward"` 或 `"inverse"`。逆变换不归一化，需要时
 另乘变换尺寸的倒数。支持完全原地执行，拒绝部分重叠。cuFFT 适配器沿用现有
-PlanMany 的 rank 1–3 及 int32 维度/批次距离 ABI；本切片不包括 strided 布局、
-实数变换、双精度或 callback。CPU/Vulkan 在此切片没有 FFT 工厂。
+PlanMany 的 rank 1–3 及 int32 维度/批次距离 ABI；这个原有操作不包含 strided 布局和
+实数变换，下述共享 plan 接口提供这两项。双精度和 callback 尚未支持。
+CPU/Vulkan 在此切片没有 AOT FFT 工厂。
 
 每个 prepared 实例独占 vendor plan/workspace；准备不执行 FFT、不改动传入缓冲。
 kernel/FFT 混合顺序一次捕获为 CUDA Graph，重放不重复发现 provider 或创建计划。
 `workspace_bytes` 包含 vendor 报告的 scratch，小变换可能为零，不包含不透明的
 vendor 管理对象。关闭依赖在完成后退休对应 recording 和 plan。
 `info.dispatch_count` 计数导出的 kernel 入口，不包含 vendor 内部的 GPU kernel。
+
+共享计划使用原生资源 `cufft/plan_f32`：参数包含 `dimensions`、`transform`
+（`c2c`、`r2c`、`c2r`）、可选 `batch_count`（默认 1），以及可选
+`input_layout` / `output_layout`。显式布局包含 `embed`、`stride` 和
+`batch_distance`，以对应端口的实数/复数元素计数；省略时为紧凑布局，实数变换自动
+采用末轴半谱。执行操作为 `cufft/execute_f32`，绑定 `plan`、`input`、`output`，
+并指定 `direction`。R2C 只能 forward，C2R 只能 inverse；C2R 可能改写半谱输入，
+所有 inverse 仍未归一化。
+
+该接口接受标量 f32 存储（复数分量交错）或复数 `vector(2)`，字节数须恰好覆盖计划的
+物理跨度，输入输出必须互不重叠。同资源的多次执行共享 plan/workspace，独立 prepared
+实例彼此隔离，scratch 只计一份。普通 cuFFT recording 经
+`Module.add_execution_plan(name, graph)` 自动导出为此结构，保留创建时冻结的布局与
+plan 身份。callback、separable 和未获资格的 plan 子类在 kernel 导出前拒绝。
+已验证批量一维 C2C、带 padding/stride 的二维 C2C、三维 R2C/C2R、显式谱能量伴随、
+非零共享 workspace，以及独立/借用 owner 的退休。
 
 cuFFT 由应用单独安装，并对进程加载器可见（例如 Windows `PATH` 或显式预加载
 动态库）；Forge 不打包 vendor DLL。Windows cuFFT 12.2 / RTX 5090 验证覆盖
