@@ -563,8 +563,8 @@ load. Reconfiguration affects later probes/preparations; existing prepared objec
 retain their original library/resource leases. Borrowed runtimes sharing one JIT
 device have independent configuration. Paths are not serialized into artifacts.
 
-This configures registered adapter-backed factories, currently the cuTENSOR and
-cuSPARSELt operations below. It does not register arbitrary vendor symbols, change existing
+This configures registered adapter-backed factories, including the cuTENSOR,
+cuSPARSELt and AmgX operations below. It does not register arbitrary vendor symbols, change existing
 built-in cuBLAS/cuFFT discovery, or automatically export JIT recordings.
 
 CUDA cuTENSOR reconstruction uses the existing provider C ABI and the same
@@ -682,6 +682,69 @@ live B updates, ReLU, C/D feedback, independent instances,
 uninitialized-read/alias rollback and in-flight close/reset. The explicit adjoint
 does not differentiate sparsity selection or f16 rounding. CPU/Vulkan do not
 advertise these CUDA operations. Arbitrary recording export remains separate.
+
+CUDA AmgX uses the same provider configuration, resource registry and external
+adapter C ABI. Configure `"amgx"` with its SDK adapter and an application-supplied
+compatible vendor library. Its scalar CSR resource and operations are version 1:
+
+| Operation | Bindings | Parameters |
+| --- | --- | --- |
+| `solver_csr` resource | none | positive int32 `rows`, `nonzeros`; `dtype`: `"f32"`/`"f64"`; inline `config` string; `compute_residual` (default true) |
+| `setup_csr` | `solver`, `row_offsets`, `column_indices`, `values` | none |
+| `replace_coefficients` | `solver`, `values` | none |
+| `solve` | `solver`, `rhs`, `solution`; optional `status`, `iterations`, `residual` | `initial_guess`: `"zero"` (default), `"upload"`, `"retained"`; `retain_initial_guess` (default false) |
+
+For example, the producer can declare:
+
+```python
+def amgx(operation, bindings, **parameters):
+    return dict(kind="native", provider="amgx", operation=operation,
+                version=1, bindings=bindings, parameters=parameters)
+
+solver = dict(amgx("solver_csr", {}, rows=n, nonzeros=nnz, dtype="f32",
+                  config=amgx_config_string), name="solver")
+setup = amgx("setup_csr", dict(solver="solver", row_offsets="rows",
+                              column_indices="columns", values="values"))
+solve = amgx("solve", dict(solver="solver", rhs="rhs", solution="solution",
+                          status="status"), retain_initial_guess=True)
+exported.add_execution_plan("solve", ti.aot.ExecutionPlan(
+    [solve], initialization=[setup], resources=[solver]))
+```
+
+All arrays are compact scalar vectors. CSR offsets/indices use i32 with extents
+`rows + 1`/`nonzeros`; values, RHS and solution use the resource dtype with extents
+`nonzeros`, `rows`, `rows`. Optional status/iterations are i32[1], residual is
+f64[1]. Diagnostic outputs must not overlap any other bound input/output. RHS and
+solution may share identical storage. Status 0 denotes convergence; a successful
+API call may report nonconvergence and still publish an iterate. Omitting the
+residual pass writes NaN when a residual output is bound.
+
+Preparation creates a deferred resource without sampling matrix contents.
+`setup_csr` samples topology and coefficients when executed, stages topology to
+host and calls vendor upload/setup. Put it in `initialization` to sample once;
+its input leases and topology staging retire after completion when replay does
+not need them. The known staging contributes to `workspace_bytes`; opaque
+vendor-owned matrix/solver allocations do not. Zero known workspace after
+initialization does not mean zero GPU storage. A replay `setup_csr` explicitly
+rebuilds the solver and clears its retained guess. `replace_coefficients` keeps
+topology fixed and performs the vendor resetup.
+
+`"retained"` requires a preceding solve in the recorded sequence, including
+initialization. `retain_initial_guess=True` instead bootstraps with zero/upload
+and subsequently reuses the solver-owned iterate; changing the caller's solution
+array does not replace that iterate. These facts belong to each prepared instance.
+Runtime failures invalidate that execution; nonconvergence remains a solve status.
+
+The three actions advertise `cuda_synchronous` and use `cuda_mixed` execution.
+The current AmgX ABI has no capture/stream contract. Adjacent kernels still form
+native graph segments; context completion fences protect the synchronous action.
+This does not promise a single graph launch or a warm speedup over JIT.
+Windows CUDA/AmgX 2.5.0 checks cover small f32/f64 tridiagonal systems, DSL-free and
+borrowed consumers, independent instances, retained guesses, coefficient updates,
+rebuilds, nonconvergence, setup failure, input retirement and in-flight close/reset.
+Explicit SPD adjoint solves and coefficient gradients are checked against a scalar
+reference; AmgX calls do not acquire automatic derivatives. CPU/Vulkan do not
+advertise these operations. Automatic JIT recording export remains separate.
 
 The producer exports registered recipes through
 `module.add_primitive(name, kind, version=1, **options)`. Version 1 supports

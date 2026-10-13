@@ -1,11 +1,13 @@
 #pragma once
 
 #include <array>
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include "taichi/rhi/device.h"
 #include "taichi/runtime/native_resource.h"
@@ -25,6 +27,18 @@ enum class NativeOperationMode : std::uint32_t {
 // recorded conditional write as unconditional initialization.
 struct NativeRecordingState {
   std::unordered_set<const NativeResource *> initialized;
+  // Provider-owned, copyable cold facts (for example, a solver's valid guess).
+  // Copies across unconditional phases; never consulted by warm replay.
+  template <typename Facts>
+  Facts &provider_state(const NativeResource *resource) {
+    auto &state = provider_states[resource];
+    if (!state.has_value())
+      state = Facts{};
+    return std::any_cast<Facts &>(state);
+  }
+
+ private:
+  std::unordered_map<const NativeResource *, std::any> provider_states;
 };
 
 // Prepared backend commands own their scratch and recording state. The

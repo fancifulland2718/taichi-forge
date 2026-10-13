@@ -238,6 +238,47 @@ TEST(NativeOperationRegistry, RejectsAmbiguousDefinitionsBeforePublication) {
   ASSERT_EQ(registry.capabilities().size(), 1);
 }
 
+TEST(NativeOperationRegistry, AmgxDescriptionsValidateWithoutLoadingCode) {
+  const auto &registry = native_operation_registry();
+  auto description = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"amgx","operation":"solver_csr","version":1,"bindings":{},"parameters":{"rows":17,"nonzeros":49,"dtype":"f64","config":"config_version=2"}})"));
+  EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  for (const auto *patch :
+       {R"({"rows":0})", R"({"nonzeros":-1})", R"({"rows":2147483648})",
+        R"({"dtype":"f16"})", R"({"config":""})", R"({"compute_residual":1})",
+        R"({"unknown":1})"}) {
+    auto invalid = description;
+    for (const auto &[key, value] :
+         liong::json::parse_complete(patch).obj.inner)
+      invalid.parameters.obj.inner[key] = value;
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+  auto solve = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"amgx","operation":"solve","version":1,"bindings":{"solver":"s","rhs":"b","solution":"x","status":"status"},"parameters":{"initial_guess":"upload","retain_initial_guess":true}})"));
+  EXPECT_NO_THROW(registry.decode(solve));
+  for (const auto *patch :
+       {R"({"initial_guess":"automatic"})", R"({"initial_guess":2})",
+        R"({"retain_initial_guess":1})"}) {
+    auto invalid = solve;
+    for (const auto &[key, value] :
+         liong::json::parse_complete(patch).obj.inner)
+      invalid.parameters.obj.inner[key] = value;
+    EXPECT_THROW(registry.decode(invalid), std::invalid_argument);
+  }
+  for (const auto *kind :
+       {"amgx_setup_csr", "amgx_replace_coefficients", "amgx_solve"}) {
+    EXPECT_EQ(registry.find(kind, 1, host_arch()), nullptr);
+    EXPECT_EQ(registry.find(kind, 1, Arch::vulkan), nullptr);
+#ifdef TI_WITH_CUDA
+    ASSERT_NE(registry.find(kind, 1, Arch::cuda), nullptr);
+    EXPECT_EQ(registry.find(kind, 1, Arch::cuda)->mode,
+              NativeOperationMode::cuda_synchronous);
+#endif
+  }
+}
+
 TEST(NativeOperationRegistry, GemmRejectsOverflowAndInvalidScalars) {
   GemmF32Operation op{{}, {}, {}, 17, 9, 13};
   EXPECT_EQ(gemm_f32_element_counts(op),
@@ -341,6 +382,14 @@ TEST(NativeOperationRegistry, RecordingInitializationIsLocalAndPrecedesWork) {
       FixedExecution(host_arch(), device, nullptr, {reader}, &independent),
       std::invalid_argument);
   EXPECT_TRUE(independent.initialized.empty());
+  struct SolverFacts {
+    bool has_solution{false};
+  };
+  sequence.provider_state<SolverFacts>(&marker).has_solution = true;
+  auto tentative = sequence;
+  tentative.provider_state<SolverFacts>(&marker).has_solution = false;
+  EXPECT_TRUE(sequence.provider_state<SolverFacts>(&marker).has_solution);
+  EXPECT_FALSE(independent.provider_state<SolverFacts>(&marker).has_solution);
 }
 
 TEST(NativeOperationRegistry,

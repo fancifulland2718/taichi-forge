@@ -314,6 +314,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_blas_operations(result);
     register_cutensor_operations(result);
     register_cusparselt_operations(result);
+    register_amgx_operations(result);
     return result;
   }();
   return registry;

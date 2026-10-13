@@ -458,7 +458,7 @@ runtime.configure_provider("cutensor", adapter_path=None)
 provider 不加载。重配置只影响后续探测/准备，已有 prepared 保留原库与资源 lease。
 借用同一 JIT device 的 runtime 也分别持有配置；路径不写入产物。
 
-此配置作用于已注册的 adapter 工厂，目前包括下文 cuTENSOR 与 cuSPARSELt 操作；不会注册任意
+此配置作用于已注册的 adapter 工厂，包括下文 cuTENSOR、cuSPARSELt 与 AmgX 操作；不会注册任意
 厂商符号、改变既有 cuBLAS/cuFFT 内建寻址，也不自动导出 JIT recording。
 
 CUDA cuTENSOR 重建复用既有 provider C ABI 与同一原生操作/资源注册表。选择可选
@@ -557,6 +557,58 @@ Windows CUDA/cuSPARSELt 0.9.1 已验证无 DSL/借用消费、合法稀疏输入
 C/D 反馈、独立实例、未初始化读取/别名回滚和在途 close/reset。显式伴随不对稀疏
 结构选择或 f16 舍入求导。CPU/Vulkan 不声明这些 CUDA 操作，任意 recording 导出
 仍是独立待办。
+
+CUDA AmgX 复用相同的 provider 配置、资源注册表和外部 adapter C ABI。为 `"amgx"`
+配置对应 SDK adapter 与应用提供的兼容厂商库。标量 CSR 资源及操作的版本均为 1：
+
+| 操作 | 绑定 | 参数 |
+| --- | --- | --- |
+| `solver_csr` 资源 | 无 | 正 int32 `rows`、`nonzeros`；`dtype` 为 `"f32"`/`"f64"`；内联 `config` 字符串；`compute_residual` 默认 true |
+| `setup_csr` | `solver`、`row_offsets`、`column_indices`、`values` | 无 |
+| `replace_coefficients` | `solver`、`values` | 无 |
+| `solve` | `solver`、`rhs`、`solution`；可选 `status`、`iterations`、`residual` | `initial_guess` 为 `"zero"`（默认）、`"upload"`、`"retained"`；`retain_initial_guess` 默认 false |
+
+例如生产端可声明：
+
+```python
+def amgx(operation, bindings, **parameters):
+    return dict(kind="native", provider="amgx", operation=operation,
+                version=1, bindings=bindings, parameters=parameters)
+
+solver = dict(amgx("solver_csr", {}, rows=n, nonzeros=nnz, dtype="f32",
+                  config=amgx_config_string), name="solver")
+setup = amgx("setup_csr", dict(solver="solver", row_offsets="rows",
+                              column_indices="columns", values="values"))
+solve = amgx("solve", dict(solver="solver", rhs="rhs", solution="solution",
+                          status="status"), retain_initial_guess=True)
+exported.add_execution_plan("solve", ti.aot.ExecutionPlan(
+    [solve], initialization=[setup], resources=[solver]))
+```
+
+所有数组均为紧凑标量向量。CSR offsets/indices 使用 i32，长度分别为 `rows + 1` /
+`nonzeros`；values、rhs、solution 使用资源 dtype，长度为 `nonzeros`、`rows`、`rows`。
+可选 status/iterations 为 i32[1]，residual 为 f64[1]。诊断输出不能与其他绑定输入/输出
+重叠；rhs/solution 可共用同一存储。status 为 0 表示收敛，API 成功也可能报告未收敛并
+写出当前迭代值。关闭额外 residual pass 后，若绑定了 residual 输出则写入 NaN。
+
+prepare 只创建延迟资源，不采样矩阵内容。执行 `setup_csr` 时才采样拓扑和系数，将拓扑
+暂存到 host，再调用厂商 upload/setup。放入 `initialization` 可只采样一次；若重放不再
+依赖输入，其 lease 与 host 拓扑暂存会在初始化完成后退休。已知暂存计入 `workspace_bytes`，
+不透明的厂商矩阵/solver 分配不计入；初始化后已知 workspace 为零不代表不占显存。
+重放中的 `setup_csr` 显式重建 solver 并清除保留初猜；`replace_coefficients` 固定拓扑，
+更新数值并执行厂商 resetup。
+
+`"retained"` 要求当前录制序列（含初始化）中存在前序 solve；`retain_initial_guess=True`
+则先按 zero/upload 建立初猜，后续复用 solver 内部迭代值。修改调用方 solution 数组不会
+替换该内部值，状态按 prepared 实例隔离。运行异常使执行实例失效，未收敛通过 solve
+状态报告。
+
+三个动作声明 `cuda_synchronous`，采用 `cuda_mixed` 执行。现有 AmgX ABI 未提供 capture/
+stream 合同；相邻 kernel 仍组成原生图段，外部动作边界通过 context completion fence
+保证依赖。这不承诺单次图提交或相对 JIT 的暖态加速。Windows CUDA/AmgX 2.5.0 已验证
+小型 f32/f64 三对角系统、无 DSL/借用消费、独立实例、保留初猜、系数更新、重建、未收敛、
+setup 失败、输入退休与在途 close/reset。显式 SPD 伴随求解和系数梯度与独立标量参考一致；
+AmgX 调用没有自动导数。CPU/Vulkan 不声明这些操作，任意 JIT recording 自动导出仍是待办。
 
 生产端通过 `module.add_primitive(name, kind, version=1, **options)` 导出注册配方。
 版本 1 支持 `sort`、`compact` 和连续去重 `unique`；sort/compact 沿用上文的符号

@@ -292,5 +292,6 @@ void register_fft_operation(NativeOperationRegistry &registry);
 void register_blas_operations(NativeOperationRegistry &registry);
 void register_cutensor_operations(NativeOperationRegistry &registry);
 void register_cusparselt_operations(NativeOperationRegistry &registry);
+void register_amgx_operations(NativeOperationRegistry &registry);
 
 }  // namespace taichi::lang
