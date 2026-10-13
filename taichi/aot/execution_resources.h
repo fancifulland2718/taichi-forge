@@ -42,5 +42,6 @@ struct ExecutionResources {
   static ExecutionResources parse(const liong::json::JsonValue &root);
   // Replace operation slots by the exact external binding set.
   void analyze(std::set<std::string> &arguments);
+  std::set<std::string> runtime_bindings(std::set<std::string> roots) const;
 };
 }  // namespace taichi::lang::aot

@@ -180,4 +180,26 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
     if (needed[i])
       order.push_back(i);
 }
+std::set<std::string> ExecutionResources::runtime_bindings(
+    std::set<std::string> roots) const {
+  std::map<std::string, const Resource *> by_name;
+  for (const auto &resource : declarations)
+    by_name.emplace(resource.name, &resource);
+  std::vector<std::string> pending(roots.begin(), roots.end());
+  auto add = [&](const std::string &name) {
+    if (roots.insert(name).second)
+      pending.push_back(name);
+  };
+  for (std::size_t i = 0; i < pending.size(); ++i) {
+    const auto name = pending[i];
+    if (const auto gradient = gradients.find(name); gradient != gradients.end())
+      add(gradient->second);
+    if (const auto resource = by_name.find(name); resource != by_name.end())
+      if (const auto *native =
+              std::get_if<NativeOperationDescription>(&resource->second->value))
+        for (const auto &[port, slot] : native->bindings)
+          add(slot);
+  }
+  return roots;
+}
 }  // namespace taichi::lang::aot

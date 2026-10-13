@@ -9,6 +9,7 @@
 namespace taichi::lang {
 class LaunchContextBuilder;
 class NativeOperation;
+struct NativeRecordingState;
 namespace aot {
 class Kernel;
 }
@@ -40,10 +41,14 @@ class FixedExecution {
                                  BufferFill,
                                  std::shared_ptr<NativeOperation>>;
 
+  // Optional cold facts chain unconditional phases of one prepared execution.
+  // Published only after successful recording; they do not execute
+  // initialization.
   FixedExecution(Arch arch,
                  Device &device,
                  gfx::GfxRuntime *gfx_runtime,
-                 const std::vector<Operation> &operations);
+                 const std::vector<Operation> &operations,
+                 NativeRecordingState *sequence_state = nullptr);
   ~FixedExecution();
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;

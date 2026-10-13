@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <variant>
 #include <vector>
@@ -46,6 +47,9 @@ struct ExecutionPlan {
   using Native = NativeOperationDescription;
   using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Native>;
   std::vector<Operation> operations;
+  std::vector<Operation> initialization;
+  // Runtime dependencies exclude shape-only references resolved at prepare.
+  std::set<std::string> replay_bindings;
   std::vector<std::string> arguments;
   ExecutionResources resources;
 

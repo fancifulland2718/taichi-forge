@@ -79,13 +79,15 @@ void *cuda_pointer(DevicePtr ptr) {
 FixedExecution::FixedExecution(Arch arch,
                                Device &device,
                                gfx::GfxRuntime *gfx_runtime,
-                               const std::vector<Operation> &operations)
+                               const std::vector<Operation> &operations,
+                               NativeRecordingState *sequence_state)
     : state_(std::make_unique<State>()) {
   if (operations.empty())
     throw std::invalid_argument("Fixed execution requires a nonempty batch");
   // Validate every descriptor before preparing backend state or commands.
   std::unordered_set<const NativeOperation *> owners;
-  NativeRecordingState recording_state;
+  NativeRecordingState recording_state =
+      sequence_state ? *sequence_state : NativeRecordingState{};
   for (const auto &operation : operations) {
     if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
       if (!dispatch->kernel || !dispatch->context ||
@@ -172,6 +174,8 @@ FixedExecution::FixedExecution(Arch arch,
         state_->cpu_steps.push_back(std::move(step));
       }
     }
+    if (sequence_state)
+      *sequence_state = std::move(recording_state);
     return;
   }
 #endif
@@ -221,6 +225,8 @@ FixedExecution::FixedExecution(Arch arch,
     state_->cuda_graph = std::make_unique<cuda::FixedGraph>(native);
     state_->kind = 1;
     state_->bytes = state_->cuda_graph->argument_bytes();
+    if (sequence_state)
+      *sequence_state = std::move(recording_state);
     return;
   }
 #endif
@@ -283,6 +289,8 @@ FixedExecution::FixedExecution(Arch arch,
     state_->kind = 2;
     state_->bytes =
         state_->vulkan_graph->snapshot_stats().known_persistent_argument_bytes;
+    if (sequence_state)
+      *sequence_state = std::move(recording_state);
     return;
   }
 #endif

@@ -261,6 +261,34 @@ primal 不得再由调用者重复指定梯度。内部数组初始未初始化�
 与算法 `workspace_bytes` 分开，均不代表分配器/驱动的全部开销。Windows 上小规模
 CPU/CUDA/Vulkan 用例覆盖前向计算、显式反向及上述所有权转换。
 
+计划可以将一次性初始化与重放分开：
+
+```python
+plan = aot.ExecutionPlan(
+    [{"kind": "copy", "source": "snapshot", "destination": "output"}],
+    initialization=[{"kind": "copy", "source": "input", "destination": "snapshot"}],
+    resources=[{"kind": "ndarray", "name": "snapshot", "dtype": "f32", "shape": [17]}],
+)
+prepared = plan.prepare(module, {"input": source, "output": output})
+prepared.initialize()  # 此时采样 source，并等待完成
+source.close()         # 已不属于重放依赖
+prepared()             # 使用固定快照
+```
+
+`initialization` 必须为非空序列，使用相同操作 schema，保存为执行计划版本 2；
+不带初始化的计划继续使用版本 1。prepare 不执行任一阶段。初始化成功后再次调用
+为幂等操作；首次 launch 也会自动初始化。这是冷边界的同步，不在每次重放等待。
+C/C++ 使用 `ti_initialize_prepared_ext` 或首次 launch 的自动路径。重新采样输入
+需要另行准备新实例。
+
+初始化成功后先退休其命令，再释放只供初始化使用的外部 lease、私有数组和原生
+资源。重放的传递资源依赖、别名和显式绑定梯度继续存活；Python 同时释放对应的
+初始化专用 owner。`resource_bytes`、`workspace_bytes` 和 `argument_bytes`
+报告当前保留存储，可比较初始化前后数值；`dispatch_count` 和 `launches` 描述
+重放。初始化中途失败会使对象不可继续执行，保留 lease 到同步退休，禁止自动重试。
+小型 CPU/CUDA/Vulkan 测试覆盖独立/借用 owner、显式反向、独立快照、源退休、
+别名和 owner reset。
+
 分配操作缓冲前可查询 `runtime.native_operation_capabilities("compact", version=1)`
 （也支持 `"sort"`）。返回集合按当前 runtime 后端包含 `"cpu"`、`"cuda_capture"` 或
 `"vulkan_inline"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配
@@ -501,8 +529,9 @@ false）。这些显式物理配置复用既有 configured-plan adapter ABI，�
 
 无条件执行序列须先压缩该计划，再读取其压缩存储。每次准备独立地在录制前检查，
 暖态重放不查询初始化状态。每次重放沿声明序列执行，因此一次压缩可供多个乘法
-使用，不必重复压缩；准备过程不推进数学计算。当前格式要求压缩在重放序列中，
-尚未暴露“跨多次重放只初始化一次”的持久快照。未来结构化 AOT 支持条件初始化时，
+使用，不必重复压缩；准备过程不推进数学计算。上例每次重放刷新。公共初始化阶段
+可以描述一次性压缩；cuSPARSELt 快照的临时缓冲退休仍需单独验证。
+未来结构化 AOT 支持条件初始化时，
 还需按控制流验证初始化关系。
 
 每个 prepared 实例独占压缩数据和 scratch，已知字节数只计入一次 `workspace_bytes`，

@@ -19,6 +19,8 @@ using namespace taichi::lang;
 struct PreparedExecution {
   AotModule *owner{nullptr};
   std::vector<TiMemory> memories;
+  std::unordered_set<TiMemory> replay_memories;
+  std::unordered_set<const NativeResource *> replay_resources;
   TiPreparedExecutionInfo info{};
   bool live{false};
   // Declared before backend recordings so owned buffers are destroyed last.
@@ -31,6 +33,7 @@ struct PreparedExecution {
   std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
   std::vector<std::unique_ptr<BoundKernelArguments>> plan_arguments;
   std::unique_ptr<FixedExecution> native;
+  std::unique_ptr<FixedExecution> initialization;
 
   void release_native_resources() {
     while (!native_resources.empty())
@@ -38,6 +41,7 @@ struct PreparedExecution {
     native_resource_workspace_bytes = 0;
   }
   ~PreparedExecution() {
+    initialization.reset();
     native.reset();
     release_native_resources();
   }
@@ -51,15 +55,20 @@ struct PreparedExecution {
 
   void prepare_operations(
       Runtime &runtime,
-      const std::vector<FixedExecution::Operation> &operations) {
+      const std::vector<FixedExecution::Operation> &operations,
+      const std::vector<FixedExecution::Operation> &initializers = {}) {
     gfx::GfxRuntime *gfx_runtime = nullptr;
 #ifdef TI_WITH_VULKAN
     if (auto *gfx = dynamic_cast<::GfxRuntime *>(&runtime))
       gfx_runtime = &gfx->get_gfx_runtime();
 #endif
     try {
-      native = std::make_unique<FixedExecution>(runtime.arch, runtime.get(),
-                                                gfx_runtime, operations);
+      NativeRecordingState sequence;
+      if (!initializers.empty())
+        initialization = std::make_unique<FixedExecution>(
+            runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence);
+      native = std::make_unique<FixedExecution>(
+          runtime.arch, runtime.get(), gfx_runtime, operations, &sequence);
     } catch (const std::invalid_argument &error) {
       throw MemoryBindingError(error.what());
     }
@@ -68,7 +77,9 @@ struct PreparedExecution {
           return std::holds_alternative<FixedExecution::Dispatch>(operation);
         }));
     info.execution_kind = native->execution_kind();
-    info.argument_bytes = native->argument_bytes();
+    info.argument_bytes =
+        native->argument_bytes() +
+        (initialization ? initialization->argument_bytes() : 0);
     release_source_bindings();
     live = true;
   }
@@ -92,10 +103,38 @@ struct PreparedExecution {
 
   void invalidate() {
     live = false;
+    initialization.reset();
     native.reset();
     release_native_resources();
     release_source_bindings();
     resources.reset();
+  }
+
+  void initialize(Runtime &runtime) {
+    if (!live)
+      throw MemoryBindingError("Prepared execution has a retired dependency");
+    if (!initialization)
+      return;
+    try {
+      initialization->run();
+      runtime.wait();
+      // Commands must retire before any of their input or scratch storage.
+      initialization.reset();
+      for (std::size_t i = native_resources.size(); i-- > 0;)
+        if (!replay_resources.count(native_resources[i].get()))
+          native_resources.erase(native_resources.begin() + i);
+      native_resource_workspace_bytes = 0;
+      for (const auto &resource : native_resources)
+        native_resource_workspace_bytes += resource->workspace_bytes();
+      if (resources)
+        resources->retain(replay_memories);
+      info.argument_bytes = native->argument_bytes();
+    } catch (...) {
+      // Initialization may have partially written data. Retain its leases
+      // until a synchronized close/owner retirement; never retry implicitly.
+      live = false;
+      throw;
+    }
   }
 };
 
@@ -131,10 +170,34 @@ class PreparedExecutionRegistry {
   }
   void destroy(TiPreparedExecution handle) {
     auto &entry = get(handle);
-    if (entry.live)
+    if (entry.native || entry.initialization)
       runtime_.wait();
     remove_dependencies(handle, entry);
     entries_.erase(handle);
+  }
+  void initialize(TiPreparedExecution handle) {
+    auto &entry = get(handle);
+    const bool needed = bool(entry.initialization);
+    entry.initialize(runtime_);
+    if (!needed)
+      return;
+    for (auto memory : entry.memories)
+      if (!entry.replay_memories.count(memory))
+        remove_edge(memories_, memory, handle);
+    entry.memories.erase(
+        std::remove_if(entry.memories.begin(), entry.memories.end(),
+                       [&](TiMemory memory) {
+                         return !entry.replay_memories.count(memory);
+                       }),
+        entry.memories.end());
+    entry.replay_memories.clear();
+    entry.replay_resources.clear();
+  }
+  void run(TiPreparedExecution handle) {
+    auto &entry = get(handle);
+    if (entry.initialization)
+      initialize(handle);
+    entry.run();
   }
   void retire_memory(TiMemory memory) {
     retire(memories_, memory);
@@ -366,11 +429,17 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
       throw MemoryBindingError(error.what());
     }
   };
+  std::vector<const aot::ExecutionPlan::Operation *> steps;
+  for (const auto &operation : plan.initialization)
+    steps.push_back(&operation);
+  for (const auto &operation : plan.operations)
+    steps.push_back(&operation);
   for (const auto index : plan.resources.order)
     if (const auto *native = std::get_if<NativeOperationDescription>(
             &plan.resources.declarations[index].value))
       preflight(native, NativeObjectKind::resource);
-  for (const auto &operation : plan.operations) {
+  for (const auto *step : steps) {
+    const auto &operation = *step;
     if (const auto *native =
             std::get_if<aot::ExecutionPlan::Native>(&operation))
       preflight(native, NativeObjectKind::operation);
@@ -455,7 +524,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     }
   }
   std::vector<FixedExecution::Operation> operations;
-  for (const auto &operation : plan.operations) {
+  for (const auto *step : steps) {
+    const auto &operation = *step;
     if (const auto *kernel =
             std::get_if<aot::ExecutionPlan::Kernel>(&operation)) {
       auto handle = mod.get_kernel_handle(kernel->entry);
@@ -636,9 +706,28 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");
+  if (!plan.initialization.empty()) {
+    for (const auto &name : plan.replay_bindings) {
+      if (const auto object = native_objects.find(name);
+          object != native_objects.end()) {
+        prepared->replay_resources.insert(object->second.get());
+        continue;
+      }
+      const auto &argument = *arguments.at(name);
+      if (argument.type == TI_ARGUMENT_TYPE_NDARRAY)
+        prepared->replay_memories.insert(argument.value.ndarray.memory);
+      if (const auto binding = layouts.find(name);
+          binding != layouts.end() && binding->second->gradient)
+        prepared->replay_memories.insert(binding->second->gradient->memory);
+    }
+  }
   if (prepared->resources)
     prepared->resources->remove_owned_dependencies(prepared->memories);
-  prepared->prepare_operations(rt, operations);
+  const auto split = operations.begin() + plan.initialization.size();
+  const std::vector<FixedExecution::Operation> initializers(operations.begin(),
+                                                            split);
+  operations.erase(operations.begin(), split);
+  prepared->prepare_operations(rt, operations, initializers);
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
@@ -737,13 +826,24 @@ void ti_probe_native_operation_ext(
   TI_CAPI_TRY_CATCH_END();
 }
 
+void ti_initialize_prepared_ext(TiRuntime runtime,
+                                TiPreparedExecution execution) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(execution);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  rt.prepared_registry().initialize(execution);
+  TI_CAPI_TRY_CATCH_END();
+}
+
 void ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(execution);
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
-  rt.prepared_registry().get(execution).run();
+  rt.prepared_registry().run(execution);
   TI_CAPI_TRY_CATCH_END();
 }
 void ti_get_prepared_execution_info_ext(TiRuntime runtime,
@@ -769,7 +869,9 @@ uint64_t ti_get_prepared_execution_workspace_bytes_ext(
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   const auto &prepared = rt.prepared_registry().get(execution);
   const auto operations =
-      prepared.native ? prepared.native->workspace_bytes() : 0;
+      (prepared.native ? prepared.native->workspace_bytes() : 0) +
+      (prepared.initialization ? prepared.initialization->workspace_bytes()
+                               : 0);
   if (operations > std::numeric_limits<uint64_t>::max() -
                        prepared.native_resource_workspace_bytes)
     throw MemoryBindingError("Prepared workspace size overflow");

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_set>
+
 #include "argument_binding.h"
 #include "taichi/aot/execution_resources.h"
 
@@ -18,10 +20,12 @@ class ExecutionResourceStorage {
     return bytes_;
   }
   void remove_owned_dependencies(std::vector<TiMemory> &dependencies) const;
+  void retain(const std::unordered_set<TiMemory> &memories);
 
  private:
   Runtime &runtime_;
   std::vector<TiMemory> memories_;
+  std::unordered_map<TiMemory, uint64_t> sizes_;
   uint64_t bytes_{0};
 };
 

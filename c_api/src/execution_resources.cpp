@@ -26,8 +26,10 @@ TiMemory ExecutionResourceStorage::allocate(uint64_t bytes) {
   params.usage = taichi::lang::AllocUsage::Storage;
   auto memory = runtime_.allocate_memory(params);
   try {
+    sizes_.emplace(memory, physical);
     memories_.push_back(memory);
   } catch (...) {
+    sizes_.erase(memory);
     runtime_.free_memory(memory);
     throw;
   }
@@ -42,6 +44,19 @@ void ExecutionResourceStorage::remove_owned_dependencies(
       std::remove_if(dependencies.begin(), dependencies.end(),
                      [&](TiMemory memory) { return owned.count(memory); }),
       dependencies.end());
+}
+
+void ExecutionResourceStorage::retain(
+    const std::unordered_set<TiMemory> &memories) {
+  for (std::size_t i = memories_.size(); i-- > 0;) {
+    const auto memory = memories_[i];
+    if (memories.count(memory))
+      continue;
+    runtime_.free_memory(memory);
+    bytes_ -= sizes_.at(memory);
+    sizes_.erase(memory);
+    memories_.erase(memories_.begin() + i);
+  }
 }
 
 namespace {

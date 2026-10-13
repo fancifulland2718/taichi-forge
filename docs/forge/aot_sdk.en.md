@@ -320,6 +320,38 @@ including failed preparation, module closure and in-flight buffer retirement.
 excluding allocator/driver overhead. Small Windows CPU/CUDA/Vulkan checks cover
 primal computation, explicit reverse gradients and these ownership transitions.
 
+Plans can separate one-time initialization from replay:
+
+```python
+plan = aot.ExecutionPlan(
+    [{"kind": "copy", "source": "snapshot", "destination": "output"}],
+    initialization=[{"kind": "copy", "source": "input", "destination": "snapshot"}],
+    resources=[{"kind": "ndarray", "name": "snapshot", "dtype": "f32", "shape": [17]}],
+)
+prepared = plan.prepare(module, {"input": source, "output": output})
+prepared.initialize()  # samples source now and waits for completion
+source.close()         # no longer a dependency of replay
+prepared()             # uses the fixed snapshot
+```
+
+`initialization` is a nonempty sequence using the same operation schema and
+serializes as execution-plan version 2; plans without it retain version 1.
+Preparation executes neither phase. Initialization is idempotent after success;
+the first launch also initializes when necessary. It is a cold synchronization
+boundary, not a per-replay wait. C/C++ uses `ti_initialize_prepared_ext` or the
+automatic first-launch path. Construct a new prepared instance to resample inputs.
+
+After successful initialization, its commands retire before initialization-only
+external leases, private arrays and native resources. Replay's transitive resource
+dependencies, aliases and explicitly bound gradients remain live. Python releases
+the corresponding initialization-only owners too. `resource_bytes`,
+`workspace_bytes` and `argument_bytes` report current retained storage; capture
+them before and after initialization to compare the two phases. `dispatch_count`
+and `launches` describe replay. A partially failed initialization makes the object
+unusable; it retains its leases until synchronized retirement and cannot be retried.
+Small CPU/CUDA/Vulkan tests cover standalone and borrowed owners, explicit reverse
+gradients, independent snapshots, source retirement, aliases and owner reset.
+
 Before allocating operation buffers, query
 `runtime.native_operation_capabilities("compact", version=1)` (also `"sort"`).
 The returned set contains `"cpu"`, `"cuda_capture"` or `"vulkan_inline"` for the
@@ -610,10 +642,11 @@ The unconditional sequence must compress a plan before reading its compressed
 storage. This is checked before recording, independently for each preparation;
 no initialization check is added to replay. Each replay follows the declared
 sequence, so one compression can feed multiple multiplies without duplicate
-compression. Preparation does not advance the mathematical work. The current
-format requires compression in the replay sequence: a persistent snapshot
-initialized once across replays is not yet exposed. Conditional initialization
-will need control-flow validation when structured AOT plans are supported.
+compression. Preparation does not advance the mathematical work. The example
+above refreshes on every replay. The common initialization phase can describe
+one-time compression; cuSPARSELt snapshot scratch retirement is still being
+qualified separately. Conditional initialization will need control-flow
+validation when structured AOT plans are supported.
 
 Each prepared instance owns independent compressed data and scratch. Their known
 bytes contribute once to `workspace_bytes`, regardless of the number of uses;

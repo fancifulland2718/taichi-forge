@@ -29,6 +29,32 @@ TEST(ExecutionPlan, PreservesOrderedOperationsAndSymbolicBindings) {
             1065353216);
 }
 
+TEST(ExecutionPlan, InitializationKeepsOnlyReplayRuntimeDependencies) {
+  const auto plan = ExecutionPlan::parse(R"({"version":2,
+    "initialization":[{"kind":"copy","source":"input","destination":"scratch"}],
+    "operations":[{"kind":"native","provider":"test","operation":"use",
+      "version":1,"parameters":{},"bindings":{"plan":"p","output":"y"}}],
+    "resources":[
+      {"kind":"native","name":"p","provider":"test","operation":"plan",
+       "version":1,"parameters":{},"bindings":{"values":"weights"}},
+      {"kind":"ndarray","name":"weights","dtype":"f32",
+       "shape":[{"array":"metadata","axis":0}]},
+      {"kind":"ndarray","name":"scratch","dtype":"f32","shape":[3]}],
+    "gradients":{"weights":"dw"}})");
+  ASSERT_EQ(plan.initialization.size(), 1);
+  ASSERT_EQ(plan.operations.size(), 1);
+  EXPECT_EQ(plan.arguments,
+            (std::vector<std::string>{"dw", "input", "metadata", "y"}));
+  EXPECT_EQ(plan.replay_bindings,
+            (std::set<std::string>{"dw", "p", "weights", "y"}));
+  for (
+      const auto *document :
+      {R"({"version":1,"initialization":[],"operations":[{"kind":"fill32","destination":"x","value":0}]})",
+       R"({"version":2,"initialization":[],"operations":[{"kind":"fill32","destination":"x","value":0}]})",
+       R"({"version":2,"operations":[{"kind":"fill32","destination":"x","value":0}]})"})
+    EXPECT_THROW(ExecutionPlan::parse(document), std::invalid_argument);
+}
+
 TEST(ExecutionPlan, RejectsUnsupportedOrAmbiguousDescriptions) {
   for (
       const auto *document :

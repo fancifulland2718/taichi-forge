@@ -617,14 +617,32 @@ class PreparedCall(_Resource):
 
     _kind = "prepared"
 
-    def __init__(self, runtime, handle, owners):
+    def __init__(self, runtime, handle, owners, *, replay_owners=None):
         self._owners = owners
+        self._replay_owners = replay_owners
         super().__init__(runtime, handle)
+
+    def initialize(self):
+        """Run initialization once and wait; release initialization-only owners."""
+        runtime = self._runtime
+        with runtime._lock:
+            self._check()
+            runtime._pending.add(self)
+            runtime._api.call(runtime._api.ti_initialize_prepared_ext, runtime._handle, self._handle)
+            if self._replay_owners is not None:
+                self._owners, self._replay_owners = self._replay_owners, None
+
+    def close(self):
+        super().close()
+        self._owners = ()
+        self._replay_owners = None
 
     def run(self):
         runtime = self._runtime
         with runtime._lock:
             self._check()
+            if self._replay_owners is not None:
+                self.initialize()
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
 

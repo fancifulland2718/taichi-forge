@@ -1,6 +1,22 @@
 """Cold, device-independent validation of persistent resource dependencies."""
 
 
+def retained_arguments(resources, gradients, arguments):
+    """Runtime closure of validated resources; shape metadata is cold-only."""
+    by_name = {resource["name"]: resource for resource in resources}
+    retained, pending = set(arguments), list(arguments)
+    for name in pending:
+        resource = by_name.get(name, {})
+        refs = list(resource.get("bindings", {}).values()) if resource.get("kind") == "native" else []
+        if name in gradients:
+            refs.append(gradients[name])
+        for ref in refs:
+            if ref not in retained:
+                retained.add(ref)
+                pending.append(ref)
+    return frozenset(retained)
+
+
 def external_arguments(resources, gradients, arguments):
     from ._runtime import _name
     from ._native import NATIVE_FIELDS, native_references

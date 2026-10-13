@@ -18,15 +18,17 @@ def _unique_fields(pairs):
 
 
 class ExecutionPlan:
-    """Version 1 kernels, native operations and private resource reconstruction.
+    """Persistent kernels, native operations and private resource reconstruction.
 
     Arguments are symbolic names bound to a loaded module and arrays/scalars at
     prepare time. Preparation records native commands without executing kernels
     or modifying buffers. Rebind by preparing another independent instance.
     """
 
-    def __init__(self, operations, *, resources=None, gradients=None):
-        document = {"version": 1, "operations": list(operations)}
+    def __init__(self, operations, *, resources=None, gradients=None, initialization=None):
+        document = {"version": 1 if initialization is None else 2, "operations": list(operations)}
+        if initialization is not None:
+            document["initialization"] = list(initialization)
         if resources is not None:
             document["resources"] = list(resources)
         if gradients is not None:
@@ -42,16 +44,25 @@ class ExecutionPlan:
         if (
             not isinstance(value, dict)
             or not {"version", "operations"} <= set(value)
-            or set(value) - {"version", "operations", "resources", "gradients"}
+            or set(value) - {"version", "operations", "resources", "gradients", "initialization"}
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] != 1:
+        if type(value["version"]) is not int or value["version"] not in (1, 2):
             raise ValueError("Unsupported execution plan version")
+        if (value["version"] == 2) != ("initialization" in value):
+            raise ValueError("Initialization requires execution plan version 2")
+        if "initialization" in value and not isinstance(value["initialization"], list):
+            raise ValueError("Execution initialization must be an operation array")
         if "resources" in value and not isinstance(value["resources"], list):
             raise ValueError("Execution resources must be a list")
         if "gradients" in value and not isinstance(value["gradients"], dict):
             raise ValueError("Execution gradients must be a name mapping")
-        return cls(value["operations"], resources=value.get("resources"), gradients=value.get("gradients"))
+        return cls(
+            value["operations"],
+            resources=value.get("resources"),
+            gradients=value.get("gradients"),
+            initialization=value.get("initialization"),
+        )
 
     @classmethod
     def load(cls, path):
@@ -65,7 +76,7 @@ class ExecutionPlan:
 
     def _validate(self, document):
         from ._runtime import _name
-        from ._resources import external_arguments
+        from ._resources import external_arguments, retained_arguments
         from ._native import NATIVE_FIELDS, native_references
 
         kernels = []
@@ -73,7 +84,12 @@ class ExecutionPlan:
         operations = document["operations"]
         if not operations:
             raise ValueError("Execution plan requires a nonempty operation array")
-        for op in operations:
+        if "initialization" in document and not document["initialization"]:
+            raise ValueError("Execution initialization must be a nonempty operation array")
+        replay = set()
+        for index, op in enumerate(operations + document.get("initialization", [])):
+            if index == len(operations):
+                replay = set(arguments)
             if not isinstance(op, dict):
                 raise ValueError("Execution operations must be objects")
             kind = op.get("kind")
@@ -169,7 +185,12 @@ class ExecutionPlan:
             document.get("resources", []), document.get("gradients", {}), arguments
         )
 
-        self._retained_argument_names = frozenset(arguments).intersection(self.argument_names)
+        resources, gradients = document.get("resources", []), document.get("gradients", {})
+        self._retained_argument_names = retained_arguments(resources, gradients, arguments)
+        self._replay_argument_names = retained_arguments(
+            resources, gradients, replay if "initialization" in document else arguments
+        )
+        self._has_initialization = "initialization" in document
 
     def prepare(self, module, arguments, *, gradients=None):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
@@ -180,15 +201,18 @@ class ExecutionPlan:
         with runtime._lock:
             module._check()
             owners = [module]
-            native = (abi.NamedArgument * len(arguments))(
-                *[
-                    abi.NamedArgument(
-                        _name(name),
-                        _argument(runtime, value, owners if name in self._retained_argument_names else []),
-                    )
-                    for name, value in arguments.items()
-                ]
-            )
+            replay_owners = [module]
+
+            def bind(name, value):
+                retained = []
+                argument = _argument(runtime, value, retained)
+                if name in self._retained_argument_names:
+                    owners.extend(retained)
+                if name in self._replay_argument_names:
+                    replay_owners.extend(retained)
+                return abi.NamedArgument(_name(name), argument)
+
+            native = (abi.NamedArgument * len(arguments))(*[bind(name, value) for name, value in arguments.items()])
             gradient_descriptors = []
             bindings = []
             for name, gradient in (gradients or {}).items():
@@ -200,6 +224,8 @@ class ExecutionPlan:
                 gradient_descriptors.append(descriptor)
                 bindings.append(abi.NamedBinding(_name(name), 0, None, C.pointer(descriptor)))
                 owners.append(gradient._memory)
+                if name in self._replay_argument_names:
+                    replay_owners.append(gradient._memory)
             handle = runtime._api.call(
                 runtime._api.ti_prepare_execution_plan_ext,
                 runtime._handle,
@@ -211,4 +237,9 @@ class ExecutionPlan:
                 len(bindings),
                 (abi.NamedBinding * len(bindings))(*bindings),
             )
-            return PreparedCall(runtime, handle, tuple(dict.fromkeys(owners)))
+            return PreparedCall(
+                runtime,
+                handle,
+                tuple(dict.fromkeys(owners)),
+                replay_owners=tuple(dict.fromkeys(replay_owners)) if self._has_initialization else None,
+            )

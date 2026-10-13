@@ -216,6 +216,19 @@ TEST(NativeOperationRegistry, RecordingInitializationIsLocalAndPrecedesWork) {
   EXPECT_EQ(runs, 6);
   EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, bad),
                std::invalid_argument);
+  NativeRecordingState sequence;
+  FixedExecution initialize(host_arch(), device, nullptr, {writer}, &sequence);
+  FixedExecution replay(host_arch(), device, nullptr, {reader}, &sequence);
+  EXPECT_EQ(runs, 6);
+  initialize.run();
+  replay.run();
+  replay.run();
+  EXPECT_EQ(runs, 9);
+  NativeRecordingState independent;
+  EXPECT_THROW(
+      FixedExecution(host_arch(), device, nullptr, {reader}, &independent),
+      std::invalid_argument);
+  EXPECT_TRUE(independent.initialized.empty());
 }
 
 TEST(NativeOperationRegistry,

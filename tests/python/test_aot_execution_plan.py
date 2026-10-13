@@ -17,6 +17,46 @@ def test_execution_plan_snapshot_and_roundtrip(tmp_path):
     assert json.loads(restored.to_json())["operations"][0]["arguments"] == ["x"]
 
 
+def test_initialization_version_and_runtime_closure():
+    initial = [dict(kind="copy", source="input", destination="weights")]
+    plan = ExecutionPlan(
+        [
+            dict(
+                kind="native",
+                provider="test",
+                operation="use",
+                version=1,
+                parameters={},
+                bindings={"plan": "p", "out": "output"},
+            )
+        ],
+        initialization=initial,
+        resources=[
+            dict(
+                kind="native",
+                name="p",
+                provider="test",
+                operation="plan",
+                version=1,
+                parameters={},
+                bindings={"values": "weights"},
+            ),
+            dict(kind="ndarray", name="weights", dtype="f32", shape=[dict(array="shape_only", axis=0)]),
+        ],
+        gradients={"weights": "dw"},
+    )
+    initial[0]["source"] = "changed"
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("dw", "input", "output", "shape_only")
+    assert restored._replay_argument_names == {"p", "weights", "dw", "output"}
+    assert restored._retained_argument_names == {"p", "weights", "dw", "output", "input"}
+    document = json.loads(plan.to_json())
+    assert document["version"] == 2
+    for patch in ({"version": 1}, {"initialization": []}, {"initialization": None}):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, **patch)))
+
+
 def test_native_description_is_provider_owned_and_has_symbolic_resources():
     op = dict(
         kind="native",

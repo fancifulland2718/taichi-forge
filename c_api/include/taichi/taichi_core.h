@@ -1264,6 +1264,10 @@ ti_prepare_execution_plan_ext(TiRuntime runtime,
                               const TiNamedNdArrayBinding *bindings);
 TI_DLL_EXPORT void TI_API_CALL
 ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
+// Execute optional one-time initialization and wait for its completion.
+// Idempotent after success. The first launch also initializes if needed.
+TI_DLL_EXPORT void TI_API_CALL
+ti_initialize_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
 TI_DLL_EXPORT void TI_API_CALL
 ti_get_prepared_execution_info_ext(TiRuntime runtime,
                                    TiPreparedExecution execution,

@@ -180,6 +180,7 @@ class Api:
                 Handle,
             ),
             "ti_launch_prepared_ext": ([Handle, Handle], None),
+            "ti_initialize_prepared_ext": ([Handle, Handle], None),
             "ti_prepare_execution_plan_ext": (
                 [Handle, Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
                 Handle,
