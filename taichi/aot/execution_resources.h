@@ -27,10 +27,14 @@ struct ExecutionResources {
     // Cold allocation policy; runs once before explicit initialization/replay.
     bool zero_initialize{false};
   };
+  struct Scalar {
+    // Exact C API scalar payload, independent of JSON numeric precision.
+    std::uint64_t bits;
+  };
   struct Resource {
     std::string name;
     std::string dtype;
-    std::variant<Array, Extent, NativeOperationDescription> value;
+    std::variant<Array, Extent, NativeOperationDescription, Scalar> value;
   };
 
   std::vector<Resource> declarations;

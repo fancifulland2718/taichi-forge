@@ -17,6 +17,33 @@ std::uint32_t word(const JsonValue &value) {
 ExecutionResources::Extent extent(const JsonValue &value) {
   return {name(value["array"]), word(value["axis"])};
 }
+ExecutionResources::Scalar scalar(const std::string &dtype,
+                                  const JsonValue &value) {
+  std::size_t digits = 0;
+  if (dtype == "i8" || dtype == "u8")
+    digits = 2;
+  else if (dtype == "i16" || dtype == "u16")
+    digits = 4;
+  else if (dtype == "i32" || dtype == "u32" || dtype == "f32" || dtype == "f16")
+    // F16 scalar arguments use a float32 payload in the public C API.
+    digits = 8;
+  else if (dtype == "i64" || dtype == "u64" || dtype == "f64")
+    digits = 16;
+  if (!digits || !value.is_str() || value.str.size() != digits)
+    throw std::invalid_argument(
+        "Execution scalar bits must match a supported C API dtype width");
+  std::uint64_t bits = 0;
+  for (const char digit : value.str) {
+    const int nibble = digit >= '0' && digit <= '9'   ? digit - '0'
+                       : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10
+                       : digit >= 'A' && digit <= 'F' ? digit - 'A' + 10
+                                                      : -1;
+    if (nibble < 0)
+      throw std::invalid_argument("Execution scalar bits must be hexadecimal");
+    bits = (bits << 4) | static_cast<std::uint64_t>(nibble);
+  }
+  return {bits};
+}
 std::vector<std::string> dependencies(
     const ExecutionResources::Resource &resource) {
   std::vector<std::string> result;
@@ -29,9 +56,9 @@ std::vector<std::string> dependencies(
                  std::get_if<NativeOperationDescription>(&resource.value)) {
     for (const auto &[port, slot] : native->bindings)
       result.push_back(slot);
-  } else {
-    result.push_back(
-        std::get<ExecutionResources::Extent>(resource.value).array);
+  } else if (const auto *ref =
+                 std::get_if<ExecutionResources::Extent>(&resource.value)) {
+    result.push_back(ref->array);
   }
   return result;
 }
@@ -83,6 +110,9 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
             array.element_shape.push_back(size);
           }
         }
+      } else if (kind == "scalar") {
+        fields(value, {"kind", "name", "dtype", "bits"});
+        resource.value = scalar(resource.dtype, value["bits"]);
       } else if (kind == "extent") {
         fields(value, {"kind", "name", "dtype", "array", "axis"});
         if (resource.dtype != "i32" && resource.dtype != "u32" &&

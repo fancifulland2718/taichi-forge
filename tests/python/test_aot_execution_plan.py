@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from taichi_forge_runtime.aot import ExecutionPlan
+from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
 def test_execution_plan_snapshot_and_roundtrip(tmp_path):
@@ -27,6 +27,38 @@ def test_execution_zero_initialization_is_a_strict_resource_policy():
     for invalid in (1, 0, "true", None, [], {}):
         with pytest.raises(ValueError, match="boolean"):
             ExecutionPlan([operation], resources=[dict(resource, zero_initialize=invalid)])
+
+
+def test_scalar_resource_bits_roundtrip_and_validation():
+    cases = (
+        ("i8", -128, "80"),
+        ("u8", 255, "ff"),
+        ("i16", -32768, "8000"),
+        ("u16", 65535, "ffff"),
+        ("i32", -(1 << 31), "80000000"),
+        ("u32", (1 << 32) - 1, "ffffffff"),
+        ("i64", -(1 << 63), "8000000000000000"),
+        ("u64", (1 << 64) - 1, "ffffffffffffffff"),
+        ("f16", 1.5, "3fc00000"),
+        ("f32", -0.0, "80000000"),
+        ("f64", -0.0, "8000000000000000"),
+    )
+    for dtype, value, bits in cases:
+        resource = Scalar(dtype, value).resource("constant")
+        assert resource["bits"] == bits
+        plan = ExecutionPlan([dict(kind="kernel", entry="k", arguments=["constant", "out"])], resources=[resource])
+        assert plan.argument_names == ("out",)
+        assert json.loads(ExecutionPlan.from_json(plan.to_json()).to_json())["resources"] == [resource]
+    operation = dict(kind="kernel", entry="k", arguments=["constant"])
+    base = Scalar("i32", 1).resource("constant")
+    for invalid in (None, True, 1, "", "1", "000000001", "0x000001", "0000000g", "0000 001", "-0000001"):
+        with pytest.raises(ValueError):
+            ExecutionPlan([operation], resources=[dict(base, bits=invalid)])
+    for patch in (dict(dtype="bool"), dict(value=1), dict(dtype="f16", bits="3e00")):
+        with pytest.raises(ValueError):
+            ExecutionPlan([operation], resources=[dict(base, **patch)])
+    with pytest.raises(ValueError, match="gradient"):
+        ExecutionPlan([operation], resources=[base], gradients={"constant": "dx"})
 
 
 def test_initialization_version_and_runtime_closure():

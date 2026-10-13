@@ -88,13 +88,22 @@ class Scalar:
     dtype: str
     value: int | float
 
-    def _argument(self):
+    def _pack(self, byte_order):
         code, format, _ = _dtype(self.dtype)
         # The public C API encodes f16 scalar arguments as float32. Array
         # elements still use IEEE half storage; do not confuse the two ABIs.
         if self.dtype == "f16":
             format = "f"
-        packed = struct.pack("=" + format, self.value)
+        return code, struct.pack(byte_order + format, self.value)
+
+    def resource(self, name):
+        """Describe an immutable private scalar without allocating device storage."""
+        _name(name)
+        _, packed = self._pack(">")
+        return dict(kind="scalar", name=name, dtype=self.dtype, bits=packed.hex())
+
+    def _argument(self):
+        code, packed = self._pack("=")
         scalar = abi.Scalar()
         scalar.type = code
         C.memmove(C.addressof(scalar.value), packed, len(packed))

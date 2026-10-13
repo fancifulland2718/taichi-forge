@@ -58,12 +58,17 @@ lifetimes. The entries below describe the changes.
 - Private AOT ndarray resources can request `zero_initialize: true`. They clear
   once before initialization/replay and retain state across launches; odd byte
   counts use padded owned storage without another shader. The changed internal
-  resource layout requires matching Python/native components at private ABI 33.
+  resource layout introduced private ABI 33; later changes require the matching newer revision.
 
 - Automatic Graph export now reconstructs declared private ndarrays, preserving
   shared allocation identity and gradient aliases across kernel/provider bindings.
   Independent preparations start with fresh state; live array snapshots and fixed
   scalars remain outside this automatic reconstruction contract.
+
+- ExecutionPlan resources can now include immutable typed scalars through
+  `Scalar.resource(name)`. Exact bit payloads preserve wide integers and negative
+  zero, reuse ordinary kernel argument binding and allocate no private device
+  storage. This shared resource extension advances the private ABI to 34.
 
 - Ordinary CUDA FFT recordings now export shared native plans, including
   batched C2C/R2C/C2R and explicit physical layouts. Forward/inverse uses of

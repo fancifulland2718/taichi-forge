@@ -18,7 +18,7 @@ def retained_arguments(resources, gradients, arguments):
 
 
 def external_arguments(resources, gradients, arguments):
-    from ._runtime import _name
+    from ._runtime import _dtype, _name
     from ._native import NATIVE_FIELDS, native_references
 
     if not isinstance(resources, list) or not isinstance(gradients, dict):
@@ -44,6 +44,8 @@ def external_arguments(resources, gradients, arguments):
             required, optional = {"kind", "name", "dtype", "shape"}, {"element_shape", "zero_initialize"}
         elif kind == "extent":
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
+        elif kind == "scalar":
+            required, optional = {"kind", "name", "dtype", "bits"}, set()
         elif kind == "native":
             required, optional = NATIVE_FIELDS | {"name"}, set()
         else:
@@ -75,6 +77,17 @@ def external_arguments(resources, gradients, arguments):
                     word(dim)
             for dim in element_shape:
                 word(dim, positive=True)
+        elif kind == "scalar":
+            _, _, size = _dtype(resource["dtype"])
+            # Match TiScalarValue, where F16 scalar payloads are float32.
+            size = 4 if resource["dtype"] == "f16" else size
+            bits = resource["bits"]
+            if (
+                not isinstance(bits, str)
+                or len(bits) != size * 2
+                or any(c not in "0123456789abcdefABCDEF" for c in bits)
+            ):
+                raise ValueError("Execution scalar bits must be hexadecimal at the C API dtype width")
         else:
             if resource["dtype"] not in ("i32", "u32", "i64", "u64"):
                 raise ValueError("Execution extent requires a 32/64-bit integer dtype")

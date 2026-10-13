@@ -300,6 +300,16 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 存储；只提供形状的外部数组在准备后不再被持有。依赖环、重复名称、与外部绑定冲突
 会报错。`plan.argument_names` 列出实际外部参数，包括形状来源和声明的梯度。
 
+不可变 kernel 参数可在同一 `resources` 列表中使用
+`aot.Scalar("i32", 17).resource("n")` 或
+`aot.Scalar("f32", -1.75).resource("gain")`。这些参数不进入
+`plan.argument_names`，不分配私有设备存储或增加初始化命令，复用现有 typed kernel
+绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
+`dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
+位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
+配套 private ABI 34。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+退休；CPU 另覆盖窄整数及 F16/F64。Graph 固定 scalar 的自动导出仍需符号类型合同。
+
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
 导出的显式梯度，复用普通 kernel 的绑定检查，不为 native 操作自动生成导数。同一
 primal 不得再由调用者重复指定梯度。内部数组默认未初始化，每次重放所需清零、复制应

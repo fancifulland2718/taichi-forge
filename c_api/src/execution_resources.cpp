@@ -144,6 +144,29 @@ ExecutionResourceBindings bind_execution_resources(
               "Execution zero initialization size overflow");
         sizes[pos] = (bytes + 3) & ~uint64_t(3);
       }
+    } else if (const auto *constant =
+                   std::get_if<Recipes::Scalar>(&recipe.value)) {
+      argument.type = TI_ARGUMENT_TYPE_SCALAR;
+      argument.value.scalar.type = dtype;
+      auto &value = argument.value.scalar.value;
+      switch (dtype) {
+        case TI_DATA_TYPE_I8:
+        case TI_DATA_TYPE_U8:
+          value.x8 = static_cast<std::uint8_t>(constant->bits);
+          break;
+        case TI_DATA_TYPE_I16:
+        case TI_DATA_TYPE_U16:
+          value.x16 = static_cast<std::uint16_t>(constant->bits);
+          break;
+        case TI_DATA_TYPE_I64:
+        case TI_DATA_TYPE_U64:
+        case TI_DATA_TYPE_F64:
+          value.x64 = constant->bits;
+          break;
+        default:
+          value.x32 = static_cast<std::uint32_t>(constant->bits);
+          break;
+      }
     } else {
       const auto extent = resolve(std::get<Recipes::Extent>(recipe.value));
       argument.type = TI_ARGUMENT_TYPE_SCALAR;

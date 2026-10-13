@@ -369,6 +369,19 @@ shape-only external arrays are not retained after preparation. Invalid cycles,
 duplicate names and conflicting external bindings are errors. `plan.argument_names`
 reports the external slots, including shape sources and declared gradients.
 
+Immutable kernel parameters can use `aot.Scalar("i32", 17).resource("n")` or
+`aot.Scalar("f32", -1.75).resource("gain")` in the same `resources` list. These
+parameters are absent from `plan.argument_names` and require no private device
+allocation or initialization command. They use the existing typed kernel binding
+path; preparing a different value requires a different description/preparation.
+The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
+preserving 64-bit integers and negative zero without JSON numeric rounding.
+Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
+elements. Matching Python/native components require private ABI 34. Small
+CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
+kernels and retirement; CPU additionally covers narrow integers and F16/F64.
+Automatic export of Graph fixed scalars still needs a symbolic type contract.
+
 Declare `gradients={"primal_name": "gradient_name"}` on the plan to bind private
 or external arrays to exported explicit gradients. This reuses ordinary kernel
 binding checks and supplies no automatic derivative for native operations. A

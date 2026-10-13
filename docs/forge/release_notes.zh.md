@@ -49,11 +49,15 @@
 
 - AOT 私有 ndarray 可用 `zero_initialize: true` 在初始化/重放之前清零一次，后续
   保留状态；奇数字节数利用自有存储补齐，不增加 shader。内部资源布局变化要求
-  Python/native 组件配套使用 private ABI 33。
+  private ABI 33，后续组件仍须按更新后的 revision 配套使用。
 
 - Graph 自动导出可重建声明式私有 ndarray，保留 kernel/provider 参数间的共享
   分配身份和梯度别名。各 preparation 从全新状态开始，暂不自动保存 live 数组
   快照或重建固定 scalar。
+
+- ExecutionPlan 资源支持通过 `Scalar.resource(name)` 声明不可变 typed scalar。
+  精确位载荷保留宽整数与负零，复用普通 kernel 参数绑定，不分配私有设备存储。
+  该公共资源扩展将 private ABI 更新为 34。
 
 - 普通 CUDA FFT recording 可导出共享原生计划，覆盖批量 C2C/R2C/C2R 和显式物理
   布局；同计划的正反变换保留一份 workspace。小规模独立/借用消费测试覆盖显式谱

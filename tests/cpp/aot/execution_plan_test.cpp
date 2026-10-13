@@ -254,6 +254,41 @@ TEST(ExecutionPlan, ZeroInitializationDoesNotMaterializeShapeOnlyResources) {
   EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"out", "state"}));
 }
 
+TEST(ExecutionPlan, ScalarResourcesPreserveBitsWithoutStorageDependencies) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,
+    "resources":[
+      {"kind":"scalar","name":"wide","dtype":"u64","bits":"ffffffffffffffff"},
+      {"kind":"scalar","name":"negative_zero","dtype":"f32","bits":"80000000"},
+      {"kind":"scalar","name":"half","dtype":"f16","bits":"3fc00000"},
+      {"kind":"scalar","name":"unused","dtype":"i8","bits":"ff"}],
+    "operations":[{"kind":"kernel","entry":"k","arguments":["wide","negative_zero","half","out"]}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out"}));
+  EXPECT_EQ(plan.resources.order, (std::vector<std::size_t>{0, 1, 2}));
+  EXPECT_EQ(
+      std::get<ExecutionResources::Scalar>(plan.resources.declarations[0].value)
+          .bits,
+      std::uint64_t(-1));
+  EXPECT_EQ(
+      std::get<ExecutionResources::Scalar>(plan.resources.declarations[1].value)
+          .bits,
+      0x80000000u);
+  const std::string prefix =
+      R"({"version":1,"operations":[{"kind":"kernel","entry":"k","arguments":["x"]}],"resources":)";
+  for (
+      const auto *resources :
+      {R"([{"kind":"scalar","name":"x","dtype":"i32","bits":"fffffffff"}])",
+       R"([{"kind":"scalar","name":"x","dtype":"i8","bits":"-1"}])",
+       R"([{"kind":"scalar","name":"x","dtype":"i16","bits":"0x01"}])",
+       R"([{"kind":"scalar","name":"x","dtype":"f16","bits":"3e00"}])",
+       R"([{"kind":"scalar","name":"x","dtype":"f32","bits":1}])",
+       R"([{"kind":"scalar","name":"x","dtype":"u64","bits":"000000000000000g"}])",
+       R"([{"kind":"scalar","name":"x","dtype":"bool","bits":"01"}])",
+       R"([{"kind":"scalar","name":"x","dtype":"i32","bits":"00000001","value":1}])",
+       R"([{"kind":"scalar","name":"n","dtype":"i32","bits":"00000001"},{"kind":"ndarray","name":"x","dtype":"f32","shape":[{"array":"n","axis":0}]}])"})
+    EXPECT_THROW(ExecutionPlan::parse(prefix + resources + "}"),
+                 std::invalid_argument);
+}
+
 TEST(ExecutionPlan, NativeResourcesShareTheRequiredDependencyClosure) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,
     "resources":[
