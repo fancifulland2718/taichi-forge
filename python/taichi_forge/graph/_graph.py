@@ -6712,7 +6712,7 @@ class _CompiledWhileGraphNode:
         if status is not None:
             required_condition.add(status)
         missing_condition = sorted(
-            required_condition.difference(condition._runtime_arg_names)
+            required_condition.difference(condition._recording_runtime_arg_names)
         )
         if missing_condition:
             raise TaichiRuntimeError(
@@ -6722,7 +6722,8 @@ class _CompiledWhileGraphNode:
         required_body = set(self.carried_state)
         if counter is not None:
             required_body.add(counter)
-        missing_body = sorted(required_body.difference(body._runtime_arg_names))
+        # Nested nodes hide private ports from their public argument set.
+        missing_body = sorted(required_body.difference(body._recording_runtime_arg_names))
         if missing_body:
             raise TaichiRuntimeError(
                 "Graph while body does not declare carried resources: "
