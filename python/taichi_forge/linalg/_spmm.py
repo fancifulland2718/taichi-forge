@@ -115,6 +115,11 @@ class _FrozenSpmmSource(FrozenNativeRecipeSource):
 class _SpmmRecording(CusparseSpmmRecording):
     _graph_binding_frame_capture_safe = True
 
+    def _export_aot(self, context):
+        # This concrete subclass adds selected physical-plan ownership only;
+        # its mathematical operation and ports are exactly the base recording.
+        return super()._export_aot(context)
+
     def __init__(self, source, strategy):
         algorithm, _preprocess = _STRATEGIES[strategy]
         super().__init__(

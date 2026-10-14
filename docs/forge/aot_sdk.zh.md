@@ -827,7 +827,7 @@ plan = ExecutionPlan([{
 复用既有外部 cuSPARSE loader，不在包中新增厂商副本；CPU/Vulkan 没有相应工厂。
 Windows cuSPARSE 12.7.9 验证覆盖无源码独立/借用消费、i32/i64 拓扑、转置、系数更新、
 空矩阵、视图、拒绝与退休。导出的 energy kernel 及其真实 `.grad` 加显式转置 SpMV
-核对输入梯度，不提供外部调用的自动微分。需配套 ABI44；SpMM、三角求解、BSR 及
+核对输入梯度，不提供外部调用的自动微分。需配套 ABI44；三角求解、BSR 及
 其他 solver 家族仍需各自的重建合同。
 
 包含 `CusparseSpmvRecording` 的根级顺序混合 Graph 可通过
@@ -842,6 +842,38 @@ Windows cuSPARSE 12.7.9 验证覆盖无源码独立/借用消费、i32/i64 拓�
 recording、数值更新后的新快照、共享拓扑、归档回滚、无源码独立/借用消费、真实导出
 梯度与显式伴随。结构化 `Sequential` 内 backend command 嵌套、JIT CGraph 的 ndarray
 梯度绑定仍是独立的未支持路径；本项已验证 AOT consumer 的显式梯度绑定。
+
+SpMM 使用同一个 `cusparse/csr_f32` 资源及公共注册协议：
+
+```python
+operation = {
+    "kind": "native", "provider": "cusparse", "operation": "spmm_f32", "version": 1,
+    "parameters": {"rhs_count": 8, "algorithm": "csr_alg3", "preprocess": "required",
+                   "alpha": 1.0, "beta": 0.0},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}
+```
+
+运算为 `Y = alpha * A * X + beta * Y`，X/Y 必须是紧凑行优先 f32 二维数组，形状为
+`(columns, rhs_count)` / `(rows, rhs_count)`。原生 RHS 数为正，支持单 RHS；现有
+`CusparseSpmmRecording` 的多 RHS 合同不变。算法为 `csr_alg2`（默认）或 `csr_alg3`，
+预处理为 `none`（默认）、`optional` 或 `required`。必需预处理失败会在准备时拒绝，
+不改选 direct 算法。资源、别名、拓扑固定及有序原位值更新规则与前述 CSR 合同一致。
+每个 prepared 操作独立持有 descriptor/workspace，复用 JIT 的 SpMM 核心；准备不执行
+乘法，重放不再分析、分配或重绑定。可冷探测 `cusparse_spmm_f32`，CPU/Vulkan 不声明
+此 CUDA provider；需要包含此工厂的配套 native 构建，不额外打包 cuSPARSE。
+
+根级 `CusparseSpmmRecording` 与已选 `SparseSpmmOperation` Graph 可自动导出；保留
+`row_streamed`、`tree_direct` 或 `pattern_preprocessed` 的 RHS、算法和预处理选择。
+已准备计划还记录 `expected_workspace_bytes`，消费端重建不匹配时冷拒绝。旧
+`deterministic` recording 尚未准备时保留原有 optional 策略，不因导出新建 JIT 计划；
+已经准备时冻结实际预处理结果。该名称不承诺跨厂商版本的位级可复现性。同次导出中的
+SpMV/SpMM 共用一次矩阵快照，数值变化需要新导出；物化 Graph 另保留最小执行顺序，
+冻结搜索定义时释放旧计划引用。
+
+Windows/cuSPARSE 12.7.9 验证覆盖三种已选方案、两组独立绑定、空矩阵、i32/i64、
+数值更新、尺寸/别名拒绝及在途关闭/reset；真实 energy `.grad` 后接显式转置矩阵的
+SpMM 验证输入梯度。尚不自动微分外部 SpMM，也不据此声明三角求解或其他 solver 支持。
 
 使用 adapter 的操作从 runtime owner 取得库位置：
 

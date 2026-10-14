@@ -58,6 +58,12 @@
   序列可自动导出一致快照并共享相同只读存储。已验证边界见
   [AOT SDK 合同](aot_sdk.zh.md)；其他稀疏操作家族仍单独推进。
 
+- AOT 新增 f32 CSR SpMM，复用 JIT 的 retained plan 和已有 CSR 资源；独立 prepared
+  帧拥有各自的 descriptor/workspace。普通 recording 与已选 SparseSpmmOperation
+  可自动导出精确算法/预处理选择，SpMV/SpMM 同次导出只取一次矩阵快照。
+  已验证显式伴随、空矩阵、数值更新与退休。另修物化混合 Graph 丢失导出执行顺序，
+  同时保持冻结定义不持有搜索执行计划。详见 [AOT SDK 合同](aot_sdk.zh.md)。
+
 - cuSPARSE 通用 CSR/COO、稠密/稀疏向量 descriptor 及 CSR 尺寸查询已匹配官方的
   有符号 64 位尺寸 ABI，修正动态调用中的截断。此项不扩大公开 `SparseMatrix`
   的索引/存储合同，也不表示完整 cuSPARSE AOT 已覆盖；需匹配 Python/native

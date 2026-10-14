@@ -452,40 +452,9 @@ class CusparseSpmvRecording(BackendCommandRecording):
         )
 
     def _export_aot(self, context):
-        matrix = self.matrix
-        matrix._ensure_valid()  # pylint: disable=W0212
-        identity = matrix._get_format_contract()["identity"]  # pylint: disable=W0212
-        if (
-            identity["backend_family"] != "cuda"
-            or identity["storage_format"] != "csr"
-        ):
-            raise TaichiRuntimeError(
-                "AOT cuSPARSE SpMV recording requires scalar CUDA CSR storage"
-            )
+        from taichi_forge.hardware._aot_cusparse import snapshot_csr
 
-        def snapshot():
-            rows, columns, offsets, indices, values = matrix.matrix._snapshot_cuda_csr(
-                impl.get_runtime().prog
-            )
-            bindings = {
-                port: context.data_resource(
-                    object(), data, dtype=dtype, shape=[len(data) // 4], readonly=True
-                )
-                for port, dtype, data in (
-                    ("row_offsets", "i32", offsets),
-                    ("column_indices", "i32", indices),
-                    ("values", "f32", values),
-                )
-            }
-            return context.resource(
-                matrix,
-                "cusparse",
-                "csr_f32",
-                parameters=dict(rows=rows, columns=columns),
-                bindings=bindings,
-            )
-
-        resource = context.resource_once(matrix, snapshot)
+        resource = snapshot_csr(context, self.matrix)
         context.native(
             "cusparse", "spmv_f32",
             bindings=dict(matrix=resource, input=self.input, output=self.output),
@@ -896,6 +865,11 @@ class CusparseSpmmRecording(BackendCommandRecording):
         "csr3_direct": 2,
         "csr3_preprocessed": 3,
     }
+
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cusparse import export_spmm
+
+        return export_spmm(self, context)
 
     def __init__(
         self,

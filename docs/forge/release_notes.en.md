@@ -72,6 +72,14 @@ lifetimes. The entries below describe the changes.
   data, sharing identical read-only storage. See the [AOT SDK contract](aot_sdk.en.md)
   for the validated scope; other sparse operation families remain separate work.
 
+- AOT adds f32 CSR SpMM using the shared JIT retained plan and existing CSR
+  resource. Prepared binding frames own independent descriptors/workspace.
+  Ordinary recordings and selected SparseSpmmOperation Graphs export their exact
+  algorithm/preprocessing choices; SpMV/SpMM share one matrix snapshot per export.
+  Checks cover explicit adjoints, empty matrices, value updates and retirement.
+  Materialized mixed Graphs also retain export command order without making frozen
+  definitions retain search execution plans. See the [AOT SDK contract](aot_sdk.en.md).
+
 - cuSPARSE generic CSR/COO and dense/sparse vector descriptors now use the
   vendor's signed 64-bit extent ABI, including CSR extent queries. This fixes
   narrowing in the dynamic calls; it does not expand the public `SparseMatrix`

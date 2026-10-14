@@ -1047,7 +1047,7 @@ checks cover standalone/source-free and borrowed consumption, i32/i64 topology,
 transpose, coefficient updates, empty matrices, views, rejection and retirement.
 An exported energy kernel and its real `.grad` compose with an explicit transpose
 SpMV to check input gradients. This does not automatically differentiate an
-external call. Use matching ABI 44 components. SpMM, triangular solves, BSR and
+external call. Use matching ABI 44 components. Triangular solves, BSR and
 other solver families still need their own reconstruction contracts.
 
 Root sequential mixed Graphs containing `CusparseSpmvRecording` can be exported
@@ -1068,6 +1068,47 @@ rollback, source-free/borrowed consumption and real exported gradients with
 explicit adjoints. Backend-command nesting in structured `Sequential` and JIT
 CGraph ndarray-gradient binding remain separate unsupported paths. The AOT
 consumer's explicit gradient binding is covered here.
+
+SpMM uses the same `cusparse/csr_f32` resource and common registry:
+
+```python
+operation = {
+    "kind": "native", "provider": "cusparse", "operation": "spmm_f32", "version": 1,
+    "parameters": {"rhs_count": 8, "algorithm": "csr_alg3", "preprocess": "required",
+                   "alpha": 1.0, "beta": 0.0},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}
+```
+
+The operation is `Y = alpha * A * X + beta * Y`. X/Y must be compact row-major
+scalar f32 matrices shaped `(columns, rhs_count)` / `(rows, rhs_count)`. The native
+RHS count is positive and includes one; the existing multiple-RHS contract of
+`CusparseSpmmRecording` is unchanged. Algorithms are `csr_alg2` (default) and
+`csr_alg3`; preprocessing is `none` (default), `optional` or `required`. Required
+preprocessing failure rejects preparation without selecting a direct alternative.
+CSR resource, aliasing, fixed topology and ordered in-place value-update rules
+apply as above. Each prepared operation owns independent descriptors/workspace
+and shares the JIT SpMM core. Preparation executes no multiplication; replay
+does no analysis, allocation or rebinding. Probe `cusparse_spmm_f32` at the cold
+boundary. CPU/Vulkan do not advertise this CUDA provider. A matching native build
+containing the factory is required; no additional cuSPARSE copy is packaged.
+
+Root `CusparseSpmmRecording` and selected `SparseSpmmOperation` Graphs export
+automatically, preserving RHS, algorithm and preprocessing for `row_streamed`,
+`tree_direct` or `pattern_preprocessed`. Prepared plans also persist
+`expected_workspace_bytes`; mismatched reconstruction is rejected during
+preparation. An unprepared legacy `deterministic` recording keeps its optional
+policy without creating a JIT plan during export; a prepared recording freezes
+the actual preprocessing outcome. The name does not promise bitwise results
+across vendor releases. SpMV/SpMM share one matrix snapshot per export transaction;
+changed values require a new export. Materialized Graphs retain minimal command
+ordering, while frozen search definitions release old execution-plan references.
+
+Windows/cuSPARSE 12.7.9 checks cover all three selected strategies, two independent
+binding frames, empty matrices, i32/i64, value updates, shape/alias rejection and
+in-flight close/reset. A real energy `.grad` followed by explicit transpose-matrix
+SpMM validates input gradients. This does not automatically differentiate an
+external SpMM or qualify triangular solves and other solver families.
 
 Adapter-backed operations take library locations from the runtime owner:
 
