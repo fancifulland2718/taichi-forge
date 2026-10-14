@@ -16121,8 +16121,26 @@ class _GraphSequentialRecipeSnapshot:
         return sequence
 
 
+def _declared_private_arguments(declarations, args):
+    for symbolic in args:
+        declared = declarations.get(getattr(symbolic, "name", None))
+        if declared is None:
+            continue
+        expected, requirement = declared
+        if symbolic is not expected:
+            raise TaichiRuntimeError(
+                f"Graph private binding {expected.name!r} must use the "
+                "symbol returned by private_ndarray()"
+            )
+        yield symbolic, requirement
+
+
 class Sequential:
-    def __init__(self):
+    def __init__(self, *, _declared_private_bindings=None):
+        # Share declarations while recording; append freezes referenced owners.
+        self._declared_private_bindings = (
+            {} if _declared_private_bindings is None else _declared_private_bindings
+        )
         self._dispatch_count = 0
         self._dispatches = []
         self._dispatch_labels = []
@@ -16138,6 +16156,17 @@ class Sequential:
         self._temporary_actions = []
         self._has_indirect_dispatch = False
         self._structured_depth = 0
+
+    def _bind_declared_private_args(self, args):
+        for symbolic, requirement in _declared_private_arguments(
+            self._declared_private_bindings, args
+        ):
+            previous = self._fixed_runtime_args.get(symbolic.name)
+            if previous is not None and previous is not requirement:
+                raise TaichiRuntimeError(
+                    f"Graph internal fixed binding {symbolic.name!r} is already defined"
+                )
+            self._fixed_runtime_args[symbolic.name] = requirement
 
     def _bind_internal_ndarray(
         self,
@@ -16203,6 +16232,7 @@ class Sequential:
         label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
+        self._bind_declared_private_args(unzipped_args)
         ir_node = _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         self._dispatches.append((kernel_cpp, unzipped_args))
         self._dispatch_labels.append(label)
@@ -16244,6 +16274,7 @@ class Sequential:
             raise ValueError("bounded dispatch capacity must be in [1, 2^31-1]")
         extent = _require_bounded_symbolic_ndarray(extent, "extent", i32)
         unzipped_args = flatten_args(args)
+        self._bind_declared_private_args((*unzipped_args, extent))
         if extent.name not in _runtime_arg_names(unzipped_args):
             raise TaichiRuntimeError(
                 "bounded dispatch payload arguments must include the extent argument"
@@ -16299,6 +16330,7 @@ class Sequential:
         label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
+        self._bind_declared_private_args((*unzipped_args, dispatch_packet))
         self._items.append(
             (
                 "indirect",
@@ -16328,6 +16360,7 @@ class Sequential:
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
+        self._bind_declared_private_args(executable.graph_binding_symbols)
         structured = executable.recordable_sequence
         if structured is not None:
             return self._append_recordable_sequence(structured, executable)
@@ -16742,18 +16775,9 @@ class GraphBuilder:
         return symbolic
 
     def _bind_declared_private_args(self, args):
-        for symbolic in args:
-            declared = self._declared_private_bindings.get(
-                getattr(symbolic, "name", None)
-            )
-            if declared is None:
-                continue
-            expected, requirement = declared
-            if symbolic is not expected:
-                raise TaichiRuntimeError(
-                    f"Graph private binding {expected.name!r} must use the "
-                    "symbol returned by private_ndarray()"
-                )
+        for symbolic, requirement in _declared_private_arguments(
+            self._declared_private_bindings, args
+        ):
             self._bind_internal_runtime_arg(symbolic, requirement)
 
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
@@ -17778,7 +17802,7 @@ class GraphBuilder:
         self._dispatch_count += 1
 
     def create_sequential(self):
-        return Sequential()
+        return Sequential(_declared_private_bindings=self._declared_private_bindings)
 
     def append(self, node):
         # TODO: support appending dispatch node as well.

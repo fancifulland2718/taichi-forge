@@ -38,6 +38,10 @@ lifetimes. The entries below describe the changes.
   from their declarations and entry-point interfaces. This fixes descriptor
   layout failures in nested loops when an outer or inner status is omitted.
 
+- Parent Graph private array declarations now propagate into its created
+  Sequential regions, including loop conditions and bodies. Arrays used only
+  in those regions remain private, with declaration symbol identity validated.
+
 - Explicit AOT execution descriptions support persistent `while` regions:
   CPU prepares native loops, while CUDA assembles prefix, initial condition,
   loop and suffix in one root graph. Bodies are not unrolled by the budget;
