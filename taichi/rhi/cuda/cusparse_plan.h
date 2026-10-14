@@ -139,4 +139,56 @@ class CudaCsrSpmmPlan final {
   bool stream_bound_{false};
 };
 
+struct CudaCsrTriangularDescription {
+  std::int64_t rows{0}, nonzeros{0}, rhs_count{1};
+  void *row_offsets{nullptr};
+  void *column_indices{nullptr};
+  void *values{nullptr};
+  cusparseIndexType_t index_type{CUSPARSE_INDEX_32I};
+  bool upper{false}, unit_diagonal{false}, transpose{false};
+};
+
+// One fixed CSR pattern and one analysis/workspace per plan. The caller keeps
+// storage alive and serializes access, including explicit value updates after
+// changing the numeric buffer. SpSV/SpSM retain numeric data in their analysis;
+// mutating the CSR values alone is not a valid update protocol.
+class CudaCsrTriangularPlan final {
+ public:
+  struct Preparation {
+    bool built{false};
+    unsigned descriptor_rebinds{0};
+  };
+  explicit CudaCsrTriangularPlan(CudaCsrTriangularDescription description);
+  ~CudaCsrTriangularPlan();
+  CudaCsrTriangularPlan(const CudaCsrTriangularPlan &) = delete;
+  CudaCsrTriangularPlan &operator=(const CudaCsrTriangularPlan &) = delete;
+
+  // Cold analysis never solves. Warm record neither rebinds nor allocates.
+  Preparation prepare(void *input, void *output, CUstream stream);
+  void record(CUstream stream);
+  // Ordered update on the plan's current stream, outside graph capture. The
+  // fixed CSR values address is unchanged; a missing provider symbol fails.
+  void update_values();
+  std::size_t workspace_bytes() const {
+    return workspace_bytes_;
+  }
+
+ private:
+  void bind_stream(CUstream stream);
+  void clear();
+  cusparseOperation_t operation() const;
+  CudaCsrTriangularDescription description_;
+  cusparseHandle_t handle_{nullptr};
+  cusparseSpMatDescr_t matrix_{nullptr};
+  cusparseDnVecDescr_t input_vector_{nullptr}, output_vector_{nullptr};
+  cusparseDnMatDescr_t input_matrix_{nullptr}, output_matrix_{nullptr};
+  cusparseSpSVDescr_t vector_solve_{nullptr};
+  cusparseSpSMDescr_t matrix_solve_{nullptr};
+  void *input_address_{nullptr}, *output_address_{nullptr};
+  void *workspace_{nullptr};
+  std::size_t workspace_bytes_{0};
+  CUstream stream_{nullptr};
+  bool initialized_{false}, stream_bound_{false};
+};
+
 }  // namespace taichi::lang
