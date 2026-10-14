@@ -56,7 +56,8 @@ struct FixedExecution::State {
   bool cuda_failed{false};
 #endif
 #ifdef TI_WITH_VULKAN
-  std::unique_ptr<gfx::GraphReplayRegistration> vulkan_graph;
+  std::vector<std::unique_ptr<gfx::GraphReplayRegistration>> vulkan_graphs;
+  gfx::GfxRuntime *vulkan_runtime{nullptr};
 #endif
 };
 
@@ -116,10 +117,29 @@ FixedExecution::FixedExecution(Arch arch,
           throw std::invalid_argument(
               "Fixed while requires aligned predicate storage and nonempty "
               "bodies");
-        if (arch == Arch::vulkan)
+        if ((arch == Arch::vulkan) != bool(loop->vulkan))
           throw std::invalid_argument(
-              "Fixed Vulkan while requires its selected structured recording "
-              "recipe");
+              "Fixed while requires a matching selected Vulkan recipe on "
+              "Vulkan only");
+        if (loop->vulkan) {
+          const auto &control = *loop->vulkan;
+          const auto valid = [&](DevicePtr ptr) {
+            return ptr.device == &device && ptr.alloc_id && ptr.offset % 4 == 0;
+          };
+          const auto flat = [](const auto &region) {
+            return std::all_of(region.begin(), region.end(),
+                               [](const auto &op) {
+                                 return std::holds_alternative<Dispatch>(op);
+                               });
+          };
+          if (inside_control || !loop->continue_while_nonzero ||
+              !valid(control.counter) ||
+              (control.status != kDeviceNullPtr && !valid(control.status)) ||
+              !flat(loop->condition) || !flat(loop->body))
+            throw std::invalid_argument(
+                "Invalid flat Vulkan structured recording recipe");
+          control.recipe.validate(loop->max_iterations);
+        }
         if (!active_loops.insert(loop.get()).second)
           throw std::invalid_argument(
               "Fixed control descriptors contain a cycle");
@@ -376,14 +396,64 @@ FixedExecution::FixedExecution(Arch arch,
 #ifdef TI_WITH_VULKAN
   if (arch == Arch::vulkan) {
     std::vector<gfx::GfxRuntime::GraphRecordingOperation> native;
+    const auto bind_dispatch = [&](const Dispatch &dispatch) {
+      auto *loaded = dynamic_cast<gfx::KernelImpl *>(dispatch.kernel);
+      if (!loaded || (gfx_runtime && gfx_runtime != &loaded->runtime()))
+        throw std::invalid_argument(
+            "Fixed Vulkan entries must share a runtime");
+      gfx_runtime = &loaded->runtime();
+      return gfx::GfxRuntime::GraphDispatch{loaded->handle(), dispatch.context};
+    };
+    const auto retain =
+        [&](std::unique_ptr<gfx::GraphReplayRegistration> graph) {
+          const auto info = graph->snapshot_stats();
+          state_->bytes += info.known_persistent_argument_bytes -
+                           info.known_persistent_control_bytes;
+          state_->workspace_bytes += info.known_persistent_control_bytes;
+          state_->vulkan_graphs.push_back(std::move(graph));
+        };
+    const auto flush = [&] {
+      if (native.empty())
+        return;
+      if (!gfx_runtime)
+        throw std::invalid_argument(
+            "Fixed Vulkan operations require a runtime");
+      retain(gfx_runtime->prepare_fixed_graph(native, {}));
+      native.clear();
+    };
     for (const auto &operation : operations) {
-      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-        auto *loaded = dynamic_cast<gfx::KernelImpl *>(dispatch->kernel);
-        if (!loaded || (gfx_runtime && gfx_runtime != &loaded->runtime()))
-          throw std::invalid_argument(
-              "Fixed Vulkan entries must share a runtime");
-        gfx_runtime = &loaded->runtime();
-        native.push_back({{loaded->handle(), dispatch->context}, {}});
+      if (const auto *value =
+              std::get_if<std::shared_ptr<const While>>(&operation)) {
+        const auto &loop = **value;
+        if (!loop.max_iterations) {
+          for (const auto &op : loop.condition)
+            native.push_back({bind_dispatch(std::get<Dispatch>(op)), {}});
+          continue;
+        }
+        flush();
+        std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
+        const auto append = [&](const auto &region) {
+          for (const auto &op : region)
+            dispatches.push_back(bind_dispatch(std::get<Dispatch>(op)));
+        };
+        append(loop.condition);
+        append(loop.body);
+        append(loop.condition);
+        gfx::GfxRuntime::GraphStructuredControl control;
+        control.predicate = loop.predicate;
+        control.counter = loop.vulkan->counter;
+        control.status = loop.vulkan->status;
+        control.has_status = control.status != kDeviceNullPtr;
+        control.initial_dispatch_count = loop.condition.size();
+        for (const auto &chunk : loop.vulkan->recipe.chunks) {
+          control.max_iterations = chunk.iterations;
+          control.strategy = chunk.strategy;
+          retain(gfx_runtime->prepare_fixed_structured_graph(dispatches,
+                                                             control, {}));
+          control.execute_initial_dispatches = false;
+        }
+      } else if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        native.push_back({bind_dispatch(*dispatch), {}});
       } else if (const auto *external =
                      std::get_if<std::shared_ptr<NativeOperation>>(
                          &operation)) {
@@ -426,12 +496,9 @@ FixedExecution::FixedExecution(Arch arch,
         native.push_back(std::move(op));
       }
     }
-    if (!gfx_runtime)
-      throw std::invalid_argument("Fixed Vulkan operations require a runtime");
-    state_->vulkan_graph = gfx_runtime->prepare_fixed_graph(native, {});
+    flush();
+    state_->vulkan_runtime = gfx_runtime;
     state_->kind = 2;
-    state_->bytes =
-        state_->vulkan_graph->snapshot_stats().known_persistent_argument_bytes;
     if (sequence_state)
       *sequence_state = std::move(recording_state);
     return;
@@ -486,8 +553,22 @@ void FixedExecution::run() {
   }
 #endif
 #ifdef TI_WITH_VULKAN
-  if (state_->vulkan_graph)
-    state_->vulkan_graph->launch_prepared();
+  if (state_->vulkan_graphs.size() > 1) {
+    state_->vulkan_runtime->begin_submission_batch();
+    try {
+      for (const auto &graph : state_->vulkan_graphs)
+        graph->launch_prepared();
+    } catch (...) {
+      try {
+        state_->vulkan_runtime->end_submission_batch();
+      } catch (...) {
+      }
+      throw;
+    }
+    state_->vulkan_runtime->end_submission_batch();
+  } else if (!state_->vulkan_graphs.empty()) {
+    state_->vulkan_graphs.front()->launch_prepared();
+  }
 #endif
 }
 std::uint32_t FixedExecution::execution_kind() const {

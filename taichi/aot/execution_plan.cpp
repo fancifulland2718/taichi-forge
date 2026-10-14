@@ -18,7 +18,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints"});
     const auto version = integer(root["version"]);
-    if (version != 1 && version != 2 && version != 3)
+    if (version < 1 || version > 4)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -38,11 +38,11 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
       for (const auto &step : steps.arr.inner) {
         const auto kind = name(step["kind"]);
         if (kind == "while") {
-          if (version != 3)
+          if (version < 3)
             throw std::invalid_argument(
                 "Structured control requires execution plan version 3");
           fields(step, {"kind", "predicate", "max_iterations", "condition",
-                        "body", "continue_while_nonzero"});
+                        "body", "continue_while_nonzero", "lowering"});
           auto loop = std::make_shared<While>();
           loop->predicate = name(step["predicate"]);
           loop->max_iterations = integer(step["max_iterations"]);
@@ -52,6 +52,60 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           arguments.insert(loop->predicate);
           parse_steps(step["condition"], loop->condition, true);
           parse_steps(step["body"], loop->body, false);
+          if (const auto found = step.obj.inner.find("lowering");
+              found != step.obj.inner.end()) {
+            if (version < 4)
+              throw std::invalid_argument(
+                  "Selected control requires execution plan version 4");
+            const auto &lowering = found->second;
+            fields(lowering,
+                   {"kind", "version", "counter", "status", "chunks"});
+            if (name(lowering["kind"]) != "vulkan_structured" ||
+                integer(lowering["version"]) != 1 ||
+                !loop->continue_while_nonzero)
+              throw std::invalid_argument(
+                  "Unsupported selected control recipe");
+            loop->vulkan.emplace();
+            auto &control = *loop->vulkan;
+            control.counter = name(lowering["counter"]);
+            arguments.insert(control.counter);
+            if (lowering.obj.inner.count("status")) {
+              control.status = name(lowering["status"]);
+              arguments.insert(*control.status);
+            }
+            if (!lowering["chunks"].is_arr())
+              throw std::invalid_argument(
+                  "Vulkan control chunks must be an array");
+            for (const auto &chunk : lowering["chunks"].arr.inner) {
+              fields(chunk, {"iterations", "strategy"});
+              const auto count = integer(chunk["iterations"]);
+              if (count > std::numeric_limits<std::uint32_t>::max())
+                throw std::invalid_argument(
+                    "Vulkan chunk descriptor exceeds uint32 iterations");
+              const auto strategy = name(chunk["strategy"]);
+              const std::vector<std::string> names{
+                  "compact", "chained", "conditional", "coarse_conditional"};
+              const auto selected =
+                  std::find(names.begin(), names.end(), strategy);
+              if (selected == names.end())
+                throw std::invalid_argument(
+                    "Unknown selected Vulkan control strategy");
+              control.recipe.chunks.push_back(
+                  {static_cast<std::uint32_t>(count),
+                   static_cast<VulkanControlStrategy>(
+                       1 + std::distance(names.begin(), selected))});
+            }
+            control.recipe.validate(loop->max_iterations);
+            const auto only_kernels = [](const auto &region) {
+              return std::all_of(region.begin(), region.end(),
+                                 [](const auto &op) {
+                                   return std::holds_alternative<Kernel>(op);
+                                 });
+            };
+            if (!only_kernels(loop->condition) || !only_kernels(loop->body))
+              throw std::invalid_argument(
+                  "Vulkan structured control requires flat kernel regions");
+          }
           operations.emplace_back(std::move(loop));
         } else if (kind == "kernel") {
           fields(step, {"kind", "entry", "arguments", "label"});

@@ -37,9 +37,22 @@ def check(runtime, arch, path):
         try:
             frame(runtime, module)
         except aot.AotError as error:
-            assert "selected structured recording" in str(error), str(error)
+            assert "selected Vulkan recipe" in str(error), str(error)
         else:
             raise AssertionError("Unsupported Vulkan control silently fell back")
+        for name, target, count in (
+            ("vulkan", 0, 0),
+            ("vulkan", 3, 3),
+            ("vulkan", 10, 4),
+            ("vulkan_zero", 3, 0),
+            ("vulkan_many", 2, 2),
+        ):
+            arrays, prepared = frame(runtime, module, name, target)
+            prepared()
+            expect(arrays, count, target)
+            prepared.close()
+            for value in arrays.values():
+                value.close()
         module.close()
         return
     # A changed scalar binding produces an independent prepared executable.

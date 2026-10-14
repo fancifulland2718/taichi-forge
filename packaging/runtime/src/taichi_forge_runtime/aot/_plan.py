@@ -17,6 +17,17 @@ def _unique_fields(pairs):
     return result
 
 
+def _control_version(steps):
+    version = 1
+    for op in steps:
+        if isinstance(op, dict) and op.get("kind") == "while":
+            version = max(version, 4 if "lowering" in op else 3)
+            for key in ("condition", "body"):
+                if isinstance(op.get(key), list):
+                    version = max(version, _control_version(op[key]))
+    return version
+
+
 class ExecutionPlan:
     """Persistent kernels, native operations and private resource reconstruction.
 
@@ -35,11 +46,9 @@ class ExecutionPlan:
             document["gradients"] = gradients
         if constraints is not None:
             document["constraints"] = list(constraints)
-        if any(
-            isinstance(op, dict) and op.get("kind") == "while"
-            for op in document["operations"] + document.get("initialization", [])
-        ):
-            document["version"] = 3
+        document["version"] = max(
+            document["version"], _control_version(document["operations"] + document.get("initialization", []))
+        )
         # Own a snapshot, including nested arrays; caller mutations cannot alter
         # a saved plan. This module remains usable without a native library.
         self._json = json.dumps(document, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -54,7 +63,7 @@ class ExecutionPlan:
             or set(value) - {"version", "operations", "resources", "gradients", "initialization", "constraints"}
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] not in (1, 2, 3):
+        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4):
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -68,11 +77,9 @@ class ExecutionPlan:
             raise ValueError("Execution gradients must be a name mapping")
         if "constraints" in value and not isinstance(value["constraints"], list):
             raise ValueError("Execution constraints must be a list")
-        if value["version"] < 3 and any(
-            isinstance(op, dict) and op.get("kind") == "while"
-            for op in value["operations"] + value.get("initialization", [])
-        ):
-            raise ValueError("Structured control requires execution plan version 3")
+        required = _control_version(value["operations"] + value.get("initialization", []))
+        if value["version"] < required:
+            raise ValueError(f"Structured control requires execution plan version {required}")
         return cls(
             value["operations"],
             resources=value.get("resources"),
@@ -104,6 +111,43 @@ class ExecutionPlan:
         if "initialization" in document and not document["initialization"]:
             raise ValueError("Execution initialization must be a nonempty operation array")
 
+        def validate_lowering(op):
+            lowering = op["lowering"]
+            required = {"kind", "version", "counter", "chunks"}
+            if (
+                not isinstance(lowering, dict)
+                or not required <= set(lowering)
+                or set(lowering) - required - {"status"}
+                or lowering["kind"] != "vulkan_structured"
+                or type(lowering["version"]) is not int
+                or lowering["version"] != 1
+                or not op.get("continue_while_nonzero", True)
+            ):
+                raise ValueError("Unsupported selected control recipe")
+            for key in ("counter", "status"):
+                if key in lowering:
+                    _name(lowering[key])
+                    arguments.add(lowering[key])
+            chunks = lowering["chunks"]
+            if not isinstance(chunks, list):
+                raise ValueError("Vulkan control chunks must be an array")
+            remaining = op["max_iterations"]
+            for chunk in chunks:
+                if (
+                    not isinstance(chunk, dict)
+                    or set(chunk) != {"iterations", "strategy"}
+                    or type(chunk["iterations"]) is not int
+                    or not 0 < chunk["iterations"] <= min(remaining, 0xFFFFFFFF)
+                    or not isinstance(chunk["strategy"], str)
+                    or chunk["strategy"] not in ("compact", "chained", "conditional", "coarse_conditional")
+                ):
+                    raise ValueError("Invalid selected Vulkan control chunk")
+                remaining -= chunk["iterations"]
+            if remaining:
+                raise ValueError("Vulkan control chunks must cover the loop budget")
+            if any(item["kind"] != "kernel" for item in op["condition"] + op["body"]):
+                raise ValueError("Vulkan structured control requires flat kernel regions")
+
         def validate_steps(steps, *, allow_empty=False):
             if not isinstance(steps, list) or (not steps and not allow_empty):
                 raise ValueError("Execution regions require operation arrays, with nonempty bodies")
@@ -113,7 +157,7 @@ class ExecutionPlan:
                 kind = op.get("kind")
                 if kind == "while":
                     required = {"kind", "predicate", "max_iterations", "condition", "body"}
-                    optional, names = {"continue_while_nonzero"}, ("predicate",)
+                    optional, names = {"continue_while_nonzero", "lowering"}, ("predicate",)
                 elif kind == "kernel":
                     required, optional = {"kind", "entry", "arguments"}, {"label"}
                     names = ("entry",)
@@ -159,7 +203,7 @@ class ExecutionPlan:
                             raise ValueError("Dispatch labels cannot contain line breaks")
                         continue
                     if kind == "while":
-                        if type(op[key]) is not bool:
+                        if key == "continue_while_nonzero" and type(op[key]) is not bool:
                             raise ValueError("Loop predicate polarity must be a boolean")
                         continue
                     if kind == "gemm_f32":
@@ -171,6 +215,8 @@ class ExecutionPlan:
                         raise ValueError("Loop budget requires a nonnegative int64 value")
                     validate_steps(op["condition"], allow_empty=True)
                     validate_steps(op["body"])
+                    if "lowering" in op:
+                        validate_lowering(op)
                 elif kind == "native":
                     arguments.update(native_references(op))
                 elif kind == "kernel":

@@ -50,6 +50,36 @@ TEST(ExecutionPlan, PersistentControlKeepsNestedCodeAndRuntimeClosure) {
                  std::invalid_argument);
 }
 
+TEST(ExecutionPlan, SelectedVulkanControlRetainsRecipeOnlyBindings) {
+  const std::string source = R"({"version":4,"operations":[{"kind":"while",
+    "predicate":"p","max_iterations":3,"condition":[],
+    "body":[{"kind":"kernel","entry":"advance","arguments":["x","p"]}],
+    "lowering":{"kind":"vulkan_structured","version":1,"counter":"counter",
+      "status":"status","chunks":[{"iterations":2,"strategy":"compact"},
+                                    {"iterations":1,"strategy":"coarse_conditional"}]}}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  EXPECT_EQ(plan.arguments,
+            (std::vector<std::string>{"counter", "p", "status", "x"}));
+  EXPECT_EQ(plan.replay_bindings,
+            (std::set<std::string>{"counter", "p", "status", "x"}));
+  const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
+      plan.operations[0]);
+  ASSERT_TRUE(loop.vulkan);
+  EXPECT_EQ(loop.vulkan->recipe.chunks.size(), 2);
+  EXPECT_EQ(loop.vulkan->recipe.chunks[1].strategy,
+            VulkanControlStrategy::coarse_conditional);
+  for (const auto &[from, to] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":4", "\"version\":3"},
+           {"\"iterations\":2", "\"iterations\":3"},
+           {"\"iterations\":2", "\"iterations\":4294967296"},
+           {"\"strategy\":\"compact\"", "\"strategy\":\"auto\""}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(from), from.size(), to);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+}
+
 TEST(ExecutionPlan, PreservesOrderedOperationsAndSymbolicBindings) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"kernel","entry":"forward","arguments":["x","scratch"]},

@@ -5,6 +5,69 @@ import pytest
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
+def test_selected_vulkan_control_recipe_closure_and_version():
+    lowering = dict(
+        kind="vulkan_structured",
+        version=1,
+        counter="counter",
+        status="status",
+        chunks=[dict(iterations=2, strategy="compact"), dict(iterations=1, strategy="coarse_conditional")],
+    )
+    loop = dict(
+        kind="while",
+        predicate="p",
+        max_iterations=3,
+        condition=[],
+        body=[dict(kind="kernel", entry="advance", arguments=["p", "x"])],
+        lowering=lowering,
+    )
+    plan = ExecutionPlan([loop], resources=[dict(kind="ndarray", name="counter", dtype="i32", shape=[1])])
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("p", "status", "x")
+    assert restored._replay_argument_names == {"p", "status", "x", "counter"}
+    assert restored.kernel_entries == ("advance",)
+    document = json.loads(restored.to_json())
+    assert document["version"] == 4
+    for version in (1, 2, 3):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+    for patch in (
+        dict(version=True),
+        dict(version=2),
+        dict(counter=""),
+        dict(chunks=[]),
+        dict(chunks=None),
+        dict(chunks=[dict(iterations=2, strategy="compact")]),
+        dict(chunks=[dict(iterations=4, strategy="compact")]),
+        dict(chunks=[dict(iterations=True, strategy="compact")]),
+        dict(chunks=[dict(iterations=3, strategy="auto")]),
+        dict(chunks=[dict(iterations=3, strategy=[])]),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, lowering=dict(lowering, **patch))])
+    for patch in (dict(continue_while_nonzero=False), dict(body=[dict(kind="fill32", destination="x", value=1)])):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, **patch)])
+    # No schema-level 8-chunk/512-iteration cap from the live JIT slot ring.
+    many = [dict(iterations=64, strategy="compact")] * 9
+    wide = [dict(iterations=0xFFFFFFFF, strategy="compact"), dict(iterations=2, strategy="compact")]
+    for chunks in (many, wide):
+        assert (
+            json.loads(
+                ExecutionPlan(
+                    [
+                        dict(
+                            loop,
+                            max_iterations=sum(c["iterations"] for c in chunks),
+                            lowering=dict(lowering, chunks=chunks),
+                        )
+                    ]
+                ).to_json()
+            )["version"]
+            == 4
+        )
+
+
 def test_persistent_control_closure_and_version():
     body = [dict(kind="kernel", entry="advance", arguments=["scratch", "x"])]
     loop = dict(

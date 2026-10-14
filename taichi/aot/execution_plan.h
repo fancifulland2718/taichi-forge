@@ -10,6 +10,7 @@
 #include "taichi/aot/execution_resources.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_description.h"
+#include "taichi/runtime/vulkan_control_recipe.h"
 
 namespace taichi::lang::aot {
 // Versioned persistent operations, independent of live definitions, runtime
@@ -57,11 +58,17 @@ struct ExecutionPlan {
                                  Native,
                                  std::shared_ptr<const While>>;
   struct While {
+    struct Vulkan {
+      std::string counter;
+      std::optional<std::string> status;
+      VulkanControlRecipe recipe;
+    };
     std::string predicate;
     std::uint64_t max_iterations{0};
     bool continue_while_nonzero{true};
     std::vector<Operation> condition;
     std::vector<Operation> body;
+    std::optional<Vulkan> vulkan;
   };
   struct ArrayLayout {
     std::string array;

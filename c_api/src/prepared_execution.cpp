@@ -466,10 +466,10 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
           if (const auto *loop =
                   std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
                       &operation)) {
-            if (rt.arch == taichi::Arch::vulkan)
+            if ((rt.arch == taichi::Arch::vulkan) != bool((*loop)->vulkan))
               throw MemoryBindingError(
-                  "AOT Vulkan while requires its selected structured recording "
-                  "recipe");
+                  "AOT while requires a matching selected Vulkan recipe on "
+                  "Vulkan only");
             collect_steps((*loop)->condition);
             collect_steps((*loop)->body);
           }
@@ -627,18 +627,39 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
               std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
                   &operation)) {
         const auto &loop = **value;
-        const auto &predicate = array_binding(loop.predicate);
-        if (predicate.scalar_type != PrimitiveType::i32 ||
-            predicate.bytes != 4 || !predicate.element_shape.empty() ||
-            !std::all_of(predicate.shape.begin(), predicate.shape.end(),
-                         [](std::uint64_t extent) { return extent == 1; }) ||
-            predicate.base_offset % 4)
-          throw MemoryBindingError(
-              "Loop predicate requires one aligned scalar i32 element");
+        const auto control_pointer = [&](const std::string &name) {
+          const auto &array = array_binding(name);
+          if (array.scalar_type != PrimitiveType::i32 || array.bytes != 4 ||
+              !array.element_shape.empty() ||
+              !std::all_of(array.shape.begin(), array.shape.end(),
+                           [](std::uint64_t extent) { return extent == 1; }) ||
+              array.base_offset % 4)
+            throw MemoryBindingError(
+                "Loop control requires one aligned scalar i32 element: " +
+                name);
+          return array.pointer;
+        };
         auto bound = std::make_shared<FixedExecution::While>();
-        bound->predicate = predicate.pointer;
+        bound->predicate = control_pointer(loop.predicate);
         bound->max_iterations = loop.max_iterations;
         bound->continue_while_nonzero = loop.continue_while_nonzero;
+        if (loop.vulkan) {
+          bound->vulkan.emplace();
+          bound->vulkan->recipe = loop.vulkan->recipe;
+          bound->vulkan->counter = control_pointer(loop.vulkan->counter);
+          std::vector<std::string> controls{loop.predicate,
+                                            loop.vulkan->counter};
+          if (loop.vulkan->status) {
+            controls.push_back(*loop.vulkan->status);
+            bound->vulkan->status = control_pointer(*loop.vulkan->status);
+          }
+          for (std::size_t i = 0; i < controls.size(); ++i)
+            for (std::size_t j = 0; j < i; ++j)
+              if (!storage_range(controls[i])
+                       .proven_disjoint(storage_range(controls[j])))
+                throw MemoryBindingError(
+                    "Vulkan loop controls must be disjoint");
+        }
         if (!bind_steps(loop.condition, bound->condition) ||
             !bind_steps(loop.body, bound->body))
           return false;

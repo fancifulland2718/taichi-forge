@@ -1,4 +1,4 @@
-"""Persistent control: source-free CPU/CUDA, explicit suffix AD and ownership."""
+"""Persistent control, selected Vulkan recipes, suffix AD and ownership."""
 
 import json
 import os
@@ -121,6 +121,27 @@ def test_aot_persistent_while(tmp_path):
             nested_prefix + [outer] + suffix, resources=nested_resources, gradients={"x": "dx", "y": "dy"}
         ),
     )
+    if arch == "vulkan":
+        for name, chunks in (("vulkan", [2, 2]), ("vulkan_zero", []), ("vulkan_many", [1] * 9)):
+            selected = dict(
+                loop,
+                max_iterations=sum(chunks),
+                body=loop["body"][1:],
+                lowering=dict(
+                    kind="vulkan_structured",
+                    version=1,
+                    counter="counter",
+                    chunks=[dict(iterations=count, strategy="compact") for count in chunks],
+                ),
+            )
+            module.add_execution_plan(
+                name,
+                ti.aot.ExecutionPlan(
+                    prefix + [loop["body"][0], selected] + suffix,
+                    resources=resources,
+                    gradients={"x": "dx", "y": "dy"},
+                ),
+            )
     artifact = tmp_path / "while.tcm"
     module.archive(str(artifact))
     for mode in ("standalone", "borrowed"):

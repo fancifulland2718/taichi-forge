@@ -23,6 +23,7 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/program/program_impl.h"
 #include "taichi/program/kernel_launcher.h"
+#include "taichi/runtime/vulkan_control_recipe.h"
 #if defined(TI_WITH_VULKAN_POINTER)
 #include "taichi/runtime/gfx/snode_allocator.h"
 #endif
@@ -88,6 +89,7 @@ struct GraphReplayStats {
   GraphReplayFallbackReason last_fallback_reason{
       GraphReplayFallbackReason::none};
   bool fixed_secondary{false};
+  uint64_t known_persistent_control_bytes{0};
 };
 
 class TI_DLL_EXPORT GraphReplayRegistration {
@@ -330,13 +332,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::string timing_path;
   };
 
-  enum class GraphStructuredStrategy : std::uint32_t {
-    automatic = 0,
-    compact = 1,
-    chained = 2,
-    conditional = 3,
-    coarse_conditional = 4,
-  };
+  using GraphStructuredStrategy = VulkanControlStrategy;
 
   struct GraphStructuredControl {
     DevicePtr predicate{kDeviceNullPtr};
@@ -507,6 +503,7 @@ class TI_DLL_EXPORT GfxRuntime {
                              bool wait_on_saturation);
     bool ready_for_retirement() const;
     uint64_t known_persistent_argument_bytes() const;
+    uint64_t known_persistent_control_bytes() const;
     void reset();
   };
 

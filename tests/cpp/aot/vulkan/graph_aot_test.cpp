@@ -146,7 +146,7 @@ TEST(CGraphAotTest, VulkanFixedControl) {
       control.max_iterations = 3;
       control.strategy = strategy;
       auto invalid = control;
-      invalid.initial_dispatch_count = 0;
+      invalid.initial_dispatch_count = dispatches.size();
       EXPECT_ANY_THROW(runtime.prepare_fixed_structured_graph(
           dispatches, invalid, {module, frame.storage}));
       const auto before = device->queue_submission_snapshot();
@@ -185,6 +185,15 @@ TEST(CGraphAotTest, VulkanFixedControl) {
       chunk->launch_prepared();
       runtime.synchronize();
       EXPECT_EQ(read(frame), (std::array<int, 7>{0, 2, 2, 12, 2, 3, 6}));
+      auto precomputed = control;
+      precomputed.initial_dispatch_count = 0;
+      auto single = runtime.prepare_fixed_structured_graph(
+          {{condition->handle(), &cond_ctx}}, precomputed,
+          {module, frame.storage});
+      write(frame, {1, 0, 0, 3, 0, 0, 0});
+      single->launch_prepared();
+      runtime.synchronize();
+      EXPECT_EQ(read(frame), (std::array<int, 7>{0, 0, 2, 3, 0, 1, 0}));
     }  // All launch contexts and borrowed Ndarray wrappers are now destroyed.
     for (int target : {0, 2, 7, 0}) {
       for (std::size_t i = 0; i < frames.size(); ++i) {

@@ -2,9 +2,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <variant>
 #include <vector>
 #include "taichi/rhi/device.h"
+#include "taichi/runtime/vulkan_control_recipe.h"
 
 namespace taichi::lang {
 class LaunchContextBuilder;
@@ -43,11 +45,17 @@ class FixedExecution {
                                  std::shared_ptr<NativeOperation>,
                                  std::shared_ptr<const While>>;
   struct While {
+    struct Vulkan {
+      DevicePtr counter{kDeviceNullPtr};
+      DevicePtr status{kDeviceNullPtr};
+      VulkanControlRecipe recipe;
+    };
     DevicePtr predicate;
     std::uint64_t max_iterations{0};
     bool continue_while_nonzero{true};
     std::vector<Operation> condition;
     std::vector<Operation> body;
+    std::optional<Vulkan> vulkan;
   };
 
   // Optional cold facts chain unconditional phases of one prepared execution.

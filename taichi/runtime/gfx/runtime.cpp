@@ -2587,6 +2587,14 @@ void GfxRuntime::GraphReplayState::reset() {
   retirement_next = 0;
 }
 
+uint64_t GfxRuntime::GraphReplayExecutable::known_persistent_control_bytes()
+    const {
+  uint64_t bytes = 0;
+  for (const auto &slot : slots)
+    bytes += slot.structured_control_bytes + slot.structured_observation_bytes;
+  return bytes;
+}
+
 std::unique_ptr<GraphReplayRegistration> GfxRuntime::register_graph_replay(
     uint64_t replay_token) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
@@ -2698,6 +2706,7 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
       state.last_path,
       state.last_fallback_reason,
       state.fixed_secondary,
+      state.executable.known_persistent_control_bytes(),
   };
   state.diagnostics_enabled = true;
   return result;
@@ -2731,6 +2740,7 @@ GraphReplayStats GfxRuntime::snapshot_graph_replay_stats(
       state.last_path,
       state.last_fallback_reason,
       state.fixed_secondary,
+      state.executable.known_persistent_control_bytes(),
   };
 }
 
@@ -3481,7 +3491,6 @@ bool GfxRuntime::launch_graph_impl(
         !valid_scalar(structured_control->counter) ||
         (structured_control->has_status &&
          !valid_scalar(structured_control->status)) ||
-        structured_control->initial_dispatch_count == 0 ||
         structured_control->initial_dispatch_count >= dispatches.size() ||
         !valid_strategy) {
       return reject();
@@ -3912,8 +3921,7 @@ bool GfxRuntime::launch_graph_impl(
     const std::size_t encoded_actions =
         static_cast<std::size_t>(structured_control->max_iterations) *
         (structured_group_counts.size() + 1);
-    if (structured_initial_tasks == 0 ||
-        structured_group_counts.empty() ||
+    if (structured_group_counts.empty() ||
         structured_group_counts.size() > kStructuredMaximumPackets) {
       return reject();
     }
@@ -4050,9 +4058,8 @@ bool GfxRuntime::launch_graph_impl(
   const bool composed_single_task =
       total_tasks == 1 && dispatches.size() == 1 &&
       dispatches.front().source_dispatch_count > 1;
-  if (total_tasks == 0 ||
-      (total_tasks == 1 && !has_indirect_dispatch &&
-       !composed_single_task)) {
+  if (total_tasks == 0 || (total_tasks == 1 && !structured_control &&
+                           !has_indirect_dispatch && !composed_single_task)) {
     return reject(GraphReplayFallbackReason::insufficient_tasks);
   }
 
