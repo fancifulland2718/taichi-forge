@@ -112,11 +112,10 @@ FixedExecution::FixedExecution(Arch arch,
               std::get_if<std::shared_ptr<const While>>(&operation)) {
         const auto &loop = *value;
         if (!loop || loop->predicate.device != &device ||
-            loop->predicate.offset % 4 || loop->condition.empty() ||
-            loop->body.empty())
+            loop->predicate.offset % 4 || loop->body.empty())
           throw std::invalid_argument(
               "Fixed while requires aligned predicate storage and nonempty "
-              "regions");
+              "bodies");
         if (arch == Arch::vulkan)
           throw std::invalid_argument(
               "Fixed Vulkan while requires its selected structured recording "

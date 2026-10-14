@@ -41,6 +41,17 @@ class _ExportContext:
         self._scalar_values = {}
         self._scalar_symbols = {}
         self._scalar_resources = {}
+        self.control_names = set()
+        self._control_bindings = set()
+
+    def region(self, emit, node):
+        """Collect a selected region without copying its code/resource owners."""
+        outer, self.operations = self.operations, []
+        try:
+            emit(self, node)
+            return self.operations
+        finally:
+            self.operations = outer
 
     def _name(self, kind):
         index = self._indices.get(kind, 0)
@@ -207,6 +218,20 @@ class _ExportContext:
             self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, name=name)
 
     def kernel_binding(self, arg):
+        if arg.name in self.control_names:
+            if arg.tag != core.ArgKind.NDARRAY or str(arg.dtype()) != "i32":
+                raise TaichiRuntimeError("AOT Graph control requires scalar i32 ndarray arguments")
+            self._control_bindings.add(arg.name)
+            self.binding_constraints.append(
+                dict(
+                    kind="array_layout",
+                    array=self.binding(arg.name),
+                    exact_shape=[1] * arg.field_dim,
+                    element_shape=[],
+                    record_bytes=4,
+                    alignment=4,
+                )
+            )
         if arg.name not in self._scalar_values:
             return self.binding(arg.name)
         if arg.tag != core.ArgKind.SCALAR:
@@ -344,17 +369,49 @@ def _sequence(context, sequence):
         context.kernel(*item[1:4])
 
 
+def _while(context, node):
+    from taichi_forge.lang import impl
+
+    arch = impl.current_cfg().arch
+    if arch == core.Arch.cuda:
+        if node._has_nested_control:
+            raise TaichiRuntimeError("AOT Graph requires its selected nested CUDA control recipe")
+        if not node.supports_native_submission or node._cuda_control_lowering != "cuda_conditional_graph":
+            raise TaichiRuntimeError("AOT Graph requires its selected CUDA control recipe")
+    elif arch not in (core.Arch.x64, core.Arch.arm64):
+        raise TaichiRuntimeError("AOT Graph requires its selected backend control recipe")
+    elif node.chunk_limit != 1:
+        raise TaichiRuntimeError("AOT Graph requires its selected chunked CPU control recipe")
+    # Preserve the physical body+condition segment. Splitting or rebuilding it
+    # could discard selected fusion; appending condition again repeats work.
+    _node(context, node._condition)
+    if node.max_iterations:
+        context.operations.append(
+            dict(
+                kind="while",
+                predicate=context.binding(node.predicate),
+                max_iterations=node.max_iterations,
+                condition=[],
+                body=context.region(_node, node._chunks[1]),
+            )
+        )
+
+
 def _node(context, node):
     from taichi_forge.graph._graph import (
         _CompiledCGraphNode,
         _CompiledNativeGraphNode,
         _CompiledSequentialRegionNode,
+        _CompiledWhileGraphNode,
     )
     from taichi_forge.graph._ir import DispatchNode, SequentialRegion
 
     if isinstance(node, _CompiledSequentialRegionNode):
         for child in node.nodes:
             _node(context, child)
+        return
+    if isinstance(node, _CompiledWhileGraphNode):
+        _while(context, node)
         return
     if isinstance(node, _CompiledNativeGraphNode):
         if set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings:
@@ -442,6 +499,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False):
             snapshot_state=snapshot_state,
         )
         context.declare_private_bindings(spec.fixed_runtime_args)
+        context.control_names = set(spec.control_binding_plan.names)
         # Dispatch actions may already be flattened into ordinary physical
         # kernels. Reconstruct their concrete binding contracts before lowering
         # those kernels, without regenerating the selected dispatch recipe.
@@ -451,6 +509,13 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False):
                 exporter(lease, context)
         for node in graph._spec.nodes:
             _node(context, node)
+        if context.control_names != context._control_bindings:
+            raise TaichiRuntimeError("AOT Graph requires complete selected control binding metadata")
+        for _, bindings in spec.control_binding_plan.distinct_groups:
+            names = [context.binding(name) for _, _, name in bindings]
+            for i, left in enumerate(names):
+                for right in names[i + 1 :]:
+                    context.binding_constraints.append(dict(kind="disjoint", left=left, right=right))
         if any(
             (
                 callable(getattr(lease, "bind_graph_arguments", None))

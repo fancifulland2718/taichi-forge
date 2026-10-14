@@ -27,11 +27,11 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     ExecutionPlan plan;
     plan.resources = ExecutionResources::parse(root);
     std::set<std::string> arguments;
-    std::function<void(const JsonValue &, std::vector<Operation> &)>
+    std::function<void(const JsonValue &, std::vector<Operation> &, bool)>
         parse_steps;
     parse_steps = [&](const JsonValue &steps,
-                      std::vector<Operation> &operations) {
-      if (!steps.is_arr() || steps.arr.inner.empty() ||
+                      std::vector<Operation> &operations, bool allow_empty) {
+      if (!steps.is_arr() || (!allow_empty && steps.arr.inner.empty()) ||
           steps.arr.inner.size() > std::numeric_limits<std::uint32_t>::max())
         throw std::invalid_argument(
             "Execution plan needs a nonempty operation array");
@@ -50,8 +50,8 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
               !step.obj.inner.count("continue_while_nonzero") ||
               optional_bool(step, "continue_while_nonzero");
           arguments.insert(loop->predicate);
-          parse_steps(step["condition"], loop->condition);
-          parse_steps(step["body"], loop->body);
+          parse_steps(step["condition"], loop->condition, true);
+          parse_steps(step["body"], loop->body, false);
           operations.emplace_back(std::move(loop));
         } else if (kind == "kernel") {
           fields(step, {"kind", "entry", "arguments", "label"});
@@ -150,10 +150,10 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         }
       }
     };
-    parse_steps(root["operations"], plan.operations);
+    parse_steps(root["operations"], plan.operations, false);
     plan.replay_bindings = plan.resources.runtime_bindings(arguments);
     if (has_initialization)
-      parse_steps(root["initialization"], plan.initialization);
+      parse_steps(root["initialization"], plan.initialization, false);
     if (const auto found = root.obj.inner.find("constraints");
         found != root.obj.inner.end()) {
       if (!found->second.is_arr())

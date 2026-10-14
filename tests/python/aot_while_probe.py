@@ -75,6 +75,35 @@ def check(runtime, arch, path):
             raise AssertionError("Invalid predicate layout was accepted")
         invalid.close()
     expect(first, 2, 2)  # Failed preparation did not execute or modify outputs.
+    # A precomputed predicate can use any one-element scalar ndarray shape.
+    active = runtime.ndarray("i32", (1, 1))
+    output = runtime.ndarray("i32", 1)
+    active.write(struct.pack("<i", 1))
+    output.write(struct.pack("<i", 0))
+    precomputed = aot.ExecutionPlan(
+        [
+            dict(
+                kind="while",
+                predicate="active",
+                max_iterations=2,
+                condition=[],
+                body=[
+                    dict(kind="fill32", destination="output", value=7),
+                    dict(kind="fill32", destination="active", value=0),
+                ],
+            )
+        ]
+    )
+    control = module.prepare_execution(precomputed, dict(active=active, output=output))
+    assert output.read() == struct.pack("<i", 0)
+    control()
+    assert output.read() == struct.pack("<i", 7)
+    output.write(struct.pack("<i", 0))
+    control()
+    assert output.read() == struct.pack("<i", 0)
+    control.close()
+    active.close()
+    output.close()
     for name, target, count in (
         ("normal", 0, 0),
         ("normal", 10, 4),

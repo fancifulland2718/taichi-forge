@@ -247,19 +247,28 @@ loop = dict(
 plan = ExecutionPlan([loop])
 ```
 
-Bind `active` to one aligned scalar i32 ndarray with shape `()` or `(1,)`.
+Bind `active` to one aligned scalar i32 ndarray with every extent equal to one.
 The initial condition always executes, including with a zero budget; each body
 execution is followed by the condition. Budgets are nonnegative int64 values.
-Both regions must be nonempty and may contain nested loops; the body is stored
-once. Ordinary prefix and suffix operations retain their order. CPU runs prepared
+The body must be nonempty and is stored once; nesting is allowed. An empty
+`condition` uses a precomputed predicate: initialize it in the prefix and update
+it in the body. This preserves an already composed iteration segment. Ordinary
+prefix and suffix operations retain their order. CPU runs prepared
 native steps. With CUDA conditional graph support, the entire region uses one
 root graph and one `cuGraphLaunch`, with 32 bytes of control storage per logical
 loop and no per-iteration host readback. Prepare again to change frozen arguments;
 device predicate and array contents can change between replays.
 
-This explicit-description entry does not yet include automatic `from_graph`
-while export, complete SolvePlan export, or Vulkan persistent control. Vulkan
-rejects it at prepare time. CUDA operations requiring host synchronization are
+`add_execution_plan(name, graph)` automatically exports exact CPU loops and
+selected CUDA conditional loops. It preserves the compiled body-plus-condition
+segment, initial condition, prefix and suffix without regenerating source
+definitions or repeating the trailing condition. Control scalar shapes and
+non-aliasing contracts are saved too. Small tests cover parent Sequential
+embedding, private controls, status and explicit adjoints. Selected CUDA masked,
+device-update and specialized nested routes still need their own persistent
+execution contract; export rejects implicit replacement. Complete SolvePlan
+export and Vulkan persistent control remain unimplemented; Vulkan rejects the
+description at prepare time. CUDA operations requiring host synchronization are
 excluded from loop regions; providers with opaque cold facts still require an
 explicit branch/repetition merge contract. Initialization facts established only
 in a body cannot escape a possibly zero-trip loop. Closing storage, modules or a

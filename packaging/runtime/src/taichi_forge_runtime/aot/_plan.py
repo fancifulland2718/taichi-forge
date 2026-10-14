@@ -104,9 +104,9 @@ class ExecutionPlan:
         if "initialization" in document and not document["initialization"]:
             raise ValueError("Execution initialization must be a nonempty operation array")
 
-        def validate_steps(steps):
-            if not isinstance(steps, list) or not steps:
-                raise ValueError("Execution regions require nonempty operation arrays")
+        def validate_steps(steps, *, allow_empty=False):
+            if not isinstance(steps, list) or (not steps and not allow_empty):
+                raise ValueError("Execution regions require operation arrays, with nonempty bodies")
             for op in steps:
                 if not isinstance(op, dict):
                     raise ValueError("Execution operations must be objects")
@@ -169,7 +169,7 @@ class ExecutionPlan:
                 if kind == "while":
                     if type(op["max_iterations"]) is not int or not 0 <= op["max_iterations"] <= 0x7FFFFFFFFFFFFFFF:
                         raise ValueError("Loop budget requires a nonnegative int64 value")
-                    validate_steps(op["condition"])
+                    validate_steps(op["condition"], allow_empty=True)
                     validate_steps(op["body"])
                 elif kind == "native":
                     arguments.update(native_references(op))

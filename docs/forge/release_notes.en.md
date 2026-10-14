@@ -45,8 +45,10 @@ lifetimes. The entries below describe the changes.
 - Explicit AOT execution descriptions support persistent `while` regions:
   CPU prepares native loops, while CUDA assembles prefix, initial condition,
   loop and suffix in one root graph. Bodies are not unrolled by the budget;
-  nesting and 64-bit budgets are supported. Automatic Graph export, complete
-  SolvePlan export and Vulkan persistent control remain separate work. See the
+  nesting and 64-bit budgets are supported. Graph export preserves exact CPU
+  loops and selected CUDA conditional code, private resources and control binding
+  constraints. Complete SolvePlan export, other selected routes and Vulkan
+  persistent control remain separate work. See the
   [AOT SDK contract](aot_sdk.en.md); matching private ABI 45 is required.
 
 - AOT can reconstruct fixed CSR resources and f32 cuSPARSE SpMV, including

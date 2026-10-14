@@ -210,15 +210,21 @@ loop = dict(
 plan = ExecutionPlan([loop])
 ```
 
-`active` 必须绑定一个对齐的标量 i32 ndarray，shape 为 `()` 或 `(1,)`。首次条件
+`active` 必须绑定一个对齐且仅含一个标量的 i32 ndarray，各维 extent 均为 1。首次条件
 始终执行，包括预算为零；每轮执行 body 后再执行 condition。预算是非负 int64，
-循环体只序列化一次，condition/body 均须非空，允许嵌套。循环前后的普通操作保留
+循环体只序列化一次，body 必须非空，允许嵌套。`condition=[]` 表示读取已算好的谓词；
+调用者负责在前段初始化谓词、在 body 更新谓词，适合保留已经组合的一轮执行段。
+循环前后的普通操作保留
 原顺序。CPU 使用已准备的原生循环；支持 CUDA conditional graph 的驱动上，整个
 区域物化为同一根图，一次 `cuGraphLaunch`，控制存储每个逻辑循环为 32 字节，
 不逐轮读回 host。改变冻结参数应重新 prepare，设备谓词和数组内容可在重放间更新。
 
-本接口目前是显式描述入口，尚不代表 `from_graph` 自动导出 while、完整 SolvePlan
-或 Vulkan 持久控制已经接通。Vulkan 在 prepare 明确拒绝。需要 host 同步的 CUDA
+`add_execution_plan(name, graph)` 可自动导出 CPU 的精确循环和 CUDA 已选 conditional
+循环，保留编译后的 body+condition 段、首次条件及前后段，不重新生成源定义或重复
+末尾条件计算。控制数组的标量形状及互不别名约束一并保存；父 Sequential 嵌入、
+私有控制资源、状态与显式伴随已有小规模验证。CUDA 已选 masked、device-update
+或嵌套专用路线仍需自己的持久执行合同，导出会拒绝隐式替换；完整 SolvePlan 和
+Vulkan 持久控制仍待接通。Vulkan 在 prepare 明确拒绝。需要 host 同步的 CUDA
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
 循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
 规则退休相关执行。CPU/CUDA 小用例验证了嵌套、零轮、提前结束、预算耗尽和显式导出的

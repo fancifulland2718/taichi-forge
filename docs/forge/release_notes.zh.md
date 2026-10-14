@@ -39,7 +39,8 @@
 
 - AOT 显式执行描述支持持久 `while`：CPU 准备原生循环，CUDA 将前段、首次条件、
   循环和后段组装为一个根图。循环体不按预算展开，支持嵌套和 64 位预算。
-  Graph 自动导出、完整 SolvePlan 和 Vulkan 持久控制仍待接通，详见
+  Graph 可自动导出 CPU 精确循环及 CUDA 已选 conditional 路线，保留私有资源、
+  控制绑定约束和原物理执行段；完整 SolvePlan、其他已选路线及 Vulkan 持久控制仍待接通，详见
   [AOT SDK 合同](aot_sdk.zh.md)；需匹配 private ABI 45。
 
 - AOT 可重建固定 CSR 资源与 f32 cuSPARSE SpMV，支持转置、i32/i64 拓扑和有序数值更新。

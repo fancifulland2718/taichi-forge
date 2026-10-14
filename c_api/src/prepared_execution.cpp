@@ -630,8 +630,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         const auto &predicate = array_binding(loop.predicate);
         if (predicate.scalar_type != PrimitiveType::i32 ||
             predicate.bytes != 4 || !predicate.element_shape.empty() ||
-            !(predicate.shape.empty() ||
-              predicate.shape == std::vector<std::uint64_t>{1}) ||
+            !std::all_of(predicate.shape.begin(), predicate.shape.end(),
+                         [](std::uint64_t extent) { return extent == 1; }) ||
             predicate.base_offset % 4)
           throw MemoryBindingError(
               "Loop predicate requires one aligned scalar i32 element");

@@ -86,10 +86,9 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations)
           dispatches.push_back(dispatch);
       } else {
         const auto &loop = std::get<std::shared_ptr<const While>>(operation);
-        if (!loop || !loop->predicate || loop->condition.empty() ||
-            loop->body.empty())
+        if (!loop || !loop->predicate || loop->body.empty())
           throw std::invalid_argument(
-              "Fixed CUDA while requires a predicate and nonempty regions");
+              "Fixed CUDA while requires a predicate and nonempty body");
         if (active_loops.count(loop.get()))
           throw std::invalid_argument(
               "Fixed CUDA control regions contain a cycle");
