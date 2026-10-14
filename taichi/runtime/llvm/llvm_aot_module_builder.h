@@ -20,6 +20,8 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
 
  protected:
   void add_per_backend(const std::string &identifier, Kernel *kernel) override;
+  const std::vector<int> &kernel_snode_tree_ids(
+      const std::string &identifier) const override;
   void add_per_backend_tmpl(const std::string &identifier,
                             const std::string &key,
                             Kernel *kernel) override;

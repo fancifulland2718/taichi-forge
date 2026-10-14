@@ -3765,6 +3765,17 @@ void export_lang(py::module &m) {
             return result;
           },
           py::arg("roots"), py::arg("arrays"))
+      .def("_snapshot_snode_tree_dependencies",
+           [](Program *program, const std::vector<int> &ids) {
+             py::list result;
+             for (const auto &dependency :
+                  program->snapshot_snode_tree_dependencies(ids)) {
+               result.append(py::make_tuple(dependency.tree_id,
+                                            dependency.generation,
+                                            dependency.layout_fingerprint));
+             }
+             return result;
+           })
       .def("copy_graph_observations_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {
@@ -5551,6 +5562,7 @@ void export_lang(py::module &m) {
       .def("add", &AotModuleBuilder::add)
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)
       .def("add_graph", &AotModuleBuilder::add_graph)
+      .def("_used_snode_tree_ids", &AotModuleBuilder::used_snode_tree_ids)
       .def("_add_initial_root_data",
            [](AotModuleBuilder *builder,
               const std::vector<std::tuple<int, uint64_t, std::string>> &entries) {

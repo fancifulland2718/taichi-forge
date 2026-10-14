@@ -368,7 +368,7 @@ Windows CPU/CUDA/Vulkan 已验证矩形前向/转置、嵌套 affine/compose/sum
 重新准备与生产/消费端退休。此处导出的是用户提供的显式伴随，不会自动生成 provider
 导数。默认 `update_policy="rebind"` 继续跟随兼容数值发布，导出不会静默把它冻结。
 `from_graph` 保留有序 dispatch、固定 i32 参数和原生 topology/numeric/workspace 角色。
-只读 provider 可按默认选项导出。provider workspace 可能包含非零、可变状态，需明确
+不依赖 Field 或可变 workspace 的 provider 可按默认选项导出。provider workspace 可能包含非零、可变状态，需明确
 选择在导出边界保存其当前内容：
 
 ```python
@@ -379,8 +379,23 @@ module.add_execution_plan("stateful_apply", graph, snapshot_state=True)
 前向、伴随及组合叶子共享的 allocation 只采样一次。每份消费准备独立分配并初始化数组，
 同一准备内部的别名仍指向同一资源。导出后生产端继续执行不会改变 artifact；重新准备
 从导出状态开始。JIT action 的固定代次仍共享 provider 活 workspace，本身不执行此状态
-快照；只有按声明重建的组合 scratch 才零初始化。该选项不会冻结活 SNode field，也不
-自动批准其他未支持的资源类型。
+快照；只有按声明重建的组合 scratch 才零初始化。
+
+普通 Graph 和固定代次 `from_graph(state=...)` 也可通过 `snapshot_state=True` 导出
+纯 dense Field 初值。导出以实际 AOT 编译入口的依赖为准，Field root 与所选 provider
+数组在同一次原生快照中读取。Field 的所有权是**模块**：同一加载模块的所有入口和
+prepared 调用共享、推进同一状态；重新 prepare 不会复位 Field。加载另一个模块实例
+才会创建独立初始状态。provider workspace 仍按上述合同由每份 prepared 独立持有。
+
+保存单位是实际引用的完整 SNodeTree，包括同树字段和布局 padding，不按 `state`
+字典的字段名拆分。布局与该后端产物配套，不转换跨后端字节布局；sparse、dynamic、
+bitpacked 等非纯 dense 存储继续拒绝。同一生产模块的重复导出可复用相同初值，冲突
+初值要求新建模块。编译后的定稿失败会禁止保存该生产模块，避免发布部分产物。
+含初值的 LLVM BC/PTX/cubin 使用 schema 7，GFX 使用 metadata 3；旧 runtime 必须
+升级配套组件。加载时校验数据并初始化一次，重放不添加状态上传或 copy kernel。
+Windows CPU/CUDA/Vulkan 已验证标量/向量 Field、真实 kernel.grad、共享 Field 与
+独立 workspace、多模块隔离、重复导出、错误载荷及 close/reset；完整 GeoPhys
+Field-backed SolvePlan 和任意原生 provider 的覆盖仍需分别验证。
 
 CPU/CUDA/Vulkan 测试覆盖多 dispatch 方阵及显式伴随 provider、非零状态、新旧数值发布、
 组合、独立消费者交错执行和退休。嵌套 block 通过公共 `ndarray_view` 资源重建公共端口、
@@ -388,8 +403,8 @@ Graph 私有数组及组合 scratch 上的连续视图；即使只有子视图�
 明确的父依赖。重复嵌入 Sequential 共享描述和存储，视图不增加 buffer 复制或 kernel 定义。
 CPU/CUDA/Vulkan 已验证矩形块、显式伴随、compose 内嵌 block、独立准备、数值发布，以及
 独立/借用消费端退休。既有 backend/provider 可录制性及 affine view 限制仍适用，不表示
-任意叶算子均可作为 block，也不自动生成导数。活 field 仍需重建合同。
-资源角色及一致快照要求配套 private ABI 46，不给消费端增加 provider 库依赖。
+任意叶算子均可作为 block，也不自动生成导数。
+本节自动导出要求配套 private ABI 50，不给消费端增加 provider 库依赖。
 
 kernel-backed f32 CG/PCG SolvePlan action 也可以保留完整已选程序，包括初始化、
 算子/预条件器调用、控制流、私有工作区及终端写回：
@@ -421,8 +436,9 @@ breakdown 标志及完成标记；metrics 为 f32，依次保存初始残差、�
 每份 prepared execution 独立拥有 scratch。CPU、CUDA conditional 和 Vulkan 单层
 测试覆盖双绑定、数值代次更新、零预算、初始收敛、提前结束、预算耗尽、breakdown、别名
 及 close/reset；同时验证对称算子的显式伴随求解和真实后续梯度 kernel，不表示自动微分
-动态求解器。活 field、尚未验证的 provider action、其他求解方法与专用控制路线仍需
-单独重建支持。涉及已有 provider workspace 导出时，仍按原合同要求 `snapshot_state=True`。
+动态求解器。Field-backed 完整求解仍需应用验证；尚未验证的 provider action、其他
+求解方法与专用控制路线仍需单独重建支持。涉及已有 provider workspace 或 dense Field
+状态导出时，要求 `snapshot_state=True`。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -1143,10 +1159,10 @@ Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重�
 Vulkan 模块可导出在 `Module()` 之后创建的 dense field，也可复用无关 field 创建前
 已编译的 kernel。归档只包含导出 kernel 或显式 `add_field()` 引用的布局；仅使用
 ndarray 的模块不保留 field 根存储。实际引用的树必须保持存活直到导出完成。该行为
-保留模块局部存储及显式梯度执行，不会保存生产端 field 内容，也不代表已支持
-operator 活 field 状态的自动导出。
+保留模块局部存储及显式梯度执行。普通 `add_kernel`/`add_graph` 不保存生产端 field
+内容；上述 `add_execution_plan(..., snapshot_state=True)` 可显式保存合格的 dense 状态。
 
-仅包含 dense field 与 serial/range task 的 CPU/CUDA bitcode 和 CUDA PTX 导出
+不含初值、仅包含 dense field 与 serial/range task 的 CPU/CUDA bitcode 和 CUDA PTX 导出
 使用 schema 5（`resource_binding="dense_v1"`）；CUDA cubin 使用 schema 6 和同一
 资源绑定合同。模块压紧所需资源闭包，在 field 分配前预留独立
 的 runtime ID。同一产物可在一个 runtime 中加载多份，前向和梯度存储彼此独立。

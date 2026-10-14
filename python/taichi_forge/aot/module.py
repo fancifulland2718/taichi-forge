@@ -454,9 +454,11 @@ class Module:
         Graph definition or device handle; the consumer binds arrays and records
         native execution at its cold boundary.
 
-        ``snapshot_state=True`` explicitly snapshots qualified provider workspace
-        at export. Each prepared consumer owns an independent initialized copy.
-        This does not export live fields or unsupported resource recipes.
+        ``snapshot_state=True`` snapshots qualified provider workspace and dense
+        Field roots at export. Provider workspace is private to each prepared
+        consumer; Field state is shared by all entries of one loaded module and
+        initialized once. Separate module instances isolate Field state. Changes
+        to an already exported root snapshot require a new producer module.
         """
         from taichi_forge_runtime.aot import ExecutionPlan
         from taichi_forge.graph._graph import Graph

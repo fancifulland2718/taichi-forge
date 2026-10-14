@@ -195,26 +195,92 @@ def test_pinned_from_graph_state_and_generation_export(tmp_path, monkeypatch):
         assert "cleanup failed" not in result.stdout + result.stderr
 
 
-@test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_pinned_from_graph_rejects_live_fields():
-    state = ti.field(ti.f32, shape=2)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_pinned_from_graph_live_field_and_workspace_snapshot(tmp_path, monkeypatch):
+    state = ti.field(ti.f32)
+    fields = ti.FieldsBuilder()
+    fields.dense(ti.i, 2).place(state)
+    tree = fields.finalize()
+    state.from_numpy(np.array([2, 3], np.float32))
     topology = _array(np.int32, [0, 1])
+    workspace = _array(np.float32, [5])
 
     @ti.kernel
-    def apply(t: ti.types.ndarray(ti.i32, 1), x: ti.types.ndarray(ti.f32, 1), y: ti.types.ndarray(ti.f32, 1)):
+    def apply(
+        t: ti.types.ndarray(ti.i32, 1),
+        w: ti.types.ndarray(ti.f32, 1),
+        x: ti.types.ndarray(ti.f32, 1),
+        y: ti.types.ndarray(ti.f32, 1),
+    ):
         for i in range(2):
-            y[i] = state[i] * x[t[i]]
+            y[i] = (state[i] + w[0]) * x[t[i]]
+
+    @ti.kernel
+    def tick(w: ti.types.ndarray(ti.f32, 1)):
+        for i in range(2):
+            state[i] += 1
+        w[0] += 2
 
     builder = ti.graph.GraphBuilder()
     builder.dispatch(
         apply,
         *(
             ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, dtype, ndim=1)
-            for name, dtype in (("t", ti.i32), ("input", ti.f32), ("output", ti.f32))
+            for name, dtype in (("t", ti.i32), ("w", ti.f32), ("input", ti.f32), ("output", ti.f32))
         ),
     )
+    builder.dispatch(tick, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "w", ti.f32, ndim=1))
     operator = ti.linalg.LinearOperator.from_graph(
-        builder.compile(), 2, topology={"t": topology}, state={"field": state}
+        builder.compile(), 2, topology={"t": topology}, workspace={"w": workspace}, state={"field": state}
     )
-    with pytest.raises(ti.TaichiRuntimeError, match="live fields"):
-        outer(operator, adjoint=False)
+    graph = outer(operator, adjoint=False)
+    arrays = {"x": _array(np.float32, [1, 2]), "y": ti.ndarray(ti.f32, 2)}
+    graph.run(arrays)
+    np.testing.assert_array_equal(arrays["y"].to_numpy(), [7, 16])
+    module = ti.aot.Module()
+    with pytest.raises(ti.TaichiRuntimeError, match="snapshot_state=True"):
+        module.add_execution_plan("missing_choice", graph)
+    assert not module._data_payloads and not module._exported_kernels
+    program = ti.lang.impl.get_runtime().prog
+    original = type(program)._snapshot_dense_state
+    calls = []
+
+    def snapshot(program, roots, arrays):
+        calls.append((len(roots), len(arrays)))
+        return original(program, roots, arrays)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Field and provider state must be sampled together")
+
+    before = ti.runtime.stats().transfer.device_to_host_bytes
+    with monkeypatch.context() as guard:
+        guard.setattr(type(program), "_snapshot_dense_state", snapshot)
+        guard.setattr(type(program), "copy_ndarrays_to_host", forbidden)
+        module.add_execution_plan("step", graph, snapshot_state=True)
+    assert calls == [(1, 2)]
+    assert ti.runtime.stats().transfer.device_to_host_bytes - before == 20
+    graph.run(arrays)
+    np.testing.assert_array_equal(arrays["y"].to_numpy(), [10, 22])
+    artifact = tmp_path / "field-provider.tcm"
+    module.archive(str(artifact))
+    tree.destroy()
+    with pytest.raises((ti.TaichiRuntimeError, RuntimeError), match="destroyed|stale|invalid"):
+        graph.run(arrays)
+    graph.close()
+    arch = "cpu" if ti.lang.impl.current_cfg().arch == ti.cpu else ti.lang.impl.current_cfg().arch.name
+    for mode in ("standalone", "borrowed"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                *(["-S"] if mode == "standalone" else []),
+                str(Path(__file__).with_name("aot_dense_pinned_graph_probe.py")),
+                mode,
+                arch,
+                str(artifact),
+            ],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr

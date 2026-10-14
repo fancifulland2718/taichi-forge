@@ -56,12 +56,22 @@ class AotModuleBuilder {
   // Producer IDs are relocated by dump(). Reject conflicting re-snapshots.
   void add_initial_root_data(const std::vector<aot::InitialRootData> &entries);
 
+  // Exact dependencies of selected compiled exports, in producer tree IDs.
+  std::vector<int> used_snode_tree_ids(
+      const std::vector<std::string> &entries) const;
+
  protected:
   /**
    * Intended to be overridden by each backend's implementation.
    */
   virtual void add_per_backend(const std::string &identifier,
                                Kernel *kernel) = 0;
+  virtual const std::vector<int> &kernel_snode_tree_ids(
+      const std::string &identifier) const {
+    TI_ERROR("AOT dependency inspection is unsupported by this backend.");
+    static const std::vector<int> empty;
+    return empty;
+  }
   virtual void add_field_per_backend(const std::string &identifier,
                                      const SNode *rep_snode,
                                      bool is_scalar,

@@ -232,6 +232,14 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   dump_graph(output_dir);
 }
 
+const std::vector<int> &LlvmAotModuleBuilder::kernel_snode_tree_ids(
+    const std::string &identifier) const {
+  const auto found = cache_.kernels.find(identifier);
+  TI_ERROR_IF(found == cache_.kernels.end(), "Unknown AOT kernel export '{}'.",
+              identifier);
+  return found->second.used_snode_tree_ids;
+}
+
 void LlvmAotModuleBuilder::add_per_backend(const std::string &identifier,
                                            Kernel *kernel) {
   auto compiled = compile_kernel(kernel);

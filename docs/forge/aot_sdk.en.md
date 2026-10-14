@@ -457,7 +457,7 @@ producer/consumer retirement. This exports an explicitly supplied adjoint, not a
 automatically generated provider derivative. The default `update_policy="rebind"`
 continues to follow compatible publications and is not silently frozen by export.
 `from_graph` preserves its ordered dispatches, fixed i32 parameters and native
-topology/numeric/workspace roles. Read-only providers export with the default
+topology/numeric/workspace roles. Providers without Fields or mutable workspace export with the default
 options. A provider workspace can hold nonzero, mutable state; explicitly choose
 its current contents at the export boundary:
 
@@ -472,8 +472,30 @@ arrays; aliases within that preparation keep referring to the same resource.
 Later producer execution cannot change the artifact, and preparing it again
 starts from the exported state. Pinning a JIT action still shares its provider's
 live workspace; it does not take this state snapshot. Only declared composition
-scratch uses zero initialization. The flag does not freeze live SNode fields or
-qualify unsupported resource types.
+scratch uses zero initialization.
+
+Ordinary Graphs and pinned `from_graph(state=...)` operators can also export pure
+dense Field initial state with `snapshot_state=True`. The actual compiled AOT
+entries select the dependency closure; their roots and selected provider arrays
+are read in one native snapshot. Fields belong to the **module**: all entries and
+prepared calls of one loaded module share and advance the same state. Preparing
+again does not reset Fields. Loading another module instance creates independent
+initial state. Provider workspace remains private to each prepared call.
+
+Snapshots contain each referenced complete SNodeTree, including colocated fields
+and layout padding, rather than splitting storage by names in the `state` mapping.
+Bytes use the artifact's backend layout; export does not translate between backend
+layouts. Sparse, dynamic, bitpacked and other non-dense storage remain unsupported.
+Repeated export into one producer module can reuse identical initial state;
+conflicting state requires a new module. Finalization failures after compilation
+prevent saving that producer module, so partial artifacts cannot be published.
+Artifacts with initial roots require LLVM schema 7 for BC/PTX/cubin or GFX metadata
+3 and matching newer runtime components. Loading validates and initializes the data
+once; replay adds no state uploads or copy kernels. Windows CPU/CUDA/Vulkan tests
+cover scalar/vector Fields, real kernel.grad, shared Fields with private workspace,
+independent modules, repeated exports, bad payloads and close/reset. Complete
+GeoPhys Field-backed SolvePlans and arbitrary native providers still need their
+own qualification.
 
 CPU/CUDA/Vulkan tests cover multi-dispatch square and explicit-adjoint providers,
 nonzero state, old/new numeric publications, compositions, interleaved independent
@@ -485,9 +507,9 @@ add no buffer copies or kernel definitions. CPU/CUDA/Vulkan tests cover rectangu
 blocks, explicit adjoints, blocks inside compositions, independent preparations,
 numeric publications and retirement in standalone and borrowed consumers. Existing
 backend/provider recordability and affine-view restrictions still apply; this does
-not qualify arbitrary block leaves or add automatic derivatives. Live fields still
-need reconstruction contracts. Resource roles and coherent snapshots require
-matching private ABI 46 components; no provider library is added to the consumer.
+not qualify arbitrary block leaves or add automatic derivatives. Automatic export
+in this section requires matching private ABI 50 components; no provider library
+is added to the consumer.
 
 Kernel-backed f32 CG/PCG SolvePlan actions can also retain their complete selected
 program, including initialization, operator/preconditioner calls, control, private
@@ -527,10 +549,11 @@ Each prepared execution owns its scratch. Tests cover CPU, CUDA conditional and
 flat Vulkan control, independent bindings, numeric generation changes, zero budget,
 initial convergence, early exit, budget exhaustion, breakdown, aliases and close/reset.
 They include an explicit symmetric adjoint solve and real downstream gradient
-kernels; this does not differentiate the dynamic solver automatically. Live fields,
-unqualified provider actions, other solver methods and specialized control routes
-still require separate reconstruction support. Existing provider workspace exports
-continue to require `snapshot_state=True` where applicable.
+kernels; this does not differentiate the dynamic solver automatically. Complete
+Field-backed solves still need application qualification; unqualified provider
+actions, other solver methods and specialized control routes need separate
+reconstruction support. Provider workspace and dense Field state exports require
+`snapshot_state=True` where applicable.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -1450,9 +1473,11 @@ compiled before unrelated fields were created. The archive includes only layouts
 referenced by exported kernels or explicit `add_field()` entries; ndarray-only
 modules retain no field roots. Referenced trees must remain active until export
 finishes. This preserves module-local storage and explicit gradient execution;
-it does not snapshot producer field contents or export live operator field state.
+ordinary `add_kernel`/`add_graph` exports do not snapshot producer field contents.
+The `add_execution_plan(..., snapshot_state=True)` path described above explicitly
+exports qualified dense state.
 
-CPU/CUDA bitcode and CUDA PTX exports containing only dense fields and
+Without initial state, CPU/CUDA bitcode and CUDA PTX exports containing only dense fields and
 serial/range tasks use schema 5 (`resource_binding="dense_v1"`); CUDA cubin uses
 schema 6 with the same resource binding. The module compacts its required resource
 closure and reserves independent runtime IDs before field allocation. Two
@@ -1521,7 +1546,7 @@ The tested producer uses LLVM 20.1.7 and ptxas 13.3.73 on Windows, targeting
 `sm_120`/PTX 8.7, with an RTX 5090 consumer. This does not require every producer
 to use that exact ptxas patch version.
 
-Cubins use schema 6, recording payload/ABI/resource checksums and assembler
+Cubins without initial root state use schema 6, recording payload/ABI/resource checksums and assembler
 identity. Payloads load on demand and are released with the module; missing or
 damaged files do not fall back to PTX or bitcode. The loader requires the same
 compute-capability major and an equal or higher minor. This is narrower than

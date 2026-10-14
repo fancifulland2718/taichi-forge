@@ -34,6 +34,15 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Ordinary Graphs and pinned `from_graph` operators can automatically export pure
+  dense Field initial state with `snapshot_state=True`, sampling actual AOT root
+  dependencies together with provider arrays. Fields are shared by a loaded
+  module; provider workspace remains private to each prepared call. Re-preparation
+  does not reset Fields. Three-backend tests cover forward/real kernel.grad,
+  module isolation and failure cleanup. Initial-state artifacts require LLVM
+  schema 7 / GFX metadata 3 and matching private ABI 50 components; complete
+  GeoPhys Field-backed solver qualification remains separate.
+
 - Kernel-backed f32 CG/PCG SolvePlan Graph actions support explicit
   `update_policy="pinned"` and AOT export of selected operator/preconditioner
   generations, private scratch, control and terminal state. CPU/CUDA/Vulkan

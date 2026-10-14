@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 普通 Graph 和固定代次 `from_graph` 可用 `snapshot_state=True` 自动导出纯 dense
+  Field 初值，按实际 AOT 入口依赖与 provider 数组一起采样。Field 由加载模块共享，
+  provider workspace 仍由每份 prepared 独立持有；重录制不重置 Field。三后端验证
+  前向/真实 kernel.grad、多模块隔离及异常清理。含初值产物需要 LLVM schema 7 / GFX
+  metadata 3 和配套 private ABI 50；不代表完整 GeoPhys Field-backed solver 已获资格。
+
 - kernel-backed f32 CG/PCG SolvePlan Graph action 新增显式 `update_policy="pinned"`，
   可将已选算子/预条件器代次、私有 scratch、控制流和终端状态一起导出 AOT。
   CPU/CUDA/Vulkan 消费端保留向量布局、别名规则及独立 prepared 存储；默认活数值

@@ -27,6 +27,10 @@ class _ExportContext:
         self._readonly_data_owners = {}
         self.resources = []
         self.kernels = {}
+        self._used_kernel_entries = set()
+        self._state_dependencies = {}
+        self.root_dependencies = ()
+        self.root_payloads = ()
         self._resource_owners = {}
         self._indices = {}
         self._names = set(reserved_names) | set(module._exported_kernels)
@@ -198,22 +202,47 @@ class _ExportContext:
         self.private_bindings[name] = owner
         self._private_names[name] = resource
 
-    def materialize_provider_data(self):
-        """Complete and read all selected allocations under one submission lock."""
+    def field_state(self, dependencies):
+        """Retain source lifetime proofs; the compiled AOT closure selects bytes."""
+        for dependency in dependencies:
+            if not self.snapshot_state:
+                raise TaichiRuntimeError("AOT live Field state requires explicit snapshot_state=True at export")
+            dependency = tuple(dependency)
+            previous = self._state_dependencies.setdefault(dependency[0], dependency)
+            if previous != dependency:
+                raise TaichiRuntimeError("AOT Graph has conflicting Field lifetime dependencies")
+
+    def materialize_provider_data(self, module):
+        """Sample exact compiled roots and selected provider arrays together."""
         import numpy as np
 
         from taichi_forge.lang import impl
         from taichi_forge.lang.util import to_numpy_type
 
         pending = tuple(self._provider_data.values())
+        arrays = [owner.arr for owner, _, _, _ in pending]
+        program = impl.get_runtime().prog
+        ids = module._aot_builder._used_snode_tree_ids(sorted(self._used_kernel_entries))
+        dependencies = tuple(program._snapshot_snode_tree_dependencies(ids))
+        if dependencies:
+            if not self.snapshot_state:
+                raise TaichiRuntimeError("AOT compiled Field state requires explicit snapshot_state=True at export")
+            for dependency in dependencies:
+                expected = self._state_dependencies.get(dependency[0])
+                if expected is not None and expected != tuple(dependency):
+                    raise TaichiRuntimeError("AOT compiled Field lifetime changed during export")
+            snapshot = program._snapshot_dense_state(dependencies, arrays)
+            self.root_dependencies, self.root_payloads = dependencies, snapshot["roots"]
+            for (owner, name, dtype, shape), data in zip(pending, snapshot["arrays"]):
+                self.data_resource(owner, data, dtype=dtype, shape=shape, name=name)
+            return
         if not pending:
             return
-        arrays = [owner.arr for owner, _, _, _ in pending]
         hosts = [
             np.empty(shape, dtype=to_numpy_type(array.element_data_type()))
             for array, (_, _, _, shape) in zip(arrays, pending)
         ]
-        impl.get_runtime().prog.copy_ndarrays_to_host(arrays, hosts, snapshot=True)
+        program.copy_ndarrays_to_host(arrays, hosts, snapshot=True)
         for (owner, name, dtype, shape), host in zip(pending, hosts):
             self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, name=name)
 
@@ -314,6 +343,7 @@ class _ExportContext:
             name = self._name("kernel")
             self._kernel_names[id(kernel)] = name
             self.kernels[name] = kernel
+        self._used_kernel_entries.add(name)
         operation = dict(kind="kernel", entry=name, arguments=[self.kernel_binding(arg) for arg in args])
         if label:
             operation["label"] = label
@@ -462,6 +492,7 @@ def _node(context, node):
         return
     if not isinstance(node, _CompiledCGraphNode):
         raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct {type(node).__name__} yet")
+    context.field_state(node.snode_tree_dependency_info)
     if (
         node.parallel_dispatch_groups
         or node.temporary_actions
@@ -571,7 +602,6 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False):
             for lease in spec.lifetime_leases
         ):
             raise TaichiRuntimeError("AOT execution Graph requires the selected binding validation recipe")
-        context.materialize_provider_data()
         mapped_gradients = {}
         for primal, gradient in (gradients or {}).items():
             if primal in context._scalar_values or gradient in context._scalar_values:
@@ -582,28 +612,35 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False):
             mapped_gradients[primal] = gradient
         from ._graph_constraints import export_constraints
 
-        plan = ExecutionPlan(
-            context.operations,
-            initialization=context.initialization or None,
-            resources=context.resources,
-            gradients=mapped_gradients or None,
-            constraints=export_constraints(spec, context.binding, additional=context.binding_constraints) or None,
-        )
-        # An opaque provider workspace must not accidentally become a public
-        # input to some other kernel. Resource recipes must cover the full use.
-        if set(plan.argument_names) != set(spec.runtime_arg_names) | (gradient_names - context.private_bindings.keys()):
-            raise TaichiRuntimeError("AOT Graph reconstruction changed the public binding contract")
-        for key in plan.data_entries:
-            if key not in context.data_payloads:
-                raise TaichiRuntimeError("AOT Graph reconstruction omitted an initial data payload")
-            if key in module._data_payloads and module._data_payloads[key] != context.data_payloads[key]:
-                raise ValueError("AOT data digest collision")
+        constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
         try:
             for name, kernel in context.kernels.items():
                 module._aot_builder.add(name, kernel)
+            # A different AOT compile request can retain a different Field
+            # closure than the selected JIT graph. Inspect the actual exports,
+            # then sample roots/provider arrays at one completion boundary.
+            context.materialize_provider_data(module)
+            plan = ExecutionPlan(
+                context.operations,
+                initialization=context.initialization or None,
+                resources=context.resources,
+                gradients=mapped_gradients or None,
+                constraints=constraints or None,
+            )
+            # Provider workspace must not accidentally become a public input.
+            if set(plan.argument_names) != set(spec.runtime_arg_names) | (
+                gradient_names - context.private_bindings.keys()
+            ):
+                raise TaichiRuntimeError("AOT Graph reconstruction changed the public binding contract")
+            for key in plan.data_entries:
+                if key not in context.data_payloads:
+                    raise TaichiRuntimeError("AOT Graph reconstruction omitted an initial data payload")
+                if key in module._data_payloads and module._data_payloads[key] != context.data_payloads[key]:
+                    raise ValueError("AOT data digest collision")
+            module._add_initial_root_snapshots(context.root_dependencies, context.root_payloads)
         except Exception:
-            # Backend builders do not support rollback of successful preceding
-            # kernel compilations. Never publish a partially compiled archive.
+            # Builders cannot roll back compiled entries. Finalization failures
+            # also forbid publication, even if earlier kernels compiled.
             module._graph_export_failed = True
             raise
         module._exported_kernels.update(context.kernels)

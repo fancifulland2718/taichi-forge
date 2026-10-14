@@ -157,6 +157,14 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
   }
 }
 
+const std::vector<int> &AotModuleBuilderImpl::kernel_snode_tree_ids(
+    const std::string &identifier) const {
+  const auto found = kernel_names_.find(identifier);
+  TI_ERROR_IF(found == kernel_names_.end(), "Unknown AOT kernel export '{}'.",
+              identifier);
+  return ti_aot_data_.kernel_metadata[found->second].used_snode_tree_ids;
+}
+
 void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
                                            Kernel *kernel) {
   add_compiled_kernel(identifier, kernel);

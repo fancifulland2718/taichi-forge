@@ -2,6 +2,8 @@
 #include "taichi/aot/graph_artifact.h"
 #include "taichi/program/kernel.h"
 
+#include <set>
+
 namespace taichi::lang {
 
 void AotModuleBuilder::add(const std::string &identifier, Kernel *kernel) {
@@ -42,6 +44,16 @@ bool AotModuleBuilder::all_fields_are_dense_in_container(
     return false;
   }
   return true;
+}
+
+std::vector<int> AotModuleBuilder::used_snode_tree_ids(
+    const std::vector<std::string> &entries) const {
+  std::set<int> ids;
+  for (const auto &name : entries) {
+    const auto &dependencies = kernel_snode_tree_ids(name);
+    ids.insert(dependencies.begin(), dependencies.end());
+  }
+  return {ids.begin(), ids.end()};
 }
 
 void AotModuleBuilder::add_initial_root_data(

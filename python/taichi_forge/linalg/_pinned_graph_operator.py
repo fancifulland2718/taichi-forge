@@ -18,11 +18,12 @@ from taichi_forge.linalg._runtime import (
 
 
 def _qualify_pinned_source(source):
-    """Retain authoritative resource roles; live fields need a separate recipe."""
+    """Retain authoritative resource roles and live Field lifetime proofs."""
     pending = [source]
     roles = {}
     view_sources = []
     derived = set()
+    state_dependencies = {}
     while pending:
         executable = pending.pop()
         if type(executable) is _LinearOperatorCompositionGraphExecutable:
@@ -34,8 +35,11 @@ def _qualify_pinned_source(source):
                 derived.update(item[0] for item in executable._block_bindings)
         elif type(executable) is _LinearOperatorGraphExecutable:
             record = executable._record
-            if record._state_dependencies:
-                raise TaichiRuntimeError("Pinned symbolic operator live fields require a reconstruction contract")
+            for dependency in record._state_dependencies:
+                dependency = tuple(dependency)
+                previous = state_dependencies.setdefault(dependency[0], dependency)
+                if previous != dependency:
+                    raise TaichiRuntimeError("Pinned symbolic operator Field dependencies conflict")
             graph_roles = dict(record._fixed_ndarray_roles)
             for name, (kind, original) in executable._fixed_binding_sources.items():
                 if kind in ("active_size", "i32"):
@@ -50,14 +54,14 @@ def _qualify_pinned_source(source):
             raise TaichiRuntimeError("Pinned symbolic operator provider requires an explicit generation contract")
     if derived != {binding.name for binding in source.derived_runtime_arg_schema}:
         raise TaichiRuntimeError("Pinned symbolic operator derived views require a reconstruction contract")
-    return roles, tuple(view_sources)
+    return roles, tuple(view_sources), tuple(state_dependencies.values())
 
 
 class PinnedOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
     def __init__(self, operator, input_arg, output_arg, adjoint):
         self._init_graph_ports(operator, input_arg, output_arg, adjoint)
         source = operator.graph_action(input_arg, output_arg, adjoint=adjoint).compile()
-        self._provider_roles, self._view_sources = _qualify_pinned_source(source)
+        self._provider_roles, self._view_sources, self._state_dependencies = _qualify_pinned_source(source)
         prepared = source._bind_provider_generation()
         action = source.recordable_action
         if not prepared.replacements.keys() <= action.fixed_bindings.keys():
@@ -134,6 +138,7 @@ class PinnedOperatorGraphExecutable(_OperatorGraphPorts, NativeGraphExecutable):
         from taichi_forge.graph._graph import GraphOwnedNdarray
 
         self.validate_graph_lifetime()
+        context.field_state(self._state_dependencies)
         for name, owner in self._action.fixed_bindings.items():
             if isinstance(owner, ProviderOwnedNdarrayBinding):
                 role = self._provider_roles.get(name)
