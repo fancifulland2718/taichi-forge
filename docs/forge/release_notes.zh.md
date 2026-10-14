@@ -40,8 +40,9 @@
 - AOT 显式执行描述支持持久 `while`：CPU 准备原生循环，CUDA 将前段、首次条件、
   循环和后段组装为一个根图。循环体不按预算展开，支持嵌套和 64 位预算。
   Graph 可自动导出 CPU 精确循环及 CUDA 已选 conditional 路线，保留私有资源、
-  控制绑定约束和原物理执行段；完整 SolvePlan、其他已选路线及 Vulkan 持久控制仍待接通，详见
-  [AOT SDK 合同](aot_sdk.zh.md)；需匹配 private ABI 45。
+  控制绑定约束和原物理执行段。Vulkan 可导出已选单层 native 循环的分块和策略，
+  复用录制核心，把前段、分块和后段合入一次队列提交。完整 SolvePlan 及其他已选路线
+  仍单独推进，详见 [AOT SDK 合同](aot_sdk.zh.md)；需匹配 private ABI 46。
 
 - AOT 可重建固定 CSR 资源与 f32 cuSPARSE SpMV，支持转置、i32/i64 拓扑和有序数值更新。
   捕获操作各自持有预处理状态，与 JIT 共用执行核心。根级 `CusparseSpmvRecording`
@@ -51,7 +52,7 @@
 - cuSPARSE 通用 CSR/COO、稠密/稀疏向量 descriptor 及 CSR 尺寸查询已匹配官方的
   有符号 64 位尺寸 ABI，修正动态调用中的截断。此项不扩大公开 `SparseMatrix`
   的索引/存储合同，也不表示完整 cuSPARSE AOT 已覆盖；需匹配 Python/native
-  组件（private ABI 45）。
+  组件（private ABI 46）。
 
 - runtime wheel 现提供仅依赖标准库的 `taichi_forge_runtime.aot` 消费入口，与 JIT
   共用原生库。普通 AOT kernel/CGraph 可显式准备为 CPU 批次、CUDA Graph 或 Vulkan

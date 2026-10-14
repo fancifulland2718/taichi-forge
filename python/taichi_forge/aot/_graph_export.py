@@ -373,6 +373,48 @@ def _while(context, node):
     from taichi_forge.lang import impl
 
     arch = impl.current_cfg().arch
+    if arch == core.Arch.vulkan:
+        from taichi_forge.graph._graph import _vulkan_compound_strategy_codes
+
+        if node._has_nested_control or not node.supports_native_submission:
+            raise TaichiRuntimeError("AOT Graph requires its selected Vulkan control recipe")
+        if not node.max_iterations:
+            _node(context, node._condition)
+            return
+        selected = node._vulkan_structured
+        if selected is None or selected.physical_dispatch_count != selected.dispatch_count:
+            raise TaichiRuntimeError("AOT Vulkan control requires its selected dispatch boundaries")
+        operations = context.region(_node, selected)
+        boundary = node.condition_dispatch_count
+        if not 0 < boundary < len(operations) or any(op["kind"] != "kernel" for op in operations):
+            raise TaichiRuntimeError("AOT Vulkan control requires flat selected kernel regions")
+        # Freeze the same strategy selection used by native submission. The
+        # consumer never reads producer environment variables or reselects it.
+        strategies = _vulkan_compound_strategy_codes(node.compound_chunk_count, node.vulkan_first_chunk_strategy)
+        names = ("compact", "compact", "chained", "conditional", "coarse_conditional")
+        lowering = dict(
+            kind="vulkan_structured",
+            version=1,
+            counter=context.binding(node.counter),
+            chunks=[
+                dict(iterations=count, strategy=names[strategy])
+                for count, strategy in zip(node._vulkan_chunk_iterations, strategies, strict=True)
+            ],
+        )
+        if node.status is not None:
+            lowering["status"] = context.binding(node.status)
+        context.operations.extend(operations[:boundary])
+        context.operations.append(
+            dict(
+                kind="while",
+                predicate=context.binding(node.predicate),
+                max_iterations=node.max_iterations,
+                condition=[],
+                body=operations[boundary:],
+                lowering=lowering,
+            )
+        )
+        return
     if arch == core.Arch.cuda:
         if node._has_nested_control:
             raise TaichiRuntimeError("AOT Graph requires its selected nested CUDA control recipe")

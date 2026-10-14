@@ -47,9 +47,11 @@ lifetimes. The entries below describe the changes.
   loop and suffix in one root graph. Bodies are not unrolled by the budget;
   nesting and 64-bit budgets are supported. Graph export preserves exact CPU
   loops and selected CUDA conditional code, private resources and control binding
-  constraints. Complete SolvePlan export, other selected routes and Vulkan
-  persistent control remain separate work. See the
-  [AOT SDK contract](aot_sdk.en.md); matching private ABI 45 is required.
+  constraints. Vulkan exports selected flat native loops with their chunk and
+  strategy recipe, using the shared recording core and one queue submission for
+  prefix, chunks and suffix. Complete SolvePlan and other selected routes remain
+  separate work. See the [AOT SDK contract](aot_sdk.en.md); matching private ABI 46
+  is required.
 
 - AOT can reconstruct fixed CSR resources and f32 cuSPARSE SpMV, including
   transpose, i32/i64 topology and ordered coefficient updates. Each captured
@@ -62,7 +64,7 @@ lifetimes. The entries below describe the changes.
   vendor's signed 64-bit extent ABI, including CSR extent queries. This fixes
   narrowing in the dynamic calls; it does not expand the public `SparseMatrix`
   index/storage contract or claim full cuSPARSE AOT coverage. Use matching
-  Python/native components (private ABI 45).
+  Python/native components (private ABI 46).
 
 - The runtime wheel now includes a stdlib-only `taichi_forge_runtime.aot`
   consumer sharing JIT's native library. Ordinary AOT kernels and CGraphs can

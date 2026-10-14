@@ -223,12 +223,36 @@ plan = ExecutionPlan([loop])
 循环，保留编译后的 body+condition 段、首次条件及前后段，不重新生成源定义或重复
 末尾条件计算。控制数组的标量形状及互不别名约束一并保存；父 Sequential 嵌入、
 私有控制资源、状态与显式伴随已有小规模验证。CUDA 已选 masked、device-update
-或嵌套专用路线仍需自己的持久执行合同，导出会拒绝隐式替换；完整 SolvePlan 和
-Vulkan 持久控制仍待接通。Vulkan 在 prepare 明确拒绝。需要 host 同步的 CUDA
+或嵌套专用路线仍需自己的持久执行合同，导出会拒绝隐式替换；完整 SolvePlan
+仍单独推进。需要 host 同步的 CUDA
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
 循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
 规则退休相关执行。CPU/CUDA 小用例验证了嵌套、零轮、提前结束、预算耗尽和显式导出的
-后段梯度；这不表示支持对任意动态循环自动微分。需匹配 private ABI 45。
+后段梯度；这不表示支持对任意动态循环自动微分。需匹配 private ABI 46。
+
+Vulkan 可导出已选的单层 native 循环，使用版本 4 的 `lowering` 描述：
+
+```python
+loop["lowering"] = dict(
+    kind="vulkan_structured", version=1, counter="counter", status="status",
+    chunks=[dict(iterations=500, strategy="compact"),
+            dict(iterations=500, strategy="coarse_conditional")],
+)
+```
+
+这只是格式示例，不是分块尺寸建议；已有 Graph 时优先保留其自动导出的方案。
+各块迭代数之和必须等于循环预算。单块原生描述使用 uint32 迭代数；格式不设八块或
+512 轮上限，prepare 另检查所选后端录制资格。策略显式为 `compact`、`chained`、
+`conditional` 或 `coarse_conditional`，消费端不随环境变量重新选择；条件策略要求
+设备支持。counter 与可选 status 和 predicate 一样为单个标量 i32，控制缓冲必须
+互不别名。此描述要求非零谓词继续执行及平坦的纯 kernel 区域；嵌套或未具备资格的
+Vulkan 路线明确拒绝，不替换为 host 循环。未附所选方案的通用 while 仍不能在 Vulkan 执行。
+
+Vulkan 与 JIT 复用录制核心，将前段、有序循环分块和后段合入一次队列提交。prepare
+不执行数学工作，重放不重绑描述符、不读回设备条件。序列化 body 和 shader 定义共享，
+原生命令及控制存储则随所编码的分块预算变化；prepared 统计将参数字节与控制工作区
+分开。独立及借用 runtime 的小用例覆盖零轮/提前结束/预算耗尽、首次条件副作用、
+策略冻结、双绑定、私有缓冲、显式伴随和在途退休。
 
 `add_execution_plan(name, graph, gradients=None)` 也可接收已编译的 Forge Graph，
 自动把引用的 kernel 特化及已具备重建合同的 native recording 导出为同一种执行描述，
@@ -276,7 +300,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 45。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 46。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -314,7 +338,7 @@ Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 45。
+仍需自己的重建合同。需配套 private ABI 46。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -365,7 +389,7 @@ Graph 私有数组及组合 scratch 上的连续视图；即使只有子视图�
 CPU/CUDA/Vulkan 已验证矩形块、显式伴随、compose 内嵌 block、独立准备、数值发布，以及
 独立/借用消费端退休。既有 backend/provider 可录制性及 affine view 限制仍适用，不表示
 任意叶算子均可作为 block，也不自动生成导数。活 field 与 SolvePlan 控制仍需重建合同。
-资源角色及一致快照要求配套 private ABI 45，不给消费端增加 provider 库依赖。
+资源角色及一致快照要求配套 private ABI 46，不给消费端增加 provider 库依赖。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -443,7 +467,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 45）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 46）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
@@ -504,7 +528,7 @@ resources = [
 kernel、copy、fill 和合格的原生操作使用所选范围。显式梯度绑定可以指向独立视图，
 其父数组与偏移可与 primal 不同；导出的 kernel 仍须声明相应梯度 ABI。CPU/CUDA/Vulkan
 测试覆盖实际 `.grad`、嵌套视图、tensor 元素、reshape、空视图、原生 sort、别名拒绝和
-退休。视图本身不增加设备分配或重放复制。需配套 private ABI 45。此公共资源能力与
+退休。视图本身不增加设备分配或重放复制。需配套 private ABI 46。此公共资源能力与
 operator derived view 的自动导出分别接入。
 
 计划可以将一次性初始化与重放分开：
@@ -705,7 +729,7 @@ AXPY/SCAL 接受有限 f32 的 `alpha` 参数（默认 1），或形状为 `()` 
 设备系数变化、共享 HOST/DEVICE pointer mode、视图、非法绑定回滚、空输入和退休。
 导出的 energy/反向 kernel 与显式向量伴随核对梯度，不提供外部操作的自动微分。
 测试用小规模数据执行 64 位入口，未验证数十亿元素分配或旧 vendor 库兼容性。
-需配套 private ABI 45。本项为持久计划提供可复用操作；全部 solver 或 JIT recording
+需配套 private ABI 46。本项为持久计划提供可复用操作；全部 solver 或 JIT recording
 自动导出仍需各自的合同。
 
 原生资源在 `resources` 中使用同一注册式外壳，另加 `name`。CUDA 的

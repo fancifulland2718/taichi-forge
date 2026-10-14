@@ -12,7 +12,7 @@ from tests import test_utils
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_aot_selected_while_graph(tmp_path):
+def test_aot_selected_while_graph(tmp_path, monkeypatch):
     arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
     if arch in ("x64", "arm64"):
         arch = "cpu"
@@ -142,20 +142,24 @@ def test_aot_selected_while_graph(tmp_path):
             carried_state=(args["state"],),
             max_iterations=budget,
             lowering_mode="auto" if arch == "cpu" else "native_required",
+            chunk_size=2 if arch == "vulkan" else None,
         )
 
     module = ti.aot.Module()
     cases = [("step", 4, False), ("private", 4, True), ("zero", 0, True)]
     if arch == "cpu":
         cases.append(("nested", 4, True))
+    if arch == "vulkan":
+        cases.append(("chained", 4, True))
+        if ti.graph.structured_control_capabilities()["device_control"]["conditional_rendering_available"]:
+            cases.extend((name, 4, True) for name in ("conditional", "coarse_conditional"))
     for name, budget, private in cases:
-        graph = make_graph(budget, private, nested=name == "nested")
         if arch == "vulkan":
-            with pytest.raises(ti.TaichiRuntimeError, match="selected backend control recipe"):
-                module.add_execution_plan(name, graph)
-            assert not module._exported_kernels and not module._execution_plans and not module._graph_export_failed
-            graph.close()
-            return
+            monkeypatch.setenv(
+                "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY",
+                name if name in ("chained", "conditional", "coarse_conditional") else "auto",
+            )
+        graph = make_graph(budget, private, nested=name == "nested")
         plan = module.add_execution_plan(name, graph)
         kernel_count = len(module._exported_kernels)
         module.add_execution_plan(name + "_again", graph)
@@ -165,6 +169,11 @@ def test_aot_selected_while_graph(tmp_path):
         assert len(loops) == int(budget != 0)
         if loops:
             assert loops[0]["condition"] == []
+            if arch == "vulkan":
+                assert document["version"] == 4
+                assert [c["iterations"] for c in loops[0]["lowering"]["chunks"]] == [2, 2]
+                if name in ("chained", "conditional", "coarse_conditional"):
+                    assert {c["strategy"] for c in loops[0]["lowering"]["chunks"]} == {name}
             if name == "nested":
                 assert any(op["kind"] == "while" for op in loops[0]["body"])
             else:
@@ -190,7 +199,7 @@ def test_aot_selected_while_graph(tmp_path):
         command = [sys.executable] + (["-S"] if mode == "standalone" else [])
         result = subprocess.run(
             [*command, str(Path(__file__).with_name("aot_while_graph_probe.py")), mode, arch, str(artifact)],
-            env=os.environ.copy(),
+            env=dict(os.environ, TI_GRAPH_VULKAN_STRUCTURED_STRATEGY="invalid-in-consumer"),
             capture_output=True,
             text=True,
             timeout=90,
