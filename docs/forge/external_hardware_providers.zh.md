@@ -388,7 +388,9 @@ print(ti.hardware.probe("cufft"))
 CSR SpMV 使用共用原生计划，独立拥有 matrix/vector descriptor 和预处理 workspace。
 计划借用 CSR 缓冲；准备或退休计划不会复制或释放这些缓冲。资源报告单独计入计划的
 matrix descriptor 与源存储 descriptor。JIT 矩阵仍缓存其计划，算法和值更新行为保持。
-此共用核心是重建基础；实际已支持的持久导出操作以 [AOT SDK 合同](aot_sdk.zh.md) 为准。
+AOT 通过同一核心重建固定 CSR 资源与 f32 SpMV，支持转置和有序数值更新。索引、寿命
+与准备要求见 [AOT SDK 合同](aot_sdk.zh.md)；JIT recording 自动导出与其余 cuSPARSE
+操作家族仍需独立接入。
 
 ### cuDSS 0.8.x
 

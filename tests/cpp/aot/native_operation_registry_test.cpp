@@ -22,6 +22,37 @@ struct ConflictingDescriptor {
   static constexpr std::uint32_t version = TestDescriptor::version;
 };
 
+TEST(NativeOperationRegistry, CsrDescriptionsDecodeWithoutLoadingProvider) {
+  const auto &registry = native_operation_registry();
+  auto matrix = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cusparse","operation":"csr_f32","version":1,
+      "parameters":{"rows":8589934609,"columns":17},
+      "bindings":{"row_offsets":"r","column_indices":"c","values":"v"}})"));
+  EXPECT_EQ(registry.decode(matrix, NativeObjectKind::resource).kind(),
+            "cusparse_csr_f32");
+  EXPECT_THROW(registry.decode(matrix), std::invalid_argument);
+  for (const char *parameters :
+       {R"({"rows":-1,"columns":2})", R"({"rows":true,"columns":2})",
+        R"({"rows":1,"columns":2,"base":1})"}) {
+    matrix.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(matrix, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+  auto spmv = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cusparse","operation":"spmv_f32","version":1,
+      "parameters":{"transpose":true,"preprocess":false,"algorithm":"csr_alg2","alpha":-2,"beta":0.5},
+      "bindings":{"matrix":"a","input":"x","output":"y"}})"));
+  EXPECT_EQ(registry.decode(spmv).kind(), "cusparse_spmv_f32");
+  for (const char *parameters :
+       {R"({"transpose":1})", R"({"preprocess":0})", R"({"algorithm":"auto"})",
+        R"({"alpha":true})", R"({"beta":1e300})", R"({"stride":1})"}) {
+    spmv.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(spmv), std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("cusparse_spmv_f32", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("cusparse_spmv_f32", 1, Arch::vulkan), nullptr);
+}
+
 TEST(NativeOperationRegistry, FftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto description =

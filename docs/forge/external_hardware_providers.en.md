@@ -501,9 +501,11 @@ CSR SpMV uses a common native plan with its own matrix/vector descriptors and
 preprocessing workspace. It borrows the CSR buffers; preparing or retiring a
 plan does not copy or free those buffers. Resource reports count the plan's
 matrix descriptor separately from the source storage descriptor. The JIT matrix
-keeps its cached plan, algorithm and value-update behavior. This common core is
-a reconstruction building block; see the [AOT SDK contract](aot_sdk.en.md) for
-the operations whose persistent export is actually available.
+keeps its cached plan, algorithm and value-update behavior. AOT reconstructs a
+fixed CSR resource and f32 SpMV through the same core, including transpose and
+ordered coefficient updates. See the [AOT SDK contract](aot_sdk.en.md) for index,
+lifetime and preparation requirements; automatic JIT recording export and other
+cuSPARSE operation families remain separate work.
 
 ### cuDSS 0.8.x
 

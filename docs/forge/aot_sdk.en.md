@@ -849,7 +849,7 @@ retirement. An exported energy/reverse kernel and explicit vector adjoint check
 gradients; external operations are not automatically differentiated. The tests
 exercise the 64-bit entry points at small sizes, not multi-billion-element
 allocations or compatibility with older vendor libraries. Use matching private
-ABI 41 components. This supplies reusable operations for persistent plans;
+ABI 43 components. This supplies reusable operations for persistent plans;
 automatic export of every solver or JIT recording remains a separate contract.
 
 Native resources use the same registered envelope in `resources`, with an added
@@ -882,6 +882,59 @@ dispatchable operations and cannot bind kernel arguments or gradients. This is
 an internal registered resource contract, not automatic reconstruction of every
 external provider plan. Known resource scratch contributes once to
 `workspace_bytes`; opaque vendor memory remains excluded.
+
+CUDA CSR SpMV also uses the common resource/operation registry (version 1):
+
+```python
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cusparse", "operation": "spmv_f32", "version": 1,
+    "parameters": {"transpose": False, "alpha": 1.0, "beta": 0.0,
+                   "algorithm": "csr_alg1", "preprocess": True},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}], resources=[{
+    "kind": "native", "name": "matrix", "provider": "cusparse", "operation": "csr_f32",
+    "version": 1, "parameters": {"rows": 3, "columns": 4},
+    "bindings": {"row_offsets": "offsets", "column_indices": "indices", "values": "values"},
+}])
+```
+
+All arrays are compact scalar vectors. Offsets and column indices must both be
+i32 or both i64; values, input and output are f32. Offsets have `rows + 1`
+elements and start at zero, are monotonic, and end at `nnz`; indices and values
+have `nnz` elements. Columns must be in range and unique within each row;
+unsorted rows and empty rows are accepted. Dimensions are nonnegative, including
+zero-dimensional matrices. `y = alpha * op(A) * x + beta * y` uses the selected
+transpose with matching vector lengths. Finite host alpha/beta default to 1/0;
+algorithm is `csr_alg1` (default) or `csr_alg2`. Preprocessing defaults on and
+uses the common plan's fallback when vendor preprocessing is unavailable.
+
+Topology is immutable until the prepared instance retires. It must already be
+initialized before preparation; `initial_data` payloads satisfy this requirement,
+but a later plan initialization kernel or zero fill does not. Preparation waits
+for prior CUDA work, reads and validates topology once per resource, and completes
+optional preprocessing before capture. It does not run SpMV or alter user
+outputs. Values may change in place between ordered replays. Changing topology
+or storage requires retirement and preparation again. These are explicit caller
+contracts; there is no per-replay host read or topology comparison.
+
+Writable output must be disjoint from all CSR arrays and the input. Mutable
+values must not overlap topology. Packed views use physical storage ranges for
+these checks. Multiple operations may reference one CSR resource; each owns its
+own descriptor and workspace so preprocessing state is not overwritten by a
+different operation or frame. The executor retains borrowed arrays and retires
+captured commands before plans and storage. Known workspace and private array
+bytes are reported separately; opaque vendor allocations remain excluded.
+
+Probe `runtime.probe_native_operation("cusparse_spmv_f32")` before allocating the
+route. The CUDA factory uses the existing external cuSPARSE loader, with no new
+vendor copy in the package; CPU/Vulkan have no factory. Windows cuSPARSE 12.7.9
+checks cover standalone/source-free and borrowed consumption, i32/i64 topology,
+transpose, coefficient updates, empty matrices, views, rejection and retirement.
+An exported energy kernel and its real `.grad` compose with an explicit transpose
+SpMV to check input gradients. This does not automatically differentiate an
+external call. Use matching ABI 43 components. This resource/SpMV contract does
+not yet export existing JIT recordings automatically or cover SpMM, triangular
+solves, BSR or every solver.
 
 Adapter-backed operations take library locations from the runtime owner:
 

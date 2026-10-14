@@ -36,6 +36,9 @@ CudaCsrSpmvPlan::CudaCsrSpmvPlan(CudaCsrSpmvDescription description)
     throw std::invalid_argument("Invalid CUDA CSR SpMV description");
   aligned(d.row_offsets, index_bytes(d.row_type), true);
   aligned(d.column_indices, index_bytes(d.column_type), d.nonzeros != 0);
+  if (d.row_type != d.column_type)
+    throw std::invalid_argument(
+        "CUDA CSR row and column indices require matching widths");
   aligned(d.values, sizeof(float), d.nonzeros != 0);
   auto &driver = CUSPARSEDriver::get_instance();
   try {

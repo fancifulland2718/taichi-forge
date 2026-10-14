@@ -701,6 +701,46 @@ GEMM/设备点积/GEMM 捕获、独立帧、显式梯度以及回滚/退休。
 不代表所有外部 provider plan 均已可重建。已知资源 scratch 只计入一次
 `workspace_bytes`，不透明 vendor 内存仍不计入。
 
+CUDA CSR SpMV 同样复用公共资源/操作注册（version 1）：
+
+```python
+plan = ExecutionPlan([{
+    "kind": "native", "provider": "cusparse", "operation": "spmv_f32", "version": 1,
+    "parameters": {"transpose": False, "alpha": 1.0, "beta": 0.0,
+                   "algorithm": "csr_alg1", "preprocess": True},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}], resources=[{
+    "kind": "native", "name": "matrix", "provider": "cusparse", "operation": "csr_f32",
+    "version": 1, "parameters": {"rows": 3, "columns": 4},
+    "bindings": {"row_offsets": "offsets", "column_indices": "indices", "values": "values"},
+}])
+```
+
+数组均为紧凑标量向量。offsets/indices 必须同时为 i32 或同时为 i64；values、输入与
+输出为 f32。offsets 长度 `rows + 1`，从 0 开始、单调不减、终点为 `nnz`；indices
+和 values 长度 `nnz`。列索引不得越界或在同一行重复，允许无序行和空行。维度非负，
+包括零维矩阵。操作为 `y = alpha * op(A) * x + beta * y`，向量长度与转置方向匹配。
+有限 host alpha/beta 默认 1/0；算法为默认 `csr_alg1` 或 `csr_alg2`。预处理默认开启，
+厂商预处理不可用时沿用公共计划的回退。
+
+拓扑在 prepared 实例退休前不可修改，并须在准备前初始化。`initial_data` 载荷满足
+此时序，后续计划初始化 kernel 或清零不能作为其初始化来源。准备阶段等待先前 CUDA
+工作，每个资源只读回并校验一次拓扑，完成可用预处理后再 capture；不执行 SpMV，也不
+改变用户输出。值可在有序重放之间原位更新；改变拓扑或存储需退休后重新准备。这是调用
+方的显式合同，重放不进行 host 读回或拓扑比较。
+
+写入输出不能与任何 CSR 数组或输入重叠，可变 values 不能覆盖拓扑；packed view 按
+实际物理范围校验。多个操作可引用同一 CSR 资源，但各自持有 descriptor/workspace，
+避免操作或帧之间覆盖预处理状态。执行器保活借用数组，先退休捕获命令再退休计划和存储。
+已知 workspace 与私有数组字节分别记账，厂商不透明分配仍不计入。
+
+资源分配前可查询 `runtime.probe_native_operation("cusparse_spmv_f32")`。CUDA 工厂
+复用既有外部 cuSPARSE loader，不在包中新增厂商副本；CPU/Vulkan 没有相应工厂。
+Windows cuSPARSE 12.7.9 验证覆盖无源码独立/借用消费、i32/i64 拓扑、转置、系数更新、
+空矩阵、视图、拒绝与退休。导出的 energy kernel 及其真实 `.grad` 加显式转置 SpMV
+核对输入梯度，不提供外部调用的自动微分。需配套 ABI43；本资源/SpMV 合同尚不自动导出
+已有 JIT recording，也不覆盖 SpMM、三角求解、BSR 或所有 solver。
+
 使用 adapter 的操作从 runtime owner 取得库位置：
 
 ```python

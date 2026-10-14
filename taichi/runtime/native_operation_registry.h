@@ -290,6 +290,7 @@ void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
 void register_fft_operation(NativeOperationRegistry &registry);
 void register_blas_operations(NativeOperationRegistry &registry);
+void register_cusparse_operations(NativeOperationRegistry &registry);
 void register_cutensor_operations(NativeOperationRegistry &registry);
 void register_cusparselt_operations(NativeOperationRegistry &registry);
 void register_amgx_operations(NativeOperationRegistry &registry);

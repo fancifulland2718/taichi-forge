@@ -312,6 +312,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_sort_operation(result);
     register_fft_operation(result);
     register_blas_operations(result);
+    register_cusparse_operations(result);
     register_cutensor_operations(result);
     register_cusparselt_operations(result);
     register_amgx_operations(result);

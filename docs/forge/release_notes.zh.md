@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 可重建固定 CSR 资源与 f32 cuSPARSE SpMV，支持转置、i32/i64 拓扑和有序数值更新。
+  捕获操作各自持有预处理状态，与 JIT 共用执行核心。已验证边界见
+  [AOT SDK 合同](aot_sdk.zh.md)；其他稀疏操作家族和 JIT recording 自动导出仍单独推进。
+
 - cuSPARSE 通用 CSR/COO、稠密/稀疏向量 descriptor 及 CSR 尺寸查询已匹配官方的
   有符号 64 位尺寸 ABI，修正动态调用中的截断。此项不扩大公开 `SparseMatrix`
   的索引/存储合同，也不表示完整 cuSPARSE AOT 已覆盖；需匹配 Python/native
