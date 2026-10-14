@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang {
@@ -36,6 +37,19 @@ struct CsrSpmvF32Operation {
   bool preprocess{true};
   std::uint32_t algorithm{1};
   float alpha{1}, beta{0};
+};
+
+struct CsrSpmmF32Operation {
+  static constexpr const char *kind = "cusparse_spmm_f32";
+  static constexpr std::uint32_t version = 1;
+  enum class Preprocess { none, optional, required };
+  std::shared_ptr<CsrF32Resource> matrix;
+  NativeArrayBinding input, output;
+  std::int64_t rhs_count{0};
+  std::uint32_t algorithm{2};
+  Preprocess preprocess{Preprocess::none};
+  float alpha{1}, beta{0};
+  std::optional<std::uint64_t> expected_workspace_bytes;
 };
 
 }  // namespace taichi::lang

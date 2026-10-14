@@ -53,6 +53,29 @@ TEST(NativeOperationRegistry, CsrDescriptionsDecodeWithoutLoadingProvider) {
   EXPECT_EQ(registry.find("cusparse_spmv_f32", 1, Arch::vulkan), nullptr);
 }
 
+TEST(NativeOperationRegistry, SpmmDescriptionsDecodeWithoutLoadingProvider) {
+  const auto &registry = native_operation_registry();
+  auto description =
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"cusparse","operation":"spmm_f32","version":1,
+      "parameters":{"rhs_count":8589934609,"algorithm":"csr_alg3","preprocess":"required","expected_workspace_bytes":17},
+      "bindings":{"matrix":"a","input":"x","output":"y"}})"));
+  EXPECT_EQ(registry.decode(description).kind(), "cusparse_spmm_f32");
+  for (const auto *parameters :
+       {R"({"rhs_count":0})", R"({"rhs_count":true})", R"({"rhs_count":-1})",
+        R"({"rhs_count":2,"preprocess":true})",
+        R"({"rhs_count":2,"preprocess":"auto"})",
+        R"({"rhs_count":2,"algorithm":"csr_alg1"})",
+        R"({"rhs_count":2,"alpha":1e300})",
+        R"({"rhs_count":2,"expected_workspace_bytes":-1})",
+        R"({"rhs_count":2,"transpose":true})"}) {
+    description.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("cusparse_spmm_f32", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("cusparse_spmm_f32", 1, Arch::vulkan), nullptr);
+}
+
 TEST(NativeOperationRegistry, FftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto description =

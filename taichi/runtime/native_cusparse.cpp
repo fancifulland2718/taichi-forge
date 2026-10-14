@@ -88,6 +88,33 @@ void validate_spmv(Device &device, const CsrSpmvF32Operation &op) {
     disjoint(op.output, array);
 }
 
+void validate_spmm(Device &device, const CsrSpmmF32Operation &op) {
+  if (!op.matrix || &op.matrix->device() != &device ||
+      op.matrix->arch() != Arch::cuda || op.rhs_count <= 0 ||
+      !std::isfinite(op.alpha) || !std::isfinite(op.beta) ||
+      (op.algorithm != 2 && op.algorithm != 3) ||
+      (op.preprocess != CsrSpmmF32Operation::Preprocess::none &&
+       op.preprocess != CsrSpmmF32Operation::Preprocess::optional &&
+       op.preprocess != CsrSpmmF32Operation::Preprocess::required))
+    throw std::invalid_argument("Invalid CSR SpMM owner or parameters");
+  const auto &d = op.matrix->description();
+  const auto rhs = std::uint64_t(op.rhs_count);
+  auto dense = [&](const NativeArrayBinding &array, std::uint64_t rows) {
+    if (array.pointer.device != &device ||
+        array.scalar_type != PrimitiveType::f32 ||
+        rows > std::numeric_limits<std::size_t>::max() / 4 / rhs ||
+        array.bytes != rows * rhs * 4)
+      throw std::invalid_argument(
+          "CSR SpMM requires compact f32 matrices on its device");
+    validate_native_array_layout(array, {{rows, rhs}, {}, 4, 4, true});
+  };
+  dense(op.input, d.columns);
+  dense(op.output, d.rows);
+  disjoint(op.output, op.input);
+  for (const auto &array : d.arrays)
+    disjoint(op.output, array);
+}
+
 #ifdef TI_WITH_CUDA
 NativeOperationAvailability probe_cusparse() {
   if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
@@ -105,6 +132,14 @@ NativeOperationAvailability probe_cusparse() {
       capabilities.scalar_spmv_available && driver.cpSetStream.available() &&
           driver.cpGetStream.available() && driver.cpSetPointerMode.available(),
       static_cast<std::uint32_t>(version)};
+}
+
+NativeOperationAvailability probe_spmm() {
+  auto result = probe_cusparse();
+  result.available =
+      result.available &&
+      CUSPARSEDriver::get_instance().capabilities().spmm_f32_available;
+  return result;
 }
 
 void *address(Device &device, const NativeArrayBinding &array) {
@@ -244,6 +279,68 @@ class CudaSpmv final : public NativeOperation {
   std::shared_ptr<CsrF32Resource> matrix_;
   std::unique_ptr<CudaCsrSpmvPlan> plan_;
 };
+
+class CudaSpmm final : public NativeOperation {
+ public:
+  CudaSpmm(Device &device, const CsrSpmmF32Operation &op)
+      : device_(device), matrix_(op.matrix) {
+    const auto &d = matrix_->description();
+    CudaCsrSpmmDescription description{d.rows,
+                                       d.columns,
+                                       static_cast<std::int64_t>(nonzeros(d)),
+                                       address(device, d.arrays[0]),
+                                       address(device, d.arrays[1]),
+                                       address(device, d.arrays[2]),
+                                       op.rhs_count};
+    description.row_type = d.arrays[0].scalar_type == PrimitiveType::i32
+                               ? CUSPARSE_INDEX_32I
+                               : CUSPARSE_INDEX_64I;
+    description.column_type = d.arrays[1].scalar_type == PrimitiveType::i32
+                                  ? CUSPARSE_INDEX_32I
+                                  : CUSPARSE_INDEX_64I;
+    description.algorithm =
+        op.algorithm == 2 ? CUSPARSE_SPMM_CSR_ALG2 : CUSPARSE_SPMM_CSR_ALG3;
+    description.preprocess =
+        op.preprocess == CsrSpmmF32Operation::Preprocess::none
+            ? CudaSpmmPreprocess::none
+        : op.preprocess == CsrSpmmF32Operation::Preprocess::required
+            ? CudaSpmmPreprocess::required
+            : CudaSpmmPreprocess::optional;
+    description.alpha = op.alpha;
+    description.beta = op.beta;
+    plan_ = std::make_unique<CudaCsrSpmmPlan>(description);
+    plan_->prepare(address(device, op.input), address(device, op.output),
+                   nullptr);
+    CUDADriver::get_instance().stream_synchronize(nullptr);
+    if (op.expected_workspace_bytes &&
+        *op.expected_workspace_bytes != plan_->workspace_bytes())
+      throw std::invalid_argument(
+          "Selected CSR SpMM workspace changed during reconstruction");
+  }
+  ~CudaSpmm() override {
+    auto &cuda = CUDAContext::get_instance();
+    auto lock = cuda.get_submission_lock_guard();
+    auto guard = cuda.get_guard();
+    plan_.reset();
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return plan_->workspace_bytes();
+  }
+  void record_cuda(void *stream) override {
+    plan_->record(static_cast<CUstream>(stream));
+  }
+
+ private:
+  Device &device_;
+  std::shared_ptr<CsrF32Resource> matrix_;
+  std::unique_ptr<CudaCsrSpmmPlan> plan_;
+};
 #endif
 }  // namespace
 
@@ -294,6 +391,51 @@ void register_cusparse_operations(NativeOperationRegistry &registry) {
           return result;
         };
       });
+  registry.define<CsrSpmmF32Operation>(validate_spmm);
+  registry.register_schema<CsrSpmmF32Operation>(
+      "cusparse", "spmm_f32", {"matrix", "input", "output"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<CsrSpmmF32Operation> {
+        operation_json::fields(parameters,
+                               {"rhs_count", "algorithm", "preprocess", "alpha",
+                                "beta", "expected_workspace_bytes"});
+        CsrSpmmF32Operation op;
+        op.expected_workspace_bytes = operation_json::optional_integer(
+            parameters, "expected_workspace_bytes");
+        op.rhs_count = static_cast<std::int64_t>(
+            operation_json::integer(parameters["rhs_count"]));
+        if (!op.rhs_count)
+          throw std::invalid_argument("CSR SpMM requires positive rhs_count");
+        op.alpha = operation_json::optional_f32(parameters, "alpha", 1);
+        op.beta = operation_json::optional_f32(parameters, "beta", 0);
+        if (const auto found = parameters.obj.inner.find("algorithm");
+            found != parameters.obj.inner.end()) {
+          const auto algorithm = operation_json::name(found->second);
+          if (algorithm != "csr_alg2" && algorithm != "csr_alg3")
+            throw std::invalid_argument(
+                "CSR SpMM algorithm must be csr_alg2 or csr_alg3");
+          op.algorithm = algorithm == "csr_alg2" ? 2 : 3;
+        }
+        if (const auto found = parameters.obj.inner.find("preprocess");
+            found != parameters.obj.inner.end()) {
+          const auto policy = operation_json::name(found->second);
+          if (policy != "none" && policy != "optional" && policy != "required")
+            throw std::invalid_argument(
+                "CSR SpMM preprocess must be none, optional or required");
+          op.preprocess = policy == "none"
+                              ? CsrSpmmF32Operation::Preprocess::none
+                          : policy == "required"
+                              ? CsrSpmmF32Operation::Preprocess::required
+                              : CsrSpmmF32Operation::Preprocess::optional;
+        }
+        return [op](const NativeOperationBindings &bindings) {
+          auto result = op;
+          result.matrix = bindings.at("matrix").resource<CsrF32Resource>();
+          result.input = bindings.at("input").array();
+          result.output = bindings.at("output").array();
+          return result;
+        };
+      });
 #ifdef TI_WITH_CUDA
   registry.register_factory<CsrF32Description>(
       Arch::cuda, NativeOperationMode::cuda_capture,
@@ -313,6 +455,15 @@ void register_cusparse_operations(NativeOperationRegistry &registry) {
         return std::make_shared<CudaSpmv>(device, description);
       },
       probe_cusparse);
+  registry.register_factory<CsrSpmmF32Operation>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch, Device &device, const CsrSpmmF32Operation &description) {
+        auto &cuda = CUDAContext::get_instance();
+        auto lock = cuda.get_submission_lock_guard();
+        auto guard = cuda.get_guard();
+        return std::make_shared<CudaSpmm>(device, description);
+      },
+      probe_spmm);
 #endif
 }
 }  // namespace taichi::lang
