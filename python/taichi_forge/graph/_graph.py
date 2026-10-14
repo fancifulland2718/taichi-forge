@@ -5250,6 +5250,7 @@ class _CompiledCGraphNode:
         temporary_actions=(),
         native_action_manifests=(),
         recipe_operations=(),
+        recording_operations=(),
         parallel_dispatch_groups=(),
     ):
         self.compiled_graph = compiled_graph
@@ -5273,6 +5274,7 @@ class _CompiledCGraphNode:
         self.temporary_actions = tuple(temporary_actions)
         self.native_action_manifests = tuple(native_action_manifests)
         self.recipe_operations = tuple(recipe_operations)
+        self.recording_operations = tuple(recording_operations)
         self.parallel_dispatch_groups = tuple(
             tuple(int(index) for index in group) for group in parallel_dispatch_groups
         )
@@ -11259,6 +11261,9 @@ class _GraphSpec:
                 node.compiled_graph = None
                 node._jit_cache = None
                 node.recipe_operations = tuple(operations)
+                # The frozen definition has no physical recording. Its next
+                # materialization creates new commands with independent leases.
+                node.recording_operations = ()
                 node.lifetime_leases = tuple(
                     lease
                     for lease in node.lifetime_leases
@@ -16732,6 +16737,11 @@ class GraphBuilder:
 
         self._runtime_graph_recipe_operations = []
 
+        # Selected physical commands survive recipe materialization, which
+        # deliberately drops authoring/search sources. Retain this order only
+        # for segments mixing kernels with captured backend commands.
+        self._runtime_graph_recording_operations = []
+
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
         self._runtime_graph_dispatches = []
@@ -17735,6 +17745,9 @@ class GraphBuilder:
         self._pending_ir_nodes.append(
             _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         )
+        self._runtime_graph_recording_operations.append(
+            ("dispatch", kernel_cpp, tuple(unzipped_args), label)
+        )
         if self._capture_recipe_sources:
             self._runtime_graph_recipe_operations.append(
                 (
@@ -17850,10 +17863,10 @@ class GraphBuilder:
         self._runtime_graph_arg_names.update(node._runtime_arg_names)
         self._dispatch_count += node._dispatch_count
         self._pending_ir_nodes.extend(node._ir_nodes)
+        operation = ("sequential", _GraphSequentialRecipeSnapshot(node))
+        self._runtime_graph_recording_operations.append(operation)
         if self._capture_recipe_sources:
-            self._runtime_graph_recipe_operations.append(
-                ("sequential", _GraphSequentialRecipeSnapshot(node))
-            )
+            self._runtime_graph_recipe_operations.append(operation)
 
         return self
 
@@ -17894,6 +17907,14 @@ class GraphBuilder:
                 source_native_count=self._runtime_graph_source_native_count,
                 native_action_manifests=(self._runtime_graph_native_action_manifests),
                 recipe_operations=self._runtime_graph_recipe_operations,
+                recording_operations=(
+                    self._runtime_graph_recording_operations
+                    if any(
+                        manifest.execution_kind == "backend_command"
+                        for manifest in self._runtime_graph_native_action_manifests
+                    )
+                    else ()
+                ),
                 parallel_dispatch_groups=self._cuda_parallel_dispatch_groups,
             )
         )
@@ -17909,6 +17930,7 @@ class GraphBuilder:
         self._runtime_graph_source_native_count = 0
         self._runtime_graph_native_action_manifests = []
         self._runtime_graph_recipe_operations = []
+        self._runtime_graph_recording_operations = []
         self._cuda_parallel_dispatch_groups = ()
 
         self._active_bounded_publication = None
@@ -17985,6 +18007,7 @@ class GraphBuilder:
                     compiled.native_action_manifests
                 )
                 self._pending_ir_nodes.append(compiled.ir_node)
+                self._runtime_graph_recording_operations.append(("native", executable))
                 if self._capture_recipe_sources:
                     self._runtime_graph_recipe_operations.append(
                         ("native", executable, admission)

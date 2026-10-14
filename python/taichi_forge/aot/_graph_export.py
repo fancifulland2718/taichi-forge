@@ -492,10 +492,11 @@ def _node(context, node):
     if node.composer_applied_groups or node.physical_dispatch_count != node.dispatch_count:
         raise TaichiRuntimeError("AOT mixed Graph requires the selected composition recipe")
     # Capture-native commands coexist with kernels inside one CGraph. Only the
-    # frozen operation sequence retains their ordering; dispatches alone omit them.
+    # physical recording sequence retains their ordering; dispatches alone omit
+    # them, and selected materialization deliberately drops authoring recipes.
     recreated = context.declared_bindings(node.fixed_runtime_args)
     native_count, kernel_count = 0, 0
-    for item in node.recipe_operations:
+    for item in node.recording_operations:
         if item[0] == "native":
             for name, owner in _native(context, item[1]).items():
                 if name in recreated and recreated[name] is not owner:

@@ -14,6 +14,59 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_materialized_mixed_graph_preserves_recording_order(tmp_path):
+    if not ti.hardware.linalg.cusparse_is_available():
+        pytest.skip("External cuSPARSE is unavailable")
+    arrays = []
+    for dtype, data in ((ti.i32, [0, 1, 2]), (ti.i32, [0, 1]), (ti.f32, [2, 3])):
+        array = ti.ndarray(dtype, len(data))
+        array.from_numpy(np.array(data, dtype=np.int32 if dtype == ti.i32 else np.float32))
+        arrays.append(array)
+    matrix = ti.linalg.SparsePattern.csr(2, 2, arrays[0], arrays[1]).matrix(arrays[2])
+
+    @ti.kernel
+    def shift(x: ti.types.ndarray(ti.f32, ndim=1), y: ti.types.ndarray(ti.f32, ndim=1)):
+        for i in x:
+            y[i] = x[i] + 1
+
+    args = {name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1) for name in ("x", "tmp", "product", "y")}
+    builder = ti.graph.GraphBuilder()
+    sequence = builder.create_sequential()
+    sequence.dispatch(shift, args["x"], args["tmp"], label="before")
+    builder.append(sequence)
+    builder.append_native(ti.hardware.linalg.CusparseSpmvRecording(matrix, input="tmp", output="product"))
+    builder.dispatch(shift, args["product"], args["y"], label="after")
+    definition = builder.freeze()
+    module = ti.aot.Module()
+    with definition.materialize() as selected:
+        graph = selected.executor
+        plan = module.add_execution_plan("selected", graph)
+        operations = json.loads(plan.to_json())["operations"]
+        assert [op["kind"] for op in operations] == ["kernel", "native", "kernel"]
+        assert [op["label"] for op in operations if op["kind"] == "kernel"] == ["before", "after"]
+        # A broken physical description must still fail before publishing data.
+        node = graph._spec.nodes[0]
+        complete = node.recording_operations
+        try:
+            node.recording_operations = complete[:-1]
+            invalid = ti.aot.Module()
+            with pytest.raises(ti.TaichiRuntimeError, match="does not cover"):
+                invalid.add_execution_plan("incomplete", graph)
+            assert not invalid._execution_plans and not invalid._data_payloads
+        finally:
+            node.recording_operations = complete
+    artifact = tmp_path / "selected-csr.tcm"
+    module.archive(str(artifact))
+    with ti.aot.borrow_runtime() as runtime:
+        loaded = runtime.load_module(artifact)
+        bound = {name: runtime.ndarray("f32", (2,)) for name in args}
+        bound["x"].write(np.array([1, 2], np.float32).tobytes())
+        prepared = loaded.prepare_execution("selected", bound)
+        prepared()
+        np.testing.assert_array_equal(np.frombuffer(bound["y"].read(), np.float32), [5, 10])
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_csr_recording_snapshot_composition_and_reverse(tmp_path):
     from taichi_forge_runtime.aot import Runtime
 
