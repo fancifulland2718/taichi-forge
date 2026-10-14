@@ -39,6 +39,14 @@ struct FixedExecution::State {
     std::function<void()> native;
   };
   std::vector<CpuStep> cpu_steps;
+  static void run_cpu_steps(std::vector<CpuStep> &steps) {
+    for (auto &step : steps) {
+      if (step.launcher)
+        step.launcher->launch_prepared(step.launches);
+      else
+        step.native();
+    }
+  }
 #endif
 #ifdef TI_WITH_CUDA
   std::unique_ptr<cuda::FixedGraph> cuda_graph;
@@ -93,101 +101,177 @@ FixedExecution::FixedExecution(Arch arch,
   std::unordered_set<const NativeOperation *> owners;
   NativeRecordingState recording_state =
       sequence_state ? *sequence_state : NativeRecordingState{};
-  for (const auto &operation : operations) {
-    if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-      if (!dispatch->kernel || !dispatch->context ||
-          dispatch->kernel->ret_size ||
-          !dispatch->context->argpack_ptrs.empty())
-        throw std::invalid_argument(
-            "Fixed execution requires loaded entries without returns or "
-            "ArgPacks");
-      for (const auto &[index, param] : dispatch->kernel->nested_parameters) {
-        if (param.ptype == ParameterType::kTexture ||
-            param.ptype == ParameterType::kRWTexture)
+  std::unordered_set<const While *> active_loops;
+  std::function<void(const std::vector<Operation> &, NativeRecordingState &,
+                     bool)>
+      validate;
+  validate = [&](const std::vector<Operation> &operations,
+                 NativeRecordingState &recording_state, bool inside_control) {
+    for (const auto &operation : operations) {
+      if (const auto *value =
+              std::get_if<std::shared_ptr<const While>>(&operation)) {
+        const auto &loop = *value;
+        if (!loop || loop->predicate.device != &device ||
+            loop->predicate.offset % 4 || loop->condition.empty() ||
+            loop->body.empty())
           throw std::invalid_argument(
-              "Fixed textures require generation-qualified resource owners");
+              "Fixed while requires aligned predicate storage and nonempty "
+              "regions");
+        if (arch == Arch::vulkan)
+          throw std::invalid_argument(
+              "Fixed Vulkan while requires its selected structured recording "
+              "recipe");
+        if (!active_loops.insert(loop.get()).second)
+          throw std::invalid_argument(
+              "Fixed control descriptors contain a cycle");
+        auto condition = recording_state.control_branch();
+        validate(loop->condition, condition, true);
+        // The initial condition always executes, including a zero budget. Body
+        // facts cannot escape a possibly zero-trip loop.
+        recording_state.initialized = condition.initialized;
+        auto body = condition;
+        validate(loop->body, body, true);
+        // Monotonic initialization plus stateless operations is loop-invariant;
+        // do not rewalk or unroll regions to validate another iteration.
+        for (const auto *resource : condition.initialized)
+          if (!body.initialized.count(resource))
+            throw std::invalid_argument(
+                "Loop providers cannot invalidate established initialization "
+                "facts");
+        active_loops.erase(loop.get());
+        continue;
       }
-    } else if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
-      if (copy->source.device != &device || copy->destination.device != &device)
-        throw std::invalid_argument(
-            "Fixed copy storage belongs to another device");
-    } else if (const auto *fill = std::get_if<BufferFill>(&operation)) {
-      if (fill->destination.device != &device || fill->destination.offset % 4 ||
-          fill->bytes % 4)
-        throw std::invalid_argument(
-            "Fixed fill requires aligned 32-bit storage");
-    } else {
-      const auto &native =
-          std::get<std::shared_ptr<NativeOperation>>(operation);
-      if (!native || native->arch() != arch || &native->device() != &device)
-        throw std::invalid_argument(
-            "Fixed native operation belongs to another execution device");
-      const auto mode = native->execution_mode();
-      if (!((arch_is_cpu(arch) && mode == NativeOperationMode::cpu) ||
-            (arch == Arch::cuda &&
-             (mode == NativeOperationMode::cuda_capture ||
-              mode == NativeOperationMode::cuda_synchronous)) ||
-            (arch == Arch::vulkan &&
-             mode == NativeOperationMode::vulkan_inline)))
-        throw std::invalid_argument(
-            "Fixed native operation mode/backend mismatch");
-      native->validate_recording(recording_state);
-      if (owners.insert(native.get()).second) {
-        state_->native_operations.push_back(native);
-        if (native->workspace_bytes() >
-            std::numeric_limits<std::size_t>::max() - state_->workspace_bytes)
+      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        if (!dispatch->kernel || !dispatch->context ||
+            dispatch->kernel->ret_size ||
+            !dispatch->context->argpack_ptrs.empty())
           throw std::invalid_argument(
-              "Native workspace accounting overflows address space");
-        state_->workspace_bytes += native->workspace_bytes();
+              "Fixed execution requires loaded entries without returns or "
+              "ArgPacks");
+        for (const auto &[index, param] : dispatch->kernel->nested_parameters) {
+          if (param.ptype == ParameterType::kTexture ||
+              param.ptype == ParameterType::kRWTexture)
+            throw std::invalid_argument(
+                "Fixed textures require generation-qualified resource owners");
+        }
+      } else if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
+        if (copy->source.device != &device ||
+            copy->destination.device != &device)
+          throw std::invalid_argument(
+              "Fixed copy storage belongs to another device");
+      } else if (const auto *fill = std::get_if<BufferFill>(&operation)) {
+        if (fill->destination.device != &device ||
+            fill->destination.offset % 4 || fill->bytes % 4)
+          throw std::invalid_argument(
+              "Fixed fill requires aligned 32-bit storage");
+      } else {
+        const auto &native =
+            std::get<std::shared_ptr<NativeOperation>>(operation);
+        if (!native || native->arch() != arch || &native->device() != &device)
+          throw std::invalid_argument(
+              "Fixed native operation belongs to another execution device");
+        const auto mode = native->execution_mode();
+        if (!((arch_is_cpu(arch) && mode == NativeOperationMode::cpu) ||
+              (arch == Arch::cuda &&
+               (mode == NativeOperationMode::cuda_capture ||
+                mode == NativeOperationMode::cuda_synchronous)) ||
+              (arch == Arch::vulkan &&
+               mode == NativeOperationMode::vulkan_inline)))
+          throw std::invalid_argument(
+              "Fixed native operation mode/backend mismatch");
+        if (inside_control && arch == Arch::cuda &&
+            mode != NativeOperationMode::cuda_capture)
+          throw std::invalid_argument(
+              "GPU control cannot contain host-synchronous native operations");
+        native->validate_recording(recording_state);
+        if (owners.insert(native.get()).second) {
+          state_->native_operations.push_back(native);
+          if (native->workspace_bytes() >
+              std::numeric_limits<std::size_t>::max() - state_->workspace_bytes)
+            throw std::invalid_argument(
+                "Native workspace accounting overflows address space");
+          state_->workspace_bytes += native->workspace_bytes();
+        }
       }
     }
-  }
+  };
+  validate(operations, recording_state, false);
 #ifdef TI_WITH_LLVM
   if (arch_is_cpu(arch)) {
-    for (const auto &operation : operations) {
-      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-        auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
-        auto *launcher =
-            loaded ? dynamic_cast<cpu::KernelLauncher *>(&loaded->launcher())
-                   : nullptr;
-        if (!launcher)
-          throw std::invalid_argument("Fixed CPU entry is not registered");
-        auto &steps = state_->cpu_steps;
-        if (steps.empty() || steps.back().launcher != launcher)
-          steps.push_back({launcher, {}, {}});
-        steps.back().launches.push_back(
-            launcher->prepare_launch(loaded->handle(), *dispatch->context));
-        state_->bytes += dispatch->context->arg_buffer_size;
-      } else if (const auto *native =
-                     std::get_if<std::shared_ptr<NativeOperation>>(
-                         &operation)) {
-        state_->cpu_steps.push_back(
-            {nullptr, {}, [native = *native] { native->run_cpu(); }});
-      } else {
-        State::CpuStep step;
-        if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
-          auto bytes = copy->bytes;
-          auto *dst = cpu_pointer(copy->destination, bytes);
-          auto *src = cpu_pointer(copy->source, bytes);
-          check_pointer_copy(dst, src, bytes);
-          step.native = [dst, src, bytes] {
-            if (bytes)
-              std::memcpy(dst, src, bytes);
-          };
-        } else {
-          const auto &fill = std::get<BufferFill>(operation);
-          auto *dst = static_cast<std::uint32_t *>(
-              cpu_pointer(fill.destination, fill.bytes));
-          auto count = fill.bytes / 4;
-          auto value = fill.value;
-          step.native = [dst, count, value] {
-            if (count)
-              std::fill_n(dst, count, value);
-          };
+    std::function<std::vector<State::CpuStep>(const std::vector<Operation> &)>
+        prepare;
+    prepare = [&](const std::vector<Operation> &operations) {
+      std::vector<State::CpuStep> steps;
+      for (const auto &operation : operations) {
+        if (const auto *value =
+                std::get_if<std::shared_ptr<const While>>(&operation)) {
+          const auto &loop = **value;
+          auto *predicate =
+              static_cast<std::uint32_t *>(cpu_pointer(loop.predicate, 4));
+          auto condition = std::make_shared<std::vector<State::CpuStep>>(
+              prepare(loop.condition));
+          auto body =
+              std::make_shared<std::vector<State::CpuStep>>(prepare(loop.body));
+          steps.push_back(
+              {nullptr,
+               {},
+               [condition, body, predicate, budget = loop.max_iterations,
+                nonzero = loop.continue_while_nonzero] {
+                 State::run_cpu_steps(*condition);
+                 for (std::uint64_t iteration = 0;
+                      iteration < budget && ((*predicate != 0) == nonzero);
+                      ++iteration) {
+                   State::run_cpu_steps(*body);
+                   State::run_cpu_steps(*condition);
+                 }
+               }});
+          continue;
         }
-        state_->cpu_steps.push_back(std::move(step));
+        if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+          auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
+          auto *launcher =
+              loaded ? dynamic_cast<cpu::KernelLauncher *>(&loaded->launcher())
+                     : nullptr;
+          if (!launcher)
+            throw std::invalid_argument("Fixed CPU entry is not registered");
+          if (steps.empty() || steps.back().launcher != launcher)
+            steps.push_back({launcher, {}, {}});
+          steps.back().launches.push_back(
+              launcher->prepare_launch(loaded->handle(), *dispatch->context));
+          state_->bytes += dispatch->context->arg_buffer_size;
+        } else if (const auto *native =
+                       std::get_if<std::shared_ptr<NativeOperation>>(
+                           &operation)) {
+          steps.push_back(
+              {nullptr, {}, [native = *native] { native->run_cpu(); }});
+        } else {
+          State::CpuStep step;
+          if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
+            auto bytes = copy->bytes;
+            auto *dst = cpu_pointer(copy->destination, bytes);
+            auto *src = cpu_pointer(copy->source, bytes);
+            check_pointer_copy(dst, src, bytes);
+            step.native = [dst, src, bytes] {
+              if (bytes)
+                std::memcpy(dst, src, bytes);
+            };
+          } else {
+            const auto &fill = std::get<BufferFill>(operation);
+            auto *dst = static_cast<std::uint32_t *>(
+                cpu_pointer(fill.destination, fill.bytes));
+            auto count = fill.bytes / 4;
+            auto value = fill.value;
+            step.native = [dst, count, value] {
+              if (count)
+                std::fill_n(dst, count, value);
+            };
+          }
+          steps.push_back(std::move(step));
+        }
       }
-    }
+      return steps;
+    };
+    state_->cpu_steps = prepare(operations);
     if (sequence_state)
       *sequence_state = std::move(recording_state);
     return;
@@ -195,70 +279,94 @@ FixedExecution::FixedExecution(Arch arch,
 #endif
 #ifdef TI_WITH_CUDA
   if (arch == Arch::cuda) {
-    std::vector<cuda::FixedGraph::Dispatch> native;
-    auto flush = [&]() {
+    using CudaOperation = cuda::FixedGraph::Operation;
+    auto account = [&](const cuda::FixedGraph &graph) {
+      if (graph.argument_bytes() >
+              std::numeric_limits<std::size_t>::max() - state_->bytes ||
+          graph.control_bytes() >
+              std::numeric_limits<std::size_t>::max() - state_->workspace_bytes)
+        throw std::invalid_argument("Fixed CUDA storage size overflow");
+      state_->bytes += graph.argument_bytes();
+      state_->workspace_bytes += graph.control_bytes();
+    };
+    auto flush = [&](std::vector<CudaOperation> &native) {
       if (native.empty())
         return;
       auto graph = std::make_unique<cuda::FixedGraph>(native);
-      if (graph->argument_bytes() >
-          std::numeric_limits<std::size_t>::max() - state_->bytes)
-        throw std::invalid_argument("Fixed CUDA argument size overflow");
-      state_->bytes += graph->argument_bytes();
+      account(*graph);
       state_->cuda_steps.emplace_back(std::move(graph));
       native.clear();
     };
-    for (const auto &operation : operations) {
-      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
-        auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
-        auto *launcher =
-            loaded ? dynamic_cast<cuda::KernelLauncher *>(&loaded->launcher())
-                   : nullptr;
-        if (!launcher)
-          throw std::invalid_argument("Fixed CUDA entry is not registered");
-        native.push_back({launcher, loaded->handle(), dispatch->context, {}});
-      } else if (const auto *external =
-                     std::get_if<std::shared_ptr<NativeOperation>>(
-                         &operation)) {
-        if ((*external)->execution_mode() ==
-            NativeOperationMode::cuda_synchronous) {
-          flush();
-          state_->cuda_steps.emplace_back(*external);
-          continue;
+    std::function<std::vector<CudaOperation>(const std::vector<Operation> &)>
+        prepare;
+    prepare = [&](const std::vector<Operation> &operations) {
+      std::vector<CudaOperation> native;
+      for (const auto &operation : operations) {
+        if (const auto *value =
+                std::get_if<std::shared_ptr<const While>>(&operation)) {
+          const auto &loop = **value;
+          auto result = std::make_shared<cuda::FixedGraph::While>();
+          result->predicate = cuda_pointer(loop.predicate);
+          result->max_iterations = loop.max_iterations;
+          result->continue_while_nonzero = loop.continue_while_nonzero;
+          result->condition = prepare(loop.condition);
+          result->body = prepare(loop.body);
+          native.emplace_back(std::move(result));
+        } else if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+          auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
+          auto *launcher =
+              loaded ? dynamic_cast<cuda::KernelLauncher *>(&loaded->launcher())
+                     : nullptr;
+          if (!launcher)
+            throw std::invalid_argument("Fixed CUDA entry is not registered");
+          native.emplace_back(cuda::FixedGraph::Dispatch{
+              launcher, loaded->handle(), dispatch->context, {}});
+        } else if (const auto *external =
+                       std::get_if<std::shared_ptr<NativeOperation>>(
+                           &operation)) {
+          if ((*external)->execution_mode() ==
+              NativeOperationMode::cuda_synchronous) {
+            flush(native);
+            state_->cuda_steps.emplace_back(*external);
+            continue;
+          }
+          native.emplace_back(cuda::FixedGraph::Dispatch{
+              nullptr, {}, nullptr, [external = *external](void *stream) {
+                external->record_cuda(stream);
+              }});
+        } else if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
+          auto *dst = cuda_pointer(copy->destination);
+          auto *src = cuda_pointer(copy->source);
+          auto bytes = copy->bytes;
+          check_pointer_copy(dst, src, bytes);
+          native.emplace_back(cuda::FixedGraph::Dispatch{
+              nullptr, {}, nullptr, [dst, src, bytes](void *stream) {
+                if (bytes)
+                  CUDADriver::get_instance().memcpy_device_to_device_async(
+                      dst, src, bytes, stream);
+              }});
+        } else {
+          const auto &fill = std::get<BufferFill>(operation);
+          auto *dst = cuda_pointer(fill.destination);
+          auto count = fill.bytes / 4;
+          auto value = fill.value;
+          native.emplace_back(cuda::FixedGraph::Dispatch{
+              nullptr, {}, nullptr, [dst, count, value](void *stream) {
+                if (count)
+                  CUDADriver::get_instance().memsetd32_async(dst, value, count,
+                                                             stream);
+              }});
         }
-        native.push_back(
-            {nullptr, {}, nullptr, [external = *external](void *stream) {
-               external->record_cuda(stream);
-             }});
-      } else if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
-        auto *dst = cuda_pointer(copy->destination);
-        auto *src = cuda_pointer(copy->source);
-        auto bytes = copy->bytes;
-        check_pointer_copy(dst, src, bytes);
-        native.push_back(
-            {nullptr, {}, nullptr, [dst, src, bytes](void *stream) {
-               if (bytes)
-                 CUDADriver::get_instance().memcpy_device_to_device_async(
-                     dst, src, bytes, stream);
-             }});
-      } else {
-        const auto &fill = std::get<BufferFill>(operation);
-        auto *dst = cuda_pointer(fill.destination);
-        auto count = fill.bytes / 4;
-        auto value = fill.value;
-        native.push_back(
-            {nullptr, {}, nullptr, [dst, count, value](void *stream) {
-               if (count)
-                 CUDADriver::get_instance().memsetd32_async(dst, value, count,
-                                                            stream);
-             }});
       }
-    }
+      return native;
+    };
+    auto native = prepare(operations);
     if (state_->cuda_steps.empty()) {
       state_->cuda_graph = std::make_unique<cuda::FixedGraph>(native);
       state_->kind = 1;
-      state_->bytes = state_->cuda_graph->argument_bytes();
+      account(*state_->cuda_graph);
     } else {
-      flush();
+      flush(native);
       state_->kind = 3;
     }
     if (sequence_state)
@@ -336,12 +444,7 @@ FixedExecution::FixedExecution(Arch arch,
 FixedExecution::~FixedExecution() = default;
 void FixedExecution::run() {
 #ifdef TI_WITH_LLVM
-  for (auto &step : state_->cpu_steps) {
-    if (step.launcher)
-      step.launcher->launch_prepared(step.launches);
-    else
-      step.native();
-  }
+  State::run_cpu_steps(state_->cpu_steps);
 #endif
 #ifdef TI_WITH_CUDA
   if (state_->cuda_graph)

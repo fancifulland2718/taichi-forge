@@ -5,6 +5,51 @@ import pytest
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
+def test_persistent_control_closure_and_version():
+    body = [dict(kind="kernel", entry="advance", arguments=["scratch", "x"])]
+    loop = dict(
+        kind="while",
+        predicate="predicate",
+        max_iterations=1 << 33,
+        condition=[dict(kind="kernel", entry="check", arguments=["predicate", "limit"])],
+        body=body,
+    )
+    plan = ExecutionPlan(
+        [loop],
+        resources=[
+            dict(kind="ndarray", name="scratch", dtype="f32", shape=[dict(array="shape_only", axis=0)]),
+            dict(kind="ndarray", name="predicate", dtype="i32", shape=[1]),
+        ],
+        initialization=[dict(kind="copy", source="initial", destination="scratch")],
+        gradients={"scratch": "ds"},
+    )
+    body[0]["entry"] = "changed"
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.kernel_entries == ("check", "advance")
+    assert restored.argument_names == ("ds", "initial", "limit", "shape_only", "x")
+    assert restored._replay_argument_names == {"predicate", "limit", "scratch", "x", "ds"}
+    document = json.loads(restored.to_json())
+    assert document["version"] == 3
+    assert document["operations"][0]["max_iterations"] == 1 << 33
+    for patch in (
+        dict(max_iterations=-1),
+        dict(max_iterations=True),
+        dict(max_iterations=1 << 63),
+        dict(continue_while_nonzero=1),
+        dict(body=[]),
+        dict(condition=None),
+        dict(predicate=""),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, **patch)])
+    document["version"] = 2
+    with pytest.raises(ValueError, match="version 3"):
+        ExecutionPlan.from_json(json.dumps(document))
+    for invalid in (None, {}, "bad", 1):
+        with pytest.raises(ValueError, match="operation array"):
+            ExecutionPlan.from_json(json.dumps(dict(version=3, operations=invalid)))
+
+
 def test_execution_plan_snapshot_and_roundtrip(tmp_path):
     steps = [{"kind": "kernel", "entry": "first", "arguments": ["x"]}]
     plan = ExecutionPlan(steps)

@@ -2,6 +2,7 @@
 #include "execution_resources.h"
 
 #include <algorithm>
+#include <functional>
 #include <unordered_set>
 #include <set>
 #include <limits>
@@ -82,10 +83,27 @@ struct PreparedExecution {
     } catch (const std::invalid_argument &error) {
       throw MemoryBindingError(error.what());
     }
-    info.dispatch_count = static_cast<uint32_t>(std::count_if(
-        operations.begin(), operations.end(), [](const auto &operation) {
-          return std::holds_alternative<FixedExecution::Dispatch>(operation);
-        }));
+    std::uint64_t dispatch_count = 0;
+    std::function<void(const std::vector<FixedExecution::Operation> &)>
+        count_dispatches;
+    count_dispatches = [&](const std::vector<FixedExecution::Operation>
+                               &steps) {
+      for (const auto &step : steps) {
+        if (std::holds_alternative<FixedExecution::Dispatch>(step))
+          ++dispatch_count;
+        else if (const auto *loop =
+                     std::get_if<std::shared_ptr<const FixedExecution::While>>(
+                         &step)) {
+          count_dispatches((*loop)->condition);
+          count_dispatches((*loop)->body);
+        }
+      }
+    };
+    count_dispatches(operations);
+    if (dispatch_count > std::numeric_limits<std::uint32_t>::max())
+      throw MemoryBindingError(
+          "Static dispatch count exceeds its C API representation");
+    info.dispatch_count = static_cast<std::uint32_t>(dispatch_count);
     info.execution_kind = native->execution_kind();
     info.argument_bytes =
         native->argument_bytes() +
@@ -439,10 +457,26 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     }
   };
   std::vector<const aot::ExecutionPlan::Operation *> steps;
-  for (const auto &operation : plan.initialization)
-    steps.push_back(&operation);
-  for (const auto &operation : plan.operations)
-    steps.push_back(&operation);
+  std::function<void(const std::vector<aot::ExecutionPlan::Operation> &)>
+      collect_steps;
+  collect_steps =
+      [&](const std::vector<aot::ExecutionPlan::Operation> &sequence) {
+        for (const auto &operation : sequence) {
+          steps.push_back(&operation);
+          if (const auto *loop =
+                  std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
+                      &operation)) {
+            if (rt.arch == taichi::Arch::vulkan)
+              throw MemoryBindingError(
+                  "AOT Vulkan while requires its selected structured recording "
+                  "recipe");
+            collect_steps((*loop)->condition);
+            collect_steps((*loop)->body);
+          }
+        }
+      };
+  collect_steps(plan.initialization);
+  collect_steps(plan.operations);
   for (const auto index : plan.resources.order)
     if (const auto *native = std::get_if<NativeOperationDescription>(
             &plan.resources.declarations[index].value))
@@ -583,195 +617,234 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   }
   const auto initialization_count =
       operations.size() + plan.initialization.size();
-  for (const auto *step : steps) {
-    const auto &operation = *step;
-    if (const auto *kernel =
-            std::get_if<aot::ExecutionPlan::Kernel>(&operation)) {
-      auto handle = mod.get_kernel_handle(kernel->entry);
-      if (!handle)
-        throw MemoryBindingError("Execution plan kernel was not exported: " +
-                                 kernel->entry);
-      std::vector<TiArgument> kernel_args;
-      std::vector<TiNdArrayBinding> kernel_bindings;
-      const auto &parameters = rt.get_kernel(handle).kernel->nested_parameters;
-      for (std::size_t i = 0; i < kernel->arguments.size(); ++i) {
-        const auto &name = kernel->arguments[i];
-        if (native_objects.count(name))
+  std::function<bool(const std::vector<aot::ExecutionPlan::Operation> &,
+                     std::vector<FixedExecution::Operation> &)>
+      bind_steps;
+  bind_steps = [&](const std::vector<aot::ExecutionPlan::Operation> &sequence,
+                   std::vector<FixedExecution::Operation> &operations) {
+    for (const auto &operation : sequence) {
+      if (const auto *value =
+              std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
+                  &operation)) {
+        const auto &loop = **value;
+        const auto &predicate = array_binding(loop.predicate);
+        if (predicate.scalar_type != PrimitiveType::i32 ||
+            predicate.bytes != 4 || !predicate.element_shape.empty() ||
+            !(predicate.shape.empty() ||
+              predicate.shape == std::vector<std::uint64_t>{1}) ||
+            predicate.base_offset % 4)
           throw MemoryBindingError(
-              "Kernel arguments cannot bind native resources: " + name);
-        kernel_args.push_back(*arguments.at(name));
-        if (auto binding = layouts.find(name); binding != layouts.end()) {
-          const auto &value = *binding->second;
-          const auto parameter = parameters.find({static_cast<int>(i)});
-          // A plan-wide primal may also be read by ordinary helper kernels.
-          // Supply its gradient only where the compiled dispatch ABI uses it.
-          // Keep malformed/structure bindings for the common validator, and
-          // reject gradients unused by every dispatch at the end of prepare.
-          if (value.gradient && !value.layout && value.layout_version == 0 &&
-              (parameter == parameters.end() || !parameter->second.needs_grad))
-            continue;
-          used_bindings.insert(name);
-          kernel_bindings.push_back({static_cast<uint32_t>(i),
-                                     value.layout_version, value.layout,
-                                     value.gradient});
-        }
+              "Loop predicate requires one aligned scalar i32 element");
+        auto bound = std::make_shared<FixedExecution::While>();
+        bound->predicate = predicate.pointer;
+        bound->max_iterations = loop.max_iterations;
+        bound->continue_while_nonzero = loop.continue_while_nonzero;
+        if (!bind_steps(loop.condition, bound->condition) ||
+            !bind_steps(loop.body, bound->body))
+          return false;
+        operations.emplace_back(std::move(bound));
+        continue;
       }
-      auto bound = capi::bind_kernel_arguments(
-          rt, handle, static_cast<uint32_t>(kernel_args.size()),
-          kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
-          kernel_bindings.data());
-      if (!bound)
-        return TI_NULL_HANDLE;
-      bound->context->append_dispatch_label(kernel->label);
-      prepared->memories.insert(prepared->memories.end(),
-                                bound->memories.begin(), bound->memories.end());
-      operations.emplace_back(
-          FixedExecution::Dispatch{bound->kernel, bound->context.get()});
-      prepared->plan_arguments.push_back(std::move(bound));
-    } else if (const auto *copy =
-                   std::get_if<aot::ExecutionPlan::Copy>(&operation)) {
-      const auto src = storage(copy->source, copy->source_offset);
-      const auto dst = storage(copy->destination, copy->destination_offset);
-      const auto bytes = copy->bytes.value_or(src.size);
-      if (bytes > src.size || bytes > dst.size ||
-          bytes > std::numeric_limits<std::size_t>::max())
-        throw MemoryBindingError("Execution copy exceeds ndarray extent");
-      if (bytes && src.pointer.alloc_id == dst.pointer.alloc_id &&
-          src.pointer.offset < dst.pointer.offset + bytes &&
-          dst.pointer.offset < src.pointer.offset + bytes)
-        throw MemoryBindingError("Execution copy slices must not overlap");
-      operations.emplace_back(FixedExecution::BufferCopy{
-          dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
-    } else if (const auto *native =
-                   std::get_if<aot::ExecutionPlan::Native>(&operation)) {
-      try {
-        operations.emplace_back(native_operation_registry().prepare(
-            preparation, decoded.at(native), native_inputs(*native)));
-      } catch (const std::invalid_argument &error) {
-        throw MemoryBindingError(error.what());
-      }
-    } else if (const auto *sort =
-                   std::get_if<aot::ExecutionPlan::Sort>(&operation)) {
-      const auto keys = storage(sort->keys, 0);
-      const auto &array = arguments.at(sort->keys)->value.ndarray;
-      if (array.shape.dim_count != 1 || array.elem_shape.dim_count)
-        throw MemoryBindingError("Sort requires 1D scalar keys");
-      NativeSortKeyType key_type;
-      switch (array.elem_type) {
-        case TI_DATA_TYPE_U32:
-          key_type = NativeSortKeyType::u32;
-          break;
-        case TI_DATA_TYPE_I32:
-          key_type = NativeSortKeyType::i32;
-          break;
-        case TI_DATA_TYPE_F32:
-          key_type = NativeSortKeyType::f32;
-          break;
-        case TI_DATA_TYPE_U64:
-          key_type = NativeSortKeyType::u64;
-          break;
-        case TI_DATA_TYPE_I64:
-          key_type = NativeSortKeyType::i64;
-          break;
-        case TI_DATA_TYPE_F64:
-          key_type = NativeSortKeyType::f64;
-          break;
-        default:
-          throw MemoryBindingError("Sort keys require i32/u32/f32/i64/u64/f64");
-      }
-      if (rt.get_memory(array.memory).base_offset % keys.element_bytes)
-        throw MemoryBindingError("Sort key storage is misaligned");
-      SortOperation descriptor{keys.pointer, {}, array.shape.dims[0], key_type};
-      if (sort->values) {
-        const auto values = storage(*sort->values, 0);
-        const auto &payload = arguments.at(*sort->values)->value.ndarray;
-        if (payload.shape.dim_count != 1 ||
-            payload.shape.dims[0] != array.shape.dims[0] ||
-            !values.element_bytes || values.element_bytes % 4 ||
-            rt.get_memory(payload.memory).base_offset % 4)
-          throw MemoryBindingError(
-              "Sort payload requires matching 1D raw-word records");
-        if (keys.size && values.size &&
-            keys.pointer.alloc_id == values.pointer.alloc_id &&
-            (keys.pointer.offset <= values.pointer.offset
-                 ? values.pointer.offset - keys.pointer.offset < keys.size
-                 : keys.pointer.offset - values.pointer.offset < values.size))
-          throw MemoryBindingError(
-              "Sort key and payload ranges must not overlap");
-        descriptor.values = values.pointer;
-        descriptor.value_bytes = static_cast<size_t>(values.element_bytes);
-        descriptor.value_scalar_bytes = descriptor.value_bytes;
-        for (uint32_t i = 0; i < payload.elem_shape.dim_count; ++i)
-          descriptor.value_scalar_bytes /= payload.elem_shape.dims[i];
-      }
-      try {
-        operations.emplace_back(
-            prepare_sort_operation(rt.arch, rt.get(), descriptor));
-      } catch (const std::invalid_argument &error) {
-        throw MemoryBindingError(error.what());
-      }
-    } else if (const auto *compact =
-                   std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
-      auto compact_storage = [&](const std::string &name) {
-        auto result = storage(name, 0);
-        if (rt.get_memory(arguments.at(name)->value.ndarray.memory)
-                .base_offset %
-            4)
-          throw MemoryBindingError("Compact storage must be 4-byte aligned");
-        return result;
-      };
-      const auto flag_storage = compact_storage(compact->flags);
-      const auto count_storage = compact_storage(compact->count);
-      const auto &flags = arguments.at(compact->flags)->value.ndarray;
-      const auto &count = arguments.at(compact->count)->value.ndarray;
-      if (flags.shape.dim_count != 1 || flags.elem_type != TI_DATA_TYPE_I32 ||
-          flags.elem_shape.dim_count || count.elem_type != TI_DATA_TYPE_I32 ||
-          count.elem_shape.dim_count || count.shape.dim_count > 1 ||
-          (count.shape.dim_count == 1 && count.shape.dims[0] < 1))
-        throw MemoryBindingError(
-            "Compact requires 1D i32 flags and a writable i32 count");
-      CompactOperation descriptor{
-          {}, flag_storage.pointer, count_storage.pointer, flags.shape.dims[0]};
-      for (const auto &column : compact->columns) {
-        const auto source = compact_storage(column.values);
-        const auto destination = compact_storage(column.output);
-        const auto &values = arguments.at(column.values)->value.ndarray;
-        const auto &output = arguments.at(column.output)->value.ndarray;
-        if (values.shape.dim_count != 1 || output.shape.dim_count != 1 ||
-            values.shape.dims[0] != flags.shape.dims[0] ||
-            output.shape.dims[0] < values.shape.dims[0] ||
-            values.elem_type != output.elem_type ||
-            values.elem_shape.dim_count != output.elem_shape.dim_count)
-          throw MemoryBindingError(
-              "Compact requires matching 1D records and sufficient output "
-              "capacity");
-        for (uint32_t i = 0; i < values.elem_shape.dim_count; ++i)
-          if (values.elem_shape.dims[i] != output.elem_shape.dims[i])
+      if (const auto *kernel =
+              std::get_if<aot::ExecutionPlan::Kernel>(&operation)) {
+        auto handle = mod.get_kernel_handle(kernel->entry);
+        if (!handle)
+          throw MemoryBindingError("Execution plan kernel was not exported: " +
+                                   kernel->entry);
+        std::vector<TiArgument> kernel_args;
+        std::vector<TiNdArrayBinding> kernel_bindings;
+        const auto &parameters =
+            rt.get_kernel(handle).kernel->nested_parameters;
+        for (std::size_t i = 0; i < kernel->arguments.size(); ++i) {
+          const auto &name = kernel->arguments[i];
+          if (native_objects.count(name))
             throw MemoryBindingError(
-                "Compact input and output element shapes differ");
-        descriptor.columns.push_back(
-            {source.pointer, destination.pointer,
-             static_cast<size_t>(source.element_bytes)});
-      }
-      try {
+                "Kernel arguments cannot bind native resources: " + name);
+          kernel_args.push_back(*arguments.at(name));
+          if (auto binding = layouts.find(name); binding != layouts.end()) {
+            const auto &value = *binding->second;
+            const auto parameter = parameters.find({static_cast<int>(i)});
+            // A plan-wide primal may also be read by ordinary helper kernels.
+            // Supply its gradient only where the compiled dispatch ABI uses it.
+            // Keep malformed/structure bindings for the common validator, and
+            // reject gradients unused by every dispatch at the end of prepare.
+            if (value.gradient && !value.layout && value.layout_version == 0 &&
+                (parameter == parameters.end() ||
+                 !parameter->second.needs_grad))
+              continue;
+            used_bindings.insert(name);
+            kernel_bindings.push_back({static_cast<uint32_t>(i),
+                                       value.layout_version, value.layout,
+                                       value.gradient});
+          }
+        }
+        auto bound = capi::bind_kernel_arguments(
+            rt, handle, static_cast<uint32_t>(kernel_args.size()),
+            kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
+            kernel_bindings.data());
+        if (!bound)
+          return false;
+        bound->context->append_dispatch_label(kernel->label);
+        prepared->memories.insert(prepared->memories.end(),
+                                  bound->memories.begin(),
+                                  bound->memories.end());
         operations.emplace_back(
-            prepare_compact_operation(rt.arch, rt.get(), descriptor));
-      } catch (const std::invalid_argument &error) {
-        throw MemoryBindingError(error.what());
+            FixedExecution::Dispatch{bound->kernel, bound->context.get()});
+        prepared->plan_arguments.push_back(std::move(bound));
+      } else if (const auto *copy =
+                     std::get_if<aot::ExecutionPlan::Copy>(&operation)) {
+        const auto src = storage(copy->source, copy->source_offset);
+        const auto dst = storage(copy->destination, copy->destination_offset);
+        const auto bytes = copy->bytes.value_or(src.size);
+        if (bytes > src.size || bytes > dst.size ||
+            bytes > std::numeric_limits<std::size_t>::max())
+          throw MemoryBindingError("Execution copy exceeds ndarray extent");
+        if (bytes && src.pointer.alloc_id == dst.pointer.alloc_id &&
+            src.pointer.offset < dst.pointer.offset + bytes &&
+            dst.pointer.offset < src.pointer.offset + bytes)
+          throw MemoryBindingError("Execution copy slices must not overlap");
+        operations.emplace_back(FixedExecution::BufferCopy{
+            dst.pointer, src.pointer, static_cast<std::size_t>(bytes)});
+      } else if (const auto *native =
+                     std::get_if<aot::ExecutionPlan::Native>(&operation)) {
+        try {
+          operations.emplace_back(native_operation_registry().prepare(
+              preparation, decoded.at(native), native_inputs(*native)));
+        } catch (const std::invalid_argument &error) {
+          throw MemoryBindingError(error.what());
+        }
+      } else if (const auto *sort =
+                     std::get_if<aot::ExecutionPlan::Sort>(&operation)) {
+        const auto keys = storage(sort->keys, 0);
+        const auto &array = arguments.at(sort->keys)->value.ndarray;
+        if (array.shape.dim_count != 1 || array.elem_shape.dim_count)
+          throw MemoryBindingError("Sort requires 1D scalar keys");
+        NativeSortKeyType key_type;
+        switch (array.elem_type) {
+          case TI_DATA_TYPE_U32:
+            key_type = NativeSortKeyType::u32;
+            break;
+          case TI_DATA_TYPE_I32:
+            key_type = NativeSortKeyType::i32;
+            break;
+          case TI_DATA_TYPE_F32:
+            key_type = NativeSortKeyType::f32;
+            break;
+          case TI_DATA_TYPE_U64:
+            key_type = NativeSortKeyType::u64;
+            break;
+          case TI_DATA_TYPE_I64:
+            key_type = NativeSortKeyType::i64;
+            break;
+          case TI_DATA_TYPE_F64:
+            key_type = NativeSortKeyType::f64;
+            break;
+          default:
+            throw MemoryBindingError(
+                "Sort keys require i32/u32/f32/i64/u64/f64");
+        }
+        if (rt.get_memory(array.memory).base_offset % keys.element_bytes)
+          throw MemoryBindingError("Sort key storage is misaligned");
+        SortOperation descriptor{
+            keys.pointer, {}, array.shape.dims[0], key_type};
+        if (sort->values) {
+          const auto values = storage(*sort->values, 0);
+          const auto &payload = arguments.at(*sort->values)->value.ndarray;
+          if (payload.shape.dim_count != 1 ||
+              payload.shape.dims[0] != array.shape.dims[0] ||
+              !values.element_bytes || values.element_bytes % 4 ||
+              rt.get_memory(payload.memory).base_offset % 4)
+            throw MemoryBindingError(
+                "Sort payload requires matching 1D raw-word records");
+          if (keys.size && values.size &&
+              keys.pointer.alloc_id == values.pointer.alloc_id &&
+              (keys.pointer.offset <= values.pointer.offset
+                   ? values.pointer.offset - keys.pointer.offset < keys.size
+                   : keys.pointer.offset - values.pointer.offset < values.size))
+            throw MemoryBindingError(
+                "Sort key and payload ranges must not overlap");
+          descriptor.values = values.pointer;
+          descriptor.value_bytes = static_cast<size_t>(values.element_bytes);
+          descriptor.value_scalar_bytes = descriptor.value_bytes;
+          for (uint32_t i = 0; i < payload.elem_shape.dim_count; ++i)
+            descriptor.value_scalar_bytes /= payload.elem_shape.dims[i];
+        }
+        try {
+          operations.emplace_back(
+              prepare_sort_operation(rt.arch, rt.get(), descriptor));
+        } catch (const std::invalid_argument &error) {
+          throw MemoryBindingError(error.what());
+        }
+      } else if (const auto *compact =
+                     std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
+        auto compact_storage = [&](const std::string &name) {
+          auto result = storage(name, 0);
+          if (rt.get_memory(arguments.at(name)->value.ndarray.memory)
+                  .base_offset %
+              4)
+            throw MemoryBindingError("Compact storage must be 4-byte aligned");
+          return result;
+        };
+        const auto flag_storage = compact_storage(compact->flags);
+        const auto count_storage = compact_storage(compact->count);
+        const auto &flags = arguments.at(compact->flags)->value.ndarray;
+        const auto &count = arguments.at(compact->count)->value.ndarray;
+        if (flags.shape.dim_count != 1 || flags.elem_type != TI_DATA_TYPE_I32 ||
+            flags.elem_shape.dim_count || count.elem_type != TI_DATA_TYPE_I32 ||
+            count.elem_shape.dim_count || count.shape.dim_count > 1 ||
+            (count.shape.dim_count == 1 && count.shape.dims[0] < 1))
+          throw MemoryBindingError(
+              "Compact requires 1D i32 flags and a writable i32 count");
+        CompactOperation descriptor{{},
+                                    flag_storage.pointer,
+                                    count_storage.pointer,
+                                    flags.shape.dims[0]};
+        for (const auto &column : compact->columns) {
+          const auto source = compact_storage(column.values);
+          const auto destination = compact_storage(column.output);
+          const auto &values = arguments.at(column.values)->value.ndarray;
+          const auto &output = arguments.at(column.output)->value.ndarray;
+          if (values.shape.dim_count != 1 || output.shape.dim_count != 1 ||
+              values.shape.dims[0] != flags.shape.dims[0] ||
+              output.shape.dims[0] < values.shape.dims[0] ||
+              values.elem_type != output.elem_type ||
+              values.elem_shape.dim_count != output.elem_shape.dim_count)
+            throw MemoryBindingError(
+                "Compact requires matching 1D records and sufficient output "
+                "capacity");
+          for (uint32_t i = 0; i < values.elem_shape.dim_count; ++i)
+            if (values.elem_shape.dims[i] != output.elem_shape.dims[i])
+              throw MemoryBindingError(
+                  "Compact input and output element shapes differ");
+          descriptor.columns.push_back(
+              {source.pointer, destination.pointer,
+               static_cast<size_t>(source.element_bytes)});
+        }
+        try {
+          operations.emplace_back(
+              prepare_compact_operation(rt.arch, rt.get(), descriptor));
+        } catch (const std::invalid_argument &error) {
+          throw MemoryBindingError(error.what());
+        }
+      } else {
+        const auto &fill = std::get<aot::ExecutionPlan::Fill>(operation);
+        const auto dst = storage(fill.destination, fill.offset);
+        const auto bytes = fill.bytes.value_or(dst.size);
+        const auto &array = arguments.at(fill.destination)->value.ndarray;
+        if (bytes > dst.size ||
+            bytes > std::numeric_limits<std::size_t>::max() ||
+            rt.get_memory(array.memory).base_offset % 4)
+          throw MemoryBindingError(
+              "Execution fill exceeds ndarray extent or alignment");
+        operations.emplace_back(FixedExecution::BufferFill{
+            dst.pointer, static_cast<std::size_t>(bytes), fill.value});
       }
-    } else {
-      const auto &fill = std::get<aot::ExecutionPlan::Fill>(operation);
-      const auto dst = storage(fill.destination, fill.offset);
-      const auto bytes = fill.bytes.value_or(dst.size);
-      const auto &array = arguments.at(fill.destination)->value.ndarray;
-      if (bytes > dst.size || bytes > std::numeric_limits<std::size_t>::max() ||
-          rt.get_memory(array.memory).base_offset % 4)
-        throw MemoryBindingError(
-            "Execution fill exceeds ndarray extent or alignment");
-      operations.emplace_back(FixedExecution::BufferFill{
-          dst.pointer, static_cast<std::size_t>(bytes), fill.value});
     }
-  }
+    return true;
+  };
+  if (!bind_steps(plan.initialization, operations) ||
+      !bind_steps(plan.operations, operations))
+    return TI_NULL_HANDLE;
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");

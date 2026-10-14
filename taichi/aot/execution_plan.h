@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -47,7 +48,21 @@ struct ExecutionPlan {
     std::optional<std::string> values;
   };
   using Native = NativeOperationDescription;
-  using Operation = std::variant<Kernel, Copy, Fill, Compact, Sort, Native>;
+  struct While;
+  using Operation = std::variant<Kernel,
+                                 Copy,
+                                 Fill,
+                                 Compact,
+                                 Sort,
+                                 Native,
+                                 std::shared_ptr<const While>>;
+  struct While {
+    std::string predicate;
+    std::uint64_t max_iterations{0};
+    bool continue_while_nonzero{true};
+    std::vector<Operation> condition;
+    std::vector<Operation> body;
+  };
   struct ArrayLayout {
     std::string array;
     NativeArrayLayoutRequirement required;

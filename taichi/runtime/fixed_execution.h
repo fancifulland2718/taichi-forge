@@ -36,10 +36,19 @@ class FixedExecution {
     std::size_t bytes;
     std::uint32_t value;
   };
+  struct While;
   using Operation = std::variant<Dispatch,
                                  BufferCopy,
                                  BufferFill,
-                                 std::shared_ptr<NativeOperation>>;
+                                 std::shared_ptr<NativeOperation>,
+                                 std::shared_ptr<const While>>;
+  struct While {
+    DevicePtr predicate;
+    std::uint64_t max_iterations{0};
+    bool continue_while_nonzero{true};
+    std::vector<Operation> condition;
+    std::vector<Operation> body;
+  };
 
   // Optional cold facts chain unconditional phases of one prepared execution.
   // Published only after successful recording; they do not execute

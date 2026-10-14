@@ -21,6 +21,25 @@ static_assert(offsetof(CudaGraphConditionalControl, max_iterations) == 12);
 static_assert(offsetof(CudaGraphConditionalControl, continue_while_nonzero) ==
               16);
 
+// Persistent plans use the full nonnegative int64 budget of their JSON ABI.
+// Keep the existing live-JIT control layout unchanged.
+struct CudaGraphConditionalControl64 {
+  std::uintptr_t predicate{0};
+  std::uint64_t iteration{0};
+  std::uint64_t max_iterations{0};
+  std::uint32_t continue_while_nonzero{1};
+  std::uint32_t reserved{0};
+};
+static_assert(sizeof(CudaGraphConditionalControl64) == 32);
+static_assert(offsetof(CudaGraphConditionalControl64, max_iterations) == 16);
+static_assert(offsetof(CudaGraphConditionalControl64, continue_while_nonzero) ==
+              24);
+
+void driver_graph_set_conditional64(CudaGraphConditionalControl64 *control,
+                                    std::uint64_t conditional_handle,
+                                    void *stream,
+                                    bool reset_iteration);
+
 struct CudaGraphBoundedControl {
   std::uintptr_t device_node{0};
   std::uint32_t grid_x{0};

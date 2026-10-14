@@ -38,6 +38,13 @@ lifetimes. The entries below describe the changes.
   from their declarations and entry-point interfaces. This fixes descriptor
   layout failures in nested loops when an outer or inner status is omitted.
 
+- Explicit AOT execution descriptions support persistent `while` regions:
+  CPU prepares native loops, while CUDA assembles prefix, initial condition,
+  loop and suffix in one root graph. Bodies are not unrolled by the budget;
+  nesting and 64-bit budgets are supported. Automatic Graph export, complete
+  SolvePlan export and Vulkan persistent control remain separate work. See the
+  [AOT SDK contract](aot_sdk.en.md); matching private ABI 45 is required.
+
 - AOT can reconstruct fixed CSR resources and f32 cuSPARSE SpMV, including
   transpose, i32/i64 topology and ordered coefficient updates. Each captured
   operation owns its preprocessing state while sharing the JIT execution core.
@@ -49,7 +56,7 @@ lifetimes. The entries below describe the changes.
   vendor's signed 64-bit extent ABI, including CSR extent queries. This fixes
   narrowing in the dynamic calls; it does not expand the public `SparseMatrix`
   index/storage contract or claim full cuSPARSE AOT coverage. Use matching
-  Python/native components (private ABI 44).
+  Python/native components (private ABI 45).
 
 - The runtime wheel now includes a stdlib-only `taichi_forge_runtime.aot`
   consumer sharing JIT's native library. Ordinary AOT kernels and CGraphs can

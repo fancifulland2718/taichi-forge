@@ -235,6 +235,39 @@ and operations before recording native commands; it executes no mathematical
 work or buffer modification. Warm replay submits one prepared handle without
 parsing JSON or calling Python for each node.
 
+Persistent format version 3 also accepts explicit `while` operations:
+
+```python
+loop = dict(
+    kind="while", predicate="active", max_iterations=1000,
+    condition=[dict(kind="kernel", entry="check", arguments=["state", "active"])],
+    body=[dict(kind="kernel", entry="advance", arguments=["state"])],
+    continue_while_nonzero=True,
+)
+plan = ExecutionPlan([loop])
+```
+
+Bind `active` to one aligned scalar i32 ndarray with shape `()` or `(1,)`.
+The initial condition always executes, including with a zero budget; each body
+execution is followed by the condition. Budgets are nonnegative int64 values.
+Both regions must be nonempty and may contain nested loops; the body is stored
+once. Ordinary prefix and suffix operations retain their order. CPU runs prepared
+native steps. With CUDA conditional graph support, the entire region uses one
+root graph and one `cuGraphLaunch`, with 32 bytes of control storage per logical
+loop and no per-iteration host readback. Prepare again to change frozen arguments;
+device predicate and array contents can change between replays.
+
+This explicit-description entry does not yet include automatic `from_graph`
+while export, complete SolvePlan export, or Vulkan persistent control. Vulkan
+rejects it at prepare time. CUDA operations requiring host synchronization are
+excluded from loop regions; providers with opaque cold facts still require an
+explicit branch/repetition merge contract. Initialization facts established only
+in a body cannot escape a possibly zero-trip loop. Closing storage, modules or a
+borrowed owner retires dependent executions under the existing rules. Small
+CPU/CUDA cases cover nesting, zero trips, early exit, budget exhaustion and an
+explicitly exported suffix gradient; this does not promise differentiation of
+arbitrary dynamic loops. Matching private ABI 45 components are required.
+
 `add_execution_plan(name, graph, gradients=None)` also accepts a compiled Forge
 Graph. It exports the referenced kernel specializations and qualified native
 recordings into this same execution format, and returns the frozen `ExecutionPlan`:
@@ -296,7 +329,7 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 44
+explicit reverse kernels and retirement. This requires matching private ABI 45
 components. Reduction/helper capacity, layout and disjointness certificates are
 preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
@@ -346,7 +379,7 @@ tensor layout, imported aliases and retirement. Graph export translates qualifie
 scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
 aliases and removing duplicate constraints. Custom binding executors, storage
 plans and lifetime validators still need their own reconstruction contract.
-Use matching private ABI 44 components.
+Use matching private ABI 45 components.
 
 Selected CUDA typed reductions can now export direct and block-partial/finalize
 recipes, preserving the chosen kernels, fixed counts, labels, private partials
@@ -415,7 +448,7 @@ numeric publications and retirement in standalone and borrowed consumers. Existi
 backend/provider recordability and affine-view restrictions still apply; this does
 not qualify arbitrary block leaves or add automatic derivatives. Live fields and
 SolvePlan control still need reconstruction contracts. Resource roles and coherent snapshots require
-matching private ABI 44 components; no provider library is added to the consumer.
+matching private ABI 45 components; no provider library is added to the consumer.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -518,7 +551,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 44). Small
+elements. Use matching Python/native components (current private ABI 45). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.
@@ -600,7 +633,7 @@ Explicit gradient bindings may name separate views with different parent offsets
 the exported kernel must still declare its gradient ABI. CPU/CUDA/Vulkan tests
 cover actual `.grad`, nested views, tensor elements, reshape, empty views, native
 sort, alias rejection and retirement. No additional device allocation or replay
-copy is introduced by a view. Use matching private ABI 44 components. This common
+copy is introduced by a view. Use matching private ABI 45 components. This common
 resource support is separate from automatic export of operator-derived views.
 
 Plans can separate one-time initialization from replay:

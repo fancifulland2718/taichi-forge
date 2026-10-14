@@ -1,6 +1,7 @@
 #include "taichi/aot/execution_plan.h"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -17,24 +18,42 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints"});
     const auto version = integer(root["version"]);
-    if (version != 1 && version != 2)
+    if (version != 1 && version != 2 && version != 3)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
-    if ((version == 2) != has_initialization)
+    if (version < 3 && ((version == 2) != has_initialization))
       throw std::invalid_argument(
           "Initialization requires execution plan version 2");
     ExecutionPlan plan;
     plan.resources = ExecutionResources::parse(root);
     std::set<std::string> arguments;
-    auto parse_steps = [&](const JsonValue &steps,
-                           std::vector<Operation> &operations) {
+    std::function<void(const JsonValue &, std::vector<Operation> &)>
+        parse_steps;
+    parse_steps = [&](const JsonValue &steps,
+                      std::vector<Operation> &operations) {
       if (!steps.is_arr() || steps.arr.inner.empty() ||
           steps.arr.inner.size() > std::numeric_limits<std::uint32_t>::max())
         throw std::invalid_argument(
             "Execution plan needs a nonempty operation array");
       for (const auto &step : steps.arr.inner) {
         const auto kind = name(step["kind"]);
-        if (kind == "kernel") {
+        if (kind == "while") {
+          if (version != 3)
+            throw std::invalid_argument(
+                "Structured control requires execution plan version 3");
+          fields(step, {"kind", "predicate", "max_iterations", "condition",
+                        "body", "continue_while_nonzero"});
+          auto loop = std::make_shared<While>();
+          loop->predicate = name(step["predicate"]);
+          loop->max_iterations = integer(step["max_iterations"]);
+          loop->continue_while_nonzero =
+              !step.obj.inner.count("continue_while_nonzero") ||
+              optional_bool(step, "continue_while_nonzero");
+          arguments.insert(loop->predicate);
+          parse_steps(step["condition"], loop->condition);
+          parse_steps(step["body"], loop->body);
+          operations.emplace_back(std::move(loop));
+        } else if (kind == "kernel") {
           fields(step, {"kind", "entry", "arguments", "label"});
           Kernel kernel{name(step["entry"]), {}, {}};
           if (auto found = step.obj.inner.find("label");

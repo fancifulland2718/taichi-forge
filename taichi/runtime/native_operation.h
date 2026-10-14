@@ -31,13 +31,26 @@ struct NativeRecordingState {
   // Copies across unconditional phases; never consulted by warm replay.
   template <typename Facts>
   Facts &provider_state(const NativeResource *resource) {
+    if (conditional_)
+      throw std::invalid_argument(
+          "Opaque provider facts require a structured-control merge contract");
     auto &state = provider_states[resource];
     if (!state.has_value())
       state = Facts{};
     return std::any_cast<Facts &>(state);
   }
 
+  // Initialized resources are monotonic facts. A zero-trip body may validate
+  // against a copy but cannot publish its newly initialized resources outside.
+  // Provider-specific mutable facts need an explicit join/repetition contract.
+  NativeRecordingState control_branch() const {
+    auto copy = *this;
+    copy.conditional_ = true;
+    return copy;
+  }
+
  private:
+  bool conditional_{false};
   std::unordered_map<const NativeResource *, std::any> provider_states;
 };
 

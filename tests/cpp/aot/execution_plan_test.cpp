@@ -12,6 +12,44 @@ void validate_provider_description(const std::string &document) {
 }
 }  // namespace
 
+TEST(ExecutionPlan, PersistentControlKeepsNestedCodeAndRuntimeClosure) {
+  const auto plan = ExecutionPlan::parse(R"({"version":3,
+    "initialization":[{"kind":"copy","source":"initial","destination":"scratch"}],
+    "resources":[{"kind":"ndarray","name":"scratch","dtype":"f32","shape":[17]}],
+    "operations":[{"kind":"while","predicate":"predicate","max_iterations":8589934592,
+      "condition":[{"kind":"kernel","entry":"check","arguments":["predicate","target"]}],
+      "body":[{"kind":"while","predicate":"inner","max_iterations":2,
+        "continue_while_nonzero":false,
+        "condition":[{"kind":"kernel","entry":"inner_check","arguments":["inner"]}],
+        "body":[{"kind":"kernel","entry":"advance","arguments":["scratch","x"]}]}]}]})");
+  ASSERT_EQ(plan.operations.size(), 1);
+  const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
+      plan.operations[0]);
+  EXPECT_EQ(loop.max_iterations, 8589934592ull);
+  EXPECT_TRUE(loop.continue_while_nonzero);
+  const auto &inner =
+      *std::get<std::shared_ptr<const ExecutionPlan::While>>(loop.body[0]);
+  EXPECT_FALSE(inner.continue_while_nonzero);
+  EXPECT_EQ(std::get<ExecutionPlan::Kernel>(inner.body[0]).entry, "advance");
+  EXPECT_EQ(plan.arguments,
+            (std::vector<std::string>{"initial", "inner", "predicate", "target",
+                                      "x"}));
+  EXPECT_EQ(
+      plan.replay_bindings,
+      (std::set<std::string>{"inner", "predicate", "scratch", "target", "x"}));
+  EXPECT_EQ(plan.resources.materialize, (std::vector<bool>{true}));
+  const std::string region =
+      R"(,"condition":[{"kind":"fill32","destination":"p","value":0}],"body":[{"kind":"fill32","destination":"x","value":1}]}]})";
+  for (
+      const auto *fields :
+      {R"({"version":2,"operations":[{"kind":"while","predicate":"p","max_iterations":1)",
+       R"({"version":3,"operations":[{"kind":"while","predicate":"p","max_iterations":-1)",
+       R"({"version":3,"operations":[{"kind":"while","predicate":"p","max_iterations":true)",
+       R"({"version":3,"operations":[{"kind":"while","predicate":"p","max_iterations":1,"continue_while_nonzero":1)"})
+    EXPECT_THROW(ExecutionPlan::parse(std::string(fields) + region),
+                 std::invalid_argument);
+}
+
 TEST(ExecutionPlan, PreservesOrderedOperationsAndSymbolicBindings) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"kernel","entry":"forward","arguments":["x","scratch"]},

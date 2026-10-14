@@ -198,6 +198,32 @@ runtime.wait()
 准备阶段验证全部参数、范围和操作，再记录原生命令；不执行数学工作或修改缓冲。
 暖态通过一个 prepared handle 提交，不重新解析 JSON 或逐节点调用 Python。
 
+持久描述版本 3 还接受显式 `while` 操作：
+
+```python
+loop = dict(
+    kind="while", predicate="active", max_iterations=1000,
+    condition=[dict(kind="kernel", entry="check", arguments=["state", "active"])],
+    body=[dict(kind="kernel", entry="advance", arguments=["state"])],
+    continue_while_nonzero=True,
+)
+plan = ExecutionPlan([loop])
+```
+
+`active` 必须绑定一个对齐的标量 i32 ndarray，shape 为 `()` 或 `(1,)`。首次条件
+始终执行，包括预算为零；每轮执行 body 后再执行 condition。预算是非负 int64，
+循环体只序列化一次，condition/body 均须非空，允许嵌套。循环前后的普通操作保留
+原顺序。CPU 使用已准备的原生循环；支持 CUDA conditional graph 的驱动上，整个
+区域物化为同一根图，一次 `cuGraphLaunch`，控制存储每个逻辑循环为 32 字节，
+不逐轮读回 host。改变冻结参数应重新 prepare，设备谓词和数组内容可在重放间更新。
+
+本接口目前是显式描述入口，尚不代表 `from_graph` 自动导出 while、完整 SolvePlan
+或 Vulkan 持久控制已经接通。Vulkan 在 prepare 明确拒绝。需要 host 同步的 CUDA
+provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
+循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
+规则退休相关执行。CPU/CUDA 小用例验证了嵌套、零轮、提前结束、预算耗尽和显式导出的
+后段梯度；这不表示支持对任意动态循环自动微分。需匹配 private ABI 45。
+
 `add_execution_plan(name, graph, gradients=None)` 也可接收已编译的 Forge Graph，
 自动把引用的 kernel 特化及已具备重建合同的 native recording 导出为同一种执行描述，
 返回冻结的 `ExecutionPlan`：
@@ -244,7 +270,7 @@ kernel dispatch 标签可经自动导出及 kernel operation 的可选 `"label"`
 标签属于每次操作，同一 kernel 的不同标签不会重复生成编译代码；准备时传给共用
 launch context。固定重放不会因此自动开启逐 kernel profiler 或 NVTX 事件。
 标签为非空字符串，不能含 NUL 或换行，不设固定长度上限。CPU/CUDA/Vulkan 的独立
-及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 44。
+及借用消费者小规模测试覆盖长 UTF-8 标签、显式反向和退休；需配套 private ABI 45。
 reduction/helper 的容量、布局和 disjoint 证明通过下面的冷约束保留；未支持的绑定
 配方仍在预检期拒绝。
 
@@ -282,7 +308,7 @@ Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者
 及 affine view 需要独立布局合同。CPU/CUDA/Vulkan 已测真实反向 kernel、零长度、
 tensor 布局、导入别名和退休。Graph 导出会翻译已资格的 scalar/AoS、紧凑二维布局
 要求，合并私有别名名称并去除重复约束。自定义绑定器、存储规划和生命周期 validator
-仍需自己的重建合同。需配套 private ABI 44。
+仍需自己的重建合同。需配套 private ABI 45。
 
 已选中的 CUDA typed reduction 可导出 direct 和 block-partial/finalize，保留
 物理 kernel、固定 count、标签、私有 partial 和绑定要求，重复导出复用 kernel 定义。
@@ -333,7 +359,7 @@ Graph 私有数组及组合 scratch 上的连续视图；即使只有子视图�
 CPU/CUDA/Vulkan 已验证矩形块、显式伴随、compose 内嵌 block、独立准备、数值发布，以及
 独立/借用消费端退休。既有 backend/provider 可录制性及 affine view 限制仍适用，不表示
 任意叶算子均可作为 block，也不自动生成导数。活 field 与 SolvePlan 控制仍需重建合同。
-资源角色及一致快照要求配套 private ABI 44，不给消费端增加 provider 库依赖。
+资源角色及一致快照要求配套 private ABI 45，不给消费端增加 provider 库依赖。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。
@@ -411,7 +437,7 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
 位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 44）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+配套（当前 private ABI 45）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
@@ -472,7 +498,7 @@ resources = [
 kernel、copy、fill 和合格的原生操作使用所选范围。显式梯度绑定可以指向独立视图，
 其父数组与偏移可与 primal 不同；导出的 kernel 仍须声明相应梯度 ABI。CPU/CUDA/Vulkan
 测试覆盖实际 `.grad`、嵌套视图、tensor 元素、reshape、空视图、原生 sort、别名拒绝和
-退休。视图本身不增加设备分配或重放复制。需配套 private ABI 44。此公共资源能力与
+退休。视图本身不增加设备分配或重放复制。需配套 private ABI 45。此公共资源能力与
 operator derived view 的自动导出分别接入。
 
 计划可以将一次性初始化与重放分开：
@@ -673,7 +699,7 @@ AXPY/SCAL 接受有限 f32 的 `alpha` 参数（默认 1），或形状为 `()` 
 设备系数变化、共享 HOST/DEVICE pointer mode、视图、非法绑定回滚、空输入和退休。
 导出的 energy/反向 kernel 与显式向量伴随核对梯度，不提供外部操作的自动微分。
 测试用小规模数据执行 64 位入口，未验证数十亿元素分配或旧 vendor 库兼容性。
-需配套 private ABI 44。本项为持久计划提供可复用操作；全部 solver 或 JIT recording
+需配套 private ABI 45。本项为持久计划提供可复用操作；全部 solver 或 JIT recording
 自动导出仍需各自的合同。
 
 原生资源在 `resources` 中使用同一注册式外壳，另加 `name`。CUDA 的

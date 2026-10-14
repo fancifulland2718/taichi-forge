@@ -62,6 +62,44 @@ PREDICATE_READY:
     ret;
 }
 
+
+.visible .entry graph_set_conditional64(
+    .param .u64 control_param,
+    .param .u64 handle_param,
+    .param .u32 reset_iteration_param
+)
+{
+    .reg .pred %p<6>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<7>;
+    .param .b64 call_handle;
+    .param .b32 call_value;
+    ld.param.u64 %rd1, [control_param];
+    ld.param.u64 %rd2, [handle_param];
+    ld.param.u32 %r1, [reset_iteration_param];
+    ld.global.u64 %rd3, [%rd1];
+    ld.global.u64 %rd4, [%rd1+16];
+    ld.global.u32 %r2, [%rd1+24];
+    mov.u64 %rd5, 0;
+    setp.ne.u32 %p1, %r1, 0;
+    @%p1 bra ITERATION_READY64;
+    ld.global.u64 %rd6, [%rd1+8];
+    add.u64 %rd5, %rd6, 1;
+ITERATION_READY64:
+    st.global.u64 [%rd1+8], %rd5;
+    ld.global.u32 %r3, [%rd3];
+    setp.ne.u32 %p1, %r2, 0;
+    setp.ne.u32 %p2, %r3, 0;
+    @!%p1 not.pred %p2, %p2;
+    setp.lt.u64 %p3, %rd5, %rd4;
+    and.pred %p4, %p2, %p3;
+    selp.u32 %r4, 1, 0, %p4;
+    st.param.b64 [call_handle], %rd2;
+    st.param.b32 [call_value], %r4;
+    call.uni cudaGraphSetConditional, (call_handle, call_value);
+    ret;
+}
+
 .visible .entry graph_set_branch_conditional(
     .param .u64 control_param,
     .param .u64 handle_param
@@ -614,6 +652,7 @@ PREDICATE_GROUP_DONE:
 std::once_flag module_once;
 void *conditional_module{nullptr};
 void *set_conditional_func{nullptr};
+void *set_conditional64_func{nullptr};
 void *set_branch_conditional_func{nullptr};
 
 std::once_flag mask_module_once;
@@ -642,6 +681,8 @@ void load_module_once() {
                              nullptr, nullptr);
   driver.module_get_function(&set_conditional_func, conditional_module,
                              "graph_set_conditional");
+  driver.module_get_function(&set_conditional64_func, conditional_module,
+                             "graph_set_conditional64");
   driver.module_get_function(&set_branch_conditional_func, conditional_module,
                              "graph_set_branch_conditional");
 }
@@ -739,6 +780,18 @@ void driver_graph_set_conditional(CudaGraphConditionalControl *control,
   CUDAContext::get_instance().launch(
       set_conditional_func, "cuda_graph_set_conditional",
       {&control_arg, handle_arg, &reset_arg}, {}, 1, 1, 0, stream);
+}
+
+void driver_graph_set_conditional64(CudaGraphConditionalControl64 *control,
+                                    std::uint64_t conditional_handle,
+                                    void *stream,
+                                    bool reset_iteration) {
+  ensure_module();
+  void *control_arg = control;
+  std::uint32_t reset_arg = reset_iteration ? 1u : 0u;
+  CUDAContext::get_instance().launch(
+      set_conditional64_func, "cuda_graph_set_conditional64",
+      {&control_arg, &conditional_handle, &reset_arg}, {}, 1, 1, 0, stream);
 }
 
 void driver_graph_set_branch_conditional(CudaGraphConditionalControl *control,

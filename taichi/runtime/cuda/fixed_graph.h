@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <functional>
+#include <variant>
 #include <vector>
 #include "taichi/program/kernel_launcher.h"
 
@@ -20,7 +21,17 @@ class FixedGraph {
     // Cold capture callback only; never retained or invoked during replay.
     std::function<void(void *)> external;
   };
+  struct While;
+  using Operation = std::variant<Dispatch, std::shared_ptr<const While>>;
+  struct While {
+    void *predicate{nullptr};
+    std::uint64_t max_iterations{0};
+    bool continue_while_nonzero{true};
+    std::vector<Operation> condition;
+    std::vector<Operation> body;
+  };
   explicit FixedGraph(const std::vector<Dispatch> &dispatches);
+  explicit FixedGraph(const std::vector<Operation> &operations);
   ~FixedGraph();
   FixedGraph(const FixedGraph &) = delete;
   FixedGraph &operator=(const FixedGraph &) = delete;
@@ -28,6 +39,7 @@ class FixedGraph {
   void run();
   std::size_t argument_bytes() const;
   std::size_t node_count() const;
+  std::size_t control_bytes() const;
 
  private:
   struct State;

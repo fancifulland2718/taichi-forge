@@ -492,6 +492,29 @@ TEST(NativeOperationRegistry, RecordingInitializationIsLocalAndPrecedesWork) {
   tentative.provider_state<SolverFacts>(&marker).has_solution = false;
   EXPECT_TRUE(sequence.provider_state<SolverFacts>(&marker).has_solution);
   EXPECT_FALSE(independent.provider_state<SolverFacts>(&marker).has_solution);
+  auto conditional = sequence.control_branch();
+  EXPECT_THROW(conditional.provider_state<SolverFacts>(&marker),
+               std::invalid_argument);
+
+  auto allocation = device.allocate_memory_unique({sizeof(std::uint32_t)});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto predicate = std::move(allocation.first);
+  auto loop = std::make_shared<FixedExecution::While>();
+  loop->predicate = predicate->get_ptr();
+  loop->max_iterations = 0;
+  loop->condition = {FixedExecution::BufferFill{predicate->get_ptr(), 4, 0}};
+  loop->body = {writer, reader};
+  // A conditional initializer cannot satisfy a reader after a zero-trip loop.
+  EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, {loop, reader}),
+               std::invalid_argument);
+  EXPECT_EQ(runs, 9);
+  // The initial condition is unconditional even with a zero iteration budget.
+  loop->condition.emplace_back(writer);
+  loop->body = {reader};
+  FixedExecution zero_trip(host_arch(), device, nullptr, {loop, reader});
+  EXPECT_EQ(runs, 9);
+  zero_trip.run();
+  EXPECT_EQ(runs, 11);
 }
 
 TEST(NativeOperationRegistry,
