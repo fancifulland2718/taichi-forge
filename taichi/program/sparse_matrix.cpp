@@ -3061,34 +3061,7 @@ void CuSparseMatrix::build_csr_from_coo(void *coo_row_ptr,
 
 struct CuSparseMatrix::SpmmPlan {
 #if defined(TI_WITH_CUDA)
-  ~SpmmPlan() {
-    auto &cusparse = CUSPARSEDriver::get_instance();
-    if (input_descriptor)
-      cusparse.cpDestroyDnMat(input_descriptor);
-    if (output_descriptor)
-      cusparse.cpDestroyDnMat(output_descriptor);
-    if (matrix_descriptor)
-      cusparse.cpDestroySpMat(matrix_descriptor);
-    if (handle)
-      cusparse.cpDestroy(handle);
-    if (workspace)
-      CUDADriver::get_instance().mem_free(workspace);
-  }
-
-  cusparseHandle_t handle{nullptr};
-  CUstream stream{nullptr};
-  cusparseSpMatDescr_t matrix_descriptor{nullptr};
-  cusparseDnMatDescr_t input_descriptor{nullptr};
-  cusparseDnMatDescr_t output_descriptor{nullptr};
-  std::size_t input_ptr{0};
-  std::size_t output_ptr{0};
-  void *workspace{nullptr};
-  std::size_t workspace_size{0};
-  int rhs_count{0};
-  cusparseSpMMAlg_t algorithm{CUSPARSE_SPMM_CSR_ALG2};
-  bool preprocess_attempted{false};
-  bool preprocessed{false};
-  std::uint32_t preprocess_error{0};
+  std::unique_ptr<CudaCsrSpmmPlan> native;
 #endif
 };
 
@@ -3598,112 +3571,36 @@ void CuSparseMatrix::spmm(size_t dB,
   auto found = spmm_plans_.find(key);
   auto retained =
       found == spmm_plans_.end() ? nullptr : found->second.plan.lock();
+  const bool creating = !retained;
   if (!retained) {
-    auto created = std::make_shared<SpmmPlan>();
-    created->rhs_count = rhs_count;
-    created->algorithm = algorithm == 0 ? CUSPARSE_SPMM_CSR_ALG2
-                                        : CUSPARSE_SPMM_CSR_ALG3;
-    cusparse.cpCreate(&created->handle);
-    cusparse.cpSetPointerMode(created->handle, CUSPARSE_POINTER_MODE_HOST);
-    cusparse.cpCreateCsr(
-        &created->matrix_descriptor, rows_, cols_, nnz_, csr_row_ptr_,
-        csr_col_ind_, csr_val_, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
-    cusparse.cpCreateDnMat(&created->input_descriptor, cols_, rhs_count,
-                          rhs_count, reinterpret_cast<void *>(dB),
-                          CUDA_R_32F, CUSPARSE_ORDER_ROW);
-    cusparse.cpCreateDnMat(&created->output_descriptor, rows_, rhs_count,
-                          rhs_count, reinterpret_cast<void *>(dC),
-                          CUDA_R_32F, CUSPARSE_ORDER_ROW);
-    created->input_ptr = dB;
-    created->output_ptr = dC;
-
-    cusparse.cpSetStream(created->handle, stream);
-    CUstream bound_stream = reinterpret_cast<CUstream>(1);
-    cusparse.cpGetStream(created->handle, &bound_stream);
-    TI_ERROR_IF(bound_stream != stream,
-                "CUDA cuSPARSE SpMM stream binding could not be verified.");
-    created->stream = stream;
-
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    cusparse.cpSpMMBufferSize(
-        created->handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-        created->matrix_descriptor, created->input_descriptor, &beta,
-        created->output_descriptor, CUDA_R_32F, created->algorithm,
-        &created->workspace_size);
-    if (created->workspace_size > 0) {
-      CUDADriver::get_instance().malloc(&created->workspace,
-                                        created->workspace_size);
-      ++spmm_workspace_allocations_;
-    }
-
-    if ((algorithm == 1 || algorithm == 3) &&
-        cusparse.capabilities().spmm_preprocess_available) {
-      created->preprocess_attempted = true;
-      const auto preprocess_error = cusparse.cpSpMMPreprocess.call(
-          created->handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-          CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-          created->matrix_descriptor, created->input_descriptor, &beta,
-          created->output_descriptor, CUDA_R_32F, created->algorithm,
-          created->workspace);
-      created->preprocess_error = preprocess_error;
-      TI_ERROR_IF(algorithm == 3 && preprocess_error != 0,
-                  "The selected SpMM preprocessing failed with status {}; "
-                  "no different physical plan was substituted.",
-                  preprocess_error);
-      if (preprocess_error == 0) {
-        created->preprocessed = true;
-        ++spmm_preprocess_builds_;
-      } else {
-        ++spmm_preprocess_fallbacks_;
-      }
-    } else if (algorithm == 1) {
-      ++spmm_preprocess_fallbacks_;
-    }
-    retained = created;
-    spmm_plans_[key] = {created, created};
+    CudaCsrSpmmDescription description{
+        rows_, cols_, nnz_, csr_row_ptr_, csr_col_ind_, csr_val_, rhs_count};
+    description.algorithm =
+        algorithm == 0 ? CUSPARSE_SPMM_CSR_ALG2 : CUSPARSE_SPMM_CSR_ALG3;
+    description.preprocess = algorithm == 1   ? CudaSpmmPreprocess::optional
+                             : algorithm == 3 ? CudaSpmmPreprocess::required
+                                              : CudaSpmmPreprocess::none;
+    retained = std::make_shared<SpmmPlan>();
+    retained->native = std::make_unique<CudaCsrSpmmPlan>(description);
+  }
+  const auto prepared = retained->native->prepare(
+      reinterpret_cast<void *>(dB), reinterpret_cast<void *>(dC), stream);
+  const auto &statistics = retained->native->statistics();
+  if (creating) {
+    // Publish only complete preparations. Failed required preprocessing must
+    // not leave a reusable cache entry or change the selected physical plan.
+    spmm_plans_[key] = {retained, retained};
     ++spmm_plan_builds_;
+    spmm_workspace_allocations_ += prepared.workspace_allocated;
+    spmm_preprocess_builds_ += statistics.preprocessed;
+    spmm_preprocess_fallbacks_ += algorithm == 1 && !statistics.preprocessed;
   } else {
     ++spmm_plan_reuses_;
-    if (retained->preprocessed) {
-      ++spmm_preprocess_reuses_;
-    }
+    spmm_preprocess_reuses_ += statistics.preprocessed;
   }
-
-  auto &plan = *retained;
-  if (plan.stream != stream) {
-    cusparse.cpSetStream(plan.handle, stream);
-    CUstream bound_stream = reinterpret_cast<CUstream>(1);
-    cusparse.cpGetStream(plan.handle, &bound_stream);
-    TI_ERROR_IF(bound_stream != stream,
-                "CUDA cuSPARSE SpMM stream binding could not be verified.");
-    plan.stream = stream;
-  }
-  if (plan.input_ptr != dB) {
-    cusparse.cpDnMatSetValues(plan.input_descriptor,
-                              reinterpret_cast<void *>(dB));
-    plan.input_ptr = dB;
-    ++spmm_dense_descriptor_rebinds_;
-  }
-  if (plan.output_ptr != dC) {
-    cusparse.cpDnMatSetValues(plan.output_descriptor,
-                              reinterpret_cast<void *>(dC));
-    plan.output_ptr = dC;
-    ++spmm_dense_descriptor_rebinds_;
-  }
-
-  if (prepare_only) {
-    return;
-  }
-  float alpha = 1.0f;
-  float beta = 0.0f;
-  cusparse.cpSpMM(plan.handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                  CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-                  plan.matrix_descriptor, plan.input_descriptor, &beta,
-                  plan.output_descriptor, CUDA_R_32F, plan.algorithm,
-                  plan.workspace);
+  spmm_dense_descriptor_rebinds_ += prepared.descriptor_rebinds;
+  if (!prepare_only)
+    retained->native->record(stream);
 #else
   TI_NOT_IMPLEMENTED;
 #endif
@@ -3722,12 +3619,13 @@ CuSparseMatrix::SpmmPlanInfo CuSparseMatrix::spmm_plan_info(
   const auto retained =
       found == spmm_plans_.end() ? nullptr : found->second.plan.lock();
   if (retained) {
-    const auto &plan = *retained;
+    const auto &plan = *retained->native;
+    const auto &statistics = plan.statistics();
     result.prepared = true;
-    result.preprocess_attempted = plan.preprocess_attempted;
-    result.preprocessed = plan.preprocessed;
-    result.preprocess_error = plan.preprocess_error;
-    result.workspace_bytes = plan.workspace_size;
+    result.preprocess_attempted = statistics.preprocess_attempted;
+    result.preprocessed = statistics.preprocessed;
+    result.preprocess_error = statistics.preprocess_error;
+    result.workspace_bytes = plan.workspace_bytes();
   }
 #endif
   return result;
@@ -4109,7 +4007,7 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
   for (const auto &[key, entry] : spmm_plans_) {
     (void)key;
     if (const auto plan = entry.plan.lock()) {
-      result.spmm_workspace_reserved_bytes += plan->workspace_size;
+      result.spmm_workspace_reserved_bytes += plan->native->workspace_bytes();
       ++result.spmm_plan_count;
     }
   }
