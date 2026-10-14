@@ -60,6 +60,7 @@
 #include "taichi/codegen/spirv/spv_stats.h"
 #include "taichi/python/snode_registry.h"
 #include "taichi/program/sparse_matrix.h"
+#include "taichi/program/sparse_matrix_export.h"
 #include "taichi/program/sparse_preconditioner.h"
 #include "taichi/program/sparse_solver.h"
 #include "taichi/program/conjugate_gradient.h"
@@ -8486,6 +8487,17 @@ void export_lang(py::module &m) {
       .def("num_cols", &SparseMatrix::num_cols)
       .def("num_nonzero", &SparseMatrix::num_nonzero)
       .def("update_values", &SparseMatrix::update_values)
+      .def("_snapshot_cuda_csr", [](SparseMatrix &matrix, Program &program) {
+        auto snapshot = snapshot_cuda_csr(program, matrix);
+        auto bytes = [](const auto &data) {
+          return py::bytes(reinterpret_cast<const char *>(data.data()),
+                           data.size() * sizeof(data[0]));
+        };
+        return py::make_tuple(snapshot.rows, snapshot.columns,
+                              bytes(snapshot.row_offsets),
+                              bytes(snapshot.column_indices),
+                              bytes(snapshot.values));
+      })
       .def(
           "_cuda_cusparse_retain_spmm_plan",
           [](SparseMatrix &matrix, int rhs_count, int algorithm,

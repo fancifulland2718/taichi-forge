@@ -24,6 +24,7 @@ class _ExportContext:
         self._initialization_resources = {}
         self.data_payloads = {}
         self._data_keys = {}
+        self._readonly_data_owners = {}
         self.resources = []
         self.kernels = {}
         self._resource_owners = {}
@@ -61,6 +62,17 @@ class _ExportContext:
                 bindings={port: self.binding(slot) for port, slot in (bindings or {}).items()},
             ),
         )
+
+    def resource_once(self, owner, build):
+        """Sample a qualified live resource once within this export transaction."""
+        previous = self._resource_owners.get(id(owner))
+        if previous is not None:
+            return previous[1]
+        name = build()
+        created = self._resource_owners.get(id(owner))
+        if created is None or created[1] != name:
+            raise ValueError("AOT resource factory did not register its owner")
+        return name
 
     def _resource(self, owner, description, *, name=None):
         """Share only an identical producer resource, with an identical description."""
@@ -108,7 +120,7 @@ class _ExportContext:
             )
             self.private_bindings[name] = owner
 
-    def data_resource(self, owner, data, *, dtype, shape, element_shape=(), name=None):
+    def data_resource(self, owner, data, *, dtype, shape, element_shape=(), name=None, readonly=False):
         """Stage already frozen data; never sample a live owner during export."""
         if type(data) is not bytes:
             raise TypeError("AOT resource data must be an immutable byte snapshot")
@@ -121,6 +133,13 @@ class _ExportContext:
             self._data_keys[id(data)] = (data, key)
         else:
             key = previous[1]
+        if readonly:
+            # Qualified exporters must never pass shared data to a writable
+            # operation or expose it as mutable state.
+            if name is not None:
+                raise ValueError("Shared read-only AOT data cannot reserve a private binding name")
+            identity = key, dtype, tuple(shape), tuple(element_shape)
+            owner = self._readonly_data_owners.setdefault(identity, owner)
         return self._resource(
             owner,
             dict(kind="ndarray", dtype=dtype, shape=shape, element_shape=element_shape, initial_data=key),

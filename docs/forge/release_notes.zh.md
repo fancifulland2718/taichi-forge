@@ -32,13 +32,14 @@
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
 - AOT 可重建固定 CSR 资源与 f32 cuSPARSE SpMV，支持转置、i32/i64 拓扑和有序数值更新。
-  捕获操作各自持有预处理状态，与 JIT 共用执行核心。已验证边界见
-  [AOT SDK 合同](aot_sdk.zh.md)；其他稀疏操作家族和 JIT recording 自动导出仍单独推进。
+  捕获操作各自持有预处理状态，与 JIT 共用执行核心。根级 `CusparseSpmvRecording`
+  序列可自动导出一致快照并共享相同只读存储。已验证边界见
+  [AOT SDK 合同](aot_sdk.zh.md)；其他稀疏操作家族仍单独推进。
 
 - cuSPARSE 通用 CSR/COO、稠密/稀疏向量 descriptor 及 CSR 尺寸查询已匹配官方的
   有符号 64 位尺寸 ABI，修正动态调用中的截断。此项不扩大公开 `SparseMatrix`
   的索引/存储合同，也不表示完整 cuSPARSE AOT 已覆盖；需匹配 Python/native
-  组件（private ABI 43）。
+  组件（private ABI 44）。
 
 - runtime wheel 现提供仅依赖标准库的 `taichi_forge_runtime.aot` 消费入口，与 JIT
   共用原生库。普通 AOT kernel/CGraph 可显式准备为 CPU 批次、CUDA Graph 或 Vulkan

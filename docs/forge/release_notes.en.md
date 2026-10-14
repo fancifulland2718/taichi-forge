@@ -37,14 +37,15 @@ lifetimes. The entries below describe the changes.
 - AOT can reconstruct fixed CSR resources and f32 cuSPARSE SpMV, including
   transpose, i32/i64 topology and ordered coefficient updates. Each captured
   operation owns its preprocessing state while sharing the JIT execution core.
-  See the [AOT SDK contract](aot_sdk.en.md) for the validated scope; other sparse
-  operation families and automatic JIT recording export remain separate work.
+  Root `CusparseSpmvRecording` sequences automatically export coherent frozen
+  data, sharing identical read-only storage. See the [AOT SDK contract](aot_sdk.en.md)
+  for the validated scope; other sparse operation families remain separate work.
 
 - cuSPARSE generic CSR/COO and dense/sparse vector descriptors now use the
   vendor's signed 64-bit extent ABI, including CSR extent queries. This fixes
   narrowing in the dynamic calls; it does not expand the public `SparseMatrix`
   index/storage contract or claim full cuSPARSE AOT coverage. Use matching
-  Python/native components (private ABI 43).
+  Python/native components (private ABI 44).
 
 - The runtime wheel now includes a stdlib-only `taichi_forge_runtime.aot`
   consumer sharing JIT's native library. Ordinary AOT kernels and CGraphs can

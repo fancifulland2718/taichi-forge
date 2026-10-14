@@ -296,7 +296,7 @@ Preparation forwards them to the common launch context. Fixed replay does not
 thereby enable individual kernel-profiler or NVTX events. Labels must be nonempty
 strings without NUL or line breaks, with no fixed length limit. Small
 CPU/CUDA/Vulkan standalone and borrowed consumer tests cover long UTF-8 labels,
-explicit reverse kernels and retirement. This requires matching private ABI 43
+explicit reverse kernels and retirement. This requires matching private ABI 44
 components. Reduction/helper capacity, layout and disjointness certificates are
 preserved through the cold constraints below; unsupported binding recipes still fail preflight.
 
@@ -346,7 +346,7 @@ tensor layout, imported aliases and retirement. Graph export translates qualifie
 scalar/AoS and packed two-dimensional layout requirements, canonicalizing private
 aliases and removing duplicate constraints. Custom binding executors, storage
 plans and lifetime validators still need their own reconstruction contract.
-Use matching private ABI 43 components.
+Use matching private ABI 44 components.
 
 Selected CUDA typed reductions can now export direct and block-partial/finalize
 recipes, preserving the chosen kernels, fixed counts, labels, private partials
@@ -415,7 +415,7 @@ numeric publications and retirement in standalone and borrowed consumers. Existi
 backend/provider recordability and affine-view restrictions still apply; this does
 not qualify arbitrary block leaves or add automatic derivatives. Live fields and
 SolvePlan control still need reconstruction contracts. Resource roles and coherent snapshots require
-matching private ABI 43 components; no provider library is added to the consumer.
+matching private ABI 44 components; no provider library is added to the consumer.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations
@@ -518,7 +518,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 43). Small
+elements. Use matching Python/native components (current private ABI 44). Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.
@@ -600,7 +600,7 @@ Explicit gradient bindings may name separate views with different parent offsets
 the exported kernel must still declare its gradient ABI. CPU/CUDA/Vulkan tests
 cover actual `.grad`, nested views, tensor elements, reshape, empty views, native
 sort, alias rejection and retirement. No additional device allocation or replay
-copy is introduced by a view. Use matching private ABI 43 components. This common
+copy is introduced by a view. Use matching private ABI 44 components. This common
 resource support is separate from automatic export of operator-derived views.
 
 Plans can separate one-time initialization from replay:
@@ -849,7 +849,7 @@ retirement. An exported energy/reverse kernel and explicit vector adjoint check
 gradients; external operations are not automatically differentiated. The tests
 exercise the 64-bit entry points at small sizes, not multi-billion-element
 allocations or compatibility with older vendor libraries. Use matching private
-ABI 43 components. This supplies reusable operations for persistent plans;
+ABI 44 components. This supplies reusable operations for persistent plans;
 automatic export of every solver or JIT recording remains a separate contract.
 
 Native resources use the same registered envelope in `resources`, with an added
@@ -932,9 +932,27 @@ checks cover standalone/source-free and borrowed consumption, i32/i64 topology,
 transpose, coefficient updates, empty matrices, views, rejection and retirement.
 An exported energy kernel and its real `.grad` compose with an explicit transpose
 SpMV to check input gradients. This does not automatically differentiate an
-external call. Use matching ABI 43 components. This resource/SpMV contract does
-not yet export existing JIT recordings automatically or cover SpMM, triangular
-solves, BSR or every solver.
+external call. Use matching ABI 44 components. SpMM, triangular solves, BSR and
+other solver families still need their own reconstruction contracts.
+
+Root sequential mixed Graphs containing `CusparseSpmvRecording` can be exported
+with `module.add_execution_plan(name, graph)`. Export takes one coherent CSR
+snapshot per matrix in that transaction, under the submission and numeric-update
+gates. Repeated recordings reference one resource. Read-only arrays with identical
+bytes, dtype and shape share both archive payload and prepared storage; mutable
+workspace is not shared through this rule. The source recording keeps using live
+coefficients. An existing export remains frozen; a later export reads the then
+current values. Each prepared instance still owns independent execution plans
+and workspace, and runs after the producing Graph/matrix has retired.
+
+This automatic route covers scalar f32 CUDA CSR, including empty matrices;
+it does not convert BSR to scalar CSR. Snapshot reads occur only during export,
+not during construction or replay of ordinary JIT recordings. Bounded Windows
+checks cover repeated recordings, updated snapshots, shared topology, archive
+rollback, source-free/borrowed consumption and real exported gradients with
+explicit adjoints. Backend-command nesting in structured `Sequential` and JIT
+CGraph ndarray-gradient binding remain separate unsupported paths. The AOT
+consumer's explicit gradient binding is covered here.
 
 Adapter-backed operations take library locations from the runtime owner:
 

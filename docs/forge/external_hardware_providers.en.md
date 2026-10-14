@@ -504,8 +504,9 @@ matrix descriptor separately from the source storage descriptor. The JIT matrix
 keeps its cached plan, algorithm and value-update behavior. AOT reconstructs a
 fixed CSR resource and f32 SpMV through the same core, including transpose and
 ordered coefficient updates. See the [AOT SDK contract](aot_sdk.en.md) for index,
-lifetime and preparation requirements; automatic JIT recording export and other
-cuSPARSE operation families remain separate work.
+lifetime and preparation requirements. Root `CusparseSpmvRecording` sequences
+export a coherent frozen CSR snapshot while the source keeps its live-value
+behavior. Other cuSPARSE operation families remain separate work.
 
 ### cuDSS 0.8.x
 

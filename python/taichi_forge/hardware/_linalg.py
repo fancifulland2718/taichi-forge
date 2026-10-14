@@ -451,6 +451,47 @@ class CusparseSpmvRecording(BackendCommandRecording):
             ResourceEffect(self.output, GraphAccess.WRITE),
         )
 
+    def _export_aot(self, context):
+        matrix = self.matrix
+        matrix._ensure_valid()  # pylint: disable=W0212
+        identity = matrix._get_format_contract()["identity"]  # pylint: disable=W0212
+        if (
+            identity["backend_family"] != "cuda"
+            or identity["storage_format"] != "csr"
+        ):
+            raise TaichiRuntimeError(
+                "AOT cuSPARSE SpMV recording requires scalar CUDA CSR storage"
+            )
+
+        def snapshot():
+            rows, columns, offsets, indices, values = matrix.matrix._snapshot_cuda_csr(
+                impl.get_runtime().prog
+            )
+            bindings = {
+                port: context.data_resource(
+                    object(), data, dtype=dtype, shape=[len(data) // 4], readonly=True
+                )
+                for port, dtype, data in (
+                    ("row_offsets", "i32", offsets),
+                    ("column_indices", "i32", indices),
+                    ("values", "f32", values),
+                )
+            }
+            return context.resource(
+                matrix,
+                "cusparse",
+                "csr_f32",
+                parameters=dict(rows=rows, columns=columns),
+                bindings=bindings,
+            )
+
+        resource = context.resource_once(matrix, snapshot)
+        context.native(
+            "cusparse", "spmv_f32",
+            bindings=dict(matrix=resource, input=self.input, output=self.output),
+        )
+        return ()
+
     @staticmethod
     def _validate_array(value, name, shape):
         if not isinstance(value, Ndarray):

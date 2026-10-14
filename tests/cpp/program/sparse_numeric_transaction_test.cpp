@@ -11,6 +11,10 @@
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/program/sparse_matrix.h"
+#include "taichi/program/sparse_matrix_export.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
 
 namespace taichi::lang {
 namespace {
@@ -130,6 +134,55 @@ TEST(CpuSparseNumericTransaction, BsrPinsValueUpdateAndRawApply) {
 }
 
 #endif  // TI_WITH_LLVM
+
+#if defined(TI_WITH_CUDA) && defined(TI_WITH_LLVM)
+TEST(CudaSparseNumericTransaction, ExportDoesNotInvertTheUpdateGate) {
+  if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  auto &driver = CUSPARSEDriver::get_instance();
+  if (!driver.is_loaded() && !driver.load_cusparse())
+    GTEST_SKIP();
+  program.materialize_runtime();
+  auto upload = [&](DataType dtype, auto data) {
+    auto *result = program.create_ndarray(dtype, {int(data.size())});
+    program.copy_ndarray_from_host(result, data.data(),
+                                   data.size() * sizeof(data[0]));
+    return result;
+  };
+  auto *rows = upload(PrimitiveType::i32, std::array<int, 3>{0, 1, 2});
+  auto *cols = upload(PrimitiveType::i32, std::array<int, 2>{0, 1});
+  auto *values = upload(PrimitiveType::f32, std::array<float, 2>{2, 3});
+  auto *replacement = upload(PrimitiveType::f32, std::array<float, 2>{5, 7});
+  auto pattern =
+      std::make_shared<SparseCsrPattern>(&program, 2, 2, *rows, *cols);
+  CuSparseMatrix matrix(pattern, *values);
+  auto numeric = matrix.acquire_numeric_access_guard();
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  auto snapshot = std::async(std::launch::async, [&] {
+    started.set_value();
+    return snapshot_cuda_csr(program, matrix);
+  });
+  started_future.wait();
+  EXPECT_EQ(snapshot.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  auto submission = std::async(std::launch::async, [&] {
+    auto guard = program.acquire_runtime_resource_submission_guard();
+  });
+  const auto ready = submission.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(ready, std::future_status::ready);
+  if (ready == std::future_status::ready)
+    matrix.update_values(&program, *replacement);
+  // Even a regression releases the gate before joining either worker.
+  numeric.unlock();
+  submission.get();
+  auto result = snapshot.get();
+  EXPECT_EQ(result.row_offsets, (std::vector<std::int32_t>{0, 1, 2}));
+  EXPECT_EQ(result.column_indices, (std::vector<std::int32_t>{0, 1}));
+  EXPECT_EQ(result.values, (std::vector<float>{5, 7}));
+}
+#endif
 
 }  // namespace
 }  // namespace taichi::lang
