@@ -4,6 +4,7 @@
 #include <taichi/rhi/cuda/cuda_capability.h>
 #include <taichi/rhi/cuda/cuda_context.h>
 #include <taichi/rhi/cuda/cuda_device.h>
+#include <taichi/rhi/cuda/cusparse_plan.h>
 
 #include <algorithm>
 #include <atomic>
@@ -122,6 +123,97 @@ TEST(CUSPARSEDriverABI, WideExtentsReachTheDynamicCallWithoutAllocation) {
   } else {
     FAIL() << "cuSPARSE vector extents are narrowed before the vendor call";
   }
+}
+
+TEST(CUSPARSECsrPlan, IndependentPlansRetainOnlyTheirOwnExecutionState) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  auto &context = CUDAContext::get_instance();
+  auto submission = context.get_submission_lock_guard();
+  auto guard = context.get_guard();
+  auto &cusparse = CUSPARSEDriver::get_instance();
+  if (!cusparse.is_loaded() && !cusparse.load_cusparse())
+    GTEST_SKIP();
+  auto &driver = CUDADriver::get_instance();
+  std::vector<std::unique_ptr<void, void (*)(void *)>> storage;
+  auto upload = [&](auto values) {
+    void *address = nullptr;
+    driver.malloc(&address, sizeof(values));
+    storage.emplace_back(
+        address,
+        +[](void *value) { CUDADriver::get_instance().mem_free(value); });
+    driver.memcpy_host_to_device(address, values.data(), sizeof(values));
+    return address;
+  };
+  auto read = [&](void *address, std::size_t size) {
+    std::vector<float> values(size);
+    driver.memcpy_device_to_host(values.data(), address, size * sizeof(float));
+    return values;
+  };
+  const auto rows = upload(std::array<std::int32_t, 3>{0, 2, 4});
+  const auto columns = upload(std::array<std::int32_t, 4>{0, 2, 1, 2});
+  const auto values = upload(std::array<float, 4>{2, 3, -1, 4});
+  const auto x = upload(std::array<float, 3>{1, 2, 3});
+  const auto x2 = upload(std::array<float, 3>{-1, .5f, 2});
+  const auto y = upload(std::array<float, 2>{8, -2});
+  const auto y2 = upload(std::array<float, 2>{99, 99});
+  CudaCsrSpmvDescription description{2, 3, 4, rows, columns, values};
+  description.alpha = 2;
+  description.beta = .5f;
+  auto first = std::make_unique<CudaCsrSpmvPlan>(description);
+  description.alpha = 1;
+  description.beta = 0;
+  CudaCsrSpmvPlan second(description);
+  EXPECT_TRUE(first->prepare(x, y, nullptr, true).built);
+  EXPECT_TRUE(second.prepare(x2, y2, nullptr, true).built);
+  EXPECT_EQ(read(y, 2), (std::vector<float>{8, -2}));
+  EXPECT_EQ(read(y2, 2), (std::vector<float>{99, 99}));
+  first->record(nullptr);
+  second.record(nullptr);
+  EXPECT_EQ(read(y, 2), (std::vector<float>{26, 19}));
+  EXPECT_EQ(read(y2, 2), (std::vector<float>{4, 7.5f}));
+
+  // The transpose is also the explicit adjoint. Use the generic 64-bit index
+  // path with small data, independently of the producer's 32-bit CSR contract.
+  description.row_offsets = upload(std::array<std::int64_t, 3>{0, 2, 4});
+  description.column_indices = upload(std::array<std::int64_t, 4>{0, 2, 1, 2});
+  description.row_type = description.column_type = CUSPARSE_INDEX_64I;
+  description.transpose = true;
+  CudaCsrSpmvPlan transpose(description);
+  const auto q = upload(std::array<float, 2>{5, 7});
+  const auto dq = upload(std::array<float, 3>{99, 99, 99});
+  transpose.prepare(q, dq, nullptr, true);
+  transpose.record(nullptr);
+  EXPECT_EQ(read(dq, 3), (std::vector<float>{10, -7, 43}));
+
+  first.reset();
+  EXPECT_EQ(read(x, 3), (std::vector<float>{1, 2, 3}));
+  std::array<float, 4> changed{1, 3, -2, 4};
+  driver.memcpy_host_to_device(values, changed.data(), sizeof(changed));
+  const auto reused = second.prepare(x2, y2, nullptr, true);
+  EXPECT_FALSE(reused.built);
+  EXPECT_EQ(reused.descriptor_creations, 0);
+  second.record(nullptr);
+  transpose.record(nullptr);
+  EXPECT_EQ(read(y2, 2), (std::vector<float>{5, 7}));
+  EXPECT_EQ(read(dq, 3), (std::vector<float>{5, -14, 43}));
+  const auto rebound = second.prepare(x, y2, nullptr, false);
+  EXPECT_FALSE(rebound.built);
+  EXPECT_EQ(rebound.descriptor_creations, 1);
+  EXPECT_EQ(rebound.descriptor_rebinds, 1);
+  second.record(nullptr);
+  EXPECT_EQ(read(y2, 2), (std::vector<float>{10, 8}));
+  EXPECT_EQ(second.statistics().preprocess_builds,
+            second.statistics().preprocessed ? 1 : 0);
+
+  // An empty matrix overwrites old output on every replay, without owning the
+  // null index/value buffers. Caller storage outlives all three plans above.
+  description = CudaCsrSpmvDescription{
+      2, 3, 0, upload(std::array<std::int32_t, 3>{0, 0, 0})};
+  CudaCsrSpmvPlan empty(description);
+  empty.prepare(x, y2, nullptr, true);
+  empty.record(nullptr);
+  EXPECT_EQ(read(y2, 2), (std::vector<float>{0, 0}));
 }
 
 TEST(CUDADriverCompatibility, MapsAndGatesMUSADriverSurface) {

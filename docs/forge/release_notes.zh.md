@@ -34,7 +34,7 @@
 - cuSPARSE 通用 CSR/COO、稠密/稀疏向量 descriptor 及 CSR 尺寸查询已匹配官方的
   有符号 64 位尺寸 ABI，修正动态调用中的截断。此项不扩大公开 `SparseMatrix`
   的索引/存储合同，也不表示完整 cuSPARSE AOT 已覆盖；需匹配 Python/native
-  组件（private ABI 42）。
+  组件（private ABI 43）。
 
 - runtime wheel 现提供仅依赖标准库的 `taichi_forge_runtime.aot` 消费入口，与 JIT
   共用原生库。普通 AOT kernel/CGraph 可显式准备为 CPU 批次、CUDA Graph 或 Vulkan

@@ -7,6 +7,7 @@ target_sources(${CUDA_RHI}
     cuda_device.cpp
     cuda_context.cpp
     cuda_driver.cpp
+    cusparse_plan.cpp
     cuda_profiler.cpp
     cuda_primitives.cpp
     primitives/hierarchical_ptx.cpp

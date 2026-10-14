@@ -385,6 +385,11 @@ print(ti.hardware.probe("cufft"))
 - 显式请求必须保持失败可见。显式 provider 不可用或执行失败，不等于允许静默复制到 host
   或选择另一算法。
 
+CSR SpMV 使用共用原生计划，独立拥有 matrix/vector descriptor 和预处理 workspace。
+计划借用 CSR 缓冲；准备或退休计划不会复制或释放这些缓冲。资源报告单独计入计划的
+matrix descriptor 与源存储 descriptor。JIT 矩阵仍缓存其计划，算法和值更新行为保持。
+此共用核心是重建基础；实际已支持的持久导出操作以 [AOT SDK 合同](aot_sdk.zh.md) 为准。
+
 ### cuDSS 0.8.x
 
 平台 `taichi-forge-runtime` wheel 携带一份基于官方 cuDSS 0.8 header 构建的 Forge 薄

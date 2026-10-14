@@ -21,6 +21,7 @@
 #include "taichi/program/linear_operator.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
+#include "taichi/rhi/cuda/cusparse_plan.h"
 #include "taichi/util/environ_config.h"
 
 #define BUILD(TYPE)                                                         \
@@ -3158,26 +3159,7 @@ struct CuSparseMatrix::SpsmPlan {
 
 void CuSparseMatrix::reset_spmv_resources() {
 #if defined(TI_WITH_CUDA)
-  if (spmv_vec_x_)
-    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
-  if (spmv_vec_y_)
-    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
-  if (spmv_handle_)
-    CUSPARSEDriver::get_instance().cpDestroy(spmv_handle_);
-  if (spmv_buffer_)
-    CUDADriver::get_instance().mem_free(spmv_buffer_);
-  spmv_vec_x_ = nullptr;
-  spmv_vec_y_ = nullptr;
-  spmv_handle_ = nullptr;
-  spmv_stream_ = nullptr;
-  spmv_buffer_ = nullptr;
-  spmv_x_ptr_ = 0;
-  spmv_y_ptr_ = 0;
-  spmv_buffer_size_ = 0;
-  spmv_buffer_initialized_ = false;
-  spmv_preprocessed_ = false;
-  spmv_preprocess_disabled_ = false;
-  spmv_preprocess_last_error_ = 0;
+  spmv_plan_.reset();
 #endif
 }
 
@@ -3557,91 +3539,26 @@ void CuSparseMatrix::spmv(size_t dX,
 #if defined(TI_WITH_CUDA)
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
-  if (!prepare_only) {
+  if (!prepare_only)
     record_spmv_call();
-  }
-  if (!spmv_handle_) {
-    CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
-    spmv_stream_ = nullptr;
+  if (!spmv_plan_) {
+    spmv_plan_ = std::make_shared<CudaCsrSpmvPlan>(CudaCsrSpmvDescription{
+        rows_, cols_, nnz_, csr_row_ptr_, csr_col_ind_, csr_val_});
     record_spmv_handle_creation();
   }
-  if (spmv_stream_ != stream) {
-    auto &driver = CUSPARSEDriver::get_instance();
-    TI_ERROR_IF(!driver.cpSetStream.available() ||
-                    !driver.cpGetStream.available(),
-                "CUDA CSR SpMV cannot bind the requested execution stream.");
-    driver.cpSetStream(spmv_handle_, stream);
-    CUstream bound_stream = reinterpret_cast<CUstream>(1);
-    driver.cpGetStream(spmv_handle_, &bound_stream);
-    TI_ERROR_IF(bound_stream != stream,
-                "CUDA CSR SpMV stream binding could not be verified.");
-    spmv_stream_ = stream;
-  }
-  if (!spmv_vec_x_ || spmv_x_ptr_ != dX) {
-    const bool rebind = spmv_vec_x_ != nullptr;
-    if (spmv_vec_x_)
-      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
-    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_x_, cols_,
-                                                 (void *)dX, CUDA_R_32F);
-    spmv_x_ptr_ = dX;
-    record_dense_vector_descriptor_creation(rebind);
-  }
-  if (!spmv_vec_y_ || spmv_y_ptr_ != dY) {
-    const bool rebind = spmv_vec_y_ != nullptr;
-    if (spmv_vec_y_)
-      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
-    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_y_, rows_,
-                                                 (void *)dY, CUDA_R_32F);
-    spmv_y_ptr_ = dY;
-    record_dense_vector_descriptor_creation(rebind);
-  }
-
-  float alpha = 1.0f, beta = 0.0f;
-  if (!spmv_buffer_initialized_) {
+  const auto prepared = spmv_plan_->prepare(
+      reinterpret_cast<void *>(dX), reinterpret_cast<void *>(dY), stream,
+      get_environ_config("TI_CUDA_CUSPARSE_SPMV_PREPROCESS", 1) != 0);
+  if (prepared.built)
     record_spmv_plan_build();
-    CUSPARSEDriver::get_instance().cpSpMV_bufferSize(
-        spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
-        spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
-        CUSPARSE_SPMV_CSR_ALG1, &spmv_buffer_size_);
-    if (spmv_buffer_size_ > 0) {
-      CUDADriver::get_instance().malloc(&spmv_buffer_, spmv_buffer_size_);
-      record_spmv_workspace_allocation();
-    }
-    spmv_buffer_initialized_ = true;
-  } else {
+  else
     record_spmv_plan_reuse();
-  }
-  auto &cusparse = CUSPARSEDriver::get_instance();
-  const bool preprocess_enabled =
-      get_environ_config("TI_CUDA_CUSPARSE_SPMV_PREPROCESS", 1) != 0;
-  if (preprocess_enabled && cusparse.cpSpMVPreprocess.available() &&
-      !spmv_preprocess_disabled_) {
-    if (!spmv_preprocessed_) {
-      const auto preprocess_error = cusparse.cpSpMVPreprocess.call(
-          spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
-          spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
-          CUSPARSE_SPMV_CSR_ALG1, spmv_buffer_);
-      if (preprocess_error == 0) {
-        spmv_preprocessed_ = true;
-        spmv_preprocess_last_error_ = 0;
-        ++spmv_preprocess_builds_;
-      } else {
-        spmv_preprocess_disabled_ = true;
-        spmv_preprocess_last_error_ = preprocess_error;
-        ++spmv_preprocess_fallbacks_;
-      }
-    } else {
-      ++spmv_preprocess_reuses_;
-    }
-  } else {
-    ++spmv_preprocess_fallbacks_;
-  }
-  if (prepare_only) {
-    return;
-  }
-  cusparse.cpSpMV(spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-                  matrix_, spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
-                  CUSPARSE_SPMV_CSR_ALG1, spmv_buffer_);
+  if (prepared.workspace_allocated)
+    record_spmv_workspace_allocation();
+  for (unsigned i = 0; i < prepared.descriptor_creations; ++i)
+    record_dense_vector_descriptor_creation(i < prepared.descriptor_rebinds);
+  if (!prepare_only)
+    spmv_plan_->record(stream);
 #endif
 }
 
@@ -4149,11 +4066,14 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
       provider.spsm_value_update_available;
   result.provider_triangular_value_update_available =
       provider.triangular_value_update_available;
-  result.spmv_preprocess_active = spmv_preprocessed_;
-  result.spmv_preprocess_last_error = spmv_preprocess_last_error_;
-  result.spmv_preprocess_builds = spmv_preprocess_builds_;
-  result.spmv_preprocess_reuses = spmv_preprocess_reuses_;
-  result.spmv_preprocess_fallbacks = spmv_preprocess_fallbacks_;
+  if (spmv_plan_) {
+    const auto &stats = spmv_plan_->statistics();
+    result.spmv_preprocess_active = stats.preprocessed;
+    result.spmv_preprocess_last_error = stats.preprocess_error;
+    result.spmv_preprocess_builds = stats.preprocess_builds;
+    result.spmv_preprocess_reuses = stats.preprocess_reuses;
+    result.spmv_preprocess_fallbacks = stats.preprocess_fallbacks;
+  }
   result.spmm_calls = spmm_calls_;
   result.spmm_plan_builds = spmm_plan_builds_;
   result.spmm_plan_reuses = spmm_plan_reuses_;
@@ -4185,7 +4105,7 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
   result.values_reserved_bytes =
       static_cast<std::uint64_t>(nnz_) * sizeof(float32);
   result.spmv_workspace_reserved_bytes =
-      spmv_buffer_initialized_ ? spmv_buffer_size_ : 0;
+      spmv_plan_ ? spmv_plan_->workspace_bytes() : 0;
   for (const auto &[key, entry] : spmm_plans_) {
     (void)key;
     if (const auto plan = entry.plan.lock()) {
@@ -4218,13 +4138,13 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
         pattern_->operator_references();
     result.pattern_storage_shared = true;
   }
-  result.matrix_descriptor_count = (matrix_ != nullptr ? 1 : 0) +
-                                   result.spmm_plan_count + spsv_plans_.size() +
-                                   spsm_plans_.size();
+  result.matrix_descriptor_count =
+      (matrix_ != nullptr ? 1 : 0) + (spmv_plan_ ? 1 : 0) +
+      result.spmm_plan_count + spsv_plans_.size() + spsm_plans_.size();
   result.dense_vector_descriptor_count =
-      (spmv_vec_x_ != nullptr ? 1 : 0) + (spmv_vec_y_ != nullptr ? 1 : 0) +
+      (spmv_plan_ ? spmv_plan_->dense_descriptor_count() : 0) +
       spsv_plans_.size() * 2;
-  result.spmv_handle_count = spmv_handle_ != nullptr ? 1 : 0;
+  result.spmv_handle_count = spmv_plan_ ? 1 : 0;
   result.spmm_dense_matrix_descriptor_count = result.spmm_plan_count * 2;
   result.spsv_plan_count = spsv_plans_.size();
   result.spsm_plan_count = spsm_plans_.size();

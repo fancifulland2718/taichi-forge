@@ -497,6 +497,14 @@ Recommended lifecycle:
   provider is not permission to copy data to the host or select another
   algorithm silently.
 
+CSR SpMV uses a common native plan with its own matrix/vector descriptors and
+preprocessing workspace. It borrows the CSR buffers; preparing or retiring a
+plan does not copy or free those buffers. Resource reports count the plan's
+matrix descriptor separately from the source storage descriptor. The JIT matrix
+keeps its cached plan, algorithm and value-update behavior. This common core is
+a reconstruction building block; see the [AOT SDK contract](aot_sdk.en.md) for
+the operations whose persistent export is actually available.
+
 ### cuDSS 0.8.x
 
 The platform `taichi-forge-runtime` wheel contains one Forge-owned thin C ABI 1

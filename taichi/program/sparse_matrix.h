@@ -26,6 +26,7 @@ struct OperatorVectorView;
 std::uint64_t allocate_sparse_matrix_id();
 
 class CudaSparseAssemblyPlan;
+class CudaCsrSpmvPlan;
 class VulkanSparseAssemblyPlan;
 class Kernel;
 class CompiledKernelData;
@@ -1205,21 +1206,7 @@ class CuSparseMatrix : public SparseMatrix {
   int nnz_{0};
   std::shared_ptr<SparseCsrPattern> pattern_;
   mutable std::mutex spmv_mutex_;
-  cusparseHandle_t spmv_handle_{nullptr};
-  CUstream spmv_stream_{nullptr};
-  cusparseDnVecDescr_t spmv_vec_x_{nullptr};
-  cusparseDnVecDescr_t spmv_vec_y_{nullptr};
-  size_t spmv_x_ptr_{0};
-  size_t spmv_y_ptr_{0};
-  void *spmv_buffer_{nullptr};
-  size_t spmv_buffer_size_{0};
-  bool spmv_buffer_initialized_{false};
-  bool spmv_preprocessed_{false};
-  bool spmv_preprocess_disabled_{false};
-  std::uint32_t spmv_preprocess_last_error_{0};
-  std::uint64_t spmv_preprocess_builds_{0};
-  std::uint64_t spmv_preprocess_reuses_{0};
-  std::uint64_t spmv_preprocess_fallbacks_{0};
+  std::shared_ptr<CudaCsrSpmvPlan> spmv_plan_;
   struct SpmmPlanEntry {
     std::weak_ptr<SpmmPlan> plan;
     std::shared_ptr<SpmmPlan> cache_owner;
