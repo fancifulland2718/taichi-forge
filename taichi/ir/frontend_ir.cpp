@@ -925,6 +925,9 @@ bool IndexExpression::is_global() const {
 
 static void field_validation(FieldExpression *field_expr, int index_dim) {
   TI_ASSERT(field_expr != nullptr);
+  TI_ERROR_IF(
+      field_expr->snode_retired,
+      "Field's SNodeTree has been destroyed; rebuild the Field/kernel.");
   TI_ASSERT(field_expr->snode != nullptr);
   int field_dim = field_expr->snode->num_active_indices;
 

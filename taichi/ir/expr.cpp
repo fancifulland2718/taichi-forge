@@ -69,7 +69,11 @@ Expr &Expr::operator=(const Expr &o) {
 SNode *Expr::snode() const {
   TI_ASSERT_INFO(is<FieldExpression>(),
                  "Cannot get snode of non-field expressions.");
-  return cast<FieldExpression>()->snode;
+  const auto field = cast<FieldExpression>();
+  TI_ERROR_IF(
+      field->snode_retired,
+      "Field's SNodeTree has been destroyed; rebuild the Field/kernel.");
+  return field->snode;
 }
 
 void Expr::set_adjoint(const Expr &o) {

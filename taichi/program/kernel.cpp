@@ -1,6 +1,7 @@
 #include "taichi/program/kernel.h"
 
 #include "taichi/analysis/offline_cache_util.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/codegen/codegen.h"
 #include "taichi/common/logging.h"
@@ -744,6 +745,31 @@ bool Kernel::has_matching_cached_request(
          kernel_key_context_snapshot_->matches(config, caps, *this);
 }
 
+std::vector<int> Kernel::source_snode_tree_dependencies() const {
+  std::lock_guard<std::mutex> key_lock(kernel_key_mutex_);
+  std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
+  if (!source_snode_tree_dependencies_) {
+    source_snode_tree_dependencies_ =
+        !ir ? std::vector<int>{}
+        : ir_is_ast_
+            ? irpass::analysis::gather_frontend_snode_tree_dependencies(*ir)
+            : irpass::analysis::gather_source_snode_tree_dependencies(*ir);
+  }
+  auto ids = *source_snode_tree_dependencies_;
+  for (const auto *snode : no_activate) {
+    ids.push_back(snode->get_snode_tree_id());
+  }
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  return ids;
+}
+
+void Kernel::set_source_snode_tree_dependencies(
+    std::vector<int> dependencies) const {
+  std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
+  source_snode_tree_dependencies_ = std::move(dependencies);
+}
+
 void Kernel::retire_definition(bool preserve_relocatable_abi) {
   std::lock_guard<std::mutex> key_lock(kernel_key_mutex_);
   ir.reset();
@@ -753,12 +779,15 @@ void Kernel::retire_definition(bool preserve_relocatable_abi) {
   name.clear();
   name.shrink_to_fit();
   offline_cache_body_.reset();
+  {
+    std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
+    source_snode_tree_dependencies_.reset();
+  }
   if (preserve_relocatable_abi) {
-    // The immutable callable ABI, source cache key and dependency slots are
-    // the frontend half of a verified relocatable template. They contain no
-    // SNode pointer or generation-owned allocation. Keeping them lets a new
-    // structurally equivalent Field specialization reuse the retired shell
-    // without rebuilding Python AST/CHI IR.
+    // The immutable ABI, source key and executable dependency slots contain
+    // no SNode pointer or generation-owned allocation. Preserve them for a
+    // verified relocatable template or an executable unaffected by this tree
+    // destruction. Changed compile requests still require a live definition.
     return;
   }
   std::vector<Parameter>().swap(parameter_list);

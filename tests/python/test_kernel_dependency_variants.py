@@ -101,7 +101,7 @@ def test_field_free_variant_does_not_elide_changed_request_guard(monkeypatch):
     arch = ti.lang.impl.current_cfg().arch
     ti.reset()
     monkeypatch.setenv("TI_DEBUG_ORDINARY_LAUNCH_ATTRIBUTION", "1")
-    ti.init(arch=arch, offline_cache=False, compile_tier="fast")
+    ti.init(arch=arch, offline_cache=False, compile_tier="fast", advanced_optimization=True)
     source = ti.field(ti.i32, shape=())
 
     @ti.kernel

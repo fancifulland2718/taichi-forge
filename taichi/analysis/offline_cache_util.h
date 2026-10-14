@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "taichi/rhi/arch.h"
 
@@ -213,6 +214,8 @@ std::string get_hashed_offline_cache_semantic_key(
     const CompileConfig &config,
     const DeviceCapabilityConfig &caps,
     Kernel *kernel);
-void gen_offline_cache_key(IRNode *ast, std::ostream *os);
+void gen_offline_cache_key(IRNode *ast,
+                           std::ostream *os,
+                           std::vector<int> *source_tree_ids = nullptr);
 
 }  // namespace taichi::lang

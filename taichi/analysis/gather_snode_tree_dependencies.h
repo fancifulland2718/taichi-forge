@@ -18,6 +18,9 @@ namespace irpass::analysis {
 // dependency collection is independent of the compilation tier/cache path.
 std::vector<int> gather_snode_tree_dependencies(const Kernel &kernel);
 std::vector<int> gather_snode_tree_dependencies(IRNode &ir);
+// Definition lifetime includes references that optimization may eliminate.
+std::vector<int> gather_frontend_snode_tree_dependencies(IRNode &ir);
+std::vector<int> gather_source_snode_tree_dependencies(IRNode &ir);
 
 // Returns true when the lowered IR directly references an SNode whose path
 // contains activating state. Unlike the tree-granular helper below, this is

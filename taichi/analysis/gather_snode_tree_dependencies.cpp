@@ -16,6 +16,10 @@ namespace {
 
 class SNodeTreeDependencyCollector : public BasicStmtVisitor {
  public:
+  explicit SNodeTreeDependencyCollector(bool include_source = false)
+      : include_source_(include_source) {
+  }
+
   void visit(FuncCallStmt *stmt) override {
     visit_function(stmt->func);
   }
@@ -115,6 +119,13 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
     // Field roots used only by a callee still belong to the caller's binding
     // table and lifetime contract. Mark before visiting to handle recursion.
     if (visited_functions_.insert(func).second) {
+      TI_ERROR_IF(func->definition_retired(),
+                  "Cannot compile a retired function definition after its "
+                  "SNodeTree was destroyed; rebuild the function/kernel.");
+      if (include_source_) {
+        const auto &ids = func->source_snode_tree_dependencies();
+        tree_ids_.insert(ids.begin(), ids.end());
+      }
       func->ir->accept(this);
     }
   }
@@ -153,6 +164,7 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   }
 
   std::unordered_set<int> tree_ids_;
+  bool include_source_{false};
   std::unordered_set<Function *> visited_functions_;
   SNodeRelocationStructure relocation_structures_{
       SNodeRelocationStructure::none};
@@ -178,6 +190,12 @@ std::vector<int> gather_snode_tree_dependencies(const Kernel &kernel) {
 
 std::vector<int> gather_snode_tree_dependencies(IRNode &ir) {
   SNodeTreeDependencyCollector collector;
+  ir.accept(&collector);
+  return collector.result();
+}
+
+std::vector<int> gather_source_snode_tree_dependencies(IRNode &ir) {
+  SNodeTreeDependencyCollector collector(/*include_source=*/true);
   ir.accept(&collector);
   return collector.result();
 }

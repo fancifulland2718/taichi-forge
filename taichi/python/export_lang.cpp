@@ -7290,6 +7290,10 @@ void export_lang(py::module &m) {
       .def("make_launch_context", &Kernel::make_launch_context,
            py::arg("cpu_bounded_range") = false)
       .def("definition_retired", &Kernel::definition_retired)
+      .def("_has_field_free_executable", [](const Kernel &kernel) {
+        return kernel.snode_tree_dependency_state() ==
+               Kernel::SNodeTreeDependencyState::none;
+      })
       .def("set_compile_tier_override",
            &Kernel::set_compile_tier_override)
       .def("set_task_launch_policy", &Kernel::set_task_launch_policy)
@@ -7396,7 +7400,11 @@ void export_lang(py::module &m) {
           py::return_value_policy::reference);
 
   py::class_<Expr> expr(m, "Expr");
-  expr.def("snode", &Expr::snode, py::return_value_policy::reference)
+  expr.def("_snode_retired", [](const Expr &value) {
+        return value.is<FieldExpression>() &&
+               value.cast<FieldExpression>()->snode_retired;
+      })
+      .def("snode", &Expr::snode, py::return_value_policy::reference)
       .def("is_external_tensor_expr",
            [](Expr *expr) { return expr->is<ExternalTensorExpression>(); })
       .def("is_index_expr",

@@ -745,10 +745,13 @@ class PyTaichi:
     def clear_compiled_functions(self):
         reclaimed = 0
         for k in tuple(self.kernels):
+            # A source-only retirement leaves an already compiled field-free
+            # specialization valid. Keep its identity instead of rebuilding
+            # the Python closure with a destroyed captured Field.
             retired = tuple(
                 key
                 for key, kernel in k.compiled_kernels.items()
-                if kernel.definition_retired()
+                if kernel.definition_retired() and not kernel._has_field_free_executable()
             )
             k.mapper.retire_instance_ids(
                 {key[1] for key in retired if isinstance(key, tuple) and len(key) > 1}
@@ -918,7 +921,7 @@ class PyTaichi:
     def _check_field_not_placed(self):
         not_placed = []
         for _var in self.global_vars:
-            if _var.ptr.snode() is None:
+            if not _var.ptr._snode_retired() and _var.ptr.snode() is None:
                 not_placed.append(self._get_tb(_var))
 
         if len(not_placed):
@@ -938,7 +941,7 @@ class PyTaichi:
         elif gradient_type == "dual":
             gradient_vars = self.dual_vars
         for _var in gradient_vars:
-            if _var.ptr.snode() is None:
+            if not _var.ptr._snode_retired() and _var.ptr.snode() is None:
                 not_placed.add(self._get_tb(_var))
 
         if len(not_placed):
@@ -985,6 +988,9 @@ class PyTaichi:
         self._check_field_not_placed()
         self._check_gradient_field_not_placed("grad")
         self._check_gradient_field_not_placed("dual")
+        self.matrix_fields = [
+            field for field in self.matrix_fields if not any(var.ptr._snode_retired() for var in field.vars)
+        ]
         self._check_matrix_field_member_shape()
         self._calc_matrix_field_dynamic_index_stride()
         self.global_vars = []

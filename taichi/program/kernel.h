@@ -237,7 +237,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
       std::size_t task_index,
       OffloadedTaskType task_type) const;
 
-  // Definition lifetime dependencies accumulate across compiled variants.
+  // Executable dependencies accumulate across compiled variants.
   // Each CompiledKernelData/Graph retains its own exact executable bindings.
   std::vector<int> snode_tree_dependencies() const {
     std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
@@ -246,6 +246,12 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   void set_snode_tree_dependencies(
       const std::vector<int> &dependencies) const;
+
+  // Source lifetime is independent of executable bindings and their warm
+  // lock-elision state. The cache-body walk normally supplies this metadata;
+  // definitions never compiled are inspected only at tree destruction.
+  std::vector<int> source_snode_tree_dependencies() const;
+  void set_source_snode_tree_dependencies(std::vector<int> dependencies) const;
 
   // A prior field-free artifact permits lock elision only for the same
   // request. A changed request may retain accesses removed by optimization.
@@ -301,6 +307,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
   mutable std::atomic<SNodeTreeDependencyState> snode_tree_dependency_state_{
       SNodeTreeDependencyState::unknown};
   mutable std::vector<int> snode_tree_dependencies_;
+  mutable std::optional<std::vector<int>> source_snode_tree_dependencies_;
 };
 
 }  // namespace taichi::lang

@@ -654,6 +654,7 @@ class FieldExpression : public Expression {
   DataType dt;
   std::string name;
   SNode *snode{nullptr};
+  bool snode_retired{false};
   SNodeGradType snode_grad_type{SNodeGradType::kPrimal};
   bool has_ambient{false};
   TypedConstant ambient_value;
@@ -669,6 +670,7 @@ class FieldExpression : public Expression {
 
   void set_snode(SNode *snode) {
     this->snode = snode;
+    snode_retired = false;
   }
 
   TI_DEFINE_ACCEPT_FOR_EXPRESSION

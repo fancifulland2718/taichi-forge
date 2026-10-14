@@ -6137,7 +6137,8 @@ static void remove_snode_frontend_caches(
     SNode *parent_snode,
     SNodeRwAccessorsBank *snode_rw_accessors_bank,
     SNodeFieldMap *snode_to_fields,
-    std::unordered_set<Kernel *> *retired_accessor_kernels) {
+    std::unordered_set<Kernel *> *retired_accessor_kernels,
+    std::vector<std::shared_ptr<FieldExpression>> *retired_fields) {
   for (int i = 0; i < (int)parent_snode->ch.size(); i++) {
     auto child_snode = parent_snode->ch[i].get();
     if (child_snode->type == SNodeType::place) {
@@ -6149,10 +6150,15 @@ static void remove_snode_frontend_caches(
       if (writer != nullptr) {
         retired_accessor_kernels->insert(writer);
       }
-      snode_to_fields->erase(child_snode);
+      const auto found = snode_to_fields->find(child_snode);
+      if (found != snode_to_fields->end()) {
+        retired_fields->push_back(found->second);
+        snode_to_fields->erase(found);
+      }
     }
     remove_snode_frontend_caches(child_snode, snode_rw_accessors_bank,
-                                 snode_to_fields, retired_accessor_kernels);
+                                 snode_to_fields, retired_accessor_kernels,
+                                 retired_fields);
   }
 }
 
@@ -6215,12 +6221,13 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
       snapshot_snode_tree_dependencies_unlocked(active_tree_ids);
 
   std::unordered_set<Kernel *> retired_accessor_kernels;
+  std::vector<std::shared_ptr<FieldExpression>> retired_fields;
   // Remove frontend state keyed by SNode pointers before destroying the root.
   {
     TI_COMPILE_PROFILER("cpp.snode.destroy.frontend_caches");
     remove_snode_frontend_caches(root, &snode_rw_accessors_bank_,
-                                 &snode_to_fields_,
-                                 &retired_accessor_kernels);
+                                 &snode_to_fields_, &retired_accessor_kernels,
+                                 &retired_fields);
   }
 
   // Destroy the root before retiring executable state so an exceptional
@@ -6289,9 +6296,15 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
         continue;
       }
       const auto &dependencies = kernel->snode_tree_dependencies();
-      if (std::binary_search(dependencies.begin(), dependencies.end(),
-                             tree_id)) {
+      const bool executable_uses_tree =
+          std::binary_search(dependencies.begin(), dependencies.end(), tree_id);
+      const auto source_dependencies = kernel->source_snode_tree_dependencies();
+      if (executable_uses_tree ||
+          std::binary_search(source_dependencies.begin(),
+                             source_dependencies.end(), tree_id)) {
         const bool preserve_relocatable_abi =
+            (!executable_uses_tree &&
+             kernel->snode_tree_dependencies_known()) ||
             program_impl_->get_kernel_compilation_manager()
                 .has_relocatable_template(kernel->get_cached_kernel_key());
         kernel->retire_definition(preserve_relocatable_abi);
@@ -6305,6 +6318,22 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
     }
   }
   TI_ASSERT(retired_accessor_kernels.empty());
+  // real_func definitions are Program-owned and may outlive every caller.
+  // Keep their pointer-free signatures for diagnostics, never their stale IR.
+  for (auto &function : functions_) {
+    const auto &dependencies = function->source_snode_tree_dependencies();
+    if (!function->definition_retired() &&
+        std::binary_search(dependencies.begin(), dependencies.end(), tree_id)) {
+      function->retire_definition();
+    }
+  }
+  // Retire source expressions only after every definition has recorded its
+  // original roots. Python may still retain these Fields and request a new
+  // specialization after this tree's slot or SNode addresses are reused.
+  for (auto &field : retired_fields) {
+    field->snode = nullptr;
+    field->snode_retired = true;
+  }
   snode_tree_active_[tree_id] = 0;
   free_snode_tree_ids_.push(tree_id);
   advance_snode_tree_epoch(snode_tree_mutation_epoch_);

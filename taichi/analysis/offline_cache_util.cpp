@@ -221,12 +221,14 @@ std::string get_hashed_offline_cache_key_impl(
       kernel_body_string = kernel->get_cached_offline_cache_body();
     } else {
       std::ostringstream oss;
+      std::vector<int> source_tree_ids;
       {
         TI_PROFILER("gen_offline_cache_key.body");
-        gen_offline_cache_key(kernel->ir.get(), &oss);
+        gen_offline_cache_key(kernel->ir.get(), &oss, &source_tree_ids);
       }
       kernel_body_string = oss.str();
       kernel->set_offline_cache_body(kernel_body_string);
+      kernel->set_source_snode_tree_dependencies(std::move(source_tree_ids));
     }
   }
 

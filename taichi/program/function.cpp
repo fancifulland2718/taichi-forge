@@ -3,6 +3,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/analysis/offline_cache_util.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 
 namespace taichi::lang {
 
@@ -30,8 +31,11 @@ void Function::set_function_body(const std::function<void()> &func) {
   // even when disk caching is disabled.
   if (is_inline_template_ || program->compile_config().offline_cache) {
     std::ostringstream oss;
-    gen_offline_cache_key(ir.get(), &oss);
+    gen_offline_cache_key(ir.get(), &oss, &source_snode_tree_dependencies_);
     ast_serialization_data_ = oss.str();
+  } else {
+    source_snode_tree_dependencies_ =
+        irpass::analysis::gather_frontend_snode_tree_dependencies(*ir);
   }
 }
 
@@ -42,6 +46,15 @@ void Function::set_function_body(std::unique_ptr<IRNode> func_body) {
   ir->as<Block>()->set_parent_callable(this);
 
   ir_stage_ = IRStage::InitialIR;
+  source_snode_tree_dependencies_ =
+      irpass::analysis::gather_source_snode_tree_dependencies(*ir);
+}
+
+void Function::retire_definition() {
+  ir.reset();
+  context.reset();
+  ast_serialization_data_.reset();
+  store_dests.clear();
 }
 
 std::string Function::get_name() const {

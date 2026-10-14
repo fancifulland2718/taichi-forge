@@ -59,11 +59,22 @@ class Function : public Callable {
 
   std::unordered_set<Stmt *> store_dests;
 
+  const std::vector<int> &source_snode_tree_dependencies() const {
+    return source_snode_tree_dependencies_;
+  }
+
+  bool definition_retired() const {
+    return ir == nullptr && ir_stage_ != IRStage::None;
+  }
+
+  void retire_definition();
+
  private:
   bool is_inline_template_{false};
   bool inline_returns_lvalue_{false};
   IRStage ir_stage_{IRStage::None};
   std::optional<std::string> ast_serialization_data_;  // For generating AST-Key
+  std::vector<int> source_snode_tree_dependencies_;
 };
 
 }  // namespace taichi::lang

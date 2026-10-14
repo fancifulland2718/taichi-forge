@@ -1,4 +1,7 @@
 #include "offline_cache_util.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
+
+#include <set>
 
 #include "taichi/ir/expr.h"
 #include "taichi/ir/frontend_ir.h"
@@ -53,7 +56,8 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   using IRVisitor::visit;
 
  public:
-  explicit ASTSerializer(std::ostream *os) : ExpressionVisitor(false), os_(os) {
+  explicit ASTSerializer(std::ostream *os, bool collect_source = false)
+      : ExpressionVisitor(false), os_(os), collect_source_(collect_source) {
     this->allow_undefined_visitor = false;
   }
 
@@ -155,6 +159,11 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   }
 
   void visit(FieldExpression *expr) override {
+    // A live primal may still name a retired adjoint/dual in its metadata.
+    // Actual indexing or AD lowering validates that retired expression.
+    TI_ERROR_IF(
+        expr->snode_retired && expr->snode_grad_type == SNodeGradType::kPrimal,
+        "Field's SNodeTree has been destroyed; rebuild the Field/kernel.");
     emit(ExprOpCode::FieldExpression);
     emit(expr->ident);
     emit(expr->dt);
@@ -437,10 +446,18 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(stmt->outputs);
   }
 
-  static void run(IRNode *ast, std::ostream *os) {
-    ASTSerializer serializer(os);
+  static void run(IRNode *ast,
+                  std::ostream *os,
+                  std::vector<int> *source_tree_ids) {
+    ASTSerializer serializer(os, source_tree_ids != nullptr);
     ast->accept(&serializer);
-    serializer.emit_dependencies();
+    if (os) {
+      serializer.emit_dependencies();
+    }
+    if (source_tree_ids) {
+      source_tree_ids->assign(serializer.source_tree_ids_.begin(),
+                              serializer.source_tree_ids_.end());
+    }
   }
 
  private:
@@ -478,13 +495,13 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   template <typename T>
   void emit_pod(const T &val) {
     static_assert(std::is_pod<T>::value);
-    TI_ASSERT(os_);
-    os_->write((const char *)&val, sizeof(T));
+    if (os_) {
+      os_->write((const char *)&val, sizeof(T));
+    }
   }
 
   void emit_bytes(const char *bytes, std::size_t len) {
-    TI_ASSERT(os_);
-    if (!bytes)
+    if (!os_ || !bytes)
       return;
     os_->write(bytes, len);
   }
@@ -522,6 +539,9 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   }
 
   void emit(const std::string &str) {
+    if (!os_) {
+      return;
+    }
     std::size_t size = str.size();
     std::size_t offset = string_pool_.size();
     string_pool_.insert(string_pool_.end(), str.begin(), str.end());
@@ -531,10 +551,17 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
 
   void emit(Function *func) {
     TI_ASSERT(func);
+    TI_ERROR_IF(func->definition_retired(),
+                "Cannot compile a retired function definition after its "
+                "SNodeTree was destroyed; rebuild the function/kernel.");
     auto iter = real_funcs_.find(func);
     if (iter != real_funcs_.end()) {
       emit(iter->second);
     } else {
+      if (collect_source_) {
+        const auto &ids = func->source_snode_tree_dependencies();
+        source_tree_ids_.insert(ids.begin(), ids.end());
+      }
       auto [iter, ok] = real_funcs_.insert({func, real_funcs_.size()});
       TI_ASSERT(ok);
       real_funcs_in_id_order_.push_back(func);
@@ -543,6 +570,9 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   }
 
   void emit(const TypedConstant &val) {
+    if (!os_) {
+      return;
+    }
     emit(val.dt);
     if (!val.dt->is_primitive(PrimitiveTypeID::unknown)) {
       emit(val.stringify());
@@ -551,6 +581,12 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
 
   void emit(const SNode *snode) {
     if (snode) {
+      if (collect_source_) {
+        source_tree_ids_.insert(snode->get_snode_tree_id());
+      }
+      if (!os_) {
+        return;
+      }
       emit(static_cast<std::size_t>(snode->get_snode_tree_id()));
       emit(static_cast<std::size_t>(snode->id));
       const auto *root = snode->get_root();
@@ -584,6 +620,9 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   }
 
   void emit(const DataType &type) {
+    if (!os_) {
+      return;
+    }
     if (auto *p = type->cast<PrimitiveType>()) {
       emit(p->type);
     } else {
@@ -678,6 +717,8 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
 #undef DEFINE_EMIT_ENUM
 
   std::ostream *os_{nullptr};
+  bool collect_source_{false};
+  std::set<int> source_tree_ids_;
   std::vector<const SNode *> snode_tree_roots_;
   std::unordered_map<const SNode *, std::string> snode_key_cache_;
   std::map<Function *, std::size_t> real_funcs_;
@@ -687,8 +728,17 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
 
 }  // namespace
 
-void gen_offline_cache_key(IRNode *ast, std::ostream *os) {
-  ASTSerializer::run(ast, os);
+void gen_offline_cache_key(IRNode *ast,
+                           std::ostream *os,
+                           std::vector<int> *source_tree_ids) {
+  ASTSerializer::run(ast, os, source_tree_ids);
+}
+
+std::vector<int> irpass::analysis::gather_frontend_snode_tree_dependencies(
+    IRNode &ir) {
+  std::vector<int> ids;
+  ASTSerializer::run(&ir, nullptr, &ids);
+  return ids;
 }
 
 }  // namespace taichi::lang
