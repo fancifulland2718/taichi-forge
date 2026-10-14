@@ -140,6 +140,11 @@ class ProgramImpl {
     return kDeviceNullPtr;
   }
 
+  virtual size_t get_snode_tree_root_size(int tree_id) const {
+    TI_ERROR("Dense SNodeTree snapshots are unsupported by this backend.");
+    return 0;
+  }
+
   virtual DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
                                                      uint64 *result_buffer) {
     return kDeviceNullAllocation;

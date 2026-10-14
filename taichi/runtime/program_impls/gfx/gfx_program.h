@@ -112,6 +112,10 @@ class GfxProgramImpl : public ProgramImpl {
     return snode_tree_mgr_->get_snode_tree_device_ptr(tree_id);
   }
 
+  size_t get_snode_tree_root_size(int tree_id) const override {
+    return snode_tree_mgr_->get_compiled_structs().at(tree_id).root_size;
+  }
+
   std::pair<const StructType *, size_t> get_struct_type_with_data_layout(
       const StructType *old_ty,
       const std::string &layout) override {

@@ -3734,6 +3734,37 @@ void export_lang(py::module &m) {
            },
            py::arg("sources"), py::arg("destinations"), py::kw_only(),
            py::arg("snapshot") = false)
+      .def(
+          "_snapshot_dense_state",
+          [](Program *program,
+             const std::vector<std::tuple<int, uint64_t, uint64_t>> &roots,
+             const std::vector<Ndarray *> &arrays) {
+            std::vector<SNodeTreeDependency> dependencies;
+            for (const auto &[id, generation, layout] : roots) {
+              dependencies.push_back({id, generation, layout});
+            }
+            Program::DenseStateSnapshot snapshot;
+            {
+              py::gil_scoped_release release;
+              snapshot = program->snapshot_dense_state(
+                  dependencies,
+                  std::vector<const Ndarray *>(arrays.begin(), arrays.end()));
+            }
+            auto payloads = [](const auto &data) {
+              py::list result;
+              for (const auto &bytes : data) {
+                result.append(
+                    py::bytes(reinterpret_cast<const char *>(bytes.data()),
+                              bytes.size()));
+              }
+              return result;
+            };
+            py::dict result;
+            result["roots"] = payloads(snapshot.roots);
+            result["arrays"] = payloads(snapshot.arrays);
+            return result;
+          },
+          py::arg("roots"), py::arg("arrays"))
       .def("copy_graph_observations_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {

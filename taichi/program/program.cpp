@@ -10297,6 +10297,71 @@ void Program::copy_ndarrays_to_host(const Ndarray *const *srcs,
               "copy_ndarrays_to_host failed: {}", res);
 }
 
+Program::DenseStateSnapshot Program::snapshot_dense_state(
+    const std::vector<SNodeTreeDependency> &dependencies,
+    const std::vector<const Ndarray *> &arrays) {
+  auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  validate_snode_tree_dependencies(dependencies, "Dense state snapshot");
+  TI_ERROR_IF(!snode_tree_dependencies_are_fixed_dense(dependencies),
+              "Dense state snapshot requires purely dense SNodeTrees.");
+  TI_ERROR_IF(
+      dependencies.size() > std::numeric_limits<int>::max() ||
+          arrays.size() > std::numeric_limits<int>::max() - dependencies.size(),
+      "Dense state snapshot exceeds the RHI transfer count range.");
+  auto leases = acquire_ndarray_leases(arrays.data(), arrays.size());
+  DenseStateSnapshot result;
+  result.roots.resize(dependencies.size());
+  result.arrays.resize(arrays.size());
+  std::vector<DevicePtr> sources;
+  std::vector<void *> destinations;
+  std::vector<size_t> sizes;
+  size_t total_bytes = 0;
+  const auto add = [&](DevicePtr source, size_t bytes,
+                       std::vector<uint8_t> &payload) {
+    TI_ERROR_IF(bytes > std::numeric_limits<size_t>::max() - total_bytes,
+                "Dense state snapshot byte count overflow.");
+    total_bytes += bytes;
+    payload.resize(bytes);
+    if (bytes) {
+      sources.push_back(source);
+      destinations.push_back(payload.data());
+      sizes.push_back(bytes);
+    }
+  };
+  std::unordered_set<int> seen;
+  for (size_t i = 0; i < dependencies.size(); ++i) {
+    const auto id = dependencies[i].tree_id;
+    TI_ERROR_IF(!seen.insert(id).second,
+                "Dense state snapshot repeats SNodeTree {}.", id);
+    TI_ERROR_IF(dependencies[i].layout_fingerprint !=
+                    snode_tree_layout_fingerprint(*snode_trees_[id]),
+                "Dense state snapshot layout changed for SNodeTree {}.", id);
+    add(program_impl_->get_snode_tree_device_ptr(id),
+        program_impl_->get_snode_tree_root_size(id), result.roots[i]);
+  }
+  for (size_t i = 0; i < arrays.size(); ++i) {
+    TI_ERROR_IF(!arrays[i], "Dense state snapshot received a null ndarray.");
+    const size_t count = arrays[i]->get_nelement();
+    const size_t element = arrays[i]->get_element_size();
+    TI_ERROR_IF(element && count > std::numeric_limits<size_t>::max() / element,
+                "Dense state snapshot ndarray byte count overflow.");
+    add(arrays[i]->ndarray_alloc_.get_ptr(), count * element, result.arrays[i]);
+  }
+  if (sources.empty()) {
+    return result;
+  }
+  synchronize();
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, total_bytes);
+  const auto status = program_impl_->get_compute_device()->readback_data(
+      sources.data(), destinations.data(), sizes.data(),
+      static_cast<int>(sources.size()));
+  TI_ERROR_IF(status != RhiResult::success,
+              "Dense state snapshot readback failed: {}", status);
+  return result;
+}
+
 void Program::copy_graph_observations_to_host(
     const Ndarray *const *srcs,
     void *const *dsts,

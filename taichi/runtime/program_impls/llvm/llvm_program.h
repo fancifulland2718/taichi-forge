@@ -244,6 +244,10 @@ class LlvmProgramImpl : public ProgramImpl {
     return runtime_exec_->get_snode_tree_device_ptr(tree_id);
   }
 
+  size_t get_snode_tree_root_size(int tree_id) const override {
+    return cache_data_->fields.at(tree_id).root_size;
+  }
+
   LlvmDevice *llvm_device() {
     return runtime_exec_->llvm_device();
   }
