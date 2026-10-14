@@ -50,6 +50,9 @@ constexpr std::size_t kNestedStructuredTraceWords = 6;
 constexpr std::size_t kNestedStructuredMaximumOuterIterations = 64;
 constexpr std::size_t kGraphReplayRetirementPollBudget = 8;
 
+// Optional status must be absent from both declarations and the entry-point
+// interface. Otherwise descriptor reflection can retain the unused binding,
+// depending on optimization, while the recording correctly omits it.
 std::vector<uint32_t> make_compact_controller_spirv(
     const DeviceCapabilityConfig &caps,
     const std::vector<uint32_t> &group_counts,
@@ -60,7 +63,8 @@ std::vector<uint32_t> make_compact_controller_spirv(
   const auto u32 = builder.u32_type();
   const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
   const auto control = builder.buffer_argument(u32, 0, 1, "control");
-  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto status = has_status ? builder.buffer_argument(u32, 0, 2, "status")
+                                 : spirv::Value{};
   const auto function = builder.new_function();
   builder.start_function(function);
 
@@ -120,7 +124,9 @@ std::vector<uint32_t> make_compact_controller_spirv(
   builder.make_inst(spv::OpFunctionEnd);
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
-    interfaces = {predicate, control, status};
+    interfaces = {predicate, control};
+    if (has_status)
+      interfaces.push_back(status);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -136,7 +142,8 @@ std::vector<uint32_t> make_structured_terminal_spirv(
   const auto u32 = builder.u32_type();
   const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
   const auto counter = builder.buffer_argument(u32, 0, 1, "counter");
-  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto status = has_status ? builder.buffer_argument(u32, 0, 2, "status")
+                                 : spirv::Value{};
   const auto control = builder.buffer_argument(u32, 0, 3, "control");
   const auto function = builder.new_function();
   builder.start_function(function);
@@ -182,7 +189,9 @@ std::vector<uint32_t> make_structured_terminal_spirv(
 
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
-    interfaces = {predicate, counter, status, control};
+    interfaces = {predicate, counter, control};
+    if (has_status)
+      interfaces.push_back(status);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -199,7 +208,8 @@ std::vector<uint32_t> make_nested_outer_snapshot_spirv(
   const auto u32 = builder.u32_type();
   const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
   const auto counter = builder.buffer_argument(u32, 0, 1, "counter");
-  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto status = has_status ? builder.buffer_argument(u32, 0, 2, "status")
+                                 : spirv::Value{};
   const auto control = builder.buffer_argument(u32, 0, 3, "control");
   const auto function = builder.new_function();
   builder.start_function(function);
@@ -227,7 +237,9 @@ std::vector<uint32_t> make_nested_outer_snapshot_spirv(
 
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
-    interfaces = {predicate, counter, status, control};
+    interfaces = {predicate, counter, control};
+    if (has_status)
+      interfaces.push_back(status);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -245,7 +257,8 @@ std::vector<uint32_t> make_nested_inner_initial_spirv(
   builder.init_header();
   const auto u32 = builder.u32_type();
   const auto counter = builder.buffer_argument(u32, 0, 0, "counter");
-  const auto status = builder.buffer_argument(u32, 0, 1, "status");
+  const auto status = has_status ? builder.buffer_argument(u32, 0, 1, "status")
+                                 : spirv::Value{};
   const auto control = builder.buffer_argument(u32, 0, 2, "control");
   const auto function = builder.new_function();
   builder.start_function(function);
@@ -299,7 +312,9 @@ std::vector<uint32_t> make_nested_inner_initial_spirv(
 
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
-    interfaces = {counter, status, control};
+    interfaces = {counter, control};
+    if (has_status)
+      interfaces.push_back(status);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -318,7 +333,8 @@ std::vector<uint32_t> make_nested_inner_terminal_spirv(
   const auto u32 = builder.u32_type();
   const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
   const auto counter = builder.buffer_argument(u32, 0, 1, "counter");
-  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto status = has_status ? builder.buffer_argument(u32, 0, 2, "status")
+                                 : spirv::Value{};
   const auto control = builder.buffer_argument(u32, 0, 3, "control");
   const auto function = builder.new_function();
   builder.start_function(function);
@@ -365,7 +381,9 @@ std::vector<uint32_t> make_nested_inner_terminal_spirv(
 
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
-    interfaces = {predicate, counter, status, control};
+    interfaces = {predicate, counter, control};
+    if (has_status)
+      interfaces.push_back(status);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -382,7 +400,8 @@ std::vector<uint32_t> make_chained_controller_spirv(
   const auto u32 = builder.u32_type();
   const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
   const auto control = builder.buffer_argument(u32, 0, 1, "control");
-  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto status = has_status ? builder.buffer_argument(u32, 0, 2, "status")
+                                 : spirv::Value{};
   const auto function = builder.new_function();
   builder.start_function(function);
 
@@ -469,7 +488,9 @@ std::vector<uint32_t> make_chained_controller_spirv(
   builder.make_inst(spv::OpFunctionEnd);
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
-    interfaces = {predicate, control, status};
+    interfaces = {predicate, control};
+    if (has_status)
+      interfaces.push_back(status);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -485,7 +506,8 @@ std::vector<uint32_t> make_conditional_controller_spirv(
   const auto u32 = builder.u32_type();
   const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
   const auto control = builder.buffer_argument(u32, 0, 1, "control");
-  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto status = has_status ? builder.buffer_argument(u32, 0, 2, "status")
+                                 : spirv::Value{};
   const auto function = builder.new_function();
   builder.start_function(function);
 
@@ -529,7 +551,9 @@ std::vector<uint32_t> make_conditional_controller_spirv(
   builder.make_inst(spv::OpFunctionEnd);
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
-    interfaces = {predicate, control, status};
+    interfaces = {predicate, control};
+    if (has_status)
+      interfaces.push_back(status);
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -4463,8 +4487,7 @@ bool GfxRuntime::try_launch_graph(
     controller->rw_buffer(0, structured_control->predicate,
                           sizeof(std::uint32_t));
     controller->rw_buffer(1, *slot->structured_control_buffer);
-    // Match the compiled interface: a no-status shader has no binding 2.
-    // Binding a dummy counter is not equivalent after dead-code elimination.
+    // Match the generated interface: status is only declared when present.
     if (structured_control->has_status) {
       controller->rw_buffer(2, structured_control->status, sizeof(std::uint32_t));
     }

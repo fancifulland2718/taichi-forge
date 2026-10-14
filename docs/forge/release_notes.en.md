@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan structured control shaders now omit unused optional status bindings
+  from their declarations and entry-point interfaces. This fixes descriptor
+  layout failures in nested loops when an outer or inner status is omitted.
+
 - AOT can reconstruct fixed CSR resources and f32 cuSPARSE SpMV, including
   transpose, i32/i64 topology and ordered coefficient updates. Each captured
   operation owns its preprocessing state while sharing the JIT execution core.
