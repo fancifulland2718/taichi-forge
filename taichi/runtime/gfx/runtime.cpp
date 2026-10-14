@@ -3257,6 +3257,50 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   return registration;
 }
 
+std::unique_ptr<GraphReplayRegistration>
+GfxRuntime::prepare_fixed_structured_graph(
+    const std::vector<GraphDispatch> &dispatches,
+    const GraphStructuredControl &control,
+    std::vector<std::shared_ptr<void>> owners,
+    std::vector<int> snode_tree_ids) {
+  // Registration destruction follows the registry -> runtime lock order even
+  // if qualification, descriptor allocation or command recording fails.
+  auto registration = register_graph_replay(1);
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  for (const int tree_id : snode_tree_ids) {
+    TI_ERROR_IF(tree_id < 0 ||
+                    static_cast<std::size_t>(tree_id) >= root_buffers_.size() ||
+                    !root_buffers_[tree_id],
+                "Prepared Vulkan control SNodeTree root {} is unavailable",
+                tree_id);
+    owners.push_back(root_buffers_[tree_id]);
+  }
+  TI_ERROR_IF(
+      !launch_graph_impl(dispatches, registration->replay_key(), nullptr,
+                         &control, nullptr, nullptr, nullptr, true),
+      "Prepared Vulkan control cannot record the selected strategy");
+  auto &state = graph_replay_states_.at(registration->replay_key());
+  auto &executable = state.executable;
+  const auto found =
+      std::find_if(executable.slots.begin(), executable.slots.end(),
+                   [](const auto &slot) { return slot.recorded; });
+  TI_ASSERT(found != executable.slots.end() && found->cmdlist &&
+            !found->completion);
+  found->retained_owners = std::move(owners);
+  state.fixed_snode_tree_ids = std::move(snode_tree_ids);
+  state.fixed_argument_bytes = executable.known_persistent_argument_bytes();
+  // No replay-slot acquisition, key construction, argument upload, descriptor
+  // patch or predicate observation is performed after this cold preparation.
+  auto *slot = &*found;
+  state.fixed_submit = [this, slot] {
+    flush_if_pending();
+    slot->completion = submit_compute_commands(slot->cmdlist.get());
+  };
+  executable.cached_prepared.clear();
+  executable.cached_prepare_key.clear();
+  return registration;
+}
+
 void GfxRuntime::launch_prepared_graph(std::uint64_t replay_key) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   // Fixed argument images, commands and owners: no signature building,
@@ -3311,11 +3355,29 @@ bool GfxRuntime::try_launch_graph(
     GraphStructuredResult *structured_result,
     const GraphNestedStructuredControl *nested_control,
     GraphNestedStructuredResult *nested_result) {
+  return launch_graph_impl(dispatches, replay_key, statistics,
+                           structured_control, structured_result,
+                           nested_control, nested_result, false);
+}
+
+bool GfxRuntime::launch_graph_impl(
+    const std::vector<GraphDispatch> &dispatches,
+    uint64_t replay_key,
+    RuntimeStatistics *statistics,
+    const GraphStructuredControl *structured_control,
+    GraphStructuredResult *structured_result,
+    const GraphNestedStructuredControl *nested_control,
+    GraphNestedStructuredResult *nested_result,
+    bool prepare_only) {
+  TI_ASSERT(!prepare_only || (structured_control && !structured_result &&
+                              !nested_control && !nested_result));
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
   TI_ASSERT(replay_key != 0);
   GraphReplayState &state = graph_replay_states_[replay_key];
   TI_ASSERT(!state.retirement_requested);
+  TI_ERROR_IF(state.fixed_submit,
+              "Prepared Vulkan Graph arguments and commands are immutable");
   GraphReplayExecutable &executable = state.executable;
   if (state.diagnostics_enabled) {
     ++state.attempts;
@@ -4048,7 +4110,9 @@ bool GfxRuntime::try_launch_graph(
     }
   }
 
-  flush_if_pending();
+  if (!prepare_only) {
+    flush_if_pending();
+  }
 
   if (slot->resource_sets.size() < total_tasks) {
     const size_t old_size = slot->resource_sets.size();
@@ -5458,6 +5522,10 @@ bool GfxRuntime::try_launch_graph(
     slot->structure_key = std::move(structure_key);
     slot->cmdlist = std::move(recorded_cmdlist);
     slot->recorded = true;
+    if (prepare_only) {
+      state.last_path = GraphReplayLastPath::record;
+      return true;
+    }
     slot->completion = submit_compute_commands(slot->cmdlist.get());
     if (state.diagnostics_enabled) {
       ++state.recorded;

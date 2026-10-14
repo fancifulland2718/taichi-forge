@@ -77,6 +77,9 @@
   - test: GfxAotTest.OpenglKernelTest2
     script: aot/python_scripts/kernel_aot_test2.py
     args: --arch=opengl
+  - test: CGraphAotTest.VulkanFixedControl
+    script: aot/python_scripts/fixed_vulkan_control.py
+    args: ''
   - test: CGraphAotTest.VulkanRunCGraph1
     script: aot/python_scripts/graph_aot_test_.py
     args: --arch=vulkan

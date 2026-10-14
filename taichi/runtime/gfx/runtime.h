@@ -102,8 +102,8 @@ class TI_DLL_EXPORT GraphReplayRegistration {
   }
   GraphReplayStats debug_stats() const;
   GraphReplayStats snapshot_stats() const;
-  // Only registrations returned by prepare_fixed_graph() expose this private
-  // native entry. Its command/argument images are immutable until retirement.
+  // Only fixed preparations expose this private native entry. Their command
+  // and argument images are immutable until retirement.
   void launch_prepared() const;
 
  private:
@@ -564,6 +564,13 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<int> snode_tree_ids = {},
       bool independent_graphics = false,
       std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> *timings = nullptr);
+  // Record the existing GPU-controlled strategy without executing it. Contexts
+  // are cold-only; owners retain code and external storage through retirement.
+  std::unique_ptr<GraphReplayRegistration> prepare_fixed_structured_graph(
+      const std::vector<GraphDispatch> &dispatches,
+      const GraphStructuredControl &control,
+      std::vector<std::shared_ptr<void>> owners,
+      std::vector<int> snode_tree_ids = {});
   void launch_prepared_graph(std::uint64_t replay_key);
   void retire_graphics_pipeline_recordings(std::uint64_t pipeline);
   void retire_ray_resource_recordings(std::uint64_t resource);
@@ -745,6 +752,14 @@ class TI_DLL_EXPORT GfxRuntime {
   GraphReplayStats debug_graph_replay_stats(uint64_t replay_token);
   GraphReplayStats snapshot_graph_replay_stats(uint64_t replay_token);
   void collect_ready_graph_replays(std::size_t max_polls);
+  bool launch_graph_impl(const std::vector<GraphDispatch> &dispatches,
+                         uint64_t replay_key,
+                         RuntimeStatistics *statistics,
+                         const GraphStructuredControl *structured_control,
+                         GraphStructuredResult *structured_result,
+                         const GraphNestedStructuredControl *nested_control,
+                         GraphNestedStructuredResult *nested_result,
+                         bool prepare_only);
 
   struct HashOverflowWatch {
     int root_id{-1};
