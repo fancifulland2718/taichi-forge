@@ -744,6 +744,7 @@ class GraphKrylovSolver:
         initial_guess=None,
         private_prefix,
         name,
+        update_policy="rebind",
     ):
         """Build one inlined solve program with Graph-instance-owned state."""
 
@@ -778,7 +779,7 @@ class GraphKrylovSolver:
             output,
             use_initial_guess,
         )
-        sequence.append_native(self._operator.graph_action(output, vectors["ax"]))
+        sequence.append_native(self._operator.graph_action(output, vectors["ax"], update_policy=update_policy))
         sequence.dispatch(
             kernels["initialize_blocks"],
             rhs,
@@ -808,7 +809,9 @@ class GraphKrylovSolver:
                 scalars["rz_old"],
             )
         else:
-            sequence.append_native(self._preconditioner.graph_action(vectors["r"], vectors["z"]))
+            sequence.append_native(
+                self._preconditioner.graph_action(vectors["r"], vectors["z"], update_policy=update_policy)
+            )
             sequence.dispatch(
                 kernels["seed_pcg"],
                 vectors["r"],
@@ -827,7 +830,7 @@ class GraphKrylovSolver:
             status,
         )
         body = ti.graph.GraphBuilder().create_sequential()
-        body.append_native(self._operator.graph_action(vectors["p"], vectors["ap"]))
+        body.append_native(self._operator.graph_action(vectors["p"], vectors["ap"], update_policy=update_policy))
         body.dispatch(
             kernels["reduce_pap_blocks"],
             vectors["p"],
@@ -864,7 +867,7 @@ class GraphKrylovSolver:
                 partials["partial1"],
             )
         else:
-            body.append_native(self._preconditioner.graph_action(vectors["r"], vectors["z"]))
+            body.append_native(self._preconditioner.graph_action(vectors["r"], vectors["z"], update_policy=update_policy))
             body.dispatch(
                 kernels["reduce_next_pcg_blocks"],
                 vectors["r"],

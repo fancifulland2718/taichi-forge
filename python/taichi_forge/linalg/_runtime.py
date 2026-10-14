@@ -4853,6 +4853,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
         action_record,
         *,
         name,
+        update_policy,
     ):
         from taichi_forge.graph._graph import ArgKind
 
@@ -4888,6 +4889,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
         self._terminal = terminal
         self._action_record = action_record
         self._name = name
+        self._update_policy = update_policy
         # GraphKrylovSolver owns the exact operator used to materialize the
         # recorded dispatch sequence. Snapshot that provider and its schema so
         # later assignments to the parent plan cannot splice a different
@@ -4932,6 +4934,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
             initial_guess=initial_arg,
             private_prefix=private_prefix,
             name=name,
+            update_policy=update_policy,
         )
         self._action_record.record_compiled()
 
@@ -4960,6 +4963,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
             "method": self._plan.method,
             "name": self._name,
             "recordable": True,
+            "update_policy": self._update_policy,
             "terminal_state": self._terminal.state.name,
             "terminal_metrics": self._terminal.metrics.name,
         }
@@ -4991,6 +4995,11 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
         if value.shape != (4,):
             raise TaichiRuntimeError(f"{role} must have shape (4,)")
         return value
+
+    def _export_aot_bindings(self, context):
+        from taichi_forge.linalg._solve_plan_export import export_bindings
+
+        export_bindings(self, context)
 
     def bind_graph_arguments(self, runtime_args):
         replacements = {}
@@ -5067,6 +5076,8 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
         # boundary. Keep it on the same exact-operator contract as the
         # recorded sequence before delegating to the parent plan.
         self._validate_operator_identity()
+        if self._update_policy == "pinned":
+            raise TaichiRuntimeError("Pinned SolvePlan actions require native Graph recording")
         result = self._plan.solve(
             runtime_args[self._rhs_name],
             initial_guess=(
@@ -5124,6 +5135,7 @@ class _SolvePlanGraphNode(NativeGraphNode):
         action_record,
         *,
         name,
+        update_policy,
     ):
         self._plan = plan
         self._solver = solver
@@ -5133,6 +5145,7 @@ class _SolvePlanGraphNode(NativeGraphNode):
         self.terminal = terminal
         self._action_record = action_record
         self.name = name
+        self._update_policy = update_policy
 
     def allocate_terminal(self, *, initialize=True):
         return self.terminal.allocate(initialize=initialize)
@@ -5152,6 +5165,7 @@ class _SolvePlanGraphNode(NativeGraphNode):
             self.terminal,
             self._action_record,
             name=self.name,
+            update_policy=self._update_policy,
         )
 
 
@@ -6453,6 +6467,7 @@ class SolvePlan:
         *,
         initial_guess=None,
         name=None,
+        update_policy="rebind",
     ):
         """Record this complete solve into an enclosing Graph.
 
@@ -6461,8 +6476,17 @@ class SolvePlan:
         ``node.allocate_terminal()`` and include ``packet.arguments`` in the
         enclosing Graph arguments. No terminal state is read back before the
         caller waits for the enclosing ``SubmissionTicket``.
+
+        ``update_policy="pinned"`` retains the operator and fixed preconditioner
+        generations selected when the Graph action is compiled. Compatible
+        kernel-backed actions can then be exported as an AOT execution plan.
+        Later numeric publications require a new Graph to adopt them. The
+        default ``"rebind"`` continues to select compatible live generations
+        at submission and cannot be implicitly frozen by AOT export.
         """
 
+        if update_policy not in ("rebind", "pinned"):
+            raise ValueError("update_policy must be 'rebind' or 'pinned'")
         if self.operator is None or self._program is not _current_program():
             raise TaichiRuntimeError(
                 "SolvePlan cannot be used after ti.reset()"
@@ -6541,6 +6565,7 @@ class SolvePlan:
             terminal,
             action_record,
             name=name,
+            update_policy=update_policy,
         )
 
     def _submission_graph(self, with_initial_guess):

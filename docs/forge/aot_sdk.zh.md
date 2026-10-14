@@ -223,8 +223,8 @@ plan = ExecutionPlan([loop])
 循环，保留编译后的 body+condition 段、首次条件及前后段，不重新生成源定义或重复
 末尾条件计算。控制数组的标量形状及互不别名约束一并保存；父 Sequential 嵌入、
 私有控制资源、状态与显式伴随已有小规模验证。CUDA 已选 masked、device-update
-或嵌套专用路线仍需自己的持久执行合同，导出会拒绝隐式替换；完整 SolvePlan
-仍单独推进。需要 host 同步的 CUDA
+或嵌套专用路线仍需自己的持久执行合同，导出会拒绝隐式替换；下文的 kernel-backed
+CG/PCG SolvePlan 导出复用这些已选控制路线。需要 host 同步的 CUDA
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
 循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
 规则退休相关执行。CPU/CUDA 小用例验证了嵌套、零轮、提前结束、预算耗尽和显式导出的
@@ -388,8 +388,41 @@ Graph 私有数组及组合 scratch 上的连续视图；即使只有子视图�
 明确的父依赖。重复嵌入 Sequential 共享描述和存储，视图不增加 buffer 复制或 kernel 定义。
 CPU/CUDA/Vulkan 已验证矩形块、显式伴随、compose 内嵌 block、独立准备、数值发布，以及
 独立/借用消费端退休。既有 backend/provider 可录制性及 affine view 限制仍适用，不表示
-任意叶算子均可作为 block，也不自动生成导数。活 field 与 SolvePlan 控制仍需重建合同。
+任意叶算子均可作为 block，也不自动生成导数。活 field 仍需重建合同。
 资源角色及一致快照要求配套 private ABI 46，不给消费端增加 provider 库依赖。
+
+kernel-backed f32 CG/PCG SolvePlan action 也可以保留完整已选程序，包括初始化、
+算子/预条件器调用、控制流、私有工作区及终端写回：
+
+```python
+solve = solver.graph_action(rhs_arg, output_arg, initial_guess=initial_arg,
+                            update_policy="pinned")
+builder = ti.graph.GraphBuilder()
+builder.append_native(solve)
+graph = builder.compile()
+module = ti.aot.Module()
+module.add_execution_plan("solve", graph)
+module.archive("solve.tcm")
+```
+
+默认 `update_policy="rebind"` 保持活数值更新，导出会明确拒绝。固定模式在 Graph action
+编译时选择算子和固定预条件器的代次；采用之后发布的新数值需要新 Graph 和 artifact。
+既有拓扑/runtime 失效检查仍适用。消费端只加载编译代码与资源，不构建 Python solver，
+也不重新选择算法。循环体仅保存一次，不随迭代预算复制；Vulkan 保留其已选命令策略。
+
+公开绑定包括 RHS、输出、可选初始猜测，以及 `solve.terminal.state.name` 和
+`solve.terminal.metrics.name`，应将这些名称写入应用接口清单。终端数组形状均为 `(4,)`，
+state 为 i32，依次保存状态（0：预算耗尽，1：breakdown，2：收敛）、完成迭代数、
+breakdown 标志及完成标记；metrics 为 f32，依次保存初始残差、最终残差、RHS 范数及
+有效容差的平方。每次执行覆盖终端包。向量端口要求与算子尺寸完全匹配的连续标量 f32
+数组。RHS 必须与输出、初始猜测互不重叠；初始猜测与输出可不重叠或为完全相同的物理
+类型视图，禁止部分重叠。这些检查在 prepare 阶段完成。
+
+每份 prepared execution 独立拥有 scratch。CPU、CUDA conditional 和 Vulkan 单层
+测试覆盖双绑定、数值代次更新、零预算、初始收敛、提前结束、预算耗尽、breakdown、别名
+及 close/reset；同时验证对称算子的显式伴随求解和真实后续梯度 kernel，不表示自动微分
+动态求解器。活 field、尚未验证的 provider action、其他求解方法与专用控制路线仍需
+单独重建支持。涉及已有 provider workspace 导出时，仍按原合同要求 `snapshot_state=True`。
 
 Graph 已含显式反向 kernel 时，可用 `gradients={"x": "dx", "y": "dy"}` 绑定 ndarray
 梯度，并一并导出梯度清零/播种操作；不会自动生成 native provider 的导数。

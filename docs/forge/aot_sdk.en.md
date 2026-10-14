@@ -266,8 +266,8 @@ definitions or repeating the trailing condition. Control scalar shapes and
 non-aliasing contracts are saved too. Small tests cover parent Sequential
 embedding, private controls, status and explicit adjoints. Selected CUDA masked,
 device-update and specialized nested routes still need their own persistent
-execution contract; export rejects implicit replacement. Complete SolvePlan
-export remains separate work. CUDA operations requiring host synchronization are
+execution contract; export rejects implicit replacement. Kernel-backed CG/PCG
+SolvePlan export uses these selected control paths as described below. CUDA operations requiring host synchronization are
 excluded from loop regions; providers with opaque cold facts still require an
 explicit branch/repetition merge contract. Initialization facts established only
 in a body cannot escape a possibly zero-trip loop. Closing storage, modules or a
@@ -485,9 +485,52 @@ add no buffer copies or kernel definitions. CPU/CUDA/Vulkan tests cover rectangu
 blocks, explicit adjoints, blocks inside compositions, independent preparations,
 numeric publications and retirement in standalone and borrowed consumers. Existing
 backend/provider recordability and affine-view restrictions still apply; this does
-not qualify arbitrary block leaves or add automatic derivatives. Live fields and
-SolvePlan control still need reconstruction contracts. Resource roles and coherent snapshots require
+not qualify arbitrary block leaves or add automatic derivatives. Live fields still
+need reconstruction contracts. Resource roles and coherent snapshots require
 matching private ABI 46 components; no provider library is added to the consumer.
+
+Kernel-backed f32 CG/PCG SolvePlan actions can also retain their complete selected
+program, including initialization, operator/preconditioner calls, control, private
+workspace and terminal writes:
+
+```python
+solve = solver.graph_action(rhs_arg, output_arg, initial_guess=initial_arg,
+                            update_policy="pinned")
+builder = ti.graph.GraphBuilder()
+builder.append_native(solve)
+graph = builder.compile()
+module = ti.aot.Module()
+module.add_execution_plan("solve", graph)
+module.archive("solve.tcm")
+```
+
+The default `update_policy="rebind"` retains live numeric updates and is rejected
+by export. Pinning selects the operator and fixed preconditioner generations when
+the Graph action is compiled; later numeric publications require a new Graph and
+artifact. Existing topology/runtime invalidation checks still apply. The consumer
+loads compiled kernels and resources without constructing a Python solver or
+selecting another algorithm. The loop body is stored once, independent of its
+iteration budget; Vulkan retains its selected command strategy.
+
+The public bindings include RHS, output, optional initial guess, and the names
+`solve.terminal.state.name` and `solve.terminal.metrics.name`. Include these names
+in the application interface manifest. Allocate terminal arrays of shape `(4,)`,
+with `i32` state and `f32` metrics. State contains status (`0` budget exhausted,
+`1` breakdown, `2` converged), completed iterations, breakdown flag and completion
+marker. Metrics contain squared initial residual, final residual, RHS norm and
+effective tolerance. Each invocation overwrites the terminal packet. Vector ports
+require packed scalar f32 arrays of the operator's exact size. RHS must be disjoint
+from output and initial guess; initial guess and output may be disjoint or the
+same physical typed view, never partially overlapping. Checks run at preparation.
+
+Each prepared execution owns its scratch. Tests cover CPU, CUDA conditional and
+flat Vulkan control, independent bindings, numeric generation changes, zero budget,
+initial convergence, early exit, budget exhaustion, breakdown, aliases and close/reset.
+They include an explicit symmetric adjoint solve and real downstream gradient
+kernels; this does not differentiate the dynamic solver automatically. Live fields,
+unqualified provider actions, other solver methods and specialized control routes
+still require separate reconstruction support. Existing provider workspace exports
+continue to require `snapshot_state=True` where applicable.
 
 For Graphs with explicit reverse kernels, `gradients={"x": "dx", "y": "dy"}`
 binds their ndarray gradients. Export the gradient clearing/seeding operations

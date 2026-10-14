@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Kernel-backed f32 CG/PCG SolvePlan Graph actions support explicit
+  `update_policy="pinned"` and AOT export of selected operator/preconditioner
+  generations, private scratch, control and terminal state. CPU/CUDA/Vulkan
+  consumers preserve vector layout/alias rules and independent prepared storage.
+  Default live rebinding remains unchanged; automatic solver differentiation,
+  other solver methods and unqualified providers are not included.
+
 - Zero-budget Graph loops keep native action manifests consistent with their
   reachable condition, fixing parent Sequential compilation failures when the
   unused body contains a native action. Flat Vulkan loops also skip compilation

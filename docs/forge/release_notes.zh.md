@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- kernel-backed f32 CG/PCG SolvePlan Graph action 新增显式 `update_policy="pinned"`，
+  可将已选算子/预条件器代次、私有 scratch、控制流和终端状态一起导出 AOT。
+  CPU/CUDA/Vulkan 消费端保留向量布局、别名规则及独立 prepared 存储；默认活数值
+  重绑定不变，不包含动态 solver 自动微分、其他求解方法及尚未验证的 provider。
+
 - 零预算 Graph 循环的 native action 清单与实际可执行的条件区域保持一致，修复循环体
   含 native action 时父 Sequential 编译断言失败；Vulkan 单层循环也不再编译、保留
   不可达循环体的绑定。首次条件计算仍照常执行。
