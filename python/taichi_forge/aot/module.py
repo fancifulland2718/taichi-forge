@@ -298,6 +298,7 @@ class Module:
         self._exported_kernels = {}
         self._execution_plans = {}
         self._data_payloads = {}
+        self._initial_root_data = {}
         self._graph_export_failed = False
         self._fields = {}
         rtm = impl.get_runtime()
@@ -418,6 +419,30 @@ class Module:
             raise ValueError("AOT data digest collision")
         return key
 
+    def _add_initial_root_snapshots(self, dependencies, payloads):
+        """Publish one coherent root snapshot after its export closure is known."""
+        if len(dependencies) != len(payloads):
+            raise ValueError("AOT root snapshot count does not match dependencies")
+        pending = {}
+        data = {}
+        for (tree, generation, layout), payload in zip(dependencies, payloads):
+            snapshot = bytes(payload)
+            key = hashlib.sha256(snapshot).hexdigest()
+            descriptor = (generation, layout, len(snapshot), key)
+            existing = pending.get(tree, self._initial_root_data.get(tree))
+            if existing is not None and existing != descriptor:
+                raise ValueError(f"AOT initial root state conflicts for tree {tree}; create a new module")
+            previous = data.get(key, self._data_payloads.get(key))
+            if previous is not None and previous != snapshot:
+                raise ValueError("AOT data digest collision")
+            pending[tree] = descriptor
+            data[key] = snapshot
+        self._aot_builder._add_initial_root_data(
+            [(tree, descriptor[2], descriptor[3]) for tree, descriptor in pending.items()]
+        )
+        self._initial_root_data.update(pending)
+        self._data_payloads.update(data)
+
     def add_execution_plan(self, name, plan, *, gradients=None, snapshot_state=False):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
@@ -532,6 +557,7 @@ class Module:
         filepath = output_dir.as_posix()
         self._aot_builder.dump(filepath, "")
         data_entries = {key for plan in self._execution_plans.values() for key in plan.data_entries}
+        data_entries.update(descriptor[3] for descriptor in self._initial_root_data.values())
         if data_entries:
             directory = output_dir / "data"
             directory.mkdir(exist_ok=True)

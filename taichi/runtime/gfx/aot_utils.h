@@ -36,7 +36,7 @@ inline std::string kernel_identity(spirv::TaichiKernelAttributes attributes,
  * AOT module data for the Unified Device API backend.
  */
 struct TaichiAotData {
-  static constexpr uint32_t kMetadataVersion = 2;
+  static constexpr uint32_t kMetadataVersion = 3;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;
@@ -51,6 +51,7 @@ struct TaichiAotData {
   // layout allocation.
   size_t root_buffer_size{0};
   std::vector<size_t> root_buffer_sizes;
+  std::vector<aot::InitialRootData> initial_root_data;
 
   TI_IO_DEF(metadata_version,
             kernels,
@@ -59,7 +60,8 @@ struct TaichiAotData {
             fields,
             required_caps,
             root_buffer_size,
-            root_buffer_sizes);
+            root_buffer_sizes,
+            initial_root_data);
 };
 
 }  // namespace gfx

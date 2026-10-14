@@ -96,6 +96,7 @@ LlvmAotModule::LlvmAotModule(
     }
   }
   const bool relocatable = metadata.resource_binding == "dense_v1";
+  std::vector<size_t> root_sizes;
   // Validate the complete resource closure before reserving or allocating any
   // tree. Legacy artifacts retain their original ID collision contract.
   for (std::size_t i = 0; i < snode_tree_ids_.size(); ++i) {
@@ -104,6 +105,7 @@ LlvmAotModule::LlvmAotModule(
     TI_ERROR_IF(
         !cache_reader_->get_field_cache(field, id) || field.tree_id != id,
         "Invalid LLVM AOT field metadata for tree {}", id);
+    root_sizes.push_back(field.root_size);
     if (relocatable) {
       TI_ERROR_IF(id != i ||
                       !executor_->get_config().demote_dense_struct_fors ||
@@ -133,6 +135,7 @@ LlvmAotModule::LlvmAotModule(
                   id);
     }
   }
+  aot::validate_initial_root_data(metadata.initial_root_data, root_sizes);
   if (relocatable) {
     reserved_tree_ids_ =
         executor_->reserve_aot_snode_tree_ids(snode_tree_ids_.size());
@@ -147,6 +150,9 @@ LlvmAotModule::LlvmAotModule(
       tree_bindings_.emplace(snode_tree_ids_[i], relocatable
                                                      ? reserved_tree_ids_[i]
                                                      : snode_tree_ids_[i]);
+    }
+    for (const auto &entry : metadata.initial_root_data) {
+      initial_root_data_.emplace(tree_bindings_.at(entry.tree_id), entry);
     }
   } catch (...) {
     executor_->release_aot_snode_tree_ids(reserved_tree_ids_);
@@ -375,6 +381,27 @@ std::unique_ptr<aot::CompiledGraph> LlvmAotModule::get_graph(
   return std::make_unique<aot::CompiledGraph>(std::move(graph));
 }
 
+void LlvmAotModule::initialize_snode_tree(
+    const LlvmOfflineCache::FieldCacheData &field,
+    uint64 *result_buffer) {
+  TI_ERROR_IF(is_corrupted(), "Cannot initialize an invalid LLVM AOT module.");
+  if (is_snode_tree_initialized(field.tree_id))
+    return;
+  executor_->initialize_llvm_runtime_snodes(field, result_buffer);
+  // Record ownership before upload so a failed payload also retires the root.
+  set_initialized_snode_tree(field.tree_id);
+  const auto initial = initial_root_data_.find(field.tree_id);
+  if (initial != initial_root_data_.end()) {
+    try {
+      initialize_root_data(initial->second,
+                           executor_->get_snode_tree_device_ptr(field.tree_id));
+    } catch (...) {
+      mark_corrupted();
+      throw;
+    }
+  }
+}
+
 void allocate_aot_snode_tree_type(aot::Module *aot_module,
                                   aot::Field *aot_field,
                                   uint64 *result_buffer) {
@@ -384,15 +411,8 @@ void allocate_aot_snode_tree_type(aot::Module *aot_module,
   TI_ASSERT(llvm_aot_module != nullptr);
   TI_ASSERT(aot_field_impl != nullptr);
 
-  auto *runtime_executor = llvm_aot_module->get_runtime_executor();
   const auto &field_cache = aot_field_impl->get_snode_tree_cache();
-
-  int snode_tree_id = field_cache.tree_id;
-  if (!llvm_aot_module->is_snode_tree_initialized(snode_tree_id)) {
-    runtime_executor->initialize_llvm_runtime_snodes(field_cache,
-                                                     result_buffer);
-    llvm_aot_module->set_initialized_snode_tree(snode_tree_id);
-  }
+  llvm_aot_module->initialize_snode_tree(field_cache, result_buffer);
 }
 
 std::unique_ptr<aot::Module> make_aot_module(AotModuleParams mod_params) {

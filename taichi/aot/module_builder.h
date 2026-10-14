@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <map>
 #include <vector>
 
 #include "taichi/aot/module_data.h"
@@ -8,6 +9,7 @@
 #include "taichi/ir/snode.h"
 #include "taichi/aot/module_data.h"
 #include "taichi/aot/graph_data.h"
+#include "taichi/aot/initial_root_data.h"
 #include "taichi/program/kernel_compile_request.h"
 
 namespace taichi::lang {
@@ -51,6 +53,9 @@ class AotModuleBuilder {
 
   void add_graph(const std::string &name, const aot::CompiledGraph &graph);
 
+  // Producer IDs are relocated by dump(). Reject conflicting re-snapshots.
+  void add_initial_root_data(const std::vector<aot::InitialRootData> &entries);
+
  protected:
   /**
    * Intended to be overridden by each backend's implementation.
@@ -88,6 +93,7 @@ class AotModuleBuilder {
 
  protected:
   std::unordered_map<std::string, aot::CompiledGraph> graphs_;
+  std::map<int, aot::InitialRootData> initial_root_data_;
   KernelCompileOptions compile_options_;
   bool compile_options_frozen_{false};
 };

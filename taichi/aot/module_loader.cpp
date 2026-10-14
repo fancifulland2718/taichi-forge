@@ -60,6 +60,8 @@ std::unique_ptr<Module> Module::load(Arch arch, std::any mod_params) {
 }
 
 Kernel *Module::get_kernel(const std::string &name) {
+  if (is_corrupted())
+    throw ArtifactLoadError("Cannot load a kernel from an invalid AOT module");
   auto itr = loaded_kernels_.find(name);
   if (itr != loaded_kernels_.end()) {
     return itr->second.get();
@@ -73,10 +75,15 @@ Kernel *Module::get_kernel(const std::string &name) {
 std::vector<std::uint8_t> Module::load_data(
     const std::string &sha256,
     std::uint64_t expected_bytes) const {
+  return load_data_from(data_source(), sha256, expected_bytes);
+}
+
+std::vector<std::uint8_t> Module::load_data_from(const io::VirtualDir *source,
+                                                 const std::string &sha256,
+                                                 std::uint64_t expected_bytes) {
   if (sha256.size() != 64 ||
       sha256.find_first_not_of("0123456789abcdef") != std::string::npos)
     throw ArtifactLoadError("Invalid AOT data payload key");
-  const auto *source = data_source();
   const auto path = "data/" + sha256 + ".bin";
   std::size_t size = 0;
   if (!source || !source->get_file_size(path, size) || size != expected_bytes)
@@ -88,6 +95,27 @@ std::vector<std::uint8_t> Module::load_data(
     throw ArtifactLoadError("AOT data payload failed integrity validation: " +
                             sha256);
   return bytes;
+}
+
+void Module::initialize_root_data(
+    const InitialRootData &entry,
+    DevicePtr destination,
+    const std::vector<std::uint8_t> *preloaded) const {
+  std::vector<std::uint8_t> loaded;
+  if (!preloaded) {
+    loaded = load_data(entry.sha256, entry.size);
+    preloaded = &loaded;
+  }
+  TI_ASSERT(preloaded->size() == entry.size);
+  if (preloaded->empty())
+    return;
+  const void *source = preloaded->data();
+  size_t bytes = preloaded->size();
+  const auto status =
+      destination.device->upload_data(&destination, &source, &bytes, 1);
+  if (status != RhiResult::success)
+    throw ArtifactLoadError("Failed to initialize AOT root " +
+                            std::to_string(entry.tree_id));
 }
 
 KernelTemplate *Module::get_kernel_template(const std::string &name) {

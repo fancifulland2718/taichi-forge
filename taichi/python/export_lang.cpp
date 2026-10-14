@@ -5551,6 +5551,15 @@ void export_lang(py::module &m) {
       .def("add", &AotModuleBuilder::add)
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)
       .def("add_graph", &AotModuleBuilder::add_graph)
+      .def("_add_initial_root_data",
+           [](AotModuleBuilder *builder,
+              const std::vector<std::tuple<int, uint64_t, std::string>> &entries) {
+             std::vector<aot::InitialRootData> data;
+             for (const auto &[tree, size, key] : entries) {
+               data.push_back({tree, size, key});
+             }
+             builder->add_initial_root_data(data);
+           })
       .def("dump", &AotModuleBuilder::dump);
 
   py::class_<Axis>(m, "Axis").def(py::init<int>());

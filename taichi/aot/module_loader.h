@@ -12,6 +12,7 @@
 #include "taichi/rhi/device.h"
 #include "taichi/ir/snode.h"
 #include "taichi/aot/graph_data.h"
+#include "taichi/aot/initial_root_data.h"
 
 namespace taichi::io {
 struct VirtualDir;
@@ -127,6 +128,16 @@ class TI_DLL_EXPORT Module {
   virtual const io::VirtualDir *data_source() const {
     return nullptr;
   }
+  static std::vector<std::uint8_t> load_data_from(const io::VirtualDir *source,
+                                                  const std::string &sha256,
+                                                  std::uint64_t expected_bytes);
+  // Synchronous cold upload, after allocation and before executable
+  // publication. Borrowed artifact sources may eagerly retain verified bytes
+  // until this call.
+  void initialize_root_data(
+      const InitialRootData &entry,
+      DevicePtr destination,
+      const std::vector<std::uint8_t> *preloaded = nullptr) const;
   virtual std::unique_ptr<Kernel> make_new_kernel(const std::string &name) = 0;
   virtual std::unique_ptr<KernelTemplate> make_new_kernel_template(
       const std::string &name) = 0;

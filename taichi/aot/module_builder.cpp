@@ -44,6 +44,21 @@ bool AotModuleBuilder::all_fields_are_dense_in_container(
   return true;
 }
 
+void AotModuleBuilder::add_initial_root_data(
+    const std::vector<aot::InitialRootData> &entries) {
+  auto merged = initial_root_data_;
+  for (const auto &entry : entries) {
+    aot::validate_initial_root_data(entry);
+    const auto [existing, inserted] = merged.emplace(entry.tree_id, entry);
+    TI_ERROR_IF(!inserted && (existing->second.size != entry.size ||
+                              existing->second.sha256 != entry.sha256),
+                "AOT initial root state conflicts for tree {}; create a new "
+                "module.",
+                entry.tree_id);
+  }
+  initial_root_data_ = std::move(merged);
+}
+
 void AotModuleBuilder::load(const std::string &output_dir) {
   TI_ERROR("Aot loader not supported");
 }

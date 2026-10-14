@@ -118,6 +118,19 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     exported.fields = std::move(fields);
     metadata.resource_binding = "dense_v1";
   }
+  TI_ERROR_IF(!initial_root_data_.empty() && !relocatable,
+              "AOT initial root state requires relocatable dense trees.");
+  for (const auto &[producer, entry] : initial_root_data_) {
+    const auto field = cache_.fields.find(producer);
+    TI_ERROR_IF(
+        field == cache_.fields.end() || field->second.root_size != entry.size,
+        "AOT initial root state references an absent or incompatible "
+        "tree {}.",
+        producer);
+    auto local = entry;
+    local.tree_id = tree_mapping.at(producer);
+    metadata.initial_root_data.push_back(std::move(local));
+  }
   auto prepare_module = [&](LlvmOfflineCache::KernelCacheData &kernel) {
     auto module = llvm::CloneModule(
         *cache_.kernels.at(kernel.kernel_key).compiled_data.module);
@@ -195,6 +208,9 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   }
   if (artifact_format_ == "cubin") {
     metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;
+  }
+  if (!metadata.initial_root_data.empty()) {
+    metadata.schema_version = LLVM::kInitialRootDataAotSchemaVersion;
   }
   if (compile_config_.arch == Arch::cuda) {
     for (const auto capability : {

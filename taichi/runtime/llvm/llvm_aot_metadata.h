@@ -6,6 +6,7 @@
 
 #include "taichi/common/core.h"
 #include "taichi/common/serialization.h"
+#include "taichi/aot/initial_root_data.h"
 
 namespace taichi::lang::LLVM {
 
@@ -17,6 +18,7 @@ inline constexpr std::uint32_t kLlvmAotSchemaVersion = 3;
 inline constexpr std::uint32_t kCudaPtxAotSchemaVersion = 4;
 inline constexpr std::uint32_t kRelocatableLlvmAotSchemaVersion = 5;
 inline constexpr std::uint32_t kCudaCubinAotSchemaVersion = 6;
+inline constexpr std::uint32_t kInitialRootDataAotSchemaVersion = 7;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
@@ -55,6 +57,7 @@ struct LlvmAotMetadata {
   // Separate from the version-5 per-kernel contract hash for compatibility.
   std::map<std::string, std::string> cuda_cubin_providers;
   std::string resource_binding;
+  std::vector<aot::InitialRootData> initial_root_data;
 
   TI_IO_DEF(schema_version,
             required_caps,
@@ -62,37 +65,47 @@ struct LlvmAotMetadata {
             abi_sha256,
             cuda_artifacts,
             cuda_cubin_providers,
-            resource_binding);
+            resource_binding,
+            initial_root_data);
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
-  TI_ERROR_IF(metadata.schema_version != 2 &&
-                  metadata.schema_version != kLlvmAotSchemaVersion &&
-                  metadata.schema_version != kCudaPtxAotSchemaVersion &&
-                  metadata.schema_version != kRelocatableLlvmAotSchemaVersion &&
-                  metadata.schema_version != kCudaCubinAotSchemaVersion,
+  const bool initial_state =
+      metadata.schema_version == kInitialRootDataAotSchemaVersion;
+  TI_ERROR_IF(initial_state != !metadata.initial_root_data.empty() ||
+                  (initial_state && metadata.resource_binding != "dense_v1"),
+              "AOT initial root data requires schema 7 and dense_v1 binding.");
+  // Reuse the exact BC/PTX or cubin contract without copying payload metadata.
+  const auto schema = initial_state ? (metadata.kernel_format == "cubin"
+                                           ? kCudaCubinAotSchemaVersion
+                                           : kRelocatableLlvmAotSchemaVersion)
+                                    : metadata.schema_version;
+  TI_ERROR_IF(schema != 2 && schema != kLlvmAotSchemaVersion &&
+                  schema != kCudaPtxAotSchemaVersion &&
+                  schema != kRelocatableLlvmAotSchemaVersion &&
+                  schema != kCudaCubinAotSchemaVersion,
               "LLVM AOT artifact schema {} is incompatible with this runtime. "
               "Rebuild the artifact with the current Forge AOT "
               "compiler.",
               metadata.schema_version);
-  if (metadata.schema_version == kCudaCubinAotSchemaVersion) {
+  if (schema == kCudaCubinAotSchemaVersion) {
     TI_ERROR_IF(metadata.kernel_format != "cubin" ||
                     metadata.abi_sha256.size() != 64 ||
                     (!metadata.resource_binding.empty() &&
                      metadata.resource_binding != "dense_v1"),
                 "CUDA cubin AOT requires cubin, an ABI checksum and a supported "
                 "resource binding");
-  } else if (metadata.schema_version == kRelocatableLlvmAotSchemaVersion) {
+  } else if (schema == kRelocatableLlvmAotSchemaVersion) {
     TI_ERROR_IF(
         metadata.resource_binding != "dense_v1" ||
             (metadata.kernel_format != "bc" &&
              metadata.kernel_format != "ptx") ||
             metadata.abi_sha256.size() != 64,
         "Relocatable LLVM AOT requires dense_v1, BC/PTX and an ABI checksum");
-  } else if (metadata.schema_version == 2) {
+  } else if (schema == 2) {
     TI_ERROR_IF(!metadata.kernel_format.empty() && metadata.kernel_format != "ll",
                 "Legacy LLVM AOT schema 2 requires text kernel format.");
-  } else if (metadata.schema_version == kCudaPtxAotSchemaVersion) {
+  } else if (schema == kCudaPtxAotSchemaVersion) {
     TI_ERROR_IF(metadata.kernel_format != "ptx" ||
                     metadata.abi_sha256.size() != 64,
                 "CUDA PTX AOT requires PTX format and a launch ABI checksum.");
@@ -101,8 +114,8 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                 "Unsupported or missing LLVM AOT kernel format '{}'.",
                 metadata.kernel_format);
   }
-  TI_ERROR_IF(metadata.schema_version != kRelocatableLlvmAotSchemaVersion &&
-                  metadata.schema_version != kCudaCubinAotSchemaVersion &&
+  TI_ERROR_IF(schema != kRelocatableLlvmAotSchemaVersion &&
+                  schema != kCudaCubinAotSchemaVersion &&
                   !metadata.resource_binding.empty(),
               "Legacy LLVM AOT cannot declare resource relocation");
 }

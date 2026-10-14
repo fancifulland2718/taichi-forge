@@ -14,12 +14,14 @@ namespace taichi::lang {
 namespace gfx {
 namespace {
 
-bool is_dense_tree(const SNode *node) {
-  if (node->need_activation()) {
+bool is_dense_tree(const SNode *node, bool plain_storage = false) {
+  if (node->need_activation() ||
+      (plain_storage && node->type != SNodeType::root &&
+       node->type != SNodeType::dense && node->type != SNodeType::place)) {
     return false;
   }
   for (const auto &child : node->ch) {
-    if (!is_dense_tree(child.get())) {
+    if (!is_dense_tree(child.get(), plain_storage)) {
       return false;
     }
   }
@@ -37,7 +39,8 @@ AotModuleBuilderImpl::AotModuleBuilderImpl(
       compilation_manager_(compilation_manager),
       config_(compile_config),
       caps_(caps) {
-  ti_aot_data_.metadata_version = TaichiAotData::kMetadataVersion;
+  // Keep state-free artifacts readable by version-2 runtimes.
+  ti_aot_data_.metadata_version = 2;
   for (const auto &pair : caps.to_inner()) {
     ti_aot_data_.required_caps[to_string(pair.first)] = pair.second;
   }
@@ -101,6 +104,22 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     }
     if (!artifact.root_buffer_sizes.empty()) {
       artifact.root_buffer_size = artifact.root_buffer_sizes.front();
+    }
+    for (const auto &[producer, entry] : initial_root_data_) {
+      const auto id = module_ids.find(producer);
+      TI_ERROR_IF(id == module_ids.end(),
+                  "AOT initial root state references unexported tree {}.",
+                  producer);
+      TI_ERROR_IF(!is_dense_tree(compiled_structs_[producer].root, true),
+                  "AOT initial root state requires plain dense storage.");
+      auto local = entry;
+      local.tree_id = id->second;
+      artifact.initial_root_data.push_back(std::move(local));
+    }
+    if (!artifact.initial_root_data.empty()) {
+      artifact.metadata_version = TaichiAotData::kMetadataVersion;
+      aot::validate_initial_root_data(artifact.initial_root_data,
+                                      artifact.root_buffer_sizes);
     }
     for (auto &metadata : artifact.kernel_metadata) {
       metadata.num_snode_trees = artifact.root_buffer_sizes.size();

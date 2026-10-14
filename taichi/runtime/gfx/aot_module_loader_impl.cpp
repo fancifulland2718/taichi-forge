@@ -96,6 +96,20 @@ class AotModuleImpl : public aot::Module {
       TI_WARN("GFX AOT kernel metadata count does not match kernel count");
       return;
     }
+    TI_ERROR_IF((ti_aot_data_.metadata_version == 3) !=
+                    !ti_aot_data_.initial_root_data.empty(),
+                "AOT initial root data requires GFX metadata version 3.");
+    aot::validate_initial_root_data(ti_aot_data_.initial_root_data,
+                                    ti_aot_data_.root_buffer_sizes);
+    if (!source_) {
+      // The legacy borrowed VirtualDir need only live through construction.
+      // Keep these verified bytes only until roots are allocated, like eager
+      // shader loading on the same legacy path.
+      for (const auto &entry : ti_aot_data_.initial_root_data) {
+        eager_initial_root_data_.push_back(
+            load_data_from(dir, entry.sha256, entry.size));
+      }
+    }
     for (std::size_t i = 0; i < ti_aot_data_.kernel_metadata.size(); ++i) {
       const auto &metadata = ti_aot_data_.kernel_metadata[i];
       if (metadata.num_snode_trees != ti_aot_data_.root_buffer_sizes.size()) {
@@ -239,6 +253,20 @@ class AotModuleImpl : public aot::Module {
                 "GFX AOT resources must be bound before loading kernels.");
     root_bindings_ = runtime_->allocate_aot_root_buffers(ti_aot_data_.root_buffer_sizes);
     owns_runtime_resources_ = true;
+    try {
+      for (size_t i = 0; i < ti_aot_data_.initial_root_data.size(); ++i) {
+        const auto &entry = ti_aot_data_.initial_root_data[i];
+        initialize_root_data(
+            entry,
+            runtime_->get_root_buffer(root_bindings_.at(entry.tree_id))
+                ->get_ptr(),
+            source_ ? nullptr : &eager_initial_root_data_.at(i));
+      }
+      decltype(eager_initial_root_data_){}.swap(eager_initial_root_data_);
+    } catch (...) {
+      mark_corrupted();
+      throw;
+    }
   }
 
   std::unique_ptr<aot::CompiledGraph> get_graph(
@@ -389,6 +417,7 @@ class AotModuleImpl : public aot::Module {
   std::unordered_map<std::string, size_t> kernel_indices_;
   std::unordered_map<size_t, GfxRuntime::KernelHandle> registered_kernels_;
   std::vector<int> root_bindings_;
+  std::vector<std::vector<std::uint8_t>> eager_initial_root_data_;
   bool owns_runtime_resources_{false};
   GfxRuntime *runtime_{nullptr};
   Arch device_api_backend_;

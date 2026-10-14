@@ -86,6 +86,9 @@ class LlvmRuntimeExecutor {
   // registering a generation-owned compact kernel binding.
   void *get_snode_tree_root_ptr(int tree_id);
 
+  // Non-owning RHI view for cold JIT snapshots and AOT state initialization.
+  DevicePtr get_snode_tree_device_ptr(int tree_id);
+
   const CompileConfig &get_config() const {
     return config_;
   }
@@ -137,8 +140,6 @@ class LlvmRuntimeExecutor {
   T fetch_result(char *result_buffer, int offset) {
     return *(T *)(result_buffer + offset);
   }
-
-  DevicePtr get_snode_tree_device_ptr(int tree_id);
 
   void fill_ndarray(const DeviceAllocation &alloc,
                     std::size_t size,

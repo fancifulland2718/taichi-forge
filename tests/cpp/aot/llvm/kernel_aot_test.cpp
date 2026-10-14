@@ -154,6 +154,43 @@ TEST(LlvmAotMetadataTest, CubinRequiresNewSchemaAndBinaryCompatibleTarget) {
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
 }
 
+TEST(LlvmAotMetadataTest,
+     InitialRootStateRequiresExplicitSchemaAndDenseBinding) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kInitialRootDataAotSchemaVersion;
+  metadata.resource_binding = "dense_v1";
+  metadata.abi_sha256 = std::string(64, 'a');
+  metadata.initial_root_data.push_back({0, 32, std::string(64, 'b')});
+  for (const auto *format : {"bc", "ptx", "cubin"}) {
+    metadata.kernel_format = format;
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  }
+  metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.schema_version = LLVM::kInitialRootDataAotSchemaVersion;
+  metadata.resource_binding.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  metadata.resource_binding = "dense_v1";
+  metadata.initial_root_data.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+}
+
+TEST(LlvmAotMetadataTest, InitialRootDataValidatesExactStorageAndUniqueIds) {
+  const std::vector<size_t> sizes{32, 64};
+  std::vector<aot::InitialRootData> entries{{1, 64, std::string(64, 'a')}};
+  EXPECT_NO_THROW(aot::validate_initial_root_data(entries, sizes));
+  entries.push_back(entries.front());
+  EXPECT_ANY_THROW(aot::validate_initial_root_data(entries, sizes));
+  entries.pop_back();
+  entries[0].tree_id = 2;
+  EXPECT_ANY_THROW(aot::validate_initial_root_data(entries, sizes));
+  entries[0].tree_id = 0;
+  EXPECT_ANY_THROW(aot::validate_initial_root_data(entries, sizes));
+  entries[0].size = 32;
+  entries[0].sha256[0] = 'g';
+  EXPECT_ANY_THROW(aot::validate_initial_root_data(entries, sizes));
+}
+
 TEST(LlvmAotMetadataTest, ResourceReservationsPrecedeAllocation) {
   CompileConfig cfg;
   cfg.arch = Arch::x64;

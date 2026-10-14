@@ -59,6 +59,9 @@ class LlvmAotModule final : public aot::Module {
     return initialized_snode_tree_ids.count(snode_tree_id);
   }
 
+  void initialize_snode_tree(const LlvmOfflineCache::FieldCacheData &field,
+                             uint64 *result_buffer);
+
   std::unique_ptr<aot::CompiledGraph> get_graph(
       const std::string &name) override;
 
@@ -96,6 +99,7 @@ class LlvmAotModule final : public aot::Module {
   std::vector<int> snode_tree_ids_;
   std::map<int, int> tree_bindings_;
   std::vector<int> reserved_tree_ids_;
+  std::map<int, aot::InitialRootData> initial_root_data_;
 
   // To prevent repeated SNodeTree initialization
   std::unordered_set<int> initialized_snode_tree_ids;
