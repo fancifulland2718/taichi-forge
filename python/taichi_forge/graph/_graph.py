@@ -6815,7 +6815,9 @@ class _CompiledWhileGraphNode:
                     "while_condition",
                 ),
             )
-            if arch == _ti_core.Arch.vulkan and not self._has_nested_control
+            if arch == _ti_core.Arch.vulkan
+            and not self._has_nested_control
+            and self.max_iterations
             else None
         )
         self._vulkan_nested = None
@@ -6931,6 +6933,14 @@ class _CompiledWhileGraphNode:
         )
         self.source_native_count = sum(
             sequence._source_native_count for sequence in active_sequences
+        )
+        # A zero-budget loop executes only its initial condition. Retain the
+        # complete declarative body for reconstruction, but expose manifests
+        # from the same reachable regions as the count and lifetime leases.
+        self.native_action_manifests = tuple(
+            manifest
+            for sequence in active_sequences
+            for manifest in sequence._native_action_manifests
         )
         self.snode_tree_dependencies = frozenset().union(
             *(node.snode_tree_dependencies for node in dependency_nodes)

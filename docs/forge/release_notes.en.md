@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Zero-budget Graph loops keep native action manifests consistent with their
+  reachable condition, fixing parent Sequential compilation failures when the
+  unused body contains a native action. Flat Vulkan loops also skip compilation
+  and binding retention for that unreachable body; the initial condition still runs.
+
 - Vulkan structured control shaders now omit unused optional status bindings
   from their declarations and entry-point interfaces. This fixes descriptor
   layout failures in nested loops when an outer or inner status is omitted.
