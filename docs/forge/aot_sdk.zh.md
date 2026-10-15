@@ -1308,3 +1308,50 @@ Python/Cython ABI 已取得资格。生产构建使用 `binding=True`、
 [Cython 官方编译指令](https://docs.cython.org/en/latest/src/userguide/source_files_and_compilation.html#compiler-directives)。
 私有模板协议须与生产侧 Forge 前端配套，不改变 JIT/AOT 默认项；应用依赖闭包和
 包体仍需单独验收。不交付源码文件并不等于保密执行，消费进程中的编译模板仍可被检查。
+
+私有 `_host_build.py` 生产工具可按显式模块清单创建干净、不可变的宿主布局。
+在独立构建环境中安装 `packaging/constraints/host-build.txt` 的生产依赖，并初始化
+匹配的 C++ 编译器及 CPython；消费端不需要 Cython 或 setuptools。在 Forge 源码根目录：
+
+```sh
+python python/taichi_forge/tools/_host_build.py --spec app-host.json \
+    --work host-cache --output host-layout --jobs 4
+```
+
+清单使用规范模块名，必须包含所需的包初始化器，并锁定生产工具版本：
+
+```json
+{
+  "version": 1,
+  "source_root": "private-source",
+  "modules": {
+    "simulation": "simulation/__init__.py",
+    "simulation.solver": "simulation/solver.py"
+  },
+  "toolchain": {
+    "python": "3.10.11",
+    "cython": "3.2.9",
+    "setuptools": "82.0.1"
+  }
+}
+```
+
+`source_root` 相对清单文件解析，模块路径必须位于该根目录内；缓存、输出和私有源码
+分别存放。应用初始化时已有的别名可描述为
+`"aliases": {"solver_alias": {"target": "simulation.solver", "registered_by": "simulation"}}`。
+这只记录现有导入合同，不安装导入钩子，也不重复编译模块。会替换自身模块或
+`__file__` 的初始化器需要显式加入；观察到的导入清单不能证明动态依赖已经完整。
+
+输出只有声明的扩展与 `host-manifest.json`，记录相对产物名、哈希、模板条目和生产
+身份。缓存命中核对二进制内容，并跳过模板构造和编译；源码、生产器或工具链变化会
+使相应配方失效。已有输出必须与清单完全一致，变更构建应选新的输出目录。编译失败
+不修改原输出，日志及生成的 Python/C++ 留在生产缓存。每份缓存由一个生产进程持有，
+其内部按模块并行构建。
+
+生产配置保留普通宿主的 Python 对象类型，条件分支中的字面元组显式装箱，避免误用
+固定长度 C 元组；未解析的全局名称仍在运行时抛出 `NameError`。这条生产路径当前
+采用 Cython 3.2.9：更广的宿主代码在3.3中暴露编译异常，早前小夹具通过不代表全量
+兼容。包初始化、别名、损坏缓存恢复、惰性分支、源码排除及CPU/CUDA/Vulkan新特化与
+梯度已有测试。
+宿主布局还不是完整SDK wheel；外部依赖锁、资源、公开stubs及应用功能资格由后续
+部署步骤承接。

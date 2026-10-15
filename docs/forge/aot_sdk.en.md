@@ -1665,3 +1665,61 @@ The private template protocol must match the producer's Forge frontend. It does
 not change JIT or AOT defaults, and still needs application dependency and size
 qualification. Omitting source files is not confidential execution: compilation
 templates can be inspected in the consuming process.
+
+The private `_host_build.py` producer creates a clean, immutable host layout
+from an explicit module inventory. Install the producer-only versions in
+`packaging/constraints/host-build.txt` in a separate build environment; the
+consumer does not need Cython or setuptools. Initialize its C++ compiler and
+use a matching CPython interpreter. For example, from a Forge source checkout:
+
+```sh
+python python/taichi_forge/tools/_host_build.py --spec app-host.json \
+    --work host-cache --output host-layout --jobs 4
+```
+
+The specification names canonical modules, including every required package
+initializer, and locks the producer versions:
+
+```json
+{
+  "version": 1,
+  "source_root": "private-source",
+  "modules": {
+    "simulation": "simulation/__init__.py",
+    "simulation.solver": "simulation/solver.py"
+  },
+  "toolchain": {
+    "python": "3.10.11",
+    "cython": "3.2.9",
+    "setuptools": "82.0.1"
+  }
+}
+```
+
+`source_root` is relative to the specification; module paths stay within that
+root. Cache, output and private sources must be separate. Aliases already
+registered by application initialization may be recorded as
+`"aliases": {"solver_alias": {"target": "simulation.solver", "registered_by": "simulation"}}`.
+This records an existing import contract; it does not install an import hook or
+compile a second copy. Imports that replace their own module or `__file__` need
+explicit inventory entries. An observed import list is not proof of complete
+dynamic dependency coverage.
+
+The output contains only declared extensions and `host-manifest.json` with
+relative artifact names, hashes, template entries and producer identity. Cache
+hits verify the artifact bytes and skip template construction and compilation.
+Changed producer/source/toolchain settings invalidate the affected recipes.
+Existing output must match its manifest exactly; use a fresh output directory
+for a different build. Compilation failure leaves the previous output intact.
+Build logs and generated Python/C++ remain in the producer cache. One producer
+owns a cache at a time, with parallel per-module workers.
+
+This producer keeps Python object inference for ordinary host code and boxes
+literal-tuple conditional branches to avoid accidental fixed C tuple types.
+Unresolved globals retain their runtime `NameError`. Cython 3.2.9 is the current
+qualified producer choice for this path; broader host code exposed a Cython
+3.3 compilation failure despite the earlier bounded fixtures passing. Package
+initializers, aliases, damaged-cache recovery, lazy branches, source exclusion
+and CPU/CUDA/Vulkan specialization/gradient fixtures are tested. The host layout is not a
+complete SDK wheel: external dependency locks, resources, public stubs and
+application feature qualification remain separate deployment responsibilities.

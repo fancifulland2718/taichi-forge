@@ -1,0 +1,4 @@
+# Producer-only toolchain qualified for source-hidden Python hosts.
+# Install in the producer environment, not the AOT consumer.
+Cython==3.2.9
+setuptools==82.0.1
