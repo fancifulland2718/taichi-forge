@@ -658,6 +658,12 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
              void *rhs,
              void *solution) override {
     std::lock_guard<std::mutex> lock(mutex_);
+    validate_current_factors(matrix);
+    bind_dense_vectors(rhs, solution);
+    execute_solve();
+  }
+
+  void validate_current_factors(const CudaCudssMatrixView &matrix) const {
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
     require_no_refactor_solve_inflight("solve");
     TI_ERROR_IF(!factorized_,
@@ -673,8 +679,6 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
         "CUDA cuDSS factorization is stale because the matrix or its "
         "pattern/numeric version changed. Call factorize() again before "
         "solve().");
-    bind_dense_vectors(rhs, solution);
-    execute_solve();
   }
 
   std::size_t rows() const noexcept override {
@@ -690,12 +694,42 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
     fault_domain_->throw_if_submission_disallowed("snapshot cuDSS Graph seed");
     TI_ERROR_IF(closed_ || !graph_owned_ || !factorized_,
                 "cuDSS export requires a prepared Graph-owned seed.");
+    auto result = copy_seed(seed_buffers_[0], seed_buffers_[1],
+                            seed_buffers_[2], graph_numeric_phase_);
+    ++graph_seed_snapshot_count_;
+    graph_seed_snapshot_bytes_ += (rows_ + 1) * sizeof(int32_t) +
+                                  nonzeros_ * (sizeof(int32_t) + sizeof(float));
+    return result;
+  }
+
+  CudaCudssPlanSnapshot snapshot_solve_seed(
+      const CudaCudssMatrixView &matrix) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fault_domain_->throw_if_submission_disallowed("snapshot cuDSS solve seed");
+    TI_ERROR_IF(graph_owned_,
+                "cuDSS live solve export requires an ordinary plan.");
+    validate_current_factors(matrix);
+    TI_ERROR_IF(matrix.rows != rows_ || matrix.columns != rows_ ||
+                    matrix.nonzeros != nonzeros_,
+                "cuDSS live solve export matrix dimensions changed.");
+    auto result =
+        copy_seed(matrix.row_offsets, matrix.column_indices, matrix.values, 0);
+    ++solve_seed_snapshot_count_;
+    solve_seed_snapshot_bytes_ += (rows_ + 1) * sizeof(int32_t) +
+                                  nonzeros_ * (sizeof(int32_t) + sizeof(float));
+    return result;
+  }
+
+  CudaCudssPlanSnapshot copy_seed(void *offsets,
+                                  void *columns,
+                                  void *values,
+                                  int phase) {
     CudaCudssPlanSnapshot result;
     result.rows = rows_;
     result.nonzeros = nonzeros_;
     result.matrix_type = matrix_type_;
     result.matrix_view = matrix_view_;
-    result.phase = graph_numeric_phase_;
+    result.phase = phase;
     result.reordering = reordering_;
     result.solve_algorithm = solve_algorithm_;
     result.row_offsets.resize(rows_ + 1);
@@ -703,23 +737,20 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
     result.values.resize(nonzeros_);
     auto &driver = CUDADriver::get_instance();
     try {
-      // Export is a cold boundary. The seed remains immutable even after a
-      // capture rebinds the vendor matrix descriptor to another values array.
+      // Called under the owner mutex and the caller's storage/submission gates.
+      // Export reads reconstruction data, never vendor factor storage.
       driver.context_synchronize();
-      driver.memcpy_device_to_host(result.row_offsets.data(), seed_buffers_[0],
+      driver.memcpy_device_to_host(result.row_offsets.data(), offsets,
                                    result.row_offsets.size() * sizeof(int32_t));
       driver.memcpy_device_to_host(
-          result.column_indices.data(), seed_buffers_[1],
+          result.column_indices.data(), columns,
           result.column_indices.size() * sizeof(int32_t));
-      driver.memcpy_device_to_host(result.values.data(), seed_buffers_[2],
+      driver.memcpy_device_to_host(result.values.data(), values,
                                    result.values.size() * sizeof(float));
     } catch (const BackendRuntimeError &error) {
       fault_domain_->report_backend_error(error, 0);
       throw;
     }
-    ++graph_seed_snapshot_count_;
-    graph_seed_snapshot_bytes_ += (rows_ + 1) * sizeof(int32_t) +
-                                  nonzeros_ * (sizeof(int32_t) + sizeof(float));
     return result;
   }
 
@@ -858,6 +889,8 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
         {"graph_owned", graph_owned_ ? 1 : 0},
         {"graph_seed_snapshot_count", graph_seed_snapshot_count_},
         {"graph_seed_snapshot_bytes", graph_seed_snapshot_bytes_},
+        {"solve_seed_snapshot_count", solve_seed_snapshot_count_},
+        {"solve_seed_snapshot_bytes", solve_seed_snapshot_bytes_},
         {"capture_parameters_device_resident", graph_owned_ ? 1 : 0},
         {"allocator_live_requested_bytes",
          static_cast<std::int64_t>(allocation[0])},
@@ -1241,6 +1274,7 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
   const bool graph_owned_{false};
   const int matrix_type_{0}, matrix_view_{0};
   std::int64_t graph_seed_snapshot_count_{0}, graph_seed_snapshot_bytes_{0};
+  std::int64_t solve_seed_snapshot_count_{0}, solve_seed_snapshot_bytes_{0};
   int graph_numeric_phase_{-1};
   void *graph_stream_{nullptr};
   void *graph_fork_event_{nullptr};

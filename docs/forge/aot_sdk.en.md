@@ -918,7 +918,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 58.
+Current components require matching private ABI 59.
 
 Plans can separate one-time initialization from replay:
 
@@ -1330,7 +1330,7 @@ Windows/cuSPARSE 12.7.9 checks cover standalone consumption without the DSL,
 borrowed execution, snapshot isolation, in-place updates, close and in-flight
 retirement. Real `energy.grad` composes with SpMV of an explicitly transposed BSR
 to check input gradients; the external adjoint is not generated automatically.
-Use matching private ABI58 components. CPU/Vulkan do not expose this CUDA provider.
+Use matching private ABI59 components. CPU/Vulkan do not expose this CUDA provider.
 
 SpMM uses the same `cusparse/csr_f32` resource and common registry:
 
@@ -1506,8 +1506,20 @@ factorization, operations share one reconstructed plan, and identical read-only
 payloads are deduplicated within the module. This export requires paired private
 ABI 54; rebuilding analysis/factors remains cold preparation. Qualification covers
 changes to original seed/display fields, independent source-free consumption,
-explicit adjoints and selected recipe order. Automatic export of ordinary live
-`CudssSolveRecording`/`CudssRefactorSolveRecording` is not included.
+explicit adjoints and selected recipe order.
+
+Ordinary `CudssPlan.recording()` (`CudssSolveRecording`) also exports a frozen
+`solve` resource with paired private ABI 59. Under the native storage/submission
+locks, export verifies that successful factors still match the matrix identity,
+pattern and numeric version, then copies its CSR data and native configuration
+once per plan per export. Updating matrix values requires a new successful
+factorization before re-export; previously exported packages keep their original
+values. Export rejects unfactored, stale, in-flight, explicit-value-only or closed
+owners. Consumer preparation rebuilds factors, and replay uses the retained
+plan without host matrix queries. Windows CUDA checks cover standalone/borrowed
+consumption after closing the source plan, separate bindings, and real kernel
+gradients with an explicit symmetric solve adjoint. Ordinary transactional
+`CudssRefactorSolveRecording` export remains unsupported.
 
 Graph-owned cuDSS groups can also be appended to a CUDA `Sequential` loop body
 and exported from a selected flat conditional loop. The common capture protocol

@@ -280,6 +280,65 @@ TEST(CudssSharedPlan, CapturesIndependentBindingsWithoutProgramOrCompiler) {
 TEST(CudssSharedPlan, CommonSessionRetiresAfterLastCapturedPlan) {
   check_captures(true);
 }
+
+TEST(CudssSharedPlan, LiveSolveSnapshotRequiresCurrentUnreservedFactors) {
+  const auto *library = std::getenv("TI_CUDSS_TEST_LIBRARY");
+  const auto *adapter = std::getenv("TI_CUDSS_TEST_ADAPTER");
+  if (!library || !adapter)
+    GTEST_SKIP() << "Set cuDSS runtime and adapter paths";
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  auto &driver = CUDADriver::get_instance();
+  std::vector<DeviceAllocationUnique> allocations;
+  auto upload = [&](auto source) {
+    auto allocation = device.allocate_memory_unique({sizeof(source)});
+    if (allocation.second != RhiResult::success)
+      throw std::runtime_error("Test CUDA allocation failed");
+    auto *pointer = device.get_memory_addr(*allocation.first);
+    allocations.push_back(std::move(allocation.first));
+    driver.memcpy_host_to_device(pointer, source.data(), sizeof(source));
+    return pointer;
+  };
+  const std::array<int, 5> rows{0, 2, 5, 8, 10};
+  const std::array<int, 10> columns{0, 1, 0, 1, 2, 1, 2, 3, 2, 3};
+  const std::array<float, 10> values{4, -1, -1, 4, -1, -1, 4, -1, -1, 3};
+  CudaCudssMatrixView matrix{
+      4, 4, 10, upload(rows), upload(columns), upload(values), 1, 1, 1, 1};
+  auto plan = make_cuda_cudss_plan(
+      matrix, 3, 0, adapter, library,
+      std::make_shared<RuntimeFaultDomain>(Arch::cuda, 1), {1, 1}, false);
+  EXPECT_ANY_THROW(plan->snapshot_solve_seed(matrix));
+  plan->analyze(matrix);
+  plan->factorize(matrix, false);
+  auto check_snapshot = [&] {
+    auto snapshot = plan->snapshot_solve_seed(matrix);
+    EXPECT_EQ(snapshot.values,
+              (std::vector<float>(values.begin(), values.end())));
+    EXPECT_EQ(snapshot.phase, 0);
+    EXPECT_EQ(snapshot.reordering, 1);
+    EXPECT_EQ(snapshot.solve_algorithm, 1);
+  };
+  check_snapshot();
+  for (auto identity :
+       {&CudaCudssMatrixView::matrix_id, &CudaCudssMatrixView::pattern_version,
+        &CudaCudssMatrixView::numeric_version}) {
+    auto stale = matrix;
+    ++(stale.*identity);
+    EXPECT_ANY_THROW(plan->snapshot_solve_seed(stale));
+  }
+  plan->reserve_refactor_solve();
+  EXPECT_ANY_THROW(plan->snapshot_solve_seed(matrix));
+  plan->cancel_unsubmitted_refactor_solve();
+  // Reservation invalidates factors even if execution is cancelled.
+  EXPECT_ANY_THROW(plan->snapshot_solve_seed(matrix));
+  plan->factorize(matrix, false);
+  check_snapshot();
+  EXPECT_EQ(plan->configuration().at("solve_seed_snapshot_count"), 2);
+  EXPECT_EQ(plan->configuration().at("solve_seed_snapshot_bytes"), 200);
+  plan->destroy(true);
+  EXPECT_ANY_THROW(plan->snapshot_solve_seed(matrix));
+}
 }  // namespace
 }  // namespace taichi::lang
 #endif

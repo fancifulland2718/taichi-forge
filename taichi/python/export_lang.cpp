@@ -3689,6 +3689,23 @@ void export_lang(py::module &m) {
                 bytes(snapshot.column_indices), bytes(snapshot.values));
           },
           py::arg("handle"))
+      .def("_snapshot_cuda_cudss_solve_seed",
+           [](Program &program, std::uint64_t handle, SparseMatrix *matrix) {
+             CudaCudssPlanSnapshot snapshot;
+             {
+               py::gil_scoped_release release;
+               snapshot = program.snapshot_cuda_cudss_solve_seed(handle, matrix);
+             }
+             auto bytes = [](const auto &data) {
+               return py::bytes(reinterpret_cast<const char *>(data.data()),
+                                data.size() * sizeof(data[0]));
+             };
+             return py::make_tuple(
+                 snapshot.rows, snapshot.nonzeros, snapshot.matrix_type,
+                 snapshot.matrix_view, snapshot.phase, snapshot.reordering,
+                 snapshot.solve_algorithm, bytes(snapshot.row_offsets),
+                 bytes(snapshot.column_indices), bytes(snapshot.values));
+           }, py::arg("handle"), py::arg("matrix"))
       .def("_cuda_cudss_factorize",
            tracked_native_program_method(&Program::cuda_cudss_factorize),
            py::arg("handle"), py::arg("matrix"),

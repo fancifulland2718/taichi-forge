@@ -715,7 +715,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 58。
+当前组件须配套 private ABI 59。
 
 计划可以将一次性初始化与重放分开：
 
@@ -1039,7 +1039,7 @@ BSR `CusparseSpmvRecording` 的普通/已物化顺序 Graph 可直接自动导�
 后续重导出取得新数值。需要活值的消费者使用上述显式资源绑定。Windows/cuSPARSE
 12.7.9 已验证独立无 DSL/借用消费、快照隔离、原位更新、关闭和在途退休；真实
 `energy.grad` 与显式转置 BSR 的 SpMV 核对输入梯度，不自动生成外部调用的伴随。
-该入口需要配套 private ABI58；CPU/Vulkan 不声明此 CUDA provider 的支持。
+该入口需要配套 private ABI59；CPU/Vulkan 不声明此 CUDA provider 的支持。
 
 SpMM 使用同一个 `cusparse/csr_f32` 资源及公共注册协议：
 
@@ -1180,8 +1180,16 @@ Graph-owned `CudssCaptureRecording` 也可通过 `module.add_execution_plan(name
 只采样一次；多 RHS 组保持一次数值分解，多个操作共享一份重建计划，相同只读载荷
 在模块内去重。该导出需要配对的 private ABI 54；重建时重新分析/分解属于冷准备。
 已验证原始 seed/展示字段修改后仍保留原生语义、独立无源码消费、显式伴随及选中
-recipe 顺序。此项不包含普通活状态 `CudssSolveRecording`/`CudssRefactorSolveRecording`
-的自动导出。
+recipe 顺序。
+
+普通 `CudssPlan.recording()`（`CudssSolveRecording`）也可导出冻结的 `solve` 资源，
+要求配对 private ABI 59。导出在原生存储/提交锁内检查成功分解的因子仍对应当前矩阵
+身份、pattern 和 numeric version，再读取 CSR 数据与原生配置；每计划每次导出只
+读取一次。更新矩阵值后必须重新成功分解才能再导出，已导出的包仍保留原值。
+未分解、过期、事务在途、仅来自显式值的因子和已关闭 owner 均会被拒绝。
+消费端在冷准备时重建因子，重放复用计划，不在主机查询矩阵。Windows CUDA 已验证
+源计划关闭后的独立/借用消费、不同绑定及真实 kernel 梯度配合显式对称求解伴随。
+普通事务型 `CudssRefactorSolveRecording` 的自动导出仍不支持。
 
 Graph-owned cuDSS 组也可放入 CUDA `Sequential` 循环体，并随已选单层 conditional
 循环自动导出。公共捕获协议要求显式声明条件体资格，其他 provider 命令默认仍不具备

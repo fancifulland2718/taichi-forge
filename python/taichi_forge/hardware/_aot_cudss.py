@@ -1,17 +1,12 @@
-"""Export frozen cuDSS Graph seeds through the shared native resource schema."""
+"""Export qualified cuDSS seeds through the shared native resource schema."""
 
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
-def export_capture(recording, context):
-    plan = recording.plan
-    plan._ensure_open()
-    phase = recording.phase
-
+def _resource(context, plan, phase, read_snapshot):
     def snapshot():
-        # Never resample plan._matrix: it may no longer contain the private seed.
         rows, nonzeros, matrix_type, matrix_view, numeric_phase, reordering, solve, offsets, columns, values = (
-            plan._program._snapshot_cuda_cudss_graph_seed(plan._handle)
+            read_snapshot()
         )
         if numeric_phase not in (-1, {"solve": 0, "factor_solve": 4, "refactor_solve": 8}[phase]):
             raise TaichiRuntimeError("cuDSS AOT recording differs from its frozen numerical phase")
@@ -24,17 +19,30 @@ def export_capture(recording, context):
             )
         }
         return context.resource(
-            plan, "cudss", "plan_f32",
+            plan,
+            "cudss",
+            "plan_f32",
             parameters=dict(
-                rows=rows, nonzeros=nonzeros,
+                rows=rows,
+                nonzeros=nonzeros,
                 matrix_type={0: "general", 1: "symmetric", 3: "spd"}[matrix_type],
-                matrix_view=("full", "lower", "upper")[matrix_view], phase=phase,
+                matrix_view=("full", "lower", "upper")[matrix_view],
+                phase=phase,
                 reordering=("default", "amd", "nested_dissection", "natural")[reordering],
                 solve=("default", "general")[solve],
-            ), bindings=bindings,
+            ),
+            bindings=bindings,
         )
 
-    resource = context.resource_once(plan, snapshot)
+    return context.resource_once(plan, snapshot)
+
+
+def export_capture(recording, context):
+    plan = recording.plan
+    plan._ensure_open()
+    phase = recording.phase
+    # Never resample plan._matrix: it may no longer contain the private seed.
+    resource = _resource(context, plan, phase, lambda: plan._program._snapshot_cuda_cudss_graph_seed(plan._handle))
     bindings = dict(plan=resource)
     if phase != "solve":
         bindings["values"] = recording.binding_names[0]
@@ -42,4 +50,24 @@ def export_capture(recording, context):
         bindings[f"rhs_{index}"] = rhs
         bindings[f"output_{index}"] = output
     context.native("cudss", "solve_group_f32", parameters=dict(rhs_count=len(recording._rhs_pairs)), bindings=bindings)
+    return ()
+
+
+def export_solve(recording, context):
+    recording.validate_graph_lifetime()
+    plan = recording.plan
+    matrix = plan._matrix
+    matrix._ensure_valid()
+    resource = _resource(
+        context,
+        plan,
+        "solve",
+        lambda: plan._program._snapshot_cuda_cudss_solve_seed(plan._handle, matrix.matrix),
+    )
+    context.native(
+        "cudss",
+        "solve_group_f32",
+        parameters=dict(rhs_count=1),
+        bindings=dict(plan=resource, rhs_0=recording.rhs, output_0=recording.solution),
+    )
     return ()

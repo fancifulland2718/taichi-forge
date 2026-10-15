@@ -232,6 +232,34 @@ CudaCudssPlanSnapshot snapshot_cuda_cudss_graph_seed(Program &program,
   return plan->snapshot_graph_seed();
 }
 
+CudaCudssPlanSnapshot Program::snapshot_cuda_cudss_solve_seed(
+    std::uint64_t handle,
+    SparseMatrix *matrix) {
+  TI_ERROR_IF(!matrix || compile_config().arch != Arch::cuda,
+              "cuDSS solve export requires a CUDA matrix and Program.");
+  // Numeric updates can enter through the matrix gate first. Acquire all
+  // submission/storage gates together, as for ordinary sparse snapshots.
+  auto numeric = matrix->acquire_numeric_access_guard();
+  numeric.unlock();
+  auto submission = acquire_runtime_resource_submission_guard();
+  submission.unlock();
+  auto &cuda = CUDAContext::get_instance();
+  auto cuda_submission = cuda.get_submission_lock_guard();
+  cuda_submission.unlock();
+  std::lock(numeric, submission, cuda_submission);
+  auto context = cuda.get_guard();
+  std::shared_ptr<CudaCudssPlan> plan;
+  {
+    std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
+    const auto found = cuda_cudss_plans_.find(handle);
+    TI_ERROR_IF(found == cuda_cudss_plans_.end(),
+                "cuDSS live solve owner is stale or closed.");
+    plan = found->second;
+  }
+  return plan->snapshot_solve_seed(
+      cudss_matrix_view(require_cudss_matrix(matrix, this)));
+}
+
 std::uint64_t Program::create_cuda_cudss_plan(
     SparseMatrix *matrix,
     int matrix_type,
@@ -493,6 +521,11 @@ namespace taichi::lang {
 
 CudaCudssPlanSnapshot snapshot_cuda_cudss_graph_seed(Program &, std::uint64_t) {
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
+}
+
+CudaCudssPlanSnapshot Program::snapshot_cuda_cudss_solve_seed(std::uint64_t,
+                                                              SparseMatrix *) {
+  TI_ERROR("cuDSS solve snapshots require the CUDA backend.");
 }
 
 std::shared_ptr<aot::CudaGraphCaptureCommand> make_cuda_cudss_capture_command(

@@ -219,6 +219,7 @@ class VulkanFftPlan;
 class VulkanParallelSortPlan;
 class VulkanSpdPlan;
 class CudaCudssPlan;
+struct CudaCudssPlanSnapshot;
 class VulkanTriangleRayScene;
 class VulkanRayResource;
 class VulkanGraphicsPipelineResource;
@@ -1769,6 +1770,9 @@ class TI_DLL_EXPORT Program {
 
   std::shared_ptr<CudaCudssPlan> retain_cuda_cudss_capture_plan(
       std::uint64_t handle);
+
+  CudaCudssPlanSnapshot snapshot_cuda_cudss_solve_seed(std::uint64_t handle,
+                                                       SparseMatrix *matrix);
 
   std::unordered_map<std::string, std::int64_t> cuda_cudss_plan_configuration(
       std::uint64_t handle);

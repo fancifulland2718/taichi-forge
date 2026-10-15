@@ -43,6 +43,8 @@ class CudaCudssPlan : public CudaProviderCompletionResource {
   virtual std::size_t rows() const noexcept = 0;
   virtual std::size_t nonzeros() const noexcept = 0;
   virtual CudaCudssPlanSnapshot snapshot_graph_seed() = 0;
+  virtual CudaCudssPlanSnapshot snapshot_solve_seed(
+      const CudaCudssMatrixView &matrix) = 0;
   virtual void analyze(const CudaCudssMatrixView &matrix) = 0;
   virtual void factorize(const CudaCudssMatrixView &matrix,
                          bool refactorize) = 0;

@@ -1943,6 +1943,11 @@ class CudssSolveRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.plan.validate_graph_lifetime()
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cudss import export_solve
+
+        return export_solve(self, context)
+
     def _graph_provider_memory_report(self):
         return self.plan.memory_report()
 
