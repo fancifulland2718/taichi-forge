@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA CSR/BSR SpMV share an execution-plan core. BSR keeps its native block
+  layout and existing matrix descriptor, replacing duplicated vector-binding
+  and workspace management. This supplies the execution prerequisite for BSR
+  AOT reconstruction; resource registration and automatic export remain pending.
+  Shared layout changes require matching producer/runtime private ABI 57.
+
 - Reverse AD preserves integer power exponents, fixing NaN gradients at negative
   bases inside Vulkan conditionals. Base derivatives at zero with exponents 0/1
   are also corrected. Explicit reverse and forward AD regressions pass on

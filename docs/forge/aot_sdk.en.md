@@ -888,7 +888,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Use matching private ABI 56 components.
+Current components require matching private ABI 57.
 
 Plans can separate one-time initialization from replay:
 

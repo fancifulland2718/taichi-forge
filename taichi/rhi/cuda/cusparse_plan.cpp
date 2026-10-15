@@ -7,7 +7,7 @@
 
 namespace taichi::lang {
 namespace {
-cusparseOperation_t operation(const CudaCsrSpmvDescription &description) {
+cusparseOperation_t operation(const CudaSparseSpmvDescription &description) {
   return description.transpose ? CUSPARSE_OPERATION_TRANSPOSE
                                : CUSPARSE_OPERATION_NON_TRANSPOSE;
 }
@@ -27,14 +27,23 @@ void aligned(const void *pointer, std::size_t alignment, bool required) {
 }
 }  // namespace
 
-CudaCsrSpmvPlan::CudaCsrSpmvPlan(CudaCsrSpmvDescription description)
-    : description_(description) {
+CudaSparseSpmvPlan::CudaSparseSpmvPlan(CudaSparseSpmvDescription description,
+                                       cusparseSpMatDescr_t borrowed_bsr_matrix)
+    : description_(description), owns_matrix_(!borrowed_bsr_matrix) {
   const auto &d = description_;
-  if (d.rows < 0 || d.columns < 0 || d.nonzeros < 0 ||
-      !std::isfinite(d.alpha) || !std::isfinite(d.beta) ||
-      (d.algorithm != CUSPARSE_SPMV_CSR_ALG1 &&
-       d.algorithm != CUSPARSE_SPMV_CSR_ALG2))
+  if (d.rows < 0 || d.columns < 0 || d.nonzeros < 0 || d.block_size < 0 ||
+      !std::isfinite(d.alpha) || !std::isfinite(d.beta))
+    throw std::invalid_argument("Invalid CUDA sparse SpMV description");
+  if (d.block_size) {
+    if (d.rows % d.block_size || d.columns % d.block_size || d.transpose ||
+        d.algorithm != CUSPARSE_SPMV_BSR_ALG1)
+      throw std::invalid_argument(
+          "BSR SpMV requires whole row-major blocks and non-transpose BSR "
+          "ALG1");
+  } else if (borrowed_bsr_matrix || (d.algorithm != CUSPARSE_SPMV_CSR_ALG1 &&
+                                     d.algorithm != CUSPARSE_SPMV_CSR_ALG2)) {
     throw std::invalid_argument("Invalid CUDA CSR SpMV description");
+  }
   aligned(d.row_offsets, index_bytes(d.row_type), true);
   aligned(d.column_indices, index_bytes(d.column_type), d.nonzeros != 0);
   if (d.row_type != d.column_type)
@@ -42,29 +51,42 @@ CudaCsrSpmvPlan::CudaCsrSpmvPlan(CudaCsrSpmvDescription description)
         "CUDA CSR row and column indices require matching widths");
   aligned(d.values, sizeof(float), d.nonzeros != 0);
   auto &driver = CUSPARSEDriver::get_instance();
+  if (d.block_size && !driver.capabilities().generic_bsr_spmv_available)
+    throw std::invalid_argument(
+        "CUDA BSR SpMV requires a compatible cuSPARSE provider");
   try {
     driver.cpCreate(&handle_);
     driver.cpSetPointerMode(handle_, CUSPARSE_POINTER_MODE_HOST);
-    driver.cpCreateCsr(&matrix_, d.rows, d.columns, d.nonzeros, d.row_offsets,
-                       d.column_indices, d.values, d.row_type, d.column_type,
-                       CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    if (borrowed_bsr_matrix) {
+      matrix_ = borrowed_bsr_matrix;
+    } else if (d.block_size) {
+      driver.cpCreateBsr(
+          &matrix_, d.rows / d.block_size, d.columns / d.block_size, d.nonzeros,
+          d.block_size, d.block_size, d.row_offsets, d.column_indices, d.values,
+          d.row_type, d.column_type, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F,
+          CUSPARSE_ORDER_ROW);
+    } else {
+      driver.cpCreateCsr(&matrix_, d.rows, d.columns, d.nonzeros, d.row_offsets,
+                         d.column_indices, d.values, d.row_type, d.column_type,
+                         CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    }
   } catch (...) {
     clear();
     throw;
   }
 }
 
-CudaCsrSpmvPlan::~CudaCsrSpmvPlan() {
+CudaSparseSpmvPlan::~CudaSparseSpmvPlan() {
   clear();
 }
 
-void CudaCsrSpmvPlan::clear() {
+void CudaSparseSpmvPlan::clear() {
   auto &driver = CUSPARSEDriver::get_instance();
   if (input_)
     driver.cpDestroyDnVec.call_with_warning(input_);
   if (output_)
     driver.cpDestroyDnVec.call_with_warning(output_);
-  if (matrix_)
+  if (matrix_ && owns_matrix_)
     driver.cpDestroySpMat.call_with_warning(matrix_);
   if (handle_)
     driver.cpDestroy.call_with_warning(handle_);
@@ -76,7 +98,7 @@ void CudaCsrSpmvPlan::clear() {
   workspace_ = nullptr;
 }
 
-void CudaCsrSpmvPlan::bind_stream(CUstream stream) {
+void CudaSparseSpmvPlan::bind_stream(CUstream stream) {
   if (stream_ == stream)
     return;
   auto &driver = CUSPARSEDriver::get_instance();
@@ -91,10 +113,11 @@ void CudaCsrSpmvPlan::bind_stream(CUstream stream) {
   stream_ = stream;
 }
 
-CudaCsrSpmvPlan::Preparation CudaCsrSpmvPlan::prepare(void *input,
-                                                      void *output,
-                                                      CUstream stream,
-                                                      bool enable_preprocess) {
+CudaSparseSpmvPlan::Preparation CudaSparseSpmvPlan::prepare(
+    void *input,
+    void *output,
+    CUstream stream,
+    bool enable_preprocess) {
   const auto input_size =
       description_.transpose ? description_.rows : description_.columns;
   const auto output_size =
@@ -131,8 +154,8 @@ CudaCsrSpmvPlan::Preparation CudaCsrSpmvPlan::prepare(void *input,
     }
     initialized_ = result.built = true;
   }
-  if (enable_preprocess && driver.cpSpMVPreprocess.available() &&
-      !preprocess_disabled_) {
+  if (!description_.block_size && enable_preprocess &&
+      driver.cpSpMVPreprocess.available() && !preprocess_disabled_) {
     if (!statistics_.preprocessed) {
       statistics_.preprocess_error = driver.cpSpMVPreprocess.call(
           handle_, operation(description_), &description_.alpha, matrix_,
@@ -154,7 +177,7 @@ CudaCsrSpmvPlan::Preparation CudaCsrSpmvPlan::prepare(void *input,
   return result;
 }
 
-void CudaCsrSpmvPlan::record(CUstream stream) {
+void CudaSparseSpmvPlan::record(CUstream stream) {
   TI_ERROR_IF(!initialized_,
               "CUDA CSR SpMV must be prepared before recording.");
   bind_stream(stream);

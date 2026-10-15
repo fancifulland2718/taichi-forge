@@ -7,8 +7,8 @@
 namespace taichi::lang {
 
 // The caller retains these buffers, their CUDA context and serialized access.
-// A plan owns only vendor descriptors/workspace, never the CSR or vector data.
-struct CudaCsrSpmvDescription {
+// A plan owns execution descriptors/workspace, never sparse or vector data.
+struct CudaSparseSpmvDescription {
   std::int64_t rows{0}, columns{0}, nonzeros{0};
   void *row_offsets{nullptr};
   void *column_indices{nullptr};
@@ -18,12 +18,14 @@ struct CudaCsrSpmvDescription {
   cusparseSpMVAlg_t algorithm{CUSPARSE_SPMV_CSR_ALG1};
   bool transpose{false};
   float alpha{1}, beta{0};
+  // Zero selects CSR; positive selects square row-major BSR blocks. rows and
+  // columns remain scalar extents, while nonzeros counts stored blocks in BSR.
+  std::int64_t block_size{0};
 };
 
 // Shared by live JIT matrices and reconstructed native operations. Independent
-// plans may reference the same CSR data without sharing mutable preprocess
-// state.
-class CudaCsrSpmvPlan final {
+// plans may reference the same sparse data without sharing execution state.
+class CudaSparseSpmvPlan final {
  public:
   struct Preparation {
     bool built{false};
@@ -39,10 +41,14 @@ class CudaCsrSpmvPlan final {
     std::uint64_t preprocess_fallbacks{0};
   };
 
-  explicit CudaCsrSpmvPlan(CudaCsrSpmvDescription description);
-  ~CudaCsrSpmvPlan();
-  CudaCsrSpmvPlan(const CudaCsrSpmvPlan &) = delete;
-  CudaCsrSpmvPlan &operator=(const CudaCsrSpmvPlan &) = delete;
+  // An explicitly borrowed BSR descriptor outlives this plan; this avoids
+  // duplicating the live matrix descriptor. It is never preprocessed here.
+  explicit CudaSparseSpmvPlan(
+      CudaSparseSpmvDescription description,
+      cusparseSpMatDescr_t borrowed_bsr_matrix = nullptr);
+  ~CudaSparseSpmvPlan();
+  CudaSparseSpmvPlan(const CudaSparseSpmvPlan &) = delete;
+  CudaSparseSpmvPlan &operator=(const CudaSparseSpmvPlan &) = delete;
 
   // Cold preparation may allocate and preprocess; it does not execute SpMV.
   Preparation prepare(void *input,
@@ -64,7 +70,7 @@ class CudaCsrSpmvPlan final {
  private:
   void bind_stream(CUstream stream);
   void clear();
-  CudaCsrSpmvDescription description_;
+  CudaSparseSpmvDescription description_;
   Statistics statistics_;
   cusparseHandle_t handle_{nullptr};
   cusparseSpMatDescr_t matrix_{nullptr};
@@ -75,6 +81,7 @@ class CudaCsrSpmvPlan final {
   std::size_t workspace_bytes_{0};
   bool initialized_{false};
   bool preprocess_disabled_{false};
+  bool owns_matrix_{true};
 };
 
 enum class CudaSpmmPreprocess { none, optional, required };

@@ -339,7 +339,7 @@ class CudaSpmv final : public NativeOperation {
   CudaSpmv(Device &device, const CsrSpmvF32Operation &op)
       : device_(device), matrix_(op.matrix) {
     const auto &d = matrix_->description();
-    CudaCsrSpmvDescription description{d.rows,
+    CudaSparseSpmvDescription description{d.rows,
                                        d.columns,
                                        static_cast<std::int64_t>(nonzeros(d)),
                                        address(device, d.arrays[0]),
@@ -356,7 +356,7 @@ class CudaSpmv final : public NativeOperation {
         op.algorithm == 1 ? CUSPARSE_SPMV_CSR_ALG1 : CUSPARSE_SPMV_CSR_ALG2;
     description.alpha = op.alpha;
     description.beta = op.beta;
-    plan_ = std::make_unique<CudaCsrSpmvPlan>(description);
+    plan_ = std::make_unique<CudaSparseSpmvPlan>(description);
     plan_->prepare(address(device, op.input), address(device, op.output),
                    nullptr, op.preprocess);
     // Workspace analysis must complete before recording onto another stream.
@@ -384,7 +384,7 @@ class CudaSpmv final : public NativeOperation {
  private:
   Device &device_;
   std::shared_ptr<CsrF32Resource> matrix_;
-  std::unique_ptr<CudaCsrSpmvPlan> plan_;
+  std::unique_ptr<CudaSparseSpmvPlan> plan_;
 };
 
 class CudaSpmm final : public NativeOperation {

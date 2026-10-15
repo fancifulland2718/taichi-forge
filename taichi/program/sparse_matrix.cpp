@@ -3462,7 +3462,7 @@ void CuSparseMatrix::spmv(size_t dX,
   if (!prepare_only)
     record_spmv_call();
   if (!spmv_plan_) {
-    spmv_plan_ = std::make_shared<CudaCsrSpmvPlan>(CudaCsrSpmvDescription{
+    spmv_plan_ = std::make_shared<CudaSparseSpmvPlan>(CudaSparseSpmvDescription{
         rows_, cols_, nnz_, csr_row_ptr_, csr_col_ind_, csr_val_});
     record_spmv_handle_creation();
   }
@@ -3978,23 +3978,7 @@ CuSparseBsrMatrix::CuSparseBsrMatrix(
 
 void CuSparseBsrMatrix::reset_spmv_resources() {
 #if defined(TI_WITH_CUDA)
-  if (spmv_vec_x_)
-    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
-  if (spmv_vec_y_)
-    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
-  if (spmv_handle_)
-    CUSPARSEDriver::get_instance().cpDestroy(spmv_handle_);
-  if (spmv_buffer_)
-    CUDADriver::get_instance().mem_free(spmv_buffer_);
-  spmv_vec_x_ = nullptr;
-  spmv_vec_y_ = nullptr;
-  spmv_handle_ = nullptr;
-  spmv_stream_ = nullptr;
-  spmv_buffer_ = nullptr;
-  spmv_x_ptr_ = 0;
-  spmv_y_ptr_ = 0;
-  spmv_buffer_size_ = 0;
-  spmv_buffer_initialized_ = false;
+  spmv_plan_.reset();
 #endif
 }
 
@@ -4020,84 +4004,45 @@ bool CuSparseBsrMatrix::supports_spmv_stream_binding() const {
 }
 
 void CuSparseBsrMatrix::spmv(size_t dX,
-                            size_t dY,
-                            CUstream stream,
-                            bool prepare_only) {
+                             size_t dY,
+                             CUstream stream,
+                             bool prepare_only) {
 #if defined(TI_WITH_CUDA)
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
-  if (!prepare_only) {
+  if (!prepare_only)
     record_spmv_call();
-  }
-  if (!spmv_handle_) {
-    CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
-    spmv_stream_ = nullptr;
+  if (!spmv_plan_) {
+    CudaSparseSpmvDescription description{rows_,
+                                          cols_,
+                                          block_nnz_,
+                                          pattern_->cuda_row_offsets(),
+                                          pattern_->cuda_column_indices(),
+                                          values_};
+    description.block_size = block_size_;
+    description.algorithm = CUSPARSE_SPMV_BSR_ALG1;
+    spmv_plan_ = std::make_shared<CudaSparseSpmvPlan>(description, matrix_);
     record_spmv_handle_creation();
   }
-  if (spmv_stream_ != stream) {
-    auto &driver = CUSPARSEDriver::get_instance();
-    TI_ERROR_IF(!driver.cpSetStream.available() ||
-                    !driver.cpGetStream.available(),
-                "CUDA BSR SpMV cannot bind the requested execution stream.");
-    driver.cpSetStream(spmv_handle_, stream);
-    CUstream bound_stream = reinterpret_cast<CUstream>(1);
-    driver.cpGetStream(spmv_handle_, &bound_stream);
-    TI_ERROR_IF(bound_stream != stream,
-                "CUDA BSR SpMV stream binding could not be verified.");
-    spmv_stream_ = stream;
-  }
-  if (!spmv_vec_x_ || spmv_x_ptr_ != dX) {
-    const bool rebind = spmv_vec_x_ != nullptr;
-    if (spmv_vec_x_)
-      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
-    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_x_, cols_,
-                                                 reinterpret_cast<void *>(dX),
-                                                 CUDA_R_32F);
-    spmv_x_ptr_ = dX;
-    record_dense_vector_descriptor_creation(rebind);
-  }
-  if (!spmv_vec_y_ || spmv_y_ptr_ != dY) {
-    const bool rebind = spmv_vec_y_ != nullptr;
-    if (spmv_vec_y_)
-      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
-    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_y_, rows_,
-                                                 reinterpret_cast<void *>(dY),
-                                                 CUDA_R_32F);
-    spmv_y_ptr_ = dY;
-    record_dense_vector_descriptor_creation(rebind);
-  }
-
-  float alpha = 1.0f;
-  float beta = 0.0f;
-  if (!spmv_buffer_initialized_) {
+  const auto prepared =
+      spmv_plan_->prepare(reinterpret_cast<void *>(dX),
+                          reinterpret_cast<void *>(dY), stream, false);
+  if (prepared.built)
     record_spmv_plan_build();
-    CUSPARSEDriver::get_instance().cpSpMV_bufferSize(
-        spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
-        spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
-        CUSPARSE_SPMV_BSR_ALG1, &spmv_buffer_size_);
-    if (spmv_buffer_size_ > 0) {
-      CUDADriver::get_instance().malloc(&spmv_buffer_, spmv_buffer_size_);
-      record_spmv_workspace_allocation();
-    }
-    spmv_buffer_initialized_ = true;
-  } else {
+  else
     record_spmv_plan_reuse();
-  }
-  if (prepare_only) {
-    return;
-  }
-  CUSPARSEDriver::get_instance().cpSpMV(
-      spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
-      spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
-      CUSPARSE_SPMV_BSR_ALG1, spmv_buffer_);
+  if (prepared.workspace_allocated)
+    record_spmv_workspace_allocation();
+  for (unsigned i = 0; i < prepared.descriptor_creations; ++i)
+    record_dense_vector_descriptor_creation(i < prepared.descriptor_rebinds);
+  if (!prepare_only)
+    spmv_plan_->record(stream);
 #else
   TI_NOT_IMPLEMENTED;
 #endif
 }
 
-void CuSparseBsrMatrix::spmv_kernel(size_t dX,
-                                    size_t dY,
-                                    CUstream stream) {
+void CuSparseBsrMatrix::spmv_kernel(size_t dX, size_t dY, CUstream stream) {
 #if defined(TI_WITH_CUDA)
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
@@ -4205,20 +4150,19 @@ CuSparseBsrMatrix::debug_runtime_statistics() const {
   result.values_reserved_bytes =
       static_cast<std::uint64_t>(value_count_) * sizeof(float32);
   result.spmv_workspace_reserved_bytes =
-      spmv_buffer_initialized_ ? spmv_buffer_size_ : 0;
+      spmv_plan_ ? spmv_plan_->workspace_bytes() : 0;
   result.operator_owned_reserved_bytes = result.pattern_reserved_bytes +
                                          result.values_reserved_bytes +
                                          result.spmv_workspace_reserved_bytes;
   result.operator_exclusive_reserved_bytes =
       result.values_reserved_bytes + result.spmv_workspace_reserved_bytes;
   result.shared_pattern_id = pattern_->pattern_id();
-  result.shared_pattern_operator_references =
-      pattern_->operator_references();
+  result.shared_pattern_operator_references = pattern_->operator_references();
   result.pattern_storage_shared = true;
   result.matrix_descriptor_count = matrix_ != nullptr ? 1 : 0;
   result.dense_vector_descriptor_count =
-      (spmv_vec_x_ != nullptr ? 1 : 0) + (spmv_vec_y_ != nullptr ? 1 : 0);
-  result.spmv_handle_count = spmv_handle_ != nullptr ? 1 : 0;
+      spmv_plan_ ? spmv_plan_->dense_descriptor_count() : 0;
+  result.spmv_handle_count = spmv_plan_ ? 1 : 0;
   return result;
 #else
   return make_runtime_statistics("cuda", "bsr");

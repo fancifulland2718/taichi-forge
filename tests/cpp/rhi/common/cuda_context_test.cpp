@@ -157,13 +157,13 @@ TEST(CUSPARSECsrPlan, IndependentPlansRetainOnlyTheirOwnExecutionState) {
   const auto x2 = upload(std::array<float, 3>{-1, .5f, 2});
   const auto y = upload(std::array<float, 2>{8, -2});
   const auto y2 = upload(std::array<float, 2>{99, 99});
-  CudaCsrSpmvDescription description{2, 3, 4, rows, columns, values};
+  CudaSparseSpmvDescription description{2, 3, 4, rows, columns, values};
   description.alpha = 2;
   description.beta = .5f;
-  auto first = std::make_unique<CudaCsrSpmvPlan>(description);
+  auto first = std::make_unique<CudaSparseSpmvPlan>(description);
   description.alpha = 1;
   description.beta = 0;
-  CudaCsrSpmvPlan second(description);
+  CudaSparseSpmvPlan second(description);
   EXPECT_TRUE(first->prepare(x, y, nullptr, true).built);
   EXPECT_TRUE(second.prepare(x2, y2, nullptr, true).built);
   EXPECT_EQ(read(y, 2), (std::vector<float>{8, -2}));
@@ -179,7 +179,7 @@ TEST(CUSPARSECsrPlan, IndependentPlansRetainOnlyTheirOwnExecutionState) {
   description.column_indices = upload(std::array<std::int64_t, 4>{0, 2, 1, 2});
   description.row_type = description.column_type = CUSPARSE_INDEX_64I;
   description.transpose = true;
-  CudaCsrSpmvPlan transpose(description);
+  CudaSparseSpmvPlan transpose(description);
   const auto q = upload(std::array<float, 2>{5, 7});
   const auto dq = upload(std::array<float, 3>{99, 99, 99});
   transpose.prepare(q, dq, nullptr, true);
@@ -208,12 +208,97 @@ TEST(CUSPARSECsrPlan, IndependentPlansRetainOnlyTheirOwnExecutionState) {
 
   // An empty matrix overwrites old output on every replay, without owning the
   // null index/value buffers. Caller storage outlives all three plans above.
-  description = CudaCsrSpmvDescription{
+  description = CudaSparseSpmvDescription{
       2, 3, 0, upload(std::array<std::int32_t, 3>{0, 0, 0})};
-  CudaCsrSpmvPlan empty(description);
+  CudaSparseSpmvPlan empty(description);
   empty.prepare(x, y2, nullptr, true);
   empty.record(nullptr);
   EXPECT_EQ(read(y2, 2), (std::vector<float>{0, 0}));
+}
+
+TEST(CUSPARSEBsrPlan, SharedCoreOwnsOrBorrowsDescriptorsWithoutOwningData) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  auto &context = CUDAContext::get_instance();
+  auto submission = context.get_submission_lock_guard();
+  auto guard = context.get_guard();
+  auto &cusparse = CUSPARSEDriver::get_instance();
+  if ((!cusparse.is_loaded() && !cusparse.load_cusparse()) ||
+      !cusparse.capabilities().generic_bsr_spmv_available)
+    GTEST_SKIP();
+  auto &driver = CUDADriver::get_instance();
+  std::vector<std::unique_ptr<void, void (*)(void *)>> storage;
+  auto upload = [&](auto values) {
+    void *address = nullptr;
+    driver.malloc(&address, sizeof(values));
+    storage.emplace_back(
+        address,
+        +[](void *value) { CUDADriver::get_instance().mem_free(value); });
+    driver.memcpy_host_to_device(address, values.data(), sizeof(values));
+    return address;
+  };
+  auto read = [&](void *address) {
+    std::vector<float> values(4);
+    driver.memcpy_device_to_host(values.data(), address, 4 * sizeof(float));
+    return values;
+  };
+  const auto rows = upload(std::array<std::int32_t, 3>{0, 2, 3});
+  const auto columns = upload(std::array<std::int32_t, 3>{0, 2, 1});
+  const auto values =
+      upload(std::array<float, 12>{2, 1, 0, 3, -1, 0, 2, 1, 4, -2, 1, 5});
+  const auto x = upload(std::array<float, 6>{1, 2, 3, 4, 5, 6});
+  const auto x2 = upload(std::array<float, 6>{-1, 0, 2, -2, 1, 3});
+  const auto y = upload(std::array<float, 4>{8, -2, 6, 4});
+  const auto y2 = upload(std::array<float, 4>{99, 99, 99, 99});
+  CudaSparseSpmvDescription description{4, 6, 3, rows, columns, values};
+  description.block_size = 2;
+  description.algorithm = CUSPARSE_SPMV_BSR_ALG1;
+  description.alpha = 2;
+  description.beta = .5f;
+  auto first = std::make_unique<CudaSparseSpmvPlan>(description);
+  EXPECT_TRUE(first->prepare(x, y, nullptr, false).built);
+  EXPECT_EQ(read(y), (std::vector<float>{8, -2, 6, 4}));
+  first->record(nullptr);
+  EXPECT_EQ(read(y), (std::vector<float>{2, 43, 11, 48}));
+
+  cusparseSpMatDescr_t borrowed = nullptr;
+  cusparse.cpCreateBsr(&borrowed, 2, 3, 3, 2, 2, rows, columns, values,
+                       CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                       CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F,
+                       CUSPARSE_ORDER_ROW);
+  auto borrowed_guard = std::unique_ptr<void, void (*)(void *)>(
+      borrowed, +[](void *value) {
+        CUSPARSEDriver::get_instance().cpDestroySpMat(
+            static_cast<cusparseSpMatDescr_t>(value));
+      });
+  description.alpha = 1;
+  description.beta = 0;
+  {
+    CudaSparseSpmvPlan second(description, borrowed);
+    EXPECT_TRUE(second.prepare(x2, y2, nullptr, false).built);
+    EXPECT_EQ(read(y2), (std::vector<float>{99, 99, 99, 99}));
+    first.reset();
+    second.record(nullptr);
+    EXPECT_EQ(read(y2), (std::vector<float>{-3, 5, 12, -8}));
+    const auto rebound = second.prepare(x, y2, nullptr, false);
+    EXPECT_FALSE(rebound.built);
+    EXPECT_EQ(rebound.descriptor_creations, 1);
+    EXPECT_EQ(rebound.descriptor_rebinds, 1);
+    second.record(nullptr);
+    EXPECT_EQ(read(y2), (std::vector<float>{-1, 22, 4, 23}));
+  }
+  // Retirement must leave the caller's BSR descriptor and buffers usable.
+  CudaSparseSpmvPlan third(description, borrowed);
+  third.prepare(x, y2, nullptr, false);
+  std::array<float, 12> changed{1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1};
+  driver.memcpy_host_to_device(values, changed.data(), sizeof(changed));
+  third.record(nullptr);
+  EXPECT_EQ(read(y2), (std::vector<float>{1, 2, 3, 4}));
+  description.transpose = true;
+  EXPECT_THROW(CudaSparseSpmvPlan{description}, std::invalid_argument);
+  description.transpose = false;
+  description.rows = 3;
+  EXPECT_THROW(CudaSparseSpmvPlan{description}, std::invalid_argument);
 }
 
 TEST(CUSPARSETriangularPlan, CapturedValueRefreshUsesReplayValues) {
