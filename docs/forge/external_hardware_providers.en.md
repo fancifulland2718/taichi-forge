@@ -413,9 +413,12 @@ and host workspace; callers retain factor, status and device workspace storage
 until execution retires. Closing a runtime with live plans is rejected. The
 optional SDK component `TaichiSDKProvider_cusolverdn` installs the adapter and
 `forge_cusolverdn_provider.h` without requiring vendor headers at build time.
-This shared-core support does not yet provide AOT resource registration or
-automatic export of cuSOLVERDn recordings. CUDA execution is required; CPU and
-Vulkan do not acquire a vendor dependency.
+Retained recordings also support AOT resource reconstruction and automatic Graph
+export. Solve-only export snapshots actual factors with `snapshot_state=True`;
+full refactor recordings omit unused old factors. See the
+[AOT Cholesky contract](aot_sdk.en.md#cusolverdn-retained-cholesky-recordings),
+including explicit mapping of device status used by surrounding kernels.
+CUDA execution is required; CPU and Vulkan do not acquire a vendor dependency.
 
 ```python
 with ti.hardware.linalg.CusolverDnProvider(library_path) as provider:

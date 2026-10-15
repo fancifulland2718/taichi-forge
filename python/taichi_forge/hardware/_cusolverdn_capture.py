@@ -207,6 +207,11 @@ class _Recording(BackendCommandRecording):
     def execute(self, bindings):
         self.capture.run()
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cusolverdn import export_capture
+
+        return export_capture(self, context)
+
     def as_node(self):
         return native_recording_node(
             self,

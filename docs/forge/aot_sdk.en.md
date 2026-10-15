@@ -76,9 +76,8 @@ cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
 
 Replace `cutensor` with `cusparselt`, `amgx` or `cusolverdn` for those components.
 The cuSOLVERDn component also installs `forge_cusolverdn_provider.h` for its
-shared Cholesky execution API. Native plan execution and existing JIT recordings
-are supported; AOT resource registration and automatic recording export are
-not yet supplied by this component. The vendor runtime remains external.
+shared Cholesky execution API. Native plan execution and AOT reconstruction of
+retained Cholesky recordings share this adapter. The vendor runtime remains external.
 
 cuDSS uses
 its independent build option and matching 0.8.x SDK headers, without enabling
@@ -2021,6 +2020,61 @@ No JIT provider or AOT artifact default changes with this feature.
 PTX 6.0 is needed for Forge's synchronized warp collectives on older targets;
 the processor's minimum ISA alone is insufficient. See NVIDIA's
 [shfl.sync specification](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-shfl-sync).
+
+### cuSOLVERDn retained Cholesky recordings
+
+The CUDA registry provides `cusolverdn/cholesky_plan` v1 resources and
+`cusolverdn/cholesky` v1 operations. Configure the optional common adapter through
+`runtime.configure_provider("cusolverdn", adapter_path=adapter, library_path=vendor)`.
+Probe `cusolverdn_cholesky` before preparation; its composition capability is
+`cuda_ordered`. CPU and Vulkan have no factory for this operation.
+
+The resource parameters are `rows`, `rhs_count`, `dtype` (`f32` or `f64`) and
+`seeded` (default false); ports are `factor` and `status`. Factor storage is a
+compact `(rows, rows)` array with meaningful row-major lower triangle; status is
+device `i32[2]` for factor and solve results. Preparation retains this storage,
+creates vendor handles and workspace, and does not execute a factorization or
+write caller arrays. `seeded=True` declares supplied factors; it does not prove
+numerical success. A solve needs that seed or a preceding unconditional refactor.
+
+The operation parameter `phase` is `solve` or `factor_and_solve`, with ports
+`plan`, `a`, `rhs`, `solution`. A is preserved. RHS and solution shapes are
+`(rows,)` for one RHS and `(rhs_count, rows)` otherwise. Only identical RHS/solution
+aliasing is allowed. All dimensions, layouts, allocation spans and provider
+availability are checked at preparation; there are no per-element host
+checks or fixed application-size limits. Numerical status remains on device.
+
+Existing `binding.capture(...).record(...)` recordings export automatically in
+ordinary and selected Graphs through `module.add_execution_plan(name, graph)`.
+The first `factor_and_solve` recording rebuilds private factor scratch and stores
+no unused old factor. A first `solve` recording requires `snapshot_state=True`,
+copying the actual private factor and status at one synchronized export boundary.
+It never substitutes the current A, which may have changed since factorization.
+Operations sharing one producer plan share one reconstructed plan per prepared
+instance. Different prepared bindings have independent plan state.
+
+When Graph kernels use `plan.info`, supply its symbolic name explicitly:
+
+```python
+module.add_execution_plan(
+    "step", graph, snapshot_state=True,
+    source_bindings={"status": plan.info},
+)
+```
+
+Here `status` must be the same symbolic binding used by those kernels. The initial
+status snapshot is copied once on first execution, not at prepare; later kernels
+and solver operations use the same public device array. Without that mapping,
+status remains private to the reconstructed provider plan.
+
+Cold preparation records the retained vendor graph. Replay preserves root order
+with surrounding kernels and uses the common completion/retirement owner; it
+does not call vendor factor/solve APIs or rebuild captures on the host. This
+contract does not include enclosing Graph fusion or GPU conditional bodies.
+Windows CUDA tests cover f32/f64, single/multiple RHS, source retirement,
+standalone and borrowed runtimes, independent bindings, failure status, and
+exported kernel gradients with explicit symmetric adjoint solves. Provider
+autodiff and the separate cuSOLVERSp sparse route are not included.
 
 ### Compiled application hosts (experimental)
 

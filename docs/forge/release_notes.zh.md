@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- cuSOLVERDn Cholesky 共用公共 provider adapter，支持 f32/f64 保留式 recording 的
+  AOT 资源重建和普通/已选 Graph 导出。solve-only 保存实际 factor/status，重新分解
+  路线不保存无用旧因子；公开设备状态可与前后 kernel 共用。独立/借用消费、输入保留、
+  失败状态、退休与显式伴随已验证，保持 root-ordered 提交边界。可选 SDK 组件不打包
+  厂商库；GPU 条件体、provider 自动求导与 cuSOLVERSp 不在此次范围内。
+
 - AOT 可导出 CUDA 整数 segmented scan 的已选策略，包括使用保留 scratch 的原生
   global scan、chunk、shuffle 和长短段 hybrid。复用既有驱动内核，保存不可变拓扑，
   每份 preparation 重建私有工作区；多个子图的参数作用域互相隔离。
@@ -57,7 +63,8 @@
 - Graph-owned cuDSS 组现可在具备资格的 CUDA 条件循环体中执行，并随已选单层循环
   导出 AOT。三种数值阶段、多 RHS、交替绑定、显式伴随、零轮/提前结束/预算耗尽及
   退休已验证，也覆盖显式嵌套 AOT 计划。provider 捕获保留参数存储并匹配确切分配
-  绑定；需配对 private ABI 54。普通活状态 cuDSS 导出与 cuSOLVER 仍待单独完成。
+  绑定；需配对 private ABI 54。普通 cuDSS solve 快照与平坦 refactor 事务导出分别由
+  private ABI 59/62 接通；cuSOLVERDn 的范围见上文。
 
 - Vulkan 嵌套 Graph 的普通异步提交不再生成未被使用的循环观察 shader、轨迹表、
   host 可读回缓冲和回拷。条件门及间接分发保持原语义；诊断路径仍按需生成观察数据，
@@ -77,8 +84,8 @@
   分解/重分解后求解；组内共享一次数值分解。独立与借用消费端已验证前向及显式伴随。
   可选 `TaichiSDKProvider_cudss` 组件单独安装 adapter 与清单，vendor 库仍由应用提供。
   Graph-owned `CudssCaptureRecording` 可导出普通/已选 Graph，按原生私有 seed 重建，
-  每计划每导出只采样一次；需要配对 private ABI 52。普通活状态 cuDSS recording 的
-  自动导出、条件区域与 cuSOLVER 支持仍待接通。
+  每计划每导出只采样一次；需要配对 private ABI 52。后续条件区域及普通 recording
+  导出范围见上文和 AOT SDK 文档。
 
 - cuDSS Graph 内存报告将已分配的计划快照和 vendor 载荷计入驻留请求字节；驱动
   私有存储仍保留大小未知，不再错误地报告“驻留 0 字节且统计完整”。

@@ -310,8 +310,10 @@ JIT 与原生消费者通过 provider ABI 2、execution ABI 1 共享 Cholesky �
 adapter 持有 vendor handle、参数和 host workspace；调用者保留 factor、status 与
 device workspace，直至执行退休。存在活计划时拒绝关闭 runtime。可选 SDK 组件
 `TaichiSDKProvider_cusolverdn` 安装 adapter 和 `forge_cusolverdn_provider.h`，
-构建 adapter 不需要厂商头文件。此共享核心尚不提供 cuSOLVERDn 的 AOT 资源注册或
-recording 自动导出。执行需要 CUDA；CPU 和 Vulkan 不增加厂商库依赖。
+构建 adapter 不需要厂商头文件。保留式 recording 也支持 AOT 资源重建和 Graph 自动
+导出：solve-only 使用 `snapshot_state=True` 保存实际因子，重新分解路线不保存无用
+旧因子。详见 [AOT Cholesky 合同](aot_sdk.zh.md#cusolverdn-保留式-cholesky-recording)，
+包括前后 kernel 使用设备状态时的显式映射。执行需要 CUDA；CPU 和 Vulkan 不增加厂商库依赖。
 
 ```python
 with ti.hardware.linalg.CusolverDnProvider(library_path) as provider:

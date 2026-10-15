@@ -34,6 +34,15 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- cuSOLVERDn Cholesky shares the common provider adapter and supports AOT resource
+  reconstruction and ordinary/selected Graph export of retained f32/f64 recordings.
+  Solve-only export preserves actual factor/status state; refactor routes omit
+  unused old factors. Public device status can be shared with surrounding kernels.
+  Standalone/borrowed consumers cover preserved inputs, failure status, retirement
+  and explicit adjoints while keeping root-ordered submissions. The optional SDK
+  component excludes vendor libraries; GPU conditional bodies, provider autodiff
+  and the separate cuSOLVERSp route are outside this scope.
+
 - AOT exports selected CUDA integer segmented-scan strategies, including native
   global scan with retained scratch, chunk, shuffle and length-bucket hybrid.
   Existing driver kernels are reused, immutable topology is retained, each
@@ -71,7 +80,8 @@ lifetimes. The entries below describe the changes.
   alternating bindings, explicit adjoints, zero/early/budget exits and retirement
   are tested; explicit nested AOT plans are covered too. Provider capture uses
   retained parameter storage and exact allocation bindings. Use paired private
-  ABI 54 components. Ordinary live cuDSS export and cuSOLVER remain separate work.
+  ABI 54 components. Ordinary cuDSS solve snapshots and flat refactor transactions
+  export through private ABI 59/62 respectively; cuSOLVERDn coverage is described above.
 
 - Ordinary asynchronous Vulkan nested Graph submissions no longer generate
   unused loop-observation shaders, trace tables, host-readable buffers or
@@ -101,8 +111,8 @@ lifetimes. The entries below describe the changes.
   component installs the adapter and manifest separately; vendor libraries remain
   application-managed. Graph-owned `CudssCaptureRecording` exports ordinary and
   selected Graphs from the native private seed, sampled once per plan per export;
-  paired private ABI 52 is required. Ordinary live cuDSS recording export,
-  conditional regions and cuSOLVER support remain pending.
+  paired private ABI 52 is required. Subsequent conditional and ordinary-recording
+  export coverage is described above and in the AOT SDK documentation.
 
 - cuDSS Graph memory reports count already allocated plan snapshots and vendor
   payloads as resident requested bytes. Opaque driver storage remains unknown,

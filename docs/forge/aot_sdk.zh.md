@@ -68,8 +68,8 @@ cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
 
 cuSPARSELt、AmgX 和 cuSOLVERDn 将 `cutensor` 替换为 `cusparselt`、`amgx` 或 `cusolverdn`。
 cuSOLVERDn 组件还安装共享 Cholesky 执行 API 的 `forge_cusolverdn_provider.h`。
-目前支持原生计划执行及既有 JIT recording；该组件尚不提供 AOT 资源注册或 recording
-自动导出，厂商 runtime 仍由应用另行提供。
+原生计划执行与保留式 Cholesky recording 的 AOT 重建共用该 adapter，
+厂商 runtime 仍由应用另行提供。
 
 cuDSS 使用其独立
 构建开关及匹配的 0.8.x SDK 头文件，不需要开启其他可选 provider：
@@ -1575,6 +1575,49 @@ Windows 小型 cubin 消费测试覆盖 dense field、scalar/vector/matrix ndarr
 Forge 在较旧目标上生成的同步 warp 操作也需要 PTX 6.0，仅采用处理器的最低 ISA
 版本不足以覆盖这些操作，见 NVIDIA 的
 [shfl.sync 说明](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-shfl-sync)。
+
+### cuSOLVERDn 保留式 Cholesky recording
+
+CUDA 注册表提供 `cusolverdn/cholesky_plan` v1 资源及 `cusolverdn/cholesky` v1 操作。
+通过 `runtime.configure_provider("cusolverdn", adapter_path=adapter, library_path=vendor)`
+配置公共 adapter；准备前可 probe `cusolverdn_cholesky`，其组合能力为 `cuda_ordered`。
+CPU/Vulkan 不提供该操作工厂。
+
+资源参数为 `rows`、`rhs_count`、`dtype`（`f32`/`f64`）、`seeded`（默认 false），
+端口为 `factor`、`status`。factor 是紧凑 `(rows, rows)` 数组，有效部分为行主序下三角；
+status 是设备 `i32[2]`，依次报告分解与求解结果。准备期保留这些存储、创建 vendor
+handle 和工作区，不进行分解或改写调用者数组。`seeded=True` 声明已有因子，不证明
+数值成功；solve 要求已有 seed，或前面无条件执行过重新分解。
+
+操作参数 `phase` 为 `solve` 或 `factor_and_solve`，端口为 `plan`、`a`、`rhs`、
+`solution`。A 保持不变；单 RHS 形状为 `(rows,)`，多 RHS 为 `(rhs_count, rows)`。
+只允许 RHS/solution 完全相同的别名，其余存储须分离。维度、布局、分配范围和 provider
+能力在准备时检查，不新增逐元素主机检查或固定应用规模上限；数值状态继续留在设备。
+
+现有 `binding.capture(...).record(...)` 可通过 `module.add_execution_plan(name, graph)`
+自动导出普通及已选 Graph。首个 recording 是 `factor_and_solve` 时重建私有 factor
+scratch，不保存无用旧因子；首个 recording 是 `solve` 时要求 `snapshot_state=True`，
+在同一同步边界复制实际私有 factor/status，不用可能已改变的当前 A 替代它们。
+同一生产计划的多个操作在每份 prepared 中共用一个重建计划；不同 prepared 绑定独立持有状态。
+
+Graph 中的 kernel 使用 `plan.info` 时，显式提供其符号名：
+
+```python
+module.add_execution_plan(
+    "step", graph, snapshot_state=True,
+    source_bindings={"status": plan.info},
+)
+```
+
+这里 `status` 必须与 kernel 的符号绑定一致。初始状态快照在首次执行时复制一次，
+prepare 不写该数组；后续 kernel 与求解操作使用同一份公开设备存储。省略该映射时，
+状态由重建后的 provider 计划私有持有。
+
+冷准备录制 vendor 保留图；暖重放与前后 kernel 保持 root 次序，复用公共完成/退休
+owner，不在主机调用 vendor factor/solve 或重建捕获。此合同不包含 enclosing Graph
+融合或 GPU 条件体。Windows CUDA 已验证 f32/f64、单/多 RHS、源退休、独立/借用消费、
+不同绑定、失败状态以及导出 kernel 梯度配合显式对称伴随求解；不包含 provider 自动
+求导或另一条 cuSOLVERSp 稀疏路线。
 
 ### 编译后的应用宿主（实验性）
 
