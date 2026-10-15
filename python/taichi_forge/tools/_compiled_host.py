@@ -10,7 +10,7 @@ import copy
 import symtable
 
 
-def lower_module(source, module_name):
+def lower_module(source, module_name, *, _constructor=None):
     tree = ast.parse(source)
     symbols = symtable.symtable(source, module_name, "exec")
     tables = {}
@@ -105,7 +105,7 @@ def lower_module(source, module_name):
             original = copy.deepcopy(node)
             original.decorator_list = []
             ast.increment_lineno(original, 1 - node.lineno)
-            factories.append(constructor(original, factory_name))
+            factories.append((_constructor or constructor)(original, factory_name))
             table = tables[("function", node.name, node.lineno)]
             frees = table.get_frees()
             scope = "{" + ", ".join(repr(n) + ": " + n for n in frees) + "}"

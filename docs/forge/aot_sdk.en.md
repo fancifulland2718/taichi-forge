@@ -1641,6 +1641,15 @@ consumer uses the existing Forge compiler for genuinely new specializations;
 loading previously exported AOT artifacts still uses the lightweight runtime.
 Plain host modules without DSL definitions acquire no dependency on this helper.
 
+For larger hosts, the private `taichi_forge.tools._native_host.NativeConstructors`
+producer can supply `lower_module(..., _constructor=constructors.constructor)`.
+Its `emit(header_name)` returns a Cython declaration and matching C++/header
+build inputs; link the C++ into the same host extension. Shared construction and
+cleanup reduce repeated native code without changing the frontend template or
+requiring a new consumer library. Build against the matching CPython headers.
+Native-constructor tests cover exact AST values/locations, Unicode and wide
+integers, Python exception propagation and temporary-object retirement.
+
 The current bridge preserves explicit signatures, lexical captures, class and
 static methods, `ti.func`/`ti.pyfunc`/`ti.real_func`, and compiler-generated
 gradients in bounded tests. Windows CPython 3.10/Cython 3.3.0 host fixtures pass on

@@ -1290,6 +1290,13 @@ Forge 在较旧目标上生成的同步 warp 操作也需要 PTX 6.0，仅采用
 编译器；已经导出的 AOT 产物继续走轻量 runtime。没有 DSL 定义的普通宿主模块
 不增加对该工具的依赖。
 
+较大宿主可使用私有生产器 `taichi_forge.tools._native_host.NativeConstructors`，
+通过 `lower_module(..., _constructor=constructors.constructor)` 接入。
+`emit(header_name)` 返回 Cython 声明及配套 C++/头文件构建输入；将 C++ 链入同一个
+宿主扩展。共用构造和清理逻辑可减少重复机器码，前端模板合同不变，也不增加新的
+消费端库。构建时使用匹配的 CPython 头文件。原生构造器测试覆盖 AST 值与位置、
+Unicode/宽整数、Python 异常传播及临时对象退休。
+
 当前桥接已在小规模测试中保留显式签名、词法捕获、类方法、静态方法、
 `ti.func`/`ti.pyfunc`/`ti.real_func` 及编译器生成的梯度。Windows CPython 3.10 /
 Cython 3.3.0 宿主夹具通过 CPU/CUDA/Vulkan 验证；这不代表整个应用或其他
