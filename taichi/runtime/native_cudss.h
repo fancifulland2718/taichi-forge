@@ -17,17 +17,28 @@ struct CudssPlanDescription {
   std::array<NativeArrayBinding, 3> arrays;
 };
 
+// Same portable CSR/configuration seed, but preparation only analyzes it.
+// Each invocation supplies values and owns an ordinary refactor transaction.
+struct CudssTransactionPlanDescription : CudssPlanDescription {
+  static constexpr const char *kind = "cudss_transaction_plan_f32";
+};
+
 class CudssPlanResource : public NativeResource {
  public:
   const CudssPlanDescription &description() const {
     return description_;
   }
+  bool transactional() const {
+    return transactional_;
+  }
 
  protected:
-  explicit CudssPlanResource(CudssPlanDescription description)
-      : description_(std::move(description)) {
+  explicit CudssPlanResource(CudssPlanDescription description,
+                             bool transactional = false)
+      : description_(std::move(description)), transactional_(transactional) {
   }
   CudssPlanDescription description_;
+  bool transactional_{false};
 };
 
 // A numerical phase runs once, followed by all RHS solves. Splitting this into
@@ -38,6 +49,13 @@ struct CudssSolveGroupOperation {
   std::shared_ptr<CudssPlanResource> plan;
   std::optional<NativeArrayBinding> values;
   std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> rhs_outputs;
+};
+
+struct CudssRefactorSolveOperation {
+  static constexpr const char *kind = "cudss_refactor_solve_f32";
+  static constexpr uint32_t version = 1;
+  std::shared_ptr<CudssPlanResource> plan;
+  NativeArrayBinding values, rhs, output;
 };
 
 }  // namespace taichi::lang

@@ -1772,7 +1772,8 @@ class TI_DLL_EXPORT Program {
       std::uint64_t handle);
 
   CudaCudssPlanSnapshot snapshot_cuda_cudss_solve_seed(std::uint64_t handle,
-                                                       SparseMatrix *matrix);
+                                                       SparseMatrix *matrix,
+                                                       bool transactional = false);
 
   std::unordered_map<std::string, std::int64_t> cuda_cudss_plan_configuration(
       std::uint64_t handle);

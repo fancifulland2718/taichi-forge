@@ -720,6 +720,25 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
     return result;
   }
 
+  CudaCudssPlanSnapshot snapshot_refactor_seed(
+      const CudaCudssMatrixView &matrix) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fault_domain_->throw_if_submission_disallowed("snapshot cuDSS refactor seed");
+    TI_ERROR_IF(closed_ || graph_owned_,
+                "cuDSS refactor export requires an open ordinary plan.");
+    require_no_refactor_solve_inflight("refactor export");
+    TI_ERROR_IF(!analyzed_, "cuDSS refactor export requires analysis first.");
+    validate_analyzed_pattern(matrix);
+    // Values are reconstruction data for analysis only. Warm execution always
+    // binds explicit values and does not depend on existing factor state.
+    auto result = copy_seed(matrix.row_offsets, matrix.column_indices,
+                            matrix.values, -1);
+    ++refactor_seed_snapshot_count_;
+    refactor_seed_snapshot_bytes_ += (rows_ + 1) * sizeof(int32_t) +
+                                     nonzeros_ * (sizeof(int32_t) + sizeof(float));
+    return result;
+  }
+
   CudaCudssPlanSnapshot copy_seed(void *offsets,
                                   void *columns,
                                   void *values,
@@ -730,8 +749,10 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
     result.matrix_type = matrix_type_;
     result.matrix_view = matrix_view_;
     result.phase = phase;
-    result.reordering = reordering_;
-    result.solve_algorithm = solve_algorithm_;
+    // Unconfigured ordinary plans use vendor defaults. Never serialize the
+    // diagnostic -1 sentinel as an index into a named-policy table.
+    result.reordering = std::max(reordering_, 0);
+    result.solve_algorithm = std::max(solve_algorithm_, 0);
     result.row_offsets.resize(rows_ + 1);
     result.column_indices.resize(nonzeros_);
     result.values.resize(nonzeros_);
@@ -891,6 +912,8 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
         {"graph_seed_snapshot_bytes", graph_seed_snapshot_bytes_},
         {"solve_seed_snapshot_count", solve_seed_snapshot_count_},
         {"solve_seed_snapshot_bytes", solve_seed_snapshot_bytes_},
+        {"refactor_seed_snapshot_count", refactor_seed_snapshot_count_},
+        {"refactor_seed_snapshot_bytes", refactor_seed_snapshot_bytes_},
         {"capture_parameters_device_resident", graph_owned_ ? 1 : 0},
         {"allocator_live_requested_bytes",
          static_cast<std::int64_t>(allocation[0])},
@@ -1275,6 +1298,7 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
   const int matrix_type_{0}, matrix_view_{0};
   std::int64_t graph_seed_snapshot_count_{0}, graph_seed_snapshot_bytes_{0};
   std::int64_t solve_seed_snapshot_count_{0}, solve_seed_snapshot_bytes_{0};
+  std::int64_t refactor_seed_snapshot_count_{0}, refactor_seed_snapshot_bytes_{0};
   int graph_numeric_phase_{-1};
   void *graph_stream_{nullptr};
   void *graph_fork_event_{nullptr};

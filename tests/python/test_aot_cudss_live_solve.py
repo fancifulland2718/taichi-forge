@@ -135,10 +135,14 @@ def test_live_cudss_solve_snapshot_rejects_unqualified_factor_state():
             snapshot()
         owner.factorize()
         assert len(snapshot()[-1]) == 40
-        # Transactional refactor remains unqualified; do not silently freeze it.
+        # Ordinary transactions use a distinct live-values resource policy.
         builder = ti.graph.GraphBuilder()
         builder.append_native(owner.record_refactor_solve())
         graph = builder.compile()
-        with pytest.raises(RuntimeError, match="unavailable"):
-            ti.aot.Module().add_execution_plan("transactional", graph)
+        exported = ti.aot.Module().add_execution_plan("transactional", graph)
+        document = json.loads(exported.to_json())
+        resource = next(item for item in document["resources"] if item["kind"] == "native")
+        assert resource["operation"] == "transaction_plan_f32"
+        assert resource["parameters"]["reordering"] == "default"
+        assert resource["parameters"]["solve"] == "default"
         graph.close()

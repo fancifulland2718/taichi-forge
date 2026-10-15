@@ -937,7 +937,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 61.
+Current components require matching private ABI 62.
 
 Plans can separate one-time initialization from replay:
 
@@ -1003,9 +1003,8 @@ instances. An action failure skips the suffix, retains partially submitted work
 through retirement, and rejects replay of that instance. GPU conditional bodies
 cannot contain host-invoked actions. Pure ordered batches report
 `execution_kind="cuda_ordered"`; batches also containing synchronous actions
-report `cuda_mixed`. This shared contract requires paired private ABI 61 and
-separate provider registration; it does not yet enable ordinary cuDSS
-`record_refactor_solve()` export.
+report `cuda_mixed`. This shared contract was introduced in private ABI 61. Ordinary cuDSS
+transaction export uses it with the paired ABI 62 components described below.
 
 This composition capability still requires a registered provider-specific schema,
 resource reconstruction and numeric qualification. NVIDIA documents the
@@ -1550,8 +1549,37 @@ values. Export rejects unfactored, stale, in-flight, explicit-value-only or clos
 owners. Consumer preparation rebuilds factors, and replay uses the retained
 plan without host matrix queries. Windows CUDA checks cover standalone/borrowed
 consumption after closing the source plan, separate bindings, and real kernel
-gradients with an explicit symmetric solve adjoint. Ordinary transactional
-`CudssRefactorSolveRecording` export remains unsupported.
+gradients with an explicit symmetric solve adjoint.
+
+Ordinary `CudssPlan.record_refactor_solve()` exports through the same API with
+paired private ABI 62. Its `cudss/transaction_plan_f32` v1 resource uses the CSR
+seed ports and configuration above, without a `phase` parameter. The
+`cudss/refactor_solve_f32` v1 operation has empty parameters and `plan`, `values`,
+`rhs`, `output` ports. It reports `cuda_ordered`, retaining ordinary host-invoked
+transaction semantics and stream ordering with preceding/following kernels.
+Export requires completed analysis and a matching pattern, but no valid factors.
+Consumer preparation makes a private seed copy and analyzes it; it does not
+factor the seed or write user outputs. Each invocation reads explicit values,
+performs full factorization if no valid factors exist, otherwise refactorization,
+and then solves. Unconfigured source plans preserve vendor default policies.
+
+The source may have explicit-value factors, stale numerical factors, or a retired
+failed transaction. In-flight, unanalyzed, closed and incompatible-pattern sources
+are rejected. All three operation arrays must be compact f32 vectors and mutually
+disjoint. The existing owner permits one in-flight transaction: preparation rejects
+repeated use of that owner in one submission; a completed event must retire before
+reuse. Independent owners can compose forward and adjoint solves. For multiple RHS
+with one factorization, use the captured group above. Mixing frozen solve and
+transactional export of the same source owner is rejected, not silently split.
+
+A provider failure retains partial work until completion, skips subsequent work,
+and invalidates that prepared execution. Retire it and prepare again to retry;
+failed factors cannot be reused. GPU conditional bodies still require a captured
+operation. `workspace_bytes` accounts for the private CSR seed; vendor factor
+allocations/residency remain opaque. Windows CUDA checks cover analysis-only seeds,
+updated values, independent bindings, partial failure and recovery, standalone and
+borrowed retirement, real downstream `kernel.grad` and explicit symmetric RHS
+adjoints. This does not add provider autodiff or ordinary cuDSS inside GPU loops.
 
 Graph-owned cuDSS groups can also be appended to a CUDA `Sequential` loop body
 and exported from a selected flat conditional loop. The common capture protocol

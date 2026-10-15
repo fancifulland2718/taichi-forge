@@ -2036,6 +2036,11 @@ class CudssRefactorSolveRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.plan.validate_graph_lifetime(allow_explicit_values=True)
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cudss import export_refactor
+
+        return export_refactor(self, context)
+
     def _graph_provider_memory_report(self):
         return self.plan.memory_report()
 

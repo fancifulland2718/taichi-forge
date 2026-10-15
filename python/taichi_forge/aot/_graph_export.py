@@ -33,6 +33,7 @@ class _ExportContext:
         self.root_dependencies = ()
         self.root_payloads = ()
         self._resource_owners = {}
+        self._resource_policies = {}
         self._indices = {}
         self._names = set(reserved_names) | set(module._exported_kernels) | set(module._fields)
         self._kernel_names = {id(kernel): name for name, kernel in module._exported_kernels.items()}
@@ -83,15 +84,18 @@ class _ExportContext:
             ),
         )
 
-    def resource_once(self, owner, build):
+    def resource_once(self, owner, build, *, policy=None):
         """Sample a qualified live resource once within this export transaction."""
         previous = self._resource_owners.get(id(owner))
         if previous is not None:
+            if self._resource_policies.get(id(owner)) != policy:
+                raise ValueError("AOT resource reconstruction policy changed within one export")
             return previous[1]
         name = build()
         created = self._resource_owners.get(id(owner))
         if created is None or created[1] != name:
             raise ValueError("AOT resource factory did not register its owner")
+        self._resource_policies[id(owner)] = policy
         return name
 
     def _resource(self, owner, description, *, name=None):

@@ -74,7 +74,146 @@ TEST(NativeCudss, CsrContractAllowsUnsortedRowsAndRejectsDuplicateEntries) {
   EXPECT_THROW(validate({0, 2}, {0, -1}), std::invalid_argument);
 }
 
+TEST(NativeCudss, TransactionSchemasAreDistinctFromCapturedGroups) {
+  const auto &registry = native_operation_registry();
+  auto plan = cudss_description(R"({"kind":"native","provider":"cudss",
+    "operation":"transaction_plan_f32","version":1,"parameters":{"rows":4,"nonzeros":10},
+    "bindings":{"row_offsets":"r","column_indices":"c","values":"v"}})");
+  EXPECT_EQ(registry.decode(plan, NativeObjectKind::resource).kind(),
+            CudssTransactionPlanDescription::kind);
+  plan.parameters.obj.inner["phase"] = liong::json::JsonValue("refactor_solve");
+  EXPECT_THROW(registry.decode(plan, NativeObjectKind::resource),
+               std::invalid_argument);
+  auto operation = cudss_description(R"({"kind":"native","provider":"cudss",
+    "operation":"refactor_solve_f32","version":1,"parameters":{},
+    "bindings":{"plan":"p","values":"v","rhs":"b","output":"x"}})");
+  EXPECT_EQ(registry.decode(operation).kind(),
+            CudssRefactorSolveOperation::kind);
+  operation.bindings.erase("values");
+  EXPECT_THROW(registry.decode(operation), std::invalid_argument);
+  for (const auto *kind : {CudssTransactionPlanDescription::kind,
+                           CudssRefactorSolveOperation::kind}) {
+    EXPECT_EQ(registry.find(kind, 1, host_arch()), nullptr);
+    EXPECT_EQ(registry.find(kind, 1, Arch::vulkan), nullptr);
+  }
+}
+
 #ifdef TI_WITH_CUDA
+TEST(NativeCudss, OrderedTransactionsFreezePatternAndRetireFailures) {
+  const auto *library = std::getenv("TI_CUDSS_TEST_LIBRARY");
+  const auto *adapter = std::getenv("TI_CUDSS_TEST_ADAPTER");
+  if (!library || !adapter)
+    GTEST_SKIP() << "Set cuDSS runtime and adapter paths";
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  auto &driver = CUDADriver::get_instance();
+  auto fault = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 32);
+  NativePreparationContext context(Arch::cuda, device,
+                                   {{"cudss", {adapter, library}}}, fault);
+  const auto &registry = native_operation_registry();
+  std::vector<DeviceAllocationUnique> allocations;
+  auto allocate = [&](DataType type, uint64_t count) {
+    auto result = device.allocate_memory_unique({std::size_t(count * 4)});
+    if (result.second != RhiResult::success)
+      throw std::runtime_error("Test CUDA allocation failed");
+    NativeArrayBinding array{
+        result.first->get_ptr(), count * 4, type, {count}, {}};
+    allocations.push_back(std::move(result.first));
+    return array;
+  };
+  auto ptr = [&](const NativeArrayBinding &array) {
+    return device.get_memory_addr(array.pointer);
+  };
+  auto r = allocate(PrimitiveType::i32, 5),
+       c = allocate(PrimitiveType::i32, 10);
+  auto v = allocate(PrimitiveType::f32, 10),
+       seed = allocate(PrimitiveType::f32, 10);
+  auto b = allocate(PrimitiveType::f32, 4), x = allocate(PrimitiveType::f32, 4);
+  std::array<int32_t, 5> rows{0, 2, 5, 8, 10};
+  std::array<int32_t, 10> columns{0, 1, 0, 1, 2, 1, 2, 3, 2, 3};
+  std::array<float, 10> values{4, -1, -1, 4, -1, -1, 4, -1, -1, 3};
+  std::array<float, 4> rhs{2, 4, 6, 9};
+  driver.memcpy_host_to_device(ptr(r), rows.data(), sizeof(rows));
+  driver.memcpy_host_to_device(ptr(c), columns.data(), sizeof(columns));
+  driver.memsetd32(ptr(seed), 0,
+                   10);  // Analysis seed need not have valid factors.
+  driver.memcpy_host_to_device(ptr(b), rhs.data(), sizeof(rhs));
+  driver.memsetd32(ptr(x), 0, 4);
+  auto description = cudss_description(R"({"kind":"native","provider":"cudss",
+    "operation":"transaction_plan_f32","version":1,"parameters":{"rows":4,"nonzeros":10,"matrix_type":"spd"},
+    "bindings":{"row_offsets":"r","column_indices":"c","values":"v"}})");
+  auto resource = registry.prepare_resource(
+      context, registry.decode(description, NativeObjectKind::resource),
+      {{"row_offsets", r}, {"column_indices", c}, {"values", seed}});
+  EXPECT_EQ(resource->workspace_bytes(), 100);
+  auto operation = cudss_description(R"({"kind":"native","provider":"cudss",
+    "operation":"refactor_solve_f32","version":1,"parameters":{},
+    "bindings":{"plan":"p","values":"v","rhs":"b","output":"x"}})");
+  NativeOperationBindings bindings{
+      {"plan", resource}, {"values", v}, {"rhs", b}, {"output", x}};
+  auto op = registry.prepare(context, registry.decode(operation), bindings);
+  auto owner =
+      std::dynamic_pointer_cast<CudaCudssPlan>(op->cuda_ordered_resource());
+  ASSERT_NE(owner, nullptr);
+  EXPECT_EQ(owner->statistics().at("factorized"), 0);
+  EXPECT_EQ(op->execution_mode(), NativeOperationMode::cuda_ordered);
+  auto alias = bindings;
+  alias.at("output") = b;
+  EXPECT_THROW(registry.prepare(context, registry.decode(operation), alias),
+               std::invalid_argument);
+  alias = bindings;
+  auto bad = v;
+  bad.shape = {2, 5};
+  alias.at("values") = bad;
+  EXPECT_THROW(registry.prepare(context, registry.decode(operation), alias),
+               std::invalid_argument);
+  auto make_execution = [&] {
+    return std::make_unique<FixedExecution>(
+        Arch::cuda, device, nullptr, std::vector<FixedExecution::Operation>{op},
+        nullptr, fault);
+  };
+  EXPECT_THROW((FixedExecution(Arch::cuda, device, nullptr,
+                               std::vector<FixedExecution::Operation>{op, op},
+                               nullptr, fault)),
+               std::invalid_argument);
+  auto execution = make_execution();
+  driver.memsetd32(ptr(r), 0, 5);
+  driver.memsetd32(ptr(c), 0, 10);  // Input topology is no longer referenced.
+  auto check = [&](float scale) {
+    std::array<float, 4> result{};
+    driver.stream_synchronize(nullptr);
+    driver.memcpy_device_to_host(result.data(), ptr(x), sizeof(result));
+    for (int i = 0; i < 4; ++i)
+      EXPECT_NEAR(result[i], (i + 1) * scale, 3e-5f);
+  };
+  check(0);  // Preparation did not solve or write outputs.
+  driver.memcpy_host_to_device(ptr(v), values.data(), sizeof(values));
+  execution->run();
+  check(1);
+  for (auto &value : values)
+    value *= 2;
+  driver.memcpy_host_to_device(ptr(v), values.data(), sizeof(values));
+  execution->run();  // Polls and retires the preceding completed transaction.
+  check(0.5f);
+  execution.reset();
+  EXPECT_EQ(owner->statistics().at("refactor_solve_retirements"), 2);
+  owner->debug_fail_next_refactor_solve();
+  execution = make_execution();
+  EXPECT_ANY_THROW(execution->run());
+  EXPECT_THROW(execution->run(), std::runtime_error);
+  EXPECT_EQ(owner->statistics().at("factorized"), 0);
+  execution.reset();
+  EXPECT_EQ(owner->statistics().at("refactor_solve_inflight"), 0);
+  EXPECT_EQ(owner->statistics().at("refactor_solve_retirements"), 3);
+  execution = make_execution();
+  execution->run();  // Failed factors require full factorization again.
+  check(0.5f);
+  execution.reset();
+  EXPECT_EQ(owner->statistics().at("refactor_solve_successes"), 3);
+  EXPECT_EQ(owner->statistics().at("refactor_solve_retirements"), 4);
+}
+
 TEST(NativeCudss, RebuildsFrozenPlansAndMultiRhsGroupsThroughTheRegistry) {
   const auto *library = std::getenv("TI_CUDSS_TEST_LIBRARY");
   const auto *adapter = std::getenv("TI_CUDSS_TEST_ADAPTER");

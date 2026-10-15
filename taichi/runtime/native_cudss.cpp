@@ -57,7 +57,8 @@ void validate_plan(Device &device, const CudssPlanDescription &d) {
 
 void validate_group(Device &device, const CudssSolveGroupOperation &op) {
   if (!op.plan || &op.plan->device() != &device ||
-      op.plan->arch() != Arch::cuda || op.rhs_outputs.empty())
+      op.plan->arch() != Arch::cuda || op.plan->transactional() ||
+      op.rhs_outputs.empty())
     throw std::invalid_argument(
         "cuDSS requires a local plan and nonempty RHS group");
   const auto &d = op.plan->description();
@@ -92,6 +93,24 @@ void validate_group(Device &device, const CudssSolveGroupOperation &op) {
   }
 }
 
+void validate_transaction(Device &device,
+                          const CudssRefactorSolveOperation &op) {
+  if (!op.plan || &op.plan->device() != &device ||
+      op.plan->arch() != Arch::cuda || !op.plan->transactional())
+    throw std::invalid_argument(
+        "cuDSS refactor requires a local transaction plan");
+  const auto &d = op.plan->description();
+  const std::array<NativeStorageRange, 3> ranges{
+      vector_layout(device, op.values, PrimitiveType::f32, d.nonzeros),
+      vector_layout(device, op.rhs, PrimitiveType::f32, d.rows),
+      vector_layout(device, op.output, PrimitiveType::f32, d.rows)};
+  for (std::size_t i = 0; i < ranges.size(); ++i)
+    for (std::size_t j = i + 1; j < ranges.size(); ++j)
+      if (!ranges[i].proven_disjoint(ranges[j]))
+        throw std::invalid_argument(
+            "cuDSS transaction bindings must not alias");
+}
+
 int option(const liong::json::JsonValue &parameters,
            const char *key,
            std::initializer_list<std::pair<const char *, int>> choices,
@@ -107,35 +126,64 @@ int option(const liong::json::JsonValue &parameters,
                               value);
 }
 
+CudssPlanDescription decode_plan(const liong::json::JsonValue &p,
+                                 bool transactional) {
+  using namespace operation_json;
+  if (transactional)
+    fields(p, {"rows", "nonzeros", "matrix_type", "matrix_view", "reordering",
+               "solve"});
+  else
+    fields(p, {"rows", "nonzeros", "matrix_type", "matrix_view", "phase",
+               "reordering", "solve"});
+  CudssPlanDescription d;
+  d.rows = integer(p["rows"]);
+  d.nonzeros = integer(p["nonzeros"]);
+  d.matrix_type =
+      option(p, "matrix_type", {{"general", 0}, {"symmetric", 1}, {"spd", 3}});
+  d.matrix_view =
+      option(p, "matrix_view", {{"full", 0}, {"lower", 1}, {"upper", 2}});
+  if (!transactional)
+    d.phase = option(
+        p, "phase", {{"solve", 0}, {"factor_solve", 4}, {"refactor_solve", 8}});
+  d.reordering = option(
+      p, "reordering",
+      {{"default", 0}, {"amd", 1}, {"nested_dissection", 2}, {"natural", 3}});
+  d.solve_algorithm = option(p, "solve", {{"default", 0}, {"general", 1}});
+  validate_policy(d);
+  return d;
+}
+
 #ifdef TI_WITH_CUDA
-NativeOperationAvailability probe_cudss(NativeProviderSession &providers) {
+NativeOperationAvailability probe_cudss_mode(NativeProviderSession &providers,
+                                             bool capture) {
   auto &driver = CUDADriver::get_instance_without_context();
-  if (!driver.nvidia_extensions_available() ||
-      driver.get_version_major() < 12 ||
-      !driver.malloc_async_impl.available() ||
-      !driver.mem_free_async_impl.available() ||
-      !driver.stream_get_capture_info_v2.available() ||
-      !driver.graph_node_get_type.available() ||
-      !driver.graph_memcpy_node_get_params.available() ||
-      !driver.graph_memcpy_node_set_params.available())
+  if (!driver.nvidia_extensions_available() || driver.get_version_major() < 12)
+    return {};
+  if (capture && (!driver.malloc_async_impl.available() ||
+                  !driver.mem_free_async_impl.available() ||
+                  !driver.stream_get_capture_info_v2.available() ||
+                  !driver.graph_node_get_type.available() ||
+                  !driver.graph_memcpy_node_get_params.available() ||
+                  !driver.graph_memcpy_node_set_params.available()))
     return {};
   try {
     // One retained DLL runtime serves the cold probe and subsequent factories.
     // No analysis, factorization, solver handle or device allocation here.
     auto runtime = providers.runtime(cuda_cudss_provider_definition());
     const auto api = runtime->execution_api<TiForgeCudssExecutionApi>();
-    if (!api.configuration.struct_size || !api.allocator.struct_size)
+    if (!api.configuration.struct_size ||
+        (capture && !api.allocator.struct_size))
       return {};
     if (api.configuration.struct_size < sizeof(api.configuration) ||
         api.configuration.abi_version !=
             TI_FORGE_CUDSS_CONFIGURATION_ABI_VERSION ||
-        api.allocator.struct_size < sizeof(api.allocator) ||
-        api.allocator.abi_version != 1)
+        (capture && (api.allocator.struct_size < sizeof(api.allocator) ||
+                     api.allocator.abi_version != 1)))
       throw NativeProviderError(TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH,
                                 "cuDSS capture extension ABI is incompatible");
     if (!api.configuration.configure ||
         !api.configuration.analysis_memory_estimates ||
-        !api.allocator.set_allocator)
+        (capture && !api.allocator.set_allocator))
       return {};
     const auto &info = runtime->info();
     return {true, info.version_major * 10000 + info.version_minor * 100 +
@@ -148,17 +196,72 @@ NativeOperationAvailability probe_cudss(NativeProviderSession &providers) {
   }
 }
 
+NativeOperationAvailability probe_cudss(NativeProviderSession &providers) {
+  return probe_cudss_mode(providers, true);
+}
+
+NativeOperationAvailability probe_transaction(
+    NativeProviderSession &providers) {
+  return probe_cudss_mode(providers, false);
+}
+
 void *address(const NativeArrayBinding &array) {
   return reinterpret_cast<void *>(static_cast<uintptr_t>(
       resolve_native_storage_range(Arch::cuda, array.pointer, array.bytes)
           .memory_offset));
 }
 
+// Ordinary plans borrow their CSR pointers. A reconstructed resource owns an
+// immutable private copy until the shared solver and all submissions retire.
+struct TransactionSeed {
+  std::shared_ptr<RuntimeFaultDomain> fault;
+  std::array<void *, 3> buffers{};
+  std::size_t bytes{0};
+  explicit TransactionSeed(std::shared_ptr<RuntimeFaultDomain> fault)
+      : fault(std::move(fault)) {
+  }
+  void copy(const CudssPlanDescription &d) {
+    auto &driver = CUDADriver::get_instance();
+    try {
+      for (std::size_t i = 0; i < buffers.size(); ++i) {
+        driver.malloc(&buffers[i], d.arrays[i].bytes);
+        bytes += d.arrays[i].bytes;
+        driver.memcpy_device_to_device(buffers[i], address(d.arrays[i]),
+                                       d.arrays[i].bytes);
+      }
+    } catch (const BackendRuntimeError &error) {
+      fault->report_backend_error(error, 0);
+      throw;
+    }
+  }
+  ~TransactionSeed() {
+    if (!fault->backend_calls_safe() ||
+        fault->state() == RuntimeLifecycleState::kFinalized)
+      return;
+    try {
+      auto &cuda = CUDAContext::get_instance();
+      auto lock = cuda.get_submission_lock_guard();
+      auto guard = cuda.get_guard();
+      for (auto *buffer : buffers)
+        if (buffer)
+          CUDADriver::get_instance().mem_free(buffer);
+    } catch (const BackendRuntimeError &error) {
+      fault->report_backend_error(error, 0);
+    } catch (...) {
+    }
+  }
+};
+
 class CudaCudssResource final : public CudssPlanResource {
+  // Declaration order keeps the input storage alive through solver destruction.
+  std::shared_ptr<TransactionSeed> seed_;
+
  public:
   CudaCudssResource(NativePreparationContext &context,
-                    CudssPlanDescription description)
-      : CudssPlanResource(std::move(description)), device_(context.device) {
+                    CudssPlanDescription description,
+                    bool transactional = false)
+      : CudssPlanResource(std::move(description), transactional),
+        device_(context.device) {
     const auto &d = description_;
     auto &driver = CUDADriver::get_instance();
     // Sample topology once at preparation, after any producer on other streams.
@@ -169,13 +272,36 @@ class CudaCudssResource final : public CudssPlanResource {
     driver.memcpy_device_to_host(columns.data(), address(d.arrays[1]),
                                  columns.size() * 4);
     validate_native_csr_indices(rows, columns, d.rows);
-    const CudaCudssMatrixView matrix{
-        std::size_t(d.rows),  std::size_t(d.rows),  std::size_t(d.nonzeros),
-        address(d.arrays[0]), address(d.arrays[1]), address(d.arrays[2])};
+    CudaCudssMatrixView matrix{std::size_t(d.rows),     std::size_t(d.rows),
+                               std::size_t(d.nonzeros), address(d.arrays[0]),
+                               address(d.arrays[1]),    address(d.arrays[2])};
+    if (transactional) {
+      seed_ = std::make_shared<TransactionSeed>(context.fault_domain);
+      seed_->copy(d);
+      matrix.row_offsets = seed_->buffers[0];
+      matrix.column_indices = seed_->buffers[1];
+      matrix.values = seed_->buffers[2];
+      // Ordinary shared plans require a live matrix identity. This immutable
+      // seed's identity is private to its owner, never persisted in an artifact.
+      matrix.matrix_id = reinterpret_cast<std::uintptr_t>(seed_.get());
+      matrix.pattern_version = 1;
+    }
     plan = make_cuda_cudss_plan(
         matrix, d.matrix_type, d.matrix_view,
         context.providers.runtime(cuda_cudss_provider_definition()),
-        context.fault_domain, {d.reordering, d.solve_algorithm}, true);
+        context.fault_domain, {d.reordering, d.solve_algorithm},
+        !transactional);
+    if (transactional) {
+      try {
+        plan->analyze(matrix);
+        driver.stream_synchronize(nullptr);
+      } catch (const BackendRuntimeError &error) {
+        context.fault_domain->report_backend_error(error, 0);
+        throw;
+      }
+      workspace_bytes_ = seed_->bytes;  // Vendor allocations remain opaque.
+      return;
+    }
     plan->claim_graph_phase(d.phase);
     // Includes the private seed snapshot. Capture parameter storage is
     // accounted separately by FixedGraph; the vendor's physical pool residency
@@ -245,8 +371,59 @@ class CudaCudssGroup final : public NativeOperation {
   std::shared_ptr<CudaGraphCaptureResources> resources_;
 };
 
+class CudaCudssTransaction final : public NativeOperation {
+ public:
+  CudaCudssTransaction(std::shared_ptr<CudaCudssResource> resource,
+                       const CudssRefactorSolveOperation &op)
+      : resource_(std::move(resource)),
+        values_(address(op.values)),
+        rhs_(address(op.rhs)),
+        output_(address(op.output)) {
+    if (!resource_ || !resource_->transactional())
+      throw std::invalid_argument("cuDSS requires a native transaction owner");
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return resource_->device();
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  NativeOperationMode execution_mode() const override {
+    return NativeOperationMode::cuda_ordered;
+  }
+  void validate_recording(NativeRecordingState &state) const override {
+    auto &used = state.provider_state<bool>(resource_.get());
+    if (used)
+      throw std::invalid_argument(
+          "cuDSS transaction owner permits one in-flight invocation; use "
+          "separate owners or a captured RHS group");
+    used = true;
+  }
+  std::shared_ptr<CudaProviderCompletionResource> cuda_ordered_resource()
+      const override {
+    return resource_->plan;
+  }
+  void reserve_cuda_ordered() override {
+    resource_->plan->reserve_refactor_solve();
+  }
+  void run_cuda_ordered(void *stream) override {
+    if (stream)
+      throw std::invalid_argument(
+          "Ordinary cuDSS transactions use the runtime stream");
+    resource_->plan->execute_reserved_refactor_solve(values_, rhs_, output_);
+  }
+
+ private:
+  std::shared_ptr<CudaCudssResource> resource_;
+  void *values_, *rhs_, *output_;
+};
+
 std::shared_ptr<NativeResource> prepare_plan(NativePreparationContext &context,
-                                             const CudssPlanDescription &d) {
+                                             const CudssPlanDescription &d,
+                                             bool transactional) {
   if (!context.fault_domain ||
       !dynamic_cast<cuda::CudaDevice *>(&context.device))
     throw std::invalid_argument(
@@ -255,7 +432,7 @@ std::shared_ptr<NativeResource> prepare_plan(NativePreparationContext &context,
   auto lock = cuda.get_submission_lock_guard();
   auto guard = cuda.get_guard();
   try {
-    return std::make_shared<CudaCudssResource>(context, d);
+    return std::make_shared<CudaCudssResource>(context, d, transactional);
   } catch (const BackendRuntimeError &error) {
     context.fault_domain->report_backend_error(error, 0);
     throw;
@@ -271,33 +448,43 @@ void register_cudss_operations(NativeOperationRegistry &registry) {
       "cudss", "plan_f32", {"row_offsets", "column_indices", "values"},
       [](const liong::json::JsonValue &p)
           -> NativeOperationRegistry::Binder<CudssPlanDescription> {
-        using namespace operation_json;
-        fields(p, {"rows", "nonzeros", "matrix_type", "matrix_view", "phase",
-                   "reordering", "solve"});
-        CudssPlanDescription d;
-        d.rows = integer(p["rows"]);
-        d.nonzeros = integer(p["nonzeros"]);
-        d.matrix_type = option(p, "matrix_type",
-                               {{"general", 0}, {"symmetric", 1}, {"spd", 3}});
-        d.matrix_view =
-            option(p, "matrix_view", {{"full", 0}, {"lower", 1}, {"upper", 2}});
-        d.phase =
-            option(p, "phase",
-                   {{"solve", 0}, {"factor_solve", 4}, {"refactor_solve", 8}});
-        d.reordering = option(p, "reordering",
-                              {{"default", 0},
-                               {"amd", 1},
-                               {"nested_dissection", 2},
-                               {"natural", 3}});
-        d.solve_algorithm =
-            option(p, "solve", {{"default", 0}, {"general", 1}});
-        validate_policy(d);
+        const auto d = decode_plan(p, false);
         return [d](const NativeOperationBindings &b) {
           auto bound = d;
           bound.arrays = {b.at("row_offsets").array(),
                           b.at("column_indices").array(),
                           b.at("values").array()};
           return bound;
+        };
+      });
+  registry.define<CudssTransactionPlanDescription>(validate_plan,
+                                                   NativeObjectKind::resource);
+  registry.register_schema<CudssTransactionPlanDescription>(
+      "cudss", "transaction_plan_f32",
+      {"row_offsets", "column_indices", "values"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<CudssTransactionPlanDescription> {
+        const auto d = decode_plan(p, true);
+        return [d](const NativeOperationBindings &b) {
+          CudssTransactionPlanDescription bound;
+          static_cast<CudssPlanDescription &>(bound) = d;
+          bound.arrays = {b.at("row_offsets").array(),
+                          b.at("column_indices").array(),
+                          b.at("values").array()};
+          return bound;
+        };
+      });
+  registry.define<CudssRefactorSolveOperation>(validate_transaction);
+  registry.register_schema<CudssRefactorSolveOperation>(
+      "cudss", "refactor_solve_f32", {"plan", "values", "rhs", "output"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<CudssRefactorSolveOperation> {
+        operation_json::fields(p, {});
+        return [](const NativeOperationBindings &b) {
+          return CudssRefactorSolveOperation{
+              b.at("plan").resource<CudssPlanResource>(),
+              b.at("values").array(), b.at("rhs").array(),
+              b.at("output").array()};
         };
       });
   registry.define<CudssSolveGroupOperation>(validate_group);
@@ -325,7 +512,25 @@ void register_cudss_operations(NativeOperationRegistry &registry) {
       NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}});
 #ifdef TI_WITH_CUDA
   registry.register_context_factory<CudssPlanDescription>(
-      Arch::cuda, NativeOperationMode::cuda_capture, prepare_plan, probe_cudss);
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](NativePreparationContext &context, const CudssPlanDescription &d) {
+        return prepare_plan(context, d, false);
+      },
+      probe_cudss);
+  registry.register_context_factory<CudssTransactionPlanDescription>(
+      Arch::cuda, NativeOperationMode::cuda_ordered,
+      [](NativePreparationContext &context,
+         const CudssTransactionPlanDescription &d) {
+        return prepare_plan(context, d, true);
+      },
+      probe_transaction);
+  registry.register_context_factory<CudssRefactorSolveOperation>(
+      Arch::cuda, NativeOperationMode::cuda_ordered,
+      [](NativePreparationContext &, const CudssRefactorSolveOperation &op) {
+        return std::make_shared<CudaCudssTransaction>(
+            std::dynamic_pointer_cast<CudaCudssResource>(op.plan), op);
+      },
+      probe_transaction);
   registry.register_context_factory<CudssSolveGroupOperation>(
       Arch::cuda, NativeOperationMode::cuda_capture,
       [](NativePreparationContext &, const CudssSolveGroupOperation &op) {

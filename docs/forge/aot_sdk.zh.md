@@ -729,7 +729,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 61。
+当前组件须配套 private ABI 62。
 
 计划可以将一次性初始化与重放分开：
 
@@ -780,8 +780,7 @@ stream 的原生宿主动作。前后 CUDA Graph 片段依靠 stream 次序，�
 不同 prepared 实例可识别同一完成事件。动作失败时跳过后段，保留部分提交的资源直到
 退休，并拒绝该实例再次重放。GPU 条件循环体不能包含宿主调用。仅含有序动作的混合图
 报告 `execution_kind="cuda_ordered"`；同时含同步动作则报告 `cuda_mixed`。公共合同
-需要配对 private ABI 61 和单独的 provider 注册，尚未开放普通 cuDSS
-`record_refactor_solve()` 导出。
+于 private ABI 61 引入；普通 cuDSS 事务导出通过下文配对的 ABI 62 组件使用它。
 
 这项组合能力仍需对应 provider 的 schema、资源重建与数值资格，不能代称库全面
 支持 capture。当前 context 的等待语义见 NVIDIA
@@ -1212,7 +1211,25 @@ recipe 顺序。
 未分解、过期、事务在途、仅来自显式值的因子和已关闭 owner 均会被拒绝。
 消费端在冷准备时重建因子，重放复用计划，不在主机查询矩阵。Windows CUDA 已验证
 源计划关闭后的独立/借用消费、不同绑定及真实 kernel 梯度配合显式对称求解伴随。
-普通事务型 `CudssRefactorSolveRecording` 的自动导出仍不支持。
+普通 `CudssPlan.record_refactor_solve()` 也通过相同导出 API 接入，要求配对 private ABI 62。
+其 `cudss/transaction_plan_f32` v1 资源沿用上面的 CSR seed 端口和配置，不接受 `phase`。
+`cudss/refactor_solve_f32` v1 动作参数为空，端口为 `plan`、`values`、`rhs`、`output`，
+报告 `cuda_ordered`：保留普通主机调用的事务语义，与前后 kernel 按 stream 次序执行。
+导出要求分析完成且 pattern 匹配，不要求有效因子。消费端冷准备复制私有 seed 并分析，
+不分解 seed、不写用户输出。每次读取显式 values，无有效因子时做完整 factorization，
+否则做 refactorization，然后 solve。未配置的源计划保留 vendor 默认策略。
+
+源计划可以只有 analysis、持有显式值因子、数值因子过期，或经历过已退休的失败事务；
+在途、未分析、关闭或 pattern 不兼容会被拒绝。三个动作数组必须为紧凑 f32 向量且互不
+重叠。沿用原 owner 的单在途事务合同：冷准备拒绝同次提交重复使用该 owner，实际完成
+事件退休后才能复用。独立 owner 可组合前向和伴随；同次分解求解多 RHS 可用上面的
+captured group。同一源 owner 混合冻结 solve 和事务导出会明确拒绝，不静默拆成独立资源。
+
+provider 失败后保留部分提交到完成、跳过后段，并使该 prepared 执行失效；退休后重新
+prepare 才能重试，失败因子不可复用。GPU 条件体仍要求 captured 动作。
+`workspace_bytes` 计入私有 CSR seed，vendor 因子分配/物理驻留仍未知。Windows CUDA
+已测仅分析的种子、活值更新、双绑定、部分失败及恢复、独立/借用退休、真实后续
+`kernel.grad` 与显式对称 RHS 伴随；不增加 provider 自动求导或普通 cuDSS 的 GPU 循环资格。
 
 Graph-owned cuDSS 组也可放入 CUDA `Sequential` 循环体，并随已选单层 conditional
 循环自动导出。公共捕获协议要求显式声明条件体资格，其他 provider 命令默认仍不具备

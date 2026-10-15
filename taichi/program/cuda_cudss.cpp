@@ -234,7 +234,8 @@ CudaCudssPlanSnapshot snapshot_cuda_cudss_graph_seed(Program &program,
 
 CudaCudssPlanSnapshot Program::snapshot_cuda_cudss_solve_seed(
     std::uint64_t handle,
-    SparseMatrix *matrix) {
+    SparseMatrix *matrix,
+    bool transactional) {
   TI_ERROR_IF(!matrix || compile_config().arch != Arch::cuda,
               "cuDSS solve export requires a CUDA matrix and Program.");
   // Numeric updates can enter through the matrix gate first. Acquire all
@@ -256,8 +257,9 @@ CudaCudssPlanSnapshot Program::snapshot_cuda_cudss_solve_seed(
                 "cuDSS live solve owner is stale or closed.");
     plan = found->second;
   }
-  return plan->snapshot_solve_seed(
-      cudss_matrix_view(require_cudss_matrix(matrix, this)));
+  const auto view = cudss_matrix_view(require_cudss_matrix(matrix, this));
+  return transactional ? plan->snapshot_refactor_seed(view)
+                       : plan->snapshot_solve_seed(view);
 }
 
 std::uint64_t Program::create_cuda_cudss_plan(
@@ -524,7 +526,8 @@ CudaCudssPlanSnapshot snapshot_cuda_cudss_graph_seed(Program &, std::uint64_t) {
 }
 
 CudaCudssPlanSnapshot Program::snapshot_cuda_cudss_solve_seed(std::uint64_t,
-                                                              SparseMatrix *) {
+                                                              SparseMatrix *,
+                                                              bool) {
   TI_ERROR("cuDSS solve snapshots require the CUDA backend.");
 }
 
