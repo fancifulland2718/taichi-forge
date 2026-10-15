@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Ordinary asynchronous Vulkan nested Graph submissions no longer generate
+  unused loop-observation shaders, trace tables, host-readable buffers or
+  readback copies. Predicate gates and indirect dispatch retain their semantics.
+  Diagnostic paths still generate observations on demand, with distinct cache
+  identities. The shared fixed recorder is available internally; public export
+  of nested Vulkan AOT plans remains pending.
+
 - Prepared AOT executions and native resource preparation now share their runtime's
   fault state; borrowed runtimes retain the JIT owner's state without finalizing it
   on close. Fixed CUDA graphs report capture, launch and retirement errors, reject

@@ -346,11 +346,19 @@ TEST(CGraphAotTest, VulkanFixedNestedControl) {
           dispatches, invalid, {module, frame.storage}));
       invalid = control;
       invalid.outer_max_iterations = std::numeric_limits<std::uint32_t>::max();
+      invalid.inner_controls[0].inner_max_iterations =
+          std::numeric_limits<std::uint32_t>::max();
+      invalid.inner_controls[0].inner_chunk_size =
+          invalid.inner_controls[0].inner_max_iterations;
       EXPECT_ANY_THROW(runtime.prepare_fixed_nested_structured_graph(
           dispatches, invalid, {module, frame.storage}));
       const auto before = device->queue_submission_snapshot();
       frame.loop = runtime.prepare_fixed_nested_structured_graph(
           dispatches, control, {module, frame.storage});
+      // Two serial dispatches per inner body: only their indirect packets and
+      // the stable outer predicate remain, independent of iteration budgets.
+      EXPECT_EQ(frame.loop->snapshot_stats().known_persistent_control_bytes,
+                (shape[2] * 2 * 3 + 1) * sizeof(std::uint32_t));
       append("adjoint", 0);
       frame.finish = runtime.prepare_fixed_graph({{dispatches.back(), {}}},
                                                  {module, frame.storage});
@@ -359,11 +367,37 @@ TEST(CGraphAotTest, VulkanFixedNestedControl) {
       runtime.synchronize();
       EXPECT_EQ(read(frame), initial);
       if (shape == (std::array<int, 3>{3, 4, 2}) && &frame == &frames.front()) {
+        const std::vector<gfx::GfxRuntime::GraphDispatch> nested_dispatches(
+            dispatches.begin(), dispatches.end() - 1);
+        auto dynamic = runtime.register_graph_replay(1);
+        for (bool observe : {false, true, false, true}) {
+          auto input = initial;
+          input[4] = 1;
+          input[12] = 1;
+          input[20] = 1;
+          write(frame, input);
+          gfx::GfxRuntime::GraphNestedStructuredResult result;
+          ASSERT_TRUE(runtime.try_launch_graph(
+              nested_dispatches, dynamic->replay_key(), nullptr, nullptr,
+              nullptr, &control, observe ? &result : nullptr));
+          runtime.synchronize();
+          const auto output = read(frame);
+          EXPECT_EQ(output[1], 1);
+          EXPECT_EQ(output[3], 12);
+          EXPECT_EQ(output[7], 2);
+          if (observe) {
+            EXPECT_TRUE(result.submitted);
+            EXPECT_EQ(result.outer_logical_iterations, 1);
+            EXPECT_EQ(result.outer_initial_counter, 0);
+            EXPECT_EQ(result.outer_final_counter, 1);
+            EXPECT_EQ(result.inner_logical_iterations,
+                      (std::vector<std::uint32_t>{1, 1}));
+          }
+        }
+        write(frame, initial);
         runtime.begin_submission_batch();
         frame.finish->launch_prepared();
         const auto pending = device->queue_submission_snapshot();
-        const std::vector<gfx::GfxRuntime::GraphDispatch> nested_dispatches(
-            dispatches.begin(), dispatches.end() - 1);
         auto additional = runtime.prepare_fixed_nested_structured_graph(
             nested_dispatches, control, {module, frame.storage});
         EXPECT_EQ(device->queue_submission_snapshot().queue_submit_calls,
