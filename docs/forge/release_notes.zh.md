@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- cuDSS Graph 内存报告将已分配的计划快照和 vendor 载荷计入驻留请求字节；驱动
+  私有存储仍保留大小未知，不再错误地报告“驻留 0 字节且统计完整”。
+
 - 普通 Graph 和固定代次 `from_graph` 可用 `snapshot_state=True` 自动导出纯 dense
   Field 初值，按实际 AOT 入口依赖与 provider 数组一起采样。Field 由加载模块共享，
   provider workspace 仍由每份 prepared 独立持有；重录制不重置 Field。三后端验证

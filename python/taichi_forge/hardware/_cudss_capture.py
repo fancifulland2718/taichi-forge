@@ -217,6 +217,7 @@ class CudssCaptureRecording(BackendCommandRecording):
                     True,
                     "provider_generation",
                     "provider",
+                    resident=True,
                 ),
                 HardwareMemoryComponent(
                     "vendor_requested_payload",
@@ -224,6 +225,7 @@ class CudssCaptureRecording(BackendCommandRecording):
                     True,
                     "provider_generation",
                     "provider",
+                    resident=True,
                 ),
                 HardwareMemoryComponent(
                     "driver_pool_backing_and_opaque_state",
@@ -231,6 +233,7 @@ class CudssCaptureRecording(BackendCommandRecording):
                     False,
                     "provider_generation",
                     "driver",
+                    resident=True,
                 ),
             ),
             lifecycle_state="ready",

@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- cuDSS Graph memory reports count already allocated plan snapshots and vendor
+  payloads as resident requested bytes. Opaque driver storage remains unknown,
+  so the report no longer presents a complete zero-byte resident footprint.
+
 - Ordinary Graphs and pinned `from_graph` operators can automatically export pure
   dense Field initial state with `snapshot_state=True`, sampling actual AOT root
   dependencies together with provider arrays. Fields are shared by a loaded

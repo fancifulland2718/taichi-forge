@@ -161,6 +161,14 @@ def test_cudss_capture_two_binding_frames_and_memory_owner(monkeypatch):
             "driver_pool_backing_and_opaque_state",
         ]
         assert memory["components"][-1]["requested_bytes"] is None
+        # The Graph-owned plan already allocated its snapshot and vendor
+        # payload. Unknown driver backing must not turn into a complete zero.
+        allocation = plan._configuration_report()["graph_allocator"]
+        assert all(component["resident"] for component in memory["components"])
+        assert memory["known_resident_requested_bytes"] == allocation["live_bytes"] > 0
+        assert memory["known_capacity_requested_bytes"] == allocation["live_bytes"]
+        assert memory["opaque_component_count"] == 1
+        assert not memory["resident_requested_bytes_complete"]
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
