@@ -5584,9 +5584,11 @@ void export_lang(py::module &m) {
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)
       .def("add_graph", &AotModuleBuilder::add_graph)
       .def("_used_snode_tree_ids", &AotModuleBuilder::used_snode_tree_ids)
+      .def("_add_root_storage_view", &AotModuleBuilder::add_root_storage_view)
       .def("_add_initial_root_data",
            [](AotModuleBuilder *builder,
-              const std::vector<std::tuple<int, uint64_t, std::string>> &entries) {
+              const std::vector<std::tuple<int, uint64_t, std::string>>
+                  &entries) {
              std::vector<aot::InitialRootData> data;
              for (const auto &[tree, size, key] : entries) {
                data.push_back({tree, size, key});

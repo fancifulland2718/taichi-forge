@@ -649,6 +649,32 @@ kernel、copy、fill 和合格的原生操作使用所选范围。显式梯度�
 退休。视图本身不增加设备分配或重放复制。需配套 private ABI 46。此公共资源能力与
 operator derived view 的自动导出分别接入。
 
+CPU/CUDA/Vulkan 的连续 dense Field 可将同一份模块存储提供给 kernel 与原生执行操作：
+
+```python
+module.add_field("keys", keys, as_array=True)
+module.add_field("order", order, as_array=True)
+module.add_execution_plan("sort_fields", aot.ExecutionPlan(
+    [{"kind": "sort", "keys": "keys", "values": "order"}],
+    resources=[{"kind": "module_array", "name": name, "view": name}
+               for name in ("keys", "order")],
+))
+```
+
+`as_array` 默认关闭。显式启用后，标量 dtype、形状、tensor element shape 与字节偏移
+冻结在 `root_storage.json`，tree ID 随产物重定位。`module_array` 使用该布局，
+不接受生产进程指针，也不复制 Field。LLVM 要求可重定位的纯 dense 树；非连续/带跨步
+Field 明确拒绝，已导出的视图名称不能重绑定到其他 Field。普通 Field 导出行为不变。
+此选项不采样 Field 初值；仍需已有 dense-state 快照或显式初始化。
+
+模块数组可作为 `ndarray_view` 的父对象、extent 形状来源或显式 ndarray 梯度绑定。
+别名不增加 `resource_bytes` 设备存储，模块 root 单独计量。准备时检查名称、布局与
+root 边界，重放使用已绑定存储。关闭 preparation 只释放其别名；关闭模块先退休相关
+录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
+Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
+借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
+需配套 private ABI 56。
+
 计划可以将一次性初始化与重放分开：
 
 ```python

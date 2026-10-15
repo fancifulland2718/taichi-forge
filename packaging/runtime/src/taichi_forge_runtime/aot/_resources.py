@@ -52,6 +52,8 @@ def external_arguments(resources, gradients, arguments):
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
         elif kind == "ndarray_view":
             required, optional = {"kind", "name", "array", "offset", "shape"}, set()
+        elif kind == "module_array":
+            required, optional = {"kind", "name", "view"}, set()
         elif kind == "scalar":
             required, optional = {"kind", "name", "dtype", "bits"}, set()
         elif kind == "native":
@@ -62,7 +64,7 @@ def external_arguments(resources, gradients, arguments):
             raise ValueError(f"Invalid {kind} resource fields")
         name = resource["name"]
         _name(name)
-        if kind not in ("native", "ndarray_view"):
+        if kind not in ("native", "ndarray_view", "module_array"):
             _name(resource["dtype"])
         if name in by_name:
             raise ValueError(f"Duplicate execution resource: {name}")
@@ -70,6 +72,8 @@ def external_arguments(resources, gradients, arguments):
         refs = references[name] = []
         if kind == "native":
             refs.extend(native_references(resource))
+        elif kind == "module_array":
+            _name(resource["view"])
         elif kind in ("ndarray", "ndarray_view"):
             if kind == "ndarray_view":
                 _name(resource["array"])
@@ -122,7 +126,7 @@ def external_arguments(resources, gradients, arguments):
     for name, refs in references.items():
         for parent in refs:
             if parent in by_name:
-                if by_name[name]["kind"] != "native" and by_name[parent]["kind"] not in ("ndarray", "ndarray_view"):
+                if by_name[name]["kind"] != "native" and by_name[parent]["kind"] not in ("ndarray", "ndarray_view", "module_array"):
                     raise ValueError(f"Execution shape reference requires an ndarray: {parent}")
                 indegree[name] += 1
                 dependents[parent].append(name)
@@ -139,7 +143,7 @@ def external_arguments(resources, gradients, arguments):
         _name(primal)
         _name(gradient)
         for name in (primal, gradient):
-            if name in by_name and by_name[name]["kind"] not in ("ndarray", "ndarray_view"):
+            if name in by_name and by_name[name]["kind"] not in ("ndarray", "ndarray_view", "module_array"):
                 raise ValueError(f"Execution gradient reference requires an ndarray: {name}")
         arguments.update((primal, gradient))
     pending, seen, external = list(arguments), set(), set()

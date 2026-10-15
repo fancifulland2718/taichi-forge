@@ -66,6 +66,7 @@ class LlvmAotModule final : public aot::Module {
       const std::string &name) override;
 
  protected:
+  RootStorage get_root_storage(int tree_id) override;
   const io::VirtualDir *data_source() const override {
     return directory_.get();
   }
@@ -97,6 +98,7 @@ class LlvmAotModule final : public aot::Module {
   LlvmAotMetadata metadata_;
   std::unordered_map<std::string, std::string> artifact_failures_;
   std::vector<int> snode_tree_ids_;
+  std::vector<std::size_t> root_storage_sizes_;
   std::map<int, int> tree_bindings_;
   std::vector<int> reserved_tree_ids_;
   std::map<int, aot::InitialRootData> initial_root_data_;

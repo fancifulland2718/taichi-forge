@@ -1,12 +1,33 @@
 #include "taichi/aot/module_loader.h"
 #include "taichi/common/virtual_dir.h"
 #include "picosha2.h"
+#include <limits>
 
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #include "taichi/runtime/dx12/aot_module_loader_impl.h"
 
 namespace taichi::lang {
 namespace aot {
+Module::BoundRootStorageView Module::get_root_storage_view(
+    const std::string &name) {
+  if (is_corrupted())
+    throw ArtifactLoadError("Cannot bind storage from an invalid AOT module");
+  const auto found = root_storage_views_.find(name);
+  if (found == root_storage_views_.end())
+    throw std::invalid_argument("Unknown AOT root storage view: " + name);
+  const auto &view = found->second;
+  const auto bytes = view.bytes();
+  auto root = get_root_storage(view.tree_id);
+  if (!root.pointer.device || view.byte_offset > root.bytes ||
+      bytes > root.bytes - view.byte_offset ||
+      view.byte_offset >
+          std::numeric_limits<std::uint64_t>::max() - root.pointer.offset)
+    throw ArtifactLoadError(
+        "AOT root storage view exceeds its module allocation");
+  root.pointer.offset += view.byte_offset;
+  return {view, root.pointer};
+}
+
 namespace {
 
 std::string make_kernel_key(

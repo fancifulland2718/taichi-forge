@@ -41,10 +41,19 @@ struct ExecutionResources {
     std::uint64_t offset{0};
     std::vector<Dimension> shape;
   };
+  struct ModuleArray {
+    std::string view;
+  };
   struct Resource {
     std::string name;
     std::string dtype;
-    std::variant<Array, Extent, NativeOperationDescription, Scalar, View> value;
+    std::variant<Array,
+                 Extent,
+                 NativeOperationDescription,
+                 Scalar,
+                 View,
+                 ModuleArray>
+        value;
   };
 
   std::vector<Resource> declarations;

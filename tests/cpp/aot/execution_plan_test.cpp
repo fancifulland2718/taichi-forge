@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 #include "taichi/aot/execution_plan.h"
+#include "taichi/aot/root_storage.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/common/operation_json.h"
 
@@ -11,6 +12,70 @@ void validate_provider_description(const std::string &document) {
       std::get<ExecutionPlan::Native>(plan.operations.at(0)));
 }
 }  // namespace
+
+TEST(AotRootStorage, PackedLayoutsValidateSizesAndOffsets) {
+  const auto parse = [](const std::string &layout) {
+    return parse_root_storage_views(liong::json::parse_complete(
+        "{\"version\":1,\"views\":{\"values\":" + layout + "}}"));
+  };
+  const auto values = parse(R"({"tree_id":2,"byte_offset":68,"dtype":"f32",
+    "shape":[17],"element_shape":[2]})");
+  const auto &value = values.at("values");
+  EXPECT_EQ(value.tree_id, 2);
+  EXPECT_EQ(value.byte_offset, 68);
+  EXPECT_EQ(value.bytes(), 136);
+  EXPECT_EQ(parse(R"({"tree_id":0,"byte_offset":0,"dtype":"i32",
+    "shape":[],"element_shape":[]})")
+                .at("values")
+                .bytes(),
+            4);
+  EXPECT_EQ(parse(R"({"tree_id":0,"byte_offset":0,"dtype":"f64",
+    "shape":[0],"element_shape":[]})")
+                .at("values")
+                .bytes(),
+            0);
+  for (
+      const auto *layout :
+      {R"({"tree_id":-1,"byte_offset":0,"dtype":"f32","shape":[17],"element_shape":[]})",
+       R"({"tree_id":2147483648,"byte_offset":0,"dtype":"f32","shape":[17],"element_shape":[]})",
+       R"({"tree_id":0,"byte_offset":1,"dtype":"f32","shape":[17],"element_shape":[]})",
+       R"({"tree_id":0,"byte_offset":0,"dtype":"bad","shape":[17],"element_shape":[]})",
+       R"({"tree_id":0,"byte_offset":0,"dtype":"f32","shape":[true],"element_shape":[]})",
+       R"({"tree_id":0,"byte_offset":0,"dtype":"f32","shape":[17],"element_shape":[0]})",
+       R"({"tree_id":0,"byte_offset":0,"dtype":"f64","shape":[4294967295,4294967295],"element_shape":[]})",
+       R"({"tree_id":0,"byte_offset":0,"dtype":"f32","shape":[4294967296],"element_shape":[]})",
+       R"({"tree_id":0,"byte_offset":0,"dtype":"f32","shape":[17],"element_shape":[],"address":123})"})
+    EXPECT_THROW(parse(layout), std::invalid_argument) << layout;
+}
+
+TEST(ExecutionPlan, ModuleArraysSupplyStorageShapesAndGradients) {
+  const auto plan = ExecutionPlan::parse(R"({"version":1,
+    "resources":[
+      {"kind":"ndarray_view","name":"tail","array":"values","offset":2,"shape":[15]},
+      {"kind":"module_array","name":"values","view":"exported_values"},
+      {"kind":"module_array","name":"gradient","view":"exported_gradient"},
+      {"kind":"module_array","name":"metadata","view":"exported_shape"},
+      {"kind":"extent","name":"count","dtype":"i32","array":"metadata","axis":0}],
+    "gradients":{"values":"gradient"},
+    "operations":[{"kind":"kernel","entry":"k","arguments":["values","tail","count"]}]})");
+  EXPECT_TRUE(plan.arguments.empty());
+  EXPECT_EQ(plan.resources.materialize,
+            (std::vector<bool>{true, true, true, false, true}));
+  EXPECT_EQ(std::get<ExecutionResources::ModuleArray>(
+                plan.resources.declarations[1].value)
+                .view,
+            "exported_values");
+  for (const auto *resource :
+       {R"({"kind":"module_array","name":"values","view":""})",
+        R"({"kind":"module_array","name":"values","view":123})",
+        R"({"kind":"module_array","name":"values","view":"x","dtype":"f32"})"})
+    EXPECT_THROW(
+        ExecutionPlan::parse(
+            std::string(
+                R"({"version":1,"operations":[{"kind":"copy","source":"values","destination":"out"}],"resources":[)") +
+            resource + "]}"),
+        std::invalid_argument);
+}
 
 TEST(ExecutionPlan, PersistentControlKeepsNestedCodeAndRuntimeClosure) {
   const auto plan = ExecutionPlan::parse(R"({"version":3,

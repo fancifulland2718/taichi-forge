@@ -120,6 +120,9 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   }
   TI_ERROR_IF(!initial_root_data_.empty() && !relocatable,
               "AOT initial root state requires relocatable dense trees.");
+  TI_ERROR_IF(!root_storage_views_.empty() && !relocatable,
+              "AOT root storage views require relocatable dense trees.");
+  aot::write_root_storage_views(root_storage_views_, tree_mapping, output_dir);
   for (const auto &[producer, entry] : initial_root_data_) {
     const auto field = cache_.fields.find(producer);
     TI_ERROR_IF(

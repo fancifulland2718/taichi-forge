@@ -162,6 +162,9 @@ class Runtime {
     // Logical offset within the RHI allocation, independent of an imported
     // VkDeviceMemory binding offset. Used by internal execution-plan views.
     uint64_t byte_offset{0};
+    // Internal aliases can instead be owned by their enclosing module. That
+    // lifetime is ordered by prepared retirement, not by a placeholder lease.
+    bool owns_allocation{true};
   };
 
  private:
@@ -218,7 +221,8 @@ class Runtime {
                            bool release_on_failure = true,
                            uint64_t base_offset = 0,
                            std::shared_ptr<void> storage_owner = {},
-                           uint64_t byte_offset = 0);
+                           uint64_t byte_offset = 0,
+                           bool owns_allocation = true);
   MemoryAllocation get_memory(TiMemory memory) const;
   static std::uintptr_t new_handle_token();
   TiKernel register_kernel(KernelBinding binding);

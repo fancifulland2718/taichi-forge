@@ -54,15 +54,26 @@ TiMemory ExecutionResourceStorage::view(TiMemory parent,
       offset > std::numeric_limits<uint64_t>::max() - source.base_offset ||
       offset > std::numeric_limits<uint64_t>::max() - source.byte_offset)
     throw MemoryBindingError("Execution view exceeds its parent storage");
-  // The nonempty owner marks this handle as a non-owning alias. Borrowed JIT
-  // storage keeps its real lease too. ExecutionPlan's transitive dependency
-  // closure is responsible for retaining ordinary owned/external parents.
-  auto owner = source.storage_owner;
-  if (!owner)
-    owner = std::make_shared<int>(0);
+  // Borrowed JIT storage keeps its real lease. The execution's transitive
+  // closure retains ordinary parents; module aliases share the module owner.
   auto memory = runtime_.register_memory(
       source.allocation, bytes, false, source.base_offset + offset,
-      std::move(owner), source.byte_offset + offset);
+      source.storage_owner, source.byte_offset + offset, false);
+  try {
+    sizes_.emplace(memory, 0);
+    memories_.push_back(memory);
+  } catch (...) {
+    sizes_.erase(memory);
+    runtime_.free_memory(memory);
+    throw;
+  }
+  return memory;
+}
+
+TiMemory ExecutionResourceStorage::module_view(taichi::lang::DevicePtr pointer,
+                                               uint64_t bytes) {
+  auto memory = runtime_.register_memory(pointer, bytes, false, pointer.offset,
+                                         {}, pointer.offset, false);
   try {
     sizes_.emplace(memory, 0);
     memories_.push_back(memory);
@@ -119,6 +130,7 @@ ExecutionResourceBindings bind_execution_resources(
   result.arguments.resize(resources.order.size());
   std::vector<uint64_t> sizes(resources.order.size());
   std::vector<uint64_t> view_offsets(resources.order.size());
+  std::vector<taichi::lang::DevicePtr> module_pointers(resources.order.size());
   std::map<std::string, std::vector<std::uint8_t>> payloads;
   std::unordered_set<const TiArgument *> local, validated_sources;
   auto array_source = [&](const std::string &name) -> const TiNdArray & {
@@ -148,8 +160,22 @@ ExecutionResourceBindings bind_execution_resources(
       continue;
     auto &argument = result.arguments[pos];
     const auto *view = std::get_if<Recipes::View>(&recipe.value);
+    auto dtype_name = recipe.dtype;
+    Recipes::Array module_array;
+    const auto *array_description = std::get_if<Recipes::Array>(&recipe.value);
+    if (const auto *source = std::get_if<Recipes::ModuleArray>(&recipe.value)) {
+      const auto bound = module.get_root_storage_view(source->view);
+      dtype_name = bound.layout.dtype;
+      for (const auto extent : bound.layout.shape)
+        module_array.shape.emplace_back(extent);
+      module_array.element_shape = bound.layout.element_shape;
+      array_description = &module_array;
+      module_pointers[pos] = bound.pointer;
+      if (bound.pointer.device != &runtime.get())
+        throw MemoryBindingError("Module storage belongs to another device");
+    }
     const auto dtype =
-        view ? array_source(view->array).elem_type : scalar_type(recipe.dtype);
+        view ? array_source(view->array).elem_type : scalar_type(dtype_name);
     if (view) {
       argument.type = TI_ARGUMENT_TYPE_NDARRAY;
       auto &array = argument.value.ndarray;
@@ -174,7 +200,7 @@ ExecutionResourceBindings bind_execution_resources(
       view_offsets[pos] = view->offset * parent.element_bytes;
       if (sizes[pos] > parent.bytes - view_offsets[pos])
         throw MemoryBindingError("Execution view shape exceeds parent shape");
-    } else if (const auto *desc = std::get_if<Recipes::Array>(&recipe.value)) {
+    } else if (const auto *desc = array_description) {
       argument.type = TI_ARGUMENT_TYPE_NDARRAY;
       auto &array = argument.value.ndarray;
       constexpr auto rank_capacity =
@@ -291,6 +317,15 @@ ExecutionResourceBindings bind_execution_resources(
   std::vector<std::size_t> upload_sizes;
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     auto &argument = result.arguments[pos];
+    if (module_pointers[pos].device) {
+      if (resources.materialize[resources.order[pos]]) {
+        if (!result.storage)
+          result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
+        argument.value.ndarray.memory =
+            result.storage->module_view(module_pointers[pos], sizes[pos]);
+      }
+      continue;
+    }
     if (const auto *view = std::get_if<Recipes::View>(
             &resources.declarations[resources.order[pos]].value)) {
       if (resources.materialize[resources.order[pos]]) {

@@ -301,6 +301,7 @@ class Module:
         self._initial_root_data = {}
         self._graph_export_failed = False
         self._fields = {}
+        self._array_fields = set()
         rtm = impl.get_runtime()
         rtm._finalize_root_fb_for_aot()
         self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps)
@@ -310,12 +311,15 @@ class Module:
             self._aot_builder.set_compile_options(options)
         self._content = []
 
-    def add_field(self, name, field):
+    def add_field(self, name, field, *, as_array=False):
         """Add a taichi field to the AOT module.
 
         Args:
           name: name of taichi field
           field: taichi field
+          as_array: Also expose packed dense storage as a named ``module_array``
+            execution resource on CPU/CUDA/Vulkan. The view shares module state;
+            LLVM exports require relocatable dense trees. Defaults to False.
 
         Example::
 
@@ -327,6 +331,24 @@ class Module:
             >>>
             >>> # Must add in sequence
         """
+        storage = None
+        if not isinstance(as_array, bool):
+            raise TypeError("AOT as_array must be a bool")
+        if as_array or name in self._array_fields:
+            if not isinstance(name, str) or not name or "\0" in name:
+                raise ValueError("AOT module array names must be nonempty strings without NUL")
+            if name in self._fields and self._fields[name] is not field:
+                raise ValueError("AOT module array names cannot be rebound to another Field")
+        if as_array:
+            if self._arch not in (_ti_core.x64, _ti_core.arm64, _ti_core.cuda, _ti_core.vulkan):
+                raise ValueError("AOT module array views require CPU, CUDA or Vulkan")
+            from taichi_forge.lang._storage_view import describe_storage
+
+            storage = describe_storage(field)
+            if not storage.supported or not all(
+                storage.properties[key] for key in ("compact_contiguous", "ndarray_abi_compatible", "aligned")
+            ):
+                raise ValueError("AOT module array views require aligned packed dense Field storage")
         is_scalar = True
         self._fields[name] = field
         column_num = 1
@@ -346,6 +368,9 @@ class Module:
             row_num,
             column_num,
         )
+        if storage is not None:
+            self._aot_builder._add_root_storage_view(name, storage.descriptor)
+            self._array_fields.add(name)
 
     def _check_kernel_export(self, name, compiled):
         previous = self._exported_kernels.get(name)

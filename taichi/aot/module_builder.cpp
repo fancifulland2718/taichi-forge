@@ -3,8 +3,40 @@
 #include "taichi/program/kernel.h"
 
 #include <set>
+#include <limits>
 
 namespace taichi::lang {
+
+void AotModuleBuilder::add_root_storage_view(
+    const std::string &name,
+    const storage::DenseStorageDescriptor &descriptor) {
+  const auto &properties = descriptor.properties();
+  if (name.empty() || name.find('\0') != std::string::npos ||
+      descriptor.owner().kind != storage::StorageOwnerKind::kSNodePayload ||
+      !properties.compact_contiguous || !properties.ndarray_abi_compatible ||
+      !properties.aligned || descriptor.byte_offset() < 0)
+    throw std::invalid_argument(
+        "AOT root storage requires a named packed dense Field view");
+  aot::RootStorageView view;
+  view.tree_id = descriptor.owner().tree.tree_id;
+  view.byte_offset = static_cast<std::uint64_t>(descriptor.byte_offset());
+  view.dtype = descriptor.scalar_type()->to_string();
+  const auto copy_shape = [](const auto &source, auto &destination) {
+    for (const auto size : source) {
+      if (size < 0 || size > std::numeric_limits<std::uint32_t>::max())
+        throw std::invalid_argument(
+            "AOT root storage dimensions must fit uint32");
+      destination.push_back(static_cast<std::uint32_t>(size));
+    }
+  };
+  copy_shape(descriptor.index_shape(), view.shape);
+  copy_shape(descriptor.element_shape(), view.element_shape);
+  view.bytes();
+  const auto [found, inserted] = root_storage_views_.emplace(name, view);
+  if (!inserted && !(found->second == view))
+    throw std::invalid_argument(
+        "AOT root storage name has conflicting layouts");
+}
 
 void AotModuleBuilder::add(const std::string &identifier, Kernel *kernel) {
   compile_options_frozen_ = true;

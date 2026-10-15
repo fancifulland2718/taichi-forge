@@ -162,7 +162,7 @@ void Runtime::free_memory(TiMemory devmem) {
   if (found == memories_.end()) {
     throw MemoryBindingError("Memory is not a live allocation of this runtime");
   }
-  if (!found->second.storage_owner)
+  if (found->second.owns_allocation)
     this->get().dealloc_memory(found->second.allocation);
   memories_.erase(found);
 }
@@ -172,20 +172,24 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
                                   bool release_on_failure,
                                   uint64_t base_offset,
                                   std::shared_ptr<void> storage_owner,
-                                  uint64_t byte_offset) {
+                                  uint64_t byte_offset,
+                                  bool owns_allocation) {
   TI_ASSERT(allocation.device == &get());
   try {
     // Never reuse a token, including across runtime destruction. Refuse the
     // machine's exhausted handle space instead of wrapping into a live token.
     const auto handle = reinterpret_cast<TiMemory>(new_handle_token());
     std::lock_guard<std::mutex> lock(memory_mutex_);
-    memories_.emplace(handle, MemoryAllocation{allocation, size, base_offset,
-                                               storage_owner, byte_offset});
+    memories_.emplace(
+        handle,
+        MemoryAllocation{allocation, size, base_offset, storage_owner,
+                         byte_offset, owns_allocation && !storage_owner});
     return handle;
   } catch (...) {
     // RHI import paths allocate their own wrapper too. Retire that wrapper;
     // the backend retains ownership rules for the external storage itself.
-    if (release_on_failure && !storage_owner) get().dealloc_memory(allocation);
+    if (release_on_failure && owns_allocation && !storage_owner)
+      get().dealloc_memory(allocation);
     throw;
   }
 }

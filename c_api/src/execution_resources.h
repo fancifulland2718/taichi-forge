@@ -18,6 +18,9 @@ class ExecutionResourceStorage {
   TiMemory allocate(uint64_t bytes);
   // Non-owning aliases; the execution resource closure retains their parents.
   TiMemory view(TiMemory parent, uint64_t offset, uint64_t bytes);
+  // The enclosing prepared execution belongs to this same module and retires
+  // before module roots. Only the alias handle is owned by this storage set.
+  TiMemory module_view(taichi::lang::DevicePtr pointer, uint64_t bytes);
   uint64_t bytes() const {
     return bytes_;
   }

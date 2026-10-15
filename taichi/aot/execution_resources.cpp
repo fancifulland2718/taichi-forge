@@ -33,7 +33,9 @@ std::vector<ExecutionResources::Dimension> shape(const JsonValue &value) {
 }
 bool is_array(const ExecutionResources::Resource &resource) {
   return std::holds_alternative<ExecutionResources::Array>(resource.value) ||
-         std::holds_alternative<ExecutionResources::View>(resource.value);
+         std::holds_alternative<ExecutionResources::View>(resource.value) ||
+         std::holds_alternative<ExecutionResources::ModuleArray>(
+             resource.value);
 }
 ExecutionResources::Scalar scalar(const std::string &dtype,
                                   const JsonValue &value) {
@@ -109,6 +111,12 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
         fields(value, {"kind", "name", "array", "offset", "shape"});
         resource.value = View{name(value["array"]), integer(value["offset"]),
                               shape(value["shape"])};
+        result.declarations.push_back(std::move(resource));
+        continue;
+      }
+      if (kind == "module_array") {
+        fields(value, {"kind", "name", "view"});
+        resource.value = ModuleArray{name(value["view"])};
         result.declarations.push_back(std::move(resource));
         continue;
       }

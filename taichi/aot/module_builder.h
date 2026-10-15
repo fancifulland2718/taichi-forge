@@ -10,6 +10,8 @@
 #include "taichi/aot/module_data.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/initial_root_data.h"
+#include "taichi/aot/root_storage.h"
+#include "taichi/program/storage_view.h"
 #include "taichi/program/kernel_compile_request.h"
 
 namespace taichi::lang {
@@ -55,6 +57,8 @@ class AotModuleBuilder {
 
   // Producer IDs are relocated by dump(). Reject conflicting re-snapshots.
   void add_initial_root_data(const std::vector<aot::InitialRootData> &entries);
+  void add_root_storage_view(const std::string &name,
+                             const storage::DenseStorageDescriptor &descriptor);
 
   // Exact dependencies of selected compiled exports, in producer tree IDs.
   std::vector<int> used_snode_tree_ids(
@@ -104,6 +108,7 @@ class AotModuleBuilder {
  protected:
   std::unordered_map<std::string, aot::CompiledGraph> graphs_;
   std::map<int, aot::InitialRootData> initial_root_data_;
+  aot::RootStorageViews root_storage_views_;
   KernelCompileOptions compile_options_;
   bool compile_options_frozen_{false};
 };

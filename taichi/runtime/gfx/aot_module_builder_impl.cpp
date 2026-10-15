@@ -141,6 +141,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       }
     }
     std::string json = liong::json::print(liong::json::serialize(artifact));
+    aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);
     std::fstream f(output_dir + "/metadata.json",
                    std::ios::trunc | std::ios::out);
     f.write(json.data(), json.size());

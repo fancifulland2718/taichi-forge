@@ -5,6 +5,26 @@ import pytest
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
+def test_module_array_resources_keep_layout_in_the_module():
+    resources = [
+        dict(kind="module_array", name="x", view="values"),
+        dict(kind="module_array", name="dx", view="gradient"),
+        dict(kind="ndarray_view", name="tail", array="x", offset=2, shape=[15]),
+        dict(kind="extent", name="count", dtype="i32", array="x", axis=0),
+    ]
+    operations = [dict(kind="kernel", entry="k", arguments=["x", "tail", "count", "output"])]
+    plan = ExecutionPlan(
+        operations,
+        resources=resources, gradients={"x": "dx"},
+    )
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("output",)
+    assert {"x", "dx", "tail"} <= restored._replay_argument_names
+    for patch in (dict(view=""), dict(view=4), dict(dtype="f32"), dict(shape=[17])):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=[dict(resources[0], **patch)])
+
+
 def test_typed_array_layout_roundtrip_and_rejection():
     operations = [dict(kind="fill32", destination="x", value=0)]
     layout = dict(kind="array_layout", array="x", dtype="f32", exact_shape=[17], record_bytes=4, alignment=4)

@@ -13,6 +13,7 @@
 #include "taichi/ir/snode.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/initial_root_data.h"
+#include "taichi/aot/root_storage.h"
 
 namespace taichi::io {
 struct VirtualDir;
@@ -101,6 +102,18 @@ class TI_DLL_EXPORT Module {
     return {get_root_size()};
   }
 
+  struct RootStorage {
+    DevicePtr pointer;
+    std::uint64_t bytes;
+  };
+  struct BoundRootStorageView {
+    RootStorageView layout;
+    DevicePtr pointer;
+  };
+  // Cold, non-owning alias. The module must outlive its prepared executions;
+  // its owner retires all recordings before freeing any root allocation.
+  BoundRootStorageView get_root_storage_view(const std::string &name);
+
   Kernel *get_kernel(const std::string &name);
   KernelTemplate *get_kernel_template(const std::string &name);
   Field *get_snode_tree(const std::string &name);
@@ -125,6 +138,10 @@ class TI_DLL_EXPORT Module {
   }
 
  protected:
+  virtual RootStorage get_root_storage(int tree_id) {
+    throw std::invalid_argument("This AOT backend has no root storage views");
+  }
+  RootStorageViews root_storage_views_;
   virtual const io::VirtualDir *data_source() const {
     return nullptr;
   }

@@ -136,6 +136,10 @@ LlvmAotModule::LlvmAotModule(
     }
   }
   aot::validate_initial_root_data(metadata.initial_root_data, root_sizes);
+  root_storage_views_ = aot::load_root_storage_views(*directory_);
+  TI_ERROR_IF(!root_storage_views_.empty() && !relocatable,
+              "AOT root storage views require relocatable dense trees.");
+  root_storage_sizes_ = std::move(root_sizes);
   if (relocatable) {
     reserved_tree_ids_ =
         executor_->reserve_aot_snode_tree_ids(snode_tree_ids_.size());
@@ -341,6 +345,18 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
   return std::make_unique<llvm_aot::KernelImpl>(
       kernel_launcher_.get(), handle, arch(), kernel_name,
       compiled.get_internal_data());
+}
+
+LlvmAotModule::RootStorage LlvmAotModule::get_root_storage(int tree_id) {
+  const auto binding = tree_bindings_.find(tree_id);
+  if (metadata_.resource_binding != "dense_v1" ||
+      binding == tree_bindings_.end() || tree_id < 0 ||
+      static_cast<std::size_t>(tree_id) >= root_storage_sizes_.size() ||
+      !is_snode_tree_initialized(binding->second))
+    throw std::invalid_argument(
+        "AOT root storage requires an initialized module-local dense tree");
+  return {executor_->get_snode_tree_device_ptr(binding->second),
+          root_storage_sizes_[tree_id]};
 }
 
 std::unique_ptr<aot::Field> LlvmAotModule::make_new_field(

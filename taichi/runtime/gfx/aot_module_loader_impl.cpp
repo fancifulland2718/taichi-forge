@@ -31,6 +31,8 @@ class AotModuleImpl : public aot::Module {
       source_ = io::VirtualDir::from_fs_dir(params.module_path);
     }
     const io::VirtualDir *dir = source_ ? source_.get() : params.dir;
+    if (dir)
+      root_storage_views_ = aot::load_root_storage_views(*dir);
 
     {
       std::vector<uint8_t> metadata_json{};
@@ -406,6 +408,15 @@ class AotModuleImpl : public aot::Module {
 
   const io::VirtualDir *data_source() const override {
     return source_.get();
+  }
+
+  RootStorage get_root_storage(int tree_id) override {
+    if (!owns_runtime_resources_ || tree_id < 0 ||
+        static_cast<std::size_t>(tree_id) >= root_bindings_.size())
+      throw std::invalid_argument(
+          "AOT root storage requires an allocated module-local tree");
+    return {runtime_->get_root_buffer(root_bindings_[tree_id])->get_ptr(),
+            ti_aot_data_.root_buffer_sizes[tree_id]};
   }
 
   std::shared_ptr<const io::VirtualDir> source_;

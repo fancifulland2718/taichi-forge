@@ -834,6 +834,38 @@ sort, alias rejection and retirement. No additional device allocation or replay
 copy is introduced by a view. Use matching private ABI 46 components. This common
 resource support is separate from automatic export of operator-derived views.
 
+Packed dense Fields can expose the same module-owned storage to kernels and native
+execution operations on CPU/CUDA/Vulkan:
+
+```python
+module.add_field("keys", keys, as_array=True)
+module.add_field("order", order, as_array=True)
+module.add_execution_plan("sort_fields", aot.ExecutionPlan(
+    [{"kind": "sort", "keys": "keys", "values": "order"}],
+    resources=[{"kind": "module_array", "name": name, "view": name}
+               for name in ("keys", "order")],
+))
+```
+
+`as_array` defaults to false. Opting in freezes scalar dtype, shape, tensor element
+shape and byte offset in `root_storage.json`; tree IDs are relocated with the
+artifact. `module_array` uses those layouts rather than caller-provided pointers
+or copies. LLVM requires relocatable plain dense trees. Nonpacked/strided Fields
+are rejected, and an exported view name cannot be rebound to another Field.
+Ordinary Field export remains unchanged. This does not capture initial Field
+values; existing dense-state snapshots or explicit initialization remain necessary.
+
+A module array may parent an `ndarray_view`, supply extent metadata, or participate
+in explicit ndarray gradient bindings. Aliases add no device storage to
+`resource_bytes`; module roots remain accounted separately. Preparation checks
+names, layouts and root bounds. Replay uses the already-bound storage. Closing a
+preparation releases its aliases; closing the module retires dependent recordings
+before releasing roots. Independent module instances have independent state.
+CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
+copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
+shared storage contract, not automatic export of arbitrary Field-based helpers.
+Use matching private ABI 56 components.
+
 Plans can separate one-time initialization from replay:
 
 ```python
