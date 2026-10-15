@@ -50,3 +50,23 @@ def export_spmm(recording, context):
         bindings=dict(matrix=resource, input=recording.input, output=recording.output),
     )
     return ()
+
+
+def export_triangular(recording, context):
+    recording.validate_graph_lifetime()
+    matrix = snapshot_csr(context, recording.matrix)
+    plan = context.resource(
+        recording,
+        "cusparse",
+        "triangular_plan_f32",
+        parameters=dict(
+            rhs_count=recording.rhs_count,
+            fill_mode=recording.fill_mode,
+            unit_diagonal=recording.unit_diagonal,
+            transpose=recording.transpose,
+            mutable_values=False,
+        ),
+        bindings=dict(matrix=matrix, input=recording.input, output=recording.output),
+    )
+    context.native("cusparse", "triangular_solve_f32", bindings=dict(plan=plan))
+    return ()

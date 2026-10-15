@@ -1423,6 +1423,11 @@ class _CusparseTriangularRecording(BackendCommandRecording):
 class CusparseSpsvRecording(_CusparseTriangularRecording):
     """Retained f32 CSR triangular solve for one nonsingular right-hand side."""
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cusparse import export_triangular
+
+        return export_triangular(self, context)
+
     def __init__(self, matrix, **options):
         super().__init__(
             matrix,
@@ -1436,6 +1441,11 @@ class CusparseSpsvRecording(_CusparseTriangularRecording):
 @instrument_hardware_recording("linalg.spsm.cusparse_explicit")
 class CusparseSpsmRecording(_CusparseTriangularRecording):
     """Retained f32 CSR triangular solve for multiple nonsingular RHSs."""
+
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cusparse import export_triangular
+
+        return export_triangular(self, context)
 
     def __init__(self, matrix, rhs_count, **options):
         if isinstance(rhs_count, bool) or not isinstance(rhs_count, int):

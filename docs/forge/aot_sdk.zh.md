@@ -902,6 +902,13 @@ SpMM 验证输入梯度。尚不自动微分外部 SpMM；三角求解使用下�
 默认 false）。单 RHS 的输入输出为 `[n]`，多 RHS 为紧凑行主序 `[n, rhs_count]`。
 矩阵须为方阵，非单位对角要求有限非零 pivot；求解不执行 host 侧数值检查。
 
+`CusparseSpsvRecording` 和 `CusparseSpsmRecording` 可通过
+`Module.add_execution_plan` 导出普通及已资格物化 Graph。每次导出对每个矩阵只取
+一份 CSR 快照，前向和转置计划共享；不同导出中的相同数据也去重。冷导出不会
+创建 JIT 三角分析计划。自动路线冻结系数（`mutable_values=False`），源矩阵变化
+后须重新导出；消费端更新系数使用下述显式可变资源合同。未知 recording 子类
+需要自己的导出资格。
+
 ```python
 triangular = {
     "kind": "native", "name": "triangular", "provider": "cusparse",

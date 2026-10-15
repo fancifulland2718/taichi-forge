@@ -1149,6 +1149,16 @@ positive `rhs_count`, `fill_mode="lower"|"upper"`, `unit_diagonal`, `transpose`,
 be square; non-unit diagonals require finite nonzero pivots. Solves perform no
 host-side numerical validation.
 
+`CusparseSpsvRecording` and `CusparseSpsmRecording` export through
+`Module.add_execution_plan`, including ordinary and qualified materialized Graphs.
+Export freezes one CSR snapshot per matrix per transaction; forward and transpose
+plans share it, and unchanged payloads are deduplicated across exports. Cold
+export does not create a JIT triangular analysis plan. This automatic route uses
+fixed coefficients (`mutable_values=False`); changing the source matrix requires
+a new export. Use the explicit mutable resource contract below for consumer-side
+coefficient updates. Unknown recording subclasses require their own export
+qualification.
+
 ```python
 triangular = {
     "kind": "native", "name": "triangular", "provider": "cusparse",
