@@ -398,6 +398,61 @@ def _validate_sequence(context, sequence):
             raise TaichiRuntimeError(f"AOT sequence cannot reconstruct {item[0]!r} yet")
 
 
+def _cuda_nested_while(context, node):
+    from taichi_forge.graph._graph import _CUDA_NESTED_CONDITIONAL_ROUTE
+
+    selected = node._cuda_nested
+    if (
+        not node.supports_native_submission
+        or node._cuda_nested_control_lowering != _CUDA_NESTED_CONDITIONAL_ROUTE
+        or selected is None
+        or not selected.nested_conditional_eligible
+    ):
+        raise TaichiRuntimeError("AOT Graph requires its selected nested CUDA control recipe")
+    if selected.physical_dispatch_count != selected.dispatch_count:
+        raise TaichiRuntimeError("AOT nested CUDA control requires its selected dispatch boundaries")
+    # The native nested builder owns one flat copy of the selected dispatches.
+    # Its boundary table includes initial conditions and body+tail conditions;
+    # exporting logical child nodes could discard physical IR or run tests twice.
+    operations = context.region(_node, selected)
+    first_body, boundaries = node._cuda_nested_boundaries
+    inners = node._cuda_nested_inner
+    if (
+        len(operations) != selected.physical_dispatch_count
+        or any(op["kind"] != "kernel" for op in operations)
+        or not 0 < first_body < len(operations)
+        or len(inners) != len(boundaries)
+    ):
+        raise TaichiRuntimeError("AOT nested CUDA control lacks complete physical boundaries")
+    body = []
+    cursor = first_body
+    for inner, (condition_begin, body_begin, end) in zip(inners, boundaries):
+        if not cursor <= condition_begin < body_begin < end <= len(operations):
+            raise TaichiRuntimeError("AOT nested CUDA control has invalid physical boundaries")
+        body.extend(operations[cursor:body_begin])
+        body.append(
+            dict(
+                kind="while",
+                predicate=context.binding(inner.predicate),
+                max_iterations=inner.max_iterations,
+                condition=[],
+                body=operations[body_begin:end],
+            )
+        )
+        cursor = end
+    body.extend(operations[cursor:])
+    context.operations.extend(operations[:first_body])
+    context.operations.append(
+        dict(
+            kind="while",
+            predicate=context.binding(node.predicate),
+            max_iterations=node.max_iterations,
+            condition=[],
+            body=body,
+        )
+    )
+
+
 def _while(context, node):
     from taichi_forge.lang import impl
 
@@ -446,7 +501,8 @@ def _while(context, node):
         return
     if arch == core.Arch.cuda:
         if node._has_nested_control:
-            raise TaichiRuntimeError("AOT Graph requires its selected nested CUDA control recipe")
+            _cuda_nested_while(context, node)
+            return
         if not node.supports_native_submission or node._cuda_control_lowering != "cuda_conditional_graph":
             raise TaichiRuntimeError("AOT Graph requires its selected CUDA control recipe")
     elif arch not in (core.Arch.x64, core.Arch.arm64):

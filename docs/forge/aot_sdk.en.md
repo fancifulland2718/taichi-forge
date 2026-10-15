@@ -260,13 +260,18 @@ loop and no per-iteration host readback. Prepare again to change frozen argument
 device predicate and array contents can change between replays.
 
 `add_execution_plan(name, graph)` automatically exports exact CPU loops and
-selected CUDA conditional loops. It preserves the compiled body-plus-condition
+selected CUDA conditional loops, including the nested conditional recipe. It
+preserves the compiled body-plus-condition
 segment, initial condition, prefix and suffix without regenerating source
 definitions or repeating the trailing condition. Control scalar shapes and
 non-aliasing contracts are saved too. Small tests cover parent Sequential
-embedding, private controls, status and explicit adjoints. Selected CUDA masked,
-device-update and specialized nested routes still need their own persistent
-execution contract; export rejects implicit replacement. Kernel-backed CG/PCG
+embedding, private controls, status and explicit adjoints. Nested CUDA export
+uses the selected flat physical dispatches and their condition/body boundaries;
+two ordered inner loops, independent bindings and owner retirement are tested
+with the matching private ABI 51 build.
+Selected CUDA masked/device-update routes and specialized Vulkan nested routes
+still need their own persistent execution contract; export rejects implicit
+replacement. Kernel-backed CG/PCG
 SolvePlan export uses these selected control paths as described below. CUDA operations requiring host synchronization are
 excluded from loop regions; providers with opaque cold facts still require an
 explicit branch/repetition merge contract. Initialization facts established only

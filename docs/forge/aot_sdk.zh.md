@@ -220,10 +220,14 @@ plan = ExecutionPlan([loop])
 不逐轮读回 host。改变冻结参数应重新 prepare，设备谓词和数组内容可在重放间更新。
 
 `add_execution_plan(name, graph)` 可自动导出 CPU 的精确循环和 CUDA 已选 conditional
-循环，保留编译后的 body+condition 段、首次条件及前后段，不重新生成源定义或重复
+循环（含 nested conditional recipe），保留编译后的 body+condition 段、首次条件及
+前后段，不重新生成源定义或重复
 末尾条件计算。控制数组的标量形状及互不别名约束一并保存；父 Sequential 嵌入、
-私有控制资源、状态与显式伴随已有小规模验证。CUDA 已选 masked、device-update
-或嵌套专用路线仍需自己的持久执行合同，导出会拒绝隐式替换；下文的 kernel-backed
+私有控制资源、状态与显式伴随已有小规模验证。CUDA 嵌套导出使用已选的平坦物理
+dispatch 及条件/循环体边界；两个顺序内循环、独立绑定及 owner 退休已在配套
+private ABI 51 构建中验证。
+CUDA 已选 masked/device-update 和 Vulkan 专用嵌套路线仍需自己的持久执行合同，
+导出会拒绝隐式替换；下文的 kernel-backed
 CG/PCG SolvePlan 导出复用这些已选控制路线。需要 host 同步的 CUDA
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
 循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
