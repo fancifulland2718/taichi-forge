@@ -8605,6 +8605,18 @@ void export_lang(py::module &m) {
                               bytes(snapshot.column_indices),
                               bytes(snapshot.values));
       })
+      .def("_snapshot_cuda_bsr",
+           [](SparseMatrix &matrix, Program &program) {
+             auto snapshot = snapshot_cuda_bsr(program, matrix);
+             auto bytes = [](const auto &data) {
+               return py::bytes(reinterpret_cast<const char *>(data.data()),
+                                data.size() * sizeof(data[0]));
+             };
+             return py::make_tuple(
+                 snapshot.block_rows, snapshot.block_columns,
+                 snapshot.block_size, bytes(snapshot.row_offsets),
+                 bytes(snapshot.column_indices), bytes(snapshot.values));
+           })
       .def(
           "_cuda_cusparse_retain_spmm_plan",
           [](SparseMatrix &matrix, int rhs_count, int algorithm,

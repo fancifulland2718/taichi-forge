@@ -174,6 +174,42 @@ TEST(NativeOperationRegistry, CsrDescriptionsDecodeWithoutLoadingProvider) {
   EXPECT_EQ(registry.find("cusparse_spmv_f32", 1, Arch::vulkan), nullptr);
 }
 
+TEST(NativeOperationRegistry,
+     BsrDescriptionsPreserveBlocksWithoutLoadingProvider) {
+  const auto &registry = native_operation_registry();
+  auto matrix = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cusparse","operation":"bsr_f32","version":1,
+      "parameters":{"block_rows":8589934609,"block_columns":17,"block_size":4},
+      "bindings":{"row_offsets":"r","column_indices":"c","values":"v"}})"));
+  EXPECT_EQ(registry.decode(matrix, NativeObjectKind::resource).kind(),
+            "cusparse_bsr_f32");
+  EXPECT_THROW(registry.decode(matrix), std::invalid_argument);
+  for (
+      const char *parameters :
+      {R"({"block_rows":-1,"block_columns":2,"block_size":2})",
+       R"({"block_rows":1,"block_columns":2,"block_size":0})",
+       R"({"block_rows":1,"block_columns":2,"block_size":true})",
+       R"({"block_rows":9223372036854775807,"block_columns":2,"block_size":2})",
+       R"({"block_rows":1,"block_columns":2,"block_size":2,"base":1})"}) {
+    matrix.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(matrix, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+  auto spmv = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cusparse","operation":"bsr_spmv_f32","version":1,
+      "parameters":{"alpha":-2,"beta":0.5},
+      "bindings":{"matrix":"a","input":"x","output":"y"}})"));
+  EXPECT_EQ(registry.decode(spmv).kind(), "cusparse_bsr_spmv_f32");
+  for (const char *parameters :
+       {R"({"transpose":true})", R"({"algorithm":"csr_alg1"})",
+        R"({"alpha":true})", R"({"beta":1e300})"}) {
+    spmv.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(spmv), std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("cusparse_bsr_spmv_f32", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("cusparse_bsr_spmv_f32", 1, Arch::vulkan), nullptr);
+}
+
 TEST(NativeOperationRegistry, SpmmDescriptionsDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto description =

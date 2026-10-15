@@ -32,8 +32,9 @@
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
 - CUDA CSR/BSR SpMV 共用执行计划核心，BSR 保留原生块布局及现有描述符，消除独立
-  的向量绑定/workspace 管理实现。该节点补齐 BSR AOT 重建的执行前置；资源注册和
-  自动导出仍待接通。共享对象布局调整，当前 producer/runtime 须配套 private ABI 57。
+  的向量绑定/workspace 管理实现。AOT 已接通 f32 BSR 资源、SpMV 和 recording 自动
+  快照导出，支持独立/借用消费与显式资源的有序原位值更新。导出快照保持冻结；
+  显式转置 BSR 可与导出的 kernel 梯度组合。当前 producer/runtime 须配套 private ABI 58。
 
 - 反向 AD 保留整数幂指数的整数类型，修复 Vulkan 条件分支中的负底数梯度 NaN；
   同时修复底数为零、指数为 0/1 时的底数梯度。CPU/CUDA/Vulkan 的显式反向及前向

@@ -888,7 +888,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 57.
+Current components require matching private ABI 58.
 
 Plans can separate one-time initialization from replay:
 
@@ -1242,8 +1242,8 @@ checks cover standalone/source-free and borrowed consumption, i32/i64 topology,
 transpose, coefficient updates, empty matrices, views, rejection and retirement.
 An exported energy kernel and its real `.grad` compose with an explicit transpose
 SpMV to check input gradients. This does not automatically differentiate an
-external call. Use matching ABI 44 components. Triangular solves, BSR and
-other solver families still need their own reconstruction contracts.
+external call. CSR support started at ABI 44. Triangular solves and BSR use the
+separate reconstruction contracts below; components must match the current private ABI.
 
 Root sequential mixed Graphs containing `CusparseSpmvRecording` can be exported
 with `module.add_execution_plan(name, graph)`. Export takes one coherent CSR
@@ -1263,6 +1263,44 @@ rollback, source-free/borrowed consumption and real exported gradients with
 explicit adjoints. Backend-command nesting in structured `Sequential` and JIT
 CGraph ndarray-gradient binding remain separate unsupported paths. The AOT
 consumer's explicit gradient binding is covered here.
+
+BSR uses the same registry while retaining blocks without expanding them to CSR:
+
+```python
+resource = {
+    "kind": "native", "name": "matrix", "provider": "cusparse",
+    "operation": "bsr_f32", "version": 1,
+    "parameters": {"block_rows": 3, "block_columns": 4, "block_size": 2},
+    "bindings": {"row_offsets": "offsets", "column_indices": "indices", "values": "values"},
+}
+operation = {
+    "kind": "native", "provider": "cusparse", "operation": "bsr_spmv_f32", "version": 1,
+    "parameters": {"alpha": 1.0, "beta": 0.0},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}
+```
+
+Native resources accept matching i32/i64 block indices, zero-based topology and
+packed f32 row-major square blocks. Values have `nnzb * block_size**2` elements;
+x/y lengths are block column/row counts times block_size. Columns within a row
+may be unsorted but must be unique. Empty rows, zero blocks and zero dimensions
+are supported. Preparation validates topology and physical aliases without
+executing user SpMV. Explicitly bound values may change in place between ordered
+replays with fixed topology; changing topology or storage requires preparation
+again. Probe `runtime.probe_native_operation("cusparse_bsr_spmv_f32")` first.
+This CUDA factory uses non-transpose BSR ALG1 and the existing compatible external
+cuSPARSE library, without packaging another vendor copy.
+
+Ordinary and materialized sequential Graphs containing BSR
+`CusparseSpmvRecording` export automatically, taking one snapshot per matrix per
+export and retaining the public producer's format contract. Exported read-only
+values remain frozen when the source matrix changes; a new export takes current
+values. Consumers needing live coefficients use explicit resource bindings above.
+Windows/cuSPARSE 12.7.9 checks cover standalone consumption without the DSL,
+borrowed execution, snapshot isolation, in-place updates, close and in-flight
+retirement. Real `energy.grad` composes with SpMV of an explicitly transposed BSR
+to check input gradients; the external adjoint is not generated automatically.
+Use matching private ABI58 components. CPU/Vulkan do not expose this CUDA provider.
 
 SpMM uses the same `cusparse/csr_f32` resource and common registry:
 

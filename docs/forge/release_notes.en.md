@@ -36,9 +36,11 @@ lifetimes. The entries below describe the changes.
 
 - CUDA CSR/BSR SpMV share an execution-plan core. BSR keeps its native block
   layout and existing matrix descriptor, replacing duplicated vector-binding
-  and workspace management. This supplies the execution prerequisite for BSR
-  AOT reconstruction; resource registration and automatic export remain pending.
-  Shared layout changes require matching producer/runtime private ABI 57.
+  and workspace management. AOT now supports f32 BSR resources, SpMV and automatic
+  recording snapshots, with standalone/borrowed consumption and ordered in-place
+  value updates for explicitly bound resources. Exported snapshots remain frozen;
+  an explicit transposed BSR can compose with exported kernel gradients.
+  Current producer/runtime components require matching private ABI 58.
 
 - Reverse AD preserves integer power exponents, fixing NaN gradients at negative
   bases inside Vulkan conditionals. Base derivatives at zero with exponents 0/1

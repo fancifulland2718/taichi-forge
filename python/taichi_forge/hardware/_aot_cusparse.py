@@ -1,17 +1,23 @@
-"""Cold CSR snapshots shared by qualified sparse recording exporters."""
+"""Cold sparse snapshots shared by qualified recording exporters."""
 
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
-def snapshot_csr(context, matrix):
+def _snapshot(context, matrix, formats):
     matrix._ensure_valid()
     identity = matrix._get_format_contract()["identity"]
-    if identity["backend_family"] != "cuda" or identity["storage_format"] != "csr" or identity["dtype"] != "f32":
-        raise TaichiRuntimeError("AOT cuSPARSE recording requires scalar f32 CUDA CSR storage")
+    storage = identity["storage_format"]
+    if identity["backend_family"] != "cuda" or storage not in formats or identity["dtype"] != "f32":
+        raise TaichiRuntimeError("AOT cuSPARSE recording requires f32 CUDA " + "/".join(formats).upper() + " storage")
 
     def snapshot():
-        rows, columns, offsets, indices, values = matrix.matrix._snapshot_cuda_csr(impl.get_runtime().prog)
+        if storage == "bsr":
+            rows, columns, size, offsets, indices, values = matrix.matrix._snapshot_cuda_bsr(impl.get_runtime().prog)
+            parameters = dict(block_rows=rows, block_columns=columns, block_size=size)
+        else:
+            rows, columns, offsets, indices, values = matrix.matrix._snapshot_cuda_csr(impl.get_runtime().prog)
+            parameters = dict(rows=rows, columns=columns)
         bindings = {
             port: context.data_resource(object(), data, dtype=dtype, shape=[len(data) // 4], readonly=True)
             for port, dtype, data in (
@@ -20,11 +26,24 @@ def snapshot_csr(context, matrix):
                 ("values", "f32", values),
             )
         }
-        return context.resource(
-            matrix, "cusparse", "csr_f32", parameters=dict(rows=rows, columns=columns), bindings=bindings
-        )
+        return context.resource(matrix, "cusparse", storage + "_f32", parameters=parameters, bindings=bindings)
 
-    return context.resource_once(matrix, snapshot)
+    return context.resource_once(matrix, snapshot), storage
+
+
+def snapshot_csr(context, matrix):
+    return _snapshot(context, matrix, ("csr",))[0]
+
+
+def export_spmv(recording, context):
+    recording.validate_graph_lifetime()
+    resource, storage = _snapshot(context, recording.matrix, ("csr", "bsr"))
+    context.native(
+        "cusparse",
+        "bsr_spmv_f32" if storage == "bsr" else "spmv_f32",
+        bindings=dict(matrix=resource, input=recording.input, output=recording.output),
+    )
+    return ()
 
 
 def export_spmm(recording, context):

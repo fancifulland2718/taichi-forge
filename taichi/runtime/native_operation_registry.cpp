@@ -352,6 +352,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_vkfft_operations(result);
     register_blas_operations(result);
     register_cusparse_operations(result);
+    register_cusparse_bsr_operations(result);
     register_cudss_operations(result);
     register_cutensor_operations(result);
     register_cusparselt_operations(result);

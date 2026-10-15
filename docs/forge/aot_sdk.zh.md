@@ -691,7 +691,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 57。
+当前组件须配套 private ABI 58。
 
 计划可以将一次性初始化与重放分开：
 
@@ -971,8 +971,8 @@ plan = ExecutionPlan([{
 复用既有外部 cuSPARSE loader，不在包中新增厂商副本；CPU/Vulkan 没有相应工厂。
 Windows cuSPARSE 12.7.9 验证覆盖无源码独立/借用消费、i32/i64 拓扑、转置、系数更新、
 空矩阵、视图、拒绝与退休。导出的 energy kernel 及其真实 `.grad` 加显式转置 SpMV
-核对输入梯度，不提供外部调用的自动微分。需配套 ABI44；三角求解、BSR 及
-其他 solver 家族仍需各自的重建合同。
+核对输入梯度，不提供外部调用的自动微分。CSR 支持始于 ABI44；三角求解和 BSR
+使用下文各自的重建合同，组件须匹配当前 private ABI。
 
 包含 `CusparseSpmvRecording` 的根级顺序混合 Graph 可通过
 `module.add_execution_plan(name, graph)` 自动导出。一次事务中每个矩阵只在提交锁与
@@ -986,6 +986,36 @@ Windows cuSPARSE 12.7.9 验证覆盖无源码独立/借用消费、i32/i64 拓�
 recording、数值更新后的新快照、共享拓扑、归档回滚、无源码独立/借用消费、真实导出
 梯度与显式伴随。结构化 `Sequential` 内 backend command 嵌套、JIT CGraph 的 ndarray
 梯度绑定仍是独立的未支持路径；本项已验证 AOT consumer 的显式梯度绑定。
+
+BSR 使用同一注册协议，保持块布局，不展开成 CSR：
+
+```python
+resource = {
+    "kind": "native", "name": "matrix", "provider": "cusparse",
+    "operation": "bsr_f32", "version": 1,
+    "parameters": {"block_rows": 3, "block_columns": 4, "block_size": 2},
+    "bindings": {"row_offsets": "offsets", "column_indices": "indices", "values": "values"},
+}
+operation = {
+    "kind": "native", "provider": "cusparse", "operation": "bsr_spmv_f32", "version": 1,
+    "parameters": {"alpha": 1.0, "beta": 0.0},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}
+```
+
+原生资源接受匹配的 i32/i64 块索引，零基拓扑，连续 f32 行优先方块；values 长度为
+`nnzb * block_size**2`，x/y 长度为块列/块行数乘以 block_size。每行可无序但不能
+重复，支持空行、零块和零维度。准备时校验拓扑和物理别名，不执行用户 SpMV。
+固定拓扑下，显式绑定的 values 可在有序重放之间原位更新；改变拓扑或存储需重新准备。
+调用方可先查询 `runtime.probe_native_operation("cusparse_bsr_spmv_f32")`。
+该工厂仅支持 CUDA、非转置 BSR ALG1，复用外部兼容 cuSPARSE，不新增厂商库副本。
+
+BSR `CusparseSpmvRecording` 的普通/已物化顺序 Graph 可直接自动导出；每次导出
+按矩阵去重取快照，保留公开 producer 的格式合同。导出的只读数值不会随源矩阵更新，
+后续重导出取得新数值。需要活值的消费者使用上述显式资源绑定。Windows/cuSPARSE
+12.7.9 已验证独立无 DSL/借用消费、快照隔离、原位更新、关闭和在途退休；真实
+`energy.grad` 与显式转置 BSR 的 SpMV 核对输入梯度，不自动生成外部调用的伴随。
+该入口需要配套 private ABI58；CPU/Vulkan 不声明此 CUDA provider 的支持。
 
 SpMM 使用同一个 `cusparse/csr_f32` 资源及公共注册协议：
 

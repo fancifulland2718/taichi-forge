@@ -452,14 +452,9 @@ class CusparseSpmvRecording(BackendCommandRecording):
         )
 
     def _export_aot(self, context):
-        from taichi_forge.hardware._aot_cusparse import snapshot_csr
+        from taichi_forge.hardware._aot_cusparse import export_spmv
 
-        resource = snapshot_csr(context, self.matrix)
-        context.native(
-            "cusparse", "spmv_f32",
-            bindings=dict(matrix=resource, input=self.input, output=self.output),
-        )
-        return ()
+        return export_spmv(self, context)
 
     @staticmethod
     def _validate_array(value, name, shape):
