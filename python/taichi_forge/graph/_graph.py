@@ -8102,11 +8102,13 @@ class _CompiledWhileGraphNode:
         chunk_stats = tuple(node.debug_graph_stats for node in self._chunks.values())
         condition_stats = (self._condition.debug_graph_stats,)
         if self._native_region_jit_cache is not None:
+            # Preserve the standalone loop's diagnostic positions. The fused
+            # submission cache can be unused by run() or telemetry replay.
             return (
-                self._native_region_jit_cache._debug_graph_stats(),
                 self._native_jit_cache._debug_graph_stats(),
                 *condition_stats,
                 *chunk_stats,
+                self._native_region_jit_cache._debug_graph_stats(),
             )
         if self._vulkan_nested is not None or self._cuda_nested is not None:
             return (
@@ -8134,10 +8136,10 @@ class _CompiledWhileGraphNode:
         condition_stats = (self._condition.snapshot_graph_stats,)
         if self._native_region_jit_cache is not None:
             return (
-                self._native_region_jit_cache._debug_graph_stats(False),
                 self._native_jit_cache._debug_graph_stats(False),
                 *condition_stats,
                 *chunk_stats,
+                self._native_region_jit_cache._debug_graph_stats(False),
             )
         if self._vulkan_nested is not None or self._cuda_nested is not None:
             return (

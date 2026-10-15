@@ -127,6 +127,26 @@ def test_cuda_while_region_single_submission(budget, embedded):
 
 
 @test_utils.test(arch=ti.cuda)
+def test_cuda_while_region_keeps_standalone_diagnostic_positions():
+    _require_conditional()
+    graph = _build_step(4)
+    arguments = _arguments([0, 2, 5, -1])
+    control = graph._instance._executable._cuda_submission_regions[0].control
+    graph._graph_stats  # Enable counters before either cache is used.
+    graph.run(arguments)
+    assert control.debug_graph_stats[0]["captures"] == 1
+    assert control.debug_graph_stats[-1]["captures"] == 0
+    graph.submit(arguments).wait()
+    graph.submit(arguments).wait()
+    for stats in (control.debug_graph_stats, control.snapshot_graph_stats):
+        assert stats[0]["captures"] == 1
+        assert stats[-1]["captures"] == 1
+        assert stats[-1]["exact_replays"] >= 1
+        assert stats[-1]["last_path"] == "cuda_exact_replay"
+    np.testing.assert_array_equal(arguments["result"].to_numpy(), [2, 8, 17, 2])
+
+
+@test_utils.test(arch=ti.cuda)
 def test_cuda_while_region_telemetry_and_invalidation():
     _require_conditional()
     graph = _build_step(4, embedded=True)
