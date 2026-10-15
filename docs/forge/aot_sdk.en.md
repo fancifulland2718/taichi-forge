@@ -65,7 +65,7 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
-Optional cuTENSOR, cuSPARSELt and AmgX adapters have separate SDK components.
+Optional cuDSS, cuTENSOR, cuSPARSELt and AmgX adapters have separate SDK components.
 Enable their build targets, then build and install only the selected adapter:
 
 ```sh
@@ -74,7 +74,17 @@ cmake --build BUILD --target taichi_forge_cutensor_provider
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
 ```
 
-Replace `cutensor` with `cusparselt` or `amgx` for the other components. Each
+Replace `cutensor` with `cusparselt` or `amgx` for those components. cuDSS uses
+its independent build option and matching 0.8.x SDK headers, without enabling
+the other optional providers:
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_BUNDLED_CUDSS_PROVIDER=ON -DTI_CUDSS_ROOT_080=CUDSS_ROOT
+cmake --build BUILD --target taichi_forge_cudss_provider_080
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cudss
+```
+
+Each component
 installs an adapter into `bin/hardware_providers` on Windows or
 `lib/hardware_providers` on Linux, the common provider C ABI header, the Forge
 license and `share/taichi/providers/<provider>.json` with file sizes and SHA256
@@ -1227,8 +1237,9 @@ built-in cuBLAS/cuFFT discovery, or automatically export JIT recordings.
 
 CUDA cuDSS 0.8 supports explicit persistent f32/i32 CSR plans. Configure the
 `"cudss"` provider and probe `"cudss_solve_group_f32"`. Supply a Forge adapter with
-the common runtime-provider entry point and an external cuDSS library; optional
-SDK adapter installation and automatic JIT recording export remain pending.
+the common runtime-provider entry point and an external cuDSS library; the
+optional installation component is `TaichiSDKProvider_cudss`. Automatic JIT
+recording export remains pending.
 
 ```python
 resource = {

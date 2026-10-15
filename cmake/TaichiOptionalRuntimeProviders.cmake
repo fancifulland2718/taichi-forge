@@ -1,3 +1,5 @@
+include(${CMAKE_CURRENT_LIST_DIR}/TaichiProviderSdk.cmake)
+
 option(TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS
        "Build optional vendor-runtime execution adapters" OFF)
 
@@ -31,33 +33,7 @@ function(ti_add_optional_runtime_provider provider kind output_name)
             LIBRARY DESTINATION ${INSTALL_LIB_DIR}/hardware_providers
                     COMPONENT runtime)
 
-    # Standalone SDK consumers choose adapters independently. These components
-    # contain no vendor libraries and do not duplicate the Forge runtime core.
-    set(_ti_provider_component "TaichiSDKProvider_${provider}")
-    if(WIN32)
-        set(_ti_provider_native_dir bin)
-    else()
-        set(_ti_provider_native_dir lib)
-    endif()
-    set(_ti_provider_binary
-        "${_ti_provider_native_dir}/hardware_providers/$<TARGET_FILE_NAME:${target}>")
-    install(TARGETS ${target}
-        RUNTIME DESTINATION bin/hardware_providers
-            COMPONENT ${_ti_provider_component} EXCLUDE_FROM_ALL
-        LIBRARY DESTINATION lib/hardware_providers
-            COMPONENT ${_ti_provider_component} EXCLUDE_FROM_ALL)
-    install(FILES taichi/external_runtime/forge_runtime_provider.h
-        DESTINATION include/taichi
-        COMPONENT ${_ti_provider_component} EXCLUDE_FROM_ALL)
-    install(FILES LICENSE DESTINATION licenses
-        COMPONENT ${_ti_provider_component} EXCLUDE_FROM_ALL)
-    configure_file(cmake/TaichiProviderManifest.cmake.in
-        "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}.cmake.in" @ONLY)
-    file(GENERATE
-        OUTPUT "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}_$<CONFIG>.cmake"
-        INPUT "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}.cmake.in")
-    install(SCRIPT "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}_$<CONFIG>.cmake"
-        COMPONENT ${_ti_provider_component} EXCLUDE_FROM_ALL)
+    ti_install_provider_sdk(${target} ${provider})
 endfunction()
 
 ti_add_optional_runtime_provider(

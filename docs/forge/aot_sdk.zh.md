@@ -57,7 +57,7 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
 
-可选的 cuTENSOR、cuSPARSELt 和 AmgX adapter 各自有独立 SDK 安装组件。
+可选的 cuDSS、cuTENSOR、cuSPARSELt 和 AmgX adapter 各自有独立 SDK 安装组件。
 启用构建目标后，只构建和安装选中的 adapter：
 
 ```sh
@@ -66,7 +66,16 @@ cmake --build BUILD --target taichi_forge_cutensor_provider
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
 ```
 
-另外两个组件将 `cutensor` 替换为 `cusparselt` 或 `amgx`。每个组件安装 adapter
+cuSPARSELt 和 AmgX 将 `cutensor` 替换为 `cusparselt` 或 `amgx`。cuDSS 使用其独立
+构建开关及匹配的 0.8.x SDK 头文件，不需要开启其他可选 provider：
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_BUNDLED_CUDSS_PROVIDER=ON -DTI_CUDSS_ROOT_080=CUDSS_ROOT
+cmake --build BUILD --target taichi_forge_cudss_provider_080
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cudss
+```
+
+每个组件安装 adapter
 到 Windows 的 `bin/hardware_providers` 或 Linux 的 `lib/hardware_providers`，
 并包含公共 provider C ABI 头文件、Forge 许可证以及记录文件大小和 SHA256 的
 `share/taichi/providers/<provider>.json`。基础 `sdk_manifest.json` 单独保留。
@@ -965,7 +974,8 @@ provider 不加载。重配置只影响后续探测/准备，已有 prepared 保
 
 CUDA cuDSS 0.8 可通过显式持久资源重建 f32/i32 CSR 计划。配置 `"cudss"` provider
 并探测 `"cudss_solve_group_f32"`；当前需提供带公共 runtime-provider 入口的 Forge
-adapter 及外部 cuDSS 库，可选 SDK 安装组件与 JIT recording 自动导出尚待接入。
+adapter 及外部 cuDSS 库；可选安装组件为 `TaichiSDKProvider_cudss`，JIT recording
+自动导出尚待接入。
 
 ```python
 resource = {

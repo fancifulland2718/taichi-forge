@@ -1,5 +1,7 @@
+include(${CMAKE_CURRENT_LIST_DIR}/TaichiProviderSdk.cmake)
+
 option(TI_BUILD_BUNDLED_CUDSS_PROVIDER
-       "Build the pinned cuDSS provider for the runtime wheel" OFF)
+       "Build the pinned cuDSS provider for the runtime wheel and optional SDK component" OFF)
 set(TI_CUDSS_ROOT_080 "" CACHE PATH
     "Optional cuDSS 0.8 package root for a bundled-provider build")
 
@@ -72,3 +74,5 @@ install(TARGETS taichi_forge_cudss_provider_080
                 COMPONENT runtime
         LIBRARY DESTINATION ${INSTALL_LIB_DIR}/hardware_providers
                 COMPONENT runtime)
+
+ti_install_provider_sdk(taichi_forge_cudss_provider_080 cudss)
