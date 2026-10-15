@@ -80,6 +80,9 @@
   - test: CGraphAotTest.VulkanFixedControl
     script: aot/python_scripts/fixed_vulkan_control.py
     args: ''
+  - test: CGraphAotTest.VulkanFixedNestedControl
+    script: aot/python_scripts/fixed_vulkan_nested_control.py
+    args: ''
   - test: CGraphAotTest.VulkanRunCGraph1
     script: aot/python_scripts/graph_aot_test_.py
     args: --arch=vulkan

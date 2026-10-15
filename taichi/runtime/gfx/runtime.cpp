@@ -47,7 +47,6 @@ constexpr std::size_t kStructuredChainedMaximumDispatches = 256;
 constexpr std::size_t kStructuredChainedMaximumControlBytes = 64 * 1024;
 constexpr std::size_t kNestedStructuredHeaderWords = 8;
 constexpr std::size_t kNestedStructuredTraceWords = 6;
-constexpr std::size_t kNestedStructuredMaximumOuterIterations = 64;
 constexpr std::size_t kGraphReplayRetirementPollBudget = 8;
 
 // Optional status must be absent from both declarations and the entry-point
@@ -3273,6 +3272,29 @@ GfxRuntime::prepare_fixed_structured_graph(
     const GraphStructuredControl &control,
     std::vector<std::shared_ptr<void>> owners,
     std::vector<int> snode_tree_ids) {
+  return prepare_fixed_control_graph(dispatches, &control, nullptr,
+                                     std::move(owners),
+                                     std::move(snode_tree_ids));
+}
+
+std::unique_ptr<GraphReplayRegistration>
+GfxRuntime::prepare_fixed_nested_structured_graph(
+    const std::vector<GraphDispatch> &dispatches,
+    const GraphNestedStructuredControl &control,
+    std::vector<std::shared_ptr<void>> owners,
+    std::vector<int> snode_tree_ids) {
+  return prepare_fixed_control_graph(dispatches, nullptr, &control,
+                                     std::move(owners),
+                                     std::move(snode_tree_ids));
+}
+
+std::unique_ptr<GraphReplayRegistration>
+GfxRuntime::prepare_fixed_control_graph(
+    const std::vector<GraphDispatch> &dispatches,
+    const GraphStructuredControl *control,
+    const GraphNestedStructuredControl *nested_control,
+    std::vector<std::shared_ptr<void>> owners,
+    std::vector<int> snode_tree_ids) {
   // Registration destruction follows the registry -> runtime lock order even
   // if qualification, descriptor allocation or command recording fails.
   auto registration = register_graph_replay(1);
@@ -3287,7 +3309,7 @@ GfxRuntime::prepare_fixed_structured_graph(
   }
   TI_ERROR_IF(
       !launch_graph_impl(dispatches, registration->replay_key(), nullptr,
-                         &control, nullptr, nullptr, nullptr, true),
+                         control, nullptr, nested_control, nullptr, true),
       "Prepared Vulkan control cannot record the selected strategy");
   auto &state = graph_replay_states_.at(registration->replay_key());
   auto &executable = state.executable;
@@ -3379,8 +3401,9 @@ bool GfxRuntime::launch_graph_impl(
     const GraphNestedStructuredControl *nested_control,
     GraphNestedStructuredResult *nested_result,
     bool prepare_only) {
-  TI_ASSERT(!prepare_only || (structured_control && !structured_result &&
-                              !nested_control && !nested_result));
+  TI_ASSERT(!prepare_only ||
+            ((bool(structured_control) != bool(nested_control)) &&
+             !structured_result && !nested_result));
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
   TI_ASSERT(replay_key != 0);
@@ -3559,8 +3582,7 @@ bool GfxRuntime::launch_graph_impl(
         break;
       }
     }
-    bool inner_valid = !nested_control->inner_controls.empty() &&
-                       nested_control->inner_controls.size() <= 8;
+    bool inner_valid = !nested_control->inner_controls.empty();
     std::size_t boundary_cursor =
         nested_control->outer_condition_dispatch_count;
     for (const auto &inner : nested_control->inner_controls) {
@@ -3573,10 +3595,10 @@ bool GfxRuntime::launch_graph_impl(
               inner.inner_body_dispatch_begin &&
           inner.inner_body_dispatch_begin < inner.inner_dispatch_end &&
           inner.inner_dispatch_end < dispatches.size() &&
-          inner.inner_max_iterations > 0 &&
-          inner.inner_max_iterations <= 64 && inner.inner_chunk_size > 0 &&
-          inner.inner_chunk_size <= inner.inner_max_iterations &&
-          inner.inner_chunk_size <= 64;
+          (inner.inner_max_iterations == 0
+               ? inner.inner_chunk_size == 0
+               : inner.inner_chunk_size > 0 &&
+                     inner.inner_chunk_size <= inner.inner_max_iterations);
       boundary_cursor = inner.inner_dispatch_end;
     }
     if (!device_->supports_conditional_commands() ||
@@ -3585,10 +3607,7 @@ bool GfxRuntime::launch_graph_impl(
         (nested_control->outer_has_status &&
          !valid_scalar(nested_control->outer_status)) ||
         controls_alias || !inner_valid ||
-        nested_control->outer_condition_dispatch_count == 0 ||
-        nested_control->outer_max_iterations == 0 ||
-        nested_control->outer_max_iterations >
-            kNestedStructuredMaximumOuterIterations) {
+        nested_control->outer_condition_dispatch_count == 0) {
       return reject();
     }
     key.insert(
@@ -3984,6 +4003,14 @@ bool GfxRuntime::launch_graph_impl(
     std::uint64_t repeated_payload_tasks = 0;
     std::uint64_t single_copy_payload_tasks = 0;
     std::uint64_t inner_controller_actions = 0;
+    const auto add_product = [](std::uint64_t &sum, std::uint64_t count,
+                                std::uint64_t value) {
+      if (count &&
+          value > (std::numeric_limits<std::uint64_t>::max() - sum) / count)
+        return false;
+      sum += count * value;
+      return true;
+    };
     for (const auto &inner : nested_control->inner_controls) {
       NestedTaskRange range;
       range.condition_begin =
@@ -4019,34 +4046,35 @@ bool GfxRuntime::launch_graph_impl(
         }
         range.group_counts.push_back(static_cast<std::uint32_t>(group_x));
       }
-      if (range.group_counts.empty() ||
-          range.group_counts.size() > kStructuredMaximumPackets) {
+      if (range.group_counts.empty()) {
         return reject();
       }
       const std::uint64_t payload_tasks = range.end - range.body_begin;
       single_copy_payload_tasks += payload_tasks;
-      repeated_payload_tasks +=
-          static_cast<std::uint64_t>(inner.inner_max_iterations) *
-          payload_tasks;
-      inner_controller_actions +=
-          2 + static_cast<std::uint64_t>(inner.inner_max_iterations);
+      if (!add_product(repeated_payload_tasks, inner.inner_max_iterations,
+                       payload_tasks) ||
+          !add_product(
+              inner_controller_actions, 1,
+              2 + static_cast<std::uint64_t>(inner.inner_max_iterations)))
+        return reject();
       task_cursor = range.end;
       nested_task_ranges.push_back(std::move(range));
     }
     const std::uint64_t static_tasks =
         total_tasks - nested_outer_condition_task_end -
         single_copy_payload_tasks;
-    const std::uint64_t per_outer_actions =
-        1 + static_tasks + repeated_payload_tasks +
-        inner_controller_actions;
-    const std::uint64_t encoded_actions =
-        nested_outer_condition_task_end + 2 +
-        static_cast<std::uint64_t>(
-            nested_control->outer_max_iterations) *
-            per_outer_actions;
-    if (encoded_actions > kStructuredMaximumEncodedActions) {
+    std::uint64_t per_outer_actions = 1;
+    std::uint64_t encoded_actions = 2;
+    if (!add_product(per_outer_actions, 1, static_tasks) ||
+        !add_product(per_outer_actions, 1, repeated_payload_tasks) ||
+        !add_product(per_outer_actions, 1, inner_controller_actions) ||
+        !add_product(encoded_actions, 1, nested_outer_condition_task_end) ||
+        !add_product(encoded_actions, nested_control->outer_max_iterations,
+                     per_outer_actions))
       return reject();
-    }
+    if (nested_result &&
+        encoded_actions > std::numeric_limits<std::uint32_t>::max())
+      return reject();  // Diagnostic counters have a uint32 representation.
     structured_strategy = GraphStructuredStrategy::compact;
     structured_group_counts = nested_task_ranges.front().group_counts;
     key.insert(key.end(),
@@ -4161,8 +4189,19 @@ bool GfxRuntime::launch_graph_impl(
   std::size_t structured_control_bytes = 0;
   if (!structured_group_counts.empty()) {
     if (nested_structured) {
+      // Shader offsets and dynamic trace indices use uint32 words. Validate
+      // their actual representation, not the JIT route's historical policy
+      // limits on iterations, child regions, packets or encoded actions.
+      const auto max_words = std::min<std::size_t>(
+          std::numeric_limits<std::uint32_t>::max(),
+          std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t));
       std::size_t child_control_words = 0;
       for (auto &range : nested_task_ranges) {
+        if (child_control_words > max_words - kStructuredObservationWords ||
+            range.group_counts.size() > (max_words - child_control_words -
+                                         kStructuredObservationWords) /
+                                            kStructuredPacketWords)
+          return reject();
         range.packet_word_offset = child_control_words;
         range.observation_word_offset =
             child_control_words +
@@ -4170,12 +4209,18 @@ bool GfxRuntime::launch_graph_impl(
         child_control_words =
             range.observation_word_offset + kStructuredObservationWords;
       }
+      if (child_control_words > max_words - 1 - kNestedStructuredHeaderWords ||
+          nested_task_ranges.size() > max_words / kNestedStructuredTraceWords)
+        return reject();
       nested_outer_gate_word_offset = child_control_words;
       nested_header_word_offset = nested_outer_gate_word_offset + 1;
       nested_trace_word_offset =
           nested_header_word_offset + kNestedStructuredHeaderWords;
       nested_trace_row_words =
           nested_task_ranges.size() * kNestedStructuredTraceWords;
+      if (nested_control->outer_max_iterations >
+          (max_words - nested_trace_word_offset) / nested_trace_row_words)
+        return reject();
       structured_control_bytes =
           (nested_trace_word_offset +
            static_cast<std::size_t>(
@@ -4208,10 +4253,13 @@ bool GfxRuntime::launch_graph_impl(
           sizeof(std::uint32_t);
     }
   }
-  if (structured_control_bytes >
-      kStructuredChainedMaximumControlBytes) {
+  if (!nested_structured &&
+      structured_control_bytes > kStructuredChainedMaximumControlBytes) {
     return reject();
   }
+  if (nested_result &&
+      structured_control_bytes > std::numeric_limits<std::uint32_t>::max())
+    return reject();
   // Nested replay uses the same device-side snapshot buffer for its gate
   // controller even when the caller does not request an immediate host
   // observation. Keeping that buffer internal lets asynchronous submission
@@ -5281,6 +5329,10 @@ bool GfxRuntime::launch_graph_impl(
       slot->structure_key = std::move(structure_key);
       slot->cmdlist = std::move(recorded_cmdlist);
       slot->recorded = true;
+      if (prepare_only) {
+        state.last_path = GraphReplayLastPath::record;
+        return true;
+      }
       slot->completion = submit_compute_commands(slot->cmdlist.get());
       if (state.diagnostics_enabled) {
         ++state.recorded;

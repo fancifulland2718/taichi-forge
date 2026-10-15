@@ -568,6 +568,12 @@ class TI_DLL_EXPORT GfxRuntime {
       const GraphStructuredControl &control,
       std::vector<std::shared_ptr<void>> owners,
       std::vector<int> snode_tree_ids = {});
+  std::unique_ptr<GraphReplayRegistration>
+  prepare_fixed_nested_structured_graph(
+      const std::vector<GraphDispatch> &dispatches,
+      const GraphNestedStructuredControl &control,
+      std::vector<std::shared_ptr<void>> owners,
+      std::vector<int> snode_tree_ids = {});
   void launch_prepared_graph(std::uint64_t replay_key);
   void retire_graphics_pipeline_recordings(std::uint64_t pipeline);
   void retire_ray_resource_recordings(std::uint64_t resource);
@@ -749,6 +755,12 @@ class TI_DLL_EXPORT GfxRuntime {
   GraphReplayStats debug_graph_replay_stats(uint64_t replay_token);
   GraphReplayStats snapshot_graph_replay_stats(uint64_t replay_token);
   void collect_ready_graph_replays(std::size_t max_polls);
+  std::unique_ptr<GraphReplayRegistration> prepare_fixed_control_graph(
+      const std::vector<GraphDispatch> &dispatches,
+      const GraphStructuredControl *control,
+      const GraphNestedStructuredControl *nested_control,
+      std::vector<std::shared_ptr<void>> owners,
+      std::vector<int> snode_tree_ids);
   bool launch_graph_impl(const std::vector<GraphDispatch> &dispatches,
                          uint64_t replay_key,
                          RuntimeStatistics *statistics,

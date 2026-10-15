@@ -4,6 +4,7 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "tests/cpp/aot/gfx_utils.h"
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
+#include <limits>
 
 using namespace taichi;
 using namespace lang;
@@ -213,6 +214,213 @@ TEST(CGraphAotTest, VulkanFixedControl) {
     }
     // Keep actual pending work at close, so premature owner release cannot
     // accidentally pass merely because this tiny kernel already completed.
+    std::weak_ptr<aot::Module> retired_module = module;
+    std::weak_ptr<DeviceAllocationGuard> retired_storage = frames[0].storage;
+    runtime.begin_submission_batch();
+    for (auto &frame : frames) {
+      frame.loop->launch_prepared();
+      frame.loop.reset();
+      frame.finish.reset();
+      frame.storage.reset();
+    }
+    module.reset();
+    EXPECT_FALSE(retired_module.expired());
+    EXPECT_FALSE(retired_storage.expired());
+    runtime.end_submission_batch();
+    runtime.synchronize();
+    EXPECT_TRUE(retired_module.expired());
+    EXPECT_TRUE(retired_storage.expired());
+  }
+}
+
+TEST(CGraphAotTest, VulkanFixedNestedControl) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan is unavailable";
+  const auto *folder = std::getenv("TAICHI_AOT_FOLDER_PATH");
+  ASSERT_NE(folder, nullptr);
+  vulkan::VulkanDeviceCreator::Params params;
+  vulkan::VulkanDeviceCreator creator(params);
+  auto *device = creator.device();
+  if (!device->supports_conditional_commands())
+    GTEST_SKIP() << "Conditional commands are unavailable";
+  gfx::GfxRuntime::Params runtime_params;
+  runtime_params.device = device;
+  gfx::GfxRuntime runtime(std::move(runtime_params));
+
+  // Test zero budgets and go past each historical JIT route policy without
+  // large data or long logical execution. No arbitrary bounds in this API.
+  for (const auto shape : {std::array<int, 3>{3, 4, 2},
+                           {0, 4, 2},
+                           {3, 0, 2},
+                           {65, 1, 1},
+                           {1, 65, 1},
+                           {1, 1, 9},
+                           {65, 65, 1}}) {
+    SCOPED_TRACE(::testing::Message()
+                 << shape[0] << "/" << shape[1] << "/" << shape[2]);
+    gfx::AotModuleParams module_params;
+    module_params.module_path = folder;
+    module_params.runtime = &runtime;
+    std::shared_ptr<aot::Module> module =
+        aot::Module::load(Arch::vulkan, module_params);
+    ASSERT_TRUE(module && !module->is_corrupted());
+    const int elements = (shape[2] + 1) * 8;
+    struct Frame {
+      std::shared_ptr<DeviceAllocationGuard> storage;
+      std::unique_ptr<gfx::GraphReplayRegistration> loop, finish;
+    };
+    std::array<Frame, 2> frames;
+    const auto write = [&](Frame &frame, const std::vector<int> &values) {
+      void *mapped = nullptr;
+      ASSERT_EQ(device->map(*frame.storage, &mapped), RhiResult::success);
+      std::memcpy(mapped, values.data(), values.size() * sizeof(int));
+      device->unmap(*frame.storage);
+    };
+    const auto read = [&](Frame &frame) {
+      std::vector<int> values(elements);
+      void *mapped = nullptr;
+      if (device->map(*frame.storage, &mapped) != RhiResult::success) {
+        ADD_FAILURE() << "Cannot map nested control storage";
+        return values;
+      }
+      std::memcpy(values.data(), mapped, values.size() * sizeof(int));
+      device->unmap(*frame.storage);
+      return values;
+    };
+    for (auto &frame : frames) {
+      auto [storage, result] = device->allocate_memory_unique(
+          {elements * sizeof(int), true, true, false, AllocUsage::Storage});
+      ASSERT_EQ(result, RhiResult::success);
+      frame.storage = std::move(storage);
+      std::vector<int> initial(elements, 0);
+      initial[3] = 3;
+      write(frame, initial);
+      Ndarray array(*frame.storage, PrimitiveType::i32, {elements});
+      std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
+      std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
+      const auto append = [&](const char *name, int base) {
+        auto *kernel =
+            dynamic_cast<gfx::KernelImpl *>(module->get_kernel(name));
+        TI_ASSERT(kernel);
+        auto context = std::make_unique<LaunchContextBuilder>(kernel);
+        context->set_arg_ndarray({0}, array);
+        context->set_arg_int({1}, base);
+        dispatches.push_back({kernel->handle(), context.get()});
+        contexts.push_back(std::move(context));
+      };
+      gfx::GfxRuntime::GraphNestedStructuredControl control;
+      control.outer_predicate = frame.storage->get_ptr();
+      control.outer_counter = frame.storage->get_ptr(sizeof(int));
+      control.outer_status = frame.storage->get_ptr(2 * sizeof(int));
+      control.outer_has_status = &frame == &frames.front();
+      control.outer_max_iterations = shape[0];
+      append("condition", 0);
+      control.outer_condition_dispatch_count = dispatches.size();
+      for (int child = 0; child < shape[2]; ++child) {
+        const int base = (child + 1) * 8;
+        gfx::GfxRuntime::GraphNestedStructuredInnerControl inner;
+        inner.inner_predicate = frame.storage->get_ptr(base * sizeof(int));
+        inner.inner_counter = frame.storage->get_ptr((base + 1) * sizeof(int));
+        inner.inner_status = frame.storage->get_ptr((base + 2) * sizeof(int));
+        inner.inner_has_status = (child % 2 == 0) && control.outer_has_status;
+        inner.inner_max_iterations = shape[1];
+        inner.inner_chunk_size = shape[1];
+        append("reset", base);
+        inner.inner_condition_dispatch_begin = dispatches.size();
+        append("condition", base);
+        inner.inner_body_dispatch_begin = dispatches.size();
+        append("advance", base);
+        append("condition", base);
+        inner.inner_dispatch_end = dispatches.size();
+        control.inner_controls.push_back(inner);
+      }
+      append("outer_advance", 0);
+      append("condition", 0);
+      auto invalid = control;
+      invalid.inner_controls[0].inner_counter = control.outer_counter;
+      EXPECT_ANY_THROW(runtime.prepare_fixed_nested_structured_graph(
+          dispatches, invalid, {module, frame.storage}));
+      invalid = control;
+      invalid.inner_controls[0].inner_dispatch_end = dispatches.size() + 1;
+      EXPECT_ANY_THROW(runtime.prepare_fixed_nested_structured_graph(
+          dispatches, invalid, {module, frame.storage}));
+      invalid = control;
+      invalid.outer_max_iterations = std::numeric_limits<std::uint32_t>::max();
+      EXPECT_ANY_THROW(runtime.prepare_fixed_nested_structured_graph(
+          dispatches, invalid, {module, frame.storage}));
+      const auto before = device->queue_submission_snapshot();
+      frame.loop = runtime.prepare_fixed_nested_structured_graph(
+          dispatches, control, {module, frame.storage});
+      append("adjoint", 0);
+      frame.finish = runtime.prepare_fixed_graph({{dispatches.back(), {}}},
+                                                 {module, frame.storage});
+      EXPECT_EQ(device->queue_submission_snapshot().queue_submit_calls,
+                before.queue_submit_calls);
+      runtime.synchronize();
+      EXPECT_EQ(read(frame), initial);
+      if (shape == (std::array<int, 3>{3, 4, 2}) && &frame == &frames.front()) {
+        runtime.begin_submission_batch();
+        frame.finish->launch_prepared();
+        const auto pending = device->queue_submission_snapshot();
+        const std::vector<gfx::GfxRuntime::GraphDispatch> nested_dispatches(
+            dispatches.begin(), dispatches.end() - 1);
+        auto additional = runtime.prepare_fixed_nested_structured_graph(
+            nested_dispatches, control, {module, frame.storage});
+        EXPECT_EQ(device->queue_submission_snapshot().queue_submit_calls,
+                  pending.queue_submit_calls);
+        runtime.end_submission_batch();
+        runtime.synchronize();
+        initial[6] = 6;
+        EXPECT_EQ(read(frame), initial);
+      }
+    }  // Borrowed arrays and launch contexts are gone before the first replay.
+
+    std::vector<std::array<int, 2>> cases{
+        {0, 1}, {1, 1}, {1, 0}, {2, 1}, {0, 1}};
+    if (shape == (std::array<int, 3>{3, 4, 2})) {
+      cases.push_back({5, 1});
+      cases.push_back({1, 5});
+    }
+    for (const auto targets : cases) {
+      for (std::size_t index = 0; index < frames.size(); ++index) {
+        auto &frame = frames[index];
+        std::vector<int> initial(elements, 0);
+        initial[3] = 3 + static_cast<int>(index);
+        initial[4] = targets[0];
+        for (int child = 0; child < shape[2]; ++child)
+          initial[(child + 1) * 8 + 4] = targets[1];
+        write(frame, initial);
+        const auto before = device->queue_submission_snapshot();
+        runtime.begin_submission_batch();
+        frame.loop->launch_prepared();
+        frame.finish->launch_prepared();
+        runtime.end_submission_batch();
+        EXPECT_EQ(device->queue_submission_snapshot().queue_submit_calls,
+                  before.queue_submit_calls + 1);
+      }
+      runtime.synchronize();
+      for (std::size_t index = 0; index < frames.size(); ++index) {
+        const auto values = read(frames[index]);
+        const int outer = std::min(shape[0], targets[0]);
+        const int inner = std::min(shape[1], targets[1]);
+        const int doublings = outer * inner * shape[2];
+        const int initial = 3 + static_cast<int>(index);
+        EXPECT_EQ(values[0], outer < targets[0]);
+        EXPECT_EQ(values[1], outer);
+        EXPECT_EQ(values[2], outer < targets[0] ? 1 : 2);
+        EXPECT_EQ(values[3], initial << doublings);
+        EXPECT_EQ(values[5], outer + 1);
+        EXPECT_EQ(values[6], 2 * initial * (1 << (2 * doublings)));
+        EXPECT_EQ(values[7], doublings);
+        for (int child = 0; child < shape[2]; ++child) {
+          const int base = (child + 1) * 8;
+          EXPECT_EQ(values[base], outer && inner < targets[1]);
+          EXPECT_EQ(values[base + 1], outer ? inner : 0);
+          EXPECT_EQ(values[base + 2], outer ? (inner < targets[1] ? 1 : 2) : 0);
+          EXPECT_EQ(values[base + 5], outer * (inner + 1));
+        }
+      }
+    }
     std::weak_ptr<aot::Module> retired_module = module;
     std::weak_ptr<DeviceAllocationGuard> retired_storage = frames[0].storage;
     runtime.begin_submission_batch();
