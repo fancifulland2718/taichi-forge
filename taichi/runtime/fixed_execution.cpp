@@ -307,6 +307,10 @@ FixedExecution::FixedExecution(Arch arch,
         throw std::invalid_argument("Fixed CUDA storage size overflow");
       state_->bytes += graph.argument_bytes();
       state_->workspace_bytes += graph.control_bytes();
+      if (graph.capture_bytes() >
+          std::numeric_limits<std::size_t>::max() - state_->workspace_bytes)
+        throw std::invalid_argument("Fixed CUDA capture storage size overflow");
+      state_->workspace_bytes += graph.capture_bytes();
     };
     auto flush = [&](std::vector<CudaOperation> &native) {
       if (native.empty())
@@ -350,8 +354,14 @@ FixedExecution::FixedExecution(Arch arch,
             continue;
           }
           native.emplace_back(cuda::FixedGraph::Dispatch{
-              nullptr, {}, nullptr, [external = *external](void *stream) {
+              nullptr,
+              {},
+              nullptr,
+              [external = *external](void *stream) {
                 external->record_cuda(stream);
+              },
+              [external = *external] {
+                return external->take_cuda_capture_resources();
               }});
         } else if (const auto *copy = std::get_if<BufferCopy>(&operation)) {
           auto *dst = cuda_pointer(copy->destination);

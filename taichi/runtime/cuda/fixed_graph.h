@@ -5,6 +5,7 @@
 #include <variant>
 #include <vector>
 #include "taichi/program/kernel_launcher.h"
+#include "taichi/runtime/cuda/capture_resources.h"
 
 namespace taichi::lang::cuda {
 class KernelLauncher;
@@ -20,6 +21,7 @@ class FixedGraph {
     LaunchContextBuilder *context;
     // Cold capture callback only; never retained or invoked during replay.
     std::function<void(void *)> external;
+    std::function<std::shared_ptr<CudaGraphCaptureResources>()> take_resources;
   };
   struct While;
   using Operation = std::variant<Dispatch, std::shared_ptr<const While>>;
@@ -40,6 +42,7 @@ class FixedGraph {
   std::size_t argument_bytes() const;
   std::size_t node_count() const;
   std::size_t control_bytes() const;
+  std::size_t capture_bytes() const;
 
  private:
   struct State;

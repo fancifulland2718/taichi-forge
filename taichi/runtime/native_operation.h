@@ -11,6 +11,7 @@
 #include <vector>
 #include "taichi/rhi/device.h"
 #include "taichi/runtime/native_resource.h"
+#include "taichi/runtime/cuda/capture_resources.h"
 
 namespace taichi::lang {
 
@@ -76,6 +77,11 @@ class NativeOperation : public NativeResource {
   }
   virtual void record_cuda(void *stream) {
     throw std::invalid_argument("Native operation has no CUDA recording");
+  }
+  // Transfer capture-local storage immediately after each recording, including
+  // a failed recording. Repeated captures must produce independent storage.
+  virtual std::shared_ptr<CudaGraphCaptureResources> take_cuda_capture_resources() {
+    return {};
   }
   // Host invocation under the CUDA owner lock, between whole-context fences.
   // May enqueue work on private streams in the owner's context. Never called

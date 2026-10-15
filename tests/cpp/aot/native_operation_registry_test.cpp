@@ -1,5 +1,7 @@
 #include "gtest/gtest.h"
+#include <algorithm>
 #include <limits>
+#include <utility>
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/common/operation_json.h"
@@ -8,6 +10,7 @@
 #endif
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/cuda/graph_region_builder.h"
 #endif
 
 namespace taichi::lang {
@@ -151,6 +154,222 @@ TEST(NativeOperationRegistry, FftPlansDecodeWithoutLoadingProvider) {
 }
 
 #ifdef TI_WITH_CUDA
+struct CaptureResourceCounts {
+  int recorded{0};
+  int finalized{0};
+  int released{0};
+};
+
+class CapturedScalar final : public CudaGraphCaptureResources {
+ public:
+  CapturedScalar(uint32_t value, CaptureResourceCounts &counts, bool fail)
+      : value_(value), counts_(counts), fail_(fail) {
+  }
+  ~CapturedScalar() override {
+    release(true);
+  }
+  void record(void *output, void *stream) {
+    auto &driver = CUDADriver::get_instance();
+    CUgraph graph = nullptr;
+    uint32_t status = 0;
+    driver.stream_get_capture_info_v2(stream, &status, nullptr, &graph, nullptr,
+                                      nullptr);
+    std::size_t count = 0;
+    driver.graph_get_nodes(graph, nullptr, &count);
+    std::vector<void *> before(count);
+    driver.graph_get_nodes(graph, before.data(), &count);
+    driver.memcpy_host_to_device_async(output, &value_, sizeof(value_), stream);
+    driver.graph_get_nodes(graph, nullptr, &count);
+    std::vector<void *> after(count);
+    driver.graph_get_nodes(graph, after.data(), &count);
+    for (auto *node : after) {
+      if (std::find(before.begin(), before.end(), node) == before.end()) {
+        node_ = node;
+        driver.graph_memcpy_node_get_params(node_, &params_);
+      }
+    }
+    if (!node_)
+      throw std::runtime_error("Missing captured parameter copy");
+  }
+  void finalize() override {
+    ++counts_.finalized;
+    auto &driver = CUDADriver::get_instance();
+    driver.malloc(&device_, sizeof(value_));
+    driver.memcpy_host_to_device(device_, &value_, sizeof(value_));
+    if (fail_)
+      throw std::runtime_error("Capture finalization failure after allocation");
+    params_.srcMemoryType = static_cast<CUmemorytype>(CU_MEMORYTYPE_DEVICE);
+    params_.srcHost = nullptr;
+    params_.srcDevice = device_;
+    params_.srcPitch = sizeof(value_);
+    driver.graph_memcpy_node_set_params(node_, &params_);
+  }
+  uint64_t requested_device_bytes() const override {
+    return device_ ? sizeof(value_) : 0;
+  }
+  void release(bool backend_safe) noexcept override {
+    if (released_)
+      return;
+    released_ = true;
+    ++counts_.released;
+    if (device_ && backend_safe)
+      CUDADriver::get_instance().mem_free.call(device_);
+    device_ = nullptr;
+  }
+
+ private:
+  uint32_t value_;
+  CaptureResourceCounts &counts_;
+  bool fail_, released_{false};
+  void *node_{nullptr}, *device_{nullptr};
+  CUDA_MEMCPY3D params_{};
+};
+
+class CaptureScalarOperation final : public NativeOperation {
+ public:
+  CaptureScalarOperation(Device &device,
+                         void *output,
+                         CaptureResourceCounts &counts)
+      : device_(device), output_(output), counts_(counts) {
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  void record_cuda(void *stream) override {
+    ++counts_.recorded;
+    pending_ = std::make_shared<CapturedScalar>(value, counts_, fail_finalize);
+    last = pending_;
+    pending_->record(output_, stream);
+    if (fail_record)
+      throw std::runtime_error("Provider failed during capture");
+  }
+  std::shared_ptr<CudaGraphCaptureResources> take_cuda_capture_resources()
+      override {
+    return std::exchange(pending_, {});
+  }
+  uint32_t value{7};
+  bool fail_record{false}, fail_finalize{false};
+  std::weak_ptr<CudaGraphCaptureResources> last;
+
+ private:
+  Device &device_;
+  void *output_;
+  CaptureResourceCounts &counts_;
+  std::shared_ptr<CapturedScalar> pending_;
+};
+
+TEST(NativeOperationRegistry, CaptureResourcesArePerGraphAndRetireAfterLaunch) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  auto allocation = device.allocate_memory_unique({4});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto *output = device.get_memory_addr(*allocation.first);
+  driver.memsetd32(output, 99, 1);
+  auto read = [&] {
+    uint32_t value = 0;
+    driver.memcpy_device_to_host(&value, output, 4);
+    return value;
+  };
+  CaptureResourceCounts counts;
+  auto operation =
+      std::make_shared<CaptureScalarOperation>(device, output, counts);
+  const std::vector<FixedExecution::Operation> operations{operation};
+  auto first =
+      std::make_unique<FixedExecution>(Arch::cuda, device, nullptr, operations);
+  auto first_resource = operation->last;
+  operation->value = 11;
+  auto second =
+      std::make_unique<FixedExecution>(Arch::cuda, device, nullptr, operations);
+  EXPECT_EQ(read(),
+            99);  // Cold capture/finalization does not execute the math.
+  EXPECT_EQ(first->workspace_bytes(), 4);
+  EXPECT_EQ(second->workspace_bytes(), 4);
+  for (int i = 0; i < 3; ++i) {
+    first->run();
+    EXPECT_EQ(read(), 7);
+    second->run();
+    EXPECT_EQ(read(), 11);
+  }
+  EXPECT_EQ(counts.recorded, 2);
+  EXPECT_EQ(counts.finalized, 2);
+  EXPECT_EQ(counts.released, 0);
+  first->run();
+  first.reset();  // Retirement itself must wait for the outstanding launch.
+  EXPECT_TRUE(first_resource.expired());
+  EXPECT_EQ(read(), 7);
+  second.reset();
+  EXPECT_EQ(counts.released, 2);
+  operation->fail_record = true;
+  EXPECT_THROW(FixedExecution(Arch::cuda, device, nullptr, operations),
+               std::runtime_error);
+  EXPECT_TRUE(operation->last.expired());
+  EXPECT_EQ(counts.finalized, 2);
+  EXPECT_EQ(counts.released, 3);
+  operation->fail_record = false;
+  operation->fail_finalize = true;
+  EXPECT_THROW(FixedExecution(Arch::cuda, device, nullptr, operations),
+               std::runtime_error);
+  EXPECT_TRUE(operation->last.expired());
+  EXPECT_EQ(counts.released, 4);
+  operation->fail_finalize = false;
+  {
+    FixedExecution recovered(Arch::cuda, device, nullptr, operations);
+    recovered.run();
+  }
+  EXPECT_EQ(read(), 11);
+  EXPECT_EQ(counts.released, 5);
+}
+
+TEST(NativeOperationRegistry,
+     CaptureResourcesFinalizeInsideConditionalRegions) {
+  if (!CUDADriver::get_instance_without_context().detected() ||
+      !cuda::GraphRegionBuilder::available())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  auto allocation = device.allocate_memory_unique({8});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto predicate = allocation.first->get_ptr();
+  auto output_ptr = predicate;
+  output_ptr.offset = 4;
+  auto *output =
+      static_cast<char *>(device.get_memory_addr(*allocation.first)) + 4;
+  CaptureResourceCounts counts;
+  auto operation =
+      std::make_shared<CaptureScalarOperation>(device, output, counts);
+  auto loop = std::make_shared<FixedExecution::While>();
+  loop->predicate = predicate;
+  loop->condition = {FixedExecution::BufferFill{predicate, 4, 1}};
+  loop->body = {operation};
+  for (auto budget : {0u, 2u}) {
+    loop->max_iterations = budget;
+    {
+      FixedExecution graph(
+          Arch::cuda, device, nullptr,
+          {FixedExecution::BufferFill{output_ptr, 4, 99}, loop});
+      EXPECT_GT(graph.workspace_bytes(), 4);
+      graph.run();
+    }
+    uint32_t value = 0;
+    driver.memcpy_device_to_host(&value, output, 4);
+    EXPECT_EQ(value, budget ? 7 : 99);
+    EXPECT_TRUE(operation->last.expired());
+  }
+  EXPECT_EQ(counts.recorded, 2);
+  EXPECT_EQ(counts.finalized, 2);
+  EXPECT_EQ(counts.released, 2);
+}
+
 TEST(NativeOperationRegistry,
      SynchronousCudaActionsRespectPrivateStreamsAndFailure) {
   if (!CUDADriver::get_instance_without_context().detected())

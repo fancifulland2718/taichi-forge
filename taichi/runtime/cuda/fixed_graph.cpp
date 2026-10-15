@@ -19,27 +19,35 @@ struct FixedGraph::State {
   std::size_t control_bytes{0};
   std::size_t bytes{0};
   std::size_t nodes{0};
+  std::size_t capture_bytes{0};
+  std::vector<std::shared_ptr<CudaGraphCaptureResources>> capture_resources;
   std::vector<std::uint8_t> host_arguments;
   bool capturing{false};
   bool submitted{false};
   ~State() {
+    bool backend_safe = false;
     try {
       auto &cuda = CUDAContext::get_instance();
       auto guard = cuda.get_guard();
       auto lock = cuda.get_submission_lock_guard();
       auto &driver = CUDADriver::get_instance();
+      backend_safe = true;
       // Cleanup also handles construction failure without publishing a partial
       // executable. No default-stream wait is needed for an unused graph.
       if (capturing)
-        driver.stream_end_capture.call(stream, &graph);
+        backend_safe &=
+            driver.stream_end_capture.call(stream, &graph) == CUDA_SUCCESS;
       if (submitted)
-        driver.stream_synchronize.call(nullptr);
+        backend_safe &= driver.stream_synchronize.call(nullptr) == CUDA_SUCCESS;
       if (stream)
-        driver.stream_synchronize.call(stream);
+        backend_safe &= driver.stream_synchronize.call(stream) == CUDA_SUCCESS;
       if (executable)
-        driver.graph_exec_destroy.call(executable);
+        backend_safe &= driver.graph_exec_destroy.call(executable) == CUDA_SUCCESS;
       if (graph)
-        driver.graph_destroy.call(graph);
+        backend_safe &= driver.graph_destroy.call(graph) == CUDA_SUCCESS;
+      for (const auto &resource : capture_resources)
+        resource->release(backend_safe);
+      capture_resources.clear();
       if (controls)
         driver.mem_free.call(controls);
       if (arguments)
@@ -48,6 +56,9 @@ struct FixedGraph::State {
         driver.stream_destroy.call(stream);
     } catch (...) {
       // Cleanup must not throw while unwinding a driver failure.
+      for (const auto &resource : capture_resources)
+        resource->release(false);
+      capture_resources.clear();
     }
   }
 };
@@ -161,10 +172,23 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations)
   }
   auto record_dispatch = [&](const Dispatch &dispatch, void *stream) {
     const auto index = dispatch_index.at(&dispatch);
-    if (dispatch.external)
-      dispatch.external(stream);
-    else
+    if (dispatch.external) {
+      const auto retain = [&] {
+        if (dispatch.take_resources) {
+          if (auto resource = dispatch.take_resources())
+            state.capture_resources.push_back(std::move(resource));
+        }
+      };
+      try {
+        dispatch.external(stream);
+      } catch (...) {
+        retain();
+        throw;
+      }
+      retain();
+    } else {
       dispatch.launcher->capture_cuda_graph_launch(packets[index], stream);
+    }
   };
   if (controls.empty()) {
     auto capture_lock = cuda.get_graph_capture_lock_guard();
@@ -234,6 +258,13 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations)
     };
     record(state.graph, {}, operations);
   }
+  for (const auto &resource : state.capture_resources) {
+    resource->finalize();
+    const auto bytes = resource->requested_device_bytes();
+    if (bytes > std::numeric_limits<std::size_t>::max() - state.capture_bytes)
+      throw std::invalid_argument("Fixed CUDA capture storage size overflow");
+    state.capture_bytes += bytes;
+  }
   driver.graph_instantiate_with_flags(&state.executable, state.graph, 0);
   std::size_t root_nodes = 0;
   driver.graph_get_nodes(state.graph, nullptr, &root_nodes);
@@ -257,6 +288,9 @@ std::size_t FixedGraph::argument_bytes() const {
 }
 std::size_t FixedGraph::control_bytes() const {
   return state_->control_bytes;
+}
+std::size_t FixedGraph::capture_bytes() const {
+  return state_->capture_bytes;
 }
 std::size_t FixedGraph::node_count() const {
   return state_->nodes;

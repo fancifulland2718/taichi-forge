@@ -17,6 +17,7 @@
 #include "taichi/aot/module_data.h"
 #include "taichi/program/compile_config.h"
 #include "taichi/program/runtime_resource_registry.h"
+#include "taichi/runtime/cuda/capture_resources.h"
 #include "taichi/struct/snode_tree.h"
 #define TI_RUNTIME_HOST
 #include "taichi/program/context.h"
@@ -291,16 +292,7 @@ struct CpuBoundedDispatchMetadata {
   std::uint32_t capacity{0};
 };
 
-// Capture-local provider storage. Finalization runs after stream capture and
-// before instantiation, never on replay. The graph/frame retires this storage
-// only after its launches complete. No AOT or public deployment schema.
-class CudaGraphCaptureResources {
- public:
-  virtual ~CudaGraphCaptureResources() = default;
-  virtual void finalize() = 0;
-  virtual std::uint64_t requested_device_bytes() const = 0;
-  virtual void release(bool backend_safe) noexcept = 0;
-};
+using CudaGraphCaptureResources = taichi::lang::CudaGraphCaptureResources;
 
 // JIT-only contract for one provider command that can be prepared outside a
 // CUDA stream capture and then recorded on the capture stream. Concrete
