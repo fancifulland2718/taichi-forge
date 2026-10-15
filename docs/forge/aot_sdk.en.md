@@ -1131,7 +1131,48 @@ Windows/cuSPARSE 12.7.9 checks cover all three selected strategies, two independ
 binding frames, empty matrices, i32/i64, value updates, shape/alias rejection and
 in-flight close/reset. A real energy `.grad` followed by explicit transpose-matrix
 SpMM validates input gradients. This does not automatically differentiate an
-external SpMM or qualify triangular solves and other solver families.
+external SpMM. Triangular solves use the separate contract below.
+
+Triangular solves reuse `cusparse/csr_f32`. A `triangular_plan_f32` resource retains
+SpSV/SpSM analysis and binds `matrix/input/output`. Parameters are a required
+positive `rhs_count`, `fill_mode="lower"|"upper"`, `unit_diagonal`, `transpose`, and
+`mutable_values` (the three booleans default to false). Single-RHS ports have shape
+`[n]`; multiple-RHS ports are compact row-major `[n, rhs_count]`. The matrix must
+be square; non-unit diagonals require finite nonzero pivots. Solves perform no
+host-side numerical validation.
+
+```python
+triangular = {
+    "kind": "native", "name": "triangular", "provider": "cusparse",
+    "operation": "triangular_plan_f32", "version": 1,
+    "parameters": {"rhs_count": 2, "mutable_values": True},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}
+refresh = {
+    "kind": "native", "provider": "cusparse", "operation": "triangular_update_f32",
+    "version": 1, "parameters": {}, "bindings": {"plan": "triangular"},
+}
+solve = dict(refresh, operation="triangular_solve_f32")
+# Declare the CSR matrix before triangular in resources; execute refresh, then solve.
+```
+
+Keep `mutable_values=False` and record only solve for fixed coefficients. Mutable
+coefficients require explicit refresh after their producer and before solving;
+overwriting values does not update cuSPARSE's retained numeric analysis. A copy
+or coefficient producer, refresh, and solve can share one CUDA Graph, without
+replay-time analysis, allocation, or added host waits. Each binding frame owns
+independent analysis/workspace and may share CSR topology. Completion retirement
+protects resource destruction. Missing update symbols reject mutable plans at
+preparation.
+
+Cold-probe operations `cusparse_triangular_solve_f32` and
+`cusparse_triangular_update_f32`; the plan is a resource, outside operation
+discovery. Availability means at least one RHS route is supported; preparation
+checks the selected SpSV/SpSM and update capability. CPU/Vulkan do not register
+these CUDA factories. Windows CUDA checks cover standalone/borrowed consumption,
+i32/i64, both triangles, unit diagonals, transpose explicit adjoints, captured
+value refresh, two binding frames, and close/reset. External solves are not
+automatically differentiated.
 
 Adapter-backed operations take library locations from the runtime owner:
 

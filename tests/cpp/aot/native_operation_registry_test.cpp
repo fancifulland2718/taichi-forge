@@ -76,6 +76,42 @@ TEST(NativeOperationRegistry, SpmmDescriptionsDecodeWithoutLoadingProvider) {
   EXPECT_EQ(registry.find("cusparse_spmm_f32", 1, Arch::vulkan), nullptr);
 }
 
+TEST(NativeOperationRegistry,
+     TriangularDescriptionsDecodeWithoutLoadingProvider) {
+  const auto &registry = native_operation_registry();
+  auto description =
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"cusparse","operation":"triangular_plan_f32","version":1,
+      "parameters":{"rhs_count":2,"fill_mode":"upper","transpose":true,"unit_diagonal":true,"mutable_values":true},
+      "bindings":{"matrix":"a","input":"x","output":"y"}})"));
+  EXPECT_EQ(registry.decode(description, NativeObjectKind::resource).kind(),
+            "cusparse_triangular_plan_f32");
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  for (const auto *parameters :
+       {R"({"rhs_count":0})", R"({"rhs_count":true})", R"({"rhs_count":-1})",
+        R"({"rhs_count":2,"fill_mode":"auto"})",
+        R"({"rhs_count":1,"transpose":1})",
+        R"({"rhs_count":1,"unit_diagonal":0})",
+        R"({"rhs_count":1,"mutable_values":"yes"})",
+        R"({"rhs_count":1,"algorithm":"auto"})"}) {
+    description.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+  for (const auto *operation :
+       {"triangular_solve_f32", "triangular_update_f32"}) {
+    description.operation = operation;
+    description.bindings = {{"plan", "p"}};
+    description.parameters = liong::json::parse_complete("{}");
+    const auto decoded = registry.decode(description);
+    EXPECT_EQ(registry.find(decoded.kind(), 1, Arch::x64), nullptr);
+    EXPECT_EQ(registry.find(decoded.kind(), 1, Arch::vulkan), nullptr);
+    description.parameters =
+        liong::json::parse_complete(R"({"transpose":true})");
+    EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, FftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto description =

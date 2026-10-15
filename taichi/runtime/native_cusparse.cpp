@@ -115,6 +115,44 @@ void validate_spmm(Device &device, const CsrSpmmF32Operation &op) {
     disjoint(op.output, array);
 }
 
+void validate_triangular(Device &device,
+                         const CsrTriangularF32Description &op) {
+  if (!op.matrix || &op.matrix->device() != &device ||
+      op.matrix->arch() != Arch::cuda || op.rhs_count <= 0)
+    throw std::invalid_argument("Invalid CSR triangular owner or rhs_count");
+  const auto &d = op.matrix->description();
+  if (d.rows != d.columns)
+    throw std::invalid_argument("CSR triangular matrix must be square");
+  const auto rows = std::uint64_t(d.rows), rhs = std::uint64_t(op.rhs_count);
+  if (rows > std::numeric_limits<std::size_t>::max() / 4 / rhs)
+    throw std::invalid_argument("CSR triangular dense extent overflows");
+  for (const auto *array : {&op.input, &op.output}) {
+    if (array->pointer.device != &device ||
+        array->scalar_type != PrimitiveType::f32 ||
+        array->bytes != rows * rhs * 4)
+      throw std::invalid_argument(
+          "CSR triangular requires compact f32 ports on its device");
+    const std::vector<std::uint64_t> shape =
+        rhs == 1 ? std::vector<std::uint64_t>{rows}
+                 : std::vector<std::uint64_t>{rows, rhs};
+    validate_native_array_layout(*array, {shape, {}, 4, 4, true});
+  }
+  disjoint(op.output, op.input);
+  for (const auto &array : d.arrays)
+    disjoint(op.output, array);
+}
+
+template <bool Update>
+void validate_triangular_action(Device &device,
+                                const CsrTriangularF32Operation<Update> &op) {
+  if (!op.plan || &op.plan->device() != &device ||
+      op.plan->arch() != Arch::cuda)
+    throw std::invalid_argument("Invalid CSR triangular plan owner");
+  if (Update && !op.plan->description().mutable_values)
+    throw std::invalid_argument(
+        "CSR triangular update requires mutable_values");
+}
+
 #ifdef TI_WITH_CUDA
 NativeOperationAvailability probe_cusparse() {
   if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
@@ -225,6 +263,110 @@ class CudaCsr final : public CsrF32Resource {
 
  private:
   Device &device_;
+};
+
+NativeOperationAvailability probe_triangular(bool update) {
+  auto result = probe_cusparse();
+  const auto caps = CUSPARSEDriver::get_instance().capabilities();
+  result.available &= (caps.spsv_f32_available &&
+                       (!update || caps.spsv_value_update_available)) ||
+                      (caps.spsm_f32_available &&
+                       (!update || caps.spsm_value_update_available));
+  return result;
+}
+
+class CudaTriangularPlan final : public CsrTriangularF32Resource {
+ public:
+  CudaTriangularPlan(Device &device, CsrTriangularF32Description description)
+      : CsrTriangularF32Resource(std::move(description)), device_(device) {
+    const auto &op = description_;
+    const auto caps = CUSPARSEDriver::get_instance().capabilities();
+    if (op.mutable_values &&
+        (op.rhs_count == 1 ? !caps.spsv_value_update_available
+                           : !caps.spsm_value_update_available))
+      throw std::invalid_argument(
+          "The cuSPARSE provider lacks the selected triangular value-update "
+          "capability");
+    const auto &matrix = op.matrix->description();
+    CudaCsrTriangularDescription native{
+        matrix.rows,
+        static_cast<std::int64_t>(nonzeros(matrix)),
+        op.rhs_count,
+        address(device, matrix.arrays[0]),
+        address(device, matrix.arrays[1]),
+        address(device, matrix.arrays[2])};
+    native.index_type = matrix.arrays[0].scalar_type == PrimitiveType::i32
+                            ? CUSPARSE_INDEX_32I
+                            : CUSPARSE_INDEX_64I;
+    native.upper = op.upper;
+    native.unit_diagonal = op.unit_diagonal;
+    native.transpose = op.transpose;
+    plan_ = std::make_unique<CudaCsrTriangularPlan>(native);
+    plan_->prepare(address(device, op.input), address(device, op.output),
+                   nullptr);
+    CUDADriver::get_instance().stream_synchronize(nullptr);
+  }
+  ~CudaTriangularPlan() override {
+    auto &cuda = CUDAContext::get_instance();
+    auto lock = cuda.get_submission_lock_guard();
+    auto guard = cuda.get_guard();
+    plan_.reset();
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return plan_->workspace_bytes();
+  }
+  void record(void *stream, bool update) {
+    if (update)
+      plan_->update_values(static_cast<CUstream>(stream));
+    else
+      plan_->record(static_cast<CUstream>(stream));
+  }
+
+ private:
+  Device &device_;
+  std::unique_ptr<CudaCsrTriangularPlan> plan_;
+};
+
+template <bool Update>
+class CudaTriangularAction final : public NativeOperation {
+ public:
+  explicit CudaTriangularAction(std::shared_ptr<CudaTriangularPlan> plan)
+      : plan_(std::move(plan)) {
+    if (!plan_)
+      throw std::invalid_argument(
+          "CSR triangular resource has no CUDA implementation");
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return plan_->device();
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  void record_cuda(void *stream) override {
+    plan_->record(stream, Update);
+  }
+  void validate_recording(NativeRecordingState &state) const override {
+    if constexpr (Update) {
+      state.initialized.insert(plan_.get());
+    } else if (plan_->description().mutable_values &&
+               !state.initialized.count(plan_.get())) {
+      throw std::invalid_argument(
+          "Mutable CSR triangular solve requires a preceding update in this "
+          "sequence");
+    }
+  }
+
+ private:
+  std::shared_ptr<CudaTriangularPlan> plan_;
 };
 
 class CudaSpmv final : public NativeOperation {
@@ -342,9 +484,82 @@ class CudaSpmm final : public NativeOperation {
   std::unique_ptr<CudaCsrSpmmPlan> plan_;
 };
 #endif
+template <bool Update>
+void register_triangular_action(NativeOperationRegistry &registry) {
+  using Op = CsrTriangularF32Operation<Update>;
+  registry.define<Op>(validate_triangular_action<Update>);
+  registry.register_schema<Op>(
+      "cusparse", Update ? "triangular_update_f32" : "triangular_solve_f32",
+      {"plan"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<Op> {
+        operation_json::fields(parameters, {});
+        return [](const NativeOperationBindings &bindings) {
+          return Op{bindings.at("plan").resource<CsrTriangularF32Resource>()};
+        };
+      });
+#ifdef TI_WITH_CUDA
+  registry.register_factory<Op>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch, Device &, const Op &description) {
+        return std::make_shared<CudaTriangularAction<Update>>(
+            std::dynamic_pointer_cast<CudaTriangularPlan>(description.plan));
+      },
+      [] { return probe_triangular(Update); });
+#endif
+}
 }  // namespace
 
 void register_cusparse_operations(NativeOperationRegistry &registry) {
+  registry.define<CsrTriangularF32Description>(validate_triangular,
+                                               NativeObjectKind::resource);
+  registry.register_schema<CsrTriangularF32Description>(
+      "cusparse", "triangular_plan_f32", {"matrix", "input", "output"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<CsrTriangularF32Description> {
+        operation_json::fields(
+            parameters, {"rhs_count", "fill_mode", "unit_diagonal", "transpose",
+                         "mutable_values"});
+        CsrTriangularF32Description op;
+        op.rhs_count = static_cast<std::int64_t>(
+            operation_json::integer(parameters["rhs_count"]));
+        if (op.rhs_count <= 0)
+          throw std::invalid_argument(
+              "CSR triangular requires positive rhs_count");
+        if (const auto found = parameters.obj.inner.find("fill_mode");
+            found != parameters.obj.inner.end()) {
+          const auto name = operation_json::name(found->second);
+          if (name != "lower" && name != "upper")
+            throw std::invalid_argument(
+                "CSR triangular fill_mode must be lower or upper");
+          op.upper = name == "upper";
+        }
+        op.unit_diagonal =
+            operation_json::optional_bool(parameters, "unit_diagonal");
+        op.transpose = operation_json::optional_bool(parameters, "transpose");
+        op.mutable_values =
+            operation_json::optional_bool(parameters, "mutable_values");
+        return [op](const NativeOperationBindings &bindings) {
+          auto result = op;
+          result.matrix = bindings.at("matrix").resource<CsrF32Resource>();
+          result.input = bindings.at("input").array();
+          result.output = bindings.at("output").array();
+          return result;
+        };
+      });
+  register_triangular_action<false>(registry);
+  register_triangular_action<true>(registry);
+#ifdef TI_WITH_CUDA
+  registry.register_factory<CsrTriangularF32Description>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch, Device &device, const CsrTriangularF32Description &description) {
+        auto &cuda = CUDAContext::get_instance();
+        auto lock = cuda.get_submission_lock_guard();
+        auto guard = cuda.get_guard();
+        return std::make_shared<CudaTriangularPlan>(device, description);
+      },
+      [] { return probe_triangular(false); });
+#endif
   registry.define<CsrF32Description>(validate_matrix,
                                      NativeObjectKind::resource);
   registry.register_schema<CsrF32Description>(

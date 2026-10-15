@@ -166,9 +166,10 @@ class CudaCsrTriangularPlan final {
   // Cold analysis never solves. Warm record neither rebinds nor allocates.
   Preparation prepare(void *input, void *output, CUstream stream);
   void record(CUstream stream);
-  // Ordered update on the plan's current stream, outside graph capture. The
-  // fixed CSR values address is unchanged; a missing provider symbol fails.
+  // Explicit refresh of retained numeric analysis at the same CSR address.
+  // The no-argument form preserves the live JIT plan's current stream.
   void update_values();
+  void update_values(CUstream stream);
   std::size_t workspace_bytes() const {
     return workspace_bytes_;
   }

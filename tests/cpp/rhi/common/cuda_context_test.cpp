@@ -216,6 +216,96 @@ TEST(CUSPARSECsrPlan, IndependentPlansRetainOnlyTheirOwnExecutionState) {
   EXPECT_EQ(read(y2, 2), (std::vector<float>{0, 0}));
 }
 
+TEST(CUSPARSETriangularPlan, CapturedValueRefreshUsesReplayValues) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  auto &context = CUDAContext::get_instance();
+  auto submission = context.get_submission_lock_guard();
+  auto guard = context.get_guard();
+  auto &cusparse = CUSPARSEDriver::get_instance();
+  if (!cusparse.is_loaded() && !cusparse.load_cusparse())
+    GTEST_SKIP();
+  const auto caps = cusparse.capabilities();
+  if (!caps.spsv_f32_available || !caps.spsm_f32_available ||
+      !caps.spsv_value_update_available || !caps.spsm_value_update_available)
+    GTEST_SKIP();
+  auto &driver = CUDADriver::get_instance();
+  std::vector<std::unique_ptr<void, void (*)(void *)>> storage;
+  auto upload = [&](auto data) {
+    void *address = nullptr;
+    driver.malloc(&address, data.size() * sizeof(data[0]));
+    storage.emplace_back(
+        address,
+        +[](void *value) { CUDADriver::get_instance().mem_free(value); });
+    driver.memcpy_host_to_device(address, data.data(),
+                                 data.size() * sizeof(data[0]));
+    return address;
+  };
+  const auto offsets = upload(std::array<int32_t, 4>{0, 1, 3, 5});
+  const auto columns = upload(std::array<int32_t, 5>{0, 0, 1, 1, 2});
+  std::array<float, 5> initial{2, 1, 4, -1, 2};
+  const auto values = upload(initial), replacement = upload(initial);
+  for (int rhs : {1, 2}) {
+    SCOPED_TRACE(rhs);
+    driver.memcpy_host_to_device(values, initial.data(), sizeof(initial));
+    std::vector<float> input(3 * rhs), output(3 * rhs, 99);
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < rhs; ++j)
+        input[i * rhs + j] = std::array<float, 3>{2, 9, 4}[i] * (j + 1);
+    const auto x = upload(input), y = upload(output);
+    CudaCsrTriangularPlan plan({3, 5, rhs, offsets, columns, values});
+    EXPECT_TRUE(plan.prepare(x, y, nullptr).built);
+    driver.stream_synchronize(nullptr);
+    driver.memcpy_device_to_host(output.data(), y,
+                                 output.size() * sizeof(float));
+    EXPECT_EQ(output, std::vector<float>(3 * rhs, 99));
+    struct Capture {
+      void *stream{nullptr};
+      CUgraph graph{nullptr};
+      CUgraphExec executable{nullptr};
+      bool active{false};
+      ~Capture() {
+        auto &driver = CUDADriver::get_instance();
+        if (active)
+          driver.stream_end_capture.call(stream, &graph);
+        if (stream)
+          driver.stream_synchronize.call_with_warning(stream);
+        if (executable)
+          driver.graph_exec_destroy.call_with_warning(executable);
+        if (graph)
+          driver.graph_destroy.call_with_warning(graph);
+        if (stream)
+          driver.stream_destroy.call_with_warning(stream);
+      }
+    } capture;
+    driver.stream_create(&capture.stream, CU_STREAM_NON_BLOCKING);
+    driver.stream_begin_capture(capture.stream, CU_STREAM_CAPTURE_MODE_GLOBAL);
+    capture.active = true;
+    driver.memcpy_device_to_device_async(values, replacement, sizeof(initial),
+                                         capture.stream);
+    plan.update_values(static_cast<CUstream>(capture.stream));
+    plan.record(static_cast<CUstream>(capture.stream));
+    driver.stream_end_capture(capture.stream, &capture.graph);
+    capture.active = false;
+    driver.graph_instantiate_with_flags(&capture.executable, capture.graph, 0);
+    for (float scale : {2.f, .5f, 1.f}) {
+      auto changed = initial;
+      for (auto &value : changed)
+        value *= scale;
+      driver.memcpy_host_to_device(replacement, changed.data(),
+                                   sizeof(changed));
+      driver.graph_launch(capture.executable, capture.stream);
+      driver.stream_synchronize(capture.stream);
+      driver.memcpy_device_to_host(output.data(), y,
+                                   output.size() * sizeof(float));
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < rhs; ++j)
+          EXPECT_NEAR(output[i * rhs + j], float((i + 1) * (j + 1)) / scale,
+                      1e-6f);
+    }
+  }
+}
+
 TEST(CUDADriverCompatibility, MapsAndGatesMUSADriverSurface) {
   using cuda::detail::driver_symbol_enabled;
   using cuda::detail::driver_symbol_name;

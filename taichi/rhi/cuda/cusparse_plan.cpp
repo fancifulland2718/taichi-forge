@@ -497,8 +497,13 @@ void CudaCsrTriangularPlan::record(CUstream stream) {
 }
 
 void CudaCsrTriangularPlan::update_values() {
+  update_values(stream_);
+}
+
+void CudaCsrTriangularPlan::update_values(CUstream stream) {
   TI_ERROR_IF(!initialized_,
               "CUDA CSR triangular values require a prepared plan.");
+  bind_stream(stream);
   auto &driver = CUSPARSEDriver::get_instance();
   if (description_.rhs_count == 1) {
     TI_ERROR_IF(!driver.cpSpSVUpdateMatrix.available(),

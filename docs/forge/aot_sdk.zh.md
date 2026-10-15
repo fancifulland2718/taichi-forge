@@ -889,7 +889,40 @@ SpMV/SpMM 共用一次矩阵快照，数值变化需要新导出；物化 Graph 
 
 Windows/cuSPARSE 12.7.9 验证覆盖三种已选方案、两组独立绑定、空矩阵、i32/i64、
 数值更新、尺寸/别名拒绝及在途关闭/reset；真实 energy `.grad` 后接显式转置矩阵的
-SpMM 验证输入梯度。尚不自动微分外部 SpMM，也不据此声明三角求解或其他 solver 支持。
+SpMM 验证输入梯度。尚不自动微分外部 SpMM；三角求解使用下述独立合同。
+
+三角求解复用 `cusparse/csr_f32`，以 `triangular_plan_f32` 资源保留 SpSV/SpSM
+分析。资源绑定 `matrix/input/output`，参数包括必需的正整数 `rhs_count`，以及
+`fill_mode="lower"|"upper"`、`unit_diagonal`、`transpose`、`mutable_values`（后三项
+默认 false）。单 RHS 的输入输出为 `[n]`，多 RHS 为紧凑行主序 `[n, rhs_count]`。
+矩阵须为方阵，非单位对角要求有限非零 pivot；求解不执行 host 侧数值检查。
+
+```python
+triangular = {
+    "kind": "native", "name": "triangular", "provider": "cusparse",
+    "operation": "triangular_plan_f32", "version": 1,
+    "parameters": {"rhs_count": 2, "mutable_values": True},
+    "bindings": {"matrix": "matrix", "input": "x", "output": "y"},
+}
+refresh = {
+    "kind": "native", "provider": "cusparse", "operation": "triangular_update_f32",
+    "version": 1, "parameters": {}, "bindings": {"plan": "triangular"},
+}
+solve = dict(refresh, operation="triangular_solve_f32")
+# 在 resources 中先声明 CSR matrix，再加入 triangular；operations 使用 refresh、solve。
+```
+
+固定系数保持 `mutable_values=False`，只录制 solve。可变系数必须在数值生产之后、
+求解之前显式 refresh；直接覆盖 values 不会自动刷新 cuSPARSE 的分析副本。
+同一序列允许复制/生产系数、refresh、solve 共用 CUDA Graph，重放不再分析或
+分配，也不添加 host 等待。每组绑定拥有独立分析/workspace，共享 CSR 拓扑；关闭
+执行实例时按完成事件退休。更新符号缺失的 provider 在准备可变计划时明确拒绝。
+
+冷探测操作 `cusparse_triangular_solve_f32` / `cusparse_triangular_update_f32`；
+计划是资源，不属于 operation 查询。探测成功表示至少一种 RHS 路线可用，准备时
+进一步核查所选 SpSV/SpSM 及数值更新能力。CPU/Vulkan 不注册这些 CUDA 工厂。
+Windows CUDA 验证覆盖独立/借用消费、i32/i64、上下三角、单位对角、转置显式伴随、
+同图数值刷新、两组绑定及 close/reset。外部求解未接入自动微分。
 
 使用 adapter 的操作从 runtime owner 取得库位置：
 

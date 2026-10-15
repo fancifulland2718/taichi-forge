@@ -52,4 +52,37 @@ struct CsrSpmmF32Operation {
   std::optional<std::uint64_t> expected_workspace_bytes;
 };
 
+struct CsrTriangularF32Description {
+  static constexpr const char *kind = "cusparse_triangular_plan_f32";
+  static constexpr std::uint32_t version = 1;
+  std::shared_ptr<CsrF32Resource> matrix;
+  NativeArrayBinding input, output;
+  std::int64_t rhs_count{1};
+  bool upper{false}, unit_diagonal{false}, transpose{false};
+  // Mutable numeric storage requires explicit refresh before using changed
+  // values. Fixed plans retain their initial analysis with no warm refresh.
+  bool mutable_values{false};
+};
+
+class CsrTriangularF32Resource : public NativeResource {
+ public:
+  const CsrTriangularF32Description &description() const {
+    return description_;
+  }
+
+ protected:
+  explicit CsrTriangularF32Resource(CsrTriangularF32Description description)
+      : description_(std::move(description)) {
+  }
+  CsrTriangularF32Description description_;
+};
+
+template <bool Update>
+struct CsrTriangularF32Operation {
+  static constexpr const char *kind = Update ? "cusparse_triangular_update_f32"
+                                             : "cusparse_triangular_solve_f32";
+  static constexpr std::uint32_t version = 1;
+  std::shared_ptr<CsrTriangularF32Resource> plan;
+};
+
 }  // namespace taichi::lang
