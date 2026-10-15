@@ -188,7 +188,8 @@ class Kernel;
 //  62 - Lower sparse local matrix updates before scalarization under fast math.
 //  63 - Promote private LLVM scalar slots after O0 runtime helper inlining.
 //  64 - Emit AD stack access directly and initialize only the new adjoint.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 64;
+//  65 - Preserve integer reverse-power exponents and finite zero/one bases.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 65;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

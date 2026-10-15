@@ -1347,8 +1347,21 @@ class MakeAdjoint : public ADTransform {
       accumulate(bin->rhs, negate(div(mul(adjoint(bin), bin->lhs), numerator)));
     } else if (bin->op_type == BinaryOpType::pow) {
       // d (x ^ y) = x ^ (y-1) * (y * dx + log(x) * x * dy)
-      auto common_coeff = pow(
-          bin->lhs, sub(bin->rhs, constant(1, bin->ret_type)));  // x ^ (y-1)
+      // Preserve integer exponents through the derivative. Promoting y-1 to
+      // float loses integer-power lowering (notably after branch replay),
+      // where a negative base is outside the Vulkan floating-pow domain.
+      auto one = insert_const_for_grad(bin->rhs->ret_type, bin, 1);
+      auto zero = insert_const_for_grad(bin->rhs->ret_type, bin, 0);
+      auto exponent_zero =
+          insert<BinaryOpStmt>(BinaryOpType::cmp_eq, bin->rhs, zero);
+      auto exponent_one =
+          insert<BinaryOpStmt>(BinaryOpType::cmp_eq, bin->rhs, one);
+      auto base_one = insert_const_for_grad(bin->lhs->ret_type, bin, 1);
+      // x^0 and x^1 have finite base derivatives at x=0. Guard the input to
+      // pow, rather than evaluating an invalid power and masking its result.
+      auto base =
+          sel(exponent_zero, base_one, sel(exponent_one, base_one, bin->lhs));
+      auto common_coeff = pow(base, sub(bin->rhs, one));
       accumulate(bin->lhs, mul(adjoint(bin), mul(bin->rhs, common_coeff)));
       accumulate(bin->rhs, mul(adjoint(bin), mul(log(bin->lhs),
                                                  mul(bin->lhs, common_coeff))));

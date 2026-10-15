@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Reverse AD preserves integer power exponents, fixing NaN gradients at negative
+  bases inside Vulkan conditionals. Base derivatives at zero with exponents 0/1
+  are also corrected. Explicit reverse and forward AD regressions pass on
+  CPU/CUDA/Vulkan; old kernel caches are invalidated to avoid stale derivatives.
+
 - Qualified native sort sequences now export with their surrounding kernels on
   CPU/CUDA/Vulkan. `source_bindings` names retained producer arrays without
   serializing contents or addresses; typed exact-shape certificates preserve
