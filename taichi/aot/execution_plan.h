@@ -21,6 +21,7 @@ struct ExecutionPlan {
     std::string entry;
     std::vector<std::string> arguments;
     std::string label;
+    std::optional<std::string> indirect_packet;
   };
   struct Copy {
     std::string destination;

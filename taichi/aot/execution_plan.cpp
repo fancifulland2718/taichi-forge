@@ -18,7 +18,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 5)
+    if (version < 1 || version > 6)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -163,8 +163,20 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           }
           operations.emplace_back(std::move(loop));
         } else if (kind == "kernel") {
-          fields(step, {"kind", "entry", "arguments", "label"});
+          fields(step, {"kind", "entry", "arguments", "label", "launch"});
           Kernel kernel{name(step["entry"]), {}, {}};
+          if (auto found = step.obj.inner.find("launch");
+              found != step.obj.inner.end()) {
+            if (version < 6)
+              throw std::invalid_argument(
+                  "Selected kernel launch requires execution plan version 6");
+            const auto &launch = found->second;
+            fields(launch, {"kind", "packet"});
+            if (name(launch["kind"]) != "vulkan_indirect")
+              throw std::invalid_argument("Unsupported kernel launch recipe");
+            kernel.indirect_packet = name(launch["packet"]);
+            arguments.insert(*kernel.indirect_packet);
+          }
           if (auto found = step.obj.inner.find("label");
               found != step.obj.inner.end()) {
             kernel.label = name(found->second);

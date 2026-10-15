@@ -6681,14 +6681,15 @@ void export_lang(py::module &m) {
       }, py::arg("enable_diagnostics") = true);
 
   auto physical_graph_sources = [](const py::object &owner,
-                                   bool include_commands) {
+                                    bool include_commands,
+                                    bool include_launch) {
     const auto &graph = owner.cast<const aot::CompiledGraph &>();
     TI_ERROR_IF(!graph.cuda_parallel_dispatch_groups.empty(),
                 "Parallel Graph dispatch requires an execution recipe");
     py::list sources;
     size_t native_ordinal = 0;
     for (const auto &dispatch : graph.dispatches) {
-      TI_ERROR_IF(dispatch.indirect_dispatch_arg ||
+      TI_ERROR_IF((dispatch.indirect_dispatch_arg && !include_launch) ||
                       dispatch.cuda_bounded_dispatch ||
                       dispatch.cpu_bounded_dispatch,
                   "Graph dispatch requires a non-kernel execution recipe");
@@ -6707,9 +6708,22 @@ void export_lang(py::module &m) {
                              py::return_value_policy::reference_internal,
                              owner);
       if (include_commands) {
-        sources.append(py::make_tuple("dispatch", kernel,
-                                      dispatch.symbolic_args,
-                                      dispatch.dispatch_label));
+        if (include_launch) {
+          py::object launch = py::none();
+          if (dispatch.indirect_dispatch_arg) {
+            py::dict recipe;
+            recipe["kind"] = "vulkan_indirect";
+            recipe["packet"] = dispatch.indirect_dispatch_arg->name;
+            launch = std::move(recipe);
+          }
+          sources.append(py::make_tuple("dispatch", kernel,
+                                        dispatch.symbolic_args,
+                                        dispatch.dispatch_label, launch));
+        } else {
+          sources.append(py::make_tuple("dispatch", kernel,
+                                        dispatch.symbolic_args,
+                                        dispatch.dispatch_label));
+        }
       } else {
         sources.append(py::make_tuple(kernel, dispatch.symbolic_args,
                                       dispatch.dispatch_label));
@@ -6722,12 +6736,17 @@ void export_lang(py::module &m) {
       .def_property_readonly(
           "_physical_jit_dispatch_sources",
           [physical_graph_sources](const py::object &owner) {
-            return physical_graph_sources(owner, false);
+            return physical_graph_sources(owner, false, false);
           })
       .def_property_readonly(
           "_physical_jit_recording_sources",
           [physical_graph_sources](const py::object &owner) {
-            return physical_graph_sources(owner, true);
+            return physical_graph_sources(owner, true, false);
+          })
+      .def_property_readonly(
+          "_physical_jit_execution_sources",
+          [physical_graph_sources](const py::object &owner) {
+            return physical_graph_sources(owner, true, true);
           })
       .def_property_readonly(
           "_owned_jit_dispatch_sources", [](const py::object &owner) {

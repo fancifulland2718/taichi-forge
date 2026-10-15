@@ -20,6 +20,8 @@ def _unique_fields(pairs):
 def _control_version(steps):
     version = 1
     for op in steps:
+        if isinstance(op, dict) and op.get("kind") == "kernel" and "launch" in op:
+            version = max(version, 6)
         if isinstance(op, dict) and op.get("kind") == "while":
             lowering = op.get("lowering")
             selected = 5 if isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested" else 4
@@ -65,7 +67,7 @@ class ExecutionPlan:
             or set(value) - {"version", "operations", "resources", "gradients", "initialization", "constraints"}
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5):
+        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6):
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -195,7 +197,7 @@ class ExecutionPlan:
                     required = {"kind", "predicate", "max_iterations", "condition", "body"}
                     optional, names = {"continue_while_nonzero", "lowering"}, ("predicate",)
                 elif kind == "kernel":
-                    required, optional = {"kind", "entry", "arguments"}, {"label"}
+                    required, optional = {"kind", "entry", "arguments"}, {"label", "launch"}
                     names = ("entry",)
                 elif kind == "copy":
                     required = {"kind", "source", "destination"}
@@ -233,6 +235,17 @@ class ExecutionPlan:
                     if name != "entry":
                         arguments.add(op[name])
                 for key in (optional & set(op)) - set(names):
+                    if kind == "kernel" and key == "launch":
+                        launch = op[key]
+                        if (
+                            not isinstance(launch, dict)
+                            or set(launch) != {"kind", "packet"}
+                            or launch["kind"] != "vulkan_indirect"
+                        ):
+                            raise ValueError("Unsupported kernel launch recipe")
+                        _name(launch["packet"])
+                        arguments.add(launch["packet"])
+                        continue
                     if kind == "kernel" and key == "label":
                         _name(op[key])
                         if "\n" in op[key] or "\r" in op[key]:

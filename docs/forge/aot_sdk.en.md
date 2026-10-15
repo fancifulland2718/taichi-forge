@@ -482,8 +482,27 @@ qualified native recordings. Export follows the final physical sequence while
 matching native command barriers to their retained reconstruction contracts;
 it does not restore the unfused source maps. The cuFFT regression covers two
 library calls, three fused map regions, repeated export, and standalone/borrowed
-consumption after producer retirement. Parallel, indirect, bounded, and custom
-storage routes still require their own qualified reconstruction descriptions.
+consumption after producer retirement. Parallel and custom storage routes still
+require their own qualified reconstruction descriptions.
+
+Selected fixed-capacity `dispatch_bounded(..., physical_grid="capacity")`
+now exports on CPU/CUDA/Vulkan. Vulkan also exports the selected indirect route
+and `dispatch_ordered_segments`, preserving device packet preparation, payload
+order, and private packet/state storage. ExecutionPlan version 6 represents a
+kernel launch as `"launch": {"kind": "vulkan_indirect", "packet": "name"}`;
+ordinary kernels keep their existing format. Components must match private ABI 60.
+The packet is a contiguous scalar `u32` array with at least three values; public
+or private AOT storage supports indirect usage without another allocation or copy.
+Extent bindings use scalar `i32[2]` (count, overflow); ordered offsets use
+`i32[segment_count + 1]`. Capacity remains part of the selected compiled recipe.
+Preparation validates these layouts once, and replay does not read counts back.
+
+Tests cover zero/partial/full work, packet reuse between dependent segments,
+two bindings, real downstream `.grad`, explicit payload adjoints, and retirement
+in standalone/borrowed consumers. CPU/CUDA exact/adaptive launch recipes,
+host-count clamping, producer-owned launch state, parallel regions, and indirect
+dispatch inside structured control still require separate reconstruction support;
+export does not replace them with fixed-capacity work.
 
 Graph-instance-owned ndarray declarations (`private_ndarray` / `GraphOwnedNdarray`)
 now export as private resources with one-time zero initialization. Symbols sharing
@@ -714,8 +733,8 @@ consumers. cuBLAS/cuTENSOR checks include complete mixed sequences, explicit
 coefficient/input adjoints, shared and independent plans, source-owner retirement
 before consumption, and in-flight consumer close/reset.
 
-Unsupported recording types/subclasses, structured control, observations,
-bounded/indirect dispatch and selected composition/private-resource recipes
+Unsupported recording types/subclasses, control/launch routes, observations,
+and selected composition/private-resource recipes
 without a reconstruction contract are rejected during preflight, before adding
 kernel definitions. They are not silently replaced by a baseline recipe. If a
 backend compilation subsequently fails, the module cannot be saved: create a new
@@ -918,7 +937,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 59.
+Current components require matching private ABI 60.
 
 Plans can separate one-time initialization from replay:
 

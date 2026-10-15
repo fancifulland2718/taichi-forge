@@ -737,11 +737,23 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         if (!bound)
           return false;
         bound->context->append_dispatch_label(kernel->label);
+        DevicePtr indirect_packet{kDeviceNullPtr};
+        if (kernel->indirect_packet) {
+          if (rt.arch != taichi::Arch::vulkan)
+            throw MemoryBindingError("Vulkan indirect launch requires Vulkan");
+          const auto &packet = array_binding(*kernel->indirect_packet);
+          if (packet.scalar_type != PrimitiveType::u32 || !packet.element_shape.empty() ||
+              packet.shape.size() != 1 || packet.shape[0] < 3 ||
+              packet.bytes < 3 * sizeof(std::uint32_t) || packet.pointer.offset % 4)
+            throw MemoryBindingError(
+                "Indirect launch packet requires at least three packed u32 values");
+          indirect_packet = packet.pointer;
+        }
         prepared->memories.insert(prepared->memories.end(),
                                   bound->memories.begin(),
                                   bound->memories.end());
         operations.emplace_back(
-            FixedExecution::Dispatch{bound->kernel, bound->context.get()});
+            FixedExecution::Dispatch{bound->kernel, bound->context.get(), indirect_packet});
         prepared->plan_arguments.push_back(std::move(bound));
       } else if (const auto *copy =
                      std::get_if<aot::ExecutionPlan::Copy>(&operation)) {

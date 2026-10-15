@@ -5,6 +5,24 @@ import pytest
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
+def test_selected_indirect_launch_retains_packet_and_version():
+    operation = dict(kind="kernel", entry="payload", arguments=["x"],
+                     launch=dict(kind="vulkan_indirect", packet="grid"))
+    plan = ExecutionPlan([operation], resources=[dict(kind="ndarray", name="grid", dtype="u32", shape=[3])])
+    document = json.loads(plan.to_json())
+    assert document["version"] == 6
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("x",)
+    assert restored._replay_argument_names == {"x", "grid"}
+    for version in (1, 5, 7):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+    for launch in (None, {}, dict(kind="cuda_indirect", packet="grid"),
+                   dict(kind="vulkan_indirect", packet=""), dict(kind="vulkan_indirect", packet="grid", address=1)):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(operation, launch=launch)])
+
+
 def test_module_array_resources_keep_layout_in_the_module():
     resources = [
         dict(kind="module_array", name="x", view="values"),

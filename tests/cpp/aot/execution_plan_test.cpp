@@ -5,6 +5,28 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, SelectedIndirectLaunchRetainsPacketAndVersion) {
+  const std::string source = R"({"version":6,"resources":[
+    {"kind":"ndarray","name":"grid","dtype":"u32","shape":[3]}],
+    "operations":[{"kind":"kernel","entry":"payload","arguments":["x"],
+      "launch":{"kind":"vulkan_indirect","packet":"grid"}}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x"}));
+  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"grid", "x"}));
+  EXPECT_EQ(std::get<ExecutionPlan::Kernel>(plan.operations[0]).indirect_packet,
+            std::optional<std::string>("grid"));
+  for (const auto &change :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":6", "\"version\":5"},
+           {"vulkan_indirect", "cuda_indirect"},
+           {"\"packet\":\"grid\"", "\"packet\":\"\""},
+           {"\"packet\":\"grid\"", "\"packet\":\"grid\",\"address\":1"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(change.first), change.first.size(), change.second);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+}
+
 namespace {
 void validate_provider_description(const std::string &document) {
   const auto plan = ExecutionPlan::parse(document);

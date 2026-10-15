@@ -2796,6 +2796,27 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
   }
   return bindings->prepare_for_replay(patch_existing) == RhiResult::success;
 }
+
+RhiResult record_graph_dispatch(CommandList *commands,
+                                DevicePtr packet,
+                                int groups) {
+  if (packet == kDeviceNullPtr) {
+    return commands->dispatch(groups);
+  }
+  commands->buffer_transition(
+      packet, 3 * sizeof(std::uint32_t),
+      {BufferBarrierStage::Transfer | BufferBarrierStage::Compute,
+       BufferBarrierAccess::TransferWrite | BufferBarrierAccess::ShaderWrite,
+       BufferBarrierStage::IndirectCommand,
+       BufferBarrierAccess::IndirectCommandRead});
+  const auto status = commands->dispatch_indirect(packet);
+  commands->buffer_transition(
+      packet, 3 * sizeof(std::uint32_t),
+      {BufferBarrierStage::IndirectCommand,
+       BufferBarrierAccess::IndirectCommandRead, BufferBarrierStage::Compute,
+       BufferBarrierAccess::ShaderRead | BufferBarrierAccess::ShaderWrite});
+  return status;
+}
 }  // namespace
 
 std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
@@ -2856,8 +2877,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     }
     const auto &dispatch = operation.dispatch;
     auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
-    TI_ERROR_IF(!dispatch.host_ctx || found == ti_kernels_.end() ||
-                    dispatch.indirect_dispatch != kDeviceNullPtr,
+    TI_ERROR_IF(!dispatch.host_ctx || found == ti_kernels_.end(),
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
     TI_ERROR_IF(kernel->get_ret_buffer_size() ||
@@ -2877,6 +2897,12 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                   "Prepared Vulkan Graph requires owned device resources");
     }
     const auto &tasks = kernel->ti_kernel_attribs().tasks_attribs;
+    const auto packet = dispatch.indirect_dispatch;
+    TI_ERROR_IF(packet != kDeviceNullPtr &&
+                    (packet.device != device_ || packet.alloc_id == 0 ||
+                     packet.offset % alignof(std::uint32_t) || tasks.size() != 1),
+                "Prepared Vulkan indirect dispatch requires one task and an "
+                "aligned device packet");
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       TI_ERROR_IF(
           tasks[i].task_type == OffloadedTaskType::listgen ||
@@ -2892,7 +2918,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
             "Unsupported prepared Vulkan Graph resource binding");
       }
     }
-    prepared.push_back({kernel, dispatch.host_ctx});
+    prepared.push_back(
+        {kernel, dispatch.host_ctx, nullptr, nullptr, packet});
   }
   executable.refresh_prepared_cache({1}, prepared);
   if (independent_graphics) {
@@ -2917,6 +2944,10 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         static_cast<std::size_t>(std::distance(operations.begin(), pass));
     for (std::size_t i = 0; i < prefix_size; ++i) {
       const auto &pd = prepared[i];
+      TI_ERROR_IF(pd.indirect_dispatch != kDeviceNullPtr &&
+                      conflicts({pd.indirect_dispatch.device,
+                                 pd.indirect_dispatch.alloc_id}),
+                  "Independent graphics buffers alias an indirect packet");
       for (const auto &[key, allocation] : *pd.any_arrays) {
         TI_ERROR_IF(conflicts(allocation),
                     "Independent graphics buffers alias the compute prefix");
@@ -3159,7 +3190,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
       const int groups = (task.advisory_total_num_threads +
                           task.advisory_num_threads_per_group - 1) /
                          task.advisory_num_threads_per_group;
-      TI_ERROR_IF(commands->dispatch(groups) != RhiResult::success,
+      TI_ERROR_IF(record_graph_dispatch(commands.get(), pd.indirect_dispatch,
+                                        groups) != RhiResult::success,
                   "Prepared Vulkan Graph dispatch recording failed");
       commands->memory_barrier();
       slot.resource_sets.push_back(std::move(resources));
@@ -5840,27 +5872,10 @@ bool GfxRuntime::launch_graph_impl(
       const int group_x = (attribs.advisory_total_num_threads +
                            attribs.advisory_num_threads_per_group - 1) /
                           attribs.advisory_num_threads_per_group;
-      if (pd.indirect_dispatch == kDeviceNullPtr) {
-        status = cmdlist->dispatch(group_x);
-      } else {
+      if (pd.indirect_dispatch != kDeviceNullPtr) {
         insert_all_pending(/*exit_boundary=*/false);
-        cmdlist->buffer_transition(
-            pd.indirect_dispatch, 3 * sizeof(std::uint32_t),
-            {BufferBarrierStage::Transfer |
-                 BufferBarrierStage::Compute,
-             BufferBarrierAccess::TransferWrite |
-                 BufferBarrierAccess::ShaderWrite,
-             BufferBarrierStage::IndirectCommand,
-             BufferBarrierAccess::IndirectCommandRead});
-        status = cmdlist->dispatch_indirect(pd.indirect_dispatch);
-        cmdlist->buffer_transition(
-            pd.indirect_dispatch, 3 * sizeof(std::uint32_t),
-            {BufferBarrierStage::IndirectCommand,
-             BufferBarrierAccess::IndirectCommandRead,
-             BufferBarrierStage::Compute,
-             BufferBarrierAccess::ShaderRead |
-                 BufferBarrierAccess::ShaderWrite});
       }
+      status = record_graph_dispatch(cmdlist, pd.indirect_dispatch, group_x);
       TI_ERROR_IF(status != RhiResult::success,
                   "Vulkan graph dispatch error: RhiResult({})", status);
 

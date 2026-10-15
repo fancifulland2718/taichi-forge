@@ -560,7 +560,21 @@ Windows CPU/CUDA/Vulkan 已验证独立/借用消费的前向和反向；cuBLAS/
 完整混合序列、显式输入梯度、共享与独立 plan、生产端 owner 关闭后消费，以及在途
 consumer close/reset。
 
-未覆盖的 recording 类型/子类、结构控制、观察点、bounded/indirect dispatch、
+`dispatch_bounded(..., physical_grid="capacity")` 选中的固定容量路线现可在
+CPU/CUDA/Vulkan 导出。Vulkan 还可导出选中的间接派发和 `dispatch_ordered_segments`，
+保留设备端 packet 准备、payload 次序及私有 packet/state 存储。ExecutionPlan 版本 6
+以 `"launch": {"kind": "vulkan_indirect", "packet": "name"}` 表达 kernel 的派发方式；
+普通 kernel 格式不变，组件须配对 private ABI 60。packet 是至少三个元素的连续标量
+`u32` 数组；公开及私有 AOT 存储均具备 indirect usage，无需额外分配或复制。
+extent 绑定采用标量 `i32[2]`（count、overflow），顺序分段 offsets 采用
+`i32[segment_count + 1]`；容量仍属于选中的编译配方。布局只在准备时验证，重放不读回 count。
+
+独立/借用消费测试覆盖零量、部分/全量、相邻依赖分段复用 packet、双绑定、真实后续
+`.grad`、payload 显式伴随及退休。CPU/CUDA exact/adaptive 派发、host count 截断、
+producer-owned launch state、parallel 和结构化控制内的 indirect 仍需各自重建支持；
+导出不会将其替换为固定容量执行。
+
+未覆盖的 recording 类型/子类、控制/派发路线、观察点、
 缺少重建合同的选中组合策略/私有资源在预检期报错，先于添加 kernel 定义，不静默替换为
 baseline。若后续后端编译失败，该模块不能保存，须新建模块，避免发布不完整产物。
 `add_graph` 仍导出普通 CGraph 格式；此路径用 `prepare_execution` 消费，轻量消费端与
@@ -715,7 +729,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 59。
+当前组件须配套 private ABI 60。
 
 计划可以将一次性初始化与重放分开：
 

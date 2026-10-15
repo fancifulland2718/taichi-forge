@@ -28,6 +28,7 @@ class FixedExecution {
   struct Dispatch {
     aot::Kernel *kernel;
     LaunchContextBuilder *context;
+    DevicePtr indirect_dispatch{kDeviceNullPtr};
   };
   struct BufferCopy {
     DevicePtr destination;

@@ -41,6 +41,7 @@ class _ExportContext:
         self.reconstructed_derived_bindings = set()
         self.binding_constraints = []
         self._provider_data = {}
+        self.bounded_extents = {}
         self.private_bindings = {}
         self._private_names = {}
         self._scalar_values = {}
@@ -346,7 +347,7 @@ class _ExportContext:
         self._initialization_resources[resource] = description
         self.initialization.append(description)
 
-    def kernel(self, kernel, args, label=""):
+    def kernel(self, kernel, args, label="", launch=None):
         bindings = [self.kernel_binding(arg) for arg in args]
         if self.source_arrays is not None:
             self.source_arrays.validate_kernel(args, bindings)
@@ -361,6 +362,10 @@ class _ExportContext:
         operation = dict(kind="kernel", entry=name, arguments=bindings)
         if label:
             operation["label"] = label
+        if launch is not None:
+            if set(launch) != {"kind", "packet"} or launch["kind"] != "vulkan_indirect":
+                raise TaichiRuntimeError("AOT Graph has an unsupported selected kernel launch")
+            operation["launch"] = dict(kind="vulkan_indirect", packet=self.binding(launch["packet"]))
         self.operations.append(operation)
 
     def bound_graph(self, graph, bindings):
@@ -465,15 +470,14 @@ def _native(context, executable):
 
 def _validate_sequence(context, sequence):
     if (
-        sequence._has_indirect_dispatch
-        or sequence._structured_depth
+        sequence._structured_depth
         or sequence._temporary_actions
         or set(sequence._derived_runtime_arg_names) - context.reconstructed_derived_bindings
     ):
         raise TaichiRuntimeError("AOT sequence requires explicit control/private resource reconstruction")
     context.require_private_bindings(sequence._fixed_runtime_args)
     for item in sequence._items:
-        if item[0] != "dispatch":
+        if item[0] not in ("dispatch", "indirect"):
             raise TaichiRuntimeError(f"AOT sequence cannot reconstruct {item[0]!r} yet")
 
 
@@ -689,12 +693,11 @@ def _node(context, node):
     ):
         raise TaichiRuntimeError("AOT execution Graph requires the selected composition/resource recipe")
     ir_nodes = node.ir_node.children if isinstance(node.ir_node, SequentialRegion) else (node.ir_node,)
-    if any(isinstance(item, DispatchNode) and item.bounded_domain is not None for item in ir_nodes):
-        raise TaichiRuntimeError("AOT execution Graph does not yet reconstruct bounded dispatch")
-    if any(dispatch.dispatch_packet is not None for dispatch in node.recording_dispatches):
-        raise TaichiRuntimeError("AOT execution Graph does not yet reconstruct indirect dispatch")
+    from ._bounded_export import validate_domains
+
+    validate_domains(context, ir_nodes, node.recording_dispatches)
     if any(
-        manifest.execution_kind not in ("kernel_dispatch", "backend_command")
+        manifest.execution_kind not in ("kernel_dispatch", "indirect_dispatch", "backend_command")
         for manifest in node.native_action_manifests
     ):
         raise TaichiRuntimeError("AOT execution Graph contains an unsupported native execution kind")
@@ -703,11 +706,13 @@ def _node(context, node):
         context.require_private_bindings(node.fixed_runtime_args)
         if len(node.recording_dispatches) != node.dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete symbolic dispatch metadata")
-        dispatches = node.compiled_graph._physical_jit_dispatch_sources
+        dispatches = node.compiled_graph._physical_jit_execution_sources
         if len(dispatches) != node.physical_dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete physical dispatch metadata")
         for dispatch in dispatches:
-            context.kernel(*dispatch)
+            if dispatch[0] != "dispatch":
+                raise TaichiRuntimeError("AOT kernel sequence contains an unexpected native command")
+            context.kernel(*dispatch[1:])
         return
     # Native commands are composition barriers. Preserve their retained opaque
     # descriptions, but export kernels from the final physical sequence: source
@@ -717,7 +722,7 @@ def _node(context, node):
     for item in node.recording_operations:
         if item[0] == "native":
             natives.append(item[1])
-        elif item[0] == "dispatch":
+        elif item[0] in ("dispatch", "indirect"):
             kernel_count += 1
         elif item[0] == "sequential":
             sequences.append(item[1])
@@ -730,7 +735,7 @@ def _node(context, node):
         or len(natives) + kernel_count != node.dispatch_count
     ):
         raise TaichiRuntimeError("AOT recording sequence does not cover the materialized Graph")
-    sources = node.compiled_graph._physical_jit_recording_sources
+    sources = node.compiled_graph._physical_jit_execution_sources
     if len(sources) != node.physical_dispatch_count:
         raise TaichiRuntimeError("AOT mixed Graph lacks complete physical recording metadata")
     recreated = context.declared_bindings(node.fixed_runtime_args)

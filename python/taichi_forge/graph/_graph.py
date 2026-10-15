@@ -2486,6 +2486,11 @@ class _DeviceExtentGraphContract:
     graph_runtime_lifetime_check_required = False
     graph_publish_time_binding_validation_stable = True
 
+    def _export_aot_bindings(self, context):
+        from taichi_forge.aot._bounded_export import extent_contract
+
+        extent_contract(self, context)
+
     def __init__(self, extent_name, capacity):
         self.extent_name = extent_name
         self.capacity = int(capacity)
@@ -2550,6 +2555,11 @@ class _OrderedOffsetsGraphContract:
     # the immutable ABI once when publishing the version instead of scanning
     # it again before every replay.
     graph_publish_time_binding_validation_stable = True
+
+    def _export_aot_bindings(self, context):
+        from taichi_forge.aot._bounded_export import offsets_contract
+
+        offsets_contract(self, context)
 
     def __init__(self, offsets_name, segment_count):
         self.offsets_name = offsets_name

@@ -148,7 +148,16 @@ capi::MetalRuntime *Runtime::as_mtl() {
 TiMemory Runtime::allocate_memory(
     const taichi::lang::Device::AllocParams &params) {
   taichi::lang::DeviceAllocation devalloc;
-  taichi::lang::RhiResult res = this->get().allocate_memory(params, &devalloc);
+  auto allocation_params = params;
+  if (arch == taichi::Arch::vulkan &&
+      int(params.usage & taichi::lang::AllocUsage::Storage)) {
+    // Like JIT ndarrays, AOT storage can carry GPU-produced dispatch packets.
+    // This changes only buffer usage, without staging or extra allocation.
+    allocation_params.usage =
+        params.usage | taichi::lang::AllocUsage::Indirect;
+  }
+  taichi::lang::RhiResult res =
+      this->get().allocate_memory(allocation_params, &devalloc);
   if (res != taichi::lang::RhiResult::success) {
     throw std::bad_alloc();
   }

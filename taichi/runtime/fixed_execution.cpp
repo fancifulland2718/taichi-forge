@@ -182,6 +182,12 @@ FixedExecution::FixedExecution(Arch arch,
         continue;
       }
       if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        if (dispatch->indirect_dispatch != kDeviceNullPtr &&
+            (arch != Arch::vulkan || inside_control ||
+             dispatch->indirect_dispatch.device != &device ||
+             dispatch->indirect_dispatch.offset % 4))
+          throw std::invalid_argument(
+              "Indirect dispatch requires a flat Vulkan recording and aligned packet");
         if (!dispatch->kernel || !dispatch->context ||
             dispatch->kernel->ret_size ||
             !dispatch->context->argpack_ptrs.empty())
@@ -435,7 +441,8 @@ FixedExecution::FixedExecution(Arch arch,
         throw std::invalid_argument(
             "Fixed Vulkan entries must share a runtime");
       gfx_runtime = &loaded->runtime();
-      return gfx::GfxRuntime::GraphDispatch{loaded->handle(), dispatch.context};
+      return gfx::GfxRuntime::GraphDispatch{
+          loaded->handle(), dispatch.context, dispatch.indirect_dispatch};
     };
     const auto retain =
         [&](std::unique_ptr<gfx::GraphReplayRegistration> graph) {
