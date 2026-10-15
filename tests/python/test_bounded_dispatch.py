@@ -837,7 +837,7 @@ def test_cuda_exact_bounded_dispatch_replay_and_rebind(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False, saturating_grid_dim=2)
-def test_cuda_auto_bounded_dispatch_labeled_fallback_is_exact(monkeypatch):
+def test_cuda_auto_bounded_dispatch_labeled_capture_is_exact(monkeypatch):
     monkeypatch.delenv("TI_CUDA_BOUNDED_DISPATCH_MODE", raising=False)
     capacity = 257
     block_dim = 32
@@ -871,7 +871,7 @@ def test_cuda_auto_bounded_dispatch_labeled_fallback_is_exact(monkeypatch):
         extent=extent_arg,
         capacity=capacity,
         block_dim=block_dim,
-        label="bounded_fallback",
+        label="bounded_capture",
     )
     graph = builder.compile()
     extent = ti.DeviceExtent(capacity)
@@ -894,8 +894,8 @@ def test_cuda_auto_bounded_dispatch_labeled_fallback_is_exact(monkeypatch):
         assert snapshot.executed_count == count
 
     report = graph.execution_stats()
-    assert report.ordinary_fallback_segments > 0
-    assert report.segments[0].last_path == "ordinary"
+    assert report.ordinary_fallback_segments == 0
+    assert report.segments[0].last_path == "cuda_patched_replay"
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
