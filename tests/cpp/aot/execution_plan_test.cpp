@@ -479,11 +479,12 @@ TEST(ExecutionPlan, ExactShapesAndOptionalSameViewRemainColdRequirements) {
   const std::string prefix =
       R"({"version":1,"operations":[{"kind":"copy","source":"x","destination":"y"}],"constraints":)";
   const auto plan = ExecutionPlan::parse(prefix + R"([
-    {"kind":"array_layout","array":"x","exact_shape":[17],"record_bytes":4,"alignment":4},
+    {"kind":"array_layout","array":"x","exact_shape":[17],"record_bytes":4,"alignment":4,"dtype":"f32"},
     {"kind":"disjoint","left":"x","right":"y","allow_same_view":true}]})");
   const auto &required =
       std::get<ExecutionPlan::ArrayLayout>(plan.constraints[0]).required;
   EXPECT_TRUE(required.exact_shape);
+  EXPECT_EQ(required.dtype, "f32");
   EXPECT_EQ(required.minimum_shape, (std::vector<std::uint64_t>{17}));
   EXPECT_TRUE(
       std::get<ExecutionPlan::Disjoint>(plan.constraints[1]).allow_same_view);
@@ -493,6 +494,8 @@ TEST(ExecutionPlan, ExactShapesAndOptionalSameViewRemainColdRequirements) {
        R"({"kind":"array_layout","array":"x","exact_shape":[17],"minimum_shape":[17],"record_bytes":4,"alignment":4})",
        R"({"kind":"array_layout","array":"x","exact_shape":null,"record_bytes":4,"alignment":4})",
        R"({"kind":"array_layout","array":"x","exact_shape":[true],"record_bytes":4,"alignment":4})",
+       R"({"kind":"array_layout","array":"x","exact_shape":[17],"record_bytes":4,"alignment":4,"dtype":true})",
+       R"({"kind":"array_layout","array":"x","exact_shape":[17],"record_bytes":4,"alignment":4,"dtype":"f128"})",
        R"({"kind":"disjoint","left":"x","right":"y","allow_same_view":1})",
        R"({"kind":"disjoint","left":"x","right":"y","allow_same_view":null})"})
     EXPECT_THROW(ExecutionPlan::parse(prefix + "[" + constraint + "]}"),
@@ -601,5 +604,19 @@ TEST(ExecutionPlan, ViewDescriptionsRejectCyclesAndReinterpretation) {
     EXPECT_THROW(ExecutionPlan::parse(prefix + resource + "]}"),
                  std::invalid_argument);
   }
+}
+TEST(ExecutionPlan, TypedLayoutRejectsEqualWidthReinterpretation) {
+  NativeArrayBinding array;
+  array.pointer = {};
+  array.scalar_type = PrimitiveType::f32;
+  array.shape = {17};
+  const NativeArrayLayoutRequirement typed{{17}, {}, 4, 4, true, "f32"};
+  EXPECT_NO_THROW(validate_native_array_layout(array, typed));
+  array.scalar_type = PrimitiveType::i32;
+  EXPECT_THROW(validate_native_array_layout(array, typed),
+               std::invalid_argument);
+  auto layout_only = typed;
+  layout_only.dtype.clear();
+  EXPECT_NO_THROW(validate_native_array_layout(array, layout_only));
 }
 }  // namespace taichi::lang::aot

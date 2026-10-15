@@ -69,6 +69,14 @@ def main(mode, arch, artifact):
         runtime = Runtime(arch)
     with runtime:
         module = runtime.load_module(artifact)
+        typed = runtime.ndarray("f32", 17)
+        same_width = runtime.ndarray("i32", 17)
+        failure(lambda: module.prepare_execution("typed_fill", {"x": same_width}), "dtype")
+        with module.prepare_execution("typed_fill", {"x": typed}) as fill:
+            fill()
+            near(read(typed), [1.0] * 17)
+        typed.close()
+        same_width.close()
         frames = [{name: runtime.ndarray("f32", (17,)) for name in ("x", "y", "dx")} for _ in range(2)]
         calls = [module.prepare_execution("differentiate", frame) for frame in frames]
         for step in range(3):

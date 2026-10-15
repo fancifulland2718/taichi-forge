@@ -130,6 +130,9 @@ NativeStorageRange resolve_native_storage_range(Arch arch,
 void validate_native_array_layout(
     const NativeArrayBinding &array,
     const NativeArrayLayoutRequirement &required) {
+  if (!required.dtype.empty() &&
+      array.scalar_type->to_string() != required.dtype)
+    throw std::invalid_argument("Array does not have the required scalar dtype");
   if (!required.record_bytes || !required.alignment ||
       array.shape.size() != required.minimum_shape.size() ||
       array.element_shape != required.element_shape)

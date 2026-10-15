@@ -431,6 +431,10 @@ plan = ExecutionPlan(
 )
 ```
 
+The optional `dtype` field freezes the scalar type, rejecting equal-width type
+substitutions before recording. It requires paired private ABI 55 components.
+Without it, kernel/provider contracts continue to determine permitted types.
+
 `array_layout` requires a packed scalar/AoS ndarray, matching rank and element
 shape, index extents at least `minimum_shape`, exact bytes per record, and the
 specified base alignment. `element_shape` defaults to `[]`; dtype requirements

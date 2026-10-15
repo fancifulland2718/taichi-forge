@@ -5,6 +5,16 @@ import pytest
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
+def test_typed_array_layout_roundtrip_and_rejection():
+    operations = [dict(kind="fill32", destination="x", value=0)]
+    layout = dict(kind="array_layout", array="x", dtype="f32", exact_shape=[17], record_bytes=4, alignment=4)
+    plan = ExecutionPlan(operations, constraints=[layout])
+    assert json.loads(ExecutionPlan.from_json(plan.to_json()).to_json())["constraints"] == [layout]
+    for dtype in (None, True, [], "", "f128"):
+        with pytest.raises(ValueError, match="dtype"):
+            ExecutionPlan(operations, constraints=[dict(layout, dtype=dtype)])
+
+
 def test_selected_vulkan_control_recipe_closure_and_version():
     lowering = dict(
         kind="vulkan_structured",

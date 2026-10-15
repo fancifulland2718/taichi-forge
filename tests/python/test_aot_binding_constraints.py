@@ -25,6 +25,15 @@ def test_aot_binding_constraints_forward_reverse_and_import_aliases(tmp_path):
             y[i] = 2 * x[i] + 3
 
     module = ti.aot.Module()
+    module.add_execution_plan(
+        "typed_fill",
+        ti.aot.ExecutionPlan(
+            [dict(kind="fill32", destination="x", value=0x3F800000)],
+            constraints=[
+                dict(kind="array_layout", array="x", dtype="f32", exact_shape=[17], record_bytes=4, alignment=4)
+            ],
+        ),
+    )
     module.add_kernel(forward)
     module.add_kernel(forward.grad, name="backward")
     module.add_kernel(inplace)

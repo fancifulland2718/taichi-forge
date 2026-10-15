@@ -2,7 +2,7 @@
 
 
 def validate_constraints(constraints, used):
-    from ._runtime import _name
+    from ._runtime import _DTYPES, _name
 
     if not isinstance(constraints, list):
         raise ValueError("Execution constraints must be a list")
@@ -25,11 +25,16 @@ def validate_constraints(constraints, used):
                 "element_shape",
                 "minimum_shape",
                 "exact_shape",
+                "dtype",
             }:
                 raise ValueError("Invalid array layout constraint fields")
             if ("minimum_shape" in constraint) == ("exact_shape" in constraint):
                 raise ValueError("Array layout requires either minimum_shape or exact_shape")
             binding(constraint["array"])
+            if "dtype" in constraint and (
+                not isinstance(constraint["dtype"], str) or constraint["dtype"] not in _DTYPES
+            ):
+                raise ValueError("Unsupported array layout dtype")
             for key in ("minimum_shape", "exact_shape", "element_shape"):
                 shape = constraint.get(key, [])
                 if not isinstance(shape, list):

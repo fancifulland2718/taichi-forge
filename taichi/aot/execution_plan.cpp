@@ -291,9 +291,18 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
         const auto kind = name(constraint["kind"]);
         if (kind == "array_layout") {
           fields(constraint, {"kind", "array", "minimum_shape", "exact_shape",
-                              "element_shape", "record_bytes", "alignment"});
+                              "element_shape", "record_bytes", "alignment",
+                              "dtype"});
           ArrayLayout layout;
           layout.array = binding(constraint["array"]);
+          if (constraint.obj.inner.count("dtype")) {
+            layout.required.dtype = name(constraint["dtype"]);
+            static const std::set<std::string> supported{
+                "f16", "f32", "f64", "i8", "i16", "i32", "i64",
+                "u8", "u16", "u32", "u64"};
+            if (!supported.count(layout.required.dtype))
+              throw std::invalid_argument("Unsupported array layout dtype");
+          }
           layout.required.exact_shape =
               constraint.obj.inner.count("exact_shape");
           if (layout.required.exact_shape ==

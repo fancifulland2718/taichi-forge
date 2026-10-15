@@ -352,7 +352,8 @@ plan = ExecutionPlan(
 
 `array_layout` 要求紧凑 scalar/AoS ndarray，rank 与 element shape 一致，各索引维
 不小于 `minimum_shape`，每条 record 的字节数相等且满足基址对齐。`element_shape`
-省略时为 `[]`，dtype 仍由 kernel/provider 检查；允许零长度索引维。只能约束选中
+省略时为 `[]`；可选 `dtype` 冻结 scalar 类型，省略时仍由 kernel/provider 检查。
+显式 dtype 可拒绝同字节宽度的类型替换，需要配对 private ABI 55。允许零长度索引维。只能约束选中
 执行及其保留资源/梯度已使用的绑定，不会为此额外保留无关数组。`disjoint` 比较
 CPU/CUDA 地址范围或 Vulkan buffer/memory 绑定，可识别不同导入分配句柄的重叠。
 Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者须描述真实底层

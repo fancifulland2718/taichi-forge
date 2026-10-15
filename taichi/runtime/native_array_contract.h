@@ -33,6 +33,8 @@ struct NativeArrayLayoutRequirement {
   std::uint64_t alignment{0};
   // minimum_shape becomes an equality requirement when selected explicitly.
   bool exact_shape{false};
+  // Empty preserves a layout-only certificate; typed producers freeze dtype.
+  std::string dtype;
 };
 
 void validate_native_array_layout(const NativeArrayBinding &array,
