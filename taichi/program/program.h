@@ -20,6 +20,7 @@
 
 #include <taichi/program/runtime_resource_registry.h>
 #include <taichi/program/runtime_completion.h>
+#include "taichi/runtime/cuda/provider_completion_resource.h"
 #include <taichi/program/runtime_fault.h>
 #include <taichi/program/runtime_trace.h>
 #include <taichi/program/primitive_workspace.h>
@@ -354,19 +355,6 @@ Program *&active_runtime_submission_program() noexcept;
 }  // namespace runtime_completion_detail
 
 class StructCompiler;
-
-// Internal type-erased owner retained by RuntimeCompletion. Providers with
-// mutable asynchronous state can observe exactly when their submission lease
-// is retired without introducing a provider-specific completion queue.
-class CudaProviderCompletionResource {
- public:
-  virtual ~CudaProviderCompletionResource() = default;
-  virtual std::uint64_t submission_retirement_token() const {
-    return 0;
-  }
-  virtual void on_submission_retired(std::uint64_t) noexcept {
-  }
-};
 
 /**
  * Note [Backend-specific ProgramImpl]

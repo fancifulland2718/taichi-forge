@@ -3,6 +3,7 @@
 ti_add_native_library(cuda_runtime)
 target_sources(cuda_runtime
   PRIVATE
+    cudss_plan.cpp
     cuda_artifact_provider.cpp
     cuda_compileiq_protocol.cpp
     graph_binding_frame.cpp
