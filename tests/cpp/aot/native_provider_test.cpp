@@ -120,6 +120,23 @@ TEST_F(NativeProvider, PreservesProviderFailureDetails) {
   }
 }
 
+TEST_F(NativeProvider, EmbeddedRuntimeNeedsNoExternalVendorSymbols) {
+  set_mode(Mode::embedded_runtime);
+  auto module = load();
+  EXPECT_EQ(module->info().required_symbol_count, 0);
+  EXPECT_TRUE(module->info().features &
+              TI_FORGE_RUNTIME_PROVIDER_FEATURE_EMBEDDED_RUNTIME);
+  EXPECT_EQ(stats().probes, baseline.probes);
+  EXPECT_EQ(stats().creates, baseline.creates);
+  std::weak_ptr<NativeProviderModule> retained = module;
+  auto runtime = module->create_runtime();
+  module.reset();
+  EXPECT_FALSE(retained.expired());
+  EXPECT_EQ(runtime->execution_api<ExecutionApi>().value(runtime->handle()), 7);
+  runtime.reset();
+  EXPECT_TRUE(retained.expired());
+}
+
 TEST_F(NativeProvider, RollsBackPartialCreationAndRejectsNullRuntime) {
   auto module = load();
   for (auto mode : {Mode::create_failure, Mode::create_failure_with_handle}) {

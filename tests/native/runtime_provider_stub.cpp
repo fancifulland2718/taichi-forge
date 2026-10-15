@@ -150,6 +150,10 @@ stub_query(uint32_t version, size_t size, TiForgeRuntimeProviderApi *out) {
     case Mode::empty_audit:
       out->info.required_symbol_count = 0;
       break;
+    case Mode::embedded_runtime:
+      out->info.required_symbol_count = 0;
+      out->info.features |= TI_FORGE_RUNTIME_PROVIDER_FEATURE_EMBEDDED_RUNTIME;
+      break;
     case Mode::missing_probe:
       out->probe_runtime = nullptr;
       break;

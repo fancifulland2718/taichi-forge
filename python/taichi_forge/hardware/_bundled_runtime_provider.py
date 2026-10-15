@@ -22,6 +22,7 @@ _FEATURE_VERSION_QUERY = 1 << 0
 _FEATURE_REQUIRED_SYMBOL_AUDIT = 1 << 1
 _FEATURE_TRANSIENT_PROBE = 1 << 2
 _FEATURE_EXECUTION_API = 1 << 3
+_FEATURE_EMBEDDED_RUNTIME = 1 << 6
 _REQUIRED_FEATURES = _FEATURE_VERSION_QUERY | _FEATURE_REQUIRED_SYMBOL_AUDIT | _FEATURE_TRANSIENT_PROBE
 _ACTIVE_RUNTIME_LOCK = threading.RLock()
 _ACTIVE_RUNTIMES = {}
@@ -389,7 +390,7 @@ def _check_api(api, definition):
         raise RuntimeError(f"{definition.provider_name} adapter is missing probe features")
     if not features & _FEATURE_EXECUTION_API:
         raise RuntimeError(f"{definition.provider_name} adapter is missing execution support")
-    if api.info.required_symbol_count <= 0:
+    if api.info.required_symbol_count <= 0 and not features & _FEATURE_EMBEDDED_RUNTIME:
         raise RuntimeError(f"{definition.provider_name} adapter does not audit execution symbols")
     for name in (
         "probe_runtime",

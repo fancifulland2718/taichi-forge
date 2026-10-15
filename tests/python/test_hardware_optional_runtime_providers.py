@@ -16,6 +16,37 @@ from taichi_forge.hardware._external_cuda_submission import external_cuda_submis
 _MODULES = (_cusparselt, _cutensor, _amgx)
 
 
+def test_common_provider_embedded_runtime_still_requires_valid_execution_contract():
+    definition = _cutensor.DEFINITION
+    info = _runtime_provider._ProviderInfo()
+    info.struct_size = ctypes.sizeof(info)
+    info.provider_abi_version = _runtime_provider.PROVIDER_ABI_VERSION
+    info.provider_id = definition.provider_id.encode()
+    info.supported_version_family = definition.supported_version_family.encode()
+    info.features = _runtime_provider._REQUIRED_FEATURES | _runtime_provider._FEATURE_EXECUTION_API
+    api = SimpleNamespace(
+        struct_size=ctypes.sizeof(_runtime_provider._ProviderApi),
+        provider_abi_version=_runtime_provider.PROVIDER_ABI_VERSION,
+        info=info,
+        probe_runtime=True,
+        create_runtime=True,
+        destroy_runtime=True,
+        query_execution_api=True,
+        get_last_error=True,
+    )
+    with pytest.raises(RuntimeError, match="audit execution symbols"):
+        _runtime_provider._check_api(api, definition)
+    info.features |= _runtime_provider._FEATURE_EMBEDDED_RUNTIME
+    _runtime_provider._check_api(api, definition)
+    api.query_execution_api = False
+    with pytest.raises(RuntimeError, match="missing ABI entry"):
+        _runtime_provider._check_api(api, definition)
+    api.query_execution_api = True
+    info.features &= ~_runtime_provider._FEATURE_EXECUTION_API
+    with pytest.raises(RuntimeError, match="missing execution support"):
+        _runtime_provider._check_api(api, definition)
+
+
 class _FakeProgram:
     def __init__(self):
         self.synchronizations = 0

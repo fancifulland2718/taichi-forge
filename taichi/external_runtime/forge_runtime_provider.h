@@ -46,6 +46,9 @@ typedef enum TiForgeRuntimeProviderFeature {
   TI_FORGE_RUNTIME_PROVIDER_FEATURE_EXECUTION_API = 1ull << 3,
   TI_FORGE_RUNTIME_PROVIDER_FEATURE_AMGX_OPTIONAL_RESIDUAL = 1ull << 4,
   TI_FORGE_RUNTIME_PROVIDER_FEATURE_AMGX_RETAINED_GUESS = 1ull << 5,
+  // Vendor code is compiled into the adapter. Its external vendor symbol
+  // inventory may be empty; ordinary ABI/table validation still applies.
+  TI_FORGE_RUNTIME_PROVIDER_FEATURE_EMBEDDED_RUNTIME = 1ull << 6,
 } TiForgeRuntimeProviderFeature;
 
 typedef struct TiForgeRuntimeProviderInfo {

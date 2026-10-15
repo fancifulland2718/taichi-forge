@@ -82,7 +82,9 @@ NativeProviderModule::NativeProviderModule(
       copy_string(info.supported_version_family) !=
           definition.supported_version_family ||
       (info.features & required_features) != required_features ||
-      info.required_symbol_count == 0 || !api_.probe_runtime ||
+      (info.required_symbol_count == 0 &&
+       !(info.features & TI_FORGE_RUNTIME_PROVIDER_FEATURE_EMBEDDED_RUNTIME)) ||
+      !api_.probe_runtime ||
       !api_.create_runtime || !api_.destroy_runtime ||
       !api_.query_execution_api || !api_.get_last_error) {
     throw NativeProviderError(

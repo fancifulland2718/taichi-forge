@@ -14,6 +14,7 @@ enum class Mode {
   wrong_family,
   missing_feature,
   empty_audit,
+  embedded_runtime,
   missing_probe,
   missing_create,
   missing_destroy,
