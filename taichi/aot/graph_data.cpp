@@ -2273,6 +2273,25 @@ void record_cuda_capture_command(
     Program &program,
     void *stream);
 
+void record_cuda_provider_with_resources(
+    const CompiledDispatch &dispatch,
+    const std::unordered_map<std::string, IValue> &args,
+    Program &program,
+    void *stream,
+    CompiledGraphCudaState &state) {
+  const auto retain = [&] {
+    if (auto resource = dispatch.cuda_capture_command->take_capture_resources())
+      state.provider_capture_resources.push_back(std::move(resource));
+  };
+  try {
+    record_cuda_capture_command(dispatch, args, program, stream);
+  } catch (...) {
+    retain();
+    throw;
+  }
+  retain();
+}
+
 std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
                                          CompiledGraphCudaState &state,
                                          void *capture_stream,
@@ -2289,11 +2308,7 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
     auto &packet = state.packets[i];
     const auto &dispatch = graph.dispatches[i];
     if (dispatch.cuda_capture_command) {
-      record_cuda_capture_command(dispatch, args, program, stream);
-      if (auto resource =
-              dispatch.cuda_capture_command->take_capture_resources()) {
-        state.provider_capture_resources.push_back(std::move(resource));
-      }
+      record_cuda_provider_with_resources(dispatch, args, program, stream, state);
       return CUDA_SUCCESS;
     }
     const auto &metadata = dispatch.cuda_bounded_dispatch;
@@ -4694,8 +4709,10 @@ bool try_run_cuda_bounded_graph(
   }
   if (std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
                   [](const auto &dispatch) {
+                    if (dispatch.cuda_capture_command)
+                      return !dispatch.cuda_capture_command
+                                  ->supports_conditional_body();
                     return !dispatch.ti_kernel ||
-                           dispatch.cuda_capture_command ||
                            dispatch.cuda_bounded_dispatch.has_value();
                   })) {
     return structural_fallback();
@@ -4835,6 +4852,7 @@ bool try_run_cuda_bounded_graph(
     return false;
   }
   const bool structurally_compatible =
+      !graph.cuda_capture_commands_require_exact_bindings() &&
       state->conditional_mode && state->conditional_type == -1 &&
       state->conditional_prefix_dispatch_count == prefix_dispatch_count &&
       state->conditional_suffix_dispatch_count == suffix_dispatch_count &&
@@ -4885,6 +4903,11 @@ bool try_run_cuda_bounded_graph(
   void *capture_stream = state->ensure_capture_stream();
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     const auto &dispatch = graph.dispatches[i];
+    if (dispatch.cuda_capture_command) {
+      dispatch.cuda_capture_command->prepare(args, program);
+      state->packets.emplace_back(capture_stream);
+      continue;
+    }
     TI_ASSERT(dispatch.ti_kernel);
     auto *prog = dispatch.ti_kernel->program;
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
@@ -4914,7 +4937,7 @@ bool try_run_cuda_bounded_graph(
     state->packets.push_back(std::move(capture_packet));
   }
   state->stats.zero_arg_eligible =
-      !state->packets.empty() &&
+      !graph.has_cuda_capture_commands() && !state->packets.empty() &&
       std::all_of(state->packets.begin(), state->packets.end(),
                   [](const CudaGraphCapturePacket &packet) {
                     return packet.packet.arg_buffer_size == 0 &&
@@ -4941,8 +4964,14 @@ bool try_run_cuda_bounded_graph(
     conditional_handle = builder.conditional_handle();
     auto record_range = [&](std::size_t begin, std::size_t end, void *stream) {
       for (std::size_t i = begin; i < end; ++i) {
-        const auto &packet = state->packets[i];
-        packet.launcher->capture_cuda_graph_launch(packet.packet, stream);
+        const auto &dispatch = graph.dispatches[i];
+        if (dispatch.cuda_capture_command) {
+          record_cuda_provider_with_resources(dispatch, args, program, stream,
+                                              *state);
+        } else {
+          const auto &packet = state->packets[i];
+          packet.launcher->capture_cuda_graph_launch(packet.packet, stream);
+        }
       }
     };
     auto dependencies =
@@ -4964,6 +4993,10 @@ bool try_run_cuda_bounded_graph(
         record_range(body_end, state->packets.size(), stream);
       });
     }
+    // Each conditional body still owns the original captured nodes. Freeze
+    // provider parameters into retained device storage before instantiation.
+    for (const auto &resource : state->provider_capture_resources)
+      resource->finalize();
   } catch (const cuda::GraphBuildError &error) {
     return handle_cuda_graph_driver_failure(*state, error.code(),
                                             error.stage());

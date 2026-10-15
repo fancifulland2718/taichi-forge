@@ -1023,16 +1023,25 @@ plan = ExecutionPlan([operation], resources=[resource])
 owner 合同。冷准备包含私有种子分析/分解/预热和捕获，不执行用户输出。
 `workspace_bytes` 包含可计量的计划请求存储与捕获参数，驱动/vendor 的物理驻留仍有
 未知部分。Windows CUDA 已验证独立/借用消费、三种阶段、双绑定及 kernel.grad 配合
-显式伴随求解；这不提供 provider 自动求导、条件区域或 cuSOLVER 覆盖。
+显式伴随求解；这不提供 provider 自动求导或 cuSOLVER 覆盖。
 
 Graph-owned `CudssCaptureRecording` 也可通过 `module.add_execution_plan(name, graph)`
 导出普通或已选 Graph。导出读取原生计划冻结的 CSR seed、矩阵类型/视图与配置，
 不重新采样原始矩阵，也不序列化 vendor 因子或本机库路径。同一计划在每次导出中
 只采样一次；多 RHS 组保持一次数值分解，多个操作共享一份重建计划，相同只读载荷
-在模块内去重。该导出需要配对的 private ABI 52；重建时重新分析/分解属于冷准备。
+在模块内去重。该导出需要配对的 private ABI 54；重建时重新分析/分解属于冷准备。
 已验证原始 seed/展示字段修改后仍保留原生语义、独立无源码消费、显式伴随及选中
 recipe 顺序。此项不包含普通活状态 `CudssSolveRecording`/`CudssRefactorSolveRecording`
-的自动导出，也不扩大条件区域支持。
+的自动导出。
+
+Graph-owned cuDSS 组也可放入 CUDA `Sequential` 循环体，并随已选单层 conditional
+循环自动导出。公共捕获协议要求显式声明条件体资格，其他 provider 命令默认仍不具备
+该资格。每组保留已准备的种子因子和固定阶段：`solve` 保持因子，更新组先执行数值
+阶段再求解全部 RHS；零轮不破坏资源的就绪状态。捕获参数存储冻结并保留到图退休，
+JIT 分配绑定变化时使用匹配的捕获，不能只修补 kernel 参数。Windows CUDA 已验证
+三种阶段、多 RHS、动态数值、零轮/提前结束/预算耗尽、交替绑定和逆序显式伴随。
+独立及借用 AOT 消费还覆盖显式嵌套执行计划、关闭和 reset 退休。这不表示全部嵌套
+JIT recipe 均已具备资格，也不将整个 JIT provider step 合并为一次提交。
 
 CUDA cuTENSOR 重建复用既有 provider C ABI 与同一原生操作/资源注册表。选择可选
 cuTENSOR SDK adapter，并按上文配置兼容的外部厂商库。以下例子通过命名计划执行

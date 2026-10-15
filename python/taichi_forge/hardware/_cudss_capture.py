@@ -78,6 +78,7 @@ class _CaptureNode(NativeGraphNode):
                 (name, "ndarray") for name in recording.binding_names
             ),
             lifetime_leases=(recording,),
+            conditional_body_safe=True,
             debug_info={
                 "kind": "cuda_cudss_captured_solve_f32",
                 "numeric_phase": recording.phase,

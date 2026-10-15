@@ -318,6 +318,12 @@ class CudaGraphCaptureCommand {
   virtual bool requires_exact_bindings() const {
     return true;
   }
+  // A complete captured operation must be valid after zero or many prior
+  // iterations, without host facts crossing a device-control boundary.
+  // Providers qualify this separately from ordinary stream capture.
+  virtual bool supports_conditional_body() const {
+    return false;
+  }
   // Opt-in only for a fixed provider plan whose captured parameters can live
   // in separate immutable binding frames. Queried at construction, not replay.
   virtual bool supports_binding_frames() const {

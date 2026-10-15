@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Graph-owned cuDSS groups now run in qualified CUDA conditional loop bodies and
+  export with selected flat loops to AOT. Three numerical phases, multiple RHS,
+  alternating bindings, explicit adjoints, zero/early/budget exits and retirement
+  are tested; explicit nested AOT plans are covered too. Provider capture uses
+  retained parameter storage and exact allocation bindings. Use paired private
+  ABI 54 components. Ordinary live cuDSS export and cuSOLVER remain separate work.
+
 - Ordinary asynchronous Vulkan nested Graph submissions no longer generate
   unused loop-observation shaders, trace tables, host-readable buffers or
   readback copies. Predicate gates and indirect dispatch retain their semantics.

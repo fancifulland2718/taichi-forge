@@ -5233,6 +5233,14 @@ class _GraphRunContext:
         return flattened
 
 
+def _recordable_cuda_capture(action, backend):
+    recording = action.backend_command_recording
+    if backend != "cuda" or recording is None or recording.replay_mode != "stream_capture":
+        return None
+    recipe = getattr(recording, "_cuda_capture_recipe", None)
+    return recipe if isinstance(recipe, _CudaGraphCaptureRecipe) else None
+
+
 class _CompiledCGraphNode:
     needs_runtime_args = True
 
@@ -6068,6 +6076,15 @@ def _compile_plain_sequential_runtime_node(
     dispatch_count = 0
     runtime_arg_names = set()
     recording_dispatches = []
+    recording_operations = (
+        []
+        if any(
+            manifest.execution_kind == "backend_command"
+            for sequence in sequences
+            for manifest in sequence._native_action_manifests
+        )
+        else None
+    )
     fixed_runtime_args = {}
     lifetime_leases = []
     source_native_count = 0
@@ -6076,7 +6093,11 @@ def _compile_plain_sequential_runtime_node(
     for _ in range(repetitions):
         for sequence, sequence_region_kind in zip(sequences, region_kinds):
             recording_dispatches.extend(
-                sequence._dispatch_to(builder, region_kind=sequence_region_kind)
+                sequence._dispatch_to(
+                    builder,
+                    region_kind=sequence_region_kind,
+                    recording_operations=recording_operations,
+                )
             )
             ir_nodes.extend(sequence._ir_nodes)
             dispatch_count += sequence._dispatch_count
@@ -6104,6 +6125,7 @@ def _compile_plain_sequential_runtime_node(
         runtime_arg_names,
         SequentialRegion(tuple(ir_nodes), name=name),
         recording_dispatches=recording_dispatches,
+        recording_operations=recording_operations or (),
         lifetime_leases=lifetime_leases,
         source_native_count=source_native_count,
         region_kind=region_kind,
@@ -16415,12 +16437,13 @@ class Sequential:
                 f"Recordable action does not support the active {backend} backend"
             )
         dispatches = tuple(action.dispatches)
-        if action.backend_command_recording is not None:
+        capture_recipe = _recordable_cuda_capture(action, backend)
+        if action.backend_command_recording is not None and capture_recipe is None:
             raise TaichiRuntimeError(
                 "Backend command actions are not yet qualified inside a "
                 "structured Graph Sequential"
             )
-        if not dispatches:
+        if not dispatches and capture_recipe is None:
             raise TaichiRuntimeError(
                 "Recordable action must provide at least one dispatch"
             )
@@ -16446,7 +16469,7 @@ class Sequential:
         self._temporary_actions.extend(compiled.temporary_actions)
         self._source_native_count += compiled.source_native_count
         self._native_action_manifests.extend(compiled.native_action_manifests)
-        self._dispatch_count += len(dispatches)
+        self._dispatch_count += 1 if capture_recipe is not None else len(dispatches)
         return self
 
     def _append_recordable_sequence(self, sequence, executable):
@@ -16555,7 +16578,10 @@ class Sequential:
                 view._temporary_actions.extend(compiled.temporary_actions)
                 view._source_native_count += compiled.source_native_count
                 view._native_action_manifests.extend(compiled.native_action_manifests)
-                view._dispatch_count += len(compiled.recordable_action.dispatches)
+                action = compiled.recordable_action
+                view._dispatch_count += (
+                    1 if action.backend_command_recording is not None else len(action.dispatches)
+                )
         return view
 
     def _append_structured(self, node):
@@ -16689,7 +16715,7 @@ class Sequential:
             )
         )
 
-    def _dispatch_to(self, builder, *, region_kind="sequential"):
+    def _dispatch_to(self, builder, *, region_kind="sequential", recording_operations=None):
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         recording_dispatches = []
         for item, ir_node in zip(self._items, self._ir_nodes):
@@ -16702,6 +16728,8 @@ class Sequential:
                     ir_node,
                 )
                 recording_dispatches.append(_RecordingDispatch(kernel_cpp, tuple(args)))
+                if recording_operations is not None:
+                    recording_operations.append(("dispatch", kernel_cpp, tuple(args), label))
                 continue
             elif item[0] == "indirect":
                 _, kernel_cpp, args, dispatch_packet, label = item
@@ -16713,6 +16741,8 @@ class Sequential:
                         dispatch_packet,
                     )
                 )
+                if recording_operations is not None:
+                    recording_operations.append(("indirect",))
                 continue
             elif item[0] == "native":
                 _, node = item
@@ -16727,6 +16757,12 @@ class Sequential:
                         "Recordable action is not qualified for Graph region "
                         f"{region_kind!r}"
                     )
+                capture_recipe = _recordable_cuda_capture(action, backend)
+                if capture_recipe is not None:
+                    capture_recipe.append_to_graph(builder, impl.get_runtime().prog)
+                    if recording_operations is not None:
+                        recording_operations.append(("native", node.executable))
+                    continue
                 dispatches = tuple(action.dispatches)
             else:
                 raise TaichiRuntimeError(
@@ -16736,6 +16772,8 @@ class Sequential:
             for kernel_cpp, args in dispatches:
                 builder.dispatch(kernel_cpp, args, label)
                 recording_dispatches.append(_RecordingDispatch(kernel_cpp, tuple(args)))
+                if recording_operations is not None:
+                    recording_operations.append(("dispatch", kernel_cpp, tuple(args), label))
         return tuple(recording_dispatches)
 
 
@@ -17996,13 +18034,8 @@ class GraphBuilder:
                     f"{action.backend_command_recording.backend}, not the active "
                     f"{backend} backend"
                 )
-            recording = action.backend_command_recording
-            capture_recipe = getattr(recording, "_cuda_capture_recipe", None)
-            if (
-                backend == "cuda"
-                and recording.replay_mode == "stream_capture"
-                and isinstance(capture_recipe, _CudaGraphCaptureRecipe)
-            ):
+            capture_recipe = _recordable_cuda_capture(action, backend)
+            if capture_recipe is not None:
                 compiled = _CompiledNativeGraphNode(executable)
                 # Retained addon workspace and other private resources belong
                 # to the CGraph binding frame too. Validate conflicts before

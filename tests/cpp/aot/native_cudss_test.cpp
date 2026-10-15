@@ -198,7 +198,7 @@ TEST(NativeCudss, RebuildsFrozenPlansAndMultiRhsGroupsThroughTheRegistry) {
     NativeRecordingState state;
     EXPECT_NO_THROW(first->validate_recording(state));
     auto branch = state.control_branch();
-    EXPECT_THROW(first->validate_recording(branch), std::invalid_argument);
+    EXPECT_NO_THROW(first->validate_recording(branch));
     auto alias = bindings;
     alias.at("output_1") = x;
     EXPECT_THROW(registry.prepare(*context, group, alias),

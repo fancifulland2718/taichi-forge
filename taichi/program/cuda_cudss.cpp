@@ -124,6 +124,11 @@ class CudaCudssCaptureCommand final : public aot::CudaGraphCaptureCommand {
   bool supports_binding_frames() const override {
     return true;
   }
+  bool supports_conditional_body() const override {
+    // Cold seed factors are ready, and one frozen numerical policy covers
+    // the complete update + RHS group on every entered iteration.
+    return true;
+  }
   std::shared_ptr<void> retain_binding_frame_plan(Program &) override {
     return owner_;
   }

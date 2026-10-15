@@ -223,11 +223,12 @@ class CudaCudssGroup final : public NativeOperation {
   std::size_t workspace_bytes() const override {
     return 0;
   }
-  void validate_recording(NativeRecordingState &state) const override {
-    struct CudssFacts {};
-    // Conditional use needs a qualified join/repetition contract for the plan.
-    state.provider_state<CudssFacts>(plan_.get());
-  }
+  // The resource's cold constructor establishes valid seed factors and freezes
+  // one numerical policy for its lifetime. A solve-only group preserves them;
+  // an update group performs the entire update before every RHS solve. Neither
+  // needs a fact produced by a previous branch or iteration. Zero-trip bodies
+  // leave the ready resource intact, so conditional composition needs no opaque
+  // provider-state merge (unlike a separately recorded analyze/factor/solve).
   void record_cuda(void *stream) override {
     plan_->plan->record_capture(plan_->description().phase, values_, pairs_,
                                 stream, resources_);

@@ -1301,7 +1301,7 @@ without executing user outputs. `workspace_bytes` includes accountable plan
 requests and capture parameters; opaque driver/vendor physical residency remains
 unknown. Windows CUDA qualification covers standalone/borrowed consumers, all
 three phases, independent bindings and kernel.grad with explicit adjoint solves.
-It does not provide provider autodiff, conditional-region or cuSOLVER support.
+It does not provide provider autodiff or cuSOLVER support.
 
 Graph-owned `CudssCaptureRecording` also supports ordinary and selected Graph
 export through `module.add_execution_plan(name, graph)`. Export samples the native
@@ -1310,11 +1310,24 @@ original matrix or serializing vendor factors or machine-local library paths.
 Each plan is sampled once per export; multi-RHS groups retain one numerical
 factorization, operations share one reconstructed plan, and identical read-only
 payloads are deduplicated within the module. This export requires paired private
-ABI 52; rebuilding analysis/factors remains cold preparation. Qualification covers
+ABI 54; rebuilding analysis/factors remains cold preparation. Qualification covers
 changes to original seed/display fields, independent source-free consumption,
 explicit adjoints and selected recipe order. Automatic export of ordinary live
-`CudssSolveRecording`/`CudssRefactorSolveRecording` and conditional-region support
-are not included.
+`CudssSolveRecording`/`CudssRefactorSolveRecording` is not included.
+
+Graph-owned cuDSS groups can also be appended to a CUDA `Sequential` loop body
+and exported from a selected flat conditional loop. The common capture protocol
+requires explicit conditional-body qualification; other provider commands remain
+unqualified by default. Each group has ready seed factors and a frozen phase:
+`solve` retains them, while an update group performs its numerical phase before
+every RHS. Zero iterations leave the ready resource intact. Captured parameter
+storage is frozen and retained until the graph retires; changed JIT allocation
+bindings require a matching capture instead of patching only kernel arguments.
+Windows CUDA checks cover all three phases, multiple RHS, changing values,
+zero/early/budget exits, alternating bindings and explicit reverse-order adjoint
+solves. Standalone and borrowed AOT consumers also cover an explicit nested
+execution plan and close/reset retirement. This does not qualify every nested
+JIT recipe or fuse the entire JIT provider step into one submission.
 
 CUDA cuTENSOR reconstruction uses the existing provider C ABI and the same
 native operation/resource registry. Select the optional cuTENSOR SDK adapter and

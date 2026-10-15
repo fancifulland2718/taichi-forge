@@ -78,6 +78,7 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         debug_info,
         fixed_bindings=None,
         publish_time_binding_validation_stable=False,
+        conditional_body_safe=False,
     ):
         if not isinstance(publish_time_binding_validation_stable, bool):
             raise TypeError("publish_time_binding_validation_stable must be a bool")
@@ -104,7 +105,11 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         validate_retained_execution_contract(
             recording, tuple(_resolve(lifetime_leases, recording))
         )
-        self._action = BackendCommandGraphAction(recording, fixed_bindings=fixed_bindings)
+        self._action = BackendCommandGraphAction(
+            recording,
+            fixed_bindings=fixed_bindings,
+            conditional_body_safe=conditional_body_safe,
+        )
 
     def run(self, runtime_args):
         return self._recording.execute(runtime_args)
