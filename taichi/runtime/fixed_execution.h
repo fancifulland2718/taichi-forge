@@ -11,6 +11,7 @@
 namespace taichi::lang {
 class LaunchContextBuilder;
 class NativeOperation;
+class RuntimeFaultDomain;
 struct NativeRecordingState;
 namespace aot {
 class Kernel;
@@ -65,7 +66,8 @@ class FixedExecution {
                  Device &device,
                  gfx::GfxRuntime *gfx_runtime,
                  const std::vector<Operation> &operations,
-                 NativeRecordingState *sequence_state = nullptr);
+                 NativeRecordingState *sequence_state = nullptr,
+                 std::shared_ptr<RuntimeFaultDomain> fault_domain = {});
   ~FixedExecution();
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;
@@ -75,6 +77,7 @@ class FixedExecution {
   std::size_t workspace_bytes() const;
 
  private:
+  void run_impl();
   struct State;
   std::unique_ptr<State> state_;
 };

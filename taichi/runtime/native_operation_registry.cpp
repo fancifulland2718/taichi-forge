@@ -1,5 +1,6 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/common/operation_json.h"
+#include "taichi/program/runtime_fault.h"
 #include <set>
 
 namespace taichi::lang {
@@ -280,6 +281,9 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_impl(
     throw std::invalid_argument("No native operation factory for " + kind +
                                 " v" + std::to_string(version) + " on " +
                                 arch_name(arch));
+  if (context.fault_domain)
+    context.fault_domain->throw_if_submission_disallowed(
+        "prepare native resource");
   entry.validate(device, value);
   if (backend->second.probe &&
       !backend->second.probe(context.providers).available)

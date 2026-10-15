@@ -651,6 +651,11 @@ class TI_DLL_EXPORT Program {
   RuntimeFaultSnapshot runtime_fault_snapshot() const {
     return runtime_fault_domain_->snapshot();
   }
+  // Internal runtime clients share the owner's first-fault and retirement
+  // state; a borrower must not create a separate always-healthy domain.
+  std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain() const {
+    return runtime_fault_domain_;
+  }
   RuntimeStatisticsSnapshot runtime_statistics_snapshot();
   PrimitiveWorkspaceSnapshot primitive_workspace_snapshot() const noexcept {
     return primitive_workspace_arena_.snapshot();

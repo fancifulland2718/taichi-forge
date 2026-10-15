@@ -548,15 +548,20 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
       if (graph_owned_) {
         prepare_graph_snapshot();
       }
+    } catch (const BackendRuntimeError &error) {
+      fault_domain_->report_backend_error(error, 0);
+      destroy(fault_domain_->backend_calls_safe());
+      throw;
     } catch (...) {
-      destroy(true);
+      destroy(fault_domain_->backend_calls_safe());
       throw;
     }
   }
 
   ~CudaCudssPlanImpl() override {
     const bool provider_calls_safe =
-        fault_domain_ && !fault_domain_->has_fatal_fault();
+        fault_domain_ && fault_domain_->backend_calls_safe() &&
+        fault_domain_->state() != RuntimeLifecycleState::kFinalized;
     if (provider_calls_safe) {
       try {
         auto cuda_submission_guard =

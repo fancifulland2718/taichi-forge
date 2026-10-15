@@ -13,6 +13,7 @@
 #include "taichi/program/texture.h"
 #include "taichi/program/matrix.h"
 #include "taichi/program/launch_context_builder.h"
+#include "taichi/program/runtime_fault.h"
 #include "taichi/common/virtual_dir.h"
 #include "taichi/common/utils.h"
 
@@ -107,9 +108,24 @@ const char *describe_error(TiError error) {
 }
 }  // namespace
 
-Runtime::Runtime(taichi::Arch arch) : arch(arch) {
+Runtime::Runtime(taichi::Arch arch)
+    : runtime_fault_domain_(std::make_shared<taichi::lang::RuntimeFaultDomain>(
+          arch, new_handle_token())),
+      arch(arch) {
 }
 Runtime::~Runtime() {
+  if (!borrowed_fault_domain_)
+    runtime_fault_domain_->mark_finalized();
+}
+
+void Runtime::borrow_runtime_fault_domain(
+    std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain) {
+  std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+  if (!domain || prepared_ || !modules_.empty() || !memories_.empty() ||
+      borrowed_fault_domain_)
+    throw std::logic_error("Runtime fault domain must be bound before use");
+  runtime_fault_domain_ = std::move(domain);
+  borrowed_fault_domain_ = true;
 }
 
 VulkanRuntime *Runtime::as_vk() {

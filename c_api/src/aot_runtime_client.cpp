@@ -62,6 +62,7 @@ struct AotRuntimeClient::State {
         device_id(reinterpret_cast<std::uintptr_t>(&this->runtime->get())) {
     if (&this->runtime->get() != program.get_compute_device())
       throw std::logic_error("AOT borrower did not share its Program device");
+    this->runtime->borrow_runtime_fault_domain(program.runtime_fault_domain());
   }
   std::recursive_mutex mutex;
   Program *program;

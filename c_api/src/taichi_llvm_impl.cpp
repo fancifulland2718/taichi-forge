@@ -7,6 +7,7 @@
 #include "taichi/taichi_cuda.h"
 
 #include "taichi/program/compile_config.h"
+#include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
@@ -134,7 +135,12 @@ void LlvmRuntime::flush() {
 }
 
 void LlvmRuntime::wait() {
-  check_runtime_error();
+  try {
+    check_runtime_error();
+  } catch (const taichi::lang::BackendRuntimeError &error) {
+    runtime_fault_domain()->report_backend_error(error, 0);
+    throw;
+  }
 }
 
 }  // namespace capi

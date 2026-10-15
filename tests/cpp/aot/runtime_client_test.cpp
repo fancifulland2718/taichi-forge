@@ -154,6 +154,8 @@ TEST(RuntimeClientRegistry, ConcurrentRetirementWaitsForClientCompletion) {
 namespace {
 void check_program_retirement(Arch arch) {
   Program program(arch);
+  const auto fault_domain = program.runtime_fault_domain();
+  EXPECT_EQ(fault_domain, program.runtime_fault_domain());
   program.materialize_runtime();
   auto *device = program.get_compute_device();
   Device::AllocParams params;
@@ -165,6 +167,7 @@ void check_program_retirement(Arch arch) {
   auto client = std::make_shared<TestClient>([&] {
     EXPECT_EQ(program.runtime_fault_snapshot().state,
               RuntimeLifecycleState::kFinalizing);
+    EXPECT_EQ(fault_domain->state(), RuntimeLifecycleState::kFinalizing);
     // The finalizer itself may drain backend work. Other threads must still
     // fail admission while its callbacks run.
     std::async(std::launch::async, [&] {
@@ -183,6 +186,7 @@ void check_program_retirement(Arch arch) {
   EXPECT_FALSE(retained_weak.expired());
   program.finalize();
   EXPECT_EQ(retired, 1);
+  EXPECT_EQ(fault_domain->state(), RuntimeLifecycleState::kFinalized);
   EXPECT_EQ(retained_retired, 1);
   EXPECT_TRUE(retained_weak.expired());
   program.finalize();

@@ -11,6 +11,7 @@
 #include "taichi/runtime/native_provider.h"
 
 namespace taichi::lang {
+class RuntimeFaultDomain;
 
 struct NativeOperationCapability {
   std::string kind;
@@ -26,21 +27,28 @@ struct NativeOperationAvailability {
 };
 
 struct NativePreparationContext {
-  NativePreparationContext(Arch arch,
-                           Device &device,
-                           NativeProviderLocations locations = {})
-      : arch(arch), device(device), providers(std::move(locations)) {
+  NativePreparationContext(
+      Arch arch,
+      Device &device,
+      NativeProviderLocations locations = {},
+      std::shared_ptr<RuntimeFaultDomain> fault_domain = {})
+      : arch(arch),
+        device(device),
+        providers(std::move(locations)),
+        fault_domain(std::move(fault_domain)) {
   }
   Arch arch;
   Device &device;
   NativeProviderSession providers;
+  std::shared_ptr<RuntimeFaultDomain> fault_domain;
 };
 
 // Build privately, then publish as const. No static registration side effects,
-// replacement, implicit device probing or warm-path lookup. Descriptors and factories
-// are an internal C++ contract, not an ABI for independently built plugins.
-// A factory prepares without submitting work; its result owns scratch and any
-// provider/code leases. FixedExecution retains it until recordings retire.
+// replacement, implicit device probing or warm-path lookup. Descriptors and
+// factories are an internal C++ contract, not an ABI for independently built
+// plugins. A factory prepares without submitting work; its result owns scratch
+// and any provider/code leases. FixedExecution retains it until recordings
+// retire.
 class NativeOperationRegistry {
  public:
   using Probe = std::function<NativeOperationAvailability()>;

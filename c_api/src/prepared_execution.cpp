@@ -10,6 +10,7 @@
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -77,9 +78,11 @@ struct PreparedExecution {
       NativeRecordingState sequence;
       if (!initializers.empty())
         initialization = std::make_unique<FixedExecution>(
-            runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence);
+            runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
+            runtime.runtime_fault_domain());
       native = std::make_unique<FixedExecution>(
-          runtime.arch, runtime.get(), gfx_runtime, operations, &sequence);
+          runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
+          runtime.runtime_fault_domain());
     } catch (const std::invalid_argument &error) {
       throw MemoryBindingError(error.what());
     }
@@ -197,7 +200,8 @@ class PreparedExecutionRegistry {
   }
   void destroy(TiPreparedExecution handle) {
     auto &entry = get(handle);
-    if (entry.native || entry.initialization)
+    if ((entry.native || entry.initialization) &&
+        runtime_.runtime_fault_domain()->backend_calls_safe())
       runtime_.wait();
     remove_dependencies(handle, entry);
     entries_.erase(handle);
@@ -233,7 +237,8 @@ class PreparedExecutionRegistry {
     retire(modules_, module);
   }
   void clear(bool synchronize) {
-    if (synchronize && !entries_.empty())
+    if (synchronize && !entries_.empty() &&
+        runtime_.runtime_fault_domain()->backend_calls_safe())
       runtime_.wait();
     modules_.clear();
     memories_.clear();
@@ -250,7 +255,8 @@ class PreparedExecutionRegistry {
     // executions and remove all their edges; warm replay never scans owners.
     const std::vector<TiPreparedExecution> handles(found->second.begin(),
                                                    found->second.end());
-    runtime_.wait();
+    if (runtime_.runtime_fault_domain()->backend_calls_safe())
+      runtime_.wait();
     for (auto handle : handles) {
       auto &entry = get(handle);
       remove_dependencies(handle, entry);
@@ -435,7 +441,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
   NativePreparationContext preparation(rt.arch, rt.get(),
-                                       rt.native_provider_locations());
+                                       rt.native_provider_locations(),
+                                       rt.runtime_fault_domain());
+  preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
   std::set<std::pair<std::string, std::uint32_t>> probed;
   std::map<const aot::ExecutionPlan::Native *,
            NativeOperationRegistry::DecodedOperation>

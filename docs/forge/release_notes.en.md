@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Prepared AOT executions and native resource preparation now share their runtime's
+  fault state; borrowed runtimes retain the JIT owner's state without finalizing it
+  on close. Fixed CUDA graphs report capture, launch and retirement errors, reject
+  replay after a fatal fault, and skip unsafe graph/cuDSS cleanup on a known failed
+  device.
+
 - The cuDSS 0.8 adapter adds a common runtime-provider entry point alongside its
   existing ABI1 interfaces. Shared native plans can retain a preparation session's
   runtime through capture and retirement, without another vendor loader per plan.

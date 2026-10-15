@@ -7,6 +7,9 @@
 #include "taichi/program/kernel_launcher.h"
 #include "taichi/runtime/cuda/capture_resources.h"
 
+namespace taichi::lang {
+class RuntimeFaultDomain;
+}
 namespace taichi::lang::cuda {
 class KernelLauncher;
 
@@ -32,8 +35,10 @@ class FixedGraph {
     std::vector<Operation> condition;
     std::vector<Operation> body;
   };
-  explicit FixedGraph(const std::vector<Dispatch> &dispatches);
-  explicit FixedGraph(const std::vector<Operation> &operations);
+  explicit FixedGraph(const std::vector<Dispatch> &dispatches,
+                      std::shared_ptr<RuntimeFaultDomain> fault_domain = {});
+  explicit FixedGraph(const std::vector<Operation> &operations,
+                      std::shared_ptr<RuntimeFaultDomain> fault_domain = {});
   ~FixedGraph();
   FixedGraph(const FixedGraph &) = delete;
   FixedGraph &operator=(const FixedGraph &) = delete;
@@ -45,6 +50,7 @@ class FixedGraph {
   std::size_t capture_bytes() const;
 
  private:
+  void initialize(const std::vector<Operation> &operations);
   struct State;
   std::unique_ptr<State> state_;
 };

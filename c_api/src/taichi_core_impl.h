@@ -38,6 +38,10 @@
 #include "taichi/common/virtual_dir.h"
 #include "taichi/runtime/native_provider.h"
 
+namespace taichi::lang {
+class RuntimeFaultDomain;
+}
+
 #define TI_CAPI_NOT_SUPPORTED(x) ti_set_last_error(TI_ERROR_NOT_SUPPORTED, #x);
 #define TI_CAPI_NOT_SUPPORTED_IF(x)                \
   if (x) {                                         \
@@ -170,6 +174,8 @@ class Runtime {
   std::recursive_mutex submission_mutex_;
   std::shared_ptr<capi::PreparedExecutionRegistry> prepared_;
   taichi::lang::NativeProviderLocations native_provider_locations_;
+  std::shared_ptr<taichi::lang::RuntimeFaultDomain> runtime_fault_domain_;
+  bool borrowed_fault_domain_{false};
 
  protected:
   // 32 is a magic number in `taichi/inc/constants.h`.
@@ -241,6 +247,14 @@ class Runtime {
   void retire_prepared_memory(TiMemory memory);
   void retire_prepared_module(class AotModule *owner);
   void clear_prepared(bool synchronize = true);
+  const std::shared_ptr<taichi::lang::RuntimeFaultDomain> &runtime_fault_domain()
+      const {
+    return runtime_fault_domain_;
+  }
+  // Cold borrower construction only; ownership of the domain stays with the
+  // Program. Closing this C API view must not finalize its owner's domain.
+  void borrow_runtime_fault_domain(
+      std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain);
 
   virtual TiImage allocate_image(const taichi::lang::ImageParams &params) {
     TI_NOT_IMPLEMENTED

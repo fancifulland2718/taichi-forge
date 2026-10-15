@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/program/runtime_fault.h"
 
 #include <cstring>
 #include <limits>
@@ -11,6 +12,7 @@
 
 namespace taichi::lang::cuda {
 struct FixedGraph::State {
+  std::shared_ptr<RuntimeFaultDomain> fault_domain;
   CUgraph graph{nullptr};
   CUgraphExec executable{nullptr};
   void *stream{nullptr};
@@ -26,34 +28,62 @@ struct FixedGraph::State {
   bool submitted{false};
   ~State() {
     bool backend_safe = false;
+    if (fault_domain &&
+        (!fault_domain->backend_calls_safe() ||
+         fault_domain->state() == RuntimeLifecycleState::kFinalized)) {
+      for (const auto &resource : capture_resources)
+        resource->release(false);
+      return;
+    }
     try {
       auto &cuda = CUDAContext::get_instance();
       auto guard = cuda.get_guard();
       auto lock = cuda.get_submission_lock_guard();
       auto &driver = CUDADriver::get_instance();
       backend_safe = true;
+      bool may_call = true;
+      auto observe = [&](std::uint32_t result, const char *operation) {
+        if (result == CUDA_SUCCESS)
+          return;
+        backend_safe = false;
+        if (classify_cuda_driver_error(result) ==
+            BackendErrorClassification::kFatal)
+          may_call = false;
+        if (fault_domain)
+          fault_domain->report_backend_error(
+              BackendRuntimeError(Arch::cuda, result, operation,
+                                  "Fixed CUDA graph retirement failed"),
+              0);
+      };
       // Cleanup also handles construction failure without publishing a partial
       // executable. No default-stream wait is needed for an unused graph.
       if (capturing)
-        backend_safe &=
-            driver.stream_end_capture.call(stream, &graph) == CUDA_SUCCESS;
-      if (submitted)
-        backend_safe &= driver.stream_synchronize.call(nullptr) == CUDA_SUCCESS;
-      if (stream)
-        backend_safe &= driver.stream_synchronize.call(stream) == CUDA_SUCCESS;
-      if (executable)
-        backend_safe &= driver.graph_exec_destroy.call(executable) == CUDA_SUCCESS;
-      if (graph)
-        backend_safe &= driver.graph_destroy.call(graph) == CUDA_SUCCESS;
+        observe(driver.stream_end_capture.call(stream, &graph), "end capture");
+      if (may_call && submitted)
+        observe(driver.stream_synchronize.call(nullptr), "wait graph replay");
+      if (may_call && stream)
+        observe(driver.stream_synchronize.call(stream),
+                "wait graph preparation");
+      if (may_call && executable)
+        observe(driver.graph_exec_destroy.call(executable),
+                "destroy graph executable");
+      if (may_call && graph)
+        observe(driver.graph_destroy.call(graph), "destroy graph");
       for (const auto &resource : capture_resources)
         resource->release(backend_safe);
       capture_resources.clear();
-      if (controls)
-        driver.mem_free.call(controls);
-      if (arguments)
-        driver.mem_free.call(arguments);
-      if (stream)
-        driver.stream_destroy.call(stream);
+      if (backend_safe && controls)
+        observe(driver.mem_free.call(controls), "free graph control");
+      if (backend_safe && arguments)
+        observe(driver.mem_free.call(arguments), "free graph arguments");
+      if (may_call && stream)
+        observe(driver.stream_destroy.call(stream), "destroy graph stream");
+    } catch (const BackendRuntimeError &error) {
+      if (fault_domain)
+        fault_domain->report_backend_error(error, 0);
+      for (const auto &resource : capture_resources)
+        resource->release(false);
+      capture_resources.clear();
     } catch (...) {
       // Cleanup must not throw while unwinding a driver failure.
       for (const auto &resource : capture_resources)
@@ -71,12 +101,35 @@ bool FixedGraph::available() {
          driver.graph_launch.available();
 }
 
-FixedGraph::FixedGraph(const std::vector<Dispatch> &dispatches)
-    : FixedGraph(std::vector<Operation>(dispatches.begin(), dispatches.end())) {
+FixedGraph::FixedGraph(const std::vector<Dispatch> &dispatches,
+                       std::shared_ptr<RuntimeFaultDomain> fault_domain)
+    : FixedGraph(std::vector<Operation>(dispatches.begin(), dispatches.end()),
+                 std::move(fault_domain)) {
 }
 
-FixedGraph::FixedGraph(const std::vector<Operation> &operations)
+FixedGraph::FixedGraph(const std::vector<Operation> &operations,
+                       std::shared_ptr<RuntimeFaultDomain> fault_domain)
     : state_(std::make_unique<State>()) {
+  state_->fault_domain = std::move(fault_domain);
+  if (state_->fault_domain)
+    state_->fault_domain->throw_if_submission_disallowed("prepare CUDA graph");
+  try {
+    initialize(operations);
+  } catch (const BackendRuntimeError &error) {
+    if (state_->fault_domain)
+      state_->fault_domain->report_backend_error(error, 0);
+    throw;
+  } catch (const GraphBuildError &error) {
+    if (state_->fault_domain)
+      state_->fault_domain->report_backend_error(
+          BackendRuntimeError(Arch::cuda, error.code(), error.stage(),
+                              error.what()),
+          0);
+    throw;
+  }
+}
+
+void FixedGraph::initialize(const std::vector<Operation> &operations) {
   TI_ERROR_IF(operations.empty() || !available(),
               "Fixed CUDA Graph requires operations and driver graph support");
   auto &cuda = CUDAContext::get_instance();
@@ -200,8 +253,10 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations)
     const auto error =
         driver.stream_end_capture.call(state.stream, &state.graph);
     state.capturing = false;
-    TI_ERROR_IF(error != CUDA_SUCCESS, "Fixed CUDA Graph capture failed: {}",
-                error);
+    if (error != CUDA_SUCCESS)
+      throw BackendRuntimeError(
+          Arch::cuda, error, "end fixed CUDA capture",
+          driver.stream_end_capture.get_error_message(error));
   } else {
     if (controls.size() >
         std::numeric_limits<std::size_t>::max() / sizeof(controls[0]))
@@ -277,11 +332,19 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations)
 
 FixedGraph::~FixedGraph() = default;
 void FixedGraph::run() {
+  if (state_->fault_domain)
+    state_->fault_domain->throw_if_submission_disallowed("launch CUDA graph");
   auto &cuda = CUDAContext::get_instance();
   auto guard = cuda.get_guard();
   auto lock = cuda.get_submission_lock_guard();
   state_->submitted = true;
-  CUDADriver::get_instance().graph_launch(state_->executable, nullptr);
+  try {
+    CUDADriver::get_instance().graph_launch(state_->executable, nullptr);
+  } catch (const BackendRuntimeError &error) {
+    if (state_->fault_domain)
+      state_->fault_domain->report_backend_error(error, 0);
+    throw;
+  }
 }
 std::size_t FixedGraph::argument_bytes() const {
   return state_->bytes;

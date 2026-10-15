@@ -4,6 +4,7 @@
 #include <utility>
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/fixed_execution.h"
+#include "taichi/program/runtime_fault.h"
 #include "taichi/common/operation_json.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
@@ -676,6 +677,67 @@ TEST(NativeOperationRegistry, GemmRejectsOverflowAndInvalidScalars) {
 }
 
 #ifdef TI_WITH_LLVM
+TEST(NativeOperationRegistry,
+     FixedExecutionRetainsTypedFaultsAndRejectsReplay) {
+  // Exercise error transport without damaging a real device/context. A CPU
+  // callback injects the same typed errors that a backend driver would throw.
+  cpu::CpuDevice device;
+  class InjectedError final : public NativeOperation {
+   public:
+    explicit InjectedError(Device &device) : device_(device) {
+    }
+    Arch arch() const override {
+      return host_arch();
+    }
+    Device &device() const override {
+      return device_;
+    }
+    std::size_t workspace_bytes() const override {
+      return 0;
+    }
+    void run_cpu() override {
+      ++calls;
+      if (code)
+        throw BackendRuntimeError(Arch::cuda, code, "injected native call",
+                                  "test error");
+    }
+    int calls{0}, code{1};
+
+   private:
+    Device &device_;
+  };
+  auto domain = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 101);
+  auto operation = std::make_shared<InjectedError>(device);
+  FixedExecution execution(host_arch(), device, nullptr, {operation}, nullptr,
+                           domain);
+  EXPECT_THROW(execution.run(), BackendRuntimeError);
+  EXPECT_TRUE(
+      domain->submission_allowed());  // Invalid value is operation-local.
+  operation->code = 0;
+  execution.run();
+  EXPECT_EQ(operation->calls, 2);
+  operation->code =
+      700;  // CUDA illegal address, injected without a driver call.
+  EXPECT_THROW(execution.run(), BackendRuntimeError);
+  ASSERT_TRUE(domain->has_fatal_fault());
+  EXPECT_EQ(domain->snapshot().first_fault->operation, "injected native call");
+  operation->code = 0;
+  EXPECT_THROW(execution.run(), TaichiRuntimeError);
+  EXPECT_EQ(operation->calls, 3);
+  EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, {operation},
+                              nullptr, domain),
+               TaichiRuntimeError);
+  auto independent = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 102);
+  FixedExecution other(host_arch(), device, nullptr, {operation}, nullptr,
+                       independent);
+  other.run();
+  EXPECT_EQ(operation->calls, 4);
+  EXPECT_TRUE(independent->submission_allowed());
+  independent->mark_finalized();
+  EXPECT_THROW(other.run(), TaichiRuntimeError);
+  EXPECT_EQ(operation->calls, 4);
+}
+
 class TestOperation final : public NativeOperation {
  public:
   TestOperation(Arch arch, Device &device, int &runs, int &retired)

@@ -1,4 +1,5 @@
 #include "taichi/runtime/fixed_execution.h"
+#include "taichi/program/runtime_fault.h"
 
 #include <algorithm>
 #include <cstring>
@@ -27,6 +28,7 @@
 
 namespace taichi::lang {
 struct FixedExecution::State {
+  std::shared_ptr<RuntimeFaultDomain> fault_domain;
   std::uint32_t kind{0};
   std::size_t bytes{0};
   std::size_t workspace_bytes{0};
@@ -94,8 +96,13 @@ FixedExecution::FixedExecution(Arch arch,
                                Device &device,
                                gfx::GfxRuntime *gfx_runtime,
                                const std::vector<Operation> &operations,
-                               NativeRecordingState *sequence_state)
+                               NativeRecordingState *sequence_state,
+                               std::shared_ptr<RuntimeFaultDomain> fault_domain)
     : state_(std::make_unique<State>()) {
+  state_->fault_domain = std::move(fault_domain);
+  if (state_->fault_domain)
+    state_->fault_domain->throw_if_submission_disallowed(
+        "prepare fixed execution");
   if (operations.empty())
     throw std::invalid_argument("Fixed execution requires a nonempty batch");
   // Validate every descriptor before preparing backend state or commands.
@@ -315,7 +322,8 @@ FixedExecution::FixedExecution(Arch arch,
     auto flush = [&](std::vector<CudaOperation> &native) {
       if (native.empty())
         return;
-      auto graph = std::make_unique<cuda::FixedGraph>(native);
+      auto graph =
+          std::make_unique<cuda::FixedGraph>(native, state_->fault_domain);
       account(*graph);
       state_->cuda_steps.emplace_back(std::move(graph));
       native.clear();
@@ -391,7 +399,8 @@ FixedExecution::FixedExecution(Arch arch,
     };
     auto native = prepare(operations);
     if (state_->cuda_steps.empty()) {
-      state_->cuda_graph = std::make_unique<cuda::FixedGraph>(native);
+      state_->cuda_graph =
+          std::make_unique<cuda::FixedGraph>(native, state_->fault_domain);
       state_->kind = 1;
       account(*state_->cuda_graph);
     } else {
@@ -519,6 +528,17 @@ FixedExecution::FixedExecution(Arch arch,
 
 FixedExecution::~FixedExecution() = default;
 void FixedExecution::run() {
+  if (state_->fault_domain)
+    state_->fault_domain->throw_if_submission_disallowed("run fixed execution");
+  try {
+    run_impl();
+  } catch (const BackendRuntimeError &error) {
+    if (state_->fault_domain)
+      state_->fault_domain->report_backend_error(error, 0);
+    throw;
+  }
+}
+void FixedExecution::run_impl() {
 #ifdef TI_WITH_LLVM
   State::run_cpu_steps(state_->cpu_steps);
 #endif
