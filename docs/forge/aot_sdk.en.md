@@ -65,7 +65,7 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
-Optional cuDSS, cuTENSOR, cuSPARSELt and AmgX adapters have separate SDK components.
+Optional cuDSS, cuTENSOR, cuSPARSELt, AmgX and VkFFT adapters have separate SDK components.
 Enable their build targets, then build and install only the selected adapter:
 
 ```sh
@@ -83,6 +83,22 @@ cmake -S . -B BUILD -DTI_BUILD_BUNDLED_CUDSS_PROVIDER=ON -DTI_CUDSS_ROOT_080=CUD
 cmake --build BUILD --target taichi_forge_cudss_provider_080
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cudss
 ```
+
+VkFFT uses its own build option, VkFFT 1.3.4 sources and matching static Vulkan
+shader-compiler libraries at build time:
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_VKFFT_PROVIDER=ON -DTI_VKFFT_ROOT=VKFFT_ROOT
+cmake --build BUILD --target taichi_forge_vkfft_provider
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_vkfft
+```
+
+The component includes upstream licenses and sources notices in `licenses/vkfft`.
+VkFFT and its shader compiler are embedded in the adapter; consumers need the
+Vulkan loader/driver and platform C/C++ runtime, without a separate vendor DLL,
+Vulkan SDK or external shader compiler. Its manifest records these requirements
+and all installed license files. The qualified Windows component is about 5 MB;
+it remains optional and is not included by a default install.
 
 Each component
 installs an adapter into `bin/hardware_providers` on Windows or
@@ -993,7 +1009,7 @@ binding. Segmented/graphics variants and executor subclasses need their own
 qualification; storage recipes remain separate. Independent AOT uses the explicit
 `Runtime("vulkan", device_index=...)` enumeration index (default 0), which can
 differ from JIT's automatically chosen GPU. Compare performance on the same device.
-The optional standalone SDK component is still pending.
+The optional SDK component is `TaichiSDKProvider_vkfft`.
 
 CUDA also registers `gemm_f32` using external cuBLAS:
 

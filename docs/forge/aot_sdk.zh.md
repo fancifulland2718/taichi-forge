@@ -57,7 +57,7 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
 
-可选的 cuDSS、cuTENSOR、cuSPARSELt 和 AmgX adapter 各自有独立 SDK 安装组件。
+可选的 cuDSS、cuTENSOR、cuSPARSELt、AmgX 和 VkFFT adapter 各自有独立 SDK 安装组件。
 启用构建目标后，只构建和安装选中的 adapter：
 
 ```sh
@@ -74,6 +74,19 @@ cmake -S . -B BUILD -DTI_BUILD_BUNDLED_CUDSS_PROVIDER=ON -DTI_CUDSS_ROOT_080=CUD
 cmake --build BUILD --target taichi_forge_cudss_provider_080
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cudss
 ```
+
+VkFFT 使用独立开关，构建期需要 VkFFT 1.3.4 源码及匹配的静态 Vulkan shader 编译库：
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_VKFFT_PROVIDER=ON -DTI_VKFFT_ROOT=VKFFT_ROOT
+cmake --build BUILD --target taichi_forge_vkfft_provider
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_vkfft
+```
+
+组件在 `licenses/vkfft` 中包含上游许可与来源声明。VkFFT 和 shader 编译器已内嵌于
+adapter；消费端需要 Vulkan loader/driver 和平台 C/C++ runtime，不需要单独的厂商
+DLL、Vulkan SDK 或外部 shader 编译器。清单记录这些依赖及全部许可文件。已验证的
+Windows 组件约 5 MB，保持可选，默认安装不包含它。
 
 每个组件安装 adapter
 到 Windows 的 `bin/hardware_providers` 或 Linux 的 `lib/hardware_providers`，
@@ -772,7 +785,7 @@ FFT AD 或任意 recipe 支持声明。完整有序 Vulkan compute binding-frame
 导出为每绑定一组不可变 AOT 命令；分段/graphics 变体及 executor 子类需要自己的资格，
 storage recipe 仍需单独处理。独立 AOT 使用 `Runtime("vulkan", device_index=...)` 的显式
 枚举序号（默认 0），可能与 JIT 自动选择的 GPU 不同；性能比较须指定同一设备。
-独立 SDK 可选组件仍待接线。
+独立 SDK 可选组件为 `TaichiSDKProvider_vkfft`。
 
 CUDA 还通过外部 cuBLAS 注册 `gemm_f32`：
 

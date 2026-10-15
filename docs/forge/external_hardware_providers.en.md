@@ -1703,7 +1703,8 @@ selected batch partitions can export to AOT, preserving their fixed layouts and
 tile choices; see [AOT consumption](aot_sdk.en.md). Complete ordered compute
 binding-frame recipes can export their selected nodes too; segmented/graphics
 queue variants require separate qualification. The optional standalone SDK
-component is not yet available.
+component is `TaichiSDKProvider_vkfft`, including its upstream licenses and
+dependency manifest; it does not require a separate VkFFT vendor library.
 
 The current source exposes `ti.hardware.fft.VulkanFftPlan`. It requires a native
 runtime containing the FFT bridge and the separate

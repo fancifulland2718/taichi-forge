@@ -1,4 +1,6 @@
-option(TI_BUILD_VKFFT_PROVIDER "Build the optional Vulkan FFT JIT adapter" OFF)
+include(${CMAKE_CURRENT_LIST_DIR}/TaichiProviderSdk.cmake)
+
+option(TI_BUILD_VKFFT_PROVIDER "Build the optional Vulkan FFT JIT/AOT adapter" OFF)
 set(TI_VKFFT_ROOT "" CACHE PATH "VkFFT v1.3.4 source root")
 
 add_custom_target(taichi_forge_vkfft_providers)
@@ -83,6 +85,15 @@ if(UNIX AND NOT APPLE)
     target_link_options(taichi_forge_vkfft_provider PRIVATE "LINKER:--exclude-libs,ALL")
 endif()
 add_dependencies(taichi_forge_vkfft_providers taichi_forge_vkfft_provider)
+
+ti_install_provider_sdk(taichi_forge_vkfft_provider vkfft
+    LICENSE_FILES "${TI_VKFFT_ROOT}/LICENSE"
+        "${CMAKE_CURRENT_LIST_DIR}/../packaging/licenses/vkfft/glslang-LICENSE.txt"
+        "${CMAKE_CURRENT_LIST_DIR}/../packaging/licenses/vkfft/SPIRV-Tools-LICENSE.txt"
+        "${CMAKE_CURRENT_LIST_DIR}/../packaging/licenses/vkfft/SPIRV-Headers-LICENSE.txt"
+        "${CMAKE_CURRENT_LIST_DIR}/../packaging/licenses/vkfft/SOURCES.txt"
+    EXTERNAL_REQUIREMENTS "Vulkan loader and compatible GPU driver"
+        "platform C/C++ runtime")
 
 # Plain standalone adapter builds need not define a Python installation root.
 if(INSTALL_LIB_DIR)

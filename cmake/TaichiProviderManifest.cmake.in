@@ -4,8 +4,9 @@ set(_prefix "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
 set(_files "")
 set(_separator "")
 set(_total 0)
-foreach(_relative IN ITEMS "@_ti_provider_binary@"
-        "include/taichi/forge_runtime_provider.h" "licenses/LICENSE")
+set(_payload "@_ti_provider_payload@")
+set(_requirements [==[@_ti_provider_requirements_json@]==])
+foreach(_relative IN LISTS _payload)
     file(SHA256 "${_prefix}/${_relative}" _sha)
     file(SIZE "${_prefix}/${_relative}" _size)
     math(EXPR _total "${_total} + ${_size}")
@@ -14,4 +15,4 @@ foreach(_relative IN ITEMS "@_ti_provider_binary@"
 endforeach()
 file(MAKE_DIRECTORY "${_prefix}/share/taichi/providers")
 file(WRITE "${_prefix}/share/taichi/providers/@provider@.json"
-"{\n  \"schema_version\":1,\n  \"component\":\"@_ti_provider_component@\",\n  \"provider_id\":\"@provider@\",\n  \"adapter\":\"@_ti_provider_binary@\",\n  \"external_requirements\":[\"compatible vendor runtime and its dependencies\",\"GPU driver\",\"platform C/C++ runtime\"],\n  \"installed_payload_bytes\":${_total},\n  \"files\":[${_files}\n  ]\n}\n")
+"{\n  \"schema_version\":1,\n  \"component\":\"@_ti_provider_component@\",\n  \"provider_id\":\"@provider@\",\n  \"adapter\":\"@_ti_provider_binary@\",\n  \"external_requirements\":[${_requirements}],\n  \"installed_payload_bytes\":${_total},\n  \"files\":[${_files}\n  ]\n}\n")
