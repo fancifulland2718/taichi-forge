@@ -238,7 +238,7 @@ private ABI 51 构建中验证。
 对于 `native_required` 的 CUDA 嵌套循环，展开式表示超过动作预算时，构建阶段可选择
 已具备资格的紧凑 conditional 路线；runtime 需要提供显式嵌套路线支持。显式 recipe
 和强制 masked 选择仍受尊重，普通 `auto` 的选路不变。
-CUDA 已选 masked/device-update 和 Vulkan 专用嵌套路线仍需自己的持久执行合同，
+CUDA 已选 masked/device-update 和 Vulkan 其他专用路线仍需自己的持久执行合同，
 导出会拒绝隐式替换；下文的 kernel-backed
 CG/PCG SolvePlan 导出复用这些已选控制路线。需要 host 同步的 CUDA
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
@@ -261,8 +261,20 @@ loop["lowering"] = dict(
 512 轮上限，prepare 另检查所选后端录制资格。策略显式为 `compact`、`chained`、
 `conditional` 或 `coarse_conditional`，消费端不随环境变量重新选择；条件策略要求
 设备支持。counter 与可选 status 和 predicate 一样为单个标量 i32，控制缓冲必须
-互不别名。此描述要求非零谓词继续执行及平坦的纯 kernel 区域；嵌套或未具备资格的
+互不别名。此描述要求非零谓词继续执行及平坦的纯 kernel 区域；未具备资格的
 Vulkan 路线明确拒绝，不替换为 host 循环。未附所选方案的通用 while 仍不能在 Vulkan 执行。
+
+已选 depth-2 Vulkan native 循环也可通过 `add_execution_plan(name, graph)` 导出，
+使用持久格式 5 和版本 1 的 `vulkan_nested` lowering。描述只保存一份平坦物理
+dispatch 列表、外层首次条件、有序内层 condition/body/end 边界及冻结的预算/分块。
+末尾条件已在列表中，不再次追加。每个内层的 predicate、counter 和可选 status 均
+进入资源闭包，包括只被 lowering 引用的控制资源；外层及全部内层控制必须是互不
+别名的单标量 i32 数组。预算沿用原生控制器的 uint32 表示，格式不设置固定 64 轮或
+八个内循环上限；现有 JIT 路线资格检查仍适用。prepare 复用共用嵌套录制器，暖态
+正预算的前段/循环/后段合为一次队列提交。外层零预算只在前后段之间执行首次条件。
+独立及借用消费端的小用例覆盖两个顺序内循环、内层零预算、提前结束、预算耗尽、
+私有及外部控制、父图嵌入、输入更新、显式伴随与 owner 退休。需匹配 private ABI 53。
+这覆盖已选的纯 kernel depth-2 路线，不表示任意嵌套或全部 Vulkan SolvePlan 策略可用。
 
 Vulkan 与 JIT 复用录制核心，将前段、有序循环分块和后段合入一次队列提交。prepare
 不执行数学工作，重放不重绑描述符、不读回设备条件。序列化 body 和 shader 定义共享，

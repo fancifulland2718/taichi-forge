@@ -80,6 +80,42 @@ TEST(ExecutionPlan, SelectedVulkanControlRetainsRecipeOnlyBindings) {
   }
 }
 
+TEST(ExecutionPlan, SelectedVulkanNestedControlRetainsPhysicalClosure) {
+  const std::string source = R"({"version":5,"operations":[{"kind":"while",
+    "predicate":"op","max_iterations":65,
+    "condition":[{"kind":"kernel","entry":"initial","arguments":["x"]}],
+    "body":[{"kind":"kernel","entry":"condition","arguments":["x"]},
+            {"kind":"kernel","entry":"body","arguments":["x"]},
+            {"kind":"kernel","entry":"tail","arguments":["x"]}],
+    "lowering":{"kind":"vulkan_nested","version":1,"counter":"oc",
+      "inners":[{"predicate":"ip","counter":"ic","status":"is",
+        "condition_begin":1,"body_begin":2,"end":3,"max_iterations":65,"chunk_size":65}]}}],
+    "resources":[{"kind":"ndarray","name":"ic","dtype":"i32","shape":[]}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
+      plan.operations[0]);
+  ASSERT_TRUE(loop.vulkan && loop.vulkan->nested);
+  EXPECT_EQ(loop.vulkan->nested->inners[0].chunk_size, 65);
+  EXPECT_EQ(plan.arguments,
+            (std::vector<std::string>{"ip", "is", "oc", "op", "x"}));
+  EXPECT_EQ(plan.replay_bindings,
+            (std::set<std::string>{"ic", "ip", "is", "oc", "op", "x"}));
+  for (const auto &[from, to] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":5", "\"version\":4"},
+           {"\"condition_begin\":1", "\"condition_begin\":0"},
+           {"\"body_begin\":2", "\"body_begin\":1"},
+           {"\"end\":3", "\"end\":4"},
+           {"\"end\":3", "\"end\":true"},
+           {"\"chunk_size\":65", "\"chunk_size\":0"},
+           {"\"chunk_size\":65", "\"chunk_size\":66"},
+           {"\"max_iterations\":65", "\"max_iterations\":4294967296"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(from), from.size(), to);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+}
+
 TEST(ExecutionPlan, PreservesOrderedOperationsAndSymbolicBindings) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"kernel","entry":"forward","arguments":["x","scratch"]},

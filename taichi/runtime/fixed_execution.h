@@ -50,6 +50,7 @@ class FixedExecution {
       DevicePtr counter{kDeviceNullPtr};
       DevicePtr status{kDeviceNullPtr};
       VulkanControlRecipe recipe;
+      std::optional<VulkanNestedControlRecipe<DevicePtr>> nested;
     };
     DevicePtr predicate;
     std::uint64_t max_iterations{0};

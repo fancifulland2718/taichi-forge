@@ -62,6 +62,7 @@ struct ExecutionPlan {
       std::string counter;
       std::optional<std::string> status;
       VulkanControlRecipe recipe;
+      std::optional<VulkanNestedControlRecipe<std::string>> nested;
     };
     std::string predicate;
     std::uint64_t max_iterations{0};

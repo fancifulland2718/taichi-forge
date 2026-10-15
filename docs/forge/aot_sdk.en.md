@@ -283,7 +283,7 @@ For `native_required` nested CUDA loops, construction can select the qualified
 compact conditional route when the expanded representation exceeds its action
 budget. The runtime must expose explicit nested-route support. Explicit recipe
 and forced-masked choices remain binding; ordinary `auto` selection is unchanged.
-Selected CUDA masked/device-update routes and specialized Vulkan nested routes
+Selected CUDA masked/device-update routes and other specialized Vulkan routes
 still need their own persistent execution contract; export rejects implicit
 replacement. Kernel-backed CG/PCG
 SolvePlan export uses these selected control paths as described below. CUDA operations requiring host synchronization are
@@ -314,8 +314,27 @@ is checked at prepare. Strategies are explicit `compact`, `chained`,
 in the consumer. Conditional strategies require device support. Counter and
 optional status have the same scalar i32 layout as predicate and must be disjoint.
 This recipe requires nonzero predicate polarity and flat kernel-only regions;
-unqualified/nested Vulkan routes are rejected without host-loop substitution.
+Unqualified Vulkan routes are rejected without host-loop substitution.
 Without a selected recipe, a generic while still cannot execute on Vulkan.
+
+Selected depth-2 Vulkan native loops also export through
+`add_execution_plan(name, graph)`, using persistent format 5 and a
+`vulkan_nested` version 1 lowering. It retains one flat physical dispatch list,
+the initial outer condition, ordered inner condition/body/end boundaries and
+frozen budgets/chunk sizes. Tail conditions are already in that list and are
+not added again. Each inner predicate, counter and optional status belongs to
+the resource closure, including controls referenced only by the lowering;
+all outer/inner controls must be disjoint scalar i32 arrays. Budgets use uint32
+because the native controller encodes them that way, without a fixed 64-round
+or eight-inner-loop format limit. Existing JIT route qualification still applies.
+Preparation reuses the common nested recorder, and warmed positive-budget
+prefix/loop/suffix execution uses one queue submission. Zero outer budgets run
+only the initial condition between the prefix and suffix. Small standalone and
+borrowed checks cover two ordered inner loops, zero inner budgets, early exits,
+budget exhaustion, private and external controls, parent embedding, input updates,
+explicit adjoints and owner retirement. Use matching private ABI 53 components.
+This covers the selected kernel-only depth-2 route, not arbitrary nesting or
+every Vulkan SolvePlan strategy.
 
 Vulkan uses the common JIT recording core and batches prefix, ordered loop
 chunks and suffix into one queue submission. Preparation performs no mathematical

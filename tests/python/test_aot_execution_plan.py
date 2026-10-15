@@ -68,6 +68,69 @@ def test_selected_vulkan_control_recipe_closure_and_version():
         )
 
 
+def test_selected_vulkan_nested_recipe_closure_and_boundaries():
+    kernel = dict(kind="kernel", entry="payload", arguments=["x"])
+    inner = dict(
+        predicate="ip",
+        counter="ic",
+        status="is",
+        condition_begin=1,
+        body_begin=2,
+        end=3,
+        max_iterations=65,
+        chunk_size=65,
+    )
+    lowering = dict(kind="vulkan_nested", version=1, counter="oc", inners=[inner])
+    loop = dict(
+        kind="while", predicate="op", max_iterations=65, condition=[kernel], body=[kernel] * 3, lowering=lowering
+    )
+    plan = ExecutionPlan([loop], resources=[dict(kind="ndarray", name="ic", dtype="i32", shape=[])])
+    assert plan.argument_names == ("ip", "is", "oc", "op", "x")
+    assert plan._replay_argument_names == {"ic", "ip", "is", "oc", "op", "x"}
+    document = json.loads(plan.to_json())
+    assert document["version"] == 5
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    for version in (3, 4):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+    for patch in (
+        dict(condition_begin=0),
+        dict(body_begin=1),
+        dict(end=4),
+        dict(end=True),
+        dict(chunk_size=0),
+        dict(chunk_size=66),
+        dict(max_iterations=1 << 32),
+        dict(predicate=""),
+        dict(extra=1),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, lowering=dict(lowering, inners=[dict(inner, **patch)]))])
+    for patch in (dict(condition=[]), dict(max_iterations=1 << 32), dict(continue_while_nonzero=False)):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, **patch)])
+    for patch in (dict(inners=[]), dict(inners=None), dict(chunks=[]), dict(version=True)):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, lowering=dict(lowering, **patch))])
+    zero = dict(inner, max_iterations=0, chunk_size=0)
+    ExecutionPlan([dict(loop, max_iterations=0, lowering=dict(lowering, inners=[zero]))])
+    many = [
+        dict(
+            inner,
+            predicate=f"p{i}",
+            counter=f"c{i}",
+            status=f"s{i}",
+            condition_begin=1 + 3 * i,
+            body_begin=2 + 3 * i,
+            end=3 + 3 * i,
+        )
+        for i in range(9)
+    ]
+    ExecutionPlan([dict(loop, body=[kernel] * 27, lowering=dict(lowering, inners=many))])
+    with pytest.raises(ValueError):
+        ExecutionPlan([dict(loop, body=[kernel] * 27, lowering=dict(lowering, inners=list(reversed(many))))])
+
+
 def test_persistent_control_closure_and_version():
     body = [dict(kind="kernel", entry="advance", arguments=["scratch", "x"])]
     loop = dict(

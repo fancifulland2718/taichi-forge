@@ -145,7 +145,21 @@ FixedExecution::FixedExecution(Arch arch,
               !flat(loop->condition) || !flat(loop->body))
             throw std::invalid_argument(
                 "Invalid flat Vulkan structured recording recipe");
-          control.recipe.validate(loop->max_iterations);
+          if (control.nested) {
+            if (!control.recipe.chunks.empty())
+              throw std::invalid_argument(
+                  "Nested Vulkan control cannot carry flat chunks");
+            control.nested->validate(loop->condition.size(),
+                                     loop->condition.size() + loop->body.size(),
+                                     loop->max_iterations);
+            for (const auto &inner : control.nested->inners)
+              if (!valid(inner.predicate) || !valid(inner.counter) ||
+                  (inner.status && !valid(*inner.status)))
+                throw std::invalid_argument(
+                    "Invalid Vulkan inner control storage");
+          } else {
+            control.recipe.validate(loop->max_iterations);
+          }
         }
         if (!active_loops.insert(loop.get()).second)
           throw std::invalid_argument(
@@ -457,6 +471,32 @@ FixedExecution::FixedExecution(Arch arch,
         };
         append(loop.condition);
         append(loop.body);
+        if (loop.vulkan->nested) {
+          gfx::GfxRuntime::GraphNestedStructuredControl control;
+          control.outer_predicate = loop.predicate;
+          control.outer_counter = loop.vulkan->counter;
+          control.outer_status = loop.vulkan->status;
+          control.outer_has_status = control.outer_status != kDeviceNullPtr;
+          control.outer_condition_dispatch_count = loop.condition.size();
+          control.outer_max_iterations =
+              static_cast<std::uint32_t>(loop.max_iterations);
+          for (const auto &source : loop.vulkan->nested->inners) {
+            gfx::GfxRuntime::GraphNestedStructuredInnerControl inner;
+            inner.inner_predicate = source.predicate;
+            inner.inner_counter = source.counter;
+            inner.inner_has_status = bool(source.status);
+            inner.inner_status = source.status.value_or(kDeviceNullPtr);
+            inner.inner_condition_dispatch_begin = source.condition_begin;
+            inner.inner_body_dispatch_begin = source.body_begin;
+            inner.inner_dispatch_end = source.end;
+            inner.inner_max_iterations = source.max_iterations;
+            inner.inner_chunk_size = source.chunk_size;
+            control.inner_controls.push_back(inner);
+          }
+          retain(gfx_runtime->prepare_fixed_nested_structured_graph(
+              dispatches, control, {}));
+          continue;
+        }
         append(loop.condition);
         gfx::GfxRuntime::GraphStructuredControl control;
         control.predicate = loop.predicate;

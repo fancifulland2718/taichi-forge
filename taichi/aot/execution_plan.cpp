@@ -18,7 +18,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 4)
+    if (version < 1 || version > 5)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -58,9 +58,16 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
               throw std::invalid_argument(
                   "Selected control requires execution plan version 4");
             const auto &lowering = found->second;
+            const auto kind = name(lowering["kind"]);
+            const bool nested = kind == "vulkan_nested";
             fields(lowering,
-                   {"kind", "version", "counter", "status", "chunks"});
-            if (name(lowering["kind"]) != "vulkan_structured" ||
+                   nested
+                       ? std::initializer_list<const char *>{"kind", "version",
+                                                             "counter",
+                                                             "status", "inners"}
+                       : std::initializer_list<const char *>{
+                             "kind", "version", "counter", "status", "chunks"});
+            if ((kind != "vulkan_structured" && !nested) ||
                 integer(lowering["version"]) != 1 ||
                 !loop->continue_while_nonzero)
               throw std::invalid_argument(
@@ -73,29 +80,77 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
               control.status = name(lowering["status"]);
               arguments.insert(*control.status);
             }
-            if (!lowering["chunks"].is_arr())
-              throw std::invalid_argument(
-                  "Vulkan control chunks must be an array");
-            for (const auto &chunk : lowering["chunks"].arr.inner) {
-              fields(chunk, {"iterations", "strategy"});
-              const auto count = integer(chunk["iterations"]);
-              if (count > std::numeric_limits<std::uint32_t>::max())
+            if (nested) {
+              if (version < 5)
                 throw std::invalid_argument(
-                    "Vulkan chunk descriptor exceeds uint32 iterations");
-              const auto strategy = name(chunk["strategy"]);
-              const std::vector<std::string> names{
-                  "compact", "chained", "conditional", "coarse_conditional"};
-              const auto selected =
-                  std::find(names.begin(), names.end(), strategy);
-              if (selected == names.end())
+                    "Nested Vulkan control requires execution plan version 5");
+              control.nested.emplace();
+              if (!lowering["inners"].is_arr())
                 throw std::invalid_argument(
-                    "Unknown selected Vulkan control strategy");
-              control.recipe.chunks.push_back(
-                  {static_cast<std::uint32_t>(count),
-                   static_cast<VulkanControlStrategy>(
-                       1 + std::distance(names.begin(), selected))});
+                    "Vulkan nested controls must be an array");
+              const auto u32 = [&](const JsonValue &value) {
+                const auto number = integer(value);
+                if (number > std::numeric_limits<std::uint32_t>::max())
+                  throw std::invalid_argument(
+                      "Vulkan nested descriptor exceeds uint32");
+                return static_cast<std::uint32_t>(number);
+              };
+              for (const auto &value : lowering["inners"].arr.inner) {
+                fields(value,
+                       {"predicate", "counter", "status", "condition_begin",
+                        "body_begin", "end", "max_iterations", "chunk_size"});
+                VulkanNestedControlRecipe<std::string>::Inner inner;
+                inner.predicate = name(value["predicate"]);
+                inner.counter = name(value["counter"]);
+                arguments.insert(inner.predicate);
+                arguments.insert(inner.counter);
+                if (value.obj.inner.count("status")) {
+                  inner.status = name(value["status"]);
+                  arguments.insert(*inner.status);
+                }
+                const auto boundary = [&](const char *key) {
+                  const auto index = integer(value[key]);
+                  if (index > std::numeric_limits<std::size_t>::max())
+                    throw std::invalid_argument(
+                        "Vulkan nested boundary exceeds address space");
+                  return static_cast<std::size_t>(index);
+                };
+                inner.condition_begin = boundary("condition_begin");
+                inner.body_begin = boundary("body_begin");
+                inner.end = boundary("end");
+                inner.max_iterations = u32(value["max_iterations"]);
+                inner.chunk_size = u32(value["chunk_size"]);
+                control.nested->inners.push_back(std::move(inner));
+              }
+              control.nested->validate(
+                  loop->condition.size(),
+                  loop->condition.size() + loop->body.size(),
+                  loop->max_iterations);
+            } else {
+              if (!lowering["chunks"].is_arr())
+                throw std::invalid_argument(
+                    "Vulkan control chunks must be an array");
+              for (const auto &chunk : lowering["chunks"].arr.inner) {
+                fields(chunk, {"iterations", "strategy"});
+                const auto count = integer(chunk["iterations"]);
+                if (count > std::numeric_limits<std::uint32_t>::max())
+                  throw std::invalid_argument(
+                      "Vulkan chunk descriptor exceeds uint32 iterations");
+                const auto strategy = name(chunk["strategy"]);
+                const std::vector<std::string> names{
+                    "compact", "chained", "conditional", "coarse_conditional"};
+                const auto selected =
+                    std::find(names.begin(), names.end(), strategy);
+                if (selected == names.end())
+                  throw std::invalid_argument(
+                      "Unknown selected Vulkan control strategy");
+                control.recipe.chunks.push_back(
+                    {static_cast<std::uint32_t>(count),
+                     static_cast<VulkanControlStrategy>(
+                         1 + std::distance(names.begin(), selected))});
+              }
+              control.recipe.validate(loop->max_iterations);
             }
-            control.recipe.validate(loop->max_iterations);
             const auto only_kernels = [](const auto &region) {
               return std::all_of(region.begin(), region.end(),
                                  [](const auto &op) {

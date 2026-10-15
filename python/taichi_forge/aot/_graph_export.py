@@ -453,6 +453,58 @@ def _cuda_nested_while(context, node):
     )
 
 
+def _vulkan_nested_while(context, node):
+    selected = node._vulkan_nested
+    if not node.supports_native_submission or selected is None:
+        raise TaichiRuntimeError("AOT Graph requires its selected nested Vulkan control recipe")
+    if selected.physical_dispatch_count != selected.dispatch_count:
+        raise TaichiRuntimeError("AOT nested Vulkan control requires its selected dispatch boundaries")
+    operations = context.region(_node, selected)
+    initial, boundaries = node._vulkan_nested_boundaries
+    inners = node._vulkan_nested_inner
+    if (
+        len(operations) != selected.physical_dispatch_count
+        or any(op["kind"] != "kernel" for op in operations)
+        or not 0 < initial < len(operations)
+        or len(inners) != len(boundaries)
+    ):
+        raise TaichiRuntimeError("AOT nested Vulkan control lacks complete physical boundaries")
+    lowering = dict(kind="vulkan_nested", version=1, counter=context.binding(node.counter), inners=[])
+    if node.status is not None:
+        lowering["status"] = context.binding(node.status)
+    cursor = initial
+    for inner, (condition_begin, body_begin, end), budget, chunk in zip(
+        inners, boundaries, node._nested_inner_max_iterations, node._nested_inner_compound_chunk_limits, strict=True
+    ):
+        if not cursor <= condition_begin < body_begin < end < len(operations):
+            raise TaichiRuntimeError("AOT nested Vulkan control has invalid physical boundaries")
+        value = dict(
+            predicate=context.binding(inner.predicate),
+            counter=context.binding(inner.counter),
+            condition_begin=condition_begin,
+            body_begin=body_begin,
+            end=end,
+            max_iterations=budget,
+            chunk_size=chunk,
+        )
+        if inner.status is not None:
+            value["status"] = context.binding(inner.status)
+        lowering["inners"].append(value)
+        cursor = end
+    # All tail conditions are already present in the selected physical body.
+    # Keep its initial condition inside the same native recording, once only.
+    context.operations.append(
+        dict(
+            kind="while",
+            predicate=context.binding(node.predicate),
+            max_iterations=node.max_iterations,
+            condition=operations[:initial],
+            body=operations[initial:],
+            lowering=lowering,
+        )
+    )
+
+
 def _while(context, node):
     from taichi_forge.lang import impl
 
@@ -460,11 +512,14 @@ def _while(context, node):
     if arch == core.Arch.vulkan:
         from taichi_forge.graph._graph import _vulkan_compound_strategy_codes
 
-        if node._has_nested_control or not node.supports_native_submission:
-            raise TaichiRuntimeError("AOT Graph requires its selected Vulkan control recipe")
         if not node.max_iterations:
             _node(context, node._condition)
             return
+        if node._has_nested_control:
+            _vulkan_nested_while(context, node)
+            return
+        if not node.supports_native_submission:
+            raise TaichiRuntimeError("AOT Graph requires its selected Vulkan control recipe")
         selected = node._vulkan_structured
         if selected is None or selected.physical_dispatch_count != selected.dispatch_count:
             raise TaichiRuntimeError("AOT Vulkan control requires its selected dispatch boundaries")

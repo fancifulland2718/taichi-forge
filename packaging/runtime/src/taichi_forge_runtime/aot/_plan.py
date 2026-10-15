@@ -21,7 +21,9 @@ def _control_version(steps):
     version = 1
     for op in steps:
         if isinstance(op, dict) and op.get("kind") == "while":
-            version = max(version, 4 if "lowering" in op else 3)
+            lowering = op.get("lowering")
+            selected = 5 if isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested" else 4
+            version = max(version, selected if "lowering" in op else 3)
             for key in ("condition", "body"):
                 if isinstance(op.get(key), list):
                     version = max(version, _control_version(op[key]))
@@ -63,7 +65,7 @@ class ExecutionPlan:
             or set(value) - {"version", "operations", "resources", "gradients", "initialization", "constraints"}
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4):
+        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5):
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -113,12 +115,13 @@ class ExecutionPlan:
 
         def validate_lowering(op):
             lowering = op["lowering"]
-            required = {"kind", "version", "counter", "chunks"}
+            nested = isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested"
+            required = {"kind", "version", "counter", "inners" if nested else "chunks"}
             if (
                 not isinstance(lowering, dict)
                 or not required <= set(lowering)
                 or set(lowering) - required - {"status"}
-                or lowering["kind"] != "vulkan_structured"
+                or lowering["kind"] not in ("vulkan_structured", "vulkan_nested")
                 or type(lowering["version"]) is not int
                 or lowering["version"] != 1
                 or not op.get("continue_while_nonzero", True)
@@ -128,6 +131,41 @@ class ExecutionPlan:
                 if key in lowering:
                     _name(lowering[key])
                     arguments.add(lowering[key])
+            if any(item["kind"] != "kernel" for item in op["condition"] + op["body"]):
+                raise ValueError("Vulkan structured control requires flat kernel regions")
+            if nested:
+                inners = lowering["inners"]
+                cursor = len(op["condition"])
+                count = cursor + len(op["body"])
+                if not isinstance(inners, list) or not inners or not cursor or op["max_iterations"] > 0xFFFFFFFF:
+                    raise ValueError("Invalid selected Vulkan nested control")
+                required = {
+                    "predicate",
+                    "counter",
+                    "condition_begin",
+                    "body_begin",
+                    "end",
+                    "max_iterations",
+                    "chunk_size",
+                }
+                for inner in inners:
+                    if not isinstance(inner, dict) or not required <= set(inner) or set(inner) - required - {"status"}:
+                        raise ValueError("Invalid Vulkan nested control descriptor")
+                    for key in ("predicate", "counter", "status"):
+                        if key in inner:
+                            _name(inner[key])
+                            arguments.add(inner[key])
+                    for key in ("condition_begin", "body_begin", "end", "max_iterations", "chunk_size"):
+                        maximum = 0xFFFFFFFF if key in ("max_iterations", "chunk_size") else 0x7FFFFFFFFFFFFFFF
+                        if type(inner[key]) is not int or not 0 <= inner[key] <= maximum:
+                            raise ValueError("Invalid Vulkan nested boundary or budget representation")
+                    budget, chunk = inner["max_iterations"], inner["chunk_size"]
+                    if not cursor <= inner["condition_begin"] < inner["body_begin"] < inner["end"] < count or (
+                        chunk != 0 if budget == 0 else not 0 < chunk <= budget
+                    ):
+                        raise ValueError("Invalid Vulkan nested dispatch boundaries or budget")
+                    cursor = inner["end"]
+                return
             chunks = lowering["chunks"]
             if not isinstance(chunks, list):
                 raise ValueError("Vulkan control chunks must be an array")
@@ -145,8 +183,6 @@ class ExecutionPlan:
                 remaining -= chunk["iterations"]
             if remaining:
                 raise ValueError("Vulkan control chunks must cover the loop budget")
-            if any(item["kind"] != "kernel" for item in op["condition"] + op["body"]):
-                raise ValueError("Vulkan structured control requires flat kernel regions")
 
         def validate_steps(steps, *, allow_empty=False):
             if not isinstance(steps, list) or (not steps and not allow_empty):

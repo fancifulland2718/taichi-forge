@@ -38,8 +38,13 @@ lifetimes. The entries below describe the changes.
   unused loop-observation shaders, trace tables, host-readable buffers or
   readback copies. Predicate gates and indirect dispatch retain their semantics.
   Diagnostic paths still generate observations on demand, with distinct cache
-  identities. The shared fixed recorder is available internally; public export
-  of nested Vulkan AOT plans remains pending.
+  identities. Selected kernel-only depth-2 Vulkan loops now export persistent
+  AOT plans through `add_execution_plan`, preserving physical boundaries and
+  private control resources. Standalone and borrowed consumers reuse the shared
+  recorder, with one warmed prefix/loop/suffix submission and no host predicate
+  readback. Zero/early/budget exits, two inner loops, explicit adjoints and
+  retirement are tested. Use matching private ABI 53 components; other nested
+  routes and complete SolvePlan coverage remain separate work.
 
 - Prepared AOT executions and native resource preparation now share their runtime's
   fault state; borrowed runtimes retain the JIT owner's state without finalizing it

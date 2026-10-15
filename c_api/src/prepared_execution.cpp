@@ -661,10 +661,33 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
             controls.push_back(*loop.vulkan->status);
             bound->vulkan->status = control_pointer(*loop.vulkan->status);
           }
+          if (loop.vulkan->nested) {
+            bound->vulkan->nested.emplace();
+            for (const auto &source : loop.vulkan->nested->inners) {
+              VulkanNestedControlRecipe<DevicePtr>::Inner inner;
+              inner.predicate = control_pointer(source.predicate);
+              inner.counter = control_pointer(source.counter);
+              controls.push_back(source.predicate);
+              controls.push_back(source.counter);
+              if (source.status) {
+                inner.status = control_pointer(*source.status);
+                controls.push_back(*source.status);
+              }
+              inner.condition_begin = source.condition_begin;
+              inner.body_begin = source.body_begin;
+              inner.end = source.end;
+              inner.max_iterations = source.max_iterations;
+              inner.chunk_size = source.chunk_size;
+              bound->vulkan->nested->inners.push_back(std::move(inner));
+            }
+          }
+          std::vector<const NativeStorageRange *> ranges;
+          ranges.reserve(controls.size());
+          for (const auto &name : controls)
+            ranges.push_back(&storage_range(name));
           for (std::size_t i = 0; i < controls.size(); ++i)
             for (std::size_t j = 0; j < i; ++j)
-              if (!storage_range(controls[i])
-                       .proven_disjoint(storage_range(controls[j])))
+              if (!ranges[i]->proven_disjoint(*ranges[j]))
                 throw MemoryBindingError(
                     "Vulkan loop controls must be disjoint");
         }
