@@ -226,6 +226,9 @@ plan = ExecutionPlan([loop])
 私有控制资源、状态与显式伴随已有小规模验证。CUDA 嵌套导出使用已选的平坦物理
 dispatch 及条件/循环体边界；两个顺序内循环、独立绑定及 owner 退休已在配套
 private ABI 51 构建中验证。
+对于 `native_required` 的 CUDA 嵌套循环，展开式表示超过动作预算时，构建阶段可选择
+已具备资格的紧凑 conditional 路线；runtime 需要提供显式嵌套路线支持。显式 recipe
+和强制 masked 选择仍受尊重，普通 `auto` 的选路不变。
 CUDA 已选 masked/device-update 和 Vulkan 专用嵌套路线仍需自己的持久执行合同，
 导出会拒绝隐式替换；下文的 kernel-backed
 CG/PCG SolvePlan 导出复用这些已选控制路线。需要 host 同步的 CUDA

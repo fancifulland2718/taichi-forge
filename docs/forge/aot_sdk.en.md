@@ -269,6 +269,10 @@ embedding, private controls, status and explicit adjoints. Nested CUDA export
 uses the selected flat physical dispatches and their condition/body boundaries;
 two ordered inner loops, independent bindings and owner retirement are tested
 with the matching private ABI 51 build.
+For `native_required` nested CUDA loops, construction can select the qualified
+compact conditional route when the expanded representation exceeds its action
+budget. The runtime must expose explicit nested-route support. Explicit recipe
+and forced-masked choices remain binding; ordinary `auto` selection is unchanged.
 Selected CUDA masked/device-update routes and specialized Vulkan nested routes
 still need their own persistent execution contract; export rejects implicit
 replacement. Kernel-backed CG/PCG

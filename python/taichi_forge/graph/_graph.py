@@ -6857,6 +6857,8 @@ class _CompiledWhileGraphNode:
                     self._cuda_nested_reason,
                 ) = nested
                 if self._cuda_nested is not None:
+                    capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
+                    required_conditional = False
                     self._cuda_nested_control_lowering = (
                         _cuda_nested_structured_control_lowering(_control_recipe)
                     )
@@ -6869,18 +6871,36 @@ class _CompiledWhileGraphNode:
                         if compact
                         else self._cuda_nested.nested_expanded_eligible
                     )
+                    if (
+                        not eligible
+                        and not compact
+                        and _control_recipe is None
+                        and lowering_mode == "native_required"
+                        and os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") != "1"
+                        and self._cuda_nested.nested_conditional_eligible
+                        and capabilities.get("nested_conditional_graph_available", False)
+                        and capabilities.get("nested_explicit_route_compiled", False)
+                    ):
+                        # The expanded representation's action budget is not a
+                        # limit on a compact conditional program. Preserve the
+                        # requested native execution when that route qualifies.
+                        self._cuda_nested_control_lowering = _CUDA_NESTED_CONDITIONAL_ROUTE
+                        required_conditional = True
+                        eligible = True
                     if not eligible:
                         self._cuda_nested_control_lowering = None
+                        unavailable_reason = (
+                            "conditional_body_unsupported"
+                            if compact
+                            else "encoded_action_budget_exceeded"
+                        )
+                        if lowering_mode == "native_required":
+                            self._cuda_nested_reason = unavailable_reason
                         if _control_recipe is not None:
                             raise TaichiRuntimeError(
                                 "Selected nested control recipe is unavailable: "
-                                + (
-                                    "conditional_body_unsupported"
-                                    if compact
-                                    else "encoded_action_budget_exceeded"
-                                )
+                                + unavailable_reason
                             )
-                    capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
                     if capabilities.get("nested_explicit_route_compiled", False):
                         self._cuda_nested_submission_options = {
                             "execution_route": (
@@ -6889,7 +6909,7 @@ class _CompiledWhileGraphNode:
                                     _CUDA_NESTED_DEVICE_UPDATE_ROUTE: "device_update",
                                     _CUDA_NESTED_MASKED_ROUTE: "masked",
                                 }.get(self._cuda_nested_control_lowering, "auto")
-                                if _control_recipe is not None
+                                if _control_recipe is not None or required_conditional
                                 else "auto"
                             )
                         }
