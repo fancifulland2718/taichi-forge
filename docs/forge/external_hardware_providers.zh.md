@@ -301,10 +301,17 @@ $env:TI_CUDA_PTXAS_PATH = "C:\vendor\cuda\bin\ptxas.exe"
 
 ### cuSOLVERDn device Cholesky
 
-`ti.hardware.linalg.CusolverDnProvider` 显式使用用户安装的稠密 SPD 求解库。Forge 只提供延迟加载的薄 C-ABI
-binding，不打包 vendor runtime 或其 CUDA 依赖。可以传入库文件/目录、设置 `TI_CUSOLVERDN_LIBRARY_PATH`，
+`ti.hardware.linalg.CusolverDnProvider` 显式使用用户安装的稠密 SPD 求解库。Forge 提供延迟加载的公共 provider C-ABI
+adapter，不打包 vendor runtime 或其 CUDA 依赖。可以传入库文件/目录、设置 `TI_CUSOLVERDN_LIBRARY_PATH`，
 或安装兼容的 NVIDIA cuSOLVER component package；传递依赖也必须可被加载。
 `ti.hardware.probe("cusolverdn", library_path=...)` 只检查符号和版本，不代表执行资格化或自动选用。
+
+JIT 与原生消费者通过 provider ABI 2、execution ABI 1 共享 Cholesky 计划实现。
+adapter 持有 vendor handle、参数和 host workspace；调用者保留 factor、status 与
+device workspace，直至执行退休。存在活计划时拒绝关闭 runtime。可选 SDK 组件
+`TaichiSDKProvider_cusolverdn` 安装 adapter 和 `forge_cusolverdn_provider.h`，
+构建 adapter 不需要厂商头文件。此共享核心尚不提供 cuSOLVERDn 的 AOT 资源注册或
+recording 自动导出。执行需要 CUDA；CPU 和 Vulkan 不增加厂商库依赖。
 
 ```python
 with ti.hardware.linalg.CusolverDnProvider(library_path) as provider:

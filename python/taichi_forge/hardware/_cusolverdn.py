@@ -10,7 +10,11 @@ from taichi_forge.hardware._cusolverdn_abi import (
     ABI,
     DriverBinding,
     check,
-    load_library,
+    open_runtime,
+    ExecutionApi,
+    PlanDesc,
+    PlanInfo,
+    ExecDesc,
     passive_status,
     probe_provider,
     resolve_library_path,
@@ -68,7 +72,15 @@ class CusolverDnProvider:
             raise TaichiRuntimeError(
                 "CusolverDnProvider requires an initialized CUDA runtime"
             )
-        self._library = load_library(library_path)
+        runtime = None
+        try:
+            runtime = open_runtime(library_path)
+            self._execution_api = runtime.query_execution_api(ExecutionApi)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            if runtime is not None:
+                runtime.close()
+            raise TaichiRuntimeError(str(exc)) from exc
+        self._runtime = runtime
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self._plans = weakref.WeakSet()
@@ -77,8 +89,12 @@ class CusolverDnProvider:
         self.identity = MappingProxyType(
             {
                 "provider_abi": ABI,
-                "provider_version": self._library.version,
-                "vendor_library": self._library.path,
+                "provider_version": ".".join(
+                    str(runtime.runtime_info[f"version_{part}"])
+                    for part in ("major", "minor", "patch")
+                ),
+                "vendor_library": runtime.runtime_info["library_path"],
+                "execution_abi_version": int(self._execution_api.execution_abi_version),
             }
         )
         impl.get_runtime().register_runtime_object(self)
@@ -98,12 +114,14 @@ class CusolverDnProvider:
                 return
             if any(not plan.closed for plan in self._plans):
                 raise TaichiRuntimeError("close cuSOLVERDn plans before their provider")
+            self._runtime.close()
             self.closed = True
 
     def _invalidate_runtime(self):
         with self._lock:
             for plan in tuple(self._plans):
                 plan.close()
+            self._runtime.close()
             self.closed = True
 
     def __enter__(self):
@@ -138,7 +156,7 @@ class CusolverDnCholeskyPlan:
         self._lock = provider._lock
         self._binding = None
         self._captures = weakref.WeakSet()
-        self._handle, self._params = ct.c_void_p(), ct.c_void_p()
+        self._handle = ct.c_void_p()
         self.closed = False
         self._factor = ScalarNdarray(dtype, (rows, rows))
         self._info = ScalarNdarray(i32, (2,))
@@ -151,69 +169,72 @@ class CusolverDnCholeskyPlan:
         self._driver = DriverBinding(self._factor_pointer)
         self._scalar = 0 if dtype == f32 else 1
         self._element_bytes = 4 if dtype == f32 else 8
-        api = provider._library
+        api = provider._execution_api
         try:
-            with self._driver.activate():
-                check(api.create(ct.byref(self._handle)), "cusolverDnCreate")
-                check(api.set_stream(self._handle, None), "cusolverDnSetStream")
-                check(
-                    api.create_params(ct.byref(self._params)), "cusolverDnCreateParams"
-                )
-                device, host = ct.c_size_t(), ct.c_size_t()
-                check(
-                    api.buffer_size(
-                        self._handle,
-                        self._params,
-                        1,
-                        rows,
-                        self._scalar,
-                        self._factor_pointer,
-                        rows,
-                        self._scalar,
-                        ct.byref(device),
-                        ct.byref(host),
-                    ),
-                    "cusolverDnXpotrf_bufferSize",
-                )
-            self.workspace_bytes, self.host_workspace_bytes = device.value, host.value
-            self._workspace = (
-                ScalarNdarray(u8, (device.value,)) if device.value else None
-            )
-            self._workspace_pointer = (
-                _pointer(self._workspace, u8, (device.value,), "workspace", program)
-                if device.value
-                else 0
-            )
-            self._host_workspace = (
-                ct.create_string_buffer(host.value) if host.value else None
-            )
-            self._factor_call = partial(
-                api.factor,
-                self._handle,
-                self._params,
-                1,
-                rows,
+            desc = PlanDesc(
+                ct.sizeof(PlanDesc),
                 self._scalar,
+                rows,
+                rhs_count,
                 self._factor_pointer,
-                rows,
-                self._scalar,
-                self._workspace_pointer,
-                device.value,
-                self._host_workspace,
-                host.value,
                 self._info_pointer,
             )
+            info = PlanInfo(ct.sizeof(PlanInfo))
+            with self._driver.activate():
+                self._check(
+                    api.create_plan(
+                        provider._runtime.handle,
+                        ct.byref(desc),
+                        ct.byref(self._handle),
+                        ct.byref(info),
+                    )
+                )
+            self.workspace_bytes = int(info.device_workspace_bytes)
+            self.host_workspace_bytes = int(info.host_workspace_bytes)
+            self._workspace = (
+                ScalarNdarray(u8, (self.workspace_bytes,))
+                if self.workspace_bytes
+                else None
+            )
+            self._workspace_pointer = (
+                _pointer(
+                    self._workspace, u8, (self.workspace_bytes,), "workspace", program
+                )
+                if self.workspace_bytes
+                else 0
+            )
+            self._factor_desc = ExecDesc(
+                ct.sizeof(ExecDesc),
+                0,
+                self._workspace_pointer,
+                self.workspace_bytes,
+                0,
+                0,
+            )
+            self._factor_call = partial(self._execute, self._factor_desc)
             provider._plans.add(self)
         except Exception:
             with self._driver.activate():
-                if self._params:
-                    api.destroy_params(self._params)
                 if self._handle:
-                    api.destroy(self._handle)
-            self._params = self._handle = None
+                    self._check(api.destroy_plan(self._handle))
+                    self._handle = ct.c_void_p()
             self._driver.close()
             self.closed = True
             raise
+
+    def _check(self, result):
+        try:
+            self.provider._runtime.check_result(result)
+        except RuntimeError as exc:
+            raise TaichiRuntimeError(str(exc)) from exc
+
+    def _execute(self, desc, stream=None):
+        if self.closed:
+            _closed()
+        desc.cuda_stream = (
+            stream.value if isinstance(stream, ct.c_void_p) else stream
+        ) or 0
+        self._check(self.provider._execution_api.execute(self._handle, ct.byref(desc)))
 
     @property
     def info(self):
@@ -301,17 +322,12 @@ class CusolverDnCholeskyPlan:
             if self._binding is not None:
                 self._binding._invalidate()
             with self._driver.activate():
-                check(
-                    self.provider._library.destroy_params(self._params),
-                    "cusolverDnDestroyParams",
-                )
-                self._params = None
-                check(self.provider._library.destroy(self._handle), "cusolverDnDestroy")
-                self._handle = None
+                self._check(self.provider._execution_api.destroy_plan(self._handle))
+                self._handle = ct.c_void_p()
             self._driver.close()
             self.closed = True
             self._factor_call = _closed
-            self._factor = self._workspace = self._info = self._host_workspace = None
+            self._factor = self._workspace = self._info = None
             self._binding = None
 
     def __enter__(self):
@@ -335,21 +351,8 @@ class CusolverDnBinding:
             (plan._workspace,) if plan._workspace is not None else ()
         )
         self._a, self._rhs, self._output = pointers
-        self._solve_call = partial(
-            plan.provider._library.solve,
-            plan._handle,
-            plan._params,
-            1,
-            plan.rows,
-            plan.rhs_count,
-            plan._scalar,
-            plan._factor_pointer,
-            plan.rows,
-            plan._scalar,
-            self._output,
-            plan.rows,
-            plan._info_pointer + 4,
-        )
+        self._solve_desc = ExecDesc(ct.sizeof(ExecDesc), 1, 0, 0, self._output, 0)
+        self._solve_call = partial(plan._execute, self._solve_desc)
         self.factor = partial(self._submit, "factor")
         self.solve = _unfactored
         self.factor_and_solve = partial(self._submit, "both")
@@ -391,7 +394,7 @@ class CusolverDnBinding:
                     ),
                     "copy Cholesky input",
                 )
-                check(plan._factor_call(), "cusolverDnXpotrf")
+                plan._factor_call(stream)
             if mode != "factor":
                 if self._rhs != self._output:
                     check(
@@ -403,7 +406,7 @@ class CusolverDnBinding:
                         ),
                         "copy RHS",
                     )
-                check(self._solve_call(), "cusolverDnXpotrs")
+                self._solve_call(stream)
 
     def _submit(self, mode):
         with self._plan._lock:

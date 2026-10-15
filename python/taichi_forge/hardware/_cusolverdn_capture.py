@@ -48,10 +48,6 @@ class CusolverDnCapture:
         with plan._driver.activate():
             try:
                 check(create(ct.byref(stream), 1), "create solver capture stream")
-                check(
-                    plan.provider._library.set_stream(plan._handle, stream),
-                    "set solver capture stream",
-                )
                 check(begin(stream, 1), "begin solver capture")
                 capturing = True
                 binding._invoke(mode, stream)
@@ -74,10 +70,6 @@ class CusolverDnCapture:
                     destroy_graph(graph)
                 if stream:
                     destroy_stream(stream)
-                check(
-                    plan.provider._library.set_stream(plan._handle, None),
-                    "restore solver stream",
-                )
         self._closed = False
         self._launch = partial(launch, self._exec, None)
         self._solve_ready = partial(binding._submit, "solve")

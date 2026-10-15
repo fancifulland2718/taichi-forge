@@ -1,7 +1,6 @@
 """Bounded device/lifetime contracts, with optional unmodified vendor execution."""
 
 import os
-from types import SimpleNamespace
 import numpy as np
 import pytest
 import taichi_forge as ti
@@ -71,47 +70,36 @@ def test_cusolverdn_capture_live_inputs_root_order_and_retirement(
         saved()
 
 
+@pytest.mark.skipif(
+    not os.environ.get("TI_FORGE_TEST_CUSOLVERDN_LIBRARY_PATH"),
+    reason="real cuSOLVER required",
+)
 @test_utils.test(arch=ti.cpu)
-def test_cusolverdn_public_probe_preserves_facts_and_does_not_enable(monkeypatch):
+def test_cusolverdn_public_probe_preserves_facts_and_does_not_enable():
     from taichi_forge.hardware import _cusolverdn_abi as abi
 
-    monkeypatch.setattr(abi, "_LIBRARIES", {})
-    unloaded = []
-    marker = object()
-    monkeypatch.setattr(abi, "_unload", unloaded.append)
-    monkeypatch.setattr(
-        abi,
-        "DenseLibrary",
-        lambda path: SimpleNamespace(library=marker, path=path, version="12.1.0"),
+    before = abi.passive_status()
+    result = next(
+        o
+        for o in ti.hardware.probe(
+            "cusolverdn",
+            library_path=os.environ["TI_FORGE_TEST_CUSOLVERDN_LIBRARY_PATH"],
+        ).to_dict()["operations"]
+        if o["provider_id"] == "cusolverdn"
     )
-
-    def probe():
-        return next(
-            o
-            for o in ti.hardware.probe(
-                "cusolverdn", library_path="vendor.dll"
-            ).to_dict()["operations"]
-            if o["provider_id"] == "cusolverdn"
-        )
-
-    result = probe()
     assert result["discovery"] == "available"
-    assert result["provider_version"] == "12.1.0"
+    assert result["provider_version"]
     assert (
         result["enablement"] == "disabled" and result["selection"] == "not_considered"
     )
     assert result["native_facts"]["external_component_probed"]
     assert not result["native_facts"]["execution_qualified"]
-    assert unloaded == [marker] and not abi.passive_status()["library_loaded"]
-
-    def missing(path):
-        raise OSError("missing vendor dependency")
-
-    monkeypatch.setattr(abi, "DenseLibrary", missing)
-    failure = probe()
-    assert failure["unavailable_reason"] == "vendor_runtime_probe_failed"
-    assert "missing vendor dependency" in failure["last_error"]
-    assert not abi.passive_status()["library_loaded"]
+    assert not result["native_facts"]["execution_resource_created"]
+    assert abi.passive_status() == before
+    failure = abi.probe_provider("nonexistent-cusolver-vendor.dll")
+    assert failure["discovery"] != "available"
+    assert "nonexistent-cusolver-vendor.dll" in failure["last_error"]
+    assert abi.passive_status() == before
 
 
 @test_utils.test(arch=ti.cpu)
@@ -169,6 +157,12 @@ def test_cusolverdn_live_device_data_reuse_failure_and_retirement(
         with pytest.raises(TypeError):
             provider.cholesky_plan(n, dtype=ti.i32)
         with provider.cholesky_plan(n, rhs_count=rhs_count, dtype=dtype) as plan:
+            # The shared native runtime also refuses unload while a plan owns
+            # vendor handles and host workspace, independently of Python checks.
+            assert (
+                provider._runtime.loaded.api.destroy_runtime(provider._runtime.handle)
+                == 8
+            )
             binding = plan.bind(a, rhs, output)
             stale_call = binding.factor_and_solve
             with pytest.raises(ti.TaichiRuntimeError, match="factor"):
@@ -253,3 +247,60 @@ def test_cusolverdn_reset_invalidates_cached_actions_and_alias_binding():
     assert provider.closed and plan.closed
     with pytest.raises(ti.TaichiRuntimeError, match="closed"):
         action()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("TI_FORGE_TEST_CUSOLVERDN_LIBRARY_PATH"),
+    reason="real cuSOLVER required",
+)
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cusolverdn_shared_factor_with_real_loss_gradient_and_explicit_adjoint():
+    n = 17
+    matrix = np.diag(np.full(n, 4, np.float32))
+    matrix += np.diag(np.full(n - 1, -0.25, np.float32), 1)
+    matrix += np.diag(np.full(n - 1, -0.25, np.float32), -1)
+    a = ti.ndarray(ti.f32, (n, n))
+    rhs, dx = ti.ndarray(ti.f32, n), ti.ndarray(ti.f32, n)
+    y, loss = ti.ndarray(ti.f32, n, needs_grad=True), ti.ndarray(
+        ti.f32, 1, needs_grad=True
+    )
+    source = np.linspace(-1, 1, n, dtype=np.float32)
+    a.from_numpy(matrix)
+    rhs.from_numpy(source)
+
+    @ti.kernel
+    def energy(
+        y: ti.types.ndarray(ti.f32, 1, needs_grad=True),
+        loss: ti.types.ndarray(ti.f32, 1, needs_grad=True),
+    ):
+        for i in y:
+            loss[0] += 0.5 * y[i] * y[i]
+
+    with ti.hardware.linalg.CusolverDnProvider(
+        os.environ["TI_FORGE_TEST_CUSOLVERDN_LIBRARY_PATH"]
+    ) as provider:
+        with (
+            provider.cholesky_plan(n) as forward,
+            provider.cholesky_plan(n) as backward,
+        ):
+            primal = forward.bind(a, rhs, y)
+            adjoint = backward.bind(a, y.grad, dx)
+            primal.factor_and_solve()
+            adjoint.factor()
+            # The old factors, not the subsequently changed A, define both solves.
+            a.fill(-99)
+            loss.fill(0)
+            loss.grad.fill(1)
+            y.grad.fill(0)
+            energy(y, loss)
+            energy.grad(y, loss)
+            adjoint.solve()
+            expected_y = np.linalg.solve(matrix, source)
+            np.testing.assert_allclose(y.to_numpy(), expected_y, rtol=2e-5, atol=2e-6)
+            np.testing.assert_allclose(
+                dx.to_numpy(),
+                np.linalg.solve(matrix.T, expected_y),
+                rtol=2e-5,
+                atol=2e-6,
+            )
+            assert forward.status()["solve_ok"] and backward.status()["solve_ok"]

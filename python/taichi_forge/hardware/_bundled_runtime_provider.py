@@ -265,7 +265,7 @@ def _path_candidate(value, library_names):
     if path.is_file():
         return path.resolve()
     if path.is_dir():
-        for relative in ((), ("bin",), ("lib",), ("lib64",)):
+        for relative in ((), ("bin",), ("bin", "x64"), ("lib",), ("lib64",)):
             for name in library_names:
                 candidate = path.joinpath(*relative, name)
                 if candidate.is_file():

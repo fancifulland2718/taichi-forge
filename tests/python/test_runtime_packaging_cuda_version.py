@@ -56,6 +56,7 @@ def _write_runtime_wheel(
     include_optix_providers: bool = True,
     include_cudss_provider: bool = True,
     include_optional_runtime_providers: bool = True,
+    include_cusolverdn_provider: bool = True,
     include_aot_consumer: bool = True,
     include_c_api: bool = True,
 ) -> None:
@@ -103,6 +104,8 @@ def _write_runtime_wheel(
                 "taichi_forge_cutensor_provider_abi2_api200_207",
                 "taichi_forge_amgx_provider_abi2_stable_c",
             )
+            if include_cusolverdn_provider and Version(version).release >= (0, 6, 4):
+                stems += ("taichi_forge_cusolverdn_provider_abi2_generic_v1",)
             for stem in stems:
                 provider_name = f"{stem}.dll" if platform == "windows" else f"lib{stem}.so"
                 zf.writestr(f"{provider_dir}/{provider_name}", b"forge adapter")
@@ -1513,6 +1516,23 @@ def test_runtime_wheel_cli_checks_selected_link_version(tmp_path, monkeypatch, c
         assert "version=0.6.3" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("platform", ("windows", "manylinux"))
+@pytest.mark.parametrize("version", ("0.6.3", "0.6.4", "0.6.4.dev1"))
+@pytest.mark.parametrize("include_solver", (False, True))
+def test_runtime_wheel_cusolverdn_membership_preserves_legacy(tmp_path, platform, version, include_solver):
+    tag = "win_amd64" if platform == "windows" else "manylinux_2_35_x86_64"
+    wheel = tmp_path / f"taichi_forge_runtime-{version}-py3-none-{tag}.whl"
+    _write_runtime_wheel(
+        wheel, platform=platform, version=version, cuda_major=13,
+        dependency_class="driver-only", include_cusolverdn_provider=include_solver,
+    )
+    if Version(version).release >= (0, 6, 4) and not include_solver:
+        with pytest.raises(RuntimeError, match="optional provider adapter set"):
+            validate_runtime_wheel.inspect_runtime_wheel(wheel)
+    else:
+        assert validate_runtime_wheel.inspect_runtime_wheel(wheel).dependency_class == "driver-only"
+
+
 def test_runtime_project_defaults_to_driver_only():
     runtime_project = (REPO_ROOT / "packaging" / "runtime" / "pyproject.toml").read_text(encoding="utf-8")
 
@@ -1684,7 +1704,7 @@ def test_strict_wheel_audits_shipped_runtime_adapters_and_grafted_libraries(monk
     wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
     _write_runtime_wheel(wheel, platform=platform, version="0.6.3", cuda_major=13, dependency_class="driver-only")
     runtime = "taichi_runtime.dll" if platform == "windows" else "libtaichi_runtime.so"
-    adapters = validate_runtime_wheel._expected_optional_runtime_provider_members(platform)
+    adapters = validate_runtime_wheel._expected_optional_runtime_provider_members(platform, "0.6.3")
     adapter = Path(sorted(adapters)[0]).name
     grafted = "grafted.dll" if platform == "windows" else "libgrafted-0123.so.1"
     with ZipFile(wheel, "a") as zf:
@@ -1745,7 +1765,7 @@ def test_driver_import_exception_is_scoped_to_shipped_optix_adapter(
     member = {
         "optix": optix,
         "runtime": runtime,
-        "other_adapter": min(validate_runtime_wheel._expected_optional_runtime_provider_members(platform)),
+        "other_adapter": min(validate_runtime_wheel._expected_optional_runtime_provider_members(platform, "0.6.3")),
         "grafted_optix_name": f"taichi_forge_runtime.libs/{Path(optix).name}",
     }[location]
     dependencies = {

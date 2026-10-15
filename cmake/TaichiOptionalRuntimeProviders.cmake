@@ -33,7 +33,13 @@ function(ti_add_optional_runtime_provider provider kind output_name)
             LIBRARY DESTINATION ${INSTALL_LIB_DIR}/hardware_providers
                     COMPONENT runtime)
 
-    ti_install_provider_sdk(${target} ${provider})
+    if(provider STREQUAL "cusolverdn")
+        ti_install_provider_sdk(${target} ${provider}
+            PUBLIC_HEADERS
+                "${CMAKE_CURRENT_SOURCE_DIR}/taichi/external_runtime/forge_cusolverdn_provider.h")
+    else()
+        ti_install_provider_sdk(${target} ${provider})
+    endif()
 endfunction()
 
 ti_add_optional_runtime_provider(
@@ -42,3 +48,5 @@ ti_add_optional_runtime_provider(
     cutensor 2 "taichi_forge_cutensor_provider_abi2_api200_207")
 ti_add_optional_runtime_provider(
     amgx 3 "taichi_forge_amgx_provider_abi2_stable_c")
+ti_add_optional_runtime_provider(
+    cusolverdn 4 "taichi_forge_cusolverdn_provider_abi2_generic_v1")

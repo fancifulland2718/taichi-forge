@@ -401,11 +401,21 @@ Optional Toolkit source addons have their own build/runtime requirements below.
 ### cuSOLVERDn device Cholesky
 
 `ti.hardware.linalg.CusolverDnProvider` is an explicit, user-installed dense SPD
-solver. Forge supplies a lazy thin C-ABI binding, not the vendor runtime or its
+solver. Forge supplies a lazy common-provider C-ABI adapter, not the vendor runtime or its
 CUDA dependencies. Pass a library file/directory, set `TI_CUSOLVERDN_LIBRARY_PATH`,
 or install a compatible NVIDIA cuSOLVER component package. Transitive libraries
 must also be discoverable. `ti.hardware.probe("cusolverdn", library_path=...)`
 checks symbols/version; it does not qualify execution or select this solver.
+
+JIT and native consumers share the same Cholesky plan implementation through
+provider ABI 2 and execution ABI 1. The adapter owns vendor handles, parameters
+and host workspace; callers retain factor, status and device workspace storage
+until execution retires. Closing a runtime with live plans is rejected. The
+optional SDK component `TaichiSDKProvider_cusolverdn` installs the adapter and
+`forge_cusolverdn_provider.h` without requiring vendor headers at build time.
+This shared-core support does not yet provide AOT resource registration or
+automatic export of cuSOLVERDn recordings. CUDA execution is required; CPU and
+Vulkan do not acquire a vendor dependency.
 
 ```python
 with ti.hardware.linalg.CusolverDnProvider(library_path) as provider:

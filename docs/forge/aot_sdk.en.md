@@ -65,7 +65,7 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
-Optional cuDSS, cuTENSOR, cuSPARSELt, AmgX and VkFFT adapters have separate SDK components.
+Optional cuDSS, cuSOLVERDn, cuTENSOR, cuSPARSELt, AmgX and VkFFT adapters have separate SDK components.
 Enable their build targets, then build and install only the selected adapter:
 
 ```sh
@@ -74,7 +74,13 @@ cmake --build BUILD --target taichi_forge_cutensor_provider
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
 ```
 
-Replace `cutensor` with `cusparselt` or `amgx` for those components. cuDSS uses
+Replace `cutensor` with `cusparselt`, `amgx` or `cusolverdn` for those components.
+The cuSOLVERDn component also installs `forge_cusolverdn_provider.h` for its
+shared Cholesky execution API. Native plan execution and existing JIT recordings
+are supported; AOT resource registration and automatic recording export are
+not yet supplied by this component. The vendor runtime remains external.
+
+cuDSS uses
 its independent build option and matching 0.8.x SDK headers, without enabling
 the other optional providers:
 

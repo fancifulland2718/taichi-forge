@@ -57,7 +57,7 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
 
-可选的 cuDSS、cuTENSOR、cuSPARSELt、AmgX 和 VkFFT adapter 各自有独立 SDK 安装组件。
+可选的 cuDSS、cuSOLVERDn、cuTENSOR、cuSPARSELt、AmgX 和 VkFFT adapter 各自有独立 SDK 安装组件。
 启用构建目标后，只构建和安装选中的 adapter：
 
 ```sh
@@ -66,7 +66,12 @@ cmake --build BUILD --target taichi_forge_cutensor_provider
 cmake --install BUILD --prefix SDK --component TaichiSDKProvider_cutensor
 ```
 
-cuSPARSELt 和 AmgX 将 `cutensor` 替换为 `cusparselt` 或 `amgx`。cuDSS 使用其独立
+cuSPARSELt、AmgX 和 cuSOLVERDn 将 `cutensor` 替换为 `cusparselt`、`amgx` 或 `cusolverdn`。
+cuSOLVERDn 组件还安装共享 Cholesky 执行 API 的 `forge_cusolverdn_provider.h`。
+目前支持原生计划执行及既有 JIT recording；该组件尚不提供 AOT 资源注册或 recording
+自动导出，厂商 runtime 仍由应用另行提供。
+
+cuDSS 使用其独立
 构建开关及匹配的 0.8.x SDK 头文件，不需要开启其他可选 provider：
 
 ```sh

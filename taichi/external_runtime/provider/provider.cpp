@@ -1,4 +1,7 @@
 #include "taichi/external_runtime/forge_runtime_provider.h"
+#if TI_FORGE_RUNTIME_PROVIDER_KIND == 4
+#include "taichi/external_runtime/forge_cusolverdn_provider.h"
+#endif
 
 #if defined(_WIN32) && !defined(NOMINMAX)
 #define NOMINMAX
@@ -146,6 +149,22 @@ constexpr const char *kRequiredSymbols[] = {
 };
 #define TI_FORGE_RUNTIME_PROVIDER_QUERY_FUNCTION \
   taichi_forge_amgx_provider_query
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 4
+constexpr char kProviderId[] = "cusolverdn";
+constexpr char kProviderName[] = "NVIDIA cuSOLVERDn";
+constexpr char kSupportedVersionFamily[] = "generic Cholesky C API";
+constexpr char kBuildIdentity[] =
+    "forge-runtime-provider-abi2-cusolverdn-generic-cholesky-v1";
+constexpr const char *kWindowsCandidates[] = {"cusolver64_12.dll",
+                                            "cusolver64_11.dll"};
+constexpr const char *kLinuxCandidates[] = {"libcusolver.so.12",
+                                          "libcusolver.so.11", "libcusolver.so"};
+constexpr const char *kRequiredSymbols[] = {
+    "cusolverGetProperty", "cusolverDnCreate", "cusolverDnDestroy",
+    "cusolverDnSetStream", "cusolverDnCreateParams", "cusolverDnDestroyParams",
+    "cusolverDnXpotrf_bufferSize", "cusolverDnXpotrf", "cusolverDnXpotrs"};
+#define TI_FORGE_RUNTIME_PROVIDER_QUERY_FUNCTION \
+  taichi_forge_cusolverdn_provider_query
 #else
 #error "Unsupported TI_FORGE_RUNTIME_PROVIDER_KIND"
 #endif
@@ -280,6 +299,20 @@ bool query_version(Runtime &runtime) {
   runtime.version_minor = minor;
   runtime.version_patch = patch;
   runtime.cuda_runtime_version = static_cast<uint32_t>(get_cudart_version());
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 4
+  using GetProperty = int (*)(int, int *);
+  auto property = reinterpret_cast<GetProperty>(
+      load_symbol(runtime.library, "cusolverGetProperty"));
+  int version[3] = {-1, -1, -1};
+  for (int key = 0; key < 3; ++key) {
+    if (!property || property(key, &version[key]) || version[key] < 0) {
+      last_error = "cuSOLVERDn runtime version query failed";
+      return false;
+    }
+  }
+  runtime.version_major = static_cast<uint32_t>(version[0]);
+  runtime.version_minor = static_cast<uint32_t>(version[1]);
+  runtime.version_patch = static_cast<uint32_t>(version[2]);
 #else
   using GetApiVersion = int (*)(int *, int *);
   using GetBuildInfoStrings = int (*)(char **, char **, char **);
@@ -1310,6 +1343,8 @@ TiForgeRuntimeProviderResult query_execution_api(
   return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
 }
 
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 4
+#include "taichi/external_runtime/provider/cusolverdn.inc.h"
 #else
 
 using AmgxSimpleFn = int (*)();

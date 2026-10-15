@@ -71,6 +71,10 @@ OPTIONAL_RUNTIME_PROVIDERS = {
         "taichi_forge_amgx_provider_abi2_stable_c",
         "taichi_forge_amgx_provider_query",
     ),
+    "cusolverdn": (
+        "taichi_forge_cusolverdn_provider_abi2_generic_v1",
+        "taichi_forge_cusolverdn_provider_query",
+    ),
 }
 VKFFT_ADAPTER_STEM = "taichi_forge_vkfft_provider_abi1_vkfft134"
 # Additive C ABI extensions remain optional for older compatible adapters.
@@ -155,13 +159,18 @@ def _expected_cudss_provider_members(platform: str) -> set[str]:
     }
 
 
-def _expected_optional_runtime_provider_members(platform: str) -> set[str]:
+def _expected_optional_runtime_provider_members(platform: str, version: str) -> set[str]:
     if platform == "macos":
         return set()
     prefix = f"{PACKAGE}/_lib/hardware_providers/"
+    providers = [
+        stem
+        for provider, (stem, _symbol) in OPTIONAL_RUNTIME_PROVIDERS.items()
+        if provider != "cusolverdn" or Version(version).release >= (0, 6, 4)
+    ]
     if platform == "windows":
-        return {f"{prefix}{stem}.dll" for stem, _symbol in OPTIONAL_RUNTIME_PROVIDERS.values()}
-    return {f"{prefix}lib{stem}.so" for stem, _symbol in OPTIONAL_RUNTIME_PROVIDERS.values()}
+        return {f"{prefix}{stem}.dll" for stem in providers}
+    return {f"{prefix}lib{stem}.so" for stem in providers}
 
 
 @dataclass(frozen=True)
@@ -634,7 +643,7 @@ def inspect_runtime_wheel(
                 and any(stem in Path(name).name for stem, _symbol in OPTIONAL_RUNTIME_PROVIDERS.values())
             ]
             actual_optional_runtime_providers = set(optional_runtime_entries)
-            expected_optional_runtime_providers = _expected_optional_runtime_provider_members(platform)
+            expected_optional_runtime_providers = _expected_optional_runtime_provider_members(platform, version)
             if (
                 len(optional_runtime_entries) != len(actual_optional_runtime_providers)
                 or actual_optional_runtime_providers != expected_optional_runtime_providers
