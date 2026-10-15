@@ -1630,3 +1630,25 @@ No JIT provider or AOT artifact default changes with this feature.
 PTX 6.0 is needed for Forge's synchronized warp collectives on older targets;
 the processor's minimum ISA alone is insufficient. See NVIDIA's
 [shfl.sync specification](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-shfl-sync).
+
+### Compiled application hosts (experimental)
+
+The private producer helper `taichi_forge.tools._compiled_host.lower_module`
+can replace DSL definitions with compiled template constructors while retaining
+ordinary host code. Its output is intermediate build input: compile it with the
+host and distribute the extension, not the generated Python or C files. The
+consumer uses the existing Forge compiler for genuinely new specializations;
+loading previously exported AOT artifacts still uses the lightweight runtime.
+Plain host modules without DSL definitions acquire no dependency on this helper.
+
+The current bridge preserves explicit signatures, lexical captures, class and
+static methods, `ti.func`/`ti.pyfunc`/`ti.real_func`, and compiler-generated
+gradients in bounded tests. Windows CPython 3.10/Cython 3.3.0 host fixtures pass on
+CPU/CUDA/Vulkan; this is not qualification of an entire application or of other
+Python/Cython ABIs. Production builds use `binding=True`,
+`annotation_typing=False` and `emit_code_comments=False`; see the
+[Cython compiler directives](https://docs.cython.org/en/latest/src/userguide/source_files_and_compilation.html#compiler-directives).
+The private template protocol must match the producer's Forge frontend. It does
+not change JIT or AOT defaults, and still needs application dependency and size
+qualification. Omitting source files is not confidential execution: compilation
+templates can be inspected in the consuming process.

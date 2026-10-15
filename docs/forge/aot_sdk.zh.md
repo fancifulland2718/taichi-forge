@@ -1281,3 +1281,20 @@ Windows 小型 cubin 消费测试覆盖 dense field、scalar/vector/matrix ndarr
 Forge 在较旧目标上生成的同步 warp 操作也需要 PTX 6.0，仅采用处理器的最低 ISA
 版本不足以覆盖这些操作，见 NVIDIA 的
 [shfl.sync 说明](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-shfl-sync)。
+
+### 编译后的应用宿主（实验性）
+
+私有生产侧工具 `taichi_forge.tools._compiled_host.lower_module` 可将 DSL 定义替换
+为待编译的模板构造器，并保留普通宿主代码。输出只是构建中间文件：应随宿主编译，
+交付扩展模块，不交付生成的 Python 或 C 文件。真正的新特化仍使用既有 Forge
+编译器；已经导出的 AOT 产物继续走轻量 runtime。没有 DSL 定义的普通宿主模块
+不增加对该工具的依赖。
+
+当前桥接已在小规模测试中保留显式签名、词法捕获、类方法、静态方法、
+`ti.func`/`ti.pyfunc`/`ti.real_func` 及编译器生成的梯度。Windows CPython 3.10 /
+Cython 3.3.0 宿主夹具通过 CPU/CUDA/Vulkan 验证；这不代表整个应用或其他
+Python/Cython ABI 已取得资格。生产构建使用 `binding=True`、
+`annotation_typing=False`、`emit_code_comments=False`，配置含义见
+[Cython 官方编译指令](https://docs.cython.org/en/latest/src/userguide/source_files_and_compilation.html#compiler-directives)。
+私有模板协议须与生产侧 Forge 前端配套，不改变 JIT/AOT 默认项；应用依赖闭包和
+包体仍需单独验收。不交付源码文件并不等于保密执行，消费进程中的编译模板仍可被检查。

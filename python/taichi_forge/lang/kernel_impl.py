@@ -85,7 +85,12 @@ def func(fn, is_real_function=False):
         >>> def run():
         >>>     print(foo(40))  # 42
     """
-    is_classfunc = _inside_class(level_of_class_stackframe=3 + is_real_function)
+    compiled_template = getattr(fn, "_taichi_compiled_template", None)
+    is_classfunc = (
+        compiled_template.is_class
+        if compiled_template is not None
+        else _inside_class(level_of_class_stackframe=3 + is_real_function)
+    )
 
     fun = Func(fn, _classfunc=is_classfunc, is_real_function=is_real_function)
 
@@ -118,7 +123,12 @@ def pyfunc(fn):
     Returns:
         Callable: The decorated function
     """
-    is_classfunc = _inside_class(level_of_class_stackframe=3)
+    compiled_template = getattr(fn, "_taichi_compiled_template", None)
+    is_classfunc = (
+        compiled_template.is_class
+        if compiled_template is not None
+        else _inside_class(level_of_class_stackframe=3)
+    )
     fun = Func(fn, _classfunc=is_classfunc, _pyfunc=True)
 
     @functools.wraps(fn)
@@ -141,7 +151,19 @@ def _get_tree_and_ctx(
     is_real_function=False,
 ):
     profile_prefix = f"python.frontend.{self.func.__name__}"
-    if _SOURCE_TEMPLATE_CACHE:
+    compiled_template = getattr(self.func, "_taichi_compiled_template", None)
+    if compiled_template is not None:
+        with python_compile_profile_event(f"{profile_prefix}.compiled_template"):
+            cache = getattr(self, "_compiled_template_cache", None) if _SOURCE_TEMPLATE_CACHE else None
+            if cache is None:
+                parsed_tree, src = compiled_template.instantiate(self.func.__name__)
+                cache = (ASTTemplate(parsed_tree), src, {})
+                if _SOURCE_TEMPLATE_CACHE:
+                    self._compiled_template_cache = cache
+            tree_template, src, source_info_cache = cache
+            tree = tree_template.instantiate()
+            file, start_lineno = compiled_template.filename, 1
+    elif _SOURCE_TEMPLATE_CACHE:
         with python_compile_profile_event(f"{profile_prefix}.source"):
             cache = getattr(self, "_source_template_cache", None)
             if cache is None:
@@ -673,7 +695,7 @@ class Func:
         self.taichi_functions[key.instance_id].set_function_body(func_body)
 
     def extract_arguments(self):
-        sig = inspect.signature(self.func)
+        sig = _get_signature(self.func)
         if sig.return_annotation not in (inspect.Signature.empty, None):
             self.return_type = sig.return_annotation
             if sys.version_info >= (3, 9):
@@ -1229,7 +1251,15 @@ class TaichiCallableTemplateMapper:
         return False
 
 
+def _get_signature(_func):
+    compiled_template = getattr(_func, "_taichi_compiled_template", None)
+    return compiled_template.signature if compiled_template is not None else inspect.signature(_func)
+
+
 def _get_global_vars(_func):
+    compiled_template = getattr(_func, "_taichi_compiled_template", None)
+    if compiled_template is not None:
+        return compiled_template.scope()
     # Discussions: https://github.com/taichi-dev/taichi/issues/282
     global_vars = _func.__globals__.copy()
 
@@ -1590,7 +1620,7 @@ class Kernel:
         self._materializing_external_grad_accesses.add(arg_indices)
 
     def extract_arguments(self):
-        sig = inspect.signature(self.func)
+        sig = _get_signature(self.func)
         if sig.return_annotation not in (inspect._empty, None):
             self.return_type = sig.return_annotation
             if sys.version_info >= (3, 9):
@@ -1788,7 +1818,7 @@ class Kernel:
         )
 
         if self.autodiff_mode != AutodiffMode.NONE:
-            KernelSimplicityASTChecker(self.func).visit(tree)
+            KernelSimplicityASTChecker(self.func.__name__, ctx.file, ctx.lineno_offset + 1).visit(tree)
 
         task_launch_policy_injected = False
 
@@ -4424,7 +4454,12 @@ def _inside_class(level_of_class_stackframe):
 def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None):
     # Can decorators determine if a function is being defined inside a class?
     # https://stackoverflow.com/a/8793684/12003165
-    is_classkernel = _inside_class(level_of_class_stackframe + 1)
+    compiled_template = getattr(_func, "_taichi_compiled_template", None)
+    is_classkernel = (
+        compiled_template.is_class
+        if compiled_template is not None
+        else _inside_class(level_of_class_stackframe + 1)
+    )
 
     if verbose:
         print(f"kernel={_func.__name__} is_classkernel={is_classkernel}")
