@@ -937,7 +937,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 60.
+Current components require matching private ABI 61.
 
 Plans can separate one-time initialization from replay:
 
@@ -974,7 +974,7 @@ gradients, independent snapshots, source retirement, aliases and owner reset.
 Before allocating operation buffers, query
 `runtime.native_operation_capabilities("compact", version=1)` (also `"sort"`).
 The returned set contains `"cpu"`, `"cuda_capture"`, `"vulkan_inline"`, or
-`"cuda_synchronous"` for the
+`"cuda_synchronous"` / `"cuda_ordered"` for the
 registered implementation on this runtime's backend; an unknown kind/version
 returns an empty set. The query loads no operation code and allocates no scratch.
 Concrete dtype, layout and device requirements are still checked at preparation.
@@ -993,6 +993,19 @@ Such a prepared batch reports `execution_kind="cuda_mixed"`. Pure capture batche
 retain the single-graph path. Replay invokes no Python callback or symbolic binder.
 If an action fails after submitting work, the executor waits, skips the remaining
 sequence and rejects further replay of that instance.
+
+`cuda_ordered` is for native host actions that enqueue onto the supplied runtime
+stream, or explicitly join their private streams to it. Adjacent CUDA Graph
+segments keep stream order without context fences. The executor records a
+completion event for the submitted batch and retires provider transaction tokens
+only after completion; shared owners can observe completion across prepared
+instances. An action failure skips the suffix, retains partially submitted work
+through retirement, and rejects replay of that instance. GPU conditional bodies
+cannot contain host-invoked actions. Pure ordered batches report
+`execution_kind="cuda_ordered"`; batches also containing synchronous actions
+report `cuda_mixed`. This shared contract requires paired private ABI 61 and
+separate provider registration; it does not yet enable ordinary cuDSS
+`record_refactor_solve()` export.
 
 This composition capability still requires a registered provider-specific schema,
 resource reconstruction and numeric qualification. NVIDIA documents the

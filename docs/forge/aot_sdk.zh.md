@@ -729,7 +729,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 60。
+当前组件须配套 private ABI 61。
 
 计划可以将一次性初始化与重放分开：
 
@@ -761,7 +761,7 @@ C/C++ 使用 `ti_initialize_prepared_ext` 或首次 launch 的自动路径。重
 
 分配操作缓冲前可查询 `runtime.native_operation_capabilities("compact", version=1)`
 （也支持 `"sort"`）。返回集合按当前 runtime 后端包含 `"cpu"`、`"cuda_capture"`、
-`"vulkan_inline"` 或 `"cuda_synchronous"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配
+`"vulkan_inline"`、`"cuda_synchronous"` 或 `"cuda_ordered"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配
 工作区，具体 dtype、布局和设备要求仍在准备时检查。对应 C API 为
 `ti_get_native_operation_capabilities_ext`。注册与选择发生在共用的原生准备层，
 重放使用已准备对象，不再查询注册表。注册不代表可选 provider 已安装。
@@ -773,6 +773,15 @@ C/C++ 使用 `ti_initialize_prepared_ext` 或首次 launch 的自动路径。重
 `execution_kind="cuda_mixed"`；纯 capture 保留单图路径。暖态不调用 Python 回调
 或符号绑定器。外部动作在提交后失败时，执行器等待其工作，跳过剩余序列，并禁止
 该实例再次重放。
+
+`cuda_ordered` 用于将工作提交到指定 runtime stream、或将私有 stream 明确连接回该
+stream 的原生宿主动作。前后 CUDA Graph 片段依靠 stream 次序，不插入 context fence。
+执行器给整批提交记录完成事件，实际完成后才退休 provider 事务 token；共享 owner 的
+不同 prepared 实例可识别同一完成事件。动作失败时跳过后段，保留部分提交的资源直到
+退休，并拒绝该实例再次重放。GPU 条件循环体不能包含宿主调用。仅含有序动作的混合图
+报告 `execution_kind="cuda_ordered"`；同时含同步动作则报告 `cuda_mixed`。公共合同
+需要配对 private ABI 61 和单独的 provider 注册，尚未开放普通 cuDSS
+`record_refactor_solve()` 导出。
 
 这项组合能力仍需对应 provider 的 schema、资源重建与数值资格，不能代称库全面
 支持 capture。当前 context 的等待语义见 NVIDIA

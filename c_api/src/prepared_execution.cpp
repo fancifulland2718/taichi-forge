@@ -1005,6 +1005,9 @@ TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
   static_assert(static_cast<TiFlags>(
                     taichi::lang::NativeOperationMode::cuda_synchronous) ==
                 TI_NATIVE_OPERATION_CAPABILITY_CUDA_SYNCHRONOUS_BIT_EXT);
+  static_assert(static_cast<TiFlags>(
+                    taichi::lang::NativeOperationMode::cuda_ordered) ==
+                TI_NATIVE_OPERATION_CAPABILITY_CUDA_ORDERED_BIT_EXT);
   return capability ? static_cast<TiFlags>(capability->mode) : 0;
   TI_CAPI_TRY_CATCH_END();
   return 0;

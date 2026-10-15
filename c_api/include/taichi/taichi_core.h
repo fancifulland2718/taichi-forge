@@ -321,6 +321,7 @@ typedef struct TiPreparedExecutionInfo {
   uint32_t dispatch_count;
   // 0: CPU ordered native batch; 1: CUDA Graph; 2: Vulkan fixed commands;
   // 3: CUDA Graph segments with synchronous native actions.
+  // 4: CUDA Graph segments with stream-ordered native host actions.
   uint32_t execution_kind;
   // Known persistent argument image bytes, excluding driver/internal metadata.
   uint64_t argument_bytes;
@@ -1206,6 +1207,8 @@ typedef enum TiNativeOperationCapabilityFlagBitsExt {
   TI_NATIVE_OPERATION_CAPABILITY_CUDA_CAPTURE_BIT_EXT = 2,
   TI_NATIVE_OPERATION_CAPABILITY_VULKAN_INLINE_BIT_EXT = 4,
   TI_NATIVE_OPERATION_CAPABILITY_CUDA_SYNCHRONOUS_BIT_EXT = 8,
+  // Host invocation ordered on the runtime stream, without context fences.
+  TI_NATIVE_OPERATION_CAPABILITY_CUDA_ORDERED_BIT_EXT = 16,
 } TiNativeOperationCapabilityFlagBitsExt;
 
 // Configure a provider location for subsequent probes/preparations on this

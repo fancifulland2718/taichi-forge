@@ -237,6 +237,7 @@ void NativeOperationRegistry::register_impl(const std::string &kind,
   if (!((mode == NativeOperationMode::cpu && arch_is_cpu(arch)) ||
         (mode == NativeOperationMode::cuda_capture && arch == Arch::cuda) ||
         (mode == NativeOperationMode::cuda_synchronous && arch == Arch::cuda) ||
+        (mode == NativeOperationMode::cuda_ordered && arch == Arch::cuda) ||
         (mode == NativeOperationMode::vulkan_inline && arch == Arch::vulkan)))
     throw std::invalid_argument(
         "Native operation composition mode/backend mismatch");

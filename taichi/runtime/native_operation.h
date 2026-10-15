@@ -12,6 +12,7 @@
 #include "taichi/rhi/device.h"
 #include "taichi/runtime/native_resource.h"
 #include "taichi/runtime/cuda/capture_resources.h"
+#include "taichi/runtime/cuda/provider_completion_resource.h"
 
 namespace taichi::lang {
 
@@ -21,6 +22,7 @@ enum class NativeOperationMode : std::uint32_t {
   cuda_capture = 2,
   vulkan_inline = 4,
   cuda_synchronous = 8,
+  cuda_ordered = 16,
 };
 
 // Cold facts for one unconditional recording sequence, never replay state.
@@ -89,6 +91,17 @@ class NativeOperation : public NativeResource {
   virtual void run_cuda_synchronous() {
     throw std::invalid_argument(
         "Native operation has no synchronous CUDA implementation");
+  }
+  // Host invocation on the supplied CUDA stream, ordered with surrounding
+  // graphs. Private streams must join it before returning, including failure.
+  // Reservation enqueues nothing and must leave the owner unchanged on error.
+  virtual std::shared_ptr<CudaProviderCompletionResource> cuda_ordered_resource() const {
+    return {};
+  }
+  virtual void reserve_cuda_ordered() {
+  }
+  virtual void run_cuda_ordered(void *stream) {
+    throw std::invalid_argument("Native operation has no ordered CUDA implementation");
   }
   virtual void record_vulkan(Device *device, CommandList *commands) {
     throw std::invalid_argument("Native operation has no Vulkan recording");

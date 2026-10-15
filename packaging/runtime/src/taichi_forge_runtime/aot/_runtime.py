@@ -50,7 +50,9 @@ _DTYPES = {
     "u64": (11, "Q"),
 }
 
-_NATIVE_OPERATION_MODES = ((1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline"), (8, "cuda_synchronous"))
+_NATIVE_OPERATION_MODES = (
+    (1, "cpu"), (2, "cuda_capture"), (4, "vulkan_inline"), (8, "cuda_synchronous"), (16, "cuda_ordered")
+)
 
 
 def _dtype(name):
@@ -666,7 +668,9 @@ class PreparedCall(_Resource):
             )
             return dict(
                 dispatch_count=native.dispatch_count,
-                execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands", "cuda_mixed")[native.execution_kind],
+                execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands", "cuda_mixed", "cuda_ordered")[
+                    native.execution_kind
+                ],
                 argument_bytes=native.argument_bytes,
                 workspace_bytes=runtime._api.call(
                     runtime._api.ti_get_prepared_execution_workspace_bytes_ext, runtime._handle, self._handle

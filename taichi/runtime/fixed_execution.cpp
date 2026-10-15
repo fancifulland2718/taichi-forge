@@ -17,6 +17,7 @@
 #endif
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/runtime/cuda/ordered_submission.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/rhi/cuda/cuda_device.h"
@@ -55,6 +56,8 @@ struct FixedExecution::State {
   using CudaStep = std::variant<std::unique_ptr<cuda::FixedGraph>,
                                 std::shared_ptr<NativeOperation>>;
   std::vector<CudaStep> cuda_steps;
+  // Retire submitted native work before releasing graph/provider owners.
+  std::unique_ptr<cuda::OrderedSubmissions> cuda_ordered;
   bool cuda_failed{false};
 #endif
 #ifdef TI_WITH_VULKAN
@@ -220,6 +223,7 @@ FixedExecution::FixedExecution(Arch arch,
         if (!((arch_is_cpu(arch) && mode == NativeOperationMode::cpu) ||
               (arch == Arch::cuda &&
                (mode == NativeOperationMode::cuda_capture ||
+                mode == NativeOperationMode::cuda_ordered ||
                 mode == NativeOperationMode::cuda_synchronous)) ||
               (arch == Arch::vulkan &&
                mode == NativeOperationMode::vulkan_inline)))
@@ -228,7 +232,7 @@ FixedExecution::FixedExecution(Arch arch,
         if (inside_control && arch == Arch::cuda &&
             mode != NativeOperationMode::cuda_capture)
           throw std::invalid_argument(
-              "GPU control cannot contain host-synchronous native operations");
+              "GPU control cannot contain host-invoked native operations");
         native->validate_recording(recording_state);
         if (owners.insert(native.get()).second) {
           state_->native_operations.push_back(native);
@@ -325,7 +329,15 @@ FixedExecution::FixedExecution(Arch arch,
 #endif
 #ifdef TI_WITH_CUDA
   if (arch == Arch::cuda) {
+    if (!state_->fault_domain &&
+        std::any_of(state_->native_operations.begin(), state_->native_operations.end(),
+                    [](const auto &op) {
+                      return op->execution_mode() == NativeOperationMode::cuda_ordered;
+                    }))
+      state_->fault_domain = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 0);
     using CudaOperation = cuda::FixedGraph::Operation;
+    std::size_t ordered_operations = 0;
+    bool synchronous_operations = false;
     auto account = [&](const cuda::FixedGraph &graph) {
       if (graph.argument_bytes() >
               std::numeric_limits<std::size_t>::max() - state_->bytes ||
@@ -375,8 +387,11 @@ FixedExecution::FixedExecution(Arch arch,
         } else if (const auto *external =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {
-          if ((*external)->execution_mode() ==
-              NativeOperationMode::cuda_synchronous) {
+          const auto mode = (*external)->execution_mode();
+          if (mode == NativeOperationMode::cuda_synchronous ||
+              mode == NativeOperationMode::cuda_ordered) {
+            ordered_operations += mode == NativeOperationMode::cuda_ordered;
+            synchronous_operations |= mode == NativeOperationMode::cuda_synchronous;
             flush(native);
             state_->cuda_steps.emplace_back(*external);
             continue;
@@ -425,7 +440,10 @@ FixedExecution::FixedExecution(Arch arch,
       account(*state_->cuda_graph);
     } else {
       flush(native);
-      state_->kind = 3;
+      state_->kind = synchronous_operations ? 3 : 4;
+      if (ordered_operations)
+        state_->cuda_ordered = std::make_unique<cuda::OrderedSubmissions>(
+            ordered_operations, state_->fault_domain);
     }
     if (sequence_state)
       *sequence_state = std::move(recording_state);
@@ -595,12 +613,14 @@ void FixedExecution::run_impl() {
   if (!state_->cuda_steps.empty()) {
     if (state_->cuda_failed)
       throw std::runtime_error(
-          "Synchronous CUDA execution failed; prepare a new instance");
+          "Host-invoked CUDA execution failed; prepare a new instance");
     auto &cuda = CUDAContext::get_instance();
     auto guard = cuda.get_guard();
     auto lock = cuda.get_submission_lock_guard();
     auto &driver = CUDADriver::get_instance();
     bool idle = false;
+    if (state_->cuda_ordered)
+      state_->cuda_ordered->begin();
     try {
       for (const auto &step : state_->cuda_steps) {
         if (const auto *graph =
@@ -608,11 +628,16 @@ void FixedExecution::run_impl() {
           (*graph)->run();
           idle = false;
         } else {
+          const auto &operation = std::get<std::shared_ptr<NativeOperation>>(step);
+          if (operation->execution_mode() == NativeOperationMode::cuda_ordered) {
+            state_->cuda_ordered->run(*operation);
+            idle = false;
+            continue;
+          }
           if (!idle)
             driver.context_synchronize();
           try {
-            std::get<std::shared_ptr<NativeOperation>>(step)
-                ->run_cuda_synchronous();
+            operation->run_cuda_synchronous();
           } catch (...) {
             // A provider can enqueue work before reporting an error. Complete
             // it before allowing owner retirement; preserve the original error.
@@ -623,8 +648,17 @@ void FixedExecution::run_impl() {
           idle = true;
         }
       }
+      if (state_->cuda_ordered)
+        state_->cuda_ordered->finish();
+    } catch (const BackendRuntimeError &error) {
+      state_->cuda_failed = true;
+      if (state_->cuda_ordered)
+        state_->cuda_ordered->finish_after_failure(&error);
+      throw;
     } catch (...) {
       state_->cuda_failed = true;
+      if (state_->cuda_ordered)
+        state_->cuda_ordered->finish_after_failure();
       throw;
     }
   }
