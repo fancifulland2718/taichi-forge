@@ -1047,6 +1047,57 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_grouped_bounded_bindings_can_diverge_after_initial_alias(monkeypatch):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "grouped_stateful")
+    capacity = 65
+
+    @ti.kernel
+    def publish(count: ti.i32, extent: ti.types.ndarray(ti.i32, 1)):
+        ti.device_extent_publish(extent, capacity, count)
+
+    @ti.kernel
+    def consume(extent: ti.types.ndarray(ti.i32, 1), visited: ti.types.ndarray(ti.i32, 1)):
+        ti.loop_config(block_dim=32)
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent):
+                ti.atomic_add(visited[1], i + 1)
+
+    counts = [ti.graph.Arg(ti.graph.ArgKind.SCALAR, f"count{i}", ti.i32) for i in range(2)]
+    extents = [ti.graph.Arg(ti.graph.ArgKind.NDARRAY, f"extent{i}", ti.i32, ndim=1) for i in range(2)]
+    outputs = [ti.graph.Arg(ti.graph.ArgKind.NDARRAY, f"visited{i}", ti.i32, ndim=1) for i in range(2)]
+    builder = ti.graph.GraphBuilder()
+    for i in range(2):
+        builder.dispatch(publish, counts[i], extents[i])
+    for i in range(2):
+        builder.dispatch_bounded(
+            consume, extents[i], outputs[i], extent=extents[i], capacity=capacity, block_dim=32
+        )
+    graph = builder.compile()
+    first, second = ti.DeviceExtent(capacity), ti.DeviceExtent(capacity)
+    visited = [ti.ndarray(ti.i32, 2) for _ in range(2)]
+    args = dict(extent0=first, extent1=first, visited0=visited[0], visited1=visited[1])
+    # Equal physical addresses do not make two symbolic bindings one contract.
+    # Changing only one binding must not reuse a grouped updater for both.
+    for other, n0, n1 in ((first, 1, 1), (second, 17, 33), (second, 65, 0), (first, 2, 2)):
+        args.update(extent1=other, count0=n0, count1=n1)
+        for array in visited:
+            array.fill(0)
+        graph.run(args)
+        for array, count in zip(visited, (n0, n1)):
+            np.testing.assert_array_equal(array.to_numpy(), [count, count * (count + 1) // 2])
+        segment = graph.execution_stats().segments[0]
+        assert segment.bounded_update_groups == 2
+        assert segment.bounded_grouped_payloads == 0
+        assert segment.last_driver_error == 0
+    graph.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_grouped_updater_telemetry_is_lazily_enabled(monkeypatch):
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
     if not probe["exact_device_grid_available"]:
