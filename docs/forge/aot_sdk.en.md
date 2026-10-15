@@ -342,6 +342,14 @@ need reconstruction descriptions; export rejects them instead of dropping their
 constraints. This preserves the selected map transformation, not a serialized
 CUDA Graph handle or a guarantee of identical target machine code.
 
+Mixed CUDA Graphs also preserve fused kernels before, between, and after
+qualified native recordings. Export follows the final physical sequence while
+matching native command barriers to their retained reconstruction contracts;
+it does not restore the unfused source maps. The cuFFT regression covers two
+library calls, three fused map regions, repeated export, and standalone/borrowed
+consumption after producer retirement. Parallel, indirect, bounded, and custom
+storage routes still require their own qualified reconstruction descriptions.
+
 Graph-instance-owned ndarray declarations (`private_ndarray` / `GraphOwnedNdarray`)
 now export as private resources with one-time zero initialization. Symbols sharing
 the same declaration retain one allocation, including kernel/provider and explicit

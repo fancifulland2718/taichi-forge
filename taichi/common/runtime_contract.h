@@ -11,7 +11,7 @@ namespace taichi {
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Exact compiled dependency inspection extends the shared AOT builder.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 50;
+inline constexpr int kForgeNativeAbiRevision = 51;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

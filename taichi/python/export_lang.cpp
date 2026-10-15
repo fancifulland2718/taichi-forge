@@ -6640,30 +6640,54 @@ void export_lang(py::module &m) {
         return result;
       }, py::arg("enable_diagnostics") = true);
 
+  auto physical_graph_sources = [](const py::object &owner,
+                                   bool include_commands) {
+    const auto &graph = owner.cast<const aot::CompiledGraph &>();
+    TI_ERROR_IF(!graph.cuda_parallel_dispatch_groups.empty(),
+                "Parallel Graph dispatch requires an execution recipe");
+    py::list sources;
+    size_t native_ordinal = 0;
+    for (const auto &dispatch : graph.dispatches) {
+      TI_ERROR_IF(dispatch.indirect_dispatch_arg ||
+                      dispatch.cuda_bounded_dispatch ||
+                      dispatch.cpu_bounded_dispatch,
+                  "Graph dispatch requires a non-kernel execution recipe");
+      if (dispatch.cuda_capture_command && include_commands) {
+        TI_ERROR_IF(dispatch.ti_kernel,
+                    "Graph dispatch has conflicting execution sources");
+        // Capture commands are composition barriers. Their ordinal matches
+        // the retained recording sequence, even when adjacent maps fuse.
+        sources.append(py::make_tuple("native", native_ordinal++));
+        continue;
+      }
+      TI_ERROR_IF(!dispatch.ti_kernel || dispatch.cuda_capture_command,
+                  "Graph dispatch requires a non-kernel execution recipe");
+      // Retain the graph so selected synthetic IR survives producer close.
+      auto kernel = py::cast(dispatch.ti_kernel,
+                             py::return_value_policy::reference_internal,
+                             owner);
+      if (include_commands) {
+        sources.append(py::make_tuple("dispatch", kernel,
+                                      dispatch.symbolic_args,
+                                      dispatch.dispatch_label));
+      } else {
+        sources.append(py::make_tuple(kernel, dispatch.symbolic_args,
+                                      dispatch.dispatch_label));
+      }
+    }
+    return sources;
+  };
+
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
       .def_property_readonly(
           "_physical_jit_dispatch_sources",
-          [](const py::object &owner) {
-            const auto &graph = owner.cast<const aot::CompiledGraph &>();
-            TI_ERROR_IF(!graph.cuda_parallel_dispatch_groups.empty(),
-                        "Parallel Graph dispatch requires an execution recipe");
-            py::list sources;
-            for (const auto &dispatch : graph.dispatches) {
-              TI_ERROR_IF(
-                  !dispatch.ti_kernel || dispatch.indirect_dispatch_arg ||
-                      dispatch.cuda_bounded_dispatch ||
-                      dispatch.cpu_bounded_dispatch ||
-                      dispatch.cuda_capture_command,
-                  "Graph dispatch requires a non-kernel execution recipe");
-              // Export the selected physical IR, not its logical source
-              // lineage. Retain the graph so synthetic kernels survive producer
-              // close.
-              sources.append(py::make_tuple(
-                  py::cast(dispatch.ti_kernel,
-                           py::return_value_policy::reference_internal, owner),
-                  dispatch.symbolic_args, dispatch.dispatch_label));
-            }
-            return sources;
+          [physical_graph_sources](const py::object &owner) {
+            return physical_graph_sources(owner, false);
+          })
+      .def_property_readonly(
+          "_physical_jit_recording_sources",
+          [physical_graph_sources](const py::object &owner) {
+            return physical_graph_sources(owner, true);
           })
       .def_property_readonly(
           "_owned_jit_dispatch_sources", [](const py::object &owner) {

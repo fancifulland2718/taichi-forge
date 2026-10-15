@@ -384,7 +384,7 @@ def _native(context, executable):
     return dict(action.fixed_bindings)
 
 
-def _sequence(context, sequence):
+def _validate_sequence(context, sequence):
     if (
         sequence._has_indirect_dispatch
         or sequence._structured_depth
@@ -396,7 +396,6 @@ def _sequence(context, sequence):
     for item in sequence._items:
         if item[0] != "dispatch":
             raise TaichiRuntimeError(f"AOT sequence cannot reconstruct {item[0]!r} yet")
-        context.kernel(*item[1:4])
 
 
 def _while(context, node):
@@ -520,35 +519,47 @@ def _node(context, node):
         for dispatch in dispatches:
             context.kernel(*dispatch)
         return
-    if node.composer_applied_groups or node.physical_dispatch_count != node.dispatch_count:
-        raise TaichiRuntimeError("AOT mixed Graph requires the selected composition recipe")
-    # Capture-native commands coexist with kernels inside one CGraph. Only the
-    # physical recording sequence retains their ordering; dispatches alone omit
-    # them, and selected materialization deliberately drops authoring recipes.
-    recreated = context.declared_bindings(node.fixed_runtime_args)
-    native_count, kernel_count = 0, 0
+    # Native commands are composition barriers. Preserve their retained opaque
+    # descriptions, but export kernels from the final physical sequence: source
+    # maps may have been replaced by fused IR during ordinary compilation too.
+    natives, sequences = [], []
+    kernel_count = 0
     for item in node.recording_operations:
         if item[0] == "native":
-            for name, owner in _native(context, item[1]).items():
+            natives.append(item[1])
+        elif item[0] == "dispatch":
+            kernel_count += 1
+        elif item[0] == "sequential":
+            sequences.append(item[1])
+            kernel_count += len(item[1]._items)
+        else:
+            raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct recipe {item[0]!r}")
+    if (
+        len(natives) != command_count
+        or kernel_count != len(node.recording_dispatches)
+        or len(natives) + kernel_count != node.dispatch_count
+    ):
+        raise TaichiRuntimeError("AOT recording sequence does not cover the materialized Graph")
+    sources = node.compiled_graph._physical_jit_recording_sources
+    if len(sources) != node.physical_dispatch_count:
+        raise TaichiRuntimeError("AOT mixed Graph lacks complete physical recording metadata")
+    recreated = context.declared_bindings(node.fixed_runtime_args)
+    native_count = 0
+    for source in sources:
+        if source[0] == "dispatch":
+            context.kernel(*source[1:])
+        elif source[0] == "native" and source[1] == native_count and native_count < len(natives):
+            for name, owner in _native(context, natives[native_count]).items():
                 if name in recreated and recreated[name] is not owner:
                     raise TaichiRuntimeError("AOT recording private binding owners conflict")
                 recreated[name] = owner
             native_count += 1
-        elif item[0] == "dispatch":
-            context.kernel(*item[1:4])
-            kernel_count += 1
-        elif item[0] == "sequential":
-            before = len(context.operations)
-            _sequence(context, item[1])
-            kernel_count += len(context.operations) - before
         else:
-            raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct recipe {item[0]!r}")
-    if (
-        native_count != command_count
-        or kernel_count != len(node.recording_dispatches)
-        or native_count + kernel_count != node.dispatch_count
-    ):
-        raise TaichiRuntimeError("AOT recording sequence does not cover the materialized Graph")
+            raise TaichiRuntimeError("AOT mixed Graph has an invalid physical recording source")
+    if native_count != len(natives):
+        raise TaichiRuntimeError("AOT mixed Graph lacks complete native recording coverage")
+    for sequence in sequences:
+        _validate_sequence(context, sequence)
     if recreated.keys() != node.fixed_runtime_args.keys() or any(
         recreated[name] is not value for name, value in node.fixed_runtime_args.items()
     ):

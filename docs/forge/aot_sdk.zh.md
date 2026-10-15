@@ -283,6 +283,11 @@ provider 自己提供描述以恢复原 compute/workspace 策略，同一 plan �
 重建描述，导出时明确拒绝，不能丢掉约束。这里保留的是已选 map 变换，不是序列化
 CUDA Graph handle，也不保证不同 AOT 目标生成完全相同的机器码。
 
+混合 CUDA Graph 同样保留已资格 native recording 前、中、后的融合 kernel。
+导出按最终物理序列匹配保留下来的原生命令重建合同，不恢复融合前的源 map。
+cuFFT 回归覆盖两次库调用、三个融合 map 区域、重复导出，以及生产端退休后的
+独立/借用消费。并行、间接、有界和自定义存储路线仍需各自的重建资格。
+
 Graph 实例拥有的 ndarray 声明（`private_ndarray` / `GraphOwnedNdarray`）可导出为
 首次清零的私有资源。同一声明的多个符号共享一份分配，kernel/provider 参数和显式
 梯度绑定统一映射。每份消费端 preparation 拥有全新状态；这里重建声明，不复制已
