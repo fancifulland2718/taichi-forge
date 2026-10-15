@@ -188,6 +188,17 @@ class VulkanBindingFrameExecutor:
     execution_kind = "vulkan_prepared_binding_graph"
     physical_submission_mode = "vulkan_secondary_immutable_argument_frames_published"
 
+    @staticmethod
+    def _validate_aot_export(spec, backend):
+        from taichi_forge.lang.exception import TaichiRuntimeError
+
+        # Both executors freeze one ordered compute sequence per binding and
+        # retain it through completion. Export the already-selected nodes; do
+        # not regenerate their logical dispatches or provider alternatives.
+        # Segmented/graphics queues require their own persistent recipe.
+        if not eligible(spec, backend) or prepared_boundaries(spec):
+            raise TaichiRuntimeError("AOT binding frames require one complete ordered Vulkan compute sequence")
+
     def __init__(self, instance):
         from taichi_forge._lib import core
         from taichi_forge.graph._graph import _CompiledCGraphNode, _GraphRunContext

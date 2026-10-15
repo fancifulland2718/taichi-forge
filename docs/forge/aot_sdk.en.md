@@ -987,7 +987,13 @@ executes the user FFT or changes input. Warm replay never rebuilds plans. Window
 Vulkan checks cover mixed kernel/FFT 1D and 2D transforms, normalized inverse,
 explicit spectral-energy adjoints, tail partitions, two bindings, standalone and
 borrowed consumers, and retirement. This does not imply automatic FFT AD or
-arbitrary recipe coverage. The optional standalone SDK component is still pending.
+arbitrary recipe coverage. Complete ordered Vulkan compute binding-frame recipes
+also export their selected nodes into one immutable AOT command sequence per
+binding. Segmented/graphics variants and executor subclasses need their own
+qualification; storage recipes remain separate. Independent AOT uses the explicit
+`Runtime("vulkan", device_index=...)` enumeration index (default 0), which can
+differ from JIT's automatically chosen GPU. Compare performance on the same device.
+The optional standalone SDK component is still pending.
 
 CUDA also registers `gemm_f32` using external cuBLAS:
 

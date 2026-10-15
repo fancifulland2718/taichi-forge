@@ -1700,8 +1700,10 @@ no separate vendor-library path and creates no GPU plan during probing or sessio
 creation. FFT plans use the same native core and retain the session until commands
 retire. The original ABI1 entry points remain compatible. Ordinary recordings and
 selected batch partitions can export to AOT, preserving their fixed layouts and
-tile choices; see [AOT consumption](aot_sdk.en.md). Whole-Graph binding-frame export
-and the optional standalone SDK component are not yet qualified.
+tile choices; see [AOT consumption](aot_sdk.en.md). Complete ordered compute
+binding-frame recipes can export their selected nodes too; segmented/graphics
+queue variants require separate qualification. The optional standalone SDK
+component is not yet available.
 
 The current source exposes `ti.hardware.fft.VulkanFftPlan`. It requires a native
 runtime containing the FFT bridge and the separate

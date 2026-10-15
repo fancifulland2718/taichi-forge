@@ -16,10 +16,10 @@ from tests.python.test_hardware_vulkan_fft import _adapter, _input
 from tests.python.test_graph_vulkan_fft_recipe import _providers
 
 
-@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("selected", ["ordinary", "partition", "frame_partition"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_vulkan_fft_recording_export(tmp_path, selected):
-    dimensions, batches = ((3, 5) if selected else (8,)), 5
+def test_vulkan_fft_recording_export(tmp_path, monkeypatch, selected):
+    dimensions, batches = ((8,) if selected == "ordinary" else (3, 5)), 5
     data, values = _input(dimensions, batches)
     plans = [
         ti.hardware.fft.VulkanFftPlan(data, dimensions, batch_count=batches, adapter_path=_adapter()),
@@ -57,7 +57,7 @@ def test_vulkan_fft_recording_export(tmp_path, selected):
     builder.append_native(plans[1].record())
     builder.dispatch(finish, args["data"], args["y"], args["dx"])
     materialized = None
-    if selected:
+    if selected != "ordinary":
         definition = builder.freeze()
         catalog = definition.recipe_catalog(providers=_providers())
         tiles = [
@@ -66,6 +66,14 @@ def test_vulkan_fft_recording_export(tmp_path, selected):
             if f.provider_metadata.get("family_selection", {}).get("choice_id") == "batch-tile-2"
         ]
         assert len(tiles) == 2
+        if selected == "frame_partition":
+            tiles.append(
+                next(
+                    f
+                    for f in catalog.fragments
+                    if f.provider_metadata.get("family_selection", {}).get("source_key") == "whole-graph-bindings"
+                )
+            )
         recipe = catalog.compose(tuple(f.fragment_id for f in tiles), stage="contract").recipe
         materialized = definition.materialize(recipe, providers=_providers())
         graph = materialized.executor
@@ -83,8 +91,21 @@ def test_vulkan_fft_recording_export(tmp_path, selected):
     np.testing.assert_array_equal(data.to_numpy(), before)
     assert len(description["resources"]) == 2
     assert [r["parameters"]["direction"] for r in description["resources"]] == ["forward", "inverse"]
-    assert {r["parameters"]["batch_tile"] for r in description["resources"]} == {2 if selected else batches}
+    assert {r["parameters"]["batch_tile"] for r in description["resources"]} == {
+        batches if selected == "ordinary" else 2
+    }
     assert "adapter_path" not in json.dumps(description)
+    if selected == "frame_partition":
+
+        class UnqualifiedExecutor(graph._spec._binding_executor_factory):
+            pass
+
+        rejected = ti.aot.Module()
+        with monkeypatch.context() as patch:
+            patch.setattr(graph._spec, "_binding_executor_factory", UnqualifiedExecutor)
+            with pytest.raises(ti.TaichiRuntimeError, match="selected storage/binding recipe"):
+                rejected.add_execution_plan("step", graph)
+        assert not rejected._exported_kernels
     if materialized is not None:
         materialized.close()
     else:

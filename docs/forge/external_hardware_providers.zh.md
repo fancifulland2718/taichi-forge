@@ -1359,8 +1359,9 @@ capture/replay、root 有序执行与 whole-recipe 搜索是不同能力。
 这种声明允许外部厂商符号清单为空，仍校验 ABI、版本及执行表；统一 session 不接受额外
 vendor library 路径，也不在探测或创建 session 时创建 GPU 计划。实际 FFT 计划复用同一
 原生核心并保留 session 至命令退休。原 ABI1 入口保持兼容。普通 recording 与已选 batch
-分块可导出 AOT，保留固定布局和 tile 选择，见 [AOT 消费](aot_sdk.zh.md)。完整 Graph
-binding-frame 导出及独立 SDK 可选安装组件尚未完成验证。
+分块可导出 AOT，保留固定布局和 tile 选择，见 [AOT 消费](aot_sdk.zh.md)。完整有序 compute
+binding-frame 方案也可导出已选节点；分段/graphics queue 变体需要单独验证。独立 SDK
+可选安装组件仍待接线。
 
 当前源码提供 `ti.hardware.fft.VulkanFftPlan`，要求包含 FFT 原生桥接的 runtime，以及独立
 `taichi_forge_vkfft_provider_abi1_vkfft134` DLL/SO。adapter 使用 VkFFT 1.3.4 和匹配的静态

@@ -703,8 +703,15 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         if graph._workspace_lane_capacity != 1 or graph._qualified_fusion_selector is not None:
             raise TaichiRuntimeError("AOT execution Graph needs a fixed single-frame execution recipe")
         spec = graph._spec
-        if getattr(spec, "_binding_executor_factory", None) is not None or getattr(spec, "_storage_plans", ()):
+        if getattr(spec, "_storage_plans", ()):
             raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
+        binding_factory = getattr(spec, "_binding_executor_factory", None)
+        if binding_factory is not None:
+            # Only a concrete executor can qualify equivalence with the fixed
+            # AOT submission path. Inherited hooks could lose queue/segment work.
+            if getattr(binding_factory, "__dict__", {}).get("_validate_aot_export") is None:
+                raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
+            binding_factory._validate_aot_export(spec, graph._execution_arch)
         gradient_names = set((gradients or {}).values())
         from ._graph_source_bindings import SourceArrayBindings
 

@@ -768,7 +768,11 @@ Vulkan 注册 `vkfft/plan_f32` 资源（绑定 `data`）与 `vkfft/execute_f32` 
 inline 扩展的 adapter；不提供额外 vendor `library_path`。准备可能编译 shader、初始化 LUT，
 不执行用户 FFT、不改写输入；暖重放不重建计划。Windows Vulkan 已验证一维及二维混合
 kernel/FFT、归一化逆变换、显式谱能量伴随、尾分块、双绑定、独立/借用消费及退休；不是自动
-FFT AD 或任意 recipe 支持声明。独立 SDK 可选组件仍待接线。
+FFT AD 或任意 recipe 支持声明。完整有序 Vulkan compute binding-frame 方案也可将已选节点
+导出为每绑定一组不可变 AOT 命令；分段/graphics 变体及 executor 子类需要自己的资格，
+storage recipe 仍需单独处理。独立 AOT 使用 `Runtime("vulkan", device_index=...)` 的显式
+枚举序号（默认 0），可能与 JIT 自动选择的 GPU 不同；性能比较须指定同一设备。
+独立 SDK 可选组件仍待接线。
 
 CUDA 还通过外部 cuBLAS 注册 `gemm_f32`：
 

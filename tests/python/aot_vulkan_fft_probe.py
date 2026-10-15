@@ -16,7 +16,7 @@ def main(mode, artifact):
         ti.init(arch=ti.vulkan, offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime("vulkan")
+        runtime = Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0")))
     with runtime:
         runtime.configure_provider("vkfft", adapter_path=os.environ["TI_VKFFT_LIBRARY_PATH"])
         runtime.configure_provider("unused", adapter_path="missing-unused-provider.dll")
