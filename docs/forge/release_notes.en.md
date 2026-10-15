@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Qualified native sort sequences now export with their surrounding kernels on
+  CPU/CUDA/Vulkan. `source_bindings` names retained producer arrays without
+  serializing contents or addresses; typed exact-shape certificates preserve
+  their binding contract. Standalone and borrowed consumers cover forward and
+  explicit adjoint work, ordering edge cases and retirement. Use paired private
+  ABI 55 components; other sequence strategies and operations remain separate.
+
 - Graph-owned cuDSS groups now run in qualified CUDA conditional loop bodies and
   export with selected flat loops to AOT. Three numerical phases, multiple RHS,
   alternating bindings, explicit adjoints, zero/early/budget exits and retirement

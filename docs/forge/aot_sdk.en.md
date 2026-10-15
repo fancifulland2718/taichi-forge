@@ -371,6 +371,33 @@ Kernel specializations are deduplicated across exports in one module. Backend
 compilation still follows the module's AOT target/options; exporting a JIT Graph
 does not make those target-dependent costs disappear.
 
+For qualified native operations that retain concrete producer arrays, name those
+arrays at export using `source_bindings`. The consumer supplies its own storage:
+
+```python
+plan = exported.add_execution_plan(
+    "step", graph, source_bindings={"keys": producer_keys, "order": producer_order}
+)
+```
+
+Use the existing symbolic kernel name when a kernel and the native operation
+share an array. The mapping freezes scalar dtype and exact shape; it does not
+copy contents, serialize addresses or prewarm the sequence. Each source
+allocation needs one unambiguous name. Unused mappings, incompatible kernel
+bindings and private-storage conflicts are rejected before kernel publication.
+Explicitly named fixed ndarray bindings can also become public plan inputs.
+
+CPU/CUDA/Vulkan `primitive_sequence().sort(...)` is qualified for compact 1D
+scalar keys and optional scalar payload, stable ascending order and NaNs last.
+`auto` must resolve to the existing native backend; explicit `cpu_native`,
+`cuda_device` or `vulkan_native_radix_u32` is accepted on its matching backend.
+Other explicit strategies, descending/bitwise ordering, field/strided/tensor
+storage, fused sequences and other sequence operations require their own export
+contracts. Repeated sorts retain order and share named arrays. Windows tests
+cover native-only and kernel-sort-gather/explicit-adjoint plans, ties, signed
+zeros, NaNs, independent bindings and retirement. This is not sort autodiff or
+qualification of the complete GeoPhys rigid solver.
+
 Ordinary map compositions export the materialized physical kernel sequence,
 including fused IR and its argument remapping, rather than the original source
 dispatches. Repeated export shares those kernel definitions. CPU/CUDA/Vulkan
@@ -437,8 +464,8 @@ Without it, kernel/provider contracts continue to determine permitted types.
 
 `array_layout` requires a packed scalar/AoS ndarray, matching rank and element
 shape, index extents at least `minimum_shape`, exact bytes per record, and the
-specified base alignment. `element_shape` defaults to `[]`; dtype requirements
-still come from the kernel/provider. Empty index extents are allowed. These
+specified base alignment. `element_shape` defaults to `[]`; kernel/provider dtype
+checks also continue to apply. Empty index extents are allowed. These
 requirements apply only to bindings already used by the selected execution or
 its retained resources/gradients; they do not retain unrelated arrays.
 `disjoint` compares CPU/CUDA address ranges or Vulkan buffer/memory bindings,

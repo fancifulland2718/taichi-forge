@@ -443,7 +443,7 @@ class Module:
         self._initial_root_data.update(pending)
         self._data_payloads.update(data)
 
-    def add_execution_plan(self, name, plan, *, gradients=None, snapshot_state=False):
+    def add_execution_plan(self, name, plan, *, gradients=None, snapshot_state=False, source_bindings=None):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
         An ExecutionPlan requires its kernels to be exported first. A compiled
@@ -459,6 +459,11 @@ class Module:
         consumer; Field state is shared by all entries of one loaded module and
         initialized once. Separate module instances isolate Field state. Changes
         to an already exported root snapshot require a new producer module.
+
+        ``source_bindings`` maps public names to scalar producer ndarrays held
+        by qualified native operations. Export freezes type and shape, without
+        copying data or storing addresses; consumers supply their own arrays.
+        Reuse a kernel's symbolic name when it accesses the same storage.
         """
         from taichi_forge_runtime.aot import ExecutionPlan
         from taichi_forge.graph._graph import Graph
@@ -474,13 +479,17 @@ class Module:
         if isinstance(plan, Graph):
             from taichi_forge.aot._graph_export import export_graph
 
-            plan = export_graph(self, plan, gradients=gradients, snapshot_state=snapshot_state)
+            plan = export_graph(
+                self, plan, gradients=gradients, snapshot_state=snapshot_state, source_bindings=source_bindings
+            )
         elif not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or compiled Graph")
         elif gradients is not None:
             raise ValueError("Specify gradients on the ExecutionPlan itself")
         elif snapshot_state:
             raise ValueError("snapshot_state requires a compiled Graph")
+        elif source_bindings is not None:
+            raise ValueError("source_bindings requires a compiled Graph")
         snapshot = ExecutionPlan.from_json(plan.to_json())
         missing = set(snapshot.kernel_entries) - self._exported_kernels.keys()
         if missing:

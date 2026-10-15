@@ -17,8 +17,9 @@ def _snapshot(value):
 class _ExportContext:
     """One export transaction; object identities never become artifact data."""
 
-    def __init__(self, module, reserved_names, *, snapshot_state=False):
+    def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None):
         self.snapshot_state = snapshot_state
+        self.source_arrays = source_arrays
         self.operations = []
         self.initialization = []
         self._initialization_resources = {}
@@ -114,6 +115,10 @@ class _ExportContext:
                 # The final spec value is the shared binding frame. Source
                 # nodes may retain equal but nonidentical earlier values.
                 self.private_bindings[name] = self._scalar_values[name] = owner
+                continue
+            if self.source_arrays is not None and (external := self.source_arrays.find(owner)) is not None:
+                self.private_bindings[name] = owner
+                self._private_names[name] = external
                 continue
             if not isinstance(owner, InternalNdarrayRequirement):
                 continue
@@ -336,6 +341,8 @@ class _ExportContext:
         self.initialization.append(description)
 
     def kernel(self, kernel, args, label=""):
+        if self.source_arrays is not None:
+            self.source_arrays.validate_kernel(args)
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
             raise TaichiRuntimeError("AOT execution Graph currently requires scalar or ndarray kernel bindings")
         name = self._kernel_names.get(id(kernel))
@@ -352,6 +359,16 @@ class _ExportContext:
 
 def _native(context, executable):
     action = executable.recordable_action
+    if action is None:
+        # Explicit concrete-type opt-in, like recording exporters below. Do not
+        # inherit a base recipe through an executable with additional behavior.
+        exporter = type(executable).__dict__.get("_export_aot")
+        if exporter is not None:
+            before = len(context.operations)
+            exporter(executable, context)
+            if len(context.operations) == before:
+                raise TaichiRuntimeError("AOT executable export must contain an operation")
+            return {}
     if action is None or action.backend_command_recording is None:
         raise TaichiRuntimeError(f"AOT native Graph needs a reconstruction description: {type(executable).__name__}")
     if action.temporary_bindings:
@@ -677,7 +694,7 @@ def _node(context, node):
         raise TaichiRuntimeError("AOT execution Graph has unreconstructed fixed bindings")
 
 
-def export_graph(module, graph, *, gradients=None, snapshot_state=False):
+def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_bindings=None):
     """Preflight the entire region before publishing any module definitions."""
     with graph._lifecycle_lock:
         graph._check_runtime_valid()
@@ -689,10 +706,14 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False):
         if getattr(spec, "_binding_executor_factory", None) is not None or getattr(spec, "_storage_plans", ()):
             raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         gradient_names = set((gradients or {}).values())
+        from ._graph_source_bindings import SourceArrayBindings
+
+        source_arrays = SourceArrayBindings(source_bindings, spec.fixed_runtime_args)
         context = _ExportContext(
             module,
-            set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names,
+            set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names | source_arrays.arrays.keys(),
             snapshot_state=snapshot_state,
+            source_arrays=source_arrays,
         )
         context.declare_private_bindings(spec.fixed_runtime_args)
         context.control_names = set(spec.control_binding_plan.names)
@@ -705,6 +726,8 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False):
                 exporter(lease, context)
         for node in graph._spec.nodes:
             _node(context, node)
+        source_arrays.validate_used(spec.runtime_arg_names)
+        context.binding_constraints.extend(source_arrays.constraints)
         if context.control_names != context._control_bindings:
             raise TaichiRuntimeError("AOT Graph requires complete selected control binding metadata")
         for _, bindings in spec.control_binding_plan.distinct_groups:
@@ -750,7 +773,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False):
                 constraints=constraints or None,
             )
             # Provider workspace must not accidentally become a public input.
-            if set(plan.argument_names) != set(spec.runtime_arg_names) | (
+            if set(plan.argument_names) != set(spec.runtime_arg_names) | source_arrays.used | (
                 gradient_names - context.private_bindings.keys()
             ):
                 raise TaichiRuntimeError("AOT Graph reconstruction changed the public binding contract")

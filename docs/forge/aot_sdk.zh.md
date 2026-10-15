@@ -305,6 +305,28 @@ provider 自己提供描述以恢复原 compute/workspace 策略，同一 plan �
 回调。同模块内重复导出会复用 kernel 特化；后端编译仍遵守模块的 AOT 目标和选项，
 导出现有 JIT Graph 不代表消除了这些目标相关的编译成本。
 
+对于持有具体生产端数组、且已具备重建资格的原生操作，可用 `source_bindings`
+为数组指定导出名称；消费者提供自己的存储：
+
+```python
+plan = exported.add_execution_plan(
+    "step", graph, source_bindings={"keys": producer_keys, "order": producer_order}
+)
+```
+
+kernel 与原生操作共用数组时，沿用该 kernel 的符号名。映射冻结 scalar dtype 与
+确切形状，不复制内容、不保存地址，也不预热序列。每个源分配须有唯一明确的名称；
+未使用映射、kernel 绑定不匹配及私有存储冲突在发布 kernel 前拒绝。显式命名的固定
+ndarray 绑定也可转为公开计划输入。
+
+CPU/CUDA/Vulkan 的 `primitive_sequence().sort(...)` 已具备紧凑一维 scalar key
+及可选 scalar payload 的导出资格，保持稳定升序、NaN 在末尾。`auto` 必须对应既有
+原生后端；显式 `cpu_native`、`cuda_device`、`vulkan_native_radix_u32` 分别要求匹配
+后端。其他显式策略、降序/bitwise 排序、Field/strided/tensor 存储、融合序列及其他
+序列操作仍需自己的导出合同。多个 sort 保持原次序及命名数组共享。Windows 已验证
+独立原生入口及 kernel-sort-gather/显式伴随、重复键、正负零、NaN、独立绑定和退休；
+这不是 sort 自动求导或完整 GeoPhys 刚体求解器资格。
+
 普通 map 组合按物化后的物理 kernel 顺序导出，保留融合 IR 和参数映射，不重新导出
 融合前的源 dispatch；重复导出复用这些 kernel 定义。CPU/CUDA/Vulkan 已验证显式
 伴随、运行时数组别名及生产端关闭后的消费。自定义存储/执行器选择和绑定证明仍需

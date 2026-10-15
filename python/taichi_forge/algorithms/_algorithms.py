@@ -2769,6 +2769,11 @@ class _PrimitiveSequenceGraphExecutable(NativeGraphExecutable):
     def run(self):
         self.sequence.run()
 
+    def _export_aot(self, context):
+        from taichi_forge.algorithms._sequence_export import export_sequence
+
+        export_sequence(self.sequence, context)
+
     @property
     def debug_info(self):
         return {
