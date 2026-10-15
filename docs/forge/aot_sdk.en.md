@@ -1238,8 +1238,7 @@ built-in cuBLAS/cuFFT discovery, or automatically export JIT recordings.
 CUDA cuDSS 0.8 supports explicit persistent f32/i32 CSR plans. Configure the
 `"cudss"` provider and probe `"cudss_solve_group_f32"`. Supply a Forge adapter with
 the common runtime-provider entry point and an external cuDSS library; the
-optional installation component is `TaichiSDKProvider_cudss`. Automatic JIT
-recording export remains pending.
+optional installation component is `TaichiSDKProvider_cudss`.
 
 ```python
 resource = {
@@ -1284,6 +1283,19 @@ requests and capture parameters; opaque driver/vendor physical residency remains
 unknown. Windows CUDA qualification covers standalone/borrowed consumers, all
 three phases, independent bindings and kernel.grad with explicit adjoint solves.
 It does not provide provider autodiff, conditional-region or cuSOLVER support.
+
+Graph-owned `CudssCaptureRecording` also supports ordinary and selected Graph
+export through `module.add_execution_plan(name, graph)`. Export samples the native
+plan's frozen CSR seed, matrix type/view and configuration, without resampling the
+original matrix or serializing vendor factors or machine-local library paths.
+Each plan is sampled once per export; multi-RHS groups retain one numerical
+factorization, operations share one reconstructed plan, and identical read-only
+payloads are deduplicated within the module. This export requires paired private
+ABI 52; rebuilding analysis/factors remains cold preparation. Qualification covers
+changes to original seed/display fields, independent source-free consumption,
+explicit adjoints and selected recipe order. Automatic export of ordinary live
+`CudssSolveRecording`/`CudssRefactorSolveRecording` and conditional-region support
+are not included.
 
 CUDA cuTENSOR reconstruction uses the existing provider C ABI and the same
 native operation/resource registry. Select the optional cuTENSOR SDK adapter and

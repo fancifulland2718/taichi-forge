@@ -37,6 +37,8 @@
 #include "taichi/program/cuda_cublaslt_capture.h"
 #include "taichi/program/cuda_cutensor_capture.h"
 #include "taichi/program/cuda_cusparselt_capture.h"
+#include "taichi/program/cuda_cudss_capture.h"
+#include "taichi/runtime/cuda/cudss_plan.h"
 #include "taichi/program/extension.h"
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/program/ndarray.h"
@@ -3668,6 +3670,25 @@ void export_lang(py::module &m) {
       .def("_cuda_cudss_plan_configuration",
            &Program::cuda_cudss_plan_configuration, py::arg("handle"),
            py::call_guard<py::gil_scoped_release>())
+      .def(
+          "_snapshot_cuda_cudss_graph_seed",
+          [](Program &program, std::uint64_t handle) {
+            CudaCudssPlanSnapshot snapshot;
+            {
+              py::gil_scoped_release release;
+              snapshot = snapshot_cuda_cudss_graph_seed(program, handle);
+            }
+            auto bytes = [](const auto &data) {
+              return py::bytes(reinterpret_cast<const char *>(data.data()),
+                               data.size() * sizeof(data[0]));
+            };
+            return py::make_tuple(
+                snapshot.rows, snapshot.nonzeros, snapshot.matrix_type,
+                snapshot.matrix_view, snapshot.phase, snapshot.reordering,
+                snapshot.solve_algorithm, bytes(snapshot.row_offsets),
+                bytes(snapshot.column_indices), bytes(snapshot.values));
+          },
+          py::arg("handle"))
       .def("_cuda_cudss_factorize",
            tracked_native_program_method(&Program::cuda_cudss_factorize),
            py::arg("handle"), py::arg("matrix"),

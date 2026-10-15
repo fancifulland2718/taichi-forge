@@ -476,6 +476,8 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
       : rows_(static_cast<std::size_t>(matrix.rows)),
         nonzeros_(static_cast<std::size_t>(matrix.nonzeros)),
         graph_owned_(graph_owned),
+        matrix_type_(matrix_type),
+        matrix_view_(matrix_view),
         provider_(std::move(provider)),
         fault_domain_(std::move(fault_domain)) {
     validate_cudss_matrix_contract(matrix_type, matrix_view);
@@ -683,6 +685,44 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
     return nonzeros_;
   }
 
+  CudaCudssPlanSnapshot snapshot_graph_seed() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fault_domain_->throw_if_submission_disallowed("snapshot cuDSS Graph seed");
+    TI_ERROR_IF(closed_ || !graph_owned_ || !factorized_,
+                "cuDSS export requires a prepared Graph-owned seed.");
+    CudaCudssPlanSnapshot result;
+    result.rows = rows_;
+    result.nonzeros = nonzeros_;
+    result.matrix_type = matrix_type_;
+    result.matrix_view = matrix_view_;
+    result.phase = graph_numeric_phase_;
+    result.reordering = reordering_;
+    result.solve_algorithm = solve_algorithm_;
+    result.row_offsets.resize(rows_ + 1);
+    result.column_indices.resize(nonzeros_);
+    result.values.resize(nonzeros_);
+    auto &driver = CUDADriver::get_instance();
+    try {
+      // Export is a cold boundary. The seed remains immutable even after a
+      // capture rebinds the vendor matrix descriptor to another values array.
+      driver.context_synchronize();
+      driver.memcpy_device_to_host(result.row_offsets.data(), seed_buffers_[0],
+                                   result.row_offsets.size() * sizeof(int32_t));
+      driver.memcpy_device_to_host(
+          result.column_indices.data(), seed_buffers_[1],
+          result.column_indices.size() * sizeof(int32_t));
+      driver.memcpy_device_to_host(result.values.data(), seed_buffers_[2],
+                                   result.values.size() * sizeof(float));
+    } catch (const BackendRuntimeError &error) {
+      fault_domain_->report_backend_error(error, 0);
+      throw;
+    }
+    ++graph_seed_snapshot_count_;
+    graph_seed_snapshot_bytes_ += (rows_ + 1) * sizeof(int32_t) +
+                                  nonzeros_ * (sizeof(int32_t) + sizeof(float));
+    return result;
+  }
+
   void reserve_refactor_solve() override {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
@@ -816,6 +856,8 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
     return {
         {"configuration_abi", configuration_api_.abi_version},
         {"graph_owned", graph_owned_ ? 1 : 0},
+        {"graph_seed_snapshot_count", graph_seed_snapshot_count_},
+        {"graph_seed_snapshot_bytes", graph_seed_snapshot_bytes_},
         {"capture_parameters_device_resident", graph_owned_ ? 1 : 0},
         {"allocator_live_requested_bytes",
          static_cast<std::int64_t>(allocation[0])},
@@ -1197,6 +1239,8 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
   std::int64_t factor_statistics_queries_{0};
   std::size_t nonzeros_{0};
   const bool graph_owned_{false};
+  const int matrix_type_{0}, matrix_view_{0};
+  std::int64_t graph_seed_snapshot_count_{0}, graph_seed_snapshot_bytes_{0};
   int graph_numeric_phase_{-1};
   void *graph_stream_{nullptr};
   void *graph_fork_event_{nullptr};

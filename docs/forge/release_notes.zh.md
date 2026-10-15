@@ -40,7 +40,9 @@
   加载 vendor。AOT 可显式重建 f32/i32 CSR 计划并录制多 RHS 求解组，支持固定因子、
   分解/重分解后求解；组内共享一次数值分解。独立与借用消费端已验证前向及显式伴随。
   可选 `TaichiSDKProvider_cudss` 组件单独安装 adapter 与清单，vendor 库仍由应用提供。
-  recording 自动导出和条件区域仍待接通。
+  Graph-owned `CudssCaptureRecording` 可导出普通/已选 Graph，按原生私有 seed 重建，
+  每计划每导出只采样一次；需要配对 private ABI 52。普通活状态 cuDSS recording 的
+  自动导出、条件区域与 cuSOLVER 支持仍待接通。
 
 - cuDSS Graph 内存报告将已分配的计划快照和 vendor 载荷计入驻留请求字节；驱动
   私有存储仍保留大小未知，不再错误地报告“驻留 0 字节且统计完整”。

@@ -234,6 +234,22 @@ void check_captures(bool common_owner) {
       // The immutable factors must outlive and ignore the original seed values.
       driver.memsetd32(v, 0, 10);
     }
+    const auto snapshot = plan->snapshot_graph_seed();
+    EXPECT_EQ(snapshot.rows, 4);
+    EXPECT_EQ(snapshot.nonzeros, 10);
+    EXPECT_EQ(snapshot.phase, phase);
+    EXPECT_EQ(snapshot.matrix_type, 3);
+    EXPECT_EQ(snapshot.matrix_view, 0);
+    EXPECT_EQ(snapshot.reordering, 0);
+    EXPECT_EQ(snapshot.solve_algorithm, 0);
+    EXPECT_EQ(snapshot.row_offsets,
+              (std::vector<int32_t>(rows.begin(), rows.end())));
+    EXPECT_EQ(snapshot.column_indices,
+              (std::vector<int32_t>(columns.begin(), columns.end())));
+    EXPECT_EQ(snapshot.values,
+              (std::vector<float>(values.begin(), values.end())));
+    EXPECT_EQ(plan->configuration().at("graph_seed_snapshot_count"), 1);
+    EXPECT_EQ(plan->configuration().at("graph_seed_snapshot_bytes"), 100);
     plan.reset();
     for (int i = 0; i < 3; ++i) {
       graph1->run();

@@ -974,8 +974,7 @@ provider 不加载。重配置只影响后续探测/准备，已有 prepared 保
 
 CUDA cuDSS 0.8 可通过显式持久资源重建 f32/i32 CSR 计划。配置 `"cudss"` provider
 并探测 `"cudss_solve_group_f32"`；当前需提供带公共 runtime-provider 入口的 Forge
-adapter 及外部 cuDSS 库；可选安装组件为 `TaichiSDKProvider_cudss`，JIT recording
-自动导出尚待接入。
+adapter 及外部 cuDSS 库；可选安装组件为 `TaichiSDKProvider_cudss`。
 
 ```python
 resource = {
@@ -1013,6 +1012,15 @@ owner 合同。冷准备包含私有种子分析/分解/预热和捕获，不执
 `workspace_bytes` 包含可计量的计划请求存储与捕获参数，驱动/vendor 的物理驻留仍有
 未知部分。Windows CUDA 已验证独立/借用消费、三种阶段、双绑定及 kernel.grad 配合
 显式伴随求解；这不提供 provider 自动求导、条件区域或 cuSOLVER 覆盖。
+
+Graph-owned `CudssCaptureRecording` 也可通过 `module.add_execution_plan(name, graph)`
+导出普通或已选 Graph。导出读取原生计划冻结的 CSR seed、矩阵类型/视图与配置，
+不重新采样原始矩阵，也不序列化 vendor 因子或本机库路径。同一计划在每次导出中
+只采样一次；多 RHS 组保持一次数值分解，多个操作共享一份重建计划，相同只读载荷
+在模块内去重。该导出需要配对的 private ABI 52；重建时重新分析/分解属于冷准备。
+已验证原始 seed/展示字段修改后仍保留原生语义、独立无源码消费、显式伴随及选中
+recipe 顺序。此项不包含普通活状态 `CudssSolveRecording`/`CudssRefactorSolveRecording`
+的自动导出，也不扩大条件区域支持。
 
 CUDA cuTENSOR 重建复用既有 provider C ABI 与同一原生操作/资源注册表。选择可选
 cuTENSOR SDK adapter，并按上文配置兼容的外部厂商库。以下例子通过命名计划执行

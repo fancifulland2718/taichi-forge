@@ -26,6 +26,15 @@ struct CudaCudssMatrixView {
   std::uint64_t shared_pattern_id{0};
 };
 
+// Cold portable seed, never vendor factor storage or live device addresses.
+struct CudaCudssPlanSnapshot {
+  std::size_t rows{0}, nonzeros{0};
+  int matrix_type{0}, matrix_view{0}, phase{-1};
+  int reordering{0}, solve_algorithm{0};
+  std::vector<std::int32_t> row_offsets, column_indices;
+  std::vector<float> values;
+};
+
 // Internal shared solver implementation, independent of Program handles,
 // Ndarray, Python or a persistent schema. Calls are cold construction or
 // ordinary host submissions; captured graph replay never invokes this API.
@@ -33,6 +42,7 @@ class CudaCudssPlan : public CudaProviderCompletionResource {
  public:
   virtual std::size_t rows() const noexcept = 0;
   virtual std::size_t nonzeros() const noexcept = 0;
+  virtual CudaCudssPlanSnapshot snapshot_graph_seed() = 0;
   virtual void analyze(const CudaCudssMatrixView &matrix) = 0;
   virtual void factorize(const CudaCudssMatrixView &matrix,
                          bool refactorize) = 0;

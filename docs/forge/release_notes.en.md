@@ -48,8 +48,10 @@ lifetimes. The entries below describe the changes.
   numerical factorization within a group. Standalone and borrowed consumers cover
   forward execution and explicit adjoints. The optional `TaichiSDKProvider_cudss`
   component installs the adapter and manifest separately; vendor libraries remain
-  application-managed. Automatic recording export and conditional regions remain
-  pending.
+  application-managed. Graph-owned `CudssCaptureRecording` exports ordinary and
+  selected Graphs from the native private seed, sampled once per plan per export;
+  paired private ABI 52 is required. Ordinary live cuDSS recording export,
+  conditional regions and cuSOLVER support remain pending.
 
 - cuDSS Graph memory reports count already allocated plan snapshots and vendor
   payloads as resident requested bytes. Opaque driver storage remains unknown,

@@ -217,6 +217,16 @@ std::shared_ptr<CudaCudssPlan> Program::retain_cuda_cudss_capture_plan(
   return found->second;
 }
 
+CudaCudssPlanSnapshot snapshot_cuda_cudss_graph_seed(Program &program,
+                                                     std::uint64_t handle) {
+  auto submission = program.acquire_runtime_resource_submission_guard();
+  auto plan = program.retain_cuda_cudss_capture_plan(handle);
+  auto &cuda = CUDAContext::get_instance();
+  auto lock = cuda.get_submission_lock_guard();
+  auto guard = cuda.get_guard();
+  return plan->snapshot_graph_seed();
+}
+
 std::uint64_t Program::create_cuda_cudss_plan(
     SparseMatrix *matrix,
     int matrix_type,
@@ -475,6 +485,10 @@ void Program::cuda_clear_cudss_plans() {
 #else
 
 namespace taichi::lang {
+
+CudaCudssPlanSnapshot snapshot_cuda_cudss_graph_seed(Program &, std::uint64_t) {
+  TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
+}
 
 std::shared_ptr<aot::CudaGraphCaptureCommand> make_cuda_cudss_capture_command(
     Program *,

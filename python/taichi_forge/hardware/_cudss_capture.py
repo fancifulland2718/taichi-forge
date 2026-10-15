@@ -243,5 +243,10 @@ class CudssCaptureRecording(BackendCommandRecording):
     def execute(self, bindings):
         raise TaichiRuntimeError("cuDSS captured solve is a Graph-only recording")
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cudss import export_capture
+
+        return export_capture(self, context)
+
     def _as_graph_native_node(self):
         return _CaptureNode(self)
