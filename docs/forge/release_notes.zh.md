@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 可导出 CUDA 整数 segmented scan 的已选策略，包括使用保留 scratch 的原生
+  global scan、chunk、shuffle 和长短段 hybrid。复用既有驱动内核，保存不可变拓扑，
+  每份 preparation 重建私有工作区；多个子图的参数作用域互相隔离。
+
 - CUDA CSR/BSR SpMV 共用执行计划核心，BSR 保留原生块布局及现有描述符，消除独立
   的向量绑定/workspace 管理实现。AOT 已接通 f32 BSR 资源、SpMV 和 recording 自动
   快照导出，支持独立/借用消费与显式资源的有序原位值更新。导出快照保持冻结；

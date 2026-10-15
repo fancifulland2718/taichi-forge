@@ -62,9 +62,11 @@ class SourceArrayBindings:
             raise TaichiRuntimeError("AOT retained array needs a name in source_bindings")
         return name
 
-    def validate_kernel(self, arguments):
-        for argument in arguments:
-            owner = self.arrays.get(argument.name)
+    def validate_kernel(self, arguments, names=None):
+        if names is None:
+            names = [argument.name for argument in arguments]
+        for argument, name in zip(arguments, names, strict=True):
+            owner = self.arrays.get(name)
             if owner is not None and (
                 argument.tag != core.ArgKind.NDARRAY
                 or str(argument.dtype()) != str(owner.dtype)

@@ -16,6 +16,26 @@
 
 namespace taichi::lang {
 namespace {
+TEST(NativeOperationRegistry, RetainedScanPreservesItsSelectedCountAndType) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cuda_driver","operation":"retained_scan","version":1,
+      "parameters":{"size":2147483647,"dtype":"u32"},"bindings":{"values":"v","scratch":"s"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "cuda_retained_scan");
+  for (const char *parameters :
+       {R"({"size":-1,"dtype":"u32"})", R"({"size":2147483648,"dtype":"u32"})",
+        R"({"size":true,"dtype":"i32"})", R"({"size":4,"dtype":"f32"})",
+        R"({"size":4,"dtype":"i32","reverse":true})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  op.parameters = liong::json::parse_complete(R"({"size":0,"dtype":"i32"})");
+  EXPECT_EQ(registry.decode(op).kind(), "cuda_retained_scan");
+  EXPECT_EQ(registry.find("cuda_retained_scan", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("cuda_retained_scan", 1, Arch::vulkan), nullptr);
+}
+
 TEST(NativeOperationRegistry, VkfftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto plan = NativeOperationDescription::parse(liong::json::parse_complete(

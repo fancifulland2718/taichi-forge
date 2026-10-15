@@ -313,6 +313,7 @@ void register_vkfft_operations(NativeOperationRegistry &registry);
 void register_blas_operations(NativeOperationRegistry &registry);
 void register_cusparse_operations(NativeOperationRegistry &registry);
 void register_cusparse_bsr_operations(NativeOperationRegistry &registry);
+void register_retained_scan_operation(NativeOperationRegistry &registry);
 void register_cudss_operations(NativeOperationRegistry &registry);
 void register_cutensor_operations(NativeOperationRegistry &registry);
 void register_cusparselt_operations(NativeOperationRegistry &registry);

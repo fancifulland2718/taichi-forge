@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT exports selected CUDA integer segmented-scan strategies, including native
+  global scan with retained scratch, chunk, shuffle and length-bucket hybrid.
+  Existing driver kernels are reused, immutable topology is retained, each
+  preparation rebuilds private workspace, and subgraph binding scopes stay separate.
+
 - CUDA CSR/BSR SpMV share an execution-plan core. BSR keeps its native block
   layout and existing matrix descriptor, replacing duplicated vector-binding
   and workspace management. AOT now supports f32 BSR resources, SpMV and automatic

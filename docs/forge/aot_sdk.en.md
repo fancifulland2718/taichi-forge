@@ -438,6 +438,36 @@ duplicates, empty results, overflow and stale input. This does not qualify its
 dense ordinal or segmented branches, or the complete rigid solver.
 Selection/sorting itself gains no automatic derivative.
 
+Selected CUDA `GraphBuilder.segmented_scan()` i32/u32 sum recipes now export automatically:
+
+```python
+plan = module.add_execution_plan(
+    "scan", selected_graph,
+    source_bindings={"input": values, "result": output},
+)
+```
+
+Export preserves the selected serial, global scan/correction, warp/block chunk,
+shuffle/hierarchical or length-bucket hybrid strategy without consumer reselection.
+Immutable SegmentedLayout offsets and bucket indices become read-only data; each
+preparation reconstructs its own bases and scan scratch without saving producer
+scratch contents. The global route uses `cuda_driver/retained_scan` v1 in the common
+native registry, with `size`/`dtype` parameters and `values`/`scratch` bindings,
+reusing the existing driver kernels. That native operation performs an in-place
+inclusive prefix sum; the full segmented recipe retains its surrounding kernels,
+inclusive/exclusive semantics and unused tail. Explicit scratch counts toward
+`resource_bytes`; there is no additional hidden workspace.
+
+Preparation does not execute user scan. Replay does not query the Program arena,
+read offsets back or reallocate scratch. Bindings retain fixed shapes and disjoint
+input/output requirements. Topology or storage changes require materialization,
+export and preparation again. Retained subgraphs have separate symbolic scopes
+and share identical read-only payloads. Windows CUDA checks cover seven strategies,
+32-bit modular overflow, empty/all-empty segments, partial ranges and tails, two
+subgraphs, standalone/borrowed consumption and in-flight retirement. This extends
+the existing CUDA integer scan, without adding its automatic derivative or claiming
+CPU/Vulkan Graph-native segmented recipes or the complete GeoPhys segmented branch.
+
 Ordinary map compositions export the materialized physical kernel sequence,
 including fused IR and its argument remapping, rather than the original source
 dispatches. Repeated export shares those kernel definitions. CPU/CUDA/Vulkan

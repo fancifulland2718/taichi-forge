@@ -13,9 +13,7 @@ def scan_workspace_bytes(num_items, dtype):
     # Graph ndarray lifetime contract instead of inventing a null allocation.
     query = getattr(_ti_core, "_cuda_scan_capture_workspace_bytes", None)
     if query is None:
-        raise TaichiRuntimeError(
-            "Graph segmented scan requires a native runtime with retained scan recording support"
-        )
+        raise TaichiRuntimeError("Graph segmented scan requires a native runtime with retained scan recording support")
     return max(4, query(num_items, 0 if dtype == i32 else 2))
 
 
@@ -60,6 +58,16 @@ class RetainedScanRecording(BackendCommandRecording):
 
     def execute(self, bindings):
         raise TaichiRuntimeError("Retained scan is a CUDA Graph-only recording")
+
+    def _export_aot(self, context):
+        recipe = self._cuda_capture_recipe
+        context.native(
+            "cuda_driver",
+            "retained_scan",
+            parameters=dict(size=recipe.num_items, dtype=str(recipe.dtype)),
+            bindings=dict(values="scanned", scratch="scan_scratch"),
+        )
+        return ()
 
     def _as_graph_native_node(self):
         return native_recording_node(

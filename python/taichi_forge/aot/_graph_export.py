@@ -347,8 +347,9 @@ class _ExportContext:
         self.initialization.append(description)
 
     def kernel(self, kernel, args, label=""):
+        bindings = [self.kernel_binding(arg) for arg in args]
         if self.source_arrays is not None:
-            self.source_arrays.validate_kernel(args)
+            self.source_arrays.validate_kernel(args, bindings)
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
             raise TaichiRuntimeError("AOT execution Graph currently requires scalar or ndarray kernel bindings")
         name = self._kernel_names.get(id(kernel))
@@ -357,10 +358,65 @@ class _ExportContext:
             self._kernel_names[id(kernel)] = name
             self.kernels[name] = kernel
         self._used_kernel_entries.add(name)
-        operation = dict(kind="kernel", entry=name, arguments=[self.kernel_binding(arg) for arg in args])
+        operation = dict(kind="kernel", entry=name, arguments=bindings)
         if label:
             operation["label"] = label
         self.operations.append(operation)
+
+    def bound_graph(self, graph, bindings):
+        """Export a retained sequential graph in its own symbolic binding scope."""
+        from ._graph_constraints import export_constraints
+
+        with graph._lifecycle_lock:
+            graph._check_runtime_valid()
+            spec = graph._spec
+            if (
+                graph._workspace_lane_capacity != 1
+                or graph._qualified_fusion_selector is not None
+                or getattr(spec, "_storage_plans", ())
+                or getattr(spec, "_binding_executor_factory", None) is not None
+                or spec.control_binding_plan.names
+            ):
+                raise TaichiRuntimeError("AOT retained subgraph requires its fixed sequential binding recipe")
+            arguments, _ = graph._snapshot_binding_source(bindings)
+            if set(arguments) != set(spec.runtime_arg_names):
+                raise TaichiRuntimeError("AOT retained subgraph bindings must cover its exact inputs")
+            keys = ("private_bindings", "_private_names", "_scalar_values", "_scalar_symbols")
+            outer = {key: getattr(self, key) for key in keys}
+            outer_derived = self.reconstructed_derived_bindings
+            try:
+                self.reconstructed_derived_bindings = set()
+                for key in keys:
+                    setattr(self, key, {})
+                for name, owner in arguments.items():
+                    if type(owner) in (bool, int, float):
+                        self.private_bindings[name] = self._scalar_values[name] = owner
+                    else:
+                        self.retained_arrays.bind_private(name, owner)
+                self.declare_private_bindings(spec.fixed_runtime_args)
+                for lease in spec.lifetime_leases:
+                    exporter = type(lease).__dict__.get("_export_aot_bindings")
+                    if exporter is not None:
+                        exporter(lease, self)
+                for node in spec.nodes:
+                    _node(self, node)
+                if any(
+                    (
+                        callable(getattr(lease, "bind_graph_arguments", None))
+                        and id(lease) not in self.reconstructed_argument_binders
+                    )
+                    or (
+                        callable(getattr(lease, "validate_graph_bindings", None))
+                        and id(lease) not in self.reconstructed_binding_validators
+                    )
+                    for lease in spec.lifetime_leases
+                ):
+                    raise TaichiRuntimeError("AOT retained subgraph has an unreconstructed binding validator")
+                self.binding_constraints.extend(export_constraints(spec, self.binding))
+            finally:
+                self.reconstructed_derived_bindings = outer_derived
+                for key, value in outer.items():
+                    setattr(self, key, value)
 
 
 def _native(context, executable):

@@ -328,6 +328,11 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
     def _run_serial(self):
         self._serial_call.run()
 
+    def _export_aot(self, context):
+        from taichi_forge.graph._segmented_scan_export import export_segmented_scan
+
+        export_segmented_scan(self, context)
+
     def run(self):
         if self._strategy == _SERIAL_STRATEGY:
             self._run_serial()

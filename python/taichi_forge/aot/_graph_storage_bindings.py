@@ -35,15 +35,16 @@ class RetainedArrayBindings:
         self.context = context
         self.fields = {}
         self.tree_ids = set()
-        self.scratch = {}
+        self.private_arrays = {}
+        self.private_roles = {}
         self.existing = {_field_key(packed_description(module._fields[name])): name for name in module._array_fields}
 
     def require(self, owner):
         context = self.context
         if type(owner) is ScalarNdarray:
             identity = context.source_arrays.identity(owner)
-            if identity in self.scratch:
-                return self.scratch[identity]
+            if identity in self.private_arrays:
+                return self.private_arrays[identity]
             return context.source_arrays.require(owner)
         if type(owner) is DenseNdarrayView:
             selected = packed_description(owner)
@@ -85,12 +86,10 @@ class RetainedArrayBindings:
 
     def declare_scratch(self, owner):
         """A concrete recipe proves a full overwrite before any workspace read."""
-        identity = self.context.source_arrays.identity(owner)
-        if self.context.source_arrays.find(owner) is not None:
-            raise TaichiRuntimeError("AOT private scratch cannot also be an external source binding")
-        if identity not in self.scratch:
+        identity = self._private_identity(owner, "scratch")
+        if identity not in self.private_arrays:
             descriptor = packed_description(owner)
-            self.scratch[identity] = self.context._resource(
+            self.private_arrays[identity] = self.context._resource(
                 owner,
                 dict(
                     kind="ndarray",
@@ -99,7 +98,32 @@ class RetainedArrayBindings:
                     element_shape=list(descriptor.element_shape),
                 ),
             )
-        return self.scratch[identity]
+        return self.private_arrays[identity]
+
+    def declare_data(self, owner, data):
+        """A concrete recipe supplies immutable construction-time array data."""
+        identity = self._private_identity(owner, "data")
+        descriptor = packed_description(owner)
+        resource = self.context.data_resource(
+            owner,
+            data,
+            dtype=str(descriptor.scalar_type),
+            shape=list(descriptor.index_shape),
+            element_shape=list(descriptor.element_shape),
+            readonly=True,
+        )
+        previous = self.private_arrays.setdefault(identity, resource)
+        if previous != resource:
+            raise TaichiRuntimeError("AOT private array reconstruction changed within one export")
+        return resource
+
+    def _private_identity(self, owner, role):
+        identity = self.context.source_arrays.identity(owner)
+        if self.context.source_arrays.find(owner) is not None:
+            raise TaichiRuntimeError("AOT private recipe storage cannot also be an external source binding")
+        if self.private_roles.setdefault(identity, role) != role:
+            raise TaichiRuntimeError("AOT scratch cannot alias immutable recipe data")
+        return identity
 
     def bind_private(self, name, owner):
         context = self.context

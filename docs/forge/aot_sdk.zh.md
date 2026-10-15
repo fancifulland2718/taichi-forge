@@ -358,6 +358,30 @@ Windows 已验证独立/借用消费、重复键、空结果、部分范围、�
 路线通过无源码消费，覆盖重复项、空结果、溢出和过期输入；不扩展为 dense ordinal、
 segmented 分支或完整刚体求解器资格。选择/排序本身不新增自动导数。
 
+CUDA `GraphBuilder.segmented_scan()` 的已选 i32/u32 求和 recipe 现可自动导出：
+
+```python
+plan = module.add_execution_plan(
+    "scan", selected_graph,
+    source_bindings={"input": values, "result": output},
+)
+```
+
+导出保持已选的 serial、global scan/correction、warp/block chunk、shuffle/hierarchical
+或长短段 hybrid 策略，不在消费端重新选择。不可变 SegmentedLayout offsets 和 bucket
+indices 保存为只读数据；bases 与 scan scratch 每份 preparation 独立重建，不保存生产端
+scratch 内容。global 路线在公共 native registry 中使用 `cuda_driver/retained_scan` v1，
+`size`、`dtype` 参数及 `values`、`scratch` 绑定，复用已有驱动内核。该原生操作只做前缀
+范围内的原位 inclusive sum；完整 segmented recipe 保留前后 kernel 的 inclusive/exclusive
+语义与未使用尾部。scratch 是显式资源，其字节计入 `resource_bytes`，没有额外隐藏工作区。
+
+准备不执行用户 scan；重放不查询 Program arena、不读回 offsets、不重新分配 scratch。
+参数重建沿用固定形状与输入/输出不重叠合同；修改拓扑或存储需要重新物化/导出/准备。
+多个保留子图使用独立符号作用域，共享相同只读载荷。Windows CUDA 已验证七种策略、
+模32位溢出、空段/全空、部分范围与尾部、双子图、独立/借用消费和在途退休。
+这是现有 CUDA 整数 scan 的支持扩展，不增加整数 scan 的自动导数，也不声明
+CPU/Vulkan 的 Graph-native segmented recipe 或完整 GeoPhys segmented 分支资格。
+
 普通 map 组合按物化后的物理 kernel 顺序导出，保留融合 IR 和参数映射，不重新导出
 融合前的源 dispatch；重复导出复用这些 kernel 定义。CPU/CUDA/Vulkan 已验证显式
 伴随、运行时数组别名及生产端关闭后的消费。自定义存储/执行器选择和绑定证明仍需
