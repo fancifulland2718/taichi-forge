@@ -403,16 +403,40 @@ allocation needs one unambiguous name. Unused mappings, incompatible kernel
 bindings and private-storage conflicts are rejected before kernel publication.
 Explicitly named fixed ndarray bindings can also become public plan inputs.
 
-CPU/CUDA/Vulkan `primitive_sequence().sort(...)` is qualified for compact 1D
-scalar keys and optional scalar payload, stable ascending order and NaNs last.
-`auto` must resolve to the existing native backend; explicit `cpu_native`,
-`cuda_device` or `vulkan_native_radix_u32` is accepted on its matching backend.
-Other explicit strategies, descending/bitwise ordering, field/strided/tensor
-storage, fused sequences and other sequence operations require their own export
-contracts. Repeated sorts retain order and share named arrays. Windows tests
-cover native-only and kernel-sort-gather/explicit-adjoint plans, ties, signed
-zeros, NaNs, independent bindings and retirement. This is not sort autodiff or
-qualification of the complete GeoPhys rigid solver.
+CPU/CUDA/Vulkan `primitive_sequence()` can export native `sort`, single-key-part
+`sort_by_key`, `compact`, `unique` and `unique_by_key`. Sorting accepts compact 1D
+scalar keys and optional scalar payload, with stable ascending order and NaNs
+last; `sort_by_key` requires lexicographic order. `auto` must resolve to the
+existing native backend; explicit `cpu_native`, `cuda_device` or
+`vulkan_native_radix_u32` sorting requires its matching backend. The explicit
+Vulkan compact/unique method is `vulkan_native`. Other strategies,
+descending/bitwise ordering, multiple key parts, strided storage, fused sequences
+and unlisted operations still require their own export contracts.
+
+Retained scalar ndarrays use `source_bindings`. Qualified packed dense Fields
+use `add_execution_plan(..., snapshot_state=True)` to export module array views
+automatically, sharing the same roots as ordinary Field kernels. Native-only
+graphs also snapshot their required Fields. Views are published after structural
+preflight and reused across exports in the same module. CUDA/Vulkan recordings
+from `prepare_sort`, `prepare_compact`, and `prepare_unique`/`prepare_unique_by_key`
+also export; prepared compact checks include offset packed Field vector-record
+views. CPU retains the sequence route.
+
+Unique keeps the first item of each consecutive integer-key run without sorting.
+Fixed `size` preserves producer semantics; only the count prefix is valid and
+output tails remain unchanged. Nonempty input uses one head kernel and one
+multi-column compact sharing private flags. The head fully overwrites flags, so
+producer scratch is not serialized. A sequence with `size=0` only zeros the
+first count element, emitting no helper or keys/output access. Vulkan 64-bit key
+helpers require `Module(caps=["spirv_has_int64"])`.
+
+Windows checks cover standalone/borrowed consumption, repeated keys, empty
+results, partial ranges, independent bindings, retirement and actual `.grad`
+for downstream kernels. The existing CPU sequence and CUDA/Vulkan prepared
+routes of GeoPhys's generic candidate pipeline pass source-free consumption for
+duplicates, empty results, overflow and stale input. This does not qualify its
+dense ordinal or segmented branches, or the complete rigid solver.
+Selection/sorting itself gains no automatic derivative.
 
 Ordinary map compositions export the materialized physical kernel sequence,
 including fused IR and its argument remapping, rather than the original source

@@ -35,6 +35,11 @@
   同时修复底数为零、指数为 0/1 时的底数梯度。CPU/CUDA/Vulkan 的显式反向及前向
   AD 回归通过，旧内核缓存失效以避免继续加载错误导数。
 
+- 原生 compact/sort/unique 序列现可自动导出 AOT，连续 dense Field 与 kernel 共用
+  模块存储；CUDA/Vulkan 的对应 prepared recording 也已接通。GeoPhys 通用候选
+  管线通过三后端无源码消费，覆盖重复项、空结果、溢出及过期输入。其他候选分支及
+  完整刚体求解器仍需分别验收。
+
 - 已具备资格的原生排序序列现可连同前后 kernel 在 CPU/CUDA/Vulkan 导出 AOT。
   `source_bindings` 为持有的生产端数组命名，不序列化内容或地址；dtype 与确切形状
   约束保留绑定合同。独立及借用消费已验证前向、显式伴随、排序边界和退休。需配对

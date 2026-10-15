@@ -58,6 +58,14 @@ class _UniqueHeadExecutable(NativeGraphExecutable):
     def run(self):
         self._compiled.run(self._flattened)
 
+    def _export_aot_bindings(self, context):
+        # The selected head dispatch writes every flag, including i >= size.
+        # Reconstruct that workspace once and share it with native compaction.
+        bindings = tuple(self._bindings.items())
+        context.retained_arrays.declare_scratch(bindings[1][1])
+        for name, owner in bindings[:2]:
+            context.retained_arrays.bind_private(name, owner)
+
     @property
     def recordable_action(self):
         return self._action

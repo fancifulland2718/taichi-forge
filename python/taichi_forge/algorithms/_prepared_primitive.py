@@ -170,6 +170,12 @@ def _native_recording(plan):
             self._plan._validate_lifetime()
             return self._plan.run
 
+        def _export_aot(self, context):
+            from ._prepared_export import export_prepared
+
+            export_prepared(self._plan, context)
+            return ()
+
         def _as_graph_native_node(self):
             return native_recording_node(
                 self,

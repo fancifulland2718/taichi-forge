@@ -34,7 +34,7 @@ class _ExportContext:
         self.root_payloads = ()
         self._resource_owners = {}
         self._indices = {}
-        self._names = set(reserved_names) | set(module._exported_kernels)
+        self._names = set(reserved_names) | set(module._exported_kernels) | set(module._fields)
         self._kernel_names = {id(kernel): name for name, kernel in module._exported_kernels.items()}
         self.reconstructed_binding_validators = set()
         self.reconstructed_argument_binders = set()
@@ -48,6 +48,9 @@ class _ExportContext:
         self._scalar_resources = {}
         self.control_names = set()
         self._control_bindings = set()
+        from ._graph_storage_bindings import RetainedArrayBindings
+
+        self.retained_arrays = RetainedArrayBindings(module, self)
 
     def region(self, emit, node):
         """Collect a selected region without copying its code/resource owners."""
@@ -227,7 +230,10 @@ class _ExportContext:
         pending = tuple(self._provider_data.values())
         arrays = [owner.arr for owner, _, _, _ in pending]
         program = impl.get_runtime().prog
-        ids = module._aot_builder._used_snode_tree_ids(sorted(self._used_kernel_entries))
+        ids = sorted(
+            set(module._aot_builder._used_snode_tree_ids(sorted(self._used_kernel_entries)))
+            | self.retained_arrays.tree_ids
+        )
         dependencies = tuple(program._snapshot_snode_tree_dependencies(ids))
         if dependencies:
             if not self.snapshot_state:
@@ -766,6 +772,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
         try:
+            context.retained_arrays.publish()
             for name, kernel in context.kernels.items():
                 module._aot_builder.add(name, kernel)
             # A different AOT compile request can retain a different Field

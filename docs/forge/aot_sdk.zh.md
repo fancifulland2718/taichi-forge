@@ -332,13 +332,31 @@ kernel 与原生操作共用数组时，沿用该 kernel 的符号名。映射�
 未使用映射、kernel 绑定不匹配及私有存储冲突在发布 kernel 前拒绝。显式命名的固定
 ndarray 绑定也可转为公开计划输入。
 
-CPU/CUDA/Vulkan 的 `primitive_sequence().sort(...)` 已具备紧凑一维 scalar key
-及可选 scalar payload 的导出资格，保持稳定升序、NaN 在末尾。`auto` 必须对应既有
-原生后端；显式 `cpu_native`、`cuda_device`、`vulkan_native_radix_u32` 分别要求匹配
-后端。其他显式策略、降序/bitwise 排序、Field/strided/tensor 存储、融合序列及其他
-序列操作仍需自己的导出合同。多个 sort 保持原次序及命名数组共享。Windows 已验证
-独立原生入口及 kernel-sort-gather/显式伴随、重复键、正负零、NaN、独立绑定和退休；
-这不是 sort 自动求导或完整 GeoPhys 刚体求解器资格。
+CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part 的
+`sort_by_key`、`compact`、`unique` 和 `unique_by_key`。排序接受紧凑一维 scalar key
+及可选 scalar payload，保持稳定升序、NaN 在末尾；`sort_by_key` 要求 lexicographic。
+`auto` 必须对应既有原生后端；显式 `cpu_native`、`cuda_device`、
+`vulkan_native_radix_u32` 排序分别要求匹配后端。compact/unique 对应的 Vulkan
+显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、多 key part、strided
+存储、融合序列和未列出的操作仍需自己的导出合同。
+
+持有的 scalar ndarray 继续通过 `source_bindings` 命名；合格的连续 dense Field 使用
+`add_execution_plan(..., snapshot_state=True)` 自动导出模块数组视图，与普通 Field
+kernel 共用同一 root。没有 kernel 的纯原生图也会保存所需 Field 初值。结构预检通过后
+才发布视图，同一模块多次导出复用已有视图。CUDA/Vulkan 的 `prepare_sort`、
+`prepare_compact`、`prepare_unique`/`prepare_unique_by_key` recording 也可导出；
+prepared compact 已验证带偏移的连续 Field 向量记录视图。CPU 保持 sequence 路线。
+
+unique 保留每个连续整数键段的第一项，不隐式排序。固定 `size` 保持生产端语义；
+只有 count 指示的输出前缀有效，尾部保持不变。非空输入使用一个 head kernel 和一次
+多列 compact，共用一份私有 flags；head 完整覆盖 flags，因此不保存生产端 scratch。
+sequence 的 `size=0` 只将 count 首元素写零，不生成 helper 或访问 keys/output。
+Vulkan 的 64 位 key helper 要求 `Module(caps=["spirv_has_int64"])`。
+
+Windows 已验证独立/借用消费、重复键、空结果、部分范围、独立绑定、退休及后续 kernel
+的真实 `.grad`。GeoPhys 通用候选管线的现有 CPU sequence 和 CUDA/Vulkan prepared
+路线通过无源码消费，覆盖重复项、空结果、溢出和过期输入；不扩展为 dense ordinal、
+segmented 分支或完整刚体求解器资格。选择/排序本身不新增自动导数。
 
 普通 map 组合按物化后的物理 kernel 顺序导出，保留融合 IR 和参数映射，不重新导出
 融合前的源 dispatch；重复导出复用这些 kernel 定义。CPU/CUDA/Vulkan 已验证显式

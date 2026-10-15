@@ -84,6 +84,23 @@ _EXPORTS = {
 }
 
 
+def unique_helper(dtype, with_indices):
+    """Return the shared head helper and allocation-free specialization facts."""
+    import numpy as np
+
+    from taichi_forge._kernels import rle_mark_boundaries_and_starts_ndarray, rle_mark_boundaries_ndarray
+
+    exemplar = {
+        "keys": np.empty(0, dtype={"i32": "int32", "u32": "uint32", "i64": "int64", "u64": "uint64"}[dtype]),
+        "flags": np.empty(0, dtype="int32"),
+    }
+    helper = rle_mark_boundaries_ndarray
+    if with_indices:
+        helper = rle_mark_boundaries_and_starts_ndarray
+        exemplar["starts"] = exemplar["flags"]
+    return helper, exemplar
+
+
 def export_primitive(module, name, kind, version, options):
     if not isinstance(name, str) or not name or "\0" in name:
         raise ValueError("Primitive export name must be a nonempty string without NUL")
@@ -102,21 +119,10 @@ def export_primitive(module, name, kind, version, options):
         if not _ti_core.native_operation_capabilities(module._arch, native_kind, native_version):
             raise ValueError(f"AOT primitive requires {native_kind} version {native_version} on {module._arch}")
     if recipe.helpers:
-        import numpy as np
-
-        from taichi_forge._kernels import rle_mark_boundaries_and_starts_ndarray, rle_mark_boundaries_ndarray
-
         for entry, dtype, with_indices in recipe.helpers:
             # Zero-element host exemplars carry specialization metadata only.
             # Export neither allocates device arrays nor executes a helper.
-            exemplar = {
-                "keys": np.empty(0, dtype={"i32": "int32", "u32": "uint32", "i64": "int64", "u64": "uint64"}[dtype]),
-                "flags": np.empty(0, dtype="int32"),
-            }
-            helper = rle_mark_boundaries_ndarray
-            if with_indices:
-                helper = rle_mark_boundaries_and_starts_ndarray
-                exemplar["starts"] = exemplar["flags"]
+            helper, exemplar = unique_helper(dtype, with_indices)
             # Module.add_kernel rejects name conflicts and deduplicates the
             # identical specialization shared by multiple exported recipes.
             try:

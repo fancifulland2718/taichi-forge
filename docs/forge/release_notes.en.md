@@ -39,6 +39,13 @@ lifetimes. The entries below describe the changes.
   are also corrected. Explicit reverse and forward AD regressions pass on
   CPU/CUDA/Vulkan; old kernel caches are invalidated to avoid stale derivatives.
 
+- Native compact/sort/unique sequences now export automatically to AOT, sharing
+  packed dense Field storage with kernels. Matching CUDA/Vulkan prepared
+  recordings also export. GeoPhys's generic candidate pipeline passes source-free
+  consumption on all three backends for duplicates, empty results, overflow and
+  stale input; other candidate branches and the complete rigid solver still need
+  separate qualification.
+
 - Qualified native sort sequences now export with their surrounding kernels on
   CPU/CUDA/Vulkan. `source_bindings` names retained producer arrays without
   serializing contents or addresses; typed exact-shape certificates preserve
