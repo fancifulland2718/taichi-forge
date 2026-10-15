@@ -12,6 +12,8 @@
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+class NativeProviderRuntime;
+struct NativeProviderDefinition;
 
 // Validated compact f32/i32 CSR in the current CUDA context. The caller owns
 // storage and serializes preparation/submission. Live callers supply their
@@ -64,6 +66,19 @@ std::shared_ptr<CudaCudssPlan> make_cuda_cudss_plan(
     int matrix_view,
     const std::string &adapter_path,
     const std::string &runtime_library_path,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    const std::vector<int> &configuration,
+    bool graph_owned);
+
+// Prepared resources share the session's runtime lease. They must retire all
+// captured work before releasing their plan, exactly as for the path-based
+// JIT factory above. No global provider registry or Program is needed.
+const NativeProviderDefinition &cuda_cudss_provider_definition();
+std::shared_ptr<CudaCudssPlan> make_cuda_cudss_plan(
+    const CudaCudssMatrixView &matrix,
+    int matrix_type,
+    int matrix_view,
+    std::shared_ptr<NativeProviderRuntime> provider,
     std::shared_ptr<RuntimeFaultDomain> fault_domain,
     const std::vector<int> &configuration,
     bool graph_owned);

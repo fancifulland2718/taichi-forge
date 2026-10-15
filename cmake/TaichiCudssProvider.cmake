@@ -52,7 +52,8 @@ endif()
 
 add_library(taichi_forge_cudss_provider_080 SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/taichi/cudss/provider/provider.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/taichi/cudss/forge_cudss_provider.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/taichi/cudss/forge_cudss_provider.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/taichi/cudss/forge_cudss_runtime_provider.h")
 target_compile_features(taichi_forge_cudss_provider_080 PRIVATE cxx_std_17)
 target_compile_definitions(taichi_forge_cudss_provider_080
     PRIVATE TI_FORGE_CUDSS_PROVIDER_BUILD)

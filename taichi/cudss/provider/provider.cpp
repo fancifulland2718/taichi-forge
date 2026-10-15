@@ -1,4 +1,4 @@
-#include "taichi/cudss/forge_cudss_provider.h"
+#include "taichi/cudss/forge_cudss_runtime_provider.h"
 
 #if defined(_WIN32) && !defined(NOMINMAX)
 #define NOMINMAX
@@ -31,7 +31,7 @@ thread_local std::string probed_library_path;
 
 constexpr char kProviderName[] = "taichi-forge-cudss";
 constexpr char kBuildIdentity[] =
-    "forge-cudss-provider-abi1-cudss-0.8-configured-plan-factor-statistics-v1";
+    "forge-cudss-provider-abi1-common-abi2-cudss-0.8-v1";
 constexpr uint64_t kFeatures = TI_FORGE_CUDSS_FEATURE_CSR |
                                TI_FORGE_CUDSS_FEATURE_DENSE_VECTOR |
                                TI_FORGE_CUDSS_FEATURE_STAGED_EXECUTION |
@@ -624,4 +624,152 @@ taichi_forge_cudss_factor_statistics_query(
   }
   *out_api = {sizeof(*out_api), 1, read_factor_statistics_i32};
   return TI_FORGE_CUDSS_SUCCESS;
+}
+
+namespace {
+// Only adapter-management results are translated. Execution functions keep
+// the cuDSS vendor-status contract, including its distinct error numbering.
+TiForgeRuntimeProviderResult common_result(TiForgeCudssResult result) {
+  switch (result) {
+    case TI_FORGE_CUDSS_SUCCESS:
+      return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
+    case TI_FORGE_CUDSS_ERROR_INVALID_ARGUMENT:
+      return TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT;
+    case TI_FORGE_CUDSS_ERROR_ABI_MISMATCH:
+      return TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH;
+    case TI_FORGE_CUDSS_ERROR_RUNTIME_UNAVAILABLE:
+      return TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_UNAVAILABLE;
+    case TI_FORGE_CUDSS_ERROR_RUNTIME_INCOMPATIBLE:
+      return TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_INCOMPATIBLE;
+    case TI_FORGE_CUDSS_ERROR_OUT_OF_MEMORY:
+      return TI_FORGE_RUNTIME_PROVIDER_ERROR_OUT_OF_MEMORY;
+    default:
+      return TI_FORGE_RUNTIME_PROVIDER_ERROR_INTERNAL;
+  }
+}
+
+void common_runtime_info(const TiForgeCudssRuntimeInfo &source,
+                         TiForgeRuntimeInfo *destination) {
+  if (destination) {
+    // cuDSS reports its own version only. Zero denotes unknown CUDA runtime
+    // version; the adapter header version is not a loaded-runtime observation.
+    *destination = {sizeof(*destination),
+                    source.version_major,
+                    source.version_minor,
+                    source.version_patch,
+                    0,
+                    0,
+                    source.library_path,
+                    nullptr};
+  }
+}
+
+TiForgeRuntimeProviderResult common_probe(const char *library_path,
+                                          TiForgeRuntimeInfo *out_info) {
+  if (out_info && out_info->struct_size < sizeof(*out_info)) {
+    return common_result(fail(TI_FORGE_CUDSS_ERROR_INVALID_ARGUMENT,
+                              "cuDSS common runtime info is truncated"));
+  }
+  TiForgeCudssRuntimeInfo info{};
+  info.struct_size = sizeof(info);
+  const auto result = probe_runtime(library_path, &info);
+  if (result == TI_FORGE_CUDSS_SUCCESS)
+    common_runtime_info(info, out_info);
+  return common_result(result);
+}
+
+TiForgeRuntimeProviderResult common_create(
+    const char *library_path,
+    TiForgeRuntimeProviderRuntime *out_runtime,
+    TiForgeRuntimeInfo *out_info) {
+  if (out_runtime)
+    *out_runtime = nullptr;
+  if (!out_runtime || (out_info && out_info->struct_size < sizeof(*out_info))) {
+    return common_result(
+        fail(TI_FORGE_CUDSS_ERROR_INVALID_ARGUMENT,
+             "cuDSS common runtime output is null or truncated"));
+  }
+  TiForgeCudssRuntimeInfo info{};
+  info.struct_size = sizeof(info);
+  const auto result = create_runtime(library_path, out_runtime, &info);
+  if (result == TI_FORGE_CUDSS_SUCCESS)
+    common_runtime_info(info, out_info);
+  return common_result(result);
+}
+
+TiForgeRuntimeProviderResult common_destroy(
+    TiForgeRuntimeProviderRuntime runtime) {
+  return common_result(destroy_runtime(runtime));
+}
+
+TiForgeRuntimeProviderResult common_execution(
+    TiForgeRuntimeProviderRuntime runtime,
+    uint32_t version,
+    size_t api_size,
+    void *out_api) {
+  if (!runtime || !out_api || api_size < sizeof(TiForgeCudssExecutionApi)) {
+    return common_result(
+        fail(TI_FORGE_CUDSS_ERROR_INVALID_ARGUMENT,
+             "cuDSS execution API output is null or truncated"));
+  }
+  if (version != TI_FORGE_RUNTIME_PROVIDER_EXECUTION_ABI_VERSION) {
+    return common_result(fail(TI_FORGE_CUDSS_ERROR_ABI_MISMATCH,
+                              "unsupported cuDSS common execution ABI"));
+  }
+  auto *api = static_cast<TiForgeCudssExecutionApi *>(out_api);
+  *api = {};
+  api->struct_size = sizeof(*api);
+  api->execution_abi_version = version;
+  const auto result =
+      taichi_forge_cudss_provider_query(TI_FORGE_CUDSS_PROVIDER_ABI_VERSION,
+                                        sizeof(api->provider), &api->provider);
+  if (result != TI_FORGE_CUDSS_SUCCESS)
+    return common_result(result);
+  const auto *owner = checked(runtime);
+  if (owner->config_set && owner->config_get && owner->data_get) {
+    api->configuration = {sizeof(api->configuration),
+                          TI_FORGE_CUDSS_CONFIGURATION_ABI_VERSION, configure,
+                          analysis_memory_estimates};
+  }
+  if (owner->set_mem_handler)
+    api->allocator = {sizeof(api->allocator), 1, set_allocator};
+  if (owner->data_get)
+    api->factor_statistics = {sizeof(api->factor_statistics), 1,
+                              read_factor_statistics_i32};
+  return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
+}
+}  // namespace
+
+extern "C" TI_FORGE_CUDSS_EXPORT TiForgeRuntimeProviderResult
+taichi_forge_cudss_runtime_provider_query(uint32_t requested_abi_version,
+                                          size_t api_size,
+                                          TiForgeRuntimeProviderApi *out_api) {
+  if (!out_api || api_size < sizeof(*out_api)) {
+    return common_result(
+        fail(TI_FORGE_CUDSS_ERROR_INVALID_ARGUMENT,
+             "cuDSS common provider API is null or truncated"));
+  }
+  if (requested_abi_version != TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION) {
+    return common_result(fail(TI_FORGE_CUDSS_ERROR_ABI_MISMATCH,
+                              "unsupported cuDSS common provider ABI"));
+  }
+  constexpr uint64_t features =
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_VERSION_QUERY |
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_REQUIRED_SYMBOL_AUDIT |
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_TRANSIENT_PROBE |
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_EXECUTION_API;
+  // The 14 mandatory symbols audited by make_runtime; extension symbols stay
+  // optional and their availability is reflected in the execution table.
+  *out_api = {sizeof(*out_api),
+              TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION,
+              {sizeof(TiForgeRuntimeProviderInfo),
+               TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION, features, 14, 0, "cudss",
+               kProviderName, "0.8.x", kBuildIdentity},
+              common_probe,
+              common_create,
+              common_destroy,
+              common_execution,
+              get_last_error};
+  last_error.clear();
+  return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
 }

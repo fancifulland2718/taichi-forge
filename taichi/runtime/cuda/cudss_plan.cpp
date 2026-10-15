@@ -6,10 +6,11 @@
 #include <mutex>
 #include <unordered_set>
 #include "taichi/common/dynamic_loader.h"
-#include "taichi/cudss/forge_cudss_provider.h"
+#include "taichi/cudss/forge_cudss_runtime_provider.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/runtime/native_provider.h"
 
 namespace taichi::lang {
 namespace {
@@ -54,21 +55,25 @@ void validate_cudss_matrix_contract(int matrix_type, int matrix_view) {
       "CUDA cuDSS general matrices require the full matrix view.");
 }
 
+void require_cudss_driver() {
+  auto &cuda_driver = CUDADriver::get_instance_without_context();
+  TI_ERROR_IF(!cuda_driver.nvidia_extensions_available() ||
+                  cuda_driver.get_version_major() < 12,
+              "CUDA cuDSS requires the NVIDIA CUDA driver API 12.0 or "
+              "newer.");
+  auto &cublas = CUBLASDriver::get_instance();
+  TI_ERROR_IF(!cublas.is_loaded() && !cublas.load_cublas(),
+              "CUDA cuDSS requires a compatible user-managed cuBLAS "
+              "runtime.");
+}
+
 class CudssProviderRuntime {
  public:
   CudssProviderRuntime(const std::string &adapter_path,
                        const std::string &runtime_library_path) {
     TI_ERROR_IF(adapter_path.empty(),
                 "CUDA cuDSS requires a bundled Forge provider adapter.");
-    auto &cuda_driver = CUDADriver::get_instance_without_context();
-    TI_ERROR_IF(!cuda_driver.nvidia_extensions_available() ||
-                    cuda_driver.get_version_major() < 12,
-                "CUDA cuDSS requires the NVIDIA CUDA driver API 12.0 or "
-                "newer.");
-    auto &cublas = CUBLASDriver::get_instance();
-    TI_ERROR_IF(!cublas.is_loaded() && !cublas.load_cublas(),
-                "CUDA cuDSS requires a compatible user-managed cuBLAS "
-                "runtime.");
+    require_cudss_driver();
 
     loader_ = std::make_unique<DynamicLoader>(adapter_path);
     TI_ERROR_IF(!loader_->loaded(),
@@ -85,29 +90,7 @@ class CudssProviderRuntime {
                 "(result {}).",
                 TI_FORGE_CUDSS_PROVIDER_ABI_VERSION,
                 static_cast<int>(query_result));
-    TI_ERROR_IF(
-        api_.struct_size < sizeof(api_) ||
-            api_.provider_abi_version != TI_FORGE_CUDSS_PROVIDER_ABI_VERSION ||
-            api_.info.struct_size < sizeof(api_.info) ||
-            api_.info.provider_abi_version !=
-                TI_FORGE_CUDSS_PROVIDER_ABI_VERSION ||
-            api_.info.cudss_header_version / 100 != 8,
-        "CUDA cuDSS bundled adapter identity is incompatible.");
-    constexpr uint64_t required_features =
-        TI_FORGE_CUDSS_FEATURE_CSR | TI_FORGE_CUDSS_FEATURE_DENSE_VECTOR |
-        TI_FORGE_CUDSS_FEATURE_STAGED_EXECUTION |
-        TI_FORGE_CUDSS_FEATURE_VALUE_REBIND |
-        TI_FORGE_CUDSS_FEATURE_EXPLICIT_STREAM;
-    TI_ERROR_IF((api_.info.features & required_features) != required_features,
-                "CUDA cuDSS bundled adapter lacks required features.");
-    TI_ERROR_IF(!api_.create_runtime || !api_.destroy_runtime || !api_.create ||
-                    !api_.destroy || !api_.set_stream || !api_.config_create ||
-                    !api_.config_destroy || !api_.data_create ||
-                    !api_.data_destroy || !api_.matrix_create_csr ||
-                    !api_.matrix_create_dn || !api_.matrix_destroy ||
-                    !api_.matrix_set_values || !api_.matrix_set_csr_pointers ||
-                    !api_.execute || !api_.get_last_error,
-                "CUDA cuDSS bundled adapter API table is incomplete.");
+    validate_api();
     TiForgeCudssRuntime candidate_runtime = nullptr;
     TiForgeCudssRuntimeInfo candidate_info{};
     candidate_info.struct_size = sizeof(candidate_info);
@@ -135,11 +118,31 @@ class CudssProviderRuntime {
     runtime_info_ = candidate_info;
   }
 
+  explicit CudssProviderRuntime(std::shared_ptr<NativeProviderRuntime> owner)
+      : shared_owner_(std::move(owner)) {
+    TI_ERROR_IF(!shared_owner_ ||
+                    shared_owner_->provider_info().provider_id != "cudss" ||
+                    shared_owner_->provider_info().supported_version_family !=
+                        "0.8.x" ||
+                    shared_owner_->info().version_major != 0 ||
+                    shared_owner_->info().version_minor != 8,
+                "CUDA cuDSS requires a compatible common provider runtime.");
+    require_cudss_driver();
+    shared_api_ = shared_owner_->execution_api<TiForgeCudssExecutionApi>();
+    api_ = shared_api_.provider;
+    validate_api();
+    runtime_ = shared_owner_->handle();
+    const auto &info = shared_owner_->info();
+    runtime_info_ = {sizeof(runtime_info_), info.version_major,
+                     info.version_minor, info.version_patch,
+                     info.library_path.c_str()};
+  }
+
   CudssProviderRuntime(const CudssProviderRuntime &) = delete;
   CudssProviderRuntime &operator=(const CudssProviderRuntime &) = delete;
 
   ~CudssProviderRuntime() {
-    if (runtime_ && api_.destroy_runtime) {
+    if (runtime_ && !shared_owner_ && api_.destroy_runtime) {
       const auto result = api_.destroy_runtime(runtime_);
       if (result != TI_FORGE_CUDSS_SUCCESS) {
         TI_WARN("CUDA cuDSS adapter runtime cleanup failed (result {}).",
@@ -158,6 +161,15 @@ class CudssProviderRuntime {
   }
 
   TiForgeCudssConfigurationApi configuration_api() const {
+    if (shared_owner_) {
+      const auto &api = shared_api_.configuration;
+      TI_ERROR_IF(
+          api.struct_size < sizeof(api) ||
+              api.abi_version != TI_FORGE_CUDSS_CONFIGURATION_ABI_VERSION ||
+              !api.configure || !api.analysis_memory_estimates,
+          "CUDA cuDSS configuration extension is incompatible.");
+      return api;
+    }
     auto *symbol = loader_->load_function_optional(
         TI_FORGE_CUDSS_CONFIGURATION_QUERY_SYMBOL);
     TI_ERROR_IF(!symbol,
@@ -177,6 +189,13 @@ class CudssProviderRuntime {
   }
 
   TiForgeCudssFactorStatisticsApi factor_statistics_api() const {
+    if (shared_owner_) {
+      const auto &api = shared_api_.factor_statistics;
+      if (api.struct_size != sizeof(api) || api.abi_version != 1 ||
+          !api.read_i32)
+        return {};
+      return api;
+    }
     auto *symbol = loader_->load_function_optional(
         TI_FORGE_CUDSS_FACTOR_STATISTICS_QUERY_SYMBOL);
     TiForgeCudssFactorStatisticsApi result{};
@@ -199,6 +218,13 @@ class CudssProviderRuntime {
   }
 
   TiForgeCudssAllocatorApi allocator_api() const {
+    if (shared_owner_) {
+      const auto &api = shared_api_.allocator;
+      TI_ERROR_IF(api.struct_size < sizeof(api) || api.abi_version != 1 ||
+                      !api.set_allocator,
+                  "CUDA cuDSS Graph allocator extension is incompatible.");
+      return api;
+    }
     auto *symbol =
         loader_->load_function_optional(TI_FORGE_CUDSS_ALLOCATOR_QUERY_SYMBOL);
     TI_ERROR_IF(!symbol,
@@ -213,6 +239,32 @@ class CudssProviderRuntime {
   }
 
  private:
+  void validate_api() const {
+    TI_ERROR_IF(
+        api_.struct_size < sizeof(api_) ||
+            api_.provider_abi_version != TI_FORGE_CUDSS_PROVIDER_ABI_VERSION ||
+            api_.info.struct_size < sizeof(api_.info) ||
+            api_.info.provider_abi_version !=
+                TI_FORGE_CUDSS_PROVIDER_ABI_VERSION ||
+            api_.info.cudss_header_version / 100 != 8,
+        "CUDA cuDSS bundled adapter identity is incompatible.");
+    constexpr uint64_t required_features =
+        TI_FORGE_CUDSS_FEATURE_CSR | TI_FORGE_CUDSS_FEATURE_DENSE_VECTOR |
+        TI_FORGE_CUDSS_FEATURE_STAGED_EXECUTION |
+        TI_FORGE_CUDSS_FEATURE_VALUE_REBIND |
+        TI_FORGE_CUDSS_FEATURE_EXPLICIT_STREAM;
+    TI_ERROR_IF((api_.info.features & required_features) != required_features,
+                "CUDA cuDSS bundled adapter lacks required features.");
+    TI_ERROR_IF(!api_.create_runtime || !api_.destroy_runtime || !api_.create ||
+                    !api_.destroy || !api_.set_stream || !api_.config_create ||
+                    !api_.config_destroy || !api_.data_create ||
+                    !api_.data_destroy || !api_.matrix_create_csr ||
+                    !api_.matrix_create_dn || !api_.matrix_destroy ||
+                    !api_.matrix_set_values || !api_.matrix_set_csr_pointers ||
+                    !api_.execute || !api_.get_last_error,
+                "CUDA cuDSS bundled adapter API table is incomplete.");
+  }
+
   std::string adapter_error() const {
     if (!api_.get_last_error) {
       return "adapter error unavailable";
@@ -227,6 +279,8 @@ class CudssProviderRuntime {
   }
 
   std::unique_ptr<DynamicLoader> loader_;
+  std::shared_ptr<NativeProviderRuntime> shared_owner_;
+  TiForgeCudssExecutionApi shared_api_{};
   TiForgeCudssProviderApi api_{};
   TiForgeCudssRuntime runtime_{nullptr};
   TiForgeCudssRuntimeInfo runtime_info_{};
@@ -415,16 +469,14 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
   CudaCudssPlanImpl(const CudaCudssMatrixView &matrix,
                     int matrix_type,
                     int matrix_view,
-                    const std::string &adapter_path,
-                    const std::string &runtime_library_path,
+                    std::unique_ptr<CudssProviderRuntime> provider,
                     std::shared_ptr<RuntimeFaultDomain> fault_domain,
                     const std::vector<int> &configuration,
                     bool graph_owned)
       : rows_(static_cast<std::size_t>(matrix.rows)),
         nonzeros_(static_cast<std::size_t>(matrix.nonzeros)),
         graph_owned_(graph_owned),
-        provider_(std::make_unique<CudssProviderRuntime>(adapter_path,
-                                                         runtime_library_path)),
+        provider_(std::move(provider)),
         fault_domain_(std::move(fault_domain)) {
     validate_cudss_matrix_contract(matrix_type, matrix_view);
     TI_ERROR_IF(graph_owned && configuration.empty(),
@@ -1182,7 +1234,24 @@ class CudaCudssPlanImpl final : public CudaCudssPlan {
   mutable std::mutex mutex_;
 };
 
+void validate_matrix_owner(
+    const CudaCudssMatrixView &matrix,
+    bool graph_owned,
+    const std::shared_ptr<RuntimeFaultDomain> &fault_domain) {
+  TI_ERROR_IF(!matrix.rows || matrix.rows != matrix.columns ||
+                  !matrix.nonzeros || !matrix.row_offsets ||
+                  !matrix.column_indices || !matrix.values ||
+                  (!graph_owned && !matrix.matrix_id) || !fault_domain,
+              "cuDSS requires a validated square f32/i32 CSR, live identity, "
+              "and fault owner.");
+}
 }  // namespace
+
+const NativeProviderDefinition &cuda_cudss_provider_definition() {
+  static const NativeProviderDefinition definition{
+      "cudss", TI_FORGE_CUDSS_RUNTIME_PROVIDER_QUERY_SYMBOL, "0.8.x"};
+  return definition;
+}
 
 std::shared_ptr<CudaCudssPlan> make_cuda_cudss_plan(
     const CudaCudssMatrixView &matrix,
@@ -1193,14 +1262,26 @@ std::shared_ptr<CudaCudssPlan> make_cuda_cudss_plan(
     std::shared_ptr<RuntimeFaultDomain> fault_domain,
     const std::vector<int> &configuration,
     bool graph_owned) {
-  TI_ERROR_IF(!matrix.rows || matrix.rows != matrix.columns ||
-                  !matrix.nonzeros || !matrix.row_offsets ||
-                  !matrix.column_indices || !matrix.values ||
-                  (!graph_owned && !matrix.matrix_id) || !fault_domain,
-              "cuDSS requires a validated square f32/i32 CSR, live identity, "
-              "and fault owner.");
+  validate_matrix_owner(matrix, graph_owned, fault_domain);
   return std::make_shared<CudaCudssPlanImpl>(
-      matrix, matrix_type, matrix_view, adapter_path, runtime_library_path,
+      matrix, matrix_type, matrix_view,
+      std::make_unique<CudssProviderRuntime>(adapter_path,
+                                             runtime_library_path),
+      std::move(fault_domain), configuration, graph_owned);
+}
+
+std::shared_ptr<CudaCudssPlan> make_cuda_cudss_plan(
+    const CudaCudssMatrixView &matrix,
+    int matrix_type,
+    int matrix_view,
+    std::shared_ptr<NativeProviderRuntime> provider,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    const std::vector<int> &configuration,
+    bool graph_owned) {
+  validate_matrix_owner(matrix, graph_owned, fault_domain);
+  return std::make_shared<CudaCudssPlanImpl>(
+      matrix, matrix_type, matrix_view,
+      std::make_unique<CudssProviderRuntime>(std::move(provider)),
       std::move(fault_domain), configuration, graph_owned);
 }
 }  // namespace taichi::lang
