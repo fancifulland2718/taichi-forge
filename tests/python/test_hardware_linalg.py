@@ -630,6 +630,20 @@ def test_cusparse_triangular_retains_analysis_updates_values_and_captures_graph(
     with pytest.raises(RuntimeError, match="shape"):
         ti.hardware.linalg.spsv_f32(matrix, wrong, solution)
 
+    # The matrix retains analysis after the Graphs retire their capture streams.
+    # Refresh must bind a live execution stream before reusing either plan.
+    graph.close()
+    spsm_graph.close()
+    updated_values.from_numpy(updated_host_values * 2)
+    matrix.update_values(updated_values)
+    ti.hardware.linalg.spsv_f32(matrix, rhs, solution)
+    ti.hardware.linalg.spsm_f32(matrix, rhs_matrix, solution_matrix)
+    np.testing.assert_allclose(solution.to_numpy(), updated_expected / 2, rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(solution_matrix.to_numpy(), updated_expected_matrix / 2, rtol=2e-5, atol=2e-5)
+    after_retirement = matrix._debug_runtime_stats()["operations"]
+    assert after_retirement["spsv_analysis_builds"] == stats["operations"]["spsv_analysis_builds"]
+    assert after_retirement["spsm_analysis_builds"] == stats["operations"]["spsm_analysis_builds"]
+
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_vendor_commands_preserve_cross_provider_graph_order():

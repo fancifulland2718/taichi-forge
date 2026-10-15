@@ -3119,17 +3119,19 @@ void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
       csr_val_, reinterpret_cast<void *>(src), nnz_ * sizeof(float32));
   record_transfer_bytes(0, 0, nnz_ * sizeof(float32));
   auto &cusparse = CUSPARSEDriver::get_instance();
+  // Host-side JIT updates execute on the runtime's default stream. A retained
+  // plan may still be bound to a capture stream owned by a retired Graph.
   if (cusparse.capabilities().spsv_value_update_available) {
     for (auto &[key, plan] : spsv_plans_) {
       (void)key;
-      plan->native->update_values();
+      plan->native->update_values(nullptr);
       ++spsv_value_updates_;
     }
   }
   if (cusparse.capabilities().spsm_value_update_available) {
     for (auto &[key, plan] : spsm_plans_) {
       (void)key;
-      plan->native->update_values();
+      plan->native->update_values(nullptr);
       ++spsm_value_updates_;
     }
   }

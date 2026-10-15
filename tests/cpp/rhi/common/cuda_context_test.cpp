@@ -265,6 +265,9 @@ TEST(CUSPARSETriangularPlan, CapturedValueRefreshUsesReplayValues) {
       CUgraphExec executable{nullptr};
       bool active{false};
       ~Capture() {
+        release();
+      }
+      void release() {
         auto &driver = CUDADriver::get_instance();
         if (active)
           driver.stream_end_capture.call(stream, &graph);
@@ -276,6 +279,10 @@ TEST(CUSPARSETriangularPlan, CapturedValueRefreshUsesReplayValues) {
           driver.graph_destroy.call_with_warning(graph);
         if (stream)
           driver.stream_destroy.call_with_warning(stream);
+        stream = nullptr;
+        graph = nullptr;
+        executable = nullptr;
+        active = false;
       }
     } capture;
     driver.stream_create(&capture.stream, CU_STREAM_NON_BLOCKING);
@@ -303,6 +310,19 @@ TEST(CUSPARSETriangularPlan, CapturedValueRefreshUsesReplayValues) {
           EXPECT_NEAR(output[i * rhs + j], float((i + 1) * (j + 1)) / scale,
                       1e-6f);
     }
+    capture.release();
+    auto changed = initial;
+    for (auto &value : changed)
+      value *= 2;
+    driver.memcpy_host_to_device(values, changed.data(), sizeof(changed));
+    // Explicit rebinding must not inspect or reuse the retired capture stream.
+    plan.update_values(nullptr);
+    plan.record(nullptr);
+    driver.stream_synchronize(nullptr);
+    driver.memcpy_device_to_host(output.data(), y, output.size() * sizeof(float));
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < rhs; ++j)
+        EXPECT_NEAR(output[i * rhs + j], float((i + 1) * (j + 1)) / 2, 1e-6f);
   }
 }
 

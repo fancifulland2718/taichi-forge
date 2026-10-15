@@ -496,10 +496,6 @@ void CudaCsrTriangularPlan::record(CUstream stream) {
   }
 }
 
-void CudaCsrTriangularPlan::update_values() {
-  update_values(stream_);
-}
-
 void CudaCsrTriangularPlan::update_values(CUstream stream) {
   TI_ERROR_IF(!initialized_,
               "CUDA CSR triangular values require a prepared plan.");

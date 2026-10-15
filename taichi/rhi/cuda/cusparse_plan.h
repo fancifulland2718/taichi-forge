@@ -168,7 +168,6 @@ class CudaCsrTriangularPlan final {
   void record(CUstream stream);
   // Explicit refresh of retained numeric analysis at the same CSR address.
   // The no-argument form preserves the live JIT plan's current stream.
-  void update_values();
   void update_values(CUstream stream);
   std::size_t workspace_bytes() const {
     return workspace_bytes_;
