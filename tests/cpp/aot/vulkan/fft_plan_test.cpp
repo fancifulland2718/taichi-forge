@@ -3,16 +3,20 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/runtime/vulkan_fft_plan.h"
+#include "taichi/runtime/native_provider.h"
+#include "taichi/vkfft/forge_vkfft_runtime_provider.h"
 
 #include <cmath>
 #include <complex>
 #include <cstdlib>
 #include <limits>
+#include <tuple>
 
 namespace taichi::lang {
 namespace {
 
-class VulkanFftPlanTest : public ::testing::TestWithParam<bool> {
+class VulkanFftPlanTest
+    : public ::testing::TestWithParam<std::tuple<bool, bool>> {
  protected:
   void SetUp() override {
     if (!vulkan::is_vulkan_api_available())
@@ -66,6 +70,7 @@ class VulkanFftPlanTest : public ::testing::TestWithParam<bool> {
 };
 
 TEST_P(VulkanFftPlanTest, IndependentBindingsReplayAndCommandRetirement) {
+  const auto [inline_recording, common_provider] = GetParam();
   constexpr std::size_t count = 3 * 8 * 2;
   constexpr std::size_t bytes = count * sizeof(float);
   auto allocate = [&] {
@@ -85,22 +90,34 @@ TEST_P(VulkanFftPlanTest, IndependentBindingsReplayAndCommandRetirement) {
   }
   upload(first_allocation, input);
   upload(second_allocation, other);
+  auto session =
+      std::make_unique<NativeProviderSession>(NativeProviderLocations{
+          {"vkfft", {adapter, ""}}, {"unused", {"not-loaded", ""}}});
+  auto runtime = common_provider
+                     ? session->runtime(vulkan_fft_provider_definition())
+                     : nullptr;
+  std::weak_ptr<NativeProviderRuntime> runtime_lease = runtime;
+  auto prepare = [&](std::shared_ptr<DeviceAllocationGuard> storage,
+                     const VulkanFftPlanConfig &description) {
+    return common_provider
+               ? make_vulkan_fft_plan(*device, *storage, bytes, storage,
+                                      description, runtime)
+               : make_vulkan_fft_plan(*device, *storage, bytes, storage,
+                                      description, adapter);
+  };
   VulkanFftPlanConfig config{{8}, 3, -1, false, 2};
-  auto forward =
-      make_vulkan_fft_plan(*device, *first, bytes, first, config, adapter);
+  auto forward = prepare(first, config);
   config.batch_tile = 0;
-  auto independent =
-      make_vulkan_fft_plan(*device, *second, bytes, second, config, adapter);
+  auto independent = prepare(second, config);
   config.direction = 1;
   config.normalize_inverse = true;
   config.batch_tile = 2;
-  auto inverse =
-      make_vulkan_fft_plan(*device, *first, bytes, first, config, adapter);
+  auto inverse = prepare(first, config);
   const auto facts = forward->statistics();
   EXPECT_EQ(facts.at("batch_tile"), 2);
   EXPECT_EQ(facts.at("application_count"), 2);
   EXPECT_GT(facts.at("shader_module_count"), 0);
-  if (GetParam()) {
+  if (inline_recording) {
     ASSERT_TRUE(forward->supports_inline_recording());
     ASSERT_TRUE(independent->supports_inline_recording());
     ASSERT_TRUE(inverse->supports_inline_recording());
@@ -114,12 +131,12 @@ TEST_P(VulkanFftPlanTest, IndependentBindingsReplayAndCommandRetirement) {
   ASSERT_EQ(forward_status, RhiResult::success);
   ASSERT_EQ(inverse_status, RhiResult::success);
   forward_commands->memory_barrier();
-  forward->record(forward_commands.get(), GetParam());
+  forward->record(forward_commands.get(), inline_recording);
   forward_commands->memory_barrier();
-  independent->record(forward_commands.get(), GetParam());
+  independent->record(forward_commands.get(), inline_recording);
   forward_commands->memory_barrier();
   inverse_commands->memory_barrier();
-  inverse->record(inverse_commands.get(), GetParam());
+  inverse->record(inverse_commands.get(), inline_recording);
   inverse_commands->memory_barrier();
 
   std::weak_ptr<VulkanFftPlanCore> plan_lease = forward;
@@ -129,8 +146,12 @@ TEST_P(VulkanFftPlanTest, IndependentBindingsReplayAndCommandRetirement) {
   inverse.reset();
   first.reset();
   second.reset();
+  runtime.reset();
+  session.reset();
   EXPECT_FALSE(plan_lease.expired());
   EXPECT_FALSE(storage_lease.expired());
+  if (common_provider)
+    EXPECT_FALSE(runtime_lease.expired());
   for (int replay = 0; replay < 2; ++replay) {
     upload(first_allocation, input);
     upload(second_allocation, other);
@@ -153,6 +174,7 @@ TEST_P(VulkanFftPlanTest, IndependentBindingsReplayAndCommandRetirement) {
   stream->command_sync();
   EXPECT_TRUE(plan_lease.expired());
   EXPECT_TRUE(storage_lease.expired());
+  EXPECT_TRUE(runtime_lease.expired());
 }
 
 TEST_F(VulkanFftPlanTest, RejectsInvalidStorageAndConfigBeforeAdapterLoad) {
@@ -185,6 +207,42 @@ TEST_F(VulkanFftPlanTest, RejectsInvalidStorageAndConfigBeforeAdapterLoad) {
   reject(64, lease, "batch tile");
 }
 
-INSTANTIATE_TEST_SUITE_P(RecordingModes, VulkanFftPlanTest, ::testing::Bool());
+INSTANTIATE_TEST_SUITE_P(RecordingModes,
+                         VulkanFftPlanTest,
+                         ::testing::Combine(::testing::Bool(),
+                                            ::testing::Bool()));
+
+TEST(VulkanFftProvider, MetadataAndSessionWithoutDeviceCreation) {
+  const char *path = std::getenv("TI_VKFFT_LIBRARY_PATH");
+  if (!path || !*path)
+    GTEST_SKIP() << "Set TI_VKFFT_LIBRARY_PATH for the real FFT adapter";
+  auto module =
+      NativeProviderModule::load(vulkan_fft_provider_definition(), path);
+  EXPECT_TRUE(module->info().features &
+              TI_FORGE_RUNTIME_PROVIDER_FEATURE_EMBEDDED_RUNTIME);
+  EXPECT_EQ(module->info().required_symbol_count, 0);
+  const auto facts = module->probe();
+  EXPECT_EQ(facts.version_major, 1);
+  EXPECT_EQ(facts.version_minor, 3);
+  EXPECT_EQ(facts.version_patch, 4);
+  EXPECT_EQ(facts.cuda_runtime_version, 0);
+  EXPECT_TRUE(facts.library_path.empty());
+  EXPECT_NE(facts.build_version.find("glslang"), std::string::npos);
+  EXPECT_THROW(module->probe("unused-vendor-path"), NativeProviderError);
+  EXPECT_THROW(module->create_runtime("unused-vendor-path"),
+               NativeProviderError);
+  auto runtime = module->create_runtime();
+  const auto api = runtime->execution_api<TiForgeVkfftExecutionApi>();
+  EXPECT_EQ(api.provider.vkfft_version, 10304);
+  EXPECT_NE(api.recipe.create, nullptr);
+  EXPECT_NE(api.record_inline, nullptr);
+  EXPECT_THROW(runtime->execution_api<TiForgeVkfftExecutionApi>(2),
+               NativeProviderError);
+  std::weak_ptr<NativeProviderModule> retained = module;
+  module.reset();
+  EXPECT_FALSE(retained.expired());
+  runtime.reset();
+  EXPECT_TRUE(retained.expired());
+}
 }  // namespace
 }  // namespace taichi::lang

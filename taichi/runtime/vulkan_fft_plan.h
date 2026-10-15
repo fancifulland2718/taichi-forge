@@ -9,6 +9,8 @@
 #include "taichi/rhi/device.h"
 
 namespace taichi::lang {
+class NativeProviderRuntime;
+struct NativeProviderDefinition;
 namespace vulkan {
 class VulkanDevice;
 }
@@ -45,5 +47,14 @@ std::shared_ptr<VulkanFftPlanCore> make_vulkan_fft_plan(
     std::shared_ptr<void> storage_lease,
     const VulkanFftPlanConfig &config,
     const std::string &adapter_path);
+
+const NativeProviderDefinition &vulkan_fft_provider_definition();
+std::shared_ptr<VulkanFftPlanCore> make_vulkan_fft_plan(
+    vulkan::VulkanDevice &device,
+    DeviceAllocation storage,
+    std::size_t storage_bytes,
+    std::shared_ptr<void> storage_lease,
+    const VulkanFftPlanConfig &config,
+    std::shared_ptr<NativeProviderRuntime> runtime);
 
 }  // namespace taichi::lang

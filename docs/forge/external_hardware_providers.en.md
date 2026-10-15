@@ -1693,6 +1693,14 @@ root ordering and whole-recipe search are distinct capabilities.
 
 ## Optional Vulkan FFT plans
 
+The adapter also exposes the common runtime-provider query, declaring VkFFT/glslang
+as embedded code. This permits an empty external vendor-symbol inventory while
+retaining ABI, version and execution-table validation. The common session accepts
+no separate vendor-library path and creates no GPU plan during probing or session
+creation. FFT plans use the same native core and retain the session until commands
+retire. The original ABI1 entry points remain compatible; this integration alone
+does not provide automatic VkFFT Graph AOT export or a standalone SDK component.
+
 The current source exposes `ti.hardware.fft.VulkanFftPlan`. It requires a native
 runtime containing the FFT bridge and the separate
 `taichi_forge_vkfft_provider_abi1_vkfft134` DLL/SO. The adapter compiles VkFFT 1.3.4

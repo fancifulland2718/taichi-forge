@@ -1,7 +1,8 @@
-#include "taichi/vkfft/forge_vkfft_provider.h"
+#include "taichi/vkfft/forge_vkfft_runtime_provider.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -409,4 +410,134 @@ int taichi_forge_vkfft_record_inline(TiForgeVkfftPlan handle,
   TiForgeVkfftRecipeFacts observations{};
   FactsScope scope(observations);
   return record_plan_commands(*static_cast<Plan *>(handle), command);
+}
+
+namespace {
+// No device, shader compilation or driver probing at session creation. This
+// owner identifies the embedded code; device-specific plans lease the session
+// (and therefore its DLL) through the common native provider layer.
+struct EmbeddedRuntime {};
+
+#define FORGE_VKFFT_STRING_IMPL(value) #value
+#define FORGE_VKFFT_STRING(value) FORGE_VKFFT_STRING_IMPL(value)
+constexpr char kBuildIdentity[] =
+    "vkfft-1.3.4-glslang-" FORGE_VKFFT_STRING(GLSLANG_VERSION_MAJOR) "."
+    FORGE_VKFFT_STRING(GLSLANG_VERSION_MINOR) "."
+    FORGE_VKFFT_STRING(GLSLANG_VERSION_PATCH) "-common-v1";
+#undef FORGE_VKFFT_STRING
+#undef FORGE_VKFFT_STRING_IMPL
+
+TiForgeRuntimeProviderResult common_fail(TiForgeRuntimeProviderResult result,
+                                         const char *message) {
+  fail(message, -1);
+  return result;
+}
+
+TiForgeRuntimeProviderResult common_probe(const char *library_path,
+                                          TiForgeRuntimeInfo *info) {
+  if ((library_path && *library_path) ||
+      (info && info->struct_size < sizeof(*info))) {
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT,
+                        "VkFFT embeds its vendor runtime; library_path must "
+                        "be empty and runtime info must not be truncated");
+  }
+  const auto version = static_cast<uint32_t>(VkFFTGetVersion());
+  if (info)
+    *info = {sizeof(*info), version / 10000, (version / 100) % 100,
+             version % 100, 0, 0, "", kBuildIdentity};
+  error_message[0] = '\0';
+  return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
+}
+
+TiForgeRuntimeProviderResult common_create(
+    const char *library_path,
+    TiForgeRuntimeProviderRuntime *out,
+    TiForgeRuntimeInfo *info) {
+  if (!out)
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT,
+                        "VkFFT runtime output is null");
+  *out = nullptr;
+  const auto result = common_probe(library_path, info);
+  if (result != TI_FORGE_RUNTIME_PROVIDER_SUCCESS)
+    return result;
+  *out = new (std::nothrow) EmbeddedRuntime;
+  if (!*out)
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_OUT_OF_MEMORY,
+                        "VkFFT runtime owner allocation failed");
+  return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
+}
+
+TiForgeRuntimeProviderResult common_destroy(
+    TiForgeRuntimeProviderRuntime runtime) {
+  if (!runtime)
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT,
+                        "VkFFT runtime is null");
+  delete static_cast<EmbeddedRuntime *>(runtime);
+  error_message[0] = '\0';
+  return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
+}
+
+TiForgeRuntimeProviderResult common_execution(
+    TiForgeRuntimeProviderRuntime runtime,
+    uint32_t version,
+    size_t size,
+    void *out) {
+  if (!runtime || !out || size < sizeof(TiForgeVkfftExecutionApi))
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT,
+                        "VkFFT execution API is null or truncated");
+  if (version != TI_FORGE_RUNTIME_PROVIDER_EXECUTION_ABI_VERSION)
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH,
+                        "unsupported VkFFT common execution ABI");
+  auto *api = static_cast<TiForgeVkfftExecutionApi *>(out);
+  *api = {};
+  api->struct_size = sizeof(*api);
+  api->execution_abi_version = version;
+  if (taichi_forge_vkfft_provider_query(TI_FORGE_VKFFT_ABI_VERSION,
+                                       sizeof(api->provider), &api->provider) ||
+      taichi_forge_vkfft_recipe_query(TI_FORGE_VKFFT_RECIPE_ABI_VERSION,
+                                      sizeof(api->recipe), &api->recipe))
+    return TI_FORGE_RUNTIME_PROVIDER_ERROR_INTERNAL;
+  api->record_inline = taichi_forge_vkfft_record_inline;
+  error_message[0] = '\0';
+  return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
+}
+
+size_t common_error(char *destination, size_t size) {
+  const auto required = std::strlen(error_message) + 1;
+  if (destination && size) {
+    const auto count = std::min(size - 1, required - 1);
+    std::memcpy(destination, error_message, count);
+    destination[count] = '\0';
+  }
+  return required;
+}
+}  // namespace
+
+TiForgeRuntimeProviderResult taichi_forge_vkfft_runtime_provider_query(
+    uint32_t requested_abi_version,
+    size_t api_size,
+    TiForgeRuntimeProviderApi *out_api) {
+  if (!out_api || api_size < sizeof(*out_api))
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT,
+                        "VkFFT common provider API is null or truncated");
+  if (requested_abi_version != TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION)
+    return common_fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH,
+                        "unsupported VkFFT common provider ABI");
+  constexpr uint64_t features =
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_VERSION_QUERY |
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_REQUIRED_SYMBOL_AUDIT |
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_TRANSIENT_PROBE |
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_EXECUTION_API |
+      TI_FORGE_RUNTIME_PROVIDER_FEATURE_EMBEDDED_RUNTIME;
+  // The vendor code is statically linked. There are no dynamically resolved
+  // vendor symbols; Vulkan driver/device facts belong to actual plan creation.
+  *out_api = {sizeof(*out_api),
+              TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION,
+              {sizeof(TiForgeRuntimeProviderInfo),
+               TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION, features, 0, 0, "vkfft",
+               "Vulkan FFT", "1.3.4", kBuildIdentity},
+              common_probe, common_create, common_destroy, common_execution,
+              common_error};
+  error_message[0] = '\0';
+  return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
 }

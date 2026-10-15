@@ -4,7 +4,8 @@
 #include <limits>
 #include "taichi/common/dynamic_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
-#include "taichi/vkfft/forge_vkfft_provider.h"
+#include "taichi/runtime/native_provider.h"
+#include "taichi/vkfft/forge_vkfft_runtime_provider.h"
 
 namespace taichi::lang {
 namespace {
@@ -41,31 +42,38 @@ class VulkanFftPlanImpl final
       public vkapi::DeviceObj,
       public std::enable_shared_from_this<VulkanFftPlanImpl> {
  public:
-  explicit VulkanFftPlanImpl(const std::string &path) : library_(path) {
-    TI_ERROR_IF(!library_.loaded(), "Vulkan FFT adapter is unavailable: {}",
+  explicit VulkanFftPlanImpl(const std::string &path)
+      : library_(std::make_unique<DynamicLoader>(path)) {
+    TI_ERROR_IF(!library_->loaded(), "Vulkan FFT adapter is unavailable: {}",
                 path);
     TiForgeVkfftQueryFn query{};
-    library_.load_function(TI_FORGE_VKFFT_QUERY_SYMBOL, query);
-    TI_ERROR_IF(query(TI_FORGE_VKFFT_ABI_VERSION, sizeof(api_), &api_) != 0 ||
-                    api_.struct_size != sizeof(api_) ||
-                    api_.abi_version != TI_FORGE_VKFFT_ABI_VERSION ||
-                    api_.vkfft_version != 10304 || !api_.create ||
-                    !api_.append || !api_.memory || !api_.destroy ||
-                    !api_.last_error,
+    library_->load_function(TI_FORGE_VKFFT_QUERY_SYMBOL, query);
+    TI_ERROR_IF(query(TI_FORGE_VKFFT_ABI_VERSION, sizeof(api_), &api_) != 0,
                 "Vulkan FFT adapter ABI is incompatible: {}", path);
+    validate_api(false);
     auto recipe_query = reinterpret_cast<TiForgeVkfftRecipeQueryFn>(
-        library_.load_function_optional(TI_FORGE_VKFFT_RECIPE_QUERY_SYMBOL));
+        library_->load_function_optional(TI_FORGE_VKFFT_RECIPE_QUERY_SYMBOL));
     if (recipe_query) {
-      TI_ERROR_IF(
-          recipe_query(TI_FORGE_VKFFT_RECIPE_ABI_VERSION, sizeof(recipe_api_),
-                       &recipe_api_) != 0 ||
-              recipe_api_.struct_size != sizeof(recipe_api_) ||
-              recipe_api_.abi_version != TI_FORGE_VKFFT_RECIPE_ABI_VERSION ||
-              !recipe_api_.create || !recipe_api_.describe,
-          "Vulkan FFT recipe extension ABI is incompatible: {}", path);
+      TI_ERROR_IF(recipe_query(TI_FORGE_VKFFT_RECIPE_ABI_VERSION,
+                               sizeof(recipe_api_), &recipe_api_) != 0,
+                  "Vulkan FFT recipe extension ABI is incompatible: {}", path);
     }
     record_inline_ = reinterpret_cast<TiForgeVkfftRecordInlineFn>(
-        library_.load_function_optional(TI_FORGE_VKFFT_RECORD_INLINE_SYMBOL));
+        library_->load_function_optional(TI_FORGE_VKFFT_RECORD_INLINE_SYMBOL));
+    validate_api(recipe_query != nullptr);
+  }
+
+  explicit VulkanFftPlanImpl(std::shared_ptr<NativeProviderRuntime> runtime)
+      : runtime_(std::move(runtime)) {
+    TI_ERROR_IF(
+        !runtime_ || runtime_->provider_info().provider_id != "vkfft" ||
+            runtime_->provider_info().supported_version_family != "1.3.4",
+        "Vulkan FFT requires a matching VkFFT provider runtime");
+    const auto execution = runtime_->execution_api<TiForgeVkfftExecutionApi>();
+    api_ = execution.provider;
+    recipe_api_ = execution.recipe;
+    record_inline_ = execution.record_inline;
+    validate_api(recipe_api_.struct_size != 0);
   }
 
   ~VulkanFftPlanImpl() override {
@@ -164,8 +172,23 @@ class VulkanFftPlanImpl final
   }
 
  private:
+  void validate_api(bool has_recipe) const {
+    TI_ERROR_IF(api_.struct_size != sizeof(api_) ||
+                    api_.abi_version != TI_FORGE_VKFFT_ABI_VERSION ||
+                    api_.vkfft_version != 10304 || !api_.create ||
+                    !api_.append || !api_.memory || !api_.destroy ||
+                    !api_.last_error,
+                "Vulkan FFT adapter ABI is incompatible");
+    TI_ERROR_IF(has_recipe && (recipe_api_.struct_size != sizeof(recipe_api_) ||
+                               recipe_api_.abi_version !=
+                                   TI_FORGE_VKFFT_RECIPE_ABI_VERSION ||
+                               !recipe_api_.create || !recipe_api_.describe),
+                "Vulkan FFT recipe extension ABI is incompatible");
+  }
+
   // Keep the library loaded through plan destruction, then release storage.
-  DynamicLoader library_;
+  std::shared_ptr<NativeProviderRuntime> runtime_;
+  std::unique_ptr<DynamicLoader> library_;
   TiForgeVkfftApi api_{};
   TiForgeVkfftRecipeApi recipe_api_{};
   TiForgeVkfftRecordInlineFn record_inline_{nullptr};
@@ -177,6 +200,27 @@ class VulkanFftPlanImpl final
 };
 }  // namespace
 
+const NativeProviderDefinition &vulkan_fft_provider_definition() {
+  static const NativeProviderDefinition definition{
+      "vkfft", TI_FORGE_VKFFT_RUNTIME_PROVIDER_QUERY_SYMBOL, "1.3.4"};
+  return definition;
+}
+
+namespace {
+void validate_storage(vulkan::VulkanDevice &device,
+                      DeviceAllocation storage,
+                      std::size_t storage_bytes,
+                      const std::shared_ptr<void> &storage_lease,
+                      const VulkanFftPlanConfig &config) {
+  const auto required = validate_config(config);
+  TI_ERROR_IF(storage.device != &device || !storage_lease,
+              "Vulkan FFT requires local storage and its lifetime lease");
+  TI_ERROR_IF(
+      storage_bytes != required || device.get_vkbuffer_size(storage) < required,
+      "Vulkan FFT buffer must contain the complete compact transform");
+}
+}  // namespace
+
 std::shared_ptr<VulkanFftPlanCore> make_vulkan_fft_plan(
     vulkan::VulkanDevice &device,
     DeviceAllocation storage,
@@ -184,13 +228,22 @@ std::shared_ptr<VulkanFftPlanCore> make_vulkan_fft_plan(
     std::shared_ptr<void> storage_lease,
     const VulkanFftPlanConfig &config,
     const std::string &adapter_path) {
-  const auto required = validate_config(config);
-  TI_ERROR_IF(storage.device != &device || !storage_lease,
-              "Vulkan FFT requires local storage and its lifetime lease");
-  TI_ERROR_IF(
-      storage_bytes != required || device.get_vkbuffer_size(storage) < required,
-      "Vulkan FFT buffer must contain the complete compact transform");
+  validate_storage(device, storage, storage_bytes, storage_lease, config);
   auto plan = std::make_shared<VulkanFftPlanImpl>(adapter_path);
+  plan->initialize(device, storage, storage_bytes, std::move(storage_lease),
+                   config);
+  return plan;
+}
+
+std::shared_ptr<VulkanFftPlanCore> make_vulkan_fft_plan(
+    vulkan::VulkanDevice &device,
+    DeviceAllocation storage,
+    std::size_t storage_bytes,
+    std::shared_ptr<void> storage_lease,
+    const VulkanFftPlanConfig &config,
+    std::shared_ptr<NativeProviderRuntime> runtime) {
+  validate_storage(device, storage, storage_bytes, storage_lease, config);
+  auto plan = std::make_shared<VulkanFftPlanImpl>(std::move(runtime));
   plan->initialize(device, storage, storage_bytes, std::move(storage_lease),
                    config);
   return plan;

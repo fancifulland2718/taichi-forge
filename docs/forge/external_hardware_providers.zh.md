@@ -1355,6 +1355,12 @@ capture/replay、root 有序执行与 whole-recipe 搜索是不同能力。
 
 ## 可选 Vulkan FFT 计划
 
+当前 adapter 还提供统一 runtime provider 查询入口，声明 VkFFT/glslang 内嵌于 adapter。
+这种声明允许外部厂商符号清单为空，仍校验 ABI、版本及执行表；统一 session 不接受额外
+vendor library 路径，也不在探测或创建 session 时创建 GPU 计划。实际 FFT 计划复用同一
+原生核心并保留 session 至命令退休。原 ABI1 入口保持兼容；这项接线本身尚不表示已支持
+VkFFT Graph 的 AOT 自动导出或独立 SDK 安装组件。
+
 当前源码提供 `ti.hardware.fft.VulkanFftPlan`，要求包含 FFT 原生桥接的 runtime，以及独立
 `taichi_forge_vkfft_provider_abi1_vkfft134` DLL/SO。adapter 使用 VkFFT 1.3.4 和匹配的静态
 glslang/SPIRV-Tools 构建；执行需要 Vulkan loader/driver，不需要 CUDA、Vulkan SDK 或共享
