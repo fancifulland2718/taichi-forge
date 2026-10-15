@@ -26,6 +26,85 @@ struct ConflictingDescriptor {
   static constexpr std::uint32_t version = TestDescriptor::version;
 };
 
+TEST(NativeOperationRegistry, BindingGroupsValidateTheCompleteInventory) {
+  NativeOperationRegistry registry;
+  registry.define<TestDescriptor>([](Device &, const TestDescriptor &) {});
+  int decoded = 0;
+  registry.register_schema<TestDescriptor>(
+      "test", "group", {"plan"},
+      [&](const liong::json::JsonValue &parameters) {
+        operation_json::fields(parameters, {"rhs_count"});
+        ++decoded;
+        return [](const NativeOperationBindings &) { return TestDescriptor{}; };
+      },
+      {}, {"values"},
+      NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}});
+  auto description =
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"test","operation":"group","version":1,
+      "parameters":{"rhs_count":64},"bindings":{"plan":"p","values":"v"}})"));
+  for (int i = 0; i < 64; ++i) {
+    description.bindings.emplace("rhs_" + std::to_string(i), "input");
+    description.bindings.emplace("output_" + std::to_string(i),
+                                 "solution_" + std::to_string(i));
+  }
+  EXPECT_NO_THROW(registry.decode(description));
+  EXPECT_EQ(decoded, 1);
+  description.bindings.erase("values");
+  EXPECT_NO_THROW(registry.decode(description));
+  EXPECT_EQ(decoded, 2);
+  for (const char *parameters :
+       {"{}", "null", "[]", R"({"rhs_count":true})", R"({"rhs_count":-1})",
+        R"({"rhs_count":1.0})", R"({"rhs_count":9223372036854775807})",
+        R"({"rhs_count":63})", R"({"rhs_count":65})"}) {
+    auto bad = description;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;
+  }
+  EXPECT_EQ(decoded,
+            2);  // Reject malformed inventory before its typed decoder.
+  for (const auto *port : {"plan", "rhs_0", "output_63"}) {
+    auto bad = description;
+    bad.bindings.erase(port);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  for (const auto *port : {"rhs_00", "rhs_64", "outputs_0", "unused"}) {
+    auto bad = description;
+    bad.bindings.emplace(port, "input");
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  description.parameters = liong::json::parse_complete(R"({"rhs_count":0})");
+  description.bindings = {{"plan", "p"}};
+  EXPECT_NO_THROW(registry.decode(description));
+  EXPECT_EQ(decoded, 3);  // Individual operations may require a nonempty group.
+}
+
+TEST(NativeOperationRegistry, BindingGroupsRejectAmbiguousRegistration) {
+  NativeOperationRegistry registry;
+  registry.define<TestDescriptor>([](Device &, const TestDescriptor &) {});
+  auto decode = [](const liong::json::JsonValue &) {
+    return [](const NativeOperationBindings &) { return TestDescriptor{}; };
+  };
+  using Group = NativeOperationRegistry::BindingGroup;
+  for (const auto &group :
+       {Group{"", {"rhs"}}, Group{"count", {}}, Group{"count", {""}},
+        Group{"count", {"rhs", "rhs"}}, Group{"count", {"fixed"}},
+        Group{"count", {"optional"}}}) {
+    EXPECT_THROW(
+        registry.register_schema<TestDescriptor>(
+            "test", "group", {"fixed_0"}, decode, {}, {"optional_1"}, group),
+        std::invalid_argument);
+  }
+  EXPECT_THROW(registry.register_schema<TestDescriptor>(
+                   "test", "group", {}, decode, "legacy", {},
+                   Group{"count", {"rhs"}}),
+               std::invalid_argument);
+  // Failed registration must not reserve the schema key.
+  EXPECT_NO_THROW(registry.register_schema<TestDescriptor>(
+      "test", "group", {"fixed_0"}, decode, {}, {"optional_1"},
+      Group{"count", {"rhs", "output"}}));
+}
+
 TEST(NativeOperationRegistry, CsrDescriptionsDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto matrix = NativeOperationDescription::parse(liong::json::parse_complete(

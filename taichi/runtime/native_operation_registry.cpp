@@ -11,7 +11,8 @@ void NativeOperationRegistry::register_schema_impl(
     std::vector<std::string> ports,
     ErasedDecoder decode,
     std::string legacy_kind,
-    std::vector<std::string> optional_ports) {
+    std::vector<std::string> optional_ports,
+    std::optional<BindingGroup> binding_group) {
   using operation_json::name;
   name(liong::json::JsonValue(std::get<0>(key)));
   name(liong::json::JsonValue(std::get<1>(key)));
@@ -27,6 +28,23 @@ void NativeOperationRegistry::register_schema_impl(
     if (!unique.insert(port).second)
       throw std::invalid_argument("Duplicate native schema binding: " + port);
   }
+  if (binding_group) {
+    name(liong::json::JsonValue(binding_group->count_parameter));
+    if (binding_group->prefixes.empty() || !legacy_kind.empty())
+      throw std::invalid_argument(
+          "Binding groups require prefixes and a native schema");
+    std::set<std::string> prefixes;
+    for (const auto &prefix : binding_group->prefixes) {
+      name(liong::json::JsonValue(prefix));
+      if (!prefixes.insert(prefix).second)
+        throw std::invalid_argument("Duplicate binding group prefix: " +
+                                    prefix);
+      for (const auto &port : unique)
+        if (port.compare(0, prefix.size() + 1, prefix + "_") == 0)
+          throw std::invalid_argument(
+              "Binding group conflicts with fixed port: " + port);
+    }
+  }
   if (schemas_.count(key) ||
       (!legacy_kind.empty() && legacy_schemas_.count(legacy_kind)))
     throw std::invalid_argument("Duplicate native operation schema");
@@ -38,7 +56,8 @@ void NativeOperationRegistry::register_schema_impl(
   }
   auto inserted = schemas_.emplace(
       key, Schema{std::move(definition_key), type, std::move(ports),
-                  std::move(decode), std::move(optional_ports)});
+                  std::move(decode), std::move(optional_ports),
+                  std::move(binding_group)});
   try {
     if (!legacy_kind.empty())
       legacy_schemas_.emplace(std::move(legacy_kind), std::move(key));
@@ -60,7 +79,23 @@ NativeOperationRegistry::DecodedOperation NativeOperationRegistry::decode(
   if (definition(schema.definition, schema.type).kind != object_kind)
     throw std::invalid_argument(
         "Native operation/resource schema kind mismatch");
-  for (const auto &port : schema.ports) {
+  std::set<std::string> required(schema.ports.begin(), schema.ports.end());
+  if (schema.binding_group) {
+    const auto &group = *schema.binding_group;
+    if (!description.parameters.is_obj() ||
+        !description.parameters.obj.inner.count(group.count_parameter))
+      throw std::invalid_argument("Missing native binding group count: " +
+                                  group.count_parameter);
+    const auto count =
+        operation_json::integer(description.parameters[group.count_parameter]);
+    if (count > description.bindings.size() / group.prefixes.size())
+      throw std::invalid_argument(
+          "Binding group count exceeds supplied bindings");
+    for (std::uint64_t i = 0; i < count; ++i)
+      for (const auto &prefix : group.prefixes)
+        required.insert(prefix + "_" + std::to_string(i));
+  }
+  for (const auto &port : required) {
     if (!description.bindings.count(port))
       throw std::invalid_argument("Missing native operation binding: " + port);
   }
@@ -69,11 +104,10 @@ NativeOperationRegistry::DecodedOperation NativeOperationRegistry::decode(
   result.version_ = schema.definition.second;
   result.type_ = schema.type;
   result.object_kind_ = object_kind;
+  auto allowed = required;
+  allowed.insert(schema.optional_ports.begin(), schema.optional_ports.end());
   for (const auto &[port, slot] : description.bindings) {
-    if (std::find(schema.ports.begin(), schema.ports.end(), port) ==
-            schema.ports.end() &&
-        std::find(schema.optional_ports.begin(), schema.optional_ports.end(),
-                  port) == schema.optional_ports.end())
+    if (!allowed.count(port))
       throw std::invalid_argument("Unknown native schema binding: " + port);
     operation_json::name(liong::json::JsonValue(slot));
     result.ports_.push_back(port);

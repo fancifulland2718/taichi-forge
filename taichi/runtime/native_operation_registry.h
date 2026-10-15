@@ -51,6 +51,14 @@ struct NativePreparationContext {
 // retire.
 class NativeOperationRegistry {
  public:
+  // Cold, finite groups named prefix_0 ... prefix_(count-1). Count is supplied
+  // by the description; the actual binding inventory bounds expansion, not an
+  // arbitrary library/application limit. All members of every group are
+  // required.
+  struct BindingGroup {
+    std::string count_parameter;
+    std::vector<std::string> prefixes;
+  };
   using Probe = std::function<NativeOperationAvailability()>;
   template <typename Descriptor>
   using Validator = std::function<void(Device &, const Descriptor &)>;
@@ -97,7 +105,8 @@ class NativeOperationRegistry {
                        std::vector<std::string> ports,
                        Decoder<Descriptor> decode,
                        std::string legacy_kind = {},
-                       std::vector<std::string> optional_ports = {}) {
+                       std::vector<std::string> optional_ports = {},
+                       std::optional<BindingGroup> binding_group = {}) {
     if (!decode)
       throw std::invalid_argument("Native schema requires a decoder");
     register_schema_impl(
@@ -115,7 +124,8 @@ class NativeOperationRegistry {
                 return std::make_shared<Descriptor>(bind(bindings));
               };
         },
-        std::move(legacy_kind), std::move(optional_ports));
+        std::move(legacy_kind), std::move(optional_ports),
+        std::move(binding_group));
   }
 
   DecodedOperation decode(
@@ -252,6 +262,7 @@ class NativeOperationRegistry {
     std::vector<std::string> ports;
     ErasedDecoder decode;
     std::vector<std::string> optional_ports;
+    std::optional<BindingGroup> binding_group;
   };
   std::map<NativeOperationDescription::Key, Schema> schemas_;
   std::map<std::string, NativeOperationDescription::Key> legacy_schemas_;
@@ -262,7 +273,8 @@ class NativeOperationRegistry {
                             std::vector<std::string> ports,
                             ErasedDecoder decode,
                             std::string legacy_kind,
-                            std::vector<std::string> optional_ports);
+                            std::vector<std::string> optional_ports,
+                            std::optional<BindingGroup> binding_group);
 
   void define_impl(const std::string &kind,
                    std::uint32_t version,
