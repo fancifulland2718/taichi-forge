@@ -16,6 +16,44 @@
 
 namespace taichi::lang {
 namespace {
+TEST(NativeOperationRegistry, VkfftPlansDecodeWithoutLoadingProvider) {
+  const auto &registry = native_operation_registry();
+  auto plan = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"vkfft","operation":"plan_f32","version":1,
+      "parameters":{"dimensions":[8],"batch_count":3,"batch_tile":2,
+      "direction":"inverse","normalization":"inverse"},"bindings":{"data":"x"}})"));
+  EXPECT_EQ(registry.decode(plan, NativeObjectKind::resource).kind(),
+            "vkfft_plan_f32");
+  for (const char *parameters :
+       {R"({"dimensions":[]})", R"({"dimensions":[0]})",
+        R"({"dimensions":[17]})", R"({"dimensions":[2,2,2,2]})",
+        R"({"dimensions":[8],"batch_count":0})",
+        R"({"dimensions":[8],"batch_count":true})",
+        R"({"dimensions":[8],"batch_tile":2})",
+        R"({"dimensions":[8],"direction":"backward"})",
+        R"({"dimensions":[8],"normalization":"ortho"})",
+        R"({"dimensions":[1073741824,1073741824,8]})",
+        R"({"dimensions":[8],"adapter_path":"ignored.dll"})"}) {
+    auto bad = plan;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad, NativeObjectKind::resource),
+                 std::invalid_argument)
+        << parameters;
+  }
+  plan.bindings.clear();
+  EXPECT_THROW(registry.decode(plan, NativeObjectKind::resource),
+               std::invalid_argument);
+  auto execute = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"vkfft","operation":"execute_f32","version":1,
+      "parameters":{},"bindings":{"plan":"p"}})"));
+  EXPECT_EQ(registry.decode(execute).kind(), "vkfft_execute_f32");
+  EXPECT_THROW(registry.decode(execute, NativeObjectKind::resource),
+               std::invalid_argument);
+  execute.parameters =
+      liong::json::parse_complete(R"({"direction":"inverse"})");
+  EXPECT_THROW(registry.decode(execute), std::invalid_argument);
+}
+
 struct TestDescriptor {
   static constexpr const char *kind = "test.operation";
   static constexpr std::uint32_t version = 1;

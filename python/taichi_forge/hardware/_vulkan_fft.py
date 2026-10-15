@@ -400,6 +400,26 @@ class _Recording(BackendCommandRecording):
     def _freeze_graph_recipe_source(self):
         return _FrozenVulkanFftSource(self) if self._recipe_owned else None
 
+    def _export_aot(self, context):
+        if type(self.plan) is not VulkanFftPlan:
+            raise TaichiRuntimeError("AOT Vulkan FFT variants require their own reconstruction contract")
+        self.plan.validate_graph_lifetime()
+        plan = context.resource(
+            self.plan,
+            "vkfft",
+            "plan_f32",
+            parameters=dict(
+                dimensions=self.plan.dimensions,
+                batch_count=self.plan.batch_count,
+                direction=self.plan.direction,
+                normalization=self.plan.normalization,
+                batch_tile=self.plan._statistics.get("batch_tile", 0),
+            ),
+            bindings=dict(data=self.data),
+        )
+        context.native("vkfft", "execute_f32", bindings=dict(plan=plan), parameters={})
+        return ()
+
     def _vulkan_graph_command(self):
         self.plan.validate_graph_lifetime()
         return self.plan._runtime_prog._vulkan_fft_graph_command(

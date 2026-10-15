@@ -1,7 +1,39 @@
 #include "taichi/runtime/vulkan_fft_plan.h"
 
-#ifdef TI_WITH_VULKAN
 #include <limits>
+#include <stdexcept>
+
+namespace taichi::lang {
+std::uint64_t vulkan_fft_storage_bytes(const VulkanFftPlanConfig &config) {
+  if (config.dimensions.empty() || config.dimensions.size() > 3 ||
+      !config.batches || (config.direction != -1 && config.direction != 1) ||
+      config.batch_tile > config.batches)
+    throw std::invalid_argument(
+        "Vulkan FFT requires rank 1--3, positive batches, direction -1/+1 "
+        "and a batch tile no greater than the batch count");
+  std::uint64_t bytes = 2 * sizeof(float);
+  for (auto extent : config.dimensions) {
+    auto remaining = extent;
+    if (!remaining)
+      throw std::invalid_argument("Vulkan FFT dimensions must be positive");
+    for (auto radix : {2, 3, 5, 7, 11, 13}) {
+      while (remaining % radix == 0)
+        remaining /= radix;
+    }
+    if (remaining != 1)
+      throw std::invalid_argument(
+          "Vulkan FFT dimensions must have prime factors at most 13");
+    if (extent > std::numeric_limits<std::uint64_t>::max() / bytes)
+      throw std::invalid_argument("Vulkan FFT storage size overflow");
+    bytes *= extent;
+  }
+  if (config.batches > std::numeric_limits<std::uint64_t>::max() / bytes)
+    throw std::invalid_argument("Vulkan FFT storage size overflow");
+  return bytes * config.batches;
+}
+}  // namespace taichi::lang
+
+#ifdef TI_WITH_VULKAN
 #include "taichi/common/dynamic_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/runtime/native_provider.h"
@@ -9,33 +41,6 @@
 
 namespace taichi::lang {
 namespace {
-
-std::uint64_t validate_config(const VulkanFftPlanConfig &config) {
-  TI_ERROR_IF(config.dimensions.empty() || config.dimensions.size() > 3 ||
-                  !config.batches ||
-                  (config.direction != -1 && config.direction != 1) ||
-                  config.batch_tile > config.batches,
-              "Vulkan FFT requires rank 1--3, positive batches, direction "
-              "-1/+1 and a batch tile no greater than the batch count");
-  std::uint64_t bytes = 2 * sizeof(float);
-  for (auto extent : config.dimensions) {
-    auto remaining = extent;
-    TI_ERROR_IF(!remaining, "Vulkan FFT dimensions must be positive");
-    for (auto radix : {2, 3, 5, 7, 11, 13}) {
-      while (remaining % radix == 0)
-        remaining /= radix;
-    }
-    TI_ERROR_IF(remaining != 1,
-                "Vulkan FFT dimensions must have prime factors at most 13");
-    TI_ERROR_IF(extent > std::numeric_limits<std::uint64_t>::max() / bytes,
-                "Vulkan FFT storage size overflow");
-    bytes *= extent;
-  }
-  TI_ERROR_IF(
-      config.batches > std::numeric_limits<std::uint64_t>::max() / bytes,
-      "Vulkan FFT storage size overflow");
-  return bytes * config.batches;
-}
 
 class VulkanFftPlanImpl final
     : public VulkanFftPlanCore,
@@ -212,7 +217,7 @@ void validate_storage(vulkan::VulkanDevice &device,
                       std::size_t storage_bytes,
                       const std::shared_ptr<void> &storage_lease,
                       const VulkanFftPlanConfig &config) {
-  const auto required = validate_config(config);
+  const auto required = vulkan_fft_storage_bytes(config);
   TI_ERROR_IF(storage.device != &device || !storage_lease,
               "Vulkan FFT requires local storage and its lifetime lease");
   TI_ERROR_IF(

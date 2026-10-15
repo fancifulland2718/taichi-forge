@@ -1698,8 +1698,10 @@ as embedded code. This permits an empty external vendor-symbol inventory while
 retaining ABI, version and execution-table validation. The common session accepts
 no separate vendor-library path and creates no GPU plan during probing or session
 creation. FFT plans use the same native core and retain the session until commands
-retire. The original ABI1 entry points remain compatible; this integration alone
-does not provide automatic VkFFT Graph AOT export or a standalone SDK component.
+retire. The original ABI1 entry points remain compatible. Ordinary recordings and
+selected batch partitions can export to AOT, preserving their fixed layouts and
+tile choices; see [AOT consumption](aot_sdk.en.md). Whole-Graph binding-frame export
+and the optional standalone SDK component are not yet qualified.
 
 The current source exposes `ti.hardware.fft.VulkanFftPlan`. It requires a native
 runtime containing the FFT bridge and the separate

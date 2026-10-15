@@ -25,6 +25,9 @@ struct VulkanFftPlanConfig {
   std::uint64_t batch_tile{0};
 };
 
+// Pure cold validation, also available to artifact decoders without Vulkan.
+std::uint64_t vulkan_fft_storage_bytes(const VulkanFftPlanConfig &config);
+
 // Shared execution core, independent of Program handles, Ndarray and Python.
 // Creation may initialize LUTs on the ordered queue; it never transforms the
 // input. Recording retains the plan, adapter and storage in the command list.

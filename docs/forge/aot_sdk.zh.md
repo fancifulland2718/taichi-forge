@@ -759,6 +759,17 @@ rank 1–3、批次、原地执行、独立 workspace、失败回滚和借用 ow
 导出的 scale/FFT/energy 链还用解析梯度核对显式组装的伴随，不表示自动 FFT AD。
 变换与 Graph 合同见 [NVIDIA cuFFT 文档](https://docs.nvidia.com/cuda/cufft/index.html)。
 
+Vulkan 注册 `vkfft/plan_f32` 资源（绑定 `data`）与 `vkfft/execute_f32` 操作（绑定 `plan`）。
+计划参数为 `dimensions`、`batch_count`、`direction`、`normalization`、`batch_tile`；
+沿用 `VulkanFftPlan` 的紧凑行优先、原地 complex-f32 合同。普通 recording 和已选 batch
+分块可通过 `Module.add_execution_plan` 自动导出，保留实际 tile；缓冲非零子视图偏移和未获
+资格的 plan 子类明确拒绝。每个 prepared 绑定重建独立计划，命令保留计划及存储至退休。
+消费者通过 `runtime.configure_provider("vkfft", adapter_path=...)` 提供含公共 query 与
+inline 扩展的 adapter；不提供额外 vendor `library_path`。准备可能编译 shader、初始化 LUT，
+不执行用户 FFT、不改写输入；暖重放不重建计划。Windows Vulkan 已验证一维及二维混合
+kernel/FFT、归一化逆变换、显式谱能量伴随、尾分块、双绑定、独立/借用消费及退休；不是自动
+FFT AD 或任意 recipe 支持声明。独立 SDK 可选组件仍待接线。
+
 CUDA 还通过外部 cuBLAS 注册 `gemm_f32`：
 
 ```python

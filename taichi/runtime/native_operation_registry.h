@@ -46,9 +46,9 @@ struct NativePreparationContext {
 // Build privately, then publish as const. No static registration side effects,
 // replacement, implicit device probing or warm-path lookup. Descriptors and
 // factories are an internal C++ contract, not an ABI for independently built
-// plugins. A factory prepares without submitting work; its result owns scratch
-// and any provider/code leases. FixedExecution retains it until recordings
-// retire.
+// plugins. A factory never executes the described operation. It may initialize
+// auxiliary storage on the owner's ordered queue; caller inputs stay unchanged.
+// Its result owns scratch and provider/code leases until recordings retire.
 class NativeOperationRegistry {
  public:
   // Cold, finite groups named prefix_0 ... prefix_(count-1). Count is supplied
@@ -309,6 +309,7 @@ const NativeOperationRegistry &native_operation_registry();
 void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
 void register_fft_operation(NativeOperationRegistry &registry);
+void register_vkfft_operations(NativeOperationRegistry &registry);
 void register_blas_operations(NativeOperationRegistry &registry);
 void register_cusparse_operations(NativeOperationRegistry &registry);
 void register_cudss_operations(NativeOperationRegistry &registry);

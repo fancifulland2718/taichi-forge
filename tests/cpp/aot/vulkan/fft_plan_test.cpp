@@ -4,6 +4,7 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/runtime/vulkan_fft_plan.h"
 #include "taichi/runtime/native_provider.h"
+#include "taichi/runtime/native_operation_registry.h"
 #include "taichi/vkfft/forge_vkfft_runtime_provider.h"
 
 #include <cmath>
@@ -191,6 +192,9 @@ TEST_F(VulkanFftPlanTest, RejectsInvalidStorageAndConfigBeforeAdapterLoad) {
       FAIL() << "Invalid FFT configuration was accepted";
     } catch (const std::string &error) {
       EXPECT_NE(error.find(expected), std::string::npos) << error;
+    } catch (const std::invalid_argument &error) {
+      EXPECT_NE(std::string(error.what()).find(expected), std::string::npos)
+          << error.what();
     }
   };
   reject(64, nullptr, "lifetime lease");
@@ -205,6 +209,41 @@ TEST_F(VulkanFftPlanTest, RejectsInvalidStorageAndConfigBeforeAdapterLoad) {
   config.batches = 1;
   config.batch_tile = 2;
   reject(64, lease, "batch tile");
+}
+
+TEST_F(VulkanFftPlanTest, AotRejectsInvalidBindingsBeforeProviderLoad) {
+  const auto &registry = native_operation_registry();
+  const auto plan = registry.decode(
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"vkfft","operation":"plan_f32","version":1,
+          "parameters":{"dimensions":[8]},"bindings":{"data":"x"}})")),
+      NativeObjectKind::resource);
+  auto [allocation, result] = device->allocate_memory_unique(
+      {64, false, false, false, AllocUsage::Storage});
+  ASSERT_EQ(result, RhiResult::success);
+  NativeArrayBinding valid{
+      allocation->get_ptr(), 64, PrimitiveType::f32, {8, 2}};
+  const auto reject = [&](NativeArrayBinding array, const char *expected) {
+    try {
+      registry.prepare_resource(Arch::vulkan, *device, plan, {{"data", array}});
+      FAIL() << "Invalid FFT binding was accepted";
+    } catch (const std::invalid_argument &error) {
+      EXPECT_NE(std::string(error.what()).find(expected), std::string::npos)
+          << error.what();
+    }
+  };
+  auto invalid = valid;
+  invalid.pointer.offset = 4;
+  reject(invalid, "subview offsets");
+  invalid = valid;
+  invalid.scalar_type = PrimitiveType::i32;
+  reject(invalid, "dtype");
+  invalid = valid;
+  invalid.shape = {16};
+  reject(invalid, "shape");
+  invalid = valid;
+  invalid.bytes = 32;
+  reject(invalid, "complete compact transform");
 }
 
 INSTANTIATE_TEST_SUITE_P(RecordingModes,

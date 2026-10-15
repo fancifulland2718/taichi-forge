@@ -972,6 +972,23 @@ An exported scale/FFT/energy chain also checks an explicitly assembled adjoint
 against an analytic gradient; this does not add automatic FFT differentiation.
 See NVIDIA's [cuFFT transform and Graph contracts](https://docs.nvidia.com/cuda/cufft/index.html).
 
+Vulkan registers a `vkfft/plan_f32` resource (binding `data`) and a
+`vkfft/execute_f32` operation (binding `plan`). Plan parameters are `dimensions`,
+`batch_count`, `direction`, `normalization`, and `batch_tile`, with the compact
+row-major, in-place complex-f32 contract of `VulkanFftPlan`. Ordinary recordings
+and selected batch partitions export through `Module.add_execution_plan`, keeping
+the actual tile. Nonzero buffer subview offsets and unqualified plan subclasses
+are rejected. Each prepared binding rebuilds an independent plan; commands retain
+its plan and storage until retirement. Configure the adapter with the common
+query and inline extension using
+`runtime.configure_provider("vkfft", adapter_path=...)`, without a separate vendor
+`library_path`. Preparation may compile shaders and initialize LUTs, but never
+executes the user FFT or changes input. Warm replay never rebuilds plans. Windows
+Vulkan checks cover mixed kernel/FFT 1D and 2D transforms, normalized inverse,
+explicit spectral-energy adjoints, tail partitions, two bindings, standalone and
+borrowed consumers, and retirement. This does not imply automatic FFT AD or
+arbitrary recipe coverage. The optional standalone SDK component is still pending.
+
 CUDA also registers `gemm_f32` using external cuBLAS:
 
 ```python
