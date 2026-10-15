@@ -1221,9 +1221,58 @@ load. Reconfiguration affects later probes/preparations; existing prepared objec
 retain their original library/resource leases. Borrowed runtimes sharing one JIT
 device have independent configuration. Paths are not serialized into artifacts.
 
-This configures registered adapter-backed factories, including the cuTENSOR,
+This configures registered adapter-backed factories, including the cuDSS, cuTENSOR,
 cuSPARSELt and AmgX operations below. It does not register arbitrary vendor symbols, change existing
 built-in cuBLAS/cuFFT discovery, or automatically export JIT recordings.
+
+CUDA cuDSS 0.8 supports explicit persistent f32/i32 CSR plans. Configure the
+`"cudss"` provider and probe `"cudss_solve_group_f32"`. Supply a Forge adapter with
+the common runtime-provider entry point and an external cuDSS library; optional
+SDK adapter installation and automatic JIT recording export remain pending.
+
+```python
+resource = {
+    "kind": "native", "name": "solver", "provider": "cudss",
+    "operation": "plan_f32", "version": 1,
+    "parameters": {"rows": n, "nonzeros": nnz, "matrix_type": "spd",
+                   "matrix_view": "full", "phase": "refactor_solve"},
+    "bindings": {"row_offsets": "row", "column_indices": "column",
+                 "values": "seed_values"},
+}
+operation = {
+    "kind": "native", "provider": "cudss", "operation": "solve_group_f32", "version": 1,
+    "parameters": {"rhs_count": 2},
+    "bindings": {"plan": "solver", "values": "current_values",
+                 "rhs_0": "b0", "output_0": "x0", "rhs_1": "b1", "output_1": "x1"},
+}
+plan = ExecutionPlan([operation], resources=[resource])
+```
+
+`row` is an `(n+1,)` i32 vector, `column` is `(nnz,)` i32, and values are `(nnz,)`
+f32. RHS and output vectors are `(n,)` f32. All require compact scalar storage on
+the same device. CSR is zero-based; unsorted rows are allowed but duplicate column
+entries are rejected. Preparation validates topology once and takes a private
+snapshot. Both dimensions must be positive and `nnz` must fit i32 row offsets.
+Replay does not read back or validate the matrix on the host.
+
+`matrix_type` accepts `general` (default), `symmetric` or `spd`; `matrix_view`
+accepts `full` (default), `lower` or `upper`, with `general` requiring `full`.
+`reordering` accepts `default`, `amd`, `nested_dissection` or `natural`; `solve`
+accepts `default` or `general`. The default `phase="solve"` retains factors from
+the seed matrix and forbids an operation `values` port. `factor_solve` and
+`refactor_solve` require current `values`, execute their numerical phase once per
+group, then solve every RHS. There is no fixed RHS-count limit; all numbered
+`rhs_0…rhs_(count-1)` and matching `output_*` ports must be supplied. Outputs must
+not overlap any group input or another output; read-only RHS storage may repeat.
+
+Each prepared instance owns its plan, without duplicating factors or plan storage
+per RHS. Close and reconfiguration follow the owner contract above. Cold
+preparation includes private seed analysis/factorization/warmup and capture,
+without executing user outputs. `workspace_bytes` includes accountable plan
+requests and capture parameters; opaque driver/vendor physical residency remains
+unknown. Windows CUDA qualification covers standalone/borrowed consumers, all
+three phases, independent bindings and kernel.grad with explicit adjoint solves.
+It does not provide provider autodiff, conditional-region or cuSOLVER support.
 
 CUDA cuTENSOR reconstruction uses the existing provider C ABI and the same
 native operation/resource registry. Select the optional cuTENSOR SDK adapter and

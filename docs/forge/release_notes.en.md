@@ -43,8 +43,11 @@ lifetimes. The entries below describe the changes.
 - The cuDSS 0.8 adapter adds a common runtime-provider entry point alongside its
   existing ABI1 interfaces. Shared native plans can retain a preparation session's
   runtime through capture and retirement, without another vendor loader per plan.
-  This supplies the ownership foundation; cuDSS AOT resource reconstruction and
-  automatic recording export are not yet included.
+  AOT can explicitly reconstruct f32/i32 CSR plans and record multi-RHS solve
+  groups with fixed factors, factorization or refactorization, sharing one
+  numerical factorization within a group. Standalone and borrowed consumers cover
+  forward execution and explicit adjoints. Automatic recording export, conditional
+  regions and optional SDK adapter installation remain pending.
 
 - cuDSS Graph memory reports count already allocated plan snapshots and vendor
   payloads as resident requested bytes. Opaque driver storage remains unknown,

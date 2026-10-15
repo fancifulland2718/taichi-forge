@@ -960,8 +960,49 @@ runtime.configure_provider("cutensor", adapter_path=None)
 provider 不加载。重配置只影响后续探测/准备，已有 prepared 保留原库与资源 lease。
 借用同一 JIT device 的 runtime 也分别持有配置；路径不写入产物。
 
-此配置作用于已注册的 adapter 工厂，包括下文 cuTENSOR、cuSPARSELt 与 AmgX 操作；不会注册任意
+此配置作用于已注册的 adapter 工厂，包括下文 cuDSS、cuTENSOR、cuSPARSELt 与 AmgX 操作；不会注册任意
 厂商符号、改变既有 cuBLAS/cuFFT 内建寻址，也不自动导出 JIT recording。
+
+CUDA cuDSS 0.8 可通过显式持久资源重建 f32/i32 CSR 计划。配置 `"cudss"` provider
+并探测 `"cudss_solve_group_f32"`；当前需提供带公共 runtime-provider 入口的 Forge
+adapter 及外部 cuDSS 库，可选 SDK 安装组件与 JIT recording 自动导出尚待接入。
+
+```python
+resource = {
+    "kind": "native", "name": "solver", "provider": "cudss",
+    "operation": "plan_f32", "version": 1,
+    "parameters": {"rows": n, "nonzeros": nnz, "matrix_type": "spd",
+                   "matrix_view": "full", "phase": "refactor_solve"},
+    "bindings": {"row_offsets": "row", "column_indices": "column",
+                 "values": "seed_values"},
+}
+operation = {
+    "kind": "native", "provider": "cudss", "operation": "solve_group_f32", "version": 1,
+    "parameters": {"rhs_count": 2},
+    "bindings": {"plan": "solver", "values": "current_values",
+                 "rhs_0": "b0", "output_0": "x0", "rhs_1": "b1", "output_1": "x1"},
+}
+plan = ExecutionPlan([operation], resources=[resource])
+```
+
+`row` 为 `(n+1,)` i32，`column` 为 `(nnz,)` i32，数值为 `(nnz,)` f32；各 RHS 和
+输出为 `(n,)` f32，均为同一设备上的紧凑标量数组。CSR 从零开始，允许行内无序，
+不允许重复列项；准备时一次检查拓扑并建立私有快照。`n`、`nnz` 为正，`nnz` 必须
+可由 i32 行偏移表示。此路径不在重放时读取或检查主机矩阵。
+
+`matrix_type` 可为 `general`（默认）、`symmetric` 或 `spd`；`matrix_view` 可为
+`full`（默认）、`lower` 或 `upper`，`general` 只接受 `full`。`reordering` 支持
+`default`、`amd`、`nested_dissection`、`natural`，`solve` 支持 `default`、`general`。
+省略 `phase` 使用 `solve`：保持种子矩阵的固定因子，操作不能提供 `values`。
+`factor_solve` 和 `refactor_solve` 必须绑定当前 `values`，每组先执行一次相应数值阶段，
+再求解全部 RHS；组数不设固定上限，所有 `rhs_0…rhs_(count-1)` 与对应 `output_*`
+必须齐全。输出不能重叠任何组内输入或其他输出；只读 RHS 可以复用。
+
+每个 prepared 独立持有计划，组内不会复制分解或计划存储；关闭和重配置遵守上述
+owner 合同。冷准备包含私有种子分析/分解/预热和捕获，不执行用户输出。
+`workspace_bytes` 包含可计量的计划请求存储与捕获参数，驱动/vendor 的物理驻留仍有
+未知部分。Windows CUDA 已验证独立/借用消费、三种阶段、双绑定及 kernel.grad 配合
+显式伴随求解；这不提供 provider 自动求导、条件区域或 cuSOLVER 覆盖。
 
 CUDA cuTENSOR 重建复用既有 provider C ABI 与同一原生操作/资源注册表。选择可选
 cuTENSOR SDK adapter，并按上文配置兼容的外部厂商库。以下例子通过命名计划执行

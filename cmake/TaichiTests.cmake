@@ -25,6 +25,7 @@ list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/struct_layout_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/execution_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cudss_plan_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_cudss_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/runtime_client_test.cpp")
 
 if (TI_WITH_OPENGL OR TI_WITH_VULKAN)

@@ -2,7 +2,7 @@
 
 #include <cmath>
 #include <limits>
-#include <unordered_set>
+#include "taichi/runtime/native_csr_contract.h"
 #include "taichi/common/operation_json.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_registry.h"
@@ -198,41 +198,6 @@ std::vector<Index> read_indices(Device &device,
   return values;
 }
 
-template <typename Offset, typename Index>
-void validate_indices(const std::vector<Offset> &offsets,
-                      const std::vector<Index> &columns,
-                      std::int64_t column_count) {
-  if (offsets.front() != 0 || offsets.back() < 0 ||
-      std::uint64_t(offsets.back()) != columns.size())
-    throw std::invalid_argument(
-        "CSR offsets must start at zero and end at nnz");
-  std::unordered_set<Index> seen;
-  for (std::size_t row = 0; row + 1 < offsets.size(); ++row) {
-    const auto begin = offsets[row], end = offsets[row + 1];
-    if (begin < 0 || end < begin || std::uint64_t(end) > columns.size())
-      throw std::invalid_argument("CSR offsets must be monotonic within nnz");
-    bool unordered = false;
-    for (auto i = begin; i < end; ++i) {
-      const auto column = columns[i];
-      if (column < 0 || column >= column_count)
-        throw std::invalid_argument("CSR column index is out of bounds");
-      if (i > begin) {
-        if (columns[i - 1] == column)
-          throw std::invalid_argument("CSR duplicate column within a row");
-        unordered |= columns[i - 1] > column;
-      }
-    }
-    // Sorted rows need no candidate set. cuSPARSE permits unsorted rows, but
-    // does not guarantee correctness for duplicate entries within one row.
-    if (unordered) {
-      seen.clear();
-      for (auto i = begin; i < end; ++i)
-        if (!seen.insert(columns[i]).second)
-          throw std::invalid_argument("CSR duplicate column within a row");
-    }
-  }
-}
-
 class CudaCsr final : public CsrF32Resource {
  public:
   CudaCsr(Device &device, CsrF32Description description)
@@ -243,13 +208,13 @@ class CudaCsr final : public CsrF32Resource {
     CUDADriver::get_instance().context_synchronize();
     const auto &arrays = description_.arrays;
     if (arrays[0].scalar_type == PrimitiveType::i32)
-      validate_indices(read_indices<std::int32_t>(device, arrays[0]),
-                       read_indices<std::int32_t>(device, arrays[1]),
-                       description_.columns);
+      validate_native_csr_indices(read_indices<std::int32_t>(device, arrays[0]),
+                                  read_indices<std::int32_t>(device, arrays[1]),
+                                  description_.columns);
     else
-      validate_indices(read_indices<std::int64_t>(device, arrays[0]),
-                       read_indices<std::int64_t>(device, arrays[1]),
-                       description_.columns);
+      validate_native_csr_indices(read_indices<std::int64_t>(device, arrays[0]),
+                                  read_indices<std::int64_t>(device, arrays[1]),
+                                  description_.columns);
   }
   Arch arch() const override {
     return Arch::cuda;
