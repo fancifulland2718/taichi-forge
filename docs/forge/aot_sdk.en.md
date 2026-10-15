@@ -499,8 +499,19 @@ Preparation validates these layouts once, and replay does not read counts back.
 
 Tests cover zero/partial/full work, packet reuse between dependent segments,
 two bindings, real downstream `.grad`, explicit payload adjoints, and retirement
-in standalone/borrowed consumers. CPU/CUDA exact/adaptive launch recipes,
-host-count clamping, producer-owned launch state, parallel regions, and indirect
+in standalone/borrowed consumers. CPU exact and CUDA logical-exact launches also
+export with paired private ABI 63 components. ExecutionPlan version 7 records
+`"launch": {"kind": "cpu_exact", "extent": "name", "capacity": 65}` or the
+`cuda_logical_exact` kind. CPU schedules the valid range; CUDA preserves its
+saturation-capped grid-stride launch and executes only valid logical iterations.
+This does not resize CUDA's physical grid or skip its launch for zero work.
+The shared launch binding adds 16 argument bytes per exact dispatch, retained
+with the prepared call; CUDA still uploads one combined argument image. The
+extent is retained even when used only by the launch description. Direct kernel
+invocation without this description is rejected before execution.
+
+CUDA adaptive physical-grid updates, host-count clamping, producer-owned launch
+state, parallel regions, and exact/indirect
 dispatch inside structured control still require separate reconstruction support;
 export does not replace them with fixed-capacity work.
 
@@ -937,7 +948,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 62.
+Current components require matching private ABI 63.
 
 Plans can separate one-time initialization from replay:
 

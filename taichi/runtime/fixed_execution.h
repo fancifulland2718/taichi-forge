@@ -29,6 +29,8 @@ class FixedExecution {
     aot::Kernel *kernel;
     LaunchContextBuilder *context;
     DevicePtr indirect_dispatch{kDeviceNullPtr};
+    DevicePtr bounded_extent{kDeviceNullPtr};
+    std::uint32_t bounded_capacity{0};
   };
   struct BufferCopy {
     DevicePtr destination;

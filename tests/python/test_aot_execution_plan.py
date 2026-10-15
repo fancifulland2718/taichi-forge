@@ -14,13 +14,32 @@ def test_selected_indirect_launch_retains_packet_and_version():
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "grid"}
-    for version in (1, 5, 7):
+    for version in (1, 5, 8):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for launch in (None, {}, dict(kind="cuda_indirect", packet="grid"),
                    dict(kind="vulkan_indirect", packet=""), dict(kind="vulkan_indirect", packet="grid", address=1)):
         with pytest.raises(ValueError):
             ExecutionPlan([dict(operation, launch=launch)])
+
+
+@pytest.mark.parametrize("kind", ["cpu_exact", "cuda_logical_exact"])
+def test_selected_exact_launch_retains_extent_and_version(kind):
+    launch = dict(kind=kind, extent="extent", capacity=65)
+    operation = dict(kind="kernel", entry="payload", arguments=["x"], launch=launch)
+    plan = ExecutionPlan([operation], resources=[dict(kind="ndarray", name="extent", dtype="i32", shape=[2])])
+    document = json.loads(plan.to_json())
+    assert document["version"] == 7
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("x",)
+    assert restored._replay_argument_names == {"x", "extent"}
+    for version in (1, 6, 8):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+    for patch in (dict(capacity=0), dict(capacity=-1), dict(capacity=True), dict(capacity=1.5),
+                  dict(capacity=2**31), dict(extent=""), dict(address=1), dict(kind="cuda_exact")):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(operation, launch=dict(launch, **patch))])
 
 
 def test_module_array_resources_keep_layout_in_the_module():

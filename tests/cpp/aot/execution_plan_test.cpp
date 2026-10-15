@@ -27,6 +27,36 @@ TEST(ExecutionPlan, SelectedIndirectLaunchRetainsPacketAndVersion) {
   }
 }
 
+TEST(ExecutionPlan, SelectedExactLaunchRetainsExtentAndVersion) {
+  for (const auto *kind : {"cpu_exact", "cuda_logical_exact"}) {
+    const std::string source = std::string(R"({"version":7,"resources":[
+      {"kind":"ndarray","name":"extent","dtype":"i32","shape":[2]}],
+      "operations":[{"kind":"kernel","entry":"payload","arguments":["x"],
+        "launch":{"kind":")") + kind + R"(","extent":"extent","capacity":65}}]})";
+    const auto plan = ExecutionPlan::parse(source);
+    EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x"}));
+    EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"extent", "x"}));
+    const auto &range = std::get<ExecutionPlan::Kernel>(plan.operations[0]).bounded_range;
+    ASSERT_TRUE(range);
+    EXPECT_EQ(range->cuda, std::string(kind) == "cuda_logical_exact");
+    EXPECT_EQ(range->extent, "extent");
+    EXPECT_EQ(range->capacity, 65);
+    for (const auto &change : std::vector<std::pair<std::string, std::string>>{
+             {"\"version\":7", "\"version\":6"},
+             {"\"capacity\":65", "\"capacity\":0"},
+             {"\"capacity\":65", "\"capacity\":-1"},
+             {"\"capacity\":65", "\"capacity\":true"},
+             {"\"capacity\":65", "\"capacity\":1.5"},
+             {"\"capacity\":65", "\"capacity\":2147483648"},
+             {"\"extent\":\"extent\"", "\"extent\":\"\""},
+             {"\"extent\":\"extent\"", "\"extent\":\"extent\",\"address\":1"}}) {
+      auto invalid = source;
+      invalid.replace(invalid.find(change.first), change.first.size(), change.second);
+      EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+    }
+  }
+}
+
 namespace {
 void validate_provider_description(const std::string &document) {
   const auto plan = ExecutionPlan::parse(document);

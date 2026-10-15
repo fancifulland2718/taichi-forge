@@ -120,6 +120,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
     mutable std::atomic<const ResolvedTaskExecutionPlan *>
         task_execution_plan_mru{nullptr};
     bool uses_root_binding{false};
+    bool uses_bounded_range{false};
   };
 
  public:
@@ -151,6 +152,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::size_t arg_buffer_size{0};
     std::size_t device_arg_buffer_size{0};
     std::size_t arg_buffer_prefix_size{0};
+    std::vector<std::uint8_t> argument_prefix;
     std::uintptr_t bounded_extent{0};
     std::uint32_t bounded_capacity{0};
     bool bounded_range{false};
@@ -189,6 +191,11 @@ class KernelLauncher : public LLVM::KernelLauncher {
   bool prepare_cuda_graph_launch_packet(Handle handle,
                                         LaunchContextBuilder &ctx,
                                         GraphLaunchPacket &packet);
+  bool prepare_cuda_graph_bounded_packet(Handle handle,
+                                         LaunchContextBuilder &ctx,
+                                         GraphLaunchPacket &packet,
+                                         void *extent,
+                                         std::uint32_t capacity);
   bool prepare_cuda_graph_bounded_range(Handle handle,
                                         LaunchContextBuilder &ctx,
                                         GraphLaunchPacket &packet,
@@ -238,8 +245,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   bool sparse_list_task_is_current(const OffloadedTask &task);
   void mark_sparse_list_task_launched(const OffloadedTask &task);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
-  void configure_root_binding(const LLVM::CompiledKernelData::InternalData &compiled,
-                              Context &context);
+  void configure_launch_bindings(
+      const LLVM::CompiledKernelData::InternalData &compiled,
+      Context &context);
   void ensure_root_binding(const Context &context);
   const std::vector<OffloadedTask> &resolve_grid_policy_tasks(
       const Context &context,

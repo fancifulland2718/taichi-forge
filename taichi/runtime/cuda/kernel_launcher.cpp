@@ -272,9 +272,12 @@ void add_cuda_graph_execution_gate(LLVMCompiledKernel &compiled) {
 
 }  // namespace
 
-void KernelLauncher::configure_root_binding(
+void KernelLauncher::configure_launch_bindings(
     const LLVM::CompiledKernelData::InternalData &compiled,
     Context &context) {
+  context.uses_bounded_range = std::any_of(
+      context.offloaded_tasks.begin(), context.offloaded_tasks.end(),
+      [](const auto &task) { return task.one_to_one; });
   // The result-buffer slot is otherwise unused for a no-return kernel. New
   // kernels use it for the compact binding; old cached kernels safely ignore
   // it and continue resolving roots through the runtime directory.
@@ -953,6 +956,7 @@ bool KernelLauncher::prepare_cuda_graph_launch_packet(
   packet.dispatch_label = ctx.dispatch_label();
   packet.arg_buffer_size = ctx.arg_buffer_size;
   packet.arg_buffer_prefix_size = 0;
+  packet.argument_prefix.clear();
   packet.device_arg_buffer_size = packet.arg_buffer_size;
   packet.bounded_extent = 0;
   packet.bounded_capacity = 0;
@@ -969,6 +973,36 @@ bool KernelLauncher::prepare_cuda_graph_launch_packet(
   return true;
 }
 
+bool KernelLauncher::prepare_cuda_graph_bounded_packet(
+    Handle handle,
+    LaunchContextBuilder &ctx,
+    GraphLaunchPacket &packet,
+    void *extent,
+    std::uint32_t capacity) {
+  if (extent == nullptr || capacity == 0 || capacity > 0x7fffffffu) {
+    return false;
+  }
+  if (!prepare_cuda_graph_launch_packet(handle, ctx, packet) ||
+      packet.offloaded_tasks.size() != 1 || !packet.offloaded_tasks[0].one_to_one) {
+    return false;
+  }
+
+  CudaBoundedRangeBinding binding;
+  binding.extent = reinterpret_cast<std::uintptr_t>(extent);
+  binding.capacity = static_cast<std::int32_t>(capacity);
+  packet.arg_buffer_prefix_size = sizeof(binding);
+  packet.device_arg_buffer_size =
+      packet.arg_buffer_prefix_size + packet.arg_buffer_size;
+  packet.bounded_extent = binding.extent;
+  packet.bounded_capacity = capacity;
+  packet.bounded_range = true;
+  // Retain the host prefix through asynchronous upload, just like the packet's
+  // ordinary argument storage. FixedGraph places both in one combined image.
+  packet.argument_prefix.resize(sizeof(binding));
+  std::memcpy(packet.argument_prefix.data(), &binding, sizeof(binding));
+  return true;
+}
+
 bool KernelLauncher::prepare_cuda_graph_bounded_range(
     Handle handle,
     LaunchContextBuilder &ctx,
@@ -976,33 +1010,13 @@ bool KernelLauncher::prepare_cuda_graph_bounded_range(
     void *extent,
     std::uint32_t capacity,
     void *stream) {
-  if (extent == nullptr || capacity == 0 || capacity > 0x7fffffffu) {
+  if (!prepare_cuda_graph_bounded_packet(handle, ctx, packet, extent, capacity))
     return false;
-  }
-  RuntimeContext context;
-  if (!prepare_cuda_graph_context(handle, ctx, context,
-                                  &packet.offloaded_tasks,
-                                  &packet.task_execution_plan_identity)) {
-    return false;
-  }
-
-  CudaBoundedRangeBinding binding;
-  binding.extent = reinterpret_cast<std::uintptr_t>(extent);
-  binding.capacity = static_cast<std::int32_t>(capacity);
-  packet.handle = handle;
-  packet.dispatch_label = ctx.dispatch_label();
-  packet.arg_buffer_size = ctx.arg_buffer_size;
-  packet.arg_buffer_prefix_size = sizeof(binding);
-  packet.device_arg_buffer_size =
-      packet.arg_buffer_prefix_size + packet.arg_buffer_size;
-  packet.bounded_extent = binding.extent;
-  packet.bounded_capacity = capacity;
-  packet.bounded_range = true;
-  packet.context = context;
   CUDADriver::get_instance().malloc_async(
       &packet.device_arg_buffer, packet.device_arg_buffer_size, stream);
   CUDADriver::get_instance().memcpy_host_to_device_async(
-      packet.device_arg_buffer, &binding, sizeof(binding), stream);
+      packet.device_arg_buffer, packet.argument_prefix.data(),
+      packet.argument_prefix.size(), stream);
   auto *device_args = static_cast<char *>(packet.device_arg_buffer) +
                       packet.arg_buffer_prefix_size;
   if (packet.arg_buffer_size > 0) {
@@ -1329,6 +1343,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   auto iter = contexts_.find(handle.get_launch_id());
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
+  TI_ERROR_IF(launcher_ctx->uses_bounded_range != ctx.has_cuda_bounded_range(),
+              "CUDA exact kernel requires its bounded launch recipe");
   ensure_root_binding(*launcher_ctx);
   auto *executor = get_runtime_executor();
   const bool listgen_reuse_adaptive =
@@ -1667,7 +1683,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     ctx->snode_tree_ids = compiled.snode_tree_ids();
     ctx->parameters = std::move(parameters);
     ctx->offloaded_tasks = std::move(data.tasks);
-    configure_root_binding(compiled.get_internal_data(), *ctx);
+    configure_launch_bindings(compiled.get_internal_data(), *ctx);
     const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
     TI_ASSERT(was_inserted);
 
@@ -1686,7 +1702,7 @@ KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
   ctx->snode_tree_ids = metadata.used_snode_tree_ids;
   ctx->parameters = metadata.args;
   ctx->offloaded_tasks = metadata.compiled_data.tasks;
-  configure_root_binding(metadata, *ctx);
+  configure_launch_bindings(metadata, *ctx);
   auto *executor = get_runtime_executor();
   auto *module = executor->create_cuda_artifact_module(artifact);
   try {
@@ -1728,7 +1744,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   ctx->snode_tree_ids = compiled.snode_tree_ids();
   ctx->parameters = std::move(parameters);
   ctx->offloaded_tasks = std::move(data.tasks);
-  configure_root_binding(compiled.get_internal_data(), *ctx);
+  configure_launch_bindings(compiled.get_internal_data(), *ctx);
   const bool inserted =
       contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second;
   TI_ASSERT(inserted);

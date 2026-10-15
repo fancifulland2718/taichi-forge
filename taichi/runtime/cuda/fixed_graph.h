@@ -25,6 +25,8 @@ class FixedGraph {
     // Cold capture callback only; never retained or invoked during replay.
     std::function<void(void *)> external;
     std::function<std::shared_ptr<CudaGraphCaptureResources>()> take_resources;
+    void *bounded_extent{nullptr};
+    std::uint32_t bounded_capacity{0};
   };
   struct While;
   using Operation = std::variant<Dispatch, std::shared_ptr<const While>>;

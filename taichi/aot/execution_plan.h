@@ -18,10 +18,16 @@ namespace taichi::lang::aot {
 // in the cold phase; replay retains no JSON or symbolic argument lookups.
 struct ExecutionPlan {
   struct Kernel {
+    struct BoundedRange {
+      bool cuda{false};
+      std::string extent;
+      std::uint32_t capacity{0};
+    };
     std::string entry;
     std::vector<std::string> arguments;
     std::string label;
     std::optional<std::string> indirect_packet;
+    std::optional<BoundedRange> bounded_range;
   };
   struct Copy {
     std::string destination;

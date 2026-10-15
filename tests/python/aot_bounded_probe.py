@@ -65,7 +65,10 @@ def main(mode, arch, artifact, case="bounded"):
                 assert "taichi_forge" not in sys.modules
             return
         plan = module.execution_plan("step")
-        indirect = any("launch" in op for op in json.loads(plan.to_json())["operations"])
+        document = json.loads(plan.to_json())
+        launch = next((op["launch"] for op in document["operations"] if "launch" in op), {})
+        indirect = launch.get("kind") == "vulkan_indirect"
+        exact = launch.get("kind") in ("cpu_exact", "cuda_logical_exact")
         calls = []
         for factor in (1, -0.5):
             frame = {
@@ -85,7 +88,9 @@ def main(mode, arch, artifact, case="bounded"):
                 write(frame["raw"], [raw], "i")
                 call()
                 assert read(frame["extent"], "i") == [count, int(count != raw)]
-                assert read(frame["visited"], "i") == [min(65, ((count + 31) // 32) * 32) if indirect else 65]
+                assert read(frame["visited"], "i") == [
+                    count if exact else min(65, ((count + 31) // 32) * 32) if indirect else 65
+                ]
                 y = [v * v if i < count else 0 for i, v in enumerate(xs)]
                 dx = [2 * v**3 if i < count else 0 for i, v in enumerate(xs)]
                 for key, expected in (("y", y), ("dy", y), ("dx", dx), ("loss", [sum(v * v for v in y) / 2])):
@@ -140,7 +145,53 @@ def main(mode, arch, artifact, case="bounded"):
             else:
                 raise AssertionError("Closed indirect packet was not retired")
             packet_call.close()
-        for shape, dtype in ((1, "i32"), (3, "i32"), (2, "f32")):
+        if exact:
+            payload = next(op for op in document["operations"] if "launch" in op)
+            try:
+                module.kernel(payload["entry"])(*(calls[0][0][name] for name in payload["arguments"]))
+            except (AotError, ValueError, RuntimeError) as error:
+                assert "bounded launch recipe" in str(error), error
+            else:
+                raise AssertionError("Direct exact kernel invocation without recipe accepted")
+            controlled = ExecutionPlan(
+                [dict(kind="while", predicate="raw", max_iterations=1, condition=[], body=[payload])]
+            )
+            try:
+                controlled.prepare(module, {name: calls[0][0][name] for name in controlled.argument_names})
+            except (AotError, ValueError, RuntimeError) as error:
+                assert "flat CPU/CUDA" in str(error), error
+            else:
+                raise AssertionError("Unqualified exact control combination was accepted")
+            ordinary = dict(payload)
+            del ordinary["launch"]
+            for operation in (
+                ordinary,
+                dict(payload, launch=dict(launch, kind="cpu_exact" if arch == "cuda" else "cuda_logical_exact")),
+            ):
+                invalid = ExecutionPlan([operation])
+                try:
+                    invalid.prepare(module, {name: calls[0][0][name] for name in invalid.argument_names})
+                except (AotError, ValueError, RuntimeError) as error:
+                    assert "bounded launch recipe" in str(error) or "backend mismatch" in str(error), error
+                else:
+                    raise AssertionError("Incompatible exact kernel launch accepted")
+            # The launch extent is a retained resource even if not a kernel argument.
+            detached = dict(payload, launch=dict(launch, extent="launch_extent"))
+            retained = ExecutionPlan([detached])
+            private_extent = runtime.ndarray("i32", 2)
+            write(private_extent, [2, 0], "i")
+            retained_frame = {name: calls[0][0][name] for name in retained.argument_names if name != "launch_extent"}
+            retained_call = retained.prepare(module, dict(retained_frame, launch_extent=private_extent))
+            retained_call()
+            private_extent.close()
+            try:
+                retained_call()
+            except (AotError, ValueError, RuntimeError):
+                pass
+            else:
+                raise AssertionError("Closed launch-only extent was not retired")
+            retained_call.close()
+        for shape, dtype in ((1, "i32"), (3, "i32"), (2, "f32"), ((1, 2), "i32")):
             bad = runtime.ndarray(dtype, shape)
             try:
                 plan.prepare(module, dict(calls[0][0], extent=bad))

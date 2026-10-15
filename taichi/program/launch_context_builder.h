@@ -78,6 +78,7 @@ class LaunchContextBuilder {
                                 bool cpu_bounded_range = false);
 
   void set_cpu_bounded_range(void *extent, std::int32_t capacity);
+  std::size_t arg_buffer_prefix_size() const noexcept;
   void set_cuda_bounded_range(const std::vector<int> &extent_arg_id,
                               std::int32_t capacity);
 

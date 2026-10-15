@@ -252,6 +252,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 
 void KernelLauncher::bind_runtime_context(const Context &registration,
                                           LaunchContextBuilder &ctx) {
+  TI_ERROR_IF(registration.bounded_range != (ctx.arg_buffer_prefix_size() != 0),
+              "CPU exact kernel requires its bounded launch recipe");
   auto *executor = get_runtime_executor();
   ctx.get_context().runtime = executor->get_llvm_runtime();
   const auto &parameters = registration.parameters;
@@ -339,12 +341,17 @@ KernelLauncher::PreparedLaunch KernelLauncher::prepare_launch(
   result.registration_ = found->second;
   bind_runtime_context(*result.registration_, ctx);
   result.context_ = ctx.get_context();
-  if (ctx.arg_buffer_size) {
+  // Exact range scheduling reads its launch binding immediately before the
+  // ordinary arguments; the prepared copy must preserve that prefix as well.
+  const auto prefix = ctx.arg_buffer_prefix_size();
+  if (ctx.arg_buffer_size || prefix) {
     result.arguments_.assign(
-        ctx.get_context().arg_buffer,
+        ctx.get_context().arg_buffer - prefix,
         ctx.get_context().arg_buffer + ctx.arg_buffer_size);
   }
-  result.context_.arg_buffer = result.arguments_.data();
+  result.context_.arg_buffer = result.arguments_.empty()
+                                   ? nullptr
+                                   : result.arguments_.data() + prefix;
   result.context_.result_buffer = nullptr;
   return result;
 }
@@ -388,6 +395,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     task_trace_metadata.reserve(data.tasks.size());
     sparse_task_metadata.reserve(data.tasks.size());
     for (auto &task : data.tasks) {
+      ctx->bounded_range |= task.one_to_one;
       auto *func_ptr = jit_module->lookup_function(task.name);
       TI_ASSERT_INFO(func_ptr, "Offloaded datum function {} not found",
                      task.name);

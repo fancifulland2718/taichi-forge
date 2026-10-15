@@ -49,5 +49,7 @@ def validate_domains(context, nodes, dispatches):
             raise TaichiRuntimeError("AOT host bounded counts require their clamping recipe")
         if context.bounded_extents.get(context.binding(domain.extent)) != domain.capacity:
             raise TaichiRuntimeError("AOT bounded dispatch requires its extent contract")
-        if dispatch.dispatch_packet is None and domain.physical_grid_requirement not in ("auto", "fixed_capacity"):
+        if dispatch.dispatch_packet is None and domain.physical_grid_requirement not in (
+            "auto", "fixed_capacity", "logical_exact", "require_exact"
+        ):
             raise TaichiRuntimeError("AOT exact bounded dispatch requires its backend launch recipe")

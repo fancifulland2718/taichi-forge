@@ -1,6 +1,7 @@
 #include "taichi/runtime/cuda/fixed_graph.h"
 #include "taichi/program/runtime_fault.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -188,22 +189,35 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       continue;
     }
     TI_ERROR_IF(!dispatch.launcher || !dispatch.context ||
-                    !dispatch.launcher->prepare_cuda_graph_launch_packet(
-                        dispatch.handle, *dispatch.context, packets[i]),
+                    !(dispatch.bounded_extent
+                          ? dispatch.launcher->prepare_cuda_graph_bounded_packet(
+                                dispatch.handle, *dispatch.context, packets[i],
+                                dispatch.bounded_extent, dispatch.bounded_capacity)
+                          : dispatch.launcher->prepare_cuda_graph_launch_packet(
+                                dispatch.handle, *dispatch.context, packets[i])),
                 "Unsupported fixed CUDA Graph dispatch");
     auto &packet = packets[i];
+    TI_ERROR_IF(!packet.bounded_range &&
+                    std::any_of(packet.offloaded_tasks.begin(),
+                                packet.offloaded_tasks.end(),
+                                [](const auto &task) { return task.one_to_one; }),
+                "CUDA exact kernel requires its bounded launch recipe");
     TI_ERROR_IF(
         image.size() > std::numeric_limits<std::size_t>::max() - alignment,
         "Fixed CUDA argument image overflows address space");
     const auto offset = (image.size() + alignment - 1) & ~(alignment - 1);
     offsets.push_back(offset);
-    TI_ERROR_IF(packet.arg_buffer_size >
+    TI_ERROR_IF(packet.device_arg_buffer_size >
                     std::numeric_limits<std::size_t>::max() - offset,
                 "Fixed CUDA argument image overflows address space");
-    if (packet.arg_buffer_size) {
-      image.resize(offset + packet.arg_buffer_size);
-      std::memcpy(image.data() + offset, packet.context.arg_buffer,
-                  packet.arg_buffer_size);
+    if (packet.device_arg_buffer_size) {
+      image.resize(offset + packet.device_arg_buffer_size);
+      if (!packet.argument_prefix.empty())
+        std::memcpy(image.data() + offset, packet.argument_prefix.data(),
+                    packet.argument_prefix.size());
+      if (packet.arg_buffer_size)
+        std::memcpy(image.data() + offset + packet.arg_buffer_prefix_size,
+                    packet.context.arg_buffer, packet.arg_buffer_size);
     }
   }
   state.bytes = image.size();
@@ -217,10 +231,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   }
   std::vector<std::uint8_t>().swap(state.host_arguments);
   for (std::size_t i = 0; i < packets.size(); ++i) {
-    if (packets[i].arg_buffer_size) {
-      packets[i].context.arg_buffer =
+    if (packets[i].device_arg_buffer_size) {
+      packets[i].device_arg_buffer =
           static_cast<char *>(state.arguments) + offsets[i];
-      packets[i].device_arg_buffer = packets[i].context.arg_buffer;
+      packets[i].context.arg_buffer =
+          static_cast<char *>(packets[i].device_arg_buffer) +
+          packets[i].arg_buffer_prefix_size;
     }
   }
   auto record_dispatch = [&](const Dispatch &dispatch, void *stream) {

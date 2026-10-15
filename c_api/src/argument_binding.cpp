@@ -287,7 +287,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     uint32_t arg_count,
     const TiArgument *args,
     uint32_t binding_count,
-    const TiNdArrayBinding *bindings) {
+    const TiNdArrayBinding *bindings,
+    bool cpu_bounded_range) {
   TI_CAPI_ARGUMENT_NULL_RV(kernel);
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
@@ -382,7 +383,7 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
   result->owner = kernel_binding.owner;
   result->kernel = ti_kernel;
   result->context =
-      std::make_unique<taichi::lang::LaunchContextBuilder>(ti_kernel);
+      std::make_unique<taichi::lang::LaunchContextBuilder>(ti_kernel, cpu_bounded_range);
   auto &builder = *result->context;
   auto &devallocs = result->allocations;
 

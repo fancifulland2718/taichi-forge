@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -12,7 +13,7 @@ import taichi_forge as ti
 from tests import test_utils
 
 
-def _export(tmp_path, indirect):
+def _export(tmp_path, indirect=False, exact=False, artifact_format=None):
     capacity = 65
 
     @ti.kernel
@@ -80,7 +81,11 @@ def _export(tmp_path, indirect):
             extent=symbols["extent"],
             capacity=capacity,
             block_dim=32,
-            physical_grid="extent" if indirect else "capacity",
+            physical_grid=(
+                ("auto" if ti.lang.impl.current_cfg().arch == ti.cuda else "extent")
+                if exact
+                else ("extent" if indirect else "capacity")
+            ),
         )
         if backward:
             graph.dispatch(energy, symbols["y"], symbols["loss"])
@@ -106,14 +111,28 @@ def _export(tmp_path, indirect):
         expected = np.arange(capacity, dtype=np.float32) ** 2 / 256
         expected[count:] = 0
         np.testing.assert_allclose(frames["y"].to_numpy(), expected)
-        assert frames["visited"].to_numpy()[0] == (min(65, ((count + 31) // 32) * 32) if indirect else 65)
+        assert frames["visited"].to_numpy()[0] == (
+            count if exact else min(65, ((count + 31) // 32) * 32) if indirect else 65
+        )
     forward.close()
     graph = builder(True).compile()
-    module = ti.aot.Module()
+    caps = (
+        [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
+        if artifact_format == "cubin"
+        else None
+    )
+    module = ti.aot.Module(artifact_format=artifact_format, caps=caps)
     plan = module.add_execution_plan("step", graph, gradients=dict(y="dy", loss="dloss"))
     document = json.loads(plan.to_json())
     launched = [op for op in document["operations"] if "launch" in op]
-    assert len(launched) == int(indirect)
+    assert len(launched) == int(indirect or exact)
+    if exact:
+        assert document["version"] == 7
+        assert launched[0]["launch"] == dict(
+            kind="cuda_logical_exact" if ti.lang.impl.current_cfg().arch == ti.cuda else "cpu_exact",
+            extent="extent",
+            capacity=capacity,
+        )
     if indirect:
         assert document["version"] == 6
         packet = launched[0]["launch"]["packet"]
@@ -160,7 +179,20 @@ def test_aot_bounded_indirect(tmp_path):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_aot_exact_bounded_requires_backend_recipe():
+def test_aot_bounded_exact(tmp_path):
+    _export(tmp_path, exact=True)
+
+
+@pytest.mark.parametrize("artifact_format", ["ptx", "cubin"])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_bounded_exact_device_artifact(tmp_path, artifact_format):
+    if artifact_format == "cubin" and not (os.environ.get("TI_CUDA_PTXAS_PATH") or shutil.which("ptxas")):
+        pytest.skip("External ptxas is required for cubin export")
+    _export(tmp_path, exact=True, artifact_format=artifact_format)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_adaptive_bounded_requires_backend_recipe():
     @ti.kernel
     def payload(extent: ti.types.ndarray(ti.i32, 1), output: ti.types.ndarray(ti.i32, 1)):
         for i in range(65):

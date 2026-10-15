@@ -733,11 +733,37 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         auto bound = capi::bind_kernel_arguments(
             rt, handle, static_cast<uint32_t>(kernel_args.size()),
             kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
-            kernel_bindings.data());
+            kernel_bindings.data(),
+            kernel->bounded_range && !kernel->bounded_range->cuda);
         if (!bound)
           return false;
         bound->context->append_dispatch_label(kernel->label);
         DevicePtr indirect_packet{kDeviceNullPtr};
+        DevicePtr bounded_extent{kDeviceNullPtr};
+        std::uint32_t bounded_capacity = 0;
+        if (kernel->bounded_range) {
+          const auto &range = *kernel->bounded_range;
+          if ((range.cuda && rt.arch != taichi::Arch::cuda) ||
+              (!range.cuda && !arch_is_cpu(rt.arch)))
+            throw MemoryBindingError("Exact bounded launch backend mismatch");
+          const auto &extent = array_binding(range.extent);
+          validate_native_array_layout(extent, {{2}, {}, 4, 4, true, "i32"});
+          if (extent.scalar_type != PrimitiveType::i32 || extent.bytes != 8)
+            throw MemoryBindingError(
+                "Exact bounded extent requires a packed i32[2]");
+          bounded_extent = extent.pointer;
+          bounded_capacity = range.capacity;
+          const auto storage = resolve_native_storage_range(
+              rt.arch, extent.pointer, extent.bytes);
+          if (storage.memory_offset % 4)
+            throw MemoryBindingError("Exact bounded extent must be i32 aligned");
+          if (!range.cuda) {
+            bound->context->set_cpu_bounded_range(
+                reinterpret_cast<void *>(
+                    static_cast<std::uintptr_t>(storage.memory_offset)),
+                range.capacity);
+          }
+        }
         if (kernel->indirect_packet) {
           if (rt.arch != taichi::Arch::vulkan)
             throw MemoryBindingError("Vulkan indirect launch requires Vulkan");
@@ -753,7 +779,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                                   bound->memories.begin(),
                                   bound->memories.end());
         operations.emplace_back(
-            FixedExecution::Dispatch{bound->kernel, bound->context.get(), indirect_packet});
+            FixedExecution::Dispatch{bound->kernel, bound->context.get(),
+                                     indirect_packet, bounded_extent,
+                                     bounded_capacity});
         prepared->plan_arguments.push_back(std::move(bound));
       } else if (const auto *copy =
                      std::get_if<aot::ExecutionPlan::Copy>(&operation)) {

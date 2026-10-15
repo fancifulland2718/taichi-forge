@@ -570,8 +570,17 @@ extent 绑定采用标量 `i32[2]`（count、overflow），顺序分段 offsets 
 `i32[segment_count + 1]`；容量仍属于选中的编译配方。布局只在准备时验证，重放不读回 count。
 
 独立/借用消费测试覆盖零量、部分/全量、相邻依赖分段复用 packet、双绑定、真实后续
-`.grad`、payload 显式伴随及退休。CPU/CUDA exact/adaptive 派发、host count 截断、
-producer-owned launch state、parallel 和结构化控制内的 indirect 仍需各自重建支持；
+`.grad`、payload 显式伴随及退休。CPU exact 与 CUDA logical-exact 也可导出，要求配对
+private ABI 63 组件。ExecutionPlan 版本 7 使用
+`"launch": {"kind": "cpu_exact", "extent": "name", "capacity": 65}` 或
+`cuda_logical_exact`。CPU 只调度有效范围；CUDA 保留饱和上限的 grid-stride 派发，
+只执行有效逻辑迭代，不据此缩减物理 grid 或省略零工作量的 launch。
+共享 launch 绑定为每个 exact dispatch 增加 16 字节参数存储，由 prepared 对象保有；
+CUDA 仍只上传一份合并的参数镜像。仅用于 launch 描述的 extent 也进入资源寿命闭包，
+缺少该描述而直接调用编译后的 exact kernel 会在执行前报错。
+
+CUDA adaptive 物理 grid 更新、host count 截断、producer-owned launch state、parallel
+和结构化控制内的 exact/indirect 仍需各自重建支持；
 导出不会将其替换为固定容量执行。
 
 未覆盖的 recording 类型/子类、控制/派发路线、观察点、
@@ -729,7 +738,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 62。
+当前组件须配套 private ABI 63。
 
 计划可以将一次性初始化与重放分开：
 

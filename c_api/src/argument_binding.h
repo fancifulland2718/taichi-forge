@@ -50,7 +50,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     uint32_t arg_count,
     const TiArgument *args,
     uint32_t binding_count,
-    const TiNdArrayBinding *bindings);
+    const TiNdArrayBinding *bindings,
+    bool cpu_bounded_range = false);
 std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
     Runtime &runtime,
     TiComputeGraph graph,

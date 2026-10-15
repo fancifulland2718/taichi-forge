@@ -6692,9 +6692,10 @@ void export_lang(py::module &m) {
     py::list sources;
     size_t native_ordinal = 0;
     for (const auto &dispatch : graph.dispatches) {
-      TI_ERROR_IF((dispatch.indirect_dispatch_arg && !include_launch) ||
-                      dispatch.cuda_bounded_dispatch ||
-                      dispatch.cpu_bounded_dispatch,
+      TI_ERROR_IF((!include_launch &&
+                   (dispatch.indirect_dispatch_arg || dispatch.cuda_bounded_dispatch ||
+                    dispatch.cpu_bounded_dispatch)) ||
+                      (dispatch.cuda_bounded_dispatch && dispatch.cuda_bounded_dispatch->adaptive_grid),
                   "Graph dispatch requires a non-kernel execution recipe");
       if (dispatch.cuda_capture_command && include_commands) {
         TI_ERROR_IF(dispatch.ti_kernel,
@@ -6717,6 +6718,18 @@ void export_lang(py::module &m) {
             py::dict recipe;
             recipe["kind"] = "vulkan_indirect";
             recipe["packet"] = dispatch.indirect_dispatch_arg->name;
+            launch = std::move(recipe);
+          } else if (dispatch.cuda_bounded_dispatch || dispatch.cpu_bounded_dispatch) {
+            py::dict recipe;
+            if (dispatch.cuda_bounded_dispatch) {
+              recipe["kind"] = "cuda_logical_exact";
+              recipe["extent"] = dispatch.cuda_bounded_dispatch->extent_arg.name;
+              recipe["capacity"] = dispatch.cuda_bounded_dispatch->capacity;
+            } else {
+              recipe["kind"] = "cpu_exact";
+              recipe["extent"] = dispatch.cpu_bounded_dispatch->extent_arg.name;
+              recipe["capacity"] = dispatch.cpu_bounded_dispatch->capacity;
+            }
             launch = std::move(recipe);
           }
           sources.append(py::make_tuple("dispatch", kernel,

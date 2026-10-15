@@ -185,6 +185,15 @@ FixedExecution::FixedExecution(Arch arch,
         continue;
       }
       if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        if (dispatch->bounded_extent != kDeviceNullPtr &&
+            ((!arch_is_cpu(arch) && arch != Arch::cuda) || inside_control ||
+             dispatch->indirect_dispatch != kDeviceNullPtr ||
+             dispatch->bounded_extent.device != &device ||
+             dispatch->bounded_extent.offset % 4 || !dispatch->bounded_capacity ||
+             dispatch->bounded_capacity >
+                 std::numeric_limits<std::int32_t>::max()))
+          throw std::invalid_argument(
+              "Exact bounded launch requires a flat CPU/CUDA range and i32 capacity");
         if (dispatch->indirect_dispatch != kDeviceNullPtr &&
             (arch != Arch::vulkan || inside_control ||
              dispatch->indirect_dispatch.device != &device ||
@@ -288,7 +297,8 @@ FixedExecution::FixedExecution(Arch arch,
             steps.push_back({launcher, {}, {}});
           steps.back().launches.push_back(
               launcher->prepare_launch(loaded->handle(), *dispatch->context));
-          state_->bytes += dispatch->context->arg_buffer_size;
+          state_->bytes += dispatch->context->arg_buffer_size +
+                           dispatch->context->arg_buffer_prefix_size();
         } else if (const auto *native =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {
@@ -383,7 +393,11 @@ FixedExecution::FixedExecution(Arch arch,
           if (!launcher)
             throw std::invalid_argument("Fixed CUDA entry is not registered");
           native.emplace_back(cuda::FixedGraph::Dispatch{
-              launcher, loaded->handle(), dispatch->context, {}});
+              launcher, loaded->handle(), dispatch->context, {}, {},
+              dispatch->bounded_extent == kDeviceNullPtr
+                  ? nullptr
+                  : cuda_pointer(dispatch->bounded_extent),
+              dispatch->bounded_capacity});
         } else if (const auto *external =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {
