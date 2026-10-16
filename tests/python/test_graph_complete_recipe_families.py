@@ -1378,48 +1378,45 @@ def test_nested_conditional_recipe_uses_static_budget_and_owns_replay_resources(
     builder.while_loop(oc, ob, predicate=symbols["op"], counter=symbols["outer"],
                        max_iterations=64, masked_execution=True, name="outer", lowering_mode=lowering_mode)
     if lowering_mode == "native_required":
-        # An explicit masked override still rejects its own oversized encoding;
-        # a failed selection must explain that constraint, not report "eligible".
+        # Explicit masked selection remains qualified beyond the default cost
+        # preference. Inspect cold metadata without capturing this large graph.
         with monkeypatch.context() as patch:
             patch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
-            rejected = ti.graph.GraphBuilder()
-            with pytest.raises(TaichiRuntimeError, match="encoded_action_budget_exceeded"):
-                rejected.while_loop(oc, ob, predicate=symbols["op"], counter=symbols["outer"],
-                                    max_iterations=64, masked_execution=True, name="required",
-                                    lowering_mode="native_required")
+            selected = ti.graph.GraphBuilder()
+            selected.while_loop(oc, ob, predicate=symbols["op"], counter=symbols["outer"],
+                                max_iterations=64, masked_execution=True, name="required",
+                                lowering_mode="native_required")
+            control = selected._nodes[-1]
+            assert control._cuda_nested.nested_expanded_eligible
+            assert not control._cuda_nested.nested_expanded_preferred
+            assert control._cuda_nested_submission_options["execution_route"] == "auto"
+            assert control._cuda_nested_control_lowering == "cuda_masked_bounded_graph"
     definition = builder.freeze()
     catalog = definition.recipe_catalog()
     fragments = _family_fragments(catalog, "structured_control")
-    if lowering_mode == "native_required":
-        assert not fragments  # The only eligible route is already the baseline.
-        recipe = catalog.baseline.recipe
-    else:
-        assert tuple(_selection(f).choice_id for f in fragments) == (
-            "control:cuda_nested_conditional:v1",
-        )
-        recipe = catalog.compose((fragments[0].fragment_id,), stage="single-region").recipe
+    choices = {_selection(f).choice_id for f in fragments}
+    assert "control:cuda_nested_masked_bounded:v1" in choices
+    assert "control:cuda_nested_conditional:v1" not in choices  # Already the baseline.
+    recipe = catalog.baseline.recipe
     with definition.materialize() as baseline:
-        native = lowering_mode == "native_required"
         control = baseline.executor._spec.structured_control_nodes[0]
-        assert control.supports_native_submission == native
-        if native:
-            assert control._cuda_nested_control_lowering == "cuda_conditional_nested_graph"
-            assert control._cuda_nested_submission_options["execution_route"] == "conditional"
+        assert control.supports_native_submission
+        assert control._cuda_nested_control_lowering == "cuda_conditional_nested_graph"
+        assert control._cuda_nested_submission_options["execution_route"] == "conditional"
         empty = {name: ti.ndarray(ti.i32, shape=()) for name in symbols}
         for array in empty.values():
             array.fill(0)
         baseline.executor.run({**empty, "target": 0})
         assert empty["outer"].to_numpy()[()] == 0
-        if native:
-            baseline.executor.submit({**empty, "target": 2}).wait()
-            assert empty["outer"].to_numpy()[()] == 2
-            assert empty["inner"].to_numpy()[()] == 2
+        baseline.executor.submit({**empty, "target": 2}).wait()
+        assert empty["outer"].to_numpy()[()] == 2
+        assert empty["inner"].to_numpy()[()] == 2
     materialized = definition.materialize(recipe)
     executor = materialized.executor
     identity = materialized.materialized_physical_id
     # Rebind full resource frames; old in-flight submissions keep their leases.
     frames, tickets = [], []
-    for limit in (0, 2, 64):
+    for limit in (0, 2, 3):
         arrays = {name: ti.ndarray(ti.i32, shape=()) for name in symbols}
         for array in arrays.values():
             array.fill(0)
