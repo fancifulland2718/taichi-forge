@@ -33,7 +33,14 @@ function(ti_add_optional_runtime_provider provider kind output_name)
             LIBRARY DESTINATION ${INSTALL_LIB_DIR}/hardware_providers
                     COMPONENT runtime)
 
-    if(provider STREQUAL "cusolverdn" OR provider STREQUAL "cublaslt")
+    if(provider STREQUAL "cub_source")
+        ti_install_provider_sdk(${target} ${provider}
+            PUBLIC_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/taichi/external_runtime/forge_cub_source_provider.h"
+            LICENSE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/external/PicoSHA2/LICENSE"
+            EXTERNAL_REQUIREMENTS "immutable CUB source addon with matching binary identity and C ABI 1"
+                "addon runtime dependencies declared in its build manifest"
+                "GPU driver satisfying the addon target-code contract" "platform C/C++ runtime")
+    elseif(provider STREQUAL "cusolverdn" OR provider STREQUAL "cublaslt")
         ti_install_provider_sdk(${target} ${provider}
             PUBLIC_HEADERS
                 "${CMAKE_CURRENT_SOURCE_DIR}/taichi/external_runtime/forge_${provider}_provider.h")
@@ -52,3 +59,5 @@ ti_add_optional_runtime_provider(
     cusolverdn 4 "taichi_forge_cusolverdn_provider_abi2_generic_v1")
 ti_add_optional_runtime_provider(
     cublaslt 5 "taichi_forge_cublaslt_provider_abi2_configured_v1")
+ti_add_optional_runtime_provider(
+    cub_source 6 "taichi_forge_cub_source_provider_abi2_addon_v1")

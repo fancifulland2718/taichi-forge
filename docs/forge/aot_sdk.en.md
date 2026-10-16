@@ -79,6 +79,16 @@ The cuSOLVERDn component also installs `forge_cusolverdn_provider.h` for its
 shared Cholesky execution API. Native plan execution and AOT reconstruction of
 retained Cholesky recordings share this adapter. The vendor runtime remains external.
 
+The `cub_source` component bridges an existing CUB source-addon C ABI 1 binary
+to the same common provider protocol. It installs `forge_cub_source_provider.h`
+and a small adapter, without the addon or CUDA Toolkit. Provide an explicit
+addon library path; the common runtime reports its actual loaded path and
+`sha256:<hex>` identity, CUB version and compiled CUDART version. Keep the addon
+file immutable while loaded. Plans query caller-owned workspace once and retain
+the runtime until all recorded/submitted work has retired. Windows tests cover
+the six existing operations, empty inputs, identity, failures and retirement.
+This bridge alone does not enable automatic AOT export of selected CUB recipes.
+
 For the cuBLASLt native plan API, replace `cutensor` with `cublaslt`. Its component
 installs `forge_cublaslt_provider.h` and the adapter, with no vendor headers or
 vendor binary linkage. The API supports compact f32 matmul, batched and transposed

@@ -75,7 +75,7 @@ if(WIN32 OR LINUX)
         TI_TEST_RUNTIME_PROVIDER_PATH="$<TARGET_FILE:taichi_runtime_provider_test_stub>")
     add_dependencies(${TESTS_NAME} taichi_runtime_provider_test_stub)
     if(TARGET taichi_forge_cutensor_provider)
-        foreach(_provider IN ITEMS cutensor cusparselt amgx cublaslt)
+        foreach(_provider IN ITEMS cutensor cusparselt amgx cublaslt cub_source)
             string(TOUPPER "${_provider}" _provider_upper)
             set_property(SOURCE tests/cpp/aot/native_provider_test.cpp APPEND PROPERTY
                 COMPILE_DEFINITIONS

@@ -71,6 +71,14 @@ cuSOLVERDn 组件还安装共享 Cholesky 执行 API 的 `forge_cusolverdn_provi
 原生计划执行与保留式 Cholesky recording 的 AOT 重建共用该 adapter，
 厂商 runtime 仍由应用另行提供。
 
+`cub_source` 组件把现有 CUB source-addon C ABI 1 二进制接入同一公共 provider 协议，
+安装 `forge_cub_source_provider.h` 和小型 adapter，不包含 addon 或 CUDA Toolkit。
+须显式提供 addon 库路径；公共 runtime 报告实际加载路径、`sha256:<hex>` 身份、
+CUB 版本和编译时 CUDART 版本。加载期间保持 addon 文件不可变。计划一次查询调用方
+workspace，并要求全部录制/提交工作退休、计划释放后再销毁 runtime。Windows 测试
+覆盖原有六种操作、空输入、身份、失败和退休；此桥接本身尚未开启已选 CUB recipe
+的 AOT 自动导出。
+
 cuBLASLt 原生计划 API 将 `cutensor` 替换为 `cublaslt`。组件安装
 `forge_cublaslt_provider.h` 及 adapter，不依赖厂商构建头文件或二进制链接。
 API 支持紧凑 f32 matmul、批量与转置输入、alpha/beta 反馈、行主序或等价的转置列主序

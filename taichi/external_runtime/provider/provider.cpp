@@ -3,6 +3,12 @@
 #include "taichi/external_runtime/forge_cusolverdn_provider.h"
 #elif TI_FORGE_RUNTIME_PROVIDER_KIND == 5
 #include "taichi/external_runtime/forge_cublaslt_provider.h"
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 6
+#include "taichi/external_runtime/forge_cub_source_provider.h"
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#include "external/PicoSHA2/picosha2.h"
 #endif
 
 #if defined(_WIN32) && !defined(NOMINMAX)
@@ -193,6 +199,22 @@ constexpr const char *kRequiredSymbols[] = {
     "cublasLtMatmul"};
 #define TI_FORGE_RUNTIME_PROVIDER_QUERY_FUNCTION \
   taichi_forge_cublaslt_provider_query
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 6
+constexpr char kProviderId[] = "cub_source";
+constexpr char kProviderName[] = "Forge CUB source addon";
+constexpr char kSupportedVersionFamily[] = "source addon C ABI 1";
+constexpr char kBuildIdentity[] = "forge-runtime-provider-abi2-cub-source-abi1";
+constexpr const char *kWindowsCandidates[] = {
+    "taichi_forge_cub_source_provider_abi1.dll"};
+constexpr const char *kLinuxCandidates[] = {
+    "libtaichi_forge_cub_source_provider_abi1.so"};
+constexpr const char *kRequiredSymbols[] = {
+    "ti_forge_cub_source_provider_query",
+    "ti_forge_cub_source_provider_workspace_bytes",
+    "ti_forge_cub_source_provider_execute",
+    "ti_forge_cub_source_provider_get_last_error"};
+#define TI_FORGE_RUNTIME_PROVIDER_QUERY_FUNCTION \
+  taichi_forge_cub_source_provider_query
 #else
 #error "Unsupported TI_FORGE_RUNTIME_PROVIDER_KIND"
 #endif
@@ -260,11 +282,19 @@ struct Runtime {
   uint32_t cuda_runtime_version{0};
   std::atomic<uint32_t> live_execution_resources{0};
   bool execution_runtime_initialized{false};
+#if TI_FORGE_RUNTIME_PROVIDER_KIND == 6
+  uint64_t source_features{0};
+#endif
 
   ~Runtime() {
     close_library(library);
   }
 };
+
+#if TI_FORGE_RUNTIME_PROVIDER_KIND == 6
+#include "taichi/external_runtime/provider/source_addon_identity.inc.h"
+bool query_cub_source_version(Runtime &runtime);
+#endif
 
 TiForgeRuntimeProviderResult initialize_execution_runtime(Runtime &runtime);
 TiForgeRuntimeProviderResult shutdown_execution_runtime(Runtime &runtime);
@@ -286,7 +316,9 @@ bool audit_required_symbols(Runtime &runtime) {
 }
 
 bool query_version(Runtime &runtime) {
-#if TI_FORGE_RUNTIME_PROVIDER_KIND == 1
+#if TI_FORGE_RUNTIME_PROVIDER_KIND == 6
+  return query_cub_source_version(runtime);
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 1
   using GetProperty = int (*)(int, int *);
   auto get_property = reinterpret_cast<GetProperty>(
       load_symbol(runtime.library, "cusparseLtGetProperty"));
@@ -406,6 +438,11 @@ TiForgeRuntimeProviderResult make_runtime(const char *library_path,
   }
   *out_runtime = nullptr;
   last_error.clear();
+#if TI_FORGE_RUNTIME_PROVIDER_KIND == 6
+  if (!library_path || !library_path[0])
+    return fail(TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT,
+                "CUB source addon requires an explicit library path");
+#endif
   std::vector<std::string> candidates;
   if (library_path != nullptr && library_path[0] != '\0') {
     candidates.emplace_back(library_path);
@@ -1386,6 +1423,8 @@ TiForgeRuntimeProviderResult query_execution_api(
 #include "taichi/external_runtime/provider/cusolverdn.inc.h"
 #elif TI_FORGE_RUNTIME_PROVIDER_KIND == 5
 #include "taichi/external_runtime/provider/cublaslt.inc.h"
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 6
+#include "taichi/external_runtime/provider/cub_source.inc.h"
 #else
 
 using AmgxSimpleFn = int (*)();
