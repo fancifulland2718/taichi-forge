@@ -328,6 +328,16 @@ typedef struct TiPreparedExecutionInfo {
   uint64_t launches;
 } TiPreparedExecutionInfo;
 
+// Cold diagnostics for an explicitly shared CUDA binding family. Zero fields
+// mean the prepared execution does not use a family. Resource bytes are shared
+// once per identity, not additive across sibling bindings.
+typedef struct TiPreparedBindingFamilyInfo {
+  uint64_t identity;
+  uint64_t bindings;
+  uint64_t executables;
+  uint64_t resource_bytes;
+} TiPreparedBindingFamilyInfo;
+
 // Forge 0.6.4: immutable fixed-AoS layout owned by an AOT module. Valid until
 // that module is destroyed; obtain it once from an exported argument.
 typedef struct TiNdArrayLayout_t *TiNdArrayLayout;
@@ -1276,6 +1286,22 @@ ti_prepare_execution_plan_ext(TiRuntime runtime,
                               const TiNamedArgument *args,
                               uint32_t binding_count,
                               const TiNamedNdArrayBinding *bindings);
+// Publish another immutable binding of a selected CUDA binding-frame plan.
+// Shares one executable, private state and one-time initialization. The source
+// must be live; closing it afterwards does not close its siblings. Native
+// resource inputs remain fixed. Replay inputs are rebound at this cold
+// boundary.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_binding_ext(TiRuntime runtime,
+                                 TiPreparedExecution source,
+                                 uint32_t arg_count,
+                                 const TiNamedArgument *args,
+                                 uint32_t binding_count,
+                                 const TiNamedNdArrayBinding *bindings);
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_prepared_binding_family_info_ext(TiRuntime runtime,
+                                        TiPreparedExecution execution,
+                                        TiPreparedBindingFamilyInfo *info);
 TI_DLL_EXPORT void TI_API_CALL
 ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
 // Execute optional one-time initialization and wait for its completion.

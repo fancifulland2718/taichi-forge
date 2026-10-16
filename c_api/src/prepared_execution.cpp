@@ -1,5 +1,6 @@
 #include "argument_binding.h"
 #include "execution_resources.h"
+#include "execution_binding_family.h"
 
 #include <algorithm>
 #include <functional>
@@ -12,6 +13,9 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/program/runtime_fault.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/binding_frame_replay.h"
+#endif
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -21,13 +25,15 @@ using namespace taichi::lang;
 
 struct PreparedExecution {
   AotModule *owner{nullptr};
+  std::shared_ptr<ExecutionBindingFamily> family;
   std::vector<TiMemory> memories;
   std::unordered_set<TiMemory> replay_memories;
   std::unordered_set<const NativeResource *> replay_resources;
   TiPreparedExecutionInfo info{};
   bool live{false};
+  bool binding_retired{false};
   // Declared before backend recordings so owned buffers are destroyed last.
-  std::unique_ptr<ExecutionResourceStorage> resources;
+  std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
   uint64_t native_resource_workspace_bytes{0};
   // The backend consumes these cold descriptors before they are released.
@@ -55,8 +61,24 @@ struct PreparedExecution {
   }
   ~PreparedExecution() {
     initialization.reset();
+    retire_binding();
     native.reset();
     release_native_resources();
+  }
+
+  void retire_binding(bool already_waited = false) noexcept {
+    if (!family || !native || binding_retired)
+      return;
+    bool safe = family->runtime->runtime_fault_domain()->backend_calls_safe();
+    if (safe && !already_waited) {
+      try {
+        family->runtime->wait();
+      } catch (...) {
+        safe = false;
+      }
+    }
+    native->retire_completed_binding(safe);
+    binding_retired = true;
   }
 
   void release_source_bindings() {
@@ -76,14 +98,47 @@ struct PreparedExecution {
       gfx_runtime = &gfx->get_gfx_runtime();
 #endif
     try {
-      NativeRecordingState sequence;
-      if (!initializers.empty())
+      NativeRecordingState sequence =
+          family ? family->initial_facts : NativeRecordingState{};
+      struct FrameOperands {
+        std::shared_ptr<ExecutionResourceStorage> views;
+        std::shared_ptr<SharedExecutionResources> shared;
+        std::vector<std::shared_ptr<NativeResource>> objects;
+      };
+      std::shared_ptr<FrameOperands> operands;
+      if (family) {
+        operands = std::make_shared<FrameOperands>();
+        operands->views = resources;
+        operands->shared = family->arrays;
+        for (const auto &object : native_resources)
+          if (replay_resources.count(object.get()))
+            operands->objects.push_back(object);
+      }
+      if (family && !family->prepared) {
+        if (!initializers.empty()) {
+          auto initial_operands = std::make_shared<FrameOperands>(*operands);
+          initial_operands->objects = native_resources;
+          family->initialization_operands = std::move(initial_operands);
+          family->initialization = std::make_unique<FixedExecution>(
+              runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
+              runtime.runtime_fault_domain());
+        } else {
+          family->initialized = true;
+        }
+        family->initial_facts = sequence;
+      } else if (!family && !initializers.empty()) {
         initialization = std::make_unique<FixedExecution>(
             runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
             runtime.runtime_fault_domain());
+      }
       native = std::make_unique<FixedExecution>(
           runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
-          runtime.runtime_fault_domain());
+          runtime.runtime_fault_domain(), family ? family->replay : nullptr,
+          family ? operands : nullptr);
+      if (family) {
+        family->prepared = true;
+        family->arrays->sealed = true;
+      }
     } catch (const std::invalid_argument &error) {
       throw MemoryBindingError(error.what());
     }
@@ -112,9 +167,11 @@ struct PreparedExecution {
           "Static dispatch count exceeds its C API representation");
     info.dispatch_count = static_cast<std::uint32_t>(dispatch_count);
     info.execution_kind = native->execution_kind();
-    info.argument_bytes =
-        native->argument_bytes() +
-        (initialization ? initialization->argument_bytes() : 0);
+    info.argument_bytes = native->argument_bytes() +
+                          (initialization ? initialization->argument_bytes()
+                           : family && family->initialization
+                               ? family->initialization->argument_bytes()
+                               : 0);
     refresh_resource_workspace_bytes();
     release_source_bindings();
     live = true;
@@ -133,6 +190,9 @@ struct PreparedExecution {
   void run() {
     if (!live)
       throw MemoryBindingError("Prepared execution has a retired dependency");
+    if (family && family->failed)
+      throw MemoryBindingError(
+          "Binding family initialization failed; prepare a new family");
     native->run();
     ++info.launches;
   }
@@ -140,29 +200,43 @@ struct PreparedExecution {
   void invalidate() {
     live = false;
     initialization.reset();
+    retire_binding(true);
     native.reset();
     release_native_resources();
     release_source_bindings();
     resources.reset();
+    family.reset();
+  }
+
+  bool needs_initialization() const {
+    return family ? !family->initialized : bool(initialization);
+  }
+
+  void finish_initialization() {
+    initialization.reset();
+    for (std::size_t i = native_resources.size(); i-- > 0;)
+      if (!replay_resources.count(native_resources[i].get()))
+        native_resources.erase(native_resources.begin() + i);
+    refresh_resource_workspace_bytes();
+    if (resources)
+      resources->retain(replay_memories);
+    info.argument_bytes = native->argument_bytes();
   }
 
   void initialize(Runtime &runtime) {
     if (!live)
       throw MemoryBindingError("Prepared execution has a retired dependency");
+    if (family) {
+      family->initialize();
+      return;
+    }
     if (!initialization)
       return;
     try {
       initialization->run();
       runtime.wait();
       // Commands must retire before any of their input or scratch storage.
-      initialization.reset();
-      for (std::size_t i = native_resources.size(); i-- > 0;)
-        if (!replay_resources.count(native_resources[i].get()))
-          native_resources.erase(native_resources.begin() + i);
-      refresh_resource_workspace_bytes();
-      if (resources)
-        resources->retain(replay_memories);
-      info.argument_bytes = native->argument_bytes();
+      finish_initialization();
     } catch (...) {
       // Initialization may have partially written data. Retain its leases
       // until a synchronized close/owner retirement; never retry implicitly.
@@ -187,6 +261,8 @@ class PreparedExecutionRegistry {
     entries_.emplace(handle, std::move(execution));
     try {
       modules_[entry->owner].insert(handle);
+      if (entry->family)
+        families_[entry->family.get()].insert(handle);
       for (auto memory : memories)
         memories_[memory].insert(handle);
     } catch (...) {
@@ -202,35 +278,76 @@ class PreparedExecutionRegistry {
       throw MemoryBindingError("Prepared handle is not owned by this runtime");
     return *found->second;
   }
+  uint64_t family_size(const ExecutionBindingFamily *family) const {
+    const auto found =
+        families_.find(const_cast<ExecutionBindingFamily *>(family));
+    return found == families_.end() ? 0 : found->second.size();
+  }
   void destroy(TiPreparedExecution handle) {
     auto &entry = get(handle);
     if ((entry.native || entry.initialization) &&
         runtime_.runtime_fault_domain()->backend_calls_safe())
       runtime_.wait();
+    entry.retire_binding(true);
     remove_dependencies(handle, entry);
     entries_.erase(handle);
   }
   void initialize(TiPreparedExecution handle) {
     auto &entry = get(handle);
-    const bool needed = bool(entry.initialization);
+    const bool needed = entry.needs_initialization();
     entry.initialize(runtime_);
     if (!needed)
       return;
-    for (auto memory : entry.memories)
-      if (!entry.replay_memories.count(memory))
-        remove_edge(memories_, memory, handle);
-    entry.memories.erase(
-        std::remove_if(entry.memories.begin(), entry.memories.end(),
-                       [&](TiMemory memory) {
-                         return !entry.replay_memories.count(memory);
-                       }),
-        entry.memories.end());
-    entry.replay_memories.clear();
-    entry.replay_resources.clear();
+    const auto finish = [&](TiPreparedExecution member) {
+      auto &call = get(member);
+      if (!call.live)
+        return;
+      if (call.family)
+        call.finish_initialization();
+      for (auto memory : call.memories)
+        if (!call.replay_memories.count(memory))
+          remove_edge(memories_, memory, member);
+      call.memories.erase(
+          std::remove_if(call.memories.begin(), call.memories.end(),
+                         [&](TiMemory memory) {
+                           return !call.replay_memories.count(memory);
+                         }),
+          call.memories.end());
+      call.replay_memories.clear();
+      call.replay_resources.clear();
+    };
+    if (entry.family) {
+      auto &family = *entry.family;
+      const auto members = families_.at(&family);
+      for (auto member : members)
+        finish(member);
+      for (auto object = family.objects.begin();
+           object != family.objects.end();) {
+        if (!family.plan.replay_bindings.count(object->first))
+          object = family.objects.erase(object);
+        else
+          ++object;
+      }
+      std::unordered_set<TiMemory> retained;
+      for (auto array = family.arrays->arrays.begin();
+           array != family.arrays->arrays.end();) {
+        if (!family.plan.replay_bindings.count(array->first))
+          array = family.arrays->arrays.erase(array);
+        else {
+          retained.insert(array->second.memory);
+          ++array;
+        }
+      }
+      if (family.arrays->storage)
+        family.arrays->storage->retain(retained);
+      family.initialization_memories.clear();
+    } else {
+      finish(handle);
+    }
   }
   void run(TiPreparedExecution handle) {
     auto &entry = get(handle);
-    if (entry.initialization)
+    if (entry.needs_initialization())
       initialize(handle);
     entry.run();
   }
@@ -246,6 +363,9 @@ class PreparedExecutionRegistry {
       runtime_.wait();
     modules_.clear();
     memories_.clear();
+    families_.clear();
+    for (auto &entry : entries_)
+      entry.second->retire_binding(true);
     entries_.clear();
   }
 
@@ -278,6 +398,8 @@ class PreparedExecutionRegistry {
   }
   void remove_dependencies(TiPreparedExecution handle,
                            PreparedExecution &entry) {
+    if (entry.family)
+      remove_edge(families_, entry.family.get(), handle);
     remove_edge(modules_, entry.owner, handle);
     for (auto memory : entry.memories)
       remove_edge(memories_, memory, handle);
@@ -291,6 +413,9 @@ class PreparedExecutionRegistry {
       modules_;
   std::unordered_map<TiMemory, std::unordered_set<TiPreparedExecution>>
       memories_;
+  std::unordered_map<ExecutionBindingFamily *,
+                     std::unordered_set<TiPreparedExecution>>
+      families_;
 };
 }  // namespace capi
 
@@ -387,7 +512,7 @@ TiPreparedExecution ti_prepare_compute_graph_ext(
   return TI_NULL_HANDLE;
 }
 
-TiPreparedExecution ti_prepare_execution_plan_ext(
+static TiPreparedExecution prepare_execution_plan_impl(
     TiRuntime runtime,
     TiAotModule module,
     uint64_t description_size,
@@ -395,7 +520,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     uint32_t arg_count,
     const TiNamedArgument *args,
     uint32_t binding_count,
-    const TiNamedNdArrayBinding *bindings) {
+    const TiNamedNdArrayBinding *bindings,
+    std::shared_ptr<capi::ExecutionBindingFamily> family) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(module);
@@ -410,13 +536,25 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     throw MemoryBindingError(
         "Execution plan module belongs to another runtime");
   using namespace taichi::lang;
-  aot::ExecutionPlan plan;
-  try {
-    plan =
-        aot::ExecutionPlan::parse(std::string(description, description_size));
-  } catch (const std::invalid_argument &error) {
-    throw MemoryBindingError(error.what());
+  const bool rebinding = bool(family);
+  aot::ExecutionPlan parsed;
+  if (family) {
+    if (family->runtime != &rt || family->module != &mod || family->failed)
+      throw MemoryBindingError("Binding family owner is invalid or failed");
+  } else {
+    try {
+      parsed =
+          aot::ExecutionPlan::parse(std::string(description, description_size));
+      if (parsed.cuda_binding_frames)
+        family = std::make_shared<capi::ExecutionBindingFamily>(
+            rt, mod, std::move(parsed));
+    } catch (const std::invalid_argument &error) {
+      throw MemoryBindingError(error.what());
+    }
   }
+  const auto &plan = family ? family->plan : parsed;
+  const auto &resource_description =
+      rebinding ? family->frame_resources : plan.resources;
   std::unordered_map<std::string, const TiArgument *> arguments;
   for (uint32_t i = 0; i < arg_count; ++i) {
     if (!args[i].name || !*args[i].name ||
@@ -424,12 +562,33 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
       throw MemoryBindingError(
           "Execution plan argument names must be unique and nonempty");
   }
-  if (arguments.size() != plan.arguments.size())
-    throw MemoryBindingError(
-        "Execution plan argument set does not match its slots");
-  for (const auto &name : plan.arguments) {
-    if (!arguments.count(name))
-      throw MemoryBindingError("Missing execution plan argument: " + name);
+  std::unordered_set<std::string> frozen_metadata;
+  if (rebinding) {
+    for (const auto &[name, value] : arguments)
+      if (!family->frame_arguments.count(name))
+        throw MemoryBindingError(
+            "Binding family accepts only replay argument names: " + name);
+    for (const auto &name : family->frame_arguments) {
+      if (arguments.count(name))
+        continue;
+      if (plan.replay_bindings.count(name) &&
+          !family->persistent_public_arguments.count(name))
+        throw MemoryBindingError("Missing binding family replay argument: " +
+                                 name);
+      arguments.emplace(name, &family->original_arguments.at(name));
+      if (!plan.replay_bindings.count(name))
+        frozen_metadata.insert(name);
+    }
+  } else {
+    if (arguments.size() != plan.arguments.size())
+      throw MemoryBindingError(
+          "Execution plan argument set does not match its slots");
+    for (const auto &name : plan.arguments)
+      if (!arguments.count(name))
+        throw MemoryBindingError("Missing execution plan argument: " + name);
+    if (family)
+      for (const auto &[name, value] : arguments)
+        family->original_arguments.emplace(name, *value);
   }
   std::unordered_map<std::string, const TiNamedNdArrayBinding *> layouts;
   std::unordered_set<std::string> used_bindings;
@@ -442,11 +601,15 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
 
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = &mod;
+  prepared->family = family;
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
-  NativePreparationContext preparation(
-      rt.arch, rt.get(), rt.native_provider_locations(),
-      rt.runtime_fault_domain(), rt.native_library_locations());
+  auto local_preparation =
+      family ? nullptr
+             : std::make_unique<NativePreparationContext>(
+                   rt.arch, rt.get(), rt.native_provider_locations(),
+                   rt.runtime_fault_domain(), rt.native_library_locations());
+  auto &preparation = family ? *family->preparation : *local_preparation;
   preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
   std::set<std::pair<std::string, std::uint32_t>> probed;
   std::map<const aot::ExecutionPlan::Native *,
@@ -496,11 +659,12 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
           }
         }
       };
-  collect_steps(plan.initialization);
+  if (!rebinding)
+    collect_steps(plan.initialization);
   collect_steps(plan.operations);
-  for (const auto index : plan.resources.order)
+  for (const auto index : resource_description.order)
     if (const auto *native = std::get_if<NativeOperationDescription>(
-            &plan.resources.declarations[index].value))
+            &resource_description.declarations[index].value))
       preflight(native, NativeObjectKind::resource);
   for (const auto *step : steps) {
     const auto &operation = *step;
@@ -508,8 +672,45 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
             std::get_if<aot::ExecutionPlan::Native>(&operation))
       preflight(native, NativeObjectKind::operation);
   }
+  if (rebinding) {
+    for (const auto &name : family->persistent_public_arguments) {
+      if (!family->frame_arguments.count(name))
+        continue;
+      const auto &old = family->original_arguments.at(name);
+      const auto &next = *arguments.at(name);
+      if (old.type != TI_ARGUMENT_TYPE_NDARRAY ||
+          next.type != TI_ARGUMENT_TYPE_NDARRAY)
+        throw MemoryBindingError(
+            "Shared provider resources require unchanged array bindings: " +
+            name);
+      const auto &a = old.value.ndarray;
+      const auto &b = next.value.ndarray;
+      const auto size_a = capi::validated_ndarray_bytes(rt, a);
+      const auto size_b = capi::validated_ndarray_bytes(rt, b);
+      const auto memory_a = rt.get_memory(a.memory);
+      const auto memory_b = rt.get_memory(b.memory);
+      const auto range_a = resolve_native_storage_range(
+          rt.arch, memory_a.allocation.get_ptr(memory_a.byte_offset), size_a);
+      const auto range_b = resolve_native_storage_range(
+          rt.arch, memory_b.allocation.get_ptr(memory_b.byte_offset), size_b);
+      if (a.elem_type != b.elem_type ||
+          a.shape.dim_count != b.shape.dim_count ||
+          a.elem_shape.dim_count != b.elem_shape.dim_count ||
+          !std::equal(a.shape.dims, a.shape.dims + a.shape.dim_count,
+                      b.shape.dims) ||
+          !std::equal(a.elem_shape.dims,
+                      a.elem_shape.dims + a.elem_shape.dim_count,
+                      b.elem_shape.dims) ||
+          !range_a.proven_same_range(range_b))
+        throw MemoryBindingError(
+            "Shared provider resource input changed; prepare a new binding "
+            "family: " +
+            name);
+    }
+  }
   auto resource_bindings = capi::bind_execution_resources(
-      rt, mod.get(), plan.resources, arguments, layouts);
+      rt, mod.get(), resource_description, arguments, layouts,
+      family ? family->arrays.get() : nullptr, frozen_metadata);
   prepared->resources = std::move(resource_bindings.storage);
   struct Storage {
     DevicePtr pointer;
@@ -576,6 +777,20 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   // Resolve certificates before creating provider state or recording commands.
   // These maps disappear after prepare; replay carries only frozen bindings.
   for (const auto &constraint : plan.constraints) {
+    if (rebinding) {
+      bool relevant = true;
+      const auto used = [&](const std::string &name) {
+        return plan.replay_bindings.count(name) != 0;
+      };
+      if (const auto *layout =
+              std::get_if<aot::ExecutionPlan::ArrayLayout>(&constraint))
+        relevant = used(layout->array);
+      else if (const auto *pair =
+                   std::get_if<aot::ExecutionPlan::Disjoint>(&constraint))
+        relevant = used(pair->left) && used(pair->right);
+      if (!relevant)
+        continue;
+    }
     try {
       if (const auto *layout =
               std::get_if<aot::ExecutionPlan::ArrayLayout>(&constraint)) {
@@ -604,16 +819,28 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
             std::get<aot::ExecutionPlan::DisjointWrites>(constraint);
         std::vector<NativeStorageRange> reads;
         std::vector<NativeStorageWrite> writes;
-        for (const auto &read : group.reads)
-          reads.push_back(storage_range(read));
+        std::vector<std::optional<std::size_t>> read_indices(
+            group.reads.size());
+        for (std::size_t i = 0; i < group.reads.size(); ++i) {
+          if (rebinding && !plan.replay_bindings.count(group.reads[i]))
+            continue;
+          read_indices[i] = reads.size();
+          reads.push_back(storage_range(group.reads[i]));
+        }
         for (const auto &write : group.writes) {
+          if (rebinding && !plan.replay_bindings.count(write.array))
+            continue;
           auto inplace = write.inplace_read;
+          if (inplace && !read_indices[*inplace])
+            inplace.reset();
           if (inplace) {
             const auto &a = array_binding(write.array);
             const auto &b = array_binding(group.reads[*inplace]);
             if (a.scalar_type != b.scalar_type || a.shape != b.shape ||
                 a.element_shape != b.element_shape)
               inplace.reset();
+            else
+              inplace = read_indices[*inplace];
           }
           writes.push_back({storage_range(write.array), inplace});
         }
@@ -637,8 +864,17 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   };
   std::map<std::string, std::shared_ptr<const NativeHostBlobResource::Bytes>>
       host_blobs;
-  for (const auto index : plan.resources.order) {
-    const auto &resource = plan.resources.declarations[index];
+  for (const auto index : resource_description.order) {
+    const auto &resource = resource_description.declarations[index];
+    if (rebinding &&
+        (std::holds_alternative<NativeOperationDescription>(resource.value) ||
+         std::holds_alternative<aot::ExecutionResources::HostBlob>(
+             resource.value))) {
+      auto object = family->objects.at(resource.name);
+      prepared->native_resources.push_back(object);
+      native_objects.emplace(resource.name, std::move(object));
+      continue;
+    }
     if (const auto *blob =
             std::get_if<aot::ExecutionResources::HostBlob>(&resource.value)) {
       auto found = host_blobs.find(blob->data);
@@ -676,7 +912,7 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                                    static_cast<std::size_t>(zero.bytes), 0});
   }
   const auto initialization_count =
-      operations.size() + plan.initialization.size();
+      operations.size() + (rebinding ? 0 : plan.initialization.size());
   std::function<bool(const std::vector<aot::ExecutionPlan::Operation> &,
                      std::vector<FixedExecution::Operation> &)>
       bind_steps;
@@ -1006,8 +1242,35 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     }
     return true;
   };
-  if (!bind_steps(plan.initialization, operations) ||
-      !bind_steps(plan.operations, operations))
+  if (!rebinding && !bind_steps(plan.initialization, operations))
+    return TI_NULL_HANDLE;
+  if (family && !rebinding) {
+    family->objects = native_objects;
+    std::vector<TiMemory> dependencies;
+    for (const auto &name : plan.initialization_bindings) {
+      const auto found = arguments.find(name);
+      if (found != arguments.end() &&
+          found->second->type == TI_ARGUMENT_TYPE_NDARRAY)
+        dependencies.push_back(found->second->value.ndarray.memory);
+      if (const auto binding = layouts.find(name);
+          binding != layouts.end() && binding->second->gradient)
+        dependencies.push_back(binding->second->gradient->memory);
+    }
+    if (prepared->resources)
+      prepared->resources->remove_owned_dependencies(dependencies);
+    if (family->arrays->storage)
+      family->arrays->storage->remove_owned_dependencies(dependencies);
+    family->initialization_memories.insert(dependencies.begin(),
+                                           dependencies.end());
+    for (const auto &name : family->persistent_public_arguments) {
+      if (!plan.replay_bindings.count(name))
+        continue;
+      const auto &argument = *arguments.at(name);
+      if (argument.type == TI_ARGUMENT_TYPE_NDARRAY)
+        family->persistent_memories.insert(argument.value.ndarray.memory);
+    }
+  }
+  if (!bind_steps(plan.operations, operations))
     return TI_NULL_HANDLE;
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
@@ -1031,6 +1294,19 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         prepared->replay_memories.insert(binding->second->gradient->memory);
     }
   }
+  if (family) {
+    if (!family->initialized)
+      prepared->memories.insert(prepared->memories.end(),
+                                family->initialization_memories.begin(),
+                                family->initialization_memories.end());
+    prepared->memories.insert(prepared->memories.end(),
+                              family->persistent_memories.begin(),
+                              family->persistent_memories.end());
+    prepared->replay_memories.insert(family->persistent_memories.begin(),
+                                     family->persistent_memories.end());
+    if (family->arrays->storage)
+      family->arrays->storage->remove_owned_dependencies(prepared->memories);
+  }
   if (prepared->resources)
     prepared->resources->remove_owned_dependencies(prepared->memories);
   const auto split = operations.begin() + initialization_count;
@@ -1041,6 +1317,70 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
+}
+
+TiPreparedExecution ti_prepare_execution_plan_ext(
+    TiRuntime runtime,
+    TiAotModule module,
+    uint64_t description_size,
+    const char *description,
+    uint32_t arg_count,
+    const TiNamedArgument *args,
+    uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings) {
+  return prepare_execution_plan_impl(runtime, module, description_size,
+                                     description, arg_count, args,
+                                     binding_count, bindings, {});
+}
+
+TiPreparedExecution ti_prepare_execution_binding_ext(
+    TiRuntime runtime,
+    TiPreparedExecution source,
+    uint32_t arg_count,
+    const TiNamedArgument *args,
+    uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(source);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &entry = rt.prepared_registry().get(source);
+  if (!entry.live || !entry.family)
+    throw MemoryBindingError(
+        "Preparing a binding requires a live CUDA binding family");
+  return prepare_execution_plan_impl(
+      runtime, reinterpret_cast<TiAotModule>(entry.owner), 0, "", arg_count,
+      args, binding_count, bindings, entry.family);
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+
+void ti_get_prepared_binding_family_info_ext(
+    TiRuntime runtime,
+    TiPreparedExecution execution,
+    TiPreparedBindingFamilyInfo *info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(info);
+  *info = {};
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(execution);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &entry = rt.prepared_registry().get(execution);
+  if (!entry.live)
+    throw MemoryBindingError("Prepared execution has a retired dependency");
+  if (entry.family) {
+    info->identity = entry.family->identity;
+    info->bindings = rt.prepared_registry().family_size(entry.family.get());
+    info->resource_bytes = entry.family->arrays->storage
+                               ? entry.family->arrays->storage->bytes()
+                               : 0;
+#ifdef TI_WITH_CUDA
+    info->executables = entry.family->replay->snapshot().executables;
+#endif
+  }
+  TI_CAPI_TRY_CATCH_END();
 }
 
 void Runtime::configure_native_provider(
@@ -1245,7 +1585,13 @@ uint64_t ti_get_prepared_execution_resource_bytes_ext(
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   const auto &prepared = rt.prepared_registry().get(execution);
-  return prepared.resources ? prepared.resources->bytes() : 0;
+  const auto local = prepared.resources ? prepared.resources->bytes() : 0;
+  const auto shared = prepared.family && prepared.family->arrays->storage
+                          ? prepared.family->arrays->storage->bytes()
+                          : 0;
+  if (shared > std::numeric_limits<uint64_t>::max() - local)
+    throw MemoryBindingError("Prepared resource size overflow");
+  return local + shared;
   TI_CAPI_TRY_CATCH_END();
   return 0;
 }

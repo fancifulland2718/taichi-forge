@@ -73,7 +73,8 @@ void BindingFrameReplay::select(void *source_graph,
     if (!state.executable) {
       driver.graph_instantiate_with_flags(&state.executable, source_graph, 0);
     } else {
-      state.retain(state.active);
+      if (state.active)
+        state.retain(state.active);
       void *error_node = nullptr;
       std::uint32_t result = 0;
       const auto error = driver.graph_exec_update_v1.call(
@@ -127,6 +128,27 @@ bool BindingFrameReplay::failed() const {
 bool BindingFrameReplay::belongs_to(
     const std::shared_ptr<RuntimeFaultDomain> &owner) const {
   return state_->fault_domain == owner;
+}
+
+void BindingFrameReplay::release_completed_frame(const void *frame,
+                                                 bool backend_safe) noexcept {
+  auto &state = *state_;
+  for (auto entry = state.pending.begin(); entry != state.pending.end();) {
+    if (entry->frame.get() != frame) {
+      ++entry;
+      continue;
+    }
+    if (backend_safe)
+      entry->completion.mark_completed();
+    else
+      entry->completion.invalidate_and_release(
+          "CUDA binding owner retired after backend failure");
+    entry = state.pending.erase(entry);
+  }
+  if (state.active.get() == frame) {
+    state.active.reset();
+    state.active_graph = nullptr;
+  }
 }
 
 BindingFrameReplay::Snapshot BindingFrameReplay::snapshot() const {

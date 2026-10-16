@@ -5,6 +5,28 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, BindingFamilyKeepsInitializationClosureSeparate) {
+  const auto plan = ExecutionPlan::parse(R"({"version":10,
+    "binding_strategy":"cuda_immutable_argument_frames",
+    "initialization":[{"kind":"copy","source":"seed","destination":"state"}],
+    "operations":[{"kind":"kernel","entry":"f","arguments":["state","out"]}],
+    "resources":[{"kind":"ndarray","name":"state","dtype":"f32","shape":[17]}]})");
+  EXPECT_TRUE(plan.cuda_binding_frames);
+  EXPECT_EQ(plan.initialization_bindings,
+            (std::set<std::string>{"seed", "state"}));
+  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"out", "state"}));
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out", "seed"}));
+  EXPECT_THROW(ExecutionPlan::parse(R"({"version":9,
+    "binding_strategy":"cuda_immutable_argument_frames",
+    "operations":[{"kind":"fill32","destination":"out","value":0}]})"),
+               std::invalid_argument);
+  EXPECT_THROW(ExecutionPlan::parse(R"({"version":10,
+    "binding_strategy":"cuda_immutable_argument_frames",
+    "operations":[{"kind":"while","predicate":"p","max_iterations":3,
+      "condition":[],"body":[{"kind":"fill32","destination":"out","value":0}]}]})"),
+               std::invalid_argument);
+}
+
 TEST(ExecutionPlan, ParallelPreservesBranchesAndBindings) {
   const std::string source = R"({"version":9,"operations":[
     {"kind":"cuda_parallel","branches":[

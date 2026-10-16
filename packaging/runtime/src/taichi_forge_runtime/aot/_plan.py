@@ -45,7 +45,16 @@ class ExecutionPlan:
     or modifying buffers. Rebind by preparing another independent instance.
     """
 
-    def __init__(self, operations, *, resources=None, gradients=None, initialization=None, constraints=None):
+    def __init__(
+        self,
+        operations,
+        *,
+        resources=None,
+        gradients=None,
+        initialization=None,
+        constraints=None,
+        binding_strategy=None,
+    ):
         document = {"version": 1 if initialization is None else 2, "operations": list(operations)}
         if initialization is not None:
             document["initialization"] = list(initialization)
@@ -55,12 +64,19 @@ class ExecutionPlan:
             document["gradients"] = gradients
         if constraints is not None:
             document["constraints"] = list(constraints)
+        if binding_strategy is not None:
+            if binding_strategy != "cuda_immutable_argument_frames":
+                raise ValueError("Unsupported execution binding strategy")
+            document["binding_strategy"] = binding_strategy
+            document["version"] = 10
         document["version"] = max(
             document["version"], _control_version(document["operations"] + document.get("initialization", []))
         )
         # Own a snapshot, including nested arrays; caller mutations cannot alter
         # a saved plan. This module remains usable without a native library.
-        self._json = json.dumps(document, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        self._json = json.dumps(document, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
+            "utf-8"
+        )
         self._validate(json.loads(self._json))
 
     @classmethod
@@ -69,10 +85,19 @@ class ExecutionPlan:
         if (
             not isinstance(value, dict)
             or not {"version", "operations"} <= set(value)
-            or set(value) - {"version", "operations", "resources", "gradients", "initialization", "constraints"}
+            or set(value)
+            - {
+                "version",
+                "operations",
+                "resources",
+                "gradients",
+                "initialization",
+                "constraints",
+                "binding_strategy",
+            }
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -87,6 +112,10 @@ class ExecutionPlan:
         if "constraints" in value and not isinstance(value["constraints"], list):
             raise ValueError("Execution constraints must be a list")
         required = _control_version(value["operations"] + value.get("initialization", []))
+        if "binding_strategy" in value:
+            if value["binding_strategy"] != "cuda_immutable_argument_frames":
+                raise ValueError("Unsupported execution binding strategy")
+            required = max(required, 10)
         if value["version"] < required:
             raise ValueError(f"Structured control requires execution plan version {required}")
         return cls(
@@ -95,6 +124,7 @@ class ExecutionPlan:
             gradients=value.get("gradients"),
             initialization=value.get("initialization"),
             constraints=value.get("constraints"),
+            binding_strategy=value.get("binding_strategy"),
         )
 
     @classmethod
@@ -144,7 +174,12 @@ class ExecutionPlan:
                 inners = lowering["inners"]
                 cursor = len(op["condition"])
                 count = cursor + len(op["body"])
-                if not isinstance(inners, list) or not inners or not cursor or op["max_iterations"] > 0xFFFFFFFF:
+                if (
+                    not isinstance(inners, list)
+                    or not inners
+                    or not cursor
+                    or op["max_iterations"] > 0xFFFFFFFF
+                ):
                     raise ValueError("Invalid selected Vulkan nested control")
                 required = {
                     "predicate",
@@ -156,7 +191,11 @@ class ExecutionPlan:
                     "chunk_size",
                 }
                 for inner in inners:
-                    if not isinstance(inner, dict) or not required <= set(inner) or set(inner) - required - {"status"}:
+                    if (
+                        not isinstance(inner, dict)
+                        or not required <= set(inner)
+                        or set(inner) - required - {"status"}
+                    ):
                         raise ValueError("Invalid Vulkan nested control descriptor")
                     for key in ("predicate", "counter", "status"):
                         if key in inner:
@@ -304,7 +343,10 @@ class ExecutionPlan:
                     if type(op[key]) is not int or not 0 <= op[key] <= 0x7FFFFFFFFFFFFFFF:
                         raise ValueError("Execution sizes and offsets require nonnegative int64 values")
                 if kind == "while":
-                    if type(op["max_iterations"]) is not int or not 0 <= op["max_iterations"] <= 0x7FFFFFFFFFFFFFFF:
+                    if (
+                        type(op["max_iterations"]) is not int
+                        or not 0 <= op["max_iterations"] <= 0x7FFFFFFFFFFFFFFF
+                    ):
                         raise ValueError("Loop budget requires a nonnegative int64 value")
                     validate_steps(op["condition"], allow_empty=True)
                     validate_steps(op["body"])
@@ -339,7 +381,9 @@ class ExecutionPlan:
                     if (
                         not isinstance(dimensions, list)
                         or not dimensions
-                        or any(type(axis) is not int or not 0 < axis <= 0x7FFFFFFFFFFFFFFF for axis in dimensions)
+                        or any(
+                            type(axis) is not int or not 0 < axis <= 0x7FFFFFFFFFFFFFFF for axis in dimensions
+                        )
                         or op.get("batch_count", 1) == 0
                     ):
                         raise ValueError("FFT requires positive int64 dimensions and batch count")
@@ -355,6 +399,13 @@ class ExecutionPlan:
                         _name(column["output"])
                         arguments.update((column["values"], column["output"]))
 
+        self.binding_strategy = document.get("binding_strategy")
+        if self.binding_strategy is not None:
+            for operation in operations:
+                if isinstance(operation, dict) and (
+                    operation.get("kind") in ("while", "cuda_parallel") or "launch" in operation
+                ):
+                    raise ValueError("CUDA binding frames require a flat fixed replay sequence")
         validate_steps(operations)
         replay = set(arguments)
         if "initialization" in document:
@@ -395,17 +446,27 @@ class ExecutionPlan:
             resources, gradients, replay if "initialization" in document else arguments
         )
         self._has_initialization = "initialization" in document
+        native_roots = {
+            resource["name"]
+            for resource in resources
+            if resource["kind"] == "native" and resource["name"] in self._replay_argument_names
+        }
+        self._persistent_argument_names = retained_arguments(resources, gradients, native_roots)
 
     def prepare(self, module, arguments, *, gradients=None):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
+        return self._prepare(module, arguments, gradients=gradients)
+
+    def _prepare(self, module, arguments, *, gradients=None, source=None):
         from . import _c_api as abi
-        from ._runtime import NdArray, PreparedCall, _argument, _name
+        from ._runtime import NdArray, PreparedCall, _BindingFamily, _argument, _name
 
         runtime = module._runtime
         with runtime._lock:
             module._check()
             owners = [module]
             replay_owners = [module]
+            persistent_owners = [module]
 
             def bind(name, value):
                 retained = []
@@ -414,9 +475,13 @@ class ExecutionPlan:
                     owners.extend(retained)
                 if name in self._replay_argument_names:
                     replay_owners.extend(retained)
+                if name in self._persistent_argument_names:
+                    persistent_owners.extend(retained)
                 return abi.NamedArgument(_name(name), argument)
 
-            native = (abi.NamedArgument * len(arguments))(*[bind(name, value) for name, value in arguments.items()])
+            native = (abi.NamedArgument * len(arguments))(
+                *[bind(name, value) for name, value in arguments.items()]
+            )
             gradient_descriptors = []
             bindings = []
             for name, gradient in (gradients or {}).items():
@@ -430,20 +495,33 @@ class ExecutionPlan:
                 owners.append(gradient._memory)
                 if name in self._replay_argument_names:
                     replay_owners.append(gradient._memory)
+            function, prefix = (
+                (
+                    runtime._api.ti_prepare_execution_plan_ext,
+                    (runtime._handle, module._handle, len(self._json), self._json),
+                )
+                if source is None
+                else (runtime._api.ti_prepare_execution_binding_ext, (runtime._handle, source._handle))
+            )
             handle = runtime._api.call(
-                runtime._api.ti_prepare_execution_plan_ext,
-                runtime._handle,
-                module._handle,
-                len(self._json),
-                self._json,
+                function,
+                *prefix,
                 len(native),
                 native,
                 len(bindings),
                 (abi.NamedBinding * len(bindings))(*bindings),
             )
+            family = source._family if source is not None else None
+            if family is None and self.binding_strategy is not None:
+                family = _BindingFamily(
+                    module, self, tuple(dict.fromkeys(owners)), tuple(dict.fromkeys(persistent_owners))
+                )
             return PreparedCall(
                 runtime,
                 handle,
-                tuple(dict.fromkeys(owners)),
-                replay_owners=tuple(dict.fromkeys(replay_owners)) if self._has_initialization else None,
+                tuple(dict.fromkeys(replay_owners if family is not None else owners)),
+                replay_owners=(
+                    tuple(dict.fromkeys(replay_owners)) if self._has_initialization and family is None else None
+                ),
+                family=family,
             )

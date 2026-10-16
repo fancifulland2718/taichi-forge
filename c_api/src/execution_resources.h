@@ -34,6 +34,17 @@ class ExecutionResourceStorage {
   uint64_t bytes_{0};
 };
 
+// Explicit binding families share owned arrays, never arbitrary public views.
+// Each frame still owns its aliases and resolves public binding metadata.
+struct SharedExecutionResources {
+  std::shared_ptr<ExecutionResourceStorage> storage;
+  std::unordered_map<std::string, TiNdArray> arrays;
+  // Views feeding shared native resources have frozen public storage parents.
+  // The caller validates those public parents before reusing these aliases.
+  std::unordered_set<std::string> stable_names;
+  bool sealed{false};
+};
+
 // These host descriptors disappear after FixedExecution copies bindings.
 // Only storage moves into the prepared owner.
 struct ExecutionResourceBindings {
@@ -51,5 +62,7 @@ ExecutionResourceBindings bind_execution_resources(
     taichi::lang::aot::Module &module,
     const taichi::lang::aot::ExecutionResources &resources,
     std::unordered_map<std::string, const TiArgument *> &arguments,
-    std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts);
+    std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts,
+    SharedExecutionResources *shared = nullptr,
+    const std::unordered_set<std::string> &frozen_metadata = {});
 }  // namespace capi

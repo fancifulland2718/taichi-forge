@@ -111,8 +111,10 @@ struct ExecutionPlan {
   std::vector<Operation> initialization;
   // Runtime dependencies exclude shape-only references resolved at prepare.
   std::set<std::string> replay_bindings;
+  std::set<std::string> initialization_bindings;
   std::vector<std::string> arguments;
   ExecutionResources resources;
+  bool cuda_binding_frames{false};
 
   static ExecutionPlan parse(const std::string &json);
 };

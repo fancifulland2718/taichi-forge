@@ -634,6 +634,14 @@ class BoundCall:
             return PreparedCall(runtime, handle, self._owners)
 
 
+class _BindingFamily:
+    def __init__(self, module, plan, initial_owners, persistent_owners):
+        self.module, self.plan = module, plan
+        self.initial_owners = initial_owners
+        self.persistent_owners = persistent_owners
+        self.initialized = False
+
+
 class PreparedCall(_Resource):
     """Immutable native batch; replay resolves no names or Python arguments.
 
@@ -643,10 +651,24 @@ class PreparedCall(_Resource):
 
     _kind = "prepared"
 
-    def __init__(self, runtime, handle, owners, *, replay_owners=None):
+    def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None):
         self._owners = owners
         self._replay_owners = replay_owners
+        self._family = family
         super().__init__(runtime, handle)
+
+    def prepare_binding(self, arguments, *, gradients=None):
+        """Prepare a sibling sharing the selected CUDA plan's state and executable.
+
+        Each binding is immutable. Initialization runs once for the family;
+        closing a sibling leaves the other bindings usable. Native resource
+        inputs are fixed; use a new prepare_execution() for an independent family.
+        """
+        with self._runtime._lock:
+            self._check()
+            if self._family is None:
+                raise ValueError("Preparing a binding requires a selected CUDA binding family")
+            return self._family.plan._prepare(self._family.module, arguments, gradients=gradients, source=self)
 
     def initialize(self):
         """Run initialization once and wait; release initialization-only owners."""
@@ -655,6 +677,9 @@ class PreparedCall(_Resource):
             self._check()
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_initialize_prepared_ext, runtime._handle, self._handle)
+            if self._family is not None:
+                self._family.initialized = True
+                self._family.initial_owners = ()
             if self._replay_owners is not None:
                 self._owners, self._replay_owners = self._replay_owners, None
 
@@ -662,17 +687,32 @@ class PreparedCall(_Resource):
         super().close()
         self._owners = ()
         self._replay_owners = None
+        self._family = None
 
     def run(self):
         runtime = self._runtime
         with runtime._lock:
             self._check()
-            if self._replay_owners is not None:
+            if self._replay_owners is not None or (self._family is not None and not self._family.initialized):
                 self.initialize()
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
 
     __call__ = run
+
+    @property
+    def binding_family_info(self):
+        """Cold shared-allocation diagnostics, or None for ordinary executions."""
+        with self._runtime._lock:
+            self._check()
+            native = abi.BindingFamilyInfo()
+            self._runtime._api.call(
+                self._runtime._api.ti_get_prepared_binding_family_info_ext,
+                self._runtime._handle,
+                self._handle,
+                C.byref(native),
+            )
+            return {name: getattr(native, name) for name, _ in native._fields_} if native.identity else None
 
     @property
     def info(self):

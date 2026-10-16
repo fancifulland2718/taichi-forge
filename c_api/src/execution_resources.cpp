@@ -124,7 +124,9 @@ ExecutionResourceBindings bind_execution_resources(
     taichi::lang::aot::Module &module,
     const taichi::lang::aot::ExecutionResources &resources,
     std::unordered_map<std::string, const TiArgument *> &arguments,
-    std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts) {
+    std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts,
+    SharedExecutionResources *shared,
+    const std::unordered_set<std::string> &frozen_metadata) {
   using Recipes = taichi::lang::aot::ExecutionResources;
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
@@ -140,7 +142,7 @@ ExecutionResourceBindings bind_execution_resources(
       throw MemoryBindingError("Execution shape source is not an ndarray: " +
                                name);
     const auto &array = found->second->value.ndarray;
-    if (!local.count(found->second) &&
+    if (!local.count(found->second) && !frozen_metadata.count(name) &&
         validated_sources.insert(found->second).second)
       validated_ndarray_bytes(runtime, array);
     return array;
@@ -224,6 +226,7 @@ ExecutionResourceBindings bind_execution_resources(
                 array.elem_shape.dims);
       sizes[pos] = ndarray_storage_layout(array).bytes;
       if (!desc->initial_data.empty() &&
+          !(shared && shared->arrays.count(recipe.name)) &&
           resources.materialize[resources.order[pos]]) {
         const auto found = payloads.find(desc->initial_data);
         if (found == payloads.end())
@@ -316,10 +319,46 @@ ExecutionResourceBindings bind_execution_resources(
   std::vector<taichi::lang::DevicePtr> destinations;
   std::vector<const void *> sources;
   std::vector<std::size_t> upload_sizes;
+  auto shared_array = [&](const std::string &name, TiNdArray &next) {
+    if (!shared)
+      return false;
+    if (const auto previous = shared->arrays.find(name);
+        previous != shared->arrays.end()) {
+      const auto &old = previous->second;
+      if (old.elem_type != next.elem_type ||
+          old.shape.dim_count != next.shape.dim_count ||
+          old.elem_shape.dim_count != next.elem_shape.dim_count ||
+          !std::equal(old.shape.dims, old.shape.dims + old.shape.dim_count,
+                      next.shape.dims) ||
+          !std::equal(old.elem_shape.dims,
+                      old.elem_shape.dims + old.elem_shape.dim_count,
+                      next.elem_shape.dims))
+        throw MemoryBindingError(
+            "Shared private resource layout changed; prepare a new binding "
+            "family: " +
+            name);
+      next.memory = old.memory;
+      return true;
+    }
+    if (shared->sealed)
+      throw MemoryBindingError("Shared private resource is missing: " + name);
+    if (!shared->storage)
+      shared->storage = std::make_shared<ExecutionResourceStorage>(runtime);
+    return false;
+  };
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     auto &argument = result.arguments[pos];
+    const auto &name = resources.declarations[resources.order[pos]].name;
     if (module_pointers[pos].device) {
       if (resources.materialize[resources.order[pos]]) {
+        if (shared && shared->stable_names.count(name)) {
+          if (!shared_array(name, argument.value.ndarray)) {
+            argument.value.ndarray.memory =
+                shared->storage->module_view(module_pointers[pos], sizes[pos]);
+            shared->arrays.emplace(name, argument.value.ndarray);
+          }
+          continue;
+        }
         if (!result.storage)
           result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
         argument.value.ndarray.memory =
@@ -330,6 +369,15 @@ ExecutionResourceBindings bind_execution_resources(
     if (const auto *view = std::get_if<Recipes::View>(
             &resources.declarations[resources.order[pos]].value)) {
       if (resources.materialize[resources.order[pos]]) {
+        if (shared && shared->stable_names.count(name)) {
+          if (!shared_array(name, argument.value.ndarray)) {
+            argument.value.ndarray.memory = shared->storage->view(
+                arguments.at(view->array)->value.ndarray.memory,
+                view_offsets[pos], sizes[pos]);
+            shared->arrays.emplace(name, argument.value.ndarray);
+          }
+          continue;
+        }
         if (!result.storage)
           result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
         argument.value.ndarray.memory = result.storage->view(
@@ -342,9 +390,16 @@ ExecutionResourceBindings bind_execution_resources(
             resources.declarations[resources.order[pos]].value) &&
         resources.materialize[resources.order[pos]] &&
         argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
-      if (!result.storage)
-        result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
-      argument.value.ndarray.memory = result.storage->allocate(sizes[pos]);
+      if (shared) {
+        if (shared_array(name, argument.value.ndarray))
+          continue;
+        argument.value.ndarray.memory = shared->storage->allocate(sizes[pos]);
+        shared->arrays.emplace(name, argument.value.ndarray);
+      } else {
+        if (!result.storage)
+          result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
+        argument.value.ndarray.memory = result.storage->allocate(sizes[pos]);
+      }
       if (std::get<Recipes::Array>(
               resources.declarations[resources.order[pos]].value)
               .zero_initialize)

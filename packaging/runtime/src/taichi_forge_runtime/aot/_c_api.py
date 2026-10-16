@@ -112,6 +112,10 @@ class NamedBinding(C.Structure):
     _fields_ = [("name", C.c_char_p), ("layout_version", UInt), ("layout", Handle), ("gradient", C.POINTER(NdArray))]
 
 
+class BindingFamilyInfo(C.Structure):
+    _fields_ = [(name, C.c_uint64) for name in ("identity", "bindings", "executables", "resource_bytes")]
+
+
 class PreparedInfo(C.Structure):
     _fields_ = [
         ("dispatch_count", UInt),
@@ -187,6 +191,11 @@ class Api:
                 Handle,
             ),
             "ti_destroy_prepared_ext": ([Handle, Handle], None),
+            "ti_prepare_execution_binding_ext": (
+                [Handle, Handle, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
+                Handle,
+            ),
+            "ti_get_prepared_binding_family_info_ext": ([Handle, Handle, C.POINTER(BindingFamilyInfo)], None),
             "ti_get_prepared_execution_info_ext": ([Handle, Handle, C.POINTER(PreparedInfo)], None),
             "ti_get_prepared_execution_workspace_bytes_ext": ([Handle, Handle], C.c_uint64),
             "ti_launch_kernel_with_gradients_ext": (

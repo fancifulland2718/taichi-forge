@@ -248,6 +248,31 @@ runtime.wait()
 准备阶段验证全部参数、范围和操作，再记录原生命令；不执行数学工作或修改缓冲。
 暖态通过一个 prepared handle 提交，不重新解析 JSON 或逐节点调用 Python。
 
+ExecutionPlan 版本 10 可为平坦、固定的 CUDA 重放序列显式选择
+`binding_strategy="cuda_immutable_argument_frames"`。先正常准备第一个绑定，再创建同族绑定：
+
+```python
+first = loaded.prepare_execution("step", first_arguments)
+second = first.prepare_binding(second_arguments, gradients=second_gradients)
+first.run()
+second.run()
+```
+
+同族绑定共用一个 CUDA 执行器、重建的私有数组、原生 plan 资源和一次性初始化，
+各自保留捕获的参数镜像及输入输出 view。重放输入需要重新提供，初始化专属输入可以省略；
+仅用于形状的元数据可在原数组退休后继续继承。私有资源的布局、构建共享原生资源所用的
+物理数组绑定保持固定，需要改变时应重新准备独立族。数组内容仍可原地更新，支持显式 ndarray 梯度绑定。
+
+关闭一个绑定不会关闭其余绑定，关闭首个绑定也不会丢失待执行的初始化。
+初始化仍需使用的输入退休时，相关同族绑定会失效；初始化成功后释放其专属输入。
+关闭模块、运行时或共享的持久输入会退休相关绑定。`binding_family_info` 提供共享身份、
+有效绑定数、执行器数和共享私有数组字节数；每个绑定的 `resource_bytes` 都包含共享部分，不能直接累加。
+
+当前该显式消费策略接受平坦固定捕获及可组合的原生命令，拒绝 WHILE、parallel、bounded/indirect
+kernel launch。CPU/Vulkan 和普通 `prepare_execution()` 默认行为不变；尚未开放已选 JIT CUDA
+binding-frame recipe 的自动导出。CUDA 图更新不兼容时明确报错，不会静默改为独立执行器。
+C 调用入口为 `ti_prepare_execution_binding_ext` 与 `ti_get_prepared_binding_family_info_ext`。
+
 持久描述版本 3 还接受显式 `while` 操作：
 
 ```python

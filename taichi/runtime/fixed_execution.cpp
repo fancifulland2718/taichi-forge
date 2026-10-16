@@ -711,6 +711,18 @@ void FixedExecution::run() {
     throw;
   }
 }
+void FixedExecution::retire_completed_binding(bool backend_safe) {
+#ifdef TI_WITH_CUDA
+  if (state_->cuda_binding_replay) {
+    auto lock = CUDAContext::get_instance().get_submission_lock_guard();
+    state_->cuda_binding_replay->release_completed_frame(
+        state_->cuda_frame.get(),
+        backend_safe && (!state_->fault_domain ||
+                         state_->fault_domain->backend_calls_safe()));
+  }
+#endif
+}
+
 void FixedExecution::run_impl() {
 #ifdef TI_WITH_LLVM
   State::run_cpu_steps(state_->cpu_steps);

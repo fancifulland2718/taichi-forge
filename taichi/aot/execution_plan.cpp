@@ -16,15 +16,23 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
   try {
     const auto root = liong::json::parse_complete(json);
     fields(root, {"version", "operations", "resources", "gradients",
-                  "initialization", "constraints"});
+                  "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 9)
+    if (version < 1 || version > 10)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
       throw std::invalid_argument(
           "Initialization requires execution plan version 2");
     ExecutionPlan plan;
+    if (const auto strategy = root.obj.inner.find("binding_strategy");
+        strategy != root.obj.inner.end()) {
+      if (version < 10 ||
+          name(strategy->second) != "cuda_immutable_argument_frames")
+        throw std::invalid_argument(
+            "Unsupported execution binding strategy or version");
+      plan.cuda_binding_frames = true;
+    }
     plan.resources = ExecutionResources::parse(root);
     std::set<std::string> arguments;
     std::function<void(const JsonValue &, std::vector<Operation> &, bool)>
@@ -328,8 +336,12 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     };
     parse_steps(root["operations"], plan.operations, false);
     plan.replay_bindings = plan.resources.runtime_bindings(arguments);
+    const auto replay_arguments = arguments;
+    arguments.clear();
     if (has_initialization)
       parse_steps(root["initialization"], plan.initialization, false);
+    plan.initialization_bindings = plan.resources.runtime_bindings(arguments);
+    arguments.insert(replay_arguments.begin(), replay_arguments.end());
     if (const auto found = root.obj.inner.find("constraints");
         found != root.obj.inner.end()) {
       if (!found->second.is_arr())
@@ -419,6 +431,18 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           throw std::invalid_argument("Unsupported execution constraint: " +
                                       kind);
         }
+      }
+    }
+    if (plan.cuda_binding_frames) {
+      for (const auto &operation : plan.operations) {
+        if (std::holds_alternative<std::shared_ptr<const While>>(operation) ||
+            std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
+          throw std::invalid_argument(
+              "CUDA binding frames require a flat replay sequence");
+        if (const auto *kernel = std::get_if<Kernel>(&operation);
+            kernel && (kernel->bounded_range || kernel->indirect_packet))
+          throw std::invalid_argument(
+              "CUDA binding frames require fixed kernel dispatches");
       }
     }
     plan.resources.analyze(arguments);

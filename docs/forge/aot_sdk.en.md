@@ -301,6 +301,42 @@ and operations before recording native commands; it executes no mathematical
 work or buffer modification. Warm replay submits one prepared handle without
 parsing JSON or calling Python for each node.
 
+ExecutionPlan version 10 can explicitly select
+`binding_strategy="cuda_immutable_argument_frames"` for a flat, fixed CUDA
+replay sequence. Prepare its first binding normally, then prepare siblings:
+
+```python
+first = loaded.prepare_execution("step", first_arguments)
+second = first.prepare_binding(second_arguments, gradients=second_gradients)
+first.run()
+second.run()
+```
+
+Siblings share one CUDA executable, reconstructed private arrays, native plan
+resources and once-only initialization. Each binding retains its own captured
+argument image and input/output views. Replay inputs must be supplied again;
+initialization-only inputs can be omitted. Shape-only metadata can be inherited
+after its original array retires. Private resource layouts and the physical
+array bindings used to construct a shared native resource remain fixed; prepare
+a new independent family to change them. Array contents may still change in
+place. Explicit ndarray gradient bindings work on this path.
+
+Closing one sibling leaves the others usable. Initialization survives closing
+the first binding; retiring an input still needed by initialization invalidates
+the dependent siblings. After successful initialization, its exclusive inputs
+are released. Closing the module/runtime or a persistent shared input retires
+the affected family members. `binding_family_info` reports a shared identity,
+live binding count, executable count and shared private-array bytes. Per-call
+`resource_bytes` includes those shared bytes, so do not sum it across siblings.
+
+This explicit consumer strategy currently accepts flat fixed captures, including
+qualified native recording commands. WHILE, parallel regions and bounded or
+indirect kernel launches are rejected. It does not change CPU/Vulkan or ordinary
+`prepare_execution()` defaults, and does not yet enable automatic export of a
+selected JIT CUDA binding-frame recipe. An incompatible CUDA graph update raises
+an error; it never silently creates an independent executable. C callers use
+`ti_prepare_execution_binding_ext` and `ti_get_prepared_binding_family_info_ext`.
+
 Persistent format version 3 also accepts explicit `while` operations:
 
 ```python

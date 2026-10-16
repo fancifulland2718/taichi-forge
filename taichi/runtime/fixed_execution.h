@@ -93,6 +93,9 @@ class FixedExecution {
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;
   void run();
+  // Called by an owner which has completed submitted work before retiring a
+  // frame's external allocations. It does not retire sibling bindings.
+  void retire_completed_binding(bool backend_safe = true);
   std::uint32_t execution_kind() const;
   std::size_t argument_bytes() const;
   std::size_t workspace_bytes() const;
