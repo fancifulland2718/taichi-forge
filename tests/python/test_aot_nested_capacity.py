@@ -7,6 +7,7 @@ import statistics
 import subprocess
 import sys
 import time
+import zipfile
 
 import numpy as np
 import pytest
@@ -124,14 +125,14 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             builder.dispatch(forward.grad, public["x"], public["y"], total)
         builder.dispatch(publish, outer, total, public["terminal"])
         definition = builder.freeze()
-        if route == "device_update":
+        if route in ("device_update", "masked"):
             from taichi_forge.aot._graph_export import _cuda_nested_while
 
             source = definition._runtime_spec.structured_control_nodes[0]
             assert source._cuda_nested_submission_options["execution_route"] == "auto"
             # The source still allows fallback. Only materialization freezes
             # its route, even when the user retains the baseline recipe.
-            with pytest.raises(ti.TaichiRuntimeError, match="frozen device-update recipe"):
+            with pytest.raises(ti.TaichiRuntimeError, match=f"frozen {route.replace('_', '-')} recipe"):
                 _cuda_nested_while(None, source)
         recipe = None
         if lowering == "auto" and route == "conditional":
@@ -144,9 +145,9 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             )
             recipe = catalog.compose((fragment.fragment_id,), stage="single-region").recipe
         owner = definition.materialize(recipe)
-        if route == "device_update":
+        if route in ("device_update", "masked"):
             assert owner.executor._spec.structured_control_nodes[0]._cuda_nested_submission_options == dict(
-                execution_route="device_update"
+                execution_route=route
             )
         return owner
 
@@ -197,15 +198,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
                 owner.executor.submit(arrays).wait()
                 samples.append((time.perf_counter() - begin) * 1e6)
             timings["jit_primal_warm_complete_us"] = statistics.median(samples)
-        if route == "masked":
-            # Masked payloads need a separate persistence contract.
-            module = ti.aot.Module()
-            with pytest.raises(ti.TaichiRuntimeError, match="selected nested CUDA"):
-                module.add_execution_plan("step", owner.executor)
-            assert not module._content and not module._graph_export_failed
-            (tmp_path / "costs.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
-            return
-        if route == "device_update":
+        if route in ("device_update", "masked"):
             begin = time.perf_counter()
             module.add_execution_plan("primal", owner.executor)
             timings["primal_export_ms"] = (time.perf_counter() - begin) * 1000
@@ -223,23 +216,42 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
         assert outer["max_iterations"] == budget
         inners = (
             outer["lowering"]["inners"]
-            if arch == "vulkan" or route == "device_update"
+            if arch == "vulkan" or route in ("device_update", "masked")
             else [op for op in outer["body"] if op["kind"] == "while"]
         )
         assert len(inners) == regions and all(op["max_iterations"] == budget for op in inners)
-        if route == "device_update":
-            assert document["version"] == 13
-            assert outer["lowering"]["kind"] == "cuda_nested_device_update"
+        if route in ("device_update", "masked"):
+            assert document["version"] == (14 if route == "masked" else 13)
+            assert outer["lowering"]["kind"] == "cuda_nested_" + route
             nested = owner.executor._spec.structured_control_nodes[0]
             assert len(outer["condition"]) + len(outer["body"]) == nested._cuda_nested.physical_dispatch_count
             assert all(op["kind"] == "kernel" for op in outer["condition"] + outer["body"])
             assert document["constraints"]  # Preserve JIT control scalar/disjoint binding contracts.
+        if route == "masked":
+            variants = module._kernel_launch_abis
+            assert len(variants) == 3
+            assert all(op["entry"] not in variants for op in outer["condition"])
+            assert all(op["entry"] in variants for op in outer["body"])
+            # Same source with ordinary + gated uses; the body-only advance
+            # kernel must not gain an unused ordinary artifact.
+            assert count == 10
+            gated = next(op["entry"] for op in outer["body"] if len(op["arguments"]) == 1)
+            with pytest.raises(ti.TaichiCompilationError, match="already bound"):
+                module._check_kernel_export(gated, module._exported_kernels[gated])
+            assert not module._graph_export_failed
     timings["kernel_entries"] = len(module._exported_kernels)
     artifact = tmp_path / "nested.tcm"
     begin = time.perf_counter()
     module.archive(str(artifact))
     timings["archive_ms"] = (time.perf_counter() - begin) * 1000
     timings["artifact_bytes"] = artifact.stat().st_size
+    if route == "masked":
+        with zipfile.ZipFile(artifact) as archive:
+            metadata = json.loads(archive.read("aot_metadata.json"))
+            assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == module._kernel_launch_abis
+            assert {Path(name).stem for name in archive.namelist() if name.endswith(".bc")} == set(
+                module._exported_kernels
+            )
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
             [
@@ -251,7 +263,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
                 str(budget),
                 str(regions),
                 arch,
-                "primal" if route == "device_update" else "gradient",
+                "primal" if route in ("device_update", "masked") else "gradient",
             ],
             env=os.environ.copy(),
             capture_output=True,

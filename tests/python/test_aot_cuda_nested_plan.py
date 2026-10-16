@@ -76,6 +76,7 @@ def test_cuda_nested_persistent_forward_reverse_and_owners(budget, encoding, tmp
             entry = "gated_" + name
             module._aot_builder._add_with_launch_abi(entry, compiled, "cuda_graph_gate_v1")
             module._exported_kernels[entry] = compiled
+            module._kernel_launch_abis[entry] = "cuda_graph_gate_v1"
             module._content.append("kernel:" + entry)
     timings["variant_generation_ms"] = (time.perf_counter() - begin) * 1000
     regions = 2

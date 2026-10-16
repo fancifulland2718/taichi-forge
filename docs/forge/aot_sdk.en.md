@@ -554,7 +554,7 @@ Small nine-inner-region tests cover actual forward/suffix gradient execution,
 zero trips after active replay, early exit/exhaustion, two bindings and retirement
 in standalone and borrowed runtimes. An unfrozen `auto` node that may fall back
 to masked execution is rejected before publishing entries, even if device update
-is a candidate. Masked payload export remains unavailable; defaults are unchanged.
+is a candidate. Defaults are unchanged.
 
 Version 14 also accepts `cuda_nested_masked` with the same recipe-1 boundaries
 and predicate bindings. Initial-condition entries use the ordinary launch ABI;
@@ -564,10 +564,16 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI73 components. The private
-variant producer and explicit-plan consumer are covered by small CUDA tests;
-automatic masked Graph export is not yet exposed. Existing device-update plans
-remain version 13 and retain their ordinary-kernel contract.
+This requires a v14 consumer and matching private ABI73 components.
+`add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
+`masked`, preserving its physical dispatch boundaries and generating only the
+required body variants. Code is deduplicated by source specialization and launch
+ABI across plans; an ordinary entry cannot overwrite a gated entry. Small
+nine-inner-region tests cover actual forward/suffix gradients, two bindings,
+active-to-zero replay and standalone/borrowed retirement. No consumer compiler
+is needed to create gated variants. Unfrozen auto routes, native provider bodies,
+flat masked loops and masked branches are outside this export route. Existing
+device-update plans remain version 13 and retain their ordinary-kernel contract.
 
 Vulkan exports selected flat native loops with a version 4 `lowering` recipe:
 

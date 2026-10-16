@@ -29,6 +29,7 @@ class _ExportContext:
         self._readonly_data_owners = {}
         self.resources = []
         self.kernels = {}
+        self.kernel_launch_abis = {}
         self._used_kernel_entries = set()
         self._state_dependencies = {}
         self.root_dependencies = ()
@@ -37,7 +38,10 @@ class _ExportContext:
         self._resource_policies = {}
         self._indices = {}
         self._names = set(reserved_names) | set(module._exported_kernels) | set(module._fields)
-        self._kernel_names = {id(kernel): name for name, kernel in module._exported_kernels.items()}
+        self._kernel_names = {
+            (id(kernel), module._kernel_launch_abis.get(name, "ordinary")): name
+            for name, kernel in module._exported_kernels.items()
+        }
         self.reconstructed_binding_validators = set()
         self.reconstructed_argument_binders = set()
         self.reconstructed_derived_bindings = set()
@@ -363,17 +367,24 @@ class _ExportContext:
         self._initialization_resources[resource] = description
         self.initialization.append(description)
 
-    def kernel(self, kernel, args, label="", launch=None):
+    def kernel(self, kernel, args, label="", launch=None, *, launch_abi="ordinary"):
+        if launch_abi != "ordinary" and (
+            launch_abi != "cuda_graph_gate_v1" or self.arch != core.Arch.cuda or launch is not None
+        ):
+            raise TaichiRuntimeError("AOT gated code requires a plain selected CUDA dispatch")
         bindings = [self.kernel_binding(arg) for arg in args]
         if self.source_arrays is not None:
             self.source_arrays.validate_kernel(args, bindings)
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
             raise TaichiRuntimeError("AOT execution Graph currently requires scalar or ndarray kernel bindings")
-        name = self._kernel_names.get(id(kernel))
+        identity = (id(kernel), launch_abi)
+        name = self._kernel_names.get(identity)
         if name is None:
-            name = self._name("kernel")
-            self._kernel_names[id(kernel)] = name
+            name = self._name("kernel" if launch_abi == "ordinary" else "gated_kernel")
+            self._kernel_names[identity] = name
             self.kernels[name] = kernel
+            if launch_abi != "ordinary":
+                self.kernel_launch_abis[name] = launch_abi
         self._used_kernel_entries.add(name)
         operation = dict(kind="kernel", entry=name, arguments=bindings)
         if label:
@@ -509,29 +520,39 @@ def _validate_sequence(context, sequence):
 
 
 def _cuda_nested_while(context, node):
-    from taichi_forge.graph._graph import _CUDA_NESTED_CONDITIONAL_ROUTE, _CUDA_NESTED_DEVICE_UPDATE_ROUTE
+    from taichi_forge.graph._graph import (
+        _CUDA_NESTED_CONDITIONAL_ROUTE,
+        _CUDA_NESTED_DEVICE_UPDATE_ROUTE,
+        _CUDA_NESTED_MASKED_ROUTE,
+    )
 
     selected = node._cuda_nested
     device_update = node._cuda_nested_control_lowering == _CUDA_NESTED_DEVICE_UPDATE_ROUTE
+    masked = node._cuda_nested_control_lowering == _CUDA_NESTED_MASKED_ROUTE
+    expanded = device_update or masked
     if (
         not node.supports_native_submission
-        or node._cuda_nested_control_lowering not in (_CUDA_NESTED_CONDITIONAL_ROUTE, _CUDA_NESTED_DEVICE_UPDATE_ROUTE)
+        or node._cuda_nested_control_lowering
+        not in (_CUDA_NESTED_CONDITIONAL_ROUTE, _CUDA_NESTED_DEVICE_UPDATE_ROUTE, _CUDA_NESTED_MASKED_ROUTE)
         or selected is None
-        or not (selected.nested_expanded_eligible if device_update else selected.nested_conditional_eligible)
+        or not (selected.nested_expanded_eligible if expanded else selected.nested_conditional_eligible)
     ):
         raise TaichiRuntimeError("AOT Graph requires its selected nested CUDA control recipe")
-    if device_update and node._cuda_nested_submission_options.get("execution_route") != "device_update":
+    route = "masked" if masked else "device_update"
+    if expanded and node._cuda_nested_submission_options.get("execution_route") != route:
         # Ordinary auto submission can fall back to masked kernels. A candidate
         # route (or one successful replay) is not a frozen physical contract.
-        raise TaichiRuntimeError("AOT nested CUDA device-update export requires a frozen device-update recipe")
+        raise TaichiRuntimeError(f"AOT nested CUDA export requires a frozen {route.replace('_', '-')} recipe")
     if selected.physical_dispatch_count != selected.dispatch_count:
         raise TaichiRuntimeError("AOT nested CUDA control requires its selected dispatch boundaries")
     # The native nested builder owns one flat copy of the selected dispatches.
     # Its boundary table includes initial conditions and body+tail conditions;
     # exporting logical child nodes could discard physical IR or run tests twice.
     offsets = []
-    operations = context.region(_node, selected, dispatch_offsets=offsets)
     first_body, boundaries = node._cuda_nested_boundaries
+    operations = context.region(
+        _node, selected, dispatch_offsets=offsets, gated_body_begin=first_body if masked else None
+    )
     inners = node._cuda_nested_inner
     if (
         len(offsets) != selected.physical_dispatch_count + 1
@@ -549,10 +570,10 @@ def _cuda_nested_while(context, node):
     # its original condition/body region rather than slicing by operation count.
     first_body = offsets[first_body]
     boundaries = tuple(tuple(offsets[index] for index in row) for row in boundaries)
-    if device_update:
+    if expanded:
         if any(op["kind"] != "kernel" or "launch" in op for op in operations):
-            raise TaichiRuntimeError("AOT nested CUDA device-update requires ordinary physical kernel dispatches")
-        lowering = dict(kind="cuda_nested_device_update", version=1, inners=[])
+            raise TaichiRuntimeError("AOT expanded CUDA control requires plain physical kernel dispatches")
+        lowering = dict(kind="cuda_nested_" + route, version=1, inners=[])
         cursor = first_body
         for inner, (condition_begin, body_begin, end) in zip(inners, boundaries):
             if not cursor <= condition_begin < body_begin < end < len(operations):
@@ -821,7 +842,7 @@ def _branch(context, node):
     )
 
 
-def _node(context, node, *, dispatch_offsets=None):
+def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
     from taichi_forge.graph._graph import (
         _CompiledCGraphNode,
         _CompiledIfGraphNode,
@@ -832,7 +853,7 @@ def _node(context, node, *, dispatch_offsets=None):
     )
     from taichi_forge.graph._ir import DispatchNode, SequentialRegion
 
-    if dispatch_offsets is not None and not isinstance(node, _CompiledCGraphNode):
+    if (dispatch_offsets is not None or gated_body_begin is not None) and not isinstance(node, _CompiledCGraphNode):
         raise TaichiRuntimeError("AOT dispatch boundaries require a flat physical Graph")
     if isinstance(node, _CompiledSequentialRegionNode):
         for child in node.nodes:
@@ -864,6 +885,10 @@ def _node(context, node, *, dispatch_offsets=None):
     ):
         raise TaichiRuntimeError("AOT execution Graph contains an unsupported native execution kind")
     command_count = sum(manifest.execution_kind == "backend_command" for manifest in node.native_action_manifests)
+    if gated_body_begin is not None and (
+        command_count or node.parallel_dispatch_groups or not 0 < gated_body_begin < node.physical_dispatch_count
+    ):
+        raise TaichiRuntimeError("AOT masked control requires a flat physical kernel body")
     if not command_count:
         context.require_private_bindings(node.fixed_runtime_args)
         if len(node.recording_dispatches) != node.dispatch_count:
@@ -876,12 +901,17 @@ def _node(context, node, *, dispatch_offsets=None):
         dispatches = node.compiled_graph._physical_jit_execution_sources
         if len(dispatches) != node.physical_dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete physical dispatch metadata")
-        for dispatch in dispatches:
+        for index, dispatch in enumerate(dispatches):
             if dispatch[0] != "dispatch":
                 raise TaichiRuntimeError("AOT kernel sequence contains an unexpected native command")
             if dispatch_offsets is not None:
                 dispatch_offsets.append(len(context.operations))
-            context.kernel(*dispatch[1:])
+            context.kernel(
+                *dispatch[1:],
+                launch_abi=(
+                    "cuda_graph_gate_v1" if gated_body_begin is not None and index >= gated_body_begin else "ordinary"
+                ),
+            )
         if dispatch_offsets is not None:
             dispatch_offsets.append(len(context.operations))
         return
@@ -1011,7 +1041,10 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         try:
             context.retained_arrays.publish()
             for name, kernel in context.kernels.items():
-                module._aot_builder.add(name, kernel)
+                if name in context.kernel_launch_abis:
+                    module._aot_builder._add_with_launch_abi(name, kernel, context.kernel_launch_abis[name])
+                else:
+                    module._aot_builder.add(name, kernel)
             # A different AOT compile request can retain a different Field
             # closure than the selected JIT graph. Inspect the actual exports,
             # then sample roots/provider arrays at one completion boundary.
@@ -1041,6 +1074,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             module._graph_export_failed = True
             raise
         module._exported_kernels.update(context.kernels)
+        module._kernel_launch_abis.update(context.kernel_launch_abis)
         module._content.extend("kernel:" + name for name in context.kernels)
         module._data_payloads.update({key: context.data_payloads[key] for key in plan.data_entries})
         return plan

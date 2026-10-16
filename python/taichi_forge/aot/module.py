@@ -296,6 +296,7 @@ class Module:
         self._arch = arch
         self._kernels = []
         self._exported_kernels = {}
+        self._kernel_launch_abis = {}
         self._execution_plans = {}
         self._data_payloads = {}
         self._initial_root_data = {}
@@ -374,7 +375,7 @@ class Module:
 
     def _check_kernel_export(self, name, compiled):
         previous = self._exported_kernels.get(name)
-        if previous is not None and previous is not compiled:
+        if previous is not None and (previous is not compiled or name in self._kernel_launch_abis):
             raise TaichiCompilationError(f"AOT kernel name {name!r} is already bound to another specialization")
         return previous is None
 
