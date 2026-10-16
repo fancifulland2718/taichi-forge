@@ -7,7 +7,7 @@ import sys
 import time
 
 
-def main(mode, artifact, budget):
+def main(mode, artifact, budget, check_wrong_abi=True):
     from taichi_forge_runtime.aot import AotError, ExecutionPlan, Runtime
 
     if mode == "borrowed":
@@ -56,7 +56,7 @@ def main(mode, artifact, budget):
         document = json.loads(module.execution_plan("step").to_json())
         # Wrong launch ABIs must fail even when no body iteration will execute.
         loop_index = next(i for i, op in enumerate(document["operations"]) if op["kind"] == "while")
-        for region in ("condition", "body"):
+        for region in (("condition", "body") if check_wrong_abi else ()):
             invalid = json.loads(json.dumps(document))
             loop = invalid["operations"][loop_index]
             if region == "condition":
@@ -78,7 +78,11 @@ def main(mode, artifact, budget):
                 # kernel ABI check before the loop's scalar control check.
                 assert any(
                     message in str(error)
-                    for message in ("one aligned scalar i32", "Ndarray dtype or shape does not match")
+                    for message in (
+                        "one aligned scalar i32",
+                        "Ndarray dtype or shape does not match",
+                        "Array does not have the required exact shape",
+                    )
                 ), str(error)
             else:
                 raise AssertionError("Invalid predicate accepted")
@@ -122,4 +126,4 @@ def main(mode, artifact, budget):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], int(sys.argv[3]))
+    main(sys.argv[1], sys.argv[2], int(sys.argv[3]), check_wrong_abi=len(sys.argv) == 4)

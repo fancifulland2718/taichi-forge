@@ -733,6 +733,23 @@ def _while(context, node):
         if node._has_nested_control:
             _cuda_nested_while(context, node)
             return
+        if node.supports_native_submission and node._cuda_control_lowering == "cuda_masked_bounded_graph":
+            _node(context, node._condition)
+            if node.max_iterations:
+                # The selected chunk already includes its tail condition. Gate
+                # that complete physical body; zero budgets export no body code.
+                body = context.region(_node, node._chunks[1], gated_body_begin=0)
+                context.operations.append(
+                    dict(
+                        kind="while",
+                        predicate=context.binding(node.predicate),
+                        max_iterations=node.max_iterations,
+                        condition=[],
+                        body=body,
+                        lowering=dict(kind="cuda_masked", version=1),
+                    )
+                )
+            return
         if not node.supports_native_submission or node._cuda_control_lowering != "cuda_conditional_graph":
             raise TaichiRuntimeError("AOT Graph requires its selected CUDA control recipe")
     elif arch not in (core.Arch.x64, core.Arch.arm64):
@@ -886,7 +903,7 @@ def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
         raise TaichiRuntimeError("AOT execution Graph contains an unsupported native execution kind")
     command_count = sum(manifest.execution_kind == "backend_command" for manifest in node.native_action_manifests)
     if gated_body_begin is not None and (
-        command_count or node.parallel_dispatch_groups or not 0 < gated_body_begin < node.physical_dispatch_count
+        command_count or node.parallel_dispatch_groups or not 0 <= gated_body_begin < node.physical_dispatch_count
     ):
         raise TaichiRuntimeError("AOT masked control requires a flat physical kernel body")
     if not command_count:

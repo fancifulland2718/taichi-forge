@@ -444,7 +444,7 @@ kernel或device-update节点，不静默切换路线。每份prepare独立拥有
 嵌套Graph，保留物理dispatch边界，只生成body需要的变体；按源特化和调用ABI跨计划去重，
 普通入口不能覆盖gated入口。九个内层区域的小用例验证了真实前向/后段梯度、双绑定、活跃
 后零轮和独立/借用退休，消费端无需编译gated变体。未冻结auto、native provider body、
-单层masked循环与masked分支不属于这条导出路线。原device-update计划仍为v13，保留普通
+masked分支不属于这条导出路线；单层masked循环使用下述v15。原device-update计划仍为v13，保留普通
 kernel合同。
 
 版本15新增显式单层CUDA masked循环：`lowering=dict(kind="cuda_masked", version=1)`，
@@ -452,7 +452,11 @@ kernel合同。
 非空body中的所有kernel（包括尾条件）须为预编译的 `cuda_graph_gate_v1` 代码。非空初始
 condition使用普通入口，零预算也执行一次。静态代码不随预算复制，但录制命令仍随预算增长。
 prepare复用绑定、梯度与退休合同，拒绝非CUDA runtime、native provider body和launch override。
-此显式格式需要v15消费端及匹配的ABI74组件；单层masked Graph自动导出尚未启用。
+此格式需要v15消费端及匹配的ABI74组件。`add_execution_plan(name, graph)` 也可自动导出
+已物化且选择 `cuda_masked_bounded_graph` 的单层Graph，保留已选物理body及尾条件，
+只生成其所需gated变体，跨计划共享代码。零预算只导出初始条件与前后段，不带无用body变体。
+公开/私有控制存储、标量和互不别名约束、显式梯度绑定均保留；消费端环境变化不重选路线，
+默认策略不变。
 
 Vulkan 可导出已选的单层 native 循环，使用版本 4 的 `lowering` 描述：
 

@@ -572,7 +572,7 @@ ABI across plans; an ordinary entry cannot overwrite a gated entry. Small
 nine-inner-region tests cover actual forward/suffix gradients, two bindings,
 active-to-zero replay and standalone/borrowed retirement. No consumer compiler
 is needed to create gated variants. Unfrozen auto routes, native provider bodies,
-flat masked loops and masked branches are outside this export route. Existing
+masked branches are outside this export route. Flat masked loops use v15 below. Existing
 device-update plans remain version 13 and retain their ordinary-kernel contract.
 
 Version 15 adds explicit flat CUDA masked loops with
@@ -584,8 +584,14 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-explicit-plan format requires a v15 consumer and matching ABI74 components;
-flat masked Graph automatic export is not yet enabled.
+format requires a v15 consumer and matching ABI74 components.
+`add_execution_plan(name, graph)` also exports materialized flat Graphs selected
+for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
+condition, generates only their gated variants, and shares code across plans.
+Zero budgets export the initial condition and surrounding work without unused
+body variants. Public/private controls, scalar and disjoint constraints, and
+explicit gradient bindings remain intact. Consumer environment changes do not
+reselect the route; defaults are unchanged.
 
 Vulkan exports selected flat native loops with a version 4 `lowering` recipe:
 

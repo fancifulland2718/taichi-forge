@@ -6,13 +6,16 @@ from pathlib import Path
 import subprocess
 import sys
 
-import pytest
 import taichi_forge as ti
 from tests import test_utils
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_aot_selected_while_graph(tmp_path, monkeypatch):
+    _check_selected_while_graph(tmp_path, monkeypatch)
+
+
+def _check_selected_while_graph(tmp_path, monkeypatch, masked=False):
     arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
     if arch in ("x64", "arm64"):
         arch = "cpu"
@@ -160,6 +163,11 @@ def test_aot_selected_while_graph(tmp_path, monkeypatch):
                 name if name in ("chained", "conditional", "coarse_conditional") else "auto",
             )
         graph = make_graph(budget, private, nested=name == "nested")
+        if masked and not budget:
+            zero_module = ti.aot.Module()
+            zero_plan = zero_module.add_execution_plan("zero", graph)
+            assert not zero_module._kernel_launch_abis
+            assert len(zero_plan.kernel_entries) == len(zero_module._exported_kernels) == 3
         plan = module.add_execution_plan(name, graph)
         kernel_count = len(module._exported_kernels)
         module.add_execution_plan(name + "_again", graph)
@@ -174,6 +182,10 @@ def test_aot_selected_while_graph(tmp_path, monkeypatch):
                 assert [c["iterations"] for c in loops[0]["lowering"]["chunks"]] == [2, 2]
                 if name in ("chained", "conditional", "coarse_conditional"):
                     assert {c["strategy"] for c in loops[0]["lowering"]["chunks"]} == {name}
+            if masked:
+                assert document["version"] == 15
+                assert loops[0]["lowering"] == dict(kind="cuda_masked", version=1)
+                assert all(module._kernel_launch_abis[op["entry"]] == "cuda_graph_gate_v1" for op in loops[0]["body"])
             if name == "nested":
                 assert any(op["kind"] == "while" for op in loops[0]["body"])
             else:
@@ -209,13 +221,6 @@ def test_aot_selected_while_graph(tmp_path, monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_aot_selected_masked_control_is_not_replaced(monkeypatch):
-    from tests.python.test_graph_cuda_while_region import _build_step
-
+def test_aot_selected_masked_control_is_not_replaced(tmp_path, monkeypatch):
     monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
-    graph = _build_step(4)
-    module = ti.aot.Module()
-    with pytest.raises(ti.TaichiRuntimeError, match="selected CUDA control recipe"):
-        module.add_execution_plan("step", graph)
-    assert not module._content and not module._exported_kernels and not module._graph_export_failed
-    graph.close()
+    _check_selected_while_graph(tmp_path, monkeypatch, masked=True)
