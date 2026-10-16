@@ -580,7 +580,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
               std::get_if<aot::ExecutionPlan::ArrayLayout>(&constraint)) {
         validate_native_array_layout(array_binding(layout->array),
                                      layout->required);
-      } else {
+      } else if (std::holds_alternative<aot::ExecutionPlan::Disjoint>(
+                     constraint)) {
         const auto &pair = std::get<aot::ExecutionPlan::Disjoint>(constraint);
         const auto &left = storage_range(pair.left);
         const auto &right = storage_range(pair.right);
@@ -597,6 +598,25 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
               std::string("Cannot prove array bindings disjoint") +
               (pair.allow_same_view ? " or the same view: " : ": ") +
               pair.left + " and " + pair.right);
+      } else {
+        const auto &group =
+            std::get<aot::ExecutionPlan::DisjointWrites>(constraint);
+        std::vector<NativeStorageRange> reads;
+        std::vector<NativeStorageWrite> writes;
+        for (const auto &read : group.reads)
+          reads.push_back(storage_range(read));
+        for (const auto &write : group.writes) {
+          auto inplace = write.inplace_read;
+          if (inplace) {
+            const auto &a = array_binding(write.array);
+            const auto &b = array_binding(group.reads[*inplace]);
+            if (a.scalar_type != b.scalar_type || a.shape != b.shape ||
+                a.element_shape != b.element_shape)
+              inplace.reset();
+          }
+          writes.push_back({storage_range(write.array), inplace});
+        }
+        validate_native_disjoint_writes(reads, writes);
       }
     } catch (const std::invalid_argument &error) {
       throw MemoryBindingError(error.what());

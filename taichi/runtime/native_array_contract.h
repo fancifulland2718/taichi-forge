@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang {
@@ -22,6 +23,21 @@ struct NativeStorageRange {
 NativeStorageRange resolve_native_storage_range(Arch arch,
                                                 DevicePtr pointer,
                                                 std::uint64_t bytes);
+
+struct NativeStorageWrite {
+  NativeStorageRange range;
+  // Only this read port may overlap, and only as the exact same range. The
+  // caller must additionally qualify matching dtype/shape for an in-place view.
+  std::optional<std::size_t> inplace_read;
+};
+
+// Read/read sharing is legal. Writes cannot overlap another write or any read
+// except their explicitly paired in-place port. Uses O(N) storage and O(N log
+// N) cold validation, including imported Vulkan buffers with unknown memory
+// IDs.
+void validate_native_disjoint_writes(
+    const std::vector<NativeStorageRange> &reads,
+    const std::vector<NativeStorageWrite> &writes);
 
 // Requirements on a packed scalar/AoS array. Adapters must qualify packed
 // storage first; shape metadata alone is not proof that an affine view is

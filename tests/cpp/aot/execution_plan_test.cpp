@@ -706,6 +706,93 @@ TEST(ExecutionPlan, ExactShapesAndOptionalSameViewRemainColdRequirements) {
   EXPECT_FALSE(a.proven_same_range(alias));
 }
 
+TEST(ExecutionPlan, DisjointWriteGroupsValidatePortIndices) {
+  const std::string prefix = R"({"version":1,"operations":[
+    {"kind":"copy","source":"x","destination":"y"}],"constraints":[)";
+  const auto plan = ExecutionPlan::parse(prefix + R"(
+    {"kind":"disjoint_writes","reads":["x","x"],
+     "writes":[{"array":"y","inplace_read":1}]}]})");
+  const auto &group =
+      std::get<ExecutionPlan::DisjointWrites>(plan.constraints[0]);
+  EXPECT_EQ(group.reads, (std::vector<std::string>{"x", "x"}));
+  ASSERT_EQ(group.writes.size(), 1);
+  EXPECT_EQ(group.writes[0].inplace_read, 1);
+  for (const auto *fields :
+       {R"("reads":null,"writes":[{"array":"y"}])", R"("reads":[],"writes":[])",
+        R"("reads":["unused"],"writes":[{"array":"y"}])",
+        R"("reads":["x"],"writes":[{"array":"unused"}])",
+        R"("reads":["x"],"writes":[{"array":"y","inplace_read":-1}])",
+        R"("reads":["x"],"writes":[{"array":"y","inplace_read":1}])",
+        R"("reads":["x"],"writes":[{"array":"y","inplace_read":true}])",
+        R"("reads":["x"],"writes":[{"array":"y","inplace_read":0.0}])",
+        R"("reads":["x"],"writes":[{"array":"y","inplace_read":null}])",
+        R"("reads":["x"],"writes":[{"array":"y","unknown":0}])"})
+    EXPECT_THROW(
+        ExecutionPlan::parse(prefix + "{\"kind\":\"disjoint_writes\"," +
+                             fields + "}]}"),
+        std::invalid_argument);
+}
+
+TEST(ExecutionPlan, DisjointWriteRangesKeepOneInplaceReadAndNoSizeCap) {
+  auto *device = reinterpret_cast<Device *>(std::uintptr_t(1));
+  NativeStorageRange a{device, 1, 16, 0, 0, 16};
+  auto b = a;
+  b.memory_offset = 32;
+  EXPECT_NO_THROW(validate_native_disjoint_writes({a, a}, {{b, std::nullopt}}));
+  EXPECT_NO_THROW(
+      validate_native_disjoint_writes({a}, {{a, 0}, {b, std::nullopt}}));
+  EXPECT_THROW(validate_native_disjoint_writes({a, a}, {{a, 0}}),
+               std::invalid_argument);
+  EXPECT_THROW(validate_native_disjoint_writes({a}, {{a, 0}, {a, 0}}),
+               std::invalid_argument);
+  EXPECT_THROW(validate_native_disjoint_writes({a}, {{a, 1}}),
+               std::invalid_argument);
+  b.memory_offset = 17;
+  EXPECT_THROW(validate_native_disjoint_writes({a}, {{b, 0}}),
+               std::invalid_argument);
+  b.bytes = 0;
+  EXPECT_NO_THROW(validate_native_disjoint_writes({a}, {{b, std::nullopt}}));
+  std::vector<NativeStorageRange> reads;
+  std::vector<NativeStorageWrite> writes;
+  for (std::size_t i = 0; i < 4097; ++i) {
+    reads.push_back({device, 1, i * 32, 0, 0, 16});
+    writes.push_back({{device, 1, i * 32 + 16, 0, 0, 16}, std::nullopt});
+  }
+  EXPECT_NO_THROW(validate_native_disjoint_writes(reads, writes));
+  writes.back().range = reads.front();
+  EXPECT_THROW(validate_native_disjoint_writes(reads, writes),
+               std::invalid_argument);
+}
+
+TEST(ExecutionPlan, DisjointWriteGroupsCertifyImportedBufferRanges) {
+  auto *device = reinterpret_cast<Device *>(std::uintptr_t(1));
+  NativeStorageRange known{device, 3, 128, 9, 0, 16};
+  auto unknown = known;
+  unknown.memory = 0;
+  EXPECT_NO_THROW(validate_native_disjoint_writes({unknown}, {{known, 0}}));
+  EXPECT_NO_THROW(validate_native_disjoint_writes({known}, {{unknown, 0}}));
+  auto adjacent = known;
+  adjacent.memory_offset += 16;
+  adjacent.buffer_offset += 16;
+  EXPECT_NO_THROW(
+      validate_native_disjoint_writes({unknown}, {{adjacent, std::nullopt}}));
+  auto other = known;
+  other.buffer = 10;
+  EXPECT_THROW(validate_native_disjoint_writes({unknown}, {{other, 0}}),
+               std::invalid_argument);
+  // A known-memory alias through another buffer still participates in the
+  // memory sweep when the allowed in-place read has no imported memory ID.
+  EXPECT_THROW(validate_native_disjoint_writes({unknown, other}, {{known, 0}}),
+               std::invalid_argument);
+  other.memory_offset += 64;
+  EXPECT_NO_THROW(
+      validate_native_disjoint_writes({unknown, other}, {{known, 0}}));
+  auto inconsistent = known;
+  inconsistent.memory = 4;
+  EXPECT_THROW(validate_native_disjoint_writes({known}, {{inconsistent, 0}}),
+               std::invalid_argument);
+}
+
 TEST(ExecutionPlan, KernelLabelsBelongToDispatches) {
   const auto plan = ExecutionPlan::parse(R"({"version":2,
     "initialization":[{"kind":"kernel","entry":"shared","arguments":["x"],"label":"init"}],

@@ -50,5 +50,22 @@ def validate_constraints(constraints, used):
                 raise ValueError("allow_same_view must be a boolean")
             binding(constraint["left"])
             binding(constraint["right"])
+        elif constraint.get("kind") == "disjoint_writes":
+            if set(constraint) != {"kind", "reads", "writes"}:
+                raise ValueError("Invalid access group fields")
+            reads, writes = constraint["reads"], constraint["writes"]
+            if not isinstance(reads, list) or not isinstance(writes, list) or not writes:
+                raise ValueError("Access group needs reads and nonempty writes lists")
+            for read in reads:
+                binding(read)
+            for write in writes:
+                if not isinstance(write, dict) or set(write) - {"inplace_read"} != {"array"}:
+                    raise ValueError("Invalid access group write fields")
+                binding(write["array"])
+                if "inplace_read" in write:
+                    index = write["inplace_read"]
+                    integer(index)
+                    if index >= len(reads):
+                        raise ValueError("In-place read index is outside the access group")
         else:
             raise ValueError("Unsupported execution constraint")

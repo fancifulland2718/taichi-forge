@@ -1,6 +1,10 @@
 #include "taichi/runtime/native_array_contract.h"
 
+#include <algorithm>
 #include <limits>
+#include <map>
+#include <set>
+#include <tuple>
 #include <type_traits>
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
@@ -63,6 +67,129 @@ bool NativeStorageRange::proven_same_range(
     return buffer_offset == other.buffer_offset;
   return memory && memory == other.memory &&
          memory_offset == other.memory_offset;
+}
+
+void validate_native_disjoint_writes(
+    const std::vector<NativeStorageRange> &reads,
+    const std::vector<NativeStorageWrite> &writes) {
+  Device *owner = nullptr;
+  std::map<uint64_t, std::pair<uint64_t, uint64_t>> buffers;
+  auto validate_owner = [&](const NativeStorageRange &range) {
+    if (!range.device || (owner && owner != range.device))
+      throw std::invalid_argument("Array access group requires one live owner");
+    owner = range.device;
+    checked_add(range.memory_offset, range.bytes);
+    checked_add(range.buffer_offset, range.bytes);
+    if (range.buffer && range.memory) {
+      if (range.memory_offset < range.buffer_offset)
+        throw std::invalid_argument("Array buffer memory offset is invalid");
+      const auto identity = std::make_pair(
+          range.memory, range.memory_offset - range.buffer_offset);
+      const auto [entry, inserted] = buffers.emplace(range.buffer, identity);
+      if (!inserted && entry->second != identity)
+        throw std::invalid_argument(
+            "Array buffer memory identity is inconsistent");
+    }
+  };
+  for (const auto &read : reads)
+    validate_owner(read);
+  bool has_writes = false;
+  std::optional<uint64_t> unknown_buffer;
+  bool unknown_write = false;
+  auto unknown = [&](const NativeStorageRange &range, bool write) {
+    if (range.bytes && !range.memory) {
+      if (!range.buffer || (unknown_buffer && *unknown_buffer != range.buffer))
+        throw std::invalid_argument(
+            "Cannot prove imported array group disjoint");
+      unknown_buffer = range.buffer;
+      unknown_write |= write;
+    }
+  };
+  for (const auto &write : writes) {
+    validate_owner(write.range);
+    if (write.inplace_read && *write.inplace_read >= reads.size())
+      throw std::invalid_argument(
+          "In-place read index is outside the access group");
+    has_writes |= write.range.bytes != 0;
+  }
+  if (!has_writes)
+    return;
+  for (const auto &read : reads)
+    unknown(read, false);
+  for (const auto &write : writes)
+    unknown(write.range, true);
+  if (unknown_buffer) {
+    // Unknown memory can only be certified against the same buffer. If an
+    // unknown port writes, every nonempty read must also use that buffer.
+    for (const auto &write : writes)
+      if (write.range.bytes && write.range.buffer != *unknown_buffer)
+        throw std::invalid_argument("Cannot prove imported writes disjoint");
+    if (unknown_write)
+      for (const auto &read : reads)
+        if (read.bytes && read.buffer != *unknown_buffer)
+          throw std::invalid_argument("Cannot prove imported reads disjoint");
+  }
+
+  struct Event {
+    uint64_t memory, position;
+    bool begin, write;
+    std::size_t index;
+    auto key() const {
+      // End events precede beginnings, so adjacent ranges do not overlap.
+      return std::tie(memory, position, begin, write, index);
+    }
+  };
+  auto sweep = [&](bool buffer_view) {
+    std::vector<Event> events;
+    auto append = [&](const NativeStorageRange &range, bool write,
+                      std::size_t index) {
+      if (!range.bytes ||
+          (buffer_view ? range.buffer != *unknown_buffer : !range.memory))
+        return;
+      const auto memory = buffer_view ? 1 : range.memory;
+      const auto begin =
+          buffer_view ? range.buffer_offset : range.memory_offset;
+      events.push_back({memory, begin, true, write, index});
+      events.push_back(
+          {memory, checked_add(begin, range.bytes), false, write, index});
+    };
+    for (std::size_t i = 0; i < reads.size(); ++i)
+      append(reads[i], false, i);
+    for (std::size_t i = 0; i < writes.size(); ++i)
+      append(writes[i].range, true, i);
+    std::sort(events.begin(), events.end(),
+              [](const auto &a, const auto &b) { return a.key() < b.key(); });
+    std::set<std::size_t> active_reads;
+    std::optional<std::size_t> active_write;
+    auto allowed = [&](std::size_t write, std::size_t read) {
+      return writes[write].inplace_read == read &&
+             writes[write].range.proven_same_range(reads[read]);
+    };
+    for (const auto &event : events) {
+      if (!event.begin) {
+        if (event.write)
+          active_write.reset();
+        else
+          active_reads.erase(event.index);
+      } else if (event.write) {
+        if (active_write || active_reads.size() > 1 ||
+            (!active_reads.empty() &&
+             !allowed(event.index, *active_reads.begin())))
+          throw std::invalid_argument(
+              "Array group write overlaps another port");
+        active_write = event.index;
+      } else {
+        if (active_write && !allowed(*active_write, event.index))
+          throw std::invalid_argument(
+              "Array group read overlaps another output");
+        active_reads.insert(event.index);
+      }
+    }
+  };
+  if (!unknown_write)
+    sweep(false);
+  if (unknown_buffer)
+    sweep(true);
 }
 
 NativeStorageRange resolve_native_storage_range(Arch arch,
@@ -132,7 +259,8 @@ void validate_native_array_layout(
     const NativeArrayLayoutRequirement &required) {
   if (!required.dtype.empty() &&
       array.scalar_type->to_string() != required.dtype)
-    throw std::invalid_argument("Array does not have the required scalar dtype");
+    throw std::invalid_argument(
+        "Array does not have the required scalar dtype");
   if (!required.record_bytes || !required.alignment ||
       array.shape.size() != required.minimum_shape.size() ||
       array.element_shape != required.element_shape)

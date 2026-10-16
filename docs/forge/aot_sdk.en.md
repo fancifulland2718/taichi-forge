@@ -664,6 +664,23 @@ arrays, in-place replay, distinct imports of the same storage, and metadata or
 partial-overlap rejection; Vulkan additionally checks different buffers bound
 to the same device memory.
 
+`disjoint_writes` expresses a complete access group without pairwise expansion:
+
+```python
+{"kind": "disjoint_writes", "reads": ["b0", "c0", "b1", "c1", "a"],
+ "writes": [{"array": "d0", "inplace_read": 1},
+            {"array": "d1", "inplace_read": 3}]}
+```
+
+Reads may share storage. Writes must be disjoint from other writes and all read
+ports, except the optional zero-based `inplace_read` port with identical physical
+range, dtype and shape. A second read of that storage still forbids the write.
+Omitting `inplace_read` allows no overlap. The description is linear in port
+count, and cold validation uses O(N log N) time and O(N) temporary storage on
+CPU/CUDA/Vulkan. Imported Vulkan memory must provide enough identity to prove
+the relationships; the same-buffer case also works without a memory handle.
+Older readers reject this unknown constraint; replay adds no validation or work.
+
 Preparation validates these requirements before recording commands or creating
 provider state. Failures execute no user kernels. Fixed replay performs no new
 constraint checks; changed bindings require another preparation, retaining the
@@ -1868,6 +1885,11 @@ coefficients, alignment and configured algorithm/split-K/ReLU facts. A group
 compresses once before its products; separate recordings retain their individual
 compression steps even when they use the same resource. Unknown plan subclasses
 are rejected.
+
+Each recording also retains its full access-group contract: outputs cannot
+overwrite raw A or another product's inputs/outputs. Read-only sharing and each
+product's own identical C/D view remain legal. Low-level explicit operation
+sequences retain their individually declared contracts.
 
 For a portable snapshot recording, explicitly retain raw A at compression time:
 

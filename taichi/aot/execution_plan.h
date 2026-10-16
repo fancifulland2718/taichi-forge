@@ -97,7 +97,15 @@ struct ExecutionPlan {
     std::string right;
     bool allow_same_view{false};
   };
-  using Constraint = std::variant<ArrayLayout, Disjoint>;
+  struct DisjointWrites {
+    struct Write {
+      std::string array;
+      std::optional<std::size_t> inplace_read;
+    };
+    std::vector<std::string> reads;
+    std::vector<Write> writes;
+  };
+  using Constraint = std::variant<ArrayLayout, Disjoint, DisjointWrites>;
   std::vector<Constraint> constraints;
   std::vector<Operation> operations;
   std::vector<Operation> initialization;

@@ -326,6 +326,16 @@ class CusparseLtCaptureRecording(BackendCommandRecording):
     def _export_aot(self, context):
         if type(self.plan) is not CusparseLtMatmulPlan:
             raise TaichiRuntimeError("AOT cuSPARSELt plan variants require their own reconstruction contract")
+        reads, writes = [], []
+        for index in range(self.matmul_count):
+            b, c, d = self._public_names[3 * index : 3 * index + 3]
+            reads.extend((context.binding(b), context.binding(c)))
+            writes.append(dict(array=context.binding(d), inplace_read=len(reads) - 1))
+        if self.recompress:
+            reads.append(context.binding(self._public_names[-1]))
+        # Preserve the recording's complete group contract without expanding
+        # every output against every other product into quadratic metadata.
+        context.binding_constraints.append(dict(kind="disjoint_writes", reads=reads, writes=writes))
         with self.plan.provider._lock, self.plan._lock:
             self.plan._validate_lifetime()
             if not self.recompress and self.plan._aot_initial_a is None:

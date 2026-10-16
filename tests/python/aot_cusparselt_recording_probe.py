@@ -90,6 +90,11 @@ def main(mode, artifact, adapter, vendor, case, workspace):
 
         arrays, host, one = frame(1)
         other_arrays, other, two = frame(-0.5)
+        if case == "group":
+            # A shared-A recording protects all products, not only each
+            # individual matmul's B/C/D ports.
+            for name in ("a", "c2", "e"):
+                raises(lambda: module.prepare_execution("step", dict(arrays, d=arrays[name])))
         for _ in range(3):
             one()
             two()
@@ -100,6 +105,16 @@ def main(mode, artifact, adapter, vendor, case, workspace):
         one()
         check(arrays, host, case == "relu")
         check(other_arrays, other, case == "relu")
+        if case == "group":
+            # Read-only operands may be shared across products.
+            with module.prepare_execution("step", dict(arrays, b2=arrays["b"], c2=arrays["c"])) as shared:
+                shared()
+                check(arrays, dict(host, b2=host["b"], c2=host["c"]), False)
+            # Own C/D in-place feedback remains legal for every product.
+            feedback_host = dict(host, c=read(arrays["d"]), c2=read(arrays["e"]))
+            with module.prepare_execution("step", dict(arrays, c=arrays["d"], c2=arrays["e"])) as feedback:
+                feedback()
+                check(arrays, feedback_host, False)
         one.close()
         two()
         if mode == "borrowed":

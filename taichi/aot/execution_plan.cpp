@@ -394,6 +394,27 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           plan.constraints.emplace_back(Disjoint{
               binding(constraint["left"]), binding(constraint["right"]),
               optional_bool(constraint, "allow_same_view")});
+        } else if (kind == "disjoint_writes") {
+          fields(constraint, {"kind", "reads", "writes"});
+          if (!constraint["reads"].is_arr() || !constraint["writes"].is_arr() ||
+              constraint["writes"].arr.inner.empty())
+            throw std::invalid_argument(
+                "Access group needs reads and nonempty writes arrays");
+          DisjointWrites group;
+          for (const auto &read : constraint["reads"].arr.inner)
+            group.reads.push_back(binding(read));
+          for (const auto &write : constraint["writes"].arr.inner) {
+            fields(write, {"array", "inplace_read"});
+            DisjointWrites::Write port{binding(write["array"]), std::nullopt};
+            if (const auto index = optional_integer(write, "inplace_read")) {
+              if (*index >= group.reads.size())
+                throw std::invalid_argument(
+                    "In-place read index is outside the access group");
+              port.inplace_read = static_cast<std::size_t>(*index);
+            }
+            group.writes.push_back(std::move(port));
+          }
+          plan.constraints.emplace_back(std::move(group));
         } else {
           throw std::invalid_argument("Unsupported execution constraint: " +
                                       kind);

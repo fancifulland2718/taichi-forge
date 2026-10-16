@@ -3,7 +3,7 @@
 import ctypes as C
 import sys
 
-from taichi_forge_runtime.aot import AotError, Runtime
+from taichi_forge_runtime.aot import AotError, ExecutionPlan, Runtime
 from taichi_forge_runtime.aot._runtime import NdArray, _Memory
 from tests.python.aot_graph_recording_probe import read, write
 from tests.python.aot_cutensor_probe import near
@@ -69,6 +69,39 @@ def main(mode, arch, artifact):
         runtime = Runtime(arch)
     with runtime:
         module = runtime.load_module(artifact)
+        group = {key: runtime.ndarray("f32", 17) for key in ("x", "y", "z", "w")}
+        for key in ("x", "z"):
+            write(group[key], [2] * 17)
+        for bindings in (group, dict(group, z=group["x"]), dict(group, y=group["x"], w=group["z"])):
+            with module.prepare_execution("access_group", bindings) as run:
+                run()
+                near(read(bindings["y"]), [7] * 17)
+                near(read(bindings["w"]), [7] * 17)
+        for key in ("z", "w"):
+            failure(lambda: module.prepare_execution("access_group", dict(group, y=group[key])), "overlap")
+        # The allowed C-like read port cannot also hide a second read alias.
+        failure(lambda: module.prepare_execution("access_group", dict(group, y=group["x"], z=group["x"])), "overlap")
+        imported_x = imported(runtime, group["x"], arch)
+        with module.prepare_execution("access_group", dict(group, y=imported_x)) as run:
+            run()
+        imported_x.close()
+        singleton = ExecutionPlan(
+            [dict(kind="fill32", destination=key, value=0) for key in ("x", "y")],
+            constraints=[dict(kind="disjoint_writes", reads=["x"], writes=[dict(array="y", inplace_read=0)])],
+        )
+        integer_view = runtime.ndarray("i32", 17)
+        for view in (
+            NdArray(group["x"]._memory, "i32", integer_view._code, (17,), ()),
+            NdArray(group["x"]._memory, "f32", group["x"]._code, (1, 17), ()),
+        ):
+            failure(lambda: singleton.prepare(module, dict(x=group["x"], y=view)), "overlap")
+        integer_view.close()
+        if arch == "vulkan":
+            unknown = imported(runtime, group["x"], arch, known_memory=False)
+            with singleton.prepare(module, dict(x=unknown, y=group["x"])) as run:
+                run()
+            failure(lambda: module.prepare_execution("access_group", dict(group, x=unknown)), "imported")
+            unknown.close()
         typed = runtime.ndarray("f32", 17)
         same_width = runtime.ndarray("i32", 17)
         failure(lambda: module.prepare_execution("typed_fill", {"x": same_width}), "dtype")

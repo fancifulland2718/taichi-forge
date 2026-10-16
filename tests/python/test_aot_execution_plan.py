@@ -424,6 +424,28 @@ def test_exact_shape_and_same_view_constraints_are_explicit():
             ExecutionPlan(operations, constraints=[dict(pair, allow_same_view=bad)])
 
 
+def test_disjoint_write_groups_preserve_port_identity_and_validate_indices():
+    operations = [dict(kind="copy", source="x", destination="y")]
+    group = dict(kind="disjoint_writes", reads=["x", "x"], writes=[dict(array="y", inplace_read=1)])
+    plan = ExecutionPlan(operations, constraints=[group])
+    assert json.loads(ExecutionPlan.from_json(plan.to_json()).to_json())["constraints"] == [group]
+    for patch in (
+        dict(reads=None),
+        dict(writes=[]),
+        dict(writes=[None]),
+        dict(extra=1),
+        dict(reads=["unused"]),
+        dict(writes=[dict(array="unused")]),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, constraints=[dict(group, **patch)])
+    for value in (-1, 2, True, 1.0, None, "0"):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, constraints=[dict(group, writes=[dict(array="y", inplace_read=value)])])
+    # Pure outputs and no reads are useful for independent scratch arrays.
+    ExecutionPlan(operations, constraints=[dict(kind="disjoint_writes", reads=[], writes=[dict(array="y")])])
+
+
 def test_scalar_resource_bits_roundtrip_and_validation():
     cases = (
         ("i8", -128, "80"),

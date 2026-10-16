@@ -37,6 +37,22 @@ def test_aot_binding_constraints_forward_reverse_and_import_aliases(tmp_path):
     module.add_kernel(forward)
     module.add_kernel(forward.grad, name="backward")
     module.add_kernel(inplace)
+    module.add_execution_plan(
+        "access_group",
+        ti.aot.ExecutionPlan(
+            [
+                dict(kind="kernel", entry="inplace", arguments=["x", "y"]),
+                dict(kind="kernel", entry="inplace", arguments=["z", "w"]),
+            ],
+            constraints=[
+                dict(
+                    kind="disjoint_writes",
+                    reads=["x", "z"],
+                    writes=[dict(array="y", inplace_read=0), dict(array="w", inplace_read=1)],
+                )
+            ],
+        ),
+    )
     constraints = [
         dict(kind="array_layout", array=name, exact_shape=[17], record_bytes=4, alignment=4)
         for name in ("x", "y", "dx", "dy")

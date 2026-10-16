@@ -466,6 +466,21 @@ CPU/CUDA 地址范围或 Vulkan buffer/memory 绑定，可识别不同导入分�
 Vulkan 缺少 memory 身份时，不能证明不同 buffer 不重叠。导入者须描述真实底层
 分配；外部虚拟内存映射另外创建的独立别名不在此追踪范围。
 
+`disjoint_writes` 可紧凑表达完整访问组，避免两两展开：
+
+```python
+{"kind": "disjoint_writes", "reads": ["b0", "c0", "b1", "c1", "a"],
+ "writes": [{"array": "d0", "inplace_read": 1},
+            {"array": "d1", "inplace_read": 3}]}
+```
+
+只读端口可以共享存储；每个输出必须与其他输出及全部读取端口不重叠，仅允许与可选
+`inplace_read` 指定的零起始读取端口拥有完全相同的物理范围、dtype和shape。
+另一个读取端口也引用该存储时仍会拒绝写入。省略该索引则不允许任何重叠。
+描述大小随端口数线性增长，CPU/CUDA/Vulkan冷校验为O(N log N)时间、O(N)临时存储。
+Vulkan导入必须提供足以证明这些关系的身份；同buffer范围可在缺memory句柄时验证。
+旧reader拒绝此未知约束；暖重放不增加校验或执行节点。
+
 各索引维必须恰好匹配时，用 `exact_shape` 替代 `minimum_shape`，两者互斥。
 对本身支持原地执行的操作，disjoint 约束可设 `allow_same_view=True`，额外允许
 物理字节范围、scalar dtype、索引形状和 element shape 全部相同的视图；部分重叠或
@@ -1448,6 +1463,8 @@ C/D 反馈、独立实例、未初始化读取/别名回滚和在途 close/reset
 动态刷新型 cuSPARSELt recording 可直接从顺序 Graph 导出，保留每个压缩阶段、共享 A
 分组、系数、alignment，以及配置后的 algorithm/split-K/ReLU 参数。分组先压缩一次
 再执行各乘法；同资源上的独立 recording 仍保留各自的压缩，未知 plan 子类明确拒绝。
+每个recording还保留完整组内约束：输出不得覆盖原始A或另一乘积的输入/输出；只读
+共享及每个乘积自身C/D完全同址继续合法。低层显式操作序列保留各自声明的合同。
 可移植 snapshot recording 需要在压缩时显式保留原始 A：
 
 ```python
