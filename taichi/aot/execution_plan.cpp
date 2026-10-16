@@ -18,7 +18,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 10)
+    if (version < 1 || version > 11)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -45,7 +45,48 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             "Execution plan needs a nonempty operation array");
       for (const auto &step : steps.arr.inner) {
         const auto kind = name(step["kind"]);
-        if (kind == "cuda_parallel") {
+        if (kind == "branch") {
+          if (version < 11)
+            throw std::invalid_argument(
+                "Branches require execution plan version 11");
+          fields(step, {"kind", "selector", "selection", "has_default",
+                        "condition", "bodies", "lowering"});
+          auto branch = std::make_shared<Branch>();
+          branch->selector = name(step["selector"]);
+          const auto selection = name(step["selection"]);
+          if (selection == "nonzero")
+            branch->selection.kind = BranchSelection::Kind::nonzero;
+          else if (selection == "indexed")
+            branch->selection.kind = BranchSelection::Kind::indexed;
+          else
+            throw std::invalid_argument("Unsupported branch selection");
+          // Required, unlike optional legacy booleans: no implicit fallback.
+          if (!step.obj.inner.count("has_default"))
+            throw std::invalid_argument("Branch requires has_default");
+          branch->selection.has_default = optional_bool(step, "has_default");
+          const auto &lowering = step["lowering"];
+          fields(lowering, {"kind", "version"});
+          if (integer(lowering["version"]) != 1)
+            throw std::invalid_argument("Unsupported branch lowering version");
+          const auto route = name(lowering["kind"]);
+          if (route == "cpu")
+            branch->lowering = Branch::Lowering::cpu;
+          else if (route == "cuda_conditional")
+            branch->lowering = Branch::Lowering::cuda_conditional;
+          else
+            throw std::invalid_argument("Unsupported branch lowering");
+          const auto &bodies = step["bodies"];
+          if (!bodies.is_arr())
+            throw std::invalid_argument("Branch bodies must be an array");
+          branch->selection.validate(bodies.arr.inner.size());
+          arguments.insert(branch->selector);
+          parse_steps(step["condition"], branch->condition, true);
+          for (const auto &body : bodies.arr.inner) {
+            branch->bodies.emplace_back();
+            parse_steps(body, branch->bodies.back(), true);
+          }
+          operations.emplace_back(std::move(branch));
+        } else if (kind == "cuda_parallel") {
           if (version < 9)
             throw std::invalid_argument(
                 "CUDA parallel requires execution plan version 9");
@@ -435,7 +476,8 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     }
     if (plan.cuda_binding_frames) {
       for (const auto &operation : plan.operations) {
-        if (std::holds_alternative<std::shared_ptr<const While>>(operation) ||
+        if (std::holds_alternative<std::shared_ptr<const Branch>>(operation) ||
+            std::holds_alternative<std::shared_ptr<const While>>(operation) ||
             std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
           throw std::invalid_argument(
               "CUDA binding frames require a flat replay sequence");

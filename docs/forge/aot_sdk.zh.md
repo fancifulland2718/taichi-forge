@@ -312,6 +312,32 @@ binding-frame recipe 时自动保留该策略，包括可重建的私有存储�
 CUDA 图更新不兼容时明确报错，不会静默改为独立执行器。
 C 调用入口为 `ti_prepare_execution_binding_ext` 与 `ti_get_prepared_binding_family_info_ext`。
 
+持久描述版本 11 用统一的 `branch` 操作表达显式 IF/SWITCH：
+
+```python
+branch = dict(
+    kind="branch", selector="selected", selection="indexed", has_default=True,
+    condition=[dict(kind="kernel", entry="choose", arguments=["input", "selected"])],
+    bodies=[case_zero_operations, case_one_operations, default_operations],
+    lowering=dict(kind="cuda_conditional", version=1),  # CPU 使用 "cpu"
+)
+plan = ExecutionPlan([*prefix_operations, branch, *suffix_operations])
+```
+
+selector 绑定一个对齐的标量 i32 ndarray。condition 只执行一次；`indexed` 按有符号、
+从零开始的索引选分支，负数或越界时仅在 `has_default=True` 下选最后一个 body，否则
+不执行任何 body。`nonzero` 表达单 body 的 IF，或两个 body 且有 default 的 IF/ELSE。
+允许空 condition 和空 body，没有软件分支数上限；CUDA 节点 ABI 要求 body 数能用 uint32 表示。
+
+CPU 使用已准备的宿主步骤。`cuda_conditional` 要求 CUDA 条件图支持，将条件、选中的分支和
+前后段放在一次根图提交内。每分支增加 24 字节控制存储，与嵌套循环共用控制分配。
+声明的后端必须匹配，不会静默换路。所有 body 的代码、资源、梯度和 provider 都进入准备期
+检查；只有各条可能路径共同建立的初始化事实才传播到后段。资源及在途退休沿用既有合同。
+
+这一显式 plan 切片已在 CPU/CUDA 验证分支/循环嵌套、独立绑定、实际前向/反向 kernel，
+以及 CUDA 条件分支内的 cuBLAS 和显式矩阵伴随；不表示对控制结构自动微分。
+JIT IF/SWITCH 自动导出、Vulkan/portable/masked 分支及分支 binding family 尚未接通。
+
 持久描述版本 3 还接受显式 `while` 操作：
 
 ```python

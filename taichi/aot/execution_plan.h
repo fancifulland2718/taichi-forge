@@ -8,6 +8,7 @@
 #include <variant>
 #include <vector>
 #include "taichi/aot/execution_resources.h"
+#include "taichi/runtime/branch_selection.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_description.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
@@ -59,6 +60,7 @@ struct ExecutionPlan {
     std::optional<std::string> values;
   };
   using Native = NativeOperationDescription;
+  struct Branch;
   struct While;
   struct Parallel;
   using Operation = std::variant<Kernel,
@@ -67,12 +69,21 @@ struct ExecutionPlan {
                                  Compact,
                                  Sort,
                                  Native,
+                                 std::shared_ptr<const Branch>,
                                  std::shared_ptr<const While>,
                                  std::shared_ptr<const Parallel>>;
   // CUDA fork/join; each branch is an ordered, ordinary kernel sequence.
   // Surrounding operations retain the prefix and the join/suffix.
   struct Parallel {
     std::vector<std::vector<Operation>> branches;
+  };
+  struct Branch {
+    enum class Lowering { cpu, cuda_conditional };
+    Lowering lowering{Lowering::cpu};
+    std::string selector;
+    BranchSelection selection;
+    std::vector<Operation> condition;
+    std::vector<std::vector<Operation>> bodies;
   };
   struct While {
     struct Vulkan {

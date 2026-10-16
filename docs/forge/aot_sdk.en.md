@@ -390,6 +390,40 @@ restriction is unchanged. An incompatible CUDA graph update raises an error; it
 never silently creates an independent executable. C callers use
 `ti_prepare_execution_binding_ext` and `ti_get_prepared_binding_family_info_ext`.
 
+Persistent format version 11 accepts explicit IF/SWITCH descriptions through
+one `branch` operation:
+
+```python
+branch = dict(
+    kind="branch", selector="selected", selection="indexed", has_default=True,
+    condition=[dict(kind="kernel", entry="choose", arguments=["input", "selected"])],
+    bodies=[case_zero_operations, case_one_operations, default_operations],
+    lowering=dict(kind="cuda_conditional", version=1),  # use "cpu" on CPU
+)
+plan = ExecutionPlan([*prefix_operations, branch, *suffix_operations])
+```
+
+The selector is one aligned scalar i32 ndarray. The condition executes once;
+`indexed` selects a zero-based case using signed values, and negative/out-of-range
+values select the last body only when `has_default=True`. Otherwise no body runs.
+`nonzero` expresses IF with one body, or IF/ELSE with two bodies and a default.
+Empty conditions and bodies are allowed. There is no software branch-count cap;
+CUDA's node ABI requires a uint32 body count.
+
+CPU uses prepared host steps. `cuda_conditional` requires CUDA conditional graph
+support and keeps condition, selected body and surrounding operations in one root
+launch. It adds 24 control bytes per branch, sharing the control allocation with
+nested loops. The declared backend must match; it never silently changes route.
+All bodies participate in code, resource, gradient and provider preflight, and
+only initialization facts common to every possible path reach the suffix.
+Ordinary resource and in-flight retirement rules apply.
+
+This explicit-plan slice is verified on CPU/CUDA with branch/loop nesting,
+independent bindings, actual forward/reverse kernels and conditional cuBLAS with
+an explicit matrix adjoint. It does not differentiate the control structure.
+Automatic JIT IF/SWITCH export, Vulkan/portable/masked branch routes and branch
+binding families remain unsupported in this slice.
+
 Persistent format version 3 also accepts explicit `while` operations:
 
 ```python

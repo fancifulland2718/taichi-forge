@@ -20,6 +20,14 @@ def _unique_fields(pairs):
 def _control_version(steps):
     version = 1
     for op in steps:
+        if isinstance(op, dict) and op.get("kind") == "branch":
+            version = max(version, 11)
+            regions = [op.get("condition")]
+            if isinstance(op.get("bodies"), list):
+                regions.extend(op["bodies"])
+            for region in regions:
+                if isinstance(region, list):
+                    version = max(version, _control_version(region))
         if isinstance(op, dict) and op.get("kind") == "cuda_parallel":
             version = max(version, 9)
         if isinstance(op, dict) and op.get("kind") == "kernel" and "launch" in op:
@@ -97,7 +105,7 @@ class ExecutionPlan:
             }
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        if type(value["version"]) is not int or not 1 <= value["version"] <= 11:
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -237,6 +245,41 @@ class ExecutionPlan:
                 if not isinstance(op, dict):
                     raise ValueError("Execution operations must be objects")
                 kind = op.get("kind")
+                if kind == "branch":
+                    if set(op) != {
+                        "kind",
+                        "selector",
+                        "selection",
+                        "has_default",
+                        "condition",
+                        "bodies",
+                        "lowering",
+                    }:
+                        raise ValueError("Invalid branch operation fields")
+                    _name(op["selector"])
+                    arguments.add(op["selector"])
+                    bodies, fallback = op["bodies"], op["has_default"]
+                    if (
+                        op["selection"] not in ("nonzero", "indexed")
+                        or type(fallback) is not bool
+                        or not isinstance(bodies, list)
+                        or len(bodies) <= int(fallback)
+                        or (op["selection"] == "nonzero" and len(bodies) != 1 + int(fallback))
+                    ):
+                        raise ValueError("Invalid branch selection or body layout")
+                    lowering = op["lowering"]
+                    if (
+                        not isinstance(lowering, dict)
+                        or set(lowering) != {"kind", "version"}
+                        or lowering["kind"] not in ("cpu", "cuda_conditional")
+                        or type(lowering["version"]) is not int
+                        or lowering["version"] != 1
+                    ):
+                        raise ValueError("Unsupported branch lowering")
+                    validate_steps(op["condition"], allow_empty=True)
+                    for body in bodies:
+                        validate_steps(body, allow_empty=True)
+                    continue
                 if kind == "cuda_parallel":
                     if (
                         set(op) != {"kind", "branches"}
@@ -403,7 +446,7 @@ class ExecutionPlan:
         if self.binding_strategy is not None:
             for operation in operations:
                 if isinstance(operation, dict) and (
-                    operation.get("kind") in ("while", "cuda_parallel") or "launch" in operation
+                    operation.get("kind") in ("branch", "while", "cuda_parallel") or "launch" in operation
                 ):
                     raise ValueError("CUDA binding frames require a flat fixed replay sequence")
         validate_steps(operations)

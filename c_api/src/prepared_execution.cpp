@@ -150,8 +150,15 @@ struct PreparedExecution {
       for (const auto &step : steps) {
         if (std::holds_alternative<FixedExecution::Dispatch>(step))
           ++dispatch_count;
-        else if (const auto *parallel = std::get_if<
-                     std::shared_ptr<const FixedExecution::Parallel>>(&step)) {
+        else if (const auto *branch =
+                     std::get_if<std::shared_ptr<const FixedExecution::Branch>>(
+                         &step)) {
+          count_dispatches((*branch)->condition);
+          for (const auto &body : (*branch)->bodies)
+            count_dispatches(body);
+        } else if (const auto *parallel = std::get_if<
+                       std::shared_ptr<const FixedExecution::Parallel>>(
+                       &step)) {
           for (const auto &branch : (*parallel)->branches)
             count_dispatches(branch);
         } else if (const auto *loop = std::get_if<
@@ -634,31 +641,43 @@ static TiPreparedExecution prepare_execution_plan_impl(
   std::vector<const aot::ExecutionPlan::Operation *> steps;
   std::function<void(const std::vector<aot::ExecutionPlan::Operation> &)>
       collect_steps;
-  collect_steps =
-      [&](const std::vector<aot::ExecutionPlan::Operation> &sequence) {
-        for (const auto &operation : sequence) {
-          steps.push_back(&operation);
-          if (const auto *parallel = std::get_if<
-                  std::shared_ptr<const aot::ExecutionPlan::Parallel>>(
+  collect_steps = [&](const std::vector<aot::ExecutionPlan::Operation>
+                          &sequence) {
+    for (const auto &operation : sequence) {
+      steps.push_back(&operation);
+      if (const auto *value =
+              std::get_if<std::shared_ptr<const aot::ExecutionPlan::Branch>>(
                   &operation)) {
-            if (rt.arch != taichi::Arch::cuda)
-              throw MemoryBindingError(
-                  "AOT CUDA parallel requires a CUDA runtime");
-            for (const auto &branch : (*parallel)->branches)
-              collect_steps(branch);
-          }
-          if (const auto *loop =
-                  std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
-                      &operation)) {
-            if ((rt.arch == taichi::Arch::vulkan) != bool((*loop)->vulkan))
-              throw MemoryBindingError(
-                  "AOT while requires a matching selected Vulkan recipe on "
-                  "Vulkan only");
-            collect_steps((*loop)->condition);
-            collect_steps((*loop)->body);
-          }
-        }
-      };
+        const auto &branch = **value;
+        const bool cpu =
+            branch.lowering == aot::ExecutionPlan::Branch::Lowering::cpu;
+        if (cpu ? !arch_is_cpu(rt.arch) : rt.arch != taichi::Arch::cuda)
+          throw MemoryBindingError(
+              "AOT branch requires its declared backend lowering");
+        collect_steps(branch.condition);
+        for (const auto &body : branch.bodies)
+          collect_steps(body);
+      }
+      if (const auto *parallel =
+              std::get_if<std::shared_ptr<const aot::ExecutionPlan::Parallel>>(
+                  &operation)) {
+        if (rt.arch != taichi::Arch::cuda)
+          throw MemoryBindingError("AOT CUDA parallel requires a CUDA runtime");
+        for (const auto &branch : (*parallel)->branches)
+          collect_steps(branch);
+      }
+      if (const auto *loop =
+              std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
+                  &operation)) {
+        if ((rt.arch == taichi::Arch::vulkan) != bool((*loop)->vulkan))
+          throw MemoryBindingError(
+              "AOT while requires a matching selected Vulkan recipe on "
+              "Vulkan only");
+        collect_steps((*loop)->condition);
+        collect_steps((*loop)->body);
+      }
+    }
+  };
   if (!rebinding)
     collect_steps(plan.initialization);
   collect_steps(plan.operations);
@@ -913,15 +932,42 @@ static TiPreparedExecution prepare_execution_plan_impl(
   }
   const auto initialization_count =
       operations.size() + (rebinding ? 0 : plan.initialization.size());
+  const auto control_pointer = [&](const std::string &name) {
+    const auto &array = array_binding(name);
+    if (array.scalar_type != PrimitiveType::i32 || array.bytes != 4 ||
+        !array.element_shape.empty() ||
+        !std::all_of(array.shape.begin(), array.shape.end(),
+                     [](std::uint64_t extent) { return extent == 1; }) ||
+        array.base_offset % 4)
+      throw MemoryBindingError(
+          "Control requires one aligned scalar i32 element: " + name);
+    return array.pointer;
+  };
   std::function<bool(const std::vector<aot::ExecutionPlan::Operation> &,
                      std::vector<FixedExecution::Operation> &)>
       bind_steps;
   bind_steps = [&](const std::vector<aot::ExecutionPlan::Operation> &sequence,
                    std::vector<FixedExecution::Operation> &operations) {
     for (const auto &operation : sequence) {
-      if (const auto *parallel =
-              std::get_if<std::shared_ptr<const aot::ExecutionPlan::Parallel>>(
+      if (const auto *value =
+              std::get_if<std::shared_ptr<const aot::ExecutionPlan::Branch>>(
                   &operation)) {
+        const auto &branch = **value;
+        auto bound = std::make_shared<FixedExecution::Branch>();
+        bound->selector = control_pointer(branch.selector);
+        bound->selection = branch.selection;
+        if (!bind_steps(branch.condition, bound->condition))
+          return false;
+        for (const auto &body : branch.bodies) {
+          bound->bodies.emplace_back();
+          if (!bind_steps(body, bound->bodies.back()))
+            return false;
+        }
+        operations.emplace_back(std::move(bound));
+        continue;
+      } else if (const auto *parallel = std::get_if<
+                     std::shared_ptr<const aot::ExecutionPlan::Parallel>>(
+                     &operation)) {
         auto bound = std::make_shared<FixedExecution::Parallel>();
         for (const auto &branch : (*parallel)->branches) {
           bound->branches.emplace_back();
@@ -934,18 +980,6 @@ static TiPreparedExecution prepare_execution_plan_impl(
                      std::shared_ptr<const aot::ExecutionPlan::While>>(
                      &operation)) {
         const auto &loop = **value;
-        const auto control_pointer = [&](const std::string &name) {
-          const auto &array = array_binding(name);
-          if (array.scalar_type != PrimitiveType::i32 || array.bytes != 4 ||
-              !array.element_shape.empty() ||
-              !std::all_of(array.shape.begin(), array.shape.end(),
-                           [](std::uint64_t extent) { return extent == 1; }) ||
-              array.base_offset % 4)
-            throw MemoryBindingError(
-                "Loop control requires one aligned scalar i32 element: " +
-                name);
-          return array.pointer;
-        };
         auto bound = std::make_shared<FixedExecution::While>();
         bound->predicate = control_pointer(loop.predicate);
         bound->max_iterations = loop.max_iterations;

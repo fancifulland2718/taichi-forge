@@ -5,6 +5,55 @@ import pytest
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
+def test_branch_snapshot_closes_all_paths_and_requires_explicit_lowering():
+    branch = dict(
+        kind="branch",
+        selector="selector",
+        selection="indexed",
+        has_default=True,
+        condition=[dict(kind="kernel", entry="condition", arguments=["input", "selector"])],
+        bodies=[[dict(kind="kernel", entry="forward", arguments=[f"x{i}", "y"])] for i in range(8)] + [[]],
+        lowering=dict(kind="cuda_conditional", version=1),
+    )
+    plan = ExecutionPlan(
+        [branch],
+        resources=[dict(kind="ndarray", name="selector", dtype="i32", shape=[1])],
+        gradients={"y": "dy"},
+    )
+    snapshot = json.loads(plan.to_json())
+    assert snapshot["version"] == 11
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    assert plan.kernel_entries == ("condition", "forward")
+    assert plan.argument_names == tuple(sorted(["input", "y", "dy"] + [f"x{i}" for i in range(8)]))
+    assert "selector" in plan._replay_argument_names
+    for version in (10, 12):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(snapshot, version=version)))
+    for change in (
+        dict(selection="nonzero"),
+        dict(selection="unknown"),
+        dict(has_default=1),
+        dict(bodies=[]),
+        dict(bodies=[[]]),
+        dict(bodies=[None, []]),
+        dict(condition=None),
+        dict(lowering=dict(kind="auto", version=1)),
+        dict(lowering=dict(kind="cuda_conditional", version=True)),
+        dict(lowering=dict(kind="cpu", version=2)),
+        dict(unknown=1),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(branch, **change)])
+    with pytest.raises(ValueError, match="flat fixed"):
+        ExecutionPlan([branch], binding_strategy="cuda_immutable_argument_frames")
+    missing = dict(branch)
+    del missing["has_default"]
+    with pytest.raises(ValueError, match="fields"):
+        ExecutionPlan([missing])
+    branch["bodies"].clear()
+    assert json.loads(plan.to_json()) == snapshot
+
+
 def test_cuda_parallel_preserves_branches_bindings_and_version():
     branches = [[dict(kind="kernel", entry="advance", arguments=[f"x{i}", "shared"])] for i in range(8)]
     plan = ExecutionPlan(
@@ -18,7 +67,7 @@ def test_cuda_parallel_preserves_branches_bindings_and_version():
     assert restored.kernel_entries == ("advance", "join")
     branches[0][0]["arguments"].clear()
     assert json.loads(plan.to_json()) == document
-    for version in (8, 10):
+    for version in (8, 12):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
 
@@ -51,7 +100,7 @@ def test_selected_indirect_launch_retains_packet_and_version():
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "grid"}
-    for version in (1, 5, 10):
+    for version in (1, 5, 12):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for launch in (
@@ -75,7 +124,7 @@ def test_selected_exact_launch_retains_extent_and_version(kind):
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "extent"}
-    for version in (1, 6, 10):
+    for version in (1, 6, 12):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for patch in (
@@ -103,7 +152,7 @@ def test_selected_adaptive_launch_preserves_policy_and_extent(policy):
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "extent"}
     assert json.loads(restored.to_json())["operations"][0]["launch"] == launch
-    for version in (7, 10):
+    for version in (7, 12):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for patch in (

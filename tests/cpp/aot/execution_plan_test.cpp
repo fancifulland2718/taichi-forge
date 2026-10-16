@@ -5,6 +5,46 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, BranchKeepsEveryPathAndExplicitLowering) {
+  const std::string source = R"({"version":11,"operations":[
+    {"kind":"branch","selector":"selector","selection":"indexed",
+     "has_default":true,"lowering":{"kind":"cuda_conditional","version":1},
+     "condition":[{"kind":"kernel","entry":"condition","arguments":["input","selector"]}],
+     "bodies":[[],[{"kind":"kernel","entry":"forward","arguments":["x","y"]}],
+       [{"kind":"while","predicate":"p","max_iterations":2,"condition":[],
+         "body":[{"kind":"kernel","entry":"reverse","arguments":["y","dx"]}]}]]}],
+    "resources":[{"kind":"ndarray","name":"selector","dtype":"i32","shape":[1]}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &branch = *std::get<std::shared_ptr<const ExecutionPlan::Branch>>(
+      plan.operations[0]);
+  EXPECT_EQ(branch.lowering, ExecutionPlan::Branch::Lowering::cuda_conditional);
+  EXPECT_EQ(branch.selection.kind, BranchSelection::Kind::indexed);
+  EXPECT_TRUE(branch.selection.has_default);
+  ASSERT_EQ(branch.bodies.size(), 3);
+  EXPECT_TRUE(branch.bodies[0].empty());
+  EXPECT_EQ(plan.arguments,
+            (std::vector<std::string>{"dx", "input", "p", "x", "y"}));
+  EXPECT_EQ(plan.replay_bindings,
+            (std::set<std::string>{"dx", "input", "p", "selector", "x", "y"}));
+  for (const auto &change : std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":11", "\"version\":10"},
+           {"\"selection\":\"indexed\"", "\"selection\":\"nonzero\""},
+           {"\"selection\":\"indexed\"", "\"selection\":\"unknown\""},
+           {"\"has_default\":true", "\"has_default\":1"},
+           {"\"has_default\":true,", ""},
+           {"cuda_conditional", "auto"},
+           {"\"version\":1}", "\"version\":2}"},
+           {"\"kind\":\"branch\"", "\"kind\":\"branch\",\"unknown\":0"},
+           {"\"operations\":",
+            "\"binding_strategy\":\"cuda_immutable_argument_frames\","
+            "\"operations\":"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(change.first), change.first.size(),
+                    change.second);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+}
+
 TEST(ExecutionPlan, BindingFamilyKeepsInitializationClosureSeparate) {
   const auto plan = ExecutionPlan::parse(R"({"version":10,
     "binding_strategy":"cuda_immutable_argument_frames",
