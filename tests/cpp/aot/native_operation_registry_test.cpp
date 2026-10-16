@@ -16,6 +16,31 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, CubSourceFreezesIdentityWithoutLoadingCode) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription plan;
+  plan.provider = "cub_source";
+  plan.operation = "plan";
+  plan.parameters = liong::json::parse_complete(
+      R"({"operation":"segmented_inclusive_scan_u32","num_items":2147483647,
+      "dtype":"i32","workspace_bytes":0,"cub_version":300200,"cuda_runtime_version":13020,
+      "binary_sha256":"0000000000000000000000000000000000000000000000000000000000000000",
+      "target_code":["sm_120","compute_120"],"minimum_driver_api_version":13000,
+      "ptx_driver_api_version":13020})");
+  EXPECT_EQ(registry.decode(plan, NativeObjectKind::resource).kind(), "cub_source_plan");
+  for (const auto &[field, value] : std::vector<std::pair<std::string, std::string>>{
+           {"dtype", R"("f32")"}, {"num_items", "2147483648"}, {"num_items", "true"},
+           {"binary_sha256", R"("short")"}, {"target_code", "[]"},
+           {"target_code", R"(["sm_42949672960"])"}, {"cub_version", "0"},
+           {"unknown_field", "1"}}) {
+    auto invalid = plan;
+    invalid.parameters.obj.inner[field] = liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource), std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("cub_source_execute", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("cub_source_execute", 1, Arch::vulkan), nullptr);
+}
+
 TEST(NativeOperationRegistry, MatrixMmaUsesExistingDriverBatchAbi) {
   const auto &registry = native_operation_registry();
   auto op = NativeOperationDescription::parse(liong::json::parse_complete(

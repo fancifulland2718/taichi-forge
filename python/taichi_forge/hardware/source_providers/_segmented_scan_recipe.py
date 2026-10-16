@@ -166,6 +166,7 @@ class CubSegmentedScanRecipeProvider(GraphRuntimeFragmentProvider):
             num_items=int(source.layout.num_items),
             inclusive=source.inclusive,
             binding_prefix=f"_forge_reset_{source._recipe_node_index}",
+            head_data=packed.tobytes(),
         )
         builder = GraphBuilder(
             _capture_recipe_sources=False, _explicit_map_source_groups=()

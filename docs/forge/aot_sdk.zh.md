@@ -76,8 +76,19 @@ cuSOLVERDn 组件还安装共享 Cholesky 执行 API 的 `forge_cusolverdn_provi
 须显式提供 addon 库路径；公共 runtime 报告实际加载路径、`sha256:<hex>` 身份、
 CUB 版本和编译时 CUDART 版本。加载期间保持 addon 文件不可变。计划一次查询调用方
 workspace，并要求全部录制/提交工作退休、计划释放后再销毁 runtime。Windows 测试
-覆盖原有六种操作、空输入、身份、失败和退休；此桥接本身尚未开启已选 CUB recipe
-的 AOT 自动导出。
+覆盖原有六种操作、空输入、身份、失败和退休。
+
+原生注册层可重建 `cub_source/plan` 资源及 `cub_source/execute` 操作。冻结计划
+绑定 addon hash、CUB/CUDART 版本、target code、已声明的 driver 要求及精确 workspace
+查询结果；准备期在录制前拒绝不匹配。CPU/Vulkan 不注册这些工厂，也不加载配置的 addon。
+
+已选 `CubSegmentedScanRecipeProvider` 方案可通过 `Module.add_execution_plan`
+导出，保留 i32/u32 模加策略和冻结的 heads bitset；消费者重建 workspace，产物不包含
+producer 指针或 scratch 内容。与其他已选方案相同，用 `source_bindings` 命名输入/输出。
+Windows CUDA 检查覆盖六种原生 primitive、零元素 select/scan、已选 inclusive/exclusive
+scan、空段、尾容量、别名、独立/共享绑定、独立/借用退休及原生 AOT WHILE 的零轮、提前
+退出和预算耗尽。下游浮点权重通过真实 `kernel.grad` 检查；整数 scan/sort 本身没有自动
+数值导数。原生操作目录不意味着私有 `CubSourcePlan` 接口也新增了自动导出。
 
 cuBLASLt 原生计划 API 将 `cutensor` 替换为 `cublaslt`。组件安装
 `forge_cublaslt_provider.h` 及 adapter，不依赖厂商构建头文件或二进制链接。

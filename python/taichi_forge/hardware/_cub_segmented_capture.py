@@ -71,7 +71,7 @@ class _CubSegmentedCaptureRecipe(_CudaGraphCaptureRecipe):
 
 
 class _CubSegmentedRecording(BackendCommandRecording):
-    def __init__(self, plan, bindings):
+    def __init__(self, plan, bindings, head_data=None):
         super().__init__(
             backend="cuda",
             binding_names=tuple(bindings),
@@ -82,6 +82,7 @@ class _CubSegmentedRecording(BackendCommandRecording):
         object.__setattr__(
             self, "_cuda_capture_recipe", _CubSegmentedCaptureRecipe(plan, bindings)
         )
+        self._aot_heads_data = head_data
         attach_retained_execution_contract(
             self,
             replace(
@@ -99,6 +100,11 @@ class _CubSegmentedRecording(BackendCommandRecording):
             ),
         )
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cub_source import export_segmented
+
+        return export_segmented(self, context)
+
     def execute(self, bindings):
         raise TaichiRuntimeError(
             "The reset-monoid addon requires root native Graph recording"
@@ -111,7 +117,7 @@ class _CubSegmentedScanExecutable(NativeGraphExecutable):
     graph_runtime_lifetime_check_required = False
 
     def __init__(
-        self, provider, values, heads, output, *, num_items, inclusive, binding_prefix
+        self, provider, values, heads, output, *, num_items, inclusive, binding_prefix, head_data=None
     ):
         num_items = _dimension(num_items)
         if not isinstance(inclusive, bool):
@@ -137,7 +143,7 @@ class _CubSegmentedScanExecutable(NativeGraphExecutable):
                 (values, heads, output, self.plan.workspace),
             )
         )
-        self.recording = _CubSegmentedRecording(self.plan, self.bindings)
+        self.recording = _CubSegmentedRecording(self.plan, self.bindings, head_data)
         self._action = BackendCommandGraphAction(
             self.recording, fixed_bindings=self.bindings
         )

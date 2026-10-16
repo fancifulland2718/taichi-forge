@@ -316,6 +316,7 @@ void register_cusparse_operations(NativeOperationRegistry &registry);
 void register_cusparse_bsr_operations(NativeOperationRegistry &registry);
 void register_retained_scan_operation(NativeOperationRegistry &registry);
 void register_matrix_operations(NativeOperationRegistry &registry);
+void register_cub_source_operations(NativeOperationRegistry &registry);
 void register_cudss_operations(NativeOperationRegistry &registry);
 void register_cusolverdn_operations(NativeOperationRegistry &registry);
 void register_cublaslt_operations(NativeOperationRegistry &registry);

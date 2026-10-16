@@ -87,7 +87,23 @@ addon library path; the common runtime reports its actual loaded path and
 file immutable while loaded. Plans query caller-owned workspace once and retain
 the runtime until all recorded/submitted work has retired. Windows tests cover
 the six existing operations, empty inputs, identity, failures and retirement.
-This bridge alone does not enable automatic AOT export of selected CUB recipes.
+The native registry reconstructs `cub_source/plan` resources and
+`cub_source/execute` operations. Frozen plans bind the addon hash, CUB/CUDART
+versions, target code, declared driver requirements and exact workspace query;
+prepare rejects mismatches before recording work. CPU/Vulkan do not register
+these factories or load the configured addon.
+
+Selected `CubSegmentedScanRecipeProvider` recipes export through
+`Module.add_execution_plan`, retaining their i32/u32 modular-sum strategy and
+frozen head bitset. The consumer recreates workspace; producer pointers and
+scratch contents are not serialized. Export names the source/output arrays via
+`source_bindings` as for other selected recipes. Windows CUDA checks cover all
+six native primitives, zero-item select/scan, selected inclusive/exclusive scan,
+empty segments, capacity tails, aliases, independent and shared bindings,
+standalone/borrowed retirement, and native AOT WHILE zero/early/budget exits.
+Actual downstream `kernel.grad` is checked for floating-point weights; integer
+scan/sort itself has no automatic numerical derivative. The native operation
+inventory does not add automatic export to the private `CubSourcePlan` interface.
 
 For the cuBLASLt native plan API, replace `cutensor` with `cublaslt`. Its component
 installs `forge_cublaslt_provider.h` and the adapter, with no vendor headers or
