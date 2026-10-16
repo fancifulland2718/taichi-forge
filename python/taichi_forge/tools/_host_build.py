@@ -141,7 +141,15 @@ def prepare_source(source, name):
 
     transform = PythonTupleBranches()
     tree = transform.visit(ast.parse(lowered))
+    declaration, cpp, header = emitter.emit("templates.h")
+    imports = []
     if transform.used:
+        imports.append(ast.Import([ast.alias("cython", "_forge_host_cython")]))
+    if declaration:
+        imports.append(
+            ast.ImportFrom("cython.cimports._forge_host_templates", [ast.alias("_forge_host_native")], level=0)
+        )
+    if imports:
         position = 0
         for index, node in enumerate(tree.body):
             if isinstance(node, ast.ImportFrom) and node.module == "__future__":
@@ -153,9 +161,8 @@ def prepare_source(source, name):
                 and isinstance(node.value.value, str)
             ):
                 position = 1
-        tree.body.insert(position, ast.Import([ast.alias("cython", "_forge_host_cython")]))
+        tree.body[position:position] = imports
         lowered = ast.unparse(ast.fix_missing_locations(tree))
-    declaration, cpp, header = emitter.emit("templates.h")
     # Ordinary modules can retain their original encoding cookie. Our build
     # inputs are UTF-8, so retaining a Latin-1 cookie would corrupt constants.
     lines = lowered.splitlines(keepends=True)
@@ -163,7 +170,15 @@ def prepare_source(source, name):
         if re.match(r"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+", lines[index]):
             lines[index] = "# coding: utf-8\n"
     lowered = "".join(lines)
-    return {"host.pyx": lowered + declaration, "templates.cpp": cpp, "templates.h": header}, entries
+    # Compile application code as Python: names such as include/cdef/DEF are
+    # legal Python identifiers but reserved in .pyx syntax. Native declarations
+    # live in a producer-only .pxd; the cimport adds no runtime dependency.
+    return {
+        "host.py": lowered,
+        "_forge_host_templates.pxd": declaration,
+        "templates.cpp": cpp,
+        "templates.h": header,
+    }, entries
 
 
 def toolchain(lock):
@@ -249,7 +264,7 @@ def _worker(filename):
     os.chdir(directory)
     Options.docstrings = False
     Options.error_on_unknown_names = False
-    sources = ["host.pyx"] + (["templates.cpp"] if (directory / "templates.cpp").stat().st_size else [])
+    sources = ["host.py"] + (["templates.cpp"] if (directory / "templates.cpp").stat().st_size else [])
     extension = Extension(
         job["extension"], sources, language="c++", include_dirs=["."], extra_compile_args=job["compile_args"]
     )

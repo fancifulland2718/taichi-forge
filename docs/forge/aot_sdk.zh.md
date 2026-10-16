@@ -2002,7 +2002,9 @@ python python/taichi_forge/tools/_host_build.py --spec app-host.json \
 其内部按模块并行构建。
 
 生产配置保留普通宿主的 Python 对象类型，条件分支中的字面元组显式装箱，避免误用
-固定长度 C 元组；未解析的全局名称仍在运行时抛出 `NameError`。这条生产路径当前
+固定长度 C 元组。宿主按 Python 语法编译，`include`、`cdef` 等合法 Python 名称仍可使用；
+原生模板声明单独存放在生产文件中，安装后的扩展无需导入 Cython。
+未解析的全局名称仍在运行时抛出 `NameError`。这条生产路径当前
 采用 Cython 3.2.9：更广的宿主代码在3.3中暴露编译异常，早前小夹具通过不代表全量
 兼容。包初始化、别名、损坏缓存恢复、惰性分支、源码排除及CPU/CUDA/Vulkan新特化与
 梯度已有测试。

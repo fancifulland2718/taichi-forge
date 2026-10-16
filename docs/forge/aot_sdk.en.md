@@ -2606,6 +2606,9 @@ owns a cache at a time, with parallel per-module workers.
 
 This producer keeps Python object inference for ordinary host code and boxes
 literal-tuple conditional branches to avoid accidental fixed C tuple types.
+Host modules use Python syntax mode, so Python identifiers such as `include`
+and `cdef` remain valid. Native template declarations are separate producer-only
+files; installed extensions need no Cython imports.
 Unresolved globals retain their runtime `NameError`. Cython 3.2.9 is the current
 qualified producer choice for this path; broader host code exposed a Cython
 3.3 compilation failure despite the earlier bounded fixtures passing. Package

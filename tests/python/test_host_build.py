@@ -65,6 +65,10 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
             return tuple(sorted(getattr(value, "items", ()) or ()))
         def missing():
             return unresolved_host_name()
+        def python_names(include, *, cdef):
+            DEF = include + cdef
+            cpdef = {"include": include, "cdef": cdef}
+            return DEF, cpdef, locals()["include"]
     """),
         encoding="utf-8",
     )
@@ -267,7 +271,7 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
         sys.addaudithook(guard)
         original = builtins.__import__
         def checked(name, *args, **kwargs):
-            assert name.split('.')[0] not in ('Cython', 'setuptools'), name
+            assert name.split('.')[0] not in ('Cython', 'cython', 'setuptools'), name
             return original(name, *args, **kwargs)
         builtins.__import__ = checked
         import closed_host
@@ -295,6 +299,7 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
         assert host.power(9) == 3 and host.power(-1) == 1e-8
         assert host.ordered(object()) == ()
         assert host.ordered(type('Data', (), {'items': [3, 1, 2]})()) == (1, 2, 3)
+        assert host.python_names(include=2, cdef=3) == (5, {'include': 2, 'cdef': 3}, 2)
         try:
             host.missing()
         except NameError:
@@ -311,7 +316,7 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
             total = width * (width + 1) / 2
             assert model.loss[None] == 4 * total
             assert all(value == total for value in model.x.grad.to_numpy())
-        assert 'Cython' not in sys.modules and 'setuptools' not in sys.modules
+        assert not {'Cython', 'cython', 'setuptools'}.intersection(sys.modules)
     """),
         encoding="utf-8",
     )
