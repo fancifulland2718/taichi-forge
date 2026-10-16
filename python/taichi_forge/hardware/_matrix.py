@@ -184,6 +184,15 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
             },
         )
 
+    def _export_aot(self, context):
+        context.native(
+            "cuda_driver",
+            "matrix_mma_f16_f32",
+            bindings=dict(a=self.a, b=self.b, output=self.output),
+            parameters=dict(batch_count=self.batch_count),
+        )
+        return ()
+
     def memory_report(self):
         """MMA owns no persistent workspace; driver/JIT state is runtime-opaque."""
 

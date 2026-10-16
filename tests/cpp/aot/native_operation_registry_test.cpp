@@ -16,6 +16,24 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, MatrixMmaUsesExistingDriverBatchAbi) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cuda_driver","operation":"matrix_mma_f16_f32","version":1,
+      "parameters":{"batch_count":2147483647},"bindings":{"a":"a","b":"b","output":"c"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "cuda_matrix_mma_f16_f32");
+  for (const char *parameters : {R"({"batch_count":0})", R"({"batch_count":-1})",
+                                R"({"batch_count":2147483648})",
+                                R"({"batch_count":true})",
+                                R"({"batch_count":1,"transpose":true})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("cuda_matrix_mma_f16_f32", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("cuda_matrix_mma_f16_f32", 1, Arch::vulkan), nullptr);
+}
+
 namespace {
 TEST(NativeOperationRegistry, RetainedScanPreservesItsSelectedCountAndType) {
   const auto &registry = native_operation_registry();

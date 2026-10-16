@@ -355,6 +355,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_cusparse_operations(result);
     register_cusparse_bsr_operations(result);
     register_retained_scan_operation(result);
+    register_matrix_operations(result);
     register_cudss_operations(result);
     register_cusolverdn_operations(result);
     register_cublaslt_operations(result);

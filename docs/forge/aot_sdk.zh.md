@@ -1028,6 +1028,20 @@ storage recipe 仍需单独处理。独立 AOT 使用 `Runtime("vulkan", device_
 枚举序号（默认 0），可能与 JIT 自动选择的 GPU 不同；性能比较须指定同一设备。
 独立 SDK 可选组件为 `TaichiSDKProvider_vkfft`。
 
+`ti.hardware.matrix.CudaMatrixMmaRecording` 可通过同一 Graph API 导出。
+对应原生操作为 `cuda_driver/matrix_mma_f16_f32`，版本 1，参数
+`parameters={"batch_count": n}`，绑定 `a`、`b`、`output`。复用 Forge 内置 driver PTX：
+输入为紧凑行优先 f16，输出为 f32；单 tile 形状 `(16,16)`，多 tile 为 `(n,16,16)`。
+缓冲须满足 32 字节对齐；输出不得与输入重叠，包括分别导入的物理别名。
+正批次数须满足现有 signed-int launch ABI。要求 CUDA compute capability ≥ 7.0；
+CPU/Vulkan 不注册工厂。
+
+冷准备在 CUDA capture 前加载内置模块，不执行乘法。重放使用保留的 Graph，算子不持有
+scratch；CUDA context/module/Graph 存储不计入 `workspace_bytes`。无需 cuBLAS、Toolkit
+编译器或额外 adapter。Windows CUDA 验证覆盖单/三个 tile、独立/借用执行、共享绑定族、
+物理别名、错误绑定恢复及 owner 退休。通过下游真实 `kernel.grad` 加显式 MMA 伴随核对
+反向结果；这不新增 MMA 自动求导或 JIT recipe 选择资格。
+
 CUDA 还通过外部 cuBLAS 注册 `gemm_f32`：
 
 ```python

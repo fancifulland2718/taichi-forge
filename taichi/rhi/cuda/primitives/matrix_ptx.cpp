@@ -98,6 +98,13 @@ bool driver_matrix_mma_f16_f32_available() {
   return CUDAContext::get_instance().get_compute_capability() >= 70;
 }
 
+void driver_prepare_matrix_mma_f16_f32() {
+  TI_ERROR_IF(!driver_matrix_mma_f16_f32_available(),
+              "CUDA matrix MMA requires NVIDIA compute capability 7.0 or "
+              "newer.");
+  std::call_once(matrix_mma_module_once, load_matrix_mma_module_once);
+}
+
 std::size_t driver_matrix_mma_f16_f32(void *a,
                                       void *b,
                                       void *output,
@@ -110,15 +117,12 @@ std::size_t driver_matrix_mma_f16_f32(void *a,
   if (batch_count == 0) {
     return 0;
   }
-  TI_ERROR_IF(!driver_matrix_mma_f16_f32_available(),
-              "CUDA matrix MMA requires NVIDIA compute capability 7.0 or "
-              "newer.");
   TI_ERROR_IF((reinterpret_cast<std::uintptr_t>(a) % 32) != 0 ||
                   (reinterpret_cast<std::uintptr_t>(b) % 32) != 0 ||
                   (reinterpret_cast<std::uintptr_t>(output) % 32) != 0,
               "CUDA matrix MMA buffers must be 32-byte aligned.");
 
-  std::call_once(matrix_mma_module_once, load_matrix_mma_module_once);
+  driver_prepare_matrix_mma_f16_f32();
   void *a_arg = a;
   void *b_arg = b;
   void *output_arg = output;

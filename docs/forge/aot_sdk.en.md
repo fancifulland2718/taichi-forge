@@ -1333,6 +1333,24 @@ qualification; storage recipes remain separate. Independent AOT uses the explici
 differ from JIT's automatically chosen GPU. Compare performance on the same device.
 The optional SDK component is `TaichiSDKProvider_vkfft`.
 
+`ti.hardware.matrix.CudaMatrixMmaRecording` exports through the same Graph API.
+Its native operation is `cuda_driver/matrix_mma_f16_f32`, version 1, with
+`parameters={"batch_count": n}` and bindings `a`, `b`, `output`. It reuses Forge's
+embedded driver PTX: compact row-major f16 inputs and f32 output, shaped `(16,16)`
+for one tile or `(n,16,16)` for multiple tiles. Buffers require 32-byte alignment;
+output must not overlap either input, including separately imported aliases.
+The positive batch count must fit the existing signed-int launch ABI. CUDA
+compute capability 7.0 or newer is required; CPU/Vulkan have no factory.
+
+Cold preparation loads the embedded module before CUDA capture and does not
+execute the multiplication. Replay uses the retained Graph and owns no scratch;
+CUDA context/module/Graph storage is outside `workspace_bytes`. No cuBLAS,
+Toolkit compiler or optional adapter is needed. Windows CUDA checks cover one
+and three tiles, standalone/borrowed execution, shared binding families,
+physical aliases, failed-binding recovery and owner retirement. A downstream
+`kernel.grad` plus explicitly assembled MMA adjoints checks reverse results;
+this does not add automatic differentiation of MMA or new JIT recipe selection.
+
 CUDA also registers `gemm_f32` using external cuBLAS:
 
 ```python
