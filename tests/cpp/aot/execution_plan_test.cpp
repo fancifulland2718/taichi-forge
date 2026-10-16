@@ -575,6 +575,47 @@ TEST(ExecutionPlan, ScalarResourcesPreserveBitsWithoutStorageDependencies) {
                  std::invalid_argument);
 }
 
+TEST(ExecutionPlan, HostBlobsFollowNativeDependenciesWithoutArrayStorage) {
+  const std::string digest(64, 'a');
+  const std::string blob = R"({"kind":"host_blob","name":"code","data":")" +
+                           digest + R"(","byte_size":2096})";
+  const auto plan = ExecutionPlan::parse(
+      R"({"version":1,"operations":[{"kind":"native","provider":"test","operation":"run","version":1,"parameters":{},"bindings":{"plan":"p","out":"out"}}],"resources":[)" +
+      blob +
+      R"(,{"kind":"native","name":"p","provider":"test","operation":"plan","version":1,"parameters":{},"bindings":{"code":"code"}},)" +
+      R"({"kind":"host_blob","name":"unused","data":")" + digest +
+      R"(","byte_size":9223372036854775807}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out"}));
+  EXPECT_EQ(plan.resources.order, (std::vector<std::size_t>{0, 1}));
+  EXPECT_EQ(plan.resources.materialize, (std::vector<bool>{true, true, false}));
+  const auto &data = std::get<ExecutionResources::HostBlob>(
+      plan.resources.declarations[0].value);
+  EXPECT_EQ(data.data, digest);
+  EXPECT_EQ(data.byte_size, 2096);
+  for (const auto *size : {"-1", "true", "1.5", "null"}) {
+    const auto invalid =
+        R"({"resources":[{"kind":"host_blob","name":"b","data":")" + digest +
+        R"(","byte_size":)" + size + "}]}";
+    EXPECT_THROW(
+        ExecutionResources::parse(liong::json::parse_complete(invalid)),
+        std::invalid_argument);
+  }
+  for (const auto &key :
+       {std::string("../code"), std::string(64, 'A'), std::string(63, 'a')}) {
+    const auto invalid =
+        R"({"resources":[{"kind":"host_blob","name":"b","data":")" + key +
+        R"(","byte_size":0}]})";
+    EXPECT_THROW(
+        ExecutionResources::parse(liong::json::parse_complete(invalid)),
+        std::invalid_argument);
+  }
+  const auto invalid_shape =
+      R"({"version":1,"operations":[{"kind":"copy","source":"a","destination":"out"}],"resources":[)" +
+      blob +
+      R"(,{"kind":"ndarray","name":"a","dtype":"f32","shape":[{"array":"code","axis":0}]}]})";
+  EXPECT_THROW(ExecutionPlan::parse(invalid_shape), std::invalid_argument);
+}
+
 TEST(ExecutionPlan, InitialDataIsSelectedWithItsArrayStorage) {
   const std::string digest(64, 'a');
   const auto plan = ExecutionPlan::parse(

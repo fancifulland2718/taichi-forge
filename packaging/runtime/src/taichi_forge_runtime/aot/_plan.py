@@ -366,13 +366,24 @@ class ExecutionPlan:
 
         resources, gradients = document.get("resources", []), document.get("gradients", {})
         self._retained_argument_names = retained_arguments(resources, gradients, arguments)
+        host_data = {}
+        for resource in resources:
+            if resource["kind"] == "host_blob" and resource["name"] in self._retained_argument_names:
+                key, size = resource["data"], resource["byte_size"]
+                if host_data.setdefault(key, size) != size:
+                    raise ValueError("Execution host blob size differs between declarations")
+        # Declared reachable payload bytes, not device scratch or process RSS.
+        # A prepared owner shares identical host payloads by content key.
+        self.host_data_bytes = sum(host_data.values())
         self.data_entries = tuple(
             sorted(
                 {
-                    resource["initial_data"]
+                    resource["data"] if resource["kind"] == "host_blob" else resource["initial_data"]
                     for resource in resources
-                    if resource["kind"] == "ndarray"
-                    and "initial_data" in resource
+                    if (
+                        resource["kind"] == "host_blob"
+                        or (resource["kind"] == "ndarray" and "initial_data" in resource)
+                    )
                     and resource["name"] in self._retained_argument_names
                 }
             )

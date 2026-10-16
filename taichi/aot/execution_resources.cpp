@@ -100,6 +100,17 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
     for (const auto &value : found->second.arr.inner) {
       const auto kind = name(value["kind"]);
       Resource resource{name(value["name"]), {}, Array{}};
+      if (kind == "host_blob") {
+        fields(value, {"kind", "name", "data", "byte_size"});
+        const auto key = name(value["data"]);
+        if (key.size() != 64 ||
+            key.find_first_not_of("0123456789abcdef") != std::string::npos)
+          throw std::invalid_argument(
+              "Execution host blob requires a lowercase SHA-256 key");
+        resource.value = HostBlob{key, integer(value["byte_size"])};
+        result.declarations.push_back(std::move(resource));
+        continue;
+      }
       if (kind == "native") {
         auto description = value;
         description.obj.inner.erase("name");

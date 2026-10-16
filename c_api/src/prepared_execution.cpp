@@ -10,6 +10,7 @@
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_host_blob.h"
 #include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
@@ -634,8 +635,27 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
     }
     return inputs;
   };
+  std::map<std::string, std::shared_ptr<const NativeHostBlobResource::Bytes>>
+      host_blobs;
   for (const auto index : plan.resources.order) {
     const auto &resource = plan.resources.declarations[index];
+    if (const auto *blob =
+            std::get_if<aot::ExecutionResources::HostBlob>(&resource.value)) {
+      auto found = host_blobs.find(blob->data);
+      if (found == host_blobs.end()) {
+        auto bytes = std::make_shared<const NativeHostBlobResource::Bytes>(
+            mod.get().load_data(blob->data, blob->byte_size));
+        found = host_blobs.emplace(blob->data, std::move(bytes)).first;
+      } else if (found->second->size() != blob->byte_size) {
+        throw MemoryBindingError(
+            "Execution host blob size differs between declarations");
+      }
+      auto object = std::make_shared<NativeHostBlobResource>(rt.arch, rt.get(),
+                                                             found->second);
+      prepared->native_resources.push_back(object);
+      native_objects.emplace(resource.name, std::move(object));
+      continue;
+    }
     if (const auto *native =
             std::get_if<NativeOperationDescription>(&resource.value)) {
       try {

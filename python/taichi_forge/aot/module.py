@@ -432,7 +432,7 @@ class Module:
         self._content += ["cgraph:" + name]
 
     def add_data(self, data):
-        """Snapshot packed bytes for ndarray initial_data; return their SHA-256 key.
+        """Snapshot immutable module data; return its SHA-256 key.
 
         Identical payloads share one artifact entry. Only payloads referenced by
         exported plans are saved. Device arrays remain private to each preparation.

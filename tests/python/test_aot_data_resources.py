@@ -60,6 +60,7 @@ def test_aot_data_resources_forward_reverse_and_lazy_integrity(tmp_path):
         dict(kind="ndarray", name="dy", dtype="f32", shape=[17]),
         dict(kind="ndarray", name="shape_only", dtype="f32", shape=[17], initial_data="a" * 64),
         dict(kind="ndarray", name="unused", dtype="f32", shape=[17], initial_data="b" * 64),
+        dict(kind="host_blob", name="unused_code", data="d" * 64, byte_size=2**63 - 1),
     ]
     plan = ti.aot.ExecutionPlan(
         [
@@ -74,6 +75,14 @@ def test_aot_data_resources_forward_reverse_and_lazy_integrity(tmp_path):
     )
     module.add_execution_plan("step", plan)
     assert plan.data_entries == (key,)
+    assert plan.host_data_bytes == 0
+    module.add_execution_plan(
+        "host_misuse",
+        ti.aot.ExecutionPlan(
+            [dict(kind="copy", source="host", destination="out")],
+            resources=[dict(kind="host_blob", name="host", data=key, byte_size=len(original))],
+        ),
+    )
     module.add_execution_plan(
         "initialized",
         ti.aot.ExecutionPlan(

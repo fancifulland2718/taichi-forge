@@ -761,6 +761,15 @@ prepare 对选中数据各读取、校验一次，核对精确字节数并在录
 这是共用资源基础，并不等于任意 live operator/provider 状态均已自动序列化。
 小型 CPU/CUDA/Vulkan 测试覆盖独立消费者、显式梯度、尾部字节、空数据及在途退休。
 
+在主机上消费的不可变 provider 输入可声明为
+`dict(kind="host_blob", name="code", data=key, byte_size=len(code_bytes))`，
+复用同一个 `add_data()` 键。它不分配设备存储，也不能绑定为 ndarray；已实现对应
+合同的原生资源 factory 通过资源绑定接收它。准备时只读取并校验可达载荷，相同内容
+在同一个 prepared owner 内共享，并随资源安全退休。`plan.host_data_bytes` 统计
+可达主机载荷声明的去重字节数，与 GPU workspace 分开，不代表进程 RSS 或 provider
+内部复制成本。主机和 ndarray 使用相同内容时也共用归档条目。这是共用加载合同，
+尚未实现重建的 provider 不会因此自动获得 callback 导出支持。
+
 连续 packed 数组切片可以重建为零复制视图，不分配或复制设备存储。视图继承父数组的
 标量 dtype 和 element shape：
 

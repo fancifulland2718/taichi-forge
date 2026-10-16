@@ -985,6 +985,18 @@ This is shared resource infrastructure, not automatic serialization of arbitrary
 live operator/provider state. Small CPU/CUDA/Vulkan tests cover separate consumers,
 explicit gradients, byte tails, empty data and in-flight retirement.
 
+Immutable provider inputs that are consumed on the host can use
+`dict(kind="host_blob", name="code", data=key, byte_size=len(code_bytes))`, with
+the same `add_data()` key. This resource has no device allocation and cannot be
+bound as an ndarray. A qualified native resource factory receives it through a
+resource binding. Preparation loads and verifies only reachable blobs, shares
+identical payloads within that prepared owner, and retains them through resource
+retirement. `plan.host_data_bytes` counts unique declared reachable host bytes;
+it is separate from GPU workspace and does not estimate process RSS or copies
+made by a provider. Archive payloads also deduplicate across host and ndarray
+uses. This establishes the shared loading contract; it does not by itself enable
+callback export for a provider that has not implemented reconstruction.
+
 Packed array slices can be reconstructed without allocating or copying device
 storage. A view inherits its parent's scalar dtype and element shape:
 

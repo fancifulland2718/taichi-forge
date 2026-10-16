@@ -26,6 +26,11 @@ def main(mode, arch, artifact, directory, key):
         frames = [{name: runtime.ndarray("f32", (17,)) for name in ("x", "y", "dx")} for _ in range(2)]
         calls = [module.prepare_execution("step", frame) for frame in frames]
         assert calls[0].info["resource_bytes"] == 3 * 17 * 4
+        assert module.execution_plan("step").host_data_bytes == 0
+        assert module.execution_plan("host_misuse").host_data_bytes == 17 * 4
+        write(frames[0]["y"], [-99] * 17)
+        failure(lambda: module.prepare_execution("host_misuse", dict(out=frames[0]["y"])))
+        assert read(frames[0]["y"]) == [-99] * 17
         for step in range(1, 4):
             for index, (frame, call) in enumerate(zip(frames, calls)):
                 values = [float(i - 8 + index) for i in range(17)]
@@ -60,14 +65,17 @@ def main(mode, arch, artifact, directory, key):
         original = path.read_bytes()
         path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
         failure(lambda: loaded.prepare_execution("step", frames[0]), "integrity")
+        failure(lambda: loaded.prepare_execution("host_misuse", dict(out=frames[0]["y"])), "integrity")
         prepared()
         near(read(frames[0]["y"]), [v * w + w + 2 for v, w in zip(range(-8, 9), weights)])
         with loaded.prepare_execution("empty", dict(out=empty)) as unaffected:
             unaffected()
         path.write_bytes(original[:-1])
         failure(lambda: loaded.prepare_execution("step", frames[0]), "size")
+        failure(lambda: loaded.prepare_execution("host_misuse", dict(out=frames[0]["y"])), "size")
         path.unlink()
         failure(lambda: loaded.prepare_execution("step", frames[0]), "missing")
+        failure(lambda: loaded.prepare_execution("host_misuse", dict(out=frames[0]["y"])), "missing")
         path.write_bytes(original)
         mismatch = json.loads(loaded.execution_plan("step").to_json())
         next(r for r in mismatch["resources"] if r["name"] == "state")["shape"] = [18]

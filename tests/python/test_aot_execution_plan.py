@@ -683,6 +683,53 @@ def test_native_resource_closure_and_kind_validation():
             ExecutionPlan([op], resources=bad)
 
 
+def test_host_blob_data_closure_and_cost_are_independent_of_arrays():
+    key = "a" * 64
+    blobs = [dict(kind="host_blob", name=name, data=key, byte_size=2096) for name in ("code", "shared")]
+    blobs += [dict(kind="host_blob", name="unused", data="b" * 64, byte_size=2**63 - 1)]
+    resource = dict(
+        kind="native",
+        name="p",
+        provider="example",
+        operation="plan",
+        version=1,
+        parameters={},
+        bindings=dict(code="code", shared="shared"),
+    )
+    operations = [
+        dict(
+            kind="native",
+            provider="example",
+            operation="run",
+            version=1,
+            parameters={},
+            bindings=dict(plan="p", out="out"),
+        )
+    ]
+    plan = ExecutionPlan(operations, resources=[resource, *blobs])
+    assert plan.argument_names == ("out",)
+    assert plan.data_entries == (key,)
+    assert plan.host_data_bytes == 2096
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.host_data_bytes == 2096 and restored.data_entries == (key,)
+    for update in (
+        dict(data="../file"),
+        dict(data="A" * 64),
+        dict(byte_size=True),
+        dict(byte_size=-1),
+        dict(byte_size=2**63),
+        dict(dtype="u8"),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=[resource, dict(blobs[0], **update), *blobs[1:]])
+    with pytest.raises(ValueError, match="size differs"):
+        ExecutionPlan(operations, resources=[resource, blobs[0], dict(blobs[1], byte_size=1)])
+    with pytest.raises(ValueError, match="shape reference"):
+        ExecutionPlan(
+            [dict(kind="copy", source="a", destination="out")],
+            resources=[blobs[0], dict(kind="ndarray", name="a", dtype="f32", shape=[dict(array="code", axis=0)])],
+        )
+
 def test_initial_data_tracks_only_materialized_array_closure():
     key = "a" * 64
     resources = [

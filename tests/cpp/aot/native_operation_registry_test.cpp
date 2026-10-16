@@ -3,6 +3,7 @@
 #include <limits>
 #include <utility>
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/operation_json.h"
@@ -1345,6 +1346,30 @@ TEST(NativeOperationRegistry, ContextFactoryReceivesThePreparationSession) {
   operation->run_cpu();
   another->run_cpu();
   EXPECT_EQ(runs, 2);
+}
+
+TEST(NativeOperationRegistry, HostBlobsAreSharedImmutableResourceBindings) {
+  cpu::CpuDevice device;
+  auto bytes = std::make_shared<const NativeHostBlobResource::Bytes>(
+      NativeHostBlobResource::Bytes{0, 255, 3});
+  std::weak_ptr<const NativeHostBlobResource::Bytes> retained = bytes;
+  auto first =
+      std::make_shared<NativeHostBlobResource>(host_arch(), device, bytes);
+  auto second =
+      std::make_shared<NativeHostBlobResource>(host_arch(), device, bytes);
+  NativeOperationBindings bindings{{"code", NativeBinding(first)}};
+  EXPECT_EQ(&first->bytes(), &second->bytes());
+  EXPECT_EQ(first->workspace_bytes(), 0);
+  EXPECT_EQ(&first->device(), &device);
+  EXPECT_THROW(bindings.at("code").array(), std::invalid_argument);
+  bytes.reset();
+  first.reset();
+  second.reset();
+  EXPECT_FALSE(retained.expired());
+  EXPECT_EQ(bindings.at("code").resource<NativeHostBlobResource>()->bytes()[1],
+            255);
+  bindings.clear();
+  EXPECT_TRUE(retained.expired());
 }
 
 struct ResourceDescriptor {

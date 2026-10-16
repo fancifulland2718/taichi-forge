@@ -156,7 +156,8 @@ ExecutionResourceBindings bind_execution_resources(
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     const auto &recipe = resources.declarations[resources.order[pos]];
     if (std::holds_alternative<taichi::lang::NativeOperationDescription>(
-            recipe.value))
+            recipe.value) ||
+        std::holds_alternative<Recipes::HostBlob>(recipe.value))
       continue;
     auto &argument = result.arguments[pos];
     const auto *view = std::get_if<Recipes::View>(&recipe.value);

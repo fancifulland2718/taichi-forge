@@ -58,13 +58,15 @@ def external_arguments(resources, gradients, arguments):
             required, optional = {"kind", "name", "dtype", "bits"}, set()
         elif kind == "native":
             required, optional = NATIVE_FIELDS | {"name"}, set()
+        elif kind == "host_blob":
+            required, optional = {"kind", "name", "data", "byte_size"}, set()
         else:
             raise ValueError(f"Unsupported execution resource kind: {kind}")
         if not required <= set(resource) or set(resource) - required - optional:
             raise ValueError(f"Invalid {kind} resource fields")
         name = resource["name"]
         _name(name)
-        if kind not in ("native", "ndarray_view", "module_array"):
+        if kind not in ("native", "ndarray_view", "module_array", "host_blob"):
             _name(resource["dtype"])
         if name in by_name:
             raise ValueError(f"Duplicate execution resource: {name}")
@@ -72,6 +74,17 @@ def external_arguments(resources, gradients, arguments):
         refs = references[name] = []
         if kind == "native":
             refs.extend(native_references(resource))
+        elif kind == "host_blob":
+            key = resource["data"]
+            size = resource["byte_size"]
+            if (
+                not isinstance(key, str)
+                or len(key) != 64
+                or any(c not in "0123456789abcdef" for c in key)
+                or type(size) is not int
+                or not 0 <= size <= 0x7FFFFFFFFFFFFFFF
+            ):
+                raise ValueError("Execution host blob requires a lowercase SHA-256 key and nonnegative int64 byte_size")
         elif kind == "module_array":
             _name(resource["view"])
         elif kind in ("ndarray", "ndarray_view"):

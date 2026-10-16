@@ -109,7 +109,10 @@ def test_graph_export_resource_identity_is_local_and_configuration_stable():
     from types import SimpleNamespace
     from taichi_forge.aot._graph_export import _ExportContext
 
-    context = _ExportContext(SimpleNamespace(_exported_kernels={}), {"__forge_aot_resource_0"})
+    context = _ExportContext(
+        SimpleNamespace(_arch=ti.cpu, _exported_kernels={}, _fields={}, _array_fields={}),
+        {"__forge_aot_resource_0"},
+    )
     owner, other = object(), object()
     options = dict(parameters=dict(rows=5))
     name = context.resource(owner, "test", "plan", **options)
@@ -122,11 +125,33 @@ def test_graph_export_resource_identity_is_local_and_configuration_stable():
     assert context.resources[0]["parameters"] == dict(rows=5)
 
 
+def test_graph_export_deduplicates_host_code_without_device_storage():
+    from types import SimpleNamespace
+    from taichi_forge.aot._graph_export import _ExportContext
+
+    context = _ExportContext(
+        SimpleNamespace(_arch=ti.cpu, _exported_kernels={}, _fields={}, _array_fields={}), set()
+    )
+    data = b"\0\xffimmutable code\0"
+    name = context.host_blob_resource(data)
+    assert context.host_blob_resource(bytes(bytearray(data))) == name
+    array = context.data_resource(object(), data, dtype="u8", shape=[len(data)])
+    assert array != name and len(context.data_payloads) == 1
+    assert len(context.resources) == 2 and context.resources[0]["kind"] == "host_blob"
+    assert context.resources[0]["byte_size"] == len(data)
+    assert context.resources[0]["data"] == context.resources[1]["initial_data"]
+    assert not context.operations and not context.initialization
+    with pytest.raises(TypeError, match="immutable"):
+        context.host_blob_resource(bytearray(data))
+
+
 def test_graph_export_stages_frozen_data_and_resource_initialization():
     from types import SimpleNamespace
     from taichi_forge.aot._graph_export import _ExportContext
 
-    context = _ExportContext(SimpleNamespace(_exported_kernels={}), set())
+    context = _ExportContext(
+        SimpleNamespace(_arch=ti.cpu, _exported_kernels={}, _fields={}, _array_fields={}), set()
+    )
     owner = object()
     data = b"\0\0\x80\x3f"
     name = context.data_resource(owner, data, dtype="f32", shape=[1])

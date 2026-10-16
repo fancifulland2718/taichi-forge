@@ -175,6 +175,17 @@ class _ExportContext:
             name=name,
         )
 
+    def host_blob_resource(self, data):
+        """Retain qualified immutable provider code/data without device storage."""
+        if type(data) is not bytes:
+            raise TypeError("AOT host blobs must be immutable bytes")
+        key = hashlib.sha256(data).hexdigest()
+        previous = self.data_payloads.setdefault(key, data)
+        if previous != data:
+            raise ValueError("AOT data digest collision")
+        owner = self._readonly_data_owners.setdefault(("host_blob", key), object())
+        return self._resource(owner, dict(kind="host_blob", data=key, byte_size=len(data)))
+
     def binding(self, name):
         if name in self._scalar_values:
             raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")

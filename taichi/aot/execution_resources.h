@@ -44,6 +44,11 @@ struct ExecutionResources {
   struct ModuleArray {
     std::string view;
   };
+  struct HostBlob {
+    // Immutable bytes in the existing content-addressed module data directory.
+    std::string data;
+    std::uint64_t byte_size;
+  };
   struct Resource {
     std::string name;
     std::string dtype;
@@ -52,7 +57,8 @@ struct ExecutionResources {
                  NativeOperationDescription,
                  Scalar,
                  View,
-                 ModuleArray>
+                 ModuleArray,
+                 HostBlob>
         value;
   };
 
