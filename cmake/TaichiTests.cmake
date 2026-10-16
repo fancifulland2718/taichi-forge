@@ -27,6 +27,7 @@ list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cp
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/fixed_branch_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/host_branch_contract_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/control_encoding_cost_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cuda_predicate_graph_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cudss_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cusolverdn_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cublaslt_plan_test.cpp")

@@ -15,6 +15,7 @@ target_sources(cuda_runtime
     kernel_launcher.cpp
     ordered_submission.cpp
     parallel_graph.cpp
+    predicate_graph.cpp
   )
 
 # jit_cuda.cpp uses llvm::legacy::PassManager / PassManagerBuilder,

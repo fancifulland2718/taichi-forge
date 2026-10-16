@@ -34,6 +34,7 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/bounded_graph.h"
 #include "taichi/runtime/cuda/parallel_graph.h"
+#include "taichi/runtime/cuda/predicate_graph.h"
 #endif
 
 #if defined(TI_WITH_VULKAN)
@@ -1322,10 +1323,7 @@ struct CompiledGraphCudaState {
   bool masked_mode{false};
   bool masked_nested_mode{false};
   bool device_update_nested_mode{false};
-  cuda::CudaGraphPredicateGroupControl *nested_device_controls{nullptr};
-  std::uintptr_t *nested_device_nodes{nullptr};
-  std::vector<cuda::CudaGraphPredicateGroupControl> nested_host_controls;
-  std::vector<std::uintptr_t> nested_host_nodes;
+  cuda::NestedPredicateGraphControls nested_update;
   int masked_control_type{-1};
   int masked_max_iterations{0};
   bool masked_continue_while_nonzero{true};
@@ -1430,16 +1428,7 @@ struct CompiledGraphCudaState {
       }
     }
     nested_inner_gates.clear();
-    if (nested_device_controls != nullptr) {
-      CUDADriver::get_instance().mem_free(nested_device_controls);
-      nested_device_controls = nullptr;
-    }
-    if (nested_device_nodes != nullptr) {
-      CUDADriver::get_instance().mem_free(nested_device_nodes);
-      nested_device_nodes = nullptr;
-    }
-    nested_host_controls.clear();
-    nested_host_nodes.clear();
+    nested_update.release(true);
     bounded_dispatch.release(true);
     conditional_handle = 0;
     conditional_mode = false;
@@ -1497,13 +1486,7 @@ struct CompiledGraphCudaState {
 
   uint64_t known_bounded_control_bytes() const {
     uint64_t bytes = bounded_dispatch.device_bytes();
-    if (nested_device_controls != nullptr) {
-      bytes += nested_host_controls.size() *
-               sizeof(cuda::CudaGraphPredicateGroupControl);
-    }
-    if (nested_device_nodes != nullptr) {
-      bytes += nested_host_nodes.size() * sizeof(std::uintptr_t);
-    }
+    bytes += nested_update.device_bytes();
     if (nested_conditional && nested_conditional->controls != nullptr) {
       bytes += nested_conditional->budgets.size() *
                sizeof(cuda::CudaGraphConditionalControl64);
@@ -3513,8 +3496,6 @@ bool try_run_cuda_device_update_nested_control_graph(
     return structural_fallback();
   }
 
-  const std::size_t control_count = cost->expanded_controllers;
-  const std::size_t controls_per_outer = cost->controllers_per_outer;
   const DeviceAllocation outer_allocation =
       outer_selector.get_device_allocation();
   std::vector<DeviceAllocation> inner_allocations;
@@ -3711,48 +3692,30 @@ bool try_run_cuda_device_update_nested_control_graph(
   for (void *&gate : state->nested_inner_gates) {
     driver.malloc(&gate, sizeof(std::uint32_t));
   }
-  driver.malloc(reinterpret_cast<void **>(&state->nested_device_controls),
-                control_count * sizeof(cuda::CudaGraphPredicateGroupControl));
-  state->nested_host_controls.assign(control_count, {});
-  std::vector<std::vector<std::uintptr_t>> control_nodes(control_count);
-  auto *outer_ptr = selector_device->get_alloc_info(outer_allocation).ptr;
-  std::vector<void *> inner_ptrs;
-  inner_ptrs.reserve(inner_allocations.size());
-  for (const DeviceAllocation &allocation : inner_allocations) {
-    inner_ptrs.push_back(selector_device->get_alloc_info(allocation).ptr);
+  cuda::NestedPredicateGraphLayout layout;
+  layout.predicate = reinterpret_cast<std::uintptr_t>(
+      selector_device->get_alloc_info(outer_allocation).ptr);
+  layout.gate = reinterpret_cast<std::uintptr_t>(state->masked_gate);
+  layout.iterations = outer_max_iterations;
+  layout.initial_dispatches = outer_condition_dispatch_count;
+  layout.dispatches = dispatch_count;
+  layout.inners.reserve(inner_controls.size());
+  for (std::size_t child = 0; child < inner_controls.size(); ++child) {
+    const auto &inner = inner_controls[child];
+    layout.inners.push_back({
+        reinterpret_cast<std::uintptr_t>(
+            selector_device->get_alloc_info(inner_allocations[child]).ptr),
+        reinterpret_cast<std::uintptr_t>(state->nested_inner_gates[child]),
+        static_cast<std::uint64_t>(inner.max_iterations),
+        inner.condition_dispatch_begin, inner.body_dispatch_begin,
+        inner.dispatch_end});
   }
-  std::size_t initialized_control_count = 0;
-  for (int outer_iteration = 0; outer_iteration < outer_max_iterations;
-       ++outer_iteration) {
-    auto &outer_control =
-        state->nested_host_controls[initialized_control_count++];
-    outer_control.predicate = reinterpret_cast<std::uintptr_t>(outer_ptr);
-    outer_control.parent_gate = 0;
-    outer_control.gate =
-        reinterpret_cast<std::uintptr_t>(state->masked_gate);
-    outer_control.continue_while_nonzero = 1;
-    outer_control.telemetry_enabled = state->diagnostics_enabled ? 1u : 0u;
-    outer_control.child_controls = reinterpret_cast<std::uintptr_t>(
-        state->nested_device_controls + initialized_control_count);
-    outer_control.child_count = static_cast<std::uint32_t>(controls_per_outer - 1);
-    for (std::size_t child = 0; child < inner_controls.size(); ++child) {
-      for (int inner_iteration = 0;
-           inner_iteration < inner_controls[child].max_iterations;
-           ++inner_iteration) {
-        auto &control =
-            state->nested_host_controls[initialized_control_count++];
-        control.predicate =
-            reinterpret_cast<std::uintptr_t>(inner_ptrs[child]);
-        control.parent_gate =
-            reinterpret_cast<std::uintptr_t>(state->masked_gate);
-        control.gate = reinterpret_cast<std::uintptr_t>(
-            state->nested_inner_gates[child]);
-        control.continue_while_nonzero = 1;
-        control.telemetry_enabled = state->diagnostics_enabled ? 1u : 0u;
-      }
-    }
+  const auto initialize_error = state->nested_update.initialize(
+      std::move(layout), state->diagnostics_enabled);
+  if (initialize_error != CUDA_SUCCESS) {
+    return handle_cuda_graph_driver_failure(
+        *state, initialize_error, "nested device-update controls initialize");
   }
-  TI_ASSERT(initialized_control_count == control_count);
 
   for (std::size_t i = 0; i < dispatch_count; ++i) {
     const auto &dispatch = graph.dispatches[i];
@@ -3802,77 +3765,25 @@ bool try_run_cuda_device_update_nested_control_graph(
         *state, begin_error, "nested device-update stream begin capture");
   }
   CudaStreamCaptureGuard capture_guard(capture_stream);
-  auto capture_payload = [&](std::size_t packet_index,
-                             std::size_t control_index) {
-    std::vector<void *> device_nodes;
-    std::uint32_t capture_error = CUDA_SUCCESS;
-    if (!state->packets[packet_index]
-             .launcher->capture_cuda_graph_updatable_launch(
-                 state->packets[packet_index].packet, capture_stream,
-                 &device_nodes, &capture_error)) {
-      return capture_error == CUDA_SUCCESS ? CUDA_ERROR_NOT_SUPPORTED
-                                           : capture_error;
-    }
-    auto &destination = control_nodes[control_index];
-    destination.reserve(destination.size() + device_nodes.size());
-    for (void *device_node : device_nodes) {
-      destination.push_back(reinterpret_cast<std::uintptr_t>(device_node));
-    }
-    return static_cast<std::uint32_t>(CUDA_SUCCESS);
-  };
   std::uint32_t payload_error = CUDA_SUCCESS;
   try {
-    for (std::size_t i = 0; i < outer_condition_dispatch_count; ++i) {
-      state->packets[i].launcher->capture_cuda_graph_launch(
-          state->packets[i].packet, capture_stream);
-    }
-    std::size_t control_index = 0;
-    for (int outer_iteration = 0; outer_iteration < outer_max_iterations;
-         ++outer_iteration) {
-      const std::size_t outer_control_index = control_index++;
-      payload_error = cuda::driver_graph_update_predicate_group(
-          state->nested_device_controls + outer_control_index, capture_stream);
-      if (payload_error != CUDA_SUCCESS) {
-        break;
-      }
-      std::size_t payload_cursor = outer_condition_dispatch_count;
-      for (const auto &inner : inner_controls) {
-        for (std::size_t i = payload_cursor;
-             i < inner.body_dispatch_begin &&
-             payload_error == CUDA_SUCCESS;
-             ++i) {
-          payload_error = capture_payload(i, outer_control_index);
-        }
-        for (int inner_iteration = 0;
-             inner_iteration < inner.max_iterations &&
-             payload_error == CUDA_SUCCESS;
-             ++inner_iteration) {
-          const std::size_t inner_control_index = control_index++;
-          void *updater_node = nullptr;
-          payload_error = cuda::driver_graph_update_predicate_group(
-              state->nested_device_controls + inner_control_index,
-              capture_stream, &updater_node);
-          if (payload_error != CUDA_SUCCESS) {
-            break;
+    payload_error = state->nested_update.capture(
+        capture_stream,
+        [&](std::size_t index, std::vector<void *> *device_nodes) {
+          auto &packet = state->packets[index];
+          if (!device_nodes) {
+            packet.launcher->capture_cuda_graph_launch(packet.packet,
+                                                       capture_stream);
+            return static_cast<std::uint32_t>(CUDA_SUCCESS);
           }
-          control_nodes[outer_control_index].push_back(
-              reinterpret_cast<std::uintptr_t>(updater_node));
-          for (std::size_t i = inner.body_dispatch_begin;
-               i < inner.dispatch_end && payload_error == CUDA_SUCCESS;
-               ++i) {
-            payload_error = capture_payload(i, inner_control_index);
-          }
-        }
-        payload_cursor = inner.dispatch_end;
-      }
-      for (std::size_t i = payload_cursor;
-           i < dispatch_count && payload_error == CUDA_SUCCESS; ++i) {
-        payload_error = capture_payload(i, outer_control_index);
-      }
-      if (payload_error != CUDA_SUCCESS) {
-        break;
-      }
-    }
+          std::uint32_t error = CUDA_SUCCESS;
+          if (!packet.launcher->capture_cuda_graph_updatable_launch(
+                  packet.packet, capture_stream, device_nodes, &error))
+            return error == CUDA_SUCCESS
+                       ? static_cast<std::uint32_t>(CUDA_ERROR_NOT_SUPPORTED)
+                       : error;
+          return static_cast<std::uint32_t>(CUDA_SUCCESS);
+        });
   } catch (...) {
     if (state->diagnostics_enabled) {
       ++state->stats.capture_exceptions;
@@ -3893,28 +3804,10 @@ bool try_run_cuda_device_update_nested_control_graph(
         *state, end_error, "nested device-update stream end capture");
   }
 
-  std::size_t node_count = 0;
-  for (const auto &nodes : control_nodes) {
-    if (nodes.empty() ||
-        nodes.size() > (std::numeric_limits<std::uint32_t>::max)() ||
-        node_count > (std::numeric_limits<std::size_t>::max)() - nodes.size()) {
-      return structural_fallback();
-    }
-    node_count += nodes.size();
-  }
-  driver.malloc(reinterpret_cast<void **>(&state->nested_device_nodes),
-                node_count * sizeof(std::uintptr_t));
-  state->nested_host_nodes.reserve(node_count);
-  std::size_t node_offset = 0;
-  for (std::size_t i = 0; i < control_nodes.size(); ++i) {
-    auto &control = state->nested_host_controls[i];
-    control.device_nodes = reinterpret_cast<std::uintptr_t>(
-        state->nested_device_nodes + node_offset);
-    control.node_count = static_cast<std::uint32_t>(control_nodes[i].size());
-    state->nested_host_nodes.insert(state->nested_host_nodes.end(),
-                                    control_nodes[i].begin(),
-                                    control_nodes[i].end());
-    node_offset += control_nodes[i].size();
+  const auto nodes_error = state->nested_update.finalize_nodes();
+  if (nodes_error != CUDA_SUCCESS) {
+    return handle_cuda_graph_driver_failure(
+        *state, nodes_error, "nested device-update node table");
   }
 
   const auto instantiate_error = driver.graph_instantiate_with_flags.call(
@@ -3930,15 +3823,7 @@ bool try_run_cuda_device_update_nested_control_graph(
     return handle_cuda_graph_driver_failure(
         *state, upload_error, "nested device-update graph upload");
   }
-  auto control_upload_error = driver.memcpy_host_to_device.call(
-      state->nested_device_nodes, state->nested_host_nodes.data(),
-      state->nested_host_nodes.size() * sizeof(std::uintptr_t));
-  if (control_upload_error == CUDA_SUCCESS) {
-    control_upload_error = driver.memcpy_host_to_device.call(
-        state->nested_device_controls, state->nested_host_controls.data(),
-        state->nested_host_controls.size() *
-            sizeof(cuda::CudaGraphPredicateGroupControl));
-  }
+  const auto control_upload_error = state->nested_update.upload();
   if (control_upload_error != CUDA_SUCCESS) {
     return handle_cuda_graph_driver_failure(
         *state, control_upload_error, "nested device-update control upload");
@@ -5584,7 +5469,7 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         (!cuda_graph_state->bounded_dispatch.controls.empty() ||
          !cuda_graph_state->bounded_dispatch.groups.empty() ||
          !cuda_graph_state->bounded_dispatch_observations.empty() ||
-         cuda_graph_state->nested_device_controls != nullptr)) {
+         cuda_graph_state->nested_update.device_controls != nullptr)) {
       auto &driver = CUDADriver::get_instance();
       driver.stream_synchronize(nullptr);
       result.known_bounded_payloads = static_cast<std::uint32_t>(
@@ -5665,12 +5550,12 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
           }
         }
       }
-      if (cuda_graph_state->nested_device_controls != nullptr &&
-          !cuda_graph_state->nested_host_controls.empty()) {
+      if (cuda_graph_state->nested_update.device_controls != nullptr &&
+          !cuda_graph_state->nested_update.host_controls.empty()) {
         std::vector<cuda::CudaGraphPredicateGroupControl> observed(
-            cuda_graph_state->nested_host_controls.size());
+            cuda_graph_state->nested_update.host_controls.size());
         driver.memcpy_device_to_host(
-            observed.data(), cuda_graph_state->nested_device_controls,
+            observed.data(), cuda_graph_state->nested_update.device_controls,
             observed.size() * sizeof(cuda::CudaGraphPredicateGroupControl));
         for (const auto &control : observed) {
           result.bounded_update_replays += control.replay_count;
@@ -5711,7 +5596,7 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     const auto grouped_update_count = static_cast<std::uint32_t>(
         cuda_graph_state->bounded_dispatch.groups.size());
     const auto nested_update_count = static_cast<std::uint32_t>(
-        cuda_graph_state->nested_host_controls.size());
+        cuda_graph_state->nested_update.host_controls.size());
     result.known_bounded_update_groups =
         per_node_update_count + grouped_update_count + nested_update_count;
     result.known_bounded_updater_dispatches =
@@ -5727,10 +5612,10 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         });
     if (nested_update_count != 0) {
       result.known_bounded_grouped_payloads += static_cast<std::uint32_t>(
-          cuda_graph_state->nested_host_nodes.size());
+          cuda_graph_state->nested_update.host_nodes.size());
       // Parent-owned updater handles are already counted as updater dispatches,
       // not business payloads. The known count is topology, not active launches.
-      for (const auto &control : cuda_graph_state->nested_host_controls) {
+      for (const auto &control : cuda_graph_state->nested_update.host_controls) {
         result.known_bounded_grouped_payloads -= control.child_count;
       }
     }
@@ -5741,7 +5626,7 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
           result.known_bounded_max_group_size,
           static_cast<std::uint32_t>(group.host_nodes.size()));
     }
-    for (const auto &control : cuda_graph_state->nested_host_controls) {
+    for (const auto &control : cuda_graph_state->nested_update.host_controls) {
       result.known_bounded_max_group_size =
           std::max(result.known_bounded_max_group_size, control.node_count);
     }
