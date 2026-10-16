@@ -414,7 +414,7 @@ TEST(ExecutionPlan, SelectedCudaNestedControlRetainsStaticClosure) {
     for (const auto &[from, to] :
          std::vector<std::pair<std::string, std::string>>{
              {version, masked ? "\"version\":13" : "\"version\":12"},
-             {version, "\"version\":15"},
+             {version, "\"version\":16"},
              {"\"version\":1,", "\"version\":2,"},
              {"\"condition_begin\":1", "\"condition_begin\":0"},
              {"\"body_begin\":2", "\"body_begin\":1"},
@@ -429,6 +429,44 @@ TEST(ExecutionPlan, SelectedCudaNestedControlRetainsStaticClosure) {
       invalid.replace(invalid.find(from), from.size(), to);
       EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
     }
+  }
+}
+
+TEST(ExecutionPlan, FlatCudaMaskedKeepsPolarityAndStaticClosure) {
+  const std::string source = R"({"version":15,"operations":[{"kind":"while",
+    "predicate":"p","max_iterations":1099511627776,
+    "continue_while_nonzero":false,"condition":[],
+    "body":[{"kind":"kernel","entry":"body","arguments":["x"]}],
+    "lowering":{"kind":"cuda_masked","version":1}}],
+    "resources":[{"kind":"ndarray","name":"p","dtype":"i32","shape":[]}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
+      plan.operations[0]);
+  ASSERT_TRUE(loop.cuda_control);
+  EXPECT_EQ(loop.cuda_control->encoding, CudaControlEncoding::masked);
+  EXPECT_TRUE(loop.cuda_control->inners.empty());
+  EXPECT_FALSE(loop.continue_while_nonzero);
+  EXPECT_TRUE(loop.condition.empty());
+  EXPECT_EQ(loop.body.size(), 1);
+  EXPECT_EQ(loop.max_iterations, std::uint64_t{1} << 40);
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x"}));
+  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"p", "x"}));
+  for (const auto &[from, to] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":15", "\"version\":14"},
+           {"\"version\":15", "\"version\":16"},
+           {"\"version\":1}", "\"version\":2}"},
+           {"\"version\":1}", "\"version\":1,\"inners\":[]}"},
+           {"\"continue_while_nonzero\":false", "\"continue_while_nonzero\":0"},
+           {"\"max_iterations\":1099511627776", "\"max_iterations\":-1"},
+           {"\"kind\":\"kernel\",\"entry\":\"body\",\"arguments\":[\"x\"]",
+            "\"kind\":\"fill32\",\"destination\":\"x\",\"value\":0"},
+           {"\"entry\":\"body\"",
+            "\"entry\":\"body\",\"launch\":{\"kind\":\"cuda_logical_exact\","
+            "\"extent\":\"n\",\"capacity\":4}"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(from), from.size(), to);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
   }
 }
 

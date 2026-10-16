@@ -575,6 +575,18 @@ is needed to create gated variants. Unfrozen auto routes, native provider bodies
 flat masked loops and masked branches are outside this export route. Existing
 device-update plans remain version 13 and retain their ordinary-kernel contract.
 
+Version 15 adds explicit flat CUDA masked loops with
+`lowering=dict(kind="cuda_masked", version=1)`. Unlike the nested recipes, this
+description has no `inners` field. It permits an empty initial `condition` and
+either predicate polarity through `continue_while_nonzero`; a nonempty body
+contains precompiled `cuda_graph_gate_v1` kernels, including its tail condition.
+A nonempty initial condition runs once even for a zero budget and uses ordinary
+entries. Static code does not grow with the budget, but recorded commands do.
+Preparation retains the same binding, gradient and retirement contracts and
+rejects non-CUDA runtimes, native provider bodies and launch overrides. This
+explicit-plan format requires a v15 consumer and matching ABI74 components;
+flat masked Graph automatic export is not yet enabled.
+
 Vulkan exports selected flat native loops with a version 4 `lowering` recipe:
 
 ```python

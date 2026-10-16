@@ -13,16 +13,20 @@ namespace taichi::lang::aot {
 using namespace execution_json;
 
 namespace {
-void parse_cuda_nested_control(const JsonValue &lowering,
-                               ExecutionPlan::While &loop,
-                               std::set<std::string> &arguments,
-                               std::uint64_t version) {
-  fields(lowering, {"kind", "version", "inners"});
-  const bool masked = name(lowering["kind"]) == "cuda_nested_masked";
-  if (version < (masked ? 14 : 13) || integer(lowering["version"]) != 1 ||
-      !loop.continue_while_nonzero || !lowering["inners"].is_arr())
+void parse_cuda_control(const JsonValue &lowering,
+                        ExecutionPlan::While &loop,
+                        std::set<std::string> &arguments,
+                        std::uint64_t version) {
+  const bool flat = name(lowering["kind"]) == "cuda_masked";
+  fields(lowering, flat ? std::initializer_list<const char *>{"kind", "version"}
+                        : std::initializer_list<const char *>{"kind", "version",
+                                                              "inners"});
+  const bool masked = flat || name(lowering["kind"]) == "cuda_nested_masked";
+  if (version < (flat ? 15 : masked ? 14 : 13) ||
+      integer(lowering["version"]) != 1 ||
+      (!flat && (!loop.continue_while_nonzero || !lowering["inners"].is_arr())))
     throw std::invalid_argument(
-        "Selected CUDA nested control requires a matching plan version and recipe 1");
+        "Selected CUDA control requires a matching plan version and recipe 1");
   const auto flat_kernels = [](const auto &region) {
     return std::all_of(region.begin(), region.end(), [](const auto &op) {
       const auto *kernel = std::get_if<ExecutionPlan::Kernel>(&op);
@@ -31,10 +35,16 @@ void parse_cuda_nested_control(const JsonValue &lowering,
   };
   if (!flat_kernels(loop.condition) || !flat_kernels(loop.body))
     throw std::invalid_argument(
-        "CUDA nested control requires flat kernels without launch overrides");
+        "CUDA control requires flat kernels without launch overrides");
   loop.cuda_control.emplace();
-  loop.cuda_control->encoding = masked ? CudaControlEncoding::masked
-                                       : CudaControlEncoding::device_update;
+  loop.cuda_control->encoding =
+      masked ? CudaControlEncoding::masked : CudaControlEncoding::device_update;
+  if (flat) {
+    loop.cuda_control->validate(loop.condition.size(),
+                                loop.condition.size() + loop.body.size(),
+                                loop.continue_while_nonzero);
+    return;
+  }
   for (const auto &value : lowering["inners"].arr.inner) {
     fields(value, {"predicate", "condition_begin", "body_begin", "end",
                    "max_iterations"});
@@ -53,8 +63,8 @@ void parse_cuda_nested_control(const JsonValue &lowering,
     inner.max_iterations = integer(value["max_iterations"]);
     loop.cuda_control->inners.push_back(std::move(inner));
   }
-  // Versions 13/14 describe ordered nested regions only. Flat control gets its
-  // own persisted selection instead of weakening the existing format contract.
+  // Versions 13/14 describe ordered nested regions only. The v15 flat selection
+  // does not weaken their existing format contract.
   if (loop.cuda_control->inners.empty())
     throw std::invalid_argument("Selected CUDA nested control needs inner regions");
   loop.cuda_control->validate(loop.condition.size(),
@@ -68,7 +78,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 14)
+    if (version < 1 || version > 15)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -187,8 +197,8 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             const auto &lowering = found->second;
             const auto kind = name(lowering["kind"]);
             if (kind == "cuda_nested_device_update" ||
-                kind == "cuda_nested_masked") {
-              parse_cuda_nested_control(lowering, *loop, arguments, version);
+                kind == "cuda_nested_masked" || kind == "cuda_masked") {
+              parse_cuda_control(lowering, *loop, arguments, version);
               operations.emplace_back(std::move(loop));
               continue;
             }

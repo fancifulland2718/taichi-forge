@@ -187,10 +187,13 @@ def test_cuda_nested_plan_rejects_other_backends_before_loading_payload(tmp_path
     with ti.aot.borrow_runtime() as runtime:
         with runtime.load_module(artifact) as module:
             p, ip = runtime.ndarray("i32", 1), runtime.ndarray("i32", 1)
-            for encoding in ("device_update", "masked"):
+            for route in ("cuda_nested_device_update", "cuda_nested_masked", "cuda_masked"):
                 document = json.loads(plan.to_json())
-                document["version"] = 14
-                document["operations"][0]["lowering"]["kind"] = "cuda_nested_" + encoding
+                document["version"] = 15
+                lowering = document["operations"][0]["lowering"]
+                lowering["kind"] = route
+                if route == "cuda_masked":
+                    del lowering["inners"]
                 selected = ExecutionPlan.from_json(json.dumps(document))
                 with pytest.raises(AotError, match="requires a CUDA runtime"):
-                    module.prepare_execution(selected, dict(p=p, ip=ip))
+                    module.prepare_execution(selected, dict(p=p) if route == "cuda_masked" else dict(p=p, ip=ip))

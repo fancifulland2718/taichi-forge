@@ -447,6 +447,13 @@ kernel或device-update节点，不静默切换路线。每份prepare独立拥有
 单层masked循环与masked分支不属于这条导出路线。原device-update计划仍为v13，保留普通
 kernel合同。
 
+版本15新增显式单层CUDA masked循环：`lowering=dict(kind="cuda_masked", version=1)`，
+不带 `inners` 字段。允许空初始 `condition`，通过 `continue_while_nonzero` 保留正反条件；
+非空body中的所有kernel（包括尾条件）须为预编译的 `cuda_graph_gate_v1` 代码。非空初始
+condition使用普通入口，零预算也执行一次。静态代码不随预算复制，但录制命令仍随预算增长。
+prepare复用绑定、梯度与退休合同，拒绝非CUDA runtime、native provider body和launch override。
+此显式格式需要v15消费端及匹配的ABI74组件；单层masked Graph自动导出尚未启用。
+
 Vulkan 可导出已选的单层 native 循环，使用版本 4 的 `lowering` 描述：
 
 ```python

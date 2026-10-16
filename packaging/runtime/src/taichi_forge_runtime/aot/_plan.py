@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 14
+_MAX_EXECUTION_PLAN_VERSION = 15
 
 
 def _unique_fields(pairs):
@@ -46,6 +46,8 @@ def _control_version(steps):
                 selected = 13
             if isinstance(lowering, dict) and lowering.get("kind") == "cuda_nested_masked":
                 selected = 14
+            if isinstance(lowering, dict) and lowering.get("kind") == "cuda_masked":
+                selected = 15
             version = max(version, selected if "lowering" in op else 3)
             for key in ("condition", "body"):
                 if isinstance(op.get(key), list):
@@ -164,17 +166,20 @@ class ExecutionPlan:
         if "initialization" in document and not document["initialization"]:
             raise ValueError("Execution initialization must be a nonempty operation array")
 
-        def validate_cuda_nested(op):
+        def validate_cuda_control(op):
             lowering = op["lowering"]
+            flat = lowering["kind"] == "cuda_masked"
             if (
-                set(lowering) != {"kind", "version", "inners"}
+                set(lowering) != ({"kind", "version"} if flat else {"kind", "version", "inners"})
                 or type(lowering["version"]) is not int
                 or lowering["version"] != 1
-                or not op.get("continue_while_nonzero", True)
+                or (not flat and not op.get("continue_while_nonzero", True))
             ):
-                raise ValueError("Unsupported CUDA nested control recipe")
+                raise ValueError("Unsupported CUDA control recipe")
             if any(item["kind"] != "kernel" or "launch" in item for item in op["condition"] + op["body"]):
-                raise ValueError("CUDA nested control requires flat kernels without launch overrides")
+                raise ValueError("CUDA control requires flat kernels without launch overrides")
+            if flat:
+                return
             inners = lowering["inners"]
             cursor = len(op["condition"])
             count = cursor + len(op["body"])
@@ -198,8 +203,9 @@ class ExecutionPlan:
             if isinstance(lowering, dict) and lowering.get("kind") in (
                 "cuda_nested_device_update",
                 "cuda_nested_masked",
+                "cuda_masked",
             ):
-                validate_cuda_nested(op)
+                validate_cuda_control(op)
                 return
             nested = isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested"
             required = {"kind", "version", "counter", "inners" if nested else "chunks"}

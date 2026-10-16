@@ -408,6 +408,38 @@ def test_selected_cuda_nested_static_closure_and_version(encoding, version):
         ExecutionPlan([dict(loop, body=[kernel] * 27, lowering=dict(lowering, inners=list(reversed(many))))])
 
 
+def test_flat_cuda_masked_static_closure_polarity_and_version():
+    kernel = dict(kind="kernel", entry="payload", arguments=["x"])
+    lowering = dict(kind="cuda_masked", version=1)
+    loop = dict(kind="while", predicate="p", max_iterations=1 << 40, condition=[], body=[kernel], lowering=lowering)
+    resources = [dict(kind="ndarray", name="p", dtype="i32", shape=[])]
+    for nonzero in (False, True):
+        for condition in ([], [kernel]):
+            plan = ExecutionPlan([dict(loop, condition=condition, continue_while_nonzero=nonzero)], resources=resources)
+            assert plan.argument_names == ("x",)
+            assert plan._replay_argument_names == {"p", "x"}
+            assert plan.kernel_entries == ("payload",)
+            document = json.loads(plan.to_json())
+            assert document["version"] == 15
+            assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+            for version in (14, _MAX_EXECUTION_PLAN_VERSION + 1):
+                with pytest.raises(ValueError):
+                    ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+    for patch in (dict(inners=[]), dict(version=True), dict(version=2), dict(gate=1234)):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, lowering=dict(lowering, **patch))])
+    for patch in (
+        dict(continue_while_nonzero=0),
+        dict(max_iterations=-1),
+        dict(body=[]),
+        dict(body=[dict(kind="fill32", destination="x", value=0)]),
+        dict(body=[dict(kernel, launch=dict(kind="cuda_logical_exact", extent="n", capacity=4))]),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, **patch)])
+    ExecutionPlan([dict(loop, max_iterations=0)])
+
+
 def test_persistent_control_closure_and_version():
     body = [dict(kind="kernel", entry="advance", arguments=["scratch", "x"])]
     loop = dict(
