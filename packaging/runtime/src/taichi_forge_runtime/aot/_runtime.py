@@ -725,7 +725,7 @@ class PreparedCall(_Resource):
             )
             return dict(
                 dispatch_count=native.dispatch_count,
-                execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands", "cuda_mixed", "cuda_ordered")[
+                execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands", "cuda_mixed", "cuda_ordered", "host_control")[
                     native.execution_kind
                 ],
                 argument_bytes=native.argument_bytes,

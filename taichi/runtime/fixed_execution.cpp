@@ -36,6 +36,18 @@ struct FixedExecution::State {
   std::size_t workspace_bytes{0};
   // Destroy backend recordings before their retained workspace owners.
   std::vector<std::shared_ptr<NativeOperation>> native_operations;
+  std::size_t native_workspace_bytes{0};
+  // Host steps retire their native blocks and readback commands before staging
+  // and provider owners. All selection storage/commands are prepared cold.
+  DeviceAllocationUnique host_staging;
+  using HostSteps = std::vector<std::function<void()>>;
+  HostSteps host_steps;
+  bool host_cuda{false};
+  bool host_failed{false};
+  static void run_host_steps(const HostSteps &steps) {
+    for (const auto &step : steps)
+      step();
+  }
 #ifdef TI_WITH_LLVM
   struct CpuStep {
     cpu::KernelLauncher *launcher{nullptr};
@@ -153,6 +165,7 @@ FixedExecution::FixedExecution(
   NativeRecordingState recording_state =
       sequence_state ? *sequence_state : NativeRecordingState{};
   std::unordered_set<const void *> active_controls;
+  bool has_host_selection = false;
   std::function<void(const std::vector<Operation> &, NativeRecordingState &,
                      bool)>
       validate;
@@ -164,21 +177,27 @@ FixedExecution::FixedExecution(
         const auto &branch = *value;
         if (!branch || branch->selector.device != &device ||
             branch->selector.offset % 4 ||
-            (!arch_is_cpu(arch) && arch != Arch::cuda))
+            (!arch_is_cpu(arch) && arch != Arch::cuda &&
+             !(arch == Arch::vulkan && branch->host_selection)))
           throw std::invalid_argument(
-              "Fixed branch requires CPU/CUDA and aligned selector storage");
+              "Fixed branch requires a supported lowering and aligned selector storage");
+        if (branch->host_selection && inside_control && !arch_is_cpu(arch))
+          throw std::invalid_argument(
+              "Native GPU control cannot contain host selection");
+        has_host_selection |= branch->host_selection;
         branch->selection.validate(branch->bodies.size());
         if (!active_controls.insert(branch.get()).second)
           throw std::invalid_argument(
               "Fixed control descriptors contain a cycle");
-        // This condition executes exactly once before selecting a body. It is
-        // part of the native graph on CUDA, so cannot invoke host providers.
-        validate(branch->condition, recording_state, true);
+        // Conditions execute exactly once. Only native GPU control restricts
+        // their execution mode; conditional fact joins apply to both modes.
+        const bool native_control = !branch->host_selection;
+        validate(branch->condition, recording_state, native_control);
         auto joined = recording_state.initialized;
         bool first = branch->selection.has_default;
         for (const auto &body : branch->bodies) {
           auto facts = recording_state.control_branch();
-          validate(body, facts, true);
+          validate(body, facts, native_control);
           if (first) {
             joined = std::move(facts.initialized);
             first = false;
@@ -363,6 +382,139 @@ FixedExecution::FixedExecution(
     }
   };
   validate(operations, recording_state, false);
+  state_->native_workspace_bytes = state_->workspace_bytes;
+  if (has_host_selection && !arch_is_cpu(arch)) {
+    if (arch != Arch::cuda && arch != Arch::vulkan)
+      throw std::invalid_argument("Host selection requires CUDA or Vulkan");
+    state_->host_cuda = arch == Arch::cuda;
+    // The full validation above must finish before any backend allocation or
+    // capture. Child blocks receive incoming facts, not the final joined facts.
+    std::function<std::function<std::int32_t()>(DevicePtr)> reader;
+#ifdef TI_WITH_CUDA
+    if (arch == Arch::cuda) {
+      if (!state_->fault_domain)
+        state_->fault_domain = std::make_shared<RuntimeFaultDomain>(arch, 0);
+      reader = [](DevicePtr ptr) {
+        return [source = cuda_pointer(ptr)] {
+          std::int32_t value;
+          CUDADriver::get_instance().memcpy_device_to_host(&value, source, 4);
+          return value;
+        };
+      };
+    }
+#endif
+#ifdef TI_WITH_VULKAN
+    if (arch == Arch::vulkan) {
+      if (!gfx_runtime)
+        throw std::invalid_argument("Host Vulkan selection requires a runtime");
+      auto staging = device.allocate_memory_unique(
+          {4, false, true, false, AllocUsage::None});
+      if (staging.second != RhiResult::success)
+        throw std::runtime_error("Cannot allocate host selector staging");
+      state_->host_staging = std::move(staging.first);
+      state_->workspace_bytes += 4;
+      reader = [&, staging = state_->host_staging.get()](DevicePtr ptr) {
+        auto command = device.get_compute_stream()->new_command_list_unique();
+        if (command.second != RhiResult::success)
+          throw std::runtime_error("Cannot prepare host selector readback");
+        std::shared_ptr<CommandList> commands(std::move(command.first));
+        commands->memory_barrier();
+        commands->buffer_copy(staging->get_ptr(), ptr, 4);
+        commands->memory_barrier();
+        return [device = &device, gfx_runtime, staging, commands] {
+          (void)gfx_runtime->flush_if_pending();
+          device->get_compute_stream()->submit_synced(commands.get());
+          void *mapped = nullptr;
+          if (device->map(*staging, &mapped) != RhiResult::success)
+            throw std::runtime_error("Cannot map host selector staging");
+          std::int32_t value;
+          std::memcpy(&value, mapped, 4);
+          device->unmap(*staging);
+          return value;
+        };
+      };
+    }
+#endif
+    if (!reader)
+      throw std::invalid_argument("Host selection backend is not compiled");
+    std::function<State::HostSteps(const std::vector<Operation> &,
+                                  NativeRecordingState &)>
+        prepare;
+    prepare = [&](const std::vector<Operation> &region,
+                  NativeRecordingState &facts) {
+      State::HostSteps steps;
+      std::vector<Operation> block;
+      const auto flush = [&] {
+        if (block.empty())
+          return;
+        auto prepared = std::make_shared<FixedExecution>(
+            arch, device, gfx_runtime, block, &facts, state_->fault_domain);
+        // Shared provider workspace was counted once by the outer validation.
+        const auto extra = prepared->workspace_bytes() -
+                           prepared->state_->native_workspace_bytes;
+        if (prepared->argument_bytes() >
+                std::numeric_limits<std::size_t>::max() - state_->bytes ||
+            extra > std::numeric_limits<std::size_t>::max() -
+                        state_->workspace_bytes)
+          throw std::invalid_argument("Host control storage size overflow");
+        state_->bytes += prepared->argument_bytes();
+        state_->workspace_bytes += extra;
+        steps.push_back([prepared] { prepared->run(); });
+        block.clear();
+      };
+      for (const auto &operation : region) {
+        const auto *value =
+            std::get_if<std::shared_ptr<const Branch>>(&operation);
+        if (!value || !(*value)->host_selection) {
+          block.push_back(operation);
+          continue;
+        }
+        flush();
+        const auto &branch = **value;
+        struct PreparedBranch {
+          std::function<std::int32_t()> read;
+          State::HostSteps condition;
+          std::vector<State::HostSteps> bodies;
+        };
+        auto prepared = std::make_shared<PreparedBranch>();
+        prepared->read = reader(branch.selector);
+        prepared->condition = prepare(branch.condition, facts);
+        auto joined = facts.initialized;
+        bool first = branch.selection.has_default;
+        for (const auto &body : branch.bodies) {
+          auto selected = facts.control_branch();
+          prepared->bodies.push_back(prepare(body, selected));
+          if (first) {
+            joined = std::move(selected.initialized);
+            first = false;
+          } else {
+            for (auto it = joined.begin(); it != joined.end();) {
+              if (selected.initialized.count(*it))
+                ++it;
+              else
+                it = joined.erase(it);
+            }
+          }
+        }
+        facts.initialized = std::move(joined);
+        steps.push_back([prepared, selection = branch.selection] {
+          State::run_host_steps(prepared->condition);
+          const auto index =
+              selection.select(prepared->read(), prepared->bodies.size());
+          if (index < prepared->bodies.size())
+            State::run_host_steps(prepared->bodies[index]);
+        });
+      }
+      flush();
+      return steps;
+    };
+    auto facts = sequence_state ? *sequence_state : NativeRecordingState{};
+    state_->host_steps = prepare(operations, facts);
+    state_->kind = 5;
+    if (sequence_state)
+      *sequence_state = std::move(recording_state);
+    return;
+  }
 #ifdef TI_WITH_LLVM
   if (arch_is_cpu(arch)) {
     std::function<std::vector<State::CpuStep>(const std::vector<Operation> &)>
@@ -796,6 +948,28 @@ void FixedExecution::retire_completed_binding(bool backend_safe) {
 }
 
 void FixedExecution::run_impl() {
+  if (!state_->host_steps.empty()) {
+    if (state_->host_failed)
+      throw std::runtime_error(
+          "Host control execution failed; prepare a new instance");
+    try {
+#ifdef TI_WITH_CUDA
+      if (state_->host_cuda) {
+        auto &cuda = CUDAContext::get_instance();
+        auto guard = cuda.get_guard();
+        auto lock = cuda.get_submission_lock_guard();
+        State::run_host_steps(state_->host_steps);
+      } else
+#endif
+      {
+        State::run_host_steps(state_->host_steps);
+      }
+    } catch (...) {
+      state_->host_failed = true;
+      throw;
+    }
+    return;
+  }
 #ifdef TI_WITH_LLVM
   State::run_cpu_steps(state_->cpu_steps);
 #endif
