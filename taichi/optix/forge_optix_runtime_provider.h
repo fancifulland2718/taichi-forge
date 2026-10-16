@@ -1,7 +1,13 @@
 #pragma once
 
-#include "taichi/external_runtime/forge_runtime_provider.h"
-#include "taichi/optix/forge_optix_provider.h"
+// SDK components install the public ABI headers together. Source builds keep
+// the common ABI in external_runtime; neither layout needs vendor SDK headers.
+#if __has_include("forge_runtime_provider.h")
+#include "forge_runtime_provider.h"
+#else
+#include "../external_runtime/forge_runtime_provider.h"
+#endif
+#include "forge_optix_provider.h"
 
 #ifdef __cplusplus
 extern "C" {

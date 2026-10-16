@@ -1,5 +1,6 @@
 option(TI_BUILD_BUNDLED_OPTIX_PROVIDERS
        "Build the pinned OptiX provider set for the runtime wheel" OFF)
+include(${CMAKE_CURRENT_LIST_DIR}/TaichiProviderSdk.cmake)
 option(TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT
        "Allow non-release CUDA Toolkit versions for local adapter builds" OFF)
 set(TI_OPTIX_ROOT_93 "" CACHE PATH
@@ -171,6 +172,20 @@ function(_ti_add_optix_provider target_name root)
                     COMPONENT runtime
             LIBRARY DESTINATION ${INSTALL_LIB_DIR}/hardware_providers
                     COMPONENT runtime)
+
+    set(_ptx_requirement "PTX ${_ti_optix_expected_ptx_version}")
+    if(NOT _ti_optix_expected_ptx_version)
+        set(_ptx_requirement "generated PTX from unqualified CUDA Toolkit ${CUDAToolkit_VERSION}")
+    endif()
+    ti_install_provider_sdk(${target_name} optix VARIANT abi${_header_abi}
+        PUBLIC_HEADERS
+            "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_provider.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_runtime_provider.h"
+        LICENSE_FILES "${root}/LICENSE.txt" "${root}/license_info.txt"
+        EXTERNAL_REQUIREMENTS
+            "NVIDIA GPU driver with OptiX ABI ${_header_abi} and ${_ptx_requirement} support"
+            "driver-provided OptiX runtime and CUDA driver library"
+            "platform C/C++ runtime")
 endfunction()
 
 include(FetchContent)

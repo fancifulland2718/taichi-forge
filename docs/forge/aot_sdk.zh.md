@@ -152,7 +152,24 @@ adapter；消费端需要 Vulkan loader/driver 和平台 C/C++ runtime，不需�
 DLL、Vulkan SDK 或外部 shader 编译器。清单记录这些依赖及全部许可文件。已验证的
 Windows 组件约 5 MB，保持可选，默认安装不包含它。
 
-每个组件安装 adapter
+OptiX 为 ABI 93、105、118 提供独立组件，SDK 可只携带部署环境所需的一个 adapter。
+沿用已有的固定 OptiX 头文件和 CUDA Toolkit 构建配置，选择匹配组件安装：
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_BUNDLED_OPTIX_PROVIDERS=ON
+cmake --build BUILD --target taichi_forge_optix_provider_118
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_optix_abi118
+```
+
+选择其他变体时，将 target 和组件名中的 `118` 同时替换为 `93` 或 `105`。
+组件包含公共/OptiX C ABI 头文件、内嵌设备 PTX 及对应许可声明；驱动提供的 OptiX/CUDA
+库仍是外部依赖，消费端不需要 OptiX SDK 头文件或 nvcc。清单分别为 `optix_abi93.json`、
+`optix_abi105.json`、`optix_abi118.json`，`provider_id` 保持 `optix`，另有 `variant`
+字段；许可目录也按变体区分。多组件共存不会覆盖彼此清单或基础 SDK 清单。已验证的
+Windows 单组件约214KiB，现有runtime wheel的adapter选择方式不变。安装不会自动选择
+adapter；请将实际路径传给 `runtime.configure_provider`。
+
+普通单变体组件安装 adapter
 到 Windows 的 `bin/hardware_providers` 或 Linux 的 `lib/hardware_providers`，
 并包含公共 provider C ABI 头文件、Forge 许可证以及记录文件大小和 SHA256 的
 `share/taichi/providers/<provider>.json`。基础 `sdk_manifest.json` 单独保留。
@@ -209,7 +226,7 @@ Windows CUDA已验证独立/借用消费、双绑定、前后kernel、共享GAS�
 设备镜像/非均匀变换、仅包围盒刷新、refit后命中/miss及退休；后续
 kernel的真实梯度可运行，但不提供求交对顶点/ray的自动微分。CPU/Vulkan不注册这些
 工厂。当前操作使用 `cuda_ordered`，CUDA capture、alpha/纹理、OMM、
-programmable pipeline、recording自动导出和独立SDK安装组件仍待接通。
+programmable pipeline、recording自动导出仍待接通。
 
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
 或 Vulkan GFX runtime、设备和分配器：

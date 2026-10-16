@@ -4,7 +4,7 @@ include_guard(GLOBAL)
 # The component contains its adapter, common ABI header and declared licenses;
 # independently loaded vendor libraries and the Forge core do not belong to it.
 function(ti_install_provider_sdk target provider)
-    cmake_parse_arguments(PARSE_ARGV 2 ARG "" ""
+    cmake_parse_arguments(PARSE_ARGV 2 ARG "" "VARIANT"
         "LICENSE_FILES;EXTERNAL_REQUIREMENTS;PUBLIC_HEADERS")
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "Unknown provider SDK arguments: ${ARG_UNPARSED_ARGUMENTS}")
@@ -12,7 +12,16 @@ function(ti_install_provider_sdk target provider)
     if(NOT TARGET ${target})
         message(FATAL_ERROR "Provider SDK installation requires target ${target}")
     endif()
-    set(_ti_provider_component "TaichiSDKProvider_${provider}")
+    set(_ti_provider_key "${provider}")
+    set(_ti_provider_variant_json "")
+    if(DEFINED ARG_VARIANT)
+        if(NOT ARG_VARIANT MATCHES "^[A-Za-z0-9_]+$")
+            message(FATAL_ERROR "Provider SDK variant must be a nonempty identifier")
+        endif()
+        string(APPEND _ti_provider_key "_${ARG_VARIANT}")
+        set(_ti_provider_variant_json "  \"variant\":\"${ARG_VARIANT}\",\n")
+    endif()
+    set(_ti_provider_component "TaichiSDKProvider_${_ti_provider_key}")
     if(WIN32)
         set(_ti_provider_native_dir bin)
     else()
@@ -45,11 +54,11 @@ function(ti_install_provider_sdk target provider)
     endforeach()
     foreach(_license IN LISTS ARG_LICENSE_FILES)
         get_filename_component(_name "${_license}" NAME)
-        set(_relative "licenses/${provider}/${_name}")
+        set(_relative "licenses/${_ti_provider_key}/${_name}")
         if(_relative IN_LIST _ti_provider_payload)
             message(FATAL_ERROR "Duplicate provider license destination: ${_relative}")
         endif()
-        install(FILES "${_license}" DESTINATION "licenses/${provider}"
+        install(FILES "${_license}" DESTINATION "licenses/${_ti_provider_key}"
             COMPONENT ${_ti_provider_component} EXCLUDE_FROM_ALL)
         list(APPEND _ti_provider_payload "${_relative}")
     endforeach()
@@ -66,10 +75,10 @@ function(ti_install_provider_sdk target provider)
         set(_separator ",")
     endforeach()
     configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/TaichiProviderManifest.cmake.in"
-        "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}.cmake.in" @ONLY)
+        "${PROJECT_BINARY_DIR}/TaichiProvider_${_ti_provider_key}.cmake.in" @ONLY)
     file(GENERATE
-        OUTPUT "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}_$<CONFIG>.cmake"
-        INPUT "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}.cmake.in")
-    install(SCRIPT "${PROJECT_BINARY_DIR}/TaichiProvider_${provider}_$<CONFIG>.cmake"
+        OUTPUT "${PROJECT_BINARY_DIR}/TaichiProvider_${_ti_provider_key}_$<CONFIG>.cmake"
+        INPUT "${PROJECT_BINARY_DIR}/TaichiProvider_${_ti_provider_key}.cmake.in")
+    install(SCRIPT "${PROJECT_BINARY_DIR}/TaichiProvider_${_ti_provider_key}_$<CONFIG>.cmake"
         COMPONENT ${_ti_provider_component} EXCLUDE_FROM_ALL)
 endfunction()

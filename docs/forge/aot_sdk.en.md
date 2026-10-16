@@ -189,7 +189,28 @@ Vulkan SDK or external shader compiler. Its manifest records these requirements
 and all installed license files. The qualified Windows component is about 5 MB;
 it remains optional and is not included by a default install.
 
-Each component
+OptiX provides separate components for ABI 93, 105 and 118, so an SDK can ship
+only the adapter required by its deployment. Build with the existing pinned
+OptiX headers and CUDA Toolkit configuration, then select the matching component:
+
+```sh
+cmake -S . -B BUILD -DTI_BUILD_BUNDLED_OPTIX_PROVIDERS=ON
+cmake --build BUILD --target taichi_forge_optix_provider_118
+cmake --install BUILD --prefix SDK --component TaichiSDKProvider_optix_abi118
+```
+
+Use `93` or `105` in both the target and component name for those variants. Each
+component includes the common and OptiX C ABI headers, embedded device PTX and
+matching license notices; the driver-provided OptiX/CUDA libraries remain external.
+Consumers need neither OptiX SDK headers nor nvcc. Manifests are named
+`optix_abi93.json`, `optix_abi105.json` and `optix_abi118.json`, with `provider_id`
+remaining `optix` and a separate `variant` field. License directories are also
+variant-specific. Components can coexist without replacing each other's inventory
+or the base SDK manifest. Qualified Windows payloads are about 214 KiB each;
+the existing runtime-wheel adapter selection is unchanged. Installing a component
+does not select it automatically: pass its path to `runtime.configure_provider`.
+
+Each ordinary component
 installs an adapter into `bin/hardware_providers` on Windows or
 `lib/hardware_providers` on Linux, the common provider C ABI header, the Forge
 license and `share/taichi/providers/<provider>.json` with file sizes and SHA256
@@ -269,7 +290,7 @@ retirement. Real gradients of
 following kernels work; intersection differentiation with respect to vertices or
 rays is not provided. CPU/Vulkan do not register these factories. Operations use
 `cuda_ordered`; CUDA capture, alpha/textures, OMM,
-programmable pipelines, recording export and a separate SDK component remain
+programmable pipelines and recording export remain
 pending.
 
 When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
