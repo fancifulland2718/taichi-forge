@@ -10,7 +10,7 @@ from taichi_forge.graph._native import (
     NativeGraphNode,
     _CudaGraphCaptureRecipe,
 )
-from taichi_forge.hardware._cublaslt import CublasLtMatmulPlan, _MatmulAlgo
+from taichi_forge.hardware._cublaslt import CublasLtMatmulPlan
 from taichi_forge.hardware._native_adapter import (
     HardwareRecordingExecutable,
     validate_runtime_generation,
@@ -23,7 +23,6 @@ from taichi_forge.hardware._retained import (
 )
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32, u8
-
 
 _BINDING_FRAMES_SUPPORTED = bool(
     getattr(
@@ -76,31 +75,18 @@ class _MatmulCaptureRecipe(_CudaGraphCaptureRecipe):
         if plan.closed:
             raise TaichiRuntimeError("cuBLASLt capture requires a live plan")
         native = core._CudaCublasLtCapturePlan()
-        native.matmul_address = ctypes.cast(
-            plan.provider._library.matmul, ctypes.c_void_p
+        native.execute_address = ctypes.cast(
+            plan.provider._execution_api.execute, ctypes.c_void_p
         ).value
-        native.handle = plan.provider._handle.value
-        native.descriptor = plan._matmul_desc.value
-        native.layouts = [
-            layout.value
-            for layout in (
-                plan._a_layout,
-                plan._b_layout,
-                plan._c_layout,
-                plan._d_layout,
-            )
-        ]
-        native.algorithm = ctypes.string_at(
-            ctypes.byref(plan._heuristic.algo), ctypes.sizeof(_MatmulAlgo)
-        )
-        shapes = (plan.a_shape, plan.b_shape, plan.output_shape)
-        order = plan._capture_operand_order
-        native.shapes = [shapes[i] for i in order]
+        native.error_address = ctypes.cast(
+            plan.provider._runtime.loaded.api.get_last_error, ctypes.c_void_p
+        ).value
+        native.plan_handle = plan._plan_handle.value
+        native.shapes = [plan.a_shape, plan.b_shape, plan.output_shape]
         native.workspace_bytes = plan.workspace_bytes
-        native.alpha, native.beta = plan.alpha, plan.beta
         arguments = [
             Arg(ArgKind.NDARRAY, name, f32, ndim=len(shape))
-            for name, shape in zip((self.names[i] for i in order), native.shapes)
+            for name, shape in zip(self.names, native.shapes)
         ]
         if plan.workspace_bytes:
             arguments.append(Arg(ArgKind.NDARRAY, self.names[3], u8, ndim=1))
@@ -180,7 +166,7 @@ class CublasLtCaptureRecording(BackendCommandRecording):
         cost = HardwareExecutionCostModel(
             (
                 fixed_cost("provider_library_load", "process"),
-                fixed_cost("provider_handle", "runtime_generation"),
+                fixed_cost("provider_handle", "provider_generation"),
                 fixed_cost(
                     "descriptors_heuristic_and_workspace", "provider_generation"
                 ),

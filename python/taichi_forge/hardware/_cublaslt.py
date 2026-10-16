@@ -9,7 +9,6 @@ plan retains descriptors, a selected algorithm, and its exact workspace.
 
 import _ctypes
 import ctypes
-import hashlib
 import importlib.metadata
 import math
 import numbers
@@ -31,6 +30,7 @@ from taichi_forge.hardware._native_adapter import (
     validate_runtime_generation,
 )
 from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
+from taichi_forge.hardware import _cublaslt_abi as _abi
 from taichi_forge.hardware._retained import (
     HardwareExecutionCostModel,
     RetainedExecutionContract,
@@ -45,8 +45,7 @@ from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32, u8
 
-
-CUBLASLT_PROVIDER_ABI = "cublaslt-dynamic-symbols-v1"
+CUBLASLT_PROVIDER_ABI = _abi.ABI
 _ENVIRONMENT_VARIABLE = "TI_CUBLASLT_LIBRARY_PATH"
 _CUDA_R_32F = 0
 _CUBLAS_COMPUTE_32F = 68
@@ -60,7 +59,6 @@ _MATMUL_DESC_TRANSA = 3
 _MATMUL_DESC_TRANSB = 4
 _MATMUL_DESC_EPILOGUE = 7
 _EPILOGUE_RELU = 2
-_MATMUL_PREF_MAX_WORKSPACE_BYTES = 1
 _CUBLAS_STATUS_SUCCESS = 0
 
 
@@ -182,7 +180,6 @@ class _CublasLtLibrary:
                 self.library.cublasLtMatmulPreferenceSetAttribute
             )
             self.heuristic = self.library.cublasLtMatmulAlgoGetHeuristic
-            self.matmul = self.library.cublasLtMatmul
         except AttributeError as exc:
             _unload_library(self.library)
             raise TaichiRuntimeError(
@@ -257,25 +254,6 @@ class _CublasLtLibrary:
             ctypes.POINTER(ctypes.c_int),
         )
         self.heuristic.restype = ctypes.c_int
-        self.matmul.argtypes = (
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.POINTER(_MatmulAlgo),
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-        )
-        self.matmul.restype = ctypes.c_int
 
     def require(self, status, operation):
         status = int(status)
@@ -336,47 +314,8 @@ def passive_status():
 
 
 def probe_provider(library_path=None):
-    """Transiently inspect symbols/version without selecting the provider."""
-
-    native_facts = {
-        "probe_policy": "transient_vendor_runtime_query",
-        "provider_enablement_changed": False,
-        "provider_selection_changed": False,
-        "symbol_slice": "retained_f32_matmul",
-    }
-    result = {
-        "provider_id": "cublaslt",
-        "external_component_probed": False,
-        "discovery": "missing",
-        "unavailable_reason": "vendor_runtime_not_found",
-        "provider_abi": CUBLASLT_PROVIDER_ABI,
-        "provider_version": None,
-        "last_error": None,
-        "failure_scope": None,
-        "native_facts": native_facts,
-    }
-    candidate = resolve_library_path(library_path)
-    native_facts["library_candidate"] = candidate
-    try:
-        library = _CublasLtLibrary(candidate)
-    except (OSError, TaichiRuntimeError) as exc:
-        result.update(
-            discovery="incompatible",
-            unavailable_reason="vendor_runtime_probe_failed",
-            last_error=str(exc) or type(exc).__name__,
-            failure_scope="provider",
-        )
-        return result
-    try:
-        result.update(
-            external_component_probed=True,
-            discovery="available",
-            unavailable_reason="none",
-            provider_version=_version_string(library.version),
-        )
-        return result
-    finally:
-        _unload_library(library.library)
+    """Transiently inspect the shared adapter and vendor without selecting it."""
+    return _abi.probe_provider(resolve_library_path(library_path))
 
 
 def _positive_dimension(value, name):
@@ -390,8 +329,12 @@ def _positive_dimension(value, name):
 
 
 def _workspace_limit(value):
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError("cuBLASLt workspace_limit_bytes must be a nonnegative integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= ctypes.c_size_t(-1).value
+    ):
+        raise ValueError("cuBLASLt workspace_limit_bytes must fit nonnegative size_t")
     return value
 
 
@@ -407,7 +350,7 @@ def _device_pointer(program, value):
 
 
 class CublasLtProvider:
-    """One cuBLASLt handle bound to one Taichi CUDA runtime generation."""
+    """Common runtime owner with an optional cold-discovery cuBLASLt handle."""
 
     def __init__(self, library_path=None):
         program = impl.get_runtime().prog
@@ -419,18 +362,55 @@ class CublasLtProvider:
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self._lock = threading.RLock()
-        self._handle = ctypes.c_void_p()
+        self._runtime = None
+        self._discovery_handle = None
+        self._discovery_handle_ready = False
         self._plans = weakref.WeakSet()
-        self._library.require(
-            self._library.create(ctypes.byref(self._handle)), "handle creation"
-        )
-        if not self._handle.value:
-            raise TaichiRuntimeError("cuBLASLt returned a null provider handle")
+        try:
+            self._runtime = _abi.open_runtime(self._library.candidate)
+            self._execution_api = self._runtime.query_execution_api(_abi.ExecutionApi)
+            if not all(
+                (
+                    self._execution_api.create_plan,
+                    self._execution_api.execute,
+                    self._execution_api.destroy_plan,
+                )
+            ):
+                raise RuntimeError(
+                    "cuBLASLt adapter returned an incomplete execution API"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            if self._runtime is not None:
+                self._runtime.close()
+            raise TaichiRuntimeError(str(exc)) from exc
         impl.get_runtime().register_runtime_object(self)
 
     @property
     def closed(self):
-        return not bool(self._handle and self._handle.value)
+        return self._runtime is None or self._runtime.closed
+
+    @property
+    def _handle(self):
+        # Only host-side candidate discovery needs this extra vendor handle.
+        with self._lock:
+            self._validate_lifetime()
+            if self._discovery_handle is None:
+                self._discovery_handle = ctypes.c_void_p()
+                status = self._library.create(ctypes.byref(self._discovery_handle))
+                if not self._discovery_handle.value:
+                    self._discovery_handle = None
+                    self._library.require(status, "discovery handle creation")
+                    raise TaichiRuntimeError(
+                        "cuBLASLt returned a null discovery handle"
+                    )
+                # Keep a partial vendor handle for explicit retirement on error.
+                self._library.require(status, "discovery handle creation")
+                self._discovery_handle_ready = True
+            if not self._discovery_handle_ready:
+                raise TaichiRuntimeError(
+                    "cuBLASLt discovery handle creation failed; close the provider"
+                )
+            return self._discovery_handle
 
     @property
     def version(self):
@@ -489,9 +469,7 @@ class CublasLtProvider:
                 )
             if runtime_generation_matches(self):
                 self._runtime_prog.synchronize()
-            handle = self._handle
-            self._handle = None
-            self._library.require(self._library.destroy(handle), "handle destruction")
+            self._close_runtime()
         return None
 
     destroy = close
@@ -503,9 +481,23 @@ class CublasLtProvider:
             self._runtime_prog.synchronize()
             for plan in tuple(self._plans):
                 plan._close_native()
-            handle = self._handle
-            self._handle = None
-            self._library.require(self._library.destroy(handle), "handle destruction")
+            self._close_runtime()
+
+    def _close_runtime(self):
+        if self._discovery_handle is not None:
+            self._library.require(
+                self._library.destroy(self._discovery_handle),
+                "discovery handle destruction",
+            )
+            self._discovery_handle = None
+            self._discovery_handle_ready = False
+        self._runtime.close()
+
+    def _check(self, result):
+        try:
+            self._runtime.check_result(result)
+        except RuntimeError as exc:
+            raise TaichiRuntimeError(str(exc)) from exc
 
     def __del__(self):
         try:
@@ -582,6 +574,8 @@ class CublasLtMatmulPlan(BackendCommandRecording):
         self._lock = threading.RLock()
         self._matmul_desc = None
         self._layouts = []
+        self._plan_handle = ctypes.c_void_p()
+        self._plan_info = None
         self.workspace = None
         self._capture_leases = 0
         try:
@@ -589,9 +583,6 @@ class CublasLtMatmulPlan(BackendCommandRecording):
         except Exception:
             self._close_native()
             raise
-        algo_bytes = ctypes.string_at(
-            ctypes.byref(self._heuristic.algo), ctypes.sizeof(_MatmulAlgo)
-        )
         identity = make_retained_plan_identity(
             "linalg.matmul.cublaslt_explicit",
             "cublaslt",
@@ -611,7 +602,7 @@ class CublasLtMatmulPlan(BackendCommandRecording):
                 "transpose_b": self.transpose_b,
             },
             execution_scope={
-                "algorithm_sha256": hashlib.sha256(algo_bytes).hexdigest(),
+                "algorithm_configuration": self._algorithm_choice.to_dict(),
                 "workspace_bytes": self.workspace_bytes,
                 "workspace_limit_bytes": self.workspace_limit_bytes,
                 "row_major": self._physical_layout == "row_major",
@@ -628,7 +619,7 @@ class CublasLtMatmulPlan(BackendCommandRecording):
                 cost_model=HardwareExecutionCostModel(
                     (
                         fixed_cost("provider_library_load", "process"),
-                        fixed_cost("provider_handle", "runtime_generation"),
+                        fixed_cost("provider_handle", "provider_generation"),
                         fixed_cost(
                             "descriptors_heuristic_and_workspace",
                             "provider_generation",
@@ -646,7 +637,7 @@ class CublasLtMatmulPlan(BackendCommandRecording):
 
     @property
     def closed(self):
-        return self._matmul_desc is None
+        return self._matmul_desc is None and not self._plan_handle.value
 
     @property
     def a_shape(self):
@@ -769,57 +760,51 @@ class CublasLtMatmulPlan(BackendCommandRecording):
         return desc
 
     def _create_native_plan(self):
-        library = self.provider._library
-        desc = self._create_descriptors()
-        preference = ctypes.c_void_p()
-        library.require(
-            library.preference_create(ctypes.byref(preference)),
-            "matmul preference creation",
+        self._create_shared_plan()
+
+    def _create_shared_plan(
+        self,
+        *,
+        layout="row_major",
+        epilogue="identity",
+        choice=None,
+        allocate_workspace=True,
+    ):
+        if layout not in ("row_major", "transposed_column_major"):
+            raise ValueError("Unknown cuBLASLt physical layout")
+        if epilogue not in ("identity", "relu"):
+            raise ValueError("Unknown cuBLASLt physical epilogue")
+        self._physical_layout, self._physical_epilogue = layout, epilogue
+        desc = _abi.PlanDesc(
+            ctypes.sizeof(_abi.PlanDesc),
+            int(layout != "row_major"),
+            self.m,
+            self.n,
+            self.k,
+            self.batch_count,
+            self.transpose_a,
+            self.transpose_b,
+            int(epilogue == "relu"),
+            self.alpha,
+            self.beta,
+            self.workspace_limit_bytes,
         )
-        try:
-            workspace_limit = ctypes.c_size_t(self.workspace_limit_bytes)
-            _set_attribute(
-                library,
-                library.preference_set_attribute,
-                preference,
-                _MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                workspace_limit,
-                "workspace preference",
+        selected = None if choice is None else _abi.Algorithm.from_choice(choice)
+        info = _abi.PlanInfo(struct_size=ctypes.sizeof(_abi.PlanInfo))
+        self.provider._check(
+            self.provider._execution_api.create_plan(
+                self.provider._runtime.handle,
+                ctypes.byref(desc),
+                None if selected is None else ctypes.byref(selected),
+                ctypes.byref(self._plan_handle),
+                ctypes.byref(info),
             )
-            result = _HeuristicResult()
-            returned = ctypes.c_int()
-            library.require(
-                library.heuristic(
-                    self.provider._handle,
-                    desc,
-                    self._a_layout,
-                    self._b_layout,
-                    self._c_layout,
-                    self._d_layout,
-                    preference,
-                    1,
-                    ctypes.byref(result),
-                    ctypes.byref(returned),
-                ),
-                "algorithm heuristic",
-            )
-            if returned.value != 1 or result.state != _CUBLAS_STATUS_SUCCESS:
-                raise TaichiRuntimeError(
-                    "cuBLASLt found no compatible f32 matmul algorithm"
-                )
-            self._heuristic = result
-            self.workspace_bytes = int(result.workspace_size)
-            if self.workspace_bytes > self.workspace_limit_bytes:
-                raise TaichiRuntimeError(
-                    "cuBLASLt heuristic exceeded the configured workspace limit"
-                )
-            if self.workspace_bytes:
-                self.workspace = impl.ndarray(u8, shape=self.workspace_bytes)
-        finally:
-            library.require(
-                library.preference_destroy(preference),
-                "matmul preference destruction",
-            )
+        )
+        self._plan_info = info
+        self._algorithm_choice = info.algorithm.to_choice()
+        self.workspace_bytes = int(info.algorithm.workspace_bytes)
+        if self.workspace_bytes and allocate_workspace:
+            self.workspace = impl.ndarray(u8, shape=self.workspace_bytes)
 
     @property
     def resource_effects(self):
@@ -880,29 +865,23 @@ class CublasLtMatmulPlan(BackendCommandRecording):
                 if self.workspace is None
                 else _device_pointer(program, self.workspace)
             )
-            alpha = ctypes.c_float(self.alpha)
-            beta = ctypes.c_float(self.beta)
+            execution = _abi.ExecDesc(
+                ctypes.sizeof(_abi.ExecDesc),
+                0,
+                a_pointer,
+                b_pointer,
+                output_pointer,
+                workspace_pointer,
+                self.workspace_bytes,
+                0,
+            )
             with self.provider._lock, self._lock, hardware_provider_call("cublaslt"):
                 status = submission.invoke(
-                    self.provider._library.matmul,
-                    self.provider._handle,
-                    self._matmul_desc,
-                    ctypes.byref(alpha),
-                    a_pointer,
-                    self._a_layout,
-                    b_pointer,
-                    self._b_layout,
-                    ctypes.byref(beta),
-                    output_pointer,
-                    self._c_layout,
-                    output_pointer,
-                    self._d_layout,
-                    ctypes.byref(self._heuristic.algo),
-                    workspace_pointer,
-                    self.workspace_bytes,
-                    None,
+                    self.provider._execution_api.execute,
+                    self._plan_handle,
+                    ctypes.byref(execution),
                 )
-                self.provider._library.require(status, "matmul execution")
+                self.provider._check(status)
             return output
 
     def run(self, **bindings):
@@ -934,16 +913,23 @@ class CublasLtMatmulPlan(BackendCommandRecording):
     def _close_native(self):
         if self.closed:
             return
+        if self._plan_handle.value:
+            self.provider._check(
+                self.provider._execution_api.destroy_plan(self._plan_handle)
+            )
+            self._plan_handle = ctypes.c_void_p()
+            self.workspace = None
+            return
         library = self.provider._library
-        desc = self._matmul_desc
-        layouts = tuple(reversed(self._layouts))
-        self._matmul_desc = None
-        self._layouts = []
-        for layout in layouts:
+        while self._layouts:
+            layout = self._layouts[-1]
             library.require(library.layout_destroy(layout), "matrix layout destruction")
+            self._layouts.pop()
         library.require(
-            library.matmul_desc_destroy(desc), "matmul descriptor destruction"
+            library.matmul_desc_destroy(self._matmul_desc),
+            "matmul descriptor destruction",
         )
+        self._matmul_desc = None
         self.workspace = None
 
     def close(self):

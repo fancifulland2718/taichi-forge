@@ -134,6 +134,16 @@ profiles do not change. Exact workspace/private-buffer bytes and argument images
 are reported separately from unknown vendor/driver storage. Neither fusion nor
 packing is a universal winner; host, device and memory evidence remain separate.
 
+JIT matmul execution and typed Graph capture use the common cuBLASLt plan adapter
+(`taichi-forge-cublaslt-provider-c-abi2`). Each execution plan owns its vendor
+descriptors and handle; candidate discovery creates a separate handle only when
+needed. Frozen choices restore without a heuristic search, and warm Graph replay
+does not call the provider. `heuristic_limit` remains explicit with default 4;
+its bound is the vendor's positive int32 argument, with no separate 32-candidate
+cap. Workspace limits must fit the platform's `size_t`. The standalone SDK plan
+API is available; AOT resource reconstruction and recording export are still
+pending. See the [SDK component contract](aot_sdk.en.md).
+
 The shared CUDA operand-packing helper uses a padded warp-contiguous tile for
 wide axes and retains its compact tile for narrow axes, selected from frozen
 shape facts. Matmul and contraction reuse this lowering without a new vendor

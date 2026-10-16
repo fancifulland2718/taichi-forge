@@ -1,10 +1,9 @@
 #include "taichi/program/cuda_cublaslt_capture.h"
+#include "taichi/external_runtime/forge_cublaslt_provider.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 
-#include <array>
-#include <cmath>
-#include <cstring>
+#include <algorithm>
 
 namespace taichi::lang {
 namespace {
@@ -18,16 +17,10 @@ class CudaCublasLtCaptureCommand final : public aot::CudaGraphCaptureCommand {
     TI_ERROR_IF(
         program == nullptr || program->compile_config().arch != Arch::cuda,
         "cuBLASLt capture requires a CUDA Program");
-    TI_ERROR_IF(!plan.matmul_address || !plan.handle || !plan.descriptor ||
-                    plan.layouts.size() != 4 ||
-                    plan.algorithm.size() != sizeof(algorithm_) ||
-                    plan.shapes.size() != 3 || !std::isfinite(plan.alpha) ||
-                    !std::isfinite(plan.beta) ||
+    TI_ERROR_IF(!plan.execute_address || !plan.error_address ||
+                    !plan.plan_handle || plan.shapes.size() != 3 ||
                     arguments.size() != (plan.workspace_bytes ? 4 : 3),
                 "cuBLASLt capture plan is incomplete");
-    for (auto layout : plan.layouts) {
-      TI_ERROR_IF(!layout, "cuBLASLt capture requires prepared matrix layouts");
-    }
     for (std::size_t i = 0; i < arguments.size(); ++i) {
       const auto &arg = arguments[i];
       TI_ERROR_IF(
@@ -51,7 +44,6 @@ class CudaCublasLtCaptureCommand final : public aot::CudaGraphCaptureCommand {
                     "cuBLASLt capture binding names must be distinct");
       }
     }
-    std::memcpy(algorithm_.data(), plan.algorithm.data(), sizeof(algorithm_));
   }
 
   const char *kind() const override {
@@ -102,46 +94,34 @@ class CudaCublasLtCaptureCommand final : public aot::CudaGraphCaptureCommand {
               void *stream) override {
     TI_ERROR_IF(!supports(args, program),
                 "cuBLASLt capture bindings are incompatible");
-    auto pointer = [&](std::size_t i) {
-      return reinterpret_cast<void *>(
-          program.get_ndarray_data_ptr_as_int(array(i, args)));
+    auto pointer = [&](std::size_t i) -> std::uint64_t {
+      return program.get_ndarray_data_ptr_as_int(array(i, args));
     };
-    void *workspace = plan_.workspace_bytes ? pointer(3) : nullptr;
-    TI_ERROR_IF(workspace && reinterpret_cast<std::uintptr_t>(workspace) % 256,
-                "cuBLASLt workspace must be 256-byte aligned");
-    // Stable cuBLASLtMatmul C ABI: opaque handles and 64-byte algorithm data,
-    // matching the existing dynamic Python provider. Called only at capture.
-    const auto invoke = reinterpret_cast<Matmul>(plan_.matmul_address);
-    const int status = invoke(
-        reinterpret_cast<void *>(plan_.handle),
-        reinterpret_cast<void *>(plan_.descriptor), &plan_.alpha, pointer(0),
-        reinterpret_cast<void *>(plan_.layouts[0]), pointer(1),
-        reinterpret_cast<void *>(plan_.layouts[1]), &plan_.beta, pointer(2),
-        reinterpret_cast<void *>(plan_.layouts[2]), pointer(2),
-        reinterpret_cast<void *>(plan_.layouts[3]), algorithm_.data(),
-        workspace, plan_.workspace_bytes, stream);
-    TI_ERROR_IF(status != 0, "cuBLASLt Graph capture failed with status {}",
-                status);
+    TiForgeCublasLtExecDesc execution{sizeof(execution),
+                                      0,
+                                      pointer(0),
+                                      pointer(1),
+                                      pointer(2),
+                                      plan_.workspace_bytes ? pointer(3) : 0,
+                                      plan_.workspace_bytes,
+                                      reinterpret_cast<std::uint64_t>(stream)};
+    const auto invoke =
+        reinterpret_cast<TiForgeCublasLtExecuteFn>(plan_.execute_address);
+    const auto status =
+        invoke(reinterpret_cast<void *>(plan_.plan_handle), &execution);
+    if (status != TI_FORGE_RUNTIME_PROVIDER_SUCCESS) {
+      const auto error = reinterpret_cast<TiForgeRuntimeProviderGetLastErrorFn>(
+          plan_.error_address);
+      std::vector<char> message(std::max(error(nullptr, 0), std::size_t(1)),
+                                '\0');
+      error(message.data(), message.size());
+      message.back() = '\0';
+      TI_ERROR("cuBLASLt Graph capture failed with status {}: {}",
+               static_cast<int>(status), message.data());
+    }
   }
 
  private:
-  using Matmul = int (*)(void *,
-                         void *,
-                         const void *,
-                         const void *,
-                         void *,
-                         const void *,
-                         void *,
-                         const void *,
-                         const void *,
-                         void *,
-                         void *,
-                         void *,
-                         const void *,
-                         void *,
-                         std::size_t,
-                         void *);
-
   Ndarray *array(
       std::size_t index,
       const std::unordered_map<std::string, aot::IValue> &args) const {
@@ -168,7 +148,6 @@ class CudaCublasLtCaptureCommand final : public aot::CudaGraphCaptureCommand {
   Program *program_;
   const CudaCublasLtCapturePlan plan_;
   const std::vector<aot::Arg> arguments_;
-  std::array<std::uint64_t, 8> algorithm_{};
 };
 
 }  // namespace

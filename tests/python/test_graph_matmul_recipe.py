@@ -8,6 +8,7 @@ import pytest
 import taichi_forge as ti
 
 from tests import test_utils
+from taichi_forge.hardware._cublaslt import CublasLtMatmulPlan
 
 
 def _operation(monkeypatch, *, preparation=None, batch=2, size=(65, 49, 97)):
@@ -192,7 +193,9 @@ def test_matmul_complete_strategies_refresh_inputs_and_retire_storage(
                 expected = host[2].astype(np.float64)
                 with monkeypatch.context() as replay:
                     replay.setattr(_AlgorithmApi, "shortlist", _no_cold_work)
-                    replay.setattr(_AlgorithmApi, "restore", _no_cold_work)
+                    replay.setattr(
+                        CublasLtMatmulPlan, "_create_shared_plan", _no_cold_work
+                    )
                     replay.setattr(
                         _MatmulRecording, "validate_graph_bindings", _no_cold_work
                     )
@@ -367,7 +370,7 @@ def test_matmul_composes_with_immutable_frames_and_retains_feedback(monkeypatch)
                 np.testing.assert_array_equal(bindings["output"].to_numpy(), host[2])
             expected = [host[2].astype(np.float64) for _, host in pairs]
             with monkeypatch.context() as replay:
-                replay.setattr(_AlgorithmApi, "restore", _no_cold_work)
+                replay.setattr(CublasLtMatmulPlan, "_create_shared_plan", _no_cold_work)
                 replay.setattr(
                     _MatmulRecording, "validate_graph_bindings", _no_cold_work
                 )

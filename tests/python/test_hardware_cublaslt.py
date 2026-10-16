@@ -18,6 +18,8 @@ def _provider_or_skip():
     try:
         return CublasLtProvider(library_path)
     except RuntimeError as exc:
+        if library_path:
+            raise
         pytest.skip(f"a compatible user-provided cuBLASLt is unavailable: {exc}")
 
 
@@ -38,7 +40,7 @@ def test_cublaslt_generic_probe_is_transient():
     assert operation.discovery == "available"
     assert operation.enablement == "disabled"
     assert operation.selection == "not_considered"
-    assert operation.provider_abi == "cublaslt-dynamic-symbols-v1"
+    assert operation.provider_abi == "taichi-forge-cublaslt-provider-c-abi2"
     assert operation.provider_version
     assert operation.native_facts["external_component_probed"]
     assert not operation.native_facts["provider_enablement_changed"]
@@ -62,6 +64,13 @@ def test_cublaslt_retained_single_matmul_and_graph():
     output.from_numpy(initial)
 
     plan = provider.plan(rows, columns, inner, alpha=1.5, beta=0.25)
+    assert plan._plan_info.heuristic_calls == 1
+    assert plan._plan_info.restoration_calls == 0
+    assert provider._discovery_handle is None
+    with pytest.raises(RuntimeError, match="live execution resources"):
+        provider._runtime.close()
+    with pytest.raises(ValueError, match="size_t"):
+        provider.plan(rows, columns, inner, workspace_limit_bytes=1 << 64)
     program = impl.get_runtime().prog
     native_before = program._runtime_statistics_snapshot()["submission"][
         "native_submissions"
@@ -108,7 +117,7 @@ def test_cublaslt_retained_single_matmul_and_graph():
         (item.name, item.amortization_scope) for item in contract.cost_model.fixed_costs
     ) == (
         ("provider_library_load", "process"),
-        ("provider_handle", "runtime_generation"),
+        ("provider_handle", "provider_generation"),
         ("descriptors_heuristic_and_workspace", "provider_generation"),
         ("ctypes_dispatch", "invocation"),
         ("submission_registration", "invocation"),
@@ -127,6 +136,85 @@ def test_cublaslt_retained_single_matmul_and_graph():
         square_plan.run(a=square, b=square, output=square)
     square_plan.close()
     plan.close()
+    provider.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cublaslt_discovery_creation_failure_retains_cleanup(monkeypatch):
+    import ctypes
+
+    provider = _provider_or_skip()
+    with monkeypatch.context() as failure:
+        failure.setattr(provider._library, "create", lambda _out: 3)
+        with pytest.raises(RuntimeError, match="discovery handle creation"):
+            provider._handle
+        assert provider._discovery_handle is None
+    assert provider._handle.value  # A null failure can retry without leaking.
+    provider.close()
+
+    provider = _provider_or_skip()
+    destroyed = []
+
+    def partial_creation(out):
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = 123
+        return 3
+
+    def retire(handle):
+        destroyed.append(handle.value)
+        return 0
+
+    with monkeypatch.context() as failure:
+        failure.setattr(provider._library, "create", partial_creation)
+        failure.setattr(provider._library, "destroy", retire)
+        with pytest.raises(RuntimeError, match="discovery handle creation"):
+            provider._handle
+        with pytest.raises(RuntimeError, match="close the provider"):
+            provider._handle
+        provider.close()
+    assert destroyed == [123]
+    assert provider.closed
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cublaslt_shared_plan_explicit_adjoint_and_kernel_grad():
+    provider = _provider_or_skip()
+    m, n, k = 5, 3, 7
+    rng = np.random.default_rng(28)
+    av = rng.uniform(-0.5, 0.5, (m, k)).astype(np.float32)
+    bv = rng.uniform(-0.5, 0.5, (k, n)).astype(np.float32)
+    a, b = ti.ndarray(ti.f32, av.shape), ti.ndarray(ti.f32, bv.shape)
+    result = ti.ndarray(ti.f32, (m, n), needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    da, db = ti.ndarray(ti.f32, av.shape), ti.ndarray(ti.f32, bv.shape)
+    a.from_numpy(av)
+    b.from_numpy(bv)
+    forward = provider.plan(m, n, k, alpha=0.75)
+    adjoint_a = provider.plan(m, k, n, transpose_b=True, alpha=0.75)
+    adjoint_b = provider.plan(k, n, m, transpose_a=True, alpha=0.75)
+
+    @ti.kernel
+    def objective(values: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+        for i, j in values:
+            loss[None] += values[i, j] * values[i, j]
+
+    forward.run(a=a, b=b, output=result)
+    objective(result)
+    loss.grad[None] = 1
+    objective.grad(result)
+    adjoint_a.run(a=result.grad, b=b, output=da)
+    adjoint_b.run(a=a, b=result.grad, output=db)
+    expected = 0.75 * (av.astype(np.float64) @ bv.astype(np.float64))
+    np.testing.assert_allclose(result.to_numpy(), expected, atol=2e-6, rtol=2e-5)
+    np.testing.assert_allclose(loss[None], np.sum(expected**2), atol=2e-6, rtol=2e-5)
+    np.testing.assert_allclose(
+        da.to_numpy(), 1.5 * expected @ bv.T, atol=2e-6, rtol=2e-5
+    )
+    np.testing.assert_allclose(
+        db.to_numpy(), 1.5 * av.T @ expected, atol=2e-6, rtol=2e-5
+    )
+    adjoint_b.close()
+    adjoint_a.close()
+    forward.close()
     provider.close()
 
 
@@ -317,6 +405,7 @@ def test_cublaslt_frozen_configuration_restores_without_heuristic(
         layout=layout,
         epilogue=epilogue,
         workspace_limit_bytes=32 << 20,
+        shortlist_size=33,
         preparation_only=True,
     )
     assert description.workspace is None
@@ -363,6 +452,9 @@ def test_cublaslt_frozen_configuration_restores_without_heuristic(
                 choice=choice,
             )
             assert plan.workspace_bytes == choice.workspace_bytes
+            assert plan._plan_info.heuristic_calls == 0
+            assert plan._plan_info.restoration_calls == 1
+            assert plan._algorithm_choice == choice
             recording = plan._capture()
             builder = ti.graph.GraphBuilder()
             builder.append_native(recording)

@@ -77,7 +77,7 @@ API 支持紧凑 f32 matmul、批量与转置输入、alpha/beta 反馈、行主
 布局，以及 identity/ReLU 尾处理。计划可以冷选一个启发式结果，也可以恢复显式算法配置，
 核对精确 workspace 而不重新搜索；计划信息报告实际走过的路径和算法要求的输入对齐。
 调用方拥有设备缓冲区及 workspace，负责激活所属 CUDA context，并在销毁计划和 runtime
-前退休所有捕获图及在途执行。这是独立 C API 前置能力；Python Graph 尚未提供
+前退休所有捕获图及在途执行。JIT 计划与 typed Graph 捕获已复用此 C API；Python Graph 尚未提供
 cuBLASLt recording 导出及 AOT 资源重建。
 
 cuDSS 使用其独立

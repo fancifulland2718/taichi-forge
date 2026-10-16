@@ -116,6 +116,7 @@ def test_external_provider_registry_keeps_cudss_status_passive(monkeypatch):
 
 
 def test_external_provider_registry_keeps_cublaslt_status_passive(monkeypatch):
+    loaded_before = _cublaslt.passive_status()["library_loaded"]
     def unexpected_load(_path=None):
         raise AssertionError("passive provider status must not load cuBLASLt")
 
@@ -123,6 +124,6 @@ def test_external_provider_registry_keeps_cublaslt_status_passive(monkeypatch):
     status = passive_external_provider_status("cublaslt")
 
     assert status["provider_id"] == "cublaslt"
-    assert status["library_loaded"] is False
-    assert status["provider_abi"] == "cublaslt-dynamic-symbols-v1"
+    assert status["library_loaded"] == loaded_before
+    assert status["provider_abi"] == "taichi-forge-cublaslt-provider-c-abi2"
     assert status["native_facts"]["external_component_probed"] is False

@@ -108,6 +108,13 @@ operation.close 不破坏存活 Graph 持有的计划。固定绑定检查放在
 或 wheel 依赖类别。精确 workspace/私有数组与参数映像单列，vendor/driver 未知存储不伪装为零。融合和打包都不是
 通用赢家，host、device 和显存证据分开判断。
 
+JIT matmul 执行与 typed Graph 捕获共用 cuBLASLt 计划 adapter
+（`taichi-forge-cublaslt-provider-c-abi2`）。每个执行计划拥有自己的厂商描述符与 handle，
+候选发现所需的另一 handle 按需创建。冻结选择恢复不重新搜索，暖 Graph 重放不调用 provider。
+`heuristic_limit` 仍需显式指定、默认4，数量受厂商正 int32 参数限制，不再额外限制为32个候选；
+workspace 上限必须能由平台 `size_t` 表示。独立 SDK 计划 API 已提供，AOT 资源重建和 recording
+导出仍待接入，参见 [SDK 组件合同](aot_sdk.zh.md)。
+
 共享 CUDA operand-packing helper 对宽轴使用带 padding、warp 连续访存的 tile，对窄轴保留紧凑 tile，
 只根据冻结 shape 选择。matmul 与 contraction 复用同一 lowering，不新增 vendor 依赖或公开 block/tile 轴。
 实现 identity 属于 preparation provenance，lowering 更新后不会静默复用旧 packing 观测。

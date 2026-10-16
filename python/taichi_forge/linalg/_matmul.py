@@ -42,7 +42,6 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.linalg._packing_kernels import TILED_PACKING_IMPLEMENTATION
 from taichi_forge.types.primitive_types import f32
 
-
 _SCHEMA = "taichi_forge.matmul_preparation.v1"
 
 
@@ -447,9 +446,9 @@ class MatmulOperation(NativeGraphNode):
         if (
             isinstance(heuristic_limit, bool)
             or not isinstance(heuristic_limit, int)
-            or not 1 <= heuristic_limit <= 32
+            or not 1 <= heuristic_limit <= 0x7FFFFFFF
         ):
-            raise ValueError("Matmul heuristic_limit must be in [1, 32]")
+            raise ValueError("Matmul heuristic_limit must fit positive int32")
         provider = CublasLtProvider()
         if not hasattr(core, "_CudaCublasLtCapturePlan"):
             provider.close()

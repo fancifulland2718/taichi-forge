@@ -89,8 +89,9 @@ workspace requirement without searching. Plan information reports which path ran
 and the algorithm's operand alignment requirements. Callers own device buffers
 and workspace, activate the owning CUDA context, and retire all captured/in-flight
 uses before destroying plans and their runtime. This standalone C API is a
-prerequisite; cuBLASLt recording export and AOT resource reconstruction are not yet
-available through the Python Graph API.
+prerequisite now shared by JIT plans and typed Graph capture; cuBLASLt recording
+export and AOT resource reconstruction are not yet available through the Python
+Graph API.
 
 cuDSS uses
 its independent build option and matching 0.8.x SDK headers, without enabling

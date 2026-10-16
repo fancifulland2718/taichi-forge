@@ -679,21 +679,11 @@ void export_lang(py::module &m) {
   py::class_<lang::CudaCublasLtCapturePlan>(m, "_CudaCublasLtCapturePlan")
       .def(py::init<>())
       .def_static("supports_binding_frames", []() { return true; })
-      .def_readwrite("matmul_address", &lang::CudaCublasLtCapturePlan::matmul_address)
-      .def_readwrite("handle", &lang::CudaCublasLtCapturePlan::handle)
-      .def_readwrite("descriptor", &lang::CudaCublasLtCapturePlan::descriptor)
-      .def_readwrite("layouts", &lang::CudaCublasLtCapturePlan::layouts)
-      .def_property("algorithm",
-                    [](const lang::CudaCublasLtCapturePlan &plan) {
-                      return py::bytes(plan.algorithm);
-                    },
-                    [](lang::CudaCublasLtCapturePlan &plan, py::bytes data) {
-                      plan.algorithm = data;
-                    })
+      .def_readwrite("execute_address", &lang::CudaCublasLtCapturePlan::execute_address)
+      .def_readwrite("error_address", &lang::CudaCublasLtCapturePlan::error_address)
+      .def_readwrite("plan_handle", &lang::CudaCublasLtCapturePlan::plan_handle)
       .def_readwrite("shapes", &lang::CudaCublasLtCapturePlan::shapes)
-      .def_readwrite("workspace_bytes", &lang::CudaCublasLtCapturePlan::workspace_bytes)
-      .def_readwrite("alpha", &lang::CudaCublasLtCapturePlan::alpha)
-      .def_readwrite("beta", &lang::CudaCublasLtCapturePlan::beta);
+      .def_readwrite("workspace_bytes", &lang::CudaCublasLtCapturePlan::workspace_bytes);
   using namespace taichi::lang;
   using namespace std::placeholders;
 

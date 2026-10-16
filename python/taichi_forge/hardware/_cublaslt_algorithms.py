@@ -13,10 +13,7 @@ from taichi_forge.hardware._cublaslt import (
     _MatmulAlgo,
     _set_attribute,
 )
-from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
-from taichi_forge.types.primitive_types import u8
-
 
 # cuBLASLt public AlgoConfig ABI. The two shape attributes use uint16, not
 # the uint32 representation used by most of the earlier attributes.
@@ -87,51 +84,12 @@ class _AlgorithmApi:
         integer = ctypes.c_int
         size = ctypes.c_size_t
         algo = ctypes.POINTER(_MatmulAlgo)
-        signatures = {
-            "init": (
-                "cublasLtMatmulAlgoInit",
-                (
-                    pointer,
-                    integer,
-                    integer,
-                    integer,
-                    integer,
-                    integer,
-                    integer,
-                    integer,
-                    algo,
-                ),
-            ),
-            "get": (
-                "cublasLtMatmulAlgoConfigGetAttribute",
-                (algo, integer, pointer, size, ctypes.POINTER(size)),
-            ),
-            "set": (
-                "cublasLtMatmulAlgoConfigSetAttribute",
-                (algo, integer, pointer, size),
-            ),
-            "check": (
-                "cublasLtMatmulAlgoCheck",
-                (
-                    pointer,
-                    pointer,
-                    pointer,
-                    pointer,
-                    pointer,
-                    pointer,
-                    algo,
-                    ctypes.POINTER(_HeuristicResult),
-                ),
-            ),
-        }
-        for name, (symbol, arguments) in signatures.items():
-            function = getattr(library.library, symbol, None)
-            if function is None:
-                raise TaichiRuntimeError(
-                    f"cuBLASLt recipe preparation requires {symbol}"
-                )
-            function.argtypes, function.restype = arguments, integer
-            setattr(self, name, function)
+        symbol = "cublasLtMatmulAlgoConfigGetAttribute"
+        self.get = getattr(library.library, symbol, None)
+        if self.get is None:
+            raise TaichiRuntimeError(f"cuBLASLt recipe preparation requires {symbol}")
+        self.get.argtypes = (algo, integer, pointer, size, ctypes.POINTER(size))
+        self.get.restype = integer
 
     def describe(self, algorithm, workspace_bytes):
         values = []
@@ -158,64 +116,15 @@ class _AlgorithmApi:
             values.append(int(value.value))
         return _AlgorithmChoice(tuple(values), int(workspace_bytes))
 
-    def restore(self, plan, choice):
-        algorithm = _MatmulAlgo()
-        self.library.require(
-            self.init(
-                plan.provider._handle,
-                68,
-                0,
-                0,
-                0,
-                0,
-                0,
-                choice.configuration[0],
-                ctypes.byref(algorithm),
-            ),
-            "algorithm configuration initialization",
-        )
-        for attribute, ((_, dtype), value) in enumerate(
-            zip(_CONFIG, choice.configuration)
-        ):
-            if attribute == 0 or value is None:
-                continue
-            native = dtype(value)
-            self.library.require(
-                self.set(
-                    ctypes.byref(algorithm),
-                    attribute,
-                    ctypes.byref(native),
-                    ctypes.sizeof(native),
-                ),
-                "algorithm configuration restoration",
-            )
-        result = _HeuristicResult()
-        self.library.require(
-            self.check(
-                plan.provider._handle,
-                plan._matmul_desc,
-                *plan._layouts,
-                ctypes.byref(algorithm),
-                ctypes.byref(result),
-            ),
-            "restored algorithm support",
-        )
-        self.library.require(result.state, "restored algorithm state")
-        observed = self.describe(algorithm, result.workspace_size)
-        if observed != choice:
-            raise TaichiRuntimeError(
-                "cuBLASLt restored algorithm configuration or workspace drifted"
-            )
-        result.algo = algorithm  # AlgoCheck deliberately does not populate this field.
-        return result
-
     def shortlist(self, plan, count):
         if (
             isinstance(count, bool)
             or not isinstance(count, int)
-            or not 1 <= count <= 32
+            or not 1 <= count <= 0x7FFFFFFF
         ):
-            raise ValueError("cuBLASLt preparation shortlist count must be in [1, 32]")
+            raise ValueError(
+                "cuBLASLt preparation shortlist count must fit positive int32"
+            )
         library = self.library
         preference = ctypes.c_void_p()
         library.require(
@@ -288,34 +197,35 @@ class _MatmulRecipePlan(CublasLtMatmulPlan):
         self._preparation_only = preparation_only
         with provider._lock:
             provider._validate_lifetime()
-            if not hasattr(provider._library, "_recipe_algorithm_api"):
-                provider._library._recipe_algorithm_api = _AlgorithmApi(
-                    provider._library
-                )
-            self._algorithm_api = provider._library._recipe_algorithm_api
             super().__init__(
                 provider, **semantics, workspace_limit_bytes=workspace_limit_bytes
             )
             provider._plans.add(self)
 
     def _create_native_plan(self):
-        self._create_descriptors(
-            layout=self._requested_layout, epilogue=self._requested_epilogue
-        )
         if self._selected_choice is None:
+            library = self.provider._library
+            if not hasattr(library, "_recipe_algorithm_api"):
+                library._recipe_algorithm_api = _AlgorithmApi(library)
+            self._algorithm_api = library._recipe_algorithm_api
+            self._create_descriptors(
+                layout=self._requested_layout, epilogue=self._requested_epilogue
+            )
             found = self._algorithm_api.shortlist(self, self._shortlist_size)
             self.choices = tuple(found)
-            self._heuristic = next(iter(found.values()))
+            self._algorithm_choice = self.choices[0]
+            self.workspace_bytes = self._algorithm_choice.workspace_bytes
+            if self._preparation_only:
+                return
+            self._close_native()
         else:
-            self._heuristic = self._algorithm_api.restore(self, self._selected_choice)
             self.choices = (self._selected_choice,)
-        self.workspace_bytes = int(self._heuristic.workspace_size)
-        if self.workspace_bytes > self.workspace_limit_bytes:
-            raise TaichiRuntimeError(
-                "Selected cuBLASLt workspace exceeds the preparation limit"
-            )
-        if self.workspace_bytes and not self._preparation_only:
-            self.workspace = impl.ndarray(u8, shape=self.workspace_bytes)
+        self._create_shared_plan(
+            layout=self._requested_layout,
+            epilogue=self._requested_epilogue,
+            choice=self.choices[0],
+            allocate_workspace=not self._preparation_only,
+        )
 
     def execute(self, bindings):
         raise TaichiRuntimeError("cuBLASLt recipe plans require retained Graph capture")
