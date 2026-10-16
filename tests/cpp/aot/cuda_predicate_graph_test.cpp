@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/cuda/graph_region_builder.h"
 #include "taichi/runtime/cuda/predicate_graph.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
@@ -103,6 +104,44 @@ TEST(CudaPredicateGraphContract, FlatMaskedRecipeKeepsNestedValidation) {
   EXPECT_NO_THROW(recipe.validate(1, 4));
   EXPECT_THROW(recipe.validate(0, 4), std::invalid_argument);
   EXPECT_THROW(recipe.validate(1, 4, false), std::invalid_argument);
+}
+
+TEST(CudaMaskedBranch, SignedSelectionDoesNotDependOnBranchCount) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  auto storage = device.allocate_memory_unique({8});
+  ASSERT_EQ(storage.second, RhiResult::success);
+  auto *selector = device.get_memory_addr(storage.first->get_ptr());
+  auto *gate = static_cast<char *>(selector) + 4;
+  cuda::driver_graph_prepare_mask_latch();
+  // Only two device scalars: wide metadata never allocates a huge branch graph.
+  for (const auto count : {4u, 0x80000001u, 0x80000002u,
+                           std::numeric_limits<std::uint32_t>::max()}) {
+    for (const bool fallback : {false, true}) {
+      const BranchSelection selection{BranchSelection::Kind::indexed, fallback};
+      for (const auto value : {std::numeric_limits<std::int32_t>::min(), -1, 0, 2,
+                               std::numeric_limits<std::int32_t>::max()}) {
+        SCOPED_TRACE(::testing::Message() << "count=" << count
+                     << ", fallback=" << fallback << ", selector=" << value);
+        auto input = value;
+        driver.memcpy_host_to_device(selector, &input, 4);
+        driver.memsetd32(gate, 99, 1);
+        cuda::driver_graph_latch_branch(
+            selector, gate, 2, count,
+            fallback ? count - 1 : std::numeric_limits<std::uint32_t>::max());
+        driver.stream_synchronize(nullptr);
+        std::uint32_t actual = 99;
+        driver.memcpy_device_to_host(&actual, gate, 4);
+        const auto selected = selection.select(value, count);
+        const auto expected = selected == count ? 0u :
+            static_cast<std::uint32_t>(selected + 1);
+        EXPECT_EQ(actual, expected);
+      }
+    }
+  }
 }
 
 class CudaPredicateGraph : public ::testing::Test {

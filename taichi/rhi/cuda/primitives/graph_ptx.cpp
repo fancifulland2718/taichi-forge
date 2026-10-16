@@ -188,6 +188,8 @@ const char kCudaGraphMaskPtx[] = R"ptx(
     @%p1 bra IF_SELECTOR;
 
     setp.lt.u32 %p2, %r4, %r2;
+    setp.ge.s32 %p1, %r4, 0;
+    and.pred %p2, %p2, %p1;
     @%p2 add.u32 %r8, %r4, 1;
     @%p2 bra STORE_SELECTOR;
     setp.lt.u32 %p3, %r3, %r2;
