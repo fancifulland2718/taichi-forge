@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA parallel Graph construction uses a shared fork/join capture core and
+  removes the former four-branch construction ceiling. Existing automatic
+  two-chain selection is unchanged; explicit eight-branch capture, rebinding,
+  dense-Field gradients and retirement are covered. Parallel AOT export remains
+  a separate integration step.
+
 - AOT Graph export accepts named live f32 CUDA CSR/BSR values through
   `source_bindings`. It archives topology without copying numeric values and
   automatically refreshes retained SpSV/SpSM state before solving. CSR/BSR SpMV,

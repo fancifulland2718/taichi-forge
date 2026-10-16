@@ -31,6 +31,7 @@
 #include "taichi/rhi/cuda/primitives/graph_ptx.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/bounded_graph.h"
+#include "taichi/runtime/cuda/parallel_graph.h"
 #endif
 
 #if defined(TI_WITH_VULKAN)
@@ -1177,13 +1178,6 @@ class CudaEventHandle {
     return event_;
   }
 
-  // Capture-only fork/join events are retained by the instantiated Graph.
-  // Once graph_exec retirement has synchronized the replay stream, no event
-  // operation remains outstanding and destruction must not wait again.
-  void mark_complete() {
-    recorded_ = false;
-  }
-
   bool ready() const {
     if (!recorded_) {
       return true;
@@ -1291,9 +1285,7 @@ struct CompiledGraphCudaState {
       allocation_leases;
   std::vector<Program::TextureResourceLease> texture_leases;
   std::unique_ptr<CudaGraphCaptureStream> capture_stream;
-  std::vector<std::unique_ptr<CudaGraphCaptureStream>>
-      parallel_capture_streams;
-  std::vector<CudaEventHandle> parallel_capture_events;
+  cuda::ParallelGraphCapture parallel_capture;
   std::vector<CudaGraphCapturePacket> packets;
   std::vector<std::shared_ptr<CudaGraphCaptureResources>>
       provider_capture_resources;
@@ -1350,6 +1342,7 @@ struct CompiledGraphCudaState {
 
   ~CompiledGraphCudaState() {
     retire();
+    parallel_capture.release(true);
   }
 
   void *ensure_capture_stream() {
@@ -1357,22 +1350,6 @@ struct CompiledGraphCudaState {
       capture_stream = std::make_unique<CudaGraphCaptureStream>();
     }
     return capture_stream->get();
-  }
-
-  void ensure_parallel_capture_resources(std::size_t branch_count) {
-    if (parallel_capture_streams.size() != branch_count) {
-      parallel_capture_streams.clear();
-      parallel_capture_streams.reserve(branch_count);
-      for (std::size_t i = 0; i < branch_count; ++i) {
-        parallel_capture_streams.push_back(
-            std::make_unique<CudaGraphCaptureStream>());
-      }
-    }
-    // One fork event plus one tail event per branch.
-    if (parallel_capture_events.size() != branch_count + 1) {
-      parallel_capture_events.clear();
-      parallel_capture_events.resize(branch_count + 1);
-    }
   }
 
   void recycle_front_deferred_resources() {
@@ -1420,9 +1397,6 @@ struct CompiledGraphCudaState {
     context.make_current();
     graph_exec.reset();
     nested_conditional.reset();
-    for (auto &event : parallel_capture_events) {
-      event.mark_complete();
-    }
     if (conditional_control != nullptr) {
       CUDADriver::get_instance().mem_free(conditional_control);
       conditional_control = nullptr;
@@ -2181,8 +2155,7 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
   }
 
   const auto &groups = graph.cuda_parallel_dispatch_groups;
-  TI_ASSERT(state.parallel_capture_streams.size() == groups.size());
-  TI_ASSERT(state.parallel_capture_events.size() == groups.size() + 1);
+  TI_ASSERT(state.parallel_capture.branch_count() == groups.size());
   const std::size_t parallel_begin = groups.front().front();
   const std::size_t parallel_end = groups.back().back() + 1;
   for (std::size_t i = 0; i < parallel_begin; ++i) {
@@ -2192,30 +2165,17 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
     }
   }
 
-  auto &driver = CUDADriver::get_instance();
-  auto &fork_event = state.parallel_capture_events.front();
-  fork_event.record(capture_stream);
-  for (std::size_t branch = 0; branch < groups.size(); ++branch) {
-    void *branch_stream = state.parallel_capture_streams[branch]->get();
-    auto error = driver.stream_wait_event.call(branch_stream, fork_event.get(), 0);
-    if (error != CUDA_SUCCESS) {
-      return error;
-    }
-    for (const auto dispatch_index : groups[branch]) {
-      error = capture_dispatch(dispatch_index, branch_stream);
-      if (error != CUDA_SUCCESS) {
-        return error;
-      }
-    }
-    state.parallel_capture_events[branch + 1].record(branch_stream);
-  }
-  for (std::size_t branch = 0; branch < groups.size(); ++branch) {
-    const auto error = driver.stream_wait_event.call(
-        capture_stream, state.parallel_capture_events[branch + 1].get(), 0);
-    if (error != CUDA_SUCCESS) {
-      return error;
-    }
-  }
+  const auto parallel_error = state.parallel_capture.capture(
+      capture_stream, [&](std::size_t branch, void *stream) -> std::uint32_t {
+        for (const auto index : groups[branch]) {
+          const auto error = capture_dispatch(index, stream);
+          if (error != CUDA_SUCCESS)
+            return error;
+        }
+        return CUDA_SUCCESS;
+      });
+  if (parallel_error != CUDA_SUCCESS)
+    return parallel_error;
   for (std::size_t i = parallel_end; i < graph.dispatches.size(); ++i) {
     const auto error = capture_dispatch(i, capture_stream);
     if (error != CUDA_SUCCESS) {
@@ -2674,11 +2634,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 
   driver.stream_synchronize(capture_stream);
   if (graph.has_cuda_parallel_dispatch_groups()) {
-    state->ensure_parallel_capture_resources(
-        graph.cuda_parallel_dispatch_groups.size());
-    for (const auto &stream : state->parallel_capture_streams) {
-      driver.stream_synchronize(stream->get());
-    }
+    state->parallel_capture.prepare(graph.cuda_parallel_dispatch_groups.size());
   }
   auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
   auto begin_err = driver.stream_begin_capture.call(
