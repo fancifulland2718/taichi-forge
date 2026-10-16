@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <stdexcept>
 #include <vector>
@@ -36,6 +37,12 @@ class GraphRegionBuilder {
     void *node;
     CUgraph body;
   };
+  enum class BranchKind : std::uint32_t { if_else = 0, indexed = 2 };
+  struct Branch {
+    void *node;
+    // Borrowed from the root, like While::body. Never destroy individually.
+    std::vector<CUgraph> bodies;
+  };
 
   static bool available();
   GraphRegionBuilder(CUgraph root, void *stream);
@@ -50,8 +57,18 @@ class GraphRegionBuilder {
   While add_while(CUgraph destination,
                   const Dependencies &dependencies,
                   std::uint64_t handle) const;
+  Branch add_branch(CUgraph destination,
+                    const Dependencies &dependencies,
+                    std::uint64_t handle,
+                    BranchKind kind,
+                    std::size_t body_count) const;
 
  private:
+  Branch add_conditional(CUgraph destination,
+                         const Dependencies &dependencies,
+                         std::uint64_t handle,
+                         std::uint32_t type,
+                         std::uint32_t body_count) const;
   CUgraph root_;
   void *stream_;
   void *context_{nullptr};

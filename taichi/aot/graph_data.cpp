@@ -5054,135 +5054,45 @@ bool try_run_cuda_conditional_graph(
     return handle_cuda_graph_driver_failure(
         *state, create_error, "branch graph create");
   }
-  void *current_context = nullptr;
-  const auto context_error =
-      driver.context_get_current.call(&current_context);
-  if (context_error != CUDA_SUCCESS || current_context == nullptr) {
-    return handle_cuda_graph_driver_failure(
-        *state, context_error, "branch context query");
-  }
-
-  constexpr unsigned int kAssignDefaultValue = 1;
   std::uint64_t conditional_handle = 0;
-  const auto handle_error = driver.graph_conditional_handle_create.call(
-      &conditional_handle, parent_graph.get(), current_context, 0,
-      kAssignDefaultValue);
-  if (handle_error != CUDA_SUCCESS || conditional_handle == 0) {
-    return handle_cuda_graph_driver_failure(
-        *state, handle_error, "branch handle create");
-  }
-  driver.stream_synchronize(capture_stream);
-  {
-    auto capture_lock =
-        CUDAContext::get_instance().get_graph_capture_lock_guard();
-    const auto begin_error = driver.stream_begin_capture_to_graph.call(
-        capture_stream, parent_graph.get(), nullptr, nullptr, 0,
-        CU_STREAM_CAPTURE_MODE_RELAXED);
-    if (begin_error != CUDA_SUCCESS) {
-      return handle_cuda_graph_driver_failure(
-          *state, begin_error, "branch setter capture begin");
+  try {
+    cuda::GraphRegionBuilder builder(parent_graph.get(), capture_stream);
+    conditional_handle = builder.conditional_handle();
+    driver.stream_synchronize(capture_stream);
+    const auto entry =
+        builder.capture(parent_graph.get(), {}, [&](void *stream) {
+          cuda::driver_graph_set_branch_conditional(state->conditional_control,
+                                                    conditional_handle, stream);
+        });
+    const auto branches = builder.add_branch(
+        parent_graph.get(), entry, conditional_handle,
+        is_if ? cuda::GraphRegionBuilder::BranchKind::if_else
+              : cuda::GraphRegionBuilder::BranchKind::indexed,
+        branch_dispatch_counts.size());
+    std::size_t packet_offset = 0;
+    for (std::size_t branch = 0; branch < branches.bodies.size(); ++branch) {
+      builder.capture(branches.bodies[branch], {}, [&](void *stream) {
+        const auto packet_end = packet_offset + branch_dispatch_counts[branch];
+        for (; packet_offset < packet_end; ++packet_offset) {
+          const auto &packet = state->packets[packet_offset];
+          packet.launcher->capture_cuda_graph_launch(packet.packet, stream);
+        }
+      });
     }
-    CudaStreamCaptureGuard capture_guard(capture_stream);
-    try {
-      cuda::driver_graph_set_branch_conditional(
-          state->conditional_control, conditional_handle, capture_stream);
-    } catch (...) {
-      if (state->diagnostics_enabled) {
-        ++state->stats.capture_exceptions;
-      }
-      capture_guard.abort();
-      state->retire();
-      throw;
-    }
-    CUgraph captured_parent = nullptr;
-    const auto end_error = capture_guard.end(&captured_parent);
-    if (end_error != CUDA_SUCCESS || captured_parent == nullptr) {
-      return handle_cuda_graph_driver_failure(
-          *state, end_error, "branch setter capture end");
-    }
-  }
-
-  std::size_t parent_node_count = 0;
-  const auto count_error = driver.graph_get_nodes.call(
-      parent_graph.get(), nullptr, &parent_node_count);
-  if (count_error != CUDA_SUCCESS || parent_node_count != 1) {
-    return handle_cuda_graph_driver_failure(
-        *state, count_error, "branch setter node query");
-  }
-  void *setter_node = nullptr;
-  std::size_t setter_node_count = 1;
-  const auto nodes_error = driver.graph_get_nodes.call(
-      parent_graph.get(), &setter_node, &setter_node_count);
-  if (nodes_error != CUDA_SUCCESS || setter_node_count != 1 ||
-      setter_node == nullptr) {
-    return handle_cuda_graph_driver_failure(
-        *state, nodes_error, "branch setter node fetch");
-  }
-
-  TaichiCudaGraphNodeParams node_params{};
-  constexpr std::uint32_t kConditionalNodeType = 13;
-  node_params.type = kConditionalNodeType;
-  node_params.parameters.conditional.handle = conditional_handle;
-  node_params.parameters.conditional.type =
-      static_cast<std::uint32_t>(conditional_type);
-  node_params.parameters.conditional.size =
-      static_cast<std::uint32_t>(branch_dispatch_counts.size());
-  node_params.parameters.conditional.ph_graph_out = nullptr;
-  node_params.parameters.conditional.context = current_context;
-  void *conditional_node = nullptr;
-  const auto add_error = driver.graph_add_node.call(
-      &conditional_node, parent_graph.get(), &setter_node, 1, &node_params);
-  if (add_error != CUDA_SUCCESS || conditional_node == nullptr ||
-      node_params.parameters.conditional.ph_graph_out == nullptr) {
-    return handle_cuda_graph_driver_failure(
-        *state, add_error, "branch conditional node create");
-  }
-
-  std::size_t packet_offset = 0;
-  for (std::size_t branch = 0; branch < branch_dispatch_counts.size();
-       ++branch) {
-    CUgraph child = node_params.parameters.conditional.ph_graph_out[branch];
-    if (child == nullptr) {
-      return structural_fallback();
-    }
-    auto capture_lock =
-        CUDAContext::get_instance().get_graph_capture_lock_guard();
-    const auto begin_error = driver.stream_begin_capture_to_graph.call(
-        capture_stream, child, nullptr, nullptr, 0,
-        CU_STREAM_CAPTURE_MODE_RELAXED);
-    if (begin_error != CUDA_SUCCESS) {
-      return handle_cuda_graph_driver_failure(
-          *state, begin_error, "branch body capture begin");
-    }
-    CudaStreamCaptureGuard capture_guard(capture_stream);
-    try {
-      const std::size_t packet_end =
-          packet_offset + branch_dispatch_counts[branch];
-      for (; packet_offset < packet_end; ++packet_offset) {
-        const auto &packet = state->packets[packet_offset];
-        packet.launcher->capture_cuda_graph_launch(packet.packet,
-                                                   capture_stream);
-      }
-    } catch (...) {
-      if (state->diagnostics_enabled) {
-        ++state->stats.capture_exceptions;
-      }
-      capture_guard.abort();
-      state->retire();
-      throw;
-    }
-    CUgraph captured_child = nullptr;
-    const auto end_error = capture_guard.end(&captured_child);
-    if (end_error != CUDA_SUCCESS || captured_child == nullptr) {
-      return handle_cuda_graph_driver_failure(
-          *state, end_error, "branch body capture end");
-    }
+  } catch (const cuda::GraphBuildError &error) {
+    return handle_cuda_graph_driver_failure(*state, error.code(),
+                                            error.stage());
+  } catch (...) {
+    if (state->diagnostics_enabled)
+      ++state->stats.capture_exceptions;
+    state->retire();
+    throw;
   }
   const auto instantiate_error = driver.graph_instantiate_with_flags.call(
       state->graph_exec.put(), parent_graph.get(), 0);
   if (instantiate_error != CUDA_SUCCESS || !state->graph_exec) {
-    return handle_cuda_graph_driver_failure(
-        *state, instantiate_error, "branch graph instantiate");
+    return handle_cuda_graph_driver_failure(*state, instantiate_error,
+                                            "branch graph instantiate");
   }
 
   state->conditional_handle = conditional_handle;

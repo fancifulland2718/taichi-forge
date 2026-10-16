@@ -3,7 +3,9 @@
 #ifdef TI_WITH_CUDA
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/graph_region_builder.h"
@@ -172,6 +174,100 @@ TEST_F(CudaGraphRegion, CallbackFailureEndsCaptureWithoutDestroyingOwner) {
   driver.graph_launch(executable, stream);
   driver.stream_synchronize(stream);
   EXPECT_EQ(read()[0], 8);
+}
+
+using BranchKind = cuda::GraphRegionBuilder::BranchKind;
+class CudaGraphBranch
+    : public CudaGraphRegion,
+      public ::testing::WithParamInterface<std::tuple<BranchKind, bool>> {};
+
+TEST_P(CudaGraphBranch, RetainsPrefixJoinAndSignedSelectionAfterSourceClose) {
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto lock = CUDAContext::get_instance().get_submission_lock_guard();
+  auto &driver = CUDADriver::get_instance();
+  const auto [kind, fallback] = GetParam();
+  const bool is_if = kind == BranchKind::if_else;
+  const unsigned cases = is_if ? 1 : 8;
+  const unsigned count = cases + unsigned(fallback);
+  cuda::GraphRegionBuilder builder(root, stream);
+  auto first = builder.capture(
+      root, {}, [&](void *s) { driver.memsetd32_async(data, 0, 1, s); });
+  auto second = builder.capture(
+      root, {}, [&](void *s) { driver.memsetd32_async(at(2), 42, 1, s); });
+  first.insert(first.end(), second.begin(), second.end());
+  ASSERT_EQ(first.size(), 2);
+  const auto handle = builder.conditional_handle();
+  auto entry = builder.capture(root, first, [&](void *s) {
+    cuda::driver_graph_set_branch_conditional(control, handle, s);
+  });
+  const auto branch = builder.add_branch(root, entry, handle, kind, count);
+  ASSERT_EQ(branch.bodies.size(), count);
+  for (unsigned i = 0; i < count; ++i)
+    builder.capture(branch.bodies[i], {}, [&](void *s) {
+      driver.memsetd32_async(data, 100 + i, 1, s);
+    });
+  builder.capture(root, {branch.node}, [&](void *s) {
+    driver.memcpy_device_to_device_async(at(2), data, sizeof(std::uint32_t), s);
+  });
+  write(7, 0);
+  driver.graph_instantiate_with_flags(&executable, root, 0);
+  EXPECT_EQ(read(), (std::array<std::uint32_t, 4>{99, 99, 99, 7}));
+  driver.graph_destroy(root);
+  root = nullptr;
+  for (std::int32_t selected :
+       {-1, 0, 1, 2, 7, 8, 9, std::numeric_limits<std::int32_t>::min(),
+        std::numeric_limits<std::int32_t>::max()}) {
+    write(static_cast<std::uint32_t>(selected), 0);
+    cuda::CudaGraphConditionalControl description;
+    description.predicate = reinterpret_cast<std::uintptr_t>(at(3));
+    description.iteration = static_cast<std::uint32_t>(kind);
+    description.max_iterations = count;
+    description.continue_while_nonzero =
+        fallback ? cases : std::numeric_limits<std::uint32_t>::max();
+    driver.memcpy_host_to_device(control, &description, sizeof(description));
+    driver.graph_launch(executable, stream);
+    driver.stream_synchronize(stream);
+    unsigned expected = 0;
+    if (is_if)
+      expected = selected ? 100 : fallback ? 101 : 0;
+    else if (selected >= 0 && static_cast<unsigned>(selected) < cases)
+      expected = 100 + selected;
+    else if (fallback)
+      expected = 100 + cases;
+    const auto result = read();
+    EXPECT_EQ(result[0], expected);
+    EXPECT_EQ(result[2], expected);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    NativeBodies,
+    CudaGraphBranch,
+    ::testing::Values(std::tuple{BranchKind::if_else, false},
+                      std::tuple{BranchKind::if_else, true},
+                      std::tuple{BranchKind::indexed, false},
+                      std::tuple{BranchKind::indexed, true}));
+
+TEST_F(CudaGraphRegion, BranchBodyValidationUsesOnlyTheDriverABI) {
+  auto guard = CUDAContext::get_instance().get_guard();
+  cuda::GraphRegionBuilder builder(root, stream);
+  const auto handle = builder.conditional_handle();
+  EXPECT_THROW(builder.add_branch(root, {}, handle, BranchKind::indexed, 0),
+               std::invalid_argument);
+  EXPECT_THROW(builder.add_branch(root, {}, handle, BranchKind::if_else, 3),
+               std::invalid_argument);
+  EXPECT_THROW(
+      builder.add_branch(root, {}, handle, static_cast<BranchKind>(1), 1),
+      std::invalid_argument);
+  if (sizeof(std::size_t) > sizeof(std::uint32_t))
+    EXPECT_THROW(
+        builder.add_branch(
+            root, {}, handle, BranchKind::indexed,
+            std::size_t{std::numeric_limits<std::uint32_t>::max()} + 1),
+        std::invalid_argument);
+  std::size_t count = 99;
+  CUDADriver::get_instance().graph_get_nodes(root, nullptr, &count);
+  EXPECT_EQ(count, 0);
 }
 }  // namespace
 }  // namespace taichi::lang

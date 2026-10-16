@@ -1,5 +1,6 @@
 #include "taichi/rhi/cuda/graph_region_builder.h"
 
+#include <limits>
 #include "taichi/rhi/cuda/cuda_context.h"
 
 namespace taichi::lang::cuda {
@@ -112,20 +113,56 @@ GraphRegionBuilder::While GraphRegionBuilder::add_while(
     CUgraph destination,
     const Dependencies &dependencies,
     std::uint64_t handle) const {
+  auto result = add_conditional(destination, dependencies, handle, 1, 1);
+  return {result.node, result.bodies.front()};
+}
+
+GraphRegionBuilder::Branch GraphRegionBuilder::add_branch(
+    CUgraph destination,
+    const Dependencies &dependencies,
+    std::uint64_t handle,
+    BranchKind kind,
+    std::size_t body_count) const {
+  if (!body_count || body_count > std::numeric_limits<std::uint32_t>::max() ||
+      (kind != BranchKind::if_else && kind != BranchKind::indexed) ||
+      (kind == BranchKind::if_else && body_count > 2))
+    throw std::invalid_argument(
+        "Conditional branch bodies must satisfy the CUDA node ABI");
+  return add_conditional(destination, dependencies, handle,
+                         static_cast<std::uint32_t>(kind),
+                         static_cast<std::uint32_t>(body_count));
+}
+
+GraphRegionBuilder::Branch GraphRegionBuilder::add_conditional(
+    CUgraph destination,
+    const Dependencies &dependencies,
+    std::uint64_t handle,
+    std::uint32_t type,
+    std::uint32_t body_count) const {
+  if (!destination || !handle)
+    throw std::invalid_argument(
+        "Conditional nodes require their destination and handle");
   TaichiCudaGraphNodeParams params{};
   params.type = 13;  // CU_GRAPH_NODE_TYPE_CONDITIONAL.
   params.parameters.conditional.handle = handle;
-  params.parameters.conditional.type = 1;  // CU_GRAPH_COND_TYPE_WHILE.
-  params.parameters.conditional.size = 1;
+  params.parameters.conditional.type = type;
+  params.parameters.conditional.size = body_count;
   params.parameters.conditional.context = context_;
   void *node = nullptr;
   check(CUDADriver::get_instance().graph_add_node.call(
             &node, destination, dependencies.data(), dependencies.size(),
             &params),
-        "conditional while node create");
-  if (!node || !params.parameters.conditional.ph_graph_out ||
-      !params.parameters.conditional.ph_graph_out[0])
+        "conditional node create");
+  if (!node || !params.parameters.conditional.ph_graph_out)
     throw std::runtime_error("CUDA returned a missing conditional body");
-  return {node, params.parameters.conditional.ph_graph_out[0]};
+  Branch result{node, {}};
+  result.bodies.reserve(body_count);
+  for (std::uint32_t i = 0; i < body_count; ++i) {
+    auto body = params.parameters.conditional.ph_graph_out[i];
+    if (!body)
+      throw std::runtime_error("CUDA returned a missing conditional body");
+    result.bodies.push_back(body);
+  }
+  return result;
 }
 }  // namespace taichi::lang::cuda
