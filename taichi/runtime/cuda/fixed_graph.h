@@ -32,7 +32,13 @@ class FixedGraph {
     const void *bounded_binding_identity{nullptr};
   };
   struct While;
-  using Operation = std::variant<Dispatch, std::shared_ptr<const While>>;
+  struct Parallel;
+  using Operation = std::variant<Dispatch,
+                                 std::shared_ptr<const While>,
+                                 std::shared_ptr<const Parallel>>;
+  struct Parallel {
+    std::vector<std::vector<Operation>> branches;
+  };
   struct While {
     void *predicate{nullptr};
     std::uint64_t max_iterations{0};

@@ -18,7 +18,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 8)
+    if (version < 1 || version > 9)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -37,7 +37,31 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             "Execution plan needs a nonempty operation array");
       for (const auto &step : steps.arr.inner) {
         const auto kind = name(step["kind"]);
-        if (kind == "while") {
+        if (kind == "cuda_parallel") {
+          if (version < 9)
+            throw std::invalid_argument(
+                "CUDA parallel requires execution plan version 9");
+          fields(step, {"kind", "branches"});
+          const auto &branches = step["branches"];
+          if (!branches.is_arr() || branches.arr.inner.size() < 2)
+            throw std::invalid_argument(
+                "CUDA parallel requires at least two nonempty kernel branches");
+          auto parallel = std::make_shared<Parallel>();
+          for (const auto &branch : branches.arr.inner) {
+            if (!branch.is_arr() || branch.arr.inner.empty())
+              throw std::invalid_argument(
+                  "CUDA parallel requires nonempty branches");
+            // Reject nested/native/launch recipes before recursive parsing.
+            for (const auto &item : branch.arr.inner)
+              if (name(item["kind"]) != "kernel" ||
+                  item.obj.inner.count("launch"))
+                throw std::invalid_argument(
+                    "CUDA parallel requires ordinary kernel branches");
+            parallel->branches.emplace_back();
+            parse_steps(branch, parallel->branches.back(), false);
+          }
+          operations.emplace_back(std::move(parallel));
+        } else if (kind == "while") {
           if (version < 3)
             throw std::invalid_argument(
                 "Structured control requires execution plan version 3");

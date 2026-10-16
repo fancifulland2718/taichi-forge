@@ -5,6 +5,40 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, ParallelPreservesBranchesAndBindings) {
+  const std::string source = R"({"version":9,"operations":[
+    {"kind":"cuda_parallel","branches":[
+      [{"kind":"kernel","entry":"a","arguments":["x","shared"]}],
+      [{"kind":"kernel","entry":"b","arguments":["y","shared"]}]]},
+    {"kind":"kernel","entry":"join","arguments":["x","y"]}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &parallel =
+      *std::get<std::shared_ptr<const ExecutionPlan::Parallel>>(
+          plan.operations[0]);
+  ASSERT_EQ(parallel.branches.size(), 2);
+  EXPECT_EQ(std::get<ExecutionPlan::Kernel>(parallel.branches[1][0]).entry,
+            "b");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"shared", "x", "y"}));
+  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"shared", "x", "y"}));
+  for (const auto &change : std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":9", "\"version\":8"},
+           {"\"entry\":\"a\"", "\"entry\":\"a\",\"launch\":{}"},
+           {"\"kind\":\"kernel\"", "\"kind\":\"while\""},
+           {"\"branches\":", "\"unknown\":0,\"branches\":"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(change.first), change.first.size(),
+                    change.second);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+  for (const auto *branches : {"null", "[]", "[[]]", "[[],[]]", "[[{}],[{}]]"})
+    EXPECT_THROW(
+        ExecutionPlan::parse(
+            std::string(
+                R"({"version":9,"operations":[{"kind":"cuda_parallel","branches":)") +
+            branches + "}]}"),
+        std::invalid_argument);
+}
+
 TEST(ExecutionPlan, SelectedIndirectLaunchRetainsPacketAndVersion) {
   const std::string source = R"({"version":6,"resources":[
     {"kind":"ndarray","name":"grid","dtype":"u32","shape":[3]}],

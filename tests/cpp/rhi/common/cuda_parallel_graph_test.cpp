@@ -7,6 +7,7 @@
 #include <vector>
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/parallel_graph.h"
+#include "taichi/runtime/cuda/fixed_graph.h"
 
 namespace taichi::lang {
 namespace {
@@ -184,6 +185,83 @@ TEST(CudaParallelGraphContract, RejectsUnpreparedAndDegenerateCaptures) {
   EXPECT_THROW(parallel.capture(nullptr, {}), std::invalid_argument);
   parallel.release(false);
   EXPECT_EQ(parallel.branch_count(), 0);
+}
+
+TEST_F(CudaParallelGraph,
+       FixedExecutorPreservesPrefixJoinAndRetiresFailedCapture) {
+  using Fixed = cuda::FixedGraph;
+  auto &driver = CUDADriver::get_instance();
+  const auto copy = [&](std::size_t dst, std::size_t src,
+                        std::size_t count = 1) {
+    return Fixed::Dispatch{nullptr, {}, nullptr, [&, dst, src, count](void *s) {
+                             driver.memcpy_device_to_device_async(
+                                 at(dst), at(src), count * 4, s);
+                           }};
+  };
+  auto region = std::make_shared<Fixed::Parallel>();
+  for (std::size_t i = 0; i < 8; ++i)
+    region->branches.push_back({copy(1 + i, 0), copy(9 + i, 1 + i)});
+  std::vector<Fixed::Operation> operations{
+      Fixed::Dispatch{nullptr,
+                      {},
+                      nullptr,
+                      [&](void *s) { driver.memsetd32_async(data, 37, 1, s); }},
+      region, copy(17, 9, 8)};
+  const auto original = region->branches[1][0];
+  region->branches[1][0] =
+      Fixed::Dispatch{nullptr, {}, nullptr, [](void *) {
+                        throw std::runtime_error("branch capture rejected");
+                      }};
+  EXPECT_THROW(Fixed{operations}, std::runtime_error);
+  region->branches[1][0] = original;
+  {
+    Fixed fixed(operations);
+    EXPECT_GE(fixed.node_count(), 18u);
+    EXPECT_EQ(fixed.argument_bytes(), 0u);
+    for (int i = 0; i < 3; ++i)
+      fixed.run();
+    // Destruction must retire the in-flight replay before releasing streams.
+  }
+  std::array<std::uint32_t, 32> result;
+  driver.memcpy_device_to_host(result.data(), data, sizeof(result));
+  for (std::size_t i = 0; i < 8; ++i)
+    EXPECT_EQ(result[17 + i], 37u);
+  region->branches[0].clear();
+  EXPECT_THROW(Fixed{operations}, std::invalid_argument);
+}
+
+TEST_F(CudaParallelGraph, FixedExecutorComposesParallelAndWhileAtTheRoot) {
+  using Fixed = cuda::FixedGraph;
+  auto &driver = CUDADriver::get_instance();
+  if (!driver.graph_conditional_handle_create.available())
+    GTEST_SKIP();
+  const auto fill = [&](unsigned int value) {
+    return Fixed::Dispatch{nullptr, {}, nullptr, [&, value](void *s) {
+                             driver.memsetd32_async(data, value, 1, s);
+                           }};
+  };
+  auto region = std::make_shared<Fixed::Parallel>();
+  for (std::size_t i = 0; i < 2; ++i)
+    region->branches.push_back({Fixed::Dispatch{
+        nullptr, {}, nullptr, [&, i](void *s) {
+          driver.memcpy_device_to_device_async(at(i + 1), data, 4, s);
+        }}});
+  auto loop = std::make_shared<Fixed::While>();
+  loop->predicate = data;
+  loop->max_iterations = 3;
+  loop->body = {fill(41)};
+  {
+    // Repeated references also exercise one capture owner across root segments.
+    Fixed fixed(std::vector<Fixed::Operation>{fill(37), region, loop, region});
+    fixed.run();
+    fixed.run();
+  }
+  std::array<std::uint32_t, 3> result;
+  driver.memcpy_device_to_host(result.data(), data, sizeof(result));
+  EXPECT_EQ(result, (std::array<std::uint32_t, 3>{41, 41, 41}));
+  loop->body = {region};
+  EXPECT_THROW((Fixed{std::vector<Fixed::Operation>{loop}}),
+               std::invalid_argument);
 }
 }  // namespace
 }  // namespace taichi::lang

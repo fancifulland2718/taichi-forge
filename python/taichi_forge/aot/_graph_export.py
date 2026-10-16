@@ -18,6 +18,7 @@ class _ExportContext:
     """One export transaction; object identities never become artifact data."""
 
     def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None):
+        self.arch = module._arch
         self.snapshot_state = snapshot_state
         self.source_arrays = source_arrays
         self.operations = []
@@ -677,6 +678,33 @@ def _while(context, node):
         )
 
 
+def _parallel(context, node):
+    """Preserve the selected physical fork/join and its local dispatch order."""
+    if context.arch != core.Arch.cuda:
+        raise TaichiRuntimeError("AOT parallel requires its selected CUDA backend")
+    sources, native_groups = node.compiled_graph._physical_jit_parallel_execution_sources
+    groups = tuple(tuple(group) for group in native_groups)
+    if groups != node.parallel_dispatch_groups or len(groups) < 2 or not all(groups):
+        raise TaichiRuntimeError("AOT parallel metadata does not match the materialized Graph")
+    indices = tuple(index for group in groups for index in group)
+    if (
+        len(sources) != node.physical_dispatch_count
+        or indices != tuple(range(indices[0], indices[-1] + 1))
+        or indices[0] < 0
+        or indices[-1] >= len(sources) - 1
+        or any(source[0] != "dispatch" or source[-1] is not None for source in sources)
+    ):
+        raise TaichiRuntimeError("AOT parallel requires contiguous ordinary branches and a join suffix")
+
+    def emit(context, indices):
+        for index in indices:
+            context.kernel(*sources[index][1:])
+
+    emit(context, range(indices[0]))
+    context.operations.append(dict(kind="cuda_parallel", branches=[context.region(emit, group) for group in groups]))
+    emit(context, range(indices[-1] + 1, len(sources)))
+
+
 def _node(context, node):
     from taichi_forge.graph._graph import (
         _CompiledCGraphNode,
@@ -701,11 +729,7 @@ def _node(context, node):
     if not isinstance(node, _CompiledCGraphNode):
         raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct {type(node).__name__} yet")
     context.field_state(node.snode_tree_dependency_info)
-    if (
-        node.parallel_dispatch_groups
-        or node.temporary_actions
-        or set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings
-    ):
+    if node.temporary_actions or set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings:
         raise TaichiRuntimeError("AOT execution Graph requires the selected composition/resource recipe")
     ir_nodes = node.ir_node.children if isinstance(node.ir_node, SequentialRegion) else (node.ir_node,)
     from ._bounded_export import validate_domains
@@ -721,6 +745,9 @@ def _node(context, node):
         context.require_private_bindings(node.fixed_runtime_args)
         if len(node.recording_dispatches) != node.dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete symbolic dispatch metadata")
+        if node.parallel_dispatch_groups:
+            _parallel(context, node)
+            return
         dispatches = node.compiled_graph._physical_jit_execution_sources
         if len(dispatches) != node.physical_dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete physical dispatch metadata")

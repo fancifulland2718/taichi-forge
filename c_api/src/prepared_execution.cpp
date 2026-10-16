@@ -94,9 +94,12 @@ struct PreparedExecution {
       for (const auto &step : steps) {
         if (std::holds_alternative<FixedExecution::Dispatch>(step))
           ++dispatch_count;
-        else if (const auto *loop =
-                     std::get_if<std::shared_ptr<const FixedExecution::While>>(
-                         &step)) {
+        else if (const auto *parallel = std::get_if<
+                     std::shared_ptr<const FixedExecution::Parallel>>(&step)) {
+          for (const auto &branch : (*parallel)->branches)
+            count_dispatches(branch);
+        } else if (const auto *loop = std::get_if<
+                       std::shared_ptr<const FixedExecution::While>>(&step)) {
           count_dispatches((*loop)->condition);
           count_dispatches((*loop)->body);
         }
@@ -471,6 +474,15 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
       [&](const std::vector<aot::ExecutionPlan::Operation> &sequence) {
         for (const auto &operation : sequence) {
           steps.push_back(&operation);
+          if (const auto *parallel = std::get_if<
+                  std::shared_ptr<const aot::ExecutionPlan::Parallel>>(
+                  &operation)) {
+            if (rt.arch != taichi::Arch::cuda)
+              throw MemoryBindingError(
+                  "AOT CUDA parallel requires a CUDA runtime");
+            for (const auto &branch : (*parallel)->branches)
+              collect_steps(branch);
+          }
           if (const auto *loop =
                   std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
                       &operation)) {
@@ -631,9 +643,20 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   bind_steps = [&](const std::vector<aot::ExecutionPlan::Operation> &sequence,
                    std::vector<FixedExecution::Operation> &operations) {
     for (const auto &operation : sequence) {
-      if (const auto *value =
-              std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
+      if (const auto *parallel =
+              std::get_if<std::shared_ptr<const aot::ExecutionPlan::Parallel>>(
                   &operation)) {
+        auto bound = std::make_shared<FixedExecution::Parallel>();
+        for (const auto &branch : (*parallel)->branches) {
+          bound->branches.emplace_back();
+          if (!bind_steps(branch, bound->branches.back()))
+            return false;
+        }
+        operations.emplace_back(std::move(bound));
+        continue;
+      } else if (const auto *value = std::get_if<
+                     std::shared_ptr<const aot::ExecutionPlan::While>>(
+                     &operation)) {
         const auto &loop = **value;
         const auto control_pointer = [&](const std::string &name) {
           const auto &array = array_binding(name);

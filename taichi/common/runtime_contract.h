@@ -11,7 +11,7 @@ namespace taichi {
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Adaptive CUDA execution preserves physical launch and logical binding metadata.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 64;
+inline constexpr int kForgeNativeAbiRevision = 65;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

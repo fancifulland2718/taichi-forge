@@ -33,7 +33,9 @@
 
 - CUDA parallel Graph 构建改用共用 fork/join 录制核心，移除原有四分支构建上限。
   自动两链候选选择保持不变；已验证显式八分支、重绑定、dense Field 梯度与退休。
-  parallel AOT 导出仍需后续接线。
+  AOT 执行计划现可保留合格的 kernel 分支、前段及汇合后段、私有存储和已选别名约束；
+  冷准备复用同一核心，重放一次 CUDA Graph launch。版本 9 计划要求配对的 private
+  ABI 65 组件；控制体内的并行区域和非 kernel 分支仍需单独取得资格。
 
 - AOT Graph 导出可通过 `source_bindings` 命名 f32 CUDA CSR/BSR 活值，只归档拓扑，
   不复制数值；SpSV/SpSM 在求解前自动刷新保留的分析状态。已覆盖 CSR/BSR SpMV、

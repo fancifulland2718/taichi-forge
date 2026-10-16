@@ -6685,9 +6685,10 @@ void export_lang(py::module &m) {
 
   auto physical_graph_sources = [](const py::object &owner,
                                     bool include_commands,
-                                    bool include_launch) {
+                                    bool include_launch,
+                                    bool include_parallel = false) {
     const auto &graph = owner.cast<const aot::CompiledGraph &>();
-    TI_ERROR_IF(!graph.cuda_parallel_dispatch_groups.empty(),
+    TI_ERROR_IF(!include_parallel && !graph.cuda_parallel_dispatch_groups.empty(),
                 "Parallel Graph dispatch requires an execution recipe");
     py::list sources;
     size_t native_ordinal = 0;
@@ -6753,6 +6754,13 @@ void export_lang(py::module &m) {
   };
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
+      .def_property_readonly(
+          "_physical_jit_parallel_execution_sources",
+          [physical_graph_sources](const py::object &owner) {
+            const auto &graph = owner.cast<const aot::CompiledGraph &>();
+            return py::make_tuple(physical_graph_sources(owner, true, true, true),
+                                  graph.cuda_parallel_dispatch_groups);
+          })
       .def_property_readonly(
           "_physical_jit_dispatch_sources",
           [physical_graph_sources](const py::object &owner) {

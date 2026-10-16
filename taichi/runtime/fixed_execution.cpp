@@ -120,6 +120,30 @@ FixedExecution::FixedExecution(Arch arch,
                  NativeRecordingState &recording_state, bool inside_control) {
     for (const auto &operation : operations) {
       if (const auto *value =
+              std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
+        const auto &parallel = *value;
+        if (arch != Arch::cuda || inside_control || !parallel ||
+            parallel->branches.size() < 2)
+          throw std::invalid_argument(
+              "Fixed CUDA parallel requires a flat CUDA region and at least "
+              "two branches");
+        for (const auto &branch : parallel->branches) {
+          if (branch.empty())
+            throw std::invalid_argument(
+                "Fixed CUDA parallel requires nonempty branches");
+          for (const auto &item : branch) {
+            const auto *dispatch = std::get_if<Dispatch>(&item);
+            if (!dispatch || dispatch->bounded_extent != kDeviceNullPtr ||
+                dispatch->indirect_dispatch != kDeviceNullPtr)
+              throw std::invalid_argument(
+                  "Fixed CUDA parallel requires ordinary kernel branches");
+          }
+          auto branch_state = recording_state.control_branch();
+          validate(branch, branch_state, true);
+        }
+        continue;
+      }
+      if (const auto *value =
               std::get_if<std::shared_ptr<const While>>(&operation)) {
         const auto &loop = *value;
         if (!loop || loop->predicate.device != &device ||
@@ -380,8 +404,14 @@ FixedExecution::FixedExecution(Arch arch,
     prepare = [&](const std::vector<Operation> &operations) {
       std::vector<CudaOperation> native;
       for (const auto &operation : operations) {
-        if (const auto *value =
-                std::get_if<std::shared_ptr<const While>>(&operation)) {
+        if (const auto *parallel =
+                std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
+          auto result = std::make_shared<cuda::FixedGraph::Parallel>();
+          for (const auto &branch : (*parallel)->branches)
+            result->branches.push_back(prepare(branch));
+          native.emplace_back(std::move(result));
+        } else if (const auto *value =
+                       std::get_if<std::shared_ptr<const While>>(&operation)) {
           const auto &loop = **value;
           auto result = std::make_shared<cuda::FixedGraph::While>();
           result->predicate = cuda_pointer(loop.predicate);

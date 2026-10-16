@@ -60,13 +60,20 @@ struct ExecutionPlan {
   };
   using Native = NativeOperationDescription;
   struct While;
+  struct Parallel;
   using Operation = std::variant<Kernel,
                                  Copy,
                                  Fill,
                                  Compact,
                                  Sort,
                                  Native,
-                                 std::shared_ptr<const While>>;
+                                 std::shared_ptr<const While>,
+                                 std::shared_ptr<const Parallel>>;
+  // CUDA fork/join; each branch is an ordered, ordinary kernel sequence.
+  // Surrounding operations retain the prefix and the join/suffix.
+  struct Parallel {
+    std::vector<std::vector<Operation>> branches;
+  };
   struct While {
     struct Vulkan {
       std::string counter;

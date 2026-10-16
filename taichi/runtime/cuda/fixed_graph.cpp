@@ -11,6 +11,7 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/bounded_graph.h"
+#include "taichi/runtime/cuda/parallel_graph.h"
 
 namespace taichi::lang::cuda {
 struct FixedGraph::State {
@@ -21,6 +22,7 @@ struct FixedGraph::State {
   void *arguments{nullptr};
   CudaGraphConditionalControl64 *controls{nullptr};
   BoundedGraphControls bounded;
+  std::vector<std::unique_ptr<ParallelGraphCapture>> parallel;
   std::size_t control_bytes{0};
   std::size_t bytes{0};
   std::size_t nodes{0};
@@ -37,6 +39,8 @@ struct FixedGraph::State {
       for (const auto &resource : capture_resources)
         resource->release(false);
       bounded.release(false);
+      for (const auto &region : parallel)
+        region->release(false);
       return;
     }
     try {
@@ -77,6 +81,8 @@ struct FixedGraph::State {
         resource->release(backend_safe);
       capture_resources.clear();
       bounded.release(backend_safe);
+      for (const auto &region : parallel)
+        region->release(backend_safe);
       if (backend_safe && controls)
         observe(driver.mem_free.call(controls), "free graph control");
       if (backend_safe && arguments)
@@ -90,12 +96,16 @@ struct FixedGraph::State {
         resource->release(false);
       capture_resources.clear();
       bounded.release(false);
+      for (const auto &region : parallel)
+        region->release(false);
     } catch (...) {
       // Cleanup must not throw while unwinding a driver failure.
       for (const auto &resource : capture_resources)
         resource->release(false);
       capture_resources.clear();
       bounded.release(false);
+      for (const auto &region : parallel)
+        region->release(false);
     }
   }
 };
@@ -147,6 +157,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   std::vector<const Dispatch *> dispatches;
   std::unordered_map<const Dispatch *, std::size_t> dispatch_index;
   std::unordered_map<const While *, std::size_t> loop_index;
+  std::unordered_map<const Parallel *, std::size_t> parallel_index;
+  std::vector<const Parallel *> parallel_regions;
   std::unordered_set<const While *> active_loops;
   std::vector<CudaGraphConditionalControl64> controls;
   std::function<void(const std::vector<Operation> &)> collect;
@@ -155,6 +167,30 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
         if (dispatch_index.emplace(dispatch, dispatches.size()).second)
           dispatches.push_back(dispatch);
+      } else if (const auto *value =
+                     std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
+        const auto &parallel = *value;
+        if (!parallel || parallel->branches.size() < 2 || !active_loops.empty())
+          throw std::invalid_argument(
+              "Fixed CUDA parallel requires a flat region and at least two "
+              "branches");
+        if (!parallel_index.emplace(parallel.get(), parallel_regions.size())
+                 .second)
+          continue;
+        parallel_regions.push_back(parallel.get());
+        for (const auto &branch : parallel->branches) {
+          if (branch.empty())
+            throw std::invalid_argument(
+                "Fixed CUDA parallel requires nonempty branches");
+          for (const auto &item : branch) {
+            const auto *dispatch = std::get_if<Dispatch>(&item);
+            if (!dispatch || dispatch->bounded_extent ||
+                dispatch->adaptive_block_dim)
+              throw std::invalid_argument(
+                  "Fixed CUDA parallel requires ordinary dispatch branches");
+          }
+          collect(branch);
+        }
       } else {
         const auto &loop = std::get<std::shared_ptr<const While>>(operation);
         if (!loop || !loop->predicate || loop->body.empty())
@@ -178,6 +214,10 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     }
   };
   collect(operations);
+  for (const auto *parallel : parallel_regions) {
+    state.parallel.push_back(std::make_unique<ParallelGraphCapture>());
+    state.parallel.back()->prepare(parallel->branches.size());
+  }
   if (!controls.empty()) {
     if (!GraphRegionBuilder::available())
       throw std::invalid_argument(
@@ -315,13 +355,31 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       }
     }
   };
+  const auto record_operation = [&](const Operation &operation, void *stream) {
+    if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+      record_dispatch(*dispatch, stream);
+      return;
+    }
+    const auto &parallel =
+        *std::get<std::shared_ptr<const Parallel>>(operation);
+    const auto error = state.parallel[parallel_index.at(&parallel)]->capture(
+        stream, [&](std::size_t index, void *branch_stream) {
+          for (const auto &item : parallel.branches[index])
+            record_dispatch(std::get<Dispatch>(item), branch_stream);
+          return CUDA_SUCCESS;
+        });
+    if (error != CUDA_SUCCESS)
+      throw BackendRuntimeError(Arch::cuda, error,
+                                "capture fixed CUDA parallel",
+                                "CUDA branch capture failed");
+  };
   if (controls.empty()) {
     auto capture_lock = cuda.get_graph_capture_lock_guard();
     driver.stream_begin_capture(state.stream,
                                 CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
     state.capturing = true;
-    for (const auto *dispatch : dispatches)
-      record_dispatch(*dispatch, state.stream);
+    for (const auto &operation : operations)
+      record_operation(operation, state.stream);
     const auto error =
         driver.stream_end_capture.call(state.stream, &state.graph);
     state.capturing = false;
@@ -351,13 +409,14 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       while (begin < sequence.size()) {
         auto end = begin;
         while (end < sequence.size() &&
-               std::holds_alternative<Dispatch>(sequence[end]))
+               !std::holds_alternative<std::shared_ptr<const While>>(
+                   sequence[end]))
           ++end;
         if (end != begin) {
           dependencies =
               builder.capture(graph, dependencies, [&](void *stream) {
                 for (auto i = begin; i < end; ++i)
-                  record_dispatch(std::get<Dispatch>(sequence[i]), stream);
+                  record_operation(sequence[i], stream);
               });
           begin = end;
           continue;

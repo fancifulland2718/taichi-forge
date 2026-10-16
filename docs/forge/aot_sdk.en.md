@@ -490,7 +490,8 @@ qualified native recordings. Export follows the final physical sequence while
 matching native command barriers to their retained reconstruction contracts;
 it does not restore the unfused source maps. The cuFFT regression covers two
 library calls, three fused map regions, repeated export, and standalone/borrowed
-consumption after producer retirement. Parallel and custom storage routes still
+consumption after producer retirement. Parallel branches containing native
+recordings and custom storage routes still
 require their own qualified reconstruction descriptions.
 
 Selected fixed-capacity `dispatch_bounded(..., physical_grid="capacity")`
@@ -535,7 +536,25 @@ Windows CUDA tests cover ordinary/selected export, BC/PTX payloads, independent/
 borrowed consumers, different consumer grid limits, zero work and overflow,
 explicit adjoints with downstream `.grad`, and retirement.
 
-Host-count clamping, producer-owned launch state, parallel regions, and exact/adaptive/indirect
+Selected ordinary CUDA parallel regions export as ExecutionPlan version 9
+`{"kind": "cuda_parallel", "branches": [[kernel_operation, ...], ...]}`.
+Each nonempty branch preserves kernel order; surrounding operations retain the
+prefix and join suffix. Export checks the selected groups against the native
+physical schedule and preserves private resources, layouts and disjointness
+constraints. Each preparation creates its own branch streams and events through
+the shared JIT capture core. Warm replay launches one root CUDA graph without
+creating streams, parsing the plan or consulting the producer. Use paired private
+ABI 65 components. Standalone and borrowed CUDA checks cover 2/8 branches, selected
+two-chain recipes, private arrays, alias rejection, real Field gradients,
+independent frames and in-flight retirement. The lightweight consumer needs no
+producer Python source. CPU/Vulkan reject this CUDA-specific node.
+
+Branches currently require ordinary kernels; nested parallel/control branches,
+parallel regions inside control bodies, native callbacks and bounded/indirect
+branch launches require separate qualification. Automatic discovery continues to
+select the existing two-chain shape; the explicit schedule has no four-branch cap.
+
+Host-count clamping, producer-owned launch state, and exact/adaptive/indirect
 dispatch inside structured control still require separate reconstruction support;
 export does not replace them with fixed-capacity work.
 

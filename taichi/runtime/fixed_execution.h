@@ -47,11 +47,16 @@ class FixedExecution {
     std::uint32_t value;
   };
   struct While;
+  struct Parallel;
   using Operation = std::variant<Dispatch,
                                  BufferCopy,
                                  BufferFill,
                                  std::shared_ptr<NativeOperation>,
-                                 std::shared_ptr<const While>>;
+                                 std::shared_ptr<const While>,
+                                 std::shared_ptr<const Parallel>>;
+  struct Parallel {
+    std::vector<std::vector<Operation>> branches;
+  };
   struct While {
     struct Vulkan {
       DevicePtr counter{kDeviceNullPtr};

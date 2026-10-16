@@ -5,6 +5,42 @@ import pytest
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
+def test_cuda_parallel_preserves_branches_bindings_and_version():
+    branches = [[dict(kind="kernel", entry="advance", arguments=[f"x{i}", "shared"])] for i in range(8)]
+    plan = ExecutionPlan(
+        [dict(kind="cuda_parallel", branches=branches), dict(kind="kernel", entry="join", arguments=["y"])]
+    )
+    document = json.loads(plan.to_json())
+    assert document["version"] == 9
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert json.loads(restored.to_json()) == document
+    assert restored.argument_names == tuple(sorted(["shared", "y"] + [f"x{i}" for i in range(8)]))
+    assert restored.kernel_entries == ("advance", "join")
+    branches[0][0]["arguments"].clear()
+    assert json.loads(plan.to_json()) == document
+    for version in (8, 10):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        None,
+        [],
+        [[]],
+        [[], []],
+        [[{}], [{}]],
+        [[dict(kind="fill32", destination="x", value=0)]] * 2,
+        [[dict(kind="kernel", entry="k", arguments=[], launch=dict(kind="cuda_adaptive"))]] * 2,
+        [[dict(kind="cuda_parallel", branches=[])]] * 2,
+    ],
+)
+def test_cuda_parallel_rejects_incomplete_or_non_kernel_branches(branches):
+    with pytest.raises(ValueError):
+        ExecutionPlan([dict(kind="cuda_parallel", branches=branches)])
+
+
 def test_selected_indirect_launch_retains_packet_and_version():
     operation = dict(
         kind="kernel", entry="payload", arguments=["x"], launch=dict(kind="vulkan_indirect", packet="grid")
@@ -15,7 +51,7 @@ def test_selected_indirect_launch_retains_packet_and_version():
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "grid"}
-    for version in (1, 5, 9):
+    for version in (1, 5, 10):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for launch in (
@@ -39,7 +75,7 @@ def test_selected_exact_launch_retains_extent_and_version(kind):
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "extent"}
-    for version in (1, 6, 9):
+    for version in (1, 6, 10):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for patch in (
@@ -67,7 +103,7 @@ def test_selected_adaptive_launch_preserves_policy_and_extent(policy):
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "extent"}
     assert json.loads(restored.to_json())["operations"][0]["launch"] == launch
-    for version in (7, 9):
+    for version in (7, 10):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for patch in (

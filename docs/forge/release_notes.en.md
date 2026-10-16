@@ -37,8 +37,12 @@ lifetimes. The entries below describe the changes.
 - CUDA parallel Graph construction uses a shared fork/join capture core and
   removes the former four-branch construction ceiling. Existing automatic
   two-chain selection is unchanged; explicit eight-branch capture, rebinding,
-  dense-Field gradients and retirement are covered. Parallel AOT export remains
-  a separate integration step.
+  dense-Field gradients and retirement are covered. AOT execution plans now
+  retain qualified kernel branches, prefixes and join suffixes, private storage
+  and selected disjointness constraints. Preparation uses the same core; replay
+  uses one CUDA graph launch. Version 9 plans require paired private ABI 65
+  components. Parallel regions inside control bodies and non-kernel branches
+  still require separate qualification.
 
 - AOT Graph export accepts named live f32 CUDA CSR/BSR values through
   `source_bindings`. It archives topology without copying numeric values and

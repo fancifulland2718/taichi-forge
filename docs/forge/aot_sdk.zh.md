@@ -398,7 +398,7 @@ CUDA Graph handle，也不保证不同 AOT 目标生成完全相同的机器码�
 混合 CUDA Graph 同样保留已资格 native recording 前、中、后的融合 kernel。
 导出按最终物理序列匹配保留下来的原生命令重建合同，不恢复融合前的源 map。
 cuFFT 回归覆盖两次库调用、三个融合 map 区域、重复导出，以及生产端退休后的
-独立/借用消费。并行、间接、有界和自定义存储路线仍需各自的重建资格。
+独立/借用消费。分支内含 native recording 的并行组合及自定义存储路线仍需各自的重建资格。
 
 Graph 实例拥有的 ndarray 声明（`private_ndarray` / `GraphOwnedNdarray`）可导出为
 首次清零的私有资源。同一声明的多个符号共享一份分配，kernel/provider 参数和显式
@@ -598,7 +598,20 @@ CUDA adaptive 物理 grid 更新也可导出，保留选中的 `per_node` 或 `g
 共用一份编译代码。Windows CUDA 已验证普通/已选导出、BC/PTX、独立/借用消费、不同
 消费端 grid 上限、零量/溢出、后续 `.grad` 与显式伴随及退休。
 
-host count 截断、producer-owned launch state、parallel
+已选普通 CUDA parallel 区域可导出为 ExecutionPlan 版本 9：
+`{"kind": "cuda_parallel", "branches": [[kernel_operation, ...], ...]}`。
+每个非空分支保留 kernel 顺序，外部序列保留前段和汇合后段；导出核对所选分组与原生
+物理顺序，并保留私有资源、布局和不相交约束。每次 preparation 通过 JIT 共用核心
+创建独立分支流和事件，暖态一次根 CUDA Graph launch，不创建流、不解析计划，也不
+访问生产端。需配对的 private ABI 65 组件。独立/借用 CUDA 检查覆盖 2/8 分支、
+已选两链策略、私有数组、别名拒绝、真实 Field 梯度、独立 frame 和在途退休；轻量
+消费端不需要生产端 Python 源码。CPU/Vulkan 明确拒绝此 CUDA 专用节点。
+
+当前分支只接受普通 kernel；分支内嵌套 parallel/control、控制体内 parallel、native
+回调及有界/间接分支派发仍需单独取得资格。自动发现仍使用既有两链形状，显式构建
+没有四分支上限。
+
+host count 截断、producer-owned launch state
 和结构化控制内的 exact/adaptive/indirect 仍需各自重建支持；
 导出不会将其替换为固定容量执行。
 

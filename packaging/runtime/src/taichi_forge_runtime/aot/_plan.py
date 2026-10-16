@@ -20,6 +20,8 @@ def _unique_fields(pairs):
 def _control_version(steps):
     version = 1
     for op in steps:
+        if isinstance(op, dict) and op.get("kind") == "cuda_parallel":
+            version = max(version, 9)
         if isinstance(op, dict) and op.get("kind") == "kernel" and "launch" in op:
             launch = op["launch"]
             bounded = isinstance(launch, dict) and launch.get("kind") in ("cpu_exact", "cuda_logical_exact")
@@ -70,7 +72,7 @@ class ExecutionPlan:
             or set(value) - {"version", "operations", "resources", "gradients", "initialization", "constraints"}
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6, 7, 8):
+        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -196,6 +198,23 @@ class ExecutionPlan:
                 if not isinstance(op, dict):
                     raise ValueError("Execution operations must be objects")
                 kind = op.get("kind")
+                if kind == "cuda_parallel":
+                    if (
+                        set(op) != {"kind", "branches"}
+                        or not isinstance(op["branches"], list)
+                        or len(op["branches"]) < 2
+                    ):
+                        raise ValueError("CUDA parallel requires at least two nonempty kernel branches")
+                    for branch in op["branches"]:
+                        if not isinstance(branch, list) or not branch:
+                            raise ValueError("CUDA parallel requires nonempty branches")
+                        if any(
+                            not isinstance(item, dict) or item.get("kind") != "kernel" or "launch" in item
+                            for item in branch
+                        ):
+                            raise ValueError("CUDA parallel requires ordinary kernel branches")
+                        validate_steps(branch)
+                    continue
                 if kind == "while":
                     required = {"kind", "predicate", "max_iterations", "condition", "body"}
                     optional, names = {"continue_while_nonzero", "lowering"}, ("predicate",)
