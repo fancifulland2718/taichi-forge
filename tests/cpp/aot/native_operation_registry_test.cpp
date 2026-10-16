@@ -289,6 +289,39 @@ TEST(NativeOperationRegistry,
   }
 }
 
+TEST(NativeOperationRegistry, SelectedFftPlansDecodeWithoutLoadingProvider) {
+  const auto &registry = native_operation_registry();
+  auto description =
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"cufft","operation":"plan_f32","version":1,
+      "parameters":{},"bindings":{}})"));
+  for (const auto *strategy : {"whole_transform", "row_batch_column_inplace",
+                               "row_batch_cross_batch_columns"}) {
+    description.parameters = liong::json::parse_complete(
+        R"({"dimensions":[5,7],"batch_count":2,"transform":"c2c","expected_workspace_bytes":0})");
+    description.parameters.obj.inner["strategy"] =
+        liong::json::JsonValue(strategy);
+    EXPECT_EQ(registry.decode(description, NativeObjectKind::resource).kind(),
+              "cufft_plan_f32");
+  }
+  for (
+      const auto *parameters :
+      {R"({"dimensions":[5,7],"transform":"c2c","strategy":"guess"})",
+       R"({"dimensions":[5],"transform":"c2c","strategy":"row_batch_column_inplace"})",
+       R"({"dimensions":[5,7],"transform":"r2c","strategy":"row_batch_cross_batch_columns"})",
+       R"({"dimensions":[5,7],"transform":"c2c","strategy":"row_batch_column_inplace","input_layout":{"embed":[5,7],"stride":2,"batch_distance":70}})",
+       R"({"dimensions":[5,7],"transform":"c2c","strategy":"row_batch_column_inplace","output_layout":{"embed":[5,8],"stride":1,"batch_distance":40}})",
+       R"({"dimensions":[5,7],"transform":"c2c","strategy":"row_batch_column_inplace","input_layout":{"embed":[5,7],"stride":1,"batch_distance":36}})",
+       R"({"dimensions":[2,1],"batch_count":2147483647,"transform":"c2c","strategy":"row_batch_cross_batch_columns"})",
+       R"({"dimensions":[5,7],"transform":"c2c","expected_workspace_bytes":-1})",
+       R"({"dimensions":[5,7],"transform":"c2c","expected_workspace_bytes":true})"}) {
+    description.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+                 std::invalid_argument)
+        << parameters;
+  }
+}
+
 TEST(NativeOperationRegistry, FftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto description =

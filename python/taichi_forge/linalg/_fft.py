@@ -347,6 +347,55 @@ class _FftRecording(CufftRecording):
     def _freeze_graph_recipe_source(self):
         return _FrozenFftSource(self._graph_fft_source, self._graph_fft_strategy)
 
+    def _export_aot(self, context):
+        source, strategy = self._graph_fft_source, self._graph_fft_strategy
+        self.validate_graph_lifetime()
+        workspace = source.preparation_report()[strategy]["workspace_bytes"]
+        if self.plan._workspace_bytes != workspace:
+            raise TaichiRuntimeError("Selected FFT workspace differs from its prepared recipe")
+        for name, shape in ((self.input, self.plan.input_shape), (self.output, self.plan.output_shape)):
+            context.binding_constraints.append(
+                dict(
+                    kind="array_layout",
+                    array=context.binding(name),
+                    exact_shape=list(shape),
+                    element_shape=[],
+                    dtype="f32",
+                    record_bytes=4,
+                    alignment=4,
+                )
+            )
+        if strategy == "whole_transform":
+            return super()._export_aot(context, expected_workspace_bytes=workspace)
+        if strategy not in ("row_batch_column_inplace", "row_batch_cross_batch_columns"):
+            raise TaichiRuntimeError("AOT FFT callback recipes require explicit LTO reconstruction")
+        if (
+            type(self.plan) is not _SeparableFftPlan
+            or not self.plan._separable
+            or (self.plan._cross_batch != (strategy == "row_batch_cross_batch_columns"))
+        ):
+            raise TaichiRuntimeError("AOT FFT decomposition differs from its selected plan")
+        plan = context.resource(
+            self.plan,
+            "cufft",
+            "plan_f32",
+            parameters=dict(
+                dimensions=self.plan.dimensions,
+                batch_count=self.plan.batch_count,
+                transform=self.plan.transform,
+                strategy=strategy,
+                expected_workspace_bytes=workspace,
+            ),
+        )
+        context.native(
+            "cufft",
+            "execute_f32",
+            bindings=dict(plan=plan, input=self.input, output=self.output),
+            parameters=dict(direction=self.direction),
+        )
+        # The selected physical sequence already contains any separate scale.
+        return ()
+
 
 class FftOperation(_FftDescription, NativeGraphNode):
     """A compact batched 2D f32 transform with explicit tolerances.

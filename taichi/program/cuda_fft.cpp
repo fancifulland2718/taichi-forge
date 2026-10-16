@@ -514,11 +514,19 @@ class AotCudaFftPlan final : public FftPlanResource {
         output.batch_distance,
         description_.batch_count,
         validate_transform_kind(static_cast<int>(description_.transform))};
+    descriptor.separable =
+        description_.strategy != FftPlanStrategy::whole_transform;
+    descriptor.cross_batch =
+        description_.strategy == FftPlanStrategy::row_batch_cross_batch_columns;
     const auto counts = cufft_scalar_counts(descriptor);
     // Validate byte arithmetic before the vendor allocates any workspace.
     checked_multiply(counts.input, sizeof(float), "input bytes");
     checked_multiply(counts.output, sizeof(float), "output bytes");
     plan_ = std::make_unique<CudaFftPlan>(std::move(descriptor), true, nullptr);
+    if (description_.expected_workspace_bytes &&
+        plan_->workspace_bytes() != *description_.expected_workspace_bytes)
+      throw std::invalid_argument(
+          "Recreated cuFFT plan workspace differs from the selected recipe");
   }
   Arch arch() const override {
     return Arch::cuda;

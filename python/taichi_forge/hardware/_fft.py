@@ -258,13 +258,16 @@ class CufftRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.plan._validate_lifetime()
 
-    def _export_aot(self, context):
+    def _export_aot(self, context, *, expected_workspace_bytes=None):
         if type(self.plan) not in (CufftPlan1D, CufftPlanND):
             raise TaichiRuntimeError("AOT cuFFT plan variants require their own reconstruction contract")
         self.validate_graph_lifetime()
         if self.plan._aot_plan_parameters is None:
             raise TaichiRuntimeError("AOT cuFFT callbacks and separable recipes require explicit reconstruction")
-        plan = context.resource(self.plan, "cufft", "plan_f32", parameters=self.plan._aot_plan_parameters)
+        parameters = dict(self.plan._aot_plan_parameters)
+        if expected_workspace_bytes is not None:
+            parameters["expected_workspace_bytes"] = expected_workspace_bytes
+        plan = context.resource(self.plan, "cufft", "plan_f32", parameters=parameters)
         context.native(
             "cufft",
             "execute_f32",

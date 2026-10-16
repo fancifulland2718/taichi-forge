@@ -1198,10 +1198,26 @@ Input/output must be disjoint. Multiple executions of one resource share its
 plan/workspace; separate prepared instances remain independent, and scratch is
 accounted once. `Module.add_execution_plan(name, graph)` uses this representation
 for ordinary cuFFT recordings, preserving frozen creation layouts and plan
-identity. Callback, separable and unqualified plan subclasses need their own
+identity. Callback and unqualified plan subclasses need their own
 export contract and are rejected before kernel export. Tested automatic exports
 cover batched 1D C2C, padded/strided 2D C2C, 3D R2C/C2R, explicit spectral-energy
 adjoints, nonzero shared workspace and standalone/borrowed owner retirement.
+
+Selected `linalg.record_fft` plans also export through this shared core. They
+retain `whole_transform`, `row_batch_column_inplace` or
+`row_batch_cross_batch_columns`, direction and any separate output-scale kernel.
+The two decompositions require compact 2D C2C storage; real transforms retain the
+whole-transform route. Optional `strategy` in `cufft/plan_f32` defaults to
+`whole_transform`. Selected exports include `expected_workspace_bytes`, which
+must match the reconstructed plan before execution. Consumers do not search for
+or substitute another strategy. Existing descriptors remain readable; older
+readers reject these additional fields instead of ignoring the selection.
+Small Windows CUDA checks cover positive/negative scaling, complex forward and
+inverse transforms, real half-spectrum weighting, exact public array shapes,
+binding changes, workspace mismatch, and standalone/borrowed retirement. They
+combine real downstream `kernel.grad` with explicitly assembled FFT adjoints;
+FFT provider differentiation is still explicit. LTO store-scale callback export
+requires a separate code/dependency reconstruction contract and remains rejected.
 
 Install cuFFT separately and make it visible to the process loader (for example,
 Windows `PATH`, or an explicitly preloaded library). Forge does not bundle the

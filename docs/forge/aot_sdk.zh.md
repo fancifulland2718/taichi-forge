@@ -931,9 +931,20 @@ vendor 管理对象。关闭依赖在完成后退休对应 recording 和 plan。
 物理跨度，输入输出必须互不重叠。同资源的多次执行共享 plan/workspace，独立 prepared
 实例彼此隔离，scratch 只计一份。普通 cuFFT recording 经
 `Module.add_execution_plan(name, graph)` 自动导出为此结构，保留创建时冻结的布局与
-plan 身份。callback、separable 和未获资格的 plan 子类在 kernel 导出前拒绝。
+plan 身份。callback 和未获资格的 plan 子类在 kernel 导出前拒绝。
 已验证批量一维 C2C、带 padding/stride 的二维 C2C、三维 R2C/C2R、显式谱能量伴随、
 非零共享 workspace，以及独立/借用 owner 的退休。
+
+`linalg.record_fft` 的已选计划也通过此共享核心导出，保留 `whole_transform`、
+`row_batch_column_inplace` 或 `row_batch_cross_batch_columns`、方向和独立输出
+缩放 kernel。两种分解要求紧凑二维 C2C 存储；实数变换保留整体路线。
+`cufft/plan_f32` 的可选 `strategy` 默认 `whole_transform`。已选导出还包含
+`expected_workspace_bytes`，重建计划须在执行前匹配该值；消费端不重新搜索或替换
+策略。既有描述仍可读取，旧读取器会拒绝新增字段，避免忽略选中的策略。
+Windows CUDA 小型验收覆盖正负缩放、复数正逆变换、实数半谱权重、公开数组的精确
+shape、换绑定、workspace 不匹配、独立/借用退休，并组合真实后续 `kernel.grad`
+与显式 FFT 伴随；FFT provider 的反向仍需显式组装。LTO store-scale callback
+导出需要单独的代码与依赖重建合同，目前仍明确拒绝。
 
 cuFFT 由应用单独安装，并对进程加载器可见（例如 Windows `PATH` 或显式预加载
 动态库）；Forge 不打包 vendor DLL。Windows cuFFT 12.2 / RTX 5090 验证覆盖

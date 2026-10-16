@@ -81,8 +81,9 @@ void register_fft_plan(NativeOperationRegistry &registry) {
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<FftPlanDescription> {
         using namespace operation_json;
-        fields(parameters, {"dimensions", "batch_count", "transform",
-                            "input_layout", "output_layout"});
+        fields(parameters,
+               {"dimensions", "batch_count", "transform", "input_layout",
+                "output_layout", "strategy", "expected_workspace_bytes"});
         FftPlanDescription result;
         result.dimensions = fft_dimensions(parameters["dimensions"]);
         auto batch = parameters.obj.inner.find("batch_count");
@@ -102,6 +103,38 @@ void register_fft_plan(NativeOperationRegistry &registry) {
           input.back() = input.back() / 2 + 1;
         result.input_layout = fft_layout(parameters, "input_layout", input);
         result.output_layout = fft_layout(parameters, "output_layout", output);
+        result.expected_workspace_bytes =
+            optional_integer(parameters, "expected_workspace_bytes");
+        auto strategy = parameters.obj.inner.find("strategy");
+        if (strategy != parameters.obj.inner.end()) {
+          const auto selected = name(strategy->second);
+          if (selected == "row_batch_column_inplace")
+            result.strategy = FftPlanStrategy::row_batch_column_inplace;
+          else if (selected == "row_batch_cross_batch_columns")
+            result.strategy = FftPlanStrategy::row_batch_cross_batch_columns;
+          else if (selected != "whole_transform")
+            throw std::invalid_argument("Unknown cuFFT physical strategy");
+        }
+        if (result.strategy != FftPlanStrategy::whole_transform) {
+          if (result.dimensions.size() != 2 ||
+              result.transform != FftTransformKind::c2c)
+            throw std::invalid_argument(
+                "Decomposed cuFFT requires a two-dimensional C2C plan");
+          const uint64_t plane =
+              uint64_t(result.dimensions[0]) * result.dimensions[1];
+          const uint64_t rows =
+              uint64_t(result.batch_count) * result.dimensions[0];
+          if (plane > std::numeric_limits<int>::max() ||
+              rows > std::numeric_limits<int>::max())
+            throw std::invalid_argument(
+                "Decomposed cuFFT layout exceeds PlanMany int32");
+          for (const auto *layout :
+               {&result.input_layout, &result.output_layout})
+            if (layout->embed != result.dimensions || layout->stride != 1 ||
+                layout->batch_distance != plane)
+              throw std::invalid_argument(
+                  "Decomposed cuFFT requires compact storage");
+        }
         return [result](const NativeOperationBindings &) { return result; };
       });
   registry.define<FftExecuteOperation>(

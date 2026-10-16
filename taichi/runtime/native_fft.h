@@ -1,10 +1,16 @@
 #pragma once
 
+#include <optional>
 #include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang {
 
 enum class FftTransformKind { c2c, r2c, c2r };
+enum class FftPlanStrategy {
+  whole_transform,
+  row_batch_column_inplace,
+  row_batch_cross_batch_columns
+};
 
 struct FftLayoutDescription {
   std::vector<int> embed;
@@ -22,6 +28,8 @@ struct FftPlanDescription {
   FftTransformKind transform{FftTransformKind::c2c};
   FftLayoutDescription input_layout;
   FftLayoutDescription output_layout;
+  FftPlanStrategy strategy{FftPlanStrategy::whole_transform};
+  std::optional<uint64_t> expected_workspace_bytes;
 };
 
 class FftPlanResource : public NativeResource {
