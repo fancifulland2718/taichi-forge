@@ -177,6 +177,7 @@ class Runtime {
   std::recursive_mutex submission_mutex_;
   std::shared_ptr<capi::PreparedExecutionRegistry> prepared_;
   taichi::lang::NativeProviderLocations native_provider_locations_;
+  taichi::lang::NativeLibraryLocations native_library_locations_;
   std::shared_ptr<taichi::lang::RuntimeFaultDomain> runtime_fault_domain_;
   bool borrowed_fault_domain_{false};
 
@@ -248,6 +249,10 @@ class Runtime {
   void configure_native_provider(
       std::string provider,
       std::optional<taichi::lang::NativeProviderLocation> location);
+  const taichi::lang::NativeLibraryLocations &native_library_locations() const {
+    return native_library_locations_;
+  }
+  void configure_native_library(std::string name, const char *path);
   void retire_prepared_memory(TiMemory memory);
   void retire_prepared_module(class AotModule *owner);
   void clear_prepared(bool synchronize = true);

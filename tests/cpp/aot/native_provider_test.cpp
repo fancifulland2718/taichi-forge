@@ -68,6 +68,37 @@ TEST_F(NativeProvider, RejectsMissingLocationsAndQuery) {
       TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH);
 }
 
+TEST_F(NativeProvider, AuxiliaryLibrariesAreLazySharedAndRetained) {
+  std::shared_ptr<NativeLibrary> retained;
+  std::weak_ptr<NativeLibrary> weak;
+  {
+    NativeLibraryLocations locations{{"used", TI_TEST_RUNTIME_PROVIDER_PATH},
+                                     {"unused", "absent.dll"}};
+    NativeProviderSession session({}, locations);
+    locations["used"] = "changed.dll";
+    retained = session.library("used");
+    EXPECT_EQ(retained, session.library("used"));
+    EXPECT_THROW(session.library("missing"), NativeProviderError);
+    EXPECT_THROW(session.library("unused"), NativeProviderError);
+    EXPECT_THROW(retained->symbol("missing_symbol"), NativeProviderError);
+    weak = retained;
+    EXPECT_EQ(stats().probes, baseline.probes);
+    EXPECT_EQ(stats().creates, baseline.creates);
+  }
+  EXPECT_FALSE(weak.expired());
+  auto read = reinterpret_cast<provider_stub::Stats (*)()>(
+      retained->symbol("stub_stats"));
+  EXPECT_EQ(read().creates, baseline.creates);
+  retained.reset();
+  EXPECT_TRUE(weak.expired());
+  EXPECT_THROW(validate_native_library_location("", "path"),
+               std::invalid_argument);
+  EXPECT_THROW(validate_native_library_location("name", ""),
+               std::invalid_argument);
+  EXPECT_THROW(validate_native_library_location("name", std::string("a\0b", 3)),
+               std::invalid_argument);
+}
+
 TEST_F(NativeProvider, RejectsMalformedAdapterBeforeVendorAccess) {
   for (auto mode :
        {Mode::short_api, Mode::api_version, Mode::short_info,

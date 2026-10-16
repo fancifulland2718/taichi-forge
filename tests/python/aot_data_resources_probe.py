@@ -22,6 +22,11 @@ def main(mode, arch, artifact, directory, key):
         runtime = Runtime(arch)
     weights = [(i % 7 + 1) / 8 for i in range(17)]
     with runtime:
+        runtime.configure_library("unused", "unselected-does-not-exist.dll")
+        failure(lambda: runtime.configure_library("nvrtc", ""))
+        failure(lambda: runtime.configure_library("nvrtc", "bad\0path"))
+        failure(lambda: runtime.configure_library("", "anything"))
+        runtime.configure_library("unused", None)
         module = runtime.load_module(artifact)
         frames = [{name: runtime.ndarray("f32", (17,)) for name in ("x", "y", "dx")} for _ in range(2)]
         calls = [module.prepare_execution("step", frame) for frame in frames]

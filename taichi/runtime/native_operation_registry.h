@@ -31,10 +31,11 @@ struct NativePreparationContext {
       Arch arch,
       Device &device,
       NativeProviderLocations locations = {},
-      std::shared_ptr<RuntimeFaultDomain> fault_domain = {})
+      std::shared_ptr<RuntimeFaultDomain> fault_domain = {},
+      NativeLibraryLocations libraries = {})
       : arch(arch),
         device(device),
-        providers(std::move(locations)),
+        providers(std::move(locations), std::move(libraries)),
         fault_domain(std::move(fault_domain)) {
   }
   Arch arch;

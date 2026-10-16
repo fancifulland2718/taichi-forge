@@ -1224,6 +1224,15 @@ ti_configure_native_provider_ext(TiRuntime runtime,
                                  const char *adapter_path,
                                  const char *library_path);
 
+// Configure an auxiliary library used by a registered native factory. Does
+// not load code or change process search paths. Null path removes the entry.
+// Existing prepared objects retain their original library leases. Symbol and
+// version requirements belong to the consuming factory; use absolute paths.
+TI_DLL_EXPORT void TI_API_CALL
+ti_configure_native_library_ext(TiRuntime runtime,
+                                const char *name,
+                                const char *path);
+
 // Query the compiled factory for an exact operation kind/version and this
 // runtime's backend, without loading code or allocating operation resources.
 // Returns zero for an unregistered kind, version or backend. A nonzero result

@@ -216,6 +216,23 @@ class Runtime:
                 library_path,
             )
 
+    def configure_library(self, name, path):
+        """Set a cold auxiliary-library location for this runtime owner.
+
+        Only a registered factory that needs this name loads it. None removes
+        the setting; existing prepared owners keep their leases. This does not
+        change process search paths or embed deployment paths in an artifact.
+        """
+        name = _name(name)
+        if path is not None:
+            path = os.fspath(path)
+            if not isinstance(path, str) or not path or "\0" in path:
+                raise ValueError("Native library paths must be nonempty strings without NUL")
+            path = os.fsencode(Path(path).expanduser().resolve())
+        with self._lock:
+            self._check()
+            self._api.call(self._api.ti_configure_native_library_ext, self._handle, name, path)
+
     def probe_native_operation(self, kind, *, version=1):
         """Cold optional-dependency check; may load a library, never a plan.
 

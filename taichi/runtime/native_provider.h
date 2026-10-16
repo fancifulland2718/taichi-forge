@@ -148,6 +148,23 @@ struct NativeProviderLocation {
 };
 using NativeProviderLocations = std::map<std::string, NativeProviderLocation>;
 
+using NativeLibraryLocations = std::map<std::string, std::string>;
+void validate_native_library_location(const std::string &name,
+                                      const std::string &path);
+
+// Auxiliary vendor libraries used by registered built-in factories. This is
+// not a provider adapter: the consuming factory owns its symbol/version ABI.
+class NativeLibrary {
+ public:
+  NativeLibrary(std::string name, const std::string &path);
+  ~NativeLibrary();
+  void *symbol(const std::string &name) const;
+
+ private:
+  std::string name_;
+  std::unique_ptr<DynamicLoader> library_;
+};
+
 void validate_native_provider_location(const std::string &provider,
                                        const NativeProviderLocation &location);
 
@@ -156,7 +173,9 @@ void validate_native_provider_location(const std::string &provider,
 // registry; prepared plans retain runtime/module leases after it is destroyed.
 class NativeProviderSession {
  public:
-  explicit NativeProviderSession(NativeProviderLocations locations = {});
+  explicit NativeProviderSession(NativeProviderLocations locations = {},
+                                 NativeLibraryLocations libraries = {});
+  std::shared_ptr<NativeLibrary> library(const std::string &name);
   const NativeProviderRuntimeInfo &probe(
       const NativeProviderDefinition &definition);
   // The C ABI runtime is parameterized only by its library location. Share one
@@ -173,6 +192,8 @@ class NativeProviderSession {
   };
   Entry &resolve(const NativeProviderDefinition &definition);
   NativeProviderLocations locations_;
+  NativeLibraryLocations library_locations_;
+  std::map<std::string, std::shared_ptr<NativeLibrary>> libraries_;
   // Include the expected contract so conflicting definitions never reuse a
   // module whose identity was checked against a different query or family.
   using Key = std::tuple<std::string, std::string, std::string>;

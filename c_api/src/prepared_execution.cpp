@@ -444,9 +444,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   prepared->owner = &mod;
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
-  NativePreparationContext preparation(rt.arch, rt.get(),
-                                       rt.native_provider_locations(),
-                                       rt.runtime_fault_domain());
+  NativePreparationContext preparation(
+      rt.arch, rt.get(), rt.native_provider_locations(),
+      rt.runtime_fault_domain(), rt.native_library_locations());
   preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
   std::set<std::pair<std::string, std::uint32_t>> probed;
   std::map<const aot::ExecutionPlan::Native *,
@@ -1061,6 +1061,34 @@ void Runtime::configure_native_provider(
   }
 }
 
+void Runtime::configure_native_library(std::string name, const char *path) {
+  if (name.empty() || name.find('\0') != std::string::npos)
+    throw MemoryBindingError(
+        "Native library name must be nonempty without NUL");
+  try {
+    if (path)
+      taichi::lang::validate_native_library_location(name, path);
+  } catch (const std::invalid_argument &error) {
+    throw MemoryBindingError(error.what());
+  }
+  if (path)
+    native_library_locations_.insert_or_assign(std::move(name), path);
+  else
+    native_library_locations_.erase(name);
+}
+
+void ti_configure_native_library_ext(TiRuntime runtime,
+                                     const char *name,
+                                     const char *path) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(name);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  rt.configure_native_library(name, path);
+  TI_CAPI_TRY_CATCH_END();
+}
+
 void ti_configure_native_provider_ext(TiRuntime runtime,
                                       const char *provider,
                                       const char *adapter_path,
@@ -1133,7 +1161,7 @@ void ti_probe_native_operation_ext(
   const auto *capability = registry.find(kind, version, rt.arch);
   if (capability) {
     taichi::lang::NativeProviderSession providers(
-        rt.native_provider_locations());
+        rt.native_provider_locations(), rt.native_library_locations());
     const auto status = registry.probe(kind, version, rt.arch, providers);
     availability->capabilities = static_cast<TiFlags>(capability->mode);
     availability->available = status.available ? TI_TRUE : TI_FALSE;

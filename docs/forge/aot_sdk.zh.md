@@ -1277,6 +1277,13 @@ provider 不加载。重配置只影响后续探测/准备，已有 prepared 保
 此配置作用于已注册的 adapter 工厂，包括下文 cuDSS、cuTENSOR、cuSPARSELt 与 AmgX 操作；不会注册任意
 厂商符号、改变既有 cuBLAS/cuFFT 内建寻址，也不自动导出 JIT recording。
 
+已注册的内建工厂还可通过 `runtime.configure_library(name, path)` 配置辅助动态库，
+C 对应 `ti_configure_native_library_ext`。配置只保存位置，`path=None` 删除配置。
+同一个冷准备会话只装载实际请求的名称并共享库租约，由消费工厂检查所需符号和版本。
+重配置不影响已有 prepared owner 的租约。Python 在配置时解析路径，C 建议使用绝对
+路径；路径不写入产物，也不修改进程搜索路径。这是工厂依赖合同，不提供任意函数注册。
+操作系统加载器规则仍然适用；owner 独立配置不等于隔离进程内不兼容的 vendor 工具链。
+
 CUDA cuDSS 0.8 可通过显式持久资源重建 f32/i32 CSR 计划。配置 `"cudss"` provider
 并探测 `"cudss_solve_group_f32"`；当前需提供带公共 runtime-provider 入口的 Forge
 adapter 及外部 cuDSS 库；可选安装组件为 `TaichiSDKProvider_cudss`。

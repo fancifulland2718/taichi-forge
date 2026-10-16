@@ -194,10 +194,56 @@ void validate_native_provider_location(const std::string &provider,
   }
 }
 
-NativeProviderSession::NativeProviderSession(NativeProviderLocations locations)
-    : locations_(std::move(locations)) {
+void validate_native_library_location(const std::string &name,
+                                      const std::string &path) {
+  if (name.empty() || path.empty() || name.find('\0') != std::string::npos ||
+      path.find('\0') != std::string::npos)
+    throw std::invalid_argument(
+        "Native library name/path must be nonempty without NUL");
+}
+
+NativeLibrary::NativeLibrary(std::string name, const std::string &path)
+    : name_(std::move(name)) {
+  validate_native_library_location(name_, path);
+  library_ = std::make_unique<DynamicLoader>(path);
+  if (!library_->loaded())
+    throw NativeProviderError(
+        TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_UNAVAILABLE,
+        "Cannot load native library " + name_ + ": " + path);
+}
+
+NativeLibrary::~NativeLibrary() = default;
+
+void *NativeLibrary::symbol(const std::string &name) const {
+  auto *result = library_->load_function_optional(name);
+  if (!result)
+    throw NativeProviderError(TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH,
+                              name_ + ": missing native symbol " + name);
+  return result;
+}
+
+NativeProviderSession::NativeProviderSession(NativeProviderLocations locations,
+                                             NativeLibraryLocations libraries)
+    : locations_(std::move(locations)),
+      library_locations_(std::move(libraries)) {
   for (const auto &[provider, location] : locations_)
     validate_native_provider_location(provider, location);
+  for (const auto &[name, path] : library_locations_)
+    validate_native_library_location(name, path);
+}
+
+std::shared_ptr<NativeLibrary> NativeProviderSession::library(
+    const std::string &name) {
+  if (const auto found = libraries_.find(name); found != libraries_.end())
+    return found->second;
+  const auto location = library_locations_.find(name);
+  if (location == library_locations_.end())
+    throw NativeProviderError(
+        TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_UNAVAILABLE,
+        "Native library location is not configured: " + name);
+  auto result = std::make_shared<NativeLibrary>(name, location->second);
+  libraries_.emplace(name, result);
+  return result;
 }
 
 NativeProviderSession::Entry &NativeProviderSession::resolve(

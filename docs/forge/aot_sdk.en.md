@@ -1643,6 +1643,17 @@ This configures registered adapter-backed factories, including the cuDSS, cuTENS
 cuSPARSELt and AmgX operations below. It does not register arbitrary vendor symbols, change existing
 built-in cuBLAS/cuFFT discovery, or automatically export JIT recordings.
 
+Registered built-in factories can also request auxiliary libraries through
+`runtime.configure_library(name, path)` (`ti_configure_native_library_ext` in C).
+This records a location without loading code; `path=None` removes it. The same
+cold preparation session loads only requested names, shares their library leases,
+and lets each consuming factory check its required symbols and versions. Existing
+prepared owners retain their leases after reconfiguration. Python resolves paths
+when configured; prefer absolute paths in C. Paths stay outside artifacts, and no
+process search path is changed. This is a factory dependency contract, not a way
+to register arbitrary functions. OS loader rules still apply; owner-local settings
+do not provide process isolation between incompatible vendor toolchains.
+
 CUDA cuDSS 0.8 supports explicit persistent f32/i32 CSR plans. Configure the
 `"cudss"` provider and probe `"cudss_solve_group_f32"`. Supply a Forge adapter with
 the common runtime-provider entry point and an external cuDSS library; the
