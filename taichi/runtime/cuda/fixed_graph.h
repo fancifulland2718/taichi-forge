@@ -6,6 +6,7 @@
 #include <vector>
 #include "taichi/program/kernel_launcher.h"
 #include "taichi/runtime/cuda/capture_resources.h"
+#include "taichi/runtime/branch_selection.h"
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
@@ -32,12 +33,20 @@ class FixedGraph {
     const void *bounded_binding_identity{nullptr};
   };
   struct While;
+  struct Branch;
   struct Parallel;
   using Operation = std::variant<Dispatch,
+                                 std::shared_ptr<const Branch>,
                                  std::shared_ptr<const While>,
                                  std::shared_ptr<const Parallel>>;
   struct Parallel {
     std::vector<std::vector<Operation>> branches;
+  };
+  struct Branch {
+    void *selector{nullptr};
+    BranchSelection selection;
+    std::vector<Operation> condition;
+    std::vector<std::vector<Operation>> bodies;
   };
   struct While {
     void *predicate{nullptr};

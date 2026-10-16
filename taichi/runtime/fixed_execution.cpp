@@ -152,13 +152,52 @@ FixedExecution::FixedExecution(
   std::unordered_set<const NativeOperation *> owners;
   NativeRecordingState recording_state =
       sequence_state ? *sequence_state : NativeRecordingState{};
-  std::unordered_set<const While *> active_loops;
+  std::unordered_set<const void *> active_controls;
   std::function<void(const std::vector<Operation> &, NativeRecordingState &,
                      bool)>
       validate;
   validate = [&](const std::vector<Operation> &operations,
                  NativeRecordingState &recording_state, bool inside_control) {
     for (const auto &operation : operations) {
+      if (const auto *value =
+              std::get_if<std::shared_ptr<const Branch>>(&operation)) {
+        const auto &branch = *value;
+        if (!branch || branch->selector.device != &device ||
+            branch->selector.offset % 4 ||
+            (!arch_is_cpu(arch) && arch != Arch::cuda))
+          throw std::invalid_argument(
+              "Fixed branch requires CPU/CUDA and aligned selector storage");
+        branch->selection.validate(branch->bodies.size());
+        if (!active_controls.insert(branch.get()).second)
+          throw std::invalid_argument(
+              "Fixed control descriptors contain a cycle");
+        // This condition executes exactly once before selecting a body. It is
+        // part of the native graph on CUDA, so cannot invoke host providers.
+        validate(branch->condition, recording_state, true);
+        auto joined = recording_state.initialized;
+        bool first = branch->selection.has_default;
+        for (const auto &body : branch->bodies) {
+          auto facts = recording_state.control_branch();
+          validate(body, facts, true);
+          if (first) {
+            joined = std::move(facts.initialized);
+            first = false;
+          } else {
+            for (auto it = joined.begin(); it != joined.end();) {
+              if (facts.initialized.count(*it))
+                ++it;
+              else
+                it = joined.erase(it);
+            }
+          }
+        }
+        // With no default, the untouched incoming state is also a path. Only
+        // facts true on every path reach the suffix; opaque facts are
+        // unchanged.
+        recording_state.initialized = std::move(joined);
+        active_controls.erase(branch.get());
+        continue;
+      }
       if (const auto *value =
               std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
         const auto &parallel = *value;
@@ -228,7 +267,7 @@ FixedExecution::FixedExecution(
             control.recipe.validate(loop->max_iterations);
           }
         }
-        if (!active_loops.insert(loop.get()).second)
+        if (!active_controls.insert(loop.get()).second)
           throw std::invalid_argument(
               "Fixed control descriptors contain a cycle");
         auto condition = recording_state.control_branch();
@@ -245,7 +284,7 @@ FixedExecution::FixedExecution(
             throw std::invalid_argument(
                 "Loop providers cannot invalidate established initialization "
                 "facts");
-        active_loops.erase(loop.get());
+        active_controls.erase(loop.get());
         continue;
       }
       if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
@@ -331,6 +370,29 @@ FixedExecution::FixedExecution(
     prepare = [&](const std::vector<Operation> &operations) {
       std::vector<State::CpuStep> steps;
       for (const auto &operation : operations) {
+        if (const auto *value =
+                std::get_if<std::shared_ptr<const Branch>>(&operation)) {
+          const auto &branch = **value;
+          auto *selector =
+              static_cast<std::int32_t *>(cpu_pointer(branch.selector, 4));
+          struct PreparedBranch {
+            std::vector<State::CpuStep> condition;
+            std::vector<std::vector<State::CpuStep>> bodies;
+          };
+          auto prepared = std::make_shared<PreparedBranch>();
+          prepared->condition = prepare(branch.condition);
+          for (const auto &body : branch.bodies)
+            prepared->bodies.push_back(prepare(body));
+          steps.push_back(
+              {nullptr, {}, [selector, selection = branch.selection, prepared] {
+                 State::run_cpu_steps(prepared->condition);
+                 const auto index =
+                     selection.select(*selector, prepared->bodies.size());
+                 if (index < prepared->bodies.size())
+                   State::run_cpu_steps(prepared->bodies[index]);
+               }});
+          continue;
+        }
         if (const auto *value =
                 std::get_if<std::shared_ptr<const While>>(&operation)) {
           const auto &loop = **value;
@@ -444,8 +506,18 @@ FixedExecution::FixedExecution(
     prepare = [&](const std::vector<Operation> &operations) {
       std::vector<CudaOperation> native;
       for (const auto &operation : operations) {
-        if (const auto *parallel =
-                std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
+        if (const auto *branch =
+                std::get_if<std::shared_ptr<const Branch>>(&operation)) {
+          auto result = std::make_shared<cuda::FixedGraph::Branch>();
+          result->selector = cuda_pointer((*branch)->selector);
+          result->selection = (*branch)->selection;
+          result->condition = prepare((*branch)->condition);
+          for (const auto &body : (*branch)->bodies)
+            result->bodies.push_back(prepare(body));
+          native.emplace_back(std::move(result));
+        } else if (const auto *parallel =
+                       std::get_if<std::shared_ptr<const Parallel>>(
+                           &operation)) {
           auto result = std::make_shared<cuda::FixedGraph::Parallel>();
           for (const auto &branch : (*parallel)->branches)
             result->branches.push_back(prepare(branch));

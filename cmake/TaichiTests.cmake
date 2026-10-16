@@ -24,6 +24,7 @@ file(GLOB_RECURSE TAICHI_TESTS_SOURCE
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/struct_layout_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/execution_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/fixed_branch_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cudss_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cusolverdn_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cublaslt_plan_test.cpp")

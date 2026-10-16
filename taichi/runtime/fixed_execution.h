@@ -6,6 +6,7 @@
 #include <variant>
 #include <vector>
 #include "taichi/rhi/device.h"
+#include "taichi/runtime/branch_selection.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
 
 namespace taichi::lang {
@@ -50,15 +51,23 @@ class FixedExecution {
     std::uint32_t value;
   };
   struct While;
+  struct Branch;
   struct Parallel;
   using Operation = std::variant<Dispatch,
                                  BufferCopy,
                                  BufferFill,
                                  std::shared_ptr<NativeOperation>,
+                                 std::shared_ptr<const Branch>,
                                  std::shared_ptr<const While>,
                                  std::shared_ptr<const Parallel>>;
   struct Parallel {
     std::vector<std::vector<Operation>> branches;
+  };
+  struct Branch {
+    DevicePtr selector{kDeviceNullPtr};
+    BranchSelection selection;
+    std::vector<Operation> condition;
+    std::vector<std::vector<Operation>> bodies;
   };
   struct While {
     struct Vulkan {

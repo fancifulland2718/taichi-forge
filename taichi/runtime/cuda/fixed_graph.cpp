@@ -196,10 +196,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   std::vector<const Dispatch *> dispatches;
   std::unordered_map<const Dispatch *, std::size_t> dispatch_index;
   std::unordered_map<const While *, std::size_t> loop_index;
+  std::unordered_map<const Branch *, std::size_t> branch_index;
   std::unordered_map<const Parallel *, std::size_t> parallel_index;
   std::vector<const Parallel *> parallel_regions;
-  std::unordered_set<const While *> active_loops;
+  std::unordered_set<const void *> active_controls;
   std::vector<CudaGraphConditionalControl64> controls;
+  std::vector<CudaGraphConditionalControl> branch_controls;
   std::function<void(const std::vector<Operation> &)> collect;
   collect = [&](const std::vector<Operation> &sequence) {
     for (const auto &operation : sequence) {
@@ -207,9 +209,37 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         if (dispatch_index.emplace(dispatch, dispatches.size()).second)
           dispatches.push_back(dispatch);
       } else if (const auto *value =
+                     std::get_if<std::shared_ptr<const Branch>>(&operation)) {
+        const auto &branch = *value;
+        if (!branch || !branch->selector)
+          throw std::invalid_argument("Fixed CUDA branch requires a selector");
+        branch->selection.validate(branch->bodies.size());
+        if (branch->bodies.size() > std::numeric_limits<std::uint32_t>::max())
+          throw std::invalid_argument("CUDA branch count exceeds its node ABI");
+        if (active_controls.count(branch.get()))
+          throw std::invalid_argument(
+              "Fixed CUDA control regions contain a cycle");
+        if (!branch_index.emplace(branch.get(), branch_controls.size()).second)
+          continue;
+        active_controls.insert(branch.get());
+        CudaGraphConditionalControl control;
+        control.predicate = reinterpret_cast<std::uintptr_t>(branch->selector);
+        control.iteration =
+            branch->selection.kind == BranchSelection::Kind::nonzero ? 0 : 2;
+        control.max_iterations = branch->bodies.size();
+        control.continue_while_nonzero = branch->selection.has_default
+                                             ? branch->bodies.size() - 1
+                                             : ~std::uint32_t{0};
+        branch_controls.push_back(control);
+        collect(branch->condition);
+        for (const auto &body : branch->bodies)
+          collect(body);
+        active_controls.erase(branch.get());
+      } else if (const auto *value =
                      std::get_if<std::shared_ptr<const Parallel>>(&operation)) {
         const auto &parallel = *value;
-        if (!parallel || parallel->branches.size() < 2 || !active_loops.empty())
+        if (!parallel || parallel->branches.size() < 2 ||
+            !active_controls.empty())
           throw std::invalid_argument(
               "Fixed CUDA parallel requires a flat region and at least two "
               "branches");
@@ -235,12 +265,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         if (!loop || !loop->predicate || loop->body.empty())
           throw std::invalid_argument(
               "Fixed CUDA while requires a predicate and nonempty body");
-        if (active_loops.count(loop.get()))
+        if (active_controls.count(loop.get()))
           throw std::invalid_argument(
               "Fixed CUDA control regions contain a cycle");
         if (!loop_index.emplace(loop.get(), controls.size()).second)
           continue;
-        active_loops.insert(loop.get());
+        active_controls.insert(loop.get());
         CudaGraphConditionalControl64 control;
         control.predicate = reinterpret_cast<std::uintptr_t>(loop->predicate);
         control.max_iterations = loop->max_iterations;
@@ -248,7 +278,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         controls.push_back(control);
         collect(loop->condition);
         collect(loop->body);
-        active_loops.erase(loop.get());
+        active_controls.erase(loop.get());
       }
     }
   };
@@ -257,10 +287,10 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     state.parallel.push_back(std::make_unique<ParallelGraphCapture>());
     state.parallel.back()->prepare(parallel->branches.size());
   }
-  if (!controls.empty()) {
+  if (!controls.empty() || !branch_controls.empty()) {
     if (!GraphRegionBuilder::available())
       throw std::invalid_argument(
-          "Fixed CUDA while requires native conditional graph support");
+          "Fixed CUDA control requires native conditional graph support");
     driver_graph_prepare_conditional_setter();
   }
   std::vector<KernelLauncher::GraphLaunchPacket> packets(dispatches.size());
@@ -286,7 +316,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         "Unsupported fixed CUDA Graph dispatch");
     auto &packet = packets[i];
     if (dispatch.adaptive_block_dim) {
-      TI_ERROR_IF(!controls.empty() || !packet.bounded_range ||
+      TI_ERROR_IF(!controls.empty() || !branch_controls.empty() ||
+                      !packet.bounded_range ||
                       !dispatch.bounded_binding_identity ||
                       packet.offloaded_tasks.size() != 1 ||
                       packet.offloaded_tasks[0].block_dim !=
@@ -412,7 +443,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                                 "capture fixed CUDA parallel",
                                 "CUDA branch capture failed");
   };
-  if (controls.empty()) {
+  if (controls.empty() && branch_controls.empty()) {
     auto capture_lock = cuda.get_graph_capture_lock_guard();
     driver.stream_begin_capture(state.stream,
                                 CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
@@ -430,11 +461,24 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     if (controls.size() >
         std::numeric_limits<std::size_t>::max() / sizeof(controls[0]))
       throw std::invalid_argument("Fixed CUDA control storage overflow");
-    state.control_bytes = controls.size() * sizeof(controls[0]);
+    const auto loop_bytes = controls.size() * sizeof(controls[0]);
+    if (branch_controls.size() >
+        (std::numeric_limits<std::size_t>::max() - loop_bytes) /
+            sizeof(branch_controls[0]))
+      throw std::invalid_argument("Fixed CUDA branch storage overflow");
+    state.control_bytes =
+        loop_bytes + branch_controls.size() * sizeof(branch_controls[0]);
     driver.malloc(reinterpret_cast<void **>(&state.controls),
                   state.control_bytes);
-    driver.memcpy_host_to_device_async(state.controls, controls.data(),
-                                       state.control_bytes, state.stream);
+    auto *branch_storage = reinterpret_cast<CudaGraphConditionalControl *>(
+        reinterpret_cast<std::uint8_t *>(state.controls) + loop_bytes);
+    if (loop_bytes)
+      driver.memcpy_host_to_device_async(state.controls, controls.data(),
+                                         loop_bytes, state.stream);
+    if (!branch_controls.empty())
+      driver.memcpy_host_to_device_async(branch_storage, branch_controls.data(),
+                                         state.control_bytes - loop_bytes,
+                                         state.stream);
     driver.stream_synchronize(state.stream);
     driver.graph_create(&state.graph, 0);
     GraphRegionBuilder builder(state.graph, state.stream);
@@ -448,6 +492,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       while (begin < sequence.size()) {
         auto end = begin;
         while (end < sequence.size() &&
+               !std::holds_alternative<std::shared_ptr<const Branch>>(
+                   sequence[end]) &&
                !std::holds_alternative<std::shared_ptr<const While>>(
                    sequence[end]))
           ++end;
@@ -458,6 +504,33 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                   record_operation(sequence[i], stream);
               });
           begin = end;
+          continue;
+        }
+        if (const auto *value =
+                std::get_if<std::shared_ptr<const Branch>>(&sequence[begin])) {
+          const auto &branch = **value;
+          ++begin;
+          auto *control = branch_storage + branch_index.at(&branch);
+          const auto handle = builder.conditional_handle();
+          dependencies =
+              record(graph, std::move(dependencies), branch.condition);
+          dependencies =
+              builder.capture(graph, dependencies, [&](void *stream) {
+                driver_graph_set_branch_conditional(control, handle, stream);
+              });
+          const auto node = builder.add_branch(
+              graph, dependencies, handle,
+              branch.selection.kind == BranchSelection::Kind::nonzero
+                  ? GraphRegionBuilder::BranchKind::if_else
+                  : GraphRegionBuilder::BranchKind::indexed,
+              branch.bodies.size());
+          for (std::size_t i = 0; i < node.bodies.size(); ++i) {
+            record(node.bodies[i], {}, branch.bodies[i]);
+            std::size_t count = 0;
+            driver.graph_get_nodes(node.bodies[i], nullptr, &count);
+            state.nodes += count;
+          }
+          dependencies = {node.node};
           continue;
         }
         const auto &loop =

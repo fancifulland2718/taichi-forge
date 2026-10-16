@@ -708,6 +708,59 @@ TEST(NativeOperationRegistry,
   EXPECT_EQ(counts.released, 2);
 }
 
+TEST(NativeOperationRegistry, BranchCaptureResourcesRetireWithTheirRoot) {
+  if (!CUDADriver::get_instance_without_context().detected() ||
+      !cuda::GraphRegionBuilder::available())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  auto allocation = device.allocate_memory_unique({8});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto selector = allocation.first->get_ptr();
+  auto output_ptr = selector;
+  output_ptr.offset += 4;
+  auto *base = device.get_memory_addr(*allocation.first);
+  auto *output = static_cast<char *>(base) + 4;
+  CaptureResourceCounts counts;
+  auto operation =
+      std::make_shared<CaptureScalarOperation>(device, output, counts);
+  auto branch = std::make_shared<FixedExecution::Branch>();
+  branch->selector = selector;
+  branch->selection.has_default = true;
+  branch->bodies = {{operation},
+                    {FixedExecution::BufferFill{output_ptr, 4, 11}}};
+  auto read = [&] {
+    std::uint32_t value = 0;
+    driver.memcpy_device_to_host(&value, output, 4);
+    return value;
+  };
+  driver.memsetd32(output, 71, 1);
+  {
+    FixedExecution graph(
+        Arch::cuda, device, nullptr,
+        {FixedExecution::BufferFill{output_ptr, 4, 99}, branch});
+    EXPECT_EQ(read(), 71);  // Cold capture does not execute either branch.
+    EXPECT_EQ(graph.workspace_bytes(),
+              28);  // Selector control + captured value.
+    operation->value =
+        19;  // Replay owns the captured value, not the descriptor.
+    branch->bodies.clear();
+    for (std::uint32_t selected : {0u, 1u, 0u, 1u}) {
+      driver.memsetd32(base, selected, 1);
+      graph.run();
+      EXPECT_EQ(read(), selected ? 7 : 11);
+    }
+    EXPECT_EQ(counts.recorded, 1);
+    EXPECT_EQ(counts.finalized, 1);
+    EXPECT_EQ(counts.released, 0);
+    graph.run();  // Close retires an outstanding submission before releasing.
+  }
+  EXPECT_EQ(read(), 7);
+  EXPECT_EQ(counts.released, 1);
+  EXPECT_TRUE(operation->last.expired());
+}
+
 TEST(NativeOperationRegistry,
      SynchronousCudaActionsRespectPrivateStreamsAndFailure) {
   if (!CUDADriver::get_instance_without_context().detected())
@@ -1274,6 +1327,33 @@ TEST(NativeOperationRegistry, RecordingInitializationIsLocalAndPrecedesWork) {
   EXPECT_EQ(runs, 9);
   zero_trip.run();
   EXPECT_EQ(runs, 11);
+
+  auto branch = std::make_shared<FixedExecution::Branch>();
+  branch->selector = predicate->get_ptr();
+  branch->selection.has_default = true;
+  branch->condition = {FixedExecution::BufferFill{predicate->get_ptr(), 4, 1}};
+  branch->bodies = {{writer}, {}};
+  EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, {branch, reader}),
+               std::invalid_argument);
+  EXPECT_EQ(runs, 11);
+  branch->bodies = {{writer}, {writer}};
+  FixedExecution joined(host_arch(), device, nullptr, {branch, reader});
+  joined.run();
+  EXPECT_EQ(runs, 13);  // Only the selected writer and the suffix reader ran.
+  branch->selection.has_default = false;
+  branch->bodies.resize(1);
+  EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, {branch, reader}),
+               std::invalid_argument);
+  branch->condition.emplace_back(writer);
+  branch->bodies = {{reader}};
+  FixedExecution initialized_by_condition(host_arch(), device, nullptr,
+                                          {branch, reader});
+  initialized_by_condition.run();
+  EXPECT_EQ(runs, 16);
+  branch->bodies = {{branch}};
+  EXPECT_THROW(FixedExecution(host_arch(), device, nullptr, {branch}),
+               std::invalid_argument);
+  branch->bodies.clear();  // Break the intentionally cyclic descriptor.
 }
 
 TEST(NativeOperationRegistry,
