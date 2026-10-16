@@ -541,10 +541,14 @@ plan = exported.add_execution_plan(
 )
 ```
 
-kernel 与原生操作共用数组时，沿用该 kernel 的符号名。映射冻结 scalar dtype 与
-确切形状，不复制内容、不保存地址，也不预热序列。每个源分配须有唯一明确的名称；
+kernel 与原生操作共用数组时，沿用该 kernel 的符号名。源绑定接受紧凑的标量、向量和矩阵
+ndarray，映射冻结基础 dtype、确切数组形状及 element shape，不复制内容、不保存地址，
+也不预热序列。字节数相同但 element shape 不同的绑定仍会被拒绝。每个源分配须有唯一明确的名称；
 未使用映射、kernel 绑定不匹配及私有存储冲突在发布 kernel 前拒绝。显式命名的固定
 ndarray 绑定也可转为公开计划输入。
+已支持的连续子视图引用命名的父数组，不额外复制 tensor 记录；操作本身仍须满足各自的
+类型与布局资格。CPU/CUDA/Vulkan 已验证普通 kernel 的向量/矩阵源绑定及显式 ndarray 梯度，
+CUDA/Vulkan 另验证了 prepared compact 的偏移向量子视图。
 对于已支持的 f32 CUDA CSR/BSR recording，`SparseMatrix` 源绑定表示其压缩数值槽，
 拓扑仍保持冻结，具体见下文稀疏导出合同。
 
@@ -556,7 +560,7 @@ CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part
 显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、多 key part、strided
 存储、融合序列和未列出的操作仍需自己的导出合同。
 
-持有的 scalar ndarray 继续通过 `source_bindings` 命名；合格的连续 dense Field 使用
+持有的 scalar/vector/matrix ndarray 通过 `source_bindings` 命名；合格的连续 dense Field 使用
 `add_execution_plan(..., snapshot_state=True)` 自动导出模块数组视图，与普通 Field
 kernel 共用同一 root。没有 kernel 的纯原生图也会保存所需 Field 初值。结构预检通过后
 才发布视图，同一模块多次导出复用已有视图。CUDA/Vulkan 的 `prepare_sort`、

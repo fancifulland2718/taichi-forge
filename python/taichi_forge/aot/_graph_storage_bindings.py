@@ -7,7 +7,9 @@ from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang._storage_view import DenseNdarrayView, describe_storage
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
-from taichi_forge.lang.matrix import MatrixField
+from taichi_forge.lang.matrix import MatrixField, MatrixNdarray, VectorNdarray
+
+_SOURCE_NDARRAY_TYPES = (ScalarNdarray, VectorNdarray, MatrixNdarray)
 
 
 def packed_description(owner):
@@ -41,7 +43,7 @@ class RetainedArrayBindings:
 
     def require(self, owner):
         context = self.context
-        if type(owner) is ScalarNdarray:
+        if type(owner) in _SOURCE_NDARRAY_TYPES:
             identity = context.source_arrays.identity(owner)
             if identity in self.private_arrays:
                 return self.private_arrays[identity]

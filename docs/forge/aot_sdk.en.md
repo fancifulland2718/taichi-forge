@@ -701,11 +701,18 @@ plan = exported.add_execution_plan(
 ```
 
 Use the existing symbolic kernel name when a kernel and the native operation
-share an array. The mapping freezes scalar dtype and exact shape; it does not
-copy contents, serialize addresses or prewarm the sequence. Each source
+share an array. Source bindings accept packed scalar, vector and matrix ndarrays.
+The mapping freezes the scalar dtype, exact array shape and element shape; it
+does not copy contents, serialize addresses or prewarm the sequence. Equal byte
+sizes with different element shapes are rejected. Each source
 allocation needs one unambiguous name. Unused mappings, incompatible kernel
 bindings and private-storage conflicts are rejected before kernel publication.
 Explicitly named fixed ndarray bindings can also become public plan inputs.
+Supported contiguous subviews reference the named parent array without copying
+tensor records; each operation retains its own type and layout qualification.
+CPU/CUDA/Vulkan checks cover ordinary kernels with vector/matrix source bindings
+and explicit ndarray gradients. CUDA/Vulkan checks also cover offset vector
+subviews in prepared compact operations.
 For qualified f32 CUDA CSR/BSR recordings, a `SparseMatrix` source names its
 compressed numeric values; the topology remains frozen. See the sparse export
 contract below.
@@ -720,7 +727,7 @@ Vulkan compact/unique method is `vulkan_native`. Other strategies,
 descending/bitwise ordering, multiple key parts, strided storage, fused sequences
 and unlisted operations still require their own export contracts.
 
-Retained scalar ndarrays use `source_bindings`. Qualified packed dense Fields
+Retained scalar/vector/matrix ndarrays use `source_bindings`. Qualified packed dense Fields
 use `add_execution_plan(..., snapshot_state=True)` to export module array views
 automatically, sharing the same roots as ordinary Field kernels. Native-only
 graphs also snapshot their required Fields. Views are published after structural
