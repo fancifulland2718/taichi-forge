@@ -77,8 +77,20 @@ API 支持紧凑 f32 matmul、批量与转置输入、alpha/beta 反馈、行主
 布局，以及 identity/ReLU 尾处理。计划可以冷选一个启发式结果，也可以恢复显式算法配置，
 核对精确 workspace 而不重新搜索；计划信息报告实际走过的路径和算法要求的输入对齐。
 调用方拥有设备缓冲区及 workspace，负责激活所属 CUDA context，并在销毁计划和 runtime
-前退休所有捕获图及在途执行。JIT 计划与 typed Graph 捕获已复用此 C API；Python Graph 尚未提供
-cuBLASLt recording 导出及 AOT 资源重建。
+前退休所有捕获图及在途执行。JIT 计划、typed Graph 捕获和 AOT 消费共用此 C API。
+
+普通 `CublasLtMatmulPlan` recording 及其 typed capture 可以随 Graph 通过
+`module.add_execution_plan("step", graph)` 导出。资源 `cublaslt/matmul_plan_f32` 和操作
+`cublaslt/matmul_f32`（version 1）保存冻结配置，消费端通过
+`runtime.configure_provider("cublaslt", adapter_path=..., library_path=...)` 解析用户安装的依赖。
+准备时要求同一 cuBLASLt 版本，核对当前设备上的算法、布局和精确 workspace，恢复计划而不重搜。
+每个 prepared 对象拥有重建后的计划和 workspace；同一计划的多次调用共享资源。
+包内不保存设备地址、厂商句柄、生产端 DLL 路径或无用的 workspace 快照。
+
+已验证 CUDA 独立/借用消费、单/多 batch、转置输入、两种物理布局、identity/ReLU、
+beta 反馈和显式矩阵伴随与真实 `kernel.grad` 的组合；这不提供厂商操作自动求导。
+CPU/Vulkan 不注册此执行工厂。matmul recipe 的输入打包、独立 ReLU 等已选组合自动导出，
+以及条件/parallel 内组合，仍需各自的支持资格。
 
 cuDSS 使用其独立
 构建开关及匹配的 0.8.x SDK 头文件，不需要开启其他可选 provider：

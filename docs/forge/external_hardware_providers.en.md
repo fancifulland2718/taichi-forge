@@ -141,8 +141,11 @@ needed. Frozen choices restore without a heuristic search, and warm Graph replay
 does not call the provider. `heuristic_limit` remains explicit with default 4;
 its bound is the vendor's positive int32 argument, with no separate 32-candidate
 cap. Workspace limits must fit the platform's `size_t`. The standalone SDK plan
-API is available; AOT resource reconstruction and recording export are still
-pending. See the [SDK component contract](aot_sdk.en.md).
+API, AOT resource reconstruction, and ordinary-plan/typed-capture recording export
+are available. Restoration requires a matching cuBLASLt version and does not
+search for another algorithm. Selected matmul recipes with packing or separate
+epilogues still need their own export qualification. See the
+[SDK component contract](aot_sdk.en.md).
 
 The shared CUDA operand-packing helper uses a padded warp-contiguous tile for
 wide axes and retains its compact tile for narrow axes, selected from frozen

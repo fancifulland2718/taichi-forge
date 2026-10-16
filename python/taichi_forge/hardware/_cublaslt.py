@@ -639,6 +639,11 @@ class CublasLtMatmulPlan(BackendCommandRecording):
     def closed(self):
         return self._matmul_desc is None and not self._plan_handle.value
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cublaslt import export_plan
+
+        return export_plan(self, context, self.binding_names)
+
     @property
     def a_shape(self):
         matrix = (self.k, self.m) if self.transpose_a else (self.m, self.k)

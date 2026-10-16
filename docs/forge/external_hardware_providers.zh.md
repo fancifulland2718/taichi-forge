@@ -112,8 +112,9 @@ JIT matmul 执行与 typed Graph 捕获共用 cuBLASLt 计划 adapter
 （`taichi-forge-cublaslt-provider-c-abi2`）。每个执行计划拥有自己的厂商描述符与 handle，
 候选发现所需的另一 handle 按需创建。冻结选择恢复不重新搜索，暖 Graph 重放不调用 provider。
 `heuristic_limit` 仍需显式指定、默认4，数量受厂商正 int32 参数限制，不再额外限制为32个候选；
-workspace 上限必须能由平台 `size_t` 表示。独立 SDK 计划 API 已提供，AOT 资源重建和 recording
-导出仍待接入，参见 [SDK 组件合同](aot_sdk.zh.md)。
+workspace 上限必须能由平台 `size_t` 表示。独立 SDK 计划 API、AOT 资源重建以及普通计划/
+typed capture recording 导出已提供；恢复要求匹配 cuBLASLt 版本，不重搜算法。
+已选 matmul recipe 的打包/独立 epilogue 等组合尚需单独导出资格，参见 [SDK 组件合同](aot_sdk.zh.md)。
 
 共享 CUDA operand-packing helper 对宽轴使用带 padding、warp 连续访存的 tile，对窄轴保留紧凑 tile，
 只根据冻结 shape 选择。matmul 与 contraction 复用同一 lowering，不新增 vendor 依赖或公开 block/tile 轴。

@@ -88,10 +88,27 @@ result or restores an explicit algorithm configuration and checks its exact
 workspace requirement without searching. Plan information reports which path ran
 and the algorithm's operand alignment requirements. Callers own device buffers
 and workspace, activate the owning CUDA context, and retire all captured/in-flight
-uses before destroying plans and their runtime. This standalone C API is a
-prerequisite now shared by JIT plans and typed Graph capture; cuBLASLt recording
-export and AOT resource reconstruction are not yet available through the Python
-Graph API.
+uses before destroying plans and their runtime. JIT plans, typed Graph capture,
+and AOT consumption share this C API.
+
+Ordinary `CublasLtMatmulPlan` recordings and their typed captures can be exported
+with a Graph through `module.add_execution_plan("step", graph)`. Resource
+`cublaslt/matmul_plan_f32` and operation `cublaslt/matmul_f32` (version 1) persist
+the frozen configuration. Consumers resolve user-installed dependencies with
+`runtime.configure_provider("cublaslt", adapter_path=..., library_path=...)`.
+Preparation requires the same cuBLASLt version, checks the algorithm, layout and
+exact workspace on the current device, and restores without a heuristic search.
+Each prepared execution owns its reconstructed plan and workspace; repeated
+calls to the same plan share one resource. Packages contain no device addresses,
+vendor handles, producer DLL paths or unused workspace snapshots.
+
+Validated CUDA coverage includes standalone/borrowed consumption, single/multiple
+batches, transposed operands, both physical layouts, identity/ReLU, beta feedback,
+and explicit matrix adjoints combined with actual `kernel.grad`. This does not
+add automatic differentiation of vendor operations. CPU/Vulkan do not register
+this execution factory. Automatic export of selected matmul recipe compositions
+such as operand packing and separate ReLU, and compositions inside conditional or
+parallel regions, still require their own qualification.
 
 cuDSS uses
 its independent build option and matching 0.8.x SDK headers, without enabling

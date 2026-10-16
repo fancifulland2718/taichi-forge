@@ -186,5 +186,10 @@ class CublasLtCaptureRecording(BackendCommandRecording):
     def execute(self, bindings):
         raise TaichiRuntimeError("cuBLASLt captured matmul is a Graph-only recording")
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cublaslt import export_plan
+
+        return export_plan(self.plan, context, self.binding_names)
+
     def _as_graph_native_node(self):
         return _CaptureNode(self)

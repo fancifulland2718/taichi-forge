@@ -687,6 +687,67 @@ TEST(NativeOperationRegistry, ReportsOnlyCompiledBackendComposition) {
     EXPECT_EQ(capability.mode, found->mode);
   }
 }
+TEST(NativeOperationRegistry,
+     CublasLtFrozenDescriptionsValidateWithoutLoadingCode) {
+  auto description = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cublaslt","operation":"matmul_plan_f32","version":1,"bindings":{},"parameters":{"m":17,"n":9,"k":13,"batch_count":2,"layout":"row_major","epilogue":"identity","workspace_limit_bytes":4096,"provider_version":130300,"algorithm":{"workspace_bytes":0,"configuration":{"id":20,"tile":16,"split_k":1,"reduction":0,"swizzle":0,"custom":0,"stages":28,"inner_shape":null,"cluster_shape":null}}}})"));
+  const auto &registry = native_operation_registry();
+  EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  EXPECT_EQ(registry.find("cublaslt_matmul_f32", 1, host_arch()), nullptr);
+  EXPECT_EQ(registry.find("cublaslt_matmul_f32", 1, Arch::vulkan), nullptr);
+  for (const auto *patch :
+       {R"({"m":0})", R"({"k":9223372036854775807})",
+        R"({"batch_count":2147483648})", R"({"transpose_a":1})",
+        R"({"alpha":1e100})", R"({"layout":"column_major"})",
+        R"({"epilogue":"gelu"})", R"({"provider_version":0})",
+        R"({"provider_version":4294967296})", R"({"unknown":1})"}) {
+    auto invalid = description;
+    for (const auto &[name, value] :
+         liong::json::parse_complete(patch).obj.inner)
+      invalid.parameters.obj.inner[name] = value;
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument)
+        << patch;
+  }
+  for (const auto *patch :
+       {R"({"tile":4294967296})", R"({"split_k":2147483648})",
+        R"({"inner_shape":65536})", R"({"stages":1.0})", R"({"id":null})",
+        R"({"unknown":1})"}) {
+    auto invalid = description;
+    for (const auto &[name, value] :
+         liong::json::parse_complete(patch).obj.inner)
+      invalid.parameters["algorithm"]["configuration"].obj.inner[name] = value;
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument)
+        << patch;
+  }
+  auto absent = description;
+  absent.parameters["algorithm"]["configuration"].obj.inner.erase(
+      "inner_shape");
+  EXPECT_NO_THROW(registry.decode(absent, NativeObjectKind::resource));
+  absent.parameters["algorithm"]["configuration"].obj.inner.erase("id");
+  EXPECT_THROW(registry.decode(absent, NativeObjectKind::resource),
+               std::invalid_argument);
+  auto too_large = description;
+  too_large.parameters["algorithm"]["workspace_bytes"] =
+      liong::json::JsonValue(4097);
+  EXPECT_THROW(registry.decode(too_large, NativeObjectKind::resource),
+               std::invalid_argument);
+}
+
+TEST(NativeOperationRegistry, CublasLtOperationsRequireExactPorts) {
+  auto description = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"cublaslt","operation":"matmul_f32","version":1,"parameters":{},"bindings":{"plan":"p","a":"a","b":"b","output":"c"}})"));
+  const auto &registry = native_operation_registry();
+  EXPECT_NO_THROW(registry.decode(description));
+  description.bindings.erase("plan");
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  description.bindings["plan"] = "p";
+  description.parameters.obj.inner["alpha"] = liong::json::JsonValue(2);
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+}
+
 TEST(NativeOperationRegistry, CutensorDescriptionsValidateWithoutLoadingCode) {
   auto description = NativeOperationDescription::parse(liong::json::parse_complete(
       R"({"kind":"native","provider":"cutensor","operation":"contraction_plan_f32","version":1,"bindings":{},"parameters":{"a":{"shape":[2,3],"modes":[0,2]},"b":{"shape":[3,4],"modes":[2,1]},"c":{"shape":[2,4],"modes":[0,1]},"d":{"shape":[2,4],"modes":[0,1]}}})"));
