@@ -677,7 +677,7 @@ struct CompiledGraphNestedInnerControl {
   std::size_t condition_dispatch_begin{0};
   std::size_t body_dispatch_begin{0};
   std::size_t dispatch_end{0};
-  int max_iterations{0};
+  std::int64_t max_iterations{0};
   int chunk_size{0};
 };
 
@@ -907,7 +907,7 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *outer_status,
       const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
       std::size_t outer_condition_dispatch_count,
-      int outer_max_iterations,
+      std::int64_t outer_max_iterations,
       CompiledGraphNestedCudaRoute route) const;
   CompiledGraphStructuredResult jit_run_bounded_vulkan_cached(
       const CompileConfig &compile_config,

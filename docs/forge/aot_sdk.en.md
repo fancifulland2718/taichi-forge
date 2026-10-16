@@ -483,9 +483,16 @@ segment, initial condition, prefix and suffix without regenerating source
 definitions or repeating the trailing condition. Control scalar shapes and
 non-aliasing contracts are saved too. Small tests cover parent Sequential
 embedding, private controls, status and explicit adjoints. Nested CUDA export
-uses the selected flat physical dispatches and their condition/body boundaries;
-two ordered inner loops, independent bindings and owner retirement are tested
-with the matching private ABI 51 build.
+uses the selected flat physical dispatches and their condition/body boundaries.
+With matching private ABI 70 components, compact nested CUDA execution uses the
+same nonnegative int64 budget contract as AOT and 32 bytes of private device
+control per loop. It imposes no 64-iteration, eight-inner-region or 4096-static-
+dispatch software cap. `structured_control_capabilities()["device_control"]`
+reports this route under `nested_cuda_conditional_limits`; the legacy
+`nested_native_*` limit fields describe expanded command routes. Small Windows
+checks cover 65-iteration budget exhaustion, nine ordered inner regions with a
+`2**40` budget and early exit, independent bindings, actual suffix `kernel.grad`
+and owner retirement. Large budgets do not duplicate the compact loop body.
 For `native_required` nested CUDA loops, construction can select the qualified
 compact conditional route when the expanded representation exceeds its action
 budget. The runtime must expose explicit nested-route support. Explicit recipe

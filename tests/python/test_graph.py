@@ -5210,7 +5210,7 @@ def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
                 snapshot = compressed._graph_stats[0]
                 assert snapshot["last_path"].startswith("cuda_conditional_nested_")
                 assert snapshot["last_fallback_reason"] == "none"
-                assert snapshot["known_bounded_control_bytes"] == 3 * 24
+                assert snapshot["known_bounded_control_bytes"] == 3 * 32
                 assert materialized.materialized_physical_id == physical_id
             # Stable bindings must not upload the private iteration controls.
             frame = compressed.bind({**args, "outer_limit": 3})

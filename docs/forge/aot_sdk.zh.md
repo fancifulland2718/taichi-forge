@@ -380,8 +380,12 @@ plan = ExecutionPlan([loop])
 前后段，不重新生成源定义或重复
 末尾条件计算。控制数组的标量形状及互不别名约束一并保存；父 Sequential 嵌入、
 私有控制资源、状态与显式伴随已有小规模验证。CUDA 嵌套导出使用已选的平坦物理
-dispatch 及条件/循环体边界；两个顺序内循环、独立绑定及 owner 退休已在配套
-private ABI 51 构建中验证。
+dispatch 及条件/循环体边界。配套 private ABI 70 组件的紧凑 CUDA 嵌套路线与 AOT
+共用非负 int64 预算合同，每个循环的私有设备控制为32字节，不设置64轮、8个内层
+region或4096个静态dispatch的软件上限。`structured_control_capabilities()["device_control"]`
+通过`nested_cuda_conditional_limits`报告该路线；原`nested_native_*`数量字段描述展开式
+命令路线。Windows小用例覆盖65轮预算耗尽、9个顺序内循环在`2**40`预算下提前结束、
+独立绑定、真实后段`kernel.grad`和owner退休。大预算不复制紧凑循环体。
 对于 `native_required` 的 CUDA 嵌套循环，展开式表示超过动作预算时，构建阶段可选择
 已具备资格的紧凑 conditional 路线；runtime 需要提供显式嵌套路线支持。显式 recipe
 和强制 masked 选择仍受尊重，普通 `auto` 的选路不变。

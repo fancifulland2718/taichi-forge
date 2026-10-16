@@ -1279,9 +1279,9 @@ struct CudaGraphBoundedDispatchObservation {
 // One private counter per static loop, not per encoded iteration. Parent
 // Graph ownership covers every conditional handle and borrowed body graph.
 struct CudaNestedConditionalState {
-  cuda::CudaGraphConditionalControl *controls{nullptr};
+  cuda::CudaGraphConditionalControl64 *controls{nullptr};
   std::vector<DeviceAllocation> predicates;
-  std::vector<int> budgets;
+  std::vector<std::int64_t> budgets;
   std::vector<std::array<std::size_t, 3>> boundaries;
   std::size_t outer_condition_count{0};
 
@@ -1505,7 +1505,7 @@ struct CompiledGraphCudaState {
     }
     if (nested_conditional && nested_conditional->controls != nullptr) {
       bytes += nested_conditional->budgets.size() *
-               sizeof(cuda::CudaGraphConditionalControl);
+               sizeof(cuda::CudaGraphConditionalControl64);
     }
     return bytes;
   }
@@ -3109,7 +3109,7 @@ bool try_run_cuda_conditional_nested_control_graph(
     Ndarray &outer_predicate,
     const std::vector<CompiledGraphNestedInnerControl> &inners,
     std::size_t outer_condition_count,
-    int outer_budget,
+    std::int64_t outer_budget,
     RuntimeStatistics *statistics) {
   auto *state = get_cuda_graph_state(cache);
   auto unavailable = [&]() {
@@ -3171,13 +3171,12 @@ bool try_run_cuda_conditional_nested_control_graph(
   }
   const auto dispatch_count = graph.dispatches.size();
   if (compile_config.debug || outer_condition_count == 0 ||
-      outer_condition_count >= dispatch_count || dispatch_count > 4096 ||
-      outer_budget <= 0 || outer_budget > 64 || inners.empty() ||
-      inners.size() > 8 || !graph.cuda_conditional_body_eligible()) {
+      outer_condition_count >= dispatch_count || outer_budget <= 0 ||
+      inners.empty() || !graph.cuda_conditional_body_eligible()) {
     return unavailable();
   }
   std::vector<DeviceAllocation> predicates;
-  std::vector<int> budgets{outer_budget};
+  std::vector<std::int64_t> budgets{outer_budget};
   std::vector<std::array<std::size_t, 3>> boundaries;
   auto append_predicate = [&](Ndarray *predicate) {
     if (predicate == nullptr || predicate->owning_program() != &program ||
@@ -3207,7 +3206,7 @@ bool try_run_cuda_conditional_nested_control_graph(
     if (cursor > begin || begin >= body || body >= end ||
         end > dispatch_count - outer_condition_count ||
         end - body <= body - begin || inner.max_iterations <= 0 ||
-        inner.max_iterations > 64 || !append_predicate(inner.predicate)) {
+        !append_predicate(inner.predicate)) {
       return unavailable();
     }
     boundaries.push_back({begin, body, end});
@@ -3346,7 +3345,7 @@ bool try_run_cuda_conditional_nested_control_graph(
       state->packets.push_back(std::move(packet));
     }
     cuda::driver_graph_prepare_conditional_setter();
-    std::vector<cuda::CudaGraphConditionalControl> controls(plan.budgets.size());
+    std::vector<cuda::CudaGraphConditionalControl64> controls(plan.budgets.size());
     auto *device = static_cast<cuda::CudaDevice *>(plan.predicates.front().device);
     for (std::size_t i = 0; i < controls.size(); ++i) {
       controls[i].predicate = reinterpret_cast<std::uintptr_t>(
@@ -3376,7 +3375,7 @@ bool try_run_cuda_conditional_nested_control_graph(
               destination, dependencies, [&](void *capture_stream) {
                 capture_cuda_conditional_range(graph, *state, args, program,
                                                begin, end, capture_stream);
-                cuda::driver_graph_set_conditional(
+                cuda::driver_graph_set_conditional64(
                     plan.controls + loop, handles[loop], capture_stream, reset);
               });
         };
@@ -3492,7 +3491,7 @@ bool try_run_cuda_device_update_nested_control_graph(
             ? inner.dispatch_end - inner.body_dispatch_begin
             : 0;
     if (repeated > (std::numeric_limits<std::size_t>::max)() /
-                       std::max(inner.max_iterations, 1)) {
+                       std::max<std::int64_t>(inner.max_iterations, 1)) {
       valid_iteration_limits = false;
     } else {
       single_copy_repeated_dispatches += repeated;
@@ -4066,7 +4065,8 @@ bool try_run_cuda_masked_nested_control_graph(
             : 0;
     single_copy_repeated_dispatches += repeated;
     repeated_dispatches +=
-        repeated * static_cast<std::size_t>(std::max(inner.max_iterations, 1));
+        repeated * static_cast<std::size_t>(
+                       std::max<std::int64_t>(inner.max_iterations, 1));
     boundaries.push_back({inner.condition_dispatch_begin,
                           inner.body_dispatch_begin, inner.dispatch_end});
     boundary_cursor = inner.dispatch_end;
@@ -6644,12 +6644,11 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
     Ndarray *outer_status,
     const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
     std::size_t outer_condition_dispatch_count,
-    int outer_max_iterations,
+    std::int64_t outer_max_iterations,
     CompiledGraphNestedCudaRoute route) const try {
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch != Arch::cuda || outer_predicate == nullptr ||
-      outer_counter == nullptr || inner_controls.empty() ||
-      inner_controls.size() > 8) {
+      outer_counter == nullptr || inner_controls.empty()) {
     return false;
   }
   Program *program = jit_graph_program(*this);
@@ -6754,19 +6753,31 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
           *this, compile_config, args, cache, *program, *outer_predicate,
           inner_controls, outer_condition_dispatch_count,
           outer_max_iterations, &program->runtime_statistics());
-  if (route == CompiledGraphNestedCudaRoute::automatic ||
-      route == CompiledGraphNestedCudaRoute::device_update) {
+  // Expanded routes retain their own command-encoding admission. Never narrow
+  // a compact plan's wide budget before checking those legacy routes.
+  const bool expanded_budget =
+      route != CompiledGraphNestedCudaRoute::conditional &&
+      outer_max_iterations > 0 && outer_max_iterations <= 64 &&
+      std::all_of(inner_controls.begin(), inner_controls.end(),
+                  [](const auto &inner) {
+                    return inner.max_iterations > 0 &&
+                           inner.max_iterations <= 64;
+                  });
+  if (expanded_budget &&
+      (route == CompiledGraphNestedCudaRoute::automatic ||
+       route == CompiledGraphNestedCudaRoute::device_update)) {
     submitted = try_run_cuda_device_update_nested_control_graph(
         *this, compile_config, args, cache, *program, *outer_predicate,
         inner_controls, outer_condition_dispatch_count,
-        outer_max_iterations, &program->runtime_statistics());
+        static_cast<int>(outer_max_iterations), &program->runtime_statistics());
   }
-  if (!submitted && (route == CompiledGraphNestedCudaRoute::automatic ||
-                     route == CompiledGraphNestedCudaRoute::masked)) {
+  if (!submitted && expanded_budget &&
+      (route == CompiledGraphNestedCudaRoute::automatic ||
+       route == CompiledGraphNestedCudaRoute::masked)) {
     submitted = try_run_cuda_masked_nested_control_graph(
         *this, compile_config, args, cache, *program, *outer_predicate,
         inner_controls, outer_condition_dispatch_count,
-        outer_max_iterations, &program->runtime_statistics());
+        static_cast<int>(outer_max_iterations), &program->runtime_statistics());
   }
   if (!submitted) {
     return false;

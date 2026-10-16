@@ -4328,6 +4328,20 @@ def structured_control_capabilities():
             "nested_native_inner_iteration_limit": (64 if nested_native else 0),
             "nested_native_max_ordered_inner_regions": (8 if nested_native else 0),
             "nested_native_max_encoded_actions": (4096 if nested_native else 0),
+            # Legacy scalar limits describe expanded command routes. Compact
+            # conditional control owns one copy per static region, not budget.
+            "nested_native_limits_scope": "expanded_commands",
+            "nested_cuda_conditional_limits": (
+                {
+                    "max_iterations": (1 << 63) - 1,
+                    "max_ordered_inner_regions": None,
+                    "max_static_dispatches": None,
+                    "expands_iterations": False,
+                }
+                if backend == "cuda"
+                and cuda.get("nested_conditional_graph_available", False)
+                else None
+            ),
             "nested_native_stop_telemetry": nested_native,
             "nested_async_route": (
                 nested_async_route if nested_native else "unavailable"
@@ -6543,7 +6557,9 @@ def _compile_native_nested_while_runtime_node(
         return unavailable("vulkan_dispatch_cache_enabled")
     if outer_counter is None:
         return unavailable("outer_counter_required")
-    if outer_max_iterations <= 0 or outer_max_iterations > 64:
+    if outer_max_iterations <= 0 or (
+        arch == _ti_core.Arch.vulkan and outer_max_iterations > 64
+    ):
         return unavailable("outer_iteration_budget_out_of_range")
     if (
         arch == _ti_core.Arch.vulkan
@@ -6560,7 +6576,7 @@ def _compile_native_nested_while_runtime_node(
     )
     if not structured_indices:
         return unavailable("inner_region_required")
-    if len(structured_indices) > 8:
+    if arch == _ti_core.Arch.vulkan and len(structured_indices) > 8:
         return unavailable("inner_region_count_exceeds_eight")
 
     outer_controls = {outer_predicate, outer_counter}
@@ -6577,9 +6593,13 @@ def _compile_native_nested_while_runtime_node(
             return unavailable("inner_region_must_be_leaf")
         if inner.counter is None:
             return unavailable("inner_counter_required")
-        if inner.max_iterations <= 0 or inner.max_iterations > 64:
+        if inner.max_iterations <= 0 or (
+            arch == _ti_core.Arch.vulkan and inner.max_iterations > 64
+        ):
             return unavailable("inner_iteration_budget_out_of_range")
-        if inner.compound_chunk_limit <= 0 or inner.compound_chunk_limit > 64:
+        if inner.compound_chunk_limit <= 0 or (
+            arch == _ti_core.Arch.vulkan and inner.compound_chunk_limit > 64
+        ):
             return unavailable("inner_chunk_size_out_of_range")
         if not inner._native_upgrade_eligible:
             return unavailable(
@@ -6653,8 +6673,10 @@ def _compile_native_nested_while_runtime_node(
     )
     if (
         flattened_dispatch_count <= 0
-        or flattened_dispatch_count > 4096
-        or (arch == _ti_core.Arch.vulkan and encoded_action_count > 4096)
+        or (
+            arch == _ti_core.Arch.vulkan
+            and (flattened_dispatch_count > 4096 or encoded_action_count > 4096)
+        )
     ):
         return unavailable("encoded_action_budget_exceeded")
 
@@ -6670,7 +6692,14 @@ def _compile_native_nested_while_runtime_node(
         for manifest in compiled.native_action_manifests
     )
     compiled.nested_expanded_eligible = (
-        encoded_action_count <= 4096 and not compiled.nested_requires_conditional
+        encoded_action_count <= 4096
+        and outer_max_iterations <= 64
+        and len(inners) <= 8
+        and all(
+            inner.max_iterations <= 64 and inner.compound_chunk_limit <= 64
+            for inner in inners
+        )
+        and not compiled.nested_requires_conditional
     )
     eligible = getattr(compiled.compiled_graph, "_cuda_conditional_body_eligible", None)
     compiled.nested_conditional_eligible = bool(eligible and eligible())
@@ -10887,7 +10916,7 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
         return _CUDA_CONTROL_RECIPE_IDS, selected
 
     roots = tuple(node for node in control_nodes if node.control_depth == 1)
-    if len(roots) != 1 or not 2 <= len(control_nodes) <= 9:
+    if len(roots) != 1 or len(control_nodes) < 2:
         return (), ""
     outer = roots[0]
     if (
@@ -10907,7 +10936,7 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
         elif children:
             return (), ""
     inners = tuple(control_nodes[1:])
-    if body_children != inners or not 1 <= len(inners) <= 8:
+    if body_children != inners or not inners:
         return (), ""
     if any(
         not isinstance(inner, _CompiledWhileGraphNode)

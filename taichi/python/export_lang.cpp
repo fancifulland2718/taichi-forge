@@ -5990,7 +5990,7 @@ void export_lang(py::module &m) {
     Ndarray *outer_status{nullptr};
     std::vector<aot::CompiledGraphNestedInnerControl> inner_controls;
     std::size_t outer_condition_dispatch_count{0};
-    int outer_max_iterations{0};
+    std::int64_t outer_max_iterations{0};
     bool allow_device_update{true};
     aot::CompiledGraphNestedCudaRoute route{
         aot::CompiledGraphNestedCudaRoute::automatic};
@@ -6004,9 +6004,8 @@ void export_lang(py::module &m) {
                                         const py::sequence &statuses,
                                         const py::object &chunk_sizes) {
     const py::ssize_t count = py::len(predicates);
-    TI_ERROR_IF(count == 0 || count > 8,
-                "Nested Graph execution requires between one and eight "
-                "ordered inner regions");
+    TI_ERROR_IF(count == 0,
+                "Nested Graph execution requires ordered inner regions");
     TI_ERROR_IF(py::len(counters) != count || py::len(boundaries) != count ||
                     py::len(max_iterations) != count ||
                     py::len(statuses) != count,
@@ -6036,7 +6035,7 @@ void export_lang(py::module &m) {
            boundary[0].cast<std::size_t>(),
            boundary[1].cast<std::size_t>(),
            boundary[2].cast<std::size_t>(),
-           max_iterations[i].cast<int>(),
+           max_iterations[i].cast<std::int64_t>(),
            chunk_sizes.is_none() ? 1 : chunks[i].cast<int>()});
     }
     return controls;
@@ -7298,7 +7297,7 @@ void export_lang(py::module &m) {
               const py::sequence &inner_counters,
               std::size_t outer_condition_dispatch_count,
               const py::sequence &inner_boundaries,
-              int outer_max_iterations,
+              std::int64_t outer_max_iterations,
               const py::sequence &inner_max_iterations,
               Ndarray *outer_status, const py::sequence &inner_statuses,
               bool allow_device_update, const std::string &execution_route) {
