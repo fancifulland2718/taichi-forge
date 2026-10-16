@@ -1344,14 +1344,18 @@ prepare 才能重试，失败因子不可复用。GPU 条件体仍要求 capture
 已测仅分析的种子、活值更新、双绑定、部分失败及恢复、独立/借用退休、真实后续
 `kernel.grad` 与显式对称 RHS 伴随；不增加 provider 自动求导或普通 cuDSS 的 GPU 循环资格。
 
-Graph-owned cuDSS 组也可放入 CUDA `Sequential` 循环体，并随已选单层 conditional
+Graph-owned cuDSS 组也可放入 CUDA `Sequential` 循环体，并随已选单层或嵌套 conditional
 循环自动导出。公共捕获协议要求显式声明条件体资格，其他 provider 命令默认仍不具备
 该资格。每组保留已准备的种子因子和固定阶段：`solve` 保持因子，更新组先执行数值
 阶段再求解全部 RHS；零轮不破坏资源的就绪状态。捕获参数存储冻结并保留到图退休，
 JIT 分配绑定变化时使用匹配的捕获，不能只修补 kernel 参数。Windows CUDA 已验证
 三种阶段、多 RHS、动态数值、零轮/提前结束/预算耗尽、交替绑定和逆序显式伴随。
-独立及借用 AOT 消费还覆盖显式嵌套执行计划、关闭和 reset 退休。这不表示全部嵌套
-JIT recipe 均已具备资格，也不将整个 JIT provider step 合并为一次提交。
+嵌套 JIT 构建为这些组选择具备资格的 conditional 路线；仅支持 kernel 的展开路线在
+准备前拒绝 provider 命令。AOT 导出将物理 dispatch 边界映射为持久操作边界，一个
+recording 导出多项操作时仍完整保留在原循环区域。Windows CUDA 小型验收覆盖嵌套
+`solve`/`refactor_solve`、双 RHS、变化的限制与绑定、终端计数、JIT 显式伴随，以及
+独立/借用 AOT 中真实后续 `kernel.grad` 和逆序求解，还覆盖关闭和 reset 退休。
+这不表示全部嵌套 provider recipe 均已具备资格，也不将整个 JIT provider step 合并为一次提交。
 
 CUDA cuTENSOR 重建复用既有 provider C ABI 与同一原生操作/资源注册表。选择可选
 cuTENSOR SDK adapter，并按上文配置兼容的外部厂商库。以下例子通过命名计划执行

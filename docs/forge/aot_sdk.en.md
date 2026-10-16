@@ -1735,7 +1735,7 @@ borrowed retirement, real downstream `kernel.grad` and explicit symmetric RHS
 adjoints. This does not add provider autodiff or ordinary cuDSS inside GPU loops.
 
 Graph-owned cuDSS groups can also be appended to a CUDA `Sequential` loop body
-and exported from a selected flat conditional loop. The common capture protocol
+and exported from selected flat or nested conditional loops. The common capture protocol
 requires explicit conditional-body qualification; other provider commands remain
 unqualified by default. Each group has ready seed factors and a frozen phase:
 `solve` retains them, while an update group performs its numerical phase before
@@ -1744,9 +1744,15 @@ storage is frozen and retained until the graph retires; changed JIT allocation
 bindings require a matching capture instead of patching only kernel arguments.
 Windows CUDA checks cover all three phases, multiple RHS, changing values,
 zero/early/budget exits, alternating bindings and explicit reverse-order adjoint
-solves. Standalone and borrowed AOT consumers also cover an explicit nested
-execution plan and close/reset retirement. This does not qualify every nested
-JIT recipe or fuse the entire JIT provider step into one submission.
+solves. Nested JIT construction selects the qualified conditional route for these
+groups; expanded kernel-only routes reject provider commands before preparation.
+AOT export translates physical dispatch boundaries to portable operation boundaries,
+so a recording that emits multiple operations stays in its original loop region.
+Small Windows CUDA tests cover nested `solve`/`refactor_solve`, two RHS, changing
+limits and bindings, terminal counters, explicit JIT adjoints, and real downstream
+`kernel.grad` followed by reverse-order solves in standalone and borrowed AOT
+consumers. They also cover close/reset retirement. This does not qualify every
+nested provider recipe or fuse the entire JIT provider step into one submission.
 
 CUDA cuTENSOR reconstruction uses the existing provider C ABI and the same
 native operation/resource registry. Select the optional cuTENSOR SDK adapter and

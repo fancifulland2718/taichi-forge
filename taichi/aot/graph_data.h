@@ -851,6 +851,8 @@ struct TI_DLL_EXPORT CompiledGraph {
   bool has_indirect_dispatches() const;
   bool has_dispatch_labels() const;
   bool has_cuda_capture_commands() const;
+  bool cuda_conditional_body_eligible() const;
+  bool cuda_expanded_control_eligible() const;
   bool cuda_capture_commands_require_exact_bindings() const;
 
   void run(const std::unordered_map<std::string, IValue> &args) const;

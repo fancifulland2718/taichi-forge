@@ -6,6 +6,58 @@
 
 namespace taichi::lang::aot {
 
+namespace {
+class ControlCapture final : public CudaGraphCaptureCommand {
+ public:
+  explicit ControlCapture(bool qualified) : qualified_(qualified) {
+  }
+  const char *kind() const override {
+    return "control_qualification_test";
+  }
+  Program *program() const override {
+    return nullptr;
+  }
+  bool supports(const std::unordered_map<std::string, IValue> &,
+                Program &) const override {
+    return false;
+  }
+  void prepare(const std::unordered_map<std::string, IValue> &,
+               Program &) override {
+    ADD_FAILURE() << "Eligibility must not prepare a provider";
+  }
+  void record(const std::unordered_map<std::string, IValue> &,
+              Program &,
+              void *) override {
+    ADD_FAILURE() << "Eligibility must not record a provider";
+  }
+  bool supports_conditional_body() const override {
+    return qualified_;
+  }
+
+ private:
+  bool qualified_;
+};
+}  // namespace
+
+TEST(GraphControlEligibilityTest, RequiresExplicitProviderQualification) {
+  CompiledGraph graph;
+  graph.dispatches.emplace_back();
+  EXPECT_FALSE(graph.cuda_conditional_body_eligible());
+  EXPECT_FALSE(graph.cuda_expanded_control_eligible());
+  auto &dispatch = graph.dispatches.front();
+  dispatch.cuda_capture_command = std::make_shared<ControlCapture>(false);
+  EXPECT_FALSE(graph.cuda_conditional_body_eligible());
+  EXPECT_FALSE(graph.cuda_expanded_control_eligible());
+  dispatch.cuda_capture_command = std::make_shared<ControlCapture>(true);
+  EXPECT_TRUE(graph.cuda_conditional_body_eligible());
+  EXPECT_FALSE(graph.cuda_expanded_control_eligible());
+  dispatch.cuda_bounded_dispatch.emplace();
+  EXPECT_FALSE(graph.cuda_conditional_body_eligible());
+  dispatch.cuda_bounded_dispatch.reset();
+  graph.dispatches.emplace_back();
+  EXPECT_FALSE(graph.cuda_conditional_body_eligible());
+}
+
 TEST(GraphReplayIdentityTest, TokenChangesWhenHostAddressIsReused) {
   alignas(CompiledGraphReplayIdentity)
       std::byte storage[sizeof(CompiledGraphReplayIdentity)];

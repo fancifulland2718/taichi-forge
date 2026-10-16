@@ -902,6 +902,25 @@ bool CompiledGraph::cuda_capture_commands_require_exact_bindings() const {
       });
 }
 
+bool CompiledGraph::cuda_conditional_body_eligible() const {
+  return std::all_of(
+      dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
+        if (dispatch.cuda_bounded_dispatch)
+          return false;
+        return dispatch.cuda_capture_command
+                   ? dispatch.cuda_capture_command->supports_conditional_body()
+                   : dispatch.ti_kernel != nullptr;
+      });
+}
+
+bool CompiledGraph::cuda_expanded_control_eligible() const {
+  return std::all_of(
+      dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
+        return dispatch.ti_kernel && !dispatch.cuda_capture_command &&
+               !dispatch.cuda_bounded_dispatch;
+      });
+}
+
 #if defined(TI_WITH_CUDA)
 namespace {
 
@@ -2192,7 +2211,8 @@ bool patch_cuda_graph_arguments(
     CompiledGraphCudaState &state,
     std::vector<std::vector<uint8_t>> &host_arg_buffers,
     void *stream = nullptr) {
-  if (state.packets.size() != graph.dispatches.size()) {
+  if (state.packets.size() != graph.dispatches.size() ||
+      graph.has_cuda_capture_commands()) {
     return false;
   }
   host_arg_buffers.clear();
@@ -3136,16 +3156,7 @@ bool try_run_cuda_conditional_nested_control_graph(
   if (compile_config.debug || outer_condition_count == 0 ||
       outer_condition_count >= dispatch_count || dispatch_count > 4096 ||
       outer_budget <= 0 || outer_budget > 64 || inners.empty() ||
-      inners.size() > 8 ||
-      std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
-                  [](const auto &dispatch) {
-                    // A provider's ordinary capture permission does not imply
-                    // conditional-body permission. Kernel-backed actions have
-                    // already been lowered to ti_kernel dispatches here.
-                    return !dispatch.ti_kernel ||
-                           dispatch.cuda_capture_command ||
-                           dispatch.cuda_bounded_dispatch.has_value();
-                  })) {
+      inners.size() > 8 || !graph.cuda_conditional_body_eligible()) {
     return unavailable();
   }
   std::vector<DeviceAllocation> predicates;
@@ -3243,6 +3254,7 @@ bool try_run_cuda_conditional_nested_control_graph(
       return false;
     }
     if (topology_matches(*state) && state->graph_exec &&
+        !graph.cuda_capture_commands_require_exact_bindings() &&
         cuda_graph_signatures_are_structurally_compatible(
             state->signature, signature->entries)) {
       std::vector<std::vector<uint8_t>> host_buffers;
@@ -3287,6 +3299,11 @@ bool try_run_cuda_conditional_nested_control_graph(
     void *stream = state->ensure_capture_stream();
     for (std::size_t i = 0; i < dispatch_count; ++i) {
       const auto &dispatch = graph.dispatches[i];
+      if (dispatch.cuda_capture_command) {
+        dispatch.cuda_capture_command->prepare(args, program);
+        state->packets.emplace_back(stream);
+        continue;
+      }
       auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
           &program.get_program_impl()->get_kernel_launcher());
       if (!launcher) {
@@ -3341,9 +3358,15 @@ bool try_run_cuda_conditional_nested_control_graph(
           return builder.capture(
               destination, dependencies, [&](void *capture_stream) {
                 for (std::size_t i = begin; i < end; ++i) {
-                  const auto &packet = state->packets[i];
-                  packet.launcher->capture_cuda_graph_launch(packet.packet,
-                                                             capture_stream);
+                  const auto &dispatch = graph.dispatches[i];
+                  if (dispatch.cuda_capture_command) {
+                    record_cuda_provider_with_resources(dispatch, args, program,
+                                                        capture_stream, *state);
+                  } else {
+                    const auto &packet = state->packets[i];
+                    packet.launcher->capture_cuda_graph_launch(packet.packet,
+                                                               capture_stream);
+                  }
                 }
                 cuda::driver_graph_set_conditional(
                     plan.controls + loop, handles[loop], capture_stream, reset);
@@ -3364,6 +3387,10 @@ bool try_run_cuda_conditional_nested_control_graph(
       cursor = range[2];
     }
     capture_range(outer.body, previous, cursor, dispatch_count, 0, false);
+    // Freeze provider host parameters into graph-owned device storage while
+    // captured node handles are still valid, before conditional instantiation.
+    for (const auto &resource : state->provider_capture_resources)
+      resource->finalize();
     auto error = driver.graph_instantiate_with_flags.call(
         state->graph_exec.put(), parent.get(), 0);
     if (error != CUDA_SUCCESS || !state->graph_exec) {
@@ -3500,7 +3527,8 @@ bool try_run_cuda_device_update_nested_control_graph(
           : (std::numeric_limits<std::size_t>::max)();
   constexpr std::size_t kMaxEncodedDispatches = 4096;
   constexpr std::size_t kMaxPredicateGroups = 4096;
-  if (compile_config.debug || dispatch_count == 0 || !valid_iteration_limits ||
+  if (compile_config.debug || !graph.cuda_expanded_control_eligible() ||
+      dispatch_count == 0 || !valid_iteration_limits ||
       !ordered_boundaries ||
       final_outer_condition_begin >= dispatch_count ||
       encoded_dispatches > kMaxEncodedDispatches ||
@@ -4049,7 +4077,8 @@ bool try_run_cuda_masked_nested_control_graph(
                     (static_dispatches + repeated_dispatches)
           : (std::numeric_limits<std::size_t>::max)();
   constexpr std::size_t kMaxEncodedDispatches = 4096;
-  if (compile_config.debug || dispatch_count == 0 || !valid_iteration_limits ||
+  if (compile_config.debug || !graph.cuda_expanded_control_eligible() ||
+      dispatch_count == 0 || !valid_iteration_limits ||
       !ordered_boundaries ||
       final_outer_condition_begin >= dispatch_count ||
       encoded_dispatches > kMaxEncodedDispatches ||
@@ -4433,14 +4462,7 @@ bool try_run_cuda_bounded_graph(
       predicate.owning_program() != &program) {
     return structural_fallback();
   }
-  if (std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
-                  [](const auto &dispatch) {
-                    if (dispatch.cuda_capture_command)
-                      return !dispatch.cuda_capture_command
-                                  ->supports_conditional_body();
-                    return !dispatch.ti_kernel ||
-                           dispatch.cuda_bounded_dispatch.has_value();
-                  })) {
+  if (!graph.cuda_conditional_body_eligible()) {
     return structural_fallback();
   }
 

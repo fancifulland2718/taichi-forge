@@ -6665,7 +6665,13 @@ def _compile_native_nested_while_runtime_node(
         region_kinds=tuple(region_kinds),
     )
     boundaries = (outer_condition_count, tuple(descriptors))
-    compiled.nested_expanded_eligible = encoded_action_count <= 4096
+    compiled.nested_requires_conditional = any(
+        manifest.execution_kind == "backend_command"
+        for manifest in compiled.native_action_manifests
+    )
+    compiled.nested_expanded_eligible = (
+        encoded_action_count <= 4096 and not compiled.nested_requires_conditional
+    )
     eligible = getattr(compiled.compiled_graph, "_cuda_conditional_body_eligible", None)
     compiled.nested_conditional_eligible = bool(eligible and eligible())
     return compiled, tuple(inners), boundaries, "eligible"
@@ -6907,15 +6913,17 @@ class _CompiledWhileGraphNode:
                         not eligible
                         and not compact
                         and _control_recipe is None
-                        and lowering_mode == "native_required"
+                        and (
+                            lowering_mode == "native_required"
+                            or self._cuda_nested.nested_requires_conditional
+                        )
                         and os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") != "1"
                         and self._cuda_nested.nested_conditional_eligible
                         and capabilities.get("nested_conditional_graph_available", False)
                         and capabilities.get("nested_explicit_route_compiled", False)
                     ):
-                        # The expanded representation's action budget is not a
-                        # limit on a compact conditional program. Preserve the
-                        # requested native execution when that route qualifies.
+                        # Qualified provider commands require the compact route.
+                        # Its body also avoids the expanded route's action budget.
                         self._cuda_nested_control_lowering = _CUDA_NESTED_CONDITIONAL_ROUTE
                         required_conditional = True
                         eligible = True
@@ -6924,6 +6932,8 @@ class _CompiledWhileGraphNode:
                         unavailable_reason = (
                             "conditional_body_unsupported"
                             if compact
+                            else "backend_command_requires_conditional"
+                            if self._cuda_nested.nested_requires_conditional
                             else "encoded_action_budget_exceeded"
                         )
                         if lowering_mode == "native_required":

@@ -7336,14 +7336,8 @@ void export_lang(py::module &m) {
           py::arg("inner_statuses"),
           py::arg("allow_device_update") = true,
           py::arg("execution_route") = "auto")
-      .def("_cuda_conditional_body_eligible", [](const aot::CompiledGraph &self) {
-        return std::all_of(self.dispatches.begin(), self.dispatches.end(),
-                           [](const auto &dispatch) {
-                             return dispatch.ti_kernel &&
-                                    !dispatch.cuda_capture_command &&
-                                    !dispatch.cuda_bounded_dispatch.has_value();
-                           });
-      })
+      .def("_cuda_conditional_body_eligible",
+           &aot::CompiledGraph::cuda_conditional_body_eligible)
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

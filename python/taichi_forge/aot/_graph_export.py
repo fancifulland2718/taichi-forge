@@ -55,11 +55,11 @@ class _ExportContext:
 
         self.retained_arrays = RetainedArrayBindings(module, self)
 
-    def region(self, emit, node):
+    def region(self, emit, node, **kwargs):
         """Collect a selected region without copying its code/resource owners."""
         outer, self.operations = self.operations, []
         try:
-            emit(self, node)
+            emit(self, node, **kwargs)
             return self.operations
         finally:
             self.operations = outer
@@ -513,16 +513,26 @@ def _cuda_nested_while(context, node):
     # The native nested builder owns one flat copy of the selected dispatches.
     # Its boundary table includes initial conditions and body+tail conditions;
     # exporting logical child nodes could discard physical IR or run tests twice.
-    operations = context.region(_node, selected)
+    offsets = []
+    operations = context.region(_node, selected, dispatch_offsets=offsets)
     first_body, boundaries = node._cuda_nested_boundaries
     inners = node._cuda_nested_inner
     if (
-        len(operations) != selected.physical_dispatch_count
-        or any(op["kind"] != "kernel" for op in operations)
-        or not 0 < first_body < len(operations)
+        len(offsets) != selected.physical_dispatch_count + 1
+        or offsets[0] != 0
+        or offsets[-1] != len(operations)
+        or any(left >= right for left, right in zip(offsets, offsets[1:]))
+        or any(op["kind"] not in ("kernel", "native") for op in operations)
+        or not 0 < first_body < selected.physical_dispatch_count
         or len(inners) != len(boundaries)
+        or any(not 0 <= index <= selected.physical_dispatch_count for row in boundaries for index in row)
     ):
         raise TaichiRuntimeError("AOT nested CUDA control lacks complete physical boundaries")
+    # One opaque provider dispatch can expand into several portable operations.
+    # Translate selected physical boundaries, keeping the entire recording in
+    # its original condition/body region rather than slicing by operation count.
+    first_body = offsets[first_body]
+    boundaries = tuple(tuple(offsets[index] for index in row) for row in boundaries)
     body = []
     cursor = first_body
     for inner, (condition_begin, body_begin, end) in zip(inners, boundaries):
@@ -705,7 +715,7 @@ def _parallel(context, node):
     emit(context, range(indices[-1] + 1, len(sources)))
 
 
-def _node(context, node):
+def _node(context, node, *, dispatch_offsets=None):
     from taichi_forge.graph._graph import (
         _CompiledCGraphNode,
         _CompiledNativeGraphNode,
@@ -714,6 +724,8 @@ def _node(context, node):
     )
     from taichi_forge.graph._ir import DispatchNode, SequentialRegion
 
+    if dispatch_offsets is not None and not isinstance(node, _CompiledCGraphNode):
+        raise TaichiRuntimeError("AOT dispatch boundaries require a flat physical Graph")
     if isinstance(node, _CompiledSequentialRegionNode):
         for child in node.nodes:
             _node(context, child)
@@ -746,6 +758,8 @@ def _node(context, node):
         if len(node.recording_dispatches) != node.dispatch_count:
             raise TaichiRuntimeError("AOT execution Graph lacks complete symbolic dispatch metadata")
         if node.parallel_dispatch_groups:
+            if dispatch_offsets is not None:
+                raise TaichiRuntimeError("AOT nested control needs explicit parallel-region boundaries")
             _parallel(context, node)
             return
         dispatches = node.compiled_graph._physical_jit_execution_sources
@@ -754,7 +768,11 @@ def _node(context, node):
         for dispatch in dispatches:
             if dispatch[0] != "dispatch":
                 raise TaichiRuntimeError("AOT kernel sequence contains an unexpected native command")
+            if dispatch_offsets is not None:
+                dispatch_offsets.append(len(context.operations))
             context.kernel(*dispatch[1:])
+        if dispatch_offsets is not None:
+            dispatch_offsets.append(len(context.operations))
         return
     # Native commands are composition barriers. Preserve their retained opaque
     # descriptions, but export kernels from the final physical sequence: source
@@ -783,6 +801,8 @@ def _node(context, node):
     recreated = context.declared_bindings(node.fixed_runtime_args)
     native_count = 0
     for source in sources:
+        if dispatch_offsets is not None:
+            dispatch_offsets.append(len(context.operations))
         if source[0] == "dispatch":
             context.kernel(*source[1:])
         elif source[0] == "native" and source[1] == native_count and native_count < len(natives):
@@ -793,6 +813,8 @@ def _node(context, node):
             native_count += 1
         else:
             raise TaichiRuntimeError("AOT mixed Graph has an invalid physical recording source")
+    if dispatch_offsets is not None:
+        dispatch_offsets.append(len(context.operations))
     if native_count != len(natives):
         raise TaichiRuntimeError("AOT mixed Graph lacks complete native recording coverage")
     for sequence in sequences:
