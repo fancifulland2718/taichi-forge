@@ -4,6 +4,7 @@
 #include "taichi/runtime/native_provider.h"
 #include "taichi/external_runtime/forge_cublaslt_provider.h"
 #include "taichi/external_runtime/forge_cub_source_provider.h"
+#include "taichi/external_runtime/forge_cutlass_source_provider.h"
 #include "tests/native/runtime_provider_stub.h"
 
 #ifdef _WIN32
@@ -325,7 +326,10 @@ TEST(NativeProviderAdapters,
                 TI_TEST_CUBLASLT_PROVIDER_PATH},
         Adapter{{"cub_source", TI_FORGE_CUB_SOURCE_PROVIDER_QUERY_SYMBOL,
                  "source addon C ABI 1"},
-                TI_TEST_CUB_SOURCE_PROVIDER_PATH}}) {
+                TI_TEST_CUB_SOURCE_PROVIDER_PATH},
+        Adapter{{"cutlass_source", TI_FORGE_CUTLASS_SOURCE_PROVIDER_QUERY_SYMBOL,
+                 "source addon C ABI 1"},
+                TI_TEST_CUTLASS_SOURCE_PROVIDER_PATH}}) {
     SCOPED_TRACE(adapter.definition.provider_id);
     auto module = NativeProviderModule::load(adapter.definition, adapter.path);
     EXPECT_EQ(module->info().provider_id, adapter.definition.provider_id);

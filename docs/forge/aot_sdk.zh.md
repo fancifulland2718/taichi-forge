@@ -90,6 +90,14 @@ scan、空段、尾容量、别名、独立/共享绑定、独立/借用退休�
 退出和预算耗尽。下游浮点权重通过真实 `kernel.grad` 检查；整数 scan/sort 本身没有自动
 数值导数。原生操作目录不意味着私有 `CubSourcePlan` 接口也新增了自动导出。
 
+可选 `cutlass_source` 组件把现有 CUTLASS matmul addon C ABI 1 接入同一 provider
+所有权与实际加载二进制身份检查。`forge_cutlass_source_provider.h` 描述 direct 和
+两种 split-K 策略、紧凑 f32 输入、转置、alpha/beta 及 identity/ReLU。workspace 仍由
+调用方持有，计划退休前 adapter 保留 addon。旧 ABI 报告 CUTLASS 版本，但无法查询
+CUDART 版本（报告为零）；部署须保留 addon 的构建 manifest 与依赖合同。Windows
+检查覆盖三种策略、四种转置组合、活值 beta 反馈和失败恢复。这是公共桥接前置，组件
+本身尚不提供已选 recipe 的 AOT 自动导出。adapter SDK 不包含外部 addon 或 CUDA Toolkit。
+
 cuBLASLt 原生计划 API 将 `cutensor` 替换为 `cublaslt`。组件安装
 `forge_cublaslt_provider.h` 及 adapter，不依赖厂商构建头文件或二进制链接。
 API 支持紧凑 f32 matmul、批量与转置输入、alpha/beta 反馈、行主序或等价的转置列主序

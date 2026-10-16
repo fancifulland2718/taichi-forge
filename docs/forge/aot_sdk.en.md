@@ -105,6 +105,18 @@ Actual downstream `kernel.grad` is checked for floating-point weights; integer
 scan/sort itself has no automatic numerical derivative. The native operation
 inventory does not add automatic export to the private `CubSourcePlan` interface.
 
+The optional `cutlass_source` component bridges the existing CUTLASS matmul addon
+C ABI 1 through the same provider owner and loaded-binary identity check. Its
+`forge_cutlass_source_provider.h` describes direct and both split-K strategies,
+compact f32 operands, transpose, alpha/beta and identity/ReLU. Workspace remains
+caller-owned and the adapter retains the addon until plans retire. The old ABI
+reports CUTLASS version but no CUDART version (reported as zero); deployment must
+retain the addon's build manifest and declared dependencies. Windows checks cover
+the three strategies, four transpose combinations, live beta feedback and failure
+recovery. This bridge is a prerequisite; selected-recipe AOT export is not yet
+provided by this component alone. The external addon and CUDA Toolkit are not
+included in the adapter SDK.
+
 For the cuBLASLt native plan API, replace `cutensor` with `cublaslt`. Its component
 installs `forge_cublaslt_provider.h` and the adapter, with no vendor headers or
 vendor binary linkage. The API supports compact f32 matmul, batched and transposed
