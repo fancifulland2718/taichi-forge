@@ -2734,5 +2734,39 @@ for consumer-created two-sphere and three-box MJCF scenes on Windows CPU, CUDA
 and Vulkan, with private source access denied and source/analytic references.
 The installed closure also passes bounded CUDA SAP export and independent AOT
 consumption. This does not qualify the complete GeoPhys public API,
-dependency locks, all solver branches or nonlinear solver gradients; those remain
+all dependency profiles, solver branches or nonlinear solver gradients; those remain
 separate application/deployment work.
+
+For external dependencies, use standard resolution with the qualified producer
+versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
+wheel/extras and its Forge dependencies for the target Python/platform; installed
+version constraints alone are not a complete lock. The following assumes
+`requirements.in` describes that selected deployment and any local wheels are
+made available through pip's normal index or `--find-links` options:
+
+```sh
+python -m pip lock --only-binary=:all: -r requirements.in -o pylock.online.toml
+python -m pip download --only-binary=:all: -r pylock.online.toml -d downloads
+python python/taichi_forge/tools/_wheelhouse.py --lock pylock.online.toml --wheels downloads --output offline
+python -m pip install --no-index -r offline/pylock.toml
+```
+
+The sealer validates the standard pylock model, package/version filenames,
+SHA256 and declared sizes, then copies only the selected wheels and emits
+relative `wheels/` paths. It preserves lock metadata and publishes a new directory
+only after all checks succeed; the input lock/cache remain unchanged. It does
+not resolve versions, install packages, bundle a second runtime or import the
+DSL. Source distributions and build-on-install inputs are excluded from this
+wheel-only delivery path. Move the complete `offline` directory together.
+pip26.2.1's lock/pylock support is experimental; keep the qualified tool version
+and revalidate other Python/platform profiles. See the
+[pip lock contract](https://pip.pypa.io/en/stable/cli/pip_lock/) and
+[standard pylock paths](https://packaging.python.org/en/latest/specifications/pylock-toml/).
+
+Windows CPython3.10 qualification resolves the declared external SDK/Forge
+requirements into 44 wheels (166,914,963B), checks an offline installation, and
+runs both public scenes on CPU/CUDA/Vulkan using those dependencies with the
+staged Forge and installed compiled host. This is an external dependency profile,
+not qualification of complete Forge/SDK wheel installation, every optional extra
+or arbitrary solver/material input. Build tools remain producer-only; external
+libraries remain shared dependencies rather than copies inside the host wheel.

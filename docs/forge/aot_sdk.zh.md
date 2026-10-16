@@ -2099,4 +2099,30 @@ stubs、entry points、别名及CPU/CUDA/Vulkan两种静态尺寸的前向/Tape�
 冻结的481模块GeoPhys闭包已通过安装后的公开scene/runtime调用：Windows CPU、CUDA、
 Vulkan分别创建两个球体和三个箱体的MJCF新场景，拒绝访问内部源码，并对照源码及解析解。
 该安装包也通过小规模CUDA SAP导出和独立AOT消费；这不等于整个GeoPhys
-公开API、依赖锁、所有solver分支或非线性求解器反向已取得资格，后者仍是应用/部署工作。
+公开API、所有依赖配置、solver分支或非线性求解器反向已取得资格，后者仍是应用/部署工作。
+
+外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
+按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
+完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index
+或 `--find-links` 参数提供：
+
+```sh
+python -m pip lock --only-binary=:all: -r requirements.in -o pylock.online.toml
+python -m pip download --only-binary=:all: -r pylock.online.toml -d downloads
+python python/taichi_forge/tools/_wheelhouse.py --lock pylock.online.toml --wheels downloads --output offline
+python -m pip install --no-index -r offline/pylock.toml
+```
+
+封装器验证标准pylock模型、包名/版本与文件名、SHA256和声明大小，仅复制选中的wheel，
+输出相对 `wheels/` 路径并保留锁元数据。全部校验通过才发布新目录，原锁和下载缓存不变。
+它不求解版本、不安装包、不额外打包runtime、不导入DSL；本条纯wheel交付路线不接受
+sdist或安装时构建输入。搬迁时保留整个 `offline` 目录。pip26.2.1的lock/pylock功能
+仍标为实验性，固定已验证工具版本，其他Python/平台需另行验证。参见
+[pip lock合同](https://pip.pypa.io/en/stable/cli/pip_lock/)与
+[标准pylock路径](https://packaging.python.org/en/latest/specifications/pylock-toml/)。
+
+Windows CPython3.10已将SDK/Forge声明的外部依赖解析为44个wheel（166,914,963B），
+通过离线安装，并用这些依赖、独立staging Forge与已安装编译宿主在CPU/CUDA/Vulkan
+运行两个公开小场景。这是外部依赖配置的资格，不代表完整Forge/SDK wheel安装、全部
+extra或任意solver/材质输入均已覆盖。生产工具不进入消费依赖，外部库由环境共用，
+不复制到宿主wheel内部。

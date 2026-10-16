@@ -1,0 +1,6 @@
+# Producer-only standard resolver and pylock artifact sealing tools.
+# Qualified together; none is added to the AOT runtime dependency set.
+pip==26.2.1
+packaging==26.0
+tomli==2.4.1
+tomli-w==1.2.0
