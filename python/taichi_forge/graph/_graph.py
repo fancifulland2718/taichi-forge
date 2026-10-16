@@ -9838,9 +9838,9 @@ def _normalize_parallel_branch_indices(branches, child_count):
         raise TaichiRuntimeError(
             "parallel candidate branches must be an iterable of index iterables"
         ) from exc
-    if not 2 <= len(normalized) <= 4:
+    if len(normalized) < 2:
         raise TaichiRuntimeError(
-            "parallel candidate analysis requires between 2 and 4 branches"
+            "parallel candidate analysis requires at least two branches"
         )
     flat = []
     for branch_index, indices in enumerate(normalized):
@@ -19195,7 +19195,7 @@ class Graph:
     def _parallel_candidate_report(self, branches, args=None):
         """Analyze a possible root-level fork/join without executing it.
 
-        ``branches`` contains two to four ordered, contiguous groups of root
+        ``branches`` contains at least two ordered, contiguous groups of root
         node indices. Supplying ``args`` resolves storage aliases against the
         current runtime; unknown aliases remain fail-closed. This private
         contract is intentionally analysis-only while parallel lowering is

@@ -1080,8 +1080,8 @@ def analyze_parallel_candidate(branches):
     """Conservatively analyze sibling branches without changing execution."""
 
     branches = tuple(branches)
-    if not 2 <= len(branches) <= 4:
-        raise ValueError("parallel candidate requires between 2 and 4 branches")
+    if len(branches) < 2:
+        raise ValueError("parallel candidate requires at least two branches")
     if not all(isinstance(branch, SequentialRegion) for branch in branches):
         raise TypeError("parallel candidate branches must be SequentialRegion values")
 

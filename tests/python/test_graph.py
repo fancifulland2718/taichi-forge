@@ -1561,6 +1561,40 @@ def test_temporary_memory_plan_separates_typed_storage_slots():
     )
 
 
+def test_parallel_candidate_analyzes_every_branch_without_a_software_cap():
+    from taichi_forge.graph._graph import _normalize_parallel_branch_indices
+
+    groups = tuple((index,) for index in range(8))
+    assert _normalize_parallel_branch_indices(groups, 8) == groups
+    with pytest.raises(ti.TaichiRuntimeError, match="at least two"):
+        _normalize_parallel_branch_indices(((0,),), 1)
+
+    def branch(index, resource=None, access=GraphAccess.WRITE):
+        return SequentialRegion(
+            (
+                DispatchNode(
+                    f"branch_{index}",
+                    effects=(ResourceEffect(resource or f"array_{index}", access, runtime_bound=False),),
+                    temporaries=(TemporaryRequirement(f"scratch_{index}", (index + 1) * 16, 16),),
+                    opaque=False,
+                ),
+            )
+        )
+
+    branches = tuple(branch(index) for index in range(8))
+    safe = analyze_parallel_candidate(branches)
+    assert safe.safe and len(safe.branches) == 8
+    assert safe.parallel_peak_bytes == sum(range(1, 9)) * 16
+    assert safe.sequential_fallback_peak_bytes == 8 * 16
+    conflict = analyze_parallel_candidate((*branches[:-1], branch(7, "array_0", GraphAccess.READ)))
+    assert conflict.decision == "rejected"
+    assert len(conflict.conflicts) == 1
+    assert (conflict.conflicts[0].left_branch, conflict.conflicts[0].right_branch) == (0, 7)
+    assert conflict.conflicts[0].dependencies == ("raw",)
+    with pytest.raises(ValueError, match="at least two"):
+        analyze_parallel_candidate(branches[:1])
+
+
 def test_parallel_candidate_analysis_is_fail_closed_and_memory_aware():
     safe = analyze_parallel_candidate(
         (
