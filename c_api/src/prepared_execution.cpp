@@ -649,9 +649,13 @@ static TiPreparedExecution prepare_execution_plan_impl(
               std::get_if<std::shared_ptr<const aot::ExecutionPlan::Branch>>(
                   &operation)) {
         const auto &branch = **value;
-        const bool cpu =
-            branch.lowering == aot::ExecutionPlan::Branch::Lowering::cpu;
-        if (cpu ? !arch_is_cpu(rt.arch) : rt.arch != taichi::Arch::cuda)
+        using Lowering = aot::ExecutionPlan::Branch::Lowering;
+        const bool matches = branch.lowering == Lowering::cpu
+                                 ? arch_is_cpu(rt.arch)
+                             : branch.lowering == Lowering::vulkan_host
+                                 ? rt.arch == taichi::Arch::vulkan
+                                 : rt.arch == taichi::Arch::cuda;
+        if (!matches)
           throw MemoryBindingError(
               "AOT branch requires its declared backend lowering");
         collect_steps(branch.condition);
@@ -956,6 +960,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
         auto bound = std::make_shared<FixedExecution::Branch>();
         bound->selector = control_pointer(branch.selector);
         bound->selection = branch.selection;
+        using Lowering = aot::ExecutionPlan::Branch::Lowering;
+        bound->host_selection = branch.lowering == Lowering::cuda_host ||
+                                branch.lowering == Lowering::vulkan_host;
         if (!bind_steps(branch.condition, bound->condition))
           return false;
         for (const auto &body : branch.bodies) {

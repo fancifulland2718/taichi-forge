@@ -78,7 +78,7 @@ struct ExecutionPlan {
     std::vector<std::vector<Operation>> branches;
   };
   struct Branch {
-    enum class Lowering { cpu, cuda_conditional };
+    enum class Lowering { cpu, cuda_conditional, cuda_host, vulkan_host };
     Lowering lowering{Lowering::cpu};
     std::string selector;
     BranchSelection selection;

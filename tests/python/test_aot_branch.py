@@ -15,7 +15,19 @@ from tests import test_utils
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_aot_persistent_branch_forward_reverse_and_ownership(tmp_path):
-    arch = "cuda" if ti.lang.impl.current_cfg().arch == ti.cuda else "cpu"
+    _persistent_branch(tmp_path, host=False)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_aot_host_branch_forward_reverse_and_ownership(tmp_path):
+    _persistent_branch(tmp_path, host=True)
+
+
+def _persistent_branch(tmp_path, host):
+    arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
+    if arch == "x64" or arch == "arm64":
+        arch = "cpu"
+    route = "cpu" if arch == "cpu" else f"{arch}_host" if host else "cuda_conditional"
 
     @ti.kernel
     def condition(
@@ -52,7 +64,7 @@ def test_aot_persistent_branch_forward_reverse_and_ownership(tmp_path):
             selector="selector",
             selection=selection,
             has_default=fallback,
-            lowering=dict(kind="cpu" if arch == "cpu" else "cuda_conditional", version=1),
+            lowering=dict(kind=route, version=1),
             condition=[dict(kind="kernel", entry="condition", arguments=["choice", "selector", "checks"])],
             bodies=[
                 [
@@ -99,11 +111,13 @@ def test_aot_persistent_branch_forward_reverse_and_ownership(tmp_path):
         [],
     ]
     descriptions["nested"] = nested
+    if host:
+        # Two nested host selections, each with its own condition, share the
+        # persistent staging. GPU-native WHILE cannot contain a host branch.
+        nested["bodies"][0] = [branch("indexed", False), branch("indexed", False)]
     for name, region in descriptions.items():
-        plan = ti.aot.ExecutionPlan(
-            prefix + [region] + suffix, resources=resources, gradients={"x": "dx", "y": "dy"}
-        )
-        assert json.loads(plan.to_json())["version"] == 11
+        plan = ti.aot.ExecutionPlan(prefix + [region] + suffix, resources=resources, gradients={"x": "dx", "y": "dy"})
+        assert json.loads(plan.to_json())["version"] == (12 if host else 11)
         module.add_execution_plan(name, plan)
     artifact = tmp_path / "branch.tcm"
     module.archive(str(artifact))
@@ -125,6 +139,7 @@ def test_aot_persistent_branch_forward_reverse_and_ownership(tmp_path):
                 mode,
                 arch,
                 str(artifact),
+                *(["host"] if host else []),
             ],
             env=os.environ.copy(),
             capture_output=True,
@@ -132,9 +147,7 @@ def test_aot_persistent_branch_forward_reverse_and_ownership(tmp_path):
             timeout=90,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        evidence[mode] = json.loads(
-            next(line[7:] for line in result.stdout.splitlines() if line.startswith("RESULT "))
-        )
+        evidence[mode] = json.loads(next(line[7:] for line in result.stdout.splitlines() if line.startswith("RESULT ")))
     (tmp_path / "branch-costs.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
 
 

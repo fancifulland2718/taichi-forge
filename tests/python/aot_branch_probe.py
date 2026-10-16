@@ -38,14 +38,12 @@ def expect(arrays, name, value, scale=1):
         gain = value + 1 if 0 <= value < 8 else 9 if fallback else 0
     assert struct.unpack("<2i", arrays["state"].read()) == (checks, -77 if gain else value)
     xs = [scale * (i - 8) for i in range(17)]
-    assert list(struct.unpack("<17f", arrays["y"].read())) == (
-        [gain * x * x for x in xs] if gain else [-91] * 17
-    )
+    assert list(struct.unpack("<17f", arrays["y"].read())) == ([gain * x * x for x in xs] if gain else [-91] * 17)
     gradient = list(struct.unpack("<17f", arrays["gradient"].read()))
     assert gradient == [repeats * 2 * gain * x for x in xs], (name, value, gain, gradient)
 
 
-def check(runtime, arch, path):
+def check(runtime, arch, path, host=False):
     start = time.perf_counter()
     module = runtime.load_module(path)
     loaded = time.perf_counter()
@@ -67,9 +65,12 @@ def check(runtime, arch, path):
         assert info["launches"] == 9
         assert (
             info["dispatch_count"]
-            == {"if": 3, "if_else": 5, "switch": 17, "switch_default": 19, "nested": 18}[name]
+            == {"if": 3, "if_else": 5, "switch": 17, "switch_default": 19, "nested": 35 if host else 18}[name]
         )
-        if arch == "cuda":
+        if host:
+            assert info["execution_kind"] == "host_control"
+            assert info["workspace_bytes"] == (4 if arch == "vulkan" else 0)
+        elif arch == "cuda":
             assert info["execution_kind"] == "cuda_graph"
             assert info["workspace_bytes"] == (80 if name == "nested" else 24)
         # Excludes readback of correctness results; completion is one owner wait.
@@ -94,7 +95,7 @@ def check(runtime, arch, path):
             array.close()
 
     if arch == "cuda":
-        stats["provider"] = provider_branch(runtime, module)
+        stats["provider"] = provider_branch(runtime, module, host=host)
 
     first, one = frame(runtime, module, "switch")
     second, two = frame(runtime, module, "switch_default", scale=3)
@@ -113,7 +114,7 @@ def check(runtime, arch, path):
         has_default=False,
         condition=[],
         bodies=[[]],
-        lowering=dict(kind="cpu" if arch == "cpu" else "cuda_conditional", version=1),
+        lowering=dict(kind="cpu" if arch == "cpu" else f"{arch}_host" if host else "cuda_conditional", version=1),
     )
     for dtype, size in (("f32", 1), ("i32", 2)):
         invalid = runtime.ndarray(dtype, size)
@@ -153,7 +154,7 @@ def check(runtime, arch, path):
     return stats
 
 
-def provider_branch(runtime, module):
+def provider_branch(runtime, module, host=False):
     available = runtime.probe_native_operation("gemm_f32")["available"]
     if not available:
         return "cuBLAS unavailable; provider branch not exercised"
@@ -178,13 +179,11 @@ def provider_branch(runtime, module):
         selector="selector",
         selection="nonzero",
         has_default=False,
-        lowering=dict(kind="cuda_conditional", version=1),
+        lowering=dict(kind="cuda_host" if host else "cuda_conditional", version=1),
         condition=[],
         bodies=[[gemm("a", "b", "out"), gemm("out", "b", "adjoint", transpose_b=True)]],
     )
-    plan = aot.ExecutionPlan(
-        [dict(kind="fill32", destination=name, value=0) for name in ("out", "adjoint")] + [branch]
-    )
+    plan = aot.ExecutionPlan([dict(kind="fill32", destination=name, value=0) for name in ("out", "adjoint")] + [branch])
     call = module.prepare_execution(plan, arrays)
     assert struct.unpack("<4f", arrays["out"].read()) == (71,) * 4
     for selected in (0, 1, 0, -1):
@@ -201,13 +200,14 @@ def provider_branch(runtime, module):
 
 
 if __name__ == "__main__":
-    mode, arch, path = sys.argv[1:]
+    mode, arch, path = sys.argv[1:4]
+    host = sys.argv[4:] == ["host"]
     if mode == "borrowed":
         import taichi_forge as ti
 
         ti.init(arch=getattr(ti, arch), offline_cache=False)
         with ti.aot.borrow_runtime() as runtime:
-            stats = check(runtime, arch, path)
+            stats = check(runtime, arch, path, host=host)
             module = runtime.load_module(path)
             arrays, call = frame(runtime, module, "if_else")
             call()
@@ -221,6 +221,6 @@ if __name__ == "__main__":
             call.close()
     else:
         with aot.Runtime(arch) as runtime:
-            stats = check(runtime, arch, path)
+            stats = check(runtime, arch, path, host=host)
         assert "taichi_forge" not in sys.modules
     print("RESULT " + json.dumps(stats, sort_keys=True))

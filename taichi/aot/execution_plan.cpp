@@ -18,7 +18,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 11)
+    if (version < 1 || version > 12)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -73,6 +73,10 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             branch->lowering = Branch::Lowering::cpu;
           else if (route == "cuda_conditional")
             branch->lowering = Branch::Lowering::cuda_conditional;
+          else if (version >= 12 && route == "cuda_host")
+            branch->lowering = Branch::Lowering::cuda_host;
+          else if (version >= 12 && route == "vulkan_host")
+            branch->lowering = Branch::Lowering::vulkan_host;
           else
             throw std::invalid_argument("Unsupported branch lowering");
           const auto &bodies = step["bodies"];

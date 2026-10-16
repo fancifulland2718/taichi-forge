@@ -5,6 +5,23 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, HostBranchesRequireV12AndKeepBackendSelection) {
+  using Lowering = ExecutionPlan::Branch::Lowering;
+  for (const auto &[name, lowering] :
+       {std::pair{"cuda_host", Lowering::cuda_host},
+        std::pair{"vulkan_host", Lowering::vulkan_host}}) {
+    auto source = std::string(R"({"version":12,"operations":[
+      {"kind":"branch","selector":"p","selection":"nonzero",
+       "has_default":false,"condition":[],"bodies":[[]],"lowering":{"kind":")") +
+                  name + R"(","version":1}}]})";
+    const auto plan = ExecutionPlan::parse(source);
+    EXPECT_EQ(std::get<std::shared_ptr<const ExecutionPlan::Branch>>(
+                  plan.operations[0])->lowering, lowering);
+    source.replace(source.find("12"), 2, "11");
+    EXPECT_THROW(ExecutionPlan::parse(source), std::invalid_argument);
+  }
+}
+
 TEST(ExecutionPlan, BranchKeepsEveryPathAndExplicitLowering) {
   const std::string source = R"({"version":11,"operations":[
     {"kind":"branch","selector":"selector","selection":"indexed",

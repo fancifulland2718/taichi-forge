@@ -21,7 +21,9 @@ def _control_version(steps):
     version = 1
     for op in steps:
         if isinstance(op, dict) and op.get("kind") == "branch":
-            version = max(version, 11)
+            lowering = op.get("lowering")
+            host = isinstance(lowering, dict) and lowering.get("kind") in ("cuda_host", "vulkan_host")
+            version = max(version, 12 if host else 11)
             regions = [op.get("condition")]
             if isinstance(op.get("bodies"), list):
                 regions.extend(op["bodies"])
@@ -105,7 +107,7 @@ class ExecutionPlan:
             }
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or not 1 <= value["version"] <= 11:
+        if type(value["version"]) is not int or not 1 <= value["version"] <= 12:
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -271,7 +273,7 @@ class ExecutionPlan:
                     if (
                         not isinstance(lowering, dict)
                         or set(lowering) != {"kind", "version"}
-                        or lowering["kind"] not in ("cpu", "cuda_conditional")
+                        or lowering["kind"] not in ("cpu", "cuda_conditional", "cuda_host", "vulkan_host")
                         or type(lowering["version"]) is not int
                         or lowering["version"] != 1
                     ):

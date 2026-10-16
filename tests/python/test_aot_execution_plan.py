@@ -26,7 +26,7 @@ def test_branch_snapshot_closes_all_paths_and_requires_explicit_lowering():
     assert plan.kernel_entries == ("condition", "forward")
     assert plan.argument_names == tuple(sorted(["input", "y", "dy"] + [f"x{i}" for i in range(8)]))
     assert "selector" in plan._replay_argument_names
-    for version in (10, 12):
+    for version in (10, 13):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(snapshot, version=version)))
     for change in (
@@ -52,6 +52,27 @@ def test_branch_snapshot_closes_all_paths_and_requires_explicit_lowering():
         ExecutionPlan([missing])
     branch["bodies"].clear()
     assert json.loads(plan.to_json()) == snapshot
+
+
+@pytest.mark.parametrize("route", ["cuda_host", "vulkan_host"])
+def test_host_branch_requires_v12_and_preserves_selected_backend(route):
+    branch = dict(
+        kind="branch",
+        selector="selector",
+        selection="nonzero",
+        has_default=False,
+        condition=[],
+        bodies=[[]],
+        lowering=dict(kind=route, version=1),
+    )
+    plan = ExecutionPlan([branch])
+    snapshot = json.loads(plan.to_json())
+    assert snapshot["version"] == 12
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 12"):
+        ExecutionPlan.from_json(json.dumps(dict(snapshot, version=11)))
+    nested = dict(branch, lowering=dict(kind="cpu", version=1), bodies=[[branch]])
+    assert json.loads(ExecutionPlan([nested]).to_json())["version"] == 12
 
 
 def test_cuda_parallel_preserves_branches_bindings_and_version():
@@ -778,6 +799,7 @@ def test_host_blob_data_closure_and_cost_are_independent_of_arrays():
             [dict(kind="copy", source="a", destination="out")],
             resources=[blobs[0], dict(kind="ndarray", name="a", dtype="f32", shape=[dict(array="code", axis=0)])],
         )
+
 
 def test_initial_data_tracks_only_materialized_array_closure():
     key = "a" * 64
