@@ -33,7 +33,6 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.linalg._packing_kernels import TILED_PACKING_IMPLEMENTATION
 from taichi_forge.types.primitive_types import f32
 
-
 _SCHEMA = "taichi_forge.contraction_preparation.v1"
 _POLICY = "vendor_default_no_jit_or_autotune"
 
@@ -428,6 +427,41 @@ class _ContractionRecording(CutensorCaptureRecording):
             _validate_array(value, tuple(shape), semantics[name])
         if values[3] is values[0] or values[3] is values[1]:
             raise TaichiRuntimeError("Contraction output must not alias A or B")
+
+    def _export_aot(self, context):
+        semantics = self._public_semantics
+        names = tuple(semantics[key] for key in ("a", "b", "c", "output"))
+        shapes = tuple(
+            semantics[key]["shape"] for key in ("a_tensor", "b_tensor", "out", "out")
+        )
+        for name, shape in zip(names, shapes):
+            context.binding_constraints.append(
+                dict(
+                    kind="array_layout",
+                    array=context.binding(name),
+                    exact_shape=list(shape),
+                    element_shape=[],
+                    dtype="f32",
+                    record_bytes=4,
+                    alignment=4,
+                )
+            )
+        for name in names[:2]:
+            context.binding_constraints.append(
+                dict(
+                    kind="disjoint",
+                    left=context.binding(names[3]),
+                    right=context.binding(name),
+                )
+            )
+        # The physical sequence already includes packing and any separate
+        # epilogue. Preserve its public contract even when the vendor node
+        # only sees private arrays, including legal C/output aliasing.
+        recreated = super()._export_aot(
+            context, expected_workspace_bytes=self.plan.workspace_required_bytes
+        )
+        context.reconstructed_binding_validators.add(id(self))
+        return recreated
 
 
 class ContractionOperation(NativeGraphNode):

@@ -202,7 +202,7 @@ class CutensorCaptureRecording(BackendCommandRecording):
             for i, name in enumerate(self.binding_names)
         )
 
-    def _export_aot(self, context):
+    def _export_aot(self, context, *, expected_workspace_bytes=None):
         plan = self.plan
         if type(plan) is not CutensorContractionPlan:
             raise TaichiRuntimeError(
@@ -220,6 +220,8 @@ class CutensorCaptureRecording(BackendCommandRecording):
                 workspace_preference=plan._workspace_preference,
                 workspace_limit_bytes=plan._workspace_limit_bytes,
             )
+            if expected_workspace_bytes is not None:
+                parameters["expected_workspace_bytes"] = expected_workspace_bytes
             resource = context.resource(
                 plan, "cutensor", "contraction_plan_f32", parameters=parameters
             )

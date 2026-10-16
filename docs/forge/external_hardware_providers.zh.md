@@ -1159,9 +1159,10 @@ close 会明确拒绝；应先释放 Graph、builder、definition 和 recording�
 runtime reset 会在 CUDA Program finalize 前释放这些资源。capture 不执行数学运算，
 不会提前推进 `beta*C` 反馈。C/D 仅在 layout/modes 相同时可以共享存储，D 不得 alias A/B。
 shape、dtype 和存储合法性在 bind/capture 边界确定，不在 steady replay 扫描。
-此固定 recording 也可组合 immutable binding frames；不提供独立 `recording.execute()`、
-nested sequential 或 AOT recording。这个执行入口本身不开放 contraction 策略搜索，
-也不改变普通自动选择。
+此固定 recording 也可组合 immutable binding frames；不提供独立 `recording.execute()`
+或任意 nested sequential 组合。固定 recording 与普通编译/已选 `record_contraction`
+Graph 支持AOT导出，保留打包、epilogue 和公开绑定约束，见[AOT SDK 合同](aot_sdk.zh.md)。
+固定执行入口本身不开放 contraction 策略搜索，也不改变普通自动选择。
 
 完整 contraction 搜索使用语义入口，不把固定 expert plan 当作搜索轴：
 

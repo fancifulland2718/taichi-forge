@@ -1375,6 +1375,14 @@ plan = ExecutionPlan([{
 workspace；算法无法支持的设置由 provider 明确拒绝。沿用 adapter 既有 rank 限制，
 Forge 不新增更低的人为上限。
 
+普通编译与已选 `ti.linalg.record_contraction` Graph 可通过 `Module.add_execution_plan`
+导出，保留实际输入打包、vendor/独立 alpha-beta epilogue、ReLU kernel 和私有中间数组。
+即使厂商算子读取打包数组，原始公开绑定的形状、类型和输出/输入不重叠约束仍然有效；
+C/output 完全同址仍然合法。已选 recipe 写入版本1可选参数 `expected_workspace_bytes`，
+包括零；消费端重建的工作区大小不同会在分配 scratch 或执行前报错。这里保留的是数据流
+与厂商计划请求，不是可移植的厂商 kernel 二进制，也不重复 Forge 策略搜索。
+旧 reader 会明确拒绝此未知参数。
+
 准备创建厂商计划和 scratch，再将收缩与周围 AOT kernel 捕获为一个 CUDA Graph；
 不执行收缩、不改写输出。重放不查询 provider、不创建计划。计划持有 provider runtime、
 adapter 和厂商库，直至依赖命令退休。已知 scratch 只计入一次
@@ -1383,8 +1391,10 @@ CUDA provider 操作的能力。
 
 Windows CUDA/cuTENSOR 2.7 已验证无 DSL 的独立消费端和借用 JIT owner、前向收缩、
 导出的能量/反向 kernel 配合显式收缩伴随、输出置换、C/D 原址重合、独立帧、非法
-绑定回滚、重配置和在途 close/reset。这不提供 cuTENSOR 调用的自动求导、任意 JIT
-recording 导出，也不代表所有 tensor 拓扑和设备均已验证。
+绑定回滚、重配置和在途 close/reset。已选 f32 矩阵/批次夹具还验证了打包与独立
+epilogue、公开绑定拒绝和工作区漂移拒绝；其厂商工作区均为零，非零工作区的设备
+资格另行记录。这不提供 cuTENSOR 调用的自动求导、任意控制/provider 组合，
+也不代表所有 tensor 拓扑和设备均已验证。
 
 CUDA cuSPARSELt 使用同一配置与资源链路。安装其可选 SDK adapter 后调用
 `runtime.configure_provider("cusparselt", ...)`。版本 1 的

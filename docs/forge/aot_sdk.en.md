@@ -1772,6 +1772,17 @@ workspace estimate; a positive value caps the requested plan workspace. The
 provider may reject a configuration its algorithms cannot support. The adapter's
 existing rank limit also applies; Forge adds no lower arbitrary limit.
 
+Ordinarily compiled and selected `ti.linalg.record_contraction` Graphs export
+through `Module.add_execution_plan`. Export preserves physical input packing,
+vendor/separate alpha-beta epilogues, ReLU kernels and private intermediates.
+Public shape/type and output/input disjointness constraints remain enforced even
+when the vendor reads packed arrays; identical C/output bindings remain legal.
+Selected recipes include the optional version-1 `expected_workspace_bytes`
+parameter, including zero. Preparation rejects a different reconstructed workspace
+size before allocating scratch or executing the plan. This preserves the declared
+dataflow and vendor plan request, not a portable vendor kernel binary; it does not
+repeat Forge strategy search. Older readers reject this unknown parameter.
+
 Preparation creates the vendor plan and scratch, then captures contractions with
 the surrounding AOT kernels into one CUDA Graph. It does not execute the
 contraction or mutate its outputs. Replays perform no provider lookup or plan
@@ -1785,7 +1796,11 @@ borrowed JIT owners, forward contraction, exported energy/reverse kernels with
 explicit contraction adjoints, output permutation, exact C/D aliasing,
 independent frames, invalid-binding rollback, reconfiguration and in-flight
 close/reset. This does not provide automatic differentiation of cuTENSOR calls,
-arbitrary JIT recording export, or qualification of every tensor topology/device.
+arbitrary control/provider combinations, or qualification of every tensor
+topology/device. Selected f32 matrix/batched fixtures additionally cover packed
+and separate epilogues, public-binding rejection and workspace-drift rejection;
+their vendor workspace is zero, so nonzero-workspace device qualification remains
+separate.
 
 CUDA cuSPARSELt uses the same configuration and resource path. Install its optional
 SDK adapter and call `runtime.configure_provider("cusparselt", ...)`. A version 1

@@ -1461,9 +1461,12 @@ execute the contraction; it does not advance `beta*C` feedback. C/D may share
 storage only with identical layouts/modes, and D must not alias A/B. Shape,
 dtype and storage legality are resolved at binding/capture, not scanned during
 steady replay. The fixed recording also composes with immutable binding frames.
-No standalone `recording.execute()` or nested sequential/AOT recording is
-provided. This execution route does not itself expose contraction strategy
-search or change automatic selection.
+Standalone `recording.execute()` and arbitrary nested sequential combinations
+are not provided. Fixed recordings and ordinarily compiled/selected
+`record_contraction` Graphs support AOT export with packing, epilogues and public
+binding constraints preserved; see the [AOT SDK contract](aot_sdk.en.md).
+The fixed execution route does not itself expose contraction strategy search
+or change automatic selection.
 
 For complete contraction search, use the semantic entry rather than a fixed
 expert plan:

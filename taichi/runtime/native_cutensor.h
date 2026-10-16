@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang {
@@ -18,6 +19,7 @@ struct CutensorPlanDescription {
   uint32_t compute_mode{0};
   uint32_t workspace_preference{2};
   uint64_t workspace_limit_bytes{0};
+  std::optional<uint64_t> expected_workspace_bytes;
 };
 
 class CutensorPlanResource : public NativeResource {

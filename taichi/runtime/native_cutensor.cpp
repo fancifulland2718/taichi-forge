@@ -161,6 +161,9 @@ class CudaCutensorPlan final : public CutensorPlanResource {
       throw std::runtime_error(
           "cuTENSOR returned an invalid plan or workspace size");
     workspace_bytes_ = static_cast<std::size_t>(info.workspace_required_bytes);
+    if (description_.expected_workspace_bytes &&
+        workspace_bytes_ != *description_.expected_workspace_bytes)
+      throw std::runtime_error("cuTENSOR restored plan workspace drifted");
     if (workspace_bytes_) {
       auto allocation = device_.allocate_memory_unique({workspace_bytes_});
       if (allocation.second != RhiResult::success)
@@ -311,7 +314,8 @@ void register_cutensor_operations(NativeOperationRegistry &registry) {
         using namespace operation_json;
         fields(parameters,
                {"a", "b", "c", "d", "compute_mode", "alignment_bytes",
-                "workspace_preference", "workspace_limit_bytes"});
+                "workspace_preference", "workspace_limit_bytes",
+                "expected_workspace_bytes"});
         CutensorPlanDescription result;
         const std::array<const char *, 4> names{"a", "b", "c", "d"};
         for (std::size_t i = 0; i < names.size(); ++i) {
@@ -340,6 +344,8 @@ void register_cutensor_operations(NativeOperationRegistry &registry) {
         result.alignment_bytes = static_cast<uint32_t>(alignment);
         result.workspace_limit_bytes =
             optional_integer(parameters, "workspace_limit_bytes").value_or(0);
+        result.expected_workspace_bytes =
+            optional_integer(parameters, "expected_workspace_bytes");
         auto option = [&](const char *key, const char *fallback) {
           const auto found = parameters.obj.inner.find(key);
           return found == parameters.obj.inner.end() ? std::string(fallback)

@@ -754,6 +754,19 @@ TEST(NativeOperationRegistry, CutensorDescriptionsValidateWithoutLoadingCode) {
   const auto &registry = native_operation_registry();
   EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
   EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  for (const auto *value : {"0", "256"}) {
+    auto frozen = description;
+    frozen.parameters.obj.inner["expected_workspace_bytes"] =
+        liong::json::parse_complete(value);
+    EXPECT_NO_THROW(registry.decode(frozen, NativeObjectKind::resource));
+  }
+  for (const auto *value : {"-1", "1.0", "true", "null", "\"256\""}) {
+    auto invalid = description;
+    invalid.parameters.obj.inner["expected_workspace_bytes"] =
+        liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
   for (const auto *tensor :
        {R"({"shape":[],"modes":[]})", R"({"shape":[0,3],"modes":[0,2]})",
         R"({"shape":[2,3],"modes":[0,0]})",
