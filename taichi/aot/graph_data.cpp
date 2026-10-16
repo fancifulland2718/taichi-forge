@@ -2135,6 +2135,28 @@ void record_cuda_provider_with_resources(
   retain();
 }
 
+void capture_cuda_conditional_range(
+    const CompiledGraph &graph,
+    CompiledGraphCudaState &state,
+    const std::unordered_map<std::string, IValue> &args,
+    Program &program,
+    std::size_t begin,
+    std::size_t end,
+    void *stream) {
+  TI_ASSERT(begin <= end && end <= graph.dispatches.size());
+  TI_ASSERT(state.packets.size() == graph.dispatches.size());
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto &dispatch = graph.dispatches[i];
+    if (dispatch.cuda_capture_command) {
+      record_cuda_provider_with_resources(dispatch, args, program, stream,
+                                          state);
+    } else {
+      const auto &packet = state.packets[i];
+      packet.launcher->capture_cuda_graph_launch(packet.packet, stream);
+    }
+  }
+}
+
 std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
                                          CompiledGraphCudaState &state,
                                          void *capture_stream,
@@ -3352,17 +3374,8 @@ bool try_run_cuda_conditional_nested_control_graph(
             std::size_t begin, std::size_t end, std::size_t loop, bool reset) {
           return builder.capture(
               destination, dependencies, [&](void *capture_stream) {
-                for (std::size_t i = begin; i < end; ++i) {
-                  const auto &dispatch = graph.dispatches[i];
-                  if (dispatch.cuda_capture_command) {
-                    record_cuda_provider_with_resources(dispatch, args, program,
-                                                        capture_stream, *state);
-                  } else {
-                    const auto &packet = state->packets[i];
-                    packet.launcher->capture_cuda_graph_launch(packet.packet,
-                                                               capture_stream);
-                  }
-                }
+                capture_cuda_conditional_range(graph, *state, args, program,
+                                               begin, end, capture_stream);
                 cuda::driver_graph_set_conditional(
                     plan.controls + loop, handles[loop], capture_stream, reset);
               });
@@ -4706,16 +4719,8 @@ bool try_run_cuda_bounded_graph(
     cuda::GraphRegionBuilder builder(parent_graph.get(), capture_stream);
     conditional_handle = builder.conditional_handle();
     auto record_range = [&](std::size_t begin, std::size_t end, void *stream) {
-      for (std::size_t i = begin; i < end; ++i) {
-        const auto &dispatch = graph.dispatches[i];
-        if (dispatch.cuda_capture_command) {
-          record_cuda_provider_with_resources(dispatch, args, program, stream,
-                                              *state);
-        } else {
-          const auto &packet = state->packets[i];
-          packet.launcher->capture_cuda_graph_launch(packet.packet, stream);
-        }
-      }
+      capture_cuda_conditional_range(graph, *state, args, program, begin, end,
+                                     stream);
     };
     auto dependencies =
         builder.capture(parent_graph.get(), {}, [&](void *stream) {
@@ -4823,6 +4828,9 @@ bool try_run_cuda_conditional_graph(
       selector.owning_program() != &program) {
     return structural_fallback();
   }
+  if (!graph.cuda_conditional_body_eligible()) {
+    return structural_fallback();
+  }
 
   const DeviceAllocation selector_allocation = selector.get_device_allocation();
   auto *selector_device = dynamic_cast<cuda::CudaDevice *>(
@@ -4835,7 +4843,8 @@ bool try_run_cuda_conditional_graph(
       driver.stream_begin_capture_to_graph.available() &&
       driver.stream_end_capture.available() && driver.graph_create.available() &&
       driver.graph_conditional_handle_create.available() &&
-      driver.graph_add_node.available() && driver.graph_get_nodes.available() &&
+      driver.graph_add_node.available() &&
+      driver.stream_get_capture_info_v2.available() &&
       driver.graph_instantiate_with_flags.available() &&
       driver.graph_launch.available() && driver.graph_destroy.available() &&
       driver.graph_exec_destroy.available();
@@ -4958,6 +4967,7 @@ bool try_run_cuda_conditional_graph(
     return false;
   }
   const bool structurally_compatible =
+      !graph.cuda_capture_commands_require_exact_bindings() &&
       topology_matches && state->graph_exec &&
       cuda_graph_signatures_are_structurally_compatible(
           state->signature, signature->entries);
@@ -5005,6 +5015,11 @@ bool try_run_cuda_conditional_graph(
   void *capture_stream = state->ensure_capture_stream();
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     const auto &dispatch = graph.dispatches[i];
+    if (dispatch.cuda_capture_command) {
+      dispatch.cuda_capture_command->prepare(args, program);
+      state->packets.emplace_back(capture_stream);
+      continue;
+    }
     TI_ASSERT(dispatch.ti_kernel);
     auto *prog = dispatch.ti_kernel->program;
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
@@ -5034,7 +5049,7 @@ bool try_run_cuda_conditional_graph(
     state->packets.push_back(std::move(capture_packet));
   }
   state->stats.zero_arg_eligible =
-      !state->packets.empty() &&
+      !graph.has_cuda_capture_commands() && !state->packets.empty() &&
       std::all_of(state->packets.begin(), state->packets.end(),
                   [](const CudaGraphCapturePacket &packet) {
                     return packet.packet.arg_buffer_size == 0 &&
@@ -5073,12 +5088,13 @@ bool try_run_cuda_conditional_graph(
     for (std::size_t branch = 0; branch < branches.bodies.size(); ++branch) {
       builder.capture(branches.bodies[branch], {}, [&](void *stream) {
         const auto packet_end = packet_offset + branch_dispatch_counts[branch];
-        for (; packet_offset < packet_end; ++packet_offset) {
-          const auto &packet = state->packets[packet_offset];
-          packet.launcher->capture_cuda_graph_launch(packet.packet, stream);
-        }
+        capture_cuda_conditional_range(graph, *state, args, program,
+                                       packet_offset, packet_end, stream);
+        packet_offset = packet_end;
       });
     }
+    for (const auto &resource : state->provider_capture_resources)
+      resource->finalize();
   } catch (const cuda::GraphBuildError &error) {
     return handle_cuda_graph_driver_failure(*state, error.code(),
                                             error.stage());
