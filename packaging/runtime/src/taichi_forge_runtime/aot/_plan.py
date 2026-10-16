@@ -7,6 +7,8 @@ import json
 import math
 from pathlib import Path
 
+_MAX_EXECUTION_PLAN_VERSION = 13
+
 
 def _unique_fields(pairs):
     result = {}
@@ -40,6 +42,8 @@ def _control_version(steps):
         if isinstance(op, dict) and op.get("kind") == "while":
             lowering = op.get("lowering")
             selected = 5 if isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested" else 4
+            if isinstance(lowering, dict) and lowering.get("kind") == "cuda_nested_device_update":
+                selected = 13
             version = max(version, selected if "lowering" in op else 3)
             for key in ("condition", "body"):
                 if isinstance(op.get(key), list):
@@ -107,7 +111,7 @@ class ExecutionPlan:
             }
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or not 1 <= value["version"] <= 12:
+        if type(value["version"]) is not int or not 1 <= value["version"] <= _MAX_EXECUTION_PLAN_VERSION:
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -160,8 +164,40 @@ class ExecutionPlan:
         if "initialization" in document and not document["initialization"]:
             raise ValueError("Execution initialization must be a nonempty operation array")
 
+        def validate_cuda_nested(op):
+            lowering = op["lowering"]
+            if (
+                set(lowering) != {"kind", "version", "inners"}
+                or type(lowering["version"]) is not int
+                or lowering["version"] != 1
+                or not op.get("continue_while_nonzero", True)
+            ):
+                raise ValueError("Unsupported CUDA device-update control recipe")
+            if any(item["kind"] != "kernel" or "launch" in item for item in op["condition"] + op["body"]):
+                raise ValueError("CUDA device-update control requires ordinary flat kernel regions")
+            inners = lowering["inners"]
+            cursor = len(op["condition"])
+            count = cursor + len(op["body"])
+            if not isinstance(inners, list) or not inners or not cursor:
+                raise ValueError("Invalid selected CUDA nested control")
+            required = {"predicate", "condition_begin", "body_begin", "end", "max_iterations"}
+            for inner in inners:
+                if not isinstance(inner, dict) or set(inner) != required:
+                    raise ValueError("Invalid CUDA nested control descriptor")
+                _name(inner["predicate"])
+                arguments.add(inner["predicate"])
+                for key in ("condition_begin", "body_begin", "end", "max_iterations"):
+                    if type(inner[key]) is not int or not 0 <= inner[key] <= 0x7FFFFFFFFFFFFFFF:
+                        raise ValueError("Invalid CUDA nested boundary or budget representation")
+                if not cursor <= inner["condition_begin"] < inner["body_begin"] < inner["end"] < count:
+                    raise ValueError("Invalid CUDA nested dispatch boundaries")
+                cursor = inner["end"]
+
         def validate_lowering(op):
             lowering = op["lowering"]
+            if isinstance(lowering, dict) and lowering.get("kind") == "cuda_nested_device_update":
+                validate_cuda_nested(op)
+                return
             nested = isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested"
             required = {"kind", "version", "counter", "inners" if nested else "chunks"}
             if (

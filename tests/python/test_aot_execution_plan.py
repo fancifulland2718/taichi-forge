@@ -3,6 +3,7 @@ import json
 import pytest
 
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
+from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
 def test_branch_snapshot_closes_all_paths_and_requires_explicit_lowering():
@@ -26,7 +27,7 @@ def test_branch_snapshot_closes_all_paths_and_requires_explicit_lowering():
     assert plan.kernel_entries == ("condition", "forward")
     assert plan.argument_names == tuple(sorted(["input", "y", "dy"] + [f"x{i}" for i in range(8)]))
     assert "selector" in plan._replay_argument_names
-    for version in (10, 13):
+    for version in (10, _MAX_EXECUTION_PLAN_VERSION + 1):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(snapshot, version=version)))
     for change in (
@@ -88,7 +89,11 @@ def test_cuda_parallel_preserves_branches_bindings_and_version():
     assert restored.kernel_entries == ("advance", "join")
     branches[0][0]["arguments"].clear()
     assert json.loads(plan.to_json()) == document
-    for version in (8, 12):
+    assert (
+        ExecutionPlan.from_json(json.dumps(dict(document, version=_MAX_EXECUTION_PLAN_VERSION))).to_json()
+        == plan.to_json()
+    )
+    for version in (8, _MAX_EXECUTION_PLAN_VERSION + 1):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
 
@@ -121,7 +126,7 @@ def test_selected_indirect_launch_retains_packet_and_version():
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "grid"}
-    for version in (1, 5, 12):
+    for version in (1, 5, _MAX_EXECUTION_PLAN_VERSION + 1):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for launch in (
@@ -145,7 +150,7 @@ def test_selected_exact_launch_retains_extent_and_version(kind):
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "extent"}
-    for version in (1, 6, 12):
+    for version in (1, 6, _MAX_EXECUTION_PLAN_VERSION + 1):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for patch in (
@@ -173,7 +178,7 @@ def test_selected_adaptive_launch_preserves_policy_and_extent(policy):
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "extent"}
     assert json.loads(restored.to_json())["operations"][0]["launch"] == launch
-    for version in (7, 12):
+    for version in (7, _MAX_EXECUTION_PLAN_VERSION + 1):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
     for patch in (
@@ -346,6 +351,56 @@ def test_selected_vulkan_nested_recipe_closure_and_boundaries():
             end=3 + 3 * i,
         )
         for i in range(9)
+    ]
+    ExecutionPlan([dict(loop, body=[kernel] * 27, lowering=dict(lowering, inners=many))])
+    with pytest.raises(ValueError):
+        ExecutionPlan([dict(loop, body=[kernel] * 27, lowering=dict(lowering, inners=list(reversed(many))))])
+
+
+def test_selected_cuda_nested_static_closure_and_version():
+    kernel = dict(kind="kernel", entry="payload", arguments=["x"])
+    inner = dict(predicate="ip", condition_begin=1, body_begin=2, end=3, max_iterations=1 << 40)
+    lowering = dict(kind="cuda_nested_device_update", version=1, inners=[inner])
+    loop = dict(
+        kind="while", predicate="op", max_iterations=65, condition=[kernel], body=[kernel] * 3, lowering=lowering
+    )
+    plan = ExecutionPlan([loop], resources=[dict(kind="ndarray", name="ip", dtype="i32", shape=[])])
+    assert plan.argument_names == ("op", "x")
+    assert plan._replay_argument_names == {"ip", "op", "x"}
+    document = json.loads(plan.to_json())
+    assert document["version"] == 13
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    for version in (4, 12, _MAX_EXECUTION_PLAN_VERSION + 1):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+    for patch in (
+        dict(condition_begin=0),
+        dict(body_begin=1),
+        dict(end=4),
+        dict(end=True),
+        dict(max_iterations=-1),
+        dict(max_iterations=1 << 63),
+        dict(predicate=""),
+        dict(gate=1234),
+        dict(device_nodes=[1234]),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, lowering=dict(lowering, inners=[dict(inner, **patch)]))])
+    for patch in (dict(condition=[]), dict(continue_while_nonzero=False)):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, **patch)])
+    for patch in (dict(inners=[]), dict(inners=None), dict(version=True), dict(version=2), dict(counter="c")):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, lowering=dict(lowering, **patch))])
+    for body in (
+        [dict(kind="fill32", destination="x", value=0)] * 3,
+        [dict(kernel, launch=dict(kind="cuda_logical_exact", extent="n", capacity=4))] * 3,
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(loop, body=body)])
+    ExecutionPlan([dict(loop, max_iterations=0, lowering=dict(lowering, inners=[dict(inner, max_iterations=0)]))])
+    many = [
+        dict(inner, predicate=f"p{i}", condition_begin=1 + 3 * i, body_begin=2 + 3 * i, end=3 + 3 * i) for i in range(9)
     ]
     ExecutionPlan([dict(loop, body=[kernel] * 27, lowering=dict(lowering, inners=many))])
     with pytest.raises(ValueError):

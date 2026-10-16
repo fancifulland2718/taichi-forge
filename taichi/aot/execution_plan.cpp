@@ -12,13 +12,56 @@
 namespace taichi::lang::aot {
 using namespace execution_json;
 
+namespace {
+void parse_cuda_nested_control(const JsonValue &lowering,
+                               ExecutionPlan::While &loop,
+                               std::set<std::string> &arguments,
+                               std::uint64_t version) {
+  fields(lowering, {"kind", "version", "inners"});
+  if (version < 13 || integer(lowering["version"]) != 1 ||
+      !loop.continue_while_nonzero || !lowering["inners"].is_arr())
+    throw std::invalid_argument(
+        "Selected CUDA device-update control requires version 13 and recipe 1");
+  const auto ordinary = [](const auto &region) {
+    return std::all_of(region.begin(), region.end(), [](const auto &op) {
+      const auto *kernel = std::get_if<ExecutionPlan::Kernel>(&op);
+      return kernel && !kernel->indirect_packet && !kernel->bounded_range;
+    });
+  };
+  if (!ordinary(loop.condition) || !ordinary(loop.body))
+    throw std::invalid_argument(
+        "CUDA device-update control requires ordinary flat kernel regions");
+  loop.cuda_nested.emplace();
+  for (const auto &value : lowering["inners"].arr.inner) {
+    fields(value, {"predicate", "condition_begin", "body_begin", "end",
+                   "max_iterations"});
+    CudaNestedControlRecipe<std::string>::Inner inner;
+    inner.predicate = name(value["predicate"]);
+    arguments.insert(inner.predicate);
+    const auto boundary = [&](const char *key) {
+      const auto index = integer(value[key]);
+      if (index > std::numeric_limits<std::size_t>::max())
+        throw std::invalid_argument("CUDA nested boundary exceeds address space");
+      return static_cast<std::size_t>(index);
+    };
+    inner.condition_begin = boundary("condition_begin");
+    inner.body_begin = boundary("body_begin");
+    inner.end = boundary("end");
+    inner.max_iterations = integer(value["max_iterations"]);
+    loop.cuda_nested->inners.push_back(std::move(inner));
+  }
+  loop.cuda_nested->validate(loop.condition.size(),
+                             loop.condition.size() + loop.body.size());
+}
+}  // namespace
+
 ExecutionPlan ExecutionPlan::parse(const std::string &json) {
   try {
     const auto root = liong::json::parse_complete(json);
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 12)
+    if (version < 1 || version > 13)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -136,6 +179,11 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
                   "Selected control requires execution plan version 4");
             const auto &lowering = found->second;
             const auto kind = name(lowering["kind"]);
+            if (kind == "cuda_nested_device_update") {
+              parse_cuda_nested_control(lowering, *loop, arguments, version);
+              operations.emplace_back(std::move(loop));
+              continue;
+            }
             const bool nested = kind == "vulkan_nested";
             fields(lowering,
                    nested

@@ -389,13 +389,43 @@ region或4096个静态dispatch的软件上限。`structured_control_capabilities
 对于 `native_required` 的 CUDA 嵌套循环，展开式表示超过动作预算时，构建阶段可选择
 已具备资格的紧凑 conditional 路线；runtime 需要提供显式嵌套路线支持。显式 recipe
 和强制 masked 选择仍受尊重，普通 `auto` 的选路不变。
-CUDA 已选 masked/device-update 和 Vulkan 其他专用路线仍需自己的持久执行合同，
-导出会拒绝隐式替换；下文的 kernel-backed
+CUDA 已选 masked/device-update 的 Graph 自动导出和 Vulkan 其他专用路线仍需各自的
+导出合同，拒绝隐式替换；device-update 的显式持久描述见下文。下文的 kernel-backed
 CG/PCG SolvePlan 导出复用这些已选控制路线。需要 host 同步的 CUDA
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
 循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
 规则退休相关执行。CPU/CUDA 小用例验证了嵌套、零轮、提前结束、预算耗尽和显式导出的
 后段梯度；这不表示支持对任意动态循环自动微分。需匹配 private ABI 46。
+
+版本 13 增加显式 `cuda_nested_device_update` lowering（recipe 版本 1）：
+
+```python
+loop = dict(
+    kind="while", predicate="outer_predicate", max_iterations=outer_budget,
+    condition=[outer_initial],
+    body=[inner_initial, inner_payload_and_tail, outer_tail],
+    lowering=dict(kind="cuda_nested_device_update", version=1, inners=[dict(
+        predicate="inner_predicate", condition_begin=1, body_begin=2, end=3,
+        max_iterations=inner_budget,
+    )]),
+)
+plan = ExecutionPlan([*prefix_operations, loop, *suffix_operations])
+```
+
+示例中四个操作均为已导出普通 kernel。边界索引指向 `condition + body` 的静态列表，
+end 不包含在内；尾条件已在物理 body 中，不再自动追加。初始 condition 非空且只执行
+一次，含零预算；多个内层区域按表中顺序执行。预算为非负 int64，描述不设64轮/八区域
+等软件上限；消费期仍检查实际节点表示、驱动能力和可用资源。内外 predicate 必须各自
+绑定单个对齐 i32，包含只被 lowering 引用的资源。payload 内的 provider、bounded/
+indirect launch、任意深度控制不属于这条路线。
+
+prepare 使用普通加载 kernel 重建设备更新控制和节点表，与前后段组成一次 CUDA 根图
+提交；不执行用户计算，不保存生产器设备地址，也不切换为 conditional 或 host 循环。
+每份绑定独立拥有控制存储，在途工作完成后再退休。控制表上传后释放主机副本；包内仅保存
+一次静态代码/操作，消费端命令和控制存储随编码预算增长。小型 Windows CUDA 用例已验证
+两个顺序内循环、零预算、早停/耗尽、实际后段 `kernel.grad`、独立/借用消费、双绑定和
+predicate/module/owner关闭。梯度须显式绑定，不表示对控制流自动微分。需配套v13消费端；
+私有ABI71保持。Graph自动导出及masked载荷仍未开放，默认策略不变。
 
 Vulkan 可导出已选的单层 native 循环，使用版本 4 的 `lowering` 描述：
 

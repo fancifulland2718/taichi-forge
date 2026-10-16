@@ -9,6 +9,7 @@
 #include <vector>
 #include "taichi/aot/execution_resources.h"
 #include "taichi/runtime/branch_selection.h"
+#include "taichi/runtime/cuda_control_recipe.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_description.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
@@ -98,6 +99,7 @@ struct ExecutionPlan {
     std::vector<Operation> condition;
     std::vector<Operation> body;
     std::optional<Vulkan> vulkan;
+    std::optional<CudaNestedControlRecipe<std::string>> cuda_nested;
   };
   struct ArrayLayout {
     std::string array;

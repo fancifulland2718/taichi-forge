@@ -497,9 +497,9 @@ For `native_required` nested CUDA loops, construction can select the qualified
 compact conditional route when the expanded representation exceeds its action
 budget. The runtime must expose explicit nested-route support. Explicit recipe
 and forced-masked choices remain binding; ordinary `auto` selection is unchanged.
-Selected CUDA masked/device-update routes and other specialized Vulkan routes
-still need their own persistent execution contract; export rejects implicit
-replacement. Kernel-backed CG/PCG
+Automatic Graph export of selected CUDA masked/device-update routes and other
+specialized Vulkan routes still need their own export contracts; export rejects
+implicit replacement. Explicit device-update plans are described below. Kernel-backed CG/PCG
 SolvePlan export uses these selected control paths as described below. CUDA operations requiring host synchronization are
 excluded from loop regions; providers with opaque cold facts still require an
 explicit branch/repetition merge contract. Initialization facts established only
@@ -508,6 +508,44 @@ borrowed owner retires dependent executions under the existing rules. Small
 CPU/CUDA cases cover nesting, zero trips, early exit, budget exhaustion and an
 explicitly exported suffix gradient; this does not promise differentiation of
 arbitrary dynamic loops. Matching private ABI 46 components are required.
+
+Version 13 adds explicit `cuda_nested_device_update` lowering (recipe version 1):
+
+```python
+loop = dict(
+    kind="while", predicate="outer_predicate", max_iterations=outer_budget,
+    condition=[outer_initial],
+    body=[inner_initial, inner_payload_and_tail, outer_tail],
+    lowering=dict(kind="cuda_nested_device_update", version=1, inners=[dict(
+        predicate="inner_predicate", condition_begin=1, body_begin=2, end=3,
+        max_iterations=inner_budget,
+    )]),
+)
+plan = ExecutionPlan([*prefix_operations, loop, *suffix_operations])
+```
+
+All four example operations are ordinary exported kernels. Boundaries index the
+static `condition + body` list; `end` is exclusive. Tail conditions are already
+in the physical body and are not appended again. The nonempty initial condition
+runs exactly once, including with a zero budget; inner regions execute in table
+order. Budgets use nonnegative int64 without software caps such as 64 iterations
+or eight regions. Preparation still checks actual node representations, driver
+support and available resources. Each predicate binds one aligned i32 element,
+including resources referenced only by the lowering. Providers, bounded/indirect
+payload launches and arbitrary control depth are outside this route.
+
+Preparation rebuilds device-update control/node tables from ordinary loaded
+kernels, joining the prefix, loops and suffix in one CUDA root graph submission.
+It executes no user computation, persists no producer device addresses, and does
+not switch to conditional or host loops. Each binding owns separate controls and
+retires them after submitted work completes. Host table copies are freed after
+upload. The package stores static code/operations once; consumer command and
+control storage grows with encoded budgets. Small Windows CUDA tests cover two
+ordered inner loops, zero budgets, early exit/exhaustion, an actual suffix
+`kernel.grad`, standalone/borrowed consumption, two bindings and predicate,
+module and owner retirement. Gradients require explicit binding; this does not
+differentiate control flow. A v13 consumer is required; private ABI71 remains.
+Automatic Graph export and masked payloads remain unavailable; defaults are unchanged.
 
 Vulkan exports selected flat native loops with a version 4 `lowering` recipe:
 

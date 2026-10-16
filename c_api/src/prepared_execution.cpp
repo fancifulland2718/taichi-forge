@@ -673,6 +673,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
       if (const auto *loop =
               std::get_if<std::shared_ptr<const aot::ExecutionPlan::While>>(
                   &operation)) {
+        if ((*loop)->cuda_nested && rt.arch != taichi::Arch::cuda)
+          throw MemoryBindingError(
+              "AOT device-update control requires a CUDA runtime");
         if ((rt.arch == taichi::Arch::vulkan) != bool((*loop)->vulkan))
           throw MemoryBindingError(
               "AOT while requires a matching selected Vulkan recipe on "
@@ -991,6 +994,13 @@ static TiPreparedExecution prepare_execution_plan_impl(
         bound->predicate = control_pointer(loop.predicate);
         bound->max_iterations = loop.max_iterations;
         bound->continue_while_nonzero = loop.continue_while_nonzero;
+        if (loop.cuda_nested) {
+          bound->cuda_nested.emplace();
+          for (const auto &source : loop.cuda_nested->inners)
+            bound->cuda_nested->inners.push_back(
+                {control_pointer(source.predicate), source.condition_begin,
+                 source.body_begin, source.end, source.max_iterations});
+        }
         if (loop.vulkan) {
           bound->vulkan.emplace();
           bound->vulkan->recipe = loop.vulkan->recipe;
