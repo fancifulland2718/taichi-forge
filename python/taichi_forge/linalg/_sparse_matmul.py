@@ -150,6 +150,19 @@ class _SparseMatmulRecording(CusparseLtCaptureRecording):
         )
         object.__setattr__(self, "_graph_physical_plan_id", source.physical_id(key))
 
+    def _export_aot(self, context):
+        # Materialization already emits the selected compression/matmul group
+        # and any separate ReLU kernels. Freeze its configuration and storage
+        # costs; the consumer must neither select another algorithm nor prune A.
+        return super()._export_aot(
+            context,
+            expected_resources=(
+                self.plan.compressed_bytes,
+                self.plan.compression_buffer_bytes,
+                self.plan.workspace_bytes,
+            ),
+        )
+
 
 class _FrozenSource(FrozenNativeRecipeSource):
     _graph_binding_frame_capture_safe = (

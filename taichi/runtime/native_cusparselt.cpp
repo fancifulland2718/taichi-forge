@@ -203,14 +203,15 @@ CudaPlan::CudaPlan(Device &device,
   TiForgeCusparseLtMatmulPlanInfo info{};
   info.struct_size = sizeof(info);
   TiForgeRuntimeProviderResult result;
-  if (config.algorithm_id == -1 && !config.relu &&
-      config.split_k == TI_FORGE_CUSPARSELT_ATTRIBUTE_DEFAULT &&
+  TiForgeCusparseLtConfiguredExecutionApi configured{};
+  if (!description_.expected_resources && config.algorithm_id == -1 &&
+      !config.relu && config.split_k == TI_FORGE_CUSPARSELT_ATTRIBUTE_DEFAULT &&
       config.split_k_mode == TI_FORGE_CUSPARSELT_ATTRIBUTE_DEFAULT &&
       config.split_k_buffers == TI_FORGE_CUSPARSELT_ATTRIBUTE_DEFAULT) {
     result = plan_->api.create_matmul_plan(plan_->runtime->handle(), &desc,
                                            &plan_->handle, &info);
   } else {
-    const auto configured =
+    configured =
         plan_->runtime->execution_api<TiForgeCusparseLtConfiguredExecutionApi>(
             TI_FORGE_CUSPARSELT_CONFIG_EXECUTION_ABI_VERSION);
     if (!configured.create_matmul_plan)
@@ -226,6 +227,26 @@ CudaPlan::CudaPlan(Device &device,
         "cuSPARSELt returned an invalid plan or storage size");
   sizes_ = {info.compressed_bytes, info.compression_buffer_bytes,
             info.workspace_bytes};
+  if (description_.expected_resources) {
+    if (!configured.get_configuration)
+      throw NativeProviderError(TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH,
+                                "cuSPARSELt configuration query is missing");
+    TiForgeCusparseLtMatmulConfig actual{};
+    actual.struct_size = sizeof(actual);
+    int32_t algorithm_count = 0;
+    plan_->runtime->check(
+        configured.get_configuration(plan_->handle, &actual, &algorithm_count),
+        "read restored matmul configuration");
+    if (actual.struct_size < sizeof(actual) ||
+        actual.algorithm_id != config.algorithm_id ||
+        actual.relu != config.relu || actual.split_k != config.split_k ||
+        actual.split_k_mode != config.split_k_mode ||
+        actual.split_k_buffers != config.split_k_buffers)
+      throw std::invalid_argument(
+          "cuSPARSELt restored plan configuration drifted");
+    if (sizes_ != *description_.expected_resources)
+      throw std::invalid_argument("cuSPARSELt restored plan resources drifted");
+  }
   for (std::size_t i = 0; i < sizes_.size(); ++i) {
     if (sizes_[i] > std::numeric_limits<std::size_t>::max() - bytes_)
       throw std::runtime_error("cuSPARSELt storage size overflows");
@@ -373,9 +394,9 @@ void register_cusparselt_operations(NativeOperationRegistry &registry) {
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<CusparseLtPlanDescription> {
         using namespace operation_json;
-        fields(parameters,
-               {"m", "n", "k", "alignment_bytes", "algorithm_id", "split_k",
-                "split_k_mode", "split_k_buffers", "relu"});
+        fields(parameters, {"m", "n", "k", "alignment_bytes", "algorithm_id",
+                            "split_k", "split_k_mode", "split_k_buffers",
+                            "relu", "expected_resources"});
         CusparseLtPlanDescription result;
         result.m = static_cast<int64_t>(integer(parameters["m"]));
         result.n = static_cast<int64_t>(integer(parameters["n"]));
@@ -404,6 +425,17 @@ void register_cusparselt_operations(NativeOperationRegistry &registry) {
         config.split_k_buffers =
             option("split_k_buffers", config.split_k_buffers);
         config.relu = optional_bool(parameters, "relu");
+        const auto expected = parameters.obj.inner.find("expected_resources");
+        if (expected != parameters.obj.inner.end()) {
+          if (!expected->second.is_arr() ||
+              expected->second.arr.inner.size() != 3)
+            throw std::invalid_argument(
+                "cuSPARSELt expected resources need three byte sizes");
+          std::array<uint64_t, 3> sizes;
+          for (std::size_t i = 0; i < sizes.size(); ++i)
+            sizes[i] = integer(expected->second.arr.inner[i]);
+          result.expected_resources = sizes;
+        }
         validate_plan(result);
         return [result](const NativeOperationBindings &) { return result; };
       });

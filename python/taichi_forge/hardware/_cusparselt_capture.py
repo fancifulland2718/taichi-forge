@@ -323,7 +323,7 @@ class CusparseLtCaptureRecording(BackendCommandRecording):
     def execute(self, bindings):
         raise TaichiRuntimeError("cuSPARSELt capture is a Graph-only recording")
 
-    def _export_aot(self, context):
+    def _export_aot(self, context, *, expected_resources=None):
         if type(self.plan) is not CusparseLtMatmulPlan:
             raise TaichiRuntimeError("AOT cuSPARSELt plan variants require their own reconstruction contract")
         reads, writes = [], []
@@ -343,9 +343,10 @@ class CusparseLtCaptureRecording(BackendCommandRecording):
                     "AOT cuSPARSELt snapshot recording needs an explicit raw-A initialization payload; "
                     "call compress(A, retain_aot_data=True) before recording"
                 )
-            plan = context.resource(
-                self.plan, "cusparselt", "matmul_plan_f16", parameters=self.plan._aot_plan_parameters
-            )
+            parameters = dict(self.plan._aot_plan_parameters)
+            if expected_resources is not None:
+                parameters["expected_resources"] = list(expected_resources)
+            plan = context.resource(self.plan, "cusparselt", "matmul_plan_f16", parameters=parameters)
             if self.recompress:
                 context.native("cusparselt", "compress_f16", bindings=dict(plan=plan, a=self._public_names[-1]))
             else:

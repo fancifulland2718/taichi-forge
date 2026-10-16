@@ -1891,6 +1891,24 @@ overwrite raw A or another product's inputs/outputs. Read-only sharing and each
 product's own identical C/D view remain legal. Low-level explicit operation
 sequences retain their individually declared contracts.
 
+`linalg.record_sparse_matmul` also exports its ordinary, baseline and selected
+physical recipes. A shared-A group retains one compression per invocation, all
+ordered products, alpha/beta, the selected algorithm/split-K attributes and
+either vendor ReLU or the separate ReLU kernels. Current valid 2:4 A values are
+compressed during replay; no host readback, pruning or algorithm search is added.
+The native plan's optional `expected_resources` contains the frozen compressed-A,
+compression-scratch and matmul-workspace byte counts, in that order. When present,
+preparation checks both the exact restored configuration and these sizes before
+allocating Forge's plan buffers. A mismatch rejects preparation instead of
+silently choosing a different plan. Older readers reject this new parameter.
+
+Windows CUDA/cuSPARSELt 0.9.1 checks cover two/three-product groups, both ReLU
+routes, source retirement, independent/borrowed consumers, valid sparsity-pattern
+updates, own C/D feedback, read sharing and rejected cross-product aliases. They
+also check a real downstream f32 `energy.grad` and explicit fixed-pattern
+provider adjoints; this is not automatic differentiation through compression,
+sparsity selection or f16 rounding. No additional SDK component is required.
+
 For a portable snapshot recording, explicitly retain raw A at compression time:
 
 ```python

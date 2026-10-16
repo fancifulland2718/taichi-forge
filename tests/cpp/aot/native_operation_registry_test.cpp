@@ -791,7 +791,12 @@ TEST(NativeOperationRegistry,
   for (const auto *patch :
        {R"({"m":0})", R"({"n":17})", R"({"k":-1})", R"({"alignment_bytes":3})",
         R"({"alignment_bytes":4294967296})", R"({"algorithm_id":-2})",
-        R"({"split_k":0.0})", R"({"relu":1})",
+        R"({"split_k":0.0})", R"({"relu":1})", R"({"expected_resources":[]})",
+        R"({"expected_resources":[1,2]})",
+        R"({"expected_resources":[1,2,3,4]})", R"({"expected_resources":null})",
+        R"({"expected_resources":[1,-1,0]})",
+        R"({"expected_resources":[1,true,0]})",
+        R"({"expected_resources":[1,0.0,0]})",
         R"({"m":9223372036854775792})"}) {
     auto invalid = description;
     for (const auto &[name, value] :
@@ -800,6 +805,9 @@ TEST(NativeOperationRegistry,
     EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
                  std::invalid_argument);
   }
+  description.parameters.obj.inner["expected_resources"] =
+      liong::json::parse_complete("[1024,0,0]");
+  EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
 }
 
 TEST(NativeOperationRegistry, RejectsAmbiguousDefinitionsBeforePublication) {

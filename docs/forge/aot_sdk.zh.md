@@ -1465,6 +1465,18 @@ C/D 反馈、独立实例、未初始化读取/别名回滚和在途 close/reset
 再执行各乘法；同资源上的独立 recording 仍保留各自的压缩，未知 plan 子类明确拒绝。
 每个recording还保留完整组内约束：输出不得覆盖原始A或另一乘积的输入/输出；只读
 共享及每个乘积自身C/D完全同址继续合法。低层显式操作序列保留各自声明的合同。
+
+`linalg.record_sparse_matmul` 的普通、baseline 和已选物理 recipe 同样可以导出。
+共享 A 的组保留每次执行一次压缩、全部有序乘积、alpha/beta、已选算法/split-K 属性，
+以及厂商 ReLU 或独立 ReLU kernel。重放时压缩当前合法 2:4 A，不增加 host 回读、裁剪或算法搜索。
+native plan 的可选 `expected_resources` 依次记录冻结的压缩 A、压缩临时区和乘法工作区字节数。
+存在该字段时，准备阶段在分配 Forge 计划缓冲前检查重建的精确配置与三个尺寸，漂移则拒绝，
+不会静默重选计划；旧 reader 明确拒绝此新增参数。
+
+Windows CUDA/cuSPARSELt 0.9.1 已验证两/三乘积组、两条 ReLU 路线、生产端退休、独立/借用消费、
+合法稀疏模式更新、自身 C/D 反馈、只读共享和跨乘积别名拒绝。覆盖下游真实 f32 `energy.grad`
+及显式固定模式伴随；不表示压缩、稀疏选择或 f16 舍入可自动求导。无需新增 SDK 组件。
+
 可移植 snapshot recording 需要在压缩时显式保留原始 A：
 
 ```python

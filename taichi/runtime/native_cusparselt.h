@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include "taichi/runtime/native_operation_description.h"
 #include "taichi/external_runtime/forge_runtime_provider.h"
 
@@ -11,6 +12,9 @@ struct CusparseLtPlanDescription {
   static constexpr uint32_t version = 1;
   int64_t m{0}, n{0}, k{0};
   uint32_t alignment_bytes{16};
+  // Frozen recipes require exact configuration and storage reconstruction.
+  // Compressed A, compression scratch, then matmul workspace, in bytes.
+  std::optional<std::array<uint64_t, 3>> expected_resources;
   TiForgeCusparseLtMatmulConfig configuration{
       sizeof(TiForgeCusparseLtMatmulConfig),
       -1,
