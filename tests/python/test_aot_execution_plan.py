@@ -357,10 +357,11 @@ def test_selected_vulkan_nested_recipe_closure_and_boundaries():
         ExecutionPlan([dict(loop, body=[kernel] * 27, lowering=dict(lowering, inners=list(reversed(many))))])
 
 
-def test_selected_cuda_nested_static_closure_and_version():
+@pytest.mark.parametrize("encoding, version", (("device_update", 13), ("masked", 14)))
+def test_selected_cuda_nested_static_closure_and_version(encoding, version):
     kernel = dict(kind="kernel", entry="payload", arguments=["x"])
     inner = dict(predicate="ip", condition_begin=1, body_begin=2, end=3, max_iterations=1 << 40)
-    lowering = dict(kind="cuda_nested_device_update", version=1, inners=[inner])
+    lowering = dict(kind="cuda_nested_" + encoding, version=1, inners=[inner])
     loop = dict(
         kind="while", predicate="op", max_iterations=65, condition=[kernel], body=[kernel] * 3, lowering=lowering
     )
@@ -368,11 +369,11 @@ def test_selected_cuda_nested_static_closure_and_version():
     assert plan.argument_names == ("op", "x")
     assert plan._replay_argument_names == {"ip", "op", "x"}
     document = json.loads(plan.to_json())
-    assert document["version"] == 13
+    assert document["version"] == version
     assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
-    for version in (4, 12, _MAX_EXECUTION_PLAN_VERSION + 1):
+    for invalid_version in (4, version - 1, _MAX_EXECUTION_PLAN_VERSION + 1):
         with pytest.raises(ValueError):
-            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+            ExecutionPlan.from_json(json.dumps(dict(document, version=invalid_version)))
     for patch in (
         dict(condition_begin=0),
         dict(body_begin=1),

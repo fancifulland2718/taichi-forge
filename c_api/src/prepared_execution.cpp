@@ -675,7 +675,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
                   &operation)) {
         if ((*loop)->cuda_nested && rt.arch != taichi::Arch::cuda)
           throw MemoryBindingError(
-              "AOT device-update control requires a CUDA runtime");
+              "AOT CUDA nested control requires a CUDA runtime");
         if ((rt.arch == taichi::Arch::vulkan) != bool((*loop)->vulkan))
           throw MemoryBindingError(
               "AOT while requires a matching selected Vulkan recipe on "

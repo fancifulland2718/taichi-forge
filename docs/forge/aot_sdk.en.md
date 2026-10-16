@@ -556,6 +556,19 @@ in standalone and borrowed runtimes. An unfrozen `auto` node that may fall back
 to masked execution is rejected before publishing entries, even if device update
 is a candidate. Masked payload export remains unavailable; defaults are unchanged.
 
+Version 14 also accepts `cuda_nested_masked` with the same recipe-1 boundaries
+and predicate bindings. Initial-condition entries use the ordinary launch ABI;
+every body entry, including inner conditions and tails, must already contain
+`cuda_graph_gate_v1` code declared in artifact metadata schema 8. Preparation
+rejects an ABI mismatch, including for zero budgets. It generates neither kernel
+code nor device-update nodes, and does not silently change the selected route.
+Each prepared instance owns its gate storage until submitted work retires.
+Static code is shared across plans; captured command storage grows with budgets.
+This requires a v14 consumer and matching private ABI73 components. The private
+variant producer and explicit-plan consumer are covered by small CUDA tests;
+automatic masked Graph export is not yet exposed. Existing device-update plans
+remain version 13 and retain their ordinary-kernel contract.
+
 Vulkan exports selected flat native loops with a version 4 `lowering` recipe:
 
 ```python

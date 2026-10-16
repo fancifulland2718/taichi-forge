@@ -378,42 +378,53 @@ TEST(ExecutionPlan, SelectedVulkanNestedControlRetainsPhysicalClosure) {
 }
 
 TEST(ExecutionPlan, SelectedCudaNestedControlRetainsStaticClosure) {
-  const std::string source = R"({"version":13,"operations":[{"kind":"while",
-    "predicate":"op","max_iterations":65,
-    "condition":[{"kind":"kernel","entry":"initial","arguments":["x"]}],
-    "body":[{"kind":"kernel","entry":"condition","arguments":["x"]},
-            {"kind":"kernel","entry":"body","arguments":["x"]},
-            {"kind":"kernel","entry":"tail","arguments":["x"]}],
-    "lowering":{"kind":"cuda_nested_device_update","version":1,
-      "inners":[{"predicate":"ip","condition_begin":1,"body_begin":2,
-                 "end":3,"max_iterations":1099511627776}]}}],
-    "resources":[{"kind":"ndarray","name":"ip","dtype":"i32","shape":[]}]})";
-  const auto plan = ExecutionPlan::parse(source);
-  const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
-      plan.operations[0]);
-  ASSERT_TRUE(loop.cuda_nested);
-  EXPECT_FALSE(loop.vulkan);
-  EXPECT_EQ(loop.cuda_nested->inners[0].max_iterations, std::uint64_t{1} << 40);
-  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"op", "x"}));
-  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"ip", "op", "x"}));
-  EXPECT_EQ(plan.resources.materialize, (std::vector<bool>{true}));
-  for (const auto &[from, to] :
-       std::vector<std::pair<std::string, std::string>>{
-           {"\"version\":13", "\"version\":12"},
-           {"\"version\":13", "\"version\":14"},
-           {"\"version\":1,", "\"version\":2,"},
-           {"\"condition_begin\":1", "\"condition_begin\":0"},
-           {"\"body_begin\":2", "\"body_begin\":1"},
-           {"\"end\":3", "\"end\":4"},
-           {"\"end\":3", "\"end\":true"},
-           {"\"predicate\":\"ip\"", "\"predicate\":\"ip\",\"gate\":1234"},
-           {"\"max_iterations\":1099511627776", "\"max_iterations\":-1"},
-           {"\"entry\":\"body\"",
-            "\"entry\":\"body\",\"launch\":{\"kind\":\"cuda_logical_exact\","
-            "\"extent\":\"n\",\"capacity\":4}"}}) {
-    auto invalid = source;
-    invalid.replace(invalid.find(from), from.size(), to);
-    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  for (const bool masked : {false, true}) {
+    std::string source = R"({"version":13,"operations":[{"kind":"while",
+      "predicate":"op","max_iterations":65,
+      "condition":[{"kind":"kernel","entry":"initial","arguments":["x"]}],
+      "body":[{"kind":"kernel","entry":"condition","arguments":["x"]},
+              {"kind":"kernel","entry":"body","arguments":["x"]},
+              {"kind":"kernel","entry":"tail","arguments":["x"]}],
+      "lowering":{"kind":"cuda_nested_device_update","version":1,
+        "inners":[{"predicate":"ip","condition_begin":1,"body_begin":2,
+                   "end":3,"max_iterations":1099511627776}]}}],
+      "resources":[{"kind":"ndarray","name":"ip","dtype":"i32","shape":[]}]})";
+    if (masked) {
+      source.replace(source.find("13"), 2, "14");
+      const std::string kind = "cuda_nested_device_update";
+      source.replace(source.find(kind), kind.size(), "cuda_nested_masked");
+    }
+    const auto version = std::string("\"version\":") + (masked ? "14" : "13");
+    const auto plan = ExecutionPlan::parse(source);
+    const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
+        plan.operations[0]);
+    ASSERT_TRUE(loop.cuda_nested);
+    EXPECT_EQ(loop.cuda_nested->encoding,
+              masked ? CudaNestedControlEncoding::masked
+                     : CudaNestedControlEncoding::device_update);
+    EXPECT_FALSE(loop.vulkan);
+    EXPECT_EQ(loop.cuda_nested->inners[0].max_iterations, std::uint64_t{1} << 40);
+    EXPECT_EQ(plan.arguments, (std::vector<std::string>{"op", "x"}));
+    EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"ip", "op", "x"}));
+    EXPECT_EQ(plan.resources.materialize, (std::vector<bool>{true}));
+    for (const auto &[from, to] :
+         std::vector<std::pair<std::string, std::string>>{
+             {version, masked ? "\"version\":13" : "\"version\":12"},
+             {version, "\"version\":15"},
+             {"\"version\":1,", "\"version\":2,"},
+             {"\"condition_begin\":1", "\"condition_begin\":0"},
+             {"\"body_begin\":2", "\"body_begin\":1"},
+             {"\"end\":3", "\"end\":4"},
+             {"\"end\":3", "\"end\":true"},
+             {"\"predicate\":\"ip\"", "\"predicate\":\"ip\",\"gate\":1234"},
+             {"\"max_iterations\":1099511627776", "\"max_iterations\":-1"},
+             {"\"entry\":\"body\"",
+              "\"entry\":\"body\",\"launch\":{\"kind\":\"cuda_logical_exact\","
+              "\"extent\":\"n\",\"capacity\":4}"}}) {
+      auto invalid = source;
+      invalid.replace(invalid.find(from), from.size(), to);
+      EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+    }
   }
 }
 

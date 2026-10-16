@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 13
+_MAX_EXECUTION_PLAN_VERSION = 14
 
 
 def _unique_fields(pairs):
@@ -44,6 +44,8 @@ def _control_version(steps):
             selected = 5 if isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested" else 4
             if isinstance(lowering, dict) and lowering.get("kind") == "cuda_nested_device_update":
                 selected = 13
+            if isinstance(lowering, dict) and lowering.get("kind") == "cuda_nested_masked":
+                selected = 14
             version = max(version, selected if "lowering" in op else 3)
             for key in ("condition", "body"):
                 if isinstance(op.get(key), list):
@@ -88,9 +90,7 @@ class ExecutionPlan:
         )
         # Own a snapshot, including nested arrays; caller mutations cannot alter
         # a saved plan. This module remains usable without a native library.
-        self._json = json.dumps(document, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
-            "utf-8"
-        )
+        self._json = json.dumps(document, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         self._validate(json.loads(self._json))
 
     @classmethod
@@ -172,9 +172,9 @@ class ExecutionPlan:
                 or lowering["version"] != 1
                 or not op.get("continue_while_nonzero", True)
             ):
-                raise ValueError("Unsupported CUDA device-update control recipe")
+                raise ValueError("Unsupported CUDA nested control recipe")
             if any(item["kind"] != "kernel" or "launch" in item for item in op["condition"] + op["body"]):
-                raise ValueError("CUDA device-update control requires ordinary flat kernel regions")
+                raise ValueError("CUDA nested control requires flat kernels without launch overrides")
             inners = lowering["inners"]
             cursor = len(op["condition"])
             count = cursor + len(op["body"])
@@ -195,7 +195,10 @@ class ExecutionPlan:
 
         def validate_lowering(op):
             lowering = op["lowering"]
-            if isinstance(lowering, dict) and lowering.get("kind") == "cuda_nested_device_update":
+            if isinstance(lowering, dict) and lowering.get("kind") in (
+                "cuda_nested_device_update",
+                "cuda_nested_masked",
+            ):
                 validate_cuda_nested(op)
                 return
             nested = isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested"
@@ -220,12 +223,7 @@ class ExecutionPlan:
                 inners = lowering["inners"]
                 cursor = len(op["condition"])
                 count = cursor + len(op["body"])
-                if (
-                    not isinstance(inners, list)
-                    or not inners
-                    or not cursor
-                    or op["max_iterations"] > 0xFFFFFFFF
-                ):
+                if not isinstance(inners, list) or not inners or not cursor or op["max_iterations"] > 0xFFFFFFFF:
                     raise ValueError("Invalid selected Vulkan nested control")
                 required = {
                     "predicate",
@@ -237,11 +235,7 @@ class ExecutionPlan:
                     "chunk_size",
                 }
                 for inner in inners:
-                    if (
-                        not isinstance(inner, dict)
-                        or not required <= set(inner)
-                        or set(inner) - required - {"status"}
-                    ):
+                    if not isinstance(inner, dict) or not required <= set(inner) or set(inner) - required - {"status"}:
                         raise ValueError("Invalid Vulkan nested control descriptor")
                     for key in ("predicate", "counter", "status"):
                         if key in inner:
@@ -424,10 +418,7 @@ class ExecutionPlan:
                     if type(op[key]) is not int or not 0 <= op[key] <= 0x7FFFFFFFFFFFFFFF:
                         raise ValueError("Execution sizes and offsets require nonnegative int64 values")
                 if kind == "while":
-                    if (
-                        type(op["max_iterations"]) is not int
-                        or not 0 <= op["max_iterations"] <= 0x7FFFFFFFFFFFFFFF
-                    ):
+                    if type(op["max_iterations"]) is not int or not 0 <= op["max_iterations"] <= 0x7FFFFFFFFFFFFFFF:
                         raise ValueError("Loop budget requires a nonnegative int64 value")
                     validate_steps(op["condition"], allow_empty=True)
                     validate_steps(op["body"])
@@ -462,9 +453,7 @@ class ExecutionPlan:
                     if (
                         not isinstance(dimensions, list)
                         or not dimensions
-                        or any(
-                            type(axis) is not int or not 0 < axis <= 0x7FFFFFFFFFFFFFFF for axis in dimensions
-                        )
+                        or any(type(axis) is not int or not 0 < axis <= 0x7FFFFFFFFFFFFFFF for axis in dimensions)
                         or op.get("batch_count", 1) == 0
                     ):
                         raise ValueError("FFT requires positive int64 dimensions and batch count")
@@ -560,9 +549,7 @@ class ExecutionPlan:
                     persistent_owners.extend(retained)
                 return abi.NamedArgument(_name(name), argument)
 
-            native = (abi.NamedArgument * len(arguments))(
-                *[bind(name, value) for name, value in arguments.items()]
-            )
+            native = (abi.NamedArgument * len(arguments))(*[bind(name, value) for name, value in arguments.items()])
             gradient_descriptors = []
             bindings = []
             for name, gradient in (gradients or {}).items():

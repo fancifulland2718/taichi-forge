@@ -1,4 +1,4 @@
-"""No-source consumption of selected device-update plans and their gradients."""
+"""No-source consumption of selected CUDA nested plans and their gradients."""
 
 import json
 import statistics
@@ -50,6 +50,19 @@ def main(mode, artifact, budget):
 
         arrays, _, _ = frames[0]
         description = json.loads(module.execution_plan("step").to_json())
+        loop = next(op for op in description["operations"] if op["kind"] == "while")
+        if loop["lowering"]["kind"] == "cuda_nested_masked":
+            # A valid format cannot silently substitute the ordinary launch ABI.
+            for region, entry in (("condition", "gated_condition"), ("body", "zero")):
+                invalid = json.loads(json.dumps(description))
+                invalid_loop = next(op for op in invalid["operations"] if op["kind"] == "while")
+                invalid_loop[region][0]["entry"] = entry
+                try:
+                    module.prepare_execution(ExecutionPlan.from_json(json.dumps(invalid)), arrays)
+                except AotError as error:
+                    assert "Unsupported fixed CUDA Graph dispatch" in str(error), str(error)
+                else:
+                    raise AssertionError("Invalid CUDA launch ABI accepted")
         description["resources"] = [r for r in description["resources"] if r["name"] != "ip0"]
         public_predicate = ExecutionPlan.from_json(json.dumps(description))
         for dtype, count in (("f32", 1), ("i32", 2)):

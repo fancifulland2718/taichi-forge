@@ -18,20 +18,24 @@ void parse_cuda_nested_control(const JsonValue &lowering,
                                std::set<std::string> &arguments,
                                std::uint64_t version) {
   fields(lowering, {"kind", "version", "inners"});
-  if (version < 13 || integer(lowering["version"]) != 1 ||
+  const bool masked = name(lowering["kind"]) == "cuda_nested_masked";
+  if (version < (masked ? 14 : 13) || integer(lowering["version"]) != 1 ||
       !loop.continue_while_nonzero || !lowering["inners"].is_arr())
     throw std::invalid_argument(
-        "Selected CUDA device-update control requires version 13 and recipe 1");
-  const auto ordinary = [](const auto &region) {
+        "Selected CUDA nested control requires a matching plan version and recipe 1");
+  const auto flat_kernels = [](const auto &region) {
     return std::all_of(region.begin(), region.end(), [](const auto &op) {
       const auto *kernel = std::get_if<ExecutionPlan::Kernel>(&op);
       return kernel && !kernel->indirect_packet && !kernel->bounded_range;
     });
   };
-  if (!ordinary(loop.condition) || !ordinary(loop.body))
+  if (!flat_kernels(loop.condition) || !flat_kernels(loop.body))
     throw std::invalid_argument(
-        "CUDA device-update control requires ordinary flat kernel regions");
+        "CUDA nested control requires flat kernels without launch overrides");
   loop.cuda_nested.emplace();
+  loop.cuda_nested->encoding = masked
+                                   ? CudaNestedControlEncoding::masked
+                                   : CudaNestedControlEncoding::device_update;
   for (const auto &value : lowering["inners"].arr.inner) {
     fields(value, {"predicate", "condition_begin", "body_begin", "end",
                    "max_iterations"});
@@ -61,7 +65,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 13)
+    if (version < 1 || version > 14)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -179,7 +183,8 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
                   "Selected control requires execution plan version 4");
             const auto &lowering = found->second;
             const auto kind = name(lowering["kind"]);
-            if (kind == "cuda_nested_device_update") {
+            if (kind == "cuda_nested_device_update" ||
+                kind == "cuda_nested_masked") {
               parse_cuda_nested_control(lowering, *loop, arguments, version);
               operations.emplace_back(std::move(loop));
               continue;
