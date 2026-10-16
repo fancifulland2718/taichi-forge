@@ -2,11 +2,13 @@
 
 #include <memory>
 #include <functional>
+#include <optional>
 #include <variant>
 #include <vector>
 #include "taichi/program/kernel_launcher.h"
 #include "taichi/runtime/cuda/capture_resources.h"
 #include "taichi/runtime/branch_selection.h"
+#include "taichi/runtime/cuda_control_recipe.h"
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
@@ -54,6 +56,8 @@ class FixedGraph {
     bool continue_while_nonzero{true};
     std::vector<Operation> condition;
     std::vector<Operation> body;
+    // Explicit physical selection; never replaced by conditional nodes.
+    std::optional<CudaNestedControlRecipe<void *>> nested_update;
   };
   explicit FixedGraph(const std::vector<Dispatch> &dispatches,
                       std::shared_ptr<RuntimeFaultDomain> fault_domain = {});

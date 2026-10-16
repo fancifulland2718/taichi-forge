@@ -253,6 +253,26 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed while requires a matching selected Vulkan recipe on "
               "Vulkan only");
+        if (loop->cuda_nested) {
+          const auto flat = [](const auto &region) {
+            return std::all_of(region.begin(), region.end(), [](const auto &op) {
+              return std::holds_alternative<Dispatch>(op);
+            });
+          };
+          if (arch != Arch::cuda || inside_control ||
+              !loop->continue_while_nonzero || !flat(loop->condition) ||
+              !flat(loop->body))
+            throw std::invalid_argument(
+                "Selected CUDA device-update control requires flat kernel "
+                "regions on CUDA");
+          loop->cuda_nested->validate(
+              loop->condition.size(), loop->condition.size() + loop->body.size());
+          for (const auto &inner : loop->cuda_nested->inners)
+            if (inner.predicate.device != &device ||
+                !inner.predicate.alloc_id || inner.predicate.offset % 4)
+              throw std::invalid_argument(
+                  "Invalid CUDA nested predicate storage");
+        }
         if (loop->vulkan) {
           const auto &control = *loop->vulkan;
           const auto valid = [&](DevicePtr ptr) {
@@ -683,6 +703,13 @@ FixedExecution::FixedExecution(
           result->continue_while_nonzero = loop.continue_while_nonzero;
           result->condition = prepare(loop.condition);
           result->body = prepare(loop.body);
+          if (loop.cuda_nested) {
+            result->nested_update.emplace();
+            for (const auto &inner : loop.cuda_nested->inners)
+              result->nested_update->inners.push_back(
+                  {cuda_pointer(inner.predicate), inner.condition_begin,
+                   inner.body_begin, inner.end, inner.max_iterations});
+          }
           native.emplace_back(std::move(result));
         } else if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
           auto *loaded = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);

@@ -60,6 +60,7 @@ std::uint32_t NestedPredicateGraphControls::initialize(
       host_controls.size() * sizeof(CudaGraphPredicateGroupControl));
   if (error != CUDA_SUCCESS)
     return error;
+  device_bytes_ = host_controls.size() * sizeof(CudaGraphPredicateGroupControl);
   std::size_t index = 0;
   for (std::uint64_t outer = 0; outer < build_->layout.iterations; ++outer) {
     auto &parent = host_controls[index++];
@@ -168,13 +169,16 @@ std::uint32_t NestedPredicateGraphControls::finalize_nodes() {
       return CUDA_ERROR_NOT_SUPPORTED;
     count += nodes.size();
   }
-  if (count > std::numeric_limits<std::size_t>::max() / sizeof(std::uintptr_t))
+  if (count > std::numeric_limits<std::size_t>::max() / sizeof(std::uintptr_t) ||
+      count > (std::numeric_limits<std::uint64_t>::max() - device_bytes_) /
+                  sizeof(std::uintptr_t))
     return CUDA_ERROR_NOT_SUPPORTED;
   if (count) {
     const auto error = CUDADriver::get_instance().malloc.call(
         reinterpret_cast<void **>(&device_nodes), count * sizeof(std::uintptr_t));
     if (error != CUDA_SUCCESS)
       return error;
+    device_bytes_ += count * sizeof(std::uintptr_t);
   }
   host_nodes.reserve(count);
   for (std::size_t i = 0; i < build_->nodes.size(); ++i) {
@@ -190,20 +194,27 @@ std::uint32_t NestedPredicateGraphControls::finalize_nodes() {
   return CUDA_SUCCESS;
 }
 
-std::uint32_t NestedPredicateGraphControls::upload() const {
+std::uint32_t NestedPredicateGraphControls::upload(bool retain_host_tables) {
   if (phase_ != Phase::finalized)
     return CUDA_ERROR_NOT_SUPPORTED;
-  if (host_controls.empty())
+  if (host_controls.empty()) {
+    if (!retain_host_tables)
+      phase_ = Phase::uploaded;
     return CUDA_SUCCESS;
+  }
   auto &driver = CUDADriver::get_instance();
   auto error = driver.memcpy_host_to_device.call(
-      device_nodes, const_cast<std::uintptr_t *>(host_nodes.data()),
+      device_nodes, host_nodes.data(),
       host_nodes.size() * sizeof(std::uintptr_t));
   if (error == CUDA_SUCCESS)
     error = driver.memcpy_host_to_device.call(
-        device_controls,
-        const_cast<CudaGraphPredicateGroupControl *>(host_controls.data()),
+        device_controls, host_controls.data(),
         host_controls.size() * sizeof(CudaGraphPredicateGroupControl));
+  if (error == CUDA_SUCCESS && !retain_host_tables) {
+    std::vector<CudaGraphPredicateGroupControl>().swap(host_controls);
+    std::vector<std::uintptr_t>().swap(host_nodes);
+    phase_ = Phase::uploaded;
+  }
   return error;
 }
 
@@ -217,14 +228,12 @@ void NestedPredicateGraphControls::release(bool backend_safe) {
   host_controls.clear();
   host_nodes.clear();
   build_.reset();
+  device_bytes_ = 0;
   phase_ = Phase::empty;
 }
 
 std::uint64_t NestedPredicateGraphControls::device_bytes() const {
-  return (device_controls
-              ? host_controls.size() * sizeof(CudaGraphPredicateGroupControl)
-              : 0) +
-         (device_nodes ? host_nodes.size() * sizeof(std::uintptr_t) : 0);
+  return device_bytes_;
 }
 
 }  // namespace taichi::lang::cuda

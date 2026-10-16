@@ -54,7 +54,8 @@ class NestedPredicateGraphControls {
   std::uint32_t finalize_nodes();
   // Only after instantiating and uploading the captured graph: device node
   // handles and child-control addresses are not portable artifacts.
-  std::uint32_t upload() const;
+  // Fixed execution can discard cold tables; JIT retains them for telemetry.
+  std::uint32_t upload(bool retain_host_tables = true);
   void release(bool backend_safe);
   std::uint64_t device_bytes() const;
 
@@ -66,8 +67,11 @@ class NestedPredicateGraphControls {
 
  private:
   struct BuildState;
-  enum class Phase { empty, initialized, capturing, captured, finalized };
+  enum class Phase {
+    empty, initialized, capturing, captured, finalized, uploaded
+  };
   std::unique_ptr<BuildState> build_;
+  std::uint64_t device_bytes_{0};
   Phase phase_{Phase::empty};
 };
 

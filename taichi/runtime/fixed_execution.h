@@ -7,6 +7,7 @@
 #include <vector>
 #include "taichi/rhi/device.h"
 #include "taichi/runtime/branch_selection.h"
+#include "taichi/runtime/cuda_control_recipe.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
 
 namespace taichi::lang {
@@ -84,6 +85,7 @@ class FixedExecution {
     std::vector<Operation> condition;
     std::vector<Operation> body;
     std::optional<Vulkan> vulkan;
+    std::optional<CudaNestedControlRecipe<DevicePtr>> cuda_nested;
   };
 
   // Optional cold facts chain unconditional phases of one prepared execution.

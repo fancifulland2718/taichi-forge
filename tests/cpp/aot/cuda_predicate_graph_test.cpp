@@ -3,11 +3,19 @@
 #ifdef TI_WITH_CUDA
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <utility>
 
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/graph_region_builder.h"
 #include "taichi/runtime/cuda/predicate_graph.h"
+#include "taichi/runtime/cuda/jit_cuda.h"
+#include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/fixed_execution.h"
+#include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/runtime/llvm/llvm_runtime_executor.h"
+#include "taichi/rhi/cuda/cuda_device.h"
 
 namespace taichi::lang {
 namespace {
@@ -100,6 +108,37 @@ INNER_CONDITION:
 )ptx";
     driver.module_load_data_ex(&module, ptx, 0, nullptr, nullptr);
     driver.module_get_function(&function, module, "dispatch");
+    fixed_ptx = ptx;
+    const auto replace = [&](const std::string &from, const std::string &to) {
+      const auto at = fixed_ptx.find(from);
+      ASSERT_NE(at, std::string::npos);
+      fixed_ptx.replace(at, from.size(), to);
+    };
+    replace(".param .u64 data, .param .u32 operation",
+            ".param .align 8 .b8 context[" +
+                std::to_string(sizeof(RuntimeContext)) + "]");
+    replace(".reg .b64 %p;", ".reg .b64 %p, %args;");
+    replace("ld.param.u64 %p, [data];",
+            "ld.param.u64 %args, [context];\nld.global.u64 %p, [%args];");
+    replace("ld.param.u32 %op, [operation];",
+            "ld.global.u32 %op, [%args+8];");
+    replace("st.global.u32 [%p+24], %count;",
+            "st.global.u32 [%p+24], %count;\n"
+            "st.global.u32 [%p+28], %count;");
+    // A second physical task tests that every task in a dispatch is gated.
+    fixed_ptx +=
+        ".visible .entry audit(.param .align 8 .b8 context[" +
+        std::to_string(sizeof(RuntimeContext)) + R"ptx(]) {
+  .reg .b64 %args, %p;
+  .reg .b32 %count;
+  ld.param.u64 %args, [context];
+  ld.global.u64 %p, [%args];
+  ld.global.u32 %count, [%p+28];
+  add.u32 %count, %count, 1;
+  st.global.u32 [%p+28], %count;
+  ret;
+}
+)ptx";
   }
   void TearDown() override {
     if (!stream)
@@ -208,6 +247,7 @@ INNER_CONDITION:
     }
   };
   void *stream{nullptr}, *module{nullptr}, *function{nullptr};
+  std::string fixed_ptx;
 };
 
 TEST_F(CudaPredicateGraph, PreservesBudgetsBindingsAndPrepareOnly) {
@@ -249,7 +289,148 @@ TEST_F(CudaPredicateGraph, FailedCaptureCanBeRetiredAndRebuilt) {
   EXPECT_EQ(frame.controls.device_bytes(), 0);
   ASSERT_EQ(frame.prepare(), CUDA_SUCCESS);
   frame.run(2, 2);
+  const auto bytes = frame.controls.device_bytes();
+  RecordProperty("discarded_host_table_payload_bytes", static_cast<int>(bytes));
+  ASSERT_EQ(frame.controls.upload(false), CUDA_SUCCESS);
+  EXPECT_EQ(frame.controls.device_bytes(), bytes);
+  EXPECT_EQ(frame.controls.host_controls.capacity(), 0);
+  EXPECT_EQ(frame.controls.host_nodes.capacity(), 0);
+  EXPECT_EQ(frame.controls.upload(), CUDA_ERROR_NOT_SUPPORTED);
   frame.run(0, 0);
+}
+
+TEST_F(CudaPredicateGraph, FixedExecutionLoadsOrdinaryArtifactsAndOwnsEachRegion) {
+  auto &context = CUDAContext::get_instance();
+  auto guard = context.get_guard();
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  LlvmRuntimeExecutor executor(config, nullptr);
+  cuda::KernelLauncher launcher({&executor});
+  CUDAKernelArtifact artifact;
+  artifact.payload.assign(fixed_ptx.begin(), fixed_ptx.end());
+  artifact.payload.push_back('\0');
+  artifact.entry_names = {"dispatch", "audit"};
+  artifact.target_identity = "sm_50|+ptx60";
+  artifact.provider_identity = "fixed_predicate_test";
+  LLVM::CompiledKernelData::InternalData metadata;
+  metadata.args_size = 16;
+  metadata.compiled_data.tasks = {OffloadedTask("dispatch", 1, 1),
+                                  OffloadedTask("audit", 1, 1)};
+  llvm_aot::KernelImpl kernel(
+      &launcher, launcher.register_cuda_artifact_kernel(metadata, artifact),
+      Arch::cuda, "dispatch", metadata);
+  auto &device = *executor.get_compute_device();
+  auto &driver = CUDADriver::get_instance();
+  auto first = device.allocate_memory_unique({40});
+  auto second = device.allocate_memory_unique({40});
+  ASSERT_EQ(first.second, RhiResult::success);
+  ASSERT_EQ(second.second, RhiResult::success);
+  auto ptr = [](DeviceAllocationUnique &allocation, std::size_t word) {
+    auto result = allocation->get_ptr();
+    result.offset = word * 4;
+    return result;
+  };
+  auto address = [&](DevicePtr pointer) {
+    auto &cuda_device = static_cast<cuda::CudaDevice &>(device);
+    return static_cast<char *>(cuda_device.get_alloc_info(pointer).ptr) +
+           pointer.offset;
+  };
+  auto prepare = [&](DeviceAllocationUnique &allocation, std::uint64_t outer,
+                     std::uint64_t inner, bool conditional = false) {
+    driver.memsetd32(address(ptr(allocation, 0)), 99, 10);
+    auto loop = std::make_shared<FixedExecution::While>();
+    loop->predicate = ptr(allocation, 1);
+    loop->max_iterations = outer;
+    loop->cuda_nested.emplace();
+    loop->cuda_nested->inners.push_back({ptr(allocation, 3), 1, 2, 3, inner});
+    std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
+    for (std::uint32_t i = 0; i < 4; ++i) {
+      auto launch = std::make_unique<LaunchContextBuilder>(&kernel);
+      struct Arguments {
+        void *data;
+        std::uint32_t operation;
+        std::uint32_t padding;
+      } arguments{address(ptr(allocation, 0)), i, 0};
+      std::memcpy(launch->get_context().arg_buffer, &arguments, sizeof(arguments));
+      auto &region = i ? loop->body : loop->condition;
+      region.emplace_back(FixedExecution::Dispatch{&kernel, launch.get()});
+      contexts.push_back(std::move(launch));
+    }
+    std::vector<FixedExecution::Operation> operations{
+        FixedExecution::BufferFill{ptr(allocation, 8), 4, 77}, loop, loop,
+        FixedExecution::BufferCopy{ptr(allocation, 8), ptr(allocation, 6), 4}};
+    if (conditional) {
+      auto branch = std::make_shared<FixedExecution::Branch>();
+      branch->selector = ptr(allocation, 4);
+      branch->selection = {BranchSelection::Kind::nonzero, true};
+      branch->bodies = {
+          {FixedExecution::BufferFill{ptr(allocation, 9), 4, 11}},
+          {FixedExecution::BufferFill{ptr(allocation, 9), 4, 22}}};
+      operations.emplace_back(std::move(branch));
+    }
+    // Unsupported operation kinds must fail before preparing any replay.
+    auto saved = loop->body.front();
+    loop->body.front() = FixedExecution::BufferFill{ptr(allocation, 2), 4, 0};
+    EXPECT_THROW(FixedExecution(Arch::cuda, device, nullptr, operations),
+                 std::invalid_argument);
+    loop->body.front() = saved;
+    auto result = std::make_unique<FixedExecution>(Arch::cuda, device, nullptr,
+                                                  operations);
+    EXPECT_EQ(result->execution_kind(), 1);
+    EXPECT_GT(result->workspace_bytes(), 0);
+    std::array<std::uint32_t, 10> before;
+    driver.memcpy_device_to_host(before.data(), address(ptr(allocation, 0)), 40);
+    for (auto value : before)
+      EXPECT_EQ(value, 99);
+    return result;  // Cold descriptors/contexts are gone before execution.
+  };
+  auto run = [&](FixedExecution &call, DeviceAllocationUnique &allocation,
+                 std::uint64_t outer_budget, std::uint64_t inner_budget,
+                 std::uint32_t outer, std::uint32_t inner) {
+    std::array<std::uint32_t, 2> limits{outer, inner};
+    driver.memcpy_host_to_device(address(ptr(allocation, 4)), limits.data(), 8);
+    call.run();
+    driver.stream_synchronize(nullptr);
+    std::array<std::uint32_t, 10> actual;
+    driver.memcpy_device_to_host(actual.data(), address(ptr(allocation, 0)), 40);
+    const auto count = std::min<std::uint64_t>(outer_budget, outer);
+    const auto steps = std::min<std::uint64_t>(inner_budget, inner);
+    EXPECT_EQ(actual[0], count);
+    EXPECT_EQ(actual[6], count * steps);
+    EXPECT_EQ(actual[7], 1 + count * (2 + steps));
+    EXPECT_EQ(actual[8], count * steps);
+  };
+  auto sibling = prepare(second.first, 3, 4);
+  for (const auto budgets : {std::array<std::uint64_t, 2>{4, 3}, {0, 3},
+                             {4, 0}, {65, 1}}) {
+    auto call = prepare(first.first, budgets[0], budgets[1]);
+    for (const auto limits : {std::array<std::uint32_t, 2>{0, 0}, {2, 1},
+                              {7, 7}, {0, 2}}) {
+      run(*call, first.first, budgets[0], budgets[1], limits[0], limits[1]);
+      run(*sibling, second.first, 3, 4, limits[1], limits[0]);
+    }
+    std::array<std::uint32_t, 2> limits{2, 2};
+    driver.memcpy_host_to_device(address(ptr(first.first, 4)), limits.data(), 8);
+    call->run();
+    call.reset();  // Retirement waits for submitted work before freeing gates.
+    std::uint32_t result = 99;
+    driver.memcpy_device_to_host(&result, address(ptr(first.first, 8)), 4);
+    EXPECT_EQ(result, std::min<std::uint64_t>(2, budgets[0]) *
+                          std::min<std::uint64_t>(2, budgets[1]));
+  }
+  run(*sibling, second.first, 3, 4, 3, 2);
+  if (cuda::GraphRegionBuilder::available()) {
+    auto mixed = prepare(first.first, 2, 3, true);
+    for (const auto outer : {2u, 0u}) {
+      run(*mixed, first.first, 2, 3, outer, 1);
+      std::uint32_t selected = 0;
+      driver.memcpy_device_to_host(&selected, address(ptr(first.first, 9)), 4);
+      EXPECT_EQ(selected, outer ? 11 : 22);
+    }
+  }
+  sibling.reset();
+  EXPECT_EQ(launcher.debug_registered_kernel_count(), 1);
+  launcher.retire_all_kernels();
 }
 
 }  // namespace
