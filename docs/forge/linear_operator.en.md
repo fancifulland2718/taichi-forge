@@ -730,12 +730,12 @@ ticket region telemetry remains the source for outer-region invocation and
 backend replay counts. `plan.graph_action_statistics()` aggregates all actions
 created from the plan, while `solve.statistics()` returns one action record.
 
-The action may be appended to an outer `Sequential` together with up to seven
-other ordered inner `while` actions. The qualified depth-two shape is one
-outer `while` whose body contains one to eight leaf inner `while` regions,
+The action may be appended to an outer `Sequential` together with other ordered
+inner `while` actions. The qualified depth-two shape is one
+outer `while` whose body contains one or more leaf inner `while` regions,
 with ordinary dispatch/native actions between them. Inner control resources
-must be disjoint and the complete encoded hierarchy is capped at 4,096
-actions. CPU executes exact nested host control. Qualified CUDA Driver API
+must be disjoint. The expanded GPU routes retain their 4,096 encoded-action
+limit but no separate region-count limit. CPU executes exact nested host control. Qualified CUDA Driver API
 12.4+ runtimes use device-updatable kernel-node groups after an explicit setup
 probe; older or unqualified runtimes use Forge's version-independent bounded
 double-gate Graph. Vulkan uses bounded conditional replay. CUDA and Vulkan

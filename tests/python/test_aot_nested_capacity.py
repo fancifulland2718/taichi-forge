@@ -15,21 +15,10 @@ from tests import test_utils
 from tests.python.aot_nested_capacity_probe import cases, expected
 
 
-@pytest.mark.parametrize("budget,regions,lowering", ((65, 1, "native_required"), (1 << 40, 9, "auto")))
-@test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp_path, monkeypatch):
+def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
     from taichi_forge.graph._recipes import GraphFamilySelection
 
-    if not dict(core.cuda_conditional_graph_capabilities()).get("nested_conditional_graph_available", False):
-        pytest.skip("nested CUDA conditional Graph unavailable")
-    monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", raising=False)
-    limits = ti.graph.structured_control_capabilities()["device_control"]["nested_cuda_conditional_limits"]
-    assert limits == dict(
-        max_iterations=(1 << 63) - 1,
-        max_ordered_inner_regions=None,
-        max_static_dispatches=None,
-        expands_iterations=False,
-    )
+    arch = "vulkan" if ti.lang.impl.current_cfg().arch == ti.vulkan else "cuda"
 
     @ti.kernel
     def zero(value: ti.types.ndarray(ti.i32, 1)):
@@ -54,7 +43,11 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
         count[0] += 1
 
     @ti.kernel
-    def primal(x: ti.types.ndarray(ti.f32, 1), y: ti.types.ndarray(ti.f32, 1), total: ti.types.ndarray(ti.i32, 1)):
+    def primal(
+        x: ti.types.ndarray(ti.f32, 1),
+        y: ti.types.ndarray(ti.f32, 1),
+        total: ti.types.ndarray(ti.i32, 1),
+    ):
         for i in x:
             y[i] = x[i] * x[i] * (total[0] + 1)
 
@@ -69,7 +62,9 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
 
     @ti.kernel
     def publish(
-        count: ti.types.ndarray(ti.i32, 1), total: ti.types.ndarray(ti.i32, 1), terminal: ti.types.ndarray(ti.i32, 1)
+        count: ti.types.ndarray(ti.i32, 1),
+        total: ti.types.ndarray(ti.i32, 1),
+        terminal: ti.types.ndarray(ti.i32, 1),
     ):
         terminal[0], terminal[1] = count[0], total[0]
 
@@ -84,19 +79,44 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
         builder.dispatch(zero, total)
         builder.dispatch(seed, public["dx"], public["dy"])
         oc, ob = builder.create_sequential(), builder.create_sequential()
-        oc.dispatch(condition, outer, op, public["limits"], oc._bind_internal_scalar("outer_slot", ti.i32, 0))
+        oc.dispatch(
+            condition,
+            outer,
+            op,
+            public["limits"],
+            oc._bind_internal_scalar("outer_slot", ti.i32, 0),
+        )
         for index in range(regions):
             count = builder.private_ndarray(f"inner{index}", ti.i32, (1,))
             pred = builder.private_ndarray(f"predicate{index}", ti.i32, (1,))
             ic, ib = builder.create_sequential(), builder.create_sequential()
             ob.dispatch(zero, count)
-            ic.dispatch(condition, count, pred, public["limits"], ic._bind_internal_scalar(f"slot{index}", ti.i32, 1))
+            ic.dispatch(
+                condition,
+                count,
+                pred,
+                public["limits"],
+                ic._bind_internal_scalar(f"slot{index}", ti.i32, 1),
+            )
             ib.dispatch(advance, count)
             ib.dispatch(advance, total)
-            ob.while_loop(ic, ib, predicate=pred, counter=count, max_iterations=budget, name=f"inner{index}")
+            ob.while_loop(
+                ic,
+                ib,
+                predicate=pred,
+                counter=count,
+                max_iterations=budget,
+                name=f"inner{index}",
+            )
         ob.dispatch(advance, outer)
         builder.while_loop(
-            oc, ob, predicate=op, counter=outer, max_iterations=budget, lowering_mode=lowering, name="outer"
+            oc,
+            ob,
+            predicate=op,
+            counter=outer,
+            max_iterations=budget,
+            lowering_mode=lowering,
+            name="outer",
         )
         builder.dispatch(forward if reverse else primal, public["x"], public["y"], total)
         if reverse:
@@ -104,7 +124,7 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
         builder.dispatch(publish, outer, total, public["terminal"])
         definition = builder.freeze()
         recipe = None
-        if lowering == "auto":
+        if lowering == "auto" and route == "conditional":
             catalog = definition.recipe_catalog()
             fragment = next(
                 f
@@ -140,11 +160,27 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
                 else:
                     yield from stats(node)
 
-        nested_stats = [
-            s for s in stats(owner.executor._graph_stats) if s["last_path"].startswith("cuda_conditional_nested_")
-        ]
-        assert len(nested_stats) == 1
-        assert nested_stats[0]["known_bounded_control_bytes"] == (regions + 1) * 32
+        prefix = {
+            "conditional": "cuda_conditional_nested_",
+            "device_update": "cuda_device_update_nested_",
+            "masked": "cuda_masked_",
+            "vulkan": "vulkan_",
+        }[route]
+        nested = owner.executor._spec.structured_control_nodes[0]
+        assert nested._native_upgrade_eligible
+        nested_stats = list(stats(nested.debug_graph_stats))
+        assert any(s["last_path"].startswith(prefix) for s in nested_stats), nested_stats
+        if route == "conditional":
+            assert nested_stats[0]["known_bounded_control_bytes"] == (regions + 1) * 32
+        if route in ("masked", "device_update"):
+            # Expanded CUDA persistence is a separate capability. Do not
+            # silently export a conditional route that was never selected.
+            module = ti.aot.Module()
+            with pytest.raises(ti.TaichiRuntimeError, match="selected nested CUDA"):
+                module.add_execution_plan("step", owner.executor)
+            assert not module._content and not module._graph_export_failed
+            (tmp_path / "costs.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
+            return
     module = ti.aot.Module()
     begin = time.perf_counter()
     with build(True) as owner:
@@ -154,7 +190,9 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
         assert len(module._exported_kernels) == count
         outer = next(op for op in json.loads(plan.to_json())["operations"] if op["kind"] == "while")
         assert outer["max_iterations"] == budget
-        inners = [op for op in outer["body"] if op["kind"] == "while"]
+        inners = (
+            outer["lowering"]["inners"] if arch == "vulkan" else [op for op in outer["body"] if op["kind"] == "while"]
+        )
         assert len(inners) == regions and all(op["max_iterations"] == budget for op in inners)
     timings["gradient_build_export_ms"] = (time.perf_counter() - begin) * 1000
     artifact = tmp_path / "nested.tcm"
@@ -170,6 +208,7 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
                 str(artifact),
                 str(budget),
                 str(regions),
+                arch,
             ],
             env=os.environ.copy(),
             capture_output=True,
@@ -178,3 +217,38 @@ def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp
         )
         assert result.returncode == 0, result.stdout + result.stderr
     (tmp_path / "costs.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
+
+
+@pytest.mark.parametrize("budget,regions,lowering", ((65, 1, "native_required"), (1 << 40, 9, "auto")))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_compact_nested_capacity_and_aot_gradient(budget, regions, lowering, tmp_path, monkeypatch):
+    if not dict(core.cuda_conditional_graph_capabilities()).get("nested_conditional_graph_available", False):
+        pytest.skip("nested CUDA conditional Graph unavailable")
+    monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", raising=False)
+    limits = ti.graph.structured_control_capabilities()["device_control"]["nested_cuda_conditional_limits"]
+    assert limits == dict(
+        max_iterations=(1 << 63) - 1,
+        max_ordered_inner_regions=None,
+        max_static_dispatches=None,
+        expands_iterations=False,
+    )
+    _check_nested_capacity(budget, regions, lowering, "conditional", tmp_path)
+
+
+@pytest.mark.parametrize("route", ("device_update", "masked"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_expanded_cuda_nested_region_count(route, tmp_path, monkeypatch):
+    monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1" if route == "masked" else "0")
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if route == "device_update" and not (
+        capabilities["nested_cuda_device_update_qualified"] or capabilities["nested_cuda_device_update_candidate"]
+    ):
+        pytest.skip("CUDA nested device update unavailable")
+    _check_nested_capacity(2, 9, "native_required", route, tmp_path)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_nested_region_count_and_aot_gradient(tmp_path):
+    if not ti.graph.structured_control_capabilities()["nested_native_lowering"]:
+        pytest.skip("nested Vulkan control unavailable")
+    _check_nested_capacity(2, 9, "native_required", "vulkan", tmp_path)

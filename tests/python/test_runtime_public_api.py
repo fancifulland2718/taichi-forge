@@ -19,7 +19,7 @@ def test_runtime_contract_manifest_is_immutable_and_source_agnostic():
     assert manifest["native_abi_revision"] == FORGE_NATIVE_ABI_REVISION
     assert manifest["native_abi_revision"] == manifest["required_native_abi_revision"]
     assert manifest["schemas"]["dynamic_work"] == 5
-    assert manifest["schemas"]["structured_control"] == 5
+    assert manifest["schemas"]["structured_control"] == 6
     assert manifest["schemas"]["graph_pipeline"] == 2
     assert manifest["runtime"]["source_id"]
     assert manifest["shim"]["source_id"]

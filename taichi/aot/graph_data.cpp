@@ -3457,8 +3457,7 @@ bool try_run_cuda_device_update_nested_control_graph(
           : 0;
   bool ordered_boundaries = outer_condition_dispatch_count != 0 &&
                             outer_condition_dispatch_count < dispatch_count &&
-                            !inner_controls.empty() &&
-                            inner_controls.size() <= 8;
+                            !inner_controls.empty();
   bool valid_iteration_limits =
       outer_max_iterations > 0 && outer_max_iterations <= 64;
   std::size_t boundary_cursor = outer_condition_dispatch_count;
@@ -4031,8 +4030,7 @@ bool try_run_cuda_masked_nested_control_graph(
           : 0;
   bool ordered_boundaries = outer_condition_dispatch_count != 0 &&
                             outer_condition_dispatch_count < dispatch_count &&
-                            !inner_controls.empty() &&
-                            inner_controls.size() <= 8;
+                            !inner_controls.empty();
   bool valid_iteration_limits =
       outer_max_iterations > 0 && outer_max_iterations <= 64;
   std::size_t boundary_cursor = outer_condition_dispatch_count;
@@ -7180,10 +7178,8 @@ CompiledGraph::jit_run_bounded_vulkan_nested_sequence_cached(
 #if defined(TI_WITH_VULKAN)
   constexpr int kNestedMaximumOuterIterations = 64;
   constexpr int kNestedMaximumChunkIterations = 64;
-  constexpr std::size_t kNestedMaximumInnerRegions = 8;
   if (compile_config.arch != Arch::vulkan || outer_predicate == nullptr ||
       outer_counter == nullptr || inner_controls.empty() ||
-      inner_controls.size() > kNestedMaximumInnerRegions ||
       outer_max_iterations <= 0 ||
       outer_max_iterations > kNestedMaximumOuterIterations ||
       outer_condition_dispatch_count == 0) {

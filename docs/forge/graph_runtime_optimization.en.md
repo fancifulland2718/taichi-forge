@@ -165,16 +165,24 @@ Important current boundaries:
   is limited to eight chunks of at most 64 iterations each (512 total).
   Profiler/dispatch-cache configurations can prevent this replay route.
 - The supported asynchronous depth-two GPU shape is an outer while containing
-  one to eight ordered inner whiles, with eligible dispatch/action gaps.
+  one or more ordered inner whiles, with eligible dispatch/action gaps. There
+  is no separate region-count cap; structured-control capability schema 6
+  reports `nested_native_max_ordered_inner_regions=None` when available.
   Each loop needs a separate counter; predicate, counter and optional status
   controls are distinct one-element i32 arrays from the same runtime.
-  Per-loop budgets are 1–64. Other nested shapes can require portable parent
+  Expanded routes retain per-loop budgets of 1–64. Other nested shapes can require portable parent
   control and may reject asynchronous submission.
 - The default expanded nested route is limited to 4096 encoded actions.
   Complete-recipe search can offer compressed nested conditional execution on
-  capable CUDA runtimes; its 4096 limit counts static dispatches, not the budget
-  product. It supports eligible Taichi-kernel actions, not arbitrary vendor
-  capture. This does not change ordinary `auto`.
+  capable CUDA runtimes; that route uses int64 budgets and one copy per static
+  region, without a separate static-dispatch cap. Kernel/native body actions
+  require their own conditional-body qualification; ordinary vendor capture
+  alone is insufficient. Compact execution does not become the global default.
+
+Small Windows checks cover nine ordered inner loops through CUDA device-update,
+CUDA masked replay and Vulkan replay. The Vulkan graph also exports and runs
+with an actual suffix adjoint in standalone and borrowed AOT runtimes. Expanded
+CUDA persistence remains separate from this JIT admission support.
 
 Compressed control can help large budgets with early exit; highly active small
 kernels can favor expanded control. Choose using actual workload measurements,

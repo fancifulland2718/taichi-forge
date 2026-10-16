@@ -11,19 +11,23 @@ def cases(budget):
 def expected(values, limits, budget, regions):
     outer, inner = (min(value, budget) for value in limits)
     total = outer * inner * regions
-    return ([x * x * (total + 1) for x in values], [2 * x * (total + 1) for x in values], [outer, total])
+    return (
+        [x * x * (total + 1) for x in values],
+        [2 * x * (total + 1) for x in values],
+        [outer, total],
+    )
 
 
-def main(mode, artifact, budget, regions):
+def main(mode, artifact, budget, regions, arch="cuda"):
     from taichi_forge_runtime.aot import Runtime
 
     if mode == "borrowed":
         import taichi_forge as ti
 
-        ti.init(arch=ti.cuda, offline_cache=False, enable_fallback=False)
+        ti.init(arch=getattr(ti, arch), offline_cache=False, enable_fallback=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime("cuda")
+        runtime = Runtime(arch)
     with runtime:
         module = runtime.load_module(artifact)
         frames = []
@@ -62,4 +66,4 @@ def main(mode, artifact, budget, regions):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
+    main(sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])

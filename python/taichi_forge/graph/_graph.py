@@ -4326,7 +4326,8 @@ def structured_control_capabilities():
             "nested_native_kinds": (("while_while",) if nested_native else ()),
             "nested_native_outer_iteration_limit": (64 if nested_native else 0),
             "nested_native_inner_iteration_limit": (64 if nested_native else 0),
-            "nested_native_max_ordered_inner_regions": (8 if nested_native else 0),
+            # Each region has dynamic storage; only the encoded work is bounded.
+            "nested_native_max_ordered_inner_regions": (None if nested_native else 0),
             "nested_native_max_encoded_actions": (4096 if nested_native else 0),
             # Legacy scalar limits describe expanded command routes. Compact
             # conditional control owns one copy per static region, not budget.
@@ -6576,8 +6577,6 @@ def _compile_native_nested_while_runtime_node(
     )
     if not structured_indices:
         return unavailable("inner_region_required")
-    if arch == _ti_core.Arch.vulkan and len(structured_indices) > 8:
-        return unavailable("inner_region_count_exceeds_eight")
 
     outer_controls = {outer_predicate, outer_counter}
     if outer_status is not None:
@@ -6694,7 +6693,6 @@ def _compile_native_nested_while_runtime_node(
     compiled.nested_expanded_eligible = (
         encoded_action_count <= 4096
         and outer_max_iterations <= 64
-        and len(inners) <= 8
         and all(
             inner.max_iterations <= 64 and inner.compound_chunk_limit <= 64
             for inner in inners

@@ -4202,7 +4202,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
     device = capabilities["device_control"]
     arch = ti.lang.impl.current_cfg().arch
-    assert capabilities["schema_version"] == 5
+    assert capabilities["schema_version"] == 6
     assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
     assert (
         set(
@@ -4302,7 +4302,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         64 if expected_nested_native else 0
     )
     assert device["nested_native_max_ordered_inner_regions"] == (
-        8 if expected_nested_native else 0
+        None if expected_nested_native else 0
     )
     assert device["nested_native_max_encoded_actions"] == (
         4096 if expected_nested_native else 0

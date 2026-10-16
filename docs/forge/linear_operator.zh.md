@@ -614,10 +614,10 @@ terminal storage。`terminal.snapshot()` 执行显式读回时，每个 packet �
 为准。`plan.graph_action_statistics()` 汇总该 plan 创建的全部 action，`solve.statistics()` 返回
 单个 action 的记录。
 
-该 action 可以追加到 outer `Sequential`，并与最多另外七个有序 inner `while` action
-共同组成 depth-2 Graph。取得资格的结构是一个 outer `while`，其 body 顺序包含一至八个
+该 action 可以追加到 outer `Sequential`，并与其他有序 inner `while` action
+共同组成 depth-2 Graph。取得资格的结构是一个 outer `while`，其 body 顺序包含一个或更多
 leaf inner `while`，inner 之间允许普通 dispatch/native action；各 inner control resource
-必须互不别名，完整层级最多编码 4,096 个 action。CPU 使用精确 nested host control；
+必须互不别名；展开式 GPU 路线仍最多编码 4,096 个 action，不单独限制 region 数量。CPU 使用精确 nested host control；
 通过显式 setup probe 的 CUDA Driver API 12.4+ runtime 使用 device-updatable kernel-node
 group，较旧或未通过资格的 runtime 使用 Forge 自带、与 CUDA 版本无关的 bounded 双 gate
 Graph；Vulkan 使用 bounded conditional replay。CUDA/Vulkan 会把完整层级保持在一个
