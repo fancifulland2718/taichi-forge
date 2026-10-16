@@ -160,7 +160,7 @@ struct LLVMCompiledKernel {
   std::unique_ptr<llvm::Module> module{nullptr};
   LLVMCompiledKernel() = default;
   LLVMCompiledKernel(LLVMCompiledKernel &&) = default;
-  LLVMCompiledKernel &operator=(LLVMCompiledKernel &&) = default;
+  LLVMCompiledKernel &operator=(LLVMCompiledKernel &&other) noexcept;
   LLVMCompiledKernel(std::vector<OffloadedTask> tasks,
                      std::unique_ptr<llvm::Module> module,
                      std::shared_ptr<llvm::LLVMContext> module_context_owner =

@@ -6,6 +6,39 @@
 namespace taichi::lang {
 namespace {
 
+TEST(LLVMCompiledKernelOwnership, MoveAssignmentRetiresModuleBeforeItsContext) {
+  auto make_data = [](const std::string &name) {
+    LLVMCompiledKernel result;
+    result.module_context_owner = std::make_shared<llvm::LLVMContext>();
+    result.module = std::make_unique<llvm::Module>(
+        name, *result.module_context_owner);
+    result.tasks.emplace_back(name, 32, 64);
+    result.cuda_max_registers = 48;
+    return result;
+  };
+  auto destination = make_data("old");
+  auto source = make_data("replacement");
+  std::weak_ptr<llvm::LLVMContext> old_context =
+      destination.module_context_owner;
+  std::weak_ptr<llvm::LLVMContext> new_context = source.module_context_owner;
+  const auto *module = source.module.get();
+  destination = std::move(source);
+  EXPECT_TRUE(old_context.expired());
+  EXPECT_FALSE(new_context.expired());
+  EXPECT_EQ(destination.module.get(), module);
+  EXPECT_EQ(source.module, nullptr);
+  EXPECT_EQ(destination.cuda_max_registers, 48);
+  ASSERT_EQ(destination.tasks.size(), 1);
+  EXPECT_EQ(destination.tasks.front().name, "replacement");
+  auto *self = &destination;
+  destination = std::move(*self);
+  EXPECT_EQ(destination.module.get(), module);
+  EXPECT_FALSE(new_context.expired());
+  destination = LLVMCompiledKernel{};
+  EXPECT_EQ(destination.module, nullptr);
+  EXPECT_TRUE(new_context.expired());
+}
+
 class LoadedEntryLauncher : public LLVM::KernelLauncher {
  public:
   LoadedEntryLauncher() : LLVM::KernelLauncher(Config{}) {

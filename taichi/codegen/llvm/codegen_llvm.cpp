@@ -3764,6 +3764,20 @@ LLVMCompiledKernel LLVMCompiledKernel::clone() const {
           cuda_max_registers};
 }
 
+LLVMCompiledKernel &LLVMCompiledKernel::operator=(
+    LLVMCompiledKernel &&other) noexcept {
+  if (this != &other) {
+    // Default move assignment replaces members in declaration order, unlike
+    // destruction. Retire the old module before replacing its context owner.
+    module.reset();
+    tasks = std::move(other.tasks);
+    cuda_max_registers = other.cuda_max_registers;
+    module_context_owner = std::move(other.module_context_owner);
+    module = std::move(other.module);
+  }
+  return *this;
+}
+
 }  // namespace taichi::lang
 
 #endif  // #ifdef TI_WITH_LLVM
