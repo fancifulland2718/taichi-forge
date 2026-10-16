@@ -2,7 +2,7 @@
 
 import sys
 from taichi_forge_runtime.aot import Runtime
-from tests.python.aot_cudss_probe import near, read, solve, write
+from tests.python.aot_cudss_probe import near, raises, read, solve, write
 
 
 def main(artifact, adapter, vendor, phase):
@@ -17,6 +17,9 @@ def main(artifact, adapter, vendor, phase):
             for name in ("cold", "warm", "selected", "changed"):
                 plan = module.execution_plan(name)
                 args = {key: frames[key] for key in plan.argument_names}
+                # The original capture contract forbids aliases even between
+                # read-only RHS bindings; low-level native groups are broader.
+                raises(lambda: plan.prepare(module, dict(args, rhs2=frames["rhs"])))
                 assert not any(key in args for key in ("row", "column", "seed_values"))
                 with plan.prepare(module, args) as call:
                     assert call.info["execution_kind"] == "cuda_graph"

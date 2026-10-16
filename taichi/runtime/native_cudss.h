@@ -49,6 +49,8 @@ struct CudssSolveGroupOperation {
   std::shared_ptr<CudssPlanResource> plan;
   std::optional<NativeArrayBinding> values;
   std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> rhs_outputs;
+  // Captured JIT graphs have a stricter binding contract than explicit groups.
+  bool disjoint_bindings{false};
 };
 
 struct CudssRefactorSolveOperation {

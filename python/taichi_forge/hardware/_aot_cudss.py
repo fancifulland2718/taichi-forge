@@ -53,7 +53,15 @@ def export_capture(recording, context):
     for index, (rhs, output) in enumerate(recording._rhs_pairs):
         bindings[f"rhs_{index}"] = rhs
         bindings[f"output_{index}"] = output
-    context.native("cudss", "solve_group_f32", parameters=dict(rhs_count=len(recording._rhs_pairs)), bindings=bindings)
+    # JIT capture rejects aliases between every binding, including read-only
+    # RHS vectors. Keep that contract as one group policy; emitting every pair
+    # as a constraint would grow the package quadratically with RHS count.
+    context.native(
+        "cudss",
+        "solve_group_f32",
+        parameters=dict(rhs_count=len(recording._rhs_pairs), disjoint_bindings=True),
+        bindings=bindings,
+    )
     return ()
 
 

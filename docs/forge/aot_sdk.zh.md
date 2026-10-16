@@ -1291,6 +1291,11 @@ Graph-owned `CudssCaptureRecording` 也可通过 `module.add_execution_plan(name
 已验证原始 seed/展示字段修改后仍保留原生语义、独立无源码消费、显式伴随及选中
 recipe 顺序。
 
+capture 导出还保存 `solve_group_f32` 的布尔参数 `disjoint_bindings=true`，在冷准备时
+保留原图所有数组绑定互不重叠的要求，包括只读 RHS。该策略使用已有分组排序校验，
+不会随 RHS 数量生成二次数量的成对约束。手写低层操作省略此参数时默认 `false`，
+继续允许只读 RHS 共享存储；输出仍不能与任何输入或其他输出重叠。
+
 普通 `CudssPlan.recording()`（`CudssSolveRecording`）也可导出冻结的 `solve` 资源，
 要求配对 private ABI 59。导出在原生存储/提交锁内检查成功分解的因子仍对应当前矩阵
 身份、pattern 和 numeric version，再读取 CSR 数据与原生配置；每计划每次导出只

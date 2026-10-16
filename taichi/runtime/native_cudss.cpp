@@ -73,7 +73,8 @@ void validate_group(Device &device, const CudssSolveGroupOperation &op) {
   auto add = [&](const NativeArrayBinding &array, uint64_t count, bool write) {
     const auto range = vector_layout(device, array, PrimitiveType::f32, count);
     intervals.push_back(
-        {range.memory_offset, range.memory_offset + range.bytes, write});
+        {range.memory_offset, range.memory_offset + range.bytes,
+         write || op.disjoint_bindings});
   };
   if (op.values)
     add(*op.values, d.nonzeros, false);
@@ -87,7 +88,9 @@ void validate_group(Device &device, const CudssSolveGroupOperation &op) {
   for (const auto &range : intervals) {
     if (range.begin < write_end || (range.write && range.begin < read_end))
       throw std::invalid_argument(
-          "cuDSS outputs must not alias group inputs or other outputs");
+          op.disjoint_bindings
+              ? "cuDSS capture bindings must not overlap"
+              : "cuDSS outputs must not alias group inputs or other outputs");
     auto &end = range.write ? write_end : read_end;
     end = std::max(end, range.end);
   }
@@ -492,12 +495,15 @@ void register_cudss_operations(NativeOperationRegistry &registry) {
       "cudss", "solve_group_f32", {"plan"},
       [](const liong::json::JsonValue &p)
           -> NativeOperationRegistry::Binder<CudssSolveGroupOperation> {
-        operation_json::fields(p, {"rhs_count"});
+        operation_json::fields(p, {"rhs_count", "disjoint_bindings"});
         const auto count = operation_json::integer(p["rhs_count"]);
+        const bool disjoint =
+            operation_json::optional_bool(p, "disjoint_bindings");
         if (!count)
           throw std::invalid_argument("cuDSS requires a nonempty RHS group");
-        return [count](const NativeOperationBindings &b) {
+        return [count, disjoint](const NativeOperationBindings &b) {
           CudssSolveGroupOperation op;
+          op.disjoint_bindings = disjoint;
           op.plan = b.at("plan").resource<CudssPlanResource>();
           if (const auto values = b.find("values"); values != b.end())
             op.values = values->second.array();

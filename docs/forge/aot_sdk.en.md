@@ -1658,6 +1658,14 @@ ABI 54; rebuilding analysis/factors remains cold preparation. Qualification cove
 changes to original seed/display fields, independent source-free consumption,
 explicit adjoints and selected recipe order.
 
+Capture export also sets the boolean `solve_group_f32` parameter
+`disjoint_bindings=true`, preserving the original graph's requirement that all
+array bindings be disjoint, including read-only RHS vectors. Cold validation uses
+the existing sorted group check rather than generating quadratically many pair
+constraints. Explicit low-level operations default this parameter to `false`
+when omitted and continue to allow read-only RHS storage sharing; outputs must
+still be disjoint from every input and other output.
+
 Ordinary `CudssPlan.recording()` (`CudssSolveRecording`) also exports a frozen
 `solve` resource with paired private ABI 59. Under the native storage/submission
 locks, export verifies that successful factors still match the matrix identity,

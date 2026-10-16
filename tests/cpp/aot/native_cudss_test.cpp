@@ -49,6 +49,17 @@ TEST(NativeCudss, SchemasDecodeWithoutProviderOrDevice) {
   EXPECT_EQ(registry.decode(group).kind(), CudssSolveGroupOperation::kind);
   group.bindings.erase("values");
   EXPECT_NO_THROW(registry.decode(group));
+  for (const auto *value : {"true", "false"}) {
+    group.parameters.obj.inner["disjoint_bindings"] =
+        liong::json::parse_complete(value);
+    EXPECT_NO_THROW(registry.decode(group));
+  }
+  for (const auto *value : {"0", "1", "null", "\"true\""}) {
+    group.parameters.obj.inner["disjoint_bindings"] =
+        liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(group), std::invalid_argument);
+  }
+  group.parameters.obj.inner.erase("disjoint_bindings");
   group.bindings = {{"plan", "p"}};
   group.parameters = liong::json::parse_complete(R"({"rhs_count":0})");
   EXPECT_THROW(registry.decode(group), std::invalid_argument);
@@ -349,6 +360,13 @@ TEST(NativeCudss, RebuildsFrozenPlansAndMultiRhsGroupsThroughTheRegistry) {
     alias = bindings;
     alias.at("rhs_1") = b;  // Repeated read-only RHS storage is legal.
     EXPECT_NO_THROW(registry.prepare(*context, group, alias));
+    auto strict_description = group_description;
+    strict_description.parameters.obj.inner["disjoint_bindings"] =
+        liong::json::parse_complete("true");
+    const auto strict = registry.decode(strict_description);
+    EXPECT_THROW(registry.prepare(*context, strict, alias),
+                 std::invalid_argument);
+    EXPECT_NO_THROW(registry.prepare(*context, strict, bindings));
     alias.clear();
     auto wrong_phase = group_description;
     auto wrong_bindings = bindings;
