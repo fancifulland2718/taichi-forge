@@ -102,7 +102,7 @@ struct FixedGraph::State {
         resource->release(backend_safe);
       capture_resources.clear();
       bounded.release(backend_safe);
-    release_selected(backend_safe);
+      release_selected(backend_safe);
       for (const auto &region : parallel)
         region->release(backend_safe);
       if (backend_safe && controls)
@@ -230,6 +230,20 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     std::vector<std::size_t> packets;
   };
   std::vector<SelectedBuild> selected_builds;
+  std::unordered_map<const Operation *, std::size_t> masked_branch_index;
+  std::vector<const Branch *> masked_branches;
+  struct MaskedBranchBuild {
+    MaskedBranchGraphLayout layout;
+    std::vector<std::size_t> packets;
+  };
+  std::vector<MaskedBranchBuild> masked_branch_builds;
+  const auto flat_kernels = [](const auto &region) {
+    return std::all_of(region.begin(), region.end(), [](const auto &op) {
+      const auto *dispatch = std::get_if<Dispatch>(&op);
+      return dispatch && !dispatch->external && !dispatch->bounded_extent &&
+             !dispatch->adaptive_block_dim;
+    });
+  };
   std::unordered_set<const void *> active_controls;
   std::vector<CudaGraphConditionalControl64> controls;
   std::vector<CudaGraphConditionalControl> branch_controls;
@@ -247,6 +261,19 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         branch->selection.validate(branch->bodies.size());
         if (branch->bodies.size() > std::numeric_limits<std::uint32_t>::max())
           throw std::invalid_argument("CUDA branch count exceeds its node ABI");
+        if (branch->mode == BranchExecutionMode::cuda_masked) {
+          if (!active_controls.empty() || !flat_kernels(branch->condition) ||
+              !std::all_of(branch->bodies.begin(), branch->bodies.end(),
+                           flat_kernels))
+            throw std::invalid_argument(
+                "Selected CUDA masked branch requires flat kernel regions");
+          masked_branch_index.emplace(&operation, masked_branches.size());
+          masked_branches.push_back(branch.get());
+          collect(branch->condition);
+          continue;
+        }
+        if (branch->mode != BranchExecutionMode::native)
+          throw std::invalid_argument("Unsupported fixed CUDA branch mode");
         if (active_controls.count(branch.get()))
           throw std::invalid_argument(
               "Fixed CUDA control regions contain a cycle");
@@ -297,15 +324,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
           throw std::invalid_argument(
               "Fixed CUDA while requires a predicate and nonempty body");
         if (loop->recipe) {
-          const auto flat = [](const auto &region) {
-            return std::all_of(region.begin(), region.end(), [](const auto &op) {
-              const auto *dispatch = std::get_if<Dispatch>(&op);
-              return dispatch && !dispatch->external &&
-                     !dispatch->bounded_extent && !dispatch->adaptive_block_dim;
-            });
-          };
-          if (!active_controls.empty() || !flat(loop->condition) ||
-              !flat(loop->body))
+          if (!active_controls.empty() || !flat_kernels(loop->condition) ||
+              !flat_kernels(loop->body))
             throw std::invalid_argument(
                 "Selected CUDA control requires flat kernel "
                 "regions");
@@ -341,7 +361,11 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   };
   collect(operations);
   const auto gated_begin = dispatches.size();
-  std::vector<void *> packet_gates;
+  struct GateBinding {
+    void *pointer;
+    std::uint32_t expected;
+  };
+  std::vector<GateBinding> packet_gates;
   bool has_device_update = false;
   for (const auto *loop : selected_regions) {
     const auto &recipe = *loop->recipe;
@@ -393,7 +417,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                             : layout.gate;
       build.packets.push_back(dispatches.size());
       dispatches.push_back(dispatch);
-      packet_gates.push_back(reinterpret_cast<void *>(gate));
+      packet_gates.push_back({reinterpret_cast<void *>(gate), 1u});
     }
     if (masked) {
       driver_graph_prepare_mask_latch();
@@ -405,6 +429,43 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                                   "prepare nested CUDA controls",
                                   "Selected device-update controls are unavailable");
     }
+  }
+  for (const auto *branch : masked_branches) {
+    masked_branch_builds.emplace_back();
+    auto &build = masked_branch_builds.back();
+    auto &layout = build.layout;
+    layout.predicate = reinterpret_cast<std::uintptr_t>(branch->selector);
+    layout.conditional_type =
+        branch->selection.kind == BranchSelection::Kind::nonzero ? 0 : 2;
+    layout.branch_count = static_cast<std::uint32_t>(branch->bodies.size());
+    layout.default_branch = branch->selection.has_default
+                                ? layout.branch_count - 1
+                                : ~std::uint32_t{0};
+    for (const auto &body : branch->bodies) {
+      if (body.size() > std::numeric_limits<std::size_t>::max() - layout.dispatches)
+        throw std::invalid_argument("CUDA masked branch dispatch count overflow");
+      layout.dispatches += body.size();
+    }
+    // An all-empty branch still executes its condition, but needs no latch,
+    // device gate, or packets. Preserve empty cases in nonempty layouts.
+    if (!layout.dispatches)
+      continue;
+    state.selected_controls.push_back(std::make_unique<State::SelectedControl>());
+    auto &region = *state.selected_controls.back();
+    region.masked = true;
+    region.gate_bytes = sizeof(std::uint32_t);
+    driver.malloc(reinterpret_cast<void **>(&region.gates), region.gate_bytes);
+    layout.gate = reinterpret_cast<std::uintptr_t>(region.gates);
+    build.packets.reserve(layout.dispatches);
+    for (std::size_t i = 0; i < branch->bodies.size(); ++i) {
+      for (const auto &item : branch->bodies[i]) {
+        build.packets.push_back(dispatches.size());
+        dispatches.push_back(&std::get<Dispatch>(item));
+        packet_gates.push_back(
+            {region.gates, static_cast<std::uint32_t>(i + 1)});
+      }
+    }
+    driver_graph_prepare_mask_latch();
   }
   for (const auto *parallel : parallel_regions) {
     state.parallel.push_back(std::make_unique<ParallelGraphCapture>());
@@ -428,13 +489,14 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       offsets.push_back(0);
       continue;
     }
-    const auto gate = i >= gated_begin ? packet_gates[i - gated_begin] : nullptr;
+    const auto gate =
+        i >= gated_begin ? packet_gates[i - gated_begin] : GateBinding{nullptr, 0};
     TI_ERROR_IF(
         !dispatch.launcher || !dispatch.context ||
-            !(gate
+            !(gate.pointer
                   ? dispatch.launcher->prepare_cuda_graph_gated_packet(
                         dispatch.handle, *dispatch.context, packets[i],
-                        gate, 1u)
+                        gate.pointer, gate.expected)
               : dispatch.bounded_extent
                   ? dispatch.launcher->prepare_cuda_graph_bounded_packet(
                         dispatch.handle, *dispatch.context, packets[i],
@@ -445,7 +507,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     auto &packet = packets[i];
     if (dispatch.adaptive_block_dim) {
       TI_ERROR_IF(!controls.empty() || !branch_controls.empty() ||
-                      !selected_regions.empty() ||
+                      !selected_regions.empty() || !masked_branches.empty() ||
                       !packet.bounded_range ||
                       !dispatch.bounded_binding_identity ||
                       packet.offloaded_tasks.size() != 1 ||
@@ -563,6 +625,19 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       return;
     }
     if (const auto *value =
+            std::get_if<std::shared_ptr<const Branch>>(&operation)) {
+      const auto &build =
+          masked_branch_builds[masked_branch_index.at(&operation)];
+      for (const auto &item : (*value)->condition)
+        record_dispatch(std::get<Dispatch>(item), stream);
+      if (!build.packets.empty())
+        capture_masked_branch_graph(
+            build.layout, stream, [&](std::size_t index) {
+              record_dispatch_index(build.packets[index], stream);
+            });
+      return;
+    }
+    if (const auto *value =
             std::get_if<std::shared_ptr<const While>>(&operation)) {
       const auto index = selected_index.at(&operation);
       auto &region = *state.selected_controls[index];
@@ -660,8 +735,10 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       while (begin < sequence.size()) {
         auto end = begin;
         while (end < sequence.size() &&
-               !std::holds_alternative<std::shared_ptr<const Branch>>(
-                   sequence[end]) &&
+               (!std::holds_alternative<std::shared_ptr<const Branch>>(
+                    sequence[end]) ||
+                std::get<std::shared_ptr<const Branch>>(sequence[end])->mode ==
+                    BranchExecutionMode::cuda_masked) &&
                (!std::holds_alternative<std::shared_ptr<const While>>(
                     sequence[end]) ||
                 std::get<std::shared_ptr<const While>>(sequence[end])

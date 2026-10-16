@@ -564,7 +564,7 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI74 components.
+This requires a v14 consumer and matching private ABI75 components.
 `add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
 `masked`, preserving its physical dispatch boundaries and generating only the
 required body variants. Code is deduplicated by source specialization and launch
@@ -584,7 +584,7 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-format requires a v15 consumer and matching ABI74 components.
+format requires a v15 consumer and matching ABI75 components.
 `add_execution_plan(name, graph)` also exports materialized flat Graphs selected
 for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
 condition, generates only their gated variants, and shares code across plans.

@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
@@ -224,30 +225,41 @@ struct MaskedAotFrame {
     std::unique_ptr<cuda::FixedGraph> direct;
     void run() { fixed ? fixed->run() : direct->run(); }
   };
+  FixedExecution::Dispatch dispatch(
+      llvm_aot::KernelImpl *kernel, int operation,
+      std::vector<std::unique_ptr<LaunchContextBuilder>> &contexts) {
+    auto context = std::make_unique<LaunchContextBuilder>(kernel);
+    if (operation >= 0) {
+      context->set_arg_external_array_with_shape(
+          {0}, reinterpret_cast<std::uintptr_t>(address(4)), 56, {14});
+      context->set_arg_external_array_with_shape(
+          {1}, reinterpret_cast<std::uintptr_t>(address(3)), 16, {4});
+      context->set_arg_int({2}, operation);
+    } else {
+      context->set_arg_external_array_with_shape(
+          {0}, reinterpret_cast<std::uintptr_t>(address(0)), 16, {4},
+          reinterpret_cast<std::uintptr_t>(address(2)));
+      context->set_arg_external_array_with_shape(
+          {1}, reinterpret_cast<std::uintptr_t>(address(1)), 16, {4},
+          reinterpret_cast<std::uintptr_t>(address(3)));
+    }
+    auto result = FixedExecution::Dispatch{kernel, context.get()};
+    contexts.push_back(std::move(context));
+    return result;
+  }
+  static cuda::FixedGraph::Dispatch native_dispatch(
+      const FixedExecution::Dispatch &source) {
+    auto &entry = static_cast<llvm_aot::KernelImpl &>(*source.kernel);
+    return {&static_cast<cuda::KernelLauncher &>(entry.launcher()),
+            entry.handle(), source.context, {}, {}};
+  }
   Prepared prepare(std::uint64_t outer, std::uint64_t inner, bool direct,
                    bool conditional = false, int invalid = 0, int flat = 0) {
     auto &driver = CUDADriver::get_instance();
     driver.memsetd32(address(4), 99, 14);
     std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
     const auto dispatch = [&](llvm_aot::KernelImpl *kernel, int operation) {
-      auto context = std::make_unique<LaunchContextBuilder>(kernel);
-      if (operation >= 0) {
-        context->set_arg_external_array_with_shape(
-            {0}, reinterpret_cast<std::uintptr_t>(address(4)), 56, {14});
-        context->set_arg_external_array_with_shape(
-            {1}, reinterpret_cast<std::uintptr_t>(address(3)), 16, {4});
-        context->set_arg_int({2}, operation);
-      } else {
-        context->set_arg_external_array_with_shape(
-            {0}, reinterpret_cast<std::uintptr_t>(address(0)), 16, {4},
-            reinterpret_cast<std::uintptr_t>(address(2)));
-        context->set_arg_external_array_with_shape(
-            {1}, reinterpret_cast<std::uintptr_t>(address(1)), 16, {4},
-            reinterpret_cast<std::uintptr_t>(address(3)));
-      }
-      auto result = FixedExecution::Dispatch{kernel, context.get()};
-      contexts.push_back(std::move(context));
-      return result;
+      return this->dispatch(kernel, operation, contexts);
     };
     auto loop = std::make_shared<FixedExecution::While>();
     loop->predicate = ptr(4, 1);
@@ -281,12 +293,6 @@ struct MaskedAotFrame {
     }
     Prepared result;
     if (direct) {
-      const auto native_dispatch = [](const FixedExecution::Dispatch &source) {
-        auto &entry = static_cast<llvm_aot::KernelImpl &>(*source.kernel);
-        return cuda::FixedGraph::Dispatch{
-            &static_cast<cuda::KernelLauncher &>(entry.launcher()),
-            entry.handle(), source.context, {}, {}};
-      };
       auto native = std::make_shared<cuda::FixedGraph::While>();
       native->predicate = address(4, 1);
       native->max_iterations = outer;
@@ -332,6 +338,81 @@ struct MaskedAotFrame {
       EXPECT_EQ(value, 99);  // Preparation cannot execute the prefix/condition.
     return result;  // Every cold source descriptor/context has been discarded.
   }
+  Prepared prepare_branch(BranchSelection selection, std::size_t cases,
+                          bool direct, int empty_case = -1, int invalid = 0,
+                          bool conditional_sibling = false) {
+    auto &driver = CUDADriver::get_instance();
+    driver.memsetd32(address(4), 99, 14);
+    std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
+    const auto dispatch = [&](llvm_aot::KernelImpl *kernel, int operation) {
+      return this->dispatch(kernel, operation, contexts);
+    };
+    auto branch = std::make_shared<FixedExecution::Branch>();
+    branch->selector = ptr(4, 1);
+    branch->selection = selection;
+    branch->mode = BranchExecutionMode::cuda_masked;
+    branch->condition = {dispatch(invalid == 2 ? gated_control : control, 10)};
+    for (std::size_t i = 0; i < cases + std::size_t(selection.has_default); ++i) {
+      branch->bodies.emplace_back();
+      // -2 requests an all-empty branch, including its optional fallback.
+      if (empty_case == -2 || empty_case == static_cast<int>(i))
+        continue;
+      branch->bodies.back() = {
+          dispatch(gated_control, 100 + static_cast<int>(i)),
+          dispatch(invalid == 1 ? ordinary : forward, -1),
+          dispatch(reverse, -1)};
+    }
+    if (invalid == 3)
+      branch->bodies.front().front() = FixedExecution::BufferFill{ptr(4, 2), 4, 0};
+    if (invalid == 4) {
+      auto &bounded = std::get<FixedExecution::Dispatch>(branch->bodies.front().front());
+      bounded.bounded_extent = ptr(4, 4);
+      bounded.bounded_capacity = 1;
+    }
+    if (invalid == 5)
+      branch->mode = static_cast<BranchExecutionMode>(99);
+    Prepared result;
+    if (direct) {
+      auto native = std::make_shared<cuda::FixedGraph::Branch>();
+      native->selector = address(4, 1);
+      native->selection = selection;
+      native->mode = branch->mode;
+      for (const auto &item : branch->condition)
+        native->condition.emplace_back(
+            native_dispatch(std::get<FixedExecution::Dispatch>(item)));
+      for (const auto &body : branch->bodies) {
+        native->bodies.emplace_back();
+        for (const auto &item : body)
+          native->bodies.back().emplace_back(
+              native_dispatch(std::get<FixedExecution::Dispatch>(item)));
+      }
+      result.direct = std::make_unique<cuda::FixedGraph>(
+          std::vector<cuda::FixedGraph::Operation>{
+              native_dispatch(dispatch(control, 4)), native, native,
+              native_dispatch(dispatch(control, 5))});
+      EXPECT_EQ(result.direct->control_bytes(), empty_case == -2 ? 0 : 8);
+    } else {
+      std::vector<FixedExecution::Operation> operations{
+          FixedExecution::BufferFill{ptr(4, 7), 4, 77}, branch, branch,
+          FixedExecution::BufferCopy{ptr(4, 8), ptr(4, 6), 4}};
+      if (conditional_sibling) {
+        auto sibling = std::make_shared<FixedExecution::Branch>();
+        sibling->selector = ptr(4, 4);
+        sibling->selection.has_default = true;
+        sibling->bodies = {{FixedExecution::BufferFill{ptr(4, 7), 4, 11}},
+                           {FixedExecution::BufferFill{ptr(4, 7), 4, 22}}};
+        operations.emplace_back(std::move(sibling));
+      }
+      result.fixed = std::make_unique<FixedExecution>(Arch::cuda, device, nullptr,
+                                                     operations);
+      EXPECT_EQ(result.fixed->execution_kind(), 1);
+    }
+    std::array<std::uint32_t, 14> before;
+    driver.memcpy_device_to_host(before.data(), address(4), 56);
+    for (auto value : before)
+      EXPECT_EQ(value, 99);
+    return result;
+  }
   void reset(std::uint32_t outer, std::uint32_t inner) {
     auto &driver = CUDADriver::get_instance();
     std::array<float, 4> sentinel{-99, -99, -99, -99}, one{1, 1, 1, 1};
@@ -368,6 +449,33 @@ struct MaskedAotFrame {
       EXPECT_EQ(y[i], steps ? values[i] * values[i] : -99);
       EXPECT_EQ(dx[i], steps * 2 * values[i]);
       EXPECT_EQ(dy[i], steps ? 0 : 1);
+    }
+  }
+  void check_branch(BranchSelection selection, std::size_t cases,
+                    std::int32_t selector, int empty_case = -1,
+                    bool conditional_sibling = false) {
+    const auto body_count = cases + std::size_t(selection.has_default);
+    const auto chosen = selection.select(selector, body_count);
+    const bool accepted = chosen < body_count && empty_case != -2 &&
+                          static_cast<int>(chosen) != empty_case;
+    const auto hits = accepted ? 2u : 0u;
+    const auto weight = accepted ? 2 * (chosen + 1) : 0;
+    auto &driver = CUDADriver::get_instance();
+    std::array<std::uint32_t, 14> state;
+    driver.memcpy_device_to_host(state.data(), address(4), 56);
+    EXPECT_EQ(state[6], weight);
+    EXPECT_EQ(state[8], weight);
+    EXPECT_EQ(state[9], 2);
+    EXPECT_EQ(state[13], hits);
+    EXPECT_EQ(state[7], conditional_sibling ? (selector ? 11 : 22) : 77);
+    std::array<float, 4> y, dx, dy;
+    driver.memcpy_device_to_host(y.data(), address(1), 16);
+    driver.memcpy_device_to_host(dx.data(), address(2), 16);
+    driver.memcpy_device_to_host(dy.data(), address(3), 16);
+    for (std::size_t i = 0; i < y.size(); ++i) {
+      EXPECT_EQ(y[i], hits ? values[i] * values[i] : -99);
+      EXPECT_EQ(dx[i], hits * 2 * values[i]);
+      EXPECT_EQ(dy[i], hits ? 0 : 1);
     }
   }
 };
@@ -476,6 +584,94 @@ TEST(CudaGatedAot, FixedMaskedExecutionOwnsGatesAndPreservesActualGradients) {
              (samples[7] + samples[8]) / 2,
              measured.direct->argument_bytes(), measured.direct->control_bytes(),
              measured.direct->node_count(), conditional_sibling);
+
+  using Kind = BranchSelection::Kind;
+  struct BranchCase {
+    BranchSelection selection;
+    std::size_t cases;
+    int empty_case;
+  };
+  const BranchSelection indexed{Kind::indexed, true};
+  auto other_branch = second.prepare_branch(indexed, 3, false);
+  for (const bool direct : {false, true}) {
+    for (const auto &test : {
+             BranchCase{{Kind::nonzero, false}, 1, -1},
+             BranchCase{{Kind::nonzero, true}, 1, 1},
+             BranchCase{indexed, 3, 1},
+             BranchCase{{Kind::indexed, false}, 3, -1},
+             BranchCase{indexed, 3, -2}}) {
+      auto branch = first.prepare_branch(test.selection, test.cases, direct,
+                                          test.empty_case);
+      const auto changed = test.selection.kind == Kind::nonzero ? 0u : ~0u;
+      for (const auto selector : {std::numeric_limits<std::int32_t>::min(), -1,
+                                  0, 1, 2, 3,
+                                  std::numeric_limits<std::int32_t>::max(), 0}) {
+        first.reset(static_cast<std::uint32_t>(selector), changed);
+        second.reset(2, ~0u);
+        branch.run();
+        other_branch.run();
+        driver.stream_synchronize(nullptr);
+        first.check_branch(test.selection, test.cases, selector, test.empty_case);
+        second.check_branch(indexed, 3, 2);
+      }
+      first.reset(2, changed);
+      branch.run();
+      branch = {};
+      first.check_branch(test.selection, test.cases, 2, test.empty_case);
+    }
+    for (const int invalid : {1, 2, 5})
+      EXPECT_ANY_THROW(first.prepare_branch(indexed, 3, direct, -1, invalid));
+    if (!direct)
+      for (const int invalid : {3, 4})
+        EXPECT_ANY_THROW(first.prepare_branch(indexed, 3, false, -1, invalid));
+  }
+  if (conditional_sibling) {
+    auto mixed = first.prepare_branch(indexed, 3, false, -1, 0, true);
+    for (const auto selector : {0, 2, -1}) {
+      first.reset(static_cast<std::uint32_t>(selector), ~0u);
+      mixed.run();
+      driver.stream_synchronize(nullptr);
+      first.check_branch(indexed, 3, selector, -1, true);
+    }
+  }
+  {
+    auto empty = std::make_shared<FixedExecution::Branch>();
+    empty->selector = first.ptr(4, 1);
+    empty->mode = BranchExecutionMode::cuda_masked;
+    empty->bodies = {{}};
+    FixedExecution no_work(Arch::cuda, device, nullptr, {empty});
+    no_work.run();
+    driver.stream_synchronize(nullptr);
+    auto native = std::make_shared<cuda::FixedGraph::Branch>();
+    native->selector = first.address(4, 1);
+    native->mode = BranchExecutionMode::cuda_masked;
+    native->bodies = {{}};
+    cuda::FixedGraph native_no_work(
+        std::vector<cuda::FixedGraph::Operation>{native});
+    EXPECT_EQ(native_no_work.control_bytes(), 0);
+    EXPECT_EQ(native_no_work.argument_bytes(), 0);
+    native_no_work.run();
+    driver.stream_synchronize(nullptr);
+  }
+  const auto branch_begin = std::chrono::steady_clock::now();
+  auto branch = first.prepare_branch(indexed, 3, true);
+  const auto branch_prepare_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - branch_begin).count();
+  for (auto &sample : samples) {
+    first.reset(2, ~0u);
+    const auto start = std::chrono::steady_clock::now();
+    branch.run();
+    driver.stream_synchronize(nullptr);
+    sample = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - start).count();
+  }
+  first.check_branch(indexed, 3, 2);
+  std::sort(samples.begin(), samples.end());
+  fmt::print("BRANCH_COSTS {{\"prepare_ms\":{},\"warm_complete_median_us\":{},"
+             "\"arguments_bytes\":{},\"control_bytes\":{},\"nodes\":{}}}\n",
+             branch_prepare_ms, (samples[7] + samples[8]) / 2,
+             branch.direct->argument_bytes(), branch.direct->control_bytes(),
+             branch.direct->node_count());
   EXPECT_EQ(first.control->launcher().debug_registered_kernel_count(), registered);
 }
 

@@ -103,17 +103,30 @@ void check_nested_and_facts(Arch arch,
     return FixedExecution::BufferFill{ptr(i), 4, value};
   };
   auto inner = std::make_shared<FixedExecution::Branch>();
-  inner->host_selection = true;
+  inner->mode = BranchExecutionMode::host;
   inner->selector = ptr(1);
   inner->selection.has_default = true;
   inner->condition = {fill(1, 0)};
   inner->bodies = {{fill(2, 10)}, {fill(2, 20)}};
   auto outer = std::make_shared<FixedExecution::Branch>();
-  outer->host_selection = true;
+  outer->mode = BranchExecutionMode::host;
   outer->selector = ptr(1);
   outer->selection.has_default = true;
   outer->condition = {FixedExecution::BufferCopy{ptr(1), ptr(0), 4}};
   outer->bodies = {{inner}, {fill(2, 30)}};
+  {
+    auto invalid = std::make_shared<FixedExecution::Branch>();
+    invalid->selector = ptr(1);
+    invalid->bodies = {{}};
+    invalid->mode = static_cast<BranchExecutionMode>(99);
+    EXPECT_THROW(FixedExecution(arch, device, runtime, {invalid}),
+                 std::invalid_argument);
+    if (arch != Arch::cuda) {
+      invalid->mode = BranchExecutionMode::cuda_masked;
+      EXPECT_THROW(FixedExecution(arch, device, runtime, {invalid}),
+                   std::invalid_argument);
+    }
+  }
   {
     FixedExecution nested(
         arch, device, runtime,
@@ -126,17 +139,17 @@ void check_nested_and_facts(Arch arch,
     }
   }
   if (arch == Arch::cuda) {
-    outer->host_selection = false;
+    outer->mode = BranchExecutionMode::native;
     EXPECT_THROW(FixedExecution(arch, device, runtime, {outer}),
                  std::invalid_argument);
-    outer->host_selection = true;
+    outer->mode = BranchExecutionMode::host;
     // A native child under host selection remains a native CUDA graph.
-    inner->host_selection = false;
+    inner->mode = BranchExecutionMode::native;
     FixedExecution mixed(arch, device, runtime, {outer});
     write(ptr(0), Frame{1, 71, 72, 73});
     mixed.run();
     EXPECT_EQ(read(ptr(0))[2], 20);
-    inner->host_selection = true;
+    inner->mode = BranchExecutionMode::host;
   }
   auto writer = std::make_shared<FactOperation>(arch, device, ptr(2));
   auto reader =
@@ -199,7 +212,7 @@ void check_production(Arch arch,
         const auto begin = frame * 4;
         write(ptr(begin), Frame{0, 71, 72, 73});
         auto branch = std::make_shared<FixedExecution::Branch>();
-        branch->host_selection = true;
+        branch->mode = BranchExecutionMode::host;
         branch->selector = ptr(begin + 1);
         branch->selection = {kind, fallback};
         branch->condition = {
@@ -409,7 +422,7 @@ TEST(HostBranchContract, FailedHostProviderCannotReplay) {
   };
   auto failure = std::make_shared<Failure>(device);
   auto branch = std::make_shared<FixedExecution::Branch>();
-  branch->host_selection = true;
+  branch->mode = BranchExecutionMode::host;
   branch->selector = allocation.first->get_ptr();
   branch->condition = {FixedExecution::BufferFill{branch->selector, 4, 1}};
   branch->bodies = {{failure}};

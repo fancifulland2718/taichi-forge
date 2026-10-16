@@ -964,8 +964,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
         bound->selector = control_pointer(branch.selector);
         bound->selection = branch.selection;
         using Lowering = aot::ExecutionPlan::Branch::Lowering;
-        bound->host_selection = branch.lowering == Lowering::cuda_host ||
-                                branch.lowering == Lowering::vulkan_host;
+        bound->mode = branch.lowering == Lowering::cuda_host ||
+                              branch.lowering == Lowering::vulkan_host
+                          ? BranchExecutionMode::host
+                          : BranchExecutionMode::native;
         if (!bind_steps(branch.condition, bound->condition))
           return false;
         for (const auto &body : branch.bodies) {

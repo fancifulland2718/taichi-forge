@@ -69,8 +69,7 @@ class FixedExecution {
     BranchSelection selection;
     std::vector<Operation> condition;
     std::vector<std::vector<Operation>> bodies;
-    // Explicit portable lowering, never a fallback from a native GPU branch.
-    bool host_selection{false};
+    BranchExecutionMode mode{BranchExecutionMode::native};
   };
   struct While {
     struct Vulkan {

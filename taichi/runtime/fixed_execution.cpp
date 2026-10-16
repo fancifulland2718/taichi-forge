@@ -178,20 +178,38 @@ FixedExecution::FixedExecution(
         if (!branch || branch->selector.device != &device ||
             branch->selector.offset % 4 ||
             (!arch_is_cpu(arch) && arch != Arch::cuda &&
-             !(arch == Arch::vulkan && branch->host_selection)))
+             !(arch == Arch::vulkan && branch->mode == BranchExecutionMode::host)))
           throw std::invalid_argument(
               "Fixed branch requires a supported lowering and aligned selector storage");
-        if (branch->host_selection && inside_control && !arch_is_cpu(arch))
+        const bool host = branch->mode == BranchExecutionMode::host;
+        const bool masked = branch->mode == BranchExecutionMode::cuda_masked;
+        if (!host && !masked && branch->mode != BranchExecutionMode::native)
+          throw std::invalid_argument("Unsupported fixed branch execution mode");
+        if (masked) {
+          const auto flat = [](const auto &region) {
+            return std::all_of(region.begin(), region.end(), [](const auto &op) {
+              const auto *dispatch = std::get_if<Dispatch>(&op);
+              return dispatch && !dispatch->indirect_dispatch.alloc_id &&
+                     !dispatch->bounded_extent.alloc_id &&
+                     !dispatch->adaptive_block_dim;
+            });
+          };
+          if (arch != Arch::cuda || inside_control || !flat(branch->condition) ||
+              !std::all_of(branch->bodies.begin(), branch->bodies.end(), flat))
+            throw std::invalid_argument(
+                "Selected CUDA masked branch requires flat kernel regions on CUDA");
+        }
+        if (host && inside_control && !arch_is_cpu(arch))
           throw std::invalid_argument(
               "Native GPU control cannot contain host selection");
-        has_host_selection |= branch->host_selection;
+        has_host_selection |= host;
         branch->selection.validate(branch->bodies.size());
         if (!active_controls.insert(branch.get()).second)
           throw std::invalid_argument(
               "Fixed control descriptors contain a cycle");
         // Conditions execute exactly once. Only native GPU control restricts
         // their execution mode; conditional fact joins apply to both modes.
-        const bool native_control = !branch->host_selection;
+        const bool native_control = !host;
         validate(branch->condition, recording_state, native_control);
         auto joined = recording_state.initialized;
         bool first = branch->selection.has_default;
@@ -485,7 +503,7 @@ FixedExecution::FixedExecution(
       for (const auto &operation : region) {
         const auto *value =
             std::get_if<std::shared_ptr<const Branch>>(&operation);
-        if (!value || !(*value)->host_selection) {
+        if (!value || (*value)->mode != BranchExecutionMode::host) {
           block.push_back(operation);
           continue;
         }
@@ -683,6 +701,7 @@ FixedExecution::FixedExecution(
           auto result = std::make_shared<cuda::FixedGraph::Branch>();
           result->selector = cuda_pointer((*branch)->selector);
           result->selection = (*branch)->selection;
+          result->mode = (*branch)->mode;
           result->condition = prepare((*branch)->condition);
           for (const auto &body : (*branch)->bodies)
             result->bodies.push_back(prepare(body));

@@ -49,6 +49,7 @@ class FixedGraph {
     BranchSelection selection;
     std::vector<Operation> condition;
     std::vector<std::vector<Operation>> bodies;
+    BranchExecutionMode mode{BranchExecutionMode::native};
   };
   struct While {
     void *predicate{nullptr};

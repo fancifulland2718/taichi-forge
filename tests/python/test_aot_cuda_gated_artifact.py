@@ -77,6 +77,15 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
         elif operation == 9:
             state[0] += 1
             state[1] = state[0] >= state[4]
+        elif operation == 10:
+            state[1] = state[4]
+            state[9] += 1
+        elif operation >= 100:
+            for i in ti.static(range(4)):
+                dy[i] = 1.0
+            state[6] += operation - 99
+            state[13] += 1
+            state[1] = state[5]  # Selection must remain latched for this branch.
 
     caps = (
         [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
@@ -131,6 +140,13 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
     costs["fixed_graph"] = json.loads(
         next(
             line.removeprefix("FIXED_COSTS ") for line in result.stdout.splitlines() if line.startswith("FIXED_COSTS ")
+        )
+    )
+    costs["masked_branch"] = json.loads(
+        next(
+            line.removeprefix("BRANCH_COSTS ")
+            for line in result.stdout.splitlines()
+            if line.startswith("BRANCH_COSTS ")
         )
     )
     for mode in ("standalone", "borrowed"):

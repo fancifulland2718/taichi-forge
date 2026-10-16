@@ -5,6 +5,9 @@
 #include <stdexcept>
 
 namespace taichi::lang {
+// Explicit execution choice; never silently fall back between these modes.
+enum class BranchExecutionMode { native, host, cuda_masked };
+
 // Semantic selection shared by persistent descriptions and backend builders.
 // The optional fallback is the last body. A missing match executes no body.
 // Device-specific body-count limits belong to the corresponding backend.
