@@ -1,5 +1,6 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
+#include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/system/profiler_annotation.h"
 #include "taichi/util/environ_config.h"
@@ -9,9 +10,6 @@
 #include <cstring>
 #include <cstdint>
 #include <unordered_map>
-
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Verifier.h"
 
 namespace taichi::lang {
 namespace cuda {
@@ -217,57 +215,6 @@ std::shared_ptr<void> own_cuda_allocation(void *ptr) {
       CUDADriver::get_instance().mem_free(allocation);
     }
   });
-}
-
-void add_cuda_graph_execution_gate(LLVMCompiledKernel &compiled) {
-  TI_ASSERT(compiled.module != nullptr);
-  auto &module = *compiled.module;
-  auto &llvm_context = module.getContext();
-  auto *pointer_type = llvm::PointerType::get(llvm_context, 0);
-  auto *i8_type = llvm::Type::getInt8Ty(llvm_context);
-  auto *i32_type = llvm::Type::getInt32Ty(llvm_context);
-  auto *i64_type = llvm::Type::getInt64Ty(llvm_context);
-
-  for (const auto &task : compiled.tasks) {
-    auto *function = module.getFunction(task.name);
-    TI_ASSERT(function != nullptr && !function->empty());
-    TI_ASSERT(function->getReturnType()->isVoidTy());
-    TI_ASSERT(function->arg_size() == 1);
-    auto *original_entry = &function->getEntryBlock();
-    auto *gate_entry = llvm::BasicBlock::Create(
-        llvm_context, "graph_execution_gate", function, original_entry);
-    auto *masked_exit = llvm::BasicBlock::Create(
-        llvm_context, "graph_execution_masked_exit", function, original_entry);
-    llvm::IRBuilder<> builder(gate_entry);
-    // RuntimeContext::arg_buffer is its first member. The private gated launch
-    // allocation stores GraphExecutionGateBinding immediately before that
-    // pointer, so the variant can inline the test without adding a runtime
-    // bitcode symbol or changing RuntimeContext's split-wheel ABI.
-    auto *arg_buffer = builder.CreateAlignedLoad(
-        pointer_type, function->getArg(0), llvm::Align(8), "graph_args");
-    auto *binding = builder.CreateInBoundsGEP(
-        i8_type, arg_buffer,
-        llvm::ConstantInt::getSigned(
-            i64_type,
-            -static_cast<std::int64_t>(sizeof(GraphExecutionGateBinding))),
-        "graph_gate_binding");
-    auto *gate_bits = builder.CreateAlignedLoad(
-        i64_type, binding, llvm::Align(8), "graph_gate_address");
-    auto *expected_address = builder.CreateInBoundsGEP(
-        i8_type, binding,
-        llvm::ConstantInt::get(i64_type,
-                               offsetof(GraphExecutionGateBinding, expected)));
-    auto *expected = builder.CreateAlignedLoad(
-        i32_type, expected_address, llvm::Align(4), "graph_gate_expected");
-    auto *gate = builder.CreateIntToPtr(gate_bits, pointer_type);
-    auto *value = builder.CreateAlignedLoad(i32_type, gate, llvm::Align(4),
-                                            "graph_gate_value");
-    auto *execute = builder.CreateICmpEQ(value, expected);
-    builder.CreateCondBr(execute, original_entry, masked_exit);
-    builder.SetInsertPoint(masked_exit);
-    builder.CreateRetVoid();
-  }
-  TI_ASSERT(!llvm::verifyModule(module, &llvm::errs()));
 }
 
 }  // namespace
@@ -1733,8 +1680,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   auto handle = make_handle();
   auto ctx = std::make_shared<Context>();
   auto *executor = get_runtime_executor();
-  auto data = compiled.get_internal_data().compiled_data.clone();
-  add_cuda_graph_execution_gate(data);
+  auto data = LLVM::make_cuda_graph_gated_kernel(
+      compiled.get_internal_data().compiled_data);
   auto parameters = compiled.get_internal_data().args;
   auto *jit_module = executor->create_jit_module(std::move(data.module),
                                                  data.cuda_max_registers);
