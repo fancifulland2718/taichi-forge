@@ -318,6 +318,7 @@ void register_retained_scan_operation(NativeOperationRegistry &registry);
 void register_matrix_operations(NativeOperationRegistry &registry);
 void register_cub_source_operations(NativeOperationRegistry &registry);
 void register_cutlass_source_operations(NativeOperationRegistry &registry);
+void register_parallel_sort_operations(NativeOperationRegistry &registry);
 void register_cudss_operations(NativeOperationRegistry &registry);
 void register_cusolverdn_operations(NativeOperationRegistry &registry);
 void register_cublaslt_operations(NativeOperationRegistry &registry);

@@ -16,6 +16,37 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry,
+     ParallelSortFreezesShaderInventoryWithoutDeviceCalls) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription plan;
+  plan.provider = "fidelityfx_parallel_sort";
+  plan.operation = "plan_u32";
+  plan.bindings = {{"keys", "keys"}, {"code", "code"}};
+  plan.parameters = liong::json::parse_complete(
+      R"({"key_count":4294967295,"payload":false,"fused_prefix":true,"shader_sizes":[20,20,20]})");
+  EXPECT_EQ(registry.decode(plan, NativeObjectKind::resource).kind(),
+            "vulkan_parallel_sort_plan_u32");
+  for (const auto &[field, value] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"key_count", "4294967296"},
+           {"key_count", "0"},
+           {"key_count", "true"},
+           {"payload", "1"},
+           {"fused_prefix", "false"},
+           {"shader_sizes", "[20,20]"},
+           {"shader_sizes", "[20,19,20]"},
+           {"shader_sizes", "[20,22,20]"},
+           {"unknown", "1"}}) {
+    auto invalid = plan;
+    invalid.parameters.obj.inner[field] = liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("vulkan_parallel_sort_u32", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("vulkan_parallel_sort_u32", 1, Arch::cuda), nullptr);
+}
+
 TEST(NativeOperationRegistry, CutlassSourceFreezesStrategyWithoutLoadingCode) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription plan;

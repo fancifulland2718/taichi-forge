@@ -52,7 +52,7 @@ def test_parallel_sort_exact_capacity_and_stable_duplicate_payload(with_payload,
             assert stats["device_copy_count"] == 0
             assert (
                 plan.memory_report().known_capacity_requested_bytes
-                == stats["workspace_bytes"]
+                == stats["workspace_bytes"] + sum(plan._aot_shader_sizes)
             )
             assert not plan.memory_report().resident_requested_bytes_complete
         with pytest.raises(RuntimeError, match="closed"):

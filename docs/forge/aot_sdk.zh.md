@@ -1064,6 +1064,27 @@ storage recipe 仍需单独处理。独立 AOT 使用 `Runtime("vulkan", device_
 枚举序号（默认 0），可能与 JIT 自动选择的 GPU 不同；性能比较须指定同一设备。
 独立 SDK 可选组件为 `TaichiSDKProvider_vkfft`。
 
+`VulkanParallelSortPlan.record()` 也可通过 `Module.add_execution_plan` 导出。
+冻结的 `fidelityfx_parallel_sort/plan_u32` 资源绑定 `keys`、可选 `values` 和 `code`
+host blob；`execute_u32` 绑定重建的 `plan`。参数为 `key_count`、`payload`、
+`fused_prefix`、`shader_sizes`（每个 SPIR-V 模块的字节数）。保留现有紧凑一维 u32
+升序稳定排序合同及已选 prefix 策略，拒绝 keys/payload 的物理重叠。规模与范围须满足
+shader 的 uint32 ABI、平台字节寻址和 Vulkan 设备的 storage-buffer 限制。
+
+DXC 只在生产器构造计划时使用。导出保留已有 SPIR-V，相同 host blob 按内容去重，
+不序列化编译器路径或生产器地址；消费者无需 DXC、HLSL 源码或额外 provider DLL。
+冷准备创建 pipeline、独立 workspace 和 inline 命令，不排序用户数据，也不创建未使用
+的二级命令序列。同一 prepared 绑定多次引用一个计划时共用重建资源。暖重放使用已有
+命令；命令保留原生存储与 pipeline lease 至退休。`workspace_bytes` 计入设备 scratch，
+host shader 字节和大小未知的 driver 分配单独看待；生产器内存报告也列出保留的 host
+shader 代码。
+
+Windows Vulkan 在 NVIDIA/AMD 设备验证了 keys-only/payload、两种 prefix 策略、
+重复键稳定性、两份独立绑定、错误绑定恢复、生产器关闭、独立/借用消费和 owner 退休。
+混合 Graph 使用真实下游 `kernel.grad`，包括按排序 payload 索引的梯度；不表示整数排序
+可自动求导。本次 root ordered 路径不授予 Parallel Sort 在 Vulkan 设备条件循环体中
+执行的资格。CPU/CUDA 不注册该原生工厂；未获资格的计划子类需要独立重建合同。
+
 `ti.hardware.matrix.CudaMatrixMmaRecording` 可通过同一 Graph API 导出。
 对应原生操作为 `cuda_driver/matrix_mma_f16_f32`，版本 1，参数
 `parameters={"batch_count": n}`，绑定 `a`、`b`、`output`。复用 Forge 内置 driver PTX：

@@ -1382,6 +1382,35 @@ qualification; storage recipes remain separate. Independent AOT uses the explici
 differ from JIT's automatically chosen GPU. Compare performance on the same device.
 The optional SDK component is `TaichiSDKProvider_vkfft`.
 
+`VulkanParallelSortPlan.record()` also exports through `Module.add_execution_plan`.
+The frozen `fidelityfx_parallel_sort/plan_u32` resource binds `keys`, optional
+`values`, and a `code` host blob; `execute_u32` binds the rebuilt `plan`.
+Its parameters are `key_count`, `payload`, `fused_prefix`, and `shader_sizes`
+(bytes per SPIR-V module). The existing compact 1D u32 ascending stable-sort
+contract and selected prefix strategy are preserved. Physical key/payload
+overlap is rejected. Counts and ranges must satisfy the shader's uint32 ABI,
+platform byte addressing and the Vulkan device's storage-buffer limits.
+
+DXC is needed only to construct the producer plan. Export retains its compiled
+SPIR-V, deduplicates identical host blobs, and serializes no compiler path or
+producer address. Consumers need neither DXC, HLSL source nor an optional
+provider DLL. Cold preparation creates pipelines, independent workspace and
+inline commands without sorting user data or creating an unused secondary
+command sequence. Repeated references to one plan reuse its resource within a
+prepared binding. Warm replay uses the existing commands; commands retain native
+storage and pipeline leases until retirement. `workspace_bytes` counts device
+scratch, while host shader bytes and opaque driver allocations are separate.
+The producer memory report also identifies its retained host shader code.
+
+Windows Vulkan checks cover keys-only/payload, both prefix strategies, stable
+duplicates, two independent bindings, failed-binding recovery, producer closure,
+standalone/borrowed consumption and owner retirement on NVIDIA and AMD devices.
+Mixed Graph tests use actual downstream `kernel.grad`, including gradients
+indexed through the sorted payload; this is not differentiation of integer
+sorting. This root ordered path does not qualify Parallel Sort for Vulkan
+device-condition loop bodies. CPU/CUDA do not register this native factory;
+unqualified plan subclasses require their own reconstruction contract.
+
 `ti.hardware.matrix.CudaMatrixMmaRecording` exports through the same Graph API.
 Its native operation is `cuda_driver/matrix_mma_f16_f32`, version 1, with
 `parameters={"batch_count": n}` and bindings `a`, `b`, `output`. It reuses Forge's

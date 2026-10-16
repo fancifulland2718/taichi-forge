@@ -1,6 +1,7 @@
 """FidelityFX Parallel Sort with fixed Forge storage and retained GPU commands."""
 
 from functools import partial
+import struct
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
@@ -74,6 +75,13 @@ class VulkanParallelSortPlan:
         shaders, facts = compile_shaders(
             compiler_path, values is not None, fused_prefix=fused_create is not None
         )
+        # Preserve compiled code for AOT export even if DXC/source files retire.
+        # The consumer deduplicates this immutable host blob and allocates no
+        # device buffer for it. No scratch or producer addresses are captured.
+        self._aot_shader_sizes = tuple(len(shader) * 4 for shader in shaders)
+        self._aot_shader_payload = b"".join(
+            struct.pack(f"<{len(shader)}I", *shader) for shader in shaders
+        )
         create = fused_create or create
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
@@ -143,6 +151,14 @@ class VulkanParallelSortPlan:
                     resident=valid and not self.closed,
                 ),
                 HardwareMemoryComponent(
+                    "host_shader_code_bytes",
+                    sum(self._aot_shader_sizes),
+                    True,
+                    "provider_generation",
+                    "provider",
+                    resident=bool(self._aot_shader_payload),
+                ),
+                HardwareMemoryComponent(
                     "driver_objects_and_pending_commands",
                     None,
                     False,
@@ -154,7 +170,7 @@ class VulkanParallelSortPlan:
             lifecycle_state=(
                 "closed" if self.closed else "ready" if valid else "runtime_invalid"
             ),
-            ownership_scope="requested workspace excludes caller storage and opaque driver allocations; close is not a retirement observation",
+            ownership_scope="requested device workspace and retained host shader code exclude caller storage and opaque driver allocations; close is not a retirement observation",
         )
 
     _graph_provider_memory_report = memory_report
@@ -166,6 +182,7 @@ class VulkanParallelSortPlan:
         if not self.closed:
             self._runtime_prog._destroy_vulkan_parallel_sort_plan(self._handle)
             self._closed = True
+            self._aot_shader_payload = b""
 
     def __enter__(self):
         self.validate_graph_lifetime()
@@ -181,6 +198,45 @@ class VulkanParallelSortPlan:
 
 
 class _Recording(BackendCommandRecording):
+    def _export_aot(self, context):
+        if type(self.plan) is not VulkanParallelSortPlan:
+            raise TaichiRuntimeError(
+                "Parallel Sort variants require their own AOT reconstruction contract"
+            )
+        self.plan.validate_graph_lifetime()
+        plan = self.plan
+
+        def resource():
+            code = context.host_blob_resource(plan._aot_shader_payload)
+            bindings = dict(keys=self.binding_names[0], code=code)
+            if plan._values is not None:
+                bindings["values"] = self.binding_names[1]
+            return context.resource(
+                plan,
+                "fidelityfx_parallel_sort",
+                "plan_u32",
+                parameters=dict(
+                    key_count=plan._keys.shape[0],
+                    payload=plan._values is not None,
+                    fused_prefix=bool(plan._statistics["fused_prefix"]),
+                    shader_sizes=plan._aot_shader_sizes,
+                ),
+                bindings=bindings,
+            )
+
+        restored = context.resource_once(
+            plan,
+            resource,
+            policy=(
+                "fidelityfx_parallel_sort",
+                tuple(context.binding(n) for n in self.binding_names),
+            ),
+        )
+        context.native(
+            "fidelityfx_parallel_sort", "execute_u32", bindings=dict(plan=restored)
+        )
+        return ()
+
     def __init__(self, plan, names):
         super().__init__(
             backend="vulkan",
