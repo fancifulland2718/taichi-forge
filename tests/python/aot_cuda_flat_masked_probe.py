@@ -32,6 +32,8 @@ def main(mode, artifact, budget, check_wrong_abi=True):
             begin = time.perf_counter()
             call = module.prepare_execution(name, arrays)
             costs["prepare_ms"].append((time.perf_counter() - begin) * 1000)
+            costs["workspace_bytes"] = call.info["workspace_bytes"]
+            costs["argument_bytes"] = call.info["argument_bytes"]
             assert call.info["execution_kind"] == "cuda_graph", call.info
             assert struct.unpack("<4f", arrays["y"].read()) == (-7,) * 4
             frames.append((arrays, call, values))
@@ -44,7 +46,7 @@ def main(mode, artifact, budget, check_wrong_abi=True):
             assert list(struct.unpack("<4f", arrays["dx"].read())) == [2 * steps * x for x in values]
             assert struct.unpack("<4f", arrays["dy"].read()) == (0 if steps else 1,) * 4
 
-        for limit in (0, 2, 7, -1, 0):
+        for limit in (0, 2, budget + 1, -1, 0):
             for frame in frames:
                 arrays, call, _ = frame
                 arrays["limits"].write(struct.pack("<i", limit))
@@ -101,7 +103,9 @@ def main(mode, artifact, budget, check_wrong_abi=True):
         arrays, call, _ = frames[1]
         arrays["limits"].write(struct.pack("<i", 2))
         samples = []
-        for _ in range(16):
+        samples_count = 2 if budget > 3 else 16
+        costs["warm_samples"] = samples_count
+        for _ in range(samples_count):
             begin = time.perf_counter()
             call()
             runtime.wait()

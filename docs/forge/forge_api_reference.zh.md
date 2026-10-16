@@ -2344,7 +2344,7 @@ storage 和 AOT Graph packet 会明确失败。CPU/CUDA 也会失败关闭，不
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
 | `Sequential.while_loop(...)`、`.if_then_else(...)`、`.switch(...)` | 向 condition、body 或 branch `Sequential` 追加一个结构化 child。定义必须形成 single-owner tree。公开结构化控制的最大深度为 2；更深定义、cycle 或跨多个 call site 复用都会在执行前的 region 构造或 Graph 编译阶段失败。 |
 | `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。重复 nested 调用时，每个静态 definition 只保留最近一次 invocation。报告包含 `region_path`、`structured_depth` 与 encoded/masked 工作量；满足资格的 Vulkan nested-while outer report 还会提供 `nested_region_path`、`nested_logical_iterations` 与 `nested_encoded_iterations`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
-| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v7 portable 与 device-control 合同，分别报告 depth=2 portable 合同、native leaf/nested 资格、structured submit、有界 chunk/replay、终态观测、queue-submit 合并与 exact dynamic termination。CUDA 显式嵌套展开使用 int64 预算及实际资源/表示检查，固定 action 上限为 `None`；默认成本偏好与资格分开。 |
+| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v8 portable 与 device-control 合同，分别报告 depth=2 portable 合同、native leaf/nested 资格、structured submit、有界 chunk/replay、终态观测、queue-submit 合并与 exact dynamic termination。CUDA 显式嵌套展开使用 int64 预算及实际资源/表示检查，固定 action 上限为 `None`；flat masked 的 `max_encoded_dispatches` 也为 `None`。默认成本偏好与资格分开。 |
 
 condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
 callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使
@@ -2355,8 +2355,9 @@ CPU 在 cached dispatch plan 上使用精确 host control。满足资格的 CUDA
 使用原生 conditional Graph；较旧驱动在普通 CUDA Graph capture 可用时使用 Forge 内部
 bounded masked Graph。后者在 device 上 latch selector，一次提交全部有界工作，并使非
 active Taichi task 在 payload side effect 前返回；不做逐轮 host readback，但仍会 issue
-已编码 task node，因此不声明 exact dynamic command termination。单个结构化区域最多编码
-4096 个 dispatch。capability report 会明确区分 `cuda_conditional_graph` 与
+已编码 task node，因此不声明 exact dynamic command termination。没有固定的 dispatch 数量上限，
+但必须满足计数表示、溢出检查及实际资源要求；大预算会增加物化和重放成本。
+capability report 会明确区分 `cuda_conditional_graph` 与
 `cuda_masked_bounded_graph`。
 
 `Sequential` 提供相同的 `while`/`if`/`switch` API，因此任一 region kind 都可再包含

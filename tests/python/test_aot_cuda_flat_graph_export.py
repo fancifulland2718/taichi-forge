@@ -8,12 +8,14 @@ import sys
 import time
 import zipfile
 
+import pytest
 import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("budget", (3, 1025))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_flat_masked_graph_exports_gated_adjoint_without_unused_code(tmp_path, monkeypatch):
+def test_flat_masked_graph_exports_gated_adjoint_without_unused_code(budget, tmp_path, monkeypatch):
     monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
 
     @ti.kernel
@@ -83,7 +85,7 @@ def test_flat_masked_graph_exports_gated_adjoint_without_unused_code(tmp_path, m
         counter=count,
         control_inputs=(count, checks, args["limits"]),
         carried_state=(args["y"], args["dy"]),
-        max_iterations=3,
+        max_iterations=budget,
         lowering_mode="native_required",
     )
     sequence.dispatch(publish, count, checks, args["terminal"])
@@ -119,7 +121,7 @@ def test_flat_masked_graph_exports_gated_adjoint_without_unused_code(tmp_path, m
                 str(Path(__file__).with_name("aot_cuda_flat_masked_probe.py")),
                 mode,
                 str(artifact),
-                "3",
+                str(budget),
                 "--graph-export",
             ],
             env=dict(os.environ, TI_GRAPH_CUDA_FORCE_MASKED_CONTROL="0"),

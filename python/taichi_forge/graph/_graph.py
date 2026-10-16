@@ -4190,7 +4190,7 @@ def structured_control_capabilities():
         skip_strategy = primitive
         stops_command_issue_after_exit = using_exact
         exact_dynamic_termination = using_exact
-        max_encoded_dispatches = 4096 if primitive == "cuda_masked_bounded_graph" else 0
+        max_encoded_dispatches = None if primitive == "cuda_masked_bounded_graph" else 0
         nested_native = bool(native and nested_native_compiled)
         nested_cuda_device_update_forced_off = (
             os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"

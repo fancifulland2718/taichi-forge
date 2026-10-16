@@ -2846,7 +2846,7 @@ before selecting this path.
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
 | `Sequential.while_loop(...)`, `.if_then_else(...)`, `.switch(...)` | Append one structured child to a condition, body, or branch `Sequential`. Definitions form a single-owner tree. The public structured-control depth limit is two; deeper definitions, cycles, or reuse at multiple call sites fail before execution during region construction or Graph compilation. |
 | `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Repeated nested calls retain only the latest invocation of each static definition. Reports include `region_path`, `structured_depth`, and encoded/masked work counts; a qualified Vulkan nested-while outer report additionally exposes `nested_region_path`, `nested_logical_iterations`, and `nested_encoded_iterations`. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
-| `ti.graph.structured_control_capabilities()` | Return the schema-v7 portable and device-control contract for the active backend. It reports depth-two portable and native-leaf/nested qualification separately from structured submit, bounded chunk/replay, terminal observation, queue-submit coalescing, and exact dynamic termination. Explicit CUDA nested expansion uses int64 budgets and actual resource/representation checks, with `None` for the fixed action cap; default cost preferences are separate from qualification. |
+| `ti.graph.structured_control_capabilities()` | Return the schema-v8 portable and device-control contract for the active backend. It reports depth-two portable and native-leaf/nested qualification separately from structured submit, bounded chunk/replay, terminal observation, queue-submit coalescing, and exact dynamic termination. Explicit CUDA nested expansion uses int64 budgets and actual resource/representation checks, with `None` for the fixed action cap; flat masked control also reports `max_encoded_dispatches=None`. Default cost preferences are separate from qualification. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
 structured control does not invoke Python callbacks. Graph treats `status` as
@@ -2862,8 +2862,10 @@ the selector is latched on device, all work is submitted once, and a private
 entry gate prevents inactive Taichi tasks from reaching payload side effects.
 This route performs no per-iteration host readback and preserves exact logical
 results, but it still issues the encoded task nodes through the CUDA Graph and
-therefore does not claim exact dynamic command termination. It accepts at most
-4096 encoded dispatches. The capability report distinguishes
+therefore does not claim exact dynamic command termination. There is no fixed
+dispatch-count cap, but counts must remain representable, pass overflow checks,
+and fit available resources. Large budgets increase materialization and replay
+cost. The capability report distinguishes
 `cuda_conditional_graph` from `cuda_masked_bounded_graph` and reports whether
 command issue actually stops after exit.
 

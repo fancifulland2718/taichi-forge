@@ -2773,31 +2773,33 @@ bool try_run_cuda_masked_control_graph(
   const bool is_while = control_type == 1;
   const bool is_if = control_type == 0;
   const bool is_switch = control_type == 2;
-  const std::size_t branch_dispatch_total =
-      std::accumulate(branch_dispatch_counts.begin(),
-                      branch_dispatch_counts.end(), std::size_t{0});
-  const std::size_t encoded_dispatches =
-      is_while ? (max_iterations > 0 &&
-                          graph.dispatches.size() <=
-                              (std::numeric_limits<std::size_t>::max)() /
-                                  static_cast<std::size_t>(max_iterations)
-                      ? graph.dispatches.size() *
-                            static_cast<std::size_t>(max_iterations)
-                      : (std::numeric_limits<std::size_t>::max)())
-               : graph.dispatches.size();
-  constexpr std::size_t kMaxEncodedDispatches = 4096;
+  std::size_t branch_dispatch_total = 0;
+  const bool valid_branch_counts = std::all_of(
+      branch_dispatch_counts.begin(), branch_dispatch_counts.end(),
+      [&](int count) {
+        if (count <= 0 || static_cast<std::size_t>(count) >
+                              graph.dispatches.size() - branch_dispatch_total)
+          return false;
+        branch_dispatch_total += static_cast<std::size_t>(count);
+        return true;
+      });
+  const bool encoding_representable =
+      !is_while || (max_iterations > 0 &&
+                    graph.dispatches.size() <=
+                        (std::numeric_limits<std::size_t>::max)() /
+                            static_cast<std::size_t>(max_iterations));
   if (compile_config.debug || graph.dispatches.empty() ||
       (!is_while && !is_if && !is_switch) ||
       (is_while && max_iterations <= 0) ||
       (!is_while && (branch_dispatch_counts.empty() ||
                      branch_dispatch_total != graph.dispatches.size() ||
-                     std::any_of(branch_dispatch_counts.begin(),
-                                 branch_dispatch_counts.end(),
-                                 [](int count) { return count <= 0; }))) ||
+                     !valid_branch_counts ||
+                     branch_dispatch_counts.size() >
+                         std::numeric_limits<std::uint32_t>::max())) ||
       (is_if && branch_dispatch_counts.size() > 2) ||
-      (is_switch &&
-       default_branch >= static_cast<int>(branch_dispatch_counts.size())) ||
-      encoded_dispatches > kMaxEncodedDispatches ||
+      (is_switch && default_branch >= 0 &&
+       static_cast<std::size_t>(default_branch) >= branch_dispatch_counts.size()) ||
+      !encoding_representable ||
       selector.get_nelement() != 1 ||
       selector.get_element_data_type() != PrimitiveType::i32 ||
       selector.owning_program() != &program) {

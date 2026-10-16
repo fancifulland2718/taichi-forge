@@ -4202,7 +4202,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
     device = capabilities["device_control"]
     arch = ti.lang.impl.current_cfg().arch
-    assert capabilities["schema_version"] == 7
+    assert capabilities["schema_version"] == 8
     assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
     assert (
         set(
@@ -4376,7 +4376,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
             expected_masked and not expected_exact
         )
         assert device["max_encoded_dispatches"] == (
-            4096 if expected_masked and not expected_exact else 0
+            None if expected_masked and not expected_exact else 0
         )
         assert (
             cuda["exact_control_unavailable_reason"] == "none"
