@@ -13290,7 +13290,14 @@ class _GraphExecutable:
             for index, node in enumerate(self.spec.structured_control_nodes)
             if isinstance(node, _CompiledWhileGraphNode)
         }
-        self._submission_steps = self._build_submission_steps(self.spec.nodes)
+        # Portable control remains valid for run(), including inside a parent
+        # sequence. Only build the native schedule after its admission succeeds;
+        # submit() independently enforces the same immutable spec capability.
+        self._submission_steps = (
+            self._build_submission_steps(self.spec.nodes)
+            if self.spec.supports_native_structured_submission
+            else ()
+        )
         # Flatten semantic containers before materialization, including a step
         # embedded in a parent Graph. The original nodes still own leases and
         # invalidation; each WHILE owns both standalone and region caches.
