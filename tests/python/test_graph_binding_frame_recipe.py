@@ -56,6 +56,28 @@ def _arrays(size=131):
     return source, output, host
 
 
+@pytest.mark.parametrize("adjoint", [False, True])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_binding_recipe_rejects_implicit_ndarray_gradients_before_capture(adjoint):
+    @ti.kernel
+    def square(
+        x: ti.types.ndarray(ti.f32, 1, needs_grad=True),
+        y: ti.types.ndarray(ti.f32, 1, needs_grad=True),
+    ):
+        for i in x:
+            y[i] = x[i] * x[i]
+
+    x, y = (ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1) for name in ("x", "y"))
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(square.grad if adjoint else square, x, y)
+    definition = builder.freeze()
+    catalog = _catalog(definition)
+    recipe = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with pytest.raises((RuntimeError, ti.TaichiRuntimeError), match="JIT Graph ndarray gradients"):
+            context.materialize(recipe)
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_binding_frames_preserve_explicit_adjoint_and_zero_rebinding():
     @ti.kernel

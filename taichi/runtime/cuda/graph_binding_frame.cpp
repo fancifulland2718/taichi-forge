@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/graph_binding_frame.h"
+#include "taichi/aot/jit_graph_binding.h"
 
 #include <algorithm>
 #include <atomic>
@@ -197,6 +198,7 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
     auto *program = dispatch.ti_kernel->program;
     TI_ERROR_IF(program != state->program,
                 "CUDA binding frames cannot mix Program owners");
+    aot::validate_jit_graph_gradients(*dispatch.jit_callable());
   }
   auto resource_guard =
       state->program->acquire_runtime_resource_submission_guard();

@@ -1,4 +1,5 @@
 #include "taichi/aot/graph_data.h"
+#include "taichi/aot/jit_graph_binding.h"
 #include "taichi/program/program.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/program/ndarray.h"
@@ -477,14 +478,8 @@ const CompiledKernelData *get_or_compile_cached_kernel(
     CompiledGraphJITCachedKernel &cached,
     bool cache_compiled_kernel_data) {
   if (cached.kernel_key.empty()) {
-    // AOT has an explicit gradient binding extension. JIT Graph binding plans
-    // currently bind only the primal: fail at preparation instead of launching
-    // an adjoint with a null gradient pointer. Check only on a cache miss.
-    for (const auto &entry : dispatch.jit_callable()->nested_parameters) {
-      TI_ERROR_IF(entry.second.needs_grad,
-                  "JIT Graph ndarray gradients require explicit AOT C API "
-                  "bindings; use direct kernel calls for Python autodiff");
-    }
+    // Validate once on a cache miss, never in the warm replay path.
+    validate_jit_graph_gradients(*dispatch.jit_callable());
   }
   auto *prog = dispatch.ti_kernel->program;
   auto execution_handle = dispatch.jit_execution_handle();
