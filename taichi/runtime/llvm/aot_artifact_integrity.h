@@ -32,4 +32,10 @@ inline std::string aot_cuda_contract_sha256(CudaAotArtifactMetadata metadata) {
       liong::json::print(liong::json::serialize(metadata)));
 }
 
+inline std::string aot_launch_abi_sha256(const LlvmAotMetadata &metadata) {
+  return aot_artifact_sha256(
+      metadata.abi_sha256 + "\n" +
+      liong::json::print(liong::json::serialize(metadata.kernel_launch_abis)));
+}
+
 }  // namespace taichi::lang::LLVM

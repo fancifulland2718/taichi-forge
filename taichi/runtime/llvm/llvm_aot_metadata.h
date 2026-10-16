@@ -7,6 +7,7 @@
 #include "taichi/common/core.h"
 #include "taichi/common/serialization.h"
 #include "taichi/aot/initial_root_data.h"
+#include "taichi/runtime/cuda/kernel_launch_abi.h"
 
 namespace taichi::lang::LLVM {
 
@@ -19,6 +20,7 @@ inline constexpr std::uint32_t kCudaPtxAotSchemaVersion = 4;
 inline constexpr std::uint32_t kRelocatableLlvmAotSchemaVersion = 5;
 inline constexpr std::uint32_t kCudaCubinAotSchemaVersion = 6;
 inline constexpr std::uint32_t kInitialRootDataAotSchemaVersion = 7;
+inline constexpr std::uint32_t kKernelLaunchAbiAotSchemaVersion = 8;
 
 inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
@@ -58,6 +60,10 @@ struct LlvmAotMetadata {
   std::map<std::string, std::string> cuda_cubin_providers;
   std::string resource_binding;
   std::vector<aot::InitialRootData> initial_root_data;
+  // Only non-ordinary entries are listed. Schema 8 prevents old readers from
+  // treating prefix-dependent device code as an ordinary callable kernel.
+  std::map<std::string, std::string> kernel_launch_abis;
+  std::string launch_abi_sha256;
 
   TI_IO_DEF(schema_version,
             required_caps,
@@ -66,12 +72,41 @@ struct LlvmAotMetadata {
             cuda_artifacts,
             cuda_cubin_providers,
             resource_binding,
-            initial_root_data);
+            initial_root_data,
+            kernel_launch_abis,
+            launch_abi_sha256);
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
+  auto base_schema = metadata.schema_version;
+  const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion;
+  TI_ERROR_IF(launch_abi != !metadata.kernel_launch_abis.empty() ||
+                  (!launch_abi && !metadata.launch_abi_sha256.empty()),
+              "AOT kernel launch ABI declarations require schema 8");
+  if (launch_abi) {
+    TI_ERROR_IF(metadata.abi_sha256.size() != 64 ||
+                    metadata.launch_abi_sha256.size() != 64 ||
+                    (metadata.kernel_format != "bc" &&
+                     !is_cuda_aot_artifact_format(metadata.kernel_format)),
+                "AOT kernel launch ABI requires BC/PTX/cubin and checksums");
+    for (const auto &[name, abi] : metadata.kernel_launch_abis) {
+      TI_ERROR_IF(name.empty() || name.find('\0') != std::string::npos ||
+                      abi != cuda::kGraphGateLaunchABI,
+                  "Unsupported AOT kernel launch ABI declaration: {}", name);
+    }
+    // The launch declaration extends each existing representation/resource
+    // contract; it does not replace those checks or duplicate their payloads.
+    base_schema = !metadata.initial_root_data.empty()
+                      ? kInitialRootDataAotSchemaVersion
+                  : metadata.kernel_format == "cubin"
+                      ? kCudaCubinAotSchemaVersion
+                  : !metadata.resource_binding.empty()
+                      ? kRelocatableLlvmAotSchemaVersion
+                  : metadata.kernel_format == "ptx" ? kCudaPtxAotSchemaVersion
+                                                    : kLlvmAotSchemaVersion;
+  }
   const bool initial_state =
-      metadata.schema_version == kInitialRootDataAotSchemaVersion;
+      base_schema == kInitialRootDataAotSchemaVersion;
   TI_ERROR_IF(initial_state != !metadata.initial_root_data.empty() ||
                   (initial_state && metadata.resource_binding != "dense_v1"),
               "AOT initial root data requires schema 7 and dense_v1 binding.");
@@ -79,7 +114,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   const auto schema = initial_state ? (metadata.kernel_format == "cubin"
                                            ? kCudaCubinAotSchemaVersion
                                            : kRelocatableLlvmAotSchemaVersion)
-                                    : metadata.schema_version;
+                                    : base_schema;
   TI_ERROR_IF(schema != 2 && schema != kLlvmAotSchemaVersion &&
                   schema != kCudaPtxAotSchemaVersion &&
                   schema != kRelocatableLlvmAotSchemaVersion &&

@@ -6,11 +6,26 @@
 #include "taichi/program/context.h"
 
 namespace taichi::lang::LLVM {
+namespace {
+constexpr const char *kGateModuleFlag = "taichi.cuda.graph_gate_abi";
+}
+
+bool has_cuda_graph_gate(const llvm::Module &module) {
+  const auto *flag = module.getModuleFlag(kGateModuleFlag);
+  if (!flag)
+    return false;
+  const auto *value = llvm::mdconst::dyn_extract<llvm::ConstantInt>(flag);
+  TI_ERROR_IF(value == nullptr || !value->equalsInt(1),
+              "Unsupported CUDA Graph gate LLVM code ABI");
+  return true;
+}
 
 LLVMCompiledKernel make_cuda_graph_gated_kernel(
     const LLVMCompiledKernel &source) {
   TI_ERROR_IF(source.module == nullptr,
               "CUDA Graph gate requires lowered LLVM code");
+  TI_ERROR_IF(has_cuda_graph_gate(*source.module),
+              "CUDA Graph gate code is already generated");
   for (const auto &task : source.tasks) {
     const auto *function = source.module->getFunction(task.name);
     TI_ERROR_IF(function == nullptr || function->empty() ||
@@ -22,6 +37,7 @@ LLVMCompiledKernel make_cuda_graph_gated_kernel(
   }
   auto compiled = source.clone();
   auto &module = *compiled.module;
+  module.addModuleFlag(llvm::Module::Error, kGateModuleFlag, 1);
   auto &llvm_context = module.getContext();
   auto *pointer_type = llvm::PointerType::get(llvm_context, 0);
   auto *i8_type = llvm::Type::getInt8Ty(llvm_context);

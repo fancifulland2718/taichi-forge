@@ -20,6 +20,10 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
 
  protected:
   void add_per_backend(const std::string &identifier, Kernel *kernel) override;
+  void add_with_launch_abi_per_backend(
+      const std::string &identifier,
+      Kernel *kernel,
+      const std::string &launch_abi) override;
   const std::vector<int> &kernel_snode_tree_ids(
       const std::string &identifier) const override;
   void add_per_backend_tmpl(const std::string &identifier,
@@ -36,8 +40,12 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
 
  private:
   LLVM::CompiledKernelData::InternalData compile_kernel(Kernel *kernel);
+  void add_kernel_impl(const std::string &identifier,
+                        Kernel *kernel,
+                        const std::string &launch_abi);
 
   LlvmOfflineCache cache_;
+  std::map<std::string, std::string> kernel_launch_abis_;
   KernelCompilationManager &compilation_manager_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;

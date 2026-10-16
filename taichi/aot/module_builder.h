@@ -35,6 +35,11 @@ class AotModuleBuilder {
   }
 
   void add(const std::string &identifier, Kernel *kernel);
+  // Internal selected-code export. Backends reject unsupported call contracts
+  // before compiling or publishing an entry.
+  void add_with_launch_abi(const std::string &identifier,
+                           Kernel *kernel,
+                           const std::string &launch_abi);
 
   void add_field(const std::string &identifier,
                  const SNode *rep_snode,
@@ -70,6 +75,13 @@ class AotModuleBuilder {
    */
   virtual void add_per_backend(const std::string &identifier,
                                Kernel *kernel) = 0;
+  virtual void add_with_launch_abi_per_backend(
+      const std::string &identifier,
+      Kernel *kernel,
+      const std::string &launch_abi) {
+    TI_ERROR("AOT kernel launch ABI '{}' is unsupported by this backend",
+             launch_abi);
+  }
   virtual const std::vector<int> &kernel_snode_tree_ids(
       const std::string &identifier) const {
     TI_ERROR("AOT dependency inspection is unsupported by this backend.");

@@ -727,12 +727,18 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                                                 std::string
                                                     *task_plan_identity,
                                                 std::size_t
-                                                    *resolved_task_count) {
+                                                    *resolved_task_count,
+                                                KernelLaunchABI launch_abi) {
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   auto iter = contexts_.find(handle.get_launch_id());
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
+  if (launcher_ctx->launch_abi != launch_abi ||
+      (launch_abi == KernelLaunchABI::graph_gate_v1 &&
+       launcher_ctx->uses_bounded_range)) {
+    return false;
+  }
   ensure_root_binding(*launcher_ctx);
   const auto &parameters = launcher_ctx->parameters;
   const Context::ResolvedTaskExecutionPlan *plan = nullptr;
@@ -908,6 +914,7 @@ bool KernelLauncher::prepare_cuda_graph_launch_packet(
   packet.bounded_extent = 0;
   packet.bounded_capacity = 0;
   packet.bounded_range = false;
+  packet.launch_abi = KernelLaunchABI::ordinary;
   packet.context = context;
   if (packet.arg_buffer_size == 0) {
     // A Field-only graph has no runtime argument storage. The RuntimeContext
@@ -985,13 +992,37 @@ bool KernelLauncher::prepare_cuda_graph_gated_launch(Handle handle,
                                                      void *gate,
                                                      std::uint32_t expected,
                                                      void *stream) {
+  if (!prepare_cuda_graph_gated_packet(handle, ctx, packet, gate, expected))
+    return false;
+  CUDADriver::get_instance().malloc_async(
+      &packet.device_arg_buffer, packet.device_arg_buffer_size, stream);
+  CUDADriver::get_instance().memcpy_host_to_device_async(
+      packet.device_arg_buffer, packet.argument_prefix.data(),
+      packet.argument_prefix.size(), stream);
+  auto *device_args = static_cast<char *>(packet.device_arg_buffer) +
+                      packet.arg_buffer_prefix_size;
+  if (packet.arg_buffer_size > 0) {
+    CUDADriver::get_instance().memcpy_host_to_device_async(
+        device_args, packet.context.arg_buffer, packet.arg_buffer_size, stream);
+  }
+  packet.context.arg_buffer = device_args;
+  return true;
+}
+
+bool KernelLauncher::prepare_cuda_graph_gated_packet(
+    Handle handle,
+    LaunchContextBuilder &ctx,
+    GraphLaunchPacket &packet,
+    void *gate,
+    std::uint32_t expected) {
   if (gate == nullptr || expected == 0) {
     return false;
   }
   RuntimeContext context;
   if (!prepare_cuda_graph_context(handle, ctx, context,
                                   &packet.offloaded_tasks,
-                                  &packet.task_execution_plan_identity)) {
+                                  &packet.task_execution_plan_identity,
+                                  nullptr, KernelLaunchABI::graph_gate_v1)) {
     return false;
   }
 
@@ -1005,17 +1036,10 @@ bool KernelLauncher::prepare_cuda_graph_gated_launch(Handle handle,
   packet.device_arg_buffer_size =
       packet.arg_buffer_prefix_size + packet.arg_buffer_size;
   packet.context = context;
-  CUDADriver::get_instance().malloc_async(
-      &packet.device_arg_buffer, packet.device_arg_buffer_size, stream);
-  CUDADriver::get_instance().memcpy_host_to_device_async(
-      packet.device_arg_buffer, &binding, sizeof(binding), stream);
-  auto *device_args = static_cast<char *>(packet.device_arg_buffer) +
-                      packet.arg_buffer_prefix_size;
-  if (packet.arg_buffer_size > 0) {
-    CUDADriver::get_instance().memcpy_host_to_device_async(
-        device_args, packet.context.arg_buffer, packet.arg_buffer_size, stream);
-  }
-  packet.context.arg_buffer = device_args;
+  packet.launch_abi = KernelLaunchABI::graph_gate_v1;
+  packet.bounded_range = false;
+  packet.argument_prefix.resize(sizeof(binding));
+  std::memcpy(packet.argument_prefix.data(), &binding, sizeof(binding));
   return true;
 }
 
@@ -1032,7 +1056,7 @@ bool KernelLauncher::update_cuda_graph_launch(
   std::string task_plan_identity;
   if (!prepare_cuda_graph_context(packet.handle, ctx, context,
                                   nullptr, &task_plan_identity,
-                                  &resolved_task_count)) {
+                                  &resolved_task_count, packet.launch_abi)) {
     return false;
   }
   if (task_plan_identity != packet.task_execution_plan_identity ||
@@ -1110,6 +1134,12 @@ void KernelLauncher::capture_cuda_graph_launch(
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
   auto *cuda_module = launcher_ctx->jit_module;
+  TI_ERROR_IF(launcher_ctx->launch_abi != packet.launch_abi ||
+                  (packet.launch_abi == KernelLaunchABI::graph_gate_v1 &&
+                   (packet.arg_buffer_prefix_size !=
+                        sizeof(GraphExecutionGateBinding) ||
+                    packet.context.arg_buffer == nullptr)),
+              "CUDA graph packet does not match its kernel launch ABI");
   auto *cuda_jit_module = dynamic_cast<JITModuleCUDA *>(cuda_module);
   TI_ASSERT(cuda_jit_module != nullptr);
   const auto &offloaded_tasks = packet.offloaded_tasks;
@@ -1142,7 +1172,8 @@ bool KernelLauncher::capture_cuda_graph_bounded_launch(
     void *stream,
     void **device_node,
     std::uint32_t *driver_error) {
-  if (device_node == nullptr || driver_error == nullptr) {
+  if (device_node == nullptr || driver_error == nullptr ||
+      packet.launch_abi != KernelLaunchABI::ordinary) {
     return false;
   }
   *device_node = nullptr;
@@ -1211,7 +1242,8 @@ bool KernelLauncher::capture_cuda_graph_updatable_launch(
     void *stream,
     std::vector<void *> *device_nodes,
     std::uint32_t *driver_error) {
-  if (device_nodes == nullptr || driver_error == nullptr) {
+  if (device_nodes == nullptr || driver_error == nullptr ||
+      packet.launch_abi != KernelLaunchABI::ordinary) {
     return false;
   }
   device_nodes->clear();
@@ -1295,6 +1327,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   auto iter = contexts_.find(handle.get_launch_id());
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
+  TI_ERROR_IF(launcher_ctx->launch_abi != KernelLaunchABI::ordinary,
+              "CUDA gated kernel requires its Graph gate launch recipe");
   TI_ERROR_IF(launcher_ctx->uses_bounded_range != ctx.has_cuda_bounded_range(),
               "CUDA exact kernel requires its bounded launch recipe");
   ensure_root_binding(*launcher_ctx);
@@ -1609,7 +1643,16 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     const LLVM::CompiledKernelData &compiled) {
+  return register_llvm_kernel(compiled, KernelLaunchABI::ordinary);
+}
+
+KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
+    const LLVM::CompiledKernelData &compiled,
+    KernelLaunchABI launch_abi) {
   TI_ASSERT(compiled.arch() == Arch::cuda);
+  TI_ERROR_IF(launch_abi != KernelLaunchABI::ordinary &&
+                  launch_abi != KernelLaunchABI::graph_gate_v1,
+              "Unsupported CUDA kernel launch ABI");
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
 
   if (!compiled.get_handle()) {
@@ -1617,6 +1660,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     auto index = handle.get_launch_id();
 
     auto ctx = std::make_shared<Context>();
+    ctx->launch_abi = launch_abi;
     auto *executor = get_runtime_executor();
 
     auto data = compiled.get_internal_data().compiled_data.clone();
@@ -1640,6 +1684,11 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     TI_ASSERT(was_inserted);
 
     compiled.set_handle(handle);
+  } else {
+    TI_ERROR_IF(
+        contexts_.at(compiled.get_handle()->get_launch_id())->launch_abi !=
+            launch_abi,
+        "CUDA kernel registration cannot change its launch ABI");
   }
   return *compiled.get_handle();
 }
@@ -1647,10 +1696,15 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
 KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
     const LLVM::CompiledKernelData::InternalData &metadata,
     const CUDAKernelArtifact &artifact,
-    const std::map<int, int> &tree_bindings) {
+    const std::map<int, int> &tree_bindings,
+    KernelLaunchABI launch_abi) {
+  TI_ERROR_IF(launch_abi != KernelLaunchABI::ordinary &&
+                  launch_abi != KernelLaunchABI::graph_gate_v1,
+              "Unsupported CUDA kernel launch ABI");
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
   auto handle = make_handle();
   auto ctx = std::make_shared<Context>();
+  ctx->launch_abi = launch_abi;
   ctx->snode_tree_ids = metadata.used_snode_tree_ids;
   ctx->parameters = metadata.args;
   ctx->offloaded_tasks = metadata.compiled_data.tasks;
@@ -1679,6 +1733,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
 
   auto handle = make_handle();
   auto ctx = std::make_shared<Context>();
+  ctx->launch_abi = KernelLaunchABI::graph_gate_v1;
   auto *executor = get_runtime_executor();
   auto data = LLVM::make_cuda_graph_gated_kernel(
       compiled.get_internal_data().compiled_data);

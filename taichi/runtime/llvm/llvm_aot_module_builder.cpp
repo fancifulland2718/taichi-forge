@@ -7,6 +7,7 @@
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
+#include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
@@ -223,6 +224,15 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       metadata.required_caps[to_string(capability)] = caps_.get(capability);
     }
   }
+  if (!kernel_launch_abis_.empty()) {
+    metadata.schema_version = LLVM::kKernelLaunchAbiAotSchemaVersion;
+    metadata.kernel_launch_abis = kernel_launch_abis_;
+    if (metadata.abi_sha256.empty()) {
+      metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
+          taichi::join_path(output_dir, "metadata.tcb")));
+    }
+    metadata.launch_abi_sha256 = LLVM::aot_launch_abi_sha256(metadata);
+  }
   const std::string json =
       liong::json::print(liong::json::serialize(metadata));
   std::fstream f(taichi::join_path(output_dir,
@@ -245,7 +255,33 @@ const std::vector<int> &LlvmAotModuleBuilder::kernel_snode_tree_ids(
 
 void LlvmAotModuleBuilder::add_per_backend(const std::string &identifier,
                                            Kernel *kernel) {
+  add_kernel_impl(identifier, kernel, "ordinary");
+}
+
+void LlvmAotModuleBuilder::add_with_launch_abi_per_backend(
+    const std::string &identifier,
+    Kernel *kernel,
+    const std::string &launch_abi) {
+  TI_ERROR_IF(compile_config_.arch != Arch::cuda ||
+                  launch_abi != cuda::kGraphGateLaunchABI,
+              "Unsupported AOT kernel launch ABI '{}' for this backend",
+              launch_abi);
+  add_kernel_impl(identifier, kernel, launch_abi);
+}
+
+void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
+                                         Kernel *kernel,
+                                         const std::string &launch_abi) {
   auto compiled = compile_kernel(kernel);
+  if (launch_abi == cuda::kGraphGateLaunchABI) {
+    TI_ERROR_IF(!compiled.rets.empty() ||
+                    std::any_of(compiled.compiled_data.tasks.begin(),
+                                compiled.compiled_data.tasks.end(),
+                                [](const auto &task) { return task.one_to_one; }),
+                "AOT Graph gated code requires void, non-bounded kernels");
+    compiled.compiled_data =
+        LLVM::make_cuda_graph_gated_kernel(compiled.compiled_data);
+  }
   LlvmOfflineCache::KernelCacheData kcache;
   kcache.kernel_key = identifier;
   kcache.compiled_data = std::move(compiled.compiled_data);
@@ -270,6 +306,10 @@ void LlvmAotModuleBuilder::add_per_backend(const std::string &identifier,
   kcache.last_used_at = std::time(nullptr);
   kcache.created_at = std::time(nullptr);
   cache_.kernels[identifier] = std::move(kcache);
+  if (launch_abi == "ordinary")
+    kernel_launch_abis_.erase(identifier);
+  else
+    kernel_launch_abis_[identifier] = launch_abi;
 }
 
 void LlvmAotModuleBuilder::add_per_backend_tmpl(const std::string &identifier,

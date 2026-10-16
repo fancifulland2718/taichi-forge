@@ -4,6 +4,7 @@
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
+#include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/runtime/dx12/aot_module_loader_impl.h"
 
@@ -173,6 +174,52 @@ TEST(LlvmAotMetadataTest,
   metadata.resource_binding = "dense_v1";
   metadata.initial_root_data.clear();
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+}
+
+TEST(LlvmAotMetadataTest, GatedLaunchAbiExtendsExistingArtifactContracts) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kKernelLaunchAbiAotSchemaVersion;
+  metadata.abi_sha256 = std::string(64, 'a');
+  metadata.kernel_launch_abis["body"] = cuda::kGraphGateLaunchABI;
+  metadata.launch_abi_sha256 = LLVM::aot_launch_abi_sha256(metadata);
+  for (const auto *format : {"bc", "ptx", "cubin"}) {
+    metadata.kernel_format = format;
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+    metadata.resource_binding = "dense_v1";
+    metadata.initial_root_data = {{0, 32, std::string(64, 'b')}};
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+    metadata.resource_binding.clear();
+    EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+    metadata.initial_root_data.clear();
+  }
+  metadata.kernel_format = "bc";
+  LLVM::LlvmAotMetadata decoded;
+  liong::json::deserialize(liong::json::serialize(metadata), decoded);
+  EXPECT_EQ(decoded.kernel_launch_abis, metadata.kernel_launch_abis);
+  EXPECT_EQ(decoded.launch_abi_sha256, metadata.launch_abi_sha256);
+  EXPECT_EQ(LLVM::aot_launch_abi_sha256(decoded), metadata.launch_abi_sha256);
+  decoded.kernel_launch_abis["other"] = cuda::kGraphGateLaunchABI;
+  EXPECT_NE(LLVM::aot_launch_abi_sha256(decoded), metadata.launch_abi_sha256);
+  decoded = metadata;
+  decoded.abi_sha256[0] = 'b';
+  EXPECT_NE(LLVM::aot_launch_abi_sha256(decoded), metadata.launch_abi_sha256);
+  for (std::uint32_t version = 2; version < 8; ++version) {
+    decoded = metadata;
+    decoded.schema_version = version;
+    EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
+  }
+  decoded = metadata;
+  decoded.kernel_launch_abis["body"] = "unknown";
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
+  decoded = metadata;
+  decoded.kernel_launch_abis.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
+  decoded = metadata;
+  decoded.launch_abi_sha256.clear();
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
+  decoded = metadata;
+  decoded.kernel_format = "ll";
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(decoded));
 }
 
 TEST(LlvmAotMetadataTest, InitialRootDataValidatesExactStorageAndUniqueIds) {

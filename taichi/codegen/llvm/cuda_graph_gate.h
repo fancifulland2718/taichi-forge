@@ -1,5 +1,9 @@
 #pragma once
 
+namespace llvm {
+class Module;
+}
+
 namespace taichi::lang {
 struct LLVMCompiledKernel;
 
@@ -11,5 +15,6 @@ namespace LLVM {
 // This producer transform needs no Program, launcher or active CUDA device.
 LLVMCompiledKernel make_cuda_graph_gated_kernel(
     const LLVMCompiledKernel &source);
+bool has_cuda_graph_gate(const llvm::Module &module);
 }  // namespace LLVM
 }  // namespace taichi::lang

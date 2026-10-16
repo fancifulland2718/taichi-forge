@@ -43,6 +43,17 @@ void AotModuleBuilder::add(const std::string &identifier, Kernel *kernel) {
   add_per_backend(identifier, kernel);
 }
 
+void AotModuleBuilder::add_with_launch_abi(const std::string &identifier,
+                                         Kernel *kernel,
+                                         const std::string &launch_abi) {
+  if (launch_abi == "ordinary") {
+    add(identifier, kernel);
+    return;
+  }
+  add_with_launch_abi_per_backend(identifier, kernel, launch_abi);
+  compile_options_frozen_ = true;
+}
+
 void AotModuleBuilder::add_field(const std::string &identifier,
                                  const SNode *rep_snode,
                                  bool is_scalar,

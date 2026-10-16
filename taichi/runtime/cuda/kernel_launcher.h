@@ -1,5 +1,7 @@
 #pragma once
 
+#include "taichi/runtime/cuda/kernel_launch_abi.h"
+
 #include <atomic>
 #include <array>
 #include <cstdint>
@@ -121,6 +123,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
         task_execution_plan_mru{nullptr};
     bool uses_root_binding{false};
     bool uses_bounded_range{false};
+    KernelLaunchABI launch_abi{KernelLaunchABI::ordinary};
   };
 
  public:
@@ -156,6 +159,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::uintptr_t bounded_extent{0};
     std::uint32_t bounded_capacity{0};
     bool bounded_range{false};
+    KernelLaunchABI launch_abi{KernelLaunchABI::ordinary};
     std::string dispatch_label;
     std::string task_execution_plan_identity;
     std::vector<OffloadedTask> offloaded_tasks;
@@ -164,10 +168,15 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
+  // Register already-generated code with its persisted call contract. This
+  // overload does not insert gates or otherwise regenerate a code variant.
+  Handle register_llvm_kernel(const LLVM::CompiledKernelData &compiled,
+                              KernelLaunchABI launch_abi);
   Handle register_cuda_artifact_kernel(
       const LLVM::CompiledKernelData::InternalData &metadata,
       const CUDAKernelArtifact &artifact,
-      const std::map<int, int> &tree_bindings = {});
+      const std::map<int, int> &tree_bindings = {},
+      KernelLaunchABI launch_abi = KernelLaunchABI::ordinary);
   // Register a private variant whose offloaded task entries uniformly test a
   // device gate before executing. The source kernel and ordinary registration
   // remain untouched, so only internal masked CUDA Graph replay pays the
@@ -210,6 +219,11 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                        void *gate,
                                        std::uint32_t expected,
                                        void *stream);
+  bool prepare_cuda_graph_gated_packet(Handle handle,
+                                       LaunchContextBuilder &ctx,
+                                       GraphLaunchPacket &packet,
+                                       void *gate,
+                                       std::uint32_t expected);
   bool update_cuda_graph_launch(const GraphLaunchPacket &packet,
                                 LaunchContextBuilder &ctx,
                                 std::vector<uint8_t> &host_arg_buffer,
@@ -239,7 +253,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                       nullptr,
                                   std::string *task_execution_plan_identity =
                                       nullptr,
-                                  std::size_t *offloaded_task_count = nullptr);
+                                  std::size_t *offloaded_task_count = nullptr,
+                                  KernelLaunchABI launch_abi =
+                                      KernelLaunchABI::ordinary);
   bool on_cuda_device(void *ptr);
   int64 get_sparse_list_version(int snode_id) const;
   void record_sparse_list_reuse_sample(SparseListState &state,

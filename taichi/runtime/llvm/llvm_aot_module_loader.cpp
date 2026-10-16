@@ -7,6 +7,7 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
+#include "taichi/codegen/llvm/cuda_graph_gate.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
@@ -50,11 +51,18 @@ LlvmAotModule::LlvmAotModule(
                                  contents.data() + contents.size());
   liong::json::deserialize(json, metadata);
   validate_llvm_aot_metadata(metadata);
+  if (!metadata.kernel_launch_abis.empty()) {
+    TI_ERROR_IF(arch() != Arch::cuda,
+                "AOT CUDA gate entries require a CUDA runtime");
+    TI_ERROR_IF(metadata.launch_abi_sha256 != aot_launch_abi_sha256(metadata),
+                "AOT kernel launch ABI declaration checksum mismatch");
+  }
 
   if (is_cuda_aot_artifact_format(metadata.kernel_format)) {
     TI_ERROR_IF(arch() != Arch::cuda, "CUDA device artifacts require a CUDA runtime");
   }
-  if (is_cuda_aot_artifact_format(metadata.kernel_format) || !metadata.resource_binding.empty()) {
+  if (is_cuda_aot_artifact_format(metadata.kernel_format) ||
+      !metadata.resource_binding.empty() || !metadata.kernel_launch_abis.empty()) {
     TI_ERROR_IF(aot_artifact_sha256(read_artifact(
                     *directory_, "metadata.tcb")) != metadata.abi_sha256,
                 "LLVM AOT launch ABI checksum mismatch");
@@ -72,6 +80,10 @@ LlvmAotModule::LlvmAotModule(
               "LLVM AOT artifact metadata at {} is corrupt or incompatible. "
               "Rebuild the artifact with the current Forge AOT compiler.",
               module_path);
+  for (const auto &[name, abi] : metadata.kernel_launch_abis) {
+    TI_ERROR_IF(!cache_reader_->has_kernel(name),
+                "AOT launch ABI references an absent kernel: {}", name);
+  }
 
   if (executor_->get_config().arch == Arch::cuda) {
     for (const auto &[key, value] : metadata.required_caps) {
@@ -259,6 +271,7 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     const std::string &name) {
   if (!cache_reader_->has_kernel(name)) return nullptr;
   auto kernel_cache = load_kernel_from_cache(name);
+  const bool gated = metadata_.kernel_launch_abis.count(name) != 0;
   const auto kernel_name = std::move(kernel_cache.kernel_key);
   if (is_cuda_aot_artifact_format(metadata_.kernel_format)) {
 #if defined(TI_WITH_CUDA)
@@ -330,7 +343,10 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
     TI_ASSERT(launcher != nullptr);
     const auto handle =
-        launcher->register_cuda_artifact_kernel(data, artifact, bindings);
+        launcher->register_cuda_artifact_kernel(
+            data, artifact, bindings,
+            gated ? cuda::KernelLaunchABI::graph_gate_v1
+                  : cuda::KernelLaunchABI::ordinary);
     return std::make_unique<llvm_aot::KernelImpl>(
         launcher, handle, arch(), kernel_name, data);
 #else
@@ -339,7 +355,22 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
   }
   LLVM::CompiledKernelData compiled{
       arch(), std::move(kernel_cache).take_llvm_ckd_data()};
-  const auto handle = kernel_launcher_->register_llvm_kernel(compiled);
+  TI_ERROR_IF(has_cuda_graph_gate(
+                  *compiled.get_internal_data().compiled_data.module) != gated,
+              "AOT LLVM code does not match its kernel launch ABI: {}", name);
+  KernelLaunchHandle handle;
+  if (gated) {
+#if defined(TI_WITH_CUDA)
+    auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
+    TI_ASSERT(launcher != nullptr);
+    handle = launcher->register_llvm_kernel(
+        compiled, cuda::KernelLaunchABI::graph_gate_v1);
+#else
+    TI_ERROR("CUDA gate artifacts require a build with CUDA support");
+#endif
+  } else {
+    handle = kernel_launcher_->register_llvm_kernel(compiled);
+  }
   // The launcher owns the executable. The callable retains its parameter/return
   // ABI, not an additional LLVM module for the entire AOT module lifetime.
   return std::make_unique<llvm_aot::KernelImpl>(

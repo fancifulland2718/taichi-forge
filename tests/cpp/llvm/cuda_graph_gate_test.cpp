@@ -52,6 +52,9 @@ TEST(CudaGraphGate, ClonesAllTaskEntriesAndPreservesOrdinaryCodeAndOwnership) {
     lifetime = source.module_context_owner;
     const auto ordinary = module_text(*source.module);
     variant = LLVM::make_cuda_graph_gated_kernel(source);
+    EXPECT_FALSE(LLVM::has_cuda_graph_gate(*source.module));
+    EXPECT_TRUE(LLVM::has_cuda_graph_gate(*variant.module));
+    EXPECT_ANY_THROW(LLVM::make_cuda_graph_gated_kernel(variant));
     EXPECT_EQ(module_text(*source.module), ordinary);
     EXPECT_NE(source.module.get(), variant.module.get());
     EXPECT_EQ(variant.module_context_owner, source.module_context_owner);
