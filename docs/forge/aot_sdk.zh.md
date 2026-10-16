@@ -173,8 +173,11 @@ OptiX adapter 另提供 `taichi_forge_optix_runtime_provider_query` 公共会话
 | --- | --- | --- |
 | `context` | 资源，无绑定 | 可选 `validation` 布尔值 |
 | `triangle_scene` | 资源：`context`、`vertices`、`indices` | `vertex_count`、`triangle_count`，可选 `allow_update` |
+| `triangle_gas` | 共享几何资源，绑定和参数与 `triangle_scene` 相同 | 同 `triangle_scene` |
+| `instance_scene` | 资源：`context`、`transforms`、`gas_0` 至 `gas_{instance_count-1}` | `instance_count`；可选 `custom_indices`、`visibility_masks`、`opaque`、`allow_update` |
 | `query` | 操作：`scene`、`rays`、`hits`，typed 还需 `hit_indices`；可选 `faces` | `ray_count`，可选 `occlusion`、`any_hit`、`front_only` |
 | `refit` | 操作：`scene`、`vertices` | 空对象 |
+| `instance_refit` | 操作：`scene`，可选 `transforms` | 空对象 |
 
 使用紧凑 scalar ndarray：顶点 f32 `[V,3]`、索引 i32/u32 `[T,3]`、ray f32 `[N,8]`
 （origin.xyz、t_min、direction.xyz、t_max）。typed 输出 f32 `[N,4]` 的 t/u/v/0
@@ -187,9 +190,25 @@ miss 写回 `[-1,0,0,0]` 和 `[-1,-1,-1,0]`。遮挡输出 i32/u32 `[N]` 的0/1�
 验证并冻结；修改它们需要重新准备。`refit` 只更新相同拓扑的顶点，要求有限设备输入，
 无需逐帧host回读。查询不能覆盖输入/其他输出。准备只构建场景与pipeline，不执行查询。
 
-Windows CUDA已验证独立/借用消费、双绑定、前后kernel、refit后命中/miss及退休；后续
+`instance_scene` 引用相同 context 的 `triangle_gas` 资源；多个实例序号可共享一个 GAS。
+`query` 接受单场景或实例场景，不接受裸 GAS。实例 `transforms` 为紧凑 f32 `[I,12]`
+行优先仿射 3×4 矩阵。可选元数据数组各有 `I` 项：`custom_indices` 为无符号24位ID
+（默认0），`visibility_masks` 为无符号8位mask（默认255），`opaque` 为布尔值
+（默认false）。输出 instance ID 为从0开始的绑定序号，与 custom ID、GAS内 primitive ID
+分别保留。opaque 实例仍执行面过滤。实例场景的 `faces` 有 `sum(T_i)` 项，按实例序号
+依次拼接各 GAS 的 primitive 顺序，因此共享 GAS 的不同实例可以使用不同面规则。
+
+`refit` 也接受可更新 GAS。`instance_refit` 要求可更新的实例场景：传入 `transforms`
+时直接读取设备矩阵；省略时保留当前矩阵，仅刷新 IAS 包围盒。引用的 GAS 包围盒变化后，
+应在下次查询前安排 GAS refit 和 IAS 刷新。准备期拒绝非有限或不可逆的初始矩阵；后续
+设备更新须遵守相同输入合同。支持非均匀缩放与负行列式；面判定使用 object-to-world
+变换后的 winding。拓扑、实例映射和元数据冻结至下次准备；prepared call 保留 GAS、
+IAS、context 和 provider owner，直到在途完成与退休。
+
+Windows CUDA已验证独立/借用消费、双绑定、前后kernel、共享GAS的实例差异规则、
+设备镜像/非均匀变换、仅包围盒刷新、refit后命中/miss及退休；后续
 kernel的真实梯度可运行，但不提供求交对顶点/ray的自动微分。CPU/Vulkan不注册这些
-工厂。当前操作使用 `cuda_ordered`，CUDA capture、共享GAS/实例、alpha/纹理、OMM、
+工厂。当前操作使用 `cuda_ordered`，CUDA capture、alpha/纹理、OMM、
 programmable pipeline、recording自动导出和独立SDK安装组件仍待接通。
 
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor

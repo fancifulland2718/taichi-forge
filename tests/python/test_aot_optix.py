@@ -19,6 +19,7 @@ def test_optix_does_not_advertise_non_cuda_execution():
     with ti.aot.borrow_runtime() as runtime:
         assert not runtime.probe_native_operation("optix_query")["available"]
         assert not runtime.probe_native_operation("optix_refit")["available"]
+        assert not runtime.probe_native_operation("optix_instance_refit")["available"]
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

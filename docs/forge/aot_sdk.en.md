@@ -216,8 +216,11 @@ provider `optix`:
 | --- | --- | --- |
 | `context` | Resource, no bindings | Optional boolean `validation` |
 | `triangle_scene` | Resource: `context`, `vertices`, `indices` | `vertex_count`, `triangle_count`, optional `allow_update` |
+| `triangle_gas` | Shared geometry resource: same bindings and parameters as `triangle_scene` | Same as `triangle_scene` |
+| `instance_scene` | Resource: `context`, `transforms`, `gas_0` through `gas_{instance_count-1}` | `instance_count`; optional `custom_indices`, `visibility_masks`, `opaque`, `allow_update` |
 | `query` | Operation: `scene`, `rays`, `hits`; typed queries require `hit_indices`; optional `faces` | `ray_count`, optional `occlusion`, `any_hit`, `front_only` |
 | `refit` | Operation: `scene`, `vertices` | Empty object |
+| `instance_refit` | Operation: `scene`, optional `transforms` | Empty object |
 
 Bindings use compact scalar ndarrays: f32 vertices `[V,3]`, i32/u32 indices `[T,3]`,
 and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed output
@@ -236,11 +239,36 @@ requires finite device inputs, without per-frame host readback. Query outputs
 cannot overlap inputs or each other. Preparation builds scenes/pipelines without
 executing queries.
 
+An `instance_scene` references `triangle_gas` resources from the same context;
+several instance ordinals can reference one GAS. `query` accepts a triangle or
+instance scene, not a bare GAS. Instance `transforms` are compact f32 `[I,12]`
+row-major affine 3x4 matrices. Optional metadata arrays have `I` entries:
+`custom_indices` are unsigned 24-bit IDs (default 0), `visibility_masks` are
+unsigned 8-bit masks (default 255), and `opaque` entries are booleans (default
+false). Returned instance IDs are zero-based binding ordinals; custom IDs and
+GAS-local primitive IDs remain distinct. Opaque instances still apply face
+filtering. With instances, `faces` has `sum(T_i)` entries concatenated in instance
+ordinal order, then each GAS's primitive order. Instances sharing a GAS can
+therefore have different rules.
+
+`refit` also accepts an updateable GAS. `instance_refit` requires an updateable
+instance scene: supplying `transforms` updates its matrices from device memory;
+omitting them refreshes IAS bounds while preserving current matrices, as required
+after a referenced GAS changes bounds. Arrange GAS refits and IAS refreshes before
+the next query. Preparation rejects non-finite or singular initial matrices;
+subsequent device updates must obey the same input contract. Nonuniform scaling
+and negative determinants are supported; face filtering uses winding after the
+object-to-world transform. Topology, instance mapping and metadata stay frozen
+until another preparation. Prepared calls retain GAS, IAS, context and provider
+owners through in-flight completion and retirement.
+
 Windows CUDA qualification covers standalone/borrowed consumption, two bindings,
-surrounding kernels, refit hit/miss transitions and retirement. Real gradients of
+surrounding kernels, shared GAS with different instance rules, mirrored and
+nonuniform device transforms, bounds-only updates, refit hit/miss transitions and
+retirement. Real gradients of
 following kernels work; intersection differentiation with respect to vertices or
 rays is not provided. CPU/Vulkan do not register these factories. Operations use
-`cuda_ordered`; CUDA capture, shared GAS/instances, alpha/textures, OMM,
+`cuda_ordered`; CUDA capture, alpha/textures, OMM,
 programmable pipelines, recording export and a separate SDK component remain
 pending.
 

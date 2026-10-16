@@ -70,6 +70,72 @@ TEST(NativeOperationRegistry, OptixQueryPolicyAndBackendBoundaries) {
 #endif
 }
 
+TEST(NativeOperationRegistry, OptixInstancesPreserveIndexedResourceContracts) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription gas;
+  gas.provider = "optix";
+  gas.operation = "triangle_gas";
+  gas.bindings = {{"context", "ctx"}, {"vertices", "v"}, {"indices", "i"}};
+  gas.parameters = liong::json::parse_complete(
+      R"({"vertex_count":6,"triangle_count":2,"allow_update":true})");
+  EXPECT_EQ(registry.decode(gas, NativeObjectKind::resource).kind(),
+            "optix_triangle_gas");
+
+  auto scene = gas;
+  scene.operation = "instance_scene";
+  // Two instance ordinals may retain the same resource without duplicating GAS.
+  scene.bindings = {{"context", "ctx"}, {"transforms", "transforms"},
+                    {"gas_0", "shared"}, {"gas_1", "shared"}};
+  scene.parameters = liong::json::parse_complete(
+      R"({"instance_count":2,"custom_indices":[0,16777215],"visibility_masks":[0,255],"opaque":[false,true],"allow_update":true})");
+  EXPECT_EQ(registry.decode(scene, NativeObjectKind::resource).kind(),
+            "optix_instance_scene");
+  for (const auto &[field, value] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"instance_count", "0"}, {"instance_count", "4294967296"},
+           {"instance_count", "true"}, {"custom_indices", "[0,16777216]"},
+           {"custom_indices", "[-1,0]"}, {"visibility_masks", "[0,256]"},
+           {"visibility_masks", "[1]"}, {"opaque", "[0,1]"},
+           {"opaque", "true"}, {"allow_update", "1"}, {"unknown", "0"}}) {
+    auto invalid = scene;
+    invalid.parameters.obj.inner[field] = liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource),
+                 std::invalid_argument) << field << ": " << value;
+  }
+  auto defaults = scene;
+  defaults.parameters = liong::json::parse_complete(R"({"instance_count":2})");
+  EXPECT_EQ(registry.decode(defaults, NativeObjectKind::resource).kind(),
+            "optix_instance_scene");
+  auto missing = scene;
+  missing.bindings.erase("gas_1");
+  EXPECT_THROW(registry.decode(missing, NativeObjectKind::resource),
+               std::invalid_argument);
+  auto extra = scene;
+  extra.bindings["gas_2"] = "shared";
+  EXPECT_THROW(registry.decode(extra, NativeObjectKind::resource),
+               std::invalid_argument);
+
+  NativeOperationDescription refit;
+  refit.provider = "optix";
+  refit.operation = "instance_refit";
+  refit.parameters = liong::json::parse_complete("{}");
+  refit.bindings = {{"scene", "scene"}};
+  EXPECT_EQ(registry.decode(refit).kind(), "optix_instance_refit");
+  refit.bindings["transforms"] = "new_transforms";
+  EXPECT_EQ(registry.decode(refit).kind(), "optix_instance_refit");
+  EXPECT_THROW(registry.decode(refit, NativeObjectKind::resource),
+               std::invalid_argument);
+  refit.bindings["vertices"] = "vertices";
+  EXPECT_THROW(registry.decode(refit), std::invalid_argument);
+  EXPECT_EQ(registry.find("optix_instance_refit", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("optix_instance_refit", 1, Arch::vulkan), nullptr);
+#ifdef TI_WITH_CUDA
+  ASSERT_NE(registry.find("optix_instance_refit", 1, Arch::cuda), nullptr);
+  EXPECT_EQ(registry.find("optix_instance_refit", 1, Arch::cuda)->mode,
+            NativeOperationMode::cuda_ordered);
+#endif
+}
+
 TEST(NativeOperationRegistry,
      ParallelSortFreezesShaderInventoryWithoutDeviceCalls) {
   const auto &registry = native_operation_registry();
