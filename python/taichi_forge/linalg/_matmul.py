@@ -312,6 +312,36 @@ class _MatmulRecording(CublasLtCaptureRecording):
         if values[2] is values[0] or values[2] is values[1]:
             raise TaichiRuntimeError("Matmul output must not alias either public input")
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cublaslt import export_plan
+
+        names = tuple(self._public_semantics[key] for key in ("a", "b", "output"))
+        for name, shape in zip(names, _shapes(self._public_semantics)):
+            context.binding_constraints.append(
+                dict(
+                    kind="array_layout",
+                    array=context.binding(name),
+                    exact_shape=list(shape),
+                    element_shape=[],
+                    dtype="f32",
+                    record_bytes=4,
+                    alignment=4,
+                )
+            )
+        for name in names[:2]:
+            context.binding_constraints.append(
+                dict(
+                    kind="disjoint",
+                    left=context.binding(names[2]),
+                    right=context.binding(name),
+                )
+            )
+        # The selected physical sequence already contains packing and separate
+        # epilogues. Export only this vendor node, preserving public constraints
+        # even when both of its physical inputs are private packed storage.
+        context.reconstructed_binding_validators.add(id(self))
+        return export_plan(self.plan, context, self.binding_names)
+
     def _graph_provider_memory_report(self):
         return make_memory_report(
             "matmul_region",

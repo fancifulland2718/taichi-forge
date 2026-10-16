@@ -89,8 +89,10 @@ API 支持紧凑 f32 matmul、批量与转置输入、alpha/beta 反馈、行主
 
 已验证 CUDA 独立/借用消费、单/多 batch、转置输入、两种物理布局、identity/ReLU、
 beta 反馈和显式矩阵伴随与真实 `kernel.grad` 的组合；这不提供厂商操作自动求导。
-CPU/Vulkan 不注册此执行工厂。matmul recipe 的输入打包、独立 ReLU 等已选组合自动导出，
-以及条件/parallel 内组合，仍需各自的支持资格。
+CPU/Vulkan 不注册此执行工厂。`ti.linalg.record_matmul` 的普通编译与已选 matmul recipe
+也可导出：保留实际输入打包 kernel、融合/独立 ReLU 和私有存储，不重新选算法。
+即使厂商操作只读取私有打包结果，原始公开输入的精确形状、f32 类型及输出不别名约束
+仍在消费端冷准备时生效。条件/parallel 内组合仍需各自的支持资格。
 
 cuDSS 使用其独立
 构建开关及匹配的 0.8.x SDK 头文件，不需要开启其他可选 provider：

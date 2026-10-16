@@ -106,9 +106,13 @@ Validated CUDA coverage includes standalone/borrowed consumption, single/multipl
 batches, transposed operands, both physical layouts, identity/ReLU, beta feedback,
 and explicit matrix adjoints combined with actual `kernel.grad`. This does not
 add automatic differentiation of vendor operations. CPU/Vulkan do not register
-this execution factory. Automatic export of selected matmul recipe compositions
-such as operand packing and separate ReLU, and compositions inside conditional or
-parallel regions, still require their own qualification.
+this execution factory. Ordinary compilation of `ti.linalg.record_matmul` and
+selected matmul recipes also export their actual packing kernels, fused/separate
+ReLU and private storage without selecting another algorithm. Even when the
+vendor operation reads only private packed inputs, the original public operands'
+exact shapes, f32 types and output-disjointness constraints remain enforced during
+cold preparation. Compositions inside conditional or parallel regions still
+require their own qualification.
 
 cuDSS uses
 its independent build option and matching 0.8.x SDK headers, without enabling
