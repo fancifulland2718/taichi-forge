@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
-#include <deque>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -16,6 +15,7 @@
 #include "taichi/program/texture.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/runtime/cuda/binding_frame_replay.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 
 namespace taichi::lang::cuda {
@@ -77,11 +77,6 @@ struct GraphBindingFrame::State {
 };
 
 struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
-  struct Pending {
-    RuntimeCompletion completion;
-    std::shared_ptr<GraphBindingFrame> frame;
-  };
-
   aot::CompiledGraph graph;
   CompileConfig config;
   Program *program{nullptr};
@@ -92,22 +87,20 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
   std::vector<std::shared_ptr<void>> provider_plans;
   std::mutex mutex;
   std::atomic<bool> closed{false};
-  bool failed{false};
-  CUgraphExec executable{nullptr};
   void *capture_stream{nullptr};
-  std::shared_ptr<GraphBindingFrame> active;
   std::vector<std::weak_ptr<GraphBindingFrame>> frames;
-  std::deque<Pending> pending;
-  std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool;
-  std::uint64_t program_domain{0};
+  BindingFrameReplay replay;
   std::uint64_t upload_calls{0};
   std::uint64_t upload_bytes{0};
 
-  State(const aot::CompiledGraph &graph_, const CompileConfig &config_)
-      : graph(graph_), config(config_) {
-    event_pool = std::make_shared<RuntimeCompletionCudaEventPool>(
-        std::weak_ptr<RuntimeFaultDomain>{}, 0,
-        RuntimeCompletionCudaEventPool::Retention::until_clear);
+  State(const aot::CompiledGraph &graph_,
+        const CompileConfig &config_,
+        Program &owner)
+      : graph(graph_),
+        config(config_),
+        program(&owner),
+        replay(owner.runtime_program_generation(),
+               owner.runtime_fault_domain()) {
   }
 
   ~State() override {
@@ -115,40 +108,12 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
   }
 
   void collect(bool sweep_directory = false) {
-    // Default-stream completions are ordered. No poll on exact replay.
-    while (!pending.empty() && pending.front().completion.done()) {
-      pending.pop_front();
-    }
+    replay.collect();
     if (sweep_directory) {
       frames.erase(
           std::remove_if(frames.begin(), frames.end(),
                          [](const auto &frame) { return frame.expired(); }),
           frames.end());
-    }
-  }
-
-  void retain_pending(const std::shared_ptr<GraphBindingFrame> &frame) {
-    pending.push_back({RuntimeCompletion::from_cuda_stream(
-                           program_domain, 0, nullptr, nullptr, event_pool),
-                       frame});
-  }
-
-  void update(CUgraph source) {
-    void *error_node = nullptr;
-    std::uint32_t result = 0;
-    auto &driver = CUDADriver::get_instance();
-    const auto error = driver.graph_exec_update_v1.call(executable, source,
-                                                        &error_node, &result);
-    if (error != CUDA_SUCCESS || result != 0) {
-      // Never silently substitute recapture/reinstantiation for this recipe.
-      failed = true;
-      BackendRuntimeError failure(
-          Arch::cuda, error, "graph_exec_update_v1",
-          fmt::format(
-              "CUDA binding-frame update rejected: driver={}, result={}", error,
-              result));
-      program->report_backend_runtime_error(failure);
-      throw failure;
     }
   }
 
@@ -159,19 +124,11 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
       return;
     }
     closed = true;
-    bool safe = device && device->backend_calls_safe();
+    bool safe = replay.retire_backend(device && device->backend_calls_safe());
     auto &driver = CUDADriver::get_instance();
     if (safe) {
       try {
         auto context = CUDAContext::get_instance().get_guard();
-        // Close/reset is a lifetime boundary, never replay. Also covers
-        // preparation uploads for frames that were never launched.
-        if (executable || !pending.empty()) {
-          driver.stream_synchronize(nullptr);
-        }
-        if (executable) {
-          driver.graph_exec_destroy(executable);
-        }
         if (capture_stream) {
           driver.stream_destroy(capture_stream);
         }
@@ -179,17 +136,14 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
         safe = false;
       }
     }
-    executable = nullptr;
     capture_stream = nullptr;
     for (const auto &entry : frames) {
       if (auto frame = entry.lock()) {
         frame->state_->release(safe);
       }
     }
-    pending.clear();
-    active.reset();
+    replay.release_frame_leases();
     frames.clear();
-    event_pool->clear();
     kernels.clear();
     handles.clear();
     provider_plans.clear();
@@ -224,8 +178,7 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
           graph.has_indirect_dispatches() ||
           graph.has_cuda_parallel_dispatch_groups(),
       "CUDA binding frames require a flat CUDA Graph without SNode dependencies");
-  auto state = std::make_shared<State>(graph, config);
-  state->program = &program_owner;
+  auto state = std::make_shared<State>(graph, config, program_owner);
   auto &driver = CUDADriver::get_instance();
   TI_ERROR_IF(!available(),
               "CUDA binding-frame executable update is unavailable");
@@ -255,7 +208,6 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
   TI_ERROR_IF(!state->device || !state->launcher ||
                   !CUDAContext::get_instance().supports_mem_pool(),
               "CUDA binding frames require the CUDA launcher and async memory");
-  state->program_domain = state->program->runtime_program_generation();
   for (const auto &dispatch : graph.dispatches) {
     if (dispatch.cuda_capture_command) {
       state->handles.emplace_back();
@@ -304,7 +256,7 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
   auto context = CUDAContext::get_instance().get_guard();
   std::lock_guard<std::mutex> lock(state.mutex);
-  TI_ERROR_IF(state.closed || state.failed,
+  TI_ERROR_IF(state.closed || state.replay.failed(),
               "CUDA binding-frame executor is closed or failed");
   state.collect(true);
   auto frame = std::shared_ptr<GraphBindingFrame>(new GraphBindingFrame());
@@ -482,21 +434,8 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
       TI_ERROR_IF(type != 0 /* kernel */ && !provider_memory,
                   "CUDA binding frame contains an unsupported node");
     }
-    if (!state.executable) {
-      driver.graph_instantiate_with_flags(&state.executable, data.graph, 0);
-      state.active = frame;
-    } else {
-      // Preparation may leave the executable configured for this frame: every
-      // run explicitly names its frame, and no mathematical work executes here.
-      // Retain the previous configuration for already queued launches before
-      // updating. Restoring it only to update again on run would add two
-      // redundant driver calls to the common prepare-then-run path.
-      state.retain_pending(state.active);
-      state.update(data.graph);
-      state.active = frame;
-    }
+    state.replay.prepare(data.graph, frame);
     state.program->mark_runtime_submission_pending();
-    state.retain_pending(frame);
     resource_guard.finish_external_access_epoch();
     return frame;
   } catch (...) {
@@ -512,7 +451,7 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
       // This cold rollback is deliberately not a replay fallback.
       driver.stream_synchronize(nullptr);
     }
-    if (state.active != frame) {
+    if (!state.replay.is_active(frame.get())) {
       data.release(state.device->backend_calls_safe());
     }
     throw;
@@ -525,18 +464,11 @@ void GraphBindingExecutor::run(
   auto context = CUDAContext::get_instance().get_guard();
   auto &state = *state_;
   std::lock_guard<std::mutex> lock(state.mutex);
-  TI_ERROR_IF(state.closed || state.failed || !frame || !frame->state_->valid ||
-                  frame->state_->owner != &state,
+  TI_ERROR_IF(state.closed || state.replay.failed() || !frame ||
+                  !frame->state_->valid || frame->state_->owner != &state,
               "CUDA binding frame is closed or belongs to another executor");
   auto completion_scope = state.program->acquire_runtime_submission_scope();
-  if (state.active != frame) {
-    state.collect();
-    // Only an actual binding switch needs a last-use completion event.
-    state.retain_pending(state.active);
-    state.update(frame->state_->graph);
-    state.active = frame;
-  }
-  CUDADriver::get_instance().graph_launch(state.executable, nullptr);
+  state.replay.run(frame->state_->graph, frame);
   state.program->mark_runtime_submission(
       RuntimeSubmissionKind::kGraphBackendSubmission);
 }
@@ -565,15 +497,16 @@ GraphBindingExecutor::snapshot() {
       ++frames;
     }
   }
-  const auto events = state.event_pool->snapshot();
+  const auto replay = state.replay.snapshot();
+  const auto events = replay.events;
   return {{"closed", state.closed.load(std::memory_order_relaxed)},
-          {"failed", state.failed},
+          {"failed", replay.failed},
           {"frames", frames},
           {"argument_bytes", bytes},
           {"provider_argument_bytes", provider_bytes},
           {"kernel_nodes", nodes},
-          {"executables", state.executable ? 1 : 0},
-          {"pending_frame_leases", state.pending.size()},
+          {"executables", replay.executables},
+          {"pending_frame_leases", replay.pending_frames},
           // Driver event bytes are opaque. Counts describe retained handles,
           // never requested ndarray bytes or a measured VRAM peak.
           {"completion_events_created", events.created},

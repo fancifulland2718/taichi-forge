@@ -3,6 +3,7 @@
 ti_add_native_library(cuda_runtime)
 target_sources(cuda_runtime
   PRIVATE
+    binding_frame_replay.cpp
     bounded_graph.cpp
     cudss_plan.cpp
     cuda_artifact_provider.cpp

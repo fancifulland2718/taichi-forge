@@ -29,6 +29,7 @@ list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cusolverdn_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cublaslt_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_cudss_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cuda_ordered_submission_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/cuda_binding_frame_replay_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/runtime_client_test.cpp")
 
 if (TI_WITH_OPENGL OR TI_WITH_VULKAN)

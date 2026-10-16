@@ -56,6 +56,61 @@ def _arrays(size=131):
     return source, output, host
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_binding_frames_preserve_explicit_adjoint_and_zero_rebinding():
+    @ti.kernel
+    def forward(x: ti.types.ndarray(ti.f32, 1), y: ti.types.ndarray(ti.f32, 1), scale: ti.f32):
+        for i in x:
+            y[i] = scale * x[i] * x[i]
+
+    @ti.kernel
+    def backward(
+        x: ti.types.ndarray(ti.f32, 1),
+        dy: ti.types.ndarray(ti.f32, 1),
+        dx: ti.types.ndarray(ti.f32, 1),
+        scale: ti.f32,
+    ):
+        for i in x:
+            dx[i] = 2 * scale * x[i] * dy[i]
+
+    args = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1) for name in ("x", "y", "dy", "dx")
+    }
+    scale = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(forward, args["x"], args["y"], scale)
+    builder.dispatch(backward, args["x"], args["dy"], args["dx"], scale)
+    definition = builder.freeze()
+    catalog = _catalog(definition)
+    recipe = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+    values = np.linspace(-1, 1, 17, dtype=np.float32)
+    cotangent = np.linspace(0.25, 0.75, 17, dtype=np.float32)
+    arrays = [{name: ti.ndarray(ti.f32, 17) for name in args} for _ in range(2)]
+    for index, frame in enumerate(arrays):
+        frame["x"].from_numpy(values + index)
+        frame["dy"].from_numpy(cotangent)
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(recipe) as materialized:
+            graph = materialized.executor
+            native = graph._instance._backend_executable._native
+            frames = [graph.bind({**frame, "scale": factor}) for frame, factor in zip(arrays, (3.0, -0.5))]
+            before = native.snapshot()
+            for index in (0, 1, 0, 1, 1):
+                graph.run(frames[index])
+            for index, factor in enumerate((3.0, -0.5)):
+                np.testing.assert_allclose(arrays[index]["y"].to_numpy(), factor * (values + index) ** 2)
+                np.testing.assert_allclose(
+                    arrays[index]["dx"].to_numpy(), 2 * factor * (values + index) * cotangent
+                )
+            after = native.snapshot()
+            assert after["executables"] == 1
+            assert after["preparation_upload_calls"] == before["preparation_upload_calls"]
+            frames[0].update(scale=0.0)
+            graph.submit(frames[0]).wait()
+            np.testing.assert_array_equal(arrays[0]["y"].to_numpy(), np.zeros(17, np.float32))
+            np.testing.assert_array_equal(arrays[0]["dx"].to_numpy(), np.zeros(17, np.float32))
+
+
 def _texture_definition():
     @ti.kernel
     def sample(
