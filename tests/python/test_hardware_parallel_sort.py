@@ -61,7 +61,9 @@ def test_parallel_sort_exact_capacity_and_stable_duplicate_payload(with_payload,
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_parallel_sort_graph_publication_queue_order_and_pending_close(monkeypatch):
-    n = 1048579
+    # Native core fixtures cover prefix/tail boundaries; this case isolates
+    # Graph queue order and pending resource retirement at a bounded size.
+    n = 4099
     keys = ti.ndarray(ti.u32, shape=n)
     values = ti.ndarray(ti.u32, shape=n)
     other = ti.ndarray(ti.u32, shape=n)
