@@ -5,6 +5,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -40,6 +41,53 @@ TEST(CudaPredicateGraphContract, RejectsInvalidAndUnrepresentableLayouts) {
   EXPECT_EQ(controls.device_bytes(), 0);
   controls.release(false);
   controls.release(false);
+}
+
+TEST(CudaPredicateGraphContract, MaskedRecordingRejectsBeforePayloadOrDriver) {
+  std::size_t calls = 0;
+  const auto payload = [&](std::size_t) { ++calls; };
+  cuda::NestedPredicateGraphLayout layout{4, 8, 1, 1, 4,
+                                         {{12, 16, 3, 1, 2, 3}}};
+  auto invalid = layout;
+  invalid.inners[0].gate = 0;
+  EXPECT_THROW(cuda::capture_masked_while_graph(invalid, true, nullptr, payload),
+               std::invalid_argument);
+  invalid = layout;
+  invalid.inners[0].body_begin = invalid.inners[0].condition_begin;
+  EXPECT_THROW(cuda::capture_masked_while_graph(invalid, true, nullptr, payload),
+               std::invalid_argument);
+  invalid = layout;
+  invalid.iterations = std::numeric_limits<std::uint64_t>::max();
+  EXPECT_THROW(cuda::capture_masked_while_graph(invalid, true, nullptr, payload),
+               std::invalid_argument);
+  EXPECT_THROW(cuda::capture_masked_while_graph(layout, true, nullptr, {}),
+               std::invalid_argument);
+  cuda::MaskedBranchGraphLayout branch{4, 8, 0, 3,
+      std::numeric_limits<std::uint32_t>::max(), 3};
+  EXPECT_THROW(cuda::capture_masked_branch_graph(branch, nullptr, payload),
+               std::invalid_argument);
+  branch.conditional_type = 2;
+  branch.default_branch = 3;
+  EXPECT_THROW(cuda::capture_masked_branch_graph(branch, nullptr, payload),
+               std::invalid_argument);
+  EXPECT_EQ(calls, 0);
+}
+
+TEST(CudaPredicateGraphContract, ZeroMaskedBudgetCapturesOnlyInitialCondition) {
+  // A zero outer budget does not expand even a large inner budget or touch
+  // device addresses. The initial condition still belongs to this region.
+  cuda::NestedPredicateGraphLayout layout{
+      4, 8, 0, 2, 6, {{12, 16, std::uint64_t{1} << 32, 2, 3, 5}}};
+  std::vector<std::size_t> captured;
+  cuda::capture_masked_while_graph(layout, true, nullptr,
+      [&](std::size_t dispatch) { captured.push_back(dispatch); });
+  EXPECT_EQ(captured, (std::vector<std::size_t>{0, 1}));
+  layout.inners.clear();
+  layout.initial_dispatches = 0;  // Flat while condition owned by caller.
+  captured.clear();
+  cuda::capture_masked_while_graph(layout, false, nullptr,
+      [&](std::size_t dispatch) { captured.push_back(dispatch); });
+  EXPECT_TRUE(captured.empty());
 }
 
 class CudaPredicateGraph : public ::testing::Test {

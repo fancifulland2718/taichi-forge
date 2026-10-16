@@ -3019,27 +3019,28 @@ bool try_run_cuda_masked_control_graph(
   }
   CudaStreamCaptureGuard capture_guard(capture_stream);
   try {
+    const auto capture_payload = [&](std::size_t dispatch) {
+      const auto &packet = state->packets[dispatch];
+      packet.launcher->capture_cuda_graph_launch(packet.packet, capture_stream);
+    };
     if (is_while) {
-      for (int iteration = 0; iteration < max_iterations; ++iteration) {
-        cuda::driver_graph_latch_while(selector_ptr, state->masked_gate,
-                                       continue_while_nonzero, capture_stream);
-        for (const auto &packet : state->packets) {
-          packet.launcher->capture_cuda_graph_launch(packet.packet,
-                                                     capture_stream);
-        }
-      }
+      cuda::NestedPredicateGraphLayout layout;
+      layout.predicate = reinterpret_cast<std::uintptr_t>(selector_ptr);
+      layout.gate = reinterpret_cast<std::uintptr_t>(state->masked_gate);
+      layout.iterations = max_iterations;
+      layout.dispatches = state->packets.size();
+      cuda::capture_masked_while_graph(layout, continue_while_nonzero,
+                                       capture_stream, capture_payload);
     } else {
-      cuda::driver_graph_latch_branch(
-          selector_ptr, state->masked_gate,
+      const cuda::MaskedBranchGraphLayout layout{
+          reinterpret_cast<std::uintptr_t>(selector_ptr),
+          reinterpret_cast<std::uintptr_t>(state->masked_gate),
           static_cast<std::uint32_t>(control_type),
           static_cast<std::uint32_t>(branch_dispatch_counts.size()),
           default_branch < 0 ? (std::numeric_limits<std::uint32_t>::max)()
                              : static_cast<std::uint32_t>(default_branch),
-          capture_stream);
-      for (const auto &packet : state->packets) {
-        packet.launcher->capture_cuda_graph_launch(packet.packet,
-                                                   capture_stream);
-      }
+          state->packets.size()};
+      cuda::capture_masked_branch_graph(layout, capture_stream, capture_payload);
     }
   } catch (...) {
     if (state->diagnostics_enabled) {
@@ -4185,11 +4186,23 @@ bool try_run_cuda_masked_nested_control_graph(
     state->packets.push_back(std::move(capture_packet));
   }
 
-  auto *outer_ptr = selector_device->get_alloc_info(outer_allocation).ptr;
-  std::vector<void *> inner_ptrs;
-  inner_ptrs.reserve(inner_allocations.size());
-  for (const DeviceAllocation &allocation : inner_allocations) {
-    inner_ptrs.push_back(selector_device->get_alloc_info(allocation).ptr);
+  cuda::NestedPredicateGraphLayout masked_layout;
+  masked_layout.predicate = reinterpret_cast<std::uintptr_t>(
+      selector_device->get_alloc_info(outer_allocation).ptr);
+  masked_layout.gate = reinterpret_cast<std::uintptr_t>(state->masked_gate);
+  masked_layout.iterations = outer_max_iterations;
+  masked_layout.initial_dispatches = outer_condition_dispatch_count;
+  masked_layout.dispatches = dispatch_count;
+  masked_layout.inners.reserve(inner_controls.size());
+  for (std::size_t child = 0; child < inner_controls.size(); ++child) {
+    const auto &inner = inner_controls[child];
+    masked_layout.inners.push_back({
+        reinterpret_cast<std::uintptr_t>(
+            selector_device->get_alloc_info(inner_allocations[child]).ptr),
+        reinterpret_cast<std::uintptr_t>(state->nested_inner_gates[child]),
+        static_cast<std::uint64_t>(inner.max_iterations),
+        inner.condition_dispatch_begin, inner.body_dispatch_begin,
+        inner.dispatch_end});
   }
   driver.stream_synchronize(capture_stream);
   auto capture_lock =
@@ -4203,40 +4216,12 @@ bool try_run_cuda_masked_nested_control_graph(
   }
   CudaStreamCaptureGuard capture_guard(capture_stream);
   try {
-    for (std::size_t i = 0; i < outer_condition_dispatch_count; ++i) {
-      state->packets[i].launcher->capture_cuda_graph_launch(
-          state->packets[i].packet, capture_stream);
-    }
-    for (int outer_iteration = 0; outer_iteration < outer_max_iterations;
-         ++outer_iteration) {
-      cuda::driver_graph_latch_while(outer_ptr, state->masked_gate, true,
-                                     capture_stream);
-      std::size_t payload_cursor = outer_condition_dispatch_count;
-      for (std::size_t child = 0; child < inner_controls.size(); ++child) {
-        const auto &inner = inner_controls[child];
-        for (std::size_t i = payload_cursor;
-             i < inner.body_dispatch_begin; ++i) {
-          state->packets[i].launcher->capture_cuda_graph_launch(
-              state->packets[i].packet, capture_stream);
-        }
-        for (int inner_iteration = 0;
-             inner_iteration < inner.max_iterations; ++inner_iteration) {
-          cuda::driver_graph_latch_nested_while(
-              state->masked_gate, inner_ptrs[child],
-              state->nested_inner_gates[child], true, capture_stream);
-          for (std::size_t i = inner.body_dispatch_begin;
-               i < inner.dispatch_end; ++i) {
-            state->packets[i].launcher->capture_cuda_graph_launch(
-                state->packets[i].packet, capture_stream);
-          }
-        }
-        payload_cursor = inner.dispatch_end;
-      }
-      for (std::size_t i = payload_cursor; i < dispatch_count; ++i) {
-        state->packets[i].launcher->capture_cuda_graph_launch(
-            state->packets[i].packet, capture_stream);
-      }
-    }
+    cuda::capture_masked_while_graph(
+        masked_layout, true, capture_stream, [&](std::size_t dispatch) {
+          const auto &packet = state->packets[dispatch];
+          packet.launcher->capture_cuda_graph_launch(packet.packet,
+                                                     capture_stream);
+        });
   } catch (...) {
     if (state->diagnostics_enabled) {
       ++state->stats.capture_exceptions;

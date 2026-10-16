@@ -1,12 +1,86 @@
 #include "taichi/runtime/cuda/predicate_graph.h"
 
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/runtime/control_encoding_cost.h"
 
 namespace taichi::lang::cuda {
+namespace {
+
+std::optional<NestedControlEncodingCost> predicate_layout_cost(
+    const NestedPredicateGraphLayout &layout) {
+  if (!layout.predicate || !layout.gate ||
+      layout.initial_dispatches >= layout.dispatches ||
+      (!layout.inners.empty() && !layout.initial_dispatches))
+    return std::nullopt;
+  NestedControlCostAccumulator estimate(
+      layout.dispatches, layout.initial_dispatches, layout.iterations);
+  auto cursor = layout.initial_dispatches;
+  for (const auto &inner : layout.inners) {
+    if (!inner.predicate || !inner.gate || cursor > inner.condition_begin ||
+        inner.condition_begin >= inner.body_begin ||
+        inner.body_begin >= inner.end || inner.end >= layout.dispatches ||
+        !estimate.add_inner(inner.end - inner.body_begin, inner.iterations))
+      return std::nullopt;
+    cursor = inner.end;
+  }
+  return estimate.finish();
+}
+
+}  // namespace
+
+void capture_masked_while_graph(const NestedPredicateGraphLayout &layout,
+                                bool continue_while_nonzero,
+                                void *stream,
+                                const MaskedGraphCapture &payload) {
+  const auto cost = predicate_layout_cost(layout);
+  if (!payload || !cost || !cost->total_actions(false))
+    throw std::invalid_argument("Invalid CUDA masked while graph layout");
+  for (std::size_t dispatch = 0; dispatch < layout.initial_dispatches; ++dispatch)
+    payload(dispatch);
+  for (std::uint64_t outer = 0; outer < layout.iterations; ++outer) {
+    driver_graph_latch_while(reinterpret_cast<void *>(layout.predicate),
+                             reinterpret_cast<void *>(layout.gate),
+                             continue_while_nonzero, stream);
+    auto cursor = layout.initial_dispatches;
+    for (const auto &inner : layout.inners) {
+      for (; cursor < inner.body_begin; ++cursor)
+        payload(cursor);
+      for (std::uint64_t iteration = 0; iteration < inner.iterations; ++iteration) {
+        driver_graph_latch_nested_while(
+            reinterpret_cast<void *>(layout.gate),
+            reinterpret_cast<void *>(inner.predicate),
+            reinterpret_cast<void *>(inner.gate), true, stream);
+        for (auto dispatch = inner.body_begin; dispatch < inner.end; ++dispatch)
+          payload(dispatch);
+      }
+      cursor = inner.end;
+    }
+    for (; cursor < layout.dispatches; ++cursor)
+      payload(cursor);
+  }
+}
+
+void capture_masked_branch_graph(const MaskedBranchGraphLayout &layout,
+                                 void *stream,
+                                 const MaskedGraphCapture &payload) {
+  if (!payload || !layout.predicate || !layout.gate || !layout.dispatches ||
+      !layout.branch_count ||
+      (layout.conditional_type != 0 && layout.conditional_type != 2) ||
+      (layout.conditional_type == 0 && layout.branch_count > 2) ||
+      (layout.default_branch != std::numeric_limits<std::uint32_t>::max() &&
+       layout.default_branch >= layout.branch_count))
+    throw std::invalid_argument("Invalid CUDA masked branch graph layout");
+  driver_graph_latch_branch(
+      reinterpret_cast<void *>(layout.predicate),
+      reinterpret_cast<void *>(layout.gate), layout.conditional_type,
+      layout.branch_count, layout.default_branch, stream);
+  for (std::size_t dispatch = 0; dispatch < layout.dispatches; ++dispatch)
+    payload(dispatch);
+}
 
 struct NestedPredicateGraphControls::BuildState {
   NestedPredicateGraphLayout layout;
@@ -19,22 +93,9 @@ NestedPredicateGraphControls::~NestedPredicateGraphControls() = default;
 std::uint32_t NestedPredicateGraphControls::initialize(
     NestedPredicateGraphLayout layout,
     bool diagnostics_enabled) {
-  if (phase_ != Phase::empty || !layout.predicate || !layout.gate ||
-      !layout.initial_dispatches ||
-      layout.initial_dispatches >= layout.dispatches || layout.inners.empty())
+  if (phase_ != Phase::empty || !layout.initial_dispatches || layout.inners.empty())
     return CUDA_ERROR_NOT_SUPPORTED;
-  NestedControlCostAccumulator estimate(
-      layout.dispatches, layout.initial_dispatches, layout.iterations);
-  auto cursor = layout.initial_dispatches;
-  for (const auto &inner : layout.inners) {
-    if (!inner.predicate || !inner.gate || cursor > inner.condition_begin ||
-        inner.condition_begin >= inner.body_begin ||
-        inner.body_begin >= inner.end || inner.end >= layout.dispatches ||
-        !estimate.add_inner(inner.end - inner.body_begin, inner.iterations))
-      return CUDA_ERROR_NOT_SUPPORTED;
-    cursor = inner.end;
-  }
-  const auto cost = estimate.finish();
+  const auto cost = predicate_layout_cost(layout);
   if (!cost || cost->controllers_per_outer - 1 >
                    std::numeric_limits<std::uint32_t>::max() ||
       cost->expanded_controllers >

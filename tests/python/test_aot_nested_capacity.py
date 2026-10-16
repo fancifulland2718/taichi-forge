@@ -188,6 +188,15 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
         assert any(s["last_path"].startswith(prefix) for s in nested_stats), nested_stats
         if route == "conditional":
             assert nested_stats[0]["known_bounded_control_bytes"] == (regions + 1) * 32
+        if route in ("masked", "device_update"):
+            arrays["limits"].from_numpy(np.array([2, 1], dtype=np.int32))
+            owner.executor.submit(arrays).wait()
+            samples = []
+            for _ in range(16):
+                begin = time.perf_counter()
+                owner.executor.submit(arrays).wait()
+                samples.append((time.perf_counter() - begin) * 1e6)
+            timings["jit_primal_warm_complete_us"] = statistics.median(samples)
         if route == "masked":
             # Masked payloads need a separate persistence contract.
             module = ti.aot.Module()
@@ -197,14 +206,6 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             (tmp_path / "costs.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
             return
         if route == "device_update":
-            arrays["limits"].from_numpy(np.array([2, 1], dtype=np.int32))
-            owner.executor.submit(arrays).wait()
-            samples = []
-            for _ in range(16):
-                begin = time.perf_counter()
-                owner.executor.submit(arrays).wait()
-                samples.append((time.perf_counter() - begin) * 1e6)
-            timings["jit_primal_warm_complete_us"] = statistics.median(samples)
             begin = time.perf_counter()
             module.add_execution_plan("primal", owner.executor)
             timings["primal_export_ms"] = (time.perf_counter() - begin) * 1000

@@ -30,6 +30,34 @@ struct NestedPredicateGraphLayout {
   std::vector<Inner> inners;
 };
 
+// Stateless masked recording over the same physical layout. Empty inners
+// describe a flat while; its initial condition may be owned by the caller.
+// Initial dispatches are ordinary code, outer payloads use layout.gate, and
+// inner bodies use their own gate. Nested inner predicates continue if nonzero.
+// The caller prepares the latch module before capture, owns the active capture
+// transaction and retains all gates/packets until its executable retires.
+// These functions never allocate device storage, instantiate or submit graphs.
+using MaskedGraphCapture = std::function<void(std::size_t)>;
+void capture_masked_while_graph(const NestedPredicateGraphLayout &layout,
+                                bool continue_while_nonzero,
+                                void *stream,
+                                const MaskedGraphCapture &payload);
+
+struct MaskedBranchGraphLayout {
+  std::uintptr_t predicate{0};
+  std::uintptr_t gate{0};
+  std::uint32_t conditional_type{0};  // 0: if, 2: switch.
+  std::uint32_t branch_count{0};
+  std::uint32_t default_branch{~std::uint32_t{0}};
+  std::size_t dispatches{0};
+};
+
+// Branch packets test their one-based branch ordinal against the latched gate.
+// The owner validates branch-to-packet mapping and predicate alias/effects.
+void capture_masked_branch_graph(const MaskedBranchGraphLayout &layout,
+                                 void *stream,
+                                 const MaskedGraphCapture &payload);
+
 // Program-independent cold construction, with no JIT compilation or submission
 // ownership. The enclosing owner supplies its capture lock and stream, prepares
 // immutable dispatch packets, and retains borrowed storage through completion.
