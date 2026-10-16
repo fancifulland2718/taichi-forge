@@ -166,8 +166,31 @@ OptiX adapter 另提供 `taichi_forge_optix_runtime_provider_query` 公共会话
 执行表保留旧 OptiX 返回码，不能当作公共 provider 返回码解释。每个场景/查询 owner
 须持有会话直到在途工作和资源销毁完成；同一 adapter 的活引用必须使用同一库路径。
 具体 SDK/OptiX ABI 从执行表查询，驱动运行库版本未知时返回 0，不用 SDK 版本替代。
-此接口仅完成公共所有权桥接；OptiX AOT 场景/query/refit 注册、recording 自动导出和
-独立 SDK 安装组件仍待接通，尚不能通过 `configure_provider("optix", ...)` 消费。
+显式 AOT 计划可通过 `runtime.configure_provider("optix", adapter_path=..., library_path=...)`
+使用以下 version 1 原生资源/操作（provider 均为 `optix`）：
+
+| operation | 类型/绑定 | parameters |
+| --- | --- | --- |
+| `context` | 资源，无绑定 | 可选 `validation` 布尔值 |
+| `triangle_scene` | 资源：`context`、`vertices`、`indices` | `vertex_count`、`triangle_count`，可选 `allow_update` |
+| `query` | 操作：`scene`、`rays`、`hits`，typed 还需 `hit_indices`；可选 `faces` | `ray_count`，可选 `occlusion`、`any_hit`、`front_only` |
+| `refit` | 操作：`scene`、`vertices` | 空对象 |
+
+使用紧凑 scalar ndarray：顶点 f32 `[V,3]`、索引 i32/u32 `[T,3]`、ray f32 `[N,8]`
+（origin.xyz、t_min、direction.xyz、t_max）。typed 输出 f32 `[N,4]` 的 t/u/v/0
+及 i32/u32 `[N,4]` 的 primitive/instance/custom/hit；单场景的 instance/custom 为0。
+miss 写回 `[-1,0,0,0]` 和 `[-1,-1,-1,0]`。遮挡输出 i32/u32 `[N]` 的0/1，
+此时不传 `hit_indices`，`any_hit` 默认为true且不能关闭。普通 typed 默认最近有效命中。
+
+省略面规则接受双面；`front_only=true` 按 winding 拒绝背面并继续遍历。或用 `faces`
+绑定 i32/u32 `[T]`，0为双面、1为单面，两种配置不能同时使用。拓扑和面规则在准备期
+验证并冻结；修改它们需要重新准备。`refit` 只更新相同拓扑的顶点，要求有限设备输入，
+无需逐帧host回读。查询不能覆盖输入/其他输出。准备只构建场景与pipeline，不执行查询。
+
+Windows CUDA已验证独立/借用消费、双绑定、前后kernel、refit后命中/miss及退休；后续
+kernel的真实梯度可运行，但不提供求交对顶点/ray的自动微分。CPU/Vulkan不注册这些
+工厂。当前操作使用 `cuda_ordered`，CUDA capture、共享GAS/实例、alpha/纹理、OMM、
+programmable pipeline、recording自动导出和独立SDK安装组件仍待接通。
 
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
 或 Vulkan GFX runtime、设备和分配器：

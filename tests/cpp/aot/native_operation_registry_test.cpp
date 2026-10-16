@@ -16,6 +16,60 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, OptixResourcesDecodeWithoutLoadingAProvider) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription context;
+  context.provider = "optix";
+  context.operation = "context";
+  context.parameters = liong::json::parse_complete(R"({"validation":true})");
+  EXPECT_EQ(registry.decode(context, NativeObjectKind::resource).kind(),
+            "optix_context");
+  auto scene = context;
+  scene.operation = "triangle_scene";
+  scene.parameters = liong::json::parse_complete(
+      R"({"vertex_count":4294967295,"triangle_count":4294967295,"allow_update":true})");
+  scene.bindings = {{"context", "ctx"}, {"vertices", "v"}, {"indices", "i"}};
+  EXPECT_EQ(registry.decode(scene, NativeObjectKind::resource).kind(),
+            "optix_triangle_scene");
+  for (const auto &[field, value] : std::vector<std::pair<std::string, std::string>>{
+           {"vertex_count", "0"}, {"triangle_count", "4294967296"},
+           {"vertex_count", "true"}, {"allow_update", "1"}, {"unknown", "0"}}) {
+    auto invalid = scene;
+    invalid.parameters.obj.inner[field] = liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource), std::invalid_argument);
+  }
+  EXPECT_THROW(registry.decode(scene), std::invalid_argument);
+  scene.bindings.erase("context");
+  EXPECT_THROW(registry.decode(scene, NativeObjectKind::resource), std::invalid_argument);
+}
+
+TEST(NativeOperationRegistry, OptixQueryPolicyAndBackendBoundaries) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription query;
+  query.provider = "optix";
+  query.operation = "query";
+  query.bindings = {{"scene", "s"}, {"rays", "r"}, {"hits", "h"},
+                    {"hit_indices", "ids"}, {"faces", "f"}};
+  query.parameters = liong::json::parse_complete(R"({"ray_count":4294967295})");
+  EXPECT_EQ(registry.decode(query).kind(), "optix_query");
+  for (const auto *parameters : {
+           R"({"ray_count":0})", R"({"ray_count":4294967296})",
+           R"({"ray_count":1,"front_only":1})",
+           R"({"ray_count":1,"occlusion":true,"any_hit":false})",
+           R"({"ray_count":1,"alpha_masks":[]})"}) {
+    auto invalid = query;
+    invalid.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(invalid), std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("optix_query", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("optix_refit", 1, Arch::vulkan), nullptr);
+#ifdef TI_WITH_CUDA
+  ASSERT_NE(registry.find("optix_query", 1, Arch::cuda), nullptr);
+  EXPECT_EQ(registry.find("optix_query", 1, Arch::cuda)->mode,
+            NativeOperationMode::cuda_ordered);
+#endif
+}
+
 TEST(NativeOperationRegistry,
      ParallelSortFreezesShaderInventoryWithoutDeviceCalls) {
   const auto &registry = native_operation_registry();

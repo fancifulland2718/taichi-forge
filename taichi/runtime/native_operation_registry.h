@@ -311,6 +311,7 @@ void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
 void register_fft_operation(NativeOperationRegistry &registry);
 void register_vkfft_operations(NativeOperationRegistry &registry);
+void register_optix_operations(NativeOperationRegistry &registry);
 void register_blas_operations(NativeOperationRegistry &registry);
 void register_cusparse_operations(NativeOperationRegistry &registry);
 void register_cusparse_bsr_operations(NativeOperationRegistry &registry);

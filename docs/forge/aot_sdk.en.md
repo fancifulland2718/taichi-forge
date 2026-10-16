@@ -208,9 +208,41 @@ not be interpreted as common provider results. Each scene/query owner must retai
 its session through in-flight work and resource destruction; live leases in one
 adapter require the same library path. The execution table identifies the exact
 SDK/OptiX ABI; unknown driver runtime versions are zero, never the SDK version.
-This is the common ownership bridge only. OptiX AOT scene/query/refit registration,
-recording export and a separate SDK component remain pending; consumption through
-`configure_provider("optix", ...)` is not yet available.
+Explicit AOT plans can use `runtime.configure_provider("optix", adapter_path=...,
+library_path=...)` with these version 1 native resources/operations, all under
+provider `optix`:
+
+| operation | Kind / bindings | parameters |
+| --- | --- | --- |
+| `context` | Resource, no bindings | Optional boolean `validation` |
+| `triangle_scene` | Resource: `context`, `vertices`, `indices` | `vertex_count`, `triangle_count`, optional `allow_update` |
+| `query` | Operation: `scene`, `rays`, `hits`; typed queries require `hit_indices`; optional `faces` | `ray_count`, optional `occlusion`, `any_hit`, `front_only` |
+| `refit` | Operation: `scene`, `vertices` | Empty object |
+
+Bindings use compact scalar ndarrays: f32 vertices `[V,3]`, i32/u32 indices `[T,3]`,
+and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed output
+is f32 `[N,4]` for t/u/v/0 and i32/u32 `[N,4]` for primitive/instance/custom/hit;
+single-scene instance/custom IDs are zero. Misses write `[-1,0,0,0]` and
+`[-1,-1,-1,0]`. Occlusion writes 0/1 to i32/u32 `[N]`, omits `hit_indices`, and
+defaults `any_hit` to true, which cannot be disabled. Ordinary typed queries
+default to the closest accepted hit.
+
+Omitted face rules accept both sides. `front_only=true` rejects backfaces by
+winding and continues traversal. Alternatively, `faces` binds i32/u32 `[T]`, with
+0 for two-sided and 1 for front-only; the two policies cannot be combined.
+Topology and face rules are validated and frozen at preparation; changing them
+requires another preparation. Refit updates vertices with the same topology and
+requires finite device inputs, without per-frame host readback. Query outputs
+cannot overlap inputs or each other. Preparation builds scenes/pipelines without
+executing queries.
+
+Windows CUDA qualification covers standalone/borrowed consumption, two bindings,
+surrounding kernels, refit hit/miss transitions and retirement. Real gradients of
+following kernels work; intersection differentiation with respect to vertices or
+rays is not provided. CPU/Vulkan do not register these factories. Operations use
+`cuda_ordered`; CUDA capture, shared GAS/instances, alpha/textures, OMM,
+programmable pipelines, recording export and a separate SDK component remain
+pending.
 
 When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
 its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:
