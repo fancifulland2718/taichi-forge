@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT Graph export accepts named live f32 CUDA CSR/BSR values through
+  `source_bindings`. It archives topology without copying numeric values and
+  automatically refreshes retained SpSV/SpSM state before solving. CSR/BSR SpMV,
+  CSR SpMM, independent bindings, ordered updates and explicit input adjoints
+  are covered; omitted bindings keep the existing frozen snapshots.
+
 - AOT preserves CUDA adaptive bounded launches and their per-node/grouped update
   policy through the shared JIT construction core. Device controls are rebuilt
   on the consumer, with no host count readback during replay. Version 8 plans

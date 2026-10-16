@@ -50,7 +50,8 @@ void read_arrays(SparseMatrix &matrix,
 }  // namespace
 
 SparseCsrHostSnapshot snapshot_cuda_csr(Program &program,
-                                        SparseMatrix &matrix) {
+                                        SparseMatrix &matrix,
+                                        bool include_values) {
 #ifdef TI_WITH_CUDA
   auto *csr = dynamic_cast<CuSparseMatrix *>(&matrix);
   TI_ERROR_IF(
@@ -68,7 +69,8 @@ SparseCsrHostSnapshot snapshot_cuda_csr(Program &program,
     result.columns = csr->num_cols();
     result.row_offsets.resize(std::size_t(result.rows) + 1);
     result.column_indices.resize(csr->get_nnz());
-    result.values.resize(csr->get_nnz());
+    if (include_values)
+      result.values.resize(csr->get_nnz());
     read_arrays(matrix, result, csr->get_row_ptr(), csr->get_col_ind(),
                 csr->get_val_ptr());
     return result;
@@ -79,7 +81,8 @@ SparseCsrHostSnapshot snapshot_cuda_csr(Program &program,
 }
 
 SparseBsrHostSnapshot snapshot_cuda_bsr(Program &program,
-                                        SparseMatrix &matrix) {
+                                        SparseMatrix &matrix,
+                                        bool include_values) {
 #ifdef TI_WITH_CUDA
   auto *bsr = dynamic_cast<CuSparseBsrMatrix *>(&matrix);
   TI_ERROR_IF(program.compile_config().arch != Arch::cuda || !bsr ||
@@ -99,8 +102,9 @@ SparseBsrHostSnapshot snapshot_cuda_bsr(Program &program,
     result.block_size = bsr->get_block_size();
     result.row_offsets.resize(std::size_t(result.block_rows) + 1);
     result.column_indices.resize(bsr->get_block_nnz());
-    result.values.resize(std::size_t(bsr->get_block_nnz()) * result.block_size *
-                         result.block_size);
+    if (include_values)
+      result.values.resize(std::size_t(bsr->get_block_nnz()) *
+                           result.block_size * result.block_size);
     read_arrays(matrix, result, bsr->get_block_row_offsets(),
                 bsr->get_block_column_indices(), bsr->get_block_values());
     return result;

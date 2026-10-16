@@ -16,6 +16,7 @@ class SourceArrayBindings:
             raise TypeError("source_bindings must map public names to producer ndarrays")
         self.arrays = dict(bindings)
         self.names = {}
+        self.layouts = {}
         self.used = set()
         self.constraints = []
         for name, owner in self.arrays.items():
@@ -27,13 +28,15 @@ class SourceArrayBindings:
             if identity in self.names:
                 raise ValueError("One source allocation must have one public binding name")
             self.names[identity] = name
-            scalar_bytes = core.data_type_size(owner.dtype)
+            dtype, shape = self.layout(owner)
+            self.layouts[name] = (dtype, shape)
+            scalar_bytes = core.data_type_size(dtype)
             self.constraints.append(
                 dict(
                     kind="array_layout",
                     array=name,
-                    dtype=str(owner.dtype),
-                    exact_shape=list(owner.shape),
+                    dtype=str(dtype),
+                    exact_shape=list(shape),
                     element_shape=[],
                     record_bytes=scalar_bytes,
                     alignment=scalar_bytes,
@@ -42,14 +45,36 @@ class SourceArrayBindings:
 
     @staticmethod
     def identity(owner):
+        from taichi_forge.linalg.sparse_matrix import SparseMatrix
+
+        if type(owner) is SparseMatrix:
+            owner._ensure_valid()
+            identity = owner._get_format_contract()["identity"]
+            if (
+                identity["backend_family"] != "cuda"
+                or identity["storage_format"] not in ("csr", "bsr")
+                or identity["dtype"] != "f32"
+            ):
+                raise TaichiRuntimeError("Sparse source bindings require f32 CUDA CSR/BSR values")
+            # Keep the matrix owner alive in arrays; its native numeric storage
+            # is distinct from the ndarray copied by from_pattern/update_values.
+            return ("sparse_values", id(owner.matrix))
         if type(owner) is not ScalarNdarray:
-            raise TypeError("Source bindings currently require scalar ndarrays")
+            raise TypeError("Source bindings require scalar ndarrays or qualified SparseMatrix values")
         if owner.arr is None or owner._runtime_prog is not impl.get_runtime().prog:
             raise TaichiRuntimeError("Source binding belongs to a retired or different runtime")
         return owner._runtime_allocation_identity
 
+    @staticmethod
+    def layout(owner):
+        if type(owner) is ScalarNdarray:
+            return owner.dtype, owner.shape
+        return owner.dtype, (owner._num_nonzero(),)
+
     def find(self, owner):
-        if type(owner) is not ScalarNdarray:
+        from taichi_forge.linalg.sparse_matrix import SparseMatrix
+
+        if type(owner) not in (ScalarNdarray, SparseMatrix):
             return None
         name = self.names.get(self.identity(owner))
         if name is not None:
@@ -66,12 +91,12 @@ class SourceArrayBindings:
         if names is None:
             names = [argument.name for argument in arguments]
         for argument, name in zip(arguments, names, strict=True):
-            owner = self.arrays.get(name)
-            if owner is not None and (
+            layout = self.layouts.get(name)
+            if layout is not None and (
                 argument.tag != core.ArgKind.NDARRAY
-                or str(argument.dtype()) != str(owner.dtype)
+                or str(argument.dtype()) != str(layout[0])
                 or argument.element_shape
-                or argument.field_dim != len(owner.shape)
+                or argument.field_dim != len(layout[1])
             ):
                 raise TaichiRuntimeError("Source binding does not match its compiled kernel argument")
 

@@ -336,6 +336,8 @@ kernel 与原生操作共用数组时，沿用该 kernel 的符号名。映射�
 确切形状，不复制内容、不保存地址，也不预热序列。每个源分配须有唯一明确的名称；
 未使用映射、kernel 绑定不匹配及私有存储冲突在发布 kernel 前拒绝。显式命名的固定
 ndarray 绑定也可转为公开计划输入。
+对于已支持的 f32 CUDA CSR/BSR recording，`SparseMatrix` 源绑定表示其压缩数值槽，
+拓扑仍保持冻结，具体见下文稀疏导出合同。
 
 CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part 的
 `sort_by_key`、`compact`、`unique` 和 `unique_by_key`。排序接受紧凑一维 scalar key
@@ -1053,6 +1055,28 @@ Windows cuSPARSE 12.7.9 验证覆盖无源码独立/借用消费、i32/i64 拓�
 规则共享。源 recording 继续消费活系数，已有导出保持冻结，后续导出读取当时的数值。
 每个 prepared 实例仍独立拥有执行计划/workspace，生产端 Graph/矩阵退休后仍可执行。
 
+需要保留活值时，在 `source_bindings` 中给矩阵命名：
+
+```python
+exported.add_execution_plan("step", graph, source_bindings={"coefficients": matrix})
+# 消费者为 coefficients 提供连续的一维 f32 ndarray。
+```
+
+该显式绑定表示矩阵自己的数值分配，不是 `SparsePattern.matrix()` 或
+`SparseMatrix.update_values()` 曾复制的源 ndarray。CSR 按压缩存储顺序，BSR 按块行
+顺序且块内行优先排列；长度须等于存储的 scalar 数。每矩阵每导出只复制一次拓扑，
+不增加数值载荷或初始化复制。消费者须在 prepare 前提供有效系数，此后可通过有序
+写入或前置 Graph 命令原位更新。改变拓扑、形状或存储需要重新准备；省略映射时仍
+采用上述冻结快照行为。
+
+该绑定适用于 CSR/BSR SpMV、CSR SpMM 与 SpSV/SpSM。三角求解自动设置
+`mutable_values=True`，并在每次 solve 前插入 `triangular_update_f32`，使保留的分析
+状态读取本次重放中已更新的系数。workspace 按 prepared 实例隔离，暖态复用现有
+CUDA Graph 路线，不在 host 检查数值或重建分析。Windows/cuSPARSE 12.7.9 验证覆盖
+普通/已选导出、独立/借用消费、双绑定、图内更新、源 reset、退休及真实 `energy.grad`
+配合显式输入伴随；provider 自动求导与结构化控制组合仍按各自合同。
+厂商约束见 [cuSPARSE 数值更新与预处理说明](https://docs.nvidia.com/cuda/cusparse/index.html)。
+
 该自动路线覆盖 CUDA 标量 f32 CSR 与空矩阵，不把 BSR 展开为标量 CSR。只在导出时
 读回快照，不给普通 JIT recording 构造或重放增加读回。Windows 小规模验证覆盖重复
 recording、数值更新后的新快照、共享拓扑、归档回滚、无源码独立/借用消费、真实导出
@@ -1084,10 +1108,10 @@ operation = {
 
 BSR `CusparseSpmvRecording` 的普通/已物化顺序 Graph 可直接自动导出；每次导出
 按矩阵去重取快照，保留公开 producer 的格式合同。导出的只读数值不会随源矩阵更新，
-后续重导出取得新数值。需要活值的消费者使用上述显式资源绑定。Windows/cuSPARSE
+后续重导出取得新数值。活值可使用上述 `source_bindings` 或显式资源绑定。Windows/cuSPARSE
 12.7.9 已验证独立无 DSL/借用消费、快照隔离、原位更新、关闭和在途退休；真实
 `energy.grad` 与显式转置 BSR 的 SpMV 核对输入梯度，不自动生成外部调用的伴随。
-该入口需要配套 private ABI59；CPU/Vulkan 不声明此 CUDA provider 的支持。
+该入口需要配套当前 native/shim 组件；CPU/Vulkan 不声明此 CUDA provider 的支持。
 
 SpMM 使用同一个 `cusparse/csr_f32` 资源及公共注册协议：
 
@@ -1114,7 +1138,8 @@ operation = {
 已准备计划还记录 `expected_workspace_bytes`，消费端重建不匹配时冷拒绝。旧
 `deterministic` recording 尚未准备时保留原有 optional 策略，不因导出新建 JIT 计划；
 已经准备时冻结实际预处理结果。该名称不承诺跨厂商版本的位级可复现性。同次导出中的
-SpMV/SpMM 共用一次矩阵快照，数值变化需要新导出；物化 Graph 另保留最小执行顺序，
+SpMV/SpMM 共用一次矩阵快照；未命名数值变化需要新导出，命名数值采用上述活值合同。
+物化 Graph 另保留最小执行顺序，
 冻结搜索定义时释放旧计划引用。
 
 Windows/cuSPARSE 12.7.9 验证覆盖三种已选方案、两组独立绑定、空矩阵、i32/i64、
@@ -1130,8 +1155,8 @@ SpMM 验证输入梯度。尚不自动微分外部 SpMM；三角求解使用下�
 `CusparseSpsvRecording` 和 `CusparseSpsmRecording` 可通过
 `Module.add_execution_plan` 导出普通及已资格物化 Graph。每次导出对每个矩阵只取
 一份 CSR 快照，前向和转置计划共享；不同导出中的相同数据也去重。冷导出不会
-创建 JIT 三角分析计划。自动路线冻结系数（`mutable_values=False`），源矩阵变化
-后须重新导出；消费端更新系数使用下述显式可变资源合同。未知 recording 子类
+创建 JIT 三角分析计划。自动路线默认冻结系数（`mutable_values=False`），源矩阵变化
+后须重新导出；命名数值按上述规则自动刷新，显式计划使用下述可变资源合同。未知 recording 子类
 需要自己的导出资格。
 
 ```python

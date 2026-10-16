@@ -15,7 +15,9 @@ struct SparseCsrHostSnapshot {
   std::vector<float> values;
 };
 
-SparseCsrHostSnapshot snapshot_cuda_csr(Program &program, SparseMatrix &matrix);
+SparseCsrHostSnapshot snapshot_cuda_csr(Program &program,
+                                        SparseMatrix &matrix,
+                                        bool include_values = true);
 
 struct SparseBsrHostSnapshot {
   int block_rows{0}, block_columns{0}, block_size{0};
@@ -23,5 +25,7 @@ struct SparseBsrHostSnapshot {
   std::vector<float> values;
 };
 
-SparseBsrHostSnapshot snapshot_cuda_bsr(Program &program, SparseMatrix &matrix);
+SparseBsrHostSnapshot snapshot_cuda_bsr(Program &program,
+                                        SparseMatrix &matrix,
+                                        bool include_values = true);
 }  // namespace taichi::lang

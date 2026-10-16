@@ -154,6 +154,7 @@ def test_csr_recording_snapshot_composition_and_reverse(tmp_path):
     empty_builder.append_native(recording(empty_matrix, input="x", output="y"))
     empty_graph = empty_builder.compile()
     module.add_execution_plan("empty", empty_graph)
+    module.add_execution_plan("empty_live", empty_graph, source_bindings=dict(coefficients=empty_matrix))
     empty_graph.close()
     del empty_graph, empty_builder, empty_matrix
     live = {

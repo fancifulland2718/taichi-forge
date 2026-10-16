@@ -489,6 +489,10 @@ class Module:
         by qualified native operations. Export freezes type and shape, without
         copying data or storing addresses; consumers supply their own arrays.
         Reuse a kernel's symbolic name when it accesses the same storage.
+        An f32 CUDA CSR/BSR SparseMatrix names its compressed numeric values,
+        not the ndarray originally copied into the matrix. Its topology stays
+        frozen and consumers supply a one-dimensional f32 array in that order.
+        Unnamed sparse matrices retain the default value snapshot behavior.
         """
         from taichi_forge_runtime.aot import ExecutionPlan
         from taichi_forge.graph._graph import Graph

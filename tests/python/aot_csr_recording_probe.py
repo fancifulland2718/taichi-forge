@@ -43,11 +43,17 @@ def main(mode, artifact):
                 near(read(arrays["loss"]), [0.5 * sum(v * v for v in y)])
                 near(read(arrays["dx"]), at(at(y)))
         arrays = frames[0][0]
-        with module.prepare_execution("empty", dict(x=arrays["x"], y=arrays["y"])) as empty:
-            for _ in range(2):
-                write(arrays["y"], [99, 88])
-                empty()
-                near(read(arrays["y"]), [0, 0])
+        coefficients = runtime.ndarray("f32", (0,))
+        for name in ("empty", "empty_live"):
+            bindings = dict(x=arrays["x"], y=arrays["y"])
+            if name == "empty_live":
+                bindings["coefficients"] = coefficients
+            with module.prepare_execution(name, bindings) as empty:
+                for _ in range(2):
+                    write(arrays["y"], [99, 88])
+                    empty()
+                    near(read(arrays["y"]), [0, 0])
+        coefficients.close()
         frames[0][1].close()
         frames[1][1]()
         if mode == "borrowed":

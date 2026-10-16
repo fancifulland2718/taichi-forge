@@ -48,6 +48,12 @@ def test_spmm_recordings_share_csr_snapshot_and_selected_plan(tmp_path):
                 assert p["algorithm"] == ("csr_alg2" if strategy == "row_streamed" else "csr_alg3")
                 assert p["preprocess"] == ("required" if strategy == "pattern_preprocessed" else "none")
                 assert p["expected_workspace_bytes"] == operation.preparation_report()[strategy]["workspace_bytes"]
+                live_plan = module.add_execution_plan(
+                    strategy + "_live", graph, source_bindings=dict(coefficients=matrix)
+                )
+                live_document = json.loads(live_plan.to_json())
+                resource = next(r for r in live_document["resources"] if r.get("operation") == "csr_f32")
+                assert resource["bindings"]["values"] == "coefficients"
 
     legacy = ti.hardware.linalg.CusparseSpmmRecording(matrix, 8, algorithm="deterministic", output="product")
     builder = ti.graph.GraphBuilder()

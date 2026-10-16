@@ -21,12 +21,15 @@ def main(mode, artifact):
             "row_streamed",
             "tree_direct",
             "pattern_preprocessed",
+            "row_streamed_live",
+            "tree_direct_live",
+            "pattern_preprocessed_live",
             "legacy_unprepared",
             "legacy_prepared",
             "legacy_updated",
             "empty",
         ):
-            if name == "pattern_preprocessed":
+            if name.startswith("pattern_preprocessed"):
                 try:
                     module.execution_plan(name)
                 except KeyError:
@@ -37,7 +40,11 @@ def main(mode, artifact):
                     del shapes["product"]
                 if name.startswith("legacy"):
                     shapes.update(vector=(5,), result=(7,))
+                if name.endswith("_live"):
+                    shapes["coefficients"] = (14,)
                 arrays = {n: runtime.ndarray("f32", shape) for n, shape in shapes.items()}
+                if name.endswith("_live"):
+                    write(arrays["coefficients"], [1] * 14)
                 call = module.prepare_execution(name, arrays)
                 cases.append((name, frame_index, arrays, call))
         for step in range(2):
@@ -46,11 +53,21 @@ def main(mode, artifact):
                 write(arrays["input"], x)
                 if name.startswith("legacy"):
                     write(arrays["vector"], [1, -2, 3, -4, 5])
+                scale = 2 if name == "legacy_updated" else 1
+                if name.endswith("_live"):
+                    scale = 1.25 + step / 2 + index / 4
+                    write(
+                        arrays["coefficients"],
+                        [
+                            scale * ((r + 1) * 0.125 + c * 0.0625)
+                            for r in range(7)
+                            for c in sorted({r % 5, (r + 2) % 5})
+                        ],
+                    )
                 call()
                 if name == "empty":
                     near(read(arrays["output"]), [0] * 56)
                     continue
-                scale = 2 if name == "legacy_updated" else 1
                 a = [
                     [scale * ((r + 1) * 0.125 + c * 0.0625) if c in (r % 5, (r + 2) % 5) else 0 for c in range(5)]
                     for r in range(7)

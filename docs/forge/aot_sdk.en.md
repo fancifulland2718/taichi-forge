@@ -407,6 +407,9 @@ copy contents, serialize addresses or prewarm the sequence. Each source
 allocation needs one unambiguous name. Unused mappings, incompatible kernel
 bindings and private-storage conflicts are rejected before kernel publication.
 Explicitly named fixed ndarray bindings can also become public plan inputs.
+For qualified f32 CUDA CSR/BSR recordings, a `SparseMatrix` source names its
+compressed numeric values; the topology remains frozen. See the sparse export
+contract below.
 
 CPU/CUDA/Vulkan `primitive_sequence()` can export native `sort`, single-key-part
 `sort_by_key`, `compact`, `unique` and `unique_by_key`. Sorting accepts compact 1D
@@ -1348,6 +1351,34 @@ coefficients. An existing export remains frozen; a later export reads the then
 current values. Each prepared instance still owns independent execution plans
 and workspace, and runs after the producing Graph/matrix has retired.
 
+To keep numeric values live, name the matrix in `source_bindings`:
+
+```python
+exported.add_execution_plan("step", graph, source_bindings={"coefficients": matrix})
+# The consumer supplies coefficients as a compact one-dimensional f32 ndarray.
+```
+
+This opt-in binding denotes the matrix's numeric allocation, not the ndarray
+copied by `SparsePattern.matrix()` or `SparseMatrix.update_values()`. CSR values
+follow compressed storage order; BSR values follow block-row order with
+row-major entries inside each block. The length must equal the stored scalar
+count. Export copies only topology, once per matrix; no numeric payload or
+initialization copy is added. Consumers must populate valid coefficients before
+preparation and may update them in place through ordered writes or preceding
+Graph commands. Changing topology, shape or storage requires a new preparation.
+Omitting the mapping retains the frozen snapshot behavior above.
+
+The same binding works for CSR/BSR SpMV, CSR SpMM and SpSV/SpSM. Triangular export
+sets `mutable_values=True` and inserts `triangular_update_f32` immediately before
+each solve, so retained analysis sees changes made earlier in that replay.
+Workspace stays private to each prepared instance; warm execution uses the
+existing CUDA Graph path without host numeric checks or analysis reconstruction.
+Windows/cuSPARSE 12.7.9 checks cover ordinary/selected exports, independent and
+borrowed consumers, two bindings, in-Graph updates, source reset, retirement,
+and real `energy.grad` followed by an explicit input adjoint. External provider
+derivatives and structured-control combinations retain their separate contracts.
+See NVIDIA's [cuSPARSE value-update and preprocessing contracts](https://docs.nvidia.com/cuda/cusparse/index.html).
+
 This automatic route covers scalar f32 CUDA CSR, including empty matrices;
 it does not convert BSR to scalar CSR. Snapshot reads occur only during export,
 not during construction or replay of ordinary JIT recordings. Bounded Windows
@@ -1388,12 +1419,13 @@ Ordinary and materialized sequential Graphs containing BSR
 `CusparseSpmvRecording` export automatically, taking one snapshot per matrix per
 export and retaining the public producer's format contract. Exported read-only
 values remain frozen when the source matrix changes; a new export takes current
-values. Consumers needing live coefficients use explicit resource bindings above.
+values. Consumers needing live coefficients can use `source_bindings` as above
+or explicit resource bindings.
 Windows/cuSPARSE 12.7.9 checks cover standalone consumption without the DSL,
 borrowed execution, snapshot isolation, in-place updates, close and in-flight
 retirement. Real `energy.grad` composes with SpMV of an explicitly transposed BSR
 to check input gradients; the external adjoint is not generated automatically.
-Use matching private ABI59 components. CPU/Vulkan do not expose this CUDA provider.
+Use matching current native/shim components. CPU/Vulkan do not expose this CUDA provider.
 
 SpMM uses the same `cusparse/csr_f32` resource and common registry:
 
@@ -1427,7 +1459,8 @@ preparation. An unprepared legacy `deterministic` recording keeps its optional
 policy without creating a JIT plan during export; a prepared recording freezes
 the actual preprocessing outcome. The name does not promise bitwise results
 across vendor releases. SpMV/SpMM share one matrix snapshot per export transaction;
-changed values require a new export. Materialized Graphs retain minimal command
+unnamed matrix values require a new export when changed, while named values use
+the live source-binding contract above. Materialized Graphs retain minimal command
 ordering, while frozen search definitions release old execution-plan references.
 
 Windows/cuSPARSE 12.7.9 checks cover all three selected strategies, two independent
@@ -1449,9 +1482,9 @@ host-side numerical validation.
 Export freezes one CSR snapshot per matrix per transaction; forward and transpose
 plans share it, and unchanged payloads are deduplicated across exports. Cold
 export does not create a JIT triangular analysis plan. This automatic route uses
-fixed coefficients (`mutable_values=False`); changing the source matrix requires
-a new export. Use the explicit mutable resource contract below for consumer-side
-coefficient updates. Unknown recording subclasses require their own export
+fixed coefficients (`mutable_values=False`) by default; changing the source matrix
+then requires a new export. Named sparse values use automatic refresh as described
+above; explicit plans use the mutable resource contract below. Unknown recording subclasses require their own export
 qualification.
 
 ```python
