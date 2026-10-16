@@ -6694,8 +6694,7 @@ void export_lang(py::module &m) {
     for (const auto &dispatch : graph.dispatches) {
       TI_ERROR_IF((!include_launch &&
                    (dispatch.indirect_dispatch_arg || dispatch.cuda_bounded_dispatch ||
-                    dispatch.cpu_bounded_dispatch)) ||
-                      (dispatch.cuda_bounded_dispatch && dispatch.cuda_bounded_dispatch->adaptive_grid),
+                    dispatch.cpu_bounded_dispatch)),
                   "Graph dispatch requires a non-kernel execution recipe");
       if (dispatch.cuda_capture_command && include_commands) {
         TI_ERROR_IF(dispatch.ti_kernel,
@@ -6722,9 +6721,14 @@ void export_lang(py::module &m) {
           } else if (dispatch.cuda_bounded_dispatch || dispatch.cpu_bounded_dispatch) {
             py::dict recipe;
             if (dispatch.cuda_bounded_dispatch) {
-              recipe["kind"] = "cuda_logical_exact";
-              recipe["extent"] = dispatch.cuda_bounded_dispatch->extent_arg.name;
-              recipe["capacity"] = dispatch.cuda_bounded_dispatch->capacity;
+              const auto &bounded = *dispatch.cuda_bounded_dispatch;
+              recipe["kind"] = bounded.adaptive_grid ? "cuda_adaptive" : "cuda_logical_exact";
+              recipe["extent"] = bounded.extent_arg.name;
+              recipe["capacity"] = bounded.capacity;
+              if (bounded.adaptive_grid) {
+                recipe["block_dim"] = bounded.block_dim;
+                recipe["update_policy"] = bounded.grouped_update ? "grouped_stateful" : "per_node";
+              }
             } else {
               recipe["kind"] = "cpu_exact";
               recipe["extent"] = dispatch.cpu_bounded_dispatch->extent_arg.name;

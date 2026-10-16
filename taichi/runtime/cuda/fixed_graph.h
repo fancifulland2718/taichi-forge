@@ -27,6 +27,9 @@ class FixedGraph {
     std::function<std::shared_ptr<CudaGraphCaptureResources>()> take_resources;
     void *bounded_extent{nullptr};
     std::uint32_t bounded_capacity{0};
+    std::uint32_t adaptive_block_dim{0};
+    bool grouped_update{false};
+    const void *bounded_binding_identity{nullptr};
   };
   struct While;
   using Operation = std::variant<Dispatch, std::shared_ptr<const While>>;

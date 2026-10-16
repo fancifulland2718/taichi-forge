@@ -57,6 +57,37 @@ TEST(ExecutionPlan, SelectedExactLaunchRetainsExtentAndVersion) {
   }
 }
 
+TEST(ExecutionPlan, SelectedAdaptiveLaunchPreservesPolicyAndVersion) {
+  for (const auto *policy : {"per_node", "grouped_stateful"}) {
+    const std::string source = std::string(R"({"version":8,"resources":[
+      {"kind":"ndarray","name":"extent","dtype":"i32","shape":[2]}],
+      "operations":[{"kind":"kernel","entry":"payload","arguments":["x"],
+        "launch":{"kind":"cuda_adaptive","extent":"extent","capacity":65,
+                  "block_dim":32,"update_policy":")") + policy + R"("}}]})";
+    const auto plan = ExecutionPlan::parse(source);
+    EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x"}));
+    EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"extent", "x"}));
+    const auto &range = std::get<ExecutionPlan::Kernel>(plan.operations[0]).bounded_range;
+    ASSERT_TRUE(range);
+    EXPECT_TRUE(range->cuda);
+    EXPECT_EQ(range->capacity, 65);
+    EXPECT_EQ(range->block_dim, 32);
+    EXPECT_EQ(range->grouped_update, std::string(policy) == "grouped_stateful");
+    for (const auto &change : std::vector<std::pair<std::string, std::string>>{
+             {"\"version\":8", "\"version\":7"},
+             {"\"block_dim\":32", "\"block_dim\":0"},
+             {"\"block_dim\":32", "\"block_dim\":true"},
+             {"\"block_dim\":32", "\"block_dim\":1.5"},
+             {"\"block_dim\":32", "\"block_dim\":4294967296"},
+             {std::string("\"update_policy\":\"") + policy + "\"", "\"update_policy\":\"auto\""},
+             {"\"extent\":\"extent\"", "\"extent\":\"extent\",\"device_node\":1"}}) {
+      auto invalid = source;
+      invalid.replace(invalid.find(change.first), change.first.size(), change.second);
+      EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+    }
+  }
+}
+
 namespace {
 void validate_provider_description(const std::string &document) {
   const auto plan = ExecutionPlan::parse(document);

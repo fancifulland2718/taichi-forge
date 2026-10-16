@@ -369,7 +369,15 @@ class _ExportContext:
         if launch is not None:
             if set(launch) == {"kind", "packet"} and launch["kind"] == "vulkan_indirect":
                 operation["launch"] = dict(kind="vulkan_indirect", packet=self.binding(launch["packet"]))
-            elif set(launch) == {"kind", "extent", "capacity"} and launch["kind"] in ("cpu_exact", "cuda_logical_exact"):
+            elif set(launch) == {"kind", "extent", "capacity"} and launch["kind"] in (
+                "cpu_exact",
+                "cuda_logical_exact",
+            ):
+                operation["launch"] = dict(launch, extent=self.binding(launch["extent"]))
+            elif (
+                set(launch) == {"kind", "extent", "capacity", "block_dim", "update_policy"}
+                and launch["kind"] == "cuda_adaptive"
+            ):
                 operation["launch"] = dict(launch, extent=self.binding(launch["extent"]))
             else:
                 raise TaichiRuntimeError("AOT Graph has an unsupported selected kernel launch")

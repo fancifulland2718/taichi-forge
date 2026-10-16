@@ -22,6 +22,9 @@ struct ExecutionPlan {
       bool cuda{false};
       std::string extent;
       std::uint32_t capacity{0};
+      // Nonzero only for a selected CUDA adaptive physical grid recipe.
+      std::uint32_t block_dim{0};
+      bool grouped_update{false};
     };
     std::string entry;
     std::vector<std::string> arguments;

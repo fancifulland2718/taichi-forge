@@ -495,7 +495,7 @@ now exports on CPU/CUDA/Vulkan. Vulkan also exports the selected indirect route
 and `dispatch_ordered_segments`, preserving device packet preparation, payload
 order, and private packet/state storage. ExecutionPlan version 6 represents a
 kernel launch as `"launch": {"kind": "vulkan_indirect", "packet": "name"}`;
-ordinary kernels keep their existing format. Components must match private ABI 60.
+ordinary kernels keep their existing format. Use matching current runtime/shim components.
 The packet is a contiguous scalar `u32` array with at least three values; public
 or private AOT storage supports indirect usage without another allocation or copy.
 Extent bindings use scalar `i32[2]` (count, overflow); ordered offsets use
@@ -505,7 +505,7 @@ Preparation validates these layouts once, and replay does not read counts back.
 Tests cover zero/partial/full work, packet reuse between dependent segments,
 two bindings, real downstream `.grad`, explicit payload adjoints, and retirement
 in standalone/borrowed consumers. CPU exact and CUDA logical-exact launches also
-export with paired private ABI 63 components. ExecutionPlan version 7 records
+export with paired private ABI 64 components. ExecutionPlan version 7 records
 `"launch": {"kind": "cpu_exact", "extent": "name", "capacity": 65}` or the
 `cuda_logical_exact` kind. CPU schedules the valid range; CUDA preserves its
 saturation-capped grid-stride launch and executes only valid logical iterations.
@@ -515,8 +515,24 @@ with the prepared call; CUDA still uploads one combined argument image. The
 extent is retained even when used only by the launch description. Direct kernel
 invocation without this description is rejected before execution.
 
-CUDA adaptive physical-grid updates, host-count clamping, producer-owned launch
-state, parallel regions, and exact/indirect
+CUDA adaptive physical-grid updates also export, including the selected
+`per_node` and `grouped_stateful` policies. ExecutionPlan version 8 uses
+`"launch": {"kind": "cuda_adaptive", "extent": "name", "capacity": 65,
+"block_dim": 32, "update_policy": "grouped_stateful"}`. Cold preparation checks
+the compiled block dimension and driver support, resolves the consumer executor's
+grid limit, and reconstructs device-updatable nodes through the same core as JIT.
+Replay updates grid/enable state on the device without reading counts on the host.
+Consumer environment settings do not replace the serialized update policy.
+Consecutive grouped consumers must share a logical extent binding; equal addresses
+under independently bindable names do not merge groups. A per-node control uses
+32 bytes; a group uses 80 bytes plus one 8-byte device node handle per payload,
+reported in `prepared.info["workspace_bytes"]`. Handles are rebuilt locally and
+retired with the prepared graph. Repeated calls can share one compiled payload.
+Windows CUDA tests cover ordinary/selected export, BC/PTX payloads, independent/
+borrowed consumers, different consumer grid limits, zero work and overflow,
+explicit adjoints with downstream `.grad`, and retirement.
+
+Host-count clamping, producer-owned launch state, parallel regions, and exact/adaptive/indirect
 dispatch inside structured control still require separate reconstruction support;
 export does not replace them with fixed-capacity work.
 
@@ -953,7 +969,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 63.
+Current components require matching private ABI 64.
 
 Plans can separate one-time initialization from replay:
 

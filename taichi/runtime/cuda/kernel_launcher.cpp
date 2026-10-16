@@ -973,6 +973,11 @@ bool KernelLauncher::prepare_cuda_graph_launch_packet(
   return true;
 }
 
+std::uint32_t KernelLauncher::bounded_graph_grid_limit() {
+  const auto grid = get_runtime_executor()->get_config().saturating_grid_dim;
+  return grid > 0 ? static_cast<std::uint32_t>(grid) : 0;
+}
+
 bool KernelLauncher::prepare_cuda_graph_bounded_packet(
     Handle handle,
     LaunchContextBuilder &ctx,

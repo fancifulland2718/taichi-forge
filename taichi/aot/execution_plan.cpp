@@ -18,7 +18,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 7)
+    if (version < 1 || version > 8)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -176,18 +176,33 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
               fields(launch, {"kind", "packet"});
               kernel.indirect_packet = name(launch["packet"]);
               arguments.insert(*kernel.indirect_packet);
-            } else if (kind == "cpu_exact" || kind == "cuda_logical_exact") {
-              if (version < 7)
+            } else if (kind == "cpu_exact" || kind == "cuda_logical_exact" ||
+                       kind == "cuda_adaptive") {
+              const bool adaptive = kind == "cuda_adaptive";
+              if (version < (adaptive ? 8 : 7))
                 throw std::invalid_argument(
-                    "Exact bounded launch requires execution plan version 7");
-              fields(launch, {"kind", "extent", "capacity"});
+                    "Bounded launch requires execution plan version 7, or 8 for adaptive");
+              if (adaptive)
+                fields(launch, {"kind", "extent", "capacity", "block_dim", "update_policy"});
+              else
+                fields(launch, {"kind", "extent", "capacity"});
               const auto capacity = integer(launch["capacity"]);
               if (!capacity || capacity > std::numeric_limits<std::int32_t>::max())
                 throw std::invalid_argument(
                     "Bounded capacity must fit a positive i32");
               kernel.bounded_range = Kernel::BoundedRange{
-                  kind == "cuda_logical_exact", name(launch["extent"]),
+                  kind != "cpu_exact", name(launch["extent"]),
                   static_cast<std::uint32_t>(capacity)};
+              if (adaptive) {
+                const auto block = integer(launch["block_dim"]);
+                if (!block || block > std::numeric_limits<std::uint32_t>::max())
+                  throw std::invalid_argument("Adaptive block dimension must fit a positive u32");
+                const auto policy = name(launch["update_policy"]);
+                if (policy != "per_node" && policy != "grouped_stateful")
+                  throw std::invalid_argument("Unsupported adaptive update policy");
+                kernel.bounded_range->block_dim = static_cast<std::uint32_t>(block);
+                kernel.bounded_range->grouped_update = policy == "grouped_stateful";
+              }
               arguments.insert(kernel.bounded_range->extent);
             } else {
               throw std::invalid_argument("Unsupported kernel launch recipe");

@@ -185,6 +185,11 @@ FixedExecution::FixedExecution(Arch arch,
         continue;
       }
       if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        if (dispatch->adaptive_block_dim &&
+            (arch != Arch::cuda || dispatch->bounded_extent == kDeviceNullPtr ||
+             !dispatch->bounded_binding_identity))
+          throw std::invalid_argument(
+              "Adaptive launch requires a CUDA bounded binding identity");
         if (dispatch->bounded_extent != kDeviceNullPtr &&
             ((!arch_is_cpu(arch) && arch != Arch::cuda) || inside_control ||
              dispatch->indirect_dispatch != kDeviceNullPtr ||
@@ -397,7 +402,8 @@ FixedExecution::FixedExecution(Arch arch,
               dispatch->bounded_extent == kDeviceNullPtr
                   ? nullptr
                   : cuda_pointer(dispatch->bounded_extent),
-              dispatch->bounded_capacity});
+              dispatch->bounded_capacity, dispatch->adaptive_block_dim,
+              dispatch->grouped_update, dispatch->bounded_binding_identity});
         } else if (const auto *external =
                        std::get_if<std::shared_ptr<NativeOperation>>(
                            &operation)) {

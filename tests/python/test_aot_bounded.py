@@ -10,10 +10,11 @@ import sys
 import numpy as np
 import pytest
 import taichi_forge as ti
+from taichi_forge._lib import core as ti_core
 from tests import test_utils
 
 
-def _export(tmp_path, indirect=False, exact=False, artifact_format=None):
+def _export(tmp_path, indirect=False, exact=False, artifact_format=None, adaptive_policy=None):
     capacity = 65
 
     @ti.kernel
@@ -72,21 +73,26 @@ def _export(tmp_path, indirect=False, exact=False, artifact_format=None):
     def builder(backward):
         graph = ti.graph.GraphBuilder()
         graph.dispatch(prepare, *(symbols[name] for name in ("raw", "extent", "y", "dy", "loss", "dloss", "visited")))
-        graph.dispatch_bounded(
-            payload,
-            symbols["extent"],
-            symbols["x"],
-            symbols["y"],
-            symbols["visited"],
-            extent=symbols["extent"],
-            capacity=capacity,
-            block_dim=32,
-            physical_grid=(
-                ("auto" if ti.lang.impl.current_cfg().arch == ti.cuda else "extent")
-                if exact
-                else ("extent" if indirect else "capacity")
-            ),
-        )
+        for _ in range(2 if adaptive_policy else 1):
+            graph.dispatch_bounded(
+                payload,
+                symbols["extent"],
+                symbols["x"],
+                symbols["y"],
+                symbols["visited"],
+                extent=symbols["extent"],
+                capacity=capacity,
+                block_dim=32,
+                physical_grid=(
+                    "extent"
+                    if adaptive_policy
+                    else (
+                        ("auto" if ti.lang.impl.current_cfg().arch == ti.cuda else "extent")
+                        if exact
+                        else ("extent" if indirect else "capacity")
+                    )
+                ),
+            )
         if backward:
             graph.dispatch(energy, symbols["y"], symbols["loss"])
             graph.dispatch(energy.grad, symbols["y"], symbols["loss"])
@@ -112,21 +118,41 @@ def _export(tmp_path, indirect=False, exact=False, artifact_format=None):
         expected[count:] = 0
         np.testing.assert_allclose(frames["y"].to_numpy(), expected)
         assert frames["visited"].to_numpy()[0] == (
-            count if exact else min(65, ((count + 31) // 32) * 32) if indirect else 65
+            2 * count if adaptive_policy else count if exact else min(65, ((count + 31) // 32) * 32) if indirect else 65
         )
     forward.close()
-    graph = builder(True).compile()
+    export_builder = builder(True)
+    graph = export_builder.compile()
     caps = (
         [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
         if artifact_format == "cubin"
         else None
     )
     module = ti.aot.Module(artifact_format=artifact_format, caps=caps)
-    plan = module.add_execution_plan("step", graph, gradients=dict(y="dy", loss="dloss"))
+    if adaptive_policy == "grouped_stateful":
+        from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
+
+        definition = export_builder.freeze()
+        catalog = definition.recipe_catalog(providers=(GraphRuntimeAssemblyProvider(),))
+        catalog.build_compatible_stage(candidate_limit=4)
+        assert len(catalog.entries()) == 1
+        with definition.materialization_context(provider_set=catalog.provider_set) as context:
+            with context.materialize(catalog.entries()[0].recipe) as selected:
+                plan = module.add_execution_plan("step", selected.executor, gradients=dict(y="dy", loss="dloss"))
+    else:
+        plan = module.add_execution_plan("step", graph, gradients=dict(y="dy", loss="dloss"))
     document = json.loads(plan.to_json())
     launched = [op for op in document["operations"] if "launch" in op]
-    assert len(launched) == int(indirect or exact)
-    if exact:
+    assert len(launched) == (2 if adaptive_policy else int(indirect or exact))
+    if adaptive_policy:
+        assert document["version"] == 8
+        assert launched[0]["entry"] == launched[1]["entry"]
+        assert all(
+            op["launch"]
+            == dict(kind="cuda_adaptive", extent="extent", capacity=65, block_dim=32, update_policy=adaptive_policy)
+            for op in launched
+        )
+    elif exact:
         assert document["version"] == 7
         assert launched[0]["launch"] == dict(
             kind="cuda_logical_exact" if ti.lang.impl.current_cfg().arch == ti.cuda else "cpu_exact",
@@ -159,6 +185,7 @@ def _export(tmp_path, indirect=False, exact=False, artifact_format=None):
                 mode,
                 arch,
                 str(artifact),
+                *(["adaptive"] if adaptive_policy else []),
             ],
             env=os.environ.copy(),
             capture_output=True,
@@ -191,24 +218,15 @@ def test_aot_bounded_exact_device_artifact(tmp_path, artifact_format):
     _export(tmp_path, exact=True, artifact_format=artifact_format)
 
 
+@pytest.mark.parametrize("policy", ["per_node", "grouped_stateful"])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_aot_adaptive_bounded_requires_backend_recipe():
-    @ti.kernel
-    def payload(extent: ti.types.ndarray(ti.i32, 1), output: ti.types.ndarray(ti.i32, 1)):
-        for i in range(65):
-            if i < ti.device_extent_count(extent):
-                output[i] += 1
-
-    extent = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1)
-    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
-    builder = ti.graph.GraphBuilder()
-    builder.dispatch_bounded(payload, extent, output, extent=extent, capacity=65, physical_grid="extent")
-    graph = builder.compile()
-    module = ti.aot.Module()
-    with pytest.raises(RuntimeError, match="bounded.*recipe|non-kernel execution recipe"):
-        module.add_execution_plan("exact", graph)
-    assert not module._exported_kernels
-    graph.close()
+def test_aot_adaptive_bounded(tmp_path, monkeypatch, policy):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", policy)
+    _export(tmp_path, exact=True, adaptive_policy=policy, artifact_format="ptx" if policy == "per_node" else None)
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

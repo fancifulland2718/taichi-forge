@@ -6,19 +6,25 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 
 
 def test_selected_indirect_launch_retains_packet_and_version():
-    operation = dict(kind="kernel", entry="payload", arguments=["x"],
-                     launch=dict(kind="vulkan_indirect", packet="grid"))
+    operation = dict(
+        kind="kernel", entry="payload", arguments=["x"], launch=dict(kind="vulkan_indirect", packet="grid")
+    )
     plan = ExecutionPlan([operation], resources=[dict(kind="ndarray", name="grid", dtype="u32", shape=[3])])
     document = json.loads(plan.to_json())
     assert document["version"] == 6
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "grid"}
-    for version in (1, 5, 8):
+    for version in (1, 5, 9):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
-    for launch in (None, {}, dict(kind="cuda_indirect", packet="grid"),
-                   dict(kind="vulkan_indirect", packet=""), dict(kind="vulkan_indirect", packet="grid", address=1)):
+    for launch in (
+        None,
+        {},
+        dict(kind="cuda_indirect", packet="grid"),
+        dict(kind="vulkan_indirect", packet=""),
+        dict(kind="vulkan_indirect", packet="grid", address=1),
+    ):
         with pytest.raises(ValueError):
             ExecutionPlan([dict(operation, launch=launch)])
 
@@ -33,13 +39,54 @@ def test_selected_exact_launch_retains_extent_and_version(kind):
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("x",)
     assert restored._replay_argument_names == {"x", "extent"}
-    for version in (1, 6, 8):
+    for version in (1, 6, 9):
         with pytest.raises(ValueError):
             ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
-    for patch in (dict(capacity=0), dict(capacity=-1), dict(capacity=True), dict(capacity=1.5),
-                  dict(capacity=2**31), dict(extent=""), dict(address=1), dict(kind="cuda_exact")):
+    for patch in (
+        dict(capacity=0),
+        dict(capacity=-1),
+        dict(capacity=True),
+        dict(capacity=1.5),
+        dict(capacity=2**31),
+        dict(extent=""),
+        dict(address=1),
+        dict(kind="cuda_exact"),
+    ):
         with pytest.raises(ValueError):
             ExecutionPlan([dict(operation, launch=dict(launch, **patch))])
+
+
+@pytest.mark.parametrize("policy", ["per_node", "grouped_stateful"])
+def test_selected_adaptive_launch_preserves_policy_and_extent(policy):
+    launch = dict(kind="cuda_adaptive", extent="extent", capacity=65, block_dim=32, update_policy=policy)
+    operation = dict(kind="kernel", entry="payload", arguments=["x"], launch=launch)
+    plan = ExecutionPlan([operation], resources=[dict(kind="ndarray", name="extent", dtype="i32", shape=[2])])
+    document = json.loads(plan.to_json())
+    assert document["version"] == 8
+    restored = ExecutionPlan.from_json(plan.to_json())
+    assert restored.argument_names == ("x",)
+    assert restored._replay_argument_names == {"x", "extent"}
+    assert json.loads(restored.to_json())["operations"][0]["launch"] == launch
+    for version in (7, 9):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(document, version=version)))
+    for patch in (
+        dict(block_dim=0),
+        dict(block_dim=-1),
+        dict(block_dim=True),
+        dict(block_dim=1.5),
+        dict(block_dim=2**32),
+        dict(update_policy="auto"),
+        dict(update_policy=None),
+        dict(capacity=2**31),
+        dict(extent=""),
+        dict(device_node=1),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(operation, launch=dict(launch, **patch))])
+    for missing in ("block_dim", "update_policy"):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(operation, launch={k: v for k, v in launch.items() if k != missing})])
 
 
 def test_module_array_resources_keep_layout_in_the_module():
@@ -52,7 +99,8 @@ def test_module_array_resources_keep_layout_in_the_module():
     operations = [dict(kind="kernel", entry="k", arguments=["x", "tail", "count", "output"])]
     plan = ExecutionPlan(
         operations,
-        resources=resources, gradients={"x": "dx"},
+        resources=resources,
+        gradients={"x": "dx"},
     )
     restored = ExecutionPlan.from_json(plan.to_json())
     assert restored.argument_names == ("output",)

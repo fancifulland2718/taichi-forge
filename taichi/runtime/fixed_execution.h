@@ -31,6 +31,10 @@ class FixedExecution {
     DevicePtr indirect_dispatch{kDeviceNullPtr};
     DevicePtr bounded_extent{kDeviceNullPtr};
     std::uint32_t bounded_capacity{0};
+    std::uint32_t adaptive_block_dim{0};
+    bool grouped_update{false};
+    // Cold-only logical binding identity; never dereferenced or retained.
+    const void *bounded_binding_identity{nullptr};
   };
   struct BufferCopy {
     DevicePtr destination;

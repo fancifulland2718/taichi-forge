@@ -741,6 +741,9 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         DevicePtr indirect_packet{kDeviceNullPtr};
         DevicePtr bounded_extent{kDeviceNullPtr};
         std::uint32_t bounded_capacity = 0;
+        std::uint32_t adaptive_block_dim = 0;
+        bool grouped_update = false;
+        const void *bounded_binding_identity = nullptr;
         if (kernel->bounded_range) {
           const auto &range = *kernel->bounded_range;
           if ((range.cuda && rt.arch != taichi::Arch::cuda) ||
@@ -753,6 +756,11 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                 "Exact bounded extent requires a packed i32[2]");
           bounded_extent = extent.pointer;
           bounded_capacity = range.capacity;
+          adaptive_block_dim = range.block_dim;
+          grouped_update = range.grouped_update;
+          // std::map references are stable through cold preparation. Equal
+          // storage under two symbolic names remains independently bindable.
+          bounded_binding_identity = &extent;
           const auto storage = resolve_native_storage_range(
               rt.arch, extent.pointer, extent.bytes);
           if (storage.memory_offset % 4)
@@ -781,7 +789,8 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
         operations.emplace_back(
             FixedExecution::Dispatch{bound->kernel, bound->context.get(),
                                      indirect_packet, bounded_extent,
-                                     bounded_capacity});
+                                     bounded_capacity, adaptive_block_dim,
+                                     grouped_update, bounded_binding_identity});
         prepared->plan_arguments.push_back(std::move(bound));
       } else if (const auto *copy =
                      std::get_if<aot::ExecutionPlan::Copy>(&operation)) {

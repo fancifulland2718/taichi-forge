@@ -10,6 +10,7 @@
 #include "taichi/rhi/cuda/primitives/graph_ptx.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/cuda/bounded_graph.h"
 
 namespace taichi::lang::cuda {
 struct FixedGraph::State {
@@ -19,6 +20,7 @@ struct FixedGraph::State {
   void *stream{nullptr};
   void *arguments{nullptr};
   CudaGraphConditionalControl64 *controls{nullptr};
+  BoundedGraphControls bounded;
   std::size_t control_bytes{0};
   std::size_t bytes{0};
   std::size_t nodes{0};
@@ -34,6 +36,7 @@ struct FixedGraph::State {
          fault_domain->state() == RuntimeLifecycleState::kFinalized)) {
       for (const auto &resource : capture_resources)
         resource->release(false);
+      bounded.release(false);
       return;
     }
     try {
@@ -73,6 +76,7 @@ struct FixedGraph::State {
       for (const auto &resource : capture_resources)
         resource->release(backend_safe);
       capture_resources.clear();
+      bounded.release(backend_safe);
       if (backend_safe && controls)
         observe(driver.mem_free.call(controls), "free graph control");
       if (backend_safe && arguments)
@@ -85,11 +89,13 @@ struct FixedGraph::State {
       for (const auto &resource : capture_resources)
         resource->release(false);
       capture_resources.clear();
+      bounded.release(false);
     } catch (...) {
       // Cleanup must not throw while unwinding a driver failure.
       for (const auto &resource : capture_resources)
         resource->release(false);
       capture_resources.clear();
+      bounded.release(false);
     }
   }
 };
@@ -179,6 +185,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     driver_graph_prepare_conditional_setter();
   }
   std::vector<KernelLauncher::GraphLaunchPacket> packets(dispatches.size());
+  std::vector<BoundedGraphDispatch> bounded;
+  std::uint32_t grid_limit = 0;
   std::vector<std::size_t> offsets;
   auto &image = state.host_arguments;
   constexpr std::size_t alignment = 16;  // RuntimeContext argument ABI.
@@ -188,20 +196,52 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       offsets.push_back(0);
       continue;
     }
-    TI_ERROR_IF(!dispatch.launcher || !dispatch.context ||
-                    !(dispatch.bounded_extent
-                          ? dispatch.launcher->prepare_cuda_graph_bounded_packet(
-                                dispatch.handle, *dispatch.context, packets[i],
-                                dispatch.bounded_extent, dispatch.bounded_capacity)
-                          : dispatch.launcher->prepare_cuda_graph_launch_packet(
-                                dispatch.handle, *dispatch.context, packets[i])),
-                "Unsupported fixed CUDA Graph dispatch");
+    TI_ERROR_IF(
+        !dispatch.launcher || !dispatch.context ||
+            !(dispatch.bounded_extent
+                  ? dispatch.launcher->prepare_cuda_graph_bounded_packet(
+                        dispatch.handle, *dispatch.context, packets[i],
+                        dispatch.bounded_extent, dispatch.bounded_capacity)
+                  : dispatch.launcher->prepare_cuda_graph_launch_packet(
+                        dispatch.handle, *dispatch.context, packets[i])),
+        "Unsupported fixed CUDA Graph dispatch");
     auto &packet = packets[i];
-    TI_ERROR_IF(!packet.bounded_range &&
-                    std::any_of(packet.offloaded_tasks.begin(),
-                                packet.offloaded_tasks.end(),
-                                [](const auto &task) { return task.one_to_one; }),
-                "CUDA exact kernel requires its bounded launch recipe");
+    if (dispatch.adaptive_block_dim) {
+      TI_ERROR_IF(!controls.empty() || !packet.bounded_range ||
+                      !dispatch.bounded_binding_identity ||
+                      packet.offloaded_tasks.size() != 1 ||
+                      packet.offloaded_tasks[0].block_dim !=
+                          dispatch.adaptive_block_dim,
+                  "Adaptive CUDA Graph requires a flat bounded kernel with "
+                  "matching block dimension");
+      const auto limit = dispatch.launcher->bounded_graph_grid_limit();
+      TI_ERROR_IF(
+          !limit || (grid_limit && grid_limit != limit),
+          "Adaptive CUDA Graph requires a consistent consumer grid limit");
+      grid_limit = limit;
+      if (bounded.empty())
+        bounded.resize(dispatches.size());
+      auto &entry = bounded[i];
+      entry.extent = reinterpret_cast<std::uintptr_t>(dispatch.bounded_extent);
+      entry.capacity = dispatch.bounded_capacity;
+      entry.block_dim = dispatch.adaptive_block_dim;
+      entry.adaptive = true;
+      if (i && dispatch.grouped_update) {
+        const auto &previous = *dispatches[i - 1];
+        entry.join_previous =
+            previous.grouped_update &&
+            previous.adaptive_block_dim == dispatch.adaptive_block_dim &&
+            previous.bounded_capacity == dispatch.bounded_capacity &&
+            previous.bounded_binding_identity ==
+                dispatch.bounded_binding_identity;
+      }
+    }
+    TI_ERROR_IF(
+        !packet.bounded_range &&
+            std::any_of(packet.offloaded_tasks.begin(),
+                        packet.offloaded_tasks.end(),
+                        [](const auto &task) { return task.one_to_one; }),
+        "CUDA exact kernel requires its bounded launch recipe");
     TI_ERROR_IF(
         image.size() > std::numeric_limits<std::size_t>::max() - alignment,
         "Fixed CUDA argument image overflows address space");
@@ -219,6 +259,13 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         std::memcpy(image.data() + offset + packet.arg_buffer_prefix_size,
                     packet.context.arg_buffer, packet.arg_buffer_size);
     }
+  }
+  if (grid_limit) {
+    std::uint32_t error = CUDA_SUCCESS;
+    if (!state.bounded.initialize(bounded, grid_limit, false, &error))
+      throw BackendRuntimeError(Arch::cuda, error,
+                                "prepare adaptive CUDA controls",
+                                "Selected adaptive CUDA graph is unavailable");
   }
   state.bytes = image.size();
   driver.stream_create(&state.stream, CU_STREAM_NON_BLOCKING);
@@ -256,7 +303,16 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       }
       retain();
     } else {
-      dispatch.launcher->capture_cuda_graph_launch(packets[index], stream);
+      if (grid_limit) {
+        const auto error = state.bounded.capture(index, *dispatch.launcher,
+                                                 packets[index], stream);
+        if (error != CUDA_SUCCESS)
+          throw BackendRuntimeError(
+              Arch::cuda, error, "capture adaptive CUDA kernel",
+              "Selected adaptive CUDA kernel capture failed");
+      } else {
+        dispatch.launcher->capture_cuda_graph_launch(packets[index], stream);
+      }
     }
   };
   if (controls.empty()) {
@@ -337,6 +393,15 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     state.capture_bytes += bytes;
   }
   driver.graph_instantiate_with_flags(&state.executable, state.graph, 0);
+  if (grid_limit) {
+    driver.graph_upload(state.executable, state.stream);
+    driver.stream_synchronize(state.stream);
+    const auto error = state.bounded.upload();
+    if (error != CUDA_SUCCESS)
+      throw BackendRuntimeError(Arch::cuda, error,
+                                "upload adaptive CUDA controls",
+                                "Selected adaptive CUDA control upload failed");
+  }
   std::size_t root_nodes = 0;
   driver.graph_get_nodes(state.graph, nullptr, &root_nodes);
   state.nodes += root_nodes;
@@ -366,7 +431,7 @@ std::size_t FixedGraph::argument_bytes() const {
   return state_->bytes;
 }
 std::size_t FixedGraph::control_bytes() const {
-  return state_->control_bytes;
+  return state_->control_bytes + state_->bounded.device_bytes();
 }
 std::size_t FixedGraph::capture_bytes() const {
   return state_->capture_bytes;

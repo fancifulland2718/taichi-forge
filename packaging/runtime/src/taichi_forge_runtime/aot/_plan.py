@@ -23,7 +23,8 @@ def _control_version(steps):
         if isinstance(op, dict) and op.get("kind") == "kernel" and "launch" in op:
             launch = op["launch"]
             bounded = isinstance(launch, dict) and launch.get("kind") in ("cpu_exact", "cuda_logical_exact")
-            version = max(version, 7 if bounded else 6)
+            adaptive = isinstance(launch, dict) and launch.get("kind") == "cuda_adaptive"
+            version = max(version, 8 if adaptive else 7 if bounded else 6)
         if isinstance(op, dict) and op.get("kind") == "while":
             lowering = op.get("lowering")
             selected = 5 if isinstance(lowering, dict) and lowering.get("kind") == "vulkan_nested" else 4
@@ -69,7 +70,7 @@ class ExecutionPlan:
             or set(value) - {"version", "operations", "resources", "gradients", "initialization", "constraints"}
         ):
             raise ValueError("Execution plan requires version and operations")
-        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6, 7):
+        if type(value["version"]) is not int or value["version"] not in (1, 2, 3, 4, 5, 6, 7, 8):
             raise ValueError("Unsupported execution plan version")
         if not isinstance(value["operations"], list):
             raise ValueError("Execution operations must be an operation array")
@@ -244,10 +245,26 @@ class ExecutionPlan:
                         if launch.get("kind") == "vulkan_indirect" and set(launch) == {"kind", "packet"}:
                             binding = launch["packet"]
                         elif launch.get("kind") in ("cpu_exact", "cuda_logical_exact") and set(launch) == {
-                            "kind", "extent", "capacity"
+                            "kind",
+                            "extent",
+                            "capacity",
                         }:
                             if type(launch["capacity"]) is not int or not 0 < launch["capacity"] <= 2**31 - 1:
                                 raise ValueError("Bounded capacity must fit a positive i32")
+                            binding = launch["extent"]
+                        elif launch.get("kind") == "cuda_adaptive" and set(launch) == {
+                            "kind",
+                            "extent",
+                            "capacity",
+                            "block_dim",
+                            "update_policy",
+                        }:
+                            if type(launch["capacity"]) is not int or not 0 < launch["capacity"] <= 2**31 - 1:
+                                raise ValueError("Bounded capacity must fit a positive i32")
+                            if type(launch["block_dim"]) is not int or not 0 < launch["block_dim"] <= 2**32 - 1:
+                                raise ValueError("Adaptive block dimension must fit a positive u32")
+                            if launch["update_policy"] not in ("per_node", "grouped_stateful"):
+                                raise ValueError("Unsupported adaptive update policy")
                             binding = launch["extent"]
                         else:
                             raise ValueError("Unsupported kernel launch recipe")

@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT preserves CUDA adaptive bounded launches and their per-node/grouped update
+  policy through the shared JIT construction core. Device controls are rebuilt
+  on the consumer, with no host count readback during replay. Version 8 plans
+  require paired private ABI 64 components; structured-control combinations
+  remain separately qualified.
+
 - cuSOLVERDn Cholesky shares the common provider adapter and supports AOT resource
   reconstruction and ordinary/selected Graph export of retained f32/f64 recordings.
   Solve-only export preserves actual factor/status state; refactor routes omit

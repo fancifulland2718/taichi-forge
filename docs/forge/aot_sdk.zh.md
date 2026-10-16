@@ -569,14 +569,14 @@ consumer close/reset。
 CPU/CUDA/Vulkan 导出。Vulkan 还可导出选中的间接派发和 `dispatch_ordered_segments`，
 保留设备端 packet 准备、payload 次序及私有 packet/state 存储。ExecutionPlan 版本 6
 以 `"launch": {"kind": "vulkan_indirect", "packet": "name"}` 表达 kernel 的派发方式；
-普通 kernel 格式不变，组件须配对 private ABI 60。packet 是至少三个元素的连续标量
+普通 kernel 格式不变，须使用当前配对的 runtime/shim 组件。packet 是至少三个元素的连续标量
 `u32` 数组；公开及私有 AOT 存储均具备 indirect usage，无需额外分配或复制。
 extent 绑定采用标量 `i32[2]`（count、overflow），顺序分段 offsets 采用
 `i32[segment_count + 1]`；容量仍属于选中的编译配方。布局只在准备时验证，重放不读回 count。
 
 独立/借用消费测试覆盖零量、部分/全量、相邻依赖分段复用 packet、双绑定、真实后续
 `.grad`、payload 显式伴随及退休。CPU exact 与 CUDA logical-exact 也可导出，要求配对
-private ABI 63 组件。ExecutionPlan 版本 7 使用
+private ABI 64 组件。ExecutionPlan 版本 7 使用
 `"launch": {"kind": "cpu_exact", "extent": "name", "capacity": 65}` 或
 `cuda_logical_exact`。CPU 只调度有效范围；CUDA 保留饱和上限的 grid-stride 派发，
 只执行有效逻辑迭代，不据此缩减物理 grid 或省略零工作量的 launch。
@@ -584,8 +584,20 @@ private ABI 63 组件。ExecutionPlan 版本 7 使用
 CUDA 仍只上传一份合并的参数镜像。仅用于 launch 描述的 extent 也进入资源寿命闭包，
 缺少该描述而直接调用编译后的 exact kernel 会在执行前报错。
 
-CUDA adaptive 物理 grid 更新、host count 截断、producer-owned launch state、parallel
-和结构化控制内的 exact/indirect 仍需各自重建支持；
+CUDA adaptive 物理 grid 更新也可导出，保留选中的 `per_node` 或 `grouped_stateful`
+策略。ExecutionPlan 版本 8 使用
+`"launch": {"kind": "cuda_adaptive", "extent": "name", "capacity": 65,
+"block_dim": 32, "update_policy": "grouped_stateful"}`。冷准备核对已编译 block 布局和
+驱动能力，解析消费端执行器的 grid 上限，通过 JIT 共用核心重建可由设备更新的节点。
+重放在设备端更新 grid/启用状态，不向 host 回读 count；消费端环境变量不会替换已保存
+的更新策略。连续分组须共享逻辑 extent 绑定，两个独立名字即使地址相同也不合组。
+逐节点控制占 32 字节；分组占 80 字节加每个 payload 的 8 字节节点句柄，计入
+`prepared.info["workspace_bytes"]`。句柄在本地重建并随 prepared 图退休，重复调用仍可
+共用一份编译代码。Windows CUDA 已验证普通/已选导出、BC/PTX、独立/借用消费、不同
+消费端 grid 上限、零量/溢出、后续 `.grad` 与显式伴随及退休。
+
+host count 截断、producer-owned launch state、parallel
+和结构化控制内的 exact/adaptive/indirect 仍需各自重建支持；
 导出不会将其替换为固定容量执行。
 
 未覆盖的 recording 类型/子类、控制/派发路线、观察点、
@@ -743,7 +755,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 63。
+当前组件须配套 private ABI 64。
 
 计划可以将一次性初始化与重放分开：
 

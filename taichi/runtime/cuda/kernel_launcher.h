@@ -196,6 +196,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                          GraphLaunchPacket &packet,
                                          void *extent,
                                          std::uint32_t capacity);
+  // Resolved on the consumer executor/device, never from a producer address.
+  std::uint32_t bounded_graph_grid_limit();
   bool prepare_cuda_graph_bounded_range(Handle handle,
                                         LaunchContextBuilder &ctx,
                                         GraphLaunchPacket &packet,

@@ -41,7 +41,9 @@ def main(mode, arch, artifact, case="bounded"):
     if mode == "borrowed":
         import taichi_forge as ti
 
-        ti.init(arch=getattr(ti, arch), offline_cache=False)
+        ti.init(
+            arch=getattr(ti, arch), offline_cache=False, **({"saturating_grid_dim": 2} if case == "adaptive" else {})
+        )
         runtime = ti.aot.borrow_runtime()
     else:
         runtime = Runtime(
@@ -68,7 +70,12 @@ def main(mode, arch, artifact, case="bounded"):
         document = json.loads(plan.to_json())
         launch = next((op["launch"] for op in document["operations"] if "launch" in op), {})
         indirect = launch.get("kind") == "vulkan_indirect"
-        exact = launch.get("kind") in ("cpu_exact", "cuda_logical_exact")
+        adaptive = launch.get("kind") == "cuda_adaptive"
+        if adaptive:
+            os.environ["TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY"] = (
+                "per_node" if launch["update_policy"] == "grouped_stateful" else "grouped_stateful"
+            )
+        exact = adaptive or launch.get("kind") in ("cpu_exact", "cuda_logical_exact")
         calls = []
         for factor in (1, -0.5):
             frame = {
@@ -82,14 +89,21 @@ def main(mode, arch, artifact, case="bounded"):
             write(frame["x"], xs)
             write(frame["y"], [-99] * 65)
             call = plan.prepare(module, frame)
+            if adaptive:
+                assert call.info["execution_kind"] == "cuda_graph"
+                assert call.info["workspace_bytes"] == (96 if launch["update_policy"] == "grouped_stateful" else 64)
             assert read(frame["y"]) == [-99] * 65
-            for raw in (33, 0, 1, 32, 65, 70, -1, 2):
+            for raw in (33, 33, 0, 0, 1, 32, 65, 70, -1, 2):
                 count = max(0, min(raw, 65))
                 write(frame["raw"], [raw], "i")
                 call()
                 assert read(frame["extent"], "i") == [count, int(count != raw)]
                 assert read(frame["visited"], "i") == [
-                    count if exact else min(65, ((count + 31) // 32) * 32) if indirect else 65
+                    (
+                        2 * count
+                        if adaptive
+                        else count if exact else min(65, ((count + 31) // 32) * 32) if indirect else 65
+                    )
                 ]
                 y = [v * v if i < count else 0 for i, v in enumerate(xs)]
                 dx = [2 * v**3 if i < count else 0 for i, v in enumerate(xs)]
@@ -166,7 +180,14 @@ def main(mode, arch, artifact, case="bounded"):
             del ordinary["launch"]
             for operation in (
                 ordinary,
-                dict(payload, launch=dict(launch, kind="cpu_exact" if arch == "cuda" else "cuda_logical_exact")),
+                dict(
+                    payload,
+                    launch=dict(
+                        kind="cpu_exact" if arch == "cuda" else "cuda_logical_exact",
+                        extent=launch["extent"],
+                        capacity=launch["capacity"],
+                    ),
+                ),
             ):
                 invalid = ExecutionPlan([operation])
                 try:
@@ -175,6 +196,46 @@ def main(mode, arch, artifact, case="bounded"):
                     assert "bounded launch recipe" in str(error) or "backend mismatch" in str(error), error
                 else:
                     raise AssertionError("Incompatible exact kernel launch accepted")
+            if adaptive:
+                invalid = ExecutionPlan([dict(payload, launch=dict(launch, block_dim=17))])
+                try:
+                    invalid.prepare(module, {name: calls[0][0][name] for name in invalid.argument_names})
+                except (AotError, ValueError, RuntimeError) as error:
+                    assert "matching block dimension" in str(error), error
+                else:
+                    raise AssertionError("Mismatched compiled block dimension accepted")
+                other = dict(
+                    payload,
+                    arguments=[
+                        "other_extent" if name == "extent" else "other_visited" if name == "visited" else name
+                        for name in payload["arguments"]
+                    ],
+                    launch=dict(launch, extent="other_extent"),
+                )
+                distinct = ExecutionPlan([payload, other])
+                with (
+                    closing(runtime.ndarray("i32", 2)) as extra_extent,
+                    closing(runtime.ndarray("i32", 1)) as extra_visited,
+                ):
+                    for alias in (True, False):
+                        frame = {
+                            name: calls[0][0][name]
+                            for name in distinct.argument_names
+                            if name not in ("other_extent", "other_visited")
+                        }
+                        frame.update(
+                            other_extent=frame["extent"] if alias else extra_extent, other_visited=extra_visited
+                        )
+                        write(frame["extent"], [17, 0], "i")
+                        write(extra_extent, [33, 0], "i")
+                        write(frame["visited"], [0], "i")
+                        write(extra_visited, [0], "i")
+                        with distinct.prepare(module, frame) as separate:
+                            # Logical names stay independent even if initially aliased.
+                            assert separate.info["workspace_bytes"] == 64
+                            separate()
+                            assert read(frame["visited"], "i") == [17]
+                            assert read(extra_visited, "i") == [17 if alias else 33]
             # The launch extent is a retained resource even if not a kernel argument.
             detached = dict(payload, launch=dict(launch, extent="launch_extent"))
             retained = ExecutionPlan([detached])

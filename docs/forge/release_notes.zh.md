@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 可保留 CUDA adaptive bounded 派发及逐节点/分组更新策略，复用 JIT 构建核心，
+  在消费端重建设备控制对象，重放不向 host 回读 count。版本 8 计划须使用配对的
+  private ABI 64 组件；结构化控制内组合仍需单独验证。
+
 - cuSOLVERDn Cholesky 共用公共 provider adapter，支持 f32/f64 保留式 recording 的
   AOT 资源重建和普通/已选 Graph 导出。solve-only 保存实际 factor/status，重新分解
   路线不保存无用旧因子；公开设备状态可与前后 kernel 共用。独立/借用消费、输入保留、
