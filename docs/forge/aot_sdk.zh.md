@@ -336,7 +336,13 @@ CPU 使用已准备的宿主步骤。`cuda_conditional` 要求 CUDA 条件图支
 
 这一显式 plan 切片已在 CPU/CUDA 验证分支/循环嵌套、独立绑定、实际前向/反向 kernel，
 以及 CUDA 条件分支内的 cuBLAS 和显式矩阵伴随；不表示对控制结构自动微分。
-JIT IF/SWITCH 自动导出、Vulkan/portable/masked 分支及分支 binding family 尚未接通。
+`Module.add_execution_plan(name, graph, gradients=...)` 也可自动导出 CPU IF/SWITCH，
+以及明确使用 `native_required` 且选中 CUDA conditional 路线的普通 kernel 分支。
+保留实际物理分支顺序、前后段、私有条件存储与固定标量；共享 kernel 在包内只保存一次。
+CPU 嵌套分支、8 路 SWITCH、default/no-op、实际 `kernel.grad`、独立/借用消费和生产端
+关闭后的执行已验证。梯度须显式绑定，这不改变 JIT Graph 对隐式 ndarray 梯度的限制。
+CUDA 自动导出仍不接受 auto/portable/masked 路线、嵌套控制或分支体内 native recording；
+Vulkan 分支及分支 binding family 尚未接通。未取得资格的路线在导出时明确拒绝。
 
 持久描述版本 3 还接受显式 `while` 操作：
 

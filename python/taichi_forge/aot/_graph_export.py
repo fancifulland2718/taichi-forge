@@ -726,11 +726,67 @@ def _parallel(context, node):
     emit(context, range(indices[-1] + 1, len(sources)))
 
 
+def _branch(context, node):
+    from taichi_forge.graph._graph import _CompiledIfGraphNode
+
+    is_if = isinstance(node, _CompiledIfGraphNode)
+    selector = node.predicate if is_if else node.selector
+    fallback = node._else if is_if else node._default
+    children = (node._then,) if is_if else node._branches
+    if fallback is not None:
+        children = (*children, fallback)
+    if context.arch == core.Arch.cuda:
+        selected = node._native_branches
+        if (
+            not node.supports_native_submission
+            or node._cuda_control_lowering != "cuda_conditional_graph"
+            or selected is None
+        ):
+            raise TaichiRuntimeError("AOT Graph requires its selected CUDA branch recipe")
+        counts = node._native_branch_dispatch_counts
+        if (
+            len(counts) != len(children)
+            or any(count <= 0 for count in counts)
+            or sum(counts) != selected.physical_dispatch_count
+            or any(manifest.execution_kind != "kernel_dispatch" for manifest in selected.native_action_manifests)
+        ):
+            raise TaichiRuntimeError("AOT CUDA branch requires its selected ordinary-kernel boundaries")
+        # Export the actual combined physical sequence used by the native branch
+        # builder. Recompiling individual logical children could lose its recipe.
+        offsets = []
+        operations = context.region(_node, selected, dispatch_offsets=offsets)
+        if len(offsets) != sum(counts) + 1 or offsets[-1] != len(operations):
+            raise TaichiRuntimeError("AOT CUDA branch lacks complete physical dispatch metadata")
+        bodies, cursor = [], 0
+        for count in counts:
+            bodies.append(operations[offsets[cursor] : offsets[cursor + count]])
+            cursor += count
+        lowering = "cuda_conditional"
+    elif context.arch in (core.Arch.x64, core.Arch.arm64):
+        bodies = [context.region(_node, child) for child in children]
+        lowering = "cpu"
+    else:
+        raise TaichiRuntimeError("AOT Graph requires its selected backend branch recipe")
+    context.operations.append(
+        dict(
+            kind="branch",
+            selector=context.binding(selector),
+            selection="nonzero" if is_if else "indexed",
+            has_default=fallback is not None,
+            condition=context.region(_node, node._condition),
+            bodies=bodies,
+            lowering=dict(kind=lowering, version=1),
+        )
+    )
+
+
 def _node(context, node, *, dispatch_offsets=None):
     from taichi_forge.graph._graph import (
         _CompiledCGraphNode,
+        _CompiledIfGraphNode,
         _CompiledNativeGraphNode,
         _CompiledSequentialRegionNode,
+        _CompiledSwitchGraphNode,
         _CompiledWhileGraphNode,
     )
     from taichi_forge.graph._ir import DispatchNode, SequentialRegion
@@ -743,6 +799,9 @@ def _node(context, node, *, dispatch_offsets=None):
         return
     if isinstance(node, _CompiledWhileGraphNode):
         _while(context, node)
+        return
+    if isinstance(node, (_CompiledIfGraphNode, _CompiledSwitchGraphNode)):
+        _branch(context, node)
         return
     if isinstance(node, _CompiledNativeGraphNode):
         if set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings:
