@@ -17,7 +17,7 @@ from tests import test_utils
 from tests.python.aot_nested_capacity_probe import cases, expected
 
 
-def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
+def _check_nested_capacity(budget, regions, lowering, route, tmp_path, *, inner_budget=None, explicit_route=False):
     from taichi_forge.graph._recipes import GraphFamilySelection
 
     arch = "vulkan" if ti.lang.impl.current_cfg().arch == ti.vulkan else "cuda"
@@ -107,7 +107,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
                 ib,
                 predicate=pred,
                 counter=count,
-                max_iterations=budget,
+                max_iterations=budget if inner_budget is None else inner_budget,
                 name=f"inner{index}",
             )
         ob.dispatch(advance, outer)
@@ -125,7 +125,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             builder.dispatch(forward.grad, public["x"], public["y"], total)
         builder.dispatch(publish, outer, total, public["terminal"])
         definition = builder.freeze()
-        if route in ("device_update", "masked"):
+        if route in ("device_update", "masked") and not explicit_route:
             from taichi_forge.aot._graph_export import _cuda_nested_while
 
             source = definition._runtime_spec.structured_control_nodes[0]
@@ -135,17 +135,20 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             with pytest.raises(ti.TaichiRuntimeError, match=f"frozen {route.replace('_', '-')} recipe"):
                 _cuda_nested_while(None, source)
         recipe = None
-        if lowering == "auto" and route == "conditional":
+        source = definition._runtime_spec.structured_control_nodes[0]
+        selected_compact = source._cuda_nested_control_lowering == "cuda_conditional_nested_graph"
+        if (lowering == "auto" and route == "conditional" and not selected_compact) or explicit_route:
+            selected = "masked_bounded" if route == "masked" else route
             catalog = definition.recipe_catalog()
             fragment = next(
                 f
                 for f in catalog.fragments
                 if f.provider_namespace == "taichi_forge.graph.structured_control"
-                and GraphFamilySelection.from_fragment(f).choice_id == "control:cuda_nested_conditional:v1"
+                and GraphFamilySelection.from_fragment(f).choice_id == f"control:cuda_nested_{selected}:v1"
             )
             recipe = catalog.compose((fragment.fragment_id,), stage="single-region").recipe
         owner = definition.materialize(recipe)
-        if route in ("device_update", "masked"):
+        if route in ("device_update", "masked", "conditional"):
             assert owner.executor._spec.structured_control_nodes[0]._cuda_nested_submission_options == dict(
                 execution_route=route
             )
@@ -160,12 +163,12 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
         arrays.update({n: ti.ndarray(ti.i32, 2) for n in ("limits", "terminal")})
         arrays["x"].from_numpy(np.array([0.5, 1, 2, 3], dtype=np.float32))
         frames = []
-        for limits in cases(budget):
+        for limits in cases(budget, inner_budget):
             arrays["limits"].from_numpy(np.array(limits, dtype=np.int32))
             begin = time.perf_counter()
             owner.executor.submit(arrays).wait()
             frames.append((time.perf_counter() - begin) * 1000)
-            y, _, terminal = expected([0.5, 1, 2, 3], limits, budget, regions)
+            y, _, terminal = expected([0.5, 1, 2, 3], limits, budget, regions, inner_budget)
             np.testing.assert_array_equal(arrays["y"].to_numpy(), y)
             np.testing.assert_array_equal(arrays["terminal"].to_numpy(), terminal)
         timings["jit_complete_ms"] = frames
@@ -187,13 +190,19 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
         assert nested._native_upgrade_eligible
         nested_stats = list(stats(nested.debug_graph_stats))
         assert any(s["last_path"].startswith(prefix) for s in nested_stats), nested_stats
+        if arch == "cuda":
+            timings["jit_control_bytes"] = next(s for s in nested_stats if s["last_path"].startswith(prefix))[
+                "known_bounded_control_bytes"
+            ]
         if route == "conditional":
             assert nested_stats[0]["known_bounded_control_bytes"] == (regions + 1) * 32
         if route in ("masked", "device_update"):
             arrays["limits"].from_numpy(np.array([2, 1], dtype=np.int32))
             owner.executor.submit(arrays).wait()
             samples = []
-            for _ in range(16):
+            samples_count = 2 if inner_budget is not None else 16
+            timings["warm_samples"] = samples_count
+            for _ in range(samples_count):
                 begin = time.perf_counter()
                 owner.executor.submit(arrays).wait()
                 samples.append((time.perf_counter() - begin) * 1e6)
@@ -219,7 +228,9 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             if arch == "vulkan" or route in ("device_update", "masked")
             else [op for op in outer["body"] if op["kind"] == "while"]
         )
-        assert len(inners) == regions and all(op["max_iterations"] == budget for op in inners)
+        assert len(inners) == regions and all(
+            op["max_iterations"] == (budget if inner_budget is None else inner_budget) for op in inners
+        )
         if route in ("device_update", "masked"):
             assert document["version"] == (14 if route == "masked" else 13)
             assert outer["lowering"]["kind"] == "cuda_nested_" + route
@@ -264,6 +275,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
                 str(regions),
                 arch,
                 "primal" if route in ("device_update", "masked") else "gradient",
+                *([str(inner_budget)] if inner_budget is not None else []),
             ],
             env=os.environ.copy(),
             capture_output=True,
@@ -308,3 +320,28 @@ def test_vulkan_nested_region_count_and_aot_gradient(tmp_path):
     if not ti.graph.structured_control_capabilities()["nested_native_lowering"]:
         pytest.skip("nested Vulkan control unavailable")
     _check_nested_capacity(2, 9, "native_required", "vulkan", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "budget,inner_budget,route",
+    (
+        (65, 1, "device_update"),
+        (1, 65, "masked"),
+        (17, 79, "device_update"),
+        (17, 79, "masked"),
+    ),
+)
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_explicit_expanded_capacity_and_aot_gradient(budget, inner_budget, route, tmp_path, monkeypatch):
+    # Keep the default selection available, then explicitly select a complete
+    # recipe. Two cases cross only the old loop cutoff; the other pair has
+    # 4,098 encoded dispatches. Four data elements and two warm samples suffice.
+    monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0")
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if route == "device_update" and not (
+        capabilities["nested_cuda_device_update_qualified"] or capabilities["nested_cuda_device_update_candidate"]
+    ):
+        pytest.skip("CUDA nested device update unavailable")
+    _check_nested_capacity(
+        budget, 1, "native_required", route, tmp_path, inner_budget=inner_budget, explicit_route=True
+    )

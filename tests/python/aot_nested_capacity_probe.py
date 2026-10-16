@@ -7,12 +7,14 @@ import sys
 import time
 
 
-def cases(budget):
-    return [(0, 2), (2, 3), (66, 0), (1, 66), (0, 1)] if budget == 65 else [(0, 2), (2, 3), (1, 2), (0, 1)]
+def cases(budget, inner_budget=None):
+    if budget == 65 or inner_budget is not None:
+        return [(0, 2), (2, 3), (budget + 1, 0), (1, (inner_budget or budget) + 1), (0, 1)]
+    return [(0, 2), (2, 3), (1, 2), (0, 1)]
 
 
-def expected(values, limits, budget, regions):
-    outer, inner = (min(value, budget) for value in limits)
+def expected(values, limits, budget, regions, inner_budget=None):
+    outer, inner = min(limits[0], budget), min(limits[1], budget if inner_budget is None else inner_budget)
     total = outer * inner * regions
     return (
         [x * x * (total + 1) for x in values],
@@ -21,7 +23,7 @@ def expected(values, limits, budget, regions):
     )
 
 
-def main(mode, artifact, budget, regions, arch="cuda", comparison="gradient"):
+def main(mode, artifact, budget, regions, arch="cuda", comparison="gradient", inner_budget=None):
     from taichi_forge_runtime.aot import Runtime
 
     if mode == "borrowed":
@@ -45,18 +47,20 @@ def main(mode, artifact, budget, regions, arch="cuda", comparison="gradient"):
             begin = time.perf_counter()
             call = module.prepare_execution(name, arrays)
             costs["prepare_ms"].append((time.perf_counter() - begin) * 1000)
+            costs["workspace_bytes"] = call.info["workspace_bytes"]
+            costs["argument_bytes"] = call.info["argument_bytes"]
             if arch == "cuda":
                 assert call.info["execution_kind"] == "cuda_graph", call.info
             assert struct.unpack("<4f", arrays["y"].read()) == (-99,) * 4
             frames.append((arrays, call, values))
-        for limits in cases(budget):
+        for limits in cases(budget, inner_budget):
             for arrays, call, values in frames:
                 arrays["limits"].write(struct.pack("<2i", *limits))
                 begin = time.perf_counter()
                 call()
                 runtime.wait()
                 costs["complete_ms"].append((time.perf_counter() - begin) * 1000)
-                y, dx, terminal = expected(values, limits, budget, regions)
+                y, dx, terminal = expected(values, limits, budget, regions, inner_budget)
                 assert list(struct.unpack("<4f", arrays["y"].read())) == y
                 assert list(struct.unpack("<4f", arrays["dx"].read())) == dx
                 assert list(struct.unpack("<2i", arrays["terminal"].read())) == terminal
@@ -64,7 +68,9 @@ def main(mode, artifact, budget, regions, arch="cuda", comparison="gradient"):
         arrays, call, values = frames[1]
         arrays["limits"].write(struct.pack("<2i", 2, 1))
         samples = []
-        for _ in range(16):
+        samples_count = 2 if inner_budget is not None else 16
+        costs["warm_samples"] = samples_count
+        for _ in range(samples_count):
             begin = time.perf_counter()
             call()
             runtime.wait()
@@ -77,13 +83,13 @@ def main(mode, artifact, budget, regions, arch="cuda", comparison="gradient"):
             primal()
             runtime.wait()
             samples = []
-            for _ in range(16):
+            for _ in range(samples_count):
                 begin = time.perf_counter()
                 primal()
                 runtime.wait()
                 samples.append((time.perf_counter() - begin) * 1e6)
             costs["primal_warm_complete_us"] = statistics.median(samples)
-            y, _, terminal = expected(values, [2, 1], budget, regions)
+            y, _, terminal = expected(values, [2, 1], budget, regions, inner_budget)
             assert list(struct.unpack("<4f", arrays["y"].read())) == y
             assert list(struct.unpack("<2i", arrays["terminal"].read())) == terminal
             primal.close()
@@ -105,4 +111,12 @@ def main(mode, artifact, budget, regions, arch="cuda", comparison="gradient"):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6])
+    main(
+        sys.argv[1],
+        sys.argv[2],
+        int(sys.argv[3]),
+        int(sys.argv[4]),
+        sys.argv[5],
+        sys.argv[6],
+        int(sys.argv[7]) if len(sys.argv) > 7 else None,
+    )

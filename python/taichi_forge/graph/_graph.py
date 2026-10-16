@@ -4324,12 +4324,18 @@ def structured_control_capabilities():
             "nested_native_lowering": nested_native,
             "nested_native_lowering_compiled": nested_native_compiled,
             "nested_native_kinds": (("while_while",) if nested_native else ()),
-            "nested_native_outer_iteration_limit": (64 if nested_native else 0),
-            "nested_native_inner_iteration_limit": (64 if nested_native else 0),
-            # Each region has dynamic storage; only the encoded work is bounded.
+            "nested_native_outer_iteration_limit": (
+                ((1 << 63) - 1 if backend == "cuda" else 64) if nested_native else 0
+            ),
+            "nested_native_inner_iteration_limit": (
+                ((1 << 63) - 1 if backend == "cuda" else 64) if nested_native else 0
+            ),
+            # Dynamic storage and backend representation determine capacity.
             "nested_native_max_ordered_inner_regions": (None if nested_native else 0),
-            "nested_native_max_encoded_actions": (4096 if nested_native else 0),
-            # Legacy scalar limits describe expanded command routes. Compact
+            "nested_native_max_encoded_actions": (
+                (None if backend == "cuda" else 4096) if nested_native else 0
+            ),
+            # These scalar limits describe expanded command routes. Compact
             # conditional control owns one copy per static region, not budget.
             "nested_native_limits_scope": "expanded_commands",
             "nested_cuda_conditional_limits": (
@@ -6690,7 +6696,11 @@ def _compile_native_nested_while_runtime_node(
         manifest.execution_kind == "backend_command"
         for manifest in compiled.native_action_manifests
     )
-    compiled.nested_expanded_eligible = (
+    # Qualification is separate from the default cost preference. Explicit
+    # CUDA recipes can exceed the old cutoffs; shared native recorders check
+    # count overflow, node ABI fields and actual storage requirements.
+    compiled.nested_expanded_eligible = not compiled.nested_requires_conditional
+    compiled.nested_expanded_preferred = (
         encoded_action_count <= 4096
         and outer_max_iterations <= 64
         and all(
@@ -6936,21 +6946,22 @@ class _CompiledWhileGraphNode:
                         if compact
                         else self._cuda_nested.nested_expanded_eligible
                     )
+                    prefer_compact = (
+                        not compact
+                        and not self._cuda_nested.nested_expanded_preferred
+                    )
                     if (
-                        not eligible
+                        (not eligible or prefer_compact)
                         and not compact
                         and _control_recipe is None
-                        and (
-                            lowering_mode == "native_required"
-                            or self._cuda_nested.nested_requires_conditional
-                        )
                         and os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") != "1"
                         and self._cuda_nested.nested_conditional_eligible
                         and capabilities.get("nested_conditional_graph_available", False)
                         and capabilities.get("nested_explicit_route_compiled", False)
                     ):
                         # Qualified provider commands require the compact route.
-                        # Its body also avoids the expanded route's action budget.
+                        # Keep the default cost preference separate from explicit
+                        # expanded-route qualification.
                         self._cuda_nested_control_lowering = _CUDA_NESTED_CONDITIONAL_ROUTE
                         required_conditional = True
                         eligible = True

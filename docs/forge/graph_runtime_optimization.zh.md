@@ -137,17 +137,24 @@ Sequential 控制区域只有一个 owner，组成树；当前结构化深度上
 - Vulkan 原生 replay 支持有界 while，不支持原生 if/switch。单 region 最多八个 chunk，
   每个最多 64 轮、合计 512 轮；profiler/dispatch-cache 配置可能阻止该路径。
 - GPU 可异步执行的二层形状是 outer while 内含一个或更多有序 inner while，间隔为合格 dispatch/action。
-  不单独限制 region 数量；结构控制能力 schema 6 在路线可用时报告
+  不单独限制 region 数量；结构控制能力 schema 7 在路线可用时报告
   `nested_native_max_ordered_inner_regions=None`。
   每个 loop 需要独立 counter；predicate、counter、可选 status 是同一 runtime 的互异单元素 i32 数组。
-  展开式路线的各 loop 预算仍为 1–64。其他嵌套形状可能需要 portable parent control，并可能拒绝异步提交。
-- 默认展开式嵌套路线最多 4096 个 encoded action。支持的 CUDA runtime 可通过完整 recipe 搜索
+  CUDA 展开式各 loop 使用正 int64 预算；Vulkan 当前仍为 1–64。其他嵌套形状可能需要 portable parent control，并可能拒绝异步提交。
+- CUDA 显式选择的嵌套 device-update/masked recipe 不再受旧 64 轮/4096 action 软件准入限制。
+  共用录制器继续检查计数溢出、节点字段表示和实际存储；能力 schema 7 报告
+  `nested_native_max_encoded_actions=None`，表示没有固定软件 action 上限，不表示无限资源。
+  默认成本偏好仍可在超过旧量级时选择合格的紧凑路线；显式 recipe 保持用户选择。
+  Vulkan 展开式嵌套目前仍限制 4096 action，flat CUDA masked 的 4096 限制也尚未调整。
+  支持的 CUDA runtime 可通过完整 recipe 搜索
   提供压缩 nested conditional 路线，使用 int64 预算、每个静态 region 仅一份，不另设静态 dispatch 上限。
   kernel/native body action 各自需要条件体资格，不能据普通 vendor capture 推断支持；压缩路线不全局改为默认。
 
 Windows 小用例覆盖 CUDA device-update、CUDA masked 与 Vulkan replay 的九个顺序内循环；
-该 Vulkan Graph 还验证了带实际后段伴随的 AOT 导出及独立/借用消费。CUDA 展开式路线的
-持久化仍是独立待办，不能由 JIT 准入推断支持。
+该 Vulkan Graph 还验证了带实际后段伴随的 AOT 导出及独立/借用消费。CUDA 已选展开式路线
+也支持保存和恢复，见 [AOT SDK 的 v13/v14 合同](aot_sdk.zh.md)；它与 JIT 共用录制器。
+四元素用例覆盖显式 65×1、1×65 与约4098个展开dispatch，以及实际后段 `kernel.grad`；
+这证明上述资格边界，不代表大展开图具有低构建成本。
 
 压缩控制可能适合大预算、早退出；高度活跃的小 kernel 可能更适合展开路线。
 应按实际 workload 测量，不设固定加速门槛。

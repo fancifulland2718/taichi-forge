@@ -166,13 +166,21 @@ Important current boundaries:
   Profiler/dispatch-cache configurations can prevent this replay route.
 - The supported asynchronous depth-two GPU shape is an outer while containing
   one or more ordered inner whiles, with eligible dispatch/action gaps. There
-  is no separate region-count cap; structured-control capability schema 6
+  is no separate region-count cap; structured-control capability schema 7
   reports `nested_native_max_ordered_inner_regions=None` when available.
   Each loop needs a separate counter; predicate, counter and optional status
   controls are distinct one-element i32 arrays from the same runtime.
-  Expanded routes retain per-loop budgets of 1–64. Other nested shapes can require portable parent
+  Expanded CUDA routes use positive int64 loop budgets; Vulkan currently retains
+  budgets of 1–64. Other nested shapes can require portable parent
   control and may reject asynchronous submission.
-- The default expanded nested route is limited to 4096 encoded actions.
+- Explicit CUDA nested device-update/masked recipes no longer have the old
+  64-iteration/4096-action software admission limits. Shared recorders still check
+  count overflow, node-field representation and actual storage. Capability schema 7
+  reports `nested_native_max_encoded_actions=None`, meaning no fixed software
+  action cap, not unlimited resources. Default cost preferences may still choose
+  qualified compact control beyond the old scale; explicit recipes retain their
+  selected route. Vulkan nested expansion and flat CUDA masked control still
+  retain their 4096-action limits in this slice.
   Complete-recipe search can offer compressed nested conditional execution on
   capable CUDA runtimes; that route uses int64 budgets and one copy per static
   region, without a separate static-dispatch cap. Kernel/native body actions
@@ -181,8 +189,12 @@ Important current boundaries:
 
 Small Windows checks cover nine ordered inner loops through CUDA device-update,
 CUDA masked replay and Vulkan replay. The Vulkan graph also exports and runs
-with an actual suffix adjoint in standalone and borrowed AOT runtimes. Expanded
-CUDA persistence remains separate from this JIT admission support.
+with an actual suffix adjoint in standalone and borrowed AOT runtimes. Selected
+expanded CUDA routes also support persistence through the shared recorder; see
+the [v13/v14 AOT SDK contracts](aot_sdk.en.md). Four-element checks cover explicit
+65-by-1 and 1-by-65 budgets, about 4098 expanded dispatches, and actual suffix
+`kernel.grad`. This qualifies those boundaries, not low construction cost for
+arbitrarily large expanded graphs.
 
 Compressed control can help large budgets with early exit; highly active small
 kernels can favor expanded control. Choose using actual workload measurements,
