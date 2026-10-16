@@ -816,9 +816,10 @@ def _branch(context, node):
         lowering = "vulkan_host" if context.arch == core.Arch.vulkan else "cuda_host"
     elif context.arch == core.Arch.cuda:
         selected = node._native_branches
+        masked = node._cuda_control_lowering == "cuda_masked_bounded_graph"
         if (
             not node.supports_native_submission
-            or node._cuda_control_lowering != "cuda_conditional_graph"
+            or node._cuda_control_lowering not in ("cuda_conditional_graph", "cuda_masked_bounded_graph")
             or selected is None
         ):
             raise TaichiRuntimeError("AOT Graph requires its selected CUDA branch recipe")
@@ -827,32 +828,35 @@ def _branch(context, node):
             len(counts) != len(children)
             or any(count <= 0 for count in counts)
             or sum(counts) != selected.physical_dispatch_count
-            or not selected.compiled_graph._cuda_conditional_body_eligible()
+            or (not masked and not selected.compiled_graph._cuda_conditional_body_eligible())
         ):
             raise TaichiRuntimeError("AOT CUDA branch requires its selected qualified conditional-body boundaries")
         # Export the actual combined physical sequence used by the native branch
         # builder. Recompiling individual logical children could lose its recipe.
         offsets = []
-        operations = context.region(_node, selected, dispatch_offsets=offsets)
+        operations = context.region(_node, selected, dispatch_offsets=offsets, gated_body_begin=0 if masked else None)
         if len(offsets) != sum(counts) + 1 or offsets[-1] != len(operations):
             raise TaichiRuntimeError("AOT CUDA branch lacks complete physical dispatch metadata")
         bodies, cursor = [], 0
         for count in counts:
             bodies.append(operations[offsets[cursor] : offsets[cursor + count]])
             cursor += count
-        lowering = "cuda_conditional"
+        lowering = "cuda_masked" if masked else "cuda_conditional"
     elif context.arch in (core.Arch.x64, core.Arch.arm64):
         bodies = [context.region(_node, child) for child in children]
         lowering = "cpu"
     else:
         raise TaichiRuntimeError("AOT Graph requires its selected backend branch recipe")
+    condition = context.region(_node, node._condition)
+    if lowering == "cuda_masked" and any(op["kind"] != "kernel" or "launch" in op for op in condition):
+        raise TaichiRuntimeError("AOT masked branch requires a flat kernel condition without launch overrides")
     context.operations.append(
         dict(
             kind="branch",
             selector=context.binding(selector),
             selection="nonzero" if is_if else "indexed",
             has_default=fallback is not None,
-            condition=context.region(_node, node._condition),
+            condition=condition,
             bodies=bodies,
             lowering=dict(kind=lowering, version=1),
         )

@@ -83,8 +83,10 @@ def branch_factory():
             body = builder.create_sequential()
             gain = body._bind_internal_scalar(f"gain{i}", ti.f32, float(i + 1))
             body.dispatch(forward, public["x"], public["y"], gain, label=f"case/{i}/forward")
-            body.dispatch(forward.grad, public["x"], public["y"], gain, label=f"case/{i}/reverse")
+            # A masked body must latch its selection before this write, so
+            # the subsequent actual reverse still executes for the same case.
             body.dispatch(mark, selected, label=f"case/{i}/mark")
+            body.dispatch(forward.grad, public["x"], public["y"], gain, label=f"case/{i}/reverse")
             bodies.append(body)
         region = builder.create_sequential() if nested else parent
         if kind == "if":
@@ -126,7 +128,13 @@ def test_aot_host_branch_graph_and_reverse(tmp_path):
     _selected_branch_graph(tmp_path, host=True)
 
 
-def _selected_branch_graph(tmp_path, host):
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_masked_branch_graph_and_reverse(tmp_path, monkeypatch):
+    monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
+    _selected_branch_graph(tmp_path, host=False, masked=True)
+
+
+def _selected_branch_graph(tmp_path, host, masked=False):
     arch = (
         "vulkan"
         if ti.lang.impl.current_cfg().arch == ti.vulkan
@@ -155,9 +163,20 @@ def _selected_branch_graph(tmp_path, host):
         plan = module.add_execution_plan(name, graph, gradients=dict(x="dx", y="dy"))
         stats["export_ms"] += (time.perf_counter() - start) * 1000
         document = json.loads(plan.to_json())
-        assert document["version"] == (12 if host else 11)
+        assert document["version"] == (16 if masked else 12 if host else 11)
         assert set(plan.argument_names) == {"x", "y", "dx", "dy", "gradient", "choice", "state"}
         assert any(op["kind"] == "branch" for op in document["operations"])
+        if masked:
+            branch = next(op for op in document["operations"] if op["kind"] == "branch")
+            assert branch["lowering"] == dict(kind="cuda_masked", version=1)
+            assert all(
+                module._kernel_launch_abis[op["entry"]] == "cuda_graph_gate_v1"
+                for body in branch["bodies"]
+                for op in body
+            )
+            assert all(
+                module._kernel_launch_abis.get(op["entry"], "ordinary") == "ordinary" for op in branch["condition"]
+            )
         count = len(module._exported_kernels)
         module.add_execution_plan(name + "_again", graph, gradients=dict(x="dx", y="dy"))
         assert len(module._exported_kernels) == count
@@ -167,6 +186,9 @@ def _selected_branch_graph(tmp_path, host):
     module.archive(str(artifact))
     stats["archive_ms"] = (time.perf_counter() - start) * 1000
     stats["artifact_bytes"] = artifact.stat().st_size
+    assert len(module._exported_kernels) == 6
+    if masked:
+        assert len(module._kernel_launch_abis) == 3
     with ZipFile(artifact) as archive:
         # Six shared kernels across every branch, default and repeated plan.
         if arch != "vulkan":
@@ -175,6 +197,11 @@ def _selected_branch_graph(tmp_path, host):
             assert any(n.endswith(".spv") for n in archive.namelist())
         assert not any(n.endswith(".py") for n in archive.namelist())
     ti.reset()
+    consumer_env = os.environ.copy()
+    if masked:
+        # The saved physical route, not a consuming process's environment,
+        # controls loading and replay.
+        consumer_env["TI_GRAPH_CUDA_FORCE_MASKED_CONTROL"] = "0"
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
             [
@@ -184,9 +211,9 @@ def _selected_branch_graph(tmp_path, host):
                 mode,
                 arch,
                 str(artifact),
-                *(["host"] if host else []),
+                *(["masked"] if masked else ["host"] if host else []),
             ],
-            env=os.environ.copy(),
+            env=consumer_env,
             capture_output=True,
             text=True,
             timeout=90,
@@ -199,10 +226,9 @@ def _selected_branch_graph(tmp_path, host):
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_aot_branch_export_keeps_unqualified_routes_closed(monkeypatch):
     build = branch_factory()
-    for mode in ("auto", "native_required"):
-        if mode == "native_required":
-            monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
-        graph = build("if", True, mode)
+    for masked in ("0", "1"):
+        monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", masked)
+        graph = build("if", True, "auto")
         module = ti.aot.Module()
         with pytest.raises(ti.TaichiRuntimeError, match="selected .* branch recipe"):
             module.add_execution_plan("invalid", graph, gradients=dict(x="dx", y="dy"))

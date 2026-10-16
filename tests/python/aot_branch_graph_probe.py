@@ -41,7 +41,7 @@ def expect(arrays, name, choice, scale=1):
     assert struct.unpack("<2i", arrays["state"].read()) == (checks, -77 if gain else choice)
 
 
-def check(runtime, arch, path, host=False):
+def check(runtime, arch, path, host=False, masked=False):
     start = time.perf_counter()
     module = runtime.load_module(path)
     stats = dict(load_ms=(time.perf_counter() - start) * 1000)
@@ -64,7 +64,7 @@ def check(runtime, arch, path, host=False):
             assert prepared.info["workspace_bytes"] == (4 if arch == "vulkan" else 0)
         elif arch == "cuda":
             assert prepared.info["execution_kind"] == "cuda_graph"
-            assert prepared.info["workspace_bytes"] == 24
+            assert prepared.info["workspace_bytes"] == (4 if masked else 24)
         arrays["choice"].write(struct.pack("<i", 2))
         start = time.perf_counter()
         for _ in range(32):
@@ -112,12 +112,13 @@ def check(runtime, arch, path, host=False):
 if __name__ == "__main__":
     mode, arch, path = sys.argv[1:4]
     host = sys.argv[4:] == ["host"]
+    masked = sys.argv[4:] == ["masked"]
     if mode == "borrowed":
         import taichi_forge as ti
 
         ti.init(arch=getattr(ti, arch), offline_cache=False)
         with ti.aot.borrow_runtime() as runtime:
-            stats = check(runtime, arch, path, host=host)
+            stats = check(runtime, arch, path, host=host, masked=masked)
             module = runtime.load_module(path)
             arrays, prepared = frame(runtime, module, "if_else")
             prepared()
@@ -131,6 +132,6 @@ if __name__ == "__main__":
             prepared.close()
     else:
         with aot.Runtime(arch) as runtime:
-            stats = check(runtime, arch, path, host=host)
+            stats = check(runtime, arch, path, host=host, masked=masked)
         assert "taichi_forge" not in sys.modules
     print(json.dumps(stats))

@@ -448,7 +448,7 @@ the three backends. CUDA host branches also cover cuBLAS with an explicit matrix
 adjoint. Each provider still needs its existing recording and reconstruction
 contracts. Host branches may contain native blocks; native GPU control containing
 a host branch is rejected during preparation.
-Defaults are unchanged. CUDA auto/masked export, automatic export of nested native
+Defaults are unchanged. CUDA auto export, automatic export of nested native
 branches and branch binding families remain unavailable. Unqualified routes fail
 explicitly during export. Explicit host lowerings cannot be labeled version 11.
 
@@ -464,8 +464,15 @@ defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
 nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
 signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
 retirement are verified. Branches share code entries and replay does not parse
-descriptions. A v16 consumer and matching ABI75 components are required. This
-slice supports explicit plans; masked branch Graph export is not yet connected.
+descriptions. A v16 consumer and matching ABI75 components are required.
+`add_execution_plan(name, graph, gradients=...)` also exports IF/SWITCH selected
+for `cuda_masked_bounded_graph` under `native_required`, preserving physical
+boundaries, conditions and prefix/suffix operations. It deduplicates code by
+source specialization and launch ABI, without unused ordinary body variants.
+Actual in-body `kernel.grad`, six entries shared across four branch kinds and
+repeated plans, consumption after producer teardown and a changed consumer
+masked-control environment are verified. Ordinary `auto` remains outside this
+export route; provider bodies are rejected before publishing code.
 
 Persistent format version 3 also accepts explicit `while` operations:
 

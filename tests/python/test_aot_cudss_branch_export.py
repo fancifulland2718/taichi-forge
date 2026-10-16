@@ -8,10 +8,29 @@ import subprocess
 import sys
 import time
 
+import pytest
 import taichi_forge as ti
 from taichi_forge.hardware._cudss_capture import CudssCaptureRecording
 from tests import test_utils
 from tests.python.test_graph_cudss_capture import _owner
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_masked_branch_rejects_provider_before_export(monkeypatch):
+    from tests.python.test_graph_cudss_branch import build_branch
+
+    monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
+    owner, _, _ = _owner()
+    graph = build_branch(owner, "if")
+    module = ti.aot.Module()
+    with pytest.raises(ti.TaichiRuntimeError, match="flat physical kernel body"):
+        module.add_execution_plan("invalid", graph)
+    assert not module._content and not module._exported_kernels and not module._execution_plans
+    assert not module._graph_export_failed
+    graph.close()
+    del graph
+    gc.collect()
+    owner.close()
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

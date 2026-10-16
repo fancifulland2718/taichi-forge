@@ -351,7 +351,7 @@ cuDSS 完整 refactor/solve 录制的 IF/SWITCH 已验证共享计划、双绑�
 三后端已验证实际前向和显式 `kernel.grad`、独立/借用消费、双绑定及生产端关闭后执行；
 CUDA host 分支也验证了 cuBLAS 和显式矩阵伴随。各 provider 仍须满足已有录制与资源重建合同。
 host 分支可以包含原生子块，GPU 原生控制体内包含 host 分支在准备期拒绝。
-默认策略不变；CUDA auto/masked 自动导出、原生嵌套分支自动导出及分支 binding family
+默认策略不变；CUDA auto 自动导出、原生嵌套分支自动导出及分支 binding family
 仍未开放。未取得资格的路线在导出时明确拒绝。显式 host lowering 不能伪装为版本 11。
 
 版本 16 增加显式 `cuda_masked` 分支 lowering（recipe 1）。它与 v15 循环共用已有
@@ -363,7 +363,11 @@ condition 与各 body 可以为空。非空分支每次出现使用独立的 4 �
 CPU/Vulkan 不接受此 lowering，provider 与嵌套控制尚不属于此切片。
 已验证 IF/SWITCH、空 case、default/no-op、signed selector、实际 `kernel.grad`、独立/借用
 消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI75
-组件。该节点仅开放显式计划，masked 分支的 Graph 自动导出仍待接通。
+组件。`add_execution_plan(name, graph, gradients=...)` 也可导出 `native_required` 下已选
+`cuda_masked_bounded_graph` 的 IF/SWITCH：沿用物理边界、条件与前后段，按源特化和调用 ABI
+去重代码，不保存未用的普通 body 变体。实际分支内 `kernel.grad`、四种分支与重复计划共用
+六个入口、生产端关闭后消费、消费端改变 masked 环境变量仍保持选路已验证。
+普通 `auto` 不在此自动导出范围内；provider body 在发布代码前拒绝。
 
 持久描述版本 3 还接受显式 `while` 操作：
 
