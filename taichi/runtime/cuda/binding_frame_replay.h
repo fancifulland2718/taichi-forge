@@ -33,6 +33,7 @@ class BindingFrameReplay {
   void collect();
   bool is_active(const void *frame) const;
   bool failed() const;
+  bool belongs_to(const std::shared_ptr<RuntimeFaultDomain> &owner) const;
   Snapshot snapshot() const;
 
   // Two-phase retirement: stop device use first, then the caller invalidates

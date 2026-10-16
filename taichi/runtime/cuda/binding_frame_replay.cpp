@@ -124,6 +124,11 @@ bool BindingFrameReplay::failed() const {
   return state_->failed;
 }
 
+bool BindingFrameReplay::belongs_to(
+    const std::shared_ptr<RuntimeFaultDomain> &owner) const {
+  return state_->fault_domain == owner;
+}
+
 BindingFrameReplay::Snapshot BindingFrameReplay::snapshot() const {
   return {state_->failed, state_->executable ? 1u : 0u, state_->pending.size(),
           state_->events->snapshot()};

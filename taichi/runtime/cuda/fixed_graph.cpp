@@ -16,6 +16,8 @@
 namespace taichi::lang::cuda {
 struct FixedGraph::State {
   std::shared_ptr<RuntimeFaultDomain> fault_domain;
+  std::shared_ptr<void> operands;
+  bool binding_frame{false};
   CUgraph graph{nullptr};
   CUgraphExec executable{nullptr};
   void *stream{nullptr};
@@ -126,8 +128,17 @@ FixedGraph::FixedGraph(const std::vector<Dispatch> &dispatches,
 
 FixedGraph::FixedGraph(const std::vector<Operation> &operations,
                        std::shared_ptr<RuntimeFaultDomain> fault_domain)
+    : FixedGraph(operations, std::move(fault_domain), {}, false) {
+}
+
+FixedGraph::FixedGraph(const std::vector<Operation> &operations,
+                       std::shared_ptr<RuntimeFaultDomain> fault_domain,
+                       std::shared_ptr<void> operands,
+                       bool binding_frame)
     : state_(std::make_unique<State>()) {
   state_->fault_domain = std::move(fault_domain);
+  state_->operands = std::move(operands);
+  state_->binding_frame = binding_frame;
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed("prepare CUDA graph");
   try {
@@ -146,6 +157,23 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations,
   }
 }
 
+std::shared_ptr<FixedGraph> FixedGraph::capture_binding_frame(
+    const std::vector<Operation> &operations,
+    std::shared_ptr<void> operands,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
+  if (!operands)
+    throw std::invalid_argument(
+        "CUDA binding frame requires operand ownership");
+  return std::shared_ptr<FixedGraph>(new FixedGraph(
+      operations, std::move(fault_domain), std::move(operands), true));
+}
+
+void *FixedGraph::binding_source() const {
+  if (!state_->binding_frame || !state_->graph)
+    throw std::invalid_argument("CUDA graph is not a captured binding frame");
+  return state_->graph;
+}
+
 void FixedGraph::initialize(const std::vector<Operation> &operations) {
   TI_ERROR_IF(operations.empty() || !available(),
               "Fixed CUDA Graph requires operations and driver graph support");
@@ -154,6 +182,17 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   auto lock = cuda.get_submission_lock_guard();
   auto &driver = CUDADriver::get_instance();
   auto &state = *state_;
+  if (state.binding_frame) {
+    if (!driver.graph_node_get_type.available() ||
+        !driver.graph_exec_update_v1.available())
+      throw std::invalid_argument("CUDA binding-frame updates are unavailable");
+    for (const auto &operation : operations) {
+      const auto *dispatch = std::get_if<Dispatch>(&operation);
+      if (!dispatch || dispatch->bounded_extent || dispatch->adaptive_block_dim)
+        throw std::invalid_argument(
+            "CUDA binding frames require a flat fixed dispatch topology");
+    }
+  }
   std::vector<const Dispatch *> dispatches;
   std::unordered_map<const Dispatch *, std::size_t> dispatch_index;
   std::unordered_map<const While *, std::size_t> loop_index;
@@ -451,7 +490,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       throw std::invalid_argument("Fixed CUDA capture storage size overflow");
     state.capture_bytes += bytes;
   }
-  driver.graph_instantiate_with_flags(&state.executable, state.graph, 0);
+  if (!state.binding_frame)
+    driver.graph_instantiate_with_flags(&state.executable, state.graph, 0);
   if (grid_limit) {
     driver.graph_upload(state.executable, state.stream);
     driver.stream_synchronize(state.stream);
@@ -464,14 +504,31 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   std::size_t root_nodes = 0;
   driver.graph_get_nodes(state.graph, nullptr, &root_nodes);
   state.nodes += root_nodes;
-  driver.graph_destroy(state.graph);
-  state.graph = nullptr;
+  if (state.binding_frame) {
+    if (!root_nodes)
+      throw std::invalid_argument("CUDA binding frame contains no commands");
+    std::vector<void *> nodes(root_nodes);
+    driver.graph_get_nodes(state.graph, nodes.data(), &root_nodes);
+    for (auto *node : nodes) {
+      std::uint32_t type = 0;
+      driver.graph_node_get_type(node, &type);
+      // Match the JIT frame contract: kernel, memcpy and memset only.
+      if (type != 0 && type != 1 && type != 2)
+        throw std::invalid_argument("Unsupported CUDA binding-frame node");
+    }
+  } else {
+    driver.graph_destroy(state.graph);
+    state.graph = nullptr;
+  }
   driver.stream_destroy(state.stream);
   state.stream = nullptr;
 }
 
 FixedGraph::~FixedGraph() = default;
 void FixedGraph::run() {
+  if (state_->binding_frame)
+    throw std::invalid_argument(
+        "Captured CUDA binding frames require a replay family");
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed("launch CUDA graph");
   auto &cuda = CUDAContext::get_instance();

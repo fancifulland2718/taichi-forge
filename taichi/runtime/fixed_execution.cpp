@@ -16,6 +16,7 @@
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
 #ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/binding_frame_replay.h"
 #include "taichi/runtime/cuda/fixed_graph.h"
 #include "taichi/runtime/cuda/ordered_submission.h"
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -53,6 +54,8 @@ struct FixedExecution::State {
 #endif
 #ifdef TI_WITH_CUDA
   std::unique_ptr<cuda::FixedGraph> cuda_graph;
+  std::shared_ptr<cuda::FixedGraph> cuda_frame;
+  std::shared_ptr<cuda::BindingFrameReplay> cuda_binding_replay;
   using CudaStep = std::variant<std::unique_ptr<cuda::FixedGraph>,
                                 std::shared_ptr<NativeOperation>>;
   std::vector<CudaStep> cuda_steps;
@@ -95,14 +98,51 @@ void *cuda_pointer(DevicePtr ptr) {
 #endif
 }  // namespace
 
-FixedExecution::FixedExecution(Arch arch,
-                               Device &device,
-                               gfx::GfxRuntime *gfx_runtime,
-                               const std::vector<Operation> &operations,
-                               NativeRecordingState *sequence_state,
-                               std::shared_ptr<RuntimeFaultDomain> fault_domain)
+FixedExecution::FixedExecution(
+    Arch arch,
+    Device &device,
+    gfx::GfxRuntime *gfx_runtime,
+    const std::vector<Operation> &operations,
+    NativeRecordingState *sequence_state,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    std::shared_ptr<cuda::BindingFrameReplay> binding_replay,
+    std::shared_ptr<void> binding_operands)
     : state_(std::make_unique<State>()) {
   state_->fault_domain = std::move(fault_domain);
+  if (binding_replay) {
+    if (arch != Arch::cuda || !binding_operands)
+      throw std::invalid_argument(
+          "Shared binding replay requires CUDA and owned operands");
+#ifdef TI_WITH_CUDA
+    if (!binding_replay->belongs_to(state_->fault_domain))
+      throw std::invalid_argument(
+          "CUDA binding replay belongs to another runtime owner");
+    for (const auto &operation : operations) {
+      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        if (dispatch->bounded_extent != kDeviceNullPtr ||
+            dispatch->indirect_dispatch != kDeviceNullPtr ||
+            dispatch->adaptive_block_dim)
+          throw std::invalid_argument(
+              "CUDA binding replay requires fixed dispatches");
+      } else if (const auto *native =
+                     std::get_if<std::shared_ptr<NativeOperation>>(
+                         &operation)) {
+        if (!*native ||
+            (*native)->execution_mode() != NativeOperationMode::cuda_capture)
+          throw std::invalid_argument(
+              "CUDA binding replay requires capture-compatible native "
+              "operations");
+      } else if (!std::holds_alternative<BufferCopy>(operation) &&
+                 !std::holds_alternative<BufferFill>(operation)) {
+        throw std::invalid_argument(
+            "CUDA binding replay requires a flat operation sequence");
+      }
+    }
+#else
+    throw std::invalid_argument(
+        "CUDA binding replay is unavailable in this runtime");
+#endif
+  }
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed(
         "prepare fixed execution");
@@ -483,7 +523,25 @@ FixedExecution::FixedExecution(Arch arch,
       return native;
     };
     auto native = prepare(operations);
-    if (state_->cuda_steps.empty()) {
+    if (binding_replay) {
+      struct FrameOperands {
+        std::shared_ptr<void> bindings;
+        std::vector<std::shared_ptr<NativeOperation>> operations;
+      };
+      auto retained = std::make_shared<FrameOperands>();
+      retained->bindings = std::move(binding_operands);
+      retained->operations = state_->native_operations;
+      auto &cuda = CUDAContext::get_instance();
+      auto lock = cuda.get_submission_lock_guard();
+      auto guard = cuda.get_guard();
+      state_->cuda_frame = cuda::FixedGraph::capture_binding_frame(
+          native, std::move(retained), state_->fault_domain);
+      account(*state_->cuda_frame);
+      binding_replay->prepare(state_->cuda_frame->binding_source(),
+                              state_->cuda_frame);
+      state_->cuda_binding_replay = std::move(binding_replay);
+      state_->kind = 1;
+    } else if (state_->cuda_steps.empty()) {
       state_->cuda_graph =
           std::make_unique<cuda::FixedGraph>(native, state_->fault_domain);
       state_->kind = 1;
@@ -658,6 +716,13 @@ void FixedExecution::run_impl() {
   State::run_cpu_steps(state_->cpu_steps);
 #endif
 #ifdef TI_WITH_CUDA
+  if (state_->cuda_binding_replay) {
+    auto &cuda = CUDAContext::get_instance();
+    auto lock = cuda.get_submission_lock_guard();
+    auto guard = cuda.get_guard();
+    state_->cuda_binding_replay->run(state_->cuda_frame->binding_source(),
+                                     state_->cuda_frame);
+  }
   if (state_->cuda_graph)
     state_->cuda_graph->run();
   if (!state_->cuda_steps.empty()) {

@@ -54,6 +54,13 @@ class FixedGraph {
   FixedGraph(const FixedGraph &) = delete;
   FixedGraph &operator=(const FixedGraph &) = delete;
   static bool available();
+  // Capture a flat immutable source without instantiating an executable.
+  // The replay family retains this object and its operands through completion.
+  static std::shared_ptr<FixedGraph> capture_binding_frame(
+      const std::vector<Operation> &operations,
+      std::shared_ptr<void> operands,
+      std::shared_ptr<RuntimeFaultDomain> fault_domain = {});
+  void *binding_source() const;
   void run();
   std::size_t argument_bytes() const;
   std::size_t node_count() const;
@@ -61,6 +68,10 @@ class FixedGraph {
   std::size_t capture_bytes() const;
 
  private:
+  FixedGraph(const std::vector<Operation> &operations,
+             std::shared_ptr<RuntimeFaultDomain> fault_domain,
+             std::shared_ptr<void> operands,
+             bool binding_frame);
   void initialize(const std::vector<Operation> &operations);
   struct State;
   std::unique_ptr<State> state_;

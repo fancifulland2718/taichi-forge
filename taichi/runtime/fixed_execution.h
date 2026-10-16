@@ -19,6 +19,9 @@ class Kernel;
 namespace gfx {
 class GfxRuntime;
 }
+namespace cuda {
+class BindingFrameReplay;
+}
 
 // Cold bindings shared by loaded AOT entries and native runtime adapters. The
 // caller owns registered code, storage and submission/retirement serialization.
@@ -75,12 +78,17 @@ class FixedExecution {
   // Optional cold facts chain unconditional phases of one prepared execution.
   // Published only after successful recording; they do not execute
   // initialization.
+  // A CUDA binding family may supply one shared replay and a lease for this
+  // frame's code/storage. Captured frames retain that lease through completion,
+  // including after this FixedExecution wrapper is destroyed.
   FixedExecution(Arch arch,
                  Device &device,
                  gfx::GfxRuntime *gfx_runtime,
                  const std::vector<Operation> &operations,
                  NativeRecordingState *sequence_state = nullptr,
-                 std::shared_ptr<RuntimeFaultDomain> fault_domain = {});
+                 std::shared_ptr<RuntimeFaultDomain> fault_domain = {},
+                 std::shared_ptr<cuda::BindingFrameReplay> binding_replay = {},
+                 std::shared_ptr<void> binding_operands = {});
   ~FixedExecution();
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;
