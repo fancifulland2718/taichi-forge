@@ -325,7 +325,7 @@ OptixResult init_optix_library(const std::string &library_path, void **handle) {
 
 TiForgeOptixResult retain_optix_loader(const char *library_path) {
   std::lock_guard<std::mutex> lock(optix_loader_mutex);
-  const std::string requested = library_path == nullptr ? "" : library_path;
+  std::string requested = library_path == nullptr ? "" : library_path;
   if (optix_context_count == 0) {
     const auto result = init_optix_library(requested, &optix_library_handle);
     if (result != OPTIX_SUCCESS) {
@@ -336,7 +336,9 @@ TiForgeOptixResult retain_optix_loader(const char *library_path) {
                            ? std::to_string(static_cast<int>(result))
                            : optixGetErrorName(result)));
     }
-    active_optix_runtime_library_path = requested;
+    // After acquiring the vendor handle, finish without a throwing allocation.
+    // Both legacy contexts and common provider sessions use this lease.
+    active_optix_runtime_library_path.swap(requested);
   } else if (requested != active_optix_runtime_library_path) {
     return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
                 "all live contexts in one adapter must use the same OptiX runtime library");

@@ -160,6 +160,15 @@ CMake package 提供 `TaichiForge_PROVIDER_DIR` 和 `TaichiForge_PROVIDER_MANIFE
 兼容的厂商库及其依赖仍由应用管理。安装 adapter 后可使用其既有 C ABI；AOT plan
 重建还需要注册对应的操作/资源 schema，并通过该后端的实际资格验证。
 
+OptiX adapter 另提供 `taichi_forge_optix_runtime_provider_query` 公共会话入口，
+合同见 `taichi/optix/forge_optix_runtime_provider.h`；旧 OptiX ABI 1 仍可独立使用。
+公共会话复用旧 context 的厂商库引用计数，不创建 GPU context、pipeline 或场景。
+执行表保留旧 OptiX 返回码，不能当作公共 provider 返回码解释。每个场景/查询 owner
+须持有会话直到在途工作和资源销毁完成；同一 adapter 的活引用必须使用同一库路径。
+具体 SDK/OptiX ABI 从执行表查询，驱动运行库版本未知时返回 0，不用 SDK 版本替代。
+此接口仅完成公共所有权桥接；OptiX AOT 场景/query/refit 注册、recording 自动导出和
+独立 SDK 安装组件仍待接通，尚不能通过 `configure_provider("optix", ...)` 消费。
+
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
 或 Vulkan GFX runtime、设备和分配器：
 

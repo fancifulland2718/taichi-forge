@@ -199,6 +199,19 @@ vendor libraries and their dependencies remain application-managed. Installing
 an adapter makes its existing C ABI available; AOT plan reconstruction additionally
 requires a registered operation/resource schema and its qualified backend path.
 
+OptiX adapters additionally expose `taichi_forge_optix_runtime_provider_query`,
+specified in `taichi/optix/forge_optix_runtime_provider.h`; the original OptiX ABI 1
+remains independently usable. Common sessions share the vendor-library reference
+count with legacy contexts without creating GPU contexts, pipelines or scenes.
+The embedded execution table keeps the original OptiX result codes, which must
+not be interpreted as common provider results. Each scene/query owner must retain
+its session through in-flight work and resource destruction; live leases in one
+adapter require the same library path. The execution table identifies the exact
+SDK/OptiX ABI; unknown driver runtime versions are zero, never the SDK version.
+This is the common ownership bridge only. OptiX AOT scene/query/refit registration,
+recording export and a separate SDK component remain pending; consumption through
+`configure_provider("optix", ...)` is not yet available.
+
 When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
 its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:
 

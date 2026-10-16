@@ -8,6 +8,7 @@
 #include <cuda.h>
 #include <optix.h>
 #include "taichi/optix/forge_optix_program.h"
+#include "taichi/optix/provider/loader_internal.h"
 
 namespace taichi::optix_provider {
 
@@ -18,11 +19,8 @@ struct ProgramContextView {
   OptixDeviceContext optix_context{};
 };
 
-void clear_error_state();
-TiForgeOptixResult fail(TiForgeOptixResult result, std::string message);
 TiForgeOptixResult cuda_check(CUresult result, const char *operation);
 TiForgeOptixResult optix_check(OptixResult result, const char *operation);
-extern thread_local std::string last_error;
 
 TiForgeOptixResult retain_program_context(TiForgeOptixContext,
                                           ProgramContextView *);
