@@ -269,8 +269,11 @@ second.run()
 有效绑定数、执行器数和共享私有数组字节数；每个绑定的 `resource_bytes` 都包含共享部分，不能直接累加。
 
 当前该显式消费策略接受平坦固定捕获及可组合的原生命令，拒绝 WHILE、parallel、bounded/indirect
-kernel launch。CPU/Vulkan 和普通 `prepare_execution()` 默认行为不变；尚未开放已选 JIT CUDA
-binding-frame recipe 的自动导出。CUDA 图更新不兼容时明确报错，不会静默改为独立执行器。
+kernel launch。CPU/Vulkan 和普通 `prepare_execution()` 默认行为不变。导出已选 JIT CUDA buffer
+binding-frame recipe 时自动保留该策略，包括可重建的私有存储以及具有各自 AOT 导出合同的
+原生 recording；已验证 kernel 序列、显式反向与已选统一 FFT recording。
+采样纹理绑定仍在导出前拒绝，JIT 隐式 ndarray 梯度限制不变。
+CUDA 图更新不兼容时明确报错，不会静默改为独立执行器。
 C 调用入口为 `ti_prepare_execution_binding_ext` 与 `ti_get_prepared_binding_family_info_ext`。
 
 持久描述版本 3 还接受显式 `while` 操作：

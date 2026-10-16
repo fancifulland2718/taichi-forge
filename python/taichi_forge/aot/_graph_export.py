@@ -848,12 +848,13 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         if getattr(spec, "_storage_plans", ()):
             raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         binding_factory = getattr(spec, "_binding_executor_factory", None)
+        binding_strategy = None
         if binding_factory is not None:
             # Only a concrete executor can qualify equivalence with the fixed
             # AOT submission path. Inherited hooks could lose queue/segment work.
             if getattr(binding_factory, "__dict__", {}).get("_validate_aot_export") is None:
                 raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
-            binding_factory._validate_aot_export(spec, graph._execution_arch)
+            binding_strategy = binding_factory._validate_aot_export(spec, graph._execution_arch)
         gradient_names = set((gradients or {}).values())
         from ._graph_source_bindings import SourceArrayBindings
 
@@ -921,6 +922,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
                 resources=context.resources,
                 gradients=mapped_gradients or None,
                 constraints=constraints or None,
+                binding_strategy=binding_strategy,
             )
             # Provider workspace must not accidentally become a public input.
             if set(plan.argument_names) != set(spec.runtime_arg_names) | source_arrays.used | (

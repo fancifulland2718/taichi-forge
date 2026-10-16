@@ -86,6 +86,19 @@ class _BindingFrameExecutor:
     execution_kind = "cuda_prepared_binding_graph"
     physical_submission_mode = "cuda_immutable_argument_frames_exec_reuse"
 
+    @staticmethod
+    def _validate_aot_export(spec, backend):
+        from taichi_forge.lang.exception import TaichiRuntimeError
+
+        if not _eligible(spec, backend) or spec._texture_binding_requirements:
+            raise TaichiRuntimeError(
+                "AOT CUDA binding frames require one qualified fixed buffer Graph without textures"
+            )
+        # The persistent consumer must retain the shared executable, private
+        # state and provider plans. An ordinary fixed plan would lose that
+        # selected resource and submission contract across bindings.
+        return "cuda_immutable_argument_frames"
+
     def __init__(self, instance):
         from taichi_forge._lib import core
         from taichi_forge.graph._graph import _GraphRunContext

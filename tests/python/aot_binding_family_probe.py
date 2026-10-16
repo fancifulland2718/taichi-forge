@@ -5,15 +5,15 @@ import os
 import sys
 import weakref
 
-from taichi_forge_runtime.aot import Runtime
+from taichi_forge_runtime.aot import Runtime, Scalar
 from tests.python.aot_binding_constraints_probe import failure
 from tests.python.aot_graph_recording_probe import read, write
 
 
-def fft_family(runtime, module):
+def fft_family(runtime, module, shape=(17, 2)):
     from tests.python.aot_cutensor_probe import near
 
-    frames = [{name: runtime.ndarray("f32", (17, 2)) for name in ("x", "spectrum", "y")} for _ in range(2)]
+    frames = [{name: runtime.ndarray("f32", shape) for name in ("x", "spectrum", "y")} for _ in range(2)]
     for index, frame in enumerate(frames):
         write(frame["x"], [float(i % 7 - 3 + index) / 8 for i in range(34)])
     a = module.prepare_execution("step", frames[0])
@@ -45,9 +45,41 @@ def main(mode, artifact, case="state"):
         runtime = Runtime("cuda")
     with runtime:
         module = runtime.load_module(artifact)
-        if case == "fft":
-            fft_family(runtime, module)
-            assert "taichi_forge" not in sys.modules
+        if case in ("fft", "fft_selected"):
+            fft_family(runtime, module, (1, 17, 2) if case == "fft_selected" else (17, 2))
+            if mode == "standalone":
+                assert "taichi_forge" not in sys.modules
+            return
+        if case == "selected":
+            from tests.python.aot_cutensor_probe import near
+
+            frames = [
+                {name: runtime.ndarray("f32", (17,)) for name in ("x", "y", "dy", "dx")} for _ in range(2)
+            ]
+            for index, frame in enumerate(frames):
+                write(frame["x"], [float(i - 8 + index) / 8 for i in range(17)])
+                write(frame["dy"], [0.5] * 17)
+            a = module.prepare_execution("step", dict(frames[0], gain=Scalar("f32", 3)))
+            b = a.prepare_binding(dict(frames[1], gain=Scalar("f32", -0.5)))
+            assert b.binding_family_info["identity"] == a.binding_family_info["identity"]
+            assert b.binding_family_info["executables"] == 1
+            assert b.binding_family_info["resource_bytes"] == 17 * 4
+            for _ in range(3):
+                for call, frame, gain in zip((a, b), frames, (3, -0.5)):
+                    call()
+                    values = read(frame["x"])
+                    near(read(frame["y"]), [gain * v * v + 7 for v in values])
+                    near(read(frame["dx"]), [gain * v for v in values])
+            a.close()
+            b()
+            if mode == "borrowed":
+                ti.reset()
+            else:
+                module.close()
+            failure(b)
+            b.close()
+            if mode == "standalone":
+                assert "taichi_forge" not in sys.modules
             return
         if case == "sparse":
             coefficients = runtime.ndarray("f32", (3,))

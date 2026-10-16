@@ -332,9 +332,13 @@ live binding count, executable count and shared private-array bytes. Per-call
 This explicit consumer strategy currently accepts flat fixed captures, including
 qualified native recording commands. WHILE, parallel regions and bounded or
 indirect kernel launches are rejected. It does not change CPU/Vulkan or ordinary
-`prepare_execution()` defaults, and does not yet enable automatic export of a
-selected JIT CUDA binding-frame recipe. An incompatible CUDA graph update raises
-an error; it never silently creates an independent executable. C callers use
+`prepare_execution()` defaults. Exporting a selected JIT CUDA buffer binding-frame
+recipe preserves this strategy automatically, including reconstructible private
+storage and native recordings with their own AOT export contract. Kernel sequences
+with explicit adjoints and selected uniform FFT recordings are verified. Sampled
+texture bindings are still rejected before export; the JIT implicit ndarray-gradient
+restriction is unchanged. An incompatible CUDA graph update raises an error; it
+never silently creates an independent executable. C callers use
 `ti_prepare_execution_binding_ext` and `ti_get_prepared_binding_family_info_ext`.
 
 Persistent format version 3 also accepts explicit `while` operations:
