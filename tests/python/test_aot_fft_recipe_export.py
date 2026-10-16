@@ -15,7 +15,7 @@ from tests import test_utils
 from tests.python.aot_fft_recipe_probe import case_info, reference
 
 
-@pytest.mark.parametrize("case", ("forward", "inverse", "real"))
+@pytest.mark.parametrize("case", ("forward", "inverse", "real", "callback_forward", "callback_inverse"))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_selected_fft_export_and_adjoints(case, tmp_path, monkeypatch):
     from taichi_forge.hardware import _fft_lto
@@ -24,7 +24,17 @@ def test_selected_fft_export_and_adjoints(case, tmp_path, monkeypatch):
     dll = os.add_dll_directory(directory) if directory and os.name == "nt" else None
     if not ti.hardware.fft.is_available():
         pytest.skip("external cuFFT required")
-    monkeypatch.setattr(_fft_lto, "_library", lambda *_args, **_kwargs: pytest.fail("plain FFT loaded a JIT compiler"))
+    callback = case.startswith("callback_")
+    if callback:
+        libraries = {
+            name: os.environ.get(f"TI_TEST_{name.upper()}_LIBRARY_PATH") for name in ("nvrtc", "nvjitlink")
+        }
+        if not all(libraries.values()):
+            pytest.skip("explicit NVRTC and nvJitLink required")
+    else:
+        monkeypatch.setattr(
+            _fft_lto, "_library", lambda *_args, **_kwargs: pytest.fail("plain FFT loaded a JIT compiler")
+        )
     dimensions, batch, scale, shapes = case_info(case)
     real = case == "real"
     width = dimensions[-1]
@@ -33,7 +43,7 @@ def test_selected_fft_export_and_adjoints(case, tmp_path, monkeypatch):
         dimensions,
         batch_count=batch,
         transform="r2c" if real else "c2c",
-        direction="inverse" if case == "inverse" else "forward",
+        direction="inverse" if case.endswith("inverse") else "forward",
         output_scale=scale,
         input="x",
         output="y",
@@ -44,15 +54,20 @@ def test_selected_fft_export_and_adjoints(case, tmp_path, monkeypatch):
         dimensions,
         batch_count=batch,
         transform="c2r" if real else "c2c",
-        direction="forward" if case == "inverse" else "inverse",
+        direction="forward" if case.endswith("inverse") else "inverse",
         output_scale=scale,
         input="adjoint",
         output="dx",
         absolute_tolerance=5e-5,
         relative_tolerance=5e-5,
     )
-    forward.prepare()
-    backward.prepare()
+    options = (
+        dict(lto_callbacks=True, nvrtc_library=libraries["nvrtc"], nvjitlink_library=libraries["nvjitlink"])
+        if callback
+        else {}
+    )
+    forward.prepare(**options)
+    backward.prepare(**options)
 
     @ti.func
     def weight(column):
@@ -107,8 +122,13 @@ def test_selected_fft_export_and_adjoints(case, tmp_path, monkeypatch):
 
     def recipes(definition):
         catalog = definition.recipe_catalog(providers=providers)
-        result = {"whole_transform": catalog.baseline.recipe}
-        for choice in ("row_batch_column_inplace", "row_batch_cross_batch_columns"):
+        result = {} if callback else {"whole_transform": catalog.baseline.recipe}
+        choices = (
+            ("whole_transform_store_scale",)
+            if callback
+            else ("row_batch_column_inplace", "row_batch_cross_batch_columns")
+        )
+        for choice in choices:
             fragments = [
                 f.fragment_id
                 for f in catalog.fragments
@@ -121,16 +141,24 @@ def test_selected_fft_export_and_adjoints(case, tmp_path, monkeypatch):
         return result
 
     selected, aot_selected = recipes(definition), recipes(aot_definition)
-    assert len(selected) == (1 if real else 3)
+    assert len(selected) == (1 if real or callback else 3)
     module = ti.aot.Module()
     for strategy, recipe in selected.items():
         with aot_definition.materialize(aot_selected[strategy], providers=providers) as product:
             plan = module.add_execution_plan(strategy, product.executor, gradients=dict(y="dy", loss="dloss"))
             document = json.loads(plan.to_json())
-            assert len(document["resources"]) == 2
+            assert len(document["resources"]) == (3 if callback else 2)
             for resource in document["resources"]:
+                if resource["kind"] == "host_blob":
+                    assert callback and plan.host_data_bytes == resource["byte_size"] > 0
+                    assert plan.data_entries == (resource["data"],)
+                    continue
                 params = resource["parameters"]
-                assert params.get("strategy", "whole_transform") == strategy
+                if callback:
+                    assert params["store_callback"]["format"] == "cufft-store-scale-lto-v1"
+                    assert "path" not in json.dumps(params)
+                else:
+                    assert params.get("strategy", "whole_transform") == strategy
                 assert "expected_workspace_bytes" in params
             assert sum(op["kind"] == "native" for op in document["operations"]) == 2
         with definition.materialize(recipe, providers=providers) as product:

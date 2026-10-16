@@ -500,8 +500,9 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
 namespace {
 class AotCudaFftPlan final : public FftPlanResource {
  public:
-  AotCudaFftPlan(Device &device, FftPlanDescription description)
-      : FftPlanResource(std::move(description)), device_(device) {
+  AotCudaFftPlan(NativePreparationContext &context,
+                 FftPlanDescription description)
+      : FftPlanResource(std::move(description)), device_(context.device) {
     const auto &input = description_.input_layout;
     const auto &output = description_.output_layout;
     CufftPlanDescriptor descriptor{
@@ -518,6 +519,29 @@ class AotCudaFftPlan final : public FftPlanResource {
         description_.strategy != FftPlanStrategy::whole_transform;
     descriptor.cross_batch =
         description_.strategy == FftPlanStrategy::row_batch_cross_batch_columns;
+    if (description_.store_callback) {
+      const auto &callback = *description_.store_callback;
+      compiler_ = context.providers.library("nvrtc");
+      linker_ = context.providers.library("nvjitlink");
+      const auto nvrtc_version = reinterpret_cast<int (*)(int *, int *)>(
+          compiler_->symbol("nvrtcVersion"));
+      const auto linker_version =
+          reinterpret_cast<int (*)(unsigned *, unsigned *)>(
+              linker_->symbol("nvJitLinkVersion"));
+      int major = 0, minor = 0;
+      unsigned link_major = 0, link_minor = 0;
+      if (nvrtc_version(&major, &minor) ||
+          linker_version(&link_major, &link_minor) ||
+          major != callback.compiler_major || link_major != major ||
+          minor < 0 || link_minor < static_cast<unsigned>(minor) ||
+          link_minor < static_cast<unsigned>(callback.compiler_minor))
+        throw std::invalid_argument(
+            "cuFFT callback requires same-major NVRTC/nvJitLink and a linker "
+            "no older than the payload compiler or deployed NVRTC");
+      const auto &bytes = callback.code->bytes();
+      descriptor.store_callback_ir.assign(bytes.begin(), bytes.end());
+      descriptor.store_callback_symbol = "forge_cufft_store_scale";
+    }
     const auto counts = cufft_scalar_counts(descriptor);
     // Validate byte arithmetic before the vendor allocates any workspace.
     checked_multiply(counts.input, sizeof(float), "input bytes");
@@ -543,6 +567,8 @@ class AotCudaFftPlan final : public FftPlanResource {
 
  private:
   Device &device_;
+  // Destroy vendor plans before their compiler/linker code leases.
+  std::shared_ptr<NativeLibrary> compiler_, linker_;
   std::unique_ptr<CudaFftPlan> plan_;
 };
 
@@ -624,15 +650,14 @@ NativeOperationAvailability probe_cuda_fft_operation() {
 }
 
 std::shared_ptr<NativeResource> prepare_cuda_fft_plan(
-    Arch,
-    Device &device,
+    NativePreparationContext &context,
     const FftPlanDescription &description) {
-  if (!dynamic_cast<cuda::CudaDevice *>(&device))
+  if (!dynamic_cast<cuda::CudaDevice *>(&context.device))
     throw std::invalid_argument("cuFFT requires a CUDA device");
   auto &cuda = CUDAContext::get_instance();
   auto submission_guard = cuda.get_submission_lock_guard();
   auto context_guard = cuda.get_guard();
-  return std::make_shared<AotCudaFftPlan>(device, description);
+  return std::make_shared<AotCudaFftPlan>(context, description);
 }
 
 std::shared_ptr<NativeOperation> prepare_cuda_fft_execution(

@@ -2,6 +2,7 @@
 
 #include <optional>
 #include "taichi/runtime/native_operation_description.h"
+#include "taichi/runtime/native_host_blob.h"
 
 namespace taichi::lang {
 
@@ -30,6 +31,12 @@ struct FftPlanDescription {
   FftLayoutDescription output_layout;
   FftPlanStrategy strategy{FftPlanStrategy::whole_transform};
   std::optional<uint64_t> expected_workspace_bytes;
+  struct StoreScaleCallback {
+    std::shared_ptr<NativeHostBlobResource> code;
+    int compiler_major;
+    int compiler_minor;
+  };
+  std::optional<StoreScaleCallback> store_callback;
 };
 
 class FftPlanResource : public NativeResource {

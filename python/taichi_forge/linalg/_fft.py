@@ -1,5 +1,6 @@
 """Mathematical FFT regions, independent of physical plan decomposition."""
 
+import hashlib
 import json
 import math
 import struct
@@ -367,8 +368,46 @@ class _FftRecording(CufftRecording):
             )
         if strategy == "whole_transform":
             return super()._export_aot(context, expected_workspace_bytes=workspace)
+        if strategy == "whole_transform_store_scale":
+            from taichi_forge.hardware._fft_lto import _CufftStoreScalePlan, _StoreScaleCallback
+
+            if (
+                type(self.plan) is not _CufftStoreScalePlan
+                or type(self.plan._callback) is not _StoreScaleCallback
+            ):
+                raise TaichiRuntimeError("AOT FFT callback requires its qualified store-scale plan")
+            callback, facts = self.plan._callback, self.plan.callback_facts
+            if (
+                facts != source.preparation_report()[strategy]["callback"]
+                or facts["schema"] != "cufft-store-scale-lto-v1"
+                or facts["symbol"] != "forge_cufft_store_scale"
+                or facts["caller_info_bytes"] != 0
+                or hashlib.sha256(callback.ir).hexdigest() != facts["ir_sha256"]
+            ):
+                raise TaichiRuntimeError("AOT FFT callback differs from its frozen payload contract")
+            code = context.host_blob_resource(callback.ir)
+            plan = context.resource(
+                self.plan,
+                "cufft",
+                "plan_f32",
+                bindings=dict(store_callback_ir=code),
+                parameters=dict(
+                    dimensions=self.plan.dimensions,
+                    batch_count=self.plan.batch_count,
+                    transform="c2c",
+                    expected_workspace_bytes=workspace,
+                    store_callback=dict(format=facts["schema"], compiler_version=facts["compiler"]["version"]),
+                ),
+            )
+            context.native(
+                "cufft",
+                "execute_f32",
+                bindings=dict(plan=plan, input=self.input, output=self.output),
+                parameters=dict(direction=self.direction),
+            )
+            return ()
         if strategy not in ("row_batch_column_inplace", "row_batch_cross_batch_columns"):
-            raise TaichiRuntimeError("AOT FFT callback recipes require explicit LTO reconstruction")
+            raise TaichiRuntimeError("Unknown AOT FFT physical strategy")
         if (
             type(self.plan) is not _SeparableFftPlan
             or not self.plan._separable

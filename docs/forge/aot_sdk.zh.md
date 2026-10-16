@@ -940,7 +940,7 @@ vendor 管理对象。关闭依赖在完成后退休对应 recording 和 plan。
 物理跨度，输入输出必须互不重叠。同资源的多次执行共享 plan/workspace，独立 prepared
 实例彼此隔离，scratch 只计一份。普通 cuFFT recording 经
 `Module.add_execution_plan(name, graph)` 自动导出为此结构，保留创建时冻结的布局与
-plan 身份。callback 和未获资格的 plan 子类在 kernel 导出前拒绝。
+plan 身份。未获资格的 callback 和 plan 子类在 kernel 导出前拒绝。
 已验证批量一维 C2C、带 padding/stride 的二维 C2C、三维 R2C/C2R、显式谱能量伴随、
 非零共享 workspace，以及独立/借用 owner 的退休。
 
@@ -952,8 +952,32 @@ plan 身份。callback 和未获资格的 plan 子类在 kernel 导出前拒绝�
 策略。既有描述仍可读取，旧读取器会拒绝新增字段，避免忽略选中的策略。
 Windows CUDA 小型验收覆盖正负缩放、复数正逆变换、实数半谱权重、公开数组的精确
 shape、换绑定、workspace 不匹配、独立/借用退休，并组合真实后续 `kernel.grad`
-与显式 FFT 伴随；FFT provider 的反向仍需显式组装。LTO store-scale callback
-导出需要单独的代码与依赖重建合同，目前仍明确拒绝。
+与显式 FFT 伴随；FFT provider 的反向仍需显式组装。
+
+已选 `whole_transform_store_scale` C2C 路线还可导出已编译的 LTO callback。
+不可变代码通过按内容寻址的 `host_blob` 保存，相同载荷供多个 plan 共享。消费者
+无需 callback 源码、生产端库路径或 Python callable；准备前配置外部工具链：
+
+```python
+runtime.configure_library("nvrtc", nvrtc_library_path)
+runtime.configure_library("nvjitlink", nvjitlink_library_path)
+prepared = module.prepare_execution("step", bindings)
+```
+
+plan 包含 `store_callback={"format": "cufft-store-scale-lto-v1",
+"compiler_version": [major, minor]}` 和 `store_callback_ir` 主机资源绑定，固定使用
+内建 store-scale 符号，不因此开放任意 callback exporter。加载器校验代码完整性、
+NVRTC/nvJitLink 版本兼容和冻结的 workspace，再调用共享 cuFFT 计划核心。依赖缺失
+或不匹配时明确失败，不替换为未缩放变换。代码和库租约保留到计划退休；暖重放不
+加载库、不计算哈希、不编译。普通路线不加载这些辅助库。旧描述仍可读取，旧读取器
+会拒绝新增字段。
+
+预编译用户 LTO 代码仍需要 NVRTC 编译 cuFFT 内部 wrapper，并由 nvJitLink 链接。
+工具链家族须符合 [NVIDIA 依赖合同](https://docs.nvidia.com/cuda/archive/13.2.0/cufft/index.html#lto-load-and-store-callback-routines)，
+cuFFT 计划创建成功仍是其最终兼容性检查。Windows cuFFT `12200`、NVRTC/nvJitLink
+13.2、RTX 5090 小型验收覆盖正负缩放、正逆 C2C、真实后续 `kernel.grad` 加显式 FFT
+伴随、两组绑定、损坏/缺失代码、依赖失败与恢复及独立/借用退休。未据此声明其他平台
+资格，也未修改默认策略；准备成本仍包含 vendor 编译和链接。
 
 cuFFT 由应用单独安装，并对进程加载器可见（例如 Windows `PATH` 或显式预加载
 动态库）；Forge 不打包 vendor DLL。Windows cuFFT 12.2 / RTX 5090 验证覆盖

@@ -1210,7 +1210,7 @@ Input/output must be disjoint. Multiple executions of one resource share its
 plan/workspace; separate prepared instances remain independent, and scratch is
 accounted once. `Module.add_execution_plan(name, graph)` uses this representation
 for ordinary cuFFT recordings, preserving frozen creation layouts and plan
-identity. Callback and unqualified plan subclasses need their own
+identity. Unqualified callback and plan subclasses need their own
 export contract and are rejected before kernel export. Tested automatic exports
 cover batched 1D C2C, padded/strided 2D C2C, 3D R2C/C2R, explicit spectral-energy
 adjoints, nonzero shared workspace and standalone/borrowed owner retirement.
@@ -1228,8 +1228,39 @@ Small Windows CUDA checks cover positive/negative scaling, complex forward and
 inverse transforms, real half-spectrum weighting, exact public array shapes,
 binding changes, workspace mismatch, and standalone/borrowed retirement. They
 combine real downstream `kernel.grad` with explicitly assembled FFT adjoints;
-FFT provider differentiation is still explicit. LTO store-scale callback export
-requires a separate code/dependency reconstruction contract and remains rejected.
+FFT provider differentiation is still explicit.
+
+The selected `whole_transform_store_scale` C2C recipe also exports its compiled
+LTO callback. A content-addressed `host_blob` retains the immutable code, shared
+by plans with identical payloads. No callback source, producer library path or
+Python callable is required by the consumer. Configure the external toolchain
+before preparing this selected route:
+
+```python
+runtime.configure_library("nvrtc", nvrtc_library_path)
+runtime.configure_library("nvjitlink", nvjitlink_library_path)
+prepared = module.prepare_execution("step", bindings)
+```
+
+The plan has `store_callback={"format": "cufft-store-scale-lto-v1",
+"compiler_version": [major, minor]}` and a `store_callback_ir` host-resource
+binding. This contract fixes the built-in store-scale symbol and does not enable
+arbitrary callback exporters. The loader checks code integrity, compatible NVRTC/
+nvJitLink versions and the frozen workspace, then uses the shared cuFFT plan core.
+It rejects missing or incompatible dependencies without substituting an unscaled
+transform. Plans retain code/library leases through retirement; replay does no
+library loading, hashing or compilation. Plain recipes do not load these auxiliary
+libraries. Existing descriptors remain valid; older readers reject the new fields.
+
+Precompiled user LTO code still needs NVRTC for cuFFT's internal wrapper and
+nvJitLink for linking. NVIDIA requires compatible toolkit families; successful
+vendor plan creation remains the final cuFFT compatibility check. See the
+[cuFFT LTO dependency contract](https://docs.nvidia.com/cuda/archive/13.2.0/cufft/index.html#lto-load-and-store-callback-routines).
+Windows cuFFT `12200`, NVRTC/nvJitLink 13.2 and RTX 5090 checks cover positive and
+negative scaling, forward/inverse C2C, downstream `kernel.grad` plus explicit FFT
+adjoints, two bindings, damaged/missing code, dependency failure/recovery and
+standalone/borrowed retirement. This does not qualify other platforms or change
+recipe defaults; preparation still includes vendor compilation/linking costs.
 
 Install cuFFT separately and make it visible to the process loader (for example,
 Windows `PATH`, or an explicitly preloaded library). Forge does not bundle the

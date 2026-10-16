@@ -13,8 +13,7 @@ std::shared_ptr<NativeOperation> prepare_cuda_fft_operation(
     const FftC2COperation &operation);
 NativeOperationAvailability probe_cuda_fft_operation();
 std::shared_ptr<NativeResource> prepare_cuda_fft_plan(
-    Arch arch,
-    Device &device,
+    NativePreparationContext &context,
     const FftPlanDescription &description);
 std::shared_ptr<NativeOperation> prepare_cuda_fft_execution(
     Arch arch,
@@ -75,15 +74,28 @@ FftLayoutDescription fft_layout(const liong::json::JsonValue &parameters,
 
 void register_fft_plan(NativeOperationRegistry &registry) {
   registry.define<FftPlanDescription>(
-      [](Device &, const FftPlanDescription &) {}, NativeObjectKind::resource);
+      [](Device &device, const FftPlanDescription &plan) {
+        if (plan.store_callback &&
+            (!plan.store_callback->code ||
+             &plan.store_callback->code->device() != &device ||
+             plan.store_callback->code->bytes().empty() ||
+             plan.store_callback->compiler_major <= 0 ||
+             plan.store_callback->compiler_minor < 0 ||
+             plan.transform != FftTransformKind::c2c ||
+             plan.strategy != FftPlanStrategy::whole_transform))
+          throw std::invalid_argument(
+              "cuFFT callback requires whole C2C, a compiler version and "
+              "nonempty host code on the same owner");
+      },
+      NativeObjectKind::resource);
   registry.register_schema<FftPlanDescription>(
       "cufft", "plan_f32", {},
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<FftPlanDescription> {
         using namespace operation_json;
-        fields(parameters,
-               {"dimensions", "batch_count", "transform", "input_layout",
-                "output_layout", "strategy", "expected_workspace_bytes"});
+        fields(parameters, {"dimensions", "batch_count", "transform",
+                            "input_layout", "output_layout", "strategy",
+                            "expected_workspace_bytes", "store_callback"});
         FftPlanDescription result;
         result.dimensions = fft_dimensions(parameters["dimensions"]);
         auto batch = parameters.obj.inner.find("batch_count");
@@ -135,8 +147,36 @@ void register_fft_plan(NativeOperationRegistry &registry) {
               throw std::invalid_argument(
                   "Decomposed cuFFT requires compact storage");
         }
-        return [result](const NativeOperationBindings &) { return result; };
-      });
+        auto callback = parameters.obj.inner.find("store_callback");
+        if (callback != parameters.obj.inner.end()) {
+          fields(callback->second, {"format", "compiler_version"});
+          const auto &version = callback->second["compiler_version"];
+          if (name(callback->second["format"]) != "cufft-store-scale-lto-v1" ||
+              !version.is_arr() || version.arr.inner.size() != 2 ||
+              result.transform != FftTransformKind::c2c ||
+              result.strategy != FftPlanStrategy::whole_transform)
+            throw std::invalid_argument(
+                "Invalid cuFFT store-scale callback contract");
+          const auto minor = integer(version.arr.inner[1]);
+          if (minor > std::numeric_limits<int>::max())
+            throw std::invalid_argument(
+                "cuFFT callback compiler minor exceeds int32");
+          result.store_callback = FftPlanDescription::StoreScaleCallback{
+              {}, positive_int(version.arr.inner[0]), static_cast<int>(minor)};
+        }
+        return [result](const NativeOperationBindings &bindings) {
+          auto plan = result;
+          auto code = bindings.find("store_callback_ir");
+          if (bool(plan.store_callback) != (code != bindings.end()))
+            throw std::invalid_argument(
+                "cuFFT callback description/code binding mismatch");
+          if (plan.store_callback)
+            plan.store_callback->code =
+                code->second.resource<NativeHostBlobResource>();
+          return plan;
+        };
+      },
+      {}, {"store_callback_ir"});
   registry.define<FftExecuteOperation>(
       [](Device &device, const FftExecuteOperation &operation) {
         if (!operation.plan || &operation.plan->device() != &device ||
@@ -169,9 +209,9 @@ void register_fft_plan(NativeOperationRegistry &registry) {
         };
       });
 #ifdef TI_WITH_CUDA
-  registry.register_factory<FftPlanDescription>(
+  registry.register_context_factory<FftPlanDescription>(
       Arch::cuda, NativeOperationMode::cuda_capture, prepare_cuda_fft_plan,
-      probe_cuda_fft_operation);
+      [](NativeProviderSession &) { return probe_cuda_fft_operation(); });
   registry.register_factory<FftExecuteOperation>(
       Arch::cuda, NativeOperationMode::cuda_capture, prepare_cuda_fft_execution,
       probe_cuda_fft_operation);

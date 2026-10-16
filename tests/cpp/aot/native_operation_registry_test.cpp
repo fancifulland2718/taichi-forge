@@ -361,6 +361,37 @@ TEST(NativeOperationRegistry, FftPlansDecodeWithoutLoadingProvider) {
   EXPECT_THROW(registry.decode(description), std::invalid_argument);
 }
 
+TEST(NativeOperationRegistry, FftCallbackSchemaRejectsUnsupportedContracts) {
+  const auto &registry = native_operation_registry();
+  auto description =
+      NativeOperationDescription::parse(liong::json::parse_complete(
+          R"({"kind":"native","provider":"cufft","operation":"plan_f32","version":1,
+      "parameters":{"dimensions":[8,8],"transform":"c2c"},"bindings":{"store_callback_ir":"code"}})"));
+  auto &parameters = description.parameters.obj.inner;
+  parameters["store_callback"] = liong::json::parse_complete(
+      R"({"format":"cufft-store-scale-lto-v1","compiler_version":[13,2]})");
+  EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
+  parameters["transform"] = liong::json::JsonValue("r2c");
+  EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+               std::invalid_argument);
+  parameters["transform"] = liong::json::JsonValue("c2c");
+  parameters["strategy"] = liong::json::JsonValue("row_batch_column_inplace");
+  EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+               std::invalid_argument);
+  parameters.erase("strategy");
+  for (
+      const auto *callback :
+      {R"({"format":"other","compiler_version":[13,2]})",
+       R"({"format":"cufft-store-scale-lto-v1","compiler_version":[13]})",
+       R"({"format":"cufft-store-scale-lto-v1","compiler_version":[0,2]})",
+       R"({"format":"cufft-store-scale-lto-v1","compiler_version":[13,-1]})",
+       R"({"format":"cufft-store-scale-lto-v1","compiler_version":[13,true]})"}) {
+    parameters["store_callback"] = liong::json::parse_complete(callback);
+    EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+}
+
 #ifdef TI_WITH_CUDA
 struct CaptureResourceCounts {
   int recorded{0};

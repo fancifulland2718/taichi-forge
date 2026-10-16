@@ -3,13 +3,26 @@
 import json
 import math
 import os
+from pathlib import Path
 import sys
+import tempfile
+from zipfile import ZipFile
 
 from taichi_forge_runtime.aot import ExecutionPlan, Runtime
 from tests.python.aot_fft_probe import close_enough, dft, raises, read, write
 
 
+def rejects(operation, message):
+    try:
+        operation()
+    except RuntimeError as error:
+        assert message in str(error), str(error)
+    else:
+        raise AssertionError("Invalid callback preparation succeeded")
+
+
 def case_info(case):
+    case = case.removeprefix("callback_")
     dimensions, batch, scale = {
         "forward": ((5, 7), 2, 0.25),
         "inverse": ((8, 8), 1, -0.125),
@@ -25,6 +38,7 @@ def case_info(case):
 
 
 def reference(case, values):
+    case = case.removeprefix("callback_")
     dims, batch, scale, _ = case_info(case)
     count = math.prod(dims)
     spectrum, derivative = [], []
@@ -61,21 +75,43 @@ def main(mode, artifact, case):
         runtime = ti.aot.borrow_runtime()
     else:
         runtime = Runtime("cuda")
+    storage = tempfile.TemporaryDirectory(prefix="forge-fft-lto-") if case.startswith("callback_") else None
+    if storage is not None:
+        with ZipFile(artifact) as archive:
+            archive.extractall(storage.name)
+        artifact = Path(storage.name)
     with runtime:
+        callback = case.startswith("callback_")
+        # Unselected dependency locations must not trigger library loading.
+        runtime.configure_library("unused", "absent-unselected-library.dll")
         module = runtime.load_module(artifact)
         _, _, _, shapes = case_info(case)
         strategies = (
-            ("whole_transform",)
-            if case == "real"
-            else ("whole_transform", "row_batch_column_inplace", "row_batch_cross_batch_columns")
+            ("whole_transform_store_scale",)
+            if callback
+            else (
+                ("whole_transform",)
+                if case == "real"
+                else ("whole_transform", "row_batch_column_inplace", "row_batch_cross_batch_columns")
+            )
         )
         for strategy in strategies:
             document = json.loads(module.execution_plan(strategy).to_json())
-            expected_workspace = sum(r["parameters"]["expected_workspace_bytes"] for r in document["resources"])
+            expected_workspace = sum(
+                r["parameters"]["expected_workspace_bytes"]
+                for r in document["resources"]
+                if r["kind"] == "native"
+            )
             frames = []
             for index in range(2):
                 arrays = {name: runtime.ndarray("f32", shape) for name, shape in shapes.items()}
                 write(arrays["loss"], [-99])
+                if callback and index == 0:
+                    rejects(lambda: module.prepare_execution(strategy, arrays), "nvrtc")
+                    runtime.configure_library("nvrtc", "absent-nvrtc-library.dll")
+                    runtime.configure_library("nvjitlink", os.environ["TI_TEST_NVJITLINK_LIBRARY_PATH"])
+                    rejects(lambda: module.prepare_execution(strategy, arrays), "nvrtc")
+                    runtime.configure_library("nvrtc", os.environ["TI_TEST_NVRTC_LIBRARY_PATH"])
                 call = module.prepare_execution(strategy, arrays)
                 assert read(arrays["loss"]) == [-99]
                 assert call.info["execution_kind"] == "cuda_graph"
@@ -83,8 +119,37 @@ def main(mode, artifact, case):
                 frames.append((arrays, call))
             arrays = frames[0][0]
             invalid = json.loads(json.dumps(document))
-            invalid["resources"][0]["parameters"]["expected_workspace_bytes"] += 1
+            next(r for r in invalid["resources"] if r["kind"] == "native")["parameters"][
+                "expected_workspace_bytes"
+            ] += 1
             raises(lambda: ExecutionPlan.from_json(json.dumps(invalid)).prepare(module, arrays))
+            if callback:
+                blob = next(r for r in document["resources"] if r["kind"] == "host_blob")
+                path = artifact / "data" / (blob["data"] + ".bin")
+                original = path.read_bytes()
+                try:
+                    path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                    rejects(lambda: module.prepare_execution(strategy, arrays), "integrity")
+                    path.write_bytes(original[:-1])
+                    rejects(lambda: module.prepare_execution(strategy, arrays), "size")
+                    path.unlink()
+                    rejects(lambda: module.prepare_execution(strategy, arrays), "missing")
+                finally:
+                    path.write_bytes(original)
+                for binding in ({}, {"store_callback_ir": "x"}):
+                    invalid = json.loads(json.dumps(document))
+                    resource = next(r for r in invalid["resources"] if r["kind"] == "native")
+                    resource["bindings"] = binding
+                    raises(lambda: ExecutionPlan.from_json(json.dumps(invalid)).prepare(module, arrays))
+                invalid = json.loads(json.dumps(document))
+                params = next(r for r in invalid["resources"] if r["kind"] == "native")["parameters"]
+                params["store_callback"]["compiler_version"][0] += 1
+                rejects(
+                    lambda: ExecutionPlan.from_json(json.dumps(invalid)).prepare(module, arrays), "same-major"
+                )
+                runtime.configure_library("nvrtc", None)
+                rejects(lambda: module.prepare_execution(strategy, arrays), "nvrtc")
+                # Already prepared owners retain library/code leases.
             wrong_shape = runtime.ndarray("f32", math.prod(shapes["x"]))
             raises(lambda: module.prepare_execution(strategy, dict(arrays, x=wrong_shape)))
             if case != "real":
@@ -111,6 +176,8 @@ def main(mode, artifact, case):
         assert "numpy" not in sys.modules
     if dll is not None:
         dll.close()
+    if storage is not None:
+        storage.cleanup()
 
 
 if __name__ == "__main__":
