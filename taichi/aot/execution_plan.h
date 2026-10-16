@@ -99,7 +99,7 @@ struct ExecutionPlan {
     std::vector<Operation> condition;
     std::vector<Operation> body;
     std::optional<Vulkan> vulkan;
-    std::optional<CudaNestedControlRecipe<std::string>> cuda_nested;
+    std::optional<CudaControlRecipe<std::string>> cuda_control;
   };
   struct ArrayLayout {
     std::string array;

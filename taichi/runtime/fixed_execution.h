@@ -85,7 +85,7 @@ class FixedExecution {
     std::vector<Operation> condition;
     std::vector<Operation> body;
     std::optional<Vulkan> vulkan;
-    std::optional<CudaNestedControlRecipe<DevicePtr>> cuda_nested;
+    std::optional<CudaControlRecipe<DevicePtr>> cuda_control;
   };
 
   // Optional cold facts chain unconditional phases of one prepared execution.

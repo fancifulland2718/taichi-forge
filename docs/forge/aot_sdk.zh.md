@@ -440,7 +440,7 @@ body/尾部边界、预算、私有资源和标量/互不别名约束；不在�
 schema 8声明的 `cuda_graph_gate_v1` 代码。prepare在零预算时也检查ABI，不在消费端生成
 kernel或device-update节点，不静默切换路线。每份prepare独立拥有gate存储，在提交完成
 后退休。静态代码可由多个计划共享，捕获的命令存储仍随预算增长。需v14消费端与匹配的
-私有ABI73组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
+私有ABI74组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
 嵌套Graph，保留物理dispatch边界，只生成body需要的变体；按源特化和调用ABI跨计划去重，
 普通入口不能覆盖gated入口。九个内层区域的小用例验证了真实前向/后段梯度、双绑定、活跃
 后零轮和独立/借用退休，消费端无需编译gated变体。未冻结auto、native provider body、

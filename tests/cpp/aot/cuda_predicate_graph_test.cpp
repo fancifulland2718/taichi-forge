@@ -90,6 +90,21 @@ TEST(CudaPredicateGraphContract, ZeroMaskedBudgetCapturesOnlyInitialCondition) {
   EXPECT_TRUE(captured.empty());
 }
 
+TEST(CudaPredicateGraphContract, FlatMaskedRecipeKeepsNestedValidation) {
+  CudaControlRecipe<void *> recipe;
+  EXPECT_THROW(recipe.validate(0, 1), std::invalid_argument);
+  recipe.encoding = CudaControlEncoding::masked;
+  for (const bool nonzero : {false, true}) {
+    EXPECT_NO_THROW(recipe.validate(0, 1, nonzero));
+    EXPECT_NO_THROW(recipe.validate(1, 2, nonzero));
+    EXPECT_THROW(recipe.validate(1, 1, nonzero), std::invalid_argument);
+  }
+  recipe.inners.push_back({nullptr, 1, 2, 3, 2});
+  EXPECT_NO_THROW(recipe.validate(1, 4));
+  EXPECT_THROW(recipe.validate(0, 4), std::invalid_argument);
+  EXPECT_THROW(recipe.validate(1, 4, false), std::invalid_argument);
+}
+
 class CudaPredicateGraph : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -389,8 +404,8 @@ TEST_F(CudaPredicateGraph, FixedExecutionLoadsOrdinaryArtifactsAndOwnsEachRegion
     auto loop = std::make_shared<FixedExecution::While>();
     loop->predicate = ptr(allocation, 1);
     loop->max_iterations = outer;
-    loop->cuda_nested.emplace();
-    loop->cuda_nested->inners.push_back({ptr(allocation, 3), 1, 2, 3, inner});
+    loop->cuda_control.emplace();
+    loop->cuda_control->inners.push_back({ptr(allocation, 3), 1, 2, 3, inner});
     std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
     for (std::uint32_t i = 0; i < 4; ++i) {
       auto launch = std::make_unique<LaunchContextBuilder>(&kernel);

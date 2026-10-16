@@ -70,6 +70,13 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
             state[10] += 1
             state[6] += 1
             state[11] = state[10] < state[12]
+        elif operation == 8:
+            state[0] = 0
+            state[1] = state[4] <= 0
+            state[9] += 1
+        elif operation == 9:
+            state[0] += 1
+            state[1] = state[0] >= state[4]
 
     caps = (
         [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]

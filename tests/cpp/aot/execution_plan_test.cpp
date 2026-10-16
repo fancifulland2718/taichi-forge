@@ -398,15 +398,19 @@ TEST(ExecutionPlan, SelectedCudaNestedControlRetainsStaticClosure) {
     const auto plan = ExecutionPlan::parse(source);
     const auto &loop = *std::get<std::shared_ptr<const ExecutionPlan::While>>(
         plan.operations[0]);
-    ASSERT_TRUE(loop.cuda_nested);
-    EXPECT_EQ(loop.cuda_nested->encoding,
-              masked ? CudaNestedControlEncoding::masked
-                     : CudaNestedControlEncoding::device_update);
+    ASSERT_TRUE(loop.cuda_control);
+    EXPECT_EQ(loop.cuda_control->encoding,
+              masked ? CudaControlEncoding::masked
+                     : CudaControlEncoding::device_update);
     EXPECT_FALSE(loop.vulkan);
-    EXPECT_EQ(loop.cuda_nested->inners[0].max_iterations, std::uint64_t{1} << 40);
+    EXPECT_EQ(loop.cuda_control->inners[0].max_iterations, std::uint64_t{1} << 40);
     EXPECT_EQ(plan.arguments, (std::vector<std::string>{"op", "x"}));
     EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"ip", "op", "x"}));
     EXPECT_EQ(plan.resources.materialize, (std::vector<bool>{true}));
+    auto empty = source;
+    const auto first = empty.find('[', empty.find("\"inners\""));
+    empty.replace(first, empty.find(']', first) - first + 1, "[]");
+    EXPECT_THROW(ExecutionPlan::parse(empty), std::invalid_argument);
     for (const auto &[from, to] :
          std::vector<std::pair<std::string, std::string>>{
              {version, masked ? "\"version\":13" : "\"version\":12"},

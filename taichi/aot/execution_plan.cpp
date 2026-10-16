@@ -32,14 +32,13 @@ void parse_cuda_nested_control(const JsonValue &lowering,
   if (!flat_kernels(loop.condition) || !flat_kernels(loop.body))
     throw std::invalid_argument(
         "CUDA nested control requires flat kernels without launch overrides");
-  loop.cuda_nested.emplace();
-  loop.cuda_nested->encoding = masked
-                                   ? CudaNestedControlEncoding::masked
-                                   : CudaNestedControlEncoding::device_update;
+  loop.cuda_control.emplace();
+  loop.cuda_control->encoding = masked ? CudaControlEncoding::masked
+                                       : CudaControlEncoding::device_update;
   for (const auto &value : lowering["inners"].arr.inner) {
     fields(value, {"predicate", "condition_begin", "body_begin", "end",
                    "max_iterations"});
-    CudaNestedControlRecipe<std::string>::Inner inner;
+    CudaControlRecipe<std::string>::Inner inner;
     inner.predicate = name(value["predicate"]);
     arguments.insert(inner.predicate);
     const auto boundary = [&](const char *key) {
@@ -52,10 +51,14 @@ void parse_cuda_nested_control(const JsonValue &lowering,
     inner.body_begin = boundary("body_begin");
     inner.end = boundary("end");
     inner.max_iterations = integer(value["max_iterations"]);
-    loop.cuda_nested->inners.push_back(std::move(inner));
+    loop.cuda_control->inners.push_back(std::move(inner));
   }
-  loop.cuda_nested->validate(loop.condition.size(),
-                             loop.condition.size() + loop.body.size());
+  // Versions 13/14 describe ordered nested regions only. Flat control gets its
+  // own persisted selection instead of weakening the existing format contract.
+  if (loop.cuda_control->inners.empty())
+    throw std::invalid_argument("Selected CUDA nested control needs inner regions");
+  loop.cuda_control->validate(loop.condition.size(),
+                              loop.condition.size() + loop.body.size());
 }
 }  // namespace
 

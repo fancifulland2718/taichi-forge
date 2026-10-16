@@ -225,7 +225,7 @@ struct MaskedAotFrame {
     void run() { fixed ? fixed->run() : direct->run(); }
   };
   Prepared prepare(std::uint64_t outer, std::uint64_t inner, bool direct,
-                   bool conditional = false, int invalid = 0) {
+                   bool conditional = false, int invalid = 0, int flat = 0) {
     auto &driver = CUDADriver::get_instance();
     driver.memsetd32(address(4), 99, 14);
     std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
@@ -252,16 +252,26 @@ struct MaskedAotFrame {
     auto loop = std::make_shared<FixedExecution::While>();
     loop->predicate = ptr(4, 1);
     loop->max_iterations = outer;
-    loop->cuda_nested.emplace();
-    loop->cuda_nested->encoding = CudaNestedControlEncoding::masked;
-    loop->cuda_nested->inners.push_back({ptr(4, 3), 1, 2, 5, inner});
-    loop->cuda_nested->inners.push_back({ptr(4, 11), 5, 6, 9, inner});
+    loop->cuda_control.emplace();
+    loop->cuda_control->encoding = CudaControlEncoding::masked;
+    loop->cuda_control->inners.push_back({ptr(4, 3), 1, 2, 5, inner});
+    loop->cuda_control->inners.push_back({ptr(4, 11), 5, 6, 9, inner});
     loop->condition = {dispatch(invalid == 2 ? gated_control : control, 0)};
     loop->body = {dispatch(gated_control, 1), dispatch(gated_control, 2),
                   dispatch(invalid == 1 ? ordinary : forward, -1),
                   dispatch(reverse, -1), dispatch(gated_control, 6),
                   dispatch(gated_control, 7), dispatch(forward, -1),
                   dispatch(reverse, -1), dispatch(gated_control, 3)};
+    if (flat) {
+      loop->cuda_control->inners.clear();
+      loop->continue_while_nonzero = flat == 1;
+      loop->condition = {
+          dispatch(invalid == 2 ? gated_control : control, flat == 1 ? 0 : 8)};
+      loop->body = {dispatch(gated_control, 2),
+                    dispatch(invalid == 1 ? ordinary : forward, -1),
+                    dispatch(reverse, -1),
+                    dispatch(gated_control, flat == 1 ? 3 : 9)};
+    }
     if (invalid == 3)
       loop->body.front() = FixedExecution::BufferFill{ptr(4, 2), 4, 0};
     if (invalid == 4) {
@@ -280,10 +290,13 @@ struct MaskedAotFrame {
       auto native = std::make_shared<cuda::FixedGraph::While>();
       native->predicate = address(4, 1);
       native->max_iterations = outer;
-      native->nested.emplace();
-      native->nested->encoding = CudaNestedControlEncoding::masked;
-      native->nested->inners.push_back({address(4, 3), 1, 2, 5, inner});
-      native->nested->inners.push_back({address(4, 11), 5, 6, 9, inner});
+      native->continue_while_nonzero = loop->continue_while_nonzero;
+      native->recipe.emplace();
+      native->recipe->encoding = CudaControlEncoding::masked;
+      if (!flat) {
+        native->recipe->inners.push_back({address(4, 3), 1, 2, 5, inner});
+        native->recipe->inners.push_back({address(4, 11), 5, 6, 9, inner});
+      }
       for (const auto &item : loop->condition)
         native->condition.emplace_back(
             native_dispatch(std::get<FixedExecution::Dispatch>(item)));
@@ -296,7 +309,7 @@ struct MaskedAotFrame {
           native_dispatch(dispatch(control, 4)), native, native,
           native_dispatch(dispatch(control, 5))};
       result.direct = std::make_unique<cuda::FixedGraph>(operations);
-      EXPECT_EQ(result.direct->control_bytes(), 24);
+      EXPECT_EQ(result.direct->control_bytes(), flat ? 8 : 24);
     } else {
       std::vector<FixedExecution::Operation> operations{
           FixedExecution::BufferFill{ptr(4, 7), 4, 77}, loop, loop,
@@ -332,10 +345,13 @@ struct MaskedAotFrame {
     driver.memcpy_host_to_device(address(4), state.data(), 56);
   }
   void check(std::uint32_t outer, std::uint32_t inner, std::uint64_t outer_budget,
-             std::uint64_t inner_budget, bool conditional = false) {
+             std::uint64_t inner_budget, bool conditional = false,
+             bool flat = false) {
     auto &driver = CUDADriver::get_instance();
     const auto count = std::min<std::uint64_t>(outer, outer_budget);
-    const auto steps = 2 * count * (std::min<std::uint64_t>(inner, inner_budget) +
+    const auto steps = flat ? 2 * count
+                           : 2 * count *
+                                 (std::min<std::uint64_t>(inner, inner_budget) +
                                   std::min<std::uint64_t>(inner / 2, inner_budget));
     std::array<std::uint32_t, 14> state;
     driver.memcpy_device_to_host(state.data(), address(4), 56);
@@ -383,8 +399,25 @@ TEST(CudaGatedAot, FixedMaskedExecutionOwnsGatesAndPreservesActualGradients) {
       std::chrono::steady_clock::now() - first_prepare_begin).count();
   const auto registered = first.control->launcher().debug_registered_kernel_count();
   for (bool direct : {false, true}) {
+    for (int flat : {1, 2}) {
+      for (const auto budget : {0u, 3u}) {
+        auto call = first.prepare(budget, 0, direct, false, 0, flat);
+        for (const auto limit : {0u, 2u, 7u, 0u}) {
+          first.reset(limit, 0);
+          call.run();
+          driver.stream_synchronize(nullptr);
+          first.check(limit, 0, budget, 0, false, true);
+        }
+        first.reset(2, 0);
+        call.run();
+        call = {};
+        first.check(2, 0, budget, 0, false, true);
+      }
+    }
     for (int invalid : {1, 2})
       EXPECT_ANY_THROW(first.prepare(2, 3, direct, false, invalid));
+    for (int invalid : {1, 2})
+      EXPECT_ANY_THROW(first.prepare(0, 0, direct, false, invalid, 1));
     if (!direct)
       for (int invalid : {3, 4})
         EXPECT_ANY_THROW(first.prepare(2, 3, false, false, invalid));

@@ -16,7 +16,7 @@
 
 namespace taichi::lang::cuda {
 struct FixedGraph::State {
-  struct NestedControl {
+  struct SelectedControl {
     NestedPredicateGraphControls controls;
     bool masked{false};
     std::uint32_t *gates{nullptr};
@@ -38,7 +38,7 @@ struct FixedGraph::State {
   CudaGraphConditionalControl64 *controls{nullptr};
   BoundedGraphControls bounded;
   std::vector<std::unique_ptr<ParallelGraphCapture>> parallel;
-  std::vector<std::unique_ptr<NestedControl>> nested_controls;
+  std::vector<std::unique_ptr<SelectedControl>> selected_controls;
   std::size_t control_bytes{0};
   std::size_t bytes{0};
   std::size_t nodes{0};
@@ -47,8 +47,8 @@ struct FixedGraph::State {
   std::vector<std::uint8_t> host_arguments;
   bool capturing{false};
   bool submitted{false};
-  void release_nested(bool backend_safe) {
-    for (const auto &region : nested_controls)
+  void release_selected(bool backend_safe) {
+    for (const auto &region : selected_controls)
       region->release(backend_safe);
   }
   ~State() {
@@ -59,7 +59,7 @@ struct FixedGraph::State {
       for (const auto &resource : capture_resources)
         resource->release(false);
       bounded.release(false);
-      release_nested(false);
+      release_selected(false);
       for (const auto &region : parallel)
         region->release(false);
       return;
@@ -102,7 +102,7 @@ struct FixedGraph::State {
         resource->release(backend_safe);
       capture_resources.clear();
       bounded.release(backend_safe);
-      release_nested(backend_safe);
+    release_selected(backend_safe);
       for (const auto &region : parallel)
         region->release(backend_safe);
       if (backend_safe && controls)
@@ -118,7 +118,7 @@ struct FixedGraph::State {
         resource->release(false);
       capture_resources.clear();
       bounded.release(false);
-      release_nested(false);
+      release_selected(false);
       for (const auto &region : parallel)
         region->release(false);
     } catch (...) {
@@ -127,7 +127,7 @@ struct FixedGraph::State {
         resource->release(false);
       capture_resources.clear();
       bounded.release(false);
-      release_nested(false);
+      release_selected(false);
       for (const auto &region : parallel)
         region->release(false);
     }
@@ -223,13 +223,13 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   std::vector<const Parallel *> parallel_regions;
   // Each occurrence owns its control storage, even for a reused descriptor.
   // Masked packets contain gate addresses and cannot share across occurrences.
-  std::unordered_map<const Operation *, std::size_t> nested_index;
-  std::vector<const While *> nested_regions;
-  struct NestedBuild {
+  std::unordered_map<const Operation *, std::size_t> selected_index;
+  std::vector<const While *> selected_regions;
+  struct SelectedBuild {
     NestedPredicateGraphLayout layout;
     std::vector<std::size_t> packets;
   };
-  std::vector<NestedBuild> nested_builds;
+  std::vector<SelectedBuild> selected_builds;
   std::unordered_set<const void *> active_controls;
   std::vector<CudaGraphConditionalControl64> controls;
   std::vector<CudaGraphConditionalControl> branch_controls;
@@ -296,7 +296,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
         if (!loop || !loop->predicate || loop->body.empty())
           throw std::invalid_argument(
               "Fixed CUDA while requires a predicate and nonempty body");
-        if (loop->nested) {
+        if (loop->recipe) {
           const auto flat = [](const auto &region) {
             return std::all_of(region.begin(), region.end(), [](const auto &op) {
               const auto *dispatch = std::get_if<Dispatch>(&op);
@@ -304,20 +304,21 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                      !dispatch->bounded_extent && !dispatch->adaptive_block_dim;
             });
           };
-          if (!active_controls.empty() || !loop->continue_while_nonzero ||
-              !flat(loop->condition) || !flat(loop->body))
+          if (!active_controls.empty() || !flat(loop->condition) ||
+              !flat(loop->body))
             throw std::invalid_argument(
-                "Selected CUDA nested control requires flat kernel "
+                "Selected CUDA control requires flat kernel "
                 "regions");
-          loop->nested->validate(
-              loop->condition.size(), loop->condition.size() + loop->body.size());
-          for (const auto &inner : loop->nested->inners)
+          loop->recipe->validate(
+              loop->condition.size(), loop->condition.size() + loop->body.size(),
+              loop->continue_while_nonzero);
+          for (const auto &inner : loop->recipe->inners)
             if (!inner.predicate)
               throw std::invalid_argument("Missing CUDA nested predicate");
-          nested_index.emplace(&operation, nested_regions.size());
-          nested_regions.push_back(loop.get());
+          selected_index.emplace(&operation, selected_regions.size());
+          selected_regions.push_back(loop.get());
           collect(loop->condition);
-          if (loop->nested->encoding == CudaNestedControlEncoding::device_update)
+          if (loop->recipe->encoding == CudaControlEncoding::device_update)
             collect(loop->body);
           continue;
         }
@@ -342,9 +343,9 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   const auto gated_begin = dispatches.size();
   std::vector<void *> packet_gates;
   bool has_device_update = false;
-  for (const auto *loop : nested_regions) {
-    const auto &recipe = *loop->nested;
-    const bool masked = recipe.encoding == CudaNestedControlEncoding::masked;
+  for (const auto *loop : selected_regions) {
+    const auto &recipe = *loop->recipe;
+    const bool masked = recipe.encoding == CudaControlEncoding::masked;
     if (!masked &&
         (!driver.launch_kernel_ex.available() || !driver.graph_upload.available()))
       throw std::invalid_argument(
@@ -352,13 +353,13 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     if (recipe.inners.size() >=
         std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t))
       throw std::invalid_argument("CUDA nested gate storage size overflow");
-    state.nested_controls.push_back(std::make_unique<State::NestedControl>());
-    auto &region = *state.nested_controls.back();
+    state.selected_controls.push_back(std::make_unique<State::SelectedControl>());
+    auto &region = *state.selected_controls.back();
     region.masked = masked;
     region.gate_bytes = (recipe.inners.size() + 1) * sizeof(std::uint32_t);
     driver.malloc(reinterpret_cast<void **>(&region.gates), region.gate_bytes);
-    nested_builds.emplace_back();
-    auto &build = nested_builds.back();
+    selected_builds.emplace_back();
+    auto &build = selected_builds.back();
     auto &layout = build.layout;
     layout.predicate = reinterpret_cast<std::uintptr_t>(loop->predicate);
     layout.gate = reinterpret_cast<std::uintptr_t>(region.gates);
@@ -444,7 +445,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     auto &packet = packets[i];
     if (dispatch.adaptive_block_dim) {
       TI_ERROR_IF(!controls.empty() || !branch_controls.empty() ||
-                      !nested_regions.empty() ||
+                      !selected_regions.empty() ||
                       !packet.bounded_range ||
                       !dispatch.bounded_binding_identity ||
                       packet.offloaded_tasks.size() != 1 ||
@@ -563,12 +564,13 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
     }
     if (const auto *value =
             std::get_if<std::shared_ptr<const While>>(&operation)) {
-      const auto index = nested_index.at(&operation);
-      auto &region = *state.nested_controls[index];
-      const auto &build = nested_builds[index];
+      const auto index = selected_index.at(&operation);
+      auto &region = *state.selected_controls[index];
+      const auto &build = selected_builds[index];
       if (region.masked) {
         capture_masked_while_graph(
-            build.layout, true, stream, [&](std::size_t dispatch) {
+            build.layout, (*value)->continue_while_nonzero, stream,
+            [&](std::size_t dispatch) {
               record_dispatch_index(build.packets[dispatch], stream);
             });
         return;
@@ -663,7 +665,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                (!std::holds_alternative<std::shared_ptr<const While>>(
                     sequence[end]) ||
                 std::get<std::shared_ptr<const While>>(sequence[end])
-                    ->nested))
+                    ->recipe))
           ++end;
         if (end != begin) {
           dependencies =
@@ -731,7 +733,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
       throw std::invalid_argument("Fixed CUDA capture storage size overflow");
     state.capture_bytes += bytes;
   }
-  for (const auto &region : state.nested_controls) {
+  for (const auto &region : state.selected_controls) {
     if (!region->masked) {
       const auto error = region->controls.finalize_nodes();
       if (error != CUDA_SUCCESS)
@@ -758,7 +760,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                                   "upload adaptive CUDA controls",
                                   "Selected adaptive CUDA control upload failed");
     }
-    for (const auto &region : state.nested_controls) {
+    for (const auto &region : state.selected_controls) {
       if (region->masked)
         continue;
       const auto error = region->controls.upload(false);

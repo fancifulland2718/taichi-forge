@@ -253,21 +253,21 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed while requires a matching selected Vulkan recipe on "
               "Vulkan only");
-        if (loop->cuda_nested) {
+        if (loop->cuda_control) {
           const auto flat = [](const auto &region) {
             return std::all_of(region.begin(), region.end(), [](const auto &op) {
               return std::holds_alternative<Dispatch>(op);
             });
           };
-          if (arch != Arch::cuda || inside_control ||
-              !loop->continue_while_nonzero || !flat(loop->condition) ||
+          if (arch != Arch::cuda || inside_control || !flat(loop->condition) ||
               !flat(loop->body))
             throw std::invalid_argument(
-                "Selected CUDA nested control requires flat kernel "
+                "Selected CUDA control requires flat kernel "
                 "regions on CUDA");
-          loop->cuda_nested->validate(
-              loop->condition.size(), loop->condition.size() + loop->body.size());
-          for (const auto &inner : loop->cuda_nested->inners)
+          loop->cuda_control->validate(
+              loop->condition.size(), loop->condition.size() + loop->body.size(),
+              loop->continue_while_nonzero);
+          for (const auto &inner : loop->cuda_control->inners)
             if (inner.predicate.device != &device ||
                 !inner.predicate.alloc_id || inner.predicate.offset % 4)
               throw std::invalid_argument(
@@ -703,11 +703,11 @@ FixedExecution::FixedExecution(
           result->continue_while_nonzero = loop.continue_while_nonzero;
           result->condition = prepare(loop.condition);
           result->body = prepare(loop.body);
-          if (loop.cuda_nested) {
-            result->nested.emplace();
-            result->nested->encoding = loop.cuda_nested->encoding;
-            for (const auto &inner : loop.cuda_nested->inners)
-              result->nested->inners.push_back(
+          if (loop.cuda_control) {
+            result->recipe.emplace();
+            result->recipe->encoding = loop.cuda_control->encoding;
+            for (const auto &inner : loop.cuda_control->inners)
+              result->recipe->inners.push_back(
                   {cuda_pointer(inner.predicate), inner.condition_begin,
                    inner.body_begin, inner.end, inner.max_iterations});
           }
