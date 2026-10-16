@@ -497,9 +497,9 @@ For `native_required` nested CUDA loops, construction can select the qualified
 compact conditional route when the expanded representation exceeds its action
 budget. The runtime must expose explicit nested-route support. Explicit recipe
 and forced-masked choices remain binding; ordinary `auto` selection is unchanged.
-Automatic Graph export of selected CUDA masked/device-update routes and other
-specialized Vulkan routes still need their own export contracts; export rejects
-implicit replacement. Explicit device-update plans are described below. Kernel-backed CG/PCG
+Automatic Graph export of selected CUDA device-update routes uses the v13 contract
+below. Masked payloads and other specialized Vulkan routes still need their own
+export contracts; export rejects implicit replacement. Kernel-backed CG/PCG
 SolvePlan export uses these selected control paths as described below. CUDA operations requiring host synchronization are
 excluded from loop regions; providers with opaque cold facts still require an
 explicit branch/repetition merge contract. Initialization facts established only
@@ -545,7 +545,16 @@ ordered inner loops, zero budgets, early exit/exhaustion, an actual suffix
 `kernel.grad`, standalone/borrowed consumption, two bindings and predicate,
 module and owner retirement. Gradients require explicit binding; this does not
 differentiate control flow. A v13 consumer is required; private ABI71 remains.
-Automatic Graph export and masked payloads remain unavailable; defaults are unchanged.
+`add_execution_plan(name, graph)` also exports a materialized nested Graph whose
+submission route is frozen to `device_update`, including a frozen baseline recipe.
+It saves the selected physical kernel sequence, initial/body/tail boundaries,
+budgets, private resources and scalar/disjoint binding constraints. It neither
+expands kernels in the package nor reconstructs the loop from logical children.
+Small nine-inner-region tests cover actual forward/suffix gradient execution,
+zero trips after active replay, early exit/exhaustion, two bindings and retirement
+in standalone and borrowed runtimes. An unfrozen `auto` node that may fall back
+to masked execution is rejected before publishing entries, even if device update
+is a candidate. Masked payload export remains unavailable; defaults are unchanged.
 
 Vulkan exports selected flat native loops with a version 4 `lowering` recipe:
 

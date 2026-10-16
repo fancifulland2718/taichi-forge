@@ -389,8 +389,8 @@ region或4096个静态dispatch的软件上限。`structured_control_capabilities
 对于 `native_required` 的 CUDA 嵌套循环，展开式表示超过动作预算时，构建阶段可选择
 已具备资格的紧凑 conditional 路线；runtime 需要提供显式嵌套路线支持。显式 recipe
 和强制 masked 选择仍受尊重，普通 `auto` 的选路不变。
-CUDA 已选 masked/device-update 的 Graph 自动导出和 Vulkan 其他专用路线仍需各自的
-导出合同，拒绝隐式替换；device-update 的显式持久描述见下文。下文的 kernel-backed
+CUDA 已选 device-update 的 Graph 自动导出使用下文 v13 合同；masked 载荷和 Vulkan
+其他专用路线仍需各自的导出合同，拒绝隐式替换。下文的 kernel-backed
 CG/PCG SolvePlan 导出复用这些已选控制路线。需要 host 同步的 CUDA
 provider 不可放入循环；使用不透明冷状态的 provider 仍需专门的分支/循环合并合同。
 循环体的新初始化事实不能传播到零轮出口。关闭存储、模块或借用 owner 会按既有
@@ -425,7 +425,15 @@ prepare 使用普通加载 kernel 重建设备更新控制和节点表，与前�
 一次静态代码/操作，消费端命令和控制存储随编码预算增长。小型 Windows CUDA 用例已验证
 两个顺序内循环、零预算、早停/耗尽、实际后段 `kernel.grad`、独立/借用消费、双绑定和
 predicate/module/owner关闭。梯度须显式绑定，不表示对控制流自动微分。需配套v13消费端；
-私有ABI71保持。Graph自动导出及masked载荷仍未开放，默认策略不变。
+私有ABI71保持。
+
+`add_execution_plan(name, graph)` 也可自动导出提交路线已冻结为 `device_update` 的
+物化嵌套 Graph，包含已经冻结的基线 recipe。导出保存已选物理 kernel 序列、初始/
+body/尾部边界、预算、私有资源和标量/互不别名约束；不在包内按轮数复制 kernel，
+也不从逻辑子节点重新生成循环。九个内层区域的小用例已验证真实前向/后段梯度、
+活跃重放后零轮、早停/耗尽、双绑定，以及独立/借用 runtime 中的退休。
+尚未冻结、可能回退到 masked 的 `auto` 节点在发布条目前拒绝，即使 device-update
+是候选路线也不例外。masked 载荷导出仍未开放，默认策略不变。
 
 Vulkan 可导出已选的单层 native 循环，使用版本 4 的 `lowering` 描述：
 

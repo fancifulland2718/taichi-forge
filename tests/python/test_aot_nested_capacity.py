@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import statistics
 import subprocess
 import sys
 import time
@@ -123,6 +124,15 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             builder.dispatch(forward.grad, public["x"], public["y"], total)
         builder.dispatch(publish, outer, total, public["terminal"])
         definition = builder.freeze()
+        if route == "device_update":
+            from taichi_forge.aot._graph_export import _cuda_nested_while
+
+            source = definition._runtime_spec.structured_control_nodes[0]
+            assert source._cuda_nested_submission_options["execution_route"] == "auto"
+            # The source still allows fallback. Only materialization freezes
+            # its route, even when the user retains the baseline recipe.
+            with pytest.raises(ti.TaichiRuntimeError, match="frozen device-update recipe"):
+                _cuda_nested_while(None, source)
         recipe = None
         if lowering == "auto" and route == "conditional":
             catalog = definition.recipe_catalog()
@@ -133,9 +143,15 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
                 and GraphFamilySelection.from_fragment(f).choice_id == "control:cuda_nested_conditional:v1"
             )
             recipe = catalog.compose((fragment.fragment_id,), stage="single-region").recipe
-        return definition.materialize(recipe)
+        owner = definition.materialize(recipe)
+        if route == "device_update":
+            assert owner.executor._spec.structured_control_nodes[0]._cuda_nested_submission_options == dict(
+                execution_route="device_update"
+            )
+        return owner
 
     timings = {}
+    module = ti.aot.Module()
     begin = time.perf_counter()
     with build(False) as owner:
         timings["build_ms"] = (time.perf_counter() - begin) * 1000
@@ -172,31 +188,56 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
         assert any(s["last_path"].startswith(prefix) for s in nested_stats), nested_stats
         if route == "conditional":
             assert nested_stats[0]["known_bounded_control_bytes"] == (regions + 1) * 32
-        if route in ("masked", "device_update"):
-            # Expanded CUDA persistence is a separate capability. Do not
-            # silently export a conditional route that was never selected.
+        if route == "masked":
+            # Masked payloads need a separate persistence contract.
             module = ti.aot.Module()
             with pytest.raises(ti.TaichiRuntimeError, match="selected nested CUDA"):
                 module.add_execution_plan("step", owner.executor)
             assert not module._content and not module._graph_export_failed
             (tmp_path / "costs.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
             return
-    module = ti.aot.Module()
+        if route == "device_update":
+            arrays["limits"].from_numpy(np.array([2, 1], dtype=np.int32))
+            owner.executor.submit(arrays).wait()
+            samples = []
+            for _ in range(16):
+                begin = time.perf_counter()
+                owner.executor.submit(arrays).wait()
+                samples.append((time.perf_counter() - begin) * 1e6)
+            timings["jit_primal_warm_complete_us"] = statistics.median(samples)
+            begin = time.perf_counter()
+            module.add_execution_plan("primal", owner.executor)
+            timings["primal_export_ms"] = (time.perf_counter() - begin) * 1000
     begin = time.perf_counter()
     with build(True) as owner:
+        timings["gradient_build_ms"] = (time.perf_counter() - begin) * 1000
+        begin = time.perf_counter()
         plan = module.add_execution_plan("step", owner.executor, gradients=dict(x="dx", y="dy"))
+        timings["gradient_export_ms"] = (time.perf_counter() - begin) * 1000
         count = len(module._exported_kernels)
         module.add_execution_plan("again", owner.executor, gradients=dict(x="dx", y="dy"))
         assert len(module._exported_kernels) == count
-        outer = next(op for op in json.loads(plan.to_json())["operations"] if op["kind"] == "while")
+        document = json.loads(plan.to_json())
+        outer = next(op for op in document["operations"] if op["kind"] == "while")
         assert outer["max_iterations"] == budget
         inners = (
-            outer["lowering"]["inners"] if arch == "vulkan" else [op for op in outer["body"] if op["kind"] == "while"]
+            outer["lowering"]["inners"]
+            if arch == "vulkan" or route == "device_update"
+            else [op for op in outer["body"] if op["kind"] == "while"]
         )
         assert len(inners) == regions and all(op["max_iterations"] == budget for op in inners)
-    timings["gradient_build_export_ms"] = (time.perf_counter() - begin) * 1000
+        if route == "device_update":
+            assert document["version"] == 13
+            assert outer["lowering"]["kind"] == "cuda_nested_device_update"
+            nested = owner.executor._spec.structured_control_nodes[0]
+            assert len(outer["condition"]) + len(outer["body"]) == nested._cuda_nested.physical_dispatch_count
+            assert all(op["kind"] == "kernel" for op in outer["condition"] + outer["body"])
+            assert document["constraints"]  # Preserve JIT control scalar/disjoint binding contracts.
+    timings["kernel_entries"] = len(module._exported_kernels)
     artifact = tmp_path / "nested.tcm"
+    begin = time.perf_counter()
     module.archive(str(artifact))
+    timings["archive_ms"] = (time.perf_counter() - begin) * 1000
     timings["artifact_bytes"] = artifact.stat().st_size
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
@@ -209,6 +250,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
                 str(budget),
                 str(regions),
                 arch,
+                "primal" if route == "device_update" else "gradient",
             ],
             env=os.environ.copy(),
             capture_output=True,
@@ -216,6 +258,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path):
             timeout=90,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        timings[mode] = json.loads(next(line for line in result.stdout.splitlines() if line.startswith('{"load_ms"')))
     (tmp_path / "costs.json").write_text(json.dumps(timings, indent=2), encoding="utf-8")
 
 

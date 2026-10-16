@@ -509,16 +509,21 @@ def _validate_sequence(context, sequence):
 
 
 def _cuda_nested_while(context, node):
-    from taichi_forge.graph._graph import _CUDA_NESTED_CONDITIONAL_ROUTE
+    from taichi_forge.graph._graph import _CUDA_NESTED_CONDITIONAL_ROUTE, _CUDA_NESTED_DEVICE_UPDATE_ROUTE
 
     selected = node._cuda_nested
+    device_update = node._cuda_nested_control_lowering == _CUDA_NESTED_DEVICE_UPDATE_ROUTE
     if (
         not node.supports_native_submission
-        or node._cuda_nested_control_lowering != _CUDA_NESTED_CONDITIONAL_ROUTE
+        or node._cuda_nested_control_lowering not in (_CUDA_NESTED_CONDITIONAL_ROUTE, _CUDA_NESTED_DEVICE_UPDATE_ROUTE)
         or selected is None
-        or not selected.nested_conditional_eligible
+        or not (selected.nested_expanded_eligible if device_update else selected.nested_conditional_eligible)
     ):
         raise TaichiRuntimeError("AOT Graph requires its selected nested CUDA control recipe")
+    if device_update and node._cuda_nested_submission_options.get("execution_route") != "device_update":
+        # Ordinary auto submission can fall back to masked kernels. A candidate
+        # route (or one successful replay) is not a frozen physical contract.
+        raise TaichiRuntimeError("AOT nested CUDA device-update export requires a frozen device-update recipe")
     if selected.physical_dispatch_count != selected.dispatch_count:
         raise TaichiRuntimeError("AOT nested CUDA control requires its selected dispatch boundaries")
     # The native nested builder owns one flat copy of the selected dispatches.
@@ -544,6 +549,35 @@ def _cuda_nested_while(context, node):
     # its original condition/body region rather than slicing by operation count.
     first_body = offsets[first_body]
     boundaries = tuple(tuple(offsets[index] for index in row) for row in boundaries)
+    if device_update:
+        if any(op["kind"] != "kernel" or "launch" in op for op in operations):
+            raise TaichiRuntimeError("AOT nested CUDA device-update requires ordinary physical kernel dispatches")
+        lowering = dict(kind="cuda_nested_device_update", version=1, inners=[])
+        cursor = first_body
+        for inner, (condition_begin, body_begin, end) in zip(inners, boundaries):
+            if not cursor <= condition_begin < body_begin < end < len(operations):
+                raise TaichiRuntimeError("AOT nested CUDA control has invalid physical boundaries")
+            lowering["inners"].append(
+                dict(
+                    predicate=context.binding(inner.predicate),
+                    condition_begin=condition_begin,
+                    body_begin=body_begin,
+                    end=end,
+                    max_iterations=inner.max_iterations,
+                )
+            )
+            cursor = end
+        context.operations.append(
+            dict(
+                kind="while",
+                predicate=context.binding(node.predicate),
+                max_iterations=node.max_iterations,
+                condition=operations[:first_body],
+                body=operations[first_body:],
+                lowering=lowering,
+            )
+        )
+        return
     body = []
     cursor = first_body
     for inner, (condition_begin, body_begin, end) in zip(inners, boundaries):
