@@ -65,7 +65,7 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
-Optional cuDSS, cuSOLVERDn, cuTENSOR, cuSPARSELt, AmgX and VkFFT adapters have separate SDK components.
+Optional cuDSS, cuSOLVERDn, cuBLASLt, cuTENSOR, cuSPARSELt, AmgX and VkFFT adapters have separate SDK components.
 Enable their build targets, then build and install only the selected adapter:
 
 ```sh
@@ -78,6 +78,19 @@ Replace `cutensor` with `cusparselt`, `amgx` or `cusolverdn` for those component
 The cuSOLVERDn component also installs `forge_cusolverdn_provider.h` for its
 shared Cholesky execution API. Native plan execution and AOT reconstruction of
 retained Cholesky recordings share this adapter. The vendor runtime remains external.
+
+For the cuBLASLt native plan API, replace `cutensor` with `cublaslt`. Its component
+installs `forge_cublaslt_provider.h` and the adapter, with no vendor headers or
+vendor binary linkage. The API supports compact f32 matmul, batched and transposed
+operands, alpha/beta feedback, row-major or equivalent transposed column-major
+layouts, and identity/ReLU epilogues. A plan either selects one cold heuristic
+result or restores an explicit algorithm configuration and checks its exact
+workspace requirement without searching. Plan information reports which path ran
+and the algorithm's operand alignment requirements. Callers own device buffers
+and workspace, activate the owning CUDA context, and retire all captured/in-flight
+uses before destroying plans and their runtime. This standalone C API is a
+prerequisite; cuBLASLt recording export and AOT resource reconstruction are not yet
+available through the Python Graph API.
 
 cuDSS uses
 its independent build option and matching 0.8.x SDK headers, without enabling

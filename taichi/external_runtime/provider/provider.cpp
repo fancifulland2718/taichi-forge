@@ -1,6 +1,8 @@
 #include "taichi/external_runtime/forge_runtime_provider.h"
 #if TI_FORGE_RUNTIME_PROVIDER_KIND == 4
 #include "taichi/external_runtime/forge_cusolverdn_provider.h"
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 5
+#include "taichi/external_runtime/forge_cublaslt_provider.h"
 #endif
 
 #if defined(_WIN32) && !defined(NOMINMAX)
@@ -8,7 +10,9 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -165,6 +169,30 @@ constexpr const char *kRequiredSymbols[] = {
     "cusolverDnXpotrf_bufferSize", "cusolverDnXpotrf", "cusolverDnXpotrs"};
 #define TI_FORGE_RUNTIME_PROVIDER_QUERY_FUNCTION \
   taichi_forge_cusolverdn_provider_query
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 5
+constexpr char kProviderId[] = "cublaslt";
+constexpr char kProviderName[] = "NVIDIA cuBLASLt";
+constexpr char kSupportedVersionFamily[] =
+    "documented f32 matmul configuration C API";
+constexpr char kBuildIdentity[] =
+    "forge-runtime-provider-abi2-cublaslt-configured-matmul-v1";
+constexpr const char *kWindowsCandidates[] = {"cublasLt64_13.dll",
+                                             "cublasLt64_12.dll"};
+constexpr const char *kLinuxCandidates[] = {"libcublasLt.so.13", "libcublasLt.so.12",
+                                           "libcublasLt.so"};
+constexpr const char *kRequiredSymbols[] = {
+    "cublasLtGetVersion", "cublasLtCreate", "cublasLtDestroy",
+    "cublasLtMatmulDescCreate", "cublasLtMatmulDescDestroy",
+    "cublasLtMatmulDescSetAttribute", "cublasLtMatrixLayoutCreate",
+    "cublasLtMatrixLayoutDestroy", "cublasLtMatrixLayoutSetAttribute",
+    "cublasLtMatmulPreferenceCreate", "cublasLtMatmulPreferenceDestroy",
+    "cublasLtMatmulPreferenceSetAttribute", "cublasLtMatmulAlgoGetHeuristic",
+    "cublasLtMatmulAlgoInit", "cublasLtMatmulAlgoConfigGetAttribute",
+    "cublasLtMatmulAlgoConfigSetAttribute", "cublasLtMatmulAlgoCapGetAttribute",
+    "cublasLtMatmulAlgoCheck",
+    "cublasLtMatmul"};
+#define TI_FORGE_RUNTIME_PROVIDER_QUERY_FUNCTION \
+  taichi_forge_cublaslt_provider_query
 #else
 #error "Unsupported TI_FORGE_RUNTIME_PROVIDER_KIND"
 #endif
@@ -299,6 +327,17 @@ bool query_version(Runtime &runtime) {
   runtime.version_minor = minor;
   runtime.version_patch = patch;
   runtime.cuda_runtime_version = static_cast<uint32_t>(get_cudart_version());
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 5
+  using GetVersion = size_t (*)();
+  const auto version = reinterpret_cast<GetVersion>(
+      load_symbol(runtime.library, "cublasLtGetVersion"))();
+  if (!version) {
+    last_error = "cuBLASLt runtime version query failed";
+    return false;
+  }
+  runtime.version_major = static_cast<uint32_t>(version / 10000);
+  runtime.version_minor = static_cast<uint32_t>((version / 100) % 100);
+  runtime.version_patch = static_cast<uint32_t>(version % 100);
 #elif TI_FORGE_RUNTIME_PROVIDER_KIND == 4
   using GetProperty = int (*)(int, int *);
   auto property = reinterpret_cast<GetProperty>(
@@ -1345,6 +1384,8 @@ TiForgeRuntimeProviderResult query_execution_api(
 
 #elif TI_FORGE_RUNTIME_PROVIDER_KIND == 4
 #include "taichi/external_runtime/provider/cusolverdn.inc.h"
+#elif TI_FORGE_RUNTIME_PROVIDER_KIND == 5
+#include "taichi/external_runtime/provider/cublaslt.inc.h"
 #else
 
 using AmgxSimpleFn = int (*)();

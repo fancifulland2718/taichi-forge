@@ -57,7 +57,7 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
 
-可选的 cuDSS、cuSOLVERDn、cuTENSOR、cuSPARSELt、AmgX 和 VkFFT adapter 各自有独立 SDK 安装组件。
+可选的 cuDSS、cuSOLVERDn、cuBLASLt、cuTENSOR、cuSPARSELt、AmgX 和 VkFFT adapter 各自有独立 SDK 安装组件。
 启用构建目标后，只构建和安装选中的 adapter：
 
 ```sh
@@ -70,6 +70,15 @@ cuSPARSELt、AmgX 和 cuSOLVERDn 将 `cutensor` 替换为 `cusparselt`、`amgx` 
 cuSOLVERDn 组件还安装共享 Cholesky 执行 API 的 `forge_cusolverdn_provider.h`。
 原生计划执行与保留式 Cholesky recording 的 AOT 重建共用该 adapter，
 厂商 runtime 仍由应用另行提供。
+
+cuBLASLt 原生计划 API 将 `cutensor` 替换为 `cublaslt`。组件安装
+`forge_cublaslt_provider.h` 及 adapter，不依赖厂商构建头文件或二进制链接。
+API 支持紧凑 f32 matmul、批量与转置输入、alpha/beta 反馈、行主序或等价的转置列主序
+布局，以及 identity/ReLU 尾处理。计划可以冷选一个启发式结果，也可以恢复显式算法配置，
+核对精确 workspace 而不重新搜索；计划信息报告实际走过的路径和算法要求的输入对齐。
+调用方拥有设备缓冲区及 workspace，负责激活所属 CUDA context，并在销毁计划和 runtime
+前退休所有捕获图及在途执行。这是独立 C API 前置能力；Python Graph 尚未提供
+cuBLASLt recording 导出及 AOT 资源重建。
 
 cuDSS 使用其独立
 构建开关及匹配的 0.8.x SDK 头文件，不需要开启其他可选 provider：
