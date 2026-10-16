@@ -2006,5 +2006,39 @@ python python/taichi_forge/tools/_host_build.py --spec app-host.json \
 采用 Cython 3.2.9：更广的宿主代码在3.3中暴露编译异常，早前小夹具通过不代表全量
 兼容。包初始化、别名、损坏缓存恢复、惰性分支、源码排除及CPU/CUDA/Vulkan新特化与
 梯度已有测试。
-宿主布局还不是完整SDK wheel；外部依赖锁、资源、公开stubs及应用功能资格由后续
-部署步骤承接。
+独立 `_host_wheel.py` 生产工具将封闭宿主布局与公开stubs、资源、标准Python元数据
+组装为wheel，不重新编译模块：
+
+```sh
+python python/taichi_forge/tools/_host_wheel.py --spec release.json --output wheels
+```
+
+```json
+{
+  "version": 1,
+  "host_layout": "host-layout",
+  "project": "public/pyproject.toml",
+  "files": {
+    "simulation/solver.pyi": "public/solver.pyi",
+    "simulation/py.typed": "public/py.typed",
+    "simulation/settings.json": "public/settings.json"
+  }
+}
+```
+
+路径相对发布规格文件，公开文件位于已编译宿主命名空间中。使用匹配的Python ABI/平台；
+生产环境需有PyPA `build`、`packaging`、setuptools，以及Python3.10的`tomli`。
+项目构建依赖须预先安装；组装过程离线运行，不解析或安装应用依赖。`pyproject.toml`
+使用`setuptools.build_meta`与静态`[project]`元数据，统一声明dependencies、extras、
+entry points；不填写源码发现用的`[tool.setuptools]`。readme/license从项目目录复制。
+
+setuptools生成正确的原生wheel标签、`METADATA`、`WHEEL`和`RECORD`，已核验宿主清单
+保留在`.dist-info/forge-host.json`。构建脚本和编译缓存不进入消费包。工具校验全部产物
+哈希，拒绝未声明文件、源码、目标冲突和不匹配的ABI/平台；公开文件清单不能夹带Forge
+或其他原生runtime库。
+
+已有wheel不可变；相同输入可复现。公开文件改变时换版本或输出目录，宿主扩展无需重编译。
+遵守`SOURCE_DATE_EPOCH`，默认使用ZIP格式最早时间戳。小型已安装wheel已验证公开资源、
+stubs、entry points、别名及CPU/CUDA/Vulkan两种静态尺寸的前向/Tape梯度。
+现有401模块SAP闭包也通过wheel安装和小规模CUDA SAP/AOT回归；这不等于整个GeoPhys
+公开API、依赖锁、所有solver分支或非线性求解器反向已取得资格，后者仍是应用/部署工作。

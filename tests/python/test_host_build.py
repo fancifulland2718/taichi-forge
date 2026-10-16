@@ -6,10 +6,12 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from zipfile import ZipFile
 
 import pytest
 
 from taichi_forge.tools import _host_build as host
+from taichi_forge.tools import _host_wheel as host_wheel
 
 
 def test_host_manifest_keeps_package_initializers_and_alias_identity(tmp_path):
@@ -149,6 +151,108 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
     content = cached_artifact.read_bytes()
     cached_artifact.write_bytes(bytes((content[0] ^ 1,)) + content[1:])
     assert build(tmp_path / "repaired")["cached"] == 2
+    # Package already-built extensions with independent public resources and
+    # standard metadata. No Cython invocation or module rebuild is needed.
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "pyproject.toml").write_text(
+        textwrap.dedent("""
+        [build-system]
+        requires = ["setuptools==82.0.1"]
+        build-backend = "setuptools.build_meta"
+        [project]
+        name = "forge-closed-host-test"
+        version = "1.2.3"
+        requires-python = ">=3.10"
+        readme = "README.md"
+        license = "MIT"
+        license-files = ["LICENSE.txt"]
+        dependencies = ["taichi-forge>=0.6.4", "typing-extensions>=4.9; python_version<'3.11'"]
+        [project.optional-dependencies]
+        render = ["Pillow>=11"]
+        [project.scripts]
+        closed-host-label = "closed_host.ordinary:label"
+        """),
+        encoding="utf-8",
+    )
+    (release / "README.md").write_text("Public SDK documentation.\n", encoding="utf-8")
+    (release / "LICENSE.txt").write_text("MIT fixture license\n", encoding="utf-8")
+    (release / "api.pyi").write_text("def power(value: float) -> float: ...\n", encoding="utf-8")
+    (release / "py.typed").write_text("", encoding="utf-8")
+    (release / "settings.json").write_text('{"widths":[2,4]}', encoding="utf-8")
+    release_spec = dict(
+        version=1,
+        host_layout="layout",
+        project="release/pyproject.toml",
+        files={
+            "closed_host/ordinary.pyi": "release/api.pyi",
+            "closed_host/py.typed": "release/py.typed",
+            "closed_host/settings.json": "release/settings.json",
+            "closed_host/docs/README.md": "release/README.md",
+        },
+    )
+    release_file = tmp_path / "release.json"
+    release_file.write_text(json.dumps(release_spec), encoding="utf-8")
+
+    def package(destination=None, error=None):
+        result = subprocess.run(
+            [
+                sys.executable,
+                host_wheel.__file__,
+                "--spec",
+                str(release_file),
+                "--output",
+                str(destination or tmp_path / "wheels"),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        if error:
+            assert result.returncode != 0 and error in result.stderr, result.stdout + result.stderr
+            return None
+        assert result.returncode == 0, result.stdout + result.stderr
+        return json.loads(result.stdout.splitlines()[-1])
+
+    packaged = package()
+    assert packaged["modules"] == 3 and packaged["payload_files"] == 7
+    # Reproducible re-publication checks the existing wheel without replacing it.
+    assert package()["wheel"] == packaged["wheel"]
+    (release / "README.md").write_text("Updated public SDK documentation.\n", encoding="utf-8")
+    package(error="Published wheel is immutable")
+    updated = package(tmp_path / "updated-wheels")
+    with ZipFile(updated["wheel"]) as archive:
+        for item in manifest["modules"]:
+            assert archive.read(item["file"]) == (output / item["file"]).read_bytes()
+    with ZipFile(packaged["wheel"]) as archive:
+        names = archive.namelist()
+        assert not any(n.endswith((".py", ".pyx", ".cpp", ".dll")) for n in names)
+        metadata = next(n for n in names if n.endswith(".dist-info/METADATA"))
+        content = archive.read(metadata).decode()
+        assert "Requires-Dist: taichi-forge>=0.6.4" in content
+        assert "Requires-Dist: typing-extensions>=4.9; python_version <" in content
+        assert 'Requires-Dist: Pillow>=11; extra == "render"' in content
+        assert any(n.endswith(".dist-info/forge-host.json") for n in names)
+    installed = tmp_path / "installed"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--no-deps",
+            "--no-compile",
+            "--target",
+            str(installed),
+            packaged["wheel"],
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    (tmp_path / "host-wheel-costs.json").write_text(json.dumps(packaged, indent=2), encoding="utf-8")
     consumer = tmp_path / "consumer.py"
     consumer.write_text(
         textwrap.dedent("""
@@ -167,6 +271,14 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
             return original(name, *args, **kwargs)
         builtins.__import__ = checked
         import closed_host
+        from importlib import resources, metadata
+        import json
+        assert json.loads(resources.files(closed_host).joinpath('settings.json').read_text()) == {'widths': [2, 4]}
+        assert 'power' in resources.files(closed_host).joinpath('ordinary.pyi').read_text()
+        assert resources.files(closed_host).joinpath('py.typed').is_file()
+        distribution = metadata.distribution('forge-closed-host-test')
+        entry = next(e for e in distribution.entry_points if e.name == 'closed-host-label')
+        assert entry.load()() == 'caf\u00e9'
         assert closed_host.LABEL == 'caf\u00e9'
         assert closed_host.CONTINUED == 3
         import closed_host_alias
@@ -205,7 +317,7 @@ def test_real_host_build_semantics_cache_and_source_boundary(tmp_path):
     )
     for arch in os.environ.get("FORGE_HOST_TEST_ARCHS", "cpu").split(","):
         result = subprocess.run(
-            [sys.executable, "-S", str(consumer), str(output), str(source), arch],
+            [sys.executable, "-S", str(consumer), str(installed), str(source), arch],
             env=environment,
             capture_output=True,
             text=True,

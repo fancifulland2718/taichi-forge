@@ -2610,6 +2610,50 @@ Unresolved globals retain their runtime `NameError`. Cython 3.2.9 is the current
 qualified producer choice for this path; broader host code exposed a Cython
 3.3 compilation failure despite the earlier bounded fixtures passing. Package
 initializers, aliases, damaged-cache recovery, lazy branches, source exclusion
-and CPU/CUDA/Vulkan specialization/gradient fixtures are tested. The host layout is not a
-complete SDK wheel: external dependency locks, resources, public stubs and
-application feature qualification remain separate deployment responsibilities.
+and CPU/CUDA/Vulkan specialization/gradient fixtures are tested.
+
+The independent `_host_wheel.py` producer packages a sealed layout with public
+stubs, resources and standard Python metadata, without recompiling host modules:
+
+```sh
+python python/taichi_forge/tools/_host_wheel.py --spec release.json --output wheels
+```
+
+```json
+{
+  "version": 1,
+  "host_layout": "host-layout",
+  "project": "public/pyproject.toml",
+  "files": {
+    "simulation/solver.pyi": "public/solver.pyi",
+    "simulation/py.typed": "public/py.typed",
+    "simulation/settings.json": "public/settings.json"
+  }
+}
+```
+
+Paths are relative to the release specification; public files belong to compiled
+host namespaces. Use the matching Python ABI/platform with PyPA `build`,
+`packaging`, setuptools and, on Python 3.10, `tomli` installed. The project's
+build requirements must already be installed; packaging is offline and does not
+resolve application dependencies. `pyproject.toml` uses `setuptools.build_meta`
+and static `[project]` metadata, including dependencies, extras and entry points.
+Omit source-discovery `[tool.setuptools]` settings. Declared readme/license files
+are copied from the project directory.
+
+Setuptools generates native wheel tags, `METADATA`, `WHEEL` and `RECORD`; the
+verified host manifest is retained in `.dist-info/forge-host.json`. Generated
+build scripts and compiler caches stay outside the wheel. The tool checks every
+payload hash and rejects undeclared files, source, destination collisions and
+incompatible host ABIs/platforms. The public-file list cannot vendor Forge or
+other native runtime libraries.
+
+Output wheels are immutable. Identical inputs reproduce the same wheel; changed
+public files require another version or output directory without rebuilding host
+extensions. `SOURCE_DATE_EPOCH` is honored, with the earliest ZIP timestamp as the
+default. An installed fixture verifies public resources, stubs, entry points,
+aliases and two static sizes with forward/Tape gradients on CPU/CUDA/Vulkan.
+A prebuilt 401-module SAP closure also passes wheel installation and a bounded
+CUDA SAP/AOT regression. This does not qualify the complete GeoPhys public API,
+dependency locks, all solver branches or nonlinear solver gradients; those remain
+separate application/deployment work.
