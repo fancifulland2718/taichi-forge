@@ -67,12 +67,9 @@ def branch_factory():
     def build(kind, fallback, mode, *, nested=False):
         builder = ti.graph.GraphBuilder(_map_recipe="map2")
         public = {
-            n: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, n, ti.f32, ndim=1)
-            for n in ("x", "y", "dx", "dy", "gradient")
+            n: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, n, ti.f32, ndim=1) for n in ("x", "y", "dx", "dy", "gradient")
         }
-        public.update(
-            {n: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, n, ti.i32, ndim=1) for n in ("choice", "state")}
-        )
+        public.update({n: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, n, ti.i32, ndim=1) for n in ("choice", "state")})
         selected = builder.private_ndarray("selected", ti.i32, ())
         checks = builder.private_ndarray("checks", ti.i32, ())
         outer = builder.private_ndarray("outer", ti.i32, ()) if nested else None
@@ -121,7 +118,20 @@ def branch_factory():
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_aot_selected_branch_graph_and_reverse(tmp_path):
-    arch = "cuda" if ti.lang.impl.current_cfg().arch == ti.cuda else "cpu"
+    _selected_branch_graph(tmp_path, host=False)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_aot_host_branch_graph_and_reverse(tmp_path):
+    _selected_branch_graph(tmp_path, host=True)
+
+
+def _selected_branch_graph(tmp_path, host):
+    arch = (
+        "vulkan"
+        if ti.lang.impl.current_cfg().arch == ti.vulkan
+        else ("cuda" if ti.lang.impl.current_cfg().arch == ti.cuda else "cpu")
+    )
     build = branch_factory()
     module = ti.aot.Module()
     cases = [
@@ -130,12 +140,13 @@ def test_aot_selected_branch_graph_and_reverse(tmp_path):
         ("switch", "switch", False),
         ("switch_default", "switch", True),
     ]
-    if arch == "cpu":
+    if arch == "cpu" or host:
         cases.append(("nested", "switch", False))
     stats = dict(build_ms=0, export_ms=0, consumer={})
     for name, kind, fallback in cases:
         start = time.perf_counter()
-        graph = build(kind, fallback, "native_required" if arch == "cuda" else "auto", nested=name == "nested")
+        mode = "portable" if arch == "cuda" and host else "native_required" if arch == "cuda" else "auto"
+        graph = build(kind, fallback, mode, nested=name == "nested")
         stats["build_ms"] += (time.perf_counter() - start) * 1000
         # Export cold. JIT Graph deliberately rejects implicit ndarray AD;
         # persistent execution supplies the explicit gradient bindings below.
@@ -144,7 +155,7 @@ def test_aot_selected_branch_graph_and_reverse(tmp_path):
         plan = module.add_execution_plan(name, graph, gradients=dict(x="dx", y="dy"))
         stats["export_ms"] += (time.perf_counter() - start) * 1000
         document = json.loads(plan.to_json())
-        assert document["version"] == 11
+        assert document["version"] == (12 if host else 11)
         assert set(plan.argument_names) == {"x", "y", "dx", "dy", "gradient", "choice", "state"}
         assert any(op["kind"] == "branch" for op in document["operations"])
         count = len(module._exported_kernels)
@@ -158,7 +169,10 @@ def test_aot_selected_branch_graph_and_reverse(tmp_path):
     stats["artifact_bytes"] = artifact.stat().st_size
     with ZipFile(artifact) as archive:
         # Six shared kernels across every branch, default and repeated plan.
-        assert len([n for n in archive.namelist() if n.endswith(".bc")]) == 6
+        if arch != "vulkan":
+            assert len([n for n in archive.namelist() if n.endswith(".bc")]) == 6
+        else:
+            assert any(n.endswith(".spv") for n in archive.namelist())
         assert not any(n.endswith(".py") for n in archive.namelist())
     ti.reset()
     for mode in ("standalone", "borrowed"):
@@ -170,6 +184,7 @@ def test_aot_selected_branch_graph_and_reverse(tmp_path):
                 mode,
                 arch,
                 str(artifact),
+                *(["host"] if host else []),
             ],
             env=os.environ.copy(),
             capture_output=True,
@@ -181,11 +196,10 @@ def test_aot_selected_branch_graph_and_reverse(tmp_path):
     (tmp_path / "branch-graph-costs.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_aot_branch_export_keeps_unqualified_routes_closed(monkeypatch):
     build = branch_factory()
-    arch = ti.lang.impl.current_cfg().arch
-    for mode in ("auto", "portable", "native_required") if arch == ti.cuda else ("auto",):
+    for mode in ("auto", "native_required"):
         if mode == "native_required":
             monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
         graph = build("if", True, mode)

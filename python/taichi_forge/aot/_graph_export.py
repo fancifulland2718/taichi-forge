@@ -735,7 +735,14 @@ def _branch(context, node):
     children = (node._then,) if is_if else node._branches
     if fallback is not None:
         children = (*children, fallback)
-    if context.arch == core.Arch.cuda:
+    if context.arch == core.Arch.vulkan or (
+        context.arch == core.Arch.cuda and node.lowering_mode == "portable"
+    ):
+        # These routes already select on the host in JIT. Preserve that choice;
+        # a CUDA auto route remains ineligible because it may upgrade at replay.
+        bodies = [context.region(_node, child) for child in children]
+        lowering = "vulkan_host" if context.arch == core.Arch.vulkan else "cuda_host"
+    elif context.arch == core.Arch.cuda:
         selected = node._native_branches
         if (
             not node.supports_native_submission

@@ -41,11 +41,11 @@ def expect(arrays, name, choice, scale=1):
     assert struct.unpack("<2i", arrays["state"].read()) == (checks, -77 if gain else choice)
 
 
-def check(runtime, arch, path):
+def check(runtime, arch, path, host=False):
     start = time.perf_counter()
     module = runtime.load_module(path)
     stats = dict(load_ms=(time.perf_counter() - start) * 1000)
-    names = ["if", "if_else", "switch", "switch_default"] + (["nested"] if arch == "cpu" else [])
+    names = ["if", "if_else", "switch", "switch_default"] + (["nested"] if arch == "cpu" or host else [])
     for name in names:
         costs = {}
         arrays, prepared = frame(runtime, module, name, timings=costs)
@@ -59,7 +59,10 @@ def check(runtime, arch, path):
             arrays["choice"].write(struct.pack("<i", choice))
             prepared()
             expect(arrays, name, choice)
-        if arch == "cuda":
+        if host:
+            assert prepared.info["execution_kind"] == "host_control"
+            assert prepared.info["workspace_bytes"] == (4 if arch == "vulkan" else 0)
+        elif arch == "cuda":
             assert prepared.info["execution_kind"] == "cuda_graph"
             assert prepared.info["workspace_bytes"] == 24
         arrays["choice"].write(struct.pack("<i", 2))
@@ -107,13 +110,14 @@ def check(runtime, arch, path):
 
 
 if __name__ == "__main__":
-    mode, arch, path = sys.argv[1:]
+    mode, arch, path = sys.argv[1:4]
+    host = sys.argv[4:] == ["host"]
     if mode == "borrowed":
         import taichi_forge as ti
 
         ti.init(arch=getattr(ti, arch), offline_cache=False)
         with ti.aot.borrow_runtime() as runtime:
-            stats = check(runtime, arch, path)
+            stats = check(runtime, arch, path, host=host)
             module = runtime.load_module(path)
             arrays, prepared = frame(runtime, module, "if_else")
             prepared()
@@ -127,6 +131,6 @@ if __name__ == "__main__":
             prepared.close()
     else:
         with aot.Runtime(arch) as runtime:
-            stats = check(runtime, arch, path)
+            stats = check(runtime, arch, path, host=host)
         assert "taichi_forge" not in sys.modules
     print(json.dumps(stats))

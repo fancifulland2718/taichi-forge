@@ -322,6 +322,7 @@ typedef struct TiPreparedExecutionInfo {
   // 0: CPU ordered native batch; 1: CUDA Graph; 2: Vulkan fixed commands;
   // 3: CUDA Graph segments with synchronous native actions.
   // 4: CUDA Graph segments with stream-ordered native host actions.
+  // 5: Explicit host-selected control over prepared CUDA/Vulkan blocks.
   uint32_t execution_kind;
   // Known persistent argument image bytes, excluding driver/internal metadata.
   uint64_t argument_bytes;

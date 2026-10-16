@@ -434,9 +434,23 @@ Complete cuDSS refactor/solve recordings are verified inside IF/SWITCH with shar
 plans, independent bindings, live values, actual `kernel.grad` and explicit SPD
 adjoints. JIT and export use the same conditional-body qualification; ordinary
 capture capability alone does not qualify arbitrary providers.
-CUDA automatic export still rejects auto/portable/masked routes, nested control
-and unqualified native recordings inside branch bodies. Vulkan branches and branch binding
-families remain unconnected. Unqualified routes fail explicitly during export.
+Version 12 adds explicit `cuda_host` / `vulkan_host` branch lowerings. Existing
+Vulkan IF/SWITCH and CUDA Graphs using `lowering_mode="portable"` can be exported,
+including nested host branches. Execution information reports `host_control`:
+continuous native blocks are recorded during preparation; after the condition
+completes, the host reads one i32 and submits the selected body and suffix.
+Vulkan reuses one four-byte staging allocation per prepared instance and
+prerecorded copy commands. This route includes synchronized readback and multiple
+submission boundaries; it does not provide CUDA conditional's single root launch.
+Actual forward kernels, explicit `kernel.grad`, standalone/borrowed consumption,
+independent bindings and execution after producer retirement are verified across
+the three backends. CUDA host branches also cover cuBLAS with an explicit matrix
+adjoint. Each provider still needs its existing recording and reconstruction
+contracts. Host branches may contain native blocks; native GPU control containing
+a host branch is rejected during preparation.
+Defaults are unchanged. CUDA auto/masked export, automatic export of nested native
+branches and branch binding families remain unavailable. Unqualified routes fail
+explicitly during export. Explicit host lowerings cannot be labeled version 11.
 
 Persistent format version 3 also accepts explicit `while` operations:
 

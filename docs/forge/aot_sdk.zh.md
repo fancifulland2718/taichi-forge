@@ -343,8 +343,16 @@ CPU 嵌套分支、8 路 SWITCH、default/no-op、实际 `kernel.grad`、独立/
 关闭后的执行已验证。梯度须显式绑定，这不改变 JIT Graph 对隐式 ndarray 梯度的限制。
 cuDSS 完整 refactor/solve 录制的 IF/SWITCH 已验证共享计划、双绑定、活值、实际 `kernel.grad`
 及显式 SPD 伴随；同一个条件体资格检查由 JIT 和导出共用。普通 capture 资格不足以开放任意 provider。
-CUDA 自动导出仍不接受 auto/portable/masked 路线、嵌套控制或未取得条件体资格的 native recording；
-Vulkan 分支及分支 binding family 尚未接通。未取得资格的路线在导出时明确拒绝。
+版本 12 增加明确的 `cuda_host` / `vulkan_host` 分支 lowering。既有 Vulkan IF/SWITCH
+和 CUDA `lowering_mode="portable"` Graph 可自动导出，保留 host 选择及嵌套 host 分支。
+执行信息标为 `host_control`：连续原生块在准备期录制，条件完成后宿主读取一个 i32，再提交
+选中的 body 和后段。Vulkan 每个准备实例复用一份 4 字节 staging 和预录制复制命令；
+这条路线存在同步读回及多个提交边界，不具备 CUDA conditional 的单根图提交性质。
+三后端已验证实际前向和显式 `kernel.grad`、独立/借用消费、双绑定及生产端关闭后执行；
+CUDA host 分支也验证了 cuBLAS 和显式矩阵伴随。各 provider 仍须满足已有录制与资源重建合同。
+host 分支可以包含原生子块，GPU 原生控制体内包含 host 分支在准备期拒绝。
+默认策略不变；CUDA auto/masked 自动导出、原生嵌套分支自动导出及分支 binding family
+仍未开放。未取得资格的路线在导出时明确拒绝。显式 host lowering 不能伪装为版本 11。
 
 持久描述版本 3 还接受显式 `while` 操作：
 
