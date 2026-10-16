@@ -1296,6 +1296,12 @@ capture 导出还保存 `solve_group_f32` 的布尔参数 `disjoint_bindings=tru
 不会随 RHS 数量生成二次数量的成对约束。手写低层操作省略此参数时默认 `false`，
 继续允许只读 RHS 共享存储；输出仍不能与任何输入或其他输出重叠。
 
+`ti.linalg.record_sparse_solve` 的普通编译和 `SparseSolveRecipeProvider` 已选策略也支持
+此导出路径。归档保留已物化计划的排序/求解配置、`solve`/`factor_solve`/`refactor_solve`
+阶段和完整 RHS 组；消费端不重新搜索策略，也不会按 RHS 复制因子。固定 seed 与每次
+绑定当前数值的语义保持分离。Windows CUDA 小型 SPD 检查覆盖源关闭后的独立/借用消费、
+变化 RHS/数值、真实 `kernel.grad` 及显式对称伴随；不等于所有矩阵类别或控制组合已验证。
+
 普通 `CudssPlan.recording()`（`CudssSolveRecording`）也可导出冻结的 `solve` 资源，
 要求配对 private ABI 59。导出在原生存储/提交锁内检查成功分解的因子仍对应当前矩阵
 身份、pattern 和 numeric version，再读取 CSR 数据与原生配置；每计划每次导出只

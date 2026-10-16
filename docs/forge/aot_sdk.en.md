@@ -1666,6 +1666,15 @@ constraints. Explicit low-level operations default this parameter to `false`
 when omitted and continue to allow read-only RHS storage sharing; outputs must
 still be disjoint from every input and other output.
 
+Ordinary compilation of `ti.linalg.record_sparse_solve` and strategies selected
+by `SparseSolveRecipeProvider` also use this export path. Archives retain the
+materialized plan's ordering/solve configuration, `solve`/`factor_solve`/
+`refactor_solve` phase and complete RHS group. Consumers do not search again or
+duplicate factors per RHS. Fixed seeds remain distinct from values supplied on
+each invocation. Small Windows CUDA SPD checks cover standalone/borrowed use
+after source closure, changing RHS/values, actual `kernel.grad` and explicit
+symmetric adjoints; they do not qualify every matrix class or control composition.
+
 Ordinary `CudssPlan.recording()` (`CudssSolveRecording`) also exports a frozen
 `solve` resource with paired private ABI 59. Under the native storage/submission
 locks, export verifies that successful factors still match the matrix identity,

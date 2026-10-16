@@ -511,6 +511,11 @@ dense batched RHS。默认策略仍由 vendor 决定；请求不同 phase 不保
 魔改 CompileIQ 只接收 opaque complete recipe，不搜索库名或数值策略裸参数，也不改变普通
 `SparseSolver` auto 行为。
 
+普通编译及已选 sparse-solve Graph 可通过 `module.add_execution_plan(name, graph)`
+导出AOT。它保留实际排序/数值阶段、共享因子的完整RHS组和原始绑定不重叠合同，
+从私有seed重建资源，不在消费端重搜策略。固定/变化数值与前后向资格见
+[AOT SDK合同](aot_sdk.zh.md)。
+
 物化要求 adapter 的可选 configuration/allocator extension，以及对应 native Graph-owned capture
 能力。它建立私有 solver 存储和 retained stream，analysis 不进入 replay。capture 每个 region
 只记录一次数值更新及有序 solves，参数按 binding 独立持有。支持参数驻留的 native 在 capture 后

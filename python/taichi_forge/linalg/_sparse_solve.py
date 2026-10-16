@@ -166,6 +166,13 @@ class _SolveRecording(CudssCaptureRecording):
         )
         object.__setattr__(self, "_graph_physical_plan_id", source.physical_id(key))
 
+    def _export_aot(self, context):
+        # This concrete recipe adds provenance and a catalog memory report;
+        # execution still uses the materialized plan's frozen phase, selected
+        # configuration and complete shared-factor RHS group. Export its private
+        # seed, not the catalog's original mutable input or a newly selected plan.
+        return super()._export_aot(context)
+
     def _graph_provider_memory_report(self):
         from taichi_forge.hardware._memory import (
             HardwareMemoryComponent,

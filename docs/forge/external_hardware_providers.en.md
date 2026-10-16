@@ -655,6 +655,13 @@ choices: different requested phases do not guarantee different kernels or a
 speedup. Modified CompileIQ receives opaque complete recipes, not library names
 or numerical-policy knobs. Ordinary `SparseSolver` auto behavior is unchanged.
 
+Ordinarily compiled and selected sparse-solve Graphs export through
+`module.add_execution_plan(name, graph)`. Export retains the actual ordering and
+numerical phase, the complete shared-factor RHS group, and the original disjoint
+binding contract. Resources rebuild from the private seed without a consumer-side
+strategy search. See the [AOT SDK contract](aot_sdk.en.md) for fixed/live-value and
+forward/adjoint qualification.
+
 Materialization needs the adapter's optional configuration/allocator extensions
 and matching native Graph-owned capture capability. It creates private solver
 storage and a retained stream; analysis stays outside replay. Capture records
