@@ -10,6 +10,7 @@
 #include "taichi/system/profiler.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/util/environ_config.h"
+#include "taichi/runtime/control_encoding_cost.h"
 
 #include <algorithm>
 #include <array>
@@ -3461,9 +3462,9 @@ bool try_run_cuda_device_update_nested_control_graph(
   bool valid_iteration_limits =
       outer_max_iterations > 0 && outer_max_iterations <= 64;
   std::size_t boundary_cursor = outer_condition_dispatch_count;
-  std::size_t single_copy_repeated_dispatches = 0;
-  std::size_t repeated_dispatches = 0;
-  std::size_t controls_per_outer = 1;
+  NestedControlCostAccumulator encoding_cost(
+      dispatch_count, outer_condition_dispatch_count,
+      std::max(outer_max_iterations, 0));
   std::vector<std::array<std::size_t, 3>> boundaries;
   boundaries.reserve(inner_controls.size());
   for (const auto &inner : inner_controls) {
@@ -3489,62 +3490,31 @@ bool try_run_cuda_device_update_nested_control_graph(
         inner.dispatch_end >= inner.body_dispatch_begin
             ? inner.dispatch_end - inner.body_dispatch_begin
             : 0;
-    if (repeated > (std::numeric_limits<std::size_t>::max)() /
-                       std::max<std::int64_t>(inner.max_iterations, 1)) {
+    if (!encoding_cost.add_inner(
+            repeated, std::max<std::int64_t>(inner.max_iterations, 0))) {
       valid_iteration_limits = false;
-    } else {
-      single_copy_repeated_dispatches += repeated;
-      repeated_dispatches +=
-          repeated * static_cast<std::size_t>(inner.max_iterations);
-      controls_per_outer += static_cast<std::size_t>(inner.max_iterations);
     }
     boundaries.push_back({inner.condition_dispatch_begin,
                           inner.body_dispatch_begin, inner.dispatch_end});
     boundary_cursor = inner.dispatch_end;
   }
-  const std::size_t static_dispatches =
-      dispatch_count >= outer_condition_dispatch_count +
-                            single_copy_repeated_dispatches
-          ? dispatch_count - outer_condition_dispatch_count -
-                single_copy_repeated_dispatches
-          : (std::numeric_limits<std::size_t>::max)();
-  const std::size_t per_outer_dispatches =
-      static_dispatches <= (std::numeric_limits<std::size_t>::max)() -
-                               repeated_dispatches
-          ? static_dispatches + repeated_dispatches
-          : (std::numeric_limits<std::size_t>::max)();
-  const std::size_t encoded_dispatches =
-      valid_iteration_limits &&
-              per_outer_dispatches <=
-                  ((std::numeric_limits<std::size_t>::max)() -
-                   outer_condition_dispatch_count) /
-                      static_cast<std::size_t>(outer_max_iterations)
-          ? outer_condition_dispatch_count +
-                static_cast<std::size_t>(outer_max_iterations) *
-                    per_outer_dispatches
-          : (std::numeric_limits<std::size_t>::max)();
-  const std::size_t control_count =
-      valid_iteration_limits &&
-              controls_per_outer <=
-                  (std::numeric_limits<std::size_t>::max)() /
-                      static_cast<std::size_t>(outer_max_iterations)
-          ? static_cast<std::size_t>(outer_max_iterations) *
-                controls_per_outer
-          : (std::numeric_limits<std::size_t>::max)();
+  const auto cost = encoding_cost.finish();
   constexpr std::size_t kMaxEncodedDispatches = 4096;
   constexpr std::size_t kMaxPredicateGroups = 4096;
   if (compile_config.debug || !graph.cuda_expanded_control_eligible() ||
       dispatch_count == 0 || !valid_iteration_limits ||
       !ordered_boundaries ||
       final_outer_condition_begin >= dispatch_count ||
-      encoded_dispatches > kMaxEncodedDispatches ||
-      control_count > kMaxPredicateGroups ||
+      !cost || cost->expanded_payload_units > kMaxEncodedDispatches ||
+      cost->expanded_controllers > kMaxPredicateGroups ||
       outer_selector.get_nelement() != 1 ||
       outer_selector.get_element_data_type() != PrimitiveType::i32 ||
       outer_selector.owning_program() != &program) {
     return structural_fallback();
   }
 
+  const std::size_t control_count = cost->expanded_controllers;
+  const std::size_t controls_per_outer = cost->controllers_per_outer;
   const DeviceAllocation outer_allocation =
       outer_selector.get_device_allocation();
   std::vector<DeviceAllocation> inner_allocations;
@@ -4034,8 +4004,9 @@ bool try_run_cuda_masked_nested_control_graph(
   bool valid_iteration_limits =
       outer_max_iterations > 0 && outer_max_iterations <= 64;
   std::size_t boundary_cursor = outer_condition_dispatch_count;
-  std::size_t single_copy_repeated_dispatches = 0;
-  std::size_t repeated_dispatches = 0;
+  NestedControlCostAccumulator encoding_cost(
+      dispatch_count, outer_condition_dispatch_count,
+      std::max(outer_max_iterations, 0));
   std::vector<std::array<std::size_t, 3>> boundaries;
   boundaries.reserve(inner_controls.size());
   for (const auto &inner : inner_controls) {
@@ -4061,33 +4032,21 @@ bool try_run_cuda_masked_nested_control_graph(
         inner.dispatch_end >= inner.body_dispatch_begin
             ? inner.dispatch_end - inner.body_dispatch_begin
             : 0;
-    single_copy_repeated_dispatches += repeated;
-    repeated_dispatches +=
-        repeated * static_cast<std::size_t>(
-                       std::max<std::int64_t>(inner.max_iterations, 1));
+    if (!encoding_cost.add_inner(
+            repeated, std::max<std::int64_t>(inner.max_iterations, 0))) {
+      valid_iteration_limits = false;
+    }
     boundaries.push_back({inner.condition_dispatch_begin,
                           inner.body_dispatch_begin, inner.dispatch_end});
     boundary_cursor = inner.dispatch_end;
   }
-  const std::size_t static_dispatches =
-      dispatch_count >= outer_condition_dispatch_count +
-                            single_copy_repeated_dispatches
-          ? dispatch_count - outer_condition_dispatch_count -
-                single_copy_repeated_dispatches
-          : (std::numeric_limits<std::size_t>::max)();
-  const std::size_t encoded_dispatches =
-      valid_iteration_limits &&
-              static_dispatches <= 4096 && repeated_dispatches <= 4096
-          ? outer_condition_dispatch_count +
-                static_cast<std::size_t>(outer_max_iterations) *
-                    (static_dispatches + repeated_dispatches)
-          : (std::numeric_limits<std::size_t>::max)();
+  const auto cost = encoding_cost.finish();
   constexpr std::size_t kMaxEncodedDispatches = 4096;
   if (compile_config.debug || !graph.cuda_expanded_control_eligible() ||
       dispatch_count == 0 || !valid_iteration_limits ||
       !ordered_boundaries ||
       final_outer_condition_begin >= dispatch_count ||
-      encoded_dispatches > kMaxEncodedDispatches ||
+      !cost || cost->expanded_payload_units > kMaxEncodedDispatches ||
       outer_selector.get_nelement() != 1 ||
       outer_selector.get_element_data_type() != PrimitiveType::i32 ||
       outer_selector.owning_program() != &program) {

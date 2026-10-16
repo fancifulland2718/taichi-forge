@@ -3,6 +3,7 @@
 #include "taichi/common/filesystem.hpp"
 #include "taichi/util/environ_config.h"
 #include "taichi/system/profiler_annotation.h"
+#include "taichi/runtime/control_encoding_cost.h"
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
@@ -4032,17 +4033,9 @@ bool GfxRuntime::launch_graph_impl(
     }
     nested_task_ranges.reserve(nested_control->inner_controls.size());
     std::size_t task_cursor = nested_outer_condition_task_end;
-    std::uint64_t repeated_payload_tasks = 0;
-    std::uint64_t single_copy_payload_tasks = 0;
-    std::uint64_t inner_controller_actions = 0;
-    const auto add_product = [](std::uint64_t &sum, std::uint64_t count,
-                                std::uint64_t value) {
-      if (count &&
-          value > (std::numeric_limits<std::uint64_t>::max() - sum) / count)
-        return false;
-      sum += count * value;
-      return true;
-    };
+    NestedControlCostAccumulator encoding_cost(
+        total_tasks, nested_outer_condition_task_end,
+        nested_control->outer_max_iterations);
     for (const auto &inner : nested_control->inner_controls) {
       NestedTaskRange range;
       range.condition_begin =
@@ -4082,39 +4075,26 @@ bool GfxRuntime::launch_graph_impl(
         return reject();
       }
       const std::uint64_t payload_tasks = range.end - range.body_begin;
-      single_copy_payload_tasks += payload_tasks;
-      if (!add_product(repeated_payload_tasks, inner.inner_max_iterations,
-                       payload_tasks) ||
-          !add_product(
-              inner_controller_actions, 1,
-              (nested_result ? 2 : 0) +
-                  static_cast<std::uint64_t>(inner.inner_max_iterations)))
+      if (!encoding_cost.add_inner(payload_tasks, inner.inner_max_iterations))
         return reject();
       task_cursor = range.end;
       nested_task_ranges.push_back(std::move(range));
     }
-    const std::uint64_t static_tasks =
-        total_tasks - nested_outer_condition_task_end -
-        single_copy_payload_tasks;
-    std::uint64_t per_outer_actions = 1;
-    std::uint64_t encoded_actions = nested_result ? 2 : 0;
-    if (!add_product(per_outer_actions, 1, static_tasks) ||
-        !add_product(per_outer_actions, 1, repeated_payload_tasks) ||
-        !add_product(per_outer_actions, 1, inner_controller_actions) ||
-        !add_product(encoded_actions, 1, nested_outer_condition_task_end) ||
-        !add_product(encoded_actions, nested_control->outer_max_iterations,
-                     per_outer_actions))
+    const auto cost = encoding_cost.finish();
+    const auto encoded_actions =
+        cost ? cost->total_actions(nested_result != nullptr) : std::nullopt;
+    if (!encoded_actions)
       return reject();
     if (nested_result &&
-        encoded_actions > std::numeric_limits<std::uint32_t>::max())
+        *encoded_actions > std::numeric_limits<std::uint32_t>::max())
       return reject();  // Diagnostic counters have a uint32 representation.
     structured_strategy = GraphStructuredStrategy::compact;
     structured_group_counts = nested_task_ranges.front().group_counts;
     key.insert(key.end(),
-               {0xC101u, static_cast<std::uint64_t>(encoded_actions)});
+               {0xC101u, *encoded_actions});
     structure_key.insert(
         structure_key.end(),
-        {0xC101u, static_cast<std::uint64_t>(encoded_actions)});
+        {0xC101u, *encoded_actions});
   }
   const bool composed_single_task =
       total_tasks == 1 && dispatches.size() == 1 &&
