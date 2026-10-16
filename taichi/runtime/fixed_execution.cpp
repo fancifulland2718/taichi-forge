@@ -263,7 +263,7 @@ FixedExecution::FixedExecution(
               !loop->continue_while_nonzero || !flat(loop->condition) ||
               !flat(loop->body))
             throw std::invalid_argument(
-                "Selected CUDA device-update control requires flat kernel "
+                "Selected CUDA nested control requires flat kernel "
                 "regions on CUDA");
           loop->cuda_nested->validate(
               loop->condition.size(), loop->condition.size() + loop->body.size());
@@ -704,9 +704,10 @@ FixedExecution::FixedExecution(
           result->condition = prepare(loop.condition);
           result->body = prepare(loop.body);
           if (loop.cuda_nested) {
-            result->nested_update.emplace();
+            result->nested.emplace();
+            result->nested->encoding = loop.cuda_nested->encoding;
             for (const auto &inner : loop.cuda_nested->inners)
-              result->nested_update->inners.push_back(
+              result->nested->inners.push_back(
                   {cuda_pointer(inner.predicate), inner.condition_begin,
                    inner.body_begin, inner.end, inner.max_iterations});
           }

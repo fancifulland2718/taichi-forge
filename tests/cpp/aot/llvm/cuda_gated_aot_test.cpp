@@ -8,6 +8,9 @@
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/runtime/fixed_execution.h"
+#include "taichi/rhi/cuda/graph_region_builder.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 
@@ -179,6 +182,268 @@ TEST(CudaGatedAot, LoadsDeclaredCodeAndRejectsMismatchedFrames) {
              (samples[7] + samples[8]) / 2,
              captured.packets[0].arg_buffer_prefix_size +
                  captured.packets[1].arg_buffer_prefix_size);
+}
+
+struct MaskedAotFrame {
+  Device &device;
+  llvm_aot::KernelImpl *ordinary, *forward, *reverse, *control, *gated_control;
+  std::vector<DeviceAllocationUnique> storage;
+  std::array<float, 4> values;
+
+  MaskedAotFrame(Device &device, aot::Module &module, float offset)
+      : device(device) {
+    const auto entry = [&](const char *name) {
+      return dynamic_cast<llvm_aot::KernelImpl *>(module.get_kernel(name));
+    };
+    ordinary = entry("forward");
+    forward = entry("gated_forward");
+    reverse = entry("gated_reverse");
+    control = entry("control");
+    gated_control = entry("gated_control");
+    for (int slot = 0; slot < 5; ++slot) {
+      auto allocation = device.allocate_memory_unique({slot == 4 ? 56u : 16u});
+      if (allocation.second != RhiResult::success)
+        throw std::runtime_error("Cannot allocate masked AOT fixture");
+      storage.push_back(std::move(allocation.first));
+    }
+    for (std::size_t i = 0; i < values.size(); ++i)
+      values[i] = offset + i;
+    CUDADriver::get_instance().memcpy_host_to_device(address(0), values.data(), 16);
+  }
+  DevicePtr ptr(int slot, std::size_t word = 0) {
+    auto result = storage[slot]->get_ptr();
+    result.offset = word * 4;
+    return result;
+  }
+  void *address(int slot, std::size_t word = 0) {
+    return static_cast<char *>(static_cast<cuda::CudaDevice &>(device)
+                                   .get_alloc_info(ptr(slot)).ptr) + word * 4;
+  }
+  struct Prepared {
+    std::unique_ptr<FixedExecution> fixed;
+    std::unique_ptr<cuda::FixedGraph> direct;
+    void run() { fixed ? fixed->run() : direct->run(); }
+  };
+  Prepared prepare(std::uint64_t outer, std::uint64_t inner, bool direct,
+                   bool conditional = false, int invalid = 0) {
+    auto &driver = CUDADriver::get_instance();
+    driver.memsetd32(address(4), 99, 14);
+    std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
+    const auto dispatch = [&](llvm_aot::KernelImpl *kernel, int operation) {
+      auto context = std::make_unique<LaunchContextBuilder>(kernel);
+      if (operation >= 0) {
+        context->set_arg_external_array_with_shape(
+            {0}, reinterpret_cast<std::uintptr_t>(address(4)), 56, {14});
+        context->set_arg_external_array_with_shape(
+            {1}, reinterpret_cast<std::uintptr_t>(address(3)), 16, {4});
+        context->set_arg_int({2}, operation);
+      } else {
+        context->set_arg_external_array_with_shape(
+            {0}, reinterpret_cast<std::uintptr_t>(address(0)), 16, {4},
+            reinterpret_cast<std::uintptr_t>(address(2)));
+        context->set_arg_external_array_with_shape(
+            {1}, reinterpret_cast<std::uintptr_t>(address(1)), 16, {4},
+            reinterpret_cast<std::uintptr_t>(address(3)));
+      }
+      auto result = FixedExecution::Dispatch{kernel, context.get()};
+      contexts.push_back(std::move(context));
+      return result;
+    };
+    auto loop = std::make_shared<FixedExecution::While>();
+    loop->predicate = ptr(4, 1);
+    loop->max_iterations = outer;
+    loop->cuda_nested.emplace();
+    loop->cuda_nested->encoding = CudaNestedControlEncoding::masked;
+    loop->cuda_nested->inners.push_back({ptr(4, 3), 1, 2, 5, inner});
+    loop->cuda_nested->inners.push_back({ptr(4, 11), 5, 6, 9, inner});
+    loop->condition = {dispatch(invalid == 2 ? gated_control : control, 0)};
+    loop->body = {dispatch(gated_control, 1), dispatch(gated_control, 2),
+                  dispatch(invalid == 1 ? ordinary : forward, -1),
+                  dispatch(reverse, -1), dispatch(gated_control, 6),
+                  dispatch(gated_control, 7), dispatch(forward, -1),
+                  dispatch(reverse, -1), dispatch(gated_control, 3)};
+    if (invalid == 3)
+      loop->body.front() = FixedExecution::BufferFill{ptr(4, 2), 4, 0};
+    if (invalid == 4) {
+      auto &bounded = std::get<FixedExecution::Dispatch>(loop->body.front());
+      bounded.bounded_extent = ptr(4, 4);
+      bounded.bounded_capacity = 1;
+    }
+    Prepared result;
+    if (direct) {
+      const auto native_dispatch = [](const FixedExecution::Dispatch &source) {
+        auto &entry = static_cast<llvm_aot::KernelImpl &>(*source.kernel);
+        return cuda::FixedGraph::Dispatch{
+            &static_cast<cuda::KernelLauncher &>(entry.launcher()),
+            entry.handle(), source.context, {}, {}};
+      };
+      auto native = std::make_shared<cuda::FixedGraph::While>();
+      native->predicate = address(4, 1);
+      native->max_iterations = outer;
+      native->nested.emplace();
+      native->nested->encoding = CudaNestedControlEncoding::masked;
+      native->nested->inners.push_back({address(4, 3), 1, 2, 5, inner});
+      native->nested->inners.push_back({address(4, 11), 5, 6, 9, inner});
+      for (const auto &item : loop->condition)
+        native->condition.emplace_back(
+            native_dispatch(std::get<FixedExecution::Dispatch>(item)));
+      for (const auto &item : loop->body)
+        native->body.emplace_back(
+            native_dispatch(std::get<FixedExecution::Dispatch>(item)));
+      // The identical descriptor really occurs twice at the CUDA layer, where
+      // ordinary arguments can share but gate-prefixed packets cannot.
+      std::vector<cuda::FixedGraph::Operation> operations{
+          native_dispatch(dispatch(control, 4)), native, native,
+          native_dispatch(dispatch(control, 5))};
+      result.direct = std::make_unique<cuda::FixedGraph>(operations);
+      EXPECT_EQ(result.direct->control_bytes(), 24);
+    } else {
+      std::vector<FixedExecution::Operation> operations{
+          FixedExecution::BufferFill{ptr(4, 7), 4, 77}, loop, loop,
+          FixedExecution::BufferCopy{ptr(4, 8), ptr(4, 6), 4}};
+      if (conditional) {
+        auto branch = std::make_shared<FixedExecution::Branch>();
+        branch->selector = ptr(4, 4);
+        branch->selection = {BranchSelection::Kind::nonzero, true};
+        branch->bodies = {{FixedExecution::BufferFill{ptr(4, 7), 4, 11}},
+                          {FixedExecution::BufferFill{ptr(4, 7), 4, 22}}};
+        operations.emplace_back(std::move(branch));
+      }
+      result.fixed = std::make_unique<FixedExecution>(Arch::cuda, device, nullptr,
+                                                     operations);
+      EXPECT_EQ(result.fixed->execution_kind(), 1);
+    }
+    std::array<std::uint32_t, 14> before;
+    driver.memcpy_device_to_host(before.data(), address(4), 56);
+    for (auto value : before)
+      EXPECT_EQ(value, 99);  // Preparation cannot execute the prefix/condition.
+    return result;  // Every cold source descriptor/context has been discarded.
+  }
+  void reset(std::uint32_t outer, std::uint32_t inner) {
+    auto &driver = CUDADriver::get_instance();
+    std::array<float, 4> sentinel{-99, -99, -99, -99}, one{1, 1, 1, 1};
+    driver.memcpy_host_to_device(address(1), sentinel.data(), 16);
+    driver.memsetd32(address(2), 0, 4);
+    driver.memcpy_host_to_device(address(3), one.data(), 16);
+    std::array<std::uint32_t, 14> state{};
+    state[4] = outer;
+    state[5] = inner;
+    state[12] = inner / 2;
+    driver.memcpy_host_to_device(address(4), state.data(), 56);
+  }
+  void check(std::uint32_t outer, std::uint32_t inner, std::uint64_t outer_budget,
+             std::uint64_t inner_budget, bool conditional = false) {
+    auto &driver = CUDADriver::get_instance();
+    const auto count = std::min<std::uint64_t>(outer, outer_budget);
+    const auto steps = 2 * count * (std::min<std::uint64_t>(inner, inner_budget) +
+                                  std::min<std::uint64_t>(inner / 2, inner_budget));
+    std::array<std::uint32_t, 14> state;
+    driver.memcpy_device_to_host(state.data(), address(4), 56);
+    EXPECT_EQ(state[0], count);
+    EXPECT_EQ(state[6], steps);
+    EXPECT_EQ(state[7], conditional ? (outer ? 11 : 22) : 77);
+    EXPECT_EQ(state[8], steps);
+    EXPECT_EQ(state[9], 2);
+    std::array<float, 4> y, dx, dy;
+    driver.memcpy_device_to_host(y.data(), address(1), 16);
+    driver.memcpy_device_to_host(dx.data(), address(2), 16);
+    driver.memcpy_device_to_host(dy.data(), address(3), 16);
+    for (std::size_t i = 0; i < y.size(); ++i) {
+      EXPECT_EQ(y[i], steps ? values[i] * values[i] : -99);
+      EXPECT_EQ(dx[i], steps * 2 * values[i]);
+      EXPECT_EQ(dy[i], steps ? 0 : 1);
+    }
+  }
+};
+
+TEST(CudaGatedAot, FixedMaskedExecutionOwnsGatesAndPreservesActualGradients) {
+  const auto *folder = std::getenv("TAICHI_AOT_FOLDER_PATH");
+  if (!folder || !is_cuda_api_available())
+    GTEST_SKIP() << "Requires the saved CUDA gated-code fixture";
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  LlvmRuntimeExecutor executor(config, nullptr);
+  uint64 *result_buffer = nullptr;
+  executor.materialize_runtime(nullptr, &result_buffer);
+  LLVM::AotModuleParams params;
+  params.module_path = folder;
+  params.executor_ = &executor;
+  params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
+      cuda::KernelLauncher::Config{&executor});
+  auto module = LLVM::make_aot_module(std::move(params));
+  auto &device = *executor.get_compute_device();
+  const auto registration_begin = std::chrono::steady_clock::now();
+  MaskedAotFrame first(device, *module, 1), second(device, *module, 2);
+  const auto registration_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - registration_begin).count();
+  auto &driver = CUDADriver::get_instance();
+  const auto first_prepare_begin = std::chrono::steady_clock::now();
+  auto sibling = second.prepare(2, 3, false);
+  const auto first_prepare_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - first_prepare_begin).count();
+  const auto registered = first.control->launcher().debug_registered_kernel_count();
+  for (bool direct : {false, true}) {
+    for (int invalid : {1, 2})
+      EXPECT_ANY_THROW(first.prepare(2, 3, direct, false, invalid));
+    if (!direct)
+      for (int invalid : {3, 4})
+        EXPECT_ANY_THROW(first.prepare(2, 3, false, false, invalid));
+    for (const auto budget : {std::array<std::uint64_t, 2>{2, 3}, {0, 3}, {2, 0}}) {
+      auto call = first.prepare(budget[0], budget[1], direct);
+      for (const auto limits : {std::array<std::uint32_t, 2>{0, 0}, {2, 1},
+                                {7, 7}, {1, 0}, {0, 2}}) {
+        first.reset(limits[0], limits[1]);
+        second.reset(limits[1], limits[0]);
+        call.run();
+        sibling.run();
+        driver.stream_synchronize(nullptr);
+        first.check(limits[0], limits[1], budget[0], budget[1]);
+        second.check(limits[1], limits[0], 2, 3);
+      }
+      first.reset(2, 2);
+      call.run();
+      call = {};  // Retirement waits before freeing the captured gate prefix.
+      first.check(2, 2, budget[0], budget[1]);
+    }
+  }
+  const bool conditional_sibling = cuda::GraphRegionBuilder::available();
+  if (conditional_sibling) {
+    auto mixed = first.prepare(2, 3, false, true);
+    for (const auto outer : {2u, 0u}) {
+      first.reset(outer, 1);
+      mixed.run();
+      driver.stream_synchronize(nullptr);
+      first.check(outer, 1, 2, 3, true);
+    }
+  }
+  const auto begin = std::chrono::steady_clock::now();
+  auto measured = first.prepare(2, 3, true);
+  const auto prepare_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - begin).count();
+  std::array<double, 16> samples;
+  first.reset(2, 1);
+  measured.run();
+  driver.stream_synchronize(nullptr);
+  for (auto &sample : samples) {
+    first.reset(2, 1);
+    const auto start = std::chrono::steady_clock::now();
+    measured.run();
+    driver.stream_synchronize(nullptr);
+    sample = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - start).count();
+  }
+  first.check(2, 1, 2, 3);
+  std::sort(samples.begin(), samples.end());
+  fmt::print("FIXED_COSTS {{\"registration_and_storage_ms\":{},"
+             "\"first_prepare_ms\":{},\"warm_prepare_ms\":{},"
+             "\"warm_complete_median_us\":{},\"arguments_bytes\":{},"
+             "\"control_bytes\":{},\"nodes\":{},"
+             "\"conditional_sibling_checked\":{}}}\n",
+             registration_ms, first_prepare_ms, prepare_ms,
+             (samples[7] + samples[8]) / 2,
+             measured.direct->argument_bytes(), measured.direct->control_bytes(),
+             measured.direct->node_count(), conditional_sibling);
+  EXPECT_EQ(first.control->launcher().debug_registered_kernel_count(), registered);
 }
 
 }  // namespace

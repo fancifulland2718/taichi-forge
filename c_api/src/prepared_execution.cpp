@@ -996,6 +996,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
         bound->continue_while_nonzero = loop.continue_while_nonzero;
         if (loop.cuda_nested) {
           bound->cuda_nested.emplace();
+          bound->cuda_nested->encoding = loop.cuda_nested->encoding;
           for (const auto &source : loop.cuda_nested->inners)
             bound->cuda_nested->inners.push_back(
                 {control_pointer(source.predicate), source.condition_begin,

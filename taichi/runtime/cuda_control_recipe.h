@@ -7,7 +7,9 @@
 
 namespace taichi::lang {
 
-// Selected depth-2 device-update encoding. Store one copy of physical
+enum class CudaNestedControlEncoding { device_update, masked };
+
+// Selected depth-2 encoding. Store one copy of physical
 // dispatches, not expanded nodes or consumer device handles. Condition/body
 // ranges include the selected tail conditions and index their concatenation.
 template <typename Binding>
@@ -20,9 +22,12 @@ struct CudaNestedControlRecipe {
     std::uint64_t max_iterations{0};
   };
   std::vector<Inner> inners;
+  CudaNestedControlEncoding encoding{CudaNestedControlEncoding::device_update};
 
   void validate(std::size_t initial, std::size_t dispatches) const {
-    if (!initial || initial >= dispatches || inners.empty())
+    if (!initial || initial >= dispatches || inners.empty() ||
+        (encoding != CudaNestedControlEncoding::device_update &&
+         encoding != CudaNestedControlEncoding::masked))
       throw std::invalid_argument("Invalid selected CUDA nested control");
     auto cursor = initial;
     for (const auto &inner : inners) {

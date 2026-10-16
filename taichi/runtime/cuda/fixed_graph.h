@@ -57,7 +57,7 @@ class FixedGraph {
     std::vector<Operation> condition;
     std::vector<Operation> body;
     // Explicit physical selection; never replaced by conditional nodes.
-    std::optional<CudaNestedControlRecipe<void *>> nested_update;
+    std::optional<CudaNestedControlRecipe<void *>> nested;
   };
   explicit FixedGraph(const std::vector<Dispatch> &dispatches,
                       std::shared_ptr<RuntimeFaultDomain> fault_domain = {});

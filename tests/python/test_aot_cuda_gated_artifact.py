@@ -39,6 +39,38 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
         for i in x:
             y[i] = x[i] * x[i]
 
+    @ti.kernel
+    def control(state: ti.types.ndarray(ti.i32, 1), dy: ti.types.ndarray(ti.f32, 1), operation: ti.i32):
+        if operation == 0:
+            state[0] = 0
+            state[1] = state[4] > 0
+            state[9] += 1
+        elif operation == 1:
+            state[2] = 0
+            state[3] = state[5] > 0
+        elif operation == 2:
+            for i in ti.static(range(4)):
+                dy[i] = 1.0
+            state[2] += 1
+            state[6] += 1
+            state[3] = state[2] < state[5]
+        elif operation == 3:
+            state[0] += 1
+            state[1] = state[0] < state[4]
+        elif operation == 4:
+            state[7] = 77
+        elif operation == 5:
+            state[8] = state[6]
+        elif operation == 6:
+            state[10] = 0
+            state[11] = state[12] > 0
+        elif operation == 7:
+            for i in ti.static(range(4)):
+                dy[i] = 1.0
+            state[10] += 1
+            state[6] += 1
+            state[11] = state[10] < state[12]
+
     caps = (
         [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
         if artifact_format == "cubin"
@@ -48,11 +80,12 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
     begin = time.perf_counter()
     module.add_kernel(forward, name="forward")
     module.add_kernel(forward.grad, name="reverse")
+    module.add_kernel(control, name="control")
     costs = dict(ordinary_compile_ms=(time.perf_counter() - begin) * 1000)
     begin = time.perf_counter()
     # Internal selected-code producer entry. Graph lowering will call this only
     # for variants required by a frozen masked recipe, in its own change.
-    for name in ("forward", "reverse"):
+    for name in ("forward", "reverse", "control"):
         compiled = module._exported_kernels[name]
         module._aot_builder._add_with_launch_abi("gated_" + name, compiled, "cuda_graph_gate_v1")
         module._content.append("kernel:gated_" + name)
@@ -68,6 +101,7 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
     assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == {
         "gated_forward": "cuda_graph_gate_v1",
         "gated_reverse": "cuda_graph_gate_v1",
+        "gated_control": "cuda_graph_gate_v1",
     }
     assert len(metadata["launch_abi_sha256"]) == 64
     assert (directory / f"gated_forward.{artifact_format}").is_file()
@@ -76,16 +110,21 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
     # checks closed/open/closed gates, rebinding and ordinary-code isolation.
     begin = time.perf_counter()
     result = subprocess.run(
-        [str(executable), "--gtest_filter=CudaGatedAot.LoadsDeclaredCodeAndRejectsMismatchedFrames"],
+        [str(executable), "--gtest_filter=CudaGatedAot.*"],
         env=dict(os.environ, TAICHI_AOT_FOLDER_PATH=str(directory)),
         capture_output=True,
         text=True,
         timeout=90,
     )
-    assert result.returncode == 0 and "[  PASSED  ] 1 test." in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0 and "[  PASSED  ] 2 tests." in result.stdout, result.stdout + result.stderr
     costs["native_consumer_process_ms"] = (time.perf_counter() - begin) * 1000
     costs["native_graph"] = json.loads(
         next(line.removeprefix("GATE_COSTS ") for line in result.stdout.splitlines() if line.startswith("GATE_COSTS "))
+    )
+    costs["fixed_graph"] = json.loads(
+        next(
+            line.removeprefix("FIXED_COSTS ") for line in result.stdout.splitlines() if line.startswith("FIXED_COSTS ")
+        )
     )
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
