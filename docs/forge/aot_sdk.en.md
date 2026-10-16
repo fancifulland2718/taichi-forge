@@ -2656,7 +2656,10 @@ public files require another version or output directory without rebuilding host
 extensions. `SOURCE_DATE_EPOCH` is honored, with the earliest ZIP timestamp as the
 default. An installed fixture verifies public resources, stubs, entry points,
 aliases and two static sizes with forward/Tape gradients on CPU/CUDA/Vulkan.
-A prebuilt 401-module SAP closure also passes wheel installation and a bounded
-CUDA SAP/AOT regression. This does not qualify the complete GeoPhys public API,
+A frozen 481-module GeoPhys closure passes installed public scene/runtime calls
+for consumer-created two-sphere and three-box MJCF scenes on Windows CPU, CUDA
+and Vulkan, with private source access denied and source/analytic references.
+The installed closure also passes bounded CUDA SAP export and independent AOT
+consumption. This does not qualify the complete GeoPhys public API,
 dependency locks, all solver branches or nonlinear solver gradients; those remain
 separate application/deployment work.

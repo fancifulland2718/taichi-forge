@@ -2042,5 +2042,7 @@ setuptools生成正确的原生wheel标签、`METADATA`、`WHEEL`和`RECORD`，�
 已有wheel不可变；相同输入可复现。公开文件改变时换版本或输出目录，宿主扩展无需重编译。
 遵守`SOURCE_DATE_EPOCH`，默认使用ZIP格式最早时间戳。小型已安装wheel已验证公开资源、
 stubs、entry points、别名及CPU/CUDA/Vulkan两种静态尺寸的前向/Tape梯度。
-现有401模块SAP闭包也通过wheel安装和小规模CUDA SAP/AOT回归；这不等于整个GeoPhys
+冻结的481模块GeoPhys闭包已通过安装后的公开scene/runtime调用：Windows CPU、CUDA、
+Vulkan分别创建两个球体和三个箱体的MJCF新场景，拒绝访问内部源码，并对照源码及解析解。
+该安装包也通过小规模CUDA SAP导出和独立AOT消费；这不等于整个GeoPhys
 公开API、依赖锁、所有solver分支或非线性求解器反向已取得资格，后者仍是应用/部署工作。
