@@ -748,9 +748,9 @@ def _branch(context, node):
             len(counts) != len(children)
             or any(count <= 0 for count in counts)
             or sum(counts) != selected.physical_dispatch_count
-            or any(manifest.execution_kind != "kernel_dispatch" for manifest in selected.native_action_manifests)
+            or not selected.compiled_graph._cuda_conditional_body_eligible()
         ):
-            raise TaichiRuntimeError("AOT CUDA branch requires its selected ordinary-kernel boundaries")
+            raise TaichiRuntimeError("AOT CUDA branch requires its selected qualified conditional-body boundaries")
         # Export the actual combined physical sequence used by the native branch
         # builder. Recompiling individual logical children could lose its recipe.
         offsets = []

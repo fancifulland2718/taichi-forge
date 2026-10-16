@@ -422,15 +422,20 @@ This explicit-plan slice is verified on CPU/CUDA with branch/loop nesting,
 independent bindings, actual forward/reverse kernels and conditional cuBLAS with
 an explicit matrix adjoint. It does not differentiate the control structure.
 `Module.add_execution_plan(name, graph, gradients=...)` also exports CPU
-IF/SWITCH and ordinary-kernel CUDA branches explicitly using `native_required`
+IF/SWITCH and CUDA branches containing ordinary kernels or qualified provider
+commands, explicitly using `native_required`
 with the selected conditional route. It preserves physical branch order,
 prefix/suffix operations, private condition storage and fixed scalars; shared
 kernels are stored once. CPU nesting, eight-way SWITCH, default/no-op behavior,
 actual `kernel.grad`, standalone/borrowed consumption and execution after
 producer retirement are verified. Gradients require explicit bindings; JIT
 Graph restrictions on implicit ndarray gradients remain unchanged.
+Complete cuDSS refactor/solve recordings are verified inside IF/SWITCH with shared
+plans, independent bindings, live values, actual `kernel.grad` and explicit SPD
+adjoints. JIT and export use the same conditional-body qualification; ordinary
+capture capability alone does not qualify arbitrary providers.
 CUDA automatic export still rejects auto/portable/masked routes, nested control
-and native recordings inside branch bodies. Vulkan branches and branch binding
+and unqualified native recordings inside branch bodies. Vulkan branches and branch binding
 families remain unconnected. Unqualified routes fail explicitly during export.
 
 Persistent format version 3 also accepts explicit `while` operations:
