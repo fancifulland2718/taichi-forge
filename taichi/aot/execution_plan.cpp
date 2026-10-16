@@ -13,6 +13,13 @@ namespace taichi::lang::aot {
 using namespace execution_json;
 
 namespace {
+bool flat_kernels(const std::vector<ExecutionPlan::Operation> &region) {
+  return std::all_of(region.begin(), region.end(), [](const auto &op) {
+    const auto *kernel = std::get_if<ExecutionPlan::Kernel>(&op);
+    return kernel && !kernel->indirect_packet && !kernel->bounded_range;
+  });
+}
+
 void parse_cuda_control(const JsonValue &lowering,
                         ExecutionPlan::While &loop,
                         std::set<std::string> &arguments,
@@ -27,12 +34,6 @@ void parse_cuda_control(const JsonValue &lowering,
       (!flat && (!loop.continue_while_nonzero || !lowering["inners"].is_arr())))
     throw std::invalid_argument(
         "Selected CUDA control requires a matching plan version and recipe 1");
-  const auto flat_kernels = [](const auto &region) {
-    return std::all_of(region.begin(), region.end(), [](const auto &op) {
-      const auto *kernel = std::get_if<ExecutionPlan::Kernel>(&op);
-      return kernel && !kernel->indirect_packet && !kernel->bounded_range;
-    });
-  };
   if (!flat_kernels(loop.condition) || !flat_kernels(loop.body))
     throw std::invalid_argument(
         "CUDA control requires flat kernels without launch overrides");
@@ -78,7 +79,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 15)
+    if (version < 1 || version > 16)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -137,6 +138,8 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             branch->lowering = Branch::Lowering::cuda_host;
           else if (version >= 12 && route == "vulkan_host")
             branch->lowering = Branch::Lowering::vulkan_host;
+          else if (version >= 16 && route == "cuda_masked")
+            branch->lowering = Branch::Lowering::cuda_masked;
           else
             throw std::invalid_argument("Unsupported branch lowering");
           const auto &bodies = step["bodies"];
@@ -149,6 +152,12 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             branch->bodies.emplace_back();
             parse_steps(body, branch->bodies.back(), true);
           }
+          if (branch->lowering == Branch::Lowering::cuda_masked &&
+              (!flat_kernels(branch->condition) ||
+               !std::all_of(branch->bodies.begin(), branch->bodies.end(),
+                            flat_kernels)))
+            throw std::invalid_argument(
+                "CUDA masked branches require flat kernels without launch overrides");
           operations.emplace_back(std::move(branch));
         } else if (kind == "cuda_parallel") {
           if (version < 9)

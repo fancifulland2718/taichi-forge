@@ -36,6 +36,8 @@ def expect(arrays, name, value, scale=1):
         gain = 1 if value else 2 if fallback else 0
     else:
         gain = value + 1 if 0 <= value < 8 else 9 if fallback else 0
+    if name == "switch_empty" and value == 7:
+        gain = 0
     assert struct.unpack("<2i", arrays["state"].read()) == (checks, -77 if gain else value)
     xs = [scale * (i - 8) for i in range(17)]
     assert list(struct.unpack("<17f", arrays["y"].read())) == ([gain * x * x for x in xs] if gain else [-91] * 17)
@@ -43,12 +45,12 @@ def expect(arrays, name, value, scale=1):
     assert gradient == [repeats * 2 * gain * x for x in xs], (name, value, gain, gradient)
 
 
-def check(runtime, arch, path, host=False):
+def check(runtime, arch, path, host=False, masked=False):
     start = time.perf_counter()
     module = runtime.load_module(path)
     loaded = time.perf_counter()
     stats = dict(load_ms=(loaded - start) * 1000)
-    for name in ("if", "if_else", "switch", "switch_default", "nested"):
+    for name in ("if", "if_else", "switch", "switch_default", "switch_empty" if masked else "nested"):
         costs = {}
         arrays, call = frame(runtime, module, name, timings=costs)
         arrays["choice"].write(struct.pack("<i", 2))
@@ -63,16 +65,18 @@ def check(runtime, arch, path, host=False):
             expect(arrays, name, value)
         info = call.info
         assert info["launches"] == 9
-        assert (
-            info["dispatch_count"]
-            == {"if": 3, "if_else": 5, "switch": 17, "switch_default": 19, "nested": 35 if host else 18}[name]
+        expected_dispatches = (
+            {"if": 4, "if_else": 7, "switch": 25, "switch_default": 28, "switch_empty": 22}
+            if masked
+            else {"if": 3, "if_else": 5, "switch": 17, "switch_default": 19, "nested": 35 if host else 18}
         )
+        assert info["dispatch_count"] == expected_dispatches[name]
         if host:
             assert info["execution_kind"] == "host_control"
             assert info["workspace_bytes"] == (4 if arch == "vulkan" else 0)
         elif arch == "cuda":
             assert info["execution_kind"] == "cuda_graph"
-            assert info["workspace_bytes"] == (80 if name == "nested" else 24)
+            assert info["workspace_bytes"] == (4 if masked else 80 if name == "nested" else 24)
         # Excludes readback of correctness results; completion is one owner wait.
         arrays["choice"].write(struct.pack("<i", 2))
         begin_warm = time.perf_counter()
@@ -94,7 +98,7 @@ def check(runtime, arch, path, host=False):
         for array in arrays.values():
             array.close()
 
-    if arch == "cuda":
+    if arch == "cuda" and not masked:
         stats["provider"] = provider_branch(runtime, module, host=host)
 
     first, one = frame(runtime, module, "switch")
@@ -114,7 +118,12 @@ def check(runtime, arch, path, host=False):
         has_default=False,
         condition=[],
         bodies=[[]],
-        lowering=dict(kind="cpu" if arch == "cpu" else f"{arch}_host" if host else "cuda_conditional", version=1),
+        lowering=dict(
+            kind=(
+                "cuda_masked" if masked else "cpu" if arch == "cpu" else f"{arch}_host" if host else "cuda_conditional"
+            ),
+            version=1,
+        ),
     )
     for dtype, size in (("f32", 1), ("i32", 2)):
         invalid = runtime.ndarray(dtype, size)
@@ -134,7 +143,27 @@ def check(runtime, arch, path, host=False):
         raise AssertionError("Backend lowering silently changed")
     empty = module.prepare_execution(aot.ExecutionPlan([region]), dict(selector=first["choice"]))
     empty()
+    if masked:
+        assert empty.info["workspace_bytes"] == empty.info["argument_bytes"] == 0
     empty.close()
+    if masked:
+        bad = dict(region, bodies=[[dict(kind="kernel", entry="forward", arguments=["x", "y", "gain"])]])
+        try:
+            module.prepare_execution(
+                aot.ExecutionPlan([bad], gradients={"x": "gradient", "y": "dy"}),
+                dict(
+                    selector=first["choice"],
+                    x=first["x"],
+                    y=first["y"],
+                    gradient=first["gradient"],
+                    dy=second["gradient"],
+                    gain=aot.Scalar("f32", 1),
+                ),
+            )
+        except aot.AotError as error:
+            assert "Unsupported fixed CUDA Graph dispatch" in str(error), str(error)
+        else:
+            raise AssertionError("Ordinary body entry was accepted as gated code")
     one()
     first["x"].close()  # Closing a dependency retires submitted work.
     try:
@@ -202,12 +231,13 @@ def provider_branch(runtime, module, host=False):
 if __name__ == "__main__":
     mode, arch, path = sys.argv[1:4]
     host = sys.argv[4:] == ["host"]
+    masked = sys.argv[4:] == ["masked"]
     if mode == "borrowed":
         import taichi_forge as ti
 
         ti.init(arch=getattr(ti, arch), offline_cache=False)
         with ti.aot.borrow_runtime() as runtime:
-            stats = check(runtime, arch, path, host=host)
+            stats = check(runtime, arch, path, host=host, masked=masked)
             module = runtime.load_module(path)
             arrays, call = frame(runtime, module, "if_else")
             call()
@@ -221,6 +251,6 @@ if __name__ == "__main__":
             call.close()
     else:
         with aot.Runtime(arch) as runtime:
-            stats = check(runtime, arch, path, host=host)
+            stats = check(runtime, arch, path, host=host, masked=masked)
         assert "taichi_forge" not in sys.modules
     print("RESULT " + json.dumps(stats, sort_keys=True))

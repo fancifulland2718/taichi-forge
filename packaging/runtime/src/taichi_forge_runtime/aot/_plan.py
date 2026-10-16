@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 15
+_MAX_EXECUTION_PLAN_VERSION = 16
 
 
 def _unique_fields(pairs):
@@ -25,7 +25,8 @@ def _control_version(steps):
         if isinstance(op, dict) and op.get("kind") == "branch":
             lowering = op.get("lowering")
             host = isinstance(lowering, dict) and lowering.get("kind") in ("cuda_host", "vulkan_host")
-            version = max(version, 12 if host else 11)
+            masked = isinstance(lowering, dict) and lowering.get("kind") == "cuda_masked"
+            version = max(version, 16 if masked else 12 if host else 11)
             regions = [op.get("condition")]
             if isinstance(op.get("bodies"), list):
                 regions.extend(op["bodies"])
@@ -166,6 +167,10 @@ class ExecutionPlan:
         if "initialization" in document and not document["initialization"]:
             raise ValueError("Execution initialization must be a nonempty operation array")
 
+        def validate_flat_kernels(regions):
+            if any(item["kind"] != "kernel" or "launch" in item for region in regions for item in region):
+                raise ValueError("CUDA control requires flat kernels without launch overrides")
+
         def validate_cuda_control(op):
             lowering = op["lowering"]
             flat = lowering["kind"] == "cuda_masked"
@@ -176,8 +181,7 @@ class ExecutionPlan:
                 or (not flat and not op.get("continue_while_nonzero", True))
             ):
                 raise ValueError("Unsupported CUDA control recipe")
-            if any(item["kind"] != "kernel" or "launch" in item for item in op["condition"] + op["body"]):
-                raise ValueError("CUDA control requires flat kernels without launch overrides")
+            validate_flat_kernels((op["condition"], op["body"]))
             if flat:
                 return
             inners = lowering["inners"]
@@ -309,7 +313,8 @@ class ExecutionPlan:
                     if (
                         not isinstance(lowering, dict)
                         or set(lowering) != {"kind", "version"}
-                        or lowering["kind"] not in ("cpu", "cuda_conditional", "cuda_host", "vulkan_host")
+                        or lowering["kind"]
+                        not in ("cpu", "cuda_conditional", "cuda_host", "vulkan_host", "cuda_masked")
                         or type(lowering["version"]) is not int
                         or lowering["version"] != 1
                     ):
@@ -317,6 +322,8 @@ class ExecutionPlan:
                     validate_steps(op["condition"], allow_empty=True)
                     for body in bodies:
                         validate_steps(body, allow_empty=True)
+                    if lowering["kind"] == "cuda_masked":
+                        validate_flat_kernels([op["condition"], *bodies])
                     continue
                 if kind == "cuda_parallel":
                     if (

@@ -452,6 +452,21 @@ Defaults are unchanged. CUDA auto/masked export, automatic export of nested nati
 branches and branch binding families remain unavailable. Unqualified routes fail
 explicitly during export. Explicit host lowerings cannot be labeled version 11.
 
+Version 16 adds explicit `cuda_masked` branch lowering (recipe 1), sharing the
+gated kernel payload and root graph executor used by v15 loops. The condition
+uses ordinary entries; every body uses `cuda_graph_gate_v1` entries. Regions
+must contain flat kernels without launch overrides; conditions and bodies may
+be empty. Each nonempty branch occurrence owns a four-byte gate and latches its
+selection before issuing gated body tasks. Writing the original selector inside
+a body does not change that selection. All-empty bodies need no gate. Unselected
+tasks may still issue, so their cost differs from conditional-node skipping;
+defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
+nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
+signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
+retirement are verified. Branches share code entries and replay does not parse
+descriptions. A v16 consumer and matching ABI75 components are required. This
+slice supports explicit plans; masked branch Graph export is not yet connected.
+
 Persistent format version 3 also accepts explicit `while` operations:
 
 ```python

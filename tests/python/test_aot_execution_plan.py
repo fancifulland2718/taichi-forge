@@ -76,6 +76,48 @@ def test_host_branch_requires_v12_and_preserves_selected_backend(route):
     assert json.loads(ExecutionPlan([nested]).to_json())["version"] == 12
 
 
+def test_masked_branch_requires_v16_flat_kernels_and_all_path_closure():
+    kernel = dict(kind="kernel", entry="gated", arguments=["x", "y"])
+    branch = dict(
+        kind="branch",
+        selector="p",
+        selection="indexed",
+        has_default=True,
+        condition=[dict(kind="kernel", entry="condition", arguments=["p", "input"])],
+        bodies=[[], [kernel], []],
+        lowering=dict(kind="cuda_masked", version=1),
+    )
+    plan = ExecutionPlan(
+        [branch], resources=[dict(kind="ndarray", name="p", dtype="i32", shape=[])], gradients={"x": "dx"}
+    )
+    snapshot = json.loads(plan.to_json())
+    assert snapshot["version"] == 16
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    assert plan.kernel_entries == ("condition", "gated")
+    assert plan.argument_names == ("dx", "input", "x", "y")
+    assert plan._replay_argument_names == {"dx", "input", "p", "x", "y"}
+    for version in (15, _MAX_EXECUTION_PLAN_VERSION + 1):
+        with pytest.raises(ValueError):
+            ExecutionPlan.from_json(json.dumps(dict(snapshot, version=version)))
+    for invalid in (
+        dict(kind="fill32", destination="x", value=0),
+        dict(kernel, launch=dict(kind="cuda_logical_exact", extent="n", capacity=4)),
+        dict(kind="while", predicate="p", max_iterations=0, condition=[], body=[kernel]),
+        dict(branch, condition=[], bodies=[[], []]),
+    ):
+        for patch in (dict(condition=[invalid]), dict(bodies=[[invalid], []])):
+            with pytest.raises(ValueError, match="flat kernels"):
+                ExecutionPlan([dict(branch, **patch)])
+    for patch in (dict(version=2), dict(version=True), dict(gate=1234)):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(branch, lowering=dict(branch["lowering"], **patch))])
+    empty = ExecutionPlan([dict(branch, condition=[], bodies=[[], []])])
+    assert empty.kernel_entries == ()
+    assert empty.argument_names == ("p",)
+    branch["bodies"].clear()
+    assert json.loads(plan.to_json()) == snapshot
+
+
 def test_cuda_parallel_preserves_branches_bindings_and_version():
     branches = [[dict(kind="kernel", entry="advance", arguments=[f"x{i}", "shared"])] for i in range(8)]
     plan = ExecutionPlan(

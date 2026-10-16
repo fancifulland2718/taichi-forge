@@ -354,6 +354,17 @@ host 分支可以包含原生子块，GPU 原生控制体内包含 host 分支�
 默认策略不变；CUDA auto/masked 自动导出、原生嵌套分支自动导出及分支 binding family
 仍未开放。未取得资格的路线在导出时明确拒绝。显式 host lowering 不能伪装为版本 11。
 
+版本 16 增加显式 `cuda_masked` 分支 lowering（recipe 1）。它与 v15 循环共用已有
+gated kernel 载荷及根图执行器：condition 使用普通入口，所有 body 使用
+`cuda_graph_gate_v1` 入口；只接受无 launch override 的平坦 kernel 区域。
+condition 与各 body 可以为空。非空分支每次出现使用独立的 4 字节 gate，先锁定选择再执行
+各 body 的 gated task，body 改写原 selector 不改变本次选择；所有 body 为空时不分配 gate。
+非选中 task 仍可能发射，因此不等同于 conditional node 的跳过成本，也不改变默认策略。
+CPU/Vulkan 不接受此 lowering，provider 与嵌套控制尚不属于此切片。
+已验证 IF/SWITCH、空 case、default/no-op、signed selector、实际 `kernel.grad`、独立/借用
+消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI75
+组件。该节点仅开放显式计划，masked 分支的 Graph 自动导出仍待接通。
+
 持久描述版本 3 还接受显式 `while` 操作：
 
 ```python

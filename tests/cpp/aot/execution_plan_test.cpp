@@ -5,6 +5,46 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, MaskedBranchesRequireV16AndFlatKernelRegions) {
+  const std::string source = R"({"version":16,"operations":[
+    {"kind":"branch","selector":"p","selection":"indexed",
+     "has_default":true,"lowering":{"kind":"cuda_masked","version":1},
+     "condition":[{"kind":"kernel","entry":"condition","arguments":["p","input"]}],
+     "bodies":[[],[{"kind":"kernel","entry":"gated","arguments":["x"]}],[]]}],
+    "resources":[{"kind":"ndarray","name":"p","dtype":"i32","shape":[]}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &branch = *std::get<std::shared_ptr<const ExecutionPlan::Branch>>(
+      plan.operations[0]);
+  EXPECT_EQ(branch.lowering, ExecutionPlan::Branch::Lowering::cuda_masked);
+  ASSERT_EQ(branch.bodies.size(), 3);
+  EXPECT_TRUE(branch.bodies[0].empty());
+  EXPECT_TRUE(branch.bodies[2].empty());
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"input", "x"}));
+  EXPECT_EQ(plan.replay_bindings, (std::set<std::string>{"input", "p", "x"}));
+  for (const auto &[from, to] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":16", "\"version\":15"},
+           {"\"version\":16", "\"version\":17"},
+           {"\"version\":1}", "\"version\":2}"},
+           {"\"version\":1}", "\"version\":1,\"gate\":1234}"},
+           {"\"kind\":\"kernel\",\"entry\":\"gated\",\"arguments\":[\"x\"]",
+            "\"kind\":\"fill32\",\"destination\":\"x\",\"value\":0"},
+           {"\"entry\":\"gated\"",
+            "\"entry\":\"gated\",\"launch\":{\"kind\":\"cuda_logical_exact\","
+            "\"extent\":\"n\",\"capacity\":4}"},
+           {"\"entry\":\"condition\"",
+            "\"entry\":\"condition\",\"launch\":{\"kind\":\"vulkan_indirect\","
+            "\"packet\":\"grid\"}"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(from), from.size(), to);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+  const auto empty = ExecutionPlan::parse(R"({"version":16,"operations":[
+    {"kind":"branch","selector":"p","selection":"nonzero","has_default":false,
+     "condition":[],"bodies":[[]],"lowering":{"kind":"cuda_masked","version":1}}]})");
+  EXPECT_EQ(empty.arguments, (std::vector<std::string>{"p"}));
+}
+
 TEST(ExecutionPlan, HostBranchesRequireV12AndKeepBackendSelection) {
   using Lowering = ExecutionPlan::Branch::Lowering;
   for (const auto &[name, lowering] :
@@ -414,7 +454,7 @@ TEST(ExecutionPlan, SelectedCudaNestedControlRetainsStaticClosure) {
     for (const auto &[from, to] :
          std::vector<std::pair<std::string, std::string>>{
              {version, masked ? "\"version\":13" : "\"version\":12"},
-             {version, "\"version\":16"},
+             {version, "\"version\":17"},
              {"\"version\":1,", "\"version\":2,"},
              {"\"condition_begin\":1", "\"condition_begin\":0"},
              {"\"body_begin\":2", "\"body_begin\":1"},
@@ -454,7 +494,7 @@ TEST(ExecutionPlan, FlatCudaMaskedKeepsPolarityAndStaticClosure) {
   for (const auto &[from, to] :
        std::vector<std::pair<std::string, std::string>>{
            {"\"version\":15", "\"version\":14"},
-           {"\"version\":15", "\"version\":16"},
+           {"\"version\":15", "\"version\":17"},
            {"\"version\":1}", "\"version\":2}"},
            {"\"version\":1}", "\"version\":1,\"inners\":[]}"},
            {"\"continue_while_nonzero\":false", "\"continue_while_nonzero\":0"},
