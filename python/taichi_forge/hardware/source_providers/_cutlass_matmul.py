@@ -222,6 +222,11 @@ class _Capture(_CudaGraphCaptureRecipe):
 class _Recording(BackendCommandRecording):
     graph_publish_time_binding_validation_stable = True
 
+    def _export_aot(self, context):
+        from taichi_forge.hardware._aot_cutlass_source import export_recording
+
+        return export_recording(self, context)
+
     def __init__(
         self, library, semantics, strategy, workspace_bytes, prefix, physical_id
     ):

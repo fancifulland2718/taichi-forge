@@ -4,6 +4,7 @@
 #include "taichi/common/operation_json.h"
 #include "taichi/external_runtime/forge_cub_source_provider.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_source_addon.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/cuda/cuda_device.h"
@@ -16,11 +17,9 @@ struct CubDescription {
   static constexpr uint32_t version = 1;
   TiForgeCubSourcePlanDesc plan{sizeof(TiForgeCubSourcePlanDesc)};
   uint64_t workspace_bytes{0};
-  uint32_t cub_version{0}, cuda_runtime_version{0}, minimum_driver{0},
-      ptx_driver{0};
-  std::string binary_sha256;
+  uint32_t cub_version{0}, cuda_runtime_version{0};
+  NativeSourceAddonIdentity identity;
   bool signed_values{false};
-  std::vector<std::pair<bool, uint32_t>> targets;  // SASS or PTX, capability.
 };
 class CubResource : public NativeResource {
  public:
@@ -60,44 +59,11 @@ CubDescription decode(const liong::json::JsonValue &p) {
   if (dtype != (d.plan.operation == 2 ? "u64" : "u32") &&
       !(d.plan.operation >= 5 && d.signed_values))
     throw std::invalid_argument("CUB source operation dtype is incompatible");
-  auto u32 = [&](const char *key) {
-    auto value = integer(p[key]);
-    if (value > std::numeric_limits<uint32_t>::max())
-      throw std::invalid_argument("CUB source version exceeds its ABI");
-    return uint32_t(value);
-  };
-  d.cub_version = u32("cub_version");
-  d.cuda_runtime_version = u32("cuda_runtime_version");
-  d.minimum_driver = u32("minimum_driver_api_version");
-  d.ptx_driver = u32("ptx_driver_api_version");
-  d.binary_sha256 = name(p["binary_sha256"]);
-  if (!d.cub_version || !d.cuda_runtime_version ||
-      d.binary_sha256.size() != 64 ||
-      d.binary_sha256.find_first_not_of("0123456789abcdef") !=
-          std::string::npos)
+  d.cub_version = source_addon_u32(p, "cub_version");
+  d.cuda_runtime_version = source_addon_u32(p, "cuda_runtime_version");
+  if (!d.cub_version || !d.cuda_runtime_version)
     throw std::invalid_argument("CUB source frozen identity is invalid");
-  const auto &targets = p["target_code"];
-  if (!targets.is_arr() || targets.arr.inner.empty())
-    throw std::invalid_argument("CUB source requires target code");
-  for (const auto &entry : targets.arr.inner) {
-    auto code = name(entry);
-    bool sass = code.rfind("sm_", 0) == 0;
-    if (!sass && code.rfind("compute_", 0) != 0)
-      throw std::invalid_argument("Invalid CUB source target code");
-    auto number = code.substr(sass ? 3 : 8);
-    uint64_t capability = 0;
-    for (char c : number) {
-      if (c < '0' || c > '9')
-        throw std::invalid_argument("Invalid CUB source target capability");
-      capability = capability * 10 + c - '0';
-      if (capability > std::numeric_limits<uint32_t>::max())
-        throw std::invalid_argument("CUB source target capability overflows");
-    }
-    if (!capability)
-      throw std::invalid_argument(
-          "CUB source target capability is empty or zero");
-    d.targets.emplace_back(sass, uint32_t(capability));
-  }
+  d.identity = decode_source_addon_identity(p);
   return d;
 }
 
@@ -209,25 +175,17 @@ class CudaCubResource final : public CubResource {
         lease_(
             std::make_unique<CubLease>(context.providers.runtime(definition))) {
     auto &runtime = *lease_->runtime;
-    if (runtime.info().build_version != "sha256:" + description.binary_sha256 ||
+    if (runtime.info().build_version != "sha256:" + description.identity.binary_sha256 ||
         version(runtime) != description.cub_version ||
         runtime.info().cuda_runtime_version != description.cuda_runtime_version)
       throw std::invalid_argument(
           "CUB source binary/version differs from frozen identity");
     const auto capability =
         uint32_t(CUDAContext::get_instance().get_compute_capability());
-    bool sass = false, ptx = false;
-    for (auto [is_sass, target] : description.targets) {
-      sass |= is_sass && target / 10 == capability / 10 && target <= capability;
-      ptx |= !is_sass && target <= capability;
-    }
     auto &driver = CUDADriver::get_instance_without_context();
     const auto driver_version = uint32_t(driver.get_version_major() * 1000 +
                                          driver.get_version_minor() * 10);
-    if ((!sass && !ptx) || driver_version < (sass ? description.minimum_driver
-                                                  : description.ptx_driver))
-      throw std::invalid_argument(
-          "CUB source target code or driver is incompatible");
+    validate_source_addon_target(description.identity, capability, driver_version);
     TiForgeCubSourcePlanInfo info{sizeof(info)};
     runtime.check(lease_->api.create_plan(runtime.handle(), &description.plan,
                                           &lease_->handle, &info),

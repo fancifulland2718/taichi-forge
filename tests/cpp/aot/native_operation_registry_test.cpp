@@ -16,6 +16,31 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, CutlassSourceFreezesStrategyWithoutLoadingCode) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription plan;
+  plan.provider = "cutlass_source";
+  plan.operation = "plan";
+  plan.parameters = liong::json::parse_complete(
+      R"({"m":2147483647,"n":1,"k":1,"transpose_a":false,"transpose_b":true,
+      "alpha":0.75,"beta":0.25,"activation":"relu","strategy":"direct_fused",
+      "workspace_bytes":0,"cutlass_version":40602,
+      "binary_sha256":"0000000000000000000000000000000000000000000000000000000000000000",
+      "target_code":["sm_120"],"minimum_driver_api_version":13000,"ptx_driver_api_version":13020})");
+  EXPECT_EQ(registry.decode(plan, NativeObjectKind::resource).kind(), "cutlass_source_plan");
+  for (const auto &[field, value] : std::vector<std::pair<std::string, std::string>>{
+           {"m", "2147483648"}, {"n", "0"}, {"k", "true"}, {"transpose_a", "1"},
+           {"alpha", "1e99"}, {"activation", R"("gelu")"}, {"strategy", R"("unknown")"},
+           {"binary_sha256", R"("short")"}, {"target_code", "[]"},
+           {"target_code", R"(["sm_42949672960"])"}, {"cutlass_version", "0"}, {"unknown", "1"}}) {
+    auto invalid = plan;
+    invalid.parameters.obj.inner[field] = liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource), std::invalid_argument);
+  }
+  EXPECT_EQ(registry.find("cutlass_source_execute", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("cutlass_source_execute", 1, Arch::vulkan), nullptr);
+}
+
 TEST(NativeOperationRegistry, CubSourceFreezesIdentityWithoutLoadingCode) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription plan;

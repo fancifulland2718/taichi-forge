@@ -113,9 +113,20 @@ caller-owned and the adapter retains the addon until plans retire. The old ABI
 reports CUTLASS version but no CUDART version (reported as zero); deployment must
 retain the addon's build manifest and declared dependencies. Windows checks cover
 the three strategies, four transpose combinations, live beta feedback and failure
-recovery. This bridge is a prerequisite; selected-recipe AOT export is not yet
-provided by this component alone. The external addon and CUDA Toolkit are not
-included in the adapter SDK.
+recovery. The external addon and CUDA Toolkit are not included in the adapter SDK.
+
+Selected `CutlassMatmulRecipeProvider` recipes export through
+`Module.add_execution_plan`. The native `cutlass_source/plan` resource freezes the
+strategy, matrix semantics, binary/version/target identity and exact workspace;
+`cutlass_source/execute` restores scalar f32 shape/alignment and physical alias
+checks. Consumers recreate scratch and capture the existing addon kernels once,
+without selecting a new strategy, compiling addon code or loading the producer's
+cuBLASLt baseline. CPU/Vulkan do not register these CUDA factories. Windows CUDA
+checks cover three selected strategies, transposes, beta/ReLU, standalone and
+borrowed lifetimes, shared binding families, source Graph retirement and native
+AOT WHILE exits. Actual downstream `kernel.grad` and explicitly recorded matrix
+adjoints are checked; this does not add automatic differentiation to opaque addon
+operations or claim every JIT control combination is supported.
 
 For the cuBLASLt native plan API, replace `cutensor` with `cublaslt`. Its component
 installs `forge_cublaslt_provider.h` and the adapter, with no vendor headers or

@@ -95,8 +95,17 @@ scan、空段、尾容量、别名、独立/共享绑定、独立/借用退休�
 两种 split-K 策略、紧凑 f32 输入、转置、alpha/beta 及 identity/ReLU。workspace 仍由
 调用方持有，计划退休前 adapter 保留 addon。旧 ABI 报告 CUTLASS 版本，但无法查询
 CUDART 版本（报告为零）；部署须保留 addon 的构建 manifest 与依赖合同。Windows
-检查覆盖三种策略、四种转置组合、活值 beta 反馈和失败恢复。这是公共桥接前置，组件
-本身尚不提供已选 recipe 的 AOT 自动导出。adapter SDK 不包含外部 addon 或 CUDA Toolkit。
+检查覆盖三种策略、四种转置组合、活值 beta 反馈和失败恢复。adapter SDK 不包含外部
+addon 或 CUDA Toolkit。
+
+已选 `CutlassMatmulRecipeProvider` 方案可通过 `Module.add_execution_plan` 导出。
+原生 `cutlass_source/plan` 资源冻结策略、矩阵语义、二进制/版本/target 身份和精确
+workspace；`cutlass_source/execute` 重建标量 f32 形状、对齐和物理别名检查。消费者
+重建 scratch，一次捕获现有 addon kernel，无需重新选策略、编译 addon 或加载生产器
+的 cuBLASLt 基线。CPU/Vulkan 不注册这些 CUDA 工厂。Windows CUDA 检查覆盖三种已选
+策略、转置、beta/ReLU、独立/借用寿命、共享绑定族、源 Graph 退休和原生 AOT WHILE
+退出；真实下游 `kernel.grad` 与显式录制的矩阵伴随通过核对。此项不为 opaque addon
+操作添加自动微分，也不代表所有 JIT 控制组合已覆盖。
 
 cuBLASLt 原生计划 API 将 `cutensor` 替换为 `cublaslt`。组件安装
 `forge_cublaslt_provider.h` 及 adapter，不依赖厂商构建头文件或二进制链接。
