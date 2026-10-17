@@ -112,9 +112,10 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
                     (3, 5),
                     mip_levels=2,
                 )
-                with pytest.raises(ti.TaichiRuntimeError, match="single-level"):
+                with pytest.raises(ValueError, match="pixels_0, pixels_1"):
                     module.add_execution_plan(
-                        "mips", graph, source_bindings=dict(image=mipped)
+                        "mips", graph, source_bindings=dict(image=mipped),
+                        resource_bindings={mipped: dict(pixels="pixels"), texture: dict(pixels="pixels")},
                     )
                 assert not module._exported_kernels and not module._graph_export_failed
         else:

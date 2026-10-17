@@ -425,7 +425,8 @@ metadata list length and numbered binding inventory, including zero counts.
 
 For a managed Vulkan image that shaders will write, request `storage=True` in
 `image/sampled` resource parameters; its default remains false and CUDA rejects
-this option. The existing factory constructs one mip level. A launch cannot
+this option. The factory defaults to one mip; 2D Vulkan mip initialization is
+described below. A launch cannot
 sample and store the same image. Readable images need seed pixels or an earlier
 unconditional upload; arbitrary shader writes alone do not prove full image
 initialization. Layout transitions and RT/compute dependencies remain Forge-owned.
@@ -441,8 +442,8 @@ remain responsible for shader memory bounds and data-dependent record indices.
 Small Windows Vulkan tests cover standalone/borrowed consumers, real instance
 SBT selection and any-hit filtering, hit/miss/refit, sampled-to-storage image
 processing followed by ordinary sampling, downstream gradients and retirement.
-The external shaders have no automatic derivative. Mip-chain reconstruction and
-raster graphics resources remain separate work.
+The external shaders have no automatic derivative. Ray-program tests currently
+use the base mip. Raster graphics resources remain separate work.
 
 Graph export accepts an initialized `launch.graph_recording()` in ordinary
 Graphs and selected ordered Vulkan compute binding frames, including qualified
@@ -468,7 +469,7 @@ are likewise deduplicated within the archive; no producer driver handles are sav
 
 Image usage is collected from selected launch leases before resources are emitted.
 An image sampled by an earlier kernel and written by a later RT launch is rebuilt
-once with both usages. Single-mip qualification and initialization
+once with both usages. Sampled-image qualification and initialization
 requirements remain in force. Small tests cover both ordinary and selected Graph
 export, changed-code/group rejection, public/private owners and downstream gradients.
 
@@ -722,8 +723,8 @@ the owner's existing GFX runtime. Discover `image_upload` version 1 with
 `vulkan_inline` composition. Creation and initial pixel upload occur during
 preparation; recorded uploads and sampling share the existing command list,
 layout transitions and retirement. There is no extra warm host copy or wait.
-Kernel images are single-level 1D/2D/3D. Vulkan also accepts the extended sampler
-state described below; CUDA retains its basic sampler contract.
+Kernel images support single-level 1D/2D/3D, plus 2D Vulkan mip chains described
+below. Vulkan also accepts extended sampler state; CUDA retains basic sampling.
 Qualified Graphs use the automatic reconstruction contract below.
 
 Pixel layout follows each backend's existing texture ABI. Vulkan image X is
@@ -739,8 +740,8 @@ recording through the same native-operation requirements. Initial uploads use
 the existing ordered GFX graphics path; replay records the complete sequence on
 that queue without a per-upload host wait. Callers supply depth values in `[0,1]`,
 as required by the [Vulkan copy contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html).
-This qualifies single-level 2D depth sampling and uploads. Mip chains and
-rendering to an AOT-owned attachment remain separate work.
+This qualifies 2D depth sampling and uploads, including complete mip chains.
+Rendering to an AOT-owned attachment remains separate work.
 
 `image/sampled` accepts an optional `sampler` object with the fields of
 `ti.hardware.sampling.SamplerConfig`: `min_filter`, `mag_filter`, `mip_filter`,
@@ -759,6 +760,30 @@ public/private ordinary and selected Graphs, uploads, borrowing and downstream
 gradients. Sampler derivatives are not provided. `Texture.from_ndarray()` depth
 uploads also use the managed depth-aspect graphics transfer path, preserving
 layout tracking between Graph replays.
+
+For 2D Vulkan images, `image/sampled` also accepts `mip_levels` (default `1`).
+The count cannot exceed the complete chain implied by the dimensions or device
+limits. Initialize all allocated levels with `image/upload_mips` version 1:
+parameters are `{"mip_levels": N}`, and bindings are `image` plus `pixels_0`
+through `pixels_{N-1}`. Each array describes tightly packed texels with extent
+`(max(1, X >> level), max(1, Y >> level))` in the layout above.
+
+This operation records the complete chain in the existing command stream and
+establishes the whole-image initialization fact. Put it in the plan's
+`initialization` sequence for a one-time upload, or its normal operations for
+updates. No per-level host wait is added. Single-level `image/upload` and the
+construction-time `pixels` binding reject mip chains; they cannot establish
+that other levels have valid contents. Conditional uploads alone cannot justify
+subsequent unconditional sampling. Partial-level/region AOT updates and automatic
+mip generation are not covered by this contract.
+
+Graph export reconstructs a private mip chain with
+`resource_bindings={texture: {"pixels_0": "seed0", "pixels_1": "seed1", ...}}`,
+covering every allocated level. Public resources can be imported initialized
+from JIT, or initialized explicitly in the consuming plan. Windows tests cover
+non-square three-level color/depth chains, fractional LOD filtering, fetching,
+ordinary/selected export, borrowing, updates, retirement and downstream gradients.
+Logical texel bytes include every level; they are not driver residency estimates.
 
 CUDA and Vulkan Graph export also accept sampled Texture kernel arguments,
 including qualified immutable compute recipes. CUDA preserves its
@@ -785,8 +810,8 @@ frames share the initialized resource; use independent preparation for a differe
 image. Output buffers can change across
 CUDA siblings; separate Vulkan preparations own independent images and commands.
 No extra pixel copy or Python metadata lookup is added to replay. CUDA still
-rejects nonmatching min/mag filters and extended sampler settings. Mip chains
-on either backend require a separate reconstruction/initialization contract.
+rejects nonmatching min/mag filters, extended sampler settings and mip chains.
+Vulkan mip chains use the complete initialization contract above.
 
 Existing artifacts and explicit `image/sampled` resources with a `pixels` binding
 keep their construction-time copy and retained-input contract. To express staged
@@ -1085,8 +1110,8 @@ imports and the source Texture remain usable. Closing a borrower leaves the
 Program alive; `ti.reset()` retires all borrowed calls and leases before backend
 destruction. Imports accept only live managed Textures from that Program, on
 CUDA or Vulkan. Current qualification follows the native sampled-image boundary:
-one mip level and floating/normalized sampled formats. Vulkan preserves qualified
-extended LOD, anisotropy and comparison state; CUDA retains basic sampling.
+floating/normalized sampled formats. Vulkan preserves qualified 2D mip chains,
+extended LOD, anisotropy and comparison state; CUDA retains one-mip basic sampling.
 Unsupported settings fail at import.
 Standalone runtimes cannot import Program resources.
 

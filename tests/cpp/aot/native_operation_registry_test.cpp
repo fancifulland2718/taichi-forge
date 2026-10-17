@@ -5,6 +5,7 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/texture_storage.h"
 #include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
@@ -21,6 +22,28 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, MipStorageAccountsForTheCompleteChain) {
+  ImageParams params{};
+  params.format = BufferFormat::r32f;
+  params.dimension = ImageDimension::d2D;
+  params.x = 7;
+  params.y = 5;
+  params.z = 1;
+  params.mip_levels = 3;
+  EXPECT_EQ(image_logical_bytes(params), (35u + 6u + 1u) * 4u);
+  const auto level = image_mip_parameters(params, 1);
+  EXPECT_EQ(level.x, 3u);
+  EXPECT_EQ(level.y, 2u);
+  EXPECT_EQ(level.z, 1u);
+  EXPECT_EQ(level.mip_levels, 1u);
+  EXPECT_THROW(image_mip_parameters(params, 3), std::invalid_argument);
+  params.mip_levels = 4;
+  EXPECT_THROW(image_logical_bytes(params), std::invalid_argument);
+  params.mip_levels = 1;
+  params.x = params.y = params.z = UINT32_MAX;
+  EXPECT_THROW(image_logical_bytes(params), std::overflow_error);
+}
+
 #ifdef TI_WITH_LLVM
 TEST(NativeOperationRegistry,
      KernelAccelerationStructuresQualifyAndRetainOwners) {

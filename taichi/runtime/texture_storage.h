@@ -8,6 +8,11 @@
 
 namespace taichi::lang {
 
+// Checked logical mip layout, shared by owned and borrowed image resources.
+// These sizes describe packed texels, not driver allocation/residency.
+ImageParams image_mip_parameters(const ImageParams &params, uint32_t level);
+std::size_t image_logical_bytes(const ImageParams &params);
+
 // Backend storage shared by managed JIT textures and native AOT resources.
 // The enclosing owner retains its CUDA context, serializes device updates and
 // retires all sampling work before destruction. This object does not create a

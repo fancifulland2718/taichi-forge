@@ -38,7 +38,9 @@ void NativeImageKernelBinding::validate_parameter(
                           : p.dimension == ImageDimension::d3D ? 3u
                                                                : 0u;
   if (!dimensions || found->second.total_dim != dimensions ||
-      p.mip_levels != 1 || !is_float_sampled_texture_format(p.format))
+      (p.mip_levels != 1 &&
+       (arch != Arch::vulkan || p.dimension != ImageDimension::d2D)) ||
+      !is_float_sampled_texture_format(p.format))
     throw std::invalid_argument(
         "Sampled image does not match the kernel dimension/format contract");
   for (auto extent : {p.x, p.y, p.z})
@@ -118,6 +120,12 @@ struct ImageUploadOperation {
   std::shared_ptr<NativeSampledImage> image;
   NativeArrayBinding pixels;
 };
+struct ImageMipUploadOperation {
+  static constexpr const char *kind = "image_mip_upload";
+  static constexpr uint32_t version = 1;
+  std::shared_ptr<NativeSampledImage> image;
+  std::vector<NativeArrayBinding> pixels;
+};
 
 BufferFormat image_format(const std::string &name) {
 #define PER_BUFFER_FORMAT(format) \
@@ -130,8 +138,8 @@ BufferFormat image_format(const std::string &name) {
 
 ImageParams parameters(const liong::json::JsonValue &p) {
   using namespace operation_json;
-  fields(p,
-         {"shape", "format", "filter", "address_modes", "storage", "sampler"});
+  fields(p, {"shape", "format", "filter", "address_modes", "storage", "sampler",
+             "mip_levels"});
   const auto &shape = p["shape"];
   if (!shape.is_arr() || shape.arr.inner.empty() || shape.arr.inner.size() > 3)
     throw std::invalid_argument(
@@ -155,6 +163,13 @@ ImageParams parameters(const liong::json::JsonValue &p) {
   if (!is_float_sampled_texture_format(result.format))
     throw std::invalid_argument(
         "Image format does not support floating sampling");
+  const auto mip_levels = optional_integer(p, "mip_levels").value_or(1);
+  if (!mip_levels || mip_levels > UINT32_MAX)
+    throw std::invalid_argument("Image mip count must fit positive uint32");
+  result.mip_levels = uint32_t(mip_levels);
+  if (mip_levels != 1 && result.dimension != ImageDimension::d2D)
+    throw std::invalid_argument("Managed mip chains require 2D Vulkan images");
+  image_mip_parameters(result, 0);  // Check the full chain before allocation.
   const auto filter = [](const liong::json::JsonValue &value) {
     const auto label = name(value);
     if (label == "nearest")
@@ -392,14 +407,7 @@ class VulkanSampledImage final : public NativeSampledImage {
         device_(context.device),
         runtime_(*context.gfx_runtime),
         fault_(context.fault_domain) {
-    const auto [type, channels] =
-        buffer_format2type_channels(d.parameters.format);
-    bytes_ = size_t(data_type_size(type)) * channels;
-    for (auto extent : {d.parameters.x, d.parameters.y, d.parameters.z}) {
-      if (extent > std::numeric_limits<size_t>::max() / bytes_)
-        throw std::overflow_error("Sampled image logical size overflows");
-      bytes_ *= extent;
-    }
+    bytes_ = image_logical_bytes(d.parameters);
   }
   void initialize(const SampledImageDescription &d) {
     auto params = d.parameters;
@@ -468,8 +476,18 @@ class VulkanImageUpload final : public NativeOperation {
  public:
   explicit VulkanImageUpload(const ImageUploadOperation &op)
       : image_(op.image),
-        source_(op.pixels.pointer),
-        copy_(packed_image_copy(op.image->parameters())) {
+        transfers_{
+            {op.pixels.pointer, packed_image_copy(op.image->parameters())}} {
+  }
+  explicit VulkanImageUpload(const ImageMipUploadOperation &op)
+      : image_(op.image) {
+    transfers_.reserve(op.pixels.size());
+    for (uint32_t level = 0; level < op.pixels.size(); ++level) {
+      auto copy =
+          packed_image_copy(image_mip_parameters(image_->parameters(), level));
+      copy.image_mip_level = level;
+      transfers_.push_back({op.pixels[level].pointer, copy});
+    }
   }
   Arch arch() const override {
     return Arch::vulkan;
@@ -487,19 +505,26 @@ class VulkanImageUpload final : public NativeOperation {
       const override {
     // Depth transfers are not universally supported by compute-only queues.
     // Use the existing graphics-capable recording for portable correctness.
-    return {{{image_->gfx_sampled_allocation(), ImageLayout::transfer_dst}},
-            copy_.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT};
+    return {
+        {{image_->gfx_sampled_allocation(), ImageLayout::transfer_dst}},
+        transfers_.front().copy.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT};
   }
   void record_vulkan(Device *, CommandList *commands) override {
-    commands->buffer_barrier(source_);
-    commands->buffer_to_image(image_->gfx_sampled_allocation(), source_,
-                              ImageLayout::transfer_dst, copy_);
+    for (const auto &transfer : transfers_) {
+      commands->buffer_barrier(transfer.source);
+      commands->buffer_to_image(image_->gfx_sampled_allocation(),
+                                transfer.source, ImageLayout::transfer_dst,
+                                transfer.copy);
+    }
   }
 
  private:
   std::shared_ptr<NativeSampledImage> image_;
-  DevicePtr source_;
-  BufferImageCopyParams copy_;
+  struct Transfer {
+    DevicePtr source;
+    BufferImageCopyParams copy;
+  };
+  std::vector<Transfer> transfers_;
 };
 #endif
 }  // namespace
@@ -507,8 +532,12 @@ class VulkanImageUpload final : public NativeOperation {
 void register_image_operations(NativeOperationRegistry &registry) {
   registry.define<SampledImageDescription>(
       [](Device &device, const SampledImageDescription &d) {
-        if (d.pixels)
+        if (d.pixels) {
+          if (d.parameters.mip_levels != 1)
+            throw std::invalid_argument(
+                "Mip-chain initialization requires image/upload_mips");
           validate_pixels(device, d.parameters, *d.pixels);
+        }
       },
       NativeObjectKind::resource);
   registry.register_schema<SampledImageDescription>(
@@ -527,6 +556,9 @@ void register_image_operations(NativeOperationRegistry &registry) {
                                            const ImageUploadOperation &op) {
     if (!op.image || &op.image->device() != &device)
       throw std::invalid_argument("Image upload requires a local image owner");
+    if (op.image->parameters().mip_levels != 1)
+      throw std::invalid_argument(
+          "Mip-chain uploads require image/upload_mips");
     validate_pixels(device, op.image->parameters(), op.pixels);
   });
   registry.register_schema<ImageUploadOperation>(
@@ -539,6 +571,37 @@ void register_image_operations(NativeOperationRegistry &registry) {
               b.at("pixels").array()};
         };
       });
+  registry.define<ImageMipUploadOperation>(
+      [](Device &device, const ImageMipUploadOperation &op) {
+        if (!op.image || &op.image->device() != &device)
+          throw std::invalid_argument(
+              "Mip upload requires a local image owner");
+        const auto &params = op.image->parameters();
+        if (op.pixels.size() != params.mip_levels)
+          throw std::invalid_argument(
+              "Mip upload must cover every allocated level");
+        for (uint32_t level = 0; level < params.mip_levels; ++level)
+          validate_pixels(device, image_mip_parameters(params, level),
+                          op.pixels[level]);
+      });
+  registry.register_schema<ImageMipUploadOperation>(
+      "image", "upload_mips", {"image"},
+      [](const liong::json::JsonValue &p) {
+        operation_json::fields(p, {"mip_levels"});
+        const auto count = operation_json::integer(p["mip_levels"]);
+        return [count](const NativeOperationBindings &b) {
+          ImageMipUploadOperation op{
+              b.at("image").resource<NativeSampledImage>()};
+          if (count != op.image->parameters().mip_levels)
+            throw std::invalid_argument(
+                "Mip upload must cover every allocated level");
+          for (uint32_t level = 0; level < count; ++level)
+            op.pixels.push_back(
+                b.at("pixels_" + std::to_string(level)).array());
+          return op;
+        };
+      },
+      {}, {}, {{"mip_levels", {"pixels"}}});
 #ifdef TI_WITH_CUDA
   registry.register_context_factory<SampledImageDescription>(
       Arch::cuda, NativeOperationMode::cuda_capture,
@@ -591,6 +654,12 @@ void register_image_operations(NativeOperationRegistry &registry) {
   registry.register_factory<ImageUploadOperation>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](Arch, Device &, const ImageUploadOperation &op) {
+        return std::make_shared<VulkanImageUpload>(op);
+      },
+      [] { return NativeOperationAvailability{true, 0}; });
+  registry.register_factory<ImageMipUploadOperation>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](Arch, Device &, const ImageMipUploadOperation &op) {
         return std::make_shared<VulkanImageUpload>(op);
       },
       [] { return NativeOperationAvailability{true, 0}; });

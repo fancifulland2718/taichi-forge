@@ -339,7 +339,8 @@ scene 描述含 `set`/`binding`，绑定受管 TLAS。各 count 必须与描述�
 数量一致，包括0项。
 
 shader 要写入受管 Vulkan 图像时，在 `image/sampled` 参数中指定 `storage=True`；
-默认仍为 false，CUDA 拒绝该选项。既有工厂构建单 mip 图像。同次 launch 不能同时
+默认仍为 false，CUDA 拒绝该选项。工厂默认单 mip，二维 Vulkan 整链初始化见下文。
+同次 launch 不能同时
 采样和存储同一图像。需要读取的图像应提供种子像素或此前无条件 upload；任意 shader
 写入本身不能证明全图已初始化。布局转换与 RT/compute 依赖继续由 Forge 管理。
 
@@ -351,7 +352,7 @@ owner 队列构建并初始化 SBT 一次；重放复用 pipeline/descriptor/SBT
 
 Windows Vulkan 小夹具覆盖独立/借用消费、真实实例 SBT 选择与 any-hit 过滤、
 hit/miss/refit、采样图像→storage 写入→普通采样、下游梯度及关闭。外部 shader 本身
-没有自动导数。mip 链重建及光栅 graphics 资源仍属后续工作。
+没有自动导数。ray-program 本身目前用 base mip 验证；光栅 graphics 资源仍属后续工作。
 
 Graph 自动导出接受已初始化的 `launch.graph_recording()`，覆盖普通 Graph 和已选择的
 有序 Vulkan compute binding frame，包括具有具体导出合同的 AS refit 等计算边界。
@@ -370,7 +371,7 @@ SBT 标量与 push constant 合成按内容寻址的 host blob，shader 代码�
 不保存生产端 driver 句柄。
 
 导出在创建资源前从已选择 launch 的租约收集图像 usage，因此先被 kernel 采样、随后
-被 RT 写入的同一图像只重建一次并同时申请两种 usage。单 mip 与初始化
+被 RT 写入的同一图像只重建一次并同时申请两种 usage。采样图像准入与初始化
 检查保持。小夹具覆盖普通/已选择 Graph、不同代码/组顺序拒绝、公私 owner 和下游梯度。
 
 Graph 的 AS 参数通过 `source_bindings={"acceleration": tlas}` 声明源 owner，
@@ -563,7 +564,7 @@ GPU 更新、captured 和 OptiX ordered 计划、共享绑定退休及后续数�
 Vulkan 复用相同的 `image/sampled`、`image/upload` 描述，并接入所属 runtime 已有的
 GFX 执行器。通过 `image_upload` v1 的 `vulkan_inline` 能力协商；创建与初始像素上传在
 准备期完成，录制上传与采样共用现有 command list、布局转换和退休机制，暖态不增加
-host 复制或等待。本批 kernel 图像支持单 mip 的 1D/2D/3D；Vulkan 还接受下述扩展
+host 复制或等待。本批 kernel 图像支持单 mip 的 1D/2D/3D 和二维 Vulkan mip 链；Vulkan 还接受下述扩展
 sampler，CUDA 保持基本采样合同。
 合格 Graph 可使用下文的自动重建合同。
 
@@ -577,7 +578,7 @@ Vulkan `depth32f` 上传使用 depth aspect，并通过同一原生操作需求�
 的录制队列。初始化复用已有 GFX 有序 graphics 路径；重放将整个序列录入该队列，不为
 每次上传增加 host 等待。调用方提供 `[0,1]` 内的深度值，这是
 [Vulkan 复制合同](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html)的要求。
-本批覆盖单 mip 二维深度采样与上传；mip 链和向 AOT 图像附件渲染仍另行接通。
+本批覆盖二维深度采样与上传，包括完整 mip 链；向 AOT 图像附件渲染仍另行接通。
 
 `image/sampled` 可选 `sampler` 对象，字段与 `ti.hardware.sampling.SamplerConfig`
 一致：`min_filter`、`mag_filter`、`mip_filter`、`address_mode_u/v/w`、`lod_bias`、
@@ -592,6 +593,23 @@ min/mag filter。Windows 小夹具覆盖颜色过滤/寻址、深度比较、可
 普通/已选择 Graph 的公私资源、上传、借用和下游真实梯度，不提供 sampler 求导。
 `Texture.from_ndarray()` 的深度上传也使用受管 depth-aspect graphics 传输，保留
 Graph 重放之间的布局跟踪。
+
+二维 Vulkan `image/sampled` 还接受 `mip_levels`（默认 `1`），级数受尺寸决定的完整链
+上限及设备限制约束。使用 `image/upload_mips` version 1 初始化所有已分配级：参数为
+`{"mip_levels": N}`，绑定为 `image` 及 `pixels_0` 至 `pixels_{N-1}`。各输入按上文
+布局紧凑存储，尺寸为 `(max(1, X >> level), max(1, Y >> level))`。
+
+该操作把整链复制录入既有命令流，并建立整个图像的初始化事实。放入计划的
+`initialization` 段只上传一次，放入普通操作序列则可更新；不增加逐级 host 等待。
+旧单级 `image/upload` 及构造期 `pixels` 绑定拒绝 mip 链，不能将只上传第0级当作
+其他级已有有效内容。仅在条件分支内上传，也不能支撑随后无条件采样。本合同尚未覆盖
+局部级/区域 AOT 更新和自动生成 mip。
+
+Graph 私有图像导出使用
+`resource_bindings={texture: {"pixels_0": "seed0", "pixels_1": "seed1", ...}}`，
+须覆盖全部已分配级。公开图像可借用已初始化的 JIT Texture，或在消费计划中显式初始化。
+Windows 小夹具验证非方形三级颜色/深度图像、分数 LOD 过滤、fetch、普通/已选择导出、
+借用、更新、退休及下游梯度。逻辑 texel 字节统计包含每一级，不代表驱动实际驻留大小。
 
 CUDA/Vulkan Graph 自动导出也支持 sampled Texture kernel 参数，包括合格的不可变 compute
 录制方案。CUDA 保留 `cuda_immutable_argument_frames` 的资源共享策略，Vulkan 保留每次
@@ -612,8 +630,8 @@ Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出�
 使用的输入；仍被重放读取的数组（包括通过 view 读取）继续保留。CUDA 兄弟绑定帧共享
 初始化后的图像；不同图像使用独立准备，输出数组
 可在 CUDA 兄弟绑定间切换。Vulkan 独立准备各自拥有图像和录制命令。重放不增加像素复制
-或 Python 元数据查询。CUDA 仍拒绝不相同的 min/mag filter 与扩展 sampler；两后端
-的 mip 链仍需独立的重建/初始化合同。
+或 Python 元数据查询。CUDA 仍拒绝不相同的 min/mag filter、扩展 sampler 和 mip 链；
+Vulkan mip 链采用上文的完整初始化合同。
 
 已有产物以及显式给 `image/sampled` 绑定 `pixels` 的资源，仍保持构造期复制及保留输入
 的合同。手工计划若需分阶段初始化，可省略该资源绑定，将 `image/upload` 放入
@@ -845,8 +863,8 @@ Texture 可作为 AOT ray-program 的 storage-image 目标，再由 JIT 直接�
 导入后可回收源 Python Texture。关闭导入句柄会完成在途使用并退休对应 AOT 使用者，
 独立导入和源 Texture 仍可使用。关闭 borrower 保留 Program；`ti.reset()` 在销毁
 后端前退休全部借用调用与租约。只接受同一 Program 中存活的受管 CUDA/Vulkan Texture。
-当前准入沿用 native sampled image 边界：单 mip、浮点/归一化采样格式；Vulkan 保留
-合格的扩展 LOD、各向异性和 comparison 状态，CUDA 保持基本采样。不支持的设置在导入期拒绝。独立 Runtime
+当前准入沿用 native sampled image 边界：浮点/归一化采样格式；Vulkan 保留二维 mip 链及
+合格的扩展 LOD、各向异性和 comparison 状态，CUDA 保持单 mip 基本采样。不支持的设置在导入期拒绝。独立 Runtime
 不能导入 Program 资源。
 
 Windows 验证覆盖非方形 r32f、nearest/repeat sampler、JIT→AOT 与 AOT→JIT 更新、

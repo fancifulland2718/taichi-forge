@@ -56,9 +56,11 @@ class SourceImageBindings:
 
         owner = self.require(name)
         fmt, shape, mip_levels, sampler = owner._creation_metadata
-        if context.arch not in (core.Arch.cuda, core.Arch.vulkan) or mip_levels != 1:
+        if context.arch not in (core.Arch.cuda, core.Arch.vulkan) or (
+            mip_levels != 1 and (context.arch != core.Arch.vulkan or len(shape) != 2)
+        ):
             raise TaichiRuntimeError(
-                "AOT sampled-image reconstruction requires single-level CUDA/Vulkan textures"
+                "AOT sampled-image reconstruction requires CUDA/Vulkan; mip chains require 2D Vulkan"
             )
         basic = SamplerConfig(
             min_filter=sampler.min_filter,
@@ -78,7 +80,8 @@ class SourceImageBindings:
             return public
 
         def build():
-            inputs = context.resource_inputs.require(owner, ("pixels",))
+            ports = ("pixels",) if mip_levels == 1 else tuple(f"pixels_{i}" for i in range(mip_levels))
+            inputs = context.resource_inputs.require(owner, ports)
             sampling = (
                 dict(
                     filter=sampler.min_filter,
@@ -93,6 +96,7 @@ class SourceImageBindings:
                 parameters=dict(
                     format=fmt.name,
                     shape=list(shape),
+                    **({"mip_levels": mip_levels} if mip_levels != 1 else {}),
                     **sampling,
                     **({"storage": True} if id(owner) in self._storage_owners else {}),
                 ),
@@ -100,8 +104,9 @@ class SourceImageBindings:
             context.initialize_native_once(
                 resource,
                 "image",
-                "upload",
-                bindings=dict(image=resource, pixels=inputs["pixels"]),
+                "upload" if mip_levels == 1 else "upload_mips",
+                parameters={} if mip_levels == 1 else dict(mip_levels=mip_levels),
+                bindings=dict(image=resource, **inputs),
             )
             return resource
 

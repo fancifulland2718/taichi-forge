@@ -30,6 +30,8 @@ def test_aot_cuda_rejects_unqualified_sampler_options():
                 )
         with runtime.native_resource("image", "sampled", parameters=dict(shape=[2, 2], format="r32f")):
             pass
+        with pytest.raises(RuntimeError, match="one mip"):
+            runtime.native_resource("image", "sampled", parameters=dict(shape=[2, 2], format="r32f", mip_levels=2))
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

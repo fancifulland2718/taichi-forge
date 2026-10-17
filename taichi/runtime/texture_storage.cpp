@@ -1,5 +1,6 @@
 #include "taichi/runtime/texture_storage.h"
 
+#include <algorithm>
 #include <limits>
 #include "taichi/program/texture.h"
 
@@ -9,6 +10,51 @@
 #endif
 
 namespace taichi::lang {
+namespace {
+void validate_mip_chain(const ImageParams &params) {
+  uint32_t levels = 0;
+  for (auto extent = std::max({params.x, params.y, params.z}); extent;
+       extent >>= 1)
+    ++levels;
+  if (!params.x || !params.y || !params.z || !params.mip_levels ||
+      params.mip_levels > levels)
+    throw std::invalid_argument(
+        "Image mip count is outside the complete chain");
+}
+}  // namespace
+
+ImageParams image_mip_parameters(const ImageParams &params, uint32_t level) {
+  validate_mip_chain(params);
+  if (level >= params.mip_levels)
+    throw std::invalid_argument(
+        "Image mip level is outside the allocated chain");
+  auto result = params;
+  result.x = std::max(1u, params.x >> level);
+  result.y = std::max(1u, params.y >> level);
+  result.z = std::max(1u, params.z >> level);
+  result.mip_levels = 1;
+  return result;
+}
+
+std::size_t image_logical_bytes(const ImageParams &params) {
+  validate_mip_chain(params);
+  const auto [type, channels] = buffer_format2type_channels(params.format);
+  std::size_t total = 0;
+  for (uint32_t level = 0; level < params.mip_levels; ++level) {
+    const auto mip = image_mip_parameters(params, level);
+    std::size_t bytes = data_type_size(type) * channels;
+    for (auto extent : {mip.x, mip.y, mip.z}) {
+      if (extent > std::numeric_limits<std::size_t>::max() / bytes)
+        throw std::overflow_error("Image logical size overflows");
+      bytes *= extent;
+    }
+    if (bytes > std::numeric_limits<std::size_t>::max() - total)
+      throw std::overflow_error("Image mip-chain logical size overflows");
+    total += bytes;
+  }
+  return total;
+}
+
 #ifdef TI_WITH_CUDA
 namespace {
 

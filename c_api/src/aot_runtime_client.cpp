@@ -31,13 +31,7 @@ class BorrowedSampledImage final : public NativeSampledImage {
         arch_(arch),
         device_(device),
         cuda_storage_(cuda_storage) {
-    const auto [dtype, channels] = buffer_format2type_channels(parameters.format);
-    bytes_ = data_type_size(dtype) * channels;
-    for (auto extent : {parameters.x, parameters.y, parameters.z}) {
-      if (!extent || extent > std::numeric_limits<std::size_t>::max() / bytes_)
-        throw std::invalid_argument("Borrowed image byte extent overflows");
-      bytes_ *= extent;
-    }
+    bytes_ = image_logical_bytes(parameters);
   }
   Arch arch() const override { return arch_; }
   Device &device() const override { return device_; }
@@ -236,11 +230,11 @@ std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {
     // Validate the owner's live view before dereferencing the foreign pointer.
     state.program->validate_textures_for_external_submission(&texture, 1);
     auto lease = state.program->acquire_texture_external_lease(texture);
-    if (lease->get_mip_levels() != 1 ||
-        (state.arch == Arch::cuda && lease->sampler_config_.has_extended_sampling()) ||
+    if ((state.arch == Arch::cuda &&
+         (lease->get_mip_levels() != 1 || lease->sampler_config_.has_extended_sampling())) ||
         !is_float_sampled_texture_format(lease->get_buffer_format()))
       throw std::invalid_argument(
-          "AOT texture import requires the qualified single-level sampled format/sampler");
+          "AOT texture import requires the qualified sampled format/sampler");
     ImageParams params{};
     const auto size = lease->get_size();
     params.x = size[0];
