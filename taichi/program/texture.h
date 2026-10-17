@@ -14,6 +14,7 @@ namespace taichi::lang {
 class Program;
 class Ndarray;
 class SNode;
+class CudaTextureStorage;
 
 std::pair<DataType, uint32_t> buffer_format2type_channels(BufferFormat format);
 // Combined samplers expose normalized/floating formats as f32. This includes
@@ -93,8 +94,6 @@ class TI_DLL_EXPORT Texture {
   std::array<int, 3> get_mip_size(int level) const;
 
  private:
-  struct CudaTextureResource;
-
   friend class Program;
 
   void bind_runtime_resource_handle(RuntimeResourceHandle handle) noexcept {
@@ -102,7 +101,7 @@ class TI_DLL_EXPORT Texture {
   }
 
   DeviceAllocation texture_alloc_{kDeviceNullAllocation};
-  std::unique_ptr<CudaTextureResource> cuda_texture_;
+  std::unique_ptr<CudaTextureStorage> cuda_texture_;
   DataType dtype_;
   BufferFormat format_;
   int num_channels_{4};
