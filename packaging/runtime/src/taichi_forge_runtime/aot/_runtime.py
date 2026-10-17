@@ -319,7 +319,7 @@ class Runtime:
             return module
 
     def ndarray(self, dtype, shape, *, element_shape=(), usage=("storage",)):
-        """Allocate a packed array with explicit storage/uniform/vertex/index uses.
+        """Allocate a packed array with explicit storage/uniform/vertex/index/indirect uses.
 
         Usage describes the native allocation, not access synchronization.
         Include ``storage`` when the same array is passed to an AOT kernel.
@@ -552,11 +552,11 @@ class NativeResource(_Resource):
 
 
 def _array_usage(usage):
-    flags = {"storage": 1, "uniform": 2, "vertex": 4, "index": 8}
+    flags = {"storage": 1, "uniform": 2, "vertex": 4, "index": 8, "indirect": 16}
     if not isinstance(usage, (tuple, list)) or not usage or any(
         not isinstance(item, str) or item not in flags for item in usage
     ):
-        raise ValueError("Array usage must be a nonempty sequence of storage/uniform/vertex/index names")
+        raise ValueError("Array usage must be a nonempty sequence of storage/uniform/vertex/index/indirect names")
     bits = 0
     for item in usage:
         bits |= flags[item]

@@ -651,7 +651,11 @@ pass 声明 `pipeline_count`、`array_count`、`image_count`、`color_count`，�
 descriptor 完整性、类型/数量、真实用途、逻辑范围、对齐及设备限制均在准备期校验。
 
 共享计算与绘制的数组使用 `runtime.ndarray(..., usage=("storage", "vertex"))`。
-用途支持 `storage`、`uniform`、`vertex`、`index`，默认保持 `("storage",)`；用途声明
+用途支持 `storage`、`uniform`、`vertex`、`index`、`indirect`，C API 对应
+`TI_MEMORY_USAGE_INDIRECT_BIT`。显式 indirect-only 缓冲区不必具有 storage 用途，
+但 kernel 访问仍须 storage。既有 Vulkan storage 分配继续隐含 indirect 用途，兼容
+GPU 生成的 dispatch packet。
+默认保持 `("storage",)`；用途声明
 不添加同步，也不扫描索引内容。计划私有 ndarray 可声明相同 `usage` 列表，要求 v18
 格式及配对 ABI88 组件；省略时保持 storage 分配，不提高计划版本。`ndarray_view`
 继承父分配的真实用途，不能重新声明。vertex/index/uniform 可结合归档 `initial_data`

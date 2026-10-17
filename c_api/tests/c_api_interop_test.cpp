@@ -133,6 +133,32 @@ TEST_F(CapiTest, TestCPUImport) {
 
 #if TI_WITH_VULKAN
 
+TEST_F(CapiTest, VulkanIndirectAllocationUsagePreservesStorageDefaults) {
+  if (!ti::is_arch_available(TI_ARCH_VULKAN)) GTEST_SKIP();
+  ti::Runtime runtime(TI_ARCH_VULKAN);
+  for (auto usage : {TI_MEMORY_USAGE_UNIFORM_BIT, TI_MEMORY_USAGE_INDIRECT_BIT,
+                     TI_MEMORY_USAGE_STORAGE_BIT}) {
+    TiMemoryAllocateInfo allocation{};
+    allocation.size = 32;
+    allocation.usage = usage;
+    auto memory = ti_allocate_memory(runtime, &allocation);
+    ASSERT_NE(memory, nullptr);
+    ASSERT_TAICHI_SUCCESS();
+    TiVulkanMemoryInteropInfo info{};
+    ti_export_vulkan_memory(runtime, memory, &info);
+    ASSERT_TAICHI_SUCCESS();
+    // Historical storage allocations also support GPU-produced dispatch
+    // packets. An explicit indirect-only allocation must not imply storage.
+    EXPECT_EQ(bool(info.usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT),
+              usage != TI_MEMORY_USAGE_UNIFORM_BIT);
+    EXPECT_EQ(bool(info.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT),
+              usage == TI_MEMORY_USAGE_STORAGE_BIT);
+    EXPECT_GE(info.size, allocation.size);
+    ti_free_memory(runtime, memory);
+    ASSERT_TAICHI_SUCCESS();
+  }
+}
+
 static void texture_interop_test(TiArch arch) {
   ti::Runtime runtime(arch);
 

@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 数组可通过轻量消费者、C API 和私有资源重建显式声明 `indirect` 用途；
+  view 继承父分配用途，保留 storage 默认值及其已有的 Vulkan dispatch-packet 用途。
+
 - Vulkan 1.2 图形按实际查询结果启用 `drawIndirectCount`，修复 GPU 计数间接绘制的
   验证错误。设备创建将已选择的 promoted feature 合并到 Vulkan 1.2 结构，同时保留
   其他已启用特性。

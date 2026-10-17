@@ -15,11 +15,11 @@ def test_lightweight_array_allocation_usages():
     from tests.python.aot_optix_probe import read, write
 
     with ti.aot.borrow_runtime() as runtime:
-        value = runtime.ndarray("f32", 3, usage=("storage", "vertex", "uniform", "index"))
+        value = runtime.ndarray("f32", 3, usage=("storage", "vertex", "uniform", "index", "indirect"))
         write(value, [1, 2, 3])
         assert read(value) == [1, 2, 3]
         value.close()
-        for invalid in ((), "vertex", ("indirect",), (1,)):
+        for invalid in ((), "vertex", ("unknown",), (1,)):
             with pytest.raises(ValueError, match="usage"):
                 runtime.ndarray("f32", 1, usage=invalid)
 

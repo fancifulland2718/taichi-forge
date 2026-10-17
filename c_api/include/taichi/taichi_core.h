@@ -534,6 +534,8 @@ typedef enum TiMemoryUsageFlagBits {
   TI_MEMORY_USAGE_VERTEX_BIT = 1 << 2,
   // The memory can be used as an index buffer in graphics pipelines.
   TI_MEMORY_USAGE_INDEX_BIT = 1 << 3,
+  // The memory can supply indirect draw commands or a device draw count.
+  TI_MEMORY_USAGE_INDIRECT_BIT = 1 << 4,
 } TiMemoryUsageFlagBits;
 typedef TiFlags TiMemoryUsageFlags;
 

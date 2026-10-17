@@ -8,7 +8,7 @@ from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 def test_private_array_usages_require_v18_and_preserve_views():
     operations = [dict(kind="copy", source="view", destination="out")]
-    array = dict(kind="ndarray", name="vertices", dtype="f32", shape=[9], usage=["storage", "vertex"])
+    array = dict(kind="ndarray", name="vertices", dtype="f32", shape=[9], usage=["storage", "vertex", "indirect"])
     view = dict(kind="ndarray_view", name="view", array="vertices", offset=3, shape=[3])
     plan = ExecutionPlan(operations, resources=[array, view])
     document = json.loads(plan.to_json())

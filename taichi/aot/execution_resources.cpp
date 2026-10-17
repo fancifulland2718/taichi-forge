@@ -147,11 +147,12 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
           array.usage = AllocUsage::None;
           for (const auto &item : usage->second.arr.inner) {
             const auto label = name(item);
-            const auto flag = label == "storage"   ? AllocUsage::Storage
-                              : label == "uniform" ? AllocUsage::Uniform
-                              : label == "vertex"  ? AllocUsage::Vertex
-                              : label == "index"   ? AllocUsage::Index
-                                                   : AllocUsage::None;
+            const auto flag = label == "storage"    ? AllocUsage::Storage
+                              : label == "uniform"  ? AllocUsage::Uniform
+                              : label == "vertex"   ? AllocUsage::Vertex
+                              : label == "index"    ? AllocUsage::Index
+                              : label == "indirect" ? AllocUsage::Indirect
+                                                    : AllocUsage::None;
             if (flag == AllocUsage::None)
               throw std::invalid_argument("Unknown array usage: " + label);
             array.usage = array.usage | flag;

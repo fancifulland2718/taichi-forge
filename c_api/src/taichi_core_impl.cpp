@@ -485,6 +485,9 @@ TiMemory ti_allocate_memory(TiRuntime runtime,
   if (create_info->usage & TI_MEMORY_USAGE_INDEX_BIT) {
     usage = usage | taichi::lang::AllocUsage::Index;
   }
+  if (create_info->usage & TI_MEMORY_USAGE_INDIRECT_BIT) {
+    usage = usage | taichi::lang::AllocUsage::Indirect;
+  }
 
   taichi::lang::Device::AllocParams params{};
   params.size = create_info->size;

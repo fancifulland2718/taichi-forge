@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT arrays accept explicit `indirect` usage through the lightweight consumer,
+  C API and private-resource reconstruction. Views inherit the parent usage;
+  storage defaults and their existing Vulkan dispatch-packet usage are preserved.
+
 - Vulkan 1.2 graphics enables `drawIndirectCount` only when the queried feature
   is supported, fixing validation errors for GPU-count indirect draws. Device
   creation folds selected promoted features into the Vulkan 1.2 structure while

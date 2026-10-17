@@ -8,20 +8,21 @@ namespace taichi::lang::aot {
 TEST(ExecutionPlan, PrivateArrayUsagesRequireV18AndDoNotRedefineViews) {
   const std::string source = R"({"version":18,"operations":[
     {"kind":"copy","source":"view","destination":"out"}],"resources":[
-    {"kind":"ndarray","name":"data","dtype":"f32","shape":[9],"usage":["storage","vertex"]},
+    {"kind":"ndarray","name":"data","dtype":"f32","shape":[9],"usage":["storage","vertex","indirect"]},
     {"kind":"ndarray_view","name":"view","array":"data","offset":3,"shape":[3]}]})";
   const auto plan = ExecutionPlan::parse(source);
   const auto &array =
       std::get<ExecutionResources::Array>(plan.resources.declarations[0].value);
-  EXPECT_EQ(array.usage, AllocUsage::Storage | AllocUsage::Vertex);
+  EXPECT_EQ(array.usage,
+            AllocUsage::Storage | AllocUsage::Vertex | AllocUsage::Indirect);
   EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out"}));
   for (const auto &[before, after] :
        std::vector<std::pair<std::string, std::string>>{
            {"\"version\":18", "\"version\":17"},
-           {"[\"storage\",\"vertex\"]", "[]"},
-           {"[\"storage\",\"vertex\"]", "\"vertex\""},
-           {"[\"storage\",\"vertex\"]", "[true]"},
-           {"[\"storage\",\"vertex\"]", "[\"unknown\"]"},
+           {"[\"storage\",\"vertex\",\"indirect\"]", "[]"},
+           {"[\"storage\",\"vertex\",\"indirect\"]", "\"vertex\""},
+           {"[\"storage\",\"vertex\",\"indirect\"]", "[true]"},
+           {"[\"storage\",\"vertex\",\"indirect\"]", "[\"unknown\"]"},
            {"\"offset\":3", "\"offset\":3,\"usage\":[\"vertex\"]"}}) {
     auto invalid = source;
     invalid.replace(invalid.find(before), before.size(), after);

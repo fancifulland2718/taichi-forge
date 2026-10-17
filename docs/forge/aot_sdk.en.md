@@ -837,7 +837,10 @@ logical ranges, alignment and device limits are checked during preparation.
 
 Use `runtime.ndarray(..., usage=("storage", "vertex"))` for arrays shared by
 compute and drawing; supported allocation usages are `storage`, `uniform`,
-`vertex` and `index`. The default remains `("storage",)`. This declaration
+`vertex`, `index` and `indirect`. The C API exposes `TI_MEMORY_USAGE_INDIRECT_BIT`;
+explicit indirect-only buffers need no storage usage unless a kernel accesses
+them. Existing Vulkan storage allocations retain their implicit indirect usage
+for GPU-produced dispatch packets. The default remains `("storage",)`. This declaration
 does not add synchronization or inspect index contents. Plan-private ndarray
 resources accept the same `usage` list with execution format v18 and paired
 ABI88 components. Omitted usage keeps the previous storage allocation and
