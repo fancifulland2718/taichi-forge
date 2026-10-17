@@ -35,6 +35,10 @@
   对应导出要求 metadata v4 和配对 ABI90；普通产物保持原版本。不兼容的 SPIR-V
   缓存会重新编译，CPU/CUDA 缓存格式不变。
 
+- 显式 Vulkan AOT 计划可重建整数 storage 图像并绑定 RWTexture kernel，覆盖整数
+  MRT 和指定 mip 读写；复用图像所有者、上传、初始化及 GFX 录制路径。已验证独立/
+  借用重放及下游数值梯度；graphics/RWTexture Graph 自动导出仍待接通。
+
 - 显式 Vulkan AOT 计划可重建光栅 pipeline、颜色/深度附件，并通过 JIT 共用图形
   核心录制直接、索引及实例化绘制。完整 clear 无需 seed 上传，LOAD 和采样保留
   初始化检查；轻量 runtime 可显式声明 vertex/index/uniform 数组用途。

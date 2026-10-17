@@ -39,6 +39,12 @@ lifetimes. The entries below describe the changes.
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache
   entries are recompiled; CPU/CUDA cache formats are unchanged.
 
+- Explicit Vulkan AOT plans reconstruct integer storage images and bind
+  RWTexture kernels, including integer MRT and selected mip read/write.
+  They reuse the image owner, upload, initialization and GFX recording paths.
+  Standalone/borrowed replay and downstream numeric gradients are qualified;
+  automatic graphics/RWTexture Graph export remains pending.
+
 - Explicit Vulkan AOT plans reconstruct raster pipelines and color/depth
   attachments, then record direct, indexed and instanced draws through the
   shared JIT graphics core. Complete clears need no seed uploads; LOAD and

@@ -28,10 +28,13 @@ void NativeImageKernelBinding::validate_parameter(
         "owner");
   const auto found = kernel.nested_parameters.find(argument_);
   if (found == kernel.nested_parameters.end() ||
-      found->second.ptype != ParameterType::kTexture ||
+      (found->second.ptype != ParameterType::kTexture &&
+       found->second.ptype != ParameterType::kRWTexture) ||
       found->second.needs_grad)
     throw std::invalid_argument(
-        "Managed image requires a sampled Texture kernel parameter");
+        "Managed image requires a Texture or RWTexture kernel parameter");
+  const auto &parameter = found->second;
+  const bool storage = parameter.ptype == ParameterType::kRWTexture;
   const auto &p = image_->parameters();
   const auto dimensions = p.dimension == ImageDimension::d1D   ? 1u
                           : p.dimension == ImageDimension::d2D ? 2u
@@ -39,10 +42,22 @@ void NativeImageKernelBinding::validate_parameter(
                                                                : 0u;
   if (!dimensions || found->second.total_dim != dimensions ||
       (p.mip_levels != 1 &&
-       (arch != Arch::vulkan || p.dimension != ImageDimension::d2D)) ||
-      !is_float_sampled_texture_format(p.format))
+       (arch != Arch::vulkan || p.dimension != ImageDimension::d2D)))
     throw std::invalid_argument(
-        "Sampled image does not match the kernel dimension/format contract");
+        "Managed image does not match the kernel dimension contract");
+  if (storage) {
+    if (arch != Arch::vulkan || !bool(p.usage & ImageAllocUsage::Storage) ||
+        parameter.format != p.format)
+      throw std::invalid_argument(
+          "RWTexture requires a Vulkan storage image with matching format");
+    if (parameter.texture_lod < 0 ||
+        uint32_t(parameter.texture_lod) >= p.mip_levels)
+      throw std::invalid_argument(
+          "RWTexture mip level is outside the allocated chain");
+  } else if (!bool(p.usage & ImageAllocUsage::Sampled) ||
+             !is_float_sampled_texture_format(p.format)) {
+    throw std::invalid_argument("Texture requires a floating sampled image");
+  }
   for (auto extent : {p.x, p.y, p.z})
     if (!extent || extent > std::numeric_limits<std::int32_t>::max())
       throw std::invalid_argument(
@@ -72,6 +87,15 @@ NativeImageKernelBinding::NativeImageKernelBinding(
     if (gfx_image_.device != &device)
       throw std::invalid_argument(
           "Managed GFX sampled image is foreign or null");
+    const auto &parameter = kernel.nested_parameters.at(argument_);
+    if (parameter.ptype == ParameterType::kRWTexture) {
+      const auto p = image_mip_parameters(image_->parameters(),
+                                          uint32_t(parameter.texture_lod));
+      context.set_arg_rw_texture_impl(argument_,
+                                      reinterpret_cast<intptr_t>(&gfx_image_),
+                                      {int(p.x), int(p.y), int(p.z)});
+      return;
+    }
     context.set_arg_texture_impl(argument_,
                                  reinterpret_cast<intptr_t>(&gfx_image_));
   }
@@ -101,7 +125,10 @@ void NativeImageKernelBinding::validate(
   if (kernel_ != &kernel || context_ != &context ||
       pointer == context.array_ptrs.end() || pointer->second != descriptor ||
       kind == context.device_allocation_type.end() ||
-      kind->second != LaunchContextBuilder::DevAllocType::kTexture)
+      kind->second != (kernel.nested_parameters.at(argument_).ptype ==
+                               ParameterType::kRWTexture
+                           ? LaunchContextBuilder::DevAllocType::kRWTexture
+                           : LaunchContextBuilder::DevAllocType::kTexture))
     throw std::invalid_argument(
         "Kernel sampled-image binding changed after qualification");
   image_->validate_sampling(state);
@@ -113,6 +140,11 @@ struct SampledImageDescription {
   static constexpr uint32_t version = 1;
   ImageParams parameters;
   std::optional<NativeArrayBinding> pixels;
+};
+// Both descriptions use the same image owner, upload operations and retirement.
+// A separate capability prevents CUDA from advertising Vulkan storage images.
+struct StorageImageDescription : SampledImageDescription {
+  static constexpr const char *kind = "storage_image";
 };
 struct ImageUploadOperation {
   static constexpr const char *kind = "image_upload";
@@ -136,10 +168,14 @@ BufferFormat image_format(const std::string &name) {
   throw std::invalid_argument("Unknown sampled image format: " + name);
 }
 
-ImageParams parameters(const liong::json::JsonValue &p) {
+ImageParams parameters(const liong::json::JsonValue &p,
+                       bool storage_only = false) {
   using namespace operation_json;
-  fields(p, {"shape", "format", "filter", "address_modes", "storage", "sampler",
-             "mip_levels", "attachment"});
+  if (storage_only)
+    fields(p, {"shape", "format", "mip_levels", "attachment"});
+  else
+    fields(p, {"shape", "format", "filter", "address_modes", "storage",
+               "sampler", "mip_levels", "attachment"});
   const auto &shape = p["shape"];
   if (!shape.is_arr() || shape.arr.inner.empty() || shape.arr.inner.size() > 3)
     throw std::invalid_argument(
@@ -156,15 +192,23 @@ ImageParams parameters(const liong::json::JsonValue &p) {
           "Image extent must fit the positive uint32 RHI ABI");
     *extents[i] = uint32_t(extent);
   }
-  result.usage = ImageAllocUsage::Sampled;
+  result.usage =
+      storage_only ? ImageAllocUsage::Storage : ImageAllocUsage::Sampled;
   if (optional_bool(p, "storage"))
     result.usage = result.usage | ImageAllocUsage::Storage;
   if (optional_bool(p, "attachment"))
     result.usage = result.usage | ImageAllocUsage::Attachment;
   result.format = image_format(name(p["format"]));
-  if (!is_float_sampled_texture_format(result.format))
+  if (!storage_only && !is_float_sampled_texture_format(result.format))
     throw std::invalid_argument(
         "Image format does not support floating sampling");
+  if (storage_only && (result.format == BufferFormat::unknown ||
+                       result.format == BufferFormat::depth16 ||
+                       result.format == BufferFormat::depth24stencil8 ||
+                       result.format == BufferFormat::depth32f))
+    throw std::invalid_argument("Storage image requires a color format");
+  if (bool(result.usage & ImageAllocUsage::Storage))
+    buffer_format2storage_image_sampled_type(result.format);
   const auto mip_levels = optional_integer(p, "mip_levels").value_or(1);
   if (!mip_levels || mip_levels > UINT32_MAX)
     throw std::invalid_argument("Image mip count must fit positive uint32");
@@ -172,6 +216,8 @@ ImageParams parameters(const liong::json::JsonValue &p) {
   if (mip_levels != 1 && result.dimension != ImageDimension::d2D)
     throw std::invalid_argument("Managed mip chains require 2D Vulkan images");
   image_mip_parameters(result, 0);  // Check the full chain before allocation.
+  if (storage_only)
+    return result;
   const auto filter = [](const liong::json::JsonValue &value) {
     const auto label = name(value);
     if (label == "nearest")
@@ -416,6 +462,22 @@ class VulkanSampledImage final : public NativeSampledImage {
   }
   void initialize(const SampledImageDescription &d) {
     auto params = d.parameters;
+    if (bool(params.usage & ImageAllocUsage::Storage)) {
+      auto &device = static_cast<vulkan::VulkanDevice &>(device_);
+      const auto [result, format] =
+          vulkan::buffer_format_ti_to_vk(params.format);
+      if (result != RhiResult::success)
+        throw std::invalid_argument("Unsupported Vulkan storage image format");
+      VkFormatProperties properties{};
+      device.vk_device()
+          .instance_functions()
+          .vkGetPhysicalDeviceFormatProperties(device.vk_physical_device(),
+                                               format, &properties);
+      if (!(properties.optimalTilingFeatures &
+            VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        throw std::invalid_argument(
+            "Vulkan device does not support this storage image format");
+    }
     image_ = runtime_.create_image(params);
     if (d.pixels) {
       const auto image = image_;
@@ -428,7 +490,10 @@ class VulkanSampledImage final : public NativeSampledImage {
                                   copy);
       };
       const std::vector<ComputeOpImageRef> refs{
-          {image, ImageLayout::transfer_dst, ImageLayout::shader_read}};
+          {image, ImageLayout::transfer_dst,
+           bool(params.usage & ImageAllocUsage::Sampled)
+               ? ImageLayout::shader_read
+               : ImageLayout::shader_read_write}};
       if (copy.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT) {
         runtime_.enqueue_graphics_op_lambda(upload, refs);
       } else {
@@ -538,22 +603,38 @@ class VulkanImageUpload final : public NativeOperation {
 }  // namespace
 
 void register_image_operations(NativeOperationRegistry &registry) {
-  registry.define<SampledImageDescription>(
-      [](Device &device, const SampledImageDescription &d) {
-        if (d.pixels) {
-          if (d.parameters.mip_levels != 1)
-            throw std::invalid_argument(
-                "Mip-chain initialization requires image/upload_mips");
-          validate_pixels(device, d.parameters, *d.pixels);
-        }
-      },
-      NativeObjectKind::resource);
+  const auto validate_image = [](Device &device,
+                                 const SampledImageDescription &d) {
+    if (d.pixels) {
+      if (d.parameters.mip_levels != 1)
+        throw std::invalid_argument(
+            "Mip-chain initialization requires image/upload_mips");
+      validate_pixels(device, d.parameters, *d.pixels);
+    }
+  };
+  registry.define<SampledImageDescription>(validate_image,
+                                           NativeObjectKind::resource);
+  registry.define<StorageImageDescription>(validate_image,
+                                           NativeObjectKind::resource);
   registry.register_schema<SampledImageDescription>(
       "image", "sampled", {},
       [](const liong::json::JsonValue &p) {
         const auto config = parameters(p);
         return [config](const NativeOperationBindings &b) {
           SampledImageDescription d{config};
+          if (b.count("pixels"))
+            d.pixels = b.at("pixels").array();
+          return d;
+        };
+      },
+      {}, {"pixels"});
+  registry.register_schema<StorageImageDescription>(
+      "image", "storage", {},
+      [](const liong::json::JsonValue &p) {
+        const auto config = parameters(p, true);
+        return [config](const NativeOperationBindings &b) {
+          StorageImageDescription d;
+          d.parameters = config;
           if (b.count("pixels"))
             d.pixels = b.at("pixels").array();
           return d;
@@ -617,7 +698,8 @@ void register_image_operations(NativeOperationRegistry &registry) {
         if (bool(d.parameters.usage & ImageAllocUsage::Storage))
           throw std::invalid_argument("Managed storage images require Vulkan");
         if (bool(d.parameters.usage & ImageAllocUsage::Attachment))
-          throw std::invalid_argument("Managed attachment images require Vulkan");
+          throw std::invalid_argument(
+              "Managed attachment images require Vulkan");
         if (!c.fault_domain || !dynamic_cast<cuda::CudaDevice *>(&c.device))
           throw std::invalid_argument(
               "Sampled image requires a CUDA owner and fault domain");
@@ -642,25 +724,30 @@ void register_image_operations(NativeOperationRegistry &registry) {
       available);
 #endif
 #ifdef TI_WITH_VULKAN
+  const auto create_vulkan_image = [](NativePreparationContext &c,
+                                      const SampledImageDescription &d) {
+    if (!c.gfx_runtime || c.gfx_runtime->get_ti_device() != &c.device ||
+        !c.fault_domain || !dynamic_cast<vulkan::VulkanDevice *>(&c.device))
+      throw std::invalid_argument(
+          "Sampled image requires its owner's Vulkan GFX runtime");
+    auto owner = std::make_shared<VulkanSampledImage>(c, d);
+    try {
+      owner->initialize(d);
+    } catch (const BackendRuntimeError &error) {
+      c.fault_domain->report_backend_error(error, 0);
+      throw;
+    }
+    return owner;
+  };
+  const auto vulkan_available = [](NativeProviderSession &) {
+    return NativeOperationAvailability{true, 0};
+  };
   registry.register_context_factory<SampledImageDescription>(
-      Arch::vulkan, NativeOperationMode::vulkan_inline,
-      [](NativePreparationContext &c, const SampledImageDescription &d) {
-        if (!c.gfx_runtime || c.gfx_runtime->get_ti_device() != &c.device ||
-            !c.fault_domain || !dynamic_cast<vulkan::VulkanDevice *>(&c.device))
-          throw std::invalid_argument(
-              "Sampled image requires its owner's Vulkan GFX runtime");
-        auto owner = std::make_shared<VulkanSampledImage>(c, d);
-        try {
-          owner->initialize(d);
-        } catch (const BackendRuntimeError &error) {
-          c.fault_domain->report_backend_error(error, 0);
-          throw;
-        }
-        return owner;
-      },
-      [](NativeProviderSession &) {
-        return NativeOperationAvailability{true, 0};
-      });
+      Arch::vulkan, NativeOperationMode::vulkan_inline, create_vulkan_image,
+      vulkan_available);
+  registry.register_context_factory<StorageImageDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline, create_vulkan_image,
+      vulkan_available);
   registry.register_factory<ImageUploadOperation>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](Arch, Device &, const ImageUploadOperation &op) {

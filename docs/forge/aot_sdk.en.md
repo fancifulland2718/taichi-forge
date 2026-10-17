@@ -715,7 +715,7 @@ source. This restriction follows the [CUDA Graph update rules](https://docs.nvid
 Windows CUDA checks cover normalized 1D, non-square 2D linear/nearest sampling,
 3D axis order, seeded and GPU-updated images, captured and OptiX-ordered plans,
 shared binding retirement, and real gradients of downstream numeric kernels.
-This does not differentiate texture sampling. RWTexture, TextureCollection and
+This does not differentiate texture sampling. CUDA RWTexture, TextureCollection and
 ordinary public C API image handles still require separate qualification.
 
 Vulkan uses the same `image/sampled` and `image/upload` descriptions, backed by
@@ -861,7 +861,32 @@ indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
 LOAD, changed inputs and bindings, shared/private retirement, and downstream
 numeric gradients. This is not differentiation of rasterization. Automatic
 graphics Graph export, mesh/indirect draws, descriptor arrays, shader AS
-bindings, integer MRT and RWTexture kernel consumption remain separate work.
+bindings and automatic RWTexture Graph export remain separate work.
+
+Explicit Vulkan plans also accept `image/storage` version 1 resources with
+`shape`, `format`, optional `mip_levels` and `attachment` parameters. They use
+the same owner, `image/upload` and `image/upload_mips` operations as sampled
+images. Optional `pixels` supplies a completed cold upload for a single-level
+image. Storage images have no sampler and do not implicitly acquire sampled
+usage; use `image/sampled` with `storage=true` for compatible floating images
+that need both usages. CPU/CUDA reject the storage resource factory.
+
+Kernel entries bind these resources by name to `ti.types.rw_texture` arguments.
+Preparation checks storage usage, exact format, dimensionality and allocated
+mip level; `image.shape` reflects the selected mip. Signed/unsigned integer
+color attachments retain their exact clear/output bits. A seed, unconditional
+upload or complete attachment clear must initialize the image before kernel
+use. An arbitrary kernel store does not establish full-image initialization.
+This uses existing GFX ordering, barriers and owner retirement, without a warm
+host readback or a new submission boundary. Storage format support is checked
+against the selected Vulkan device before allocation.
+
+Windows qualification covers 2D floating/unsigned/signed images, integer MRT
+clear/draw → kernel load/store → readback, public/private owners, non-square
+mip updates, replay, close/reset and downstream numeric gradients. Neither
+storage-image operations nor rasterization become differentiable. This does
+not qualify automatic graphics/RWTexture Graph export or legacy CGraph texture
+arguments; these plans use compiled kernel entries directly.
 
 CUDA and Vulkan Graph export also accept sampled Texture kernel arguments,
 including qualified immutable compute recipes. CUDA preserves its
@@ -961,8 +986,9 @@ foreign, closed and retired handles fail before recording. Replay adds no owner
 scan or provider lookup. Seeded images may be updated and sampled across plans
 on the same runtime queue. Unseeded images still require an unconditional upload
 within each sampling plan: recording or executing a separate upload does not
-publish a global initialization fact. Legacy CGraph texture arguments and RWTexture
-are outside this interface. Existing Program Textures require the explicit borrowed
+publish a global initialization fact. Explicit Vulkan RWTexture plans follow
+the storage-image contract above; legacy CGraph texture arguments remain outside
+this interface. Existing Program Textures require the explicit borrowed
 runtime import described below.
 
 Windows qualification covers CUDA/Vulkan images in standalone and borrowed

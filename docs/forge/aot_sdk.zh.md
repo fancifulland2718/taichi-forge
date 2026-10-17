@@ -559,7 +559,7 @@ alpha recording 可通过下述显式图像重建合同自动导出。
 
 Windows CUDA 已验证归一化 1D、非方形 2D 线性/最近邻采样、3D 轴顺序、初始 seed 与
 GPU 更新、captured 和 OptiX ordered 计划、共享绑定退休及后续数值 kernel 的真实梯度。
-这不提供纹理采样求导。RWTexture、TextureCollection 和普通公开 C API 图像句柄仍需分别接通。
+这不提供纹理采样求导。CUDA RWTexture、TextureCollection 和普通公开 C API 图像句柄仍需分别接通。
 
 Vulkan 复用相同的 `image/sampled`、`image/upload` 描述，并接入所属 runtime 已有的
 GFX 执行器。通过 `image_upload` v1 的 `vulkan_inline` 能力协商；创建与初始像素上传在
@@ -666,8 +666,26 @@ clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样
 
 Windows 验证覆盖独立/借用执行、直接和索引/实例化绘制、uniform/采样描述符、颜色/深度
 clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度；不提供光栅化求导。
-graphics Graph 自动导出、mesh/indirect、描述符数组、shader AS、整数 MRT 和 RWTexture
-kernel 消费仍为后续工作。
+graphics Graph 自动导出、mesh/indirect、描述符数组、shader AS 和 RWTexture 自动 Graph 导出
+仍为后续工作。
+
+显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
+`mip_levels` 和 `attachment`，复用同一所有者及 `image/upload`、`image/upload_mips`。
+单 mip 图像可选 `pixels`，上传在冷创建完成。storage 图像没有 sampler，也不隐含
+sampled 用途；浮点图像需要两种用途时，使用 `image/sampled` 加 `storage=true`。
+CPU/CUDA 拒绝 storage 资源工厂。
+
+kernel entry 按资源名绑定 `ti.types.rw_texture` 参数。准备期检查 storage 用途、
+准确格式、维度及已分配的 mip 层级；`image.shape` 使用所选 mip 的尺寸。有符号和
+无符号整数附件保留精确 clear/output 位模式。kernel 使用前必须有 seed、无条件上传
+或完整附件 clear；任意 kernel store 不作为整张图已初始化的证明。复用 GFX 次序、
+屏障及所有者退休，不增加暖态 host 回读或提交边界；分配前检查当前设备的 storage
+格式能力。
+
+Windows 验证覆盖二维浮点/有符号/无符号图像、整数 MRT clear/draw → kernel load/store
+→ 回读、公私所有者、非方形 mip 更新、重放、close/reset 和下游数值梯度；不提供图像
+读写或光栅化求导，也不扩展到 graphics/RWTexture Graph 自动导出或旧 CGraph 纹理参数。
+这些显式计划直接使用已编译 kernel entry。
 
 `prepared.info["native_resource_bytes"]` 独立报告私有 native 资源已知的设备载荷，
 要求配对 ABI89 组件。CUDA/Vulkan 受管图像按紧凑 texel 字节统计，包含全部 mip；
@@ -757,7 +775,8 @@ call 保留的资源。仅初始化使用的资源在 `initialize()` 成功后�
 资源使用 runtime 所有的 opaque 身份，在冷绑定阶段检查外来、已关闭和依赖已退休的句柄；
 重放不增加 owner 扫描或 provider 查询。有 seed 的图像可在同 runtime 队列的不同计划间
 有序上传和采样。无 seed 图像仍要求每个采样计划内部包含无条件上传；单独录制或执行上传
-不会发布跨计划初始化事实。旧 CGraph 纹理参数、RWTexture 不在此接口范围内。
+不会发布跨计划初始化事实。显式 Vulkan RWTexture 计划遵循上文 storage 图像合同；
+旧 CGraph 纹理参数仍不在此接口范围内。
 现有 Program Texture 须使用下文显式 borrowed runtime 导入接口。
 
 Windows 已验证 CUDA/Vulkan 独立/借用 runtime 的图像跨模块采样与上传、CUDA 绑定族、

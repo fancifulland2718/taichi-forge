@@ -243,7 +243,7 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                                 if k in invalid.argument_names
                             },
                         ),
-                        "dimension/format",
+                        "dimension",
                     )
                     wrong = json.loads(plan.to_json())
                     next(
@@ -259,7 +259,7 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                                 if k in invalid.argument_names
                             },
                         ),
-                        "sampled Texture",
+                        "kernel parameter",
                     )
                     conditional = json.loads(plan.to_json())
                     conditional["version"] = 11 if arch == "cuda" else 12
