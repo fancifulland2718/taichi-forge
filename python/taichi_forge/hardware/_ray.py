@@ -603,6 +603,11 @@ class VulkanBLASBuildRecording(_GeometryRecording, BackendCommandRecording):
 class VulkanBLASRefitRecording(_GeometryRecording, BackendCommandRecording):
     """One vertex-only triangle BLAS update with fixed topology."""
 
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray import export_blas_refit
+
+        return export_blas_refit(self, context)
+
     def __init__(self, blas, *, vertices="vertices"):
         if not isinstance(blas, TriangleBLAS):
             raise TypeError("Vulkan BLAS refit recording requires a TriangleBLAS")
@@ -981,6 +986,11 @@ class VulkanTLASRefitRecording(_VulkanTLASRecording):
 @instrument_hardware_recording("ray.as_refit.vulkan")
 class VulkanTLASTransformRecording(BackendCommandRecording):
     """Pack device transforms and refit a TLAS with fixed instance topology."""
+
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray import export_instance_transforms
+
+        return export_instance_transforms(self, context)
 
     def __init__(self, tlas, *, transforms="transforms"):
         if not isinstance(tlas, InstanceTLAS):

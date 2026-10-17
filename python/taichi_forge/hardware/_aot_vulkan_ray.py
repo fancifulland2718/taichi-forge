@@ -3,12 +3,22 @@
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
-def _scene(context, scene):
-    from ._ray import TriangleScene
+def _geometry(context, scene, *, retained_by=None):
+    from ._ray import TriangleBLAS, TriangleScene
 
-    if type(scene) is not TriangleScene:
-        raise TaichiRuntimeError("AOT Vulkan ray export currently requires a qualified TriangleScene")
-    scene._validate_lifetime()
+    if type(scene) not in (TriangleScene, TriangleBLAS):
+        raise TaichiRuntimeError("AOT Vulkan geometry requires a qualified triangle resource")
+    if retained_by is None:
+        scene._validate_lifetime()
+    else:
+        # A live TLAS retains its BLAS cores after public BLAS handles close.
+        # The caller walks that frozen topology; no repeated topology search.
+        scene._validate_runtime_identity()
+        if scene._runtime_prog is not retained_by._runtime_prog:
+            raise TaichiRuntimeError("AOT Vulkan BLAS and TLAS require the same runtime")
+    shared = type(scene) is TriangleBLAS
+    if shared and scene._micromap_id is not None:
+        raise TaichiRuntimeError("AOT Vulkan recording export does not yet reconstruct micromaps")
     if (public := context.public_resource(scene)) is not None:
         return public
 
@@ -16,12 +26,51 @@ def _scene(context, scene):
         # Source arrays may have changed since AS construction/refit. Require
         # consumer seeds instead of pretending to snapshot the live AS state.
         inputs = context.resource_inputs.require(scene, ("vertices", "indices"))
+        parameters = dict(vertex_count=scene.vertex_count, triangle_count=scene.triangle_count)
+        if shared:
+            parameters["opaque"] = scene.opaque
         return context.resource(
             scene,
             "vulkan_ray",
-            "triangle_scene",
-            parameters=dict(vertex_count=scene.vertex_count, triangle_count=scene.triangle_count),
+            "triangle_blas" if shared else "triangle_scene",
+            parameters=parameters,
             bindings=inputs,
+        )
+
+    return context.resource_once(scene, build, policy="vulkan_ray_consumer_seed")
+
+
+def _scene(context, scene):
+    from ._ray import InstanceTLAS, TriangleScene
+
+    if type(scene) is TriangleScene:
+        return _geometry(context, scene)
+    if type(scene) is not InstanceTLAS:
+        raise TaichiRuntimeError("AOT Vulkan query export requires a qualified scene")
+    scene._validate_lifetime()
+    if any(scene.sbt_record_offsets) or any(blas._micromap_id is not None for blas in dict.fromkeys(scene._topology)):
+        raise TaichiRuntimeError(
+            "AOT Vulkan recording export does not yet reconstruct micromaps or nonzero SBT offsets"
+        )
+    context.resource_links(scene, {f"blas_{i}": blas for i, blas in enumerate(scene._topology)})
+    if (public := context.public_resource(scene)) is not None:
+        return public
+
+    def build():
+        inputs = context.resource_inputs.require(scene, ("transforms",))
+        bindings = dict(inputs)
+        for ordinal, blas in enumerate(scene._topology):
+            bindings[f"blas_{ordinal}"] = _geometry(context, blas, retained_by=scene)
+        return context.resource(
+            scene,
+            "vulkan_ray",
+            "instance_tlas",
+            parameters=dict(
+                instance_count=scene.instance_count,
+                custom_indices=[instance.custom_index for instance in scene._instances],
+                visibility_masks=[instance.mask for instance in scene._instances],
+            ),
+            bindings=bindings,
         )
 
     return context.resource_once(scene, build, policy="vulkan_ray_consumer_seed")
@@ -40,5 +89,23 @@ def export_refit(recording, context):
     recording.validate_graph_lifetime()
     context.native(
         "vulkan_ray", "refit", bindings=dict(scene=_scene(context, recording.scene), vertices=recording.vertices)
+    )
+    return ()
+
+
+def export_blas_refit(recording, context):
+    recording.validate_graph_lifetime()
+    context.native(
+        "vulkan_ray", "refit", bindings=dict(scene=_geometry(context, recording.blas), vertices=recording.vertices)
+    )
+    return ()
+
+
+def export_instance_transforms(recording, context):
+    recording.validate_graph_lifetime()
+    context.native(
+        "vulkan_ray",
+        "instance_refit",
+        bindings=dict(scene=_scene(context, recording.tlas), transforms=recording.transforms),
     )
     return ()

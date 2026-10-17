@@ -316,8 +316,8 @@ Small Windows Vulkan checks cover shared/repeated BLAS, distinct instance/custom
 IDs and masks, direct initial device build, GPU geometry/transform updates,
 subrange matrices, typed/legacy hit and miss reset, cross-module retirement,
 standalone/borrowed owners, and downstream gradient kernels. This factory coverage
-does not yet include automatic BLAS/TLAS Graph export, host metadata updates,
-micromaps or kernel/graphics AS bindings.
+does not yet include host metadata updates, micromaps or kernel/graphics AS
+bindings.
 
 Graphs containing `TriangleScene.record_refit()`, `record_typed()` and `record()`
 can be exported automatically:
@@ -330,6 +330,33 @@ module.add_execution_plan(
 # Or bind a public consumer scene without creating a private AS:
 module.add_execution_plan("shared_step", graph, resource_bindings={scene: "scene"})
 ```
+
+`TriangleBLAS.record_refit()`, `InstanceTLAS.record_refit_transforms()`, and its
+typed/legacy batch query recordings also export through the same path:
+
+```python
+module.add_execution_plan("step", graph, resource_bindings={
+    blas: {"vertices": "seed", "indices": "triangles"},
+    tlas: {"transforms": "initial_transforms"},
+})
+# Both resources public, or public BLAS with a privately reconstructed TLAS:
+module.add_execution_plan("public_step", graph, resource_bindings={blas: "blas", tlas: "tlas"})
+module.add_execution_plan("mixed_step", graph, resource_bindings={
+    blas: "blas", tlas: {"transforms": "initial_transforms"},
+})
+```
+
+Repeated source BLAS references reconstruct once. Version-17 resource-alias
+constraints preserve shared BLAS relationships in public TLAS bindings; equal
+geometry in a different BLAS is insufficient. A public TLAS dependency cannot also
+be reconstructed privately in the same plan. A still-live source TLAS may export
+its retained geometry after the original BLAS handle closes. Construction inputs
+remain explicit; export does not snapshot live AS memory or retained source
+arrays. Graphs with host TLAS metadata/build recordings, BLAS rebuild recordings,
+micromaps or nonzero SBT offsets are not covered by this exporter yet. Small
+Windows tests cover private/public/mixed export, invalid mappings before kernel
+publication, alias rejection before execution, retained-source geometry,
+standalone/borrowed consumers, and downstream gradients.
 
 The first form requires seeds ready before preparation and reconstructs each
 source scene once across repeated queries/refits. It serializes no producer

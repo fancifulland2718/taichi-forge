@@ -247,8 +247,8 @@ scalar `[I,12]` / `[I,3,4]` 或 element shape `[3,4]` 的 AoS `[I]`。沿用 JIT
 
 Windows Vulkan 小型检查覆盖共享/重复 BLAS、独立实例 ID/custom ID/mask、首次设备
 矩阵 build、GPU 几何/变换更新、矩阵子区间、typed/legacy 命中及 miss 清零、跨模块
-退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 BLAS/TLAS 自动 Graph 导出、
-host metadata 更新、micromap 或 kernel/graphics AS 绑定。
+退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 host metadata 更新、
+micromap 或 kernel/graphics AS 绑定。
 
 Graph 内 `TriangleScene.record_refit()`、`record_typed()` 和 `record()` 可自动导出：
 
@@ -260,6 +260,29 @@ module.add_execution_plan(
 # 或由消费端绑定公共 scene，不生成私有 AS：
 module.add_execution_plan("shared_step", graph, resource_bindings={scene: "scene"})
 ```
+
+`TriangleBLAS.record_refit()`、`InstanceTLAS.record_refit_transforms()` 及其 typed/legacy
+批次查询录制也沿用同一导出路径：
+
+```python
+module.add_execution_plan("step", graph, resource_bindings={
+    blas: {"vertices": "seed", "indices": "triangles"},
+    tlas: {"transforms": "initial_transforms"},
+})
+# 全部使用公共资源，或公共 BLAS 搭配私有重建的 TLAS：
+module.add_execution_plan("public_step", graph, resource_bindings={blas: "blas", tlas: "tlas"})
+module.add_execution_plan("mixed_step", graph, resource_bindings={
+    blas: "blas", tlas: {"transforms": "initial_transforms"},
+})
+```
+
+同一源 BLAS 的重复引用只重建一次；v17 resource-alias 约束保持公共 TLAS 的共享关系，
+不同 BLAS 即使几何相同也不能替代所要求的资源身份。公共 TLAS 的依赖不能在同一 plan
+里另外私有重建。原始 BLAS handle 关闭后，仍存活的源 TLAS 可导出其保留的几何。
+构建输入仍需显式提供，不会快照当前 AS 内存或保留的源数组。host TLAS metadata/build
+录制、BLAS rebuild 录制、micromap 及非零 SBT offset 尚未由此 exporter 覆盖。
+Windows 小型测试覆盖私有/公共/混合导出、发布 kernel 前拒绝错误映射、执行前拒绝
+alias 不匹配、保留的源几何、独立/借用消费端和下游梯度。
 
 前者的种子须在准备前就绪，多次查询/refit只重建同一个生产端scene一次；不会序列化
 生产端句柄或猜测当前AS内容。后者的公共scene可供其他模块的query-only计划共享，
