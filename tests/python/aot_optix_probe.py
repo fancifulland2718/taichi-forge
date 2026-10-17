@@ -79,10 +79,10 @@ def raises(fn, text=None):
         raise AssertionError("invalid call succeeded")
 
 
-def check(frame, shift, rules):
+def check(frame, shift, rules, rays=RAYS):
     hits, ids, gradients, occluded = [], [], [], []
     loss = 0.0
-    for ray in RAYS:
+    for ray in rays:
         accepted = []
         if ray[0] == 0:
             for primitive, z in enumerate((1 + shift, 2 + shift)):
@@ -214,6 +214,25 @@ def main(mode, artifact, adapter, output):
                     )
                 )
                 retained.append((frame, call))
+                if policy == "two_sided" and binding == 0:
+                    # Opaque any_hit has no mask input. Restrict the interval so
+                    # each ray has one candidate and an order-independent oracle.
+                    document = json.loads(plan.to_json())
+                    for operation in document["operations"]:
+                        if operation.get("operation") == "query":
+                            operation["parameters"]["any_hit"] = True
+                    first_rays = [ray[:-1] + [1.5] for ray in RAYS]
+                    write(frame["rays"], sum(first_rays, []))
+                    write(frame["indices"], range(6), "i")
+                    first = ExecutionPlan.from_json(json.dumps(document)).prepare(module, frame)
+                    try:
+                        for shift in (0.25, 4.0, 0.0):
+                            write(frame["shift"], [shift])
+                            first()
+                            check(frame, shift, [0, 0], first_rays)
+                    finally:
+                        first.close()
+                        write(frame["rays"], sum(RAYS, []))
                 if policy == "front_only" and binding == 0:
                     # any_hit uses the extended ABI; only B is a valid forward
                     # candidate, so it has the same independent oracle here.

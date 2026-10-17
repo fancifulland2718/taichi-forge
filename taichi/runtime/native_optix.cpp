@@ -626,6 +626,8 @@ class CudaOptixQuery final : public NativeOperation {
                    context.lease->handle),
           "prepare query pipeline");
     face_records_offset_ = queries.prepare ? 0 : 64;
+    const bool legacy_opaque_first =
+        !queries.prepare && op_.any_hit && !op_.occlusion && !faces_;
     if (faces_ || (extended_ && !queries.prepare)) {
       if (faces_ && scene_->instance_count() >
                         (std::numeric_limits<size_t>::max() - face_records_offset_) /
@@ -634,6 +636,12 @@ class CudaOptixQuery final : public NativeOperation {
       const size_t table_offset = face_records_offset_ +
           size_t(scene_->instance_count()) * sizeof(TiForgeOptixFaceRule);
       bytes_ = faces_ ? table_offset : 48;
+      if (legacy_opaque_first) {
+        if (scene_->instance_count() >
+            (std::numeric_limits<size_t>::max() - bytes_) / sizeof(TiForgeOptixAlphaMask))
+          throw std::overflow_error("OptiX empty mask table size overflows");
+        bytes_ += size_t(scene_->instance_count()) * sizeof(TiForgeOptixAlphaMask);
+      }
       if (op_.faces) {
         if (op_.faces->bytes > std::numeric_limits<size_t>::max() - bytes_)
           throw std::overflow_error("OptiX face workspace size overflows");
@@ -645,6 +653,14 @@ class CudaOptixQuery final : public NativeOperation {
       lease_->workspace = std::move(allocation.first);
       workspace_address_ = reinterpret_cast<uint64_t>(
           static_cast<cuda::CudaDevice &>(device()).get_memory_addr(*lease_->workspace));
+      if (legacy_opaque_first) {
+        // Older adapters require a mask record even for fully opaque first-hit
+        // traversal. Upload this compatibility table once, never on replay.
+        std::vector<TiForgeOptixAlphaMask> masks(scene_->instance_count());
+        CUDADriver::get_instance().memcpy_host_to_device(
+            reinterpret_cast<void *>(workspace_address_ + 48), masks.data(),
+            masks.size() * sizeof(TiForgeOptixAlphaMask));
+      }
       if (faces_) {
         std::vector<TiForgeOptixFaceRule> records(scene_->instance_count(), {0, 1, 0});
         auto &driver = CUDADriver::get_instance();
@@ -684,6 +700,10 @@ class CudaOptixQuery final : public NativeOperation {
               op_.ray_count, address(op_.rays), address(op_.hits),
               op_.hit_indices ? address(*op_.hit_indices) : 0,
               0, 0, workspace_address_, 0, uint32_t(op_.any_hit)};
+    if (legacy_opaque_first) {
+      query_.masks = workspace_address_ + 48;
+      query_.mask_count = scene_->instance_count();
+    }
     if (queries.prepare) {
       const TiForgeOptixFixedQueryDesc desc{
           sizeof(desc), uint32_t(scene_->is_instances()), scene_->lease->handle,

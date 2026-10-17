@@ -211,7 +211,9 @@ AOT 在创建 context 时协商一次，adapter 声明此扩展时采用固定�
 （origin.xyz、t_min、direction.xyz、t_max）。typed 输出 f32 `[N,4]` 的 t/u/v/0
 及 i32/u32 `[N,4]` 的 primitive/instance/custom/hit；单场景的 instance/custom 为0。
 miss 写回 `[-1,0,0,0]` 和 `[-1,-1,-1,0]`。遮挡输出 i32/u32 `[N]` 的0/1，
-此时不传 `hit_indices`，`any_hit` 默认为true且不能关闭。普通 typed 默认最近有效命中。
+此时不传 `hit_indices`，`any_hit` 默认为true且不能关闭。typed 的 `any_hit=true` 也可
+不提供面规则或 alpha mask；旧 adapter 的空 mask 表仅在冷准备期构造，可选固定查询
+adapter 无需该表。普通 typed 默认最近有效命中。
 
 这些记录端口也接受 AoS vector ndarray：shape `[count]`、element shape `[width]`，
 按端口使用3、8、4或1分量。面表与遮挡等单字端口还接受 scalar `[count,1]`。

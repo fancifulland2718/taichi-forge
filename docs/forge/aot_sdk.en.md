@@ -263,7 +263,10 @@ and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed o
 is f32 `[N,4]` for t/u/v/0 and i32/u32 `[N,4]` for primitive/instance/custom/hit;
 single-scene instance/custom IDs are zero. Misses write `[-1,0,0,0]` and
 `[-1,-1,-1,0]`. Occlusion writes 0/1 to i32/u32 `[N]`, omits `hit_indices`, and
-defaults `any_hit` to true, which cannot be disabled. Ordinary typed queries
+defaults `any_hit` to true, which cannot be disabled. Typed `any_hit=true` also
+works without face rules or alpha masks; legacy adapters receive a cold-prepared
+empty mask table, while the optional fixed-query adapter needs no such table.
+Ordinary typed queries
 default to the closest accepted hit.
 
 These record ports also accept AoS vector ndarrays: shape `[count]` with element

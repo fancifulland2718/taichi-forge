@@ -777,6 +777,10 @@ UV 为有限 normalized 坐标，轴顺序同 Forge `Texture.sample_lod`，非�
 `any_hit=True` 用于遮挡，返回首个接受命中而不保证最近。typed 距离/重心/整数索引与 miss 布局不变。
 不提供 mip/梯度 alpha 采样、多层透射、材质推断或自动渲染路线选择。
 
+不透明几何也可直接调用 `record_typed(N, any_hit=True)`，无需 `alpha_masks` 参数。
+输出仍为 typed 命中，返回首个已接受候选而不保证最近。兼容旧 adapter 时只在准备期
+构造全空 mask 表，调用方无需 UV 或纹理；仅需要可见性时，`record_occlusion` 的输出更小。
+
 Graph 绑定时一次准备材质表、指针与参数缓冲。UV/texel 原位更新遵循既有设备排序；资源替换用
 `bindings.update(...)`。每个 prepared binding 额外请求 `48 + 32 * instance_count` 字节，
 此外还有调用方资源和共用 pipeline/SBT。recording memory report 表示单 binding 请求量，

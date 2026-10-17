@@ -988,6 +988,12 @@ occlusion, not necessarily the closest. Typed distance/barycentric/index and
 miss layouts remain unchanged. No mip/gradient alpha sampling, multi-layer
 transmission, material inference or automatic renderer selection is provided.
 
+`record_typed(N, any_hit=True)` also accepts opaque geometry without an
+`alpha_masks` argument. It preserves typed outputs and returns the first accepted
+candidate, which need not be the nearest. Legacy adapters use an all-empty mask
+table prepared once; the caller does not supply UVs or textures. Compact
+`record_occlusion` remains the smaller-output option when only visibility matters.
+
 Graph binding prepares the material table, pointers and parameter workspace
 once. Update UVs/texels in place with normal device ordering, or use
 `bindings.update(...)` to replace resources. Each prepared binding needs

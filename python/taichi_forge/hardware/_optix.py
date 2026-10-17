@@ -1163,6 +1163,11 @@ class OptixRayQueryRecording(BackendCommandRecording):
         if not isinstance(any_hit, bool):
             raise TypeError("OptiX any_hit must be a bool")
         micromap = isinstance(scene, OptixInstanceScene) and scene._has_micromaps
+        if any_hit and not _occlusion and alpha_masks is None:
+            # Legacy adapters encode first-accepted traversal in the extended
+            # query ABI and require one (possibly empty) mask per instance.
+            count = scene.instance_count if isinstance(scene, OptixInstanceScene) else 1
+            alpha_masks = (None,) * count
         face_names = []
         if face_rules is not None:
             if isinstance(face_rules, str):
@@ -1176,8 +1181,6 @@ class OptixRayQueryRecording(BackendCommandRecording):
                     face_names.append(rule.binding)
                 elif not isinstance(rule, str) or rule not in ("two_sided", "front_only"):
                     raise ValueError("OptiX face rules require two_sided, front_only or OptixFaceRuleTable")
-            if any_hit and alpha_masks is None and not _occlusion:
-                alpha_masks = (None,) * count
             if all(rule == "two_sided" for rule in face_rules):
                 face_rules = None
             else:
@@ -1200,10 +1203,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 # OMM classification is intrinsic to this imported GAS. None
                 # accepts unknown states; callers can instead supply alpha masks.
                 alpha_masks = (None,) * scene.instance_count
-        if alpha_masks is None:
-            if any_hit and not _occlusion:
-                raise ValueError("OptiX any_hit requires an explicit alpha-mask query")
-        else:
+        if alpha_masks is not None:
             if hit_indices is None and not _occlusion:
                 raise ValueError("OptiX alpha masks require typed hits")
             alpha_masks = tuple(alpha_masks)
