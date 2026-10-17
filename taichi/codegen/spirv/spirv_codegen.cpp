@@ -517,6 +517,13 @@ class TaskCodegen : public IRVisitor {
 
   void visit(Block *stmt) override {
     for (auto &s : stmt->statements) {
+      // A continue terminates this basic block. Fast compilation can retain
+      // unreachable IR after it; emitting those statements would place SPIR-V
+      // instructions after OpBranch and before the next OpLabel. Leave the
+      // flag set so the enclosing control-flow visitor skips its own branch.
+      if (gen_label_) {
+        break;
+      }
       if (offload_loop_motion_.find(s.get()) == offload_loop_motion_.end()) {
         s->accept(this);
       }
@@ -4981,23 +4988,13 @@ class TaskCodegen : public IRVisitor {
     if (if_stmt->true_statements) {
       if_stmt->true_statements->accept(this);
     }
-    // ContinueStmt must be in IfStmt
-    if (gen_label_) {  // Skip OpBranch, because ContinueStmt already generated
-                       // one
-      gen_label_ = false;
-    } else {
-      ir_->make_inst(spv::OpBranch, merge_label);
-    }
+    finish_block(merge_label);
     // else block
     ir_->start_label(else_label);
     if (if_stmt->false_statements) {
       if_stmt->false_statements->accept(this);
     }
-    if (gen_label_) {
-      gen_label_ = false;
-    } else {
-      ir_->make_inst(spv::OpBranch, merge_label);
-    }
+    finish_block(merge_label);
     // merge label
     ir_->start_label(merge_label);
   }
@@ -5046,7 +5043,7 @@ class TaskCodegen : public IRVisitor {
     ir_->register_value(loop_var_name, spirv::Value(loop_var));
     for_stmt->body->accept(this);
     pop_loop_control_labels();
-    ir_->make_inst(spv::OpBranch, continue_label);
+    finish_block(continue_label);
 
     // loop continue
     ir_->start_label(continue_label);
@@ -5080,7 +5077,7 @@ class TaskCodegen : public IRVisitor {
     push_loop_control_labels(continue_label, merge_label);
     stmt->body->accept(this);
     pop_loop_control_labels();
-    ir_->make_inst(spv::OpBranch, continue_label);
+    finish_block(continue_label);
 
     // loop continue
     ir_->start_label(continue_label);
@@ -5122,11 +5119,19 @@ class TaskCodegen : public IRVisitor {
     } else {
       ir_->make_inst(spv::OpBranch, current_continue_label());
     }
-    gen_label_ = true;  // Only ContinueStmt will cause duplicate OpBranch,
-                        // which should be eliminated
+    gen_label_ = true;
   }
 
  private:
+  void finish_block(spirv::Label target) {
+    // A continue may terminate an if arm or an entire loop body. Emit the
+    // fallthrough edge only when the body did not already emit its own edge.
+    if (!gen_label_) {
+      ir_->make_inst(spv::OpBranch, target);
+    }
+    gen_label_ = false;
+  }
+
   void emit_headers() {
     /*
     for (int root = 0; root < compiled_structs_.size(); ++root) {
@@ -5200,7 +5205,7 @@ class TaskCodegen : public IRVisitor {
     // serial kernel
     stmt->body->accept(this);
 
-    ir_->make_inst(spv::OpBranch, merge_label);
+    finish_block(merge_label);
     ir_->start_label(merge_label);
     ir_->make_inst(spv::OpReturn);       // return;
     ir_->make_inst(spv::OpFunctionEnd);  // } Close kernel
@@ -5357,7 +5362,7 @@ class TaskCodegen : public IRVisitor {
     // loop kernel
     stmt->body->accept(this);
     pop_loop_control_labels();
-    ir_->make_inst(spv::OpBranch, continue_label);
+    finish_block(continue_label);
 
     // loop continue
     ir_->start_label(continue_label);
