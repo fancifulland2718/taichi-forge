@@ -319,9 +319,38 @@ bounds-only updates, refit hit/miss transitions and
 retirement. Real gradients of
 following kernels work; intersection differentiation with respect to vertices or
 rays is not provided. CPU/Vulkan do not register these factories. Operations use
-`cuda_ordered`; CUDA capture, alpha/textures, OMM,
-programmable pipelines and recording export remain
+`cuda_ordered`; CUDA capture, alpha/textures, OMM and programmable pipelines remain
 pending.
+
+Compiled Graphs containing a single triangle scene's typed query, compact
+occlusion and refit recordings can export automatically. Supply explicit resource
+reconstruction inputs:
+
+```python
+module.add_execution_plan(
+    "trace", compiled_graph,
+    resource_bindings={scene: {"vertices": "initial_vertices", "indices": "initial_indices"}},
+)
+```
+
+`resource_bindings` maps producer resource identities to factory input ports and
+public consumer array names. It is a common export contract; each resource family
+must explicitly support its ports. Missing/unused owners, wrong ports and private
+Graph storage names are rejected before publishing kernels. Input names may reuse
+public Graph bindings; additional names become preparation inputs. The consumer
+must initialize these arrays before preparing the plan: resource creation precedes
+both plan initialization and replay. Source layouts/counts stay fixed, but the
+consumer can supply new vertices/topology with those counts for each preparation.
+
+This policy rebuilds a fresh AS. It does not snapshot the producer AS, its original
+arrays or the last refit inputs, which may no longer match its contents.
+`snapshot_state=True` does not replace these inputs. Preparation builds the scene
+without executing queries; subsequent refits and live face tables keep their
+ordered semantics. Recordings sharing a scene/provider reuse their reconstruction
+descriptions. No provider path, device pointer or producer callback is archived.
+Consumer configuration still selects the external adapter. Shared GAS/instance
+recording export, legacy untyped hits and alpha/OMM/program recordings remain
+unsupported by this automatic route; explicit shared-GAS plans above remain usable.
 
 When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
 its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:

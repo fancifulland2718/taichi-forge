@@ -248,7 +248,30 @@ Windows CUDA已验证独立/借用消费、双绑定、前后kernel、共享GAS�
 设备镜像/非均匀变换、设备生成/共享面表、仅包围盒刷新、refit后命中/miss及退休；后续
 kernel的真实梯度可运行，但不提供求交对顶点/ray的自动微分。CPU/Vulkan不注册这些
 工厂。当前操作使用 `cuda_ordered`，CUDA capture、alpha/纹理、OMM、
-programmable pipeline、recording自动导出仍待接通。
+programmable pipeline 仍待接通。
+
+包含单个 triangle scene 的 typed query、compact occlusion 和 refit recording 的
+已编译 Graph 可自动导出，须显式提供资源重建输入：
+
+```python
+module.add_execution_plan(
+    "trace", compiled_graph,
+    resource_bindings={scene: {"vertices": "initial_vertices", "indices": "initial_indices"}},
+)
+```
+
+`resource_bindings` 将生产端资源对象映射为“工厂输入端口 → 消费端公开数组名”。
+这是公共导出合同，各资源家族须明确接通对应端口。缺失/未使用 owner、错误端口或
+私有 Graph 存储名在发布 kernel 前拒绝。输入可复用 Graph 公开绑定名，新增名称则
+成为准备输入。消费端须在 prepare 前初始化数组：资源创建早于计划 initialization
+和重放。布局/数量保持，但每次准备可用相同数量的新顶点/拓扑重建场景。
+
+此策略重建新的 AS，不快照生产端 AS、原数组或上次 refit 输入；这些数组可能早已
+与 AS 内容不同。`snapshot_state=True` 不替代显式输入。准备只构建场景，不执行查询；
+随后 refit 和活面表保持有序语义。相同 scene/provider 的 recording 共用资源描述，
+不归档 provider 路径、设备指针或生产端回调；消费端仍自行配置外部 adapter。
+共享 GAS/实例 recording、旧 untyped hit、alpha/OMM/program recording 的自动导出
+尚未接通；上面的共享 GAS 显式计划仍可使用。
 
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
 或 Vulkan GFX runtime、设备和分配器：

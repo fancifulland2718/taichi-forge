@@ -17,10 +17,11 @@ def _snapshot(value):
 class _ExportContext:
     """One export transaction; object identities never become artifact data."""
 
-    def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None):
+    def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None, resource_inputs=None):
         self.arch = module._arch
         self.snapshot_state = snapshot_state
         self.source_arrays = source_arrays
+        self.resource_inputs = resource_inputs
         self.operations = []
         self.initialization = []
         self._initialization_resources = {}
@@ -987,7 +988,7 @@ def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
         raise TaichiRuntimeError("AOT execution Graph has unreconstructed fixed bindings")
 
 
-def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_bindings=None):
+def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_bindings=None, resource_bindings=None):
     """Preflight the entire region before publishing any module definitions."""
     with graph._lifecycle_lock:
         graph._check_runtime_valid()
@@ -1008,13 +1009,20 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             binding_strategy = binding_factory._validate_aot_export(spec, graph._execution_arch)
         gradient_names = set((gradients or {}).values())
         from ._graph_source_bindings import SourceArrayBindings
+        from ._graph_resource_bindings import ResourceInputBindings
 
         source_arrays = SourceArrayBindings(source_bindings, spec.fixed_runtime_args)
+        resource_inputs = ResourceInputBindings(resource_bindings, spec.fixed_runtime_args)
         context = _ExportContext(
             module,
-            set(spec.runtime_arg_names) | set(spec.fixed_runtime_args) | gradient_names | source_arrays.arrays.keys(),
+            set(spec.runtime_arg_names)
+            | set(spec.fixed_runtime_args)
+            | gradient_names
+            | source_arrays.arrays.keys()
+            | resource_inputs.names,
             snapshot_state=snapshot_state,
             source_arrays=source_arrays,
+            resource_inputs=resource_inputs,
         )
         context.declare_private_bindings(spec.fixed_runtime_args)
         context.control_names = set(spec.control_binding_plan.names)
@@ -1028,6 +1036,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         for node in graph._spec.nodes:
             _node(context, node)
         source_arrays.validate_used(spec.runtime_arg_names)
+        resource_inputs.validate_used()
         context.binding_constraints.extend(source_arrays.constraints)
         if context.control_names != context._control_bindings:
             raise TaichiRuntimeError("AOT Graph requires complete selected control binding metadata")
@@ -1079,9 +1088,13 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
                 binding_strategy=binding_strategy,
             )
             # Provider workspace must not accidentally become a public input.
-            if set(plan.argument_names) != set(spec.runtime_arg_names) | source_arrays.used | (
-                gradient_names - context.private_bindings.keys()
-            ):
+            expected_names = (
+                set(spec.runtime_arg_names)
+                | source_arrays.used
+                | resource_inputs.used_names
+                | (gradient_names - context.private_bindings.keys())
+            )
+            if set(plan.argument_names) != expected_names:
                 raise TaichiRuntimeError("AOT Graph reconstruction changed the public binding contract")
             for key in plan.data_entries:
                 if key not in context.data_payloads:

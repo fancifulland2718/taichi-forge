@@ -841,6 +841,7 @@ class OptixProvider:
                 )
         self._loaded = loaded
         self._context = context
+        self._validation = validation
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self.required_features = required_features
@@ -1118,6 +1119,11 @@ class OptixAlphaMask:
 @instrument_hardware_recording("ray.query.batch.optix")
 class OptixRayQueryRecording(BackendCommandRecording):
     """One runtime-ordered OptiX launch against a fixed scene generation."""
+
+    def _export_aot(self, context):
+        from ._aot_optix import export_query
+
+        return export_query(self, context)
 
     def __init__(
         self,
@@ -1630,6 +1636,11 @@ class OptixRayQueryRecording(BackendCommandRecording):
 @instrument_hardware_recording("ray.as_refit.optix")
 class OptixRayRefitRecording(BackendCommandRecording):
     """One fixed-topology OptiX GAS update."""
+
+    def _export_aot(self, context):
+        from ._aot_optix import export_refit
+
+        return export_refit(self, context)
 
     def __init__(self, scene, *, vertices="vertices"):
         if not isinstance(scene, OptixTriangleScene):

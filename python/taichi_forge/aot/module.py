@@ -469,7 +469,9 @@ class Module:
         self._initial_root_data.update(pending)
         self._data_payloads.update(data)
 
-    def add_execution_plan(self, name, plan, *, gradients=None, snapshot_state=False, source_bindings=None):
+    def add_execution_plan(
+        self, name, plan, *, gradients=None, snapshot_state=False, source_bindings=None, resource_bindings=None
+    ):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
         An ExecutionPlan requires its kernels to be exported first. A compiled
@@ -494,6 +496,12 @@ class Module:
         not the ndarray originally copied into the matrix. Its topology stays
         frozen and consumers supply a one-dimensional f32 array in that order.
         Unnamed sparse matrices retain the default value snapshot behavior.
+
+        ``resource_bindings`` maps qualified opaque resource owners to input
+        port/public array name mappings. Consumers provide initialized arrays
+        before preparation; resource creation precedes plan initialization and
+        replay. This explicitly rebuilds resources from consumer data, without
+        claiming to snapshot the producer's current resource state.
         """
         from taichi_forge_runtime.aot import ExecutionPlan
         from taichi_forge.graph._graph import Graph
@@ -510,7 +518,12 @@ class Module:
             from taichi_forge.aot._graph_export import export_graph
 
             plan = export_graph(
-                self, plan, gradients=gradients, snapshot_state=snapshot_state, source_bindings=source_bindings
+                self,
+                plan,
+                gradients=gradients,
+                snapshot_state=snapshot_state,
+                source_bindings=source_bindings,
+                resource_bindings=resource_bindings,
             )
         elif not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or compiled Graph")
@@ -520,6 +533,8 @@ class Module:
             raise ValueError("snapshot_state requires a compiled Graph")
         elif source_bindings is not None:
             raise ValueError("source_bindings requires a compiled Graph")
+        elif resource_bindings is not None:
+            raise ValueError("resource_bindings requires a compiled Graph")
         snapshot = ExecutionPlan.from_json(plan.to_json())
         missing = set(snapshot.kernel_entries) - self._exported_kernels.keys()
         if missing:
