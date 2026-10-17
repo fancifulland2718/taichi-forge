@@ -344,11 +344,17 @@ module.add_execution_plan(
 
 Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出保留格式、维数和采样器，
 不复制生产端 texel；同一 Texture 的公开别名与已声明私有绑定共用一个图像资源。
-seed 在准备期复制一次，其数组沿用已有 prepared-resource 依赖寿命，须存活至相关
-prepared 调用退休。CUDA 兄弟绑定帧共享图像与 seed 绑定；不同图像使用独立准备，输出数组
+新导出将 seed 上传放入计划的一次初始化段。修改或关闭 seed 数组前须调用
+`prepared.initialize()`；首次执行也会自动初始化。上传一起录制，完成后释放仅供初始化
+使用的输入；仍被重放读取的数组（包括通过 view 读取）继续保留。CUDA 兄弟绑定帧共享
+初始化后的图像；不同图像使用独立准备，输出数组
 可在 CUDA 兄弟绑定间切换。Vulkan 独立准备各自拥有图像和录制命令。重放不增加像素复制
 或 Python 元数据查询。min/mag filter 不同、mip 链及扩展 sampler 设置会在导出时拒绝，
 当前资源描述尚不能完整保存这些状态。
+
+已有产物以及显式给 `image/sampled` 绑定 `pixels` 的资源，仍保持构造期复制及保留输入
+的合同。手工计划若需分阶段初始化，可省略该资源绑定，将 `image/upload` 放入
+`ExecutionPlan(initialization=[...])`。
 
 Windows CUDA/Vulkan 导出已验证普通 Graph 的公开/私有别名及后续数值 kernel 真实梯度、
 selected 绑定帧的公开纹理别名与显式伴随、独立 seed，以及独立/借用 runtime 的父对象退休；
@@ -421,8 +427,9 @@ module.add_execution_plan(
 ```
 
 纹理名须匹配 `OptixAlphaMask.texture`。导出冻结实际创建时的格式、尺寸和采样器，
-不读取生产端 texel。消费端绑定 `initial_alpha`，无需传入纹理句柄；冷准备时复制一次，
-后续修改 seed 数组不会隐式更新图像。手工编写的执行计划可使用 `image/upload` 显式上传。
+不读取生产端 texel。消费端绑定 `initial_alpha`，无需传入纹理句柄；新导出在上述一次
+初始化段复制，修改或关闭 seed 前须调用 `prepared.initialize()`。后续修改 seed
+不会隐式更新图像。手工编写的执行计划可使用 `image/upload` 显式上传。
 公开名或私有 Graph 绑定引用同一 Texture 时，每次准备只重建一份图像；UV 和面表仍读取
 当前设备值。缺失/未使用源、已退休纹理和不支持的纹理用途在发布 kernel 前拒绝。
 普通 sampled Texture kernel 参数复用上面的重建合同。

@@ -26,7 +26,7 @@ def native(provider, operation, bindings, **parameters):
 
 
 def plan_parts(policy):
-    resources = []
+    resources, initialization = [], []
     for name, shape, fmt, seed, filter in (
         ("one", [4], "r8", "pixels1", "linear"),
         ("linear", [3, 5], "r32f", "pixels2", "linear"),
@@ -34,6 +34,11 @@ def plan_parts(policy):
         ("three", [2, 3, 4], "r32f", "pixels3", "linear"),
     ):
         bindings = {} if seed == "pixels2" and policy != "seeded" else dict(pixels=seed)
+        if policy == "initialized":
+            bindings = {}
+            initialization.append(
+                native("image", "upload", dict(image=name, pixels=seed))
+            )
         resources.append(
             dict(
                 native(
@@ -43,7 +48,7 @@ def plan_parts(policy):
             )
         )
     operations = []
-    if policy != "seeded":
+    if policy not in ("seeded", "initialized"):
         operations += [
             dict(kind="kernel", entry="paint", arguments=["scale", "pixels2"]),
             native("image", "upload", dict(image="linear", pixels="pixels2")),
@@ -88,6 +93,7 @@ def plan_parts(policy):
     return dict(
         operations=operations,
         resources=resources,
+        initialization=initialization or None,
         gradients=dict(output="doutput", loss="dloss"),
         binding_strategy=(
             "cuda_immutable_argument_frames" if policy == "family" else None
@@ -148,9 +154,11 @@ def main(mode, artifact, adapter, output, arch="cuda"):
         start = time.perf_counter()
         module = runtime.load_module(artifact)
         load_ms = (time.perf_counter() - start) * 1000
-        policies = ["seeded", "updated"] + (["family"] if arch == "cuda" else [])
+        policies = ["seeded", "updated"] + (
+            ["family", "initialized"] if arch == "cuda" else []
+        )
         if arch == "vulkan":
-            policies += ["depth", "depth_seeded"]
+            policies += ["depth", "depth_seeded", "depth_initialized"]
         policies += ["ordered"] if adapter else []
         shapes = dict(
             pixels1=(4,),
@@ -186,7 +194,7 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                     frame["pixels2"],
                     (
                         [i / 16 for i in range(15)]
-                        if policy == "depth_seeded"
+                        if policy in ("depth_seeded", "depth_initialized")
                         else list(range(15))
                     ),
                 )
@@ -282,14 +290,21 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                     else "cuda_ordered" if policy == "ordered" else "cuda_graph"
                 )
                 assert read(frame["output"]) == [-99] * 9
+                initialize_ms = None
+                if policy.endswith("initialized"):
+                    start = time.perf_counter()
+                    call.initialize()
+                    initialize_ms = (time.perf_counter() - start) * 1000
+                    for name in ("pixels1", "pixels2", "pixels3"):
+                        frame[name].close()
                 if policy.endswith("seeded"):
                     write(frame["pixels2"], [99] * 15)
                 for scale in (
                     (1,)
-                    if policy == "seeded"
+                    if policy in ("seeded", "initialized")
                     else (
                         (1 / 16,)
-                        if policy == "depth_seeded"
+                        if policy in ("depth_seeded", "depth_initialized")
                         else (1 / 16, 0, 1 / 32) if policy == "depth" else (1, -2, 0, 3)
                     )
                 ):
@@ -346,6 +361,7 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                         policy=policy,
                         binding=binding,
                         prepare_ms=prepare_ms,
+                        initialize_ms=initialize_ms,
                         complete_us=statistics.median(samples),
                         submit_us=statistics.median(submits),
                         info=call.info,

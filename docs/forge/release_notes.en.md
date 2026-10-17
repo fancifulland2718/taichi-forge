@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- New AOT Graph exports batch sampled-image seeds into one-time initialization.
+  After `prepared.initialize()`, seed arrays used only for initialization can
+  close without invalidating replay. CUDA binding families share initialized
+  images. CUDA/Vulkan kernel sampling, Vulkan depth uploads and CUDA OptiX alpha
+  queries are covered; existing artifacts retain their original seed contract.
+
 - Vulkan color `Texture.from_ndarray()` now uses runtime-tracked transfers for
   every mip count. This fixes stale image layouts when replaying an existing
   Graph after an upload, avoids reading a nonexistent second dimension for 1D

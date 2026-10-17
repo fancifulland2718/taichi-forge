@@ -54,9 +54,11 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
     for kernel in (sample, paint, energy):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="backward")
-    policies = ["seeded", "updated"] + (["family"] if arch == "cuda" else [])
+    policies = ["seeded", "updated"] + (
+        ["family", "initialized"] if arch == "cuda" else []
+    )
     if arch == "vulkan":
-        policies += ["depth", "depth_seeded"]
+        policies += ["depth", "depth_seeded", "depth_initialized"]
     adapter = (
         os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER") if arch == "cuda" else None
     )
@@ -64,9 +66,13 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
         policies.append("ordered")
     for policy in policies:
         base = (
-            "seeded"
-            if policy == "depth_seeded"
-            else "updated" if policy == "depth" else policy
+            "initialized"
+            if policy == "depth_initialized"
+            else (
+                "seeded"
+                if policy == "depth_seeded"
+                else "updated" if policy == "depth" else policy
+            )
         )
         parts = plan_parts(base)
         if policy.startswith("depth"):

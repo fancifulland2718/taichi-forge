@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 新导出的 AOT Graph 将 sampled image 的 seed 上传合并到一次初始化段。
+  `prepared.initialize()` 完成后，仅供初始化的 seed 数组可关闭，重放继续有效；
+  CUDA 绑定族共享初始化后的图像。已覆盖 CUDA/Vulkan kernel 采样、Vulkan 深度上传
+  和 CUDA OptiX alpha 查询；已有产物保持原有 seed 合同。
+
 - Vulkan 颜色纹理的 `Texture.from_ndarray()` 现在统一使用 runtime 跟踪的上传路径，
   修复上传后重放已有 Graph 时的图像布局错误，避免读取一维输入不存在的第二维，
   并在复制前拒绝不匹配的形状和 texel 大小。已覆盖 CUDA/Vulkan 采样及后续梯度、

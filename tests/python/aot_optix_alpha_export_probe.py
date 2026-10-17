@@ -95,8 +95,13 @@ def main(mode, artifact, adapter, output):
                 call = plan.prepare(module, frame)
                 prepare_ms = (time.perf_counter() - start) * 1000
                 assert read(frame["hits"]) == [-99] * 16
-                # Initial seeds are copied once, not aliases or per-replay uploads.
+                start = time.perf_counter()
+                call.initialize()
+                initialize_ms = (time.perf_counter() - start) * 1000
+                # Image uploads finish once; later content changes and closing
+                # the seed must not invalidate the retained alpha queries.
                 write(frame["pixels"], [0.0] * len(pixels))
+                frame["pixels"].close()
                 write(frame["indices"], [99] * 3, "i")
                 for face, swapped in ((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)):
                     config = (binding, 1 - binding, face, swapped)
@@ -124,6 +129,7 @@ def main(mode, artifact, adapter, output):
                         channels=channels,
                         binding=binding,
                         prepare_ms=prepare_ms,
+                        initialize_ms=initialize_ms,
                         warm_complete_us=statistics.median(samples),
                         warm_submit_us=statistics.median(submits),
                         info=call.info,

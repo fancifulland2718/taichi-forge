@@ -139,6 +139,17 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
         assert len(images) == 1
         assert images[0]["parameters"]["shape"] == [3, 5]
         assert images[0]["parameters"]["filter"] == "nearest"
+        assert images[0]["bindings"] == {}
+        assert document["initialization"] == [
+            dict(
+                kind="native",
+                provider="image",
+                operation="upload",
+                version=1,
+                parameters={},
+                bindings=dict(image=images[0]["name"], pixels="pixels"),
+            )
+        ]
         assert document["operations"][0]["arguments"][:2] == [images[0]["name"]] * 2
         assert plan.binding_strategy == (
             "cuda_immutable_argument_frames"

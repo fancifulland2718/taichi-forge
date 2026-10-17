@@ -501,15 +501,18 @@ class Module:
         map Graph texture names to live Textures. Export preserves creation
         metadata and sampler state; ``resource_bindings[texture]`` must supply
         ``{"pixels": "consumer_seed"}``. The consumer seed replaces the texture
-        handle in the public plan arguments and is copied once at preparation.
+        handle in the public plan arguments and is uploaded in the one-time
+        initialization sequence. Call ``prepared.initialize()`` before changing
+        or closing seed arrays; first execution also initializes automatically.
+        Initialization-only seeds are released after completion.
         CUDA/Vulkan sampled Texture kernel arguments use this same contract,
         including qualified immutable compute recipes. Only basic single-level
         sampler state is currently reconstructible. CUDA sibling binding frames
-        share pixel seeds; independent preparation accepts new seeds.
+        share initialized images; independent preparation accepts new seeds.
 
         ``resource_bindings`` maps qualified opaque resource owners to input
-        port/public array name mappings. Consumers provide initialized arrays
-        before preparation; resource creation precedes plan initialization and
+        port/public array name mappings. Construction inputs must be ready
+        before preparation; image seeds before initialization. Resource creation precedes plan initialization and
         replay. This explicitly rebuilds resources from consumer data, without
         claiming to snapshot the producer's current resource state.
         """

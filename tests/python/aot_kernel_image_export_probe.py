@@ -6,7 +6,7 @@ import statistics
 import sys
 import time
 
-from taichi_forge_runtime.aot import Runtime
+from taichi_forge_runtime.aot import ExecutionPlan, Runtime
 from aot_optix_probe import raises, read, write
 
 
@@ -50,9 +50,12 @@ def main(mode, artifact, recipe, result, arch="cuda"):
             call = module.prepare_execution("step", dict(frame, pixels=pixels))
             prepare_ms = (time.perf_counter() - start) * 1000
             assert read(frame["output"]) == [-99] * 15
+            start = time.perf_counter()
             call.initialize()
-            # Seed changes after preparation must not silently alter the image.
+            initialize_ms = (time.perf_counter() - start) * 1000
+            # Initialization copies pixels once and retires the source dependency.
             write(pixels, [77] * 15)
+            pixels.close()
             call()
             check(frame, values, arch)
             if recipe == "selected" and arch == "cuda":
@@ -81,14 +84,14 @@ def main(mode, artifact, recipe, result, arch="cuda"):
             costs.append(
                 dict(
                     prepare_ms=prepare_ms,
+                    initialize_ms=initialize_ms,
                     submit_us=statistics.median(submitted),
                     complete_us=statistics.median(completed),
                     info=call.info,
                 )
             )
-            # Native resource inputs follow the existing prepared dependency
-            # contract, even when their content is sampled only during prepare.
             retained.append((call, frame, values, pixels))
+        check_seed_dependencies(runtime, module)
         for call, frame, values, _ in retained:
             call()
             check(frame, values, arch)
@@ -105,6 +108,52 @@ def main(mode, artifact, recipe, result, arch="cuda"):
     if mode == "standalone":
         assert "taichi_forge" not in sys.modules
     Path(result).write_text(json.dumps(dict(load_ms=load_ms, cases=costs), indent=2))
+
+
+def check_seed_dependencies(runtime, module):
+    """A seed remains a dependency when a replay view reads the same storage."""
+    document = json.loads(module.execution_plan("step").to_json())
+    document["resources"].append(
+        dict(
+            kind="ndarray_view",
+            name="live_seed_view",
+            array="pixels",
+            offset=0,
+            shape=[3, 5],
+        )
+    )
+    document["operations"].append(
+        dict(kind="copy", source="live_seed_view", destination="output")
+    )
+    plan = ExecutionPlan.from_json(json.dumps(document))
+    frame = {
+        name: runtime.ndarray("f32", (1,) if name == "loss" else (3, 5))
+        for name in plan.argument_names
+    }
+    write(frame["pixels"], range(15))
+    call = plan.prepare(module, frame)
+    call.initialize()
+    write(frame["pixels"], range(15, 30))
+    call()
+    assert read(frame["output"]) == list(range(15, 30))
+    frame["pixels"].close()
+    raises(call)
+    call.close()
+    for value in frame.values():
+        value.close()
+
+    # Closing an initialization input before its upload retires the call.
+    frame = {
+        name: runtime.ndarray("f32", (1,) if name == "loss" else (3, 5))
+        for name in module.execution_plan("step").argument_names
+    }
+    call = module.prepare_execution("step", frame)
+    frame["pixels"].close()
+    raises(call.initialize)
+    raises(call)
+    call.close()
+    for value in frame.values():
+        value.close()
 
 
 if __name__ == "__main__":

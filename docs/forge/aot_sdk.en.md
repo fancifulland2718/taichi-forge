@@ -440,14 +440,22 @@ module.add_execution_plan(
 The Graph's `image` port is replaced by consumer array `initial_pixels`. Export
 preserves format, dimensions and sampler, without copying producer texels. Public
 aliases and declared private bindings to one Texture share one image resource.
-The seed is copied once during preparation; its array follows the existing
-prepared-resource dependency lifetime and must stay alive until the prepared
-calls retire. CUDA sibling binding frames share that resource and seed binding; use
-independent preparation for a different image. Output buffers can change across
+New exports place seed uploads in the plan's one-time initialization sequence.
+Call `prepared.initialize()` before modifying or closing seed arrays; first
+execution also initializes automatically. Uploads are recorded together, and
+initialization-only inputs are released after completion. An input also read by
+replay, including through a view, remains a dependency. CUDA sibling binding
+frames share the initialized resource; use independent preparation for a different
+image. Output buffers can change across
 CUDA siblings; separate Vulkan preparations own independent images and commands.
 No extra pixel copy or Python metadata lookup is added to replay. Nonmatching
 min/mag filters, mip chains and extended sampler settings fail during export;
 the current resource description cannot preserve them.
+
+Existing artifacts and explicit `image/sampled` resources with a `pixels` binding
+keep their construction-time copy and retained-input contract. To express staged
+initialization explicitly, omit that resource binding and put an `image/upload`
+operation in `ExecutionPlan(initialization=[...])`.
 
 Windows CUDA/Vulkan export checks cover ordinary Graph public/private aliases with real
 downstream numeric gradients, selected binding frames with public texture aliases
@@ -544,8 +552,9 @@ module.add_execution_plan(
 
 The texture name must match `OptixAlphaMask.texture`. Export freezes the actual
 creation format, shape and sampler, without reading producer texels. The consumer
-binds `initial_alpha` instead of a texture handle. It is copied once during cold
-preparation; later seed-array writes do not implicitly upload the image. Native
+binds `initial_alpha` instead of a texture handle. New exports copy it in the
+one-time initialization sequence described above; call `prepared.initialize()`
+before modifying or closing the seed. Later writes do not upload the image. Native
 `image/upload` operations can explicitly update it in an authored execution plan.
 Public names and fixed private Graph bindings referring to the same Texture share
 one reconstructed image per preparation. UV and face-table bindings remain live.

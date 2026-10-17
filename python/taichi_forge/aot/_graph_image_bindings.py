@@ -79,7 +79,7 @@ class SourceImageBindings:
 
         def build():
             inputs = context.resource_inputs.require(owner, ("pixels",))
-            return context.resource(
+            resource = context.resource(
                 owner,
                 "image",
                 "sampled",
@@ -93,8 +93,14 @@ class SourceImageBindings:
                         sampler.address_mode_w,
                     ][: len(shape)],
                 ),
-                bindings=inputs,
             )
+            context.initialize_native_once(
+                resource,
+                "image",
+                "upload",
+                bindings=dict(image=resource, pixels=inputs["pixels"]),
+            )
+            return resource
 
         resource = context.resource_once(
             owner, build, policy="sampled_image_consumer_seed"
