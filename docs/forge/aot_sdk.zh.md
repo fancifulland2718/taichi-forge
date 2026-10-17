@@ -670,7 +670,7 @@ clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样
 
 Windows 验证覆盖独立/借用执行、直接和索引/实例化绘制、uniform/采样描述符、颜色/深度
 clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度；不提供光栅化求导。
-indirect 仍为后续工作；storage 数组与直接 mesh 绘制使用下文的对应版本。
+storage 数组、直接 mesh 与传统 indirect 绘制使用下文的对应形式。
 
 普通 Vulkan Graph 中的 `VulkanGraphicsDrawRecording` 和
 `VulkanGraphicsPassRecording` 可通过 `module.add_execution_plan` 导出上述合格的
@@ -737,7 +737,30 @@ vertex/fragment AS 合同保持。
 资产（有 task 时也包含 task），或绑定公共 pipeline。Windows 验证覆盖 mesh-only、
 task+mesh、compute→mesh 数据更新、公私 owner、替换绑定、close/reset，以及独立/
 借用消费的下游数值梯度；consumer 不需要 shader compiler。旧 raster 导出继续采用
-所需的最低版本；indirect 和分段/fork-join 提交资格保持原边界。
+所需的最低版本；mesh indirect 和分段/fork-join 提交资格保持原边界。
+
+传统间接绘制使用 `vulkan_graphics/pass_indirect` v1，选择前查询
+`native_operation_capabilities("vulkan_graphics_pass_indirect")`；准备阶段另查设备
+count/multi-draw 特性及容量。普通和已选整图 graphics-queue Graph 自动导出
+`IndirectDraw`，同一 pass 可混合传统 direct/indirect；此形式不能混入 mesh draw。
+原 direct 版本保留各自 schema。
+
+操作复用 pipeline/array/image/color/scene 资源组，无 AS 时指定 `scene_count=0`。
+indirect draw 用 `indirect` 对象代替直接绘制的 count/offset 字段，其中包含
+`commands`（数组 ordinal）、可选 `count`、`max_draw_count`、`stride`、
+`vertex_record_limit`，以及可选 `instance_record_limit=1`、`index_element_limit=0`、
+`command_offset=0`、`count_offset=0`、`first_instance_may_be_nonzero=false`。
+顶层 `index` 选择索引绘制，不使用 direct 的 `index_min/index_max`。命令/计数数据
+为 u32，偏移以有限逻辑 view 为起点、单位为字节，stride 遵守 Vulkan 命令 ABI
+（非索引/索引最小 16/20 字节）。声明的顶点/实例/索引上界是 producer 承诺；准备
+阶段不读回 GPU 命令以验证内容。GPU count 为零时不绘制。
+
+JIT/AOT 共用范围、特性、几何和整 pass alias 检查；同一 pass 可写 shader storage
+不得与 command/count 范围重叠，存在依赖的 draw 应拆成多个 pass。已知导入内存
+别名参与检查，未知身份须证明分离，不增加逐帧 host 命令检查或新提交管理器。
+Windows 验收覆盖非索引固定计数、索引 GPU count、混合直接绘制、0/1/0/1 更新、
+公开/私有有限 view、替换绑定、close/reset，以及独立/借用消费者的下游梯度。
+不新增图形 shader 求导、mesh indirect 或分段/fork-join 导出。
 
 显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
 `mip_levels` 和 `attachment`，复用同一所有者及 `image/upload`、`image/upload_mips`。

@@ -183,6 +183,12 @@ struct DrawDescription {
   uint32_t pipeline{0};
   VulkanGraphicsDrawInfo draw;
   std::optional<VulkanGraphicsMeshDrawInfo> mesh;
+  struct Indirect {
+    VulkanGraphicsIndirectParameters parameters;
+    uint32_t commands{0};
+    std::optional<uint32_t> count;
+  };
+  std::optional<Indirect> indirect;
   std::string expected;
   struct Vertex {
     uint32_t binding, array;
@@ -204,9 +210,14 @@ struct DrawDescription {
   };
   std::vector<Scene> scenes;
 };
+struct PassFeatures {
+  bool scenes, arrays, mesh, indirect;
+};
 struct PassDescription {
   static constexpr const char *kind = "vulkan_graphics_pass_direct";
+  static constexpr const char *operation = "pass_direct";
   static constexpr uint32_t version = 1;
+  static constexpr PassFeatures features{false, false, false, false};
   struct Color {
     bool clear;
     std::array<uint32_t, 4> bits;
@@ -224,12 +235,20 @@ struct PassDescription {
 };
 struct ShaderPassDescription : PassDescription {
   static constexpr uint32_t version = 2;
+  static constexpr PassFeatures features{true, false, false, false};
 };
 struct ArrayPassDescription : PassDescription {
   static constexpr uint32_t version = 3;
+  static constexpr PassFeatures features{true, true, false, false};
 };
 struct MeshPassDescription : PassDescription {
   static constexpr uint32_t version = 4;
+  static constexpr PassFeatures features{true, true, true, false};
+};
+struct IndirectPassDescription : PassDescription {
+  static constexpr const char *kind = "vulkan_graphics_pass_indirect";
+  static constexpr const char *operation = "pass_indirect";
+  static constexpr PassFeatures features{true, true, false, true};
 };
 
 #ifdef TI_WITH_VULKAN
@@ -314,11 +333,13 @@ class PreparedPass final : public NativeOperation {
     std::shared_ptr<PipelineAccess> pipeline;
     VulkanGraphicsDrawInfo info;
     std::optional<VulkanGraphicsMeshDrawInfo> mesh;
+    std::optional<VulkanGraphicsIndirectPacket> indirect;
     VulkanGraphicsDrawResources resources;
   };
   struct Payload {
     VulkanGraphicsPassTargets targets;
     std::vector<Draw> draws;
+    std::vector<size_t> indirect_draws;
     std::vector<std::shared_ptr<NativeSampledImage>> reads, clears;
     std::vector<std::pair<std::shared_ptr<NativeShaderAccelerationStructure>,
                           NativeShaderStages>>
@@ -373,6 +394,10 @@ class PreparedPass final : public NativeOperation {
     if (d.depth) {
       retain_image(d.depth, ImageLayout::depth_attachment, d.depth_clear);
     }
+    VulkanGraphicsIndirectAccesses accesses;
+    const bool has_indirect =
+        std::any_of(d.draws.begin(), d.draws.end(),
+                    [](const auto &draw) { return draw.indirect.has_value(); });
     for (const auto &input : d.draws) {
       auto pipeline = indexed(d.pipelines, input.pipeline);
       match_contract(input.expected, pipeline->contract());
@@ -403,9 +428,29 @@ class PreparedPass final : public NativeOperation {
           throw std::invalid_argument("Graphics index array must use u32");
         indices = VulkanGraphicsBufferRange{a.pointer, size_t(a.bytes)};
       }
+      std::optional<VulkanGraphicsIndirectPacket> indirect;
+      if (input.indirect) {
+        const auto command_view = [&](uint32_t index) {
+          const auto &a = indexed(d.arrays, index);
+          if (a.scalar_type != PrimitiveType::u32)
+            throw std::invalid_argument(
+                "Graphics indirect command/count arrays must use u32");
+          return DeviceBufferRange{a.pointer, size_t(a.bytes)};
+        };
+        const auto &spec = *input.indirect;
+        std::optional<DeviceBufferRange> count;
+        if (spec.count)
+          count = command_view(*spec.count);
+        indirect = prepare_vulkan_graphics_indirect(
+            device_, input.draw.indexed, spec.parameters,
+            command_view(spec.commands), count);
+        accesses.add_indirect(input.draw.indexed, *indirect);
+        payload_->indirect_draws.push_back(payload_->draws.size());
+      }
       if (!input.mesh)
         validate_vulkan_graphics_vertex_ranges(device_, pipeline->vertices(),
-                                               ranges, indices, input.draw, {});
+                                               ranges, indices, input.draw,
+                                               indirect);
       std::vector<VulkanGraphicsShaderBufferView> buffers;
       for (const auto &v : input.buffers) {
         VulkanGraphicsShaderBufferView buffer;
@@ -434,6 +479,8 @@ class PreparedPass final : public NativeOperation {
         }
         buffers.push_back(std::move(buffer));
       }
+      if (has_indirect)
+        accesses.add_shader_buffers(pipeline->pipeline(), buffers);
       std::vector<VulkanGraphicsShaderImageView> sampled;
       for (const auto &v : input.images) {
         auto image = indexed(d.images, v.image);
@@ -484,9 +531,10 @@ class PreparedPass final : public NativeOperation {
                 payload_->scene_reads[it->second].second |= qualified;
             }
           });
-      payload_->draws.push_back(
-          {std::move(pipeline), input.draw, input.mesh, std::move(resources)});
+      payload_->draws.push_back({std::move(pipeline), input.draw, input.mesh,
+                                 indirect, std::move(resources)});
     }
+    accesses.validate(device_);
   }
   ~PreparedPass() override {
     if (!fault_->backend_calls_safe() ||
@@ -515,11 +563,16 @@ class PreparedPass final : public NativeOperation {
   void record_vulkan(Device *, CommandList *commands) override {
     for (const auto &[scene, stages] : payload_->scene_reads)
       scene->record_shader_read(commands, stages, true);
+    for (const auto index : payload_->indirect_draws) {
+      const auto &draw = payload_->draws[index];
+      record_vulkan_graphics_indirect_barriers(commands, draw.info.indexed,
+                                               *draw.indirect);
+    }
     begin_vulkan_graphics_pass(commands, payload_->targets);
     for (const auto &draw : payload_->draws)
       record_vulkan_graphics_draw(commands, &draw.pipeline->pipeline(),
-                                  draw.pipeline->task_shader(), draw.info, {},
-                                  draw.mesh, draw.resources);
+                                  draw.pipeline->task_shader(), draw.info,
+                                  draw.indirect, draw.mesh, draw.resources);
     end_vulkan_graphics_pass(commands);
   }
 
@@ -620,12 +673,11 @@ PipelineDescription pipeline_parameters(const Json &p, uint32_t version) {
   return d;
 }
 
-PassDescription pass_parameters(const Json &p, uint32_t version) {
-  const bool shader_scenes = version >= 2;
+PassDescription pass_parameters(const Json &p, PassFeatures features) {
   fields(p, {"pipeline_count", "array_count", "image_count", "color_count",
              "colors", "draws", "viewport", "depth_clear", "clear_depth",
              "scene_count"});
-  if (!shader_scenes && p.obj.inner.count("scene_count"))
+  if (!features.scenes && p.obj.inner.count("scene_count"))
     throw std::invalid_argument(
         "Graphics AS bindings require pass_direct version 2");
   PassDescription d;
@@ -658,8 +710,8 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
     fields(v, {"pipeline", "vertices", "index", "buffers", "images",
                "element_count", "instance_count", "first_vertex", "first_index",
                "first_instance", "vertex_offset", "index_min", "index_max",
-               "expected_pipeline", "scenes", "mesh"});
-    if (!shader_scenes && v.obj.inner.count("scenes"))
+               "expected_pipeline", "scenes", "mesh", "indirect"});
+    if (!features.scenes && v.obj.inner.count("scenes"))
       throw std::invalid_argument(
           "Graphics AS bindings require pass_direct version 2");
     DrawDescription draw;
@@ -673,12 +725,12 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
     draw.pipeline = u32(v["pipeline"]);
     draw.expected = expected_contract(v);
     if (v.obj.inner.count("mesh")) {
-      if (version < 4)
+      if (!features.mesh)
         throw std::invalid_argument(
             "Graphics mesh draws require pass_direct version 4");
       for (const auto *key : {"element_count", "instance_count", "first_vertex",
                               "first_index", "first_instance", "vertex_offset",
-                              "index_min", "index_max", "index"})
+                              "index_min", "index_max", "index", "indirect"})
         if (v.obj.inner.count(key))
           throw std::invalid_argument(
               "Graphics mesh draws cannot declare vertex/index draw fields");
@@ -688,6 +740,39 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
             "Graphics mesh requires three group counts");
       draw.mesh = VulkanGraphicsMeshDrawInfo{u32(groups[0]), u32(groups[1]),
                                              u32(groups[2])};
+    } else if (v.obj.inner.count("indirect")) {
+      if (!features.indirect)
+        throw std::invalid_argument(
+            "Graphics indirect draws require pass_indirect");
+      for (const auto *key :
+           {"element_count", "instance_count", "first_vertex", "first_index",
+            "first_instance", "vertex_offset", "index_min", "index_max"})
+        if (v.obj.inner.count(key))
+          throw std::invalid_argument(
+              "Graphics indirect draws cannot declare direct draw fields");
+      const auto &spec = v["indirect"];
+      fields(spec, {"commands", "count", "command_offset", "count_offset",
+                    "max_draw_count", "stride", "vertex_record_limit",
+                    "instance_record_limit", "index_element_limit",
+                    "first_instance_may_be_nonzero"});
+      DrawDescription::Indirect input;
+      input.commands = u32(spec["commands"]);
+      if (spec.obj.inner.count("count"))
+        input.count = u32(spec["count"]);
+      auto &parameters = input.parameters;
+      parameters.command_offset =
+          optional_integer(spec, "command_offset").value_or(0);
+      parameters.count_offset =
+          optional_integer(spec, "count_offset").value_or(0);
+      parameters.max_draw_count = u32(spec["max_draw_count"]);
+      parameters.stride = u32(spec["stride"]);
+      parameters.vertex_record_limit = u32(spec["vertex_record_limit"]);
+      parameters.instance_record_limit =
+          opt_u32(spec, "instance_record_limit", 1);
+      parameters.index_element_limit = opt_u32(spec, "index_element_limit", 0);
+      parameters.first_instance_may_be_nonzero =
+          optional_bool(spec, "first_instance_may_be_nonzero");
+      draw.indirect = input;
     } else {
       draw.draw.element_count = u32(v["element_count"]);
     }
@@ -699,7 +784,8 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
     draw.draw.index_min = opt_u32(v, "index_min", 0);
     draw.draw.index_max = opt_u32(v, "index_max", 0);
     if (v.obj.inner.count("index")) {
-      if (!v.obj.inner.count("index_min") || !v.obj.inner.count("index_max"))
+      if (!draw.indirect &&
+          (!v.obj.inner.count("index_min") || !v.obj.inner.count("index_max")))
         throw std::invalid_argument(
             "Indexed graphics requires explicit index_min and index_max "
             "bounds");
@@ -717,7 +803,7 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
       fields(b, {"set", "binding", "array", "arrays", "storage"});
       claim(u32(b["set"]), u32(b["binding"]));
       const bool elements = b.obj.inner.count("arrays");
-      if (elements && version < 3)
+      if (elements && !features.arrays)
         throw std::invalid_argument(
             "Graphics descriptor arrays require pass_direct version 3");
       if (bool(b.obj.inner.count("array")) == elements)
@@ -770,7 +856,7 @@ static void register_graphics_pass(NativeOperationRegistry &registry) {
       {"array_count", {"array"}},
       {"image_count", {"image"}},
       {"color_count", {"color"}}};
-  if constexpr (Descriptor::version >= 2)
+  if constexpr (Descriptor::features.scenes)
     groups.push_back({"scene_count", {"scene"}});
   registry.define<Descriptor>([](Device &device, const Descriptor &d) {
     for (const auto &p : d.pipelines)
@@ -793,11 +879,11 @@ static void register_graphics_pass(NativeOperationRegistry &registry) {
     }
   });
   registry.register_schema<Descriptor>(
-      "vulkan_graphics", "pass_direct", {},
+      "vulkan_graphics", Descriptor::operation, {},
       [](const Json &p) {
         Descriptor d;
         static_cast<PassDescription &>(d) =
-            pass_parameters(p, Descriptor::version);
+            pass_parameters(p, Descriptor::features);
         return [d, p](const NativeOperationBindings &b) mutable {
           auto result = d;
           for (uint32_t i = 0; i < u32(p["pipeline_count"]); ++i)
@@ -811,7 +897,7 @@ static void register_graphics_pass(NativeOperationRegistry &registry) {
           for (uint32_t i = 0; i < u32(p["color_count"]); ++i)
             result.targets.push_back(b.at("color_" + std::to_string(i))
                                          .resource<NativeSampledImage>());
-          if constexpr (Descriptor::version >= 2) {
+          if constexpr (Descriptor::features.scenes) {
             for (uint32_t i = 0; i < u32(p["scene_count"]); ++i)
               result.scenes.push_back(
                   b.at("scene_" + std::to_string(i))
@@ -871,5 +957,6 @@ void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
   register_graphics_pass<ShaderPassDescription>(registry);
   register_graphics_pass<ArrayPassDescription>(registry);
   register_graphics_pass<MeshPassDescription>(registry);
+  register_graphics_pass<IndirectPassDescription>(registry);
 }
 }  // namespace taichi::lang

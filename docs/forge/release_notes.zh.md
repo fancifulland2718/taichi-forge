@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan AOT `pass_indirect` v1 可从普通/已选整图 graphics-queue Graph 重建传统
+  direct/indirect pass，共享检查有限 command/count view、设备容量及 shader 写入别名；
+  验收覆盖 GPU 零/非零计数、替换绑定、退休及下游梯度。
+
 - AOT 数组可通过轻量消费者、C API 和私有资源重建显式声明 `indirect` 用途；
   view 继承父分配用途，保留 storage 默认值及其已有的 Vulkan dispatch-packet 用途。
 

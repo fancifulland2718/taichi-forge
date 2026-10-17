@@ -862,8 +862,8 @@ executor, with no per-draw Python callback or extra host wait.
 Windows qualification covers standalone and borrowed execution, direct and
 indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
 LOAD, changed inputs and bindings, shared/private retirement, and downstream
-numeric gradients. This is not differentiation of rasterization. Indirect draws
-remain separate work; storage arrays and direct mesh draws use the versions below.
+numeric gradients. This is not differentiation of rasterization. Storage arrays,
+direct mesh and classic indirect draws use the forms below.
 
 Ordinary Vulkan Graphs containing `VulkanGraphicsDrawRecording` or
 `VulkanGraphicsPassRecording` can export these qualified direct/indexed/instanced
@@ -951,8 +951,37 @@ in pipeline stage order, or bind a public pipeline. Windows tests cover mesh-onl
 and task+mesh, compute-to-mesh data updates, public/private owners, replacement
 bindings, close/reset and downstream numeric gradients in standalone and
 borrowed consumers. No consumer shader compiler is required. Older raster
-exports keep their lowest required versions. Indirect and segmented/fork-join
+exports keep their lowest required versions. Mesh indirect and segmented/fork-join
 submission coverage remains unchanged.
+
+Classic indirect draws use `vulkan_graphics/pass_indirect` v1. Query
+`native_operation_capabilities("vulkan_graphics_pass_indirect")` before choosing
+this operation; preparation separately checks device count/multi-draw features
+and limits. Ordinary and selected complete graphics-queue Graphs export
+`IndirectDraw` automatically, including mixed classic direct/indirect passes.
+Mesh draws cannot be mixed into this form. Direct versions retain their schemas.
+
+The operation keeps the existing pipeline/array/image/color/scene groups
+(`scene_count=0` when unused). An indirect draw replaces direct count/offset
+fields with an `indirect` object containing `commands` (array ordinal), optional
+`count`, `max_draw_count`, `stride`, `vertex_record_limit`, optional
+`instance_record_limit=1`, `index_element_limit=0`, `command_offset=0`,
+`count_offset=0` and `first_instance_may_be_nonzero=false`. Top-level `index`
+selects indexed drawing; direct `index_min/index_max` fields are not used.
+Command/count data use u32, offsets are bytes relative to the finite logical
+view, and stride is the Vulkan command ABI stride (16/20 bytes minimum).
+Declared vertex/instance/index limits are producer promises; preparation does
+not read GPU commands back to verify their contents. GPU count zero draws nothing.
+
+JIT/AOT share range, feature, geometry and pass-wide alias checks. Writable
+shader storage cannot overlap command/count spans in the same pass; use separate
+passes for dependent draws. Known imported-memory aliases are checked, and
+unknown identities require proof of separation. No per-frame host command
+inspection or extra submission manager is introduced. Windows tests cover
+non-indexed fixed-count and indexed GPU-count draws, mixed direct draws,
+0/1/0/1 updates, public/private finite views, replacement bindings, close/reset
+and downstream gradients in standalone/borrowed consumers. This does not add
+graphics-shader differentiation, mesh indirect, or segmented/fork-join export.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use

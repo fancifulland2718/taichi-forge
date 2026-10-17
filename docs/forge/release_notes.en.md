@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan AOT `pass_indirect` v1 reconstructs classic direct/indirect passes from
+  ordinary or selected complete graphics-queue Graphs. Shared preparation checks
+  finite command/count views, device limits and shader-write aliases; tests cover
+  GPU zero/nonzero counts, replacement bindings, retirement and downstream gradients.
+
 - AOT arrays accept explicit `indirect` usage through the lightweight consumer,
   C API and private-resource reconstruction. Views inherit the parent usage;
   storage defaults and their existing Vulkan dispatch-packet usage are preserved.

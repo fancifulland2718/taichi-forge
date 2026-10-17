@@ -4,7 +4,7 @@ Run with Khronos synchronization validation and its shader-access heuristic to
 check visibility as well as numeric results. Consumers reject validation errors.
 """
 
-from contextlib import closing
+from contextlib import ExitStack, closing
 import os
 from pathlib import Path
 import subprocess
@@ -38,7 +38,7 @@ def _storage_write_pipeline():
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_vulkan_indirect_rejects_same_pass_shader_write_alias():
+def test_vulkan_indirect_rejects_same_pass_shader_write_alias(tmp_path):
     graphics = ti.hardware.graphics
     pipeline = _storage_write_pipeline()
     try:
@@ -61,6 +61,31 @@ def test_vulkan_indirect_rejects_same_pass_shader_write_alias():
         # Different Graph names are deliberately bound to the same allocation.
         with pytest.raises(RuntimeError, match="overlap writable shader storage"):
             recording.prepare_graph_execute(frame)
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="auto")
+        module = ti.aot.Module()
+        with closing(builder.compile()) as graph:
+            module.add_execution_plan(
+                "alias",
+                graph,
+                source_bindings=dict(target=frame["target"]),
+                resource_bindings={pipeline: dict(zip(("shader_0", "shader_1"), pipeline._shader_artifacts))},
+            )
+        artifact = tmp_path / "indirect-alias.tcm"
+        module.archive(str(artifact))
+        with ti.aot.borrow_runtime() as runtime, ExitStack() as owners:
+            loaded = owners.enter_context(closing(runtime.load_module(str(artifact))))
+            inputs = {
+                name: owners.enter_context(closing(runtime.ndarray(dtype, count, usage=usage)))
+                for name, dtype, count, usage in (
+                    ("vertices", "f32", 6, ("vertex",)),
+                    ("parameters", "u32", 4, ("uniform",)),
+                    ("commands", "u32", 64, ("storage", "indirect")),
+                )
+            }
+            inputs["state"] = inputs["commands"]
+            with pytest.raises(RuntimeError, match="overlap writable shader storage"):
+                loaded.prepare_execution("alias", inputs)
     finally:
         pipeline.close()
 

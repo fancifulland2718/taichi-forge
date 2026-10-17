@@ -441,8 +441,10 @@ SPIR-V 避免新增 shader-toolchain 依赖，也不增加官方 wheel 变体。
 AOT 光栅描述符数组使用 `pass_direct` v3，见 [SDK 合同](aot_sdk.zh.md)。
 
 AOT 直接 mesh/task 导出使用 graphics `pipeline` v2 与 `pass_direct` v4，复用
-同一准备和录制核心，覆盖普通/已选整图 graphics-queue Graph。indirect 和分段/
-fork-join 保持原边界；绑定方式与设备资格见 [SDK 合同](aot_sdk.zh.md)。
+同一准备和录制核心，覆盖普通/已选整图 graphics-queue Graph。传统 `IndirectDraw`
+使用 `pass_indirect` v1 导出，支持混合 direct/indirect pass 和有限 command/count
+view；mesh indirect 与分段/fork-join 保持原边界。绑定方式与设备资格见
+[SDK 合同](aot_sdk.zh.md)。
 
 vertex/fragment storage 写入要求对应 Vulkan 设备特性，Forge 在设备支持时启用，
 未启用时在准备阶段拒绝可写 shader 接口。JIT/AOT 共用 pass 边界依赖，涵盖周围

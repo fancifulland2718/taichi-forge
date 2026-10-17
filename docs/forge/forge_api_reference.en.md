@@ -555,8 +555,10 @@ range checks. AOT raster arrays use `pass_direct` v3; see the [SDK contract](aot
 
 AOT direct mesh/task exports use graphics `pipeline` v2 and `pass_direct` v4,
 sharing the same preparation and recording core. Ordinary and selected complete
-graphics-queue Graphs are covered; indirect and segmented/fork-join routes retain
-their existing boundaries. See the [SDK contract](aot_sdk.en.md) for bindings and
+graphics-queue Graphs are covered. Classic `IndirectDraw` exports use
+`pass_indirect` v1, including mixed direct/indirect passes and finite command/count
+views. Mesh indirect and segmented/fork-join routes retain their existing
+boundaries. See the [SDK contract](aot_sdk.en.md) for bindings and
 device qualification.
 
 Vertex/fragment storage writes require the corresponding Vulkan device feature;

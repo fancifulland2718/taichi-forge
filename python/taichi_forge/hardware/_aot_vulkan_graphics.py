@@ -140,7 +140,7 @@ def _parts(recording):
 
 
 def preflight(recording, context):
-    from ._graphics import Draw, MeshDraw, VulkanGraphicsPipeline, VulkanMeshPipeline
+    from ._graphics import Draw, IndirectDraw, MeshDraw, VulkanGraphicsPipeline, VulkanMeshPipeline
 
     cache = context._native_export_facts.setdefault("vulkan_graphics_recordings", {})
     if id(recording) in cache:
@@ -152,9 +152,12 @@ def preflight(recording, context):
     for item in draws:
         if (type(item.pipeline), type(item.draw)) not in (
             (VulkanGraphicsPipeline, Draw),
+            (VulkanGraphicsPipeline, IndirectDraw),
             (VulkanMeshPipeline, MeshDraw),
         ):
-            raise TaichiRuntimeError("AOT graphics recording currently requires direct/indexed raster or mesh draws")
+            raise TaichiRuntimeError("AOT graphics recording requires classic raster or direct mesh draws")
+    if any(type(item.draw) is IndirectDraw for item in draws) and any(type(item.draw) is MeshDraw for item in draws):
+        raise TaichiRuntimeError("AOT pass_indirect cannot mix mesh and classic indirect draws")
     for name in (*(value.name for value in colors), recording.depth):
         if name is not None:
             context.source_images.require_attachment(name)
@@ -177,16 +180,17 @@ def _clear_bits(fmt, values):
 
 
 def export(recording, context):
-    from ._graphics import MeshDraw, ShaderBufferArrayBinding
+    from ._graphics import IndirectDraw, MeshDraw, ShaderBufferArrayBinding
 
     draws, colors, depth_load = preflight(recording, context)
     bindings, groups, descriptions = {}, {name: {} for name in ("pipeline", "array", "image")}, []
     has_scenes = any(item.shader_acceleration_structures for item in draws)
     has_mesh = any(type(item.draw) is MeshDraw for item in draws)
+    has_indirect = any(type(item.draw) is IndirectDraw for item in draws)
     has_arrays = any(
         isinstance(value, ShaderBufferArrayBinding) for item in draws for value in item.pipeline.shader_buffer_bindings
     )
-    if has_scenes or has_arrays or has_mesh:
+    if has_scenes or has_arrays or has_mesh or has_indirect:
         groups["scene"] = {}
 
     def index(group, resource):
@@ -237,6 +241,20 @@ def export(recording, context):
         )
         if type(draw) is MeshDraw:
             result["mesh"] = [draw.group_count_x, draw.group_count_y, draw.group_count_z]
+        elif type(draw) is IndirectDraw:
+            result["indirect"] = dict(
+                commands=index("array", context.binding(item.indirect_buffer)),
+                command_offset=draw.command_offset,
+                count_offset=draw.count_offset or 0,
+                max_draw_count=draw.max_draw_count,
+                stride=draw.command_stride or (20 if item.index_buffer is not None else 16),
+                vertex_record_limit=draw.vertex_record_limit,
+                instance_record_limit=draw.instance_record_limit,
+                index_element_limit=draw.index_element_limit,
+                first_instance_may_be_nonzero=draw.first_instance_may_be_nonzero,
+            )
+            if item.count_buffer is not None:
+                result["indirect"]["count"] = index("array", context.binding(item.count_buffer))
         else:
             result.update(
                 element_count=draw.element_count,
@@ -247,11 +265,9 @@ def export(recording, context):
                 vertex_offset=draw.vertex_offset,
             )
         if item.index_buffer is not None:
-            result.update(
-                index=index("array", context.binding(item.index_buffer)),
-                index_min=draw.index_bounds[0],
-                index_max=draw.index_bounds[1],
-            )
+            result["index"] = index("array", context.binding(item.index_buffer))
+            if type(draw) is not IndirectDraw:
+                result.update(index_min=draw.index_bounds[0], index_max=draw.index_bounds[1])
         if item.shader_acceleration_structures:
             result["scenes"] = [
                 dict(
@@ -281,8 +297,8 @@ def export(recording, context):
     )
     context.native(
         "vulkan_graphics",
-        "pass_direct",
-        version=4 if has_mesh else (3 if has_arrays else (2 if has_scenes else 1)),
+        "pass_indirect" if has_indirect else "pass_direct",
+        version=1 if has_indirect else (4 if has_mesh else (3 if has_arrays else (2 if has_scenes else 1))),
         parameters=parameters,
         bindings=bindings,
     )

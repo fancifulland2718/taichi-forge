@@ -296,8 +296,14 @@ def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe):
     )
     graph = indirect.compile()
     try:
-        with pytest.raises(ti.TaichiRuntimeError, match="direct/indexed"):
-            ti.aot.Module().add_execution_plan("bad", graph, source_bindings=dict(color=sources["color"]))
+        exported = ti.aot.Module().add_execution_plan(
+            "indirect",
+            graph,
+            source_bindings=dict(color=sources["color"]),
+            resource_bindings={instance: dict(zip(("shader_0", "shader_1"), instance._shader_artifacts))},
+        )
+        operation = json.loads(exported.to_json())["operations"][0]
+        assert operation["operation"] == "pass_indirect" and operation["version"] == 1
     finally:
         graph.close()
 
