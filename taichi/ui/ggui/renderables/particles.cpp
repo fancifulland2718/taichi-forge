@@ -29,11 +29,9 @@ void Particles::update_data(const ParticlesInfo &info) {
 
   // Update UBO
   {
-    UBORenderable ubo;
-    ubo.color = glm::vec4(info.color, 1);
-    ubo.radius = info.radius;
-    ubo.use_per_vertex_color = info.renderable_info.has_per_vertex_color;
-    ubo.use_per_vertex_radius = info.renderable_info.has_per_vertex_radius;
+    auto ubo = make_raster_particle_uniforms(
+        info.color, info.renderable_info.has_per_vertex_color,
+        info.renderable_info.has_per_vertex_radius, info.radius);
 
     void *mapped{nullptr};
     RHI_VERIFY(app_context_->device().map(

@@ -54,11 +54,9 @@ void Mesh::update_data(const MeshInfo &info) {
 
   // Update UBO
   {
-    UBORenderable ubo;
-    ubo.color = info.color;
-    ubo.use_per_vertex_color = info.renderable_info.has_per_vertex_color;
-    ubo.two_sided = info.two_sided;
-    ubo.has_attribute = info.mesh_attribute_info.has_attribute;
+    auto ubo = make_raster_mesh_uniforms(
+        info.color, info.renderable_info.has_per_vertex_color, info.two_sided,
+        info.mesh_attribute_info.has_attribute);
     void *mapped{nullptr};
     RHI_VERIFY(app_context_->device().map(
         uniform_buffer_renderable_->get_ptr(0), &mapped));

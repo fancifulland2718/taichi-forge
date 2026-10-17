@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <type_traits>
 #include <glm/glm.hpp>
 
@@ -49,6 +50,64 @@ struct RasterLineUniforms {
   int32_t start_vertex{0}, start_index{0}, num_vertices{0}, is_indexed{0};
   std::array<uint32_t, 2> reserved{};
 };
+
+inline RasterSceneData make_raster_scene_data(glm::vec3 camera_pos,
+                                              const glm::mat4 &view,
+                                              const glm::mat4 &projection,
+                                              glm::vec3 ambient_light,
+                                              int32_t point_light_count) {
+  RasterSceneData data;
+  data.camera_pos = camera_pos;
+  data.view = view;
+  data.projection = projection;
+  data.ambient_light = ambient_light;
+  data.point_light_count = point_light_count;
+  return data;
+}
+
+inline RasterSceneUniforms make_raster_scene_uniforms(
+    const RasterSceneData &scene,
+    float width,
+    float height,
+    float fov_degrees) {
+  RasterSceneUniforms data;
+  data.scene = scene;
+  data.window_width = width;
+  data.window_height = height;
+  data.tan_half_fov = std::tan(glm::radians(fov_degrees) / 2.0f);
+  data.aspect_ratio = width / height;
+  return data;
+}
+
+inline RasterMeshUniforms make_raster_mesh_uniforms(glm::vec3 color,
+                                                    bool per_vertex_color,
+                                                    bool two_sided,
+                                                    bool has_attribute) {
+  RasterMeshUniforms data;
+  data.color = color;
+  data.use_per_vertex_color = per_vertex_color;
+  data.two_sided = two_sided;
+  data.has_attribute = has_attribute;
+  return data;
+}
+
+inline RasterParticleUniforms make_raster_particle_uniforms(
+    glm::vec3 color,
+    bool per_vertex_color,
+    bool per_vertex_radius,
+    float radius) {
+  RasterParticleUniforms data;
+  data.color = color;
+  data.use_per_vertex_color = per_vertex_color;
+  data.use_per_vertex_radius = per_vertex_radius;
+  data.radius = radius;
+  return data;
+}
+
+inline RasterPointLight make_raster_point_light(glm::vec3 pos,
+                                                glm::vec3 color) {
+  return {glm::vec4(pos, 1.0f), glm::vec4(color, 1.0f)};
+}
 
 static_assert(std::is_standard_layout_v<RasterSceneUniforms>);
 static_assert(std::is_trivially_copyable_v<RasterSceneUniforms>);

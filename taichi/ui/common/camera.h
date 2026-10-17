@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/ui/utils/utils.h"
+#include "taichi/runtime/raster_data.h"
 
 namespace taichi::ui {
 
@@ -32,6 +33,14 @@ struct Camera {
     } else {
       throw std::runtime_error("invalid camera projection mode");
     }
+  }
+
+  lang::RasterSceneData raster_scene_data(float aspect_ratio,
+                                          glm::vec3 ambient_light,
+                                          int32_t point_light_count) {
+    return lang::make_raster_scene_data(position, get_view_matrix(),
+                                        get_projection_matrix(aspect_ratio),
+                                        ambient_light, point_light_count);
   }
 };
 

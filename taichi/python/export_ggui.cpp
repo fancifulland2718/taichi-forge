@@ -44,6 +44,12 @@ pybind11::tuple vec3_to_tuple(glm::vec3 v) {
   return pybind11::make_tuple(v.x, v.y, v.z);
 }
 
+template <typename T>
+py::bytes raster_uniform_bytes(const T &value) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  return py::bytes(reinterpret_cast<const char *>(&value), sizeof(T));
+}
+
 // Here we convert the 2d-array to numpy array using pybind. Refs:
 // https://pybind11.readthedocs.io/en/stable/advanced/pycpp/numpy.html?highlight=array_t#vectorizing-functions
 // https://stackoverflow.com/questions/44659924/returning-numpy-arrays-via-pybind11
@@ -188,6 +194,19 @@ struct PyCamera {
   }
   py::array_t<float> get_projection_matrix(float aspect_ratio) {
     return mat4_to_nparray(camera.get_projection_matrix(aspect_ratio));
+  }
+  py::bytes raster_scene_uniforms(uint32_t width,
+                                 uint32_t height,
+                                 py::tuple ambient,
+                                 int32_t point_light_count) {
+    if (!width || !height || point_light_count < 0) {
+      throw py::value_error(
+          "Raster uniforms require positive dimensions and nonnegative light count");
+    }
+    const auto scene = camera.raster_scene_data(
+        float(width) / float(height), tuple_to_vec3(ambient), point_light_count);
+    return raster_uniform_bytes(
+        make_raster_scene_uniforms(scene, width, height, camera.fov));
   }
 };
 
@@ -1122,7 +1141,25 @@ void export_ggui(py::module &m) {
       .def("z_near", &PyCamera::z_near)
       .def("z_far", &PyCamera::z_far)
       .def("get_view_matrix", &PyCamera::get_view_matrix)
-      .def("get_projection_matrix", &PyCamera::get_projection_matrix);
+      .def("get_projection_matrix", &PyCamera::get_projection_matrix)
+      .def("_raster_scene_uniforms", &PyCamera::raster_scene_uniforms);
+
+  m.def("_raster_mesh_uniforms",
+        [](py::tuple color, bool per_vertex_color, bool two_sided,
+           bool has_attribute) {
+          return raster_uniform_bytes(make_raster_mesh_uniforms(
+              tuple_to_vec3(color), per_vertex_color, two_sided, has_attribute));
+        });
+  m.def("_raster_particle_uniforms",
+        [](py::tuple color, bool per_vertex_color, bool per_vertex_radius,
+           float radius) {
+          return raster_uniform_bytes(make_raster_particle_uniforms(
+              tuple_to_vec3(color), per_vertex_color, per_vertex_radius, radius));
+        });
+  m.def("_raster_point_light", [](py::tuple position, py::tuple color) {
+    return raster_uniform_bytes(
+        make_raster_point_light(tuple_to_vec3(position), tuple_to_vec3(color)));
+  });
 
   py::class_<Event>(m, "Event")
       .def_property("key", &Event::get_key, &Event::set_key);

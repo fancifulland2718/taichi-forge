@@ -57,13 +57,8 @@ class SceneBase {
   using UBOScene = lang::RasterSceneUniforms;
 
   void update_ubo(float aspect_ratio) {
-    current_scene_data_.camera_pos = camera_.position;
-    current_scene_data_.view = camera_.get_view_matrix();
-    current_scene_data_.projection =
-        camera_.get_projection_matrix(aspect_ratio);
-    current_scene_data_.point_light_count = point_lights_.size();
-
-    current_scene_data_.ambient_light = ambient_light_color_;
+    current_scene_data_ = camera_.raster_scene_data(
+        aspect_ratio, ambient_light_color_, point_lights_.size());
   }
 
   Camera camera_;

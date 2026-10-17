@@ -265,13 +265,9 @@ void Renderer::update_scene_data(SceneBase *scene) {
   {
     init_scene_ubo();
 
-    SceneBase::UBOScene ubo;
-    ubo.scene = scene->current_scene_data_;
-    ubo.window_width = app_context_.render_width();
-    ubo.window_height = app_context_.render_height();
-    ubo.tan_half_fov = tanf(glm::radians(scene->camera_.fov) / 2);
-    ubo.aspect_ratio =
-        float(app_context_.render_width()) / float(app_context_.render_height());
+    auto ubo = make_raster_scene_uniforms(
+        scene->current_scene_data_, app_context_.render_width(),
+        app_context_.render_height(), scene->camera_.fov);
 
     void *mapped{nullptr};
     RHI_VERIFY(app_context_.device().map(scene_ubo_->get_ptr(0), &mapped));

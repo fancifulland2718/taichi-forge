@@ -24,7 +24,7 @@ void SceneV2::particles(const ParticlesInfo &info) {
   renderer_->particles(info);
 }
 void SceneV2::point_light(glm::vec3 pos, glm::vec3 color) {
-  point_lights_.push_back({glm::vec4(pos, 1.0), glm::vec4(color, 1.0)});
+  point_lights_.push_back(make_raster_point_light(pos, color));
 }
 void SceneV2::ambient_light(glm::vec3 color) {
   ambient_light_color_ = color;

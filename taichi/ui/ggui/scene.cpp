@@ -23,7 +23,7 @@ void Scene::particles(const ParticlesInfo &info) {
   particles_infos_.back().object_id = next_object_id_++;
 }
 void Scene::point_light(glm::vec3 pos, glm::vec3 color) {
-  point_lights_.push_back({glm::vec4(pos, 1.0), glm::vec4(color, 1.0)});
+  point_lights_.push_back(make_raster_point_light(pos, color));
 }
 void Scene::ambient_light(glm::vec3 color) {
   ambient_light_color_ = color;
