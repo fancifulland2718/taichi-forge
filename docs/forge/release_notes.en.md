@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Tensor component alias analysis now preserves unknown ndarray origins and
+  component indices. This fixes a compiler abort in conditional vector ndarray
+  adjoints and avoids treating potentially overlapping accesses as independent.
+  CPU, CUDA and Vulkan JIT and standalone AOT forward/reverse checks pass.
+
 - CUDA parallel Graph construction uses a shared fork/join capture core and
   removes the former four-branch construction ceiling. Existing automatic
   two-chain selection is unchanged; explicit eight-branch capture, rebinding,

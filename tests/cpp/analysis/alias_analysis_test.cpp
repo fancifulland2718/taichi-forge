@@ -171,6 +171,76 @@ TEST(AliasAnalysis, ExternalPtr_GradDiff) {
   EXPECT_EQ(aa, AliasResult::different);
 }
 
+TEST(AliasAnalysis, TensorComponentsPreserveOriginAndIndexUncertainty) {
+  IRBuilder builder;
+  auto type = TypeFactory::get_instance().get_tensor_type({4}, PrimitiveType::f32);
+  auto arg = builder.create_arg_load({0}, PrimitiveType::f32, true, 0);
+  auto zero = builder.get_int32(0);
+  auto one = builder.get_int32(1);
+  auto index = builder.create_arg_load({1}, PrimitiveType::i32, false, 0);
+  auto other_index = builder.create_arg_load({2}, PrimitiveType::i32, false, 0);
+  auto external = [&](Stmt *i, bool grad = false) {
+    auto ptr = builder.create_external_ptr(arg, {i}, grad);
+    ptr->ret_type = type;
+    ptr->ret_type.set_is_pointer(true);
+    return ptr;
+  };
+  auto component = [&](Stmt *ptr, Stmt *offset) {
+    return builder.insert(std::make_unique<MatrixPtrStmt>(ptr, offset));
+  };
+  auto base = external(zero);
+  auto alias = external(zero);
+  auto first = component(base, zero);
+  auto expect = [](Stmt *a, Stmt *b, AliasResult result) {
+    EXPECT_EQ(alias_analysis(a, b), result);
+    EXPECT_EQ(alias_analysis(b, a), result);
+  };
+  expect(first, component(alias, zero), AliasResult::same);
+  expect(first, component(alias, one), AliasResult::different);
+  // Equal ndarray origins with unknown component offsets used to assert.
+  expect(component(base, index), component(alias, other_index),
+         AliasResult::uncertain);
+  // Unknown record indices must not be mistaken for distinct allocations.
+  expect(first, component(external(index), zero), AliasResult::uncertain);
+  expect(first, component(external(one), zero), AliasResult::different);
+  expect(first, component(external(zero, true), zero), AliasResult::different);
+  expect(first, alias, AliasResult::uncertain);
+  expect(first, external(index), AliasResult::uncertain);
+  expect(first, builder.create_local_var(type), AliasResult::different);
+}
+
+TEST(AliasAnalysis, LocalTemporaryAndNestedTensorComponents) {
+  IRBuilder builder;
+  auto type = TypeFactory::get_instance().get_tensor_type({4}, PrimitiveType::f32);
+  auto nested_type = TypeFactory::get_instance().get_tensor_type({2}, type);
+  auto zero = builder.get_int32(0);
+  auto one = builder.get_int32(1);
+  auto index = builder.create_arg_load({0}, PrimitiveType::i32, false, 0);
+  auto component = [&](Stmt *ptr, Stmt *offset) {
+    return builder.insert(std::make_unique<MatrixPtrStmt>(ptr, offset));
+  };
+  auto local = builder.create_local_var(type);
+  auto first = component(local, zero);
+  EXPECT_EQ(alias_analysis(first, local), AliasResult::uncertain);
+  EXPECT_EQ(alias_analysis(first, component(local, one)), AliasResult::different);
+  EXPECT_EQ(alias_analysis(first, component(local, index)), AliasResult::uncertain);
+  auto temp = builder.insert(std::make_unique<GlobalTemporaryStmt>(0, type));
+  auto alias = builder.insert(std::make_unique<GlobalTemporaryStmt>(0, type));
+  auto other = builder.insert(std::make_unique<GlobalTemporaryStmt>(16, type));
+  EXPECT_EQ(alias_analysis(component(temp, zero), component(alias, zero)),
+            AliasResult::same);
+  EXPECT_EQ(alias_analysis(component(temp, zero), component(other, zero)),
+            AliasResult::different);
+  auto nested = builder.create_local_var(nested_type);
+  auto row = component(nested, zero);
+  EXPECT_EQ(alias_analysis(component(row, zero),
+                           component(component(nested, zero), zero)),
+            AliasResult::same);
+  EXPECT_EQ(alias_analysis(component(row, zero),
+                           component(component(nested, index), zero)),
+            AliasResult::uncertain);
+}
+
 }  // namespace analysis
 }  // namespace irpass
 }  // namespace taichi::lang

@@ -38,51 +38,28 @@ AliasResult alias_analysis(Stmt *var1, Stmt *var2) {
     return AliasResult::different;
   }
 
-  // TODO: further optimize with offset inside MatrixPtrStmt
-  // If at least one of var1 and var2 is local, they will be treated here.
-  auto retrieve_local = [&](Stmt *var) {
-    if (var->is<AllocaStmt>()) {
-      return var;
-    } else if (var->is<MatrixPtrStmt>() &&
-               var->cast<MatrixPtrStmt>()->offset_used_as_index()) {
-      return var->cast<MatrixPtrStmt>()->origin;
-    } else {
-      return (Stmt *)nullptr;
-    }
+  // An element index does not imply local storage: ndarray and nested tensor
+  // pointers use it too. Compare their origins before comparing components,
+  // and preserve uncertainty (including a component versus its whole tensor).
+  auto indexed_matrix = [](Stmt *var) -> MatrixPtrStmt * {
+    auto *ptr = var->cast<MatrixPtrStmt>();
+    return ptr && ptr->offset_used_as_index() ? ptr : nullptr;
   };
-  Stmt *origin1 = retrieve_local(var1);
-  Stmt *origin2 = retrieve_local(var2);
-  if (origin1 != nullptr && origin2 != nullptr) {
-    if (var1->is<MatrixPtrStmt>() && var2->is<MatrixPtrStmt>()) {
-      if (origin1 == origin2 ||
-          alias_analysis(origin1, origin2) == AliasResult::same) {
-        auto diff = value_diff_ptr_index(var1->cast<MatrixPtrStmt>()->offset,
-                                         var2->cast<MatrixPtrStmt>()->offset);
-        if (diff.is_diff_certain) {
-          return diff.diff_range == 0 ? AliasResult::same
-                                      : AliasResult::different;
-        }
-      } else {
-        return AliasResult::different;
-      }
-    }
-
-    if (origin1 == origin2) {
-      return AliasResult::uncertain;
-    }
-
-    if (origin1->is<AllocaStmt>() || origin2->is<AllocaStmt>())
+  auto *matrix1 = indexed_matrix(var1);
+  auto *matrix2 = indexed_matrix(var2);
+  if (matrix1 || matrix2) {
+    const auto origins = alias_analysis(matrix1 ? matrix1->origin : var1,
+                                        matrix2 ? matrix2->origin : var2);
+    if (origins == AliasResult::different)
       return AliasResult::different;
-    TI_ASSERT(origin1->is<GlobalTemporaryStmt>() &&
-              origin2->is<GlobalTemporaryStmt>());
-    if (origin1->cast<GlobalTemporaryStmt>()->offset ==
-        origin2->cast<GlobalTemporaryStmt>()->offset) {
-      return AliasResult::uncertain;
-    } else {
-      return AliasResult::different;
+    if (origins == AliasResult::same && matrix1 && matrix2) {
+      const auto diff = value_diff_ptr_index(matrix1->offset, matrix2->offset);
+      if (diff.is_diff_certain)
+        return diff.diff_range == 0 ? AliasResult::same : AliasResult::different;
     }
+    return AliasResult::uncertain;
   }
-  if (origin1 != nullptr || origin2 != nullptr) {
+  if (var1->is<AllocaStmt>() || var2->is<AllocaStmt>()) {
     return AliasResult::different;
   }
 
