@@ -158,7 +158,8 @@ NativeStorageRange layout(Device &device,
                            const NativeArrayBinding &array,
                            uint64_t count,
                            uint32_t width,
-                           bool integer) {
+                           bool integer,
+                           bool transforms = false) {
   if (!count || array.pointer.device != &device ||
       (integer ? array.scalar_type != PrimitiveType::i32 &&
                      array.scalar_type != PrimitiveType::u32
@@ -166,10 +167,23 @@ NativeStorageRange layout(Device &device,
       count > std::numeric_limits<size_t>::max() / width / 4 ||
       array.bytes != count * width * 4)
     throw std::invalid_argument("OptiX requires matching local compact arrays");
-  std::vector<uint64_t> shape{count};
-  if (width > 1)
-    shape.push_back(width);
-  validate_native_array_layout(array, {shape, {}, 4, 4, true});
+  NativeArrayLayoutRequirement required{{count}, {}, 4, 4, true};
+  if (transforms && array.element_shape == std::vector<uint64_t>{3, 4}) {
+    required.element_shape = {3, 4};
+    required.record_bytes = 48;
+  } else if (!transforms &&
+             array.element_shape == std::vector<uint64_t>{width}) {
+    required.element_shape = {width};
+    required.record_bytes = uint64_t(width) * 4;
+  } else if (transforms &&
+             array.shape == std::vector<uint64_t>{count, 3, 4}) {
+    required.minimum_shape = {count, 3, 4};
+  } else if (width > 1 || array.shape.size() == 2) {
+    required.minimum_shape.push_back(width);
+  }
+  // Match the JIT ray/transform record layouts; equal byte counts alone are
+  // insufficient (flat, transposed and differently shaped tensors are rejected).
+  validate_native_array_layout(array, required);
   const auto range = resolve_native_storage_range(Arch::cuda, array.pointer, array.bytes);
   if (range.memory_offset % 4)
     throw std::invalid_argument("OptiX array address must be scalar-aligned");
@@ -223,7 +237,7 @@ void validate_query(Device &device, const OptixQueryOperation &op) {
   }
   if (op.scene->is_instances())
     reads.push_back(layout(device, op.scene->instances().transforms,
-                           op.scene->instance_count(), 12, false));
+                           op.scene->instance_count(), 12, false, true));
   validate_native_disjoint_writes(reads, writes);
 }
 
@@ -246,7 +260,7 @@ void validate_instances(Device &device, const OptixInstancesDescription &d) {
     if (!gas || !gas->is_gas() || gas->context() != d.context ||
         &gas->device() != &device)
       throw std::invalid_argument("OptiX instances require same-context GAS resources");
-  layout(device, d.transforms, d.gas.size(), 12, false);
+  layout(device, d.transforms, d.gas.size(), 12, false, true);
 }
 
 void validate_instance_refit(Device &device, const OptixInstanceRefitOperation &op) {
@@ -255,7 +269,7 @@ void validate_instance_refit(Device &device, const OptixInstanceRefitOperation &
       !op.scene->allow_update())
     throw std::invalid_argument("OptiX instance refit requires an updateable IAS");
   if (op.transforms)
-    layout(device, *op.transforms, op.scene->instance_count(), 12, false);
+    layout(device, *op.transforms, op.scene->instance_count(), 12, false, true);
 }
 
 std::vector<uint32_t> instance_values(const liong::json::JsonValue &p,

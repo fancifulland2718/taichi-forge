@@ -202,14 +202,21 @@ OptiX adapter 另提供 `taichi_forge_optix_runtime_provider_query` 公共会话
 miss 写回 `[-1,0,0,0]` 和 `[-1,-1,-1,0]`。遮挡输出 i32/u32 `[N]` 的0/1，
 此时不传 `hit_indices`，`any_hit` 默认为true且不能关闭。普通 typed 默认最近有效命中。
 
+这些记录端口也接受 AoS vector ndarray：shape `[count]`、element shape `[width]`，
+按端口使用3、8、4或1分量。面表与遮挡等单字端口还接受 scalar `[count,1]`。
+存储必须紧凑且记录数精确匹配；字节数相同的扁平或不同形状记录仍会被拒绝。
+这不引入布局转换或复制。
+
 query version 1 省略面规则接受双面；`front_only=true` 按 winding 拒绝背面并继续遍历。或用 `faces`
 绑定 i32/u32 `[T]`，0为双面、1为单面，两种配置不能同时使用。拓扑和面规则在准备期
 验证并冻结；修改它们需要重新准备。`refit` 只更新相同拓扑的顶点，要求有限设备输入，
 无需逐帧host回读。查询不能覆盖输入/其他输出。准备只构建场景与pipeline，不执行查询。
 
 `instance_scene` 引用相同 context 的 `triangle_gas` 资源；多个实例序号可共享一个 GAS。
-`query` 接受单场景或实例场景，不接受裸 GAS。实例 `transforms` 为紧凑 f32 `[I,12]`
-行优先仿射 3×4 矩阵。可选元数据数组各有 `I` 项：`custom_indices` 为无符号24位ID
+`query` 接受单场景或实例场景，不接受裸 GAS。实例 `transforms` 为紧凑 f32 行优先
+仿射 3×4 矩阵，可用 scalar `[I,12]`、`[I,3,4]`，或 shape `[I]`、element shape `[3,4]`
+的 AoS ndarray；构建和设备 refit 均接受这些布局。
+可选元数据数组各有 `I` 项：`custom_indices` 为无符号24位ID
 （默认0），`visibility_masks` 为无符号8位mask（默认255），`opaque` 为布尔值
 （默认false）。输出 instance ID 为从0开始的绑定序号，与 custom ID、GAS内 primitive ID
 分别保留。opaque 实例仍执行面过滤。实例场景的 `faces` 有 `sum(T_i)` 项，按实例序号

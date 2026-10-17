@@ -251,6 +251,12 @@ single-scene instance/custom IDs are zero. Misses write `[-1,0,0,0]` and
 defaults `any_hit` to true, which cannot be disabled. Ordinary typed queries
 default to the closest accepted hit.
 
+These record ports also accept AoS vector ndarrays: shape `[count]` with element
+shape `[width]`, using widths 3, 8, 4 or 1 as appropriate. Single-word ports
+(face tables and occlusion) additionally accept scalar `[count,1]`. Storage must
+be packed and match the exact record count; equal byte counts do not permit
+flattened or differently shaped records. No layout conversion or copy is added.
+
 In query version 1, omitted face rules accept both sides. `front_only=true` rejects backfaces by
 winding and continues traversal. Alternatively, `faces` binds i32/u32 `[T]`, with
 0 for two-sided and 1 for front-only; the two policies cannot be combined.
@@ -262,8 +268,10 @@ executing queries.
 
 An `instance_scene` references `triangle_gas` resources from the same context;
 several instance ordinals can reference one GAS. `query` accepts a triangle or
-instance scene, not a bare GAS. Instance `transforms` are compact f32 `[I,12]`
-row-major affine 3x4 matrices. Optional metadata arrays have `I` entries:
+instance scene, not a bare GAS. Instance `transforms` are compact f32 row-major
+affine 3x4 matrices: scalar `[I,12]` or `[I,3,4]`, or AoS shape `[I]` with element
+shape `[3,4]`. These layouts apply to construction and device refit.
+Optional metadata arrays have `I` entries:
 `custom_indices` are unsigned 24-bit IDs (default 0), `visibility_masks` are
 unsigned 8-bit masks (default 255), and `opaque` entries are booleans (default
 false). Returned instance IDs are zero-based binding ordinals; custom IDs and
