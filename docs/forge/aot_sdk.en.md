@@ -880,8 +880,20 @@ apply. No warm host probes, extra workspaces or staging copies are introduced.
 Windows tests cover private/public resources, finite views, padding, mip updates,
 depth transfers, ownership retirement and downstream numeric gradients in both
 standalone and borrowed consumers. This does not differentiate image copies or
-sampling. Automatic export of the four Python transfer recordings is a separate
-integration step.
+sampling.
+
+Ordinary Graph export also reconstructs `VulkanImageCopyRecording`,
+`VulkanImageBlitRecording`, `VulkanBufferToImageRecording` and
+`VulkanImageToBufferRecording`. Supply each source Texture in `source_bindings`;
+use `resource_bindings` for public images or consumer pixel seeds. A first complete
+single-level overwrite needs no seed. Partial destinations still need one.
+Fixed packed ndarray views reconstruct their finite range against a named parent
+in `source_bindings`; module Field views retain the existing explicit snapshot
+contract. Export never snapshots texture contents implicitly. The native
+consumer qualifies actual ranges and initialization before recording. These JIT
+recordings currently use rerecording, so this does not add a selected immutable
+Vulkan whole-graph recipe. Tests include whole integer-image copy and region
+transfers followed by real numeric gradients.
 
 ### Explicit Vulkan raster plans
 

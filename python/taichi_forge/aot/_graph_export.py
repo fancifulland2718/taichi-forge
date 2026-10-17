@@ -176,6 +176,7 @@ class _ExportContext:
 
     def declare_private_bindings(self, bindings):
         from taichi_forge.graph._ir import InternalNdarrayRequirement
+        from taichi_forge.lang._storage_view import DenseNdarrayView
         from taichi_forge.lang.util import cook_dtype
 
         for name, owner in bindings.items():
@@ -192,6 +193,11 @@ class _ExportContext:
             if self.source_arrays is not None and (external := self.source_arrays.find(owner)) is not None:
                 self.private_bindings[name] = owner
                 self._private_names[name] = external
+                continue
+            if type(owner) is DenseNdarrayView:
+                # Reconstruct its finite packed range against a named parent or
+                # qualified module root; never widen it to the backing storage.
+                self.retained_arrays.bind_private(name, owner)
                 continue
             if not isinstance(owner, InternalNdarrayRequirement):
                 continue

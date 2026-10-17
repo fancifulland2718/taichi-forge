@@ -682,8 +682,16 @@ padding 不计入所需范围，区域之外的字节和 texel 保持不变。
 写入要求目标先初始化，可先用 `upload_mips` 初始化整链。保留条件控制初始化和资源
 退休合同，不引入热态 host 探测、额外 workspace 或 staging copy。Windows 小夹具
 覆盖独立/借用消费者、公私资源、有限 view、padding、mip 更新、深度传输、退休及
-下游数值梯度；不提供图像 copy 或采样本身求导。四类 Python transfer recording 的
-Graph 自动导出属于后续独立接入。
+下游数值梯度；不提供图像 copy 或采样本身求导。
+
+普通 Graph 还能自动导出 `VulkanImageCopyRecording`、`VulkanImageBlitRecording`、
+`VulkanBufferToImageRecording`、`VulkanImageToBufferRecording`。在 `source_bindings`
+提供原 Texture，以 `resource_bindings` 选择公共图像或消费者 pixel 种子；首次完整
+单级覆盖可省略种子，部分目标写入仍须种子。固定紧凑 ndarray view 相对
+`source_bindings` 中命名的父数组重建有限范围，Field view 保持显式 snapshot 合同。
+不会隐式快照 Texture 内容，消费者原生准备期仍验证实际范围与初始化状态。这些 JIT
+recording 当前使用重录制，因此不代表新增已选择的不可变 Vulkan 整图 recipe。
+测试覆盖整数整图复制及区域传输后的真实数值梯度。
 
 ### 显式 Vulkan 光栅计划
 

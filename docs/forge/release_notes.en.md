@@ -37,8 +37,10 @@ lifetimes. The entries below describe the changes.
 - Vulkan AOT explicit plans reconstruct region image copy, blit and buffer/image
   transfers through the common native registry. Shared range checks preserve finite
   views and padding; tests cover mip/depth updates, retirement and downstream
-  gradients. Partial writes require initialized destinations. Python Graph transfer
-  export remains a separate integration step.
+  gradients. Ordinary Graph export reconstructs all four recordings, retaining
+  finite views and consumer seeds; full single-level overwrites can omit seeds.
+  Partial writes require initialized destinations. These rerecorded JIT operations
+  do not add a selected immutable whole-graph recipe.
 - Vulkan AOT explicit plans bind `texture_collection` kernel parameters through
   `image/collection` v1, sharing immutable tables, layouts and retirement with
   JIT/GFX without copying images. These artifacts require target indexing/capacity

@@ -33,7 +33,8 @@
 
 - Vulkan AOT 显式计划可经公共 native registry 重建区域 image copy、blit 和 buffer/image
   传输，共享范围检查保留有限 view 与 padding；验证覆盖 mip/深度更新、退休及下游
-  梯度。部分写入要求目标已初始化；Python Graph transfer 自动导出另行接入。
+  梯度。普通 Graph 可自动导出四类 recording，保留有限 view 和消费者种子，完整单级
+  覆盖可省略种子；部分写入要求目标已初始化。JIT 重录制路径不代表已选择的不可变整图 recipe。
 - Vulkan AOT 显式计划可用 `image/collection` v1 绑定 `texture_collection` kernel
   参数，复用 JIT/GFX 的不可变表、布局及退休路径；集合不复制图像。对应产物要求
   目标索引/容量能力和 GFX metadata v5。二维动态索引、GPU 更新、替换、退休及

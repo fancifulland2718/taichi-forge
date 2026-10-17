@@ -215,6 +215,16 @@ class _VulkanImageTransferRecording(BackendCommandRecording):
 class VulkanImageCopyRecording(_VulkanImageTransferRecording):
     """One reusable base-level or explicit region-to-region color copy."""
 
+    def _export_aot_bindings(self, context):
+        from ._aot_image import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_image import export
+
+        return export(self, context)
+
     def __init__(
         self,
         *,
@@ -372,6 +382,16 @@ class VulkanBufferToImageRecording(_VulkanBufferImageRecording):
 
     _to_image = True
 
+    def _export_aot_bindings(self, context):
+        from ._aot_image import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_image import export
+
+        return export(self, context)
+
     def __init__(
         self,
         *,
@@ -416,6 +436,16 @@ class VulkanImageToBufferRecording(_VulkanBufferImageRecording):
 
     _to_image = False
 
+    def _export_aot_bindings(self, context):
+        from ._aot_image import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_image import export
+
+        return export(self, context)
+
     def __init__(
         self,
         *,
@@ -452,6 +482,16 @@ class VulkanImageToBufferRecording(_VulkanBufferImageRecording):
 
 class VulkanImageBlitRecording(_VulkanImageTransferRecording):
     """One feature-gated Vulkan image blit with nearest or linear filtering."""
+
+    def _export_aot_bindings(self, context):
+        from ._aot_image import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_image import export
+
+        return export(self, context)
 
     def __init__(
         self,

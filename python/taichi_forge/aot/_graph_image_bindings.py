@@ -63,6 +63,15 @@ class SourceImageBindings:
             raise TaichiRuntimeError("AOT graphics attachments require single-mip 2D textures")
         self._attachment_owners.add(id(owner))
 
+    def require_transfer(self, name):
+        owner = self.require(name)
+        if type(owner) is not Texture:
+            raise TaichiRuntimeError("AOT image transfer requires a Texture, not a collection")
+        # Integer transfer images share the existing color storage owner.
+        if not is_float_sampled_texture_format(owner._creation_metadata[0]):
+            self._storage_owners.add(id(owner))
+        return owner
+
     def validate_argument(self, arch, arg):
         owner = self.require(arg.name)
         if arg.tag == core.ArgKind.TEXTURE_COLLECTION:
@@ -99,14 +108,14 @@ class SourceImageBindings:
         for arg in requirements:
             self.validate_argument(arch, arg)
 
-    def resource(self, context, name, *, first_clear=False):
+    def resource(self, context, name, *, first_clear=False, full_overwrite=False):
         owner = self.require(name)
         if type(owner) is TextureCollection:
-            if first_clear:
+            if first_clear or full_overwrite:
                 raise TaichiRuntimeError("AOT image clear requires a Texture, not a collection")
             result = self._collection_resource(context, owner)
         else:
-            result = self._image_resource(context, owner, first_clear=first_clear)
+            result = self._image_resource(context, owner, first_clear=first_clear, full_overwrite=full_overwrite)
         self.used.add(name)
         return result
 
@@ -135,7 +144,7 @@ class SourceImageBindings:
 
         return context.resource_once(owner, build, policy="image_collection_members")
 
-    def _image_resource(self, context, owner, *, first_clear=False):
+    def _image_resource(self, context, owner, *, first_clear=False, full_overwrite=False):
         from taichi_forge.hardware._sampling import SamplerConfig
 
         self._validate_owner(owner)
@@ -172,10 +181,10 @@ class SourceImageBindings:
             ports = ("pixels",) if mip_levels == 1 else tuple(f"pixels_{i}" for i in range(mip_levels))
             # This only permits allocation without a seed. The shared native
             # recorder proves initialization along the selected control flow;
-            # a conditional clear cannot authorize a later unconditional read.
+            # a conditional clear/copy cannot authorize an unconditional read.
             inputs = (
                 context.resource_inputs.require(owner, ports)
-                if not first_clear or context.resource_inputs.has_inputs(owner) else None
+                if not (first_clear or full_overwrite) or context.resource_inputs.has_inputs(owner) else None
             )
             sampling = (
                 dict(
