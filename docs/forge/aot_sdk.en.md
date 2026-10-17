@@ -251,7 +251,7 @@ single-scene instance/custom IDs are zero. Misses write `[-1,0,0,0]` and
 defaults `any_hit` to true, which cannot be disabled. Ordinary typed queries
 default to the closest accepted hit.
 
-Omitted face rules accept both sides. `front_only=true` rejects backfaces by
+In query version 1, omitted face rules accept both sides. `front_only=true` rejects backfaces by
 winding and continues traversal. Alternatively, `faces` binds i32/u32 `[T]`, with
 0 for two-sided and 1 for front-only; the two policies cannot be combined.
 Topology and face rules are validated and frozen at preparation; changing them
@@ -272,6 +272,27 @@ filtering. With instances, `faces` has `sum(T_i)` entries concatenated in instan
 ordinal order, then each GAS's primitive order. Instances sharing a GAS can
 therefore have different rules.
 
+Query version 2 additionally binds live device tables. Set `version=2`, provide
+`face_rules` in instance order (one entry for `triangle_scene`), and set
+`face_table_count` to the number of `"table"` entries. Rules are `"two_sided"`,
+`"front_only"` or `"table"`. Bind `faces_0`, `faces_1`, etc. in the order that
+`"table"` entries occur; each is compact i32/u32 `[T_i]` for that instance's GAS
+primitive order. For example, `face_rules=["front_only", "table", "two_sided"]`
+uses `face_table_count=1` and only `faces_0`, for the second instance. Several table
+ports may reference the same array when their primitive counts match.
+
+Version 2 retains table addresses and reads their current values during traversal;
+it neither snapshots them nor reads values back to the host. Values must be 0
+(two-sided) or 1 (front-only) before each query, and can be produced by preceding
+kernels in the same plan. Preparation checks layout, count and output aliases;
+it does not require initialized table values. Rule modes and bindings stay fixed
+until another preparation. The v1 `faces` and `front_only` parameters are not
+accepted by v2; ray/output layouts, `ray_count`, `occlusion` and `any_hit` keep
+their existing contracts. All-two-sided rules preserve the original query path.
+Discover this capability before preparation using
+`runtime.native_operation_capabilities("optix_query", version=2)`; the CUDA
+factory reports `{"cuda_ordered"}`. Existing v1 plans retain frozen-table behavior.
+
 `refit` also accepts an updateable GAS. `instance_refit` requires an updateable
 instance scene: supplying `transforms` updates its matrices from device memory;
 omitting them refreshes IAS bounds while preserving current matrices, as required
@@ -285,7 +306,8 @@ owners through in-flight completion and retirement.
 
 Windows CUDA qualification covers standalone/borrowed consumption, two bindings,
 surrounding kernels, shared GAS with different instance rules, mirrored and
-nonuniform device transforms, bounds-only updates, refit hit/miss transitions and
+nonuniform device transforms, live device-generated/shared face tables,
+bounds-only updates, refit hit/miss transitions and
 retirement. Real gradients of
 following kernels work; intersection differentiation with respect to vertices or
 rays is not provided. CPU/Vulkan do not register these factories. Operations use

@@ -136,6 +136,53 @@ TEST(NativeOperationRegistry, OptixInstancesPreserveIndexedResourceContracts) {
 #endif
 }
 
+TEST(NativeOperationRegistry, OptixLiveFaceTablesHaveAnExplicitQueryVersion) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription query;
+  query.provider = "optix";
+  query.operation = "query";
+  query.version = 2;
+  query.bindings = {{"scene", "scene"}, {"rays", "rays"}, {"hits", "hits"},
+                    {"hit_indices", "ids"}, {"faces_0", "table"}};
+  query.parameters = liong::json::parse_complete(
+      R"({"ray_count":10,"face_rules":["two_sided","table","front_only"],"face_table_count":1})");
+  EXPECT_EQ(registry.decode(query).kind(), "optix_query");
+  EXPECT_EQ(registry.decode(query).version(), 2);
+  for (const auto &[field, value] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"face_rules", "[]"}, {"face_rules", "[1]"},
+           {"face_rules", R"(["back_only","table"] )"},
+           {"face_rules", R"(["two_sided","two_sided","front_only"])"},
+           {"face_table_count", "0"}, {"face_table_count", "2"},
+           {"face_table_count", "true"}, {"front_only", "true"},
+           {"alpha_masks", "[]"}, {"ray_count", "0"}}) {
+    auto invalid = query;
+    invalid.parameters.obj.inner[field] = liong::json::parse_complete(value);
+    EXPECT_THROW(registry.decode(invalid), std::invalid_argument)
+        << field << ": " << value;
+  }
+  auto alias = query;
+  alias.parameters = liong::json::parse_complete(
+      R"({"ray_count":10,"face_rules":["table","table"],"face_table_count":2})");
+  alias.bindings["faces_1"] = "table";
+  EXPECT_EQ(registry.decode(alias).version(), 2);
+  auto uniform = query;
+  uniform.bindings.erase("faces_0");
+  uniform.parameters = liong::json::parse_complete(
+      R"({"ray_count":10,"face_rules":["two_sided","front_only"],"face_table_count":0})");
+  EXPECT_EQ(registry.decode(uniform).version(), 2);
+  auto wrong_version = query;
+  wrong_version.version = 1;
+  EXPECT_THROW(registry.decode(wrong_version), std::invalid_argument);
+  EXPECT_EQ(registry.find("optix_query", 2, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("optix_query", 2, Arch::vulkan), nullptr);
+#ifdef TI_WITH_CUDA
+  ASSERT_NE(registry.find("optix_query", 2, Arch::cuda), nullptr);
+  EXPECT_EQ(registry.find("optix_query", 2, Arch::cuda)->mode,
+            NativeOperationMode::cuda_ordered);
+#endif
+}
+
 TEST(NativeOperationRegistry,
      ParallelSortFreezesShaderInventoryWithoutDeviceCalls) {
   const auto &registry = native_operation_registry();

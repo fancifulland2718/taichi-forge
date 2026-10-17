@@ -202,7 +202,7 @@ OptiX adapter 另提供 `taichi_forge_optix_runtime_provider_query` 公共会话
 miss 写回 `[-1,0,0,0]` 和 `[-1,-1,-1,0]`。遮挡输出 i32/u32 `[N]` 的0/1，
 此时不传 `hit_indices`，`any_hit` 默认为true且不能关闭。普通 typed 默认最近有效命中。
 
-省略面规则接受双面；`front_only=true` 按 winding 拒绝背面并继续遍历。或用 `faces`
+query version 1 省略面规则接受双面；`front_only=true` 按 winding 拒绝背面并继续遍历。或用 `faces`
 绑定 i32/u32 `[T]`，0为双面、1为单面，两种配置不能同时使用。拓扑和面规则在准备期
 验证并冻结；修改它们需要重新准备。`refit` 只更新相同拓扑的顶点，要求有限设备输入，
 无需逐帧host回读。查询不能覆盖输入/其他输出。准备只构建场景与pipeline，不执行查询。
@@ -215,6 +215,21 @@ miss 写回 `[-1,0,0,0]` 和 `[-1,-1,-1,0]`。遮挡输出 i32/u32 `[N]` 的0/1�
 分别保留。opaque 实例仍执行面过滤。实例场景的 `faces` 有 `sum(T_i)` 项，按实例序号
 依次拼接各 GAS 的 primitive 顺序，因此共享 GAS 的不同实例可以使用不同面规则。
 
+query version 2 另支持活设备表。设置 `version=2`，`face_rules` 按实例顺序列出
+`"two_sided"`、`"front_only"` 或 `"table"`（`triangle_scene` 为一项），
+`face_table_count` 等于其中 `"table"` 的数量。按 `"table"` 出现顺序绑定 `faces_0`、
+`faces_1` 等；每张表为对应实例 GAS primitive 顺序的紧凑 i32/u32 `[T_i]`。
+例如 `face_rules=["front_only", "table", "two_sided"]` 配置 `face_table_count=1`，
+只需 `faces_0`，它对应第二个实例。primitive 数匹配时多个端口可以共用一张表。
+
+v2 保留表地址，遍历时读取当前设备值；不冻结表，也不把值读回host。每次查询前，表值须为
+0（双面）或1（单面），可由同计划的前置kernel生成。准备期检查布局、数量及输出别名，
+不要求表值已经初始化。规则模式和绑定保持固定至下一次准备。v2不接受v1的 `faces` 和
+`front_only` 参数；ray/输出布局及 `ray_count`、`occlusion`、`any_hit` 合同不变，
+全双面规则保持原查询路径。准备前可通过
+`runtime.native_operation_capabilities("optix_query", version=2)` 发现此能力，
+CUDA工厂返回 `{"cuda_ordered"}`。旧v1计划仍保留冻结表行为。
+
 `refit` 也接受可更新 GAS。`instance_refit` 要求可更新的实例场景：传入 `transforms`
 时直接读取设备矩阵；省略时保留当前矩阵，仅刷新 IAS 包围盒。引用的 GAS 包围盒变化后，
 应在下次查询前安排 GAS refit 和 IAS 刷新。准备期拒绝非有限或不可逆的初始矩阵；后续
@@ -223,7 +238,7 @@ miss 写回 `[-1,0,0,0]` 和 `[-1,-1,-1,0]`。遮挡输出 i32/u32 `[N]` 的0/1�
 IAS、context 和 provider owner，直到在途完成与退休。
 
 Windows CUDA已验证独立/借用消费、双绑定、前后kernel、共享GAS的实例差异规则、
-设备镜像/非均匀变换、仅包围盒刷新、refit后命中/miss及退休；后续
+设备镜像/非均匀变换、设备生成/共享面表、仅包围盒刷新、refit后命中/miss及退休；后续
 kernel的真实梯度可运行，但不提供求交对顶点/ray的自动微分。CPU/Vulkan不注册这些
 工厂。当前操作使用 `cuda_ordered`，CUDA capture、alpha/纹理、OMM、
 programmable pipeline、recording自动导出仍待接通。

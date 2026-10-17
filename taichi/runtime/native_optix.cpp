@@ -111,6 +111,11 @@ class OptixSceneResource : public NativeResource {
                      OptixInstancesDescription> description_;
 };
 
+struct OptixBoundFaceRule {
+  uint32_t mode{0};
+  std::optional<NativeArrayBinding> primitives;
+};
+
 struct OptixQueryOperation {
   static constexpr const char *kind = "optix_query";
   static constexpr uint32_t version = 1;
@@ -119,6 +124,13 @@ struct OptixQueryOperation {
   std::optional<NativeArrayBinding> hit_indices, faces;
   uint32_t ray_count{0};
   bool occlusion{false}, any_hit{false}, front_only{false};
+  std::vector<OptixBoundFaceRule> face_rules;
+};
+
+// Version 1 freezes a flat table; version 2 binds live per-instance tables.
+// Both lower to the same query owner, output ABI and ordered execution path.
+struct OptixBoundFaceQueryOperation : OptixQueryOperation {
+  static constexpr uint32_t version = 2;
 };
 
 struct OptixRefitOperation {
@@ -176,6 +188,7 @@ void validate_query(Device &device, const OptixQueryOperation &op) {
   if (!op.scene || &op.scene->device() != &device ||
       op.scene->arch() != Arch::cuda || op.scene->is_gas() ||
       bool(op.hit_indices) == op.occlusion || (op.front_only && op.faces) ||
+      (!op.face_rules.empty() && (op.front_only || op.faces)) ||
       (op.occlusion && !op.any_hit))
     throw std::invalid_argument("OptiX query has incompatible ports or policy");
   std::vector<NativeStorageRange> reads{
@@ -188,6 +201,18 @@ void validate_query(Device &device, const OptixQueryOperation &op) {
   if (op.faces)
     reads.push_back(layout(device, *op.faces,
                            op.scene->face_table_size(), 1, true));
+  if (!op.face_rules.empty()) {
+    if (op.face_rules.size() != op.scene->instance_count())
+      throw std::invalid_argument("OptiX face rules must match the instance count");
+    const auto counts = op.scene->primitive_counts();
+    for (size_t i = 0; i < op.face_rules.size(); ++i) {
+      const auto &rule = op.face_rules[i];
+      if (rule.mode > 2 || bool(rule.primitives) != (rule.mode == 2))
+        throw std::invalid_argument("OptiX face rule has incompatible table binding");
+      if (rule.primitives)
+        reads.push_back(layout(device, *rule.primitives, counts[i], 1, true));
+    }
+  }
   // Scene inputs can remain public arguments; a query must not corrupt them
   // through a differently named output or an imported/subview alias.
   for (const auto *geometry : op.scene->geometry_inputs()) {
@@ -549,7 +574,9 @@ class CudaOptixQuery final : public NativeOperation {
   void initialize() {
     auto &context = *scene_->lease->context;
     const auto &api = context.lease->api;
-    faces_ = op_.front_only || bool(op_.faces);
+    faces_ = op_.front_only || bool(op_.faces) ||
+             std::any_of(op_.face_rules.begin(), op_.face_rules.end(),
+                         [](const auto &rule) { return rule.mode != 0; });
     extended_ = faces_ || op_.occlusion || op_.any_hit;
     typed_trace_ = scene_->is_instances() ? api.trace_instance_scene_typed : api.trace_typed;
     extended_trace_ = scene_->is_instances()
@@ -581,7 +608,15 @@ class CudaOptixQuery final : public NativeOperation {
       if (faces_) {
         std::vector<TiForgeOptixFaceRule> records(scene_->instance_count(), {0, 1, 0});
         auto &driver = CUDADriver::get_instance();
-        if (op_.faces) {
+        if (!op_.face_rules.empty()) {
+          // Keep live device bindings. No host validation/copy of table values:
+          // an earlier kernel may produce them on every execution.
+          for (size_t i = 0; i < records.size(); ++i) {
+            const auto &rule = op_.face_rules[i];
+            records[i] = {rule.primitives ? address(*rule.primitives) : 0,
+                          rule.mode, 0};
+          }
+        } else if (op_.faces) {
           std::vector<uint32_t> rules(size_t(scene_->face_table_size()));
           driver.context_synchronize();
           driver.memcpy_device_to_host(rules.data(),
@@ -733,6 +768,94 @@ std::shared_ptr<Owner> prepare(NativePreparationContext &context,
 #endif
 
 template <typename Description>
+void register_query(NativeOperationRegistry &registry) {
+  registry.define<Description>([](Device &device, const Description &op) {
+    if constexpr (Description::version == 2) {
+      if (op.face_rules.empty())
+        throw std::invalid_argument("OptiX query v2 requires per-instance face rules");
+    }
+    validate_query(device, op);
+  });
+  std::vector<std::string> optional_ports{"hit_indices"};
+  std::optional<NativeOperationRegistry::BindingGroup> group;
+  if constexpr (Description::version == 2)
+    group = NativeOperationRegistry::BindingGroup{"face_table_count", {"faces"}};
+  else
+    optional_ports.push_back("faces");
+  registry.register_schema<Description>(
+      "optix", "query", {"scene", "rays", "hits"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<Description> {
+        using namespace operation_json;
+        if constexpr (Description::version == 2)
+          fields(p, {"ray_count", "occlusion", "any_hit", "face_rules", "face_table_count"});
+        else
+          fields(p, {"ray_count", "occlusion", "any_hit", "front_only"});
+        const auto rays = count(p, "ray_count");
+        const bool occlusion = optional_bool(p, "occlusion"),
+                   any_hit = optional_bool(p, "any_hit", occlusion),
+                   front_only = optional_bool(p, "front_only");
+        if (occlusion && !any_hit)
+          throw std::invalid_argument("OptiX occlusion requires any-hit acceptance");
+        std::vector<uint32_t> modes;
+        if constexpr (Description::version == 2) {
+          const auto &rules = p["face_rules"];
+          if (!rules.is_arr() || rules.arr.inner.empty() ||
+              rules.arr.inner.size() > std::numeric_limits<uint32_t>::max())
+            throw std::invalid_argument("OptiX face rules require a nonempty instance array");
+          modes.reserve(rules.arr.inner.size());
+          uint64_t tables = 0;
+          for (const auto &rule : rules.arr.inner) {
+            const auto value = name(rule);
+            if (value == "two_sided")
+              modes.push_back(0);
+            else if (value == "front_only")
+              modes.push_back(1);
+            else if (value == "table") {
+              modes.push_back(2);
+              ++tables;
+            } else {
+              throw std::invalid_argument("OptiX face rule must be two_sided, front_only or table");
+            }
+          }
+          if (integer(p["face_table_count"]) != tables)
+            throw std::invalid_argument("OptiX face table count does not match face rules");
+        }
+        return [=](const NativeOperationBindings &b) {
+          Description op;
+          op.scene = b.at("scene").resource<OptixSceneResource>();
+          op.rays = b.at("rays").array();
+          op.hits = b.at("hits").array();
+          op.ray_count = rays;
+          op.occlusion = occlusion;
+          op.any_hit = any_hit;
+          op.front_only = front_only;
+          if (b.count("hit_indices")) op.hit_indices = b.at("hit_indices").array();
+          if constexpr (Description::version == 2) {
+            size_t table = 0;
+            op.face_rules.reserve(modes.size());
+            for (auto mode : modes) {
+              OptixBoundFaceRule rule{mode};
+              if (mode == 2)
+                rule.primitives = b.at("faces_" + std::to_string(table++)).array();
+              op.face_rules.push_back(std::move(rule));
+            }
+          } else if (b.count("faces")) {
+            op.faces = b.at("faces").array();
+          }
+          return op;
+        };
+      }, {}, optional_ports, group);
+#ifdef TI_WITH_CUDA
+  registry.register_context_factory<Description>(
+      Arch::cuda, NativeOperationMode::cuda_ordered,
+      [](NativePreparationContext &c, const Description &op) {
+        return prepare<CudaOptixQuery>(c, op);
+      });
+#endif
+}
+
+template <typename Description>
 void register_geometry(NativeOperationRegistry &registry, const char *operation) {
   registry.define<Description>(
       [](Device &device, const Description &d) { validate_scene(device, d); },
@@ -805,31 +928,8 @@ void register_optix_operations(NativeOperationRegistry &registry) {
           return d;
         };
       }, {}, {}, NativeOperationRegistry::BindingGroup{"instance_count", {"gas"}});
-  registry.define<OptixQueryOperation>(validate_query);
-  registry.register_schema<OptixQueryOperation>(
-      "optix", "query", {"scene", "rays", "hits"},
-      [](const liong::json::JsonValue &p)
-          -> NativeOperationRegistry::Binder<OptixQueryOperation> {
-        using namespace operation_json;
-        fields(p, {"ray_count", "occlusion", "any_hit", "front_only"});
-        const auto rays = count(p, "ray_count");
-        const bool occlusion = optional_bool(p, "occlusion"),
-                   any_hit = optional_bool(p, "any_hit", occlusion),
-                   front_only = optional_bool(p, "front_only");
-        if (occlusion && !any_hit)
-          throw std::invalid_argument("OptiX occlusion requires any-hit acceptance");
-        return [=](const NativeOperationBindings &b) {
-          OptixQueryOperation op{b.at("scene").resource<OptixSceneResource>(),
-                                  b.at("rays").array(), b.at("hits").array()};
-          op.ray_count = rays;
-          op.occlusion = occlusion;
-          op.any_hit = any_hit;
-          op.front_only = front_only;
-          if (b.count("hit_indices")) op.hit_indices = b.at("hit_indices").array();
-          if (b.count("faces")) op.faces = b.at("faces").array();
-          return op;
-        };
-      }, {}, {"hit_indices", "faces"});
+  register_query<OptixQueryOperation>(registry);
+  register_query<OptixBoundFaceQueryOperation>(registry);
   registry.define<OptixRefitOperation>(validate_refit);
   registry.register_schema<OptixRefitOperation>(
       "optix", "refit", {"scene", "vertices"},
@@ -876,11 +976,6 @@ void register_optix_operations(NativeOperationRegistry &registry) {
       Arch::cuda, NativeOperationMode::cuda_ordered,
       [](NativePreparationContext &c, const OptixInstancesDescription &d) {
         return prepare<CudaOptixScene>(c, d);
-      });
-  registry.register_context_factory<OptixQueryOperation>(
-      Arch::cuda, NativeOperationMode::cuda_ordered,
-      [](NativePreparationContext &c, const OptixQueryOperation &op) {
-        return prepare<CudaOptixQuery>(c, op);
       });
   registry.register_context_factory<OptixRefitOperation>(
       Arch::cuda, NativeOperationMode::cuda_ordered,
