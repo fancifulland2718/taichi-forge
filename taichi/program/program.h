@@ -23,6 +23,7 @@
 #include "taichi/runtime/cuda/provider_completion_resource.h"
 #include "taichi/runtime/vulkan_ray_query_packet.h"
 #include "taichi/runtime/vulkan_ray_types.h"
+#include "taichi/runtime/vulkan_graphics_types.h"
 #include <taichi/program/runtime_fault.h>
 #include <taichi/program/runtime_trace.h>
 #include <taichi/program/primitive_workspace.h>
@@ -245,21 +246,6 @@ struct VulkanGraphicsVertexAttribute {
   std::uint32_t offset{0};
 };
 
-struct VulkanGraphicsDrawInfo {
-  float clear_depth{0.0f};
-  std::uint32_t element_count{0};
-  std::uint32_t instance_count{1};
-  std::uint32_t first_vertex{0};
-  std::uint32_t first_index{0};
-  std::uint32_t first_instance{0};
-  std::int32_t vertex_offset{0};
-  std::uint32_t index_min{0};
-  std::uint32_t index_max{0};
-  bool indexed{false};
-  std::array<float, 4> clear_color{0.0f, 0.0f, 0.0f, 1.0f};
-  std::array<std::uint32_t, 4> viewport{0, 0, 0, 0};
-};
-
 struct VulkanGraphicsShaderBufferBinding {
   std::uint32_t set_index{0};
   std::uint32_t binding{0};
@@ -292,12 +278,6 @@ struct VulkanGraphicsIndirectInfo {
   std::uint32_t instance_record_limit{0};
   std::uint32_t index_element_limit{0};
   bool first_instance_may_be_nonzero{false};
-};
-
-struct VulkanGraphicsMeshDrawInfo {
-  std::uint32_t group_count_x{1};
-  std::uint32_t group_count_y{1};
-  std::uint32_t group_count_z{1};
 };
 
 struct VulkanGraphicsDrawCommand {

@@ -13,6 +13,7 @@
 #include "taichi/program/texture.h"
 #include "taichi/runtime/gfx/graph_recording.h"
 #include "taichi/runtime/vulkan_graphics_pipeline.h"
+#include "taichi/runtime/vulkan_graphics_pass.h"
 
 #if defined(TI_WITH_VULKAN)
 #include "taichi/rhi/vulkan/vulkan_device.h"
@@ -25,33 +26,11 @@ namespace {
 
 constexpr std::size_t kMaximumPassDraws = 1u << 20;
 
-struct RecordedGraphicsShaderBuffer {
-  std::uint32_t set_index{0};
-  std::uint32_t binding{0};
-  DeviceAllocation allocation{kDeviceNullAllocation};
-  std::vector<DeviceAllocation> array_elements;
-  bool storage{false};
-};
+using RecordedGraphicsShaderBuffer = VulkanGraphicsShaderBufferView;
 
-struct RecordedGraphicsShaderImage {
-  std::uint32_t set_index{0};
-  std::uint32_t binding{0};
-  DeviceAllocation allocation{kDeviceNullAllocation};
-  ImageSamplerConfig sampler{};
-};
+using RecordedGraphicsShaderImage = VulkanGraphicsShaderImageView;
 
-struct RecordedGraphicsIndirect {
-  DeviceAllocation command_buffer{kDeviceNullAllocation};
-  DeviceAllocation count_buffer{kDeviceNullAllocation};
-  std::uint32_t command_offset{0};
-  std::uint32_t count_offset{0};
-  std::uint32_t max_draw_count{1};
-  std::uint32_t stride{0};
-  std::uint32_t vertex_record_limit{0};
-  std::uint32_t instance_record_limit{0};
-  std::uint32_t index_element_limit{0};
-  bool first_instance_may_be_nonzero{false};
-};
+using RecordedGraphicsIndirect = VulkanGraphicsIndirectPacket;
 
 struct RecordedGraphicsDraw {
   std::weak_ptr<VulkanGraphicsPipelineResource> pipeline;
@@ -66,11 +45,7 @@ struct RecordedGraphicsDraw {
   std::optional<VulkanGraphicsMeshDrawInfo> mesh;
 };
 
-struct PreparedVulkanGraphicsDrawResources {
-  std::vector<std::pair<std::uint32_t, std::unique_ptr<ShaderResourceSet>>>
-      shader_resource_sets;
-  std::unique_ptr<RasterResources> raster;
-};
+using PreparedVulkanGraphicsDrawResources = VulkanGraphicsDrawResources;
 
 struct PreparedVulkanGraphicsResourcePayload {
   std::vector<PreparedVulkanGraphicsDrawResources> draws;
@@ -1237,73 +1212,27 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
       std::make_shared<PreparedVulkanGraphicsResourceLease>(resource_payload);
   resource_payload->draws.reserve(recorded_draws.size());
   for (const auto &recorded : recorded_draws) {
-    PreparedVulkanGraphicsDrawResources draw_resources;
-    std::unordered_map<std::uint32_t, std::unique_ptr<ShaderResourceSet>>
-        resource_sets;
-    for (const auto &shader : recorded.shader_buffers) {
-      auto &resource_set = resource_sets[shader.set_index];
-      if (!resource_set) {
-        resource_set = device->create_resource_set_unique();
-        TI_ERROR_IF(!resource_set,
-                    "Vulkan graphics shader resource set creation failed.");
-      }
-      if (!shader.array_elements.empty()) {
-        resource_set->rw_buffer_array(shader.binding, shader.array_elements);
-      } else if (shader.storage) {
-        resource_set->rw_buffer(shader.binding, shader.allocation);
-      } else {
-        resource_set->buffer(shader.binding, shader.allocation);
-      }
-    }
-    for (const auto &image : recorded.shader_images) {
-      auto &resource_set = resource_sets[image.set_index];
-      if (!resource_set) {
-        resource_set = device->create_resource_set_unique();
-        TI_ERROR_IF(!resource_set,
-                    "Vulkan graphics shader resource set creation failed.");
-      }
-      resource_set->image(image.binding, image.allocation, image.sampler);
-    }
-    for (const auto &as : recorded.shader_acceleration_structures) {
-      auto &resource_set = resource_sets[as.set_index];
-      if (!resource_set) {
-        resource_set = device->create_resource_set_unique();
-        TI_ERROR_IF(!resource_set,
-                    "Vulkan graphics AS resource set creation failed.");
-      }
-      resource_payload->acceleration_structure_reads.push_back(
-          prepare_vulkan_ray_graphics_binding(as.handle, resource_set.get(),
-                                              as.binding, resource_lease, as.consumer_stages));
-    }
-    draw_resources.shader_resource_sets.reserve(resource_sets.size());
-    for (auto &[set_index, resource_set] : resource_sets) {
-      const RhiResult prepare_result =
-          resource_set->prepare_for_replay(/*patch_existing=*/false);
-      TI_ERROR_IF(
-          prepare_result != RhiResult::success,
-          "Vulkan graphics shader resource set {} preparation failed: "
-          "RhiResult({}).",
-          set_index, prepare_result);
-      draw_resources.shader_resource_sets.emplace_back(set_index,
-                                                        std::move(resource_set));
-    }
-    std::sort(draw_resources.shader_resource_sets.begin(),
-              draw_resources.shader_resource_sets.end(),
-              [](const auto &lhs, const auto &rhs) {
-                return lhs.first < rhs.first;
-              });
-    if (!recorded.mesh.has_value()) {
-      draw_resources.raster = device->create_raster_resources_unique();
-      TI_ERROR_IF(!draw_resources.raster,
-                  "Vulkan graphics raster resource creation failed.");
-      for (const auto &[binding, allocation] : recorded.vertex_buffers) {
-        draw_resources.raster->vertex_buffer(allocation.get_ptr(), binding);
-      }
-      if (recorded.draw.indexed) {
-        draw_resources.raster->index_buffer(recorded.index_buffer.get_ptr(),
-                                            32);
-      }
-    }
+    std::vector<std::pair<uint32_t, DevicePtr>> vertex_views;
+    vertex_views.reserve(recorded.vertex_buffers.size());
+    for (const auto &[binding, allocation] : recorded.vertex_buffers)
+      vertex_views.emplace_back(binding, allocation.get_ptr());
+    auto draw_resources = prepare_vulkan_graphics_draw_resources(
+        *device, recorded.shader_buffers, recorded.shader_images, vertex_views,
+        recorded.index_buffer.get_ptr(), recorded.draw.indexed,
+        recorded.mesh.has_value(), [&](VulkanGraphicsResourceSets &resource_sets) {
+          for (const auto &as : recorded.shader_acceleration_structures) {
+            auto &resource_set = resource_sets[as.set_index];
+            if (!resource_set) {
+              resource_set = device->create_resource_set_unique();
+              TI_ERROR_IF(!resource_set,
+                          "Vulkan graphics AS resource set creation failed.");
+            }
+            resource_payload->acceleration_structure_reads.push_back(
+                prepare_vulkan_ray_graphics_binding(
+                    as.handle, resource_set.get(), as.binding, resource_lease,
+                    as.consumer_stages));
+          }
+        });
     resource_payload->draws.push_back(std::move(draw_resources));
   }
   std::unordered_set<const VulkanGraphicsPipelineResource *>
@@ -1337,33 +1266,10 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
         DeviceAllocation depth_target = depth_allocation;
         DeviceAllocation *depth_target_ptr =
             depth_target == kDeviceNullAllocation ? nullptr : &depth_target;
-        const BufferTransition indirect_transition{
-            BufferBarrierStage::Transfer | BufferBarrierStage::Compute,
-            BufferBarrierAccess::TransferWrite |
-                BufferBarrierAccess::ShaderWrite,
-            BufferBarrierStage::IndirectCommand,
-            BufferBarrierAccess::IndirectCommandRead};
-        for (const auto &recorded : recorded_draws) {
-          if (!recorded.indirect.has_value()) {
-            continue;
-          }
-          const auto &indirect = *recorded.indirect;
-          const std::size_t command_size =
-              recorded.draw.indexed ? sizeof(VkDrawIndexedIndirectCommand)
-                                    : sizeof(VkDrawIndirectCommand);
-          const std::size_t command_bytes =
-              (static_cast<std::size_t>(indirect.max_draw_count) - 1) *
-                  indirect.stride +
-              command_size;
-          commands->buffer_transition(
-              indirect.command_buffer.get_ptr(indirect.command_offset),
-              command_bytes, indirect_transition);
-          if (indirect.count_buffer != kDeviceNullAllocation) {
-            commands->buffer_transition(
-                indirect.count_buffer.get_ptr(indirect.count_offset),
-                sizeof(std::uint32_t), indirect_transition);
-          }
-        }
+        for (const auto &recorded : recorded_draws)
+          if (recorded.indirect)
+            record_vulkan_graphics_indirect_barriers(
+                commands, recorded.draw.indexed, *recorded.indirect);
         vulkan_commands->begin_renderpass_typed(0, 0, width, height, color_allocations.size(), color_allocations.data(),
                                    color_clears.get(), clear_colors.data(), depth_target_ptr,
                                    depth_target_ptr != nullptr &&
@@ -1379,83 +1285,9 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
           auto pipeline = recorded.pipeline.lock();
           TI_ERROR_IF(!pipeline,
                       "Vulkan graphics pipeline closed or retired while recording");
-          commands->bind_pipeline(pipeline->pipeline());
-          if (!recorded.mesh.has_value()) {
-            const RhiResult raster_result =
-                commands->bind_raster_resources(draw_resources.raster.get());
-            TI_ERROR_IF(
-                raster_result != RhiResult::success,
-                "Vulkan graphics raster resource binding failed: "
-                "RhiResult({}).",
-                raster_result);
-          }
-          for (const auto &[set_index, resource_set] :
-               draw_resources.shader_resource_sets) {
-            const RhiResult shader_result =
-                commands->bind_shader_resources(resource_set.get(),
-                                                 set_index);
-            TI_ERROR_IF(
-                shader_result != RhiResult::success,
-                "Vulkan graphics shader resource set {} binding failed: "
-                "RhiResult({}).",
-                set_index, shader_result);
-          }
-
-          const auto &draw = recorded.draw;
-          if (recorded.mesh.has_value()) {
-            const auto &mesh = *recorded.mesh;
-            const RhiResult mesh_result = commands->draw_mesh_tasks(
-                mesh.group_count_x, mesh.group_count_y, mesh.group_count_z,
-                pipeline->task_shader());
-            TI_ERROR_IF(mesh_result != RhiResult::success,
-                        "Vulkan mesh draw failed: RhiResult({}).",
-                        mesh_result);
-          } else if (recorded.indirect.has_value()) {
-            const auto &indirect = *recorded.indirect;
-            const auto command_ptr =
-                indirect.command_buffer.get_ptr(indirect.command_offset);
-            RhiResult indirect_result = RhiResult::not_supported;
-            if (indirect.count_buffer != kDeviceNullAllocation) {
-              const auto count_ptr =
-                  indirect.count_buffer.get_ptr(indirect.count_offset);
-              indirect_result = draw.indexed
-                                    ? commands->draw_indexed_indirect_count(
-                                          command_ptr, count_ptr,
-                                          indirect.max_draw_count,
-                                          indirect.stride)
-                                    : commands->draw_indirect_count(
-                                          command_ptr, count_ptr,
-                                          indirect.max_draw_count,
-                                          indirect.stride);
-            } else {
-              indirect_result = draw.indexed
-                                    ? commands->draw_indexed_indirect(
-                                          command_ptr,
-                                          indirect.max_draw_count,
-                                          indirect.stride)
-                                    : commands->draw_indirect(
-                                          command_ptr,
-                                          indirect.max_draw_count,
-                                          indirect.stride);
-            }
-            TI_ERROR_IF(
-                indirect_result != RhiResult::success,
-                "Vulkan graphics indirect draw failed: RhiResult({}).",
-                indirect_result);
-          } else if (draw.indexed &&
-              (draw.instance_count > 1 || draw.first_instance != 0)) {
-            commands->draw_indexed_instance(
-                draw.element_count, draw.instance_count, draw.vertex_offset,
-                draw.first_index, draw.first_instance);
-          } else if (draw.indexed) {
-            commands->draw_indexed(draw.element_count, draw.vertex_offset,
-                                   draw.first_index);
-          } else if (draw.instance_count > 1 || draw.first_instance != 0) {
-            commands->draw_instance(draw.element_count, draw.instance_count,
-                                    draw.first_vertex, draw.first_instance);
-          } else {
-            commands->draw(draw.element_count, draw.first_vertex);
-          }
+          record_vulkan_graphics_draw(
+              commands, pipeline->pipeline(), pipeline->task_shader(),
+              recorded.draw, recorded.indirect, recorded.mesh, draw_resources);
         }
         commands->end_renderpass();
       };
