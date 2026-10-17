@@ -12,6 +12,16 @@ from tests import test_utils
 
 
 @pytest.mark.skipif(not core.GGUI_AVAILABLE, reason="GGUI Not Available")
+def test_raster_line_uniform_layout_and_shader_range():
+    data = core._raster_line_uniforms((0.25, 0.5, 1), 3, 24, True, 2, 3, 4, True)
+    assert len(data) == 48 and data[40:] == bytes(8)
+    assert struct.unpack_from("<4f6i", data) == (0.25, 0.5, 1, 0.125, 8, 12, 2, 3, 4, 1)
+    for height, first, count in ((0, 0, 2), (24, 0, 3), (24, 0, 715827884), (24, 2147483647, 2)):
+        with pytest.raises(ValueError, match="shader int32"):
+            core._raster_line_uniforms((1, 1, 1), 1, height, False, 0, first, count, True)
+
+
+@pytest.mark.skipif(not core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_raster_recording_default_ambient_does_not_inherit_later_draws():
     vertices = ti.Vector.field(3, ti.f32, 3)

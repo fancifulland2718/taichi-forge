@@ -1161,6 +1161,14 @@ void export_ggui(py::module &m) {
           return raster_uniform_bytes(make_raster_particle_uniforms(
               tuple_to_vec3(color), per_vertex_color, per_vertex_radius, radius));
         });
+  m.def("_raster_line_uniforms",
+        [](py::tuple color, float width, uint32_t height, bool per_vertex_color,
+           uint64_t first_vertex, uint64_t first_index, uint64_t num_vertices,
+           bool indexed) {
+          return raster_uniform_bytes(make_raster_line_uniforms(
+              tuple_to_vec3(color), width, height, per_vertex_color, first_vertex,
+              first_index, num_vertices, indexed));
+        });
   m.def("_raster_point_light", [](py::tuple position, py::tuple color) {
     return raster_uniform_bytes(
         make_raster_point_light(tuple_to_vec3(position), tuple_to_vec3(color)));

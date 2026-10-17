@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cmath>
 #include <type_traits>
+#include <stdexcept>
 #include <glm/glm.hpp>
+#include "taichi/runtime/raster_vertex.h"
 
 namespace taichi::lang {
 
@@ -107,6 +109,35 @@ inline RasterParticleUniforms make_raster_particle_uniforms(
 inline RasterPointLight make_raster_point_light(glm::vec3 pos,
                                                 glm::vec3 color) {
   return {glm::vec4(pos, 1.0f), glm::vec4(color, 1.0f)};
+}
+
+inline RasterLineUniforms make_raster_line_uniforms(glm::vec3 color,
+                                                    float width,
+                                                    uint32_t height,
+                                                    bool per_vertex_color,
+                                                    uint64_t first_vertex,
+                                                    uint64_t first_index,
+                                                    uint64_t num_vertices,
+                                                    bool indexed) {
+  // The expansion shader uses signed int indices, including thread_idx * 6.
+  // Qualify before narrowing; this is its actual address arithmetic contract.
+  if (!height || first_vertex > INT32_MAX || first_index > INT32_MAX ||
+      num_vertices % 2 || num_vertices / 2 > INT32_MAX / 6 ||
+      (indexed && num_vertices > INT32_MAX - first_index))
+    throw std::invalid_argument(
+        "Raster line range exceeds the shader int32 contract or height is "
+        "zero");
+  RasterLineUniforms data;
+  data.color = color;
+  data.line_width = width / float(height);
+  data.per_vertex_color_offset =
+      per_vertex_color ? offsetof(RasterVertex, color) / sizeof(float) : 0;
+  data.vertex_stride = sizeof(RasterVertex) / sizeof(float);
+  data.start_vertex = int32_t(first_vertex);
+  data.start_index = int32_t(first_index);
+  data.num_vertices = int32_t(num_vertices);
+  data.is_indexed = indexed;
+  return data;
 }
 
 static_assert(std::is_standard_layout_v<RasterSceneUniforms>);

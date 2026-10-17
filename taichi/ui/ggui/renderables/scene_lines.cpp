@@ -32,18 +32,10 @@ void SceneLines::update_data(const SceneLinesInfo &info) {
 
   // Update UBO
   {
-    UBORenderable ubo{};
-    ubo.color = info.color;
-    // FIXME: Why is the width in pixel units?
-    ubo.line_width = info.width / float(app_context_->config.height);
-    ubo.per_vertex_color_offset = info.renderable_info.has_per_vertex_color
-                                      ? offsetof(Vertex, color) / sizeof(float)
-                                      : 0;
-    ubo.vertex_stride = sizeof(Vertex) / sizeof(float);
-    ubo.start_vertex = config_.draw_first_vertex;
-    ubo.start_index = config_.draw_first_index;
-    ubo.num_vertices = lines_count_ * 2;
-    ubo.is_indexed = indexed_ ? 1 : 0;
+    const auto ubo = make_raster_line_uniforms(
+        info.color, info.width, app_context_->config.height,
+        info.renderable_info.has_per_vertex_color, config_.draw_first_vertex,
+        config_.draw_first_index, lines_count_ * 2, indexed_);
 
     void *mapped{nullptr};
     RHI_VERIFY(app_context_->device().map(uniform_buffer_renderable_->get_ptr(),
