@@ -420,14 +420,23 @@ void Texture::from_ndarray(Ndarray *ndarray) {
   prog_->validate_ndarrays_for_external_submission({ndarray});
 
 #ifdef TI_WITH_VULKAN
-  if (mip_levels_ > 1) {
-    // The legacy upload path discards the whole image from UNDEFINED. A base
-    // level upload must preserve initialized higher levels of a mip chain.
-    TI_ERROR_IF(ndarray->shape.size() != 2 || ndarray->shape[0] != width_ ||
-                    ndarray->shape[1] != height_ ||
+  if (prog_->compile_config().arch == Arch::vulkan &&
+      format_ != BufferFormat::depth16 &&
+      format_ != BufferFormat::depth24stencil8 &&
+      format_ != BufferFormat::depth32f) {
+    // Use the runtime's ordered transfer and layout tracking even for a
+    // single mip. Direct RHI uploads leave cached Graphs expecting the old
+    // layout and used to read shape[1] for one-dimensional arrays.
+    const auto dimensions = dimension_ == ImageDimension::d1D   ? 1u
+                            : dimension_ == ImageDimension::d2D ? 2u
+                                                                 : 3u;
+    TI_ERROR_IF(ndarray->shape.size() != dimensions ||
+                    ndarray->shape[0] != width_ ||
+                    (dimensions > 1 && ndarray->shape[1] != height_) ||
+                    (dimensions > 2 && ndarray->shape[2] != depth_) ||
                     ndarray->get_element_size() !=
                         data_type_size(dtype_) * num_channels_,
-                "Mipped Texture upload requires matching shape and texel size");
+                "Texture upload requires matching shape and texel size");
     prog_->vulkan_copy_ndarray_to_texture(
         this, ndarray, 0, ndarray->shape[0],
         ndarray->shape.size() > 1 ? ndarray->shape[1] : 1,

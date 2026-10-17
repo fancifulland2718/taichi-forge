@@ -78,10 +78,9 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
     artifact = tmp_path / "kernel-images.tcm"
     module.archive(str(artifact))
     costs["bytes"] = artifact.stat().st_size
-    # CUDA also has an independent JIT reference; Vulkan uses the physical
-    # X-contiguous image oracle in the consumer (not CUDA's reversed axes).
-    if arch == "cuda":
-        jit_reference(sample, energy)
+    # Both owners use independent physical-layout oracles: Vulkan images are
+    # X-contiguous, while CUDA preserves the ndarray's logical axis order.
+    jit_reference(sample, energy)
     ti.reset()
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
@@ -136,6 +135,10 @@ def jit_reference(sample, energy):
     loss.grad.fill(1)
     energy(output, loss)
     energy.grad(output, loss)
-    expected = [128 / 255, 1, 4, 11, 5.75, 6, 11, 14, 11.5]
+    expected = (
+        [128 / 255, 1, 4, 11, 5.75, 6, 11, 14, 11.5]
+        if ti.cfg.arch == ti.cuda
+        else [128 / 255, 1, 12, 5, 3.25, 4, 22, 13, 11.5]
+    )
     np.testing.assert_allclose(output.to_numpy(), expected, atol=2e-3)
     np.testing.assert_allclose(output.grad.to_numpy(), expected, atol=2e-3)

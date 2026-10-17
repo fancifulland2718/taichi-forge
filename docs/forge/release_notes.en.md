@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan color `Texture.from_ndarray()` now uses runtime-tracked transfers for
+  every mip count. This fixes stale image layouts when replaying an existing
+  Graph after an upload, avoids reading a nonexistent second dimension for 1D
+  inputs, and rejects incompatible shapes or texel sizes before copying.
+  CUDA/Vulkan sampling and downstream gradients, asymmetric 2D/3D images and
+  preservation of higher mip levels are covered.
+
 - Tensor component alias analysis now preserves unknown ndarray origins and
   component indices. This fixes a compiler abort in conditional vector ndarray
   adjoints and avoids treating potentially overlapping accesses as independent.
