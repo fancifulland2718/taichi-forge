@@ -5,6 +5,7 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_texture_collection.h"
 #include "taichi/runtime/texture_storage.h"
 #include "taichi/runtime/texture_collection.h"
 #include "taichi/runtime/native_acceleration_structure.h"
@@ -50,6 +51,35 @@ TEST(NativeOperationRegistry, TextureCollectionUsesPhysicalAndAbiCapacities) {
   EXPECT_GT(allocate_texture_collection_snapshot_id(), first);
 }
 
+TEST(NativeOperationRegistry, TextureCollectionSchemasRequireFiniteMemberBindings) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription d;
+  d.provider = "image";
+  d.operation = "collection";
+  d.parameters =
+      liong::json::parse_complete(R"({"dimensions":2,"image_count":3})");
+  d.bindings = {{"image_0", "a"}, {"image_1", "b"}, {"image_2", "a"}};
+  EXPECT_EQ(registry.decode(d, NativeObjectKind::resource).kind(),
+            "sampled_image_collection");
+  for (auto arch : {Arch::x64, Arch::cuda})
+    EXPECT_EQ(registry.find("sampled_image_collection", 1, arch,
+                            NativeObjectKind::resource),
+              nullptr);
+  for (const auto *p : {R"({"dimensions":0,"image_count":3})",
+                        R"({"dimensions":4,"image_count":3})",
+                        R"({"dimensions":2,"image_count":0})",
+                        R"({"dimensions":2,"image_count":2147483648})"}) {
+    d.parameters = liong::json::parse_complete(p);
+    EXPECT_THROW(registry.decode(d, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+  d.parameters =
+      liong::json::parse_complete(R"({"dimensions":2,"image_count":3})");
+  d.bindings.erase("image_1");
+  EXPECT_THROW(registry.decode(d, NativeObjectKind::resource),
+               std::invalid_argument);
+}
+
 TEST(NativeOperationRegistry, MipStorageAccountsForTheCompleteChain) {
   ImageParams params{};
   params.format = BufferFormat::r32f;
@@ -73,6 +103,101 @@ TEST(NativeOperationRegistry, MipStorageAccountsForTheCompleteChain) {
 }
 
 #ifdef TI_WITH_LLVM
+TEST(NativeOperationRegistry, TextureCollectionRetainsOrderedQualifiedImages) {
+  class Image final : public NativeSampledImage {
+   public:
+    Image(Device &device, ImageParams p, size_t id)
+        : NativeSampledImage(p, false), allocation_{&device, id} {
+    }
+    Arch arch() const override {
+      return Arch::vulkan;
+    }
+    Device &device() const override {
+      return *allocation_.device;
+    }
+    size_t workspace_bytes() const override {
+      return 0;
+    }
+    size_t logical_bytes() const override {
+      return 16;
+    }
+    DeviceAllocation gfx_sampled_allocation() const override {
+      return allocation_;
+    }
+
+   private:
+    DeviceAllocation allocation_;
+  };
+  cpu::CpuDevice device, foreign;
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_has_sampled_image_array_non_uniform_indexing,
+           1);
+  caps.set(DeviceCapability::max_sampled_texture_collection_size, 3);
+  device.set_caps(std::move(caps));
+  ImageParams p{};
+  p.dimension = ImageDimension::d2D;
+  p.format = BufferFormat::r32f;
+  p.x = p.y = 2;
+  auto first = std::make_shared<Image>(device, p, 41);
+  auto second = std::make_shared<Image>(device, p, 42);
+  std::vector<std::shared_ptr<NativeSampledImage>> members{second, first,
+                                                           second};
+  EXPECT_ANY_THROW((NativeTextureCollection(device, 3, members)));
+  members[0] = std::make_shared<Image>(foreign, p, 41);
+  EXPECT_THROW((NativeTextureCollection(device, 2, members)),
+               std::invalid_argument);
+  p.usage = ImageAllocUsage::Storage;
+  members[0] = std::make_shared<Image>(device, p, 43);
+  EXPECT_THROW((NativeTextureCollection(device, 2, members)),
+               std::invalid_argument);
+  members[0] = second;
+  auto collection =
+      std::make_shared<NativeTextureCollection>(device, 2, members);
+  EXPECT_EQ(collection->allocations(),
+            (std::vector<DeviceAllocation>{
+                {&device, 42}, {&device, 41}, {&device, 42}}));
+  EXPECT_EQ(collection->workspace_bytes(), 0);
+  EXPECT_EQ(collection->device_payload_bytes(), 0);
+  Program program(Arch::x64);
+  Kernel kernel(program, [] {}, "cold_collection_binding");
+  // Parameter construction is metadata-only; this test never compiles code.
+  kernel.insert_texture_param(2);
+  kernel.nested_parameters.at({0}).ptype = ParameterType::kTextureCollection;
+  kernel.nested_parameters.at({0}).element_shape = {3};
+  kernel.finalize_params();
+  auto context = kernel.make_launch_context();
+  for (auto arch : {Arch::x64, Arch::cuda})
+    EXPECT_THROW(prepare_native_kernel_resource(collection, {0}, arch, device,
+                                                kernel, context),
+                 std::invalid_argument);
+  auto binding = prepare_native_kernel_resource(collection, {0}, Arch::vulkan,
+                                                device, kernel, context);
+  NativeRecordingState state;
+  state.initialized.insert(first.get());
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, state),
+               std::invalid_argument);
+  state.initialized.insert(second.get());
+  EXPECT_NO_THROW(
+      binding->validate(Arch::vulkan, device, kernel, context, state));
+  auto other = kernel.make_launch_context();
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, other, state),
+               std::invalid_argument);
+  context.texture_collections[{0}][0] = {&device, 41};
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, state),
+               std::invalid_argument);
+  context.texture_collections[{0}][0] = {&device, 42};
+  ++context.texture_collection_snapshot_ids[{0}];
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, state),
+               std::invalid_argument);
+  std::weak_ptr<Image> retained = first;
+  members.clear();
+  first.reset();
+  collection.reset();
+  EXPECT_FALSE(retained.expired());
+  binding.reset();
+  EXPECT_TRUE(retained.expired());
+}
+
 TEST(NativeOperationRegistry,
      KernelAccelerationStructuresQualifyAndRetainOwners) {
   class Scene final : public NativeAccelerationStructure {

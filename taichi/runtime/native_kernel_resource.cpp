@@ -1,6 +1,7 @@
 #include "taichi/runtime/native_kernel_resource.h"
 
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_texture_collection.h"
 #include "taichi/runtime/native_acceleration_structure.h"
 
 namespace taichi::lang {
@@ -11,6 +12,10 @@ std::shared_ptr<NativeKernelResourceBinding> prepare_native_kernel_resource(
     Device &device,
     const CallableBase &kernel,
     LaunchContextBuilder &context) {
+  if (auto collection =
+          std::dynamic_pointer_cast<NativeTextureCollection>(resource))
+    return std::make_shared<NativeTextureCollectionKernelBinding>(
+        std::move(collection), std::move(argument), arch, device, kernel, context);
   if (auto image = std::dynamic_pointer_cast<NativeSampledImage>(resource))
     return std::make_shared<NativeImageKernelBinding>(
         std::move(image), std::move(argument), arch, device, kernel, context);

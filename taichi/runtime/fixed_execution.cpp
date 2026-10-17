@@ -385,11 +385,11 @@ FixedExecution::FixedExecution(
           state_->kernel_resources.push_back(resource);
         }
         for (const auto &[index, param] : dispatch->kernel->nested_parameters) {
-          if (((param.ptype == ParameterType::kTexture ||
+          if ((param.ptype == ParameterType::kTexture ||
                 param.ptype == ParameterType::kRWTexture ||
-                param.ptype == ParameterType::kAccelerationStructure) &&
-               !resource_arguments.count(index)) ||
-              param.ptype == ParameterType::kTextureCollection)
+                param.ptype == ParameterType::kAccelerationStructure ||
+                param.ptype == ParameterType::kTextureCollection) &&
+               !resource_arguments.count(index))
             throw std::invalid_argument(
                 "Fixed kernel resources require generation-qualified owners");
         }
