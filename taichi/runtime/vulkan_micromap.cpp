@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <limits>
 
 namespace taichi::lang {
 namespace {
@@ -15,7 +16,16 @@ T load(const vkapi::DeviceHandle &device, const char *name) {
   return fn;
 }
 VkDeviceAddress aligned(VkDeviceAddress address, VkDeviceSize alignment) {
+  TI_ERROR_IF(!address || !alignment || (alignment & (alignment - 1)) ||
+                  address > (std::numeric_limits<VkDeviceAddress>::max)() -
+                                (alignment - 1),
+              "Vulkan micromap address alignment is invalid or overflows.");
   return (address + alignment - 1) & ~(alignment - 1);
+}
+std::size_t add_bytes(std::size_t bytes, std::size_t padding) {
+  TI_ERROR_IF(bytes > (std::numeric_limits<std::size_t>::max)() - padding,
+              "Vulkan micromap byte size overflows.");
+  return bytes + padding;
 }
 using Counts = std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t>;
 std::vector<VkMicromapUsageEXT> counts(const Counts &values) {
@@ -53,19 +63,21 @@ DeviceAllocationUnique VulkanOpacityMicromap::allocate(std::size_t bytes,
   return std::move(allocation);
 }
 
-void VulkanOpacityMicromap::build(const std::string &data,
-                                  const std::string &descriptors,
-                                  const std::string &indices,
+void VulkanOpacityMicromap::build(std::string_view data,
+                                  std::string_view descriptors,
+                                  std::string_view indices,
                                   bool indexed,
                                   std::size_t triangle_count) {
   static_assert(sizeof(VkMicromapTriangleEXT) == 8);
-  TI_ERROR_IF(descriptors.size() % 8 || triangle_count == 0 ||
-                  triangle_count > UINT32_MAX ||
-                  descriptors.size() / 8 > UINT32_MAX ||
-                  (indexed ? indices.size() != triangle_count * 4
-                           : (!indices.empty() ||
-                              descriptors.size() / 8 != triangle_count)),
-              "Invalid Vulkan micromap descriptor or triangle-index count.");
+  TI_ERROR_IF(
+      descriptors.size() % 8 || triangle_count == 0 ||
+          triangle_count > UINT32_MAX ||
+          triangle_count > (std::numeric_limits<std::size_t>::max)() / 4 ||
+          descriptors.size() / 8 > UINT32_MAX ||
+          (indexed ? indices.size() != triangle_count * 4
+                   : (!indices.empty() ||
+                      descriptors.size() / 8 != triangle_count)),
+      "Invalid Vulkan micromap descriptor or triangle-index count.");
   VkPhysicalDeviceOpacityMicromapPropertiesEXT limits{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_PROPERTIES_EXT};
   VkPhysicalDeviceAccelerationStructurePropertiesKHR as_limits{
@@ -76,12 +88,18 @@ void VulkanOpacityMicromap::build(const std::string &data,
   properties.pNext = &limits;
   device_->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
       device_->vk_physical_device(), &properties);
+  TI_ERROR_IF(
+      triangle_count > as_limits.maxPrimitiveCount,
+      "Vulkan micromap triangle count exceeds the device's AS capacity.");
   Counts build_counts, used_counts;
-  std::vector<VkMicromapTriangleEXT> entries(descriptors.size() / 8);
-  if (!entries.empty()) {
-    std::memcpy(entries.data(), descriptors.data(), descriptors.size());
-  }
-  for (const auto &entry : entries) {
+  const auto entry_count = descriptors.size() / 8;
+  auto entry_at = [&](std::size_t i) {
+    VkMicromapTriangleEXT entry;
+    std::memcpy(&entry, descriptors.data() + i * 8, 8);
+    return entry;
+  };
+  for (std::size_t i = 0; i < entry_count; ++i) {
+    const auto entry = entry_at(i);
     const auto level_limit =
         entry.format == VK_OPACITY_MICROMAP_FORMAT_2_STATE_EXT
             ? limits.maxOpacity2StateSubdivisionLevel
@@ -104,17 +122,17 @@ void VulkanOpacityMicromap::build(const std::string &data,
       std::int32_t index;
       std::memcpy(&index, indices.data() + 4 * i, 4);
       TI_ERROR_IF(index < -4 || (index >= 0 && static_cast<std::size_t>(
-                                                   index) >= entries.size()),
+                                                   index) >= entry_count),
                   "Vulkan micromap triangle index is out of range.");
       if (index >= 0) {
-        const auto &entry = entries[index];
+        const auto entry = entry_at(index);
         ++used_counts[{entry.subdivisionLevel, entry.format}];
       }
     }
   } else {
     used_counts = build_counts;
   }
-  TI_ERROR_IF(entries.empty() && !data.empty(),
+  TI_ERROR_IF(entry_count == 0 && !data.empty(),
               "Empty Vulkan micromap descriptors require empty data.");
   usage_ = counts(used_counts);
   auto build_usage = counts(build_counts);
@@ -153,11 +171,11 @@ void VulkanOpacityMicromap::build(const std::string &data,
 
   // Inputs are host-written once, submitted once and freed after the cold
   // build.
-  std::vector<DeviceAllocationUnique> temporary;
-  auto upload = [&](const std::string &bytes, AllocUsage usage,
+  auto upload = [&](std::string_view bytes, AllocUsage usage,
                     std::size_t alignment) {
-    auto allocation = allocate(bytes.size() + alignment,
-                               usage | AllocUsage::DeviceAddress, true);
+    const auto allocation_bytes = add_bytes(bytes.size(), alignment);
+    auto allocation =
+        allocate(allocation_bytes, usage | AllocUsage::DeviceAddress, true);
     const auto base = device_->get_buffer_device_address(*allocation);
     const auto address = aligned(base, alignment);
     void *mapped = nullptr;
@@ -167,8 +185,8 @@ void VulkanOpacityMicromap::build(const std::string &data,
     std::memcpy(static_cast<char *>(mapped) + (address - base), bytes.data(),
                 bytes.size());
     device_->unmap(*allocation);
-    memory[2] += bytes.size() + alignment;
-    temporary.push_back(std::move(allocation));
+    memory[2] = add_bytes(memory[2], allocation_bytes);
+    temporary_.push_back(std::move(allocation));
     return address;
   };
   if (indexed) {
@@ -176,7 +194,7 @@ void VulkanOpacityMicromap::build(const std::string &data,
         allocate(indices.size(), AllocUsage::AccelerationStructureBuildInput |
                                      AllocUsage::DeviceAddress);
     const auto address = upload(indices, AllocUsage::Upload, 4);
-    const auto &staging = temporary.back();
+    const auto &staging = temporary_.back();
     commands->buffer_copy(
         indices_->get_ptr(),
         staging->get_ptr(address -
@@ -186,7 +204,7 @@ void VulkanOpacityMicromap::build(const std::string &data,
     attachment.indexBuffer.deviceAddress =
         device_->get_buffer_device_address(*indices_);
   }
-  if (!entries.empty()) {
+  if (entry_count != 0) {
     VkMicromapBuildInfoEXT build{VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT};
     build.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
     build.flags = VK_BUILD_MICROMAP_PREFER_FAST_TRACE_BIT_EXT;
@@ -199,7 +217,11 @@ void VulkanOpacityMicromap::build(const std::string &data,
     load<PFN_vkGetMicromapBuildSizesEXT>(device, "vkGetMicromapBuildSizesEXT")(
         device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build,
         &sizes);
-    memory[0] = sizes.micromapSize;
+    TI_ERROR_IF(
+        sizes.micromapSize > (std::numeric_limits<std::size_t>::max)() ||
+            sizes.buildScratchSize > (std::numeric_limits<std::size_t>::max)(),
+        "Vulkan micromap storage exceeds the host size width.");
+    memory[0] = static_cast<std::size_t>(sizes.micromapSize);
     storage_ = allocate(memory[0], AllocUsage::MicromapStorage);
     handle_ = std::make_shared<Handle>();
     handle_->device = device;
@@ -223,15 +245,15 @@ void VulkanOpacityMicromap::build(const std::string &data,
         upload(descriptors, AllocUsage::MicromapBuildInput, 256);
     if (sizes.buildScratchSize) {
       const auto bytes =
-          sizes.buildScratchSize +
-          as_limits.minAccelerationStructureScratchOffsetAlignment;
+          add_bytes(static_cast<std::size_t>(sizes.buildScratchSize),
+                    as_limits.minAccelerationStructureScratchOffsetAlignment);
       auto scratch =
           allocate(bytes, AllocUsage::Storage | AllocUsage::DeviceAddress);
       build.scratchData.deviceAddress =
           aligned(device_->get_buffer_device_address(*scratch),
                   as_limits.minAccelerationStructureScratchOffsetAlignment);
-      memory[2] += bytes;
-      temporary.push_back(std::move(scratch));
+      memory[2] = add_bytes(memory[2], bytes);
+      temporary_.push_back(std::move(scratch));
     }
     barrier(VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_WRITE_BIT,
             VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT,
@@ -246,6 +268,17 @@ void VulkanOpacityMicromap::build(const std::string &data,
           VK_ACCESS_2_MICROMAP_READ_BIT_EXT |
               VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
   stream->submit_synced(commands.get());
+  temporary_.clear();
+}
+
+VulkanTriangleRaySceneMemoryStatistics
+VulkanOpacityMicromap::memory_statistics() const {
+  VulkanTriangleRaySceneMemoryStatistics result;
+  result.geometry_input_requested_bytes = memory[1];
+  result.acceleration_structure_requested_bytes = memory[0];
+  result.known_requested_bytes = add_bytes(memory[0], memory[1]);
+  result.known_allocation_count = (memory[0] != 0) + (memory[1] != 0);
+  return result;
 }
 
 void VulkanOpacityMicromap::retain(

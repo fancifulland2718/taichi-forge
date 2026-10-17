@@ -1,7 +1,9 @@
 #pragma once
 
 #if defined(TI_WITH_VULKAN)
+#include <string_view>
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/runtime/vulkan_ray_types.h"
 
 namespace taichi::lang {
 
@@ -10,12 +12,13 @@ namespace taichi::lang {
 class VulkanOpacityMicromap {
  public:
   explicit VulkanOpacityMicromap(vulkan::VulkanDevice *device);
-  void build(const std::string &data,
-             const std::string &descriptors,
-             const std::string &indices,
+  void build(std::string_view data,
+             std::string_view descriptors,
+             std::string_view indices,
              bool indexed,
              std::size_t triangle_count);
   void retain(const vkapi::IVkCommandBuffer &commands) const;
+  VulkanTriangleRaySceneMemoryStatistics memory_statistics() const;
 
   VkAccelerationStructureTrianglesOpacityMicromapEXT attachment{
       VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT};
@@ -36,6 +39,9 @@ class VulkanOpacityMicromap {
   DeviceAllocationUnique storage_, indices_;
   std::shared_ptr<Handle> handle_;
   std::vector<VkMicromapUsageEXT> usage_;
+  // Kept on the owner until the cold submission completes. A faulted AOT owner
+  // can abandon this complete core without freeing buffers still in flight.
+  std::vector<DeviceAllocationUnique> temporary_;
 };
 
 }  // namespace taichi::lang
