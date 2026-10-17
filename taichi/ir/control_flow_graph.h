@@ -108,6 +108,10 @@ class CFGNode {
       const CFGStoreForwardingDefinitions &definitions,
       StmtUseIndex *uses = nullptr);
   void gather_loaded_snodes(std::unordered_set<SNode *> &snodes) const;
+  bool forward_constant_local_loads(
+      const std::unordered_set<Stmt *> &eligible,
+      const CFGStoreForwardingDefinitions &definitions,
+      StmtUseIndex &uses);
   void live_variable_analysis(bool after_lower_access);
   bool dead_store_elimination(bool after_lower_access,
                               StmtUseIndex *uses = nullptr);
@@ -181,6 +185,9 @@ class ControlFlowGraph {
   bool store_to_load_forwarding(bool after_lower_access,
                                 bool autodiff_enabled,
                                 StmtUseIndex *uses = nullptr);
+  // Restricted correctness cleanup: reuse reaching definitions without
+  // forwarding shared/tensor/global memory or eliminating any stores.
+  bool forward_constant_local_loads(IRNode *root);
 
   /**
    * Perform dead store elimination and identical load elimination.

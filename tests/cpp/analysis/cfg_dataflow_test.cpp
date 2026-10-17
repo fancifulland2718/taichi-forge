@@ -10,6 +10,97 @@ namespace {
 
 using Facts = std::unordered_set<Stmt *>;
 
+TEST(CFGDataflow, ConstantCleanupPreservesMemoryAndUnknownDefinitions) {
+  auto root = std::make_unique<Block>();
+  auto one = root->push_back<ConstStmt>(TypedConstant(1));
+  auto two = root->push_back<ConstStmt>(TypedConstant(2));
+  auto cond = root->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+  auto unknown = root->push_back<AllocaStmt>(PrimitiveType::i32);
+  auto shared =
+      root->push_back<AllocaStmt>(PrimitiveType::i32)->as<AllocaStmt>();
+  shared->is_shared = true;
+  auto tensor = root->push_back<AllocaStmt>(
+      TypeFactory::get_instance().get_tensor_type({4}, PrimitiveType::i32));
+  auto element = root->push_back<MatrixPtrStmt>(tensor, one);
+  auto global = root->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+  for (auto *ptr : std::vector<Stmt *>{local, unknown, shared, element})
+    root->push_back<LocalStoreStmt>(ptr, one);
+  root->push_back<GlobalStoreStmt>(global, one);
+  auto branch = root->push_back<IfStmt>(cond)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  branch->true_statements->push_back<LocalStoreStmt>(local, one);
+  branch->true_statements->push_back<LocalStoreStmt>(unknown, two);
+  auto local_load = root->push_back<LocalLoadStmt>(local);
+  auto unknown_load = root->push_back<LocalLoadStmt>(unknown);
+  auto shared_load = root->push_back<LocalLoadStmt>(shared);
+  auto tensor_load = root->push_back<LocalLoadStmt>(element);
+  auto global_load = root->push_back<GlobalLoadStmt>(global);
+  auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{
+      local_load, unknown_load, shared_load, tensor_load, global_load});
+  irpass::type_check(root.get(), CompileConfig{});
+  auto cfg = irpass::analysis::build_cfg(root.get());
+  cfg->simplify_graph();
+  EXPECT_TRUE(cfg->forward_constant_local_loads(root.get()));
+  EXPECT_EQ(result->operand(0), one);
+  EXPECT_EQ(result->operand(1), unknown_load);
+  EXPECT_EQ(result->operand(2), shared_load);
+  EXPECT_EQ(result->operand(3), tensor_load);
+  EXPECT_EQ(result->operand(4), global_load);
+  EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+}
+
+TEST(CFGDataflow, ConstantCleanupPreservesLoopCarriedValues) {
+  auto root = std::make_unique<Block>();
+  auto zero = root->push_back<ConstStmt>(TypedConstant(0));
+  auto four = root->push_back<ConstStmt>(TypedConstant(4));
+  auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+  root->push_back<LocalStoreStmt>(local, four);
+  auto loop = root->push_back<RangeForStmt>(
+                      zero, four, std::make_unique<Block>(), 1, 1, 1, false)
+                  ->as<RangeForStmt>();
+  auto index = loop->body->push_back<LoopIndexStmt>(loop, 0);
+  auto before = loop->body->push_back<LocalLoadStmt>(local);
+  auto global = loop->body->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+  auto write = loop->body->push_back<GlobalStoreStmt>(global, before)
+                   ->as<GlobalStoreStmt>();
+  loop->body->push_back<LocalStoreStmt>(local, index);
+  auto after = root->push_back<LocalLoadStmt>(local);
+  auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{after});
+  irpass::type_check(root.get(), CompileConfig{});
+  auto cfg = irpass::analysis::build_cfg(root.get());
+  cfg->simplify_graph();
+  EXPECT_FALSE(cfg->forward_constant_local_loads(root.get()));
+  EXPECT_EQ(write->val, before);
+  EXPECT_EQ(result->operand(0), after);
+  EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+}
+
+TEST(CFGDataflow, ConstantCleanupRejectsEscapedAndAtomicLocals) {
+  for (bool atomic : {false, true}) {
+    auto root = std::make_unique<Block>();
+    auto one = root->push_back<ConstStmt>(TypedConstant(1));
+    auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+    root->push_back<LocalStoreStmt>(local, one);
+    if (atomic) {
+      root->push_back<AtomicOpStmt>(AtomicOpType::add, local, one);
+    } else {
+      root->push_back<ExternalFuncCallStmt>(
+          ExternalFuncCallStmt::ASSEMBLY, nullptr, "opaque", "", "",
+          std::vector<Stmt *>{local}, std::vector<Stmt *>{});
+    }
+    auto load = root->push_back<LocalLoadStmt>(local);
+    auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{load});
+    irpass::type_check(root.get(), CompileConfig{});
+    auto cfg = irpass::analysis::build_cfg(root.get());
+    cfg->simplify_graph();
+    EXPECT_FALSE(cfg->forward_constant_local_loads(root.get()));
+    EXPECT_EQ(result->operand(0), load);
+    EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+  }
+}
+
 // Independent hash-set fixed point used as an oracle for the compact solver.
 // Compare every node, including joins and backedges, in both directions.
 void compare_reference(ControlFlowGraph &cfg, bool forward) {

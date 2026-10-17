@@ -1593,6 +1593,61 @@ bool ControlFlowGraph::store_to_load_forwarding(bool after_lower_access,
   return modified;
 }
 
+bool CFGNode::forward_constant_local_loads(
+    const std::unordered_set<Stmt *> &eligible,
+    const CFGStoreForwardingDefinitions &definitions,
+    StmtUseIndex &uses) {
+  StoreForwardingIndex index(*this, definitions);
+  bool modified = false;
+  for (int i = begin_location; i < end_location; ++i) {
+    auto *load = block->statements[i]->cast<LocalLoadStmt>();
+    if (!load || !eligible.count(load->src))
+      continue;
+    auto *value = get_store_forwarding_data(load->src, i, index);
+    if (!value || !value->is<ConstStmt>() || value->ret_type != load->ret_type)
+      continue;
+    uses.replace_uses(load, value);
+    erase(i--, &uses);
+    modified = true;
+  }
+  return modified;
+}
+
+bool ControlFlowGraph::forward_constant_local_loads(IRNode *root) {
+  StmtUseIndex uses(root);
+  std::unordered_set<Stmt *> eligible;
+  for (const auto &node : nodes) {
+    for (int i = node->begin_location; i < node->end_location; ++i) {
+      auto *allocation = node->block->statements[i]->cast<AllocaStmt>();
+      if (!allocation || allocation->is_shared ||
+          !is_integral(allocation->ret_type.ptr_removed()))
+        continue;
+      bool escaped = false;
+      for (auto *user : uses.users(allocation)) {
+        if (auto *load = user->cast<LocalLoadStmt>();
+            load && load->src == allocation)
+          continue;
+        if (auto *store = user->cast<LocalStoreStmt>();
+            store && store->dest == allocation && store->val != allocation)
+          continue;
+        escaped = true;
+        break;
+      }
+      if (!escaped)
+        eligible.insert(allocation);
+    }
+  }
+  if (eligible.empty())
+    return false;
+  reaching_definition_analysis(/*after_lower_access=*/true);
+  const CFGStoreForwardingDefinitions definitions(nodes[start_node]->reach_in);
+  bool modified = false;
+  for (auto &node : nodes)
+    modified =
+        node->forward_constant_local_loads(eligible, definitions, uses) || modified;
+  return modified;
+}
+
 bool ControlFlowGraph::dead_store_elimination(
     bool after_lower_access,
     const std::optional<LiveVarAnalysisConfig> &lva_config_opt,

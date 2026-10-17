@@ -4,6 +4,8 @@
 
 #include "taichi/ir/analysis.h"
 #include "taichi/codegen/spirv/spirv_codegen.h"
+#include "taichi/ir/control_flow_graph.h"
+#include "taichi/ir/statements.h"
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
 
 namespace taichi::lang {
@@ -32,6 +34,33 @@ KernelCompiler::IRNodePtr KernelCompiler::compile(
                                   /*start_from_ast=*/kernel_def.ir_is_ast(),
                                   graph_metadata);
   }
+  // A constant negative array index is invalid in logical SPIR-V even if its
+  // access is in a dead branch. Fast compilation skips the optional CFG passes;
+  // legalize this case using the existing indexed reaching-definition analysis.
+  // Other kernels retain their fast schedule. Live invalid accesses remain
+  // invalid; do not clamp them or relax validation to conceal the problem.
+  auto has_negative_array_index = [&]() {
+    return irpass::analysis::any_statement(ir.get(), [](Stmt *stmt) {
+      auto *ptr = stmt->cast<MatrixPtrStmt>();
+      if (!ptr || !ptr->origin->is<AllocaStmt>())
+        return false;
+      auto *offset = ptr->offset->cast<ConstStmt>();
+      return offset && is_signed(offset->ret_type) && offset->val.val_int() < 0;
+    });
+  };
+  if (!compile_config.advanced_optimization && has_negative_array_index()) {
+    TI_COMPILE_PROFILER("cpp.compile.spirv.constant_dead_branches");
+    do {
+      auto cfg = irpass::analysis::build_cfg(ir.get());
+      cfg->simplify_graph();
+      bool changed = cfg->forward_constant_local_loads(ir.get());
+      changed = irpass::constant_fold(ir.get()) || changed;
+      changed = irpass::unreachable_code_elimination(ir.get()) || changed;
+      irpass::die(ir.get());
+      if (!changed)
+        break;
+    } while (has_negative_array_index());
+  }
   return ir;
 }
 
@@ -56,8 +85,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   //                SPV-bound kernels. Going straight to 0 gives the largest
   //                compile-time win for the "fast" tier and is safe because
   //                TaskCodegen already emits legal SPIR-V (no optimiser
-  //                required to pass Vulkan driver validation, and the
-  //                spvtools validator is disabled anyway).
+  //                required to pass Vulkan driver validation). Constant dead
+  //                branches are removed before emission even in this tier.
   //   "balanced" — no change vs legacy (default external_optimization_level=3,
   //                23 passes). Preserves default runtime perf.
   //   "full"     — no change vs legacy (23 passes).
