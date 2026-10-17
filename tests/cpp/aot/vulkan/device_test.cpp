@@ -1119,6 +1119,51 @@ TEST(VulkanDescriptorSetTest, BufferArrayCacheIncludesOffsetsAndLengths) {
   EXPECT_EQ(preserved, first);
 }
 
+TEST(VulkanDescriptorSetTest, LayoutCacheDoesNotRetainBufferOwners) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  vulkan::VulkanDeviceCreator creator({});
+  auto *device = creator.device();
+  std::weak_ptr<vkapi::DeviceObjVkBuffer> owner;
+  vkapi::IVkDescriptorSetLayout layout;
+  {
+    auto [allocation, status] = device->allocate_memory_unique(
+        {32, false, false, false, AllocUsage::Storage});
+    ASSERT_EQ(status, RhiResult::success);
+    owner = device->get_vkbuffer(allocation->get_ptr());
+    vulkan::VulkanResourceSet resources(device);
+    resources.rw_buffer_array(0, {*allocation, *allocation});
+    layout = device->get_desc_set_layout(resources);
+    ASSERT_NE(layout, nullptr);
+  }
+  EXPECT_TRUE(owner.expired())
+      << "A descriptor layout must not retain data buffers";
+  vulkan::VulkanResourceSet shape_only(device);
+  shape_only.rw_buffer_array(0, {kDeviceNullAllocation, kDeviceNullAllocation});
+  EXPECT_EQ(device->get_desc_set_layout(shape_only), layout);
+}
+
+TEST(VulkanDescriptorSetTest, LayoutCacheDistinguishesBindingFlags) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  vulkan::VulkanDeviceCreator creator({});
+  auto *device = creator.device();
+  auto &caps = device->vk_caps();
+  if (!caps.descriptor_storage_buffer_update_after_bind)
+    GTEST_SKIP() << "Storage update-after-bind unavailable";
+  const bool previous = caps.descriptor_update_after_bind;
+  caps.descriptor_update_after_bind = false;
+  vulkan::VulkanResourceSet scalar(device), array(device), duplicate(device);
+  scalar.rw_buffer(0, kDeviceNullAllocation);
+  array.rw_buffer_array(0, {kDeviceNullAllocation});
+  duplicate.rw_buffer_array(0, {kDeviceNullAllocation});
+  const auto scalar_layout = device->get_desc_set_layout(scalar);
+  const auto array_layout = device->get_desc_set_layout(array);
+  EXPECT_NE(scalar_layout, array_layout);
+  EXPECT_EQ(device->get_desc_set_layout(duplicate), array_layout);
+  caps.descriptor_update_after_bind = previous;
+}
+
 TEST(VulkanDescriptorSetTest, DirtyResourceSetDoesNotMutateRecordedSet) {
   if (!vulkan::is_vulkan_api_available()) {
     return;

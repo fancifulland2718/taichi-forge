@@ -38,6 +38,10 @@
   绑定保留偏移、有限长度、别名与退休，要求配对 ABI92 组件。独立/借用消费验证包括
   shader 实际观察 view 长度与下游数值梯度。
 
+- Vulkan descriptor-layout 缓存只保存布局元数据，不再因此持有数据资源 owner；缓存
+  身份包含实际 binding flags，区分普通和 update-after-bind 布局。已录制 descriptor set
+  继续将实际资源保活至完成。
+
 - GFX AOT 补齐 RWTexture 格式及 mip 层级元数据，包括仅访问 shape 的内核。
   对应导出要求 metadata v4 和配对 ABI90；普通产物保持原版本。不兼容的 SPIR-V
   缓存会重新编译，CPU/CUDA 缓存格式不变。

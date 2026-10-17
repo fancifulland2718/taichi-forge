@@ -247,40 +247,19 @@ class VulkanResourceSet : public ShaderResourceSet {
     return 1;
   }
 
-  // This hashes the Set Layout
-  struct SetLayoutHasher {
-    std::size_t operator()(const VulkanResourceSet &set) const {
-      // NOTE: Bindings in this case is ordered, we can use non-commutative
-      // operations
-      size_t hash = 0;
-      for (const auto &pair : set.bindings_) {
-        rhi_impl::hash_combine(hash, pair.first);
-        // We only care about type in this case
-        rhi_impl::hash_combine(hash, pair.second.type);
-        rhi_impl::hash_combine(hash, descriptor_count(pair.second));
-      }
-      return hash;
-    }
-  };
-
-  // This compares the layout of two sets
+  // Shader interface coverage compares declaration shape, independently of
+  // resource identity and the descriptor-layout creation flags.
   struct SetLayoutCmp {
     bool operator()(const VulkanResourceSet &lhs,
                     const VulkanResourceSet &rhs) const {
-      if (lhs.bindings_.size() != rhs.bindings_.size()) {
+      if (lhs.bindings_.size() != rhs.bindings_.size())
         return false;
-      }
-      for (auto &lhs_pair : lhs.bindings_) {
-        auto rhs_binding_iter = rhs.bindings_.find(lhs_pair.first);
-        if (rhs_binding_iter == rhs.bindings_.end()) {
+      auto right = rhs.bindings_.begin();
+      for (const auto &[binding, resource] : lhs.bindings_) {
+        if (binding != right->first || resource.type != right->second.type ||
+            descriptor_count(resource) != descriptor_count(right->second))
           return false;
-        }
-        const Binding &rhs_binding = rhs_binding_iter->second;
-        if (rhs_binding.type != lhs_pair.second.type ||
-            descriptor_count(rhs_binding) !=
-                descriptor_count(lhs_pair.second)) {
-          return false;
-        }
+        ++right;
       }
       return true;
     }
@@ -1438,11 +1417,16 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   // descriptor set itself.
   mutable std::mutex descriptor_mutex_;
   std::mutex descriptor_pool_mutex_;
-  unordered_map<VulkanResourceSet,
-                vkapi::IVkDescriptorSetLayout,
-                VulkanResourceSet::SetLayoutHasher,
-                VulkanResourceSet::SetLayoutCmp>
-      desc_set_layouts_;
+  struct CachedDescriptorSetLayout {
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    std::vector<VkDescriptorBindingFlags> flags;
+    vkapi::IVkDescriptorSetLayout layout;
+  };
+  // Hash buckets avoid allocating a temporary metadata key on cache hits.
+  // Entries contain no data resource/set references; collisions compare all
+  // layout fields before reuse. Stage flags are always VK_SHADER_STAGE_ALL
+  // and immutable samplers are absent in this layout family.
+  std::unordered_multimap<size_t, CachedDescriptorSetLayout> desc_set_layouts_;
 
   struct CachedDescriptorSet {
     vkapi::IVkDescriptorSet set{nullptr};

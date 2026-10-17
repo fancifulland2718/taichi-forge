@@ -4559,9 +4559,34 @@ vkapi::IVkRenderPass VulkanDevice::get_renderpass(
 vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
     VulkanResourceSet &set) {
   std::lock_guard<std::mutex> lock(descriptor_mutex_);
-  auto it = desc_set_layouts_.find(set);
-  if (it != desc_set_layouts_.end()) {
-    return it->second;
+  size_t hash = 0;
+  for (const auto &[binding, resource] : set.get_bindings()) {
+    rhi_impl::hash_combine(hash, binding);
+    rhi_impl::hash_combine(hash, resource.type);
+    rhi_impl::hash_combine(hash, VulkanResourceSet::descriptor_count(resource));
+    rhi_impl::hash_combine(hash, descriptor_binding_flags(resource, vk_caps()));
+  }
+  const auto candidates = desc_set_layouts_.equal_range(hash);
+  for (auto it = candidates.first; it != candidates.second; ++it) {
+    const auto &entry = it->second;
+    if (entry.bindings.size() != set.get_bindings().size())
+      continue;
+    size_t i = 0;
+    bool match = true;
+    for (const auto &[binding, resource] : set.get_bindings()) {
+      const auto &expected = entry.bindings[i];
+      if (binding != expected.binding ||
+          resource.type != expected.descriptorType ||
+          VulkanResourceSet::descriptor_count(resource) !=
+              expected.descriptorCount ||
+          descriptor_binding_flags(resource, vk_caps()) != entry.flags[i]) {
+        match = false;
+        break;
+      }
+      ++i;
+    }
+    if (match)
+      return entry.layout;
   }
 
   std::vector<VkDescriptorSetLayoutBinding> bindings;
@@ -4574,10 +4599,10 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
       RHI_LOG_ERROR("Descriptor array bindings must not be empty");
       return nullptr;
     }
-    bindings.push_back(VkDescriptorSetLayoutBinding{
-        /*binding=*/pair.first, pair.second.type, descriptor_count,
-        VK_SHADER_STAGE_ALL,
-        /*pImmutableSamplers=*/nullptr});
+    bindings.push_back(
+        VkDescriptorSetLayoutBinding{/*binding=*/pair.first, pair.second.type,
+                                     descriptor_count, VK_SHADER_STAGE_ALL,
+                                     /*pImmutableSamplers=*/nullptr});
     const auto flags = descriptor_binding_flags(pair.second, vk_caps());
     binding_flags.push_back(flags);
     has_update_after_bind_binding |= flags != 0;
@@ -4601,8 +4626,10 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
   create_info.pBindings = bindings.data();
 
   auto layout = vkapi::create_descriptor_set_layout(device_, &create_info);
-  auto inserted = desc_set_layouts_.emplace(set, layout);
-  return inserted.first->second;
+  desc_set_layouts_.emplace(
+      hash, CachedDescriptorSetLayout{std::move(bindings),
+                                      std::move(binding_flags), layout});
+  return layout;
 }
 
 vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(

@@ -44,6 +44,11 @@ lifetimes. The entries below describe the changes.
   retirement; paired components require ABI92. Standalone/borrowed tests include
   shader-observed view lengths and downstream numeric gradients.
 
+- Vulkan descriptor-layout caching now stores layout metadata without retaining
+  data-resource owners. Cache identity includes descriptor binding flags, so
+  ordinary and update-after-bind layouts are distinguished. Recorded descriptor
+  sets continue to retain their resources through completion.
+
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache
