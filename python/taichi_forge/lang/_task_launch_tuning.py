@@ -25,6 +25,7 @@ from taichi_forge.lang import impl
 
 _SCHEMA_VERSION = 2
 _CANDIDATE_BLOCK_DIMS = (64, 128, 256, 512)
+_VULKAN_CANDIDATE_BLOCK_DIMS = (32, 64, 128, 256, 512)
 _HOT_CALL_THRESHOLD = 8
 _MIN_INDEPENDENT_BLOCKS = 5
 _MAX_RECORD_CACHE_ENTRIES = 256
@@ -61,19 +62,29 @@ class _TaskLaunchWorkloadProfile:
     ptx_identity: str = ""
     oracle_identity: str = ""
     replay_identity: str = ""
+    spirv_identity: str = ""
 
     def __post_init__(self):
         for name in (
             "workload_id",
             "input_distribution_id",
             "ir_identity",
-            "ptx_identity",
             "oracle_identity",
             "replay_identity",
         ):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip() or "\n" in value:
                 raise ValueError(f"{name} must be a non-empty single-line string")
+        for name in ("ptx_identity", "spirv_identity"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or "\n" in value
+                or (value and not value.strip())
+            ):
+                raise ValueError(f"{name} must be a single-line string")
+        if not self.ptx_identity and not self.spirv_identity:
+            raise ValueError("ptx_identity or spirv_identity is required")
         if not isinstance(self.shape, tuple) or any(
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
             for value in self.shape
@@ -107,7 +118,10 @@ class _TaskLaunchWorkloadProfile:
             "dynamic",
         ):
             raise ValueError("unsupported topology_stability")
-        stable_scope_json = _canonical_json(asdict(self))
+        scope = asdict(self)
+        if not self.spirv_identity:
+            del scope["spirv_identity"]  # Preserve existing CUDA record identities.
+        stable_scope_json = _canonical_json(scope)
         object.__setattr__(self, "_stable_scope_json", stable_scope_json)
         object.__setattr__(
             self,
@@ -198,6 +212,22 @@ def _compiler_scope():
 
 def _hardware_scope():
     program = impl.get_runtime().prog
+    if impl.current_cfg().arch == _ti_core.vulkan:
+        from taichi_forge.tools.vulkan_diagnostics import vulkan_runtime_diagnostics
+
+        info = vulkan_runtime_diagnostics()
+        device = info["device"]
+        if not device["device_uuid"].strip("0") or device["subgroup_size"] <= 0:
+            raise RuntimeError(
+                "qualified Vulkan profiles require exact device and subgroup identity"
+            )
+        return {
+            **device,
+            "backend": "vulkan",
+            "forge_version": info["forge_version"],
+            "forge_commit": info["forge_commit"],
+            "compiler": {"provider": "spirv_codegen"},
+        }
     device = program._cuda_device_identity()
     try:
         from taichi_forge.interop import current_cuda_device_uuid
@@ -235,7 +265,10 @@ def _cache_root_from_config(config):
     return Path(configured) / "task_launch_tuning_v2"
 
 
-def _candidate_blocks(tasks, max_threads, semantics=None):
+def _candidate_blocks(tasks, max_threads, semantics=None, backend="cuda"):
+    canonical = (
+        _VULKAN_CANDIDATE_BLOCK_DIMS if backend == "vulkan" else _CANDIDATE_BLOCK_DIMS
+    )
     if semantics is not None:
         from taichi_forge.lang._gpu_semantics import _GpuAvailability
         from taichi_forge.lang._gpu_semantics_tuning import (
@@ -247,13 +280,15 @@ def _candidate_blocks(tasks, max_threads, semantics=None):
         dimensions = _derive_gpu_tuning_dimensions(
             semantics,
             max_threads=max_threads,
-            canonical_workgroup_sizes=_CANDIDATE_BLOCK_DIMS,
+            canonical_workgroup_sizes=canonical,
             require_safe_serial_setup=False,
         )
         workgroup = _dimension_by_name(dimensions, _WORKGROUP_DIMENSION)
         if workgroup.status.availability != _GpuAvailability.PROVEN:
             return (), workgroup.status.reason
-        return workgroup.legal_values, "semantic CUDA workgroup candidates"
+        return workgroup.legal_values, f"semantic {backend} workgroup candidates"
+    if backend == "vulkan":
+        return (), "Vulkan candidates require compiled shader semantics"
     ranges = tuple(task for task in tasks if task.task_type == "range_for")
     if len(ranges) != 1:
         return (), "requires exactly one parallel range task"
@@ -279,8 +314,10 @@ def _task_scope(tasks):
     ]
 
 
-def _record_scope(kernel_key, tasks, hardware, workload_profile):
-    return {
+def _record_scope(
+    kernel_key, tasks, hardware, workload_profile, artifact_identity=None
+):
+    scope = {
         "schema_version": _SCHEMA_VERSION,
         "kernel": {
             "cache_key": kernel_key,
@@ -291,6 +328,13 @@ def _record_scope(kernel_key, tasks, hardware, workload_profile):
         "workload": workload_profile.stable_scope,
         "hardware": hardware,
     }
+    if hardware["backend"] == "vulkan":
+        scope["kernel"].pop("ptx_identity")
+        scope["kernel"]["spirv_identity"] = workload_profile.spirv_identity
+        scope["kernel"]["compiled_artifact_identity"] = (
+            list(artifact_identity) if artifact_identity else None
+        )
+    return scope
 
 
 def _record_path(cache_root, record_id):
@@ -312,12 +356,15 @@ def _validated_record(path, scope, record_id):
     if record.get("scope") != scope or record.get("record_id") != record_id:
         return None
     candidates = record.get("candidates")
+    canonical = (
+        _VULKAN_CANDIDATE_BLOCK_DIMS
+        if scope["hardware"]["backend"] == "vulkan"
+        else _CANDIDATE_BLOCK_DIMS
+    )
     if (
         not candidates
         or not isinstance(candidates, list)
-        or not all(
-            type(item) is int and item in _CANDIDATE_BLOCK_DIMS for item in candidates
-        )
+        or not all(type(item) is int and item in canonical for item in candidates)
     ):
         return None
     evidence = record.get("evidence")
@@ -326,6 +373,11 @@ def _validated_record(path, scope, record_id):
     if record.get("admission") != "explicit_profile":
         return None
     if evidence.get("correctness_passed") is not True:
+        return None
+    if scope["hardware"]["backend"] == "vulkan" and (
+        evidence.get("cost_metric") != "completion_time"
+        or evidence.get("completion_waited") is not True
+    ):
         return None
     independent_blocks = evidence.get("independent_abba_blocks")
     if (
@@ -367,7 +419,9 @@ class _TaskLaunchTuningCoordinator:
 
     def invalidate(self, record_id):
         with self._lock:
-            self._records.pop(record_id, None)
+            for key in tuple(self._records):
+                if key[1] == record_id:
+                    self._records.pop(key, None)
             self._generation += 1
 
     def observe_cached(self, decision):
@@ -410,15 +464,24 @@ class _TaskLaunchTuningCoordinator:
         hardware=None,
         cache_root=None,
         semantics=None,
+        artifact_identity=None,
     ):
+        hardware = dict(_hardware_scope() if hardware is None else hardware)
+        backend = hardware["backend"]
+        max_threads = int(config.max_block_dim)
+        if backend == "vulkan":
+            max_threads = min(
+                max_threads or 1024,
+                hardware["max_workgroup_invocations"],
+                hardware["max_workgroup_size_x"],
+            )
         if tasks is None:
             candidates = None
             candidate_reason = "task manifest not materialized"
         else:
             candidates, candidate_reason = _candidate_blocks(
-                tasks, config.max_block_dim, semantics
+                tasks, max_threads, semantics, backend
             )
-        hardware = dict(_hardware_scope() if hardware is None else hardware)
         hardware["runtime_max_block_dim"] = int(config.max_block_dim)
         hardware_tuple = tuple(
             sorted((key, _canonical_json(value)) for key, value in hardware.items())
@@ -444,9 +507,21 @@ class _TaskLaunchTuningCoordinator:
                 (),
                 workload_profile_id=workload_profile.identity,
             )
-        scope = _record_scope(kernel_key, tasks, hardware, workload_profile)
+        if backend == "vulkan" and (
+            not workload_profile.spirv_identity or not artifact_identity
+        ):
+            raise ValueError(
+                "Vulkan qualification requires SPIR-V profile and compiled artifact identities"
+            )
+        if backend == "cuda" and not workload_profile.ptx_identity:
+            raise ValueError("CUDA qualification requires a PTX profile identity")
+        scope = _record_scope(
+            kernel_key, tasks, hardware, workload_profile, artifact_identity
+        )
         scope_json = _canonical_json(scope)
         record_id = _sha256_json(scope)
+        root = _cache_root_from_config(config) if cache_root is None else cache_root
+        cache_key = (None if root is None else str(Path(root).resolve()), record_id)
 
         with self._lock:
             observed = self._observed_calls.get(record_id, 0)
@@ -458,9 +533,9 @@ class _TaskLaunchTuningCoordinator:
                     observed,
                     _MAX_OBSERVED_KERNELS,
                 )
-            record = self._records.get(record_id, ...)
+            record = self._records.get(cache_key, ...)
             if record is not ...:
-                self._records.move_to_end(record_id)
+                self._records.move_to_end(cache_key)
 
         if candidates == ():
             return _TaskLaunchTuningDecision(
@@ -475,18 +550,19 @@ class _TaskLaunchTuningCoordinator:
                 record_scope_json=scope_json,
             )
 
-        root = _cache_root_from_config(config) if cache_root is None else cache_root
         if record is ...:
             path = None if root is None else _record_path(root, record_id)
             record = None if path is None else _validated_record(path, scope, record_id)
             with self._lock:
                 self._store_bounded(
                     self._records,
-                    record_id,
+                    cache_key,
                     record,
                     _MAX_RECORD_CACHE_ENTRIES,
                 )
 
+        if record is not None and tuple(record["candidates"]) != candidates:
+            record = None
         if record is not None:
             record_candidates = tuple(int(value) for value in record["candidates"])
             return _TaskLaunchTuningDecision(

@@ -2063,6 +2063,16 @@ launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 co
 计入 runtime specialization budget 和 offline-cache identity，并且在 `ti.reset()` 后需要重新
 准备。block 调优取决于 backend 和 workload，应始终用执行末端同步的 `auto` 对照测量。
 
+内部由资格工具绑定的 workload profile 路径也支持 Vulkan。记录精确绑定设备/驱动 UUID、
+驱动版本、subgroup 能力、物理工作组限制、实际 JIT shader 哈希，以及 workload、IR、oracle、
+replay 身份。Vulkan profile 使用 `spirv_identity`；既有 CUDA `ptx_identity` 记录的身份不变。
+Vulkan 从 32/64/128/256/512 中按已编译 shader 语义和设备上限筛选候选，共享内存及同步约束
+仍生效。资格记录需要正确性证据、至少五个独立 AB/BA block、最差 candidate/baseline 比值
+小于一，并明确使用等待完成的 `completion_time` 证据；仅 enqueue 时间或 occupancy 不予准入。
+这些由资格工具提供，普通 kernel 调用不自动重复执行物理负载来测量。记录缺失或被拒绝时
+保留编译器默认值；不同缓存目录隔离，提交前 specialization 失败原因会保留在 report 中。
+该扩展不授予 Graph/AOT 的启动策略调优资格。
+
 
 ### 使用魔改 CompileIQ 搜索完整 Graph execution recipe
 

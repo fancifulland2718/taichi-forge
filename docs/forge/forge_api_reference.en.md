@@ -2510,6 +2510,21 @@ and offline-cache identity, and must be prepared again after `ti.reset()`.
 Block tuning is backend- and workload-specific, so always compare against
 `auto` with end-of-work synchronization.
 
+The internal qualification-owned workload-profile path also accepts Vulkan.
+Its exact record identity includes the device/driver UUIDs, driver version,
+subgroup capabilities, physical workgroup limits, the actual JIT shader hashes,
+and workload/IR/oracle/replay identities. Vulkan profiles use `spirv_identity`;
+CUDA's existing `ptx_identity` records retain their identities. Vulkan candidates
+are drawn from 32/64/128/256/512 and filtered by compiled shader semantics and
+device limits. Shared-memory and synchronization constraints still apply.
+Records require correctness evidence, at least five independent AB/BA blocks,
+a worst candidate/baseline ratio below one, and explicitly synchronized
+`completion_time` evidence. Enqueue time or occupancy alone cannot admit a
+record. These are qualification-tool inputs, not measurements made by ordinary
+kernel calls. Missing/rejected records retain the compiler default, cache
+directories are isolated, and pre-enqueue specialization failures retain their
+reason in the report. This does not enable Graph/AOT launch-policy tuning.
+
 ### Complete Graph execution-recipe search with modified CompileIQ
 
 Use `GraphBuilder.freeze()` and the public whole-Graph objects

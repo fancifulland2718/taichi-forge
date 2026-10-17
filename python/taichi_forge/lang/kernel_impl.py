@@ -2960,6 +2960,12 @@ class Kernel:
         semantics = _build_resident_gpu_semantics(
             self.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
         )
+        artifact_identity = None
+        if impl.current_cfg().arch == _ti_core.vulkan:
+            import hashlib
+
+            artifacts = self.runtime.prog._kernel_vulkan_artifacts(kernel_cpp)
+            artifact_identity = tuple(hashlib.sha256(code).hexdigest() for code in artifacts["shaders"])
         decision = _coordinator.resolve(
             kernel_key=kernel_key,
             tasks=tasks,
@@ -2967,6 +2973,7 @@ class Kernel:
             observe=observe,
             workload_profile=workload_profile,
             semantics=semantics,
+            artifact_identity=artifact_identity,
         )
         return key, tasks, decision
 
@@ -3641,7 +3648,7 @@ class _TaskLaunchBinding:
             self._last_auto_decision = None
             return None, None, -1
         if (
-            self._kernel._task_launch_backend_kind()[0] != "cuda"
+            self._kernel._task_launch_backend_kind()[0] not in ("cuda", "vulkan")
             or self._kernel.autodiff_mode != AutodiffMode.NONE
             or runtime.target_tape is not None
             or runtime.fwd_mode_manager is not None
@@ -3739,6 +3746,20 @@ class _TaskLaunchBinding:
             generation,
         )
 
+    def _reject_auto_record(self, error):
+        decision = self._last_auto_decision
+        self._kernel._task_launch_auto_failed_records.add(decision.record_id)
+        rejected = replace(
+            decision,
+            status="rejected",
+            reason=f"qualified specialization rejected before enqueue: {error}",
+            block_dim=None,
+        )
+        self._last_auto_decision = rejected
+        for key, cached in tuple(self._auto_cache_decisions.items()):
+            if cached.record_id == decision.record_id:
+                self._auto_cache_decisions[key] = rejected
+
     def _call_auto(self, args, kwargs):
         runtime = self._kernel.runtime
         fast_runtime, fast_key, fast_kernel_cpp, fast_generation = (
@@ -3774,10 +3795,8 @@ class _TaskLaunchBinding:
                 resolved, *processed
             )
             self._kernel._validate_task_launch_policy_specialization(key, resolved)
-        except (TaichiCompilationError, TaichiRuntimeError):
-            self._kernel._task_launch_auto_failed_records.add(
-                self._last_auto_decision.record_id
-            )
+        except (TaichiCompilationError, TaichiRuntimeError) as error:
+            self._reject_auto_record(error)
             return self._kernel(*args, **kwargs)
         if resolution_generation != self._auto_coordinator.generation:
             return self._kernel(*args, **kwargs)
@@ -3909,10 +3928,8 @@ class _TaskLaunchBinding:
                     report = self._kernel._task_launch_report(
                         resolved, *combined_args, **kwargs
                     )
-                except (TaichiCompilationError, TaichiRuntimeError):
-                    self._kernel._task_launch_auto_failed_records.add(
-                        self._last_auto_decision.record_id
-                    )
+                except (TaichiCompilationError, TaichiRuntimeError) as error:
+                    self._reject_auto_record(error)
                 else:
                     processed = _process_args(self._kernel, combined_args, kwargs)
                     key = self._kernel._ensure_compiled_with_task_launch_policy(
