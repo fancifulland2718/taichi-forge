@@ -85,7 +85,7 @@ def main(mode, artifact, output):
     with runtime:
         module = runtime.load_module(artifact)
         blas, scene = create_blas(runtime), None
-        scene = create_tlas(runtime, blas)
+        scene = create_tlas(runtime, blas, sbt_record_offsets=(3, 7))
         base_shapes = dict(
             seed=(3, 3),
             seed_indices=(1, 3),

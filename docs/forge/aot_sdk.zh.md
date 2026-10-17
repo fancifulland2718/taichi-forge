@@ -206,7 +206,7 @@ Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray
 | `triangle_scene` | 资源：`vertices`、`indices` | `vertex_count`、`triangle_count` |
 | `triangle_blas` | 资源：`vertices`、`indices`，可选 `opacity_micromap` | `vertex_count`、`triangle_count`，可选 `opaque`（有 micromap 时默认 false，否则 true） |
 | `opacity_micromap` | 资源：host blob `data`、`descriptors`，可选 `indices` | `triangle_count` |
-| `instance_tlas` | 资源：`transforms`、`blas_0` ... `blas_(instance_count-1)` | `instance_count`，可选 `custom_indices`、`visibility_masks` |
+| `instance_tlas` | 资源：`transforms`、`blas_0` ... `blas_(instance_count-1)` | `instance_count`，可选 `custom_indices`、`visibility_masks`、`sbt_record_offsets` |
 | `refit` | 操作：`scene`、`vertices` | 空对象 |
 | `blas_build` | 操作：`scene`（BLAS）、`vertices`、`indices` | 空对象 |
 | `instance_refit` | 操作：`scene`、`transforms` | 空对象 |
@@ -241,7 +241,10 @@ AS 遍历本身可微。面过滤及 compact occlusion 尚未由此 AOT 工厂�
 独立 `triangle_blas` 可供多个 `instance_tlas` 共享，也可在同一 TLAS 中重复引用。
 绑定按 instance ordinal 排列；primitive index 保持各 BLAS 的输入三角形顺序。
 可选 metadata 数组必须恰有 `instance_count` 项：custom ID 为24位（默认0），mask
-为8位（默认255）；批次查询使用 ray mask255。变换为紧凑 f32 行主序仿射矩阵，接受
+为8位（默认255）。可选 `sbt_record_offsets` 每实例一项、24位、默认0；host/device
+BUILD 和 UPDATE 均保留这些冻结值，改变偏移需重建 TLAS。批次/inline ray query 不
+按 SBT 选记录；保留该元数据不代表已支持 AOT ray-program 执行。批次查询使用 ray
+mask255。变换为紧凑 f32 行主序仿射矩阵，接受
 scalar `[I,12]` / `[I,3,4]` 或 element shape `[3,4]` 的 AoS `[I]`。沿用 JIT 合同，
 由调用方提供有限且可逆的变换。首次构建直接打包设备矩阵并 build TLAS 一次，不回读
 矩阵，也不先构建单位矩阵 TLAS。成功返回后可关闭种子；TLAS 继续持有依赖的 BLAS。
@@ -343,7 +346,7 @@ module.add_execution_plan("mixed_step", graph, resource_bindings={
 不同 BLAS 即使几何相同也不能替代所要求的资源身份。公共 TLAS 的依赖不能在同一 plan
 里另外私有重建。原始 BLAS handle 关闭后，仍存活的源 TLAS 可导出其保留的几何。
 构建输入仍需显式提供，不会快照当前 AS 内存或保留的源数组。host 矩阵和 metadata
-从各不可变录制中导出，不因源 TLAS 随后的修改而改变。非零 SBT offset 尚未由此 exporter 覆盖。
+从各不可变录制中导出，不因源 TLAS 随后的修改而改变。冻结的非零实例 SBT offset 作为构建元数据保留。
 Windows 小型测试覆盖私有/公共/混合导出、发布 kernel 前拒绝错误映射、执行前拒绝
 alias 不匹配、保留的源几何、独立/借用消费端和下游梯度。另有 JIT/AOT 对照覆盖索引绕序
 重建、host UPDATE/BUILD 后设备矩阵更新、metadata 保持、区间 miss 和准备失败后的重放。

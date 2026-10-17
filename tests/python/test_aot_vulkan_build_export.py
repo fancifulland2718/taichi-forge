@@ -33,7 +33,11 @@ def test_vulkan_build_recordings_export(tmp_path):
                 transform[11] += dz
                 result.append(
                     ti.hardware.ray.RayInstance(
-                        blas, transform=tuple(transform), custom_index=custom[i], mask=0 if masked and i == 1 else 255
+                        blas,
+                        transform=tuple(transform),
+                        custom_index=custom[i],
+                        mask=0 if masked and i == 1 else 255,
+                        sbt_record_offset=3 + 4 * i,
                     )
                 )
             return result
@@ -94,7 +98,11 @@ def test_vulkan_build_recordings_export(tmp_path):
                 ),
             )
             costs[("private" if private else "public") + "_export_ms"] = (time.perf_counter() - start) * 1000
-            operations = json.loads(plan.to_json())["operations"]
+            document = json.loads(plan.to_json())
+            if private:
+                tlas = next(r for r in document["resources"] if r.get("operation") == "instance_tlas")
+                assert tlas["parameters"]["sbt_record_offsets"] == [3, 7]
+            operations = document["operations"]
             updates = [op for op in operations if op.get("operation") == "instance_update"]
             assert [op["parameters"]["update"] for op in updates] == [True, False]
             assert [op["parameters"]["custom_indices"] for op in updates] == [[31, 37], [41, 43]]

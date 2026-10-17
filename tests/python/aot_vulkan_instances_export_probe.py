@@ -31,7 +31,7 @@ def main(mode, artifact, output):
     with runtime:
         module = runtime.load_module(artifact)
         blas = create_blas(runtime, opaque=False)
-        scene = create_tlas(runtime, blas)
+        scene = create_tlas(runtime, blas, sbt_record_offsets=(3, 0xFFFFFF))
         resources = dict(blas=blas, scene=scene)
         retained = []
         for name in ("private_step", "public_step", "mixed", "private_query", "public_query"):

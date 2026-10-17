@@ -80,8 +80,6 @@ def _scene(context, scene):
     if type(scene) is not InstanceTLAS:
         raise TaichiRuntimeError("AOT Vulkan query export requires a qualified scene")
     scene._validate_lifetime()
-    if any(scene.sbt_record_offsets):
-        raise TaichiRuntimeError("AOT Vulkan recording export does not yet reconstruct nonzero SBT offsets")
     context.resource_links(scene, {f"blas_{i}": blas for i, blas in enumerate(scene._topology)})
     if (public := context.public_resource(scene)) is not None:
         return public
@@ -91,15 +89,18 @@ def _scene(context, scene):
         bindings = dict(inputs)
         for ordinal, blas in enumerate(scene._topology):
             bindings[f"blas_{ordinal}"] = _geometry(context, blas, retained_by=scene)
+        parameters = dict(
+            instance_count=scene.instance_count,
+            custom_indices=[instance.custom_index for instance in scene._instances],
+            visibility_masks=[instance.mask for instance in scene._instances],
+        )
+        if any(scene.sbt_record_offsets):
+            parameters["sbt_record_offsets"] = list(scene.sbt_record_offsets)
         return context.resource(
             scene,
             "vulkan_ray",
             "instance_tlas",
-            parameters=dict(
-                instance_count=scene.instance_count,
-                custom_indices=[instance.custom_index for instance in scene._instances],
-                visibility_masks=[instance.mask for instance in scene._instances],
-            ),
+            parameters=parameters,
             bindings=bindings,
         )
 

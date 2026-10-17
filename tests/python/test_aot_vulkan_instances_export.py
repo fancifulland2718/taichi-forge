@@ -57,8 +57,12 @@ def test_vulkan_instance_recording_export(tmp_path):
         scene = stack.enter_context(
             ti.hardware.ray.InstanceTLAS(
                 [
-                    ti.hardware.ray.RayInstance(blas, transform=tuple(TRANSFORMS[:12]), custom_index=17),
-                    ti.hardware.ray.RayInstance(blas, transform=tuple(TRANSFORMS[12:]), custom_index=21),
+                    ti.hardware.ray.RayInstance(
+                        blas, transform=tuple(TRANSFORMS[:12]), custom_index=17, sbt_record_offset=3
+                    ),
+                    ti.hardware.ray.RayInstance(
+                        blas, transform=tuple(TRANSFORMS[12:]), custom_index=21, sbt_record_offset=0xFFFFFF
+                    ),
                 ]
             )
         )
@@ -118,6 +122,7 @@ def test_vulkan_instance_recording_export(tmp_path):
             tlas = next(r for r in native if r["operation"] == "instance_tlas")
             assert tlas["bindings"]["blas_0"] == tlas["bindings"]["blas_1"]
             assert tlas["parameters"]["custom_indices"] == [17, 21]
+            assert tlas["parameters"]["sbt_record_offsets"] == [3, 0xFFFFFF]
             assert next(r for r in native if r["operation"] == "triangle_blas")["parameters"]["opaque"] is False
             public_map = {scene: "scene"} if query_only else {blas: "blas", scene: "scene"}
             public = module.add_execution_plan(

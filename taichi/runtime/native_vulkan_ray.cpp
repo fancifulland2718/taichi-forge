@@ -92,6 +92,7 @@ struct TlasDescription {
   static constexpr uint32_t version = 1;
   std::vector<std::shared_ptr<BlasAccess>> blases;
   std::vector<VulkanRayInstanceInfo> instances;
+  std::vector<uint32_t> sbt_record_offsets;
   NativeArrayBinding transforms;
 };
 struct QueryDescription {
@@ -455,7 +456,7 @@ std::unique_ptr<VulkanInstanceTlas> make_tlas(NativePreparationContext &context,
     // Retain the original owner, including its fault-domain retirement policy.
     blases.emplace_back(blas, &blas->blas_core());
   return std::make_unique<VulkanInstanceTlas>(
-      &device, std::move(blases), std::vector<uint32_t>(d.blases.size(), 0));
+      &device, std::move(blases), d.sbt_record_offsets);
 }
 
 VulkanRayTransformPacket transform_packet(Device &device,
@@ -794,16 +795,19 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
       "vulkan_ray", "instance_tlas", {"transforms"},
       [](const liong::json::JsonValue &p)
           -> NativeOperationRegistry::Binder<TlasDescription> {
-        operation_json::fields(
-            p, {"instance_count", "custom_indices", "visibility_masks"});
+        operation_json::fields(p, {"instance_count", "custom_indices",
+                                   "visibility_masks", "sbt_record_offsets"});
         const auto size = count(p["instance_count"]);
         const auto ids =
             instance_values(p, "custom_indices", size, 0xffffffu, 0);
         const auto masks =
             instance_values(p, "visibility_masks", size, 0xffu, 0xffu);
-        return [size, ids, masks](const NativeOperationBindings &b) {
+        const auto sbt =
+            instance_values(p, "sbt_record_offsets", size, 0xffffffu, 0);
+        return [size, ids, masks, sbt](const NativeOperationBindings &b) {
           TlasDescription d;
           d.transforms = b.at("transforms").array();
+          d.sbt_record_offsets = sbt;
           d.instances.resize(size);
           d.blases.reserve(size);
           for (uint32_t i = 0; i < size; ++i) {

@@ -103,13 +103,16 @@ def create_blas(runtime, opaque=True):
     return blas
 
 
-def create_tlas(runtime, blas, custom=(17, 21), masks=(255, 255)):
+def create_tlas(runtime, blas, custom=(17, 21), masks=(255, 255), sbt_record_offsets=None):
     seed = runtime.ndarray("f32", 2, element_shape=(3, 4))
     write(seed, TRANSFORMS)
+    parameters = dict(instance_count=2, custom_indices=list(custom), visibility_masks=list(masks))
+    if sbt_record_offsets is not None:
+        parameters["sbt_record_offsets"] = list(sbt_record_offsets)
     tlas = runtime.native_resource(
         "vulkan_ray",
         "instance_tlas",
-        parameters=dict(instance_count=2, custom_indices=list(custom), visibility_masks=list(masks)),
+        parameters=parameters,
         bindings=dict(blas_0=blas, blas_1=blas, transforms=seed),
     )
     seed.close()
@@ -144,6 +147,10 @@ def rejection_checks(runtime, module, blas, scene, frame):
         (dict(instance_count=2, custom_indices=[1]), dict(blas_0=blas, blas_1=blas), "metadata"),
         (dict(instance_count=2, visibility_masks=[255, 256]), dict(blas_0=blas, blas_1=blas), "bit width"),
         (dict(instance_count=2, custom_indices=[0, 1 << 24]), dict(blas_0=blas, blas_1=blas), "bit width"),
+        (dict(instance_count=2, sbt_record_offsets=[1]), dict(blas_0=blas, blas_1=blas), "metadata"),
+        (dict(instance_count=2, sbt_record_offsets=[0, 1 << 24]), dict(blas_0=blas, blas_1=blas), "bit width"),
+        (dict(instance_count=2, sbt_record_offsets=[-1, 0]), dict(blas_0=blas, blas_1=blas), "integer"),
+        (dict(instance_count=2, sbt_record_offsets=[True, 0]), dict(blas_0=blas, blas_1=blas), "integer"),
         (dict(instance_count=2), dict(blas_0=scene, blas_1=blas), "type mismatch"),
         (dict(instance_count=2), dict(blas_0=blas), "bindings"),
     ):

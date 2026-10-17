@@ -168,7 +168,8 @@ TEST(VulkanRayScene, SharedBlasAndDeviceTransformsWithoutProgram) {
   EXPECT_ANY_THROW((VulkanInstanceTlas(device, {nullptr}, {0})));
   auto tlas = std::make_unique<VulkanInstanceTlas>(
       device, std::vector<std::shared_ptr<VulkanTriangleBlas>>{blas, blas},
-      std::vector<uint32_t>{0, 0});
+      std::vector<uint32_t>{3, 0xffffff});
+  EXPECT_EQ(tlas->max_sbt_record_offset(), 0xffffffu);
   EXPECT_EQ(tlas->memory_statistics().known_allocation_count, 3u);
   std::vector<VulkanRayInstanceInfo> metadata(2);
   metadata[0].custom_index = 17;
@@ -207,6 +208,7 @@ TEST(VulkanRayScene, SharedBlasAndDeviceTransformsWithoutProgram) {
     tlas->record_query(commands.get(), query);
     stream->submit_synced(commands.get());
     blas.reset();  // TLAS retains one shared geometry across both ordinals.
+    EXPECT_EQ(tlas->max_sbt_record_offset(), 0xffffffu);
     ASSERT_FALSE(weak.expired());
     std::array<float, 8> values;
     std::array<int32_t, 8> hit_ids;

@@ -260,7 +260,7 @@ under provider `vulkan_ray`, version 1:
 | `triangle_scene` | Resource: `vertices`, `indices` | `vertex_count`, `triangle_count` |
 | `triangle_blas` | Resource: `vertices`, `indices`, optional `opacity_micromap` | `vertex_count`, `triangle_count`, optional `opaque` (default false with a micromap, true otherwise) |
 | `opacity_micromap` | Resource: host blobs `data`, `descriptors`, optional `indices` | `triangle_count` |
-| `instance_tlas` | Resource: `transforms`, `blas_0` ... `blas_(instance_count-1)` | `instance_count`, optional `custom_indices`, `visibility_masks` |
+| `instance_tlas` | Resource: `transforms`, `blas_0` ... `blas_(instance_count-1)` | `instance_count`, optional `custom_indices`, `visibility_masks`, `sbt_record_offsets` |
 | `refit` | Operation: `scene`, `vertices` | Empty object |
 | `blas_build` | Operation: `scene` (BLAS), `vertices`, `indices` | Empty object |
 | `instance_refit` | Operation: `scene`, `transforms` | Empty object |
@@ -308,7 +308,11 @@ Independent `triangle_blas` resources can be shared by several `instance_tlas`
 resources and repeated within one TLAS. Bindings are in instance ordinal order;
 primitive indices retain each BLAS's input triangle order. Optional metadata arrays
 must have `instance_count` entries: custom IDs are 24-bit (default 0), masks are
-8-bit (default 255). Batch queries use ray mask 255. Transforms are packed f32
+8-bit (default 255). Optional `sbt_record_offsets` are 24-bit values, one per
+instance, defaulting to zero. They remain frozen through host/device BUILD and
+UPDATE; changing them requires a new TLAS. Batch/inline ray queries do not select
+SBT records; preserving these values does not provide AOT ray-program execution.
+Batch queries use ray mask 255. Transforms are packed f32
 row-major affine matrices, either scalar `[I,12]` / `[I,3,4]`, or AoS `[I]` with
 element shape `[3,4]`. As in JIT, the caller supplies finite, invertible transforms.
 Initial construction packs device matrices and builds the TLAS once; it does not
@@ -435,8 +439,8 @@ be reconstructed privately in the same plan. A still-live source TLAS may export
 its retained geometry after the original BLAS handle closes. Construction inputs
 remain explicit; export does not snapshot live AS memory or retained source
 arrays. Captured host matrices and metadata are taken from each immutable
-recording, even if the source TLAS is changed later. Nonzero SBT offsets are not
-covered by this exporter yet. Small
+recording, even if the source TLAS is changed later. Frozen nonzero instance SBT
+offsets are preserved as construction metadata. Small
 Windows tests cover private/public/mixed export, invalid mappings before kernel
 publication, alias rejection before execution, retained-source geometry,
 standalone/borrowed consumers, and downstream gradients. An additional JIT/AOT
