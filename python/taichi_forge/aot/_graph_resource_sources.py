@@ -63,7 +63,8 @@ class SourceResourceBindings:
         return set().union(*(handler.used for handler in self._handlers.values()))
 
     def kernel_resource(self, context, arg):
-        return self._handlers[arg.tag].kernel_resource(context, arg)
+        tag = core.ArgKind.TEXTURE if arg.tag == core.ArgKind.RWTEXTURE else arg.tag
+        return self._handlers[tag].kernel_resource(context, arg)
 
     def validate_used(self):
         for handler in self._handlers.values():

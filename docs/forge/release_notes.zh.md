@@ -37,7 +37,8 @@
 
 - 显式 Vulkan AOT 计划可重建整数 storage 图像并绑定 RWTexture kernel，覆盖整数
   MRT 和指定 mip 读写；复用图像所有者、上传、初始化及 GFX 录制路径。已验证独立/
-  借用重放及下游数值梯度；graphics/RWTexture Graph 自动导出仍待接通。
+  借用重放及下游数值梯度；普通/selected Vulkan compute Graph 可导出 RWTexture
+  别名及完整 mip seed，复用编译 entry。graphics recording 自动导出仍待接通。
 
 - 显式 Vulkan AOT 计划可重建光栅 pipeline、颜色/深度附件，并通过 JIT 共用图形
   核心录制直接、索引及实例化绘制。完整 clear 无需 seed 上传，LOAD 和采样保留

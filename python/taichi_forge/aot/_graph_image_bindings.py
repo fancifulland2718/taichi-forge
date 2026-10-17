@@ -1,4 +1,4 @@
-"""Cold sampled-image metadata and explicit consumer seeds for Graph export."""
+"""Cold image metadata and explicit consumer seeds for Graph export."""
 
 from dataclasses import asdict
 
@@ -6,6 +6,7 @@ from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.types.texture_type import FORMAT2TY_CH, is_float_sampled_texture_format
 
 
 class SourceImageBindings:
@@ -39,7 +40,7 @@ class SourceImageBindings:
         owner = self.owners.get(name)
         if owner is None:
             raise TaichiRuntimeError(
-                "AOT sampled image needs its Texture in source_bindings"
+                "AOT image needs its Texture in source_bindings"
             )
         self._validate_owner(owner)
         return owner
@@ -48,14 +49,42 @@ class SourceImageBindings:
         # Qualified binding preflight runs before any resource is reconstructed.
         # Keep one image owner even when sampling precedes a later shader write.
         if self.require(name) is not owner:
-            raise TaichiRuntimeError("AOT ray image source differs from its fixed launch binding")
+            raise TaichiRuntimeError("AOT storage image source differs from its fixed launch binding")
         self._storage_owners.add(id(owner))
+
+    def validate_argument(self, arch, arg):
+        owner = self.require(arg.name)
+        fmt, shape, _, _ = owner._creation_metadata
+        if len(shape) != len(arg.texture_shape):
+            raise TaichiRuntimeError("AOT Texture dimension differs from the Graph kernel argument")
+        if arg.tag == core.ArgKind.RWTEXTURE:
+            if arch != core.Arch.vulkan:
+                raise TaichiRuntimeError("AOT RWTexture Graph export requires Vulkan")
+            matches = (
+                fmt == arg.texture_format
+                if arg.texture_format != core.Format.unknown
+                else FORMAT2TY_CH[fmt] == (arg.channel_format(), arg.num_channels)
+            )
+            if not matches:
+                raise TaichiRuntimeError("AOT RWTexture format differs from the Graph kernel argument")
+            self.require_storage(arg.name, owner)
+        elif arg.tag != core.ArgKind.TEXTURE or not is_float_sampled_texture_format(fmt):
+            raise TaichiRuntimeError("AOT sampled Texture requires a floating sampling format")
+
+    def preflight(self, arch, requirements):
+        # Reuse the Graph's frozen resource contracts, including aliases whose
+        # writes occur after an earlier sampling kernel. No second graph walk.
+        for arg in requirements:
+            self.validate_argument(arch, arg)
 
     def resource(self, context, name):
         from taichi_forge.hardware._sampling import SamplerConfig
 
         owner = self.require(name)
         fmt, shape, mip_levels, sampler = owner._creation_metadata
+        sampled = is_float_sampled_texture_format(fmt)
+        if not sampled and (context.arch != core.Arch.vulkan or id(owner) not in self._storage_owners):
+            raise TaichiRuntimeError("AOT integer image requires a Vulkan storage-image use")
         if context.arch not in (core.Arch.cuda, core.Arch.vulkan) or (
             mip_levels != 1 and (context.arch != core.Arch.vulkan or len(shape) != 2)
         ):
@@ -92,13 +121,13 @@ class SourceImageBindings:
             resource = context.resource(
                 owner,
                 "image",
-                "sampled",
+                "sampled" if sampled else "storage",
                 parameters=dict(
                     format=fmt.name,
                     shape=list(shape),
                     **({"mip_levels": mip_levels} if mip_levels != 1 else {}),
-                    **sampling,
-                    **({"storage": True} if id(owner) in self._storage_owners else {}),
+                    **(sampling if sampled else {}),
+                    **({"storage": True} if sampled and id(owner) in self._storage_owners else {}),
                 ),
             )
             context.initialize_native_once(
@@ -111,17 +140,13 @@ class SourceImageBindings:
             return resource
 
         resource = context.resource_once(
-            owner, build, policy="sampled_image_consumer_seed"
+            owner, build, policy="image_consumer_seed"
         )
         self.used.add(name)
         return resource
 
     def kernel_resource(self, context, arg):
-        owner = self.require(arg.name)
-        if len(owner._creation_metadata[1]) != len(arg.texture_shape):
-            raise TaichiRuntimeError(
-                "AOT sampled Texture dimension differs from the Graph kernel argument"
-            )
+        self.validate_argument(context.arch, arg)
         return self.resource(context, arg.name)
 
     def validate_used(self):

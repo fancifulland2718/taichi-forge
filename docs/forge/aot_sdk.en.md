@@ -861,7 +861,7 @@ indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
 LOAD, changed inputs and bindings, shared/private retirement, and downstream
 numeric gradients. This is not differentiation of rasterization. Automatic
 graphics Graph export, mesh/indirect draws, descriptor arrays, shader AS
-bindings and automatic RWTexture Graph export remain separate work.
+bindings remain separate work.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use
@@ -885,8 +885,25 @@ Windows qualification covers 2D floating/unsigned/signed images, integer MRT
 clear/draw → kernel load/store → readback, public/private owners, non-square
 mip updates, replay, close/reset and downstream numeric gradients. Neither
 storage-image operations nor rasterization become differentiable. This does
-not qualify automatic graphics/RWTexture Graph export or legacy CGraph texture
-arguments; these plans use compiled kernel entries directly.
+not qualify automatic graphics Graph export or legacy CGraph texture arguments;
+these plans use compiled kernel entries directly.
+
+Ordinary and selected Vulkan compute Graphs can also export RWTexture kernel
+arguments through `module.add_execution_plan`. Supply producer Textures in
+`source_bindings` and consumer pixel seeds or public resource names in
+`resource_bindings`, as for sampled images below. Frozen Graph requirements
+collect storage usage before resource creation, so aliases that sample first
+and write later share one image and one initialization. Floating images retain
+sampled semantics with storage usage; integer images become `image/storage`.
+All allocated mips need their explicit seeds. No producer pixels are implicitly
+copied. Wrong dimensions/formats fail before publishing module kernels.
+
+Windows checks cover ordinary/selected export, aliased sampling and writes,
+unsigned image updates, nonzero mip shape/load/store, public/private resources,
+initialization-only seed retirement, replay and real downstream kernel gradients.
+Private/public variants reuse the same compiled kernel entries. CUDA RWTexture,
+automatic graphics recordings and imported integer Program Textures remain
+outside this qualification. The export adds no submission or runtime layer.
 
 CUDA and Vulkan Graph export also accept sampled Texture kernel arguments,
 including qualified immutable compute recipes. CUDA preserves its

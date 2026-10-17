@@ -343,7 +343,7 @@ class _ExportContext:
             self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, name=name)
 
     def kernel_binding(self, arg):
-        if arg.tag in (core.ArgKind.TEXTURE, core.ArgKind.ACCELERATION_STRUCTURE):
+        if arg.tag in (core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.ACCELERATION_STRUCTURE):
             return self.source_resources.kernel_resource(self, arg)
         if arg.name in self.control_names:
             if arg.tag != core.ArgKind.NDARRAY or str(arg.dtype()) != "i32":
@@ -441,8 +441,8 @@ class _ExportContext:
         bindings = [self.kernel_binding(arg) for arg in args]
         if self.source_arrays is not None:
             self.source_arrays.validate_kernel(args, bindings)
-        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY, core.ArgKind.TEXTURE, core.ArgKind.ACCELERATION_STRUCTURE) for arg in args):
-            raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified Texture/AS bindings")
+        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY, core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.ACCELERATION_STRUCTURE) for arg in args):
+            raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified image/AS bindings")
         identity = (id(kernel), launch_abi)
         name = self._kernel_names.get(identity)
         if name is None:
@@ -1101,6 +1101,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             resource_inputs=resource_inputs,
         )
         context.declare_private_bindings(spec.fixed_runtime_args)
+        source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
         context.control_names = set(spec.control_binding_plan.names)
         # Dispatch actions may already be flattened into ordinary physical
         # kernels. Reconstruct their concrete binding contracts before lowering

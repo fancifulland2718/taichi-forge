@@ -666,7 +666,7 @@ clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样
 
 Windows 验证覆盖独立/借用执行、直接和索引/实例化绘制、uniform/采样描述符、颜色/深度
 clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度；不提供光栅化求导。
-graphics Graph 自动导出、mesh/indirect、描述符数组、shader AS 和 RWTexture 自动 Graph 导出
+graphics Graph 自动导出、mesh/indirect、描述符数组和 shader AS
 仍为后续工作。
 
 显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
@@ -684,8 +684,21 @@ kernel entry 按资源名绑定 `ti.types.rw_texture` 参数。准备期检查 s
 
 Windows 验证覆盖二维浮点/有符号/无符号图像、整数 MRT clear/draw → kernel load/store
 → 回读、公私所有者、非方形 mip 更新、重放、close/reset 和下游数值梯度；不提供图像
-读写或光栅化求导，也不扩展到 graphics/RWTexture Graph 自动导出或旧 CGraph 纹理参数。
+读写或光栅化求导，也不扩展到 graphics Graph 自动导出或旧 CGraph 纹理参数。
 这些显式计划直接使用已编译 kernel entry。
+
+普通和 selected Vulkan compute Graph 也可通过 `module.add_execution_plan` 导出
+RWTexture kernel 参数。与下文采样图像相同，在 `source_bindings` 指定 producer
+Texture，在 `resource_bindings` 指定 consumer 像素 seed 或公共资源名。导出使用
+冻结的 Graph 参数需求，在重建前收集 storage 用途；即使别名先采样后写入，仍只
+生成一份图像和一次初始化。浮点图像保留 sampled 语义并增加 storage 用途，整数
+图像生成 `image/storage`；所有已分配 mip 须有明确 seed，不隐式复制 producer 像素。
+维度/格式不符会在模块 kernel 发布前拒绝。
+
+Windows 验证覆盖普通/selected 导出、别名采样和写入、无符号图像更新、非零 mip
+shape/load/store、公私资源、初始化专用 seed 退休、重放及真实下游 kernel 梯度。
+私有和公共版本复用相同编译 entry。CUDA RWTexture、graphics recording 自动导出、
+整数 Program Texture 导入仍不在本批范围；导出不增加提交或运行层。
 
 `prepared.info["native_resource_bytes"]` 独立报告私有 native 资源已知的设备载荷，
 要求配对 ABI89 组件。CUDA/Vulkan 受管图像按紧凑 texel 字节统计，包含全部 mip；
