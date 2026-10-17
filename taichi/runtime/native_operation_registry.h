@@ -12,6 +12,9 @@
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+namespace gfx {
+class GfxRuntime;
+}
 
 struct NativeOperationCapability {
   std::string kind;
@@ -42,6 +45,9 @@ struct NativePreparationContext {
   Device &device;
   NativeProviderSession providers;
   std::shared_ptr<RuntimeFaultDomain> fault_domain;
+  // Borrowed from the same owner. Resources retire before this runtime; image
+  // factories use its existing queue, layout tracking and sampler registry.
+  gfx::GfxRuntime *gfx_runtime{nullptr};
 };
 
 // Build privately, then publish as const. No static registration side effects,

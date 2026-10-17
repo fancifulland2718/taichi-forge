@@ -7,8 +7,12 @@
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/texture_storage.h"
-#ifdef TI_WITH_CUDA
 #include "taichi/program/runtime_fault.h"
+#ifdef TI_WITH_VULKAN
+#include "taichi/runtime/gfx/runtime.h"
+#include "taichi/rhi/vulkan/vulkan_device.h"
+#endif
+#ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_device.h"
 #endif
 
@@ -17,10 +21,11 @@ void NativeImageKernelBinding::validate_parameter(
     Arch arch,
     Device &device,
     const CallableBase &kernel) const {
-  if (!image_ || arch != Arch::cuda || image_->arch() != arch ||
-      &image_->device() != &device)
+  if (!image_ || (arch != Arch::cuda && arch != Arch::vulkan) ||
+      image_->arch() != arch || &image_->device() != &device)
     throw std::invalid_argument(
-        "Kernel sampled image requires a qualified same-device CUDA owner");
+        "Kernel sampled image requires a qualified same-device CUDA/Vulkan "
+        "owner");
   const auto found = kernel.nested_parameters.find(argument_);
   if (found == kernel.nested_parameters.end() ||
       found->second.ptype != ParameterType::kTexture ||
@@ -54,11 +59,20 @@ NativeImageKernelBinding::NativeImageKernelBinding(
       kernel_(&kernel),
       context_(&context) {
   validate_parameter(arch, device, kernel);
-  cuda_object_ = image_->cuda_sampled_object();
-  if (!cuda_object_)
-    throw std::invalid_argument("Managed CUDA sampled object is null");
-  context.set_arg_texture_impl(argument_,
-                               reinterpret_cast<intptr_t>(&cuda_object_));
+  if (arch == Arch::cuda) {
+    cuda_object_ = image_->cuda_sampled_object();
+    if (!cuda_object_)
+      throw std::invalid_argument("Managed CUDA sampled object is null");
+    context.set_arg_texture_impl(argument_,
+                                 reinterpret_cast<intptr_t>(&cuda_object_));
+  } else {
+    gfx_image_ = image_->gfx_sampled_allocation();
+    if (gfx_image_.device != &device)
+      throw std::invalid_argument(
+          "Managed GFX sampled image is foreign or null");
+    context.set_arg_texture_impl(argument_,
+                                 reinterpret_cast<intptr_t>(&gfx_image_));
+  }
   const auto &p = image_->parameters();
   const std::uint32_t shape[] = {p.x, p.y, p.z};
   auto shape_index = argument_;
@@ -79,8 +93,11 @@ void NativeImageKernelBinding::validate(
   validate_parameter(arch, device, kernel);
   const auto pointer = context.array_ptrs.find(argument_);
   const auto kind = context.device_allocation_type.find(argument_);
+  const void *descriptor = arch == Arch::cuda
+                               ? static_cast<const void *>(&cuda_object_)
+                               : static_cast<const void *>(&gfx_image_);
   if (kernel_ != &kernel || context_ != &context ||
-      pointer == context.array_ptrs.end() || pointer->second != &cuda_object_ ||
+      pointer == context.array_ptrs.end() || pointer->second != descriptor ||
       kind == context.device_allocation_type.end() ||
       kind->second != LaunchContextBuilder::DevAllocType::kTexture)
     throw std::invalid_argument(
@@ -300,6 +317,130 @@ NativeOperationAvailability available() {
           0};
 }
 #endif
+
+#ifdef TI_WITH_VULKAN
+// Vulkan keeps native X-contiguous image order. Pixel arrays describe packed
+// storage, as with managed JIT uploads; no transpose kernel or host copy is
+// added.
+BufferImageCopyParams packed_image_copy(const ImageParams &p) {
+  BufferImageCopyParams copy{};
+  copy.buffer_row_length = p.x;
+  copy.buffer_image_height = p.y;
+  copy.image_extent = {p.x, p.y, p.z};
+  return copy;
+}
+
+class VulkanSampledImage final : public NativeSampledImage {
+ public:
+  VulkanSampledImage(NativePreparationContext &context,
+                     const SampledImageDescription &d)
+      : NativeSampledImage(d.parameters, bool(d.pixels)),
+        device_(context.device),
+        runtime_(*context.gfx_runtime),
+        fault_(context.fault_domain) {
+    const auto [type, channels] =
+        buffer_format2type_channels(d.parameters.format);
+    bytes_ = size_t(data_type_size(type)) * channels;
+    for (auto extent : {d.parameters.x, d.parameters.y, d.parameters.z}) {
+      if (extent > std::numeric_limits<size_t>::max() / bytes_)
+        throw std::overflow_error("Sampled image logical size overflows");
+      bytes_ *= extent;
+    }
+  }
+  void initialize(const SampledImageDescription &d) {
+    auto params = d.parameters;
+    params.usage = ImageAllocUsage::Sampled;
+    image_ = runtime_.create_image(params);
+    if (d.pixels) {
+      const auto image = image_;
+      const auto source = d.pixels->pointer;
+      const auto copy = packed_image_copy(params);
+      initialization_pending_ = true;
+      runtime_.enqueue_compute_op_lambda(
+          [image, source, copy](Device *, CommandList *commands) {
+            commands->buffer_barrier(source);
+            commands->buffer_to_image(image, source, ImageLayout::transfer_dst,
+                                      copy);
+          },
+          {{image, ImageLayout::transfer_dst, ImageLayout::shader_read}});
+      runtime_.synchronize();
+      initialization_pending_ = false;
+    }
+  }
+  ~VulkanSampledImage() override {
+    if (image_.device == nullptr || !fault_->backend_calls_safe() ||
+        fault_->state() == RuntimeLifecycleState::kFinalized)
+      return;
+    // Fixed execution has retired its command buffers before this owner.
+    // Failed cold preparation is covered by the enclosing runtime fault domain.
+    try {
+      if (initialization_pending_)
+        runtime_.synchronize();
+      runtime_.untrack_image(image_);
+      static_cast<GraphicsDevice &>(device_).destroy_image(image_);
+    } catch (...) {
+    }
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  size_t workspace_bytes() const override {
+    return 0;
+  }
+  size_t logical_bytes() const override {
+    return bytes_;
+  }
+  DeviceAllocation gfx_sampled_allocation() const override {
+    return image_;
+  }
+
+ private:
+  Device &device_;
+  gfx::GfxRuntime &runtime_;
+  std::shared_ptr<RuntimeFaultDomain> fault_;
+  DeviceAllocation image_{kDeviceNullAllocation};
+  size_t bytes_{0};
+  bool initialization_pending_{false};
+};
+
+class VulkanImageUpload final : public NativeOperation {
+ public:
+  explicit VulkanImageUpload(const ImageUploadOperation &op)
+      : image_(op.image),
+        source_(op.pixels.pointer),
+        copy_(packed_image_copy(op.image->parameters())) {
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return image_->device();
+  }
+  size_t workspace_bytes() const override {
+    return 0;
+  }
+  void validate_recording(NativeRecordingState &state) const override {
+    state.initialized.insert(image_.get());
+  }
+  std::vector<std::pair<DeviceAllocation, ImageLayout>> vulkan_image_bindings()
+      const override {
+    return {{image_->gfx_sampled_allocation(), ImageLayout::transfer_dst}};
+  }
+  void record_vulkan(Device *, CommandList *commands) override {
+    commands->buffer_barrier(source_);
+    commands->buffer_to_image(image_->gfx_sampled_allocation(), source_,
+                              ImageLayout::transfer_dst, copy_);
+  }
+
+ private:
+  std::shared_ptr<NativeSampledImage> image_;
+  DevicePtr source_;
+  BufferImageCopyParams copy_;
+};
+#endif
 }  // namespace
 
 void register_image_operations(NativeOperationRegistry &registry) {
@@ -363,6 +504,33 @@ void register_image_operations(NativeOperationRegistry &registry) {
         return std::make_shared<CudaImageUpload>(op);
       },
       available);
+#endif
+#ifdef TI_WITH_VULKAN
+  registry.register_context_factory<SampledImageDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](NativePreparationContext &c, const SampledImageDescription &d) {
+        if (!c.gfx_runtime || c.gfx_runtime->get_ti_device() != &c.device ||
+            !c.fault_domain || !dynamic_cast<vulkan::VulkanDevice *>(&c.device))
+          throw std::invalid_argument(
+              "Sampled image requires its owner's Vulkan GFX runtime");
+        auto owner = std::make_shared<VulkanSampledImage>(c, d);
+        try {
+          owner->initialize(d);
+        } catch (const BackendRuntimeError &error) {
+          c.fault_domain->report_backend_error(error, 0);
+          throw;
+        }
+        return owner;
+      },
+      [](NativeProviderSession &) {
+        return NativeOperationAvailability{true, 0};
+      });
+  registry.register_factory<ImageUploadOperation>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](Arch, Device &, const ImageUploadOperation &op) {
+        return std::make_shared<VulkanImageUpload>(op);
+      },
+      [] { return NativeOperationAvailability{true, 0}; });
 #endif
 }
 }  // namespace taichi::lang

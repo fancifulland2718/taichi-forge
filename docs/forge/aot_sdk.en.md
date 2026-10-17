@@ -373,7 +373,7 @@ are `product(shape) * channels * channel_bytes`, separate from reported query
 workspace, which does not include image residency. Alpha recordings can export
 through the image reconstruction contract below.
 
-With matching private ABI77 components, explicit execution-plan kernels on CUDA
+With matching private ABI78 components, explicit execution-plan kernels on CUDA or Vulkan
 may bind sampled `Texture` arguments directly to `image/sampled` resource names:
 
 ```python
@@ -397,9 +397,24 @@ source. This restriction follows the [CUDA Graph update rules](https://docs.nvid
 Windows CUDA checks cover normalized 1D, non-square 2D linear/nearest sampling,
 3D axis order, seeded and GPU-updated images, captured and OptiX-ordered plans,
 shared binding retirement, and real gradients of downstream numeric kernels.
-This does not differentiate texture sampling. RWTexture, TextureCollection,
-Vulkan managed-image factories and ordinary public C API image handles still
-require separate qualification.
+This does not differentiate texture sampling. RWTexture, TextureCollection and
+ordinary public C API image handles still require separate qualification.
+
+Vulkan uses the same `image/sampled` and `image/upload` descriptions, backed by
+the owner's existing GFX runtime. Discover `image_upload` version 1 with
+`vulkan_inline` composition. Creation and initial pixel upload occur during
+preparation; recorded uploads and sampling share the existing command list,
+layout transitions and retirement. There is no extra warm host copy or wait.
+Kernel images are single-level 1D/2D/3D with the basic sampler described above.
+Vulkan Graph automatic export remains a separate qualification step.
+
+Pixel layout follows each backend's existing texture ABI. Vulkan image X is
+contiguous: a packed scalar texel at `(x,y,z)` has index `(z*Y+y)*X+x`;
+CUDA's managed logical ndarray axes use the reversed physical mapping described
+above. A `[X,Y,Z]` seed names the packed storage extent, not an implicit
+transpose. Windows Vulkan checks cover normalized 1D, non-square 2D linear/nearest
+sampling, 3D coordinates, generated uploads, missing/conditional initialization,
+real downstream numeric gradients and standalone/borrowed retirement.
 
 CUDA Graph export also accepts sampled Texture kernel arguments, including
 qualified `cuda_immutable_argument_frames` recipes:
@@ -794,7 +809,7 @@ defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
 nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
 signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
 retirement are verified. Branches share code entries and replay does not parse
-descriptions. A v16 consumer and matching ABI77 components are required.
+descriptions. A v16 consumer and matching ABI78 components are required.
 `add_execution_plan(name, graph, gradients=...)` also exports IF/SWITCH selected
 for `cuda_masked_bounded_graph` under `native_required`, preserving physical
 boundaries, conditions and prefix/suffix operations. It deduplicates code by
@@ -916,7 +931,7 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI77 components.
+This requires a v14 consumer and matching private ABI78 components.
 `add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
 `masked`, preserving its physical dispatch boundaries and generating only the
 required body variants. Code is deduplicated by source specialization and launch
@@ -936,7 +951,7 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-format requires a v15 consumer and matching ABI77 components.
+format requires a v15 consumer and matching ABI78 components.
 `add_execution_plan(name, graph)` also exports materialized flat Graphs selected
 for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
 condition, generates only their gated variants, and shares code across plans.

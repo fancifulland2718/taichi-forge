@@ -29,6 +29,9 @@ class NativeSampledImage : public NativeResource {
   virtual void upload_cuda(std::uint64_t, void *) {
     throw std::invalid_argument("Sampled image has no CUDA upload");
   }
+  virtual DeviceAllocation gfx_sampled_allocation() const {
+    throw std::invalid_argument("Sampled image has no GFX allocation");
+  }
   // Packed texel bytes; CUDA array allocation/residency is driver-private.
   virtual std::size_t logical_bytes() const = 0;
 
@@ -69,6 +72,7 @@ class NativeImageKernelBinding {
   const CallableBase *kernel_;
   const LaunchContextBuilder *context_;
   std::uint64_t cuda_object_{0};
+  DeviceAllocation gfx_image_{kDeviceNullAllocation};
 };
 
 }  // namespace taichi::lang

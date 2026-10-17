@@ -95,7 +95,7 @@ def plan_parts(policy):
     )
 
 
-def check(frame, scale):
+def check(frame, scale, arch="cuda"):
     expected = [
         128 / 255,
         1,
@@ -107,6 +107,18 @@ def check(frame, scale):
         14,
         11.5,
     ]
+    if arch == "vulkan":
+        expected = [
+            128 / 255,
+            1,
+            12 * scale,
+            5 * scale,
+            3.25 * scale,
+            4 * scale,
+            22,
+            13,
+            11.5,
+        ]
     # CUDA linear interpolation uses fractional fixed precision.
     for name in ("output", "doutput"):
         actual = read(frame[name])
@@ -121,14 +133,14 @@ def check(frame, scale):
         assert read(frame["ids"], "i") == [0, 0, 0, 1]
 
 
-def main(mode, artifact, adapter, output):
+def main(mode, artifact, adapter, output, arch="cuda"):
     if mode == "borrowed":
         import taichi_forge as ti
 
-        ti.init(arch=ti.cuda, offline_cache=False)
+        ti.init(arch=getattr(ti, arch), offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime("cuda")
+        runtime = Runtime(arch)
     retained, costs = [], []
     with runtime:
         if adapter:
@@ -136,7 +148,8 @@ def main(mode, artifact, adapter, output):
         start = time.perf_counter()
         module = runtime.load_module(artifact)
         load_ms = (time.perf_counter() - start) * 1000
-        policies = ["seeded", "updated", "family"] + (["ordered"] if adapter else [])
+        policies = ["seeded", "updated"] + (["family"] if arch == "cuda" else [])
+        policies += ["ordered"] if adapter else []
         shapes = dict(
             pixels1=(4,),
             pixels2=(3, 5),
@@ -220,7 +233,7 @@ def main(mode, artifact, adapter, output):
                         "sampled Texture",
                     )
                     conditional = json.loads(plan.to_json())
-                    conditional["version"] = 11
+                    conditional["version"] = 11 if arch == "cuda" else 12
                     uploads = conditional["operations"][1:3]
                     conditional["operations"][1:3] = [
                         dict(
@@ -228,7 +241,14 @@ def main(mode, artifact, adapter, output):
                             selector="selector",
                             selection="nonzero",
                             has_default=False,
-                            lowering=dict(kind="cuda_conditional", version=1),
+                            lowering=dict(
+                                kind=(
+                                    "cuda_conditional"
+                                    if arch == "cuda"
+                                    else "vulkan_host"
+                                ),
+                                version=1,
+                            ),
                             condition=[
                                 dict(kind="fill32", destination="selector", value=1)
                             ],
@@ -248,7 +268,9 @@ def main(mode, artifact, adapter, output):
                 call = plan.prepare(module, frame)
                 prepare_ms = (time.perf_counter() - start) * 1000
                 assert call.info["execution_kind"] == (
-                    "cuda_ordered" if policy == "ordered" else "cuda_graph"
+                    "vulkan_commands"
+                    if arch == "vulkan"
+                    else "cuda_ordered" if policy == "ordered" else "cuda_graph"
                 )
                 assert read(frame["output"]) == [-99] * 9
                 if policy == "seeded":
@@ -257,7 +279,7 @@ def main(mode, artifact, adapter, output):
                     if "scale" in frame:
                         write(frame["scale"], [scale])
                     call()
-                    check(frame, scale)
+                    check(frame, scale, arch)
                 if policy == "family":
                     changed_pixels = runtime.ndarray("f32", shapes["pixels2"])
                     raises(

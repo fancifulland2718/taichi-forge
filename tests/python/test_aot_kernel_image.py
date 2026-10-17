@@ -12,9 +12,11 @@ import taichi_forge as ti
 from tests import test_utils
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_aot_sampled_kernel_images_and_gradients(tmp_path):
     from tests.python.aot_kernel_image_probe import plan_parts
+
+    arch = ti.cfg.arch.name
 
     @ti.kernel
     def sample(
@@ -52,8 +54,10 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
     for kernel in (sample, paint, energy):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="backward")
-    policies = ["seeded", "updated", "family"]
-    adapter = os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER")
+    policies = ["seeded", "updated"] + (["family"] if arch == "cuda" else [])
+    adapter = (
+        os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER") if arch == "cuda" else None
+    )
     if adapter:
         policies.append("ordered")
     for policy in policies:
@@ -62,7 +66,34 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
     artifact = tmp_path / "kernel-images.tcm"
     module.archive(str(artifact))
     costs["bytes"] = artifact.stat().st_size
-    # An independent JIT reference uses the same public Texture sampling ABI.
+    # CUDA also has an independent JIT reference; Vulkan uses the physical
+    # X-contiguous image oracle in the consumer (not CUDA's reversed axes).
+    if arch == "cuda":
+        jit_reference(sample, energy)
+    ti.reset()
+    for mode in ("standalone", "borrowed"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                *(["-S"] if mode == "standalone" else []),
+                str(Path(__file__).with_name("aot_kernel_image_probe.py")),
+                mode,
+                str(artifact),
+                adapter or "",
+                str(tmp_path / f"{mode}.json"),
+                arch,
+            ],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "cleanup failed" not in result.stdout + result.stderr
+    (tmp_path / "producer.json").write_text(json.dumps(costs, indent=2))
+
+
+def jit_reference(sample, energy):
     textures = []
     for fmt, shape, dtype, values, nearest in (
         (ti.Format.r8, (4,), ti.u8, [0, 64, 128, 255], False),
@@ -95,23 +126,3 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
     expected = [128 / 255, 1, 4, 11, 5.75, 6, 11, 14, 11.5]
     np.testing.assert_allclose(output.to_numpy(), expected, atol=2e-3)
     np.testing.assert_allclose(output.grad.to_numpy(), expected, atol=2e-3)
-    ti.reset()
-    for mode in ("standalone", "borrowed"):
-        result = subprocess.run(
-            [
-                sys.executable,
-                *(["-S"] if mode == "standalone" else []),
-                str(Path(__file__).with_name("aot_kernel_image_probe.py")),
-                mode,
-                str(artifact),
-                adapter or "",
-                str(tmp_path / f"{mode}.json"),
-            ],
-            env=os.environ.copy(),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "cleanup failed" not in result.stdout + result.stderr
-    (tmp_path / "producer.json").write_text(json.dumps(costs, indent=2))

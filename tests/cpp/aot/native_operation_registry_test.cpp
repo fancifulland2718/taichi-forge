@@ -21,14 +21,15 @@
 
 namespace taichi::lang {
 #ifdef TI_WITH_LLVM
-TEST(NativeOperationRegistry, KernelImageBindingsRetainAndValidateQualifiedOwners) {
+TEST(NativeOperationRegistry,
+     KernelImageBindingsRetainAndValidateQualifiedOwners) {
   class Image final : public NativeSampledImage {
    public:
-    Image(Device &device, ImageParams parameters)
-        : NativeSampledImage(parameters, false), device_(device) {
+    Image(Device &device, ImageParams parameters, Arch arch)
+        : NativeSampledImage(parameters, false), device_(device), arch_(arch) {
     }
     Arch arch() const override {
-      return Arch::cuda;
+      return arch_;
     }
     Device &device() const override {
       return device_;
@@ -42,56 +43,61 @@ TEST(NativeOperationRegistry, KernelImageBindingsRetainAndValidateQualifiedOwner
     uint64_t cuda_sampled_object() const override {
       return 42;
     }
+    DeviceAllocation gfx_sampled_allocation() const override {
+      return {&device_, 42};
+    }
 
    private:
     Device &device_;
+    Arch arch_;
   };
-  Program program(Arch::x64);
-  Kernel kernel(program, [] {}, "cold_image_binding");
-  kernel.insert_texture_param(2);
-  kernel.finalize_params();
-  auto context = kernel.make_launch_context();
-  cpu::CpuDevice device, different_device;
-  ImageParams parameters{};
-  parameters.dimension = ImageDimension::d2D;
-  parameters.x = 2;
-  parameters.y = 4;
-  parameters.format = BufferFormat::r32f;
-  auto image = std::make_shared<Image>(device, parameters);
-  std::weak_ptr<Image> retained = image;
-  EXPECT_THROW((NativeImageKernelBinding(image, {0}, Arch::x64, device, kernel,
-                                         context)),
-               std::invalid_argument);
-  EXPECT_THROW((NativeImageKernelBinding(image, {0}, Arch::cuda,
-                                         different_device, kernel, context)),
-               std::invalid_argument);
-  EXPECT_THROW((NativeImageKernelBinding(image, {1}, Arch::cuda, device, kernel,
-                                         context)),
-               std::invalid_argument);
-  kernel.nested_parameters.at({0}).total_dim = 3;
-  EXPECT_THROW((NativeImageKernelBinding(image, {0}, Arch::cuda, device, kernel,
-                                         context)),
-               std::invalid_argument);
-  kernel.nested_parameters.at({0}).total_dim = 2;
-  auto binding = std::make_unique<NativeImageKernelBinding>(
-      image, std::vector<int>{0}, Arch::cuda, device, kernel, context);
-  NativeRecordingState state;
-  EXPECT_THROW(binding->validate(Arch::cuda, device, kernel, context, state),
-               std::invalid_argument);
-  state.initialized.insert(image.get());
-  EXPECT_NO_THROW(
-      binding->validate(Arch::cuda, device, kernel, context, state));
-  auto other = kernel.make_launch_context();
-  EXPECT_THROW(binding->validate(Arch::cuda, device, kernel, other, state),
-               std::invalid_argument);
-  context.device_allocation_type[{0}] =
-      LaunchContextBuilder::DevAllocType::kRWTexture;
-  EXPECT_THROW(binding->validate(Arch::cuda, device, kernel, context, state),
-               std::invalid_argument);
-  image.reset();
-  EXPECT_FALSE(retained.expired());
-  binding.reset();
-  EXPECT_TRUE(retained.expired());
+  for (const auto arch : {Arch::cuda, Arch::vulkan}) {
+    Program program(Arch::x64);
+    Kernel kernel(program, [] {}, "cold_image_binding");
+    kernel.insert_texture_param(2);
+    kernel.finalize_params();
+    auto context = kernel.make_launch_context();
+    cpu::CpuDevice device, different_device;
+    ImageParams parameters{};
+    parameters.dimension = ImageDimension::d2D;
+    parameters.x = 2;
+    parameters.y = 4;
+    parameters.format = BufferFormat::r32f;
+    auto image = std::make_shared<Image>(device, parameters, arch);
+    std::weak_ptr<Image> retained = image;
+    EXPECT_THROW((NativeImageKernelBinding(image, {0}, Arch::x64, device,
+                                           kernel, context)),
+                 std::invalid_argument);
+    EXPECT_THROW((NativeImageKernelBinding(image, {0}, arch, different_device,
+                                           kernel, context)),
+                 std::invalid_argument);
+    EXPECT_THROW(
+        (NativeImageKernelBinding(image, {1}, arch, device, kernel, context)),
+        std::invalid_argument);
+    kernel.nested_parameters.at({0}).total_dim = 3;
+    EXPECT_THROW(
+        (NativeImageKernelBinding(image, {0}, arch, device, kernel, context)),
+        std::invalid_argument);
+    kernel.nested_parameters.at({0}).total_dim = 2;
+    auto binding = std::make_unique<NativeImageKernelBinding>(
+        image, std::vector<int>{0}, arch, device, kernel, context);
+    NativeRecordingState state;
+    EXPECT_THROW(binding->validate(arch, device, kernel, context, state),
+                 std::invalid_argument);
+    state.initialized.insert(image.get());
+    EXPECT_NO_THROW(binding->validate(arch, device, kernel, context, state));
+    auto other = kernel.make_launch_context();
+    EXPECT_THROW(binding->validate(arch, device, kernel, other, state),
+                 std::invalid_argument);
+    context.device_allocation_type[{0}] =
+        LaunchContextBuilder::DevAllocType::kRWTexture;
+    EXPECT_THROW(binding->validate(arch, device, kernel, context, state),
+                 std::invalid_argument);
+    image.reset();
+    EXPECT_FALSE(retained.expired());
+    binding.reset();
+    EXPECT_TRUE(retained.expired());
+  }
 }
 #endif
 
@@ -104,30 +110,44 @@ TEST(NativeOperationRegistry,
   image.parameters = liong::json::parse_complete(
       R"({"shape":[2,4],"format":"rgba32f","filter":"nearest","address_modes":["repeat","clamp_to_edge"]})");
   image.bindings = {{"pixels", "source"}};
-  EXPECT_EQ(registry.decode(image, NativeObjectKind::resource).kind(), "sampled_image");
+  EXPECT_EQ(registry.decode(image, NativeObjectKind::resource).kind(),
+            "sampled_image");
   image.bindings.clear();
   EXPECT_NO_THROW(registry.decode(image, NativeObjectKind::resource));
-  for (const char *parameters : {
-      R"({"shape":[],"format":"r32f"})",
-      R"({"shape":[1,2,3,4],"format":"r32f"})",
-      R"({"shape":[0,2],"format":"r32f"})",
-      R"({"shape":[4294967296,2],"format":"r32f"})",
-      R"({"shape":[true,2],"format":"r32f"})",
-      R"({"shape":[2,4],"format":"missing"})",
-      R"({"shape":[2,4],"format":"r32f","filter":"cubic"})",
-      R"({"shape":[2,4],"format":"r32f","address_modes":["repeat"]})",
-      R"({"shape":[2,4],"format":"r32f","address_modes":["repeat","bad"]})",
-      R"({"shape":[2,4],"format":"r32f","raw_handle":1})"}) {
+  for (const char *parameters :
+       {R"({"shape":[],"format":"r32f"})",
+        R"({"shape":[1,2,3,4],"format":"r32f"})",
+        R"({"shape":[0,2],"format":"r32f"})",
+        R"({"shape":[4294967296,2],"format":"r32f"})",
+        R"({"shape":[true,2],"format":"r32f"})",
+        R"({"shape":[2,4],"format":"missing"})",
+        R"({"shape":[2,4],"format":"r32f","filter":"cubic"})",
+        R"({"shape":[2,4],"format":"r32f","address_modes":["repeat"]})",
+        R"({"shape":[2,4],"format":"r32f","address_modes":["repeat","bad"]})",
+        R"({"shape":[2,4],"format":"r32f","raw_handle":1})"}) {
     image.parameters = liong::json::parse_complete(parameters);
-    EXPECT_THROW(registry.decode(image, NativeObjectKind::resource), std::invalid_argument) << parameters;
+    EXPECT_THROW(registry.decode(image, NativeObjectKind::resource),
+                 std::invalid_argument)
+        << parameters;
   }
-  EXPECT_EQ(registry.find("sampled_image", 1, Arch::x64), nullptr);
-  EXPECT_EQ(registry.find("sampled_image", 1, Arch::vulkan), nullptr);
+  EXPECT_FALSE(registry.probe("sampled_image", 1, Arch::x64,
+                             NativeObjectKind::resource).available);
   EXPECT_EQ(registry.find("image_upload", 1, Arch::x64), nullptr);
+#ifdef TI_WITH_VULKAN
+  EXPECT_TRUE(registry.probe("sampled_image", 1, Arch::vulkan,
+                            NativeObjectKind::resource).available);
+  ASSERT_NE(registry.find("image_upload", 1, Arch::vulkan), nullptr);
+  EXPECT_EQ(registry.find("image_upload", 1, Arch::vulkan)->mode,
+            NativeOperationMode::vulkan_inline);
+#else
+  EXPECT_FALSE(registry.probe("sampled_image", 1, Arch::vulkan,
+                             NativeObjectKind::resource).available);
   EXPECT_EQ(registry.find("image_upload", 1, Arch::vulkan), nullptr);
+#endif
 }
 
-TEST(NativeOperationRegistry, OptixAlphaDescriptionsValidateIndependentBindings) {
+TEST(NativeOperationRegistry,
+     OptixAlphaDescriptionsValidateIndependentBindings) {
   const auto &registry = native_operation_registry();
   auto query = NativeOperationDescription::parse(liong::json::parse_complete(
       R"({"kind":"native","provider":"optix","operation":"query","version":3,

@@ -113,6 +113,12 @@ class NativeOperation : public NativeResource {
   virtual void record_vulkan(Device *device, CommandList *commands) {
     throw std::invalid_argument("Native operation has no Vulkan recording");
   }
+  // Required layouts while recording this command. The enclosing GFX recorder
+  // owns entry/exit transitions and restores its replay layout invariant.
+  virtual std::vector<std::pair<DeviceAllocation, ImageLayout>>
+  vulkan_image_bindings() const {
+    return {};
+  }
 };
 
 struct CompactOperation {

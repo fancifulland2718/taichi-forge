@@ -618,6 +618,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
                    rt.arch, rt.get(), rt.native_provider_locations(),
                    rt.runtime_fault_domain(), rt.native_library_locations());
   auto &preparation = family ? *family->preparation : *local_preparation;
+#ifdef TI_WITH_VULKAN
+  if (auto *gfx = dynamic_cast<::GfxRuntime *>(&rt))
+    preparation.gfx_runtime = &gfx->get_gfx_runtime();
+#endif
   preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
   std::set<std::pair<std::string, std::uint32_t>> probed;
   std::map<const aot::ExecutionPlan::Native *,
