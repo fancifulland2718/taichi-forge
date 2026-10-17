@@ -13,3 +13,4 @@ from taichi_forge.tools.memory_pool_stats import *
 from taichi_forge.tools.np2ply import *
 from taichi_forge.tools.video import *
 from taichi_forge.tools.vtk import *
+from taichi_forge.tools.vulkan_diagnostics import *

@@ -9,6 +9,7 @@ target_sources(${VULKAN_RHI}
     vulkan_device_creator.cpp
     vulkan_loader.cpp
     vulkan_memory_allocator.cpp
+    vulkan_pipeline_diagnostics.cpp
     vulkan_ray_pipeline.cpp
     ${PROJECT_SOURCE_DIR}/external/SPIRV-Reflect/spirv_reflect.c
 
@@ -38,3 +39,5 @@ target_include_directories(${VULKAN_RHI} SYSTEM
     ${PROJECT_SOURCE_DIR}/external/SPIRV-Reflect
     ${PROJECT_SOURCE_DIR}/external/spdlog/include
   )
+
+target_link_libraries(${VULKAN_RHI} PRIVATE SPIRV-Tools-static)

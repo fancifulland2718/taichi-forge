@@ -605,6 +605,9 @@ class TI_DLL_EXPORT GfxRuntime {
   Device *get_ti_device() const;
 
   PipelineCache *get_backend_cache() const;
+  const std::map<std::string, std::string> &pipeline_cache_diagnostics() const {
+    return pipeline_cache_diagnostics_;
+  }
 
   void add_root_buffer(size_t root_buffer_size);
 
@@ -782,6 +785,8 @@ class TI_DLL_EXPORT GfxRuntime {
   KernelProfilerBase *profiler_;
 
   std::unique_ptr<PipelineCache> backend_cache_{nullptr};
+  std::string pipeline_cache_path_;
+  std::map<std::string, std::string> pipeline_cache_diagnostics_;
 
   // Fixed Graph command payloads share root allocations until their last
   // parent command retires, independently of the active tree table.

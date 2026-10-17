@@ -92,6 +92,7 @@
 #if defined(TI_WITH_VULKAN)
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/rhi/vulkan/vulkan_pipeline_diagnostics.h"
 #endif
 
 namespace taichi {
@@ -1653,6 +1654,46 @@ void export_lang(py::module &m) {
              }
              return result;
            })
+      .def("_kernel_vulkan_artifacts", [](Program &program, Kernel *kernel) {
+        py::dict result;
+#if defined(TI_WITH_VULKAN)
+        TI_ERROR_IF(kernel == nullptr || program.compile_config().arch != Arch::vulkan,
+                    "SPIR-V JIT artifacts require a Vulkan kernel");
+        auto guard = program.acquire_snode_tree_lifecycle_read_guard();
+        const auto request = resolve_kernel_compile_request(
+            program.compile_config(), program.get_device_caps(), kernel->get_compile_tier_override());
+        const auto &compiled = program.compile_kernel(
+            program.compile_config(), program.get_device_caps(), *kernel);
+        const auto *spirv = dynamic_cast<const lang::spirv::CompiledKernelData *>(&compiled);
+        TI_ERROR_IF(!spirv, "Vulkan kernel did not produce SPIR-V");
+        py::list shaders;
+        for (const auto &code : spirv->get_internal_data().src.spirv_src) {
+          shaders.append(py::bytes(reinterpret_cast<const char *>(code.data()), code.size() * sizeof(uint32_t)));
+        }
+        result["shaders"] = shaders;
+        result["metadata_json"] = liong::json::print(liong::json::serialize(spirv->get_internal_data().metadata));
+        result["kernel_identity"] = compiled.kernel_identity();
+        result["resolved_config"] = py::cast(request.config(), py::return_value_policy::copy);
+        result["pipeline_registered"] = compiled.get_handle().has_value();
+#else
+        TI_NOT_IMPLEMENTED
+#endif
+        return result;
+      })
+      .def("_vulkan_runtime_diagnostics", [](Program &program) {
+        py::dict result;
+#if defined(TI_WITH_VULKAN)
+        TI_ERROR_IF(program.compile_config().arch != Arch::vulkan,
+                    "Vulkan diagnostics require the Vulkan backend");
+        auto *device = dynamic_cast<vulkan::VulkanDevice *>(program.get_compute_device());
+        TI_ERROR_IF(!device, "Vulkan device is not materialized");
+        result["device_json"] = vulkan::vulkan_device_identity_json(*device);
+        result["pipeline_cache"] = program.get_gfx_runtime_for_borrowing()->pipeline_cache_diagnostics();
+#else
+        TI_NOT_IMPLEMENTED
+#endif
+        return result;
+      })
       .def("_kernel_gpu_semantics_snapshot",
            [](Program &program, Kernel *kernel) {
              TI_ERROR_IF(kernel == nullptr,

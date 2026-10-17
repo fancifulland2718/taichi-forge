@@ -2454,6 +2454,9 @@ per-kernel profiling during fixed replay.
 
 ### Direct-kernel `TaskLaunchPolicy`
 
+For actual JIT shader export, optional pre-pipeline SPIR-V validation and
+independent pipeline-cache controls, see [Vulkan diagnostics](vulkan_diagnostics.md).
+
 `kernel.with_launch_policy(policy)` creates a reusable view of a direct JIT
 kernel without changing ordinary calls to that kernel. The first qualified
 CUDA/Vulkan slice controls the block size of exactly one top-level parallel

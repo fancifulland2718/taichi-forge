@@ -4,6 +4,7 @@
 
 #include "taichi/rhi/vulkan/vulkan_api.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
+#include "taichi/rhi/backend_error.h"
 
 namespace vkapi {
 
@@ -355,7 +356,10 @@ IVkPipeline create_compute_pipeline(const DeviceHandle &device,
       device, cache ? cache->cache : VK_NULL_HANDLE, 1, &info, nullptr,
       &obj->pipeline);
   RHI_THROW_UNLESS(res == VK_SUCCESS,
-                   std::runtime_error("vkCreateComputePipelines failed"));
+                   taichi::lang::BackendRuntimeError(
+                       taichi::Arch::vulkan, res,
+                       "vkCreateComputePipelines",
+                       "vkCreateComputePipelines returned VkResult " + std::to_string(res)));
 
   return obj;
 }

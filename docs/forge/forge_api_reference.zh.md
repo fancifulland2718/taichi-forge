@@ -2019,6 +2019,9 @@ kernel 标签，但不会自动开启固定重放中的逐 kernel 计时。
 
 ### Direct kernel 的 `TaskLaunchPolicy`
 
+实际 JIT shader 导出、pipeline 前 SPIR-V 验证和独立 pipeline-cache 控制见
+[Vulkan 诊断](vulkan_diagnostics.md)。
+
 `kernel.with_launch_policy(policy)` 为 direct JIT kernel 创建可复用视图，不改变该 kernel
 的普通调用。首个受支持切片可在 CUDA/Vulkan 上控制恰好一个顶层 parallel range task 的
 block 大小：

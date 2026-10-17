@@ -1,4 +1,9 @@
 #include "taichi/runtime/gfx/runtime.h"
+#include "external/PicoSHA2/picosha2.h"
+#include <random>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "taichi/program/program.h"
 #include "taichi/common/filesystem.hpp"
 #include "taichi/util/environ_config.h"
@@ -1191,14 +1196,33 @@ GfxRuntime::GfxRuntime(const Params &params)
   current_cmdlist_pending_since_ = high_res_clock::now();
   init_nonroot_buffers();
 
-  // Read pipeline cache from disk if available.
-  std::filesystem::path cache_path(get_repo_dir());
-  cache_path /= "rhi_cache.bin";
+  // Capture policy once: changing the environment after init must not redirect
+  // teardown writes. This cache is independent of the kernel offline cache.
+  const char *cache_enabled = std::getenv("TI_VULKAN_PIPELINE_CACHE");
+#ifdef _WIN32
+  const auto *configured_path = _wgetenv(L"TI_VULKAN_PIPELINE_CACHE_PATH");
+#else
+  const auto *configured_path = std::getenv("TI_VULKAN_PIPELINE_CACHE_PATH");
+#endif
+  const auto cache_path = std::filesystem::absolute(
+      configured_path && *configured_path
+          ? std::filesystem::path(configured_path)
+          : std::filesystem::path(get_repo_dir()) / "rhi_cache.bin");
+  pipeline_cache_path_ = cache_path.u8string();
+  pipeline_cache_diagnostics_["path"] = pipeline_cache_path_;
+  pipeline_cache_diagnostics_["enabled"] =
+      cache_enabled && std::string(cache_enabled) == "0" ? "false" : "true";
+  pipeline_cache_diagnostics_["load_status"] = "not_found";
+  if (pipeline_cache_diagnostics_["enabled"] == "false") {
+    pipeline_cache_diagnostics_["load_status"] = "disabled";
+    return;
+  }
   std::vector<char> cache_data;
   constexpr uintmax_t kMaxPipelineCacheBytes = 256u * 1024u * 1024u;
   std::error_code cache_ec;
   const bool cache_exists = std::filesystem::exists(cache_path, cache_ec);
   if (cache_exists && !cache_ec) {
+    pipeline_cache_diagnostics_["load_status"] = "ignored";
     const uintmax_t cache_size =
         std::filesystem::file_size(cache_path, cache_ec);
     if (cache_ec) {
@@ -1229,9 +1253,13 @@ GfxRuntime::GfxRuntime(const Params &params)
     TI_WARN("Failed to inspect Vulkan pipeline cache at {}: {}",
             cache_path.generic_string(), cache_ec.message());
   }
+  pipeline_cache_diagnostics_["input_bytes"] = std::to_string(cache_data.size());
+  pipeline_cache_diagnostics_["input_sha256"] =
+      picosha2::hash256_hex_string(cache_data.begin(), cache_data.end());
   auto cache_result = device_->create_pipeline_cache_unique(
       cache_data.size(), cache_data.empty() ? nullptr : cache_data.data());
   if (cache_result.second != RhiResult::success && !cache_data.empty()) {
+    pipeline_cache_diagnostics_["load_status"] = "rejected_by_backend";
     TI_WARN("Discarding incompatible Vulkan pipeline cache at {}",
             cache_path.generic_string());
     cache_data.clear();
@@ -1239,6 +1267,9 @@ GfxRuntime::GfxRuntime(const Params &params)
   }
   if (cache_result.second == RhiResult::success) {
     backend_cache_ = std::move(cache_result.first);
+    if (!cache_data.empty()) pipeline_cache_diagnostics_["load_status"] = "supplied_to_backend";
+  } else {
+    pipeline_cache_diagnostics_["load_status"] = "cache_creation_failed";
   }
 }
 
@@ -1282,10 +1313,13 @@ GfxRuntime::~GfxRuntime() {
       // (Periodic in-flight flush and cross-process file locks were
       // considered and dropped as low-ROI; see compile_doc/优化总规划.md
       // §7.2 row 4.)
-      std::filesystem::path cache_path =
-          std::filesystem::path(get_repo_dir()) / "rhi_cache.bin";
+      auto cache_path = std::filesystem::u8path(pipeline_cache_path_);
+      std::error_code directory_error;
+      std::filesystem::create_directories(cache_path.parent_path(), directory_error);
       std::filesystem::path tmp_path = cache_path;
-      tmp_path += ".tmp";
+      // Different runtimes/processes must never share an in-progress file.
+      std::random_device random;
+      tmp_path += "." + std::to_string(random()) + "." + std::to_string(random()) + ".tmp";
       bool wrote_ok = false;
       {
         std::ofstream cache_file(tmp_path,
@@ -1299,17 +1333,16 @@ GfxRuntime::~GfxRuntime() {
       }
       if (wrote_ok) {
         std::error_code ec;
+#ifdef _WIN32
+        if (!MoveFileExW(tmp_path.c_str(), cache_path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+          ec = std::error_code(GetLastError(), std::system_category());
+        }
+#else
         std::filesystem::rename(tmp_path, cache_path, ec);
+#endif
         if (ec) {
-          // Fallback: remove dest then rename. Some filesystems on Windows
-          // refuse cross-existing rename without explicit replace.
-          std::filesystem::remove(cache_path, ec);
-          std::filesystem::rename(tmp_path, cache_path, ec);
-          if (ec) {
-            TI_TRACE("Failed to atomically install rhi_cache.bin: {}",
-                     ec.message());
-            std::filesystem::remove(tmp_path, ec);
-          }
+          TI_TRACE("Failed to install pipeline cache at {}: {}", pipeline_cache_path_, ec.message());
+          std::filesystem::remove(tmp_path, ec);
         }
       } else {
         std::error_code ec;

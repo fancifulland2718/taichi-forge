@@ -22,6 +22,7 @@
 #include "taichi/util/environ_config.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/rhi/vulkan/vulkan_pipeline_diagnostics.h"
 
 #include "spirv_reflect.h"
 
@@ -228,10 +229,30 @@ VulkanPipeline::VulkanPipeline(const Params &params)
       device_(params.device->vk_device()),
       name_(params.name),
       cache_(params.cache) {
-  create_descriptor_set_layout(params);
-  create_shader_stages(params);
-  create_pipeline_layout();
-  create_compute_pipeline(params);
+  VulkanPipelineDiagnostics diagnostics(params);
+  try {
+    diagnostics.event("preparing_layout_and_shader");
+    create_descriptor_set_layout(params);
+    create_shader_stages(params);
+    create_pipeline_layout();
+    diagnostics.event("pipeline_call_started");
+    create_compute_pipeline(params);
+    diagnostics.event("pipeline_call_returned", "", VK_SUCCESS);
+  } catch (...) {
+    // A throwing constructor does not run VulkanPipeline's destructor.
+    for (auto module : shader_modules_) {
+      device_.functions().vkDestroyShaderModule(device_, module, kNoVkAllocCallbacks);
+    }
+    shader_modules_.clear();
+    try {
+      throw;
+    } catch (const BackendRuntimeError &error) {
+      diagnostics.event("backend_error", error.what(), error.backend_code());
+    } catch (const std::exception &error) {
+      diagnostics.event("construction_error", error.what());
+    }
+    throw;
+  }
 
   for (VkShaderModule shader_module : shader_modules_) {
     device_.functions().vkDestroyShaderModule(device_, shader_module,
@@ -2721,6 +2742,13 @@ RhiResult VulkanDevice::create_pipeline(Pipeline **out_pipeline,
 
   try {
     *out_pipeline = new VulkanPipeline(params);
+  } catch (const BackendRuntimeError &error) {
+    // BackendRuntimeError derives from TaichiError, not std::runtime_error.
+    // Keep the raw failure inside this noexcept RHI boundary.
+    *out_pipeline = nullptr;
+    report_backend_error(error);
+    RHI_LOG_ERROR(error.what());
+    return RhiResult::error;
   } catch (std::invalid_argument &e) {
     *out_pipeline = nullptr;
     RHI_LOG_ERROR(e.what());
