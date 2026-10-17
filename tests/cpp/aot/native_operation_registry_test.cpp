@@ -5,6 +5,7 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/image_transfer.h"
 #include "taichi/runtime/native_texture_collection.h"
 #include "taichi/runtime/texture_storage.h"
 #include "taichi/runtime/texture_collection.h"
@@ -24,6 +25,36 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry,
+     ImageTransferRangesUseAccessedBytesAndPhysicalLimits) {
+  EXPECT_EQ(required_buffer_image_bytes(8, 5, 4, {3, 2, 2}, 4), 120);
+  EXPECT_EQ(required_buffer_image_bytes(0, 0, 0, {3, 2, 1}, 1), 6);
+  // Large unused slice padding must not reject a single-slice transfer.
+  EXPECT_EQ(required_buffer_image_bytes(0, INT32_MAX, UINT32_MAX, {1, 1, 1}, 1),
+            1);
+  if (sizeof(size_t) == 8) {
+    const auto offset = size_t(uint64_t(1) << 33);
+    EXPECT_EQ(required_buffer_image_bytes(offset, 0, 0, {2, 1, 1}, 4),
+              offset + 8);
+  }
+  EXPECT_ANY_THROW(required_buffer_image_bytes(0, 1, 0, {2, 1, 1}, 4));
+  EXPECT_ANY_THROW(required_buffer_image_bytes(1, 0, 0, {1, 1, 1}, 4));
+  EXPECT_ANY_THROW(required_buffer_image_bytes(0, 0, 0, {0, 1, 1}, 4));
+  EXPECT_ANY_THROW(required_buffer_image_bytes(0, UINT32_MAX, 0, {1, 1, 1}, 1));
+  EXPECT_ANY_THROW(required_buffer_image_bytes(
+      (std::numeric_limits<size_t>::max)(), 0, 0, {1, 1, 1}, 1));
+  EXPECT_ANY_THROW(required_buffer_image_bytes(0, INT32_MAX, UINT32_MAX,
+                                               {1, 1, UINT32_MAX}, 1));
+  EXPECT_NO_THROW(validate_image_transfer_region({8, 4, 1}, 4, {1, 0, 0},
+                                                 {3, 2, 1}, 1, 0, 1, "test"));
+  EXPECT_ANY_THROW(validate_image_transfer_region({8, 4, 1}, 4, {2, 0, 0},
+                                                  {3, 2, 1}, 1, 0, 1, "test"));
+  EXPECT_ANY_THROW(validate_image_transfer_region({8, 4, 1}, 4, {}, {1, 1, 1},
+                                                  4, 0, 1, "test"));
+  EXPECT_ANY_THROW(validate_image_transfer_region({8, 4, 1}, 4, {}, {1, 1, 1},
+                                                  0, 1, 1, "test"));
+}
+
 TEST(NativeOperationRegistry, TextureCollectionUsesPhysicalAndAbiCapacities) {
   DeviceCapabilityConfig caps;
   EXPECT_ANY_THROW(validate_texture_collection_capacity(Arch::vulkan, caps, 1));

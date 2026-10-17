@@ -1,8 +1,8 @@
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/runtime/image_transfer.h"
 
 #include <array>
-#include <limits>
 
 #if defined(TI_WITH_VULKAN)
 #include "taichi/rhi/vulkan/vulkan_device.h"
@@ -49,65 +49,17 @@ void validate_texture_region(Texture *texture,
                              std::uint32_t base_layer,
                              std::uint32_t layer_count,
                              const char *name) {
-  TI_ERROR_IF(mip_level >= texture->get_mip_levels(),
-              "Vulkan {} mip level is outside the allocated Texture chain.",
-              name);
-  TI_ERROR_IF(base_layer != 0 || layer_count != 1,
-              "Vulkan {} array layers are unsupported by the current Texture "
-              "resource model.",
-              name);
-  const auto size = texture->get_mip_size(mip_level);
-  for (std::size_t axis = 0; axis < 3; ++axis) {
-    TI_ERROR_IF(static_cast<std::uint64_t>(offset[axis]) + extent[axis] >
-                    static_cast<std::uint64_t>(size[axis]),
-                "Vulkan {} region exceeds the texture extent.", name);
-  }
+  const auto size = texture->get_size();
+  validate_image_transfer_region(
+      {uint32_t(size[0]), uint32_t(size[1]), uint32_t(size[2])},
+      uint32_t(texture->get_mip_levels()), offset, extent, mip_level,
+      base_layer, layer_count, name);
 }
 
 std::size_t texture_texel_bytes(Texture *texture) {
   const auto [type, channels] =
       buffer_format2type_channels(texture->get_buffer_format());
   return static_cast<std::size_t>(data_type_size(type)) * channels;
-}
-
-std::size_t required_buffer_image_bytes(
-    std::size_t buffer_offset,
-    std::uint32_t buffer_row_length,
-    std::uint32_t buffer_image_height,
-    const std::array<std::uint32_t, 3> &extent,
-    std::size_t texel_bytes) {
-  const std::size_t row_length =
-      buffer_row_length == 0 ? extent[0] : buffer_row_length;
-  const std::size_t image_height =
-      buffer_image_height == 0 ? extent[1] : buffer_image_height;
-  TI_ERROR_IF(row_length < extent[0] || image_height < extent[1],
-              "Vulkan buffer-image row length and image height must cover the "
-              "copy extent.");
-  TI_ERROR_IF(texel_bytes == 0 || buffer_offset % texel_bytes != 0,
-              "Vulkan buffer-image offset must be aligned to the image texel "
-              "block size.");
-  const auto max_size = (std::numeric_limits<std::size_t>::max)();
-  const auto max_vk_pitch =
-      static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)());
-  TI_ERROR_IF(row_length > max_vk_pitch / texel_bytes,
-              "Vulkan buffer-image row pitch exceeds the 2^31-1 byte limit.");
-  TI_ERROR_IF(extent[2] > max_size / image_height ||
-                  extent[2] * image_height > max_size / row_length,
-              "Vulkan buffer-image storage size overflow.");
-  const std::size_t full_slices =
-      static_cast<std::size_t>(extent[2] - 1) * image_height * row_length;
-  const std::size_t full_rows =
-      static_cast<std::size_t>(extent[1] - 1) * row_length;
-  TI_ERROR_IF(full_slices > max_size - full_rows,
-              "Vulkan buffer-image storage size overflow.");
-  const std::size_t completed_rows = full_slices + full_rows;
-  TI_ERROR_IF(extent[0] > max_size - completed_rows,
-              "Vulkan buffer-image storage size overflow.");
-  const std::size_t texels = completed_rows + extent[0];
-  TI_ERROR_IF(texels > max_size / texel_bytes ||
-                  buffer_offset > max_size - texels * texel_bytes,
-              "Vulkan buffer-image byte range overflow.");
-  return buffer_offset + texels * texel_bytes;
 }
 
 BufferImageCopyParams make_buffer_image_params(
