@@ -28,7 +28,7 @@ template_types = (NdarrayType, TextureType, template)
 
 
 def reject_acceleration_structure_arguments(kernel, integration):
-    """Fail closed where no serialized acceleration-structure ABI exists."""
+    """Fail closed for integrations without managed AS parameter bindings."""
 
     from taichi_forge.types.ray_type import AccelerationStructureType
 
@@ -39,8 +39,8 @@ def reject_acceleration_structure_arguments(kernel, integration):
     ]
     if names:
         raise TaichiCompilationError(
-            "Vulkan acceleration-structure kernel arguments are JIT-only; "
-            f"{integration} does not support them (arguments: "
+            "Vulkan acceleration-structure kernel arguments are unsupported by "
+            f"{integration} (arguments: "
             + ", ".join(names)
             + ")"
         )
@@ -77,6 +77,8 @@ def produce_injected_args_from_template(kernel, template_args):
         anno = arg.annotation
         if isinstance(anno, template_types):
             injected_args.append(template_args[arg.name])
+        elif isinstance(anno, AccelerationStructureType):
+            injected_args.append(None)
         elif isinstance(anno, RWTextureType):
             texture_shape = (2,) * anno.num_dimensions
             fmt = anno.fmt

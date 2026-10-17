@@ -717,14 +717,32 @@ void LaunchContextBuilder::set_arg_acceleration_structure(
       arg_id, DevAllocType::kAccelerationStructure);
 }
 
+void LaunchContextBuilder::set_arg_native_acceleration_structure(
+    const std::vector<int> &arg_id, NativeAccelerationStructure *resource) {
+  TI_ERROR_IF(!resource, "Cannot bind a null native acceleration structure");
+  AccelerationStructureResourceRef ref;
+  ref.arg_offset = args_type->get_element_offset(arg_id);
+  ref.native_resource = resource;
+  const auto found = std::find_if(
+      acceleration_structure_ptrs.begin(), acceleration_structure_ptrs.end(),
+      [offset = ref.arg_offset](const auto &current) {
+        return current.arg_offset == offset;
+      });
+  if (found == acceleration_structure_ptrs.end())
+    acceleration_structure_ptrs.push_back(ref);
+  else
+    *found = ref;
+  set_array_device_allocation_type(arg_id,
+                                   DevAllocType::kAccelerationStructure);
+}
+
 void LaunchContextBuilder::debug_set_texture_resource_handle(
     const std::vector<int> &arg_id,
     RuntimeResourceHandle handle) {
   const int arg_offset = args_type->get_element_offset(arg_id);
   const auto found = std::find_if(
-      texture_ptrs.begin(), texture_ptrs.end(), [&](const auto &ref) {
-        return ref.arg_offset == arg_offset;
-      });
+      texture_ptrs.begin(), texture_ptrs.end(),
+      [&](const auto &ref) { return ref.arg_offset == arg_offset; });
   TI_ERROR_IF(found == texture_ptrs.end(),
               "Cannot override an unbound Texture resource handle");
   found->handle = handle;

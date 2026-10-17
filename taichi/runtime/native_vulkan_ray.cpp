@@ -3,6 +3,7 @@
 #include <limits>
 #include "taichi/common/operation_json.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/vulkan_ray_types.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/program/runtime_fault.h"
@@ -240,8 +241,8 @@ vulkan::VulkanDevice &ray_device(NativePreparationContext &context) {
 
 // All cores have the same ordered initialization and fault-safe retirement.
 // Native registry leases retain public input resources through dependent work.
-template <typename Core>
-class OwnedRayResource : public NativeResource {
+template <typename Core, typename Owner = NativeResource>
+class OwnedRayResource : public Owner {
  public:
   OwnedRayResource(NativePreparationContext &context,
                    std::unique_ptr<Core> core)
@@ -399,9 +400,10 @@ VulkanRayTransformPacket transform_packet(Device &device,
       {array.pointer, bytes});
 }
 
-class PreparedTlas final : public OwnedRayResource<VulkanInstanceTlas>,
-                           public QueryAccess,
-                           public InstanceAccess {
+class PreparedTlas final
+    : public OwnedRayResource<VulkanInstanceTlas, NativeAccelerationStructure>,
+      public QueryAccess,
+      public InstanceAccess {
  public:
   PreparedTlas(NativePreparationContext &context, const TlasDescription &d)
       : OwnedRayResource(context, make_tlas(context, d)) {
@@ -431,6 +433,11 @@ class PreparedTlas final : public OwnedRayResource<VulkanInstanceTlas>,
   }
   void prepare_transforms() override {
     core_->prepare_transforms();
+  }
+  void bind_for_kernel(ShaderResourceSet *bindings,
+                       int binding,
+                       CommandList *commands) override {
+    core_->bind_for_kernel(bindings, binding, commands);
   }
   void record_transforms(CommandList *commands,
                          const VulkanRayTransformPacket &p) override {

@@ -4,6 +4,7 @@
 #include "taichi/util/environ_config.h"
 #include "taichi/system/profiler_annotation.h"
 #include "taichi/runtime/control_encoding_cost.h"
+#include "taichi/runtime/native_acceleration_structure.h"
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
@@ -2267,18 +2268,27 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
 
     for (const auto &bind : attribs.acceleration_structure_binds) {
-      const int arg_offset = host_ctx.args_type->get_element_offset(bind.arg_id);
-      const auto found = std::find_if(
-          host_ctx.acceleration_structure_ptrs.begin(),
-          host_ctx.acceleration_structure_ptrs.end(),
-          [arg_offset](const auto &ref) {
-            return ref.arg_offset == arg_offset;
-          });
-      TI_ERROR_IF(found == host_ctx.acceleration_structure_ptrs.end() ||
-                      found->owner == nullptr || found->handle == 0,
-                  "Vulkan acceleration-structure kernel argument is unbound");
-      found->owner->vulkan_bind_ray_kernel_resource(
-          found->handle, bindings, bind.binding, current_cmdlist_.get());
+      const int arg_offset =
+          host_ctx.args_type->get_element_offset(bind.arg_id);
+      const auto found =
+          std::find_if(host_ctx.acceleration_structure_ptrs.begin(),
+                       host_ctx.acceleration_structure_ptrs.end(),
+                       [arg_offset](const auto &ref) {
+                         return ref.arg_offset == arg_offset;
+                       });
+      TI_ERROR_IF(
+          found == host_ctx.acceleration_structure_ptrs.end() ||
+              (!found->native_resource && (!found->owner || !found->handle)),
+          "Vulkan acceleration-structure kernel argument is unbound");
+      if (found->native_resource) {
+        TI_ERROR_IF(&found->native_resource->device() != device_,
+                    "Foreign native acceleration structure");
+        found->native_resource->bind_for_kernel(bindings, bind.binding,
+                                                current_cmdlist_.get());
+      } else {
+        found->owner->vulkan_bind_ray_kernel_resource(
+            found->handle, bindings, bind.binding, current_cmdlist_.get());
+      }
     }
 
     if (attribs.task_type == OffloadedTaskType::listgen) {
@@ -3095,17 +3105,26 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       auto resources = device_->create_resource_set_unique();
       for (const auto &bind : tasks[i].acceleration_structure_binds) {
-        const int offset = pd.host_ctx->args_type->get_element_offset(bind.arg_id);
+        const int offset =
+            pd.host_ctx->args_type->get_element_offset(bind.arg_id);
         const auto found = std::find_if(
             pd.host_ctx->acceleration_structure_ptrs.begin(),
             pd.host_ctx->acceleration_structure_ptrs.end(),
             [offset](const auto &ref) { return ref.arg_offset == offset; });
-        TI_ERROR_IF(found == pd.host_ctx->acceleration_structure_ptrs.end() ||
-                        !found->owner || !found->handle,
-                    "Prepared Vulkan Graph acceleration structure is unbound");
-        found->owner->vulkan_bind_ray_kernel_resource(
-            found->handle, resources.get(), bind.binding, commands.get());
-        state.fixed_ray_resources.push_back(found->handle);
+        TI_ERROR_IF(
+            found == pd.host_ctx->acceleration_structure_ptrs.end() ||
+                (!found->native_resource && (!found->owner || !found->handle)),
+            "Prepared Vulkan Graph acceleration structure is unbound");
+        if (found->native_resource) {
+          TI_ERROR_IF(&found->native_resource->device() != device_,
+                      "Foreign native acceleration structure");
+          found->native_resource->bind_for_kernel(resources.get(), bind.binding,
+                                                  commands.get());
+        } else {
+          found->owner->vulkan_bind_ray_kernel_resource(
+              found->handle, resources.get(), bind.binding, commands.get());
+          state.fixed_ray_resources.push_back(found->handle);
+        }
       }
       std::unordered_map<DeviceAllocationId, ImageLayout> task_images;
       for (const auto &bind : tasks[i].texture_binds) {

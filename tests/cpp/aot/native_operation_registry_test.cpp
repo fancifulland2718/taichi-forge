@@ -5,6 +5,7 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/operation_json.h"
@@ -21,6 +22,62 @@
 
 namespace taichi::lang {
 #ifdef TI_WITH_LLVM
+TEST(NativeOperationRegistry,
+     KernelAccelerationStructuresQualifyAndRetainOwners) {
+  class Scene final : public NativeAccelerationStructure {
+   public:
+    explicit Scene(Device &device) : device_(device) {
+    }
+    Arch arch() const override {
+      return Arch::vulkan;
+    }
+    Device &device() const override {
+      return device_;
+    }
+    size_t workspace_bytes() const override {
+      return 0;
+    }
+    void bind_for_kernel(ShaderResourceSet *, int, CommandList *) override {
+    }
+
+   private:
+    Device &device_;
+  };
+  Program program(Arch::x64);
+  Kernel kernel(program, [] {}, "cold_as_binding");
+  kernel.insert_acceleration_structure_param();
+  kernel.finalize_params();
+  auto context = kernel.make_launch_context();
+  cpu::CpuDevice device, other_device;
+  auto resource = std::make_shared<Scene>(device);
+  std::weak_ptr<Scene> weak = resource;
+  EXPECT_THROW((NativeAccelerationStructureKernelBinding(
+                   resource, {0}, Arch::x64, device, kernel, context)),
+               std::invalid_argument);
+  EXPECT_THROW((NativeAccelerationStructureKernelBinding(
+                   resource, {0}, Arch::cuda, device, kernel, context)),
+               std::invalid_argument);
+  EXPECT_THROW((NativeAccelerationStructureKernelBinding(
+                   resource, {0}, Arch::vulkan, other_device, kernel, context)),
+               std::invalid_argument);
+  EXPECT_THROW((NativeAccelerationStructureKernelBinding(
+                   resource, {1}, Arch::vulkan, device, kernel, context)),
+               std::invalid_argument);
+  auto binding = prepare_native_kernel_resource(resource, {0}, Arch::vulkan,
+                                                device, kernel, context);
+  EXPECT_NO_THROW(binding->validate(Arch::vulkan, device, kernel, context, {}));
+  auto other = kernel.make_launch_context();
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, other, {}),
+               std::invalid_argument);
+  context.set_arg_acceleration_structure({0}, &program, 1);
+  EXPECT_THROW(binding->validate(Arch::vulkan, device, kernel, context, {}),
+               std::invalid_argument);
+  resource.reset();
+  EXPECT_FALSE(weak.expired());
+  binding.reset();
+  EXPECT_TRUE(weak.expired());
+}
+
 TEST(NativeOperationRegistry,
      KernelImageBindingsRetainAndValidateQualifiedOwners) {
   class Image final : public NativeSampledImage {

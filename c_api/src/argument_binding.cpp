@@ -6,7 +6,8 @@
 #include <optional>
 #include <unordered_set>
 #include "fp16.h"
-#include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_kernel_resource.h"
+#include "taichi/runtime/native_operation.h"
 
 namespace {
 constexpr uint32_t kTiNdShapeDimensionCapacity =
@@ -302,8 +303,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     uint32_t binding_count,
     const TiNdArrayBinding *bindings,
     bool cpu_bounded_range,
-    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeSampledImage>>
-        &images) {
+    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
+        &resources) {
   TI_CAPI_ARGUMENT_NULL_RV(kernel);
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
@@ -319,9 +320,9 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     throw MemoryBindingError(
         "Argument count does not match the exported kernel ABI");
   }
-  for (const auto &[index, image] : images)
-    if (index >= arg_count || !image)
-      throw MemoryBindingError("Invalid managed kernel image argument");
+  for (const auto &[index, resource] : resources)
+    if (index >= arg_count || !resource)
+      throw MemoryBindingError("Invalid managed kernel resource argument");
 
   if (binding_count)
     TI_CAPI_ARGUMENT_NULL_RV(bindings);
@@ -407,15 +408,14 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
 
   for (uint32_t i = 0; i < arg_count; ++i) {
     if (args[i].type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT) {
-      auto image = std::dynamic_pointer_cast<taichi::lang::NativeSampledImage>(
-          runtime2.native_resource_registry().get(args[i].value.native_resource));
-      if (!image)
-        throw MemoryBindingError("Kernel native resource must be a sampled image");
+      auto resource = runtime2.native_resource_registry().get(
+          args[i].value.native_resource);
       try {
-        auto binding = std::make_shared<taichi::lang::NativeImageKernelBinding>(
-            std::move(image), std::vector<int>{int(i)}, runtime2.arch,
+        auto binding = taichi::lang::prepare_native_kernel_resource(
+            std::move(resource), std::vector<int>{int(i)}, runtime2.arch,
             runtime2.get(), *ti_kernel, builder);
-        binding->validate(runtime2.arch, runtime2.get(), *ti_kernel, builder, {});
+        binding->validate(runtime2.arch, runtime2.get(), *ti_kernel, builder,
+                          {});
         result->kernel_resources.push_back(std::move(binding));
         result->native_resources.push_back(args[i].value.native_resource);
       } catch (const std::invalid_argument &error) {
@@ -423,11 +423,11 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
       }
       continue;
     }
-    if (const auto image = images.find(i); image != images.end()) {
+    if (const auto resource = resources.find(i); resource != resources.end()) {
       try {
         result->kernel_resources.push_back(
-            std::make_shared<taichi::lang::NativeImageKernelBinding>(
-                image->second, std::vector<int>{int(i)}, runtime2.arch,
+            taichi::lang::prepare_native_kernel_resource(
+                resource->second, std::vector<int>{int(i)}, runtime2.arch,
                 runtime2.get(), *ti_kernel, builder));
       } catch (const std::invalid_argument &error) {
         throw MemoryBindingError(error.what());

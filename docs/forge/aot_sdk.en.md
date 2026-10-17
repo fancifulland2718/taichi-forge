@@ -319,7 +319,24 @@ Small Windows Vulkan checks cover shared/repeated BLAS, distinct instance/custom
 IDs and masks, direct initial device build, GPU geometry/transform updates,
 subrange matrices, typed/legacy hit and miss reset, cross-module retirement,
 standalone/borrowed owners, and downstream gradient kernels. This factory coverage
-does not yet include micromaps or kernel/graphics AS bindings.
+does not yet include micromaps or graphics AS bindings.
+
+Vulkan `Module.add_kernel()` accepts `ti.types.acceleration_structure()` parameters
+when the module declares `caps=["spirv_has_ray_query"]`. Pass a public
+`instance_tlas` resource to `module.kernel(name)(tlas, ...)` or
+`.prepare(tlas, ...)`; an ExecutionPlan kernel argument may also name a public or
+private TLAS. These bind the same managed AS without copying geometry or creating
+a hidden Program. Prepared commands reuse the existing queue and retirement
+contract. A BLAS is not a valid kernel AS argument.
+
+Kernels may use existing closest/any and filtered queries. Build the BLAS with
+`opaque=False` when filtering each candidate; `respect_opacity=True` retains the
+existing opaque semantics. Small standalone/borrowed Vulkan checks cover traversal
+after candidate rejection, occlusion, intervals/reverse rays, GPU refit, hit-to-miss
+reset, public/private bindings, close/reset and downstream gradients. AS traversal
+has no automatic derivative. This covers ordinary kernel export and explicit
+ExecutionPlans; automatic Graph AS argument export and `kernel_template` remain
+unavailable. CPU/CUDA do not accept Vulkan AS parameters.
 
 `blas_build` rebuilds an existing BLAS with vertices and indices of the original
 counts; index contents may change. Refresh each dependent TLAS before querying.

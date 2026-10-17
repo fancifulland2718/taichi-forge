@@ -65,8 +65,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     uint32_t binding_count,
     const TiNdArrayBinding *bindings,
     bool cpu_bounded_range = false,
-    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeSampledImage>>
-        &images = {});
+    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
+        &resources = {});
 std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
     Runtime &runtime,
     TiComputeGraph graph,

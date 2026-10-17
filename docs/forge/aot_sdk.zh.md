@@ -249,7 +249,20 @@ scalar `[I,12]` / `[I,3,4]` 或 element shape `[3,4]` 的 AoS `[I]`。沿用 JIT
 
 Windows Vulkan 小型检查覆盖共享/重复 BLAS、独立实例 ID/custom ID/mask、首次设备
 矩阵 build、GPU 几何/变换更新、矩阵子区间、typed/legacy 命中及 miss 清零、跨模块
-退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 micromap 或 kernel/graphics AS 绑定。
+退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 micromap 或 graphics AS 绑定。
+
+Vulkan `Module.add_kernel()` 支持 `ti.types.acceleration_structure()` 参数，导出模块需
+声明 `caps=["spirv_has_ray_query"]`。消费端将上述 `instance_tlas` 公共资源直接传给
+`module.kernel(name)(tlas, ...)` 或 `.prepare(tlas, ...)`；ExecutionPlan 的 kernel
+argument 也可引用公共或私有 TLAS。它们绑定同一个受管 AS，不复制几何、不创建隐藏
+Program，准备后的命令复用既有队列与资源退休合同。BLAS 不能直接充当该参数。
+
+kernel 可使用既有 closest/any 及 filtered 查询。需要逐候选过滤时，应构建
+`opaque=False` 的 BLAS；`respect_opacity=True` 仍遵守原有 opaque 语义。小型独立与
+借用 Vulkan 检查覆盖候选拒绝后继续遍历、遮挡、区间/反向 ray、GPU refit、命中后
+miss 写回、公共/私有绑定、关闭/reset 及命中后的下游梯度。AS 遍历本身不自动求导。
+此处支持普通 kernel 导出与显式 ExecutionPlan；自动 Graph AS 参数导出和
+`kernel_template` 尚未开放。CPU/CUDA 不接受 Vulkan AS 参数。
 
 `blas_build` 用原有顶点/三角形数量重建已有 BLAS，允许索引内容变化；查询前仍需刷新
 各依赖 TLAS。`instance_update` 在 JSON 中捕获 `I` 行矩阵，每行12个有限 f32 数值；

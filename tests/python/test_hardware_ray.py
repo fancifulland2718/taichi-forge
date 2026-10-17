@@ -61,7 +61,7 @@ def test_vulkan_inline_ray_query_fails_closed_outside_jit_vulkan():
     module = ti.aot.Module(ti.cpu)
     with pytest.raises(
         ti.TaichiCompilationError,
-        match="acceleration-structure kernel arguments are JIT-only",
+        match="acceleration-structure kernel arguments are unsupported",
     ):
         module.add_kernel(trace)
 

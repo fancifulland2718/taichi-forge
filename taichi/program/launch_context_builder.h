@@ -11,6 +11,7 @@
 namespace taichi::lang {
 
 struct RuntimeContext;
+class NativeAccelerationStructure;
 namespace aot {
 struct CompiledGraphKernelInvocation;
 }
@@ -72,6 +73,7 @@ class LaunchContextBuilder {
     int arg_offset{-1};
     Program *owner{nullptr};
     std::uint64_t handle{0};
+    NativeAccelerationStructure *native_resource{nullptr};
   };
 
   explicit LaunchContextBuilder(CallableBase *kernel,
@@ -264,6 +266,8 @@ class LaunchContextBuilder {
   void set_arg_acceleration_structure(const std::vector<int> &arg_id,
                                       Program *owner,
                                       std::uint64_t handle);
+  void set_arg_native_acceleration_structure(
+      const std::vector<int> &arg_id, NativeAccelerationStructure *resource);
 
   void set_arg_matrix(int arg_id, const Matrix &matrix);
 

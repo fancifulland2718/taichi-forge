@@ -399,7 +399,8 @@ class Module:
         """
         kernel, default_name, bound_args = _resolve_kernel(kernel_fn)
         kernel_name = name or default_name
-        reject_acceleration_structure_arguments(kernel, "AOT Module.add_kernel()")
+        if self._arch != _ti_core.Arch.vulkan:
+            reject_acceleration_structure_arguments(kernel, "AOT Module.add_kernel() on this backend")
         reject_texture_collection_arguments(kernel, "AOT Module.add_kernel()")
         if template_args is not None:
             if set(template_args) & set(bound_args):
