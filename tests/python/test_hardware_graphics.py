@@ -71,6 +71,29 @@ def _depth_triangle_pipeline(*, enabled, **depth_state):
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_attachment_views_rejected_before_recording():
+    vertices = ti.ndarray(ti.f32, 15)
+    color = ti.Texture(ti.Format.rgba8, (8, 8))
+    depth = ti.Texture(ti.Format.depth32f, (8, 8))
+    with _triangle_pipeline() as pipeline:
+        draw = pipeline.pass_draw(ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"})
+        recording = pipeline.record_pass((draw,), color="color", depth="depth")
+        for name, replacement, message in (
+            ("color", ti.Texture(ti.Format.rgba8, (8, 8), mip_levels=2), "single-level"),
+            ("depth", ti.Texture(ti.Format.depth32f, (8, 8), mip_levels=2), "single-level"),
+            ("color", ti.Texture(ti.Format.rgba8, (8,)), "2D"),
+            ("depth", ti.Texture(ti.Format.depth32f, (8, 4)), "shape"),
+        ):
+            bindings = dict(color=color, depth=depth, vertices=vertices)
+            bindings[name] = replacement
+            with pytest.raises(RuntimeError, match=message):
+                recording.prepare_graph_execute(bindings)
+        # Cold rejection must leave the pipeline and valid bindings usable.
+        recording.execute(dict(color=color, depth=depth, vertices=vertices))
+        ti.sync()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_graphics_depth_compare_clear_and_equal_depth_rules():
     vertices = _overlapping_depth_vertices()
     color = ti.Texture(ti.Format.rgba8, (64, 64))

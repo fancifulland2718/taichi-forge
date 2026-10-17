@@ -28,6 +28,8 @@ namespace vulkan {
 
 using std::unordered_map;
 
+rhi_impl::RhiReturn<BufferFormat> buffer_format_vk_to_ti(VkFormat format);
+
 class VulkanDevice;
 class VulkanResourceBinder;
 class VulkanStream;

@@ -4,11 +4,52 @@
 #include "taichi/rhi/device.h"
 
 #ifdef TI_WITH_VULKAN
+#include "taichi/rhi/vulkan/vulkan_common.h"
 #include <functional>
 #include <map>
 #include <optional>
 
 namespace taichi::lang {
+namespace vulkan {
+class VulkanDevice;
+class VulkanPipeline;
+}  // namespace vulkan
+
+struct VulkanGraphicsColorTarget {
+  DeviceAllocation allocation{kDeviceNullAllocation};
+  bool clear{true};
+  std::array<uint32_t, 4> clear_bits{};
+};
+
+// Physical attachment certificate prepared once, without a Program. The caller
+// retains image owners and supplies initialization, layout and queue ordering.
+// This packet owns no images and does not establish initialized contents.
+struct VulkanGraphicsPassTargets {
+  std::vector<DeviceAllocation> colors;
+  std::vector<VkClearColorValue> clear_colors;
+  std::shared_ptr<bool[]> color_clears;
+  std::vector<int> color_types;
+  std::vector<bool> color_blendable;
+  DeviceAllocation depth{kDeviceNullAllocation};
+  bool depth_clear{true};
+  float clear_depth{0};
+  uint32_t width{0}, height{0};
+  std::array<uint32_t, 4> viewport{};
+};
+
+VulkanGraphicsPassTargets prepare_vulkan_graphics_pass_targets(
+    vulkan::VulkanDevice &device,
+    const std::vector<VulkanGraphicsColorTarget> &colors,
+    DeviceAllocation depth,
+    bool depth_clear,
+    float clear_depth,
+    std::array<uint32_t, 4> viewport = {});
+void validate_vulkan_graphics_pipeline_targets(
+    vulkan::VulkanPipeline &pipeline,
+    const VulkanGraphicsPassTargets &targets);
+void begin_vulkan_graphics_pass(CommandList *commands,
+                                const VulkanGraphicsPassTargets &targets);
+
 struct VulkanGraphicsShaderBufferView {
   std::uint32_t set_index{0};
   std::uint32_t binding{0};

@@ -545,7 +545,9 @@ premultiplied = gfx.ColorTarget(
 # 独立累积附件可用 one/one；整数 ID 附件仍必须禁用混合。
 ```
 
-附件必须是互不相同、尺寸一致、格式可用的存活二维单级 Texture。不开放采样输入与附件别名、
+颜色和深度附件必须是互不相同、尺寸一致、具有 attachment usage 的存活二维单级 Texture；
+深度格式须为 `depth32f`。准备阶段检查实际图像/view，以及设备的 framebuffer 和 viewport 限值；
+每个 pass 中每种格式的能力只查询一次，混合校验复用结果。不开放采样输入与附件别名、
 MSAA resolve、稀疏 output location、mip/layer 附件 view。准备阶段检查限值，不逐 draw 重验。
 多附件 prepared 调用返回按 location 排列的 Texture tuple；旧单附件调用仍返回单 Texture。
 后续 kernel 可用 `Texture.fetch` 消费浮点目标，用匹配格式的 `rw_texture.load` 读取整数 ID

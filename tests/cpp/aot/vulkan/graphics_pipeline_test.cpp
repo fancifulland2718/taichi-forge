@@ -6,6 +6,7 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include <algorithm>
 #include <array>
+#include <limits>
 
 using namespace taichi::lang;
 using namespace taichi::lang::vulkan;
@@ -150,13 +151,11 @@ TEST(VulkanGraphicsPipeline, SharedDrawRecordsBufferRangesAndSampledImages) {
                              ImageLayout::shader_read);
   commands->image_transition(*target, ImageLayout::undefined,
                              ImageLayout::color_attachment);
-  auto *vk = static_cast<VulkanCommandList *>(commands.get());
-  vk->set_next_renderpass_color_final_layout(ImageLayout::color_attachment);
-  const bool clear = true;
-  const VkClearColorValue clear_value{};
-  vk->begin_renderpass_typed(0, 0, 8, 8, 1, target.get(), &clear, &clear_value,
-                             nullptr, false);
-  commands->set_raster_viewport_and_scissor(0, 0, 8, 8);
+  auto targets = prepare_vulkan_graphics_pass_targets(
+      device, {{*target}}, kDeviceNullAllocation, false, 0);
+  validate_vulkan_graphics_pipeline_targets(
+      *static_cast<VulkanPipeline *>(pipeline.get()), targets);
+  begin_vulkan_graphics_pass(commands.get(), targets);
   VulkanGraphicsDrawInfo draw;
   draw.element_count = 3;
   record_vulkan_graphics_draw(commands.get(), pipeline.get(), false, draw, {},
@@ -182,4 +181,81 @@ TEST(VulkanGraphicsPipeline, SharedDrawRecordsBufferRangesAndSampledImages) {
     EXPECT_EQ(result[i + 2], 0);
     EXPECT_EQ(result[i + 3], 255);
   }
+}
+
+TEST(VulkanGraphicsPipeline, SharedAttachmentContractRejectsInvalidViewsCold) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  ImageParams params;
+  params.dimension = ImageDimension::d2D;
+  params.format = BufferFormat::rgba8;
+  params.x = params.y = 8;
+  params.z = 1;
+  params.usage = ImageAllocUsage::Attachment;
+  auto color = device.create_image_unique(params);
+  params.format = BufferFormat::depth32f;
+  auto depth = device.create_image_unique(params);
+  auto prepare = [&](std::vector<VulkanGraphicsColorTarget> colors,
+                     DeviceAllocation depth_target = kDeviceNullAllocation,
+                     std::array<uint32_t, 4> viewport = {},
+                     float clear_depth = 0.25f) {
+    return prepare_vulkan_graphics_pass_targets(device, colors, depth_target,
+                                                true, clear_depth, viewport);
+  };
+  auto targets = prepare({{*color}}, *depth, {2, 1, 4, 5});
+  EXPECT_EQ(targets.width, 8);
+  EXPECT_EQ(targets.height, 8);
+  EXPECT_EQ(targets.viewport, (std::array<uint32_t, 4>{2, 1, 4, 5}));
+  EXPECT_EQ(targets.color_types, std::vector<int>{1});
+  EXPECT_TRUE(targets.color_clears[0]);
+  EXPECT_FLOAT_EQ(targets.clear_depth, 0.25f);
+  EXPECT_EQ(prepare({}, *depth).viewport,
+            (std::array<uint32_t, 4>{0, 0, 8, 8}));
+  EXPECT_ANY_THROW(prepare({}));
+  EXPECT_ANY_THROW(prepare({{kDeviceNullAllocation}}));
+  EXPECT_ANY_THROW(prepare({{*color}, {*color}}));
+  EXPECT_ANY_THROW(prepare({{*depth}}, *depth));
+  EXPECT_ANY_THROW(prepare({}, *color));
+  EXPECT_ANY_THROW(prepare({{*color}}, *depth, {7, 1, 2, 1}));
+  EXPECT_ANY_THROW(prepare({{*color}}, *depth, {0xffffffffu, 0, 2, 1}));
+  EXPECT_ANY_THROW(prepare({{*color}}, *depth, {0, 0, 0, 1}));
+  EXPECT_ANY_THROW(
+      prepare({{*color}}, *depth, {}, std::numeric_limits<float>::quiet_NaN()));
+  EXPECT_ANY_THROW(prepare({{*color}}, *depth, {}, 1.01f));
+
+  params.mip_levels = 2;
+  auto depth_mips = device.create_image_unique(params);
+  EXPECT_ANY_THROW(prepare({{*color}}, *depth_mips));
+  params.format = BufferFormat::rgba8;
+  auto color_mips = device.create_image_unique(params);
+  EXPECT_ANY_THROW(prepare({{*color_mips}}));
+  params.mip_levels = 1;
+  params.usage = ImageAllocUsage::Sampled;
+  auto sampled = device.create_image_unique(params);
+  EXPECT_ANY_THROW(prepare({{*sampled}}));
+  params.usage = ImageAllocUsage::Attachment;
+  params.y = 1;
+  auto different_shape = device.create_image_unique(params);
+  EXPECT_ANY_THROW(prepare({{*color}, {*different_shape}}));
+  params.dimension = ImageDimension::d1D;
+  auto one_dimensional = device.create_image_unique(params);
+  EXPECT_ANY_THROW(prepare({{*one_dimensional}}));
+
+  params.dimension = ImageDimension::d2D;
+  params.y = 8;
+  params.format = BufferFormat::r32u;
+  auto unsigned_color = device.create_image_unique(params);
+  params.format = BufferFormat::r32i;
+  auto signed_color = device.create_image_unique(params);
+  targets = prepare({{*color},
+                     {*unsigned_color, true, {0xf1234567u}},
+                     {*signed_color, false, {0xfedcba98u}}});
+  EXPECT_EQ(targets.color_types, (std::vector<int>{1, 3, 2}));
+  EXPECT_EQ(targets.clear_colors[1].uint32[0], 0xf1234567u);
+  EXPECT_EQ(targets.clear_colors[2].uint32[0], 0xfedcba98u);
+  EXPECT_FALSE(targets.color_clears[2]);
+  EXPECT_FALSE(targets.color_blendable[1]);
+  EXPECT_FALSE(targets.color_blendable[2]);
 }

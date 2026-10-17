@@ -682,8 +682,11 @@ premultiplied = gfx.ColorTarget(
 # An independent accumulation target can use one/one. Integer IDs cannot blend.
 ```
 
-Targets must be distinct live 2D single-level textures with compatible color
-attachment formats and equal extents. Aliasing sampled inputs with attachments,
+Color and depth targets must be distinct live 2D single-level textures with
+attachment usage and equal extents; depth targets require `depth32f`. Preparation
+checks the actual image/view, framebuffer and viewport device limits, and queries
+format capabilities once per distinct format in the pass. Blending checks reuse
+those results. Aliasing sampled inputs with attachments,
 MSAA resolves, sparse output locations and mip/layer attachment views are not
 exposed. Limits are checked during preparation, not every draw. A prepared
 MRT call returns its color textures as a tuple; single-color calls keep their
