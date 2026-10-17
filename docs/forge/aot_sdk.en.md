@@ -1887,6 +1887,13 @@ unusable; it retains its leases until synchronized retirement and cannot be retr
 Small CPU/CUDA/Vulkan tests cover standalone and borrowed owners, explicit reverse
 gradients, independent snapshots, source retirement, aliases and owner reset.
 
+`runtime.device_capabilities()` returns a snapshot of the device's enabled
+capability levels, for example `caps.get("spirv_has_ray_query", 0)`. Treat absent
+entries as zero. This cold query uses `ti_get_runtime_capabilities` without
+allocating device storage or loading providers. Device capabilities, registered
+operations and optional dependencies are separate conditions; preparation still
+qualifies concrete layouts and hardware limits.
+
 Before allocating operation buffers, query
 `runtime.native_operation_capabilities("compact", version=1)` (also `"sort"`).
 The returned set contains `"cpu"`, `"cuda_capture"`, `"vulkan_inline"`, or

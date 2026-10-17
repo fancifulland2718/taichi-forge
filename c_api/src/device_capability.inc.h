@@ -1,0 +1,40 @@
+// Public C ABI values are stable; internal ordinals also serve persisted
+// compiler metadata and must not be used as public capability numbers.
+PER_CAPABILITY(SPIRV_VERSION, spirv_version)
+PER_CAPABILITY(SPIRV_HAS_INT8, spirv_has_int8)
+PER_CAPABILITY(SPIRV_HAS_INT16, spirv_has_int16)
+PER_CAPABILITY(SPIRV_HAS_INT64, spirv_has_int64)
+PER_CAPABILITY(SPIRV_HAS_FLOAT16, spirv_has_float16)
+PER_CAPABILITY(SPIRV_HAS_FLOAT64, spirv_has_float64)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_INT64, spirv_has_atomic_int64)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT16, spirv_has_atomic_float16)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT16_ADD, spirv_has_atomic_float16_add)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT16_MINMAX, spirv_has_atomic_float16_minmax)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT, spirv_has_atomic_float)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT_ADD, spirv_has_atomic_float_add)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT_MINMAX, spirv_has_atomic_float_minmax)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT64, spirv_has_atomic_float64)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT64_ADD, spirv_has_atomic_float64_add)
+PER_CAPABILITY(SPIRV_HAS_ATOMIC_FLOAT64_MINMAX, spirv_has_atomic_float64_minmax)
+PER_CAPABILITY(SPIRV_HAS_VARIABLE_PTR, spirv_has_variable_ptr)
+PER_CAPABILITY(SPIRV_HAS_PHYSICAL_STORAGE_BUFFER,
+               spirv_has_physical_storage_buffer)
+PER_CAPABILITY(SPIRV_HAS_SUBGROUP_BASIC, spirv_has_subgroup_basic)
+PER_CAPABILITY(SPIRV_HAS_SUBGROUP_VOTE, spirv_has_subgroup_vote)
+PER_CAPABILITY(SPIRV_HAS_SUBGROUP_ARITHMETIC, spirv_has_subgroup_arithmetic)
+PER_CAPABILITY(SPIRV_HAS_SUBGROUP_BALLOT, spirv_has_subgroup_ballot)
+PER_CAPABILITY(SPIRV_HAS_NON_SEMANTIC_INFO, spirv_has_non_semantic_info)
+PER_CAPABILITY(SPIRV_HAS_NO_INTEGER_WRAP_DECORATION,
+               spirv_has_no_integer_wrap_decoration)
+PER_CAPABILITY(SPIRV_HAS_INT8_STORAGE, spirv_has_int8_storage)
+PER_CAPABILITY(SPIRV_HAS_INT16_STORAGE, spirv_has_int16_storage)
+PER_CAPABILITY(SPIRV_HAS_STORAGE_IMAGE_EXTENDED_FORMATS,
+               spirv_has_storage_image_extended_formats)
+PER_CAPABILITY(SPIRV_HAS_RAY_QUERY, spirv_has_ray_query)
+PER_CAPABILITY(SPIRV_HAS_COOPERATIVE_MATRIX, spirv_has_cooperative_matrix)
+PER_CAPABILITY(CUDA_COMPUTE_CAPABILITY, cuda_compute_capability)
+PER_CAPABILITY(CUDA_PTX_VERSION, cuda_ptx_version)
+PER_CAPABILITY(SPIRV_HAS_SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING,
+               spirv_has_sampled_image_array_non_uniform_indexing)
+PER_CAPABILITY(MAX_SAMPLED_TEXTURE_COLLECTION_SIZE,
+               max_sampled_texture_collection_size)

@@ -1440,6 +1440,11 @@ C/C++ 使用 `ti_initialize_prepared_ext` 或首次 launch 的自动路径。重
 小型 CPU/CUDA/Vulkan 测试覆盖独立/借用 owner、显式反向、独立快照、源退休、
 别名和 owner reset。
 
+`runtime.device_capabilities()` 返回当前设备启用的能力等级快照，例如
+`caps.get("spirv_has_ray_query", 0)`；缺失项按零处理。该冷查询沿用
+`ti_get_runtime_capabilities`，不分配设备存储或加载 provider。设备能力、操作注册和
+可选依赖是分别检查的条件；最终布局与硬件限制仍在准备时验证。
+
 分配操作缓冲前可查询 `runtime.native_operation_capabilities("compact", version=1)`
 （也支持 `"sort"`）。返回集合按当前 runtime 后端包含 `"cpu"`、`"cuda_capture"`、
 `"vulkan_inline"`、`"cuda_synchronous"` 或 `"cuda_ordered"`；未注册的操作类型或版本返回空集合。查询不加载操作代码、不分配

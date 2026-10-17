@@ -403,10 +403,25 @@ void ti_set_runtime_capabilities_ext(
 
   Runtime *runtime2 = (Runtime *)runtime;
   taichi::lang::DeviceCapabilityConfig devcaps;
+  if (capability_count && !capabilities) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "capabilities");
+    return;
+  }
   for (uint32_t i = 0; i < capability_count; ++i) {
     const auto &cap_level_info = capabilities[i];
-    devcaps.set((taichi::lang::DeviceCapability)cap_level_info.capability,
-                cap_level_info.level);
+    switch (cap_level_info.capability) {
+#define PER_CAPABILITY(public_name, internal_name)             \
+  case TI_CAPABILITY_##public_name:                            \
+    devcaps.set(taichi::lang::DeviceCapability::internal_name, \
+                cap_level_info.level);                         \
+    break;
+#include "device_capability.inc.h"
+#undef PER_CAPABILITY
+      default:
+        ti_set_last_error(TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+                          "Unknown public device capability");
+        return;
+    }
   }
   runtime2->get().set_caps(std::move(devcaps));
 
@@ -427,20 +442,25 @@ void ti_get_runtime_capabilities(TiRuntime runtime,
     return;
   }
 
-  if (capabilities != nullptr) {
-    auto pos = devcaps.to_inner().begin();
-    auto end = devcaps.to_inner().end();
-    for (size_t i = 0; i < *capability_count; ++i) {
-      if (pos == end) {
-        break;
-      }
-      capabilities[i].capability = (TiCapability)(uint32_t)pos->first;
-      capabilities[i].level = pos->second;
-      ++pos;
+  uint32_t count = 0;
+  for (const auto &entry : devcaps.to_inner()) {
+    TiCapability capability;
+    switch (entry.first) {
+#define PER_CAPABILITY(public_name, internal_name)    \
+  case taichi::lang::DeviceCapability::internal_name: \
+    capability = TI_CAPABILITY_##public_name;         \
+    break;
+#include "device_capability.inc.h"
+#undef PER_CAPABILITY
+      default:
+        continue;  // Internal-only capabilities have no public ABI entry.
     }
+    if (capabilities != nullptr && count < *capability_count)
+      capabilities[count] = {capability, entry.second};
+    ++count;
   }
 
-  *capability_count = devcaps.to_inner().size();
+  *capability_count = count;
 
   TI_CAPI_TRY_CATCH_END();
 }

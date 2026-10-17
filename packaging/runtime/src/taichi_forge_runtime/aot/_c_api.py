@@ -9,6 +9,52 @@ from .. import _native
 Handle = C.c_void_p
 UInt = C.c_uint32
 
+# Public TiCapability values, independent of the compiler's persisted enum.
+CAPABILITY_NAMES = dict(
+    enumerate(
+        (
+            "reserved",
+            "spirv_version",
+            "spirv_has_int8",
+            "spirv_has_int16",
+            "spirv_has_int64",
+            "spirv_has_float16",
+            "spirv_has_float64",
+            "spirv_has_atomic_int64",
+            "spirv_has_atomic_float16",
+            "spirv_has_atomic_float16_add",
+            "spirv_has_atomic_float16_minmax",
+            "spirv_has_atomic_float",
+            "spirv_has_atomic_float_add",
+            "spirv_has_atomic_float_minmax",
+            "spirv_has_atomic_float64",
+            "spirv_has_atomic_float64_add",
+            "spirv_has_atomic_float64_minmax",
+            "spirv_has_variable_ptr",
+            "spirv_has_physical_storage_buffer",
+            "spirv_has_subgroup_basic",
+            "spirv_has_subgroup_vote",
+            "spirv_has_subgroup_arithmetic",
+            "spirv_has_subgroup_ballot",
+            "spirv_has_non_semantic_info",
+            "spirv_has_no_integer_wrap_decoration",
+            "spirv_has_int8_storage",
+            "spirv_has_int16_storage",
+            "spirv_has_storage_image_extended_formats",
+            "spirv_has_ray_query",
+            "spirv_has_cooperative_matrix",
+            "cuda_compute_capability",
+            "cuda_ptx_version",
+            "spirv_has_sampled_image_array_non_uniform_indexing",
+            "max_sampled_texture_collection_size",
+        )
+    )
+)
+
+
+class CapabilityLevelInfo(C.Structure):
+    _fields_ = [("capability", UInt), ("level", UInt)]
+
 
 class Shape(C.Structure):
     _fields_ = [("dim_count", UInt), ("dims", UInt * 16)]
@@ -159,6 +205,7 @@ class Api:
             "ti_get_last_error": ([C.POINTER(C.c_uint64), C.c_void_p], C.c_int32),
             "ti_set_last_error": ([C.c_int32, C.c_char_p], None),
             "ti_create_runtime": ([UInt, UInt], Handle),
+            "ti_get_runtime_capabilities": ([Handle, C.POINTER(UInt), C.POINTER(CapabilityLevelInfo)], None),
             "ti_configure_native_provider_ext": ([Handle, C.c_char_p, C.c_char_p, C.c_char_p], None),
             "ti_configure_native_library_ext": ([Handle, C.c_char_p, C.c_char_p], None),
             "ti_get_native_operation_capabilities_ext": ([Handle, C.c_char_p, UInt], UInt),

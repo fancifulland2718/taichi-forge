@@ -1,0 +1,20 @@
+import pytest
+import taichi_forge as ti
+from tests import test_utils
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_aot_device_capabilities_snapshot_and_retirement():
+    runtime = ti.aot.borrow_runtime()
+    capabilities = runtime.device_capabilities()
+    assert all(isinstance(k, str) and isinstance(v, int) for k, v in capabilities.items())
+    if ti.cfg.arch == ti.vulkan:
+        assert capabilities["spirv_version"] >= 0x10000
+        assert capabilities.get("spirv_has_ray_query", 0) in (0, 1)
+    else:
+        assert "spirv_has_ray_query" not in capabilities
+    capabilities["spirv_version"] = 0
+    assert runtime.device_capabilities().get("spirv_version") != 0
+    runtime.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        runtime.device_capabilities()

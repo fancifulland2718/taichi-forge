@@ -174,6 +174,28 @@ class Runtime:
         if self._handle is None or (self._borrower is not None and self._borrower.closed):
             raise RuntimeError("AOT runtime is closed")
 
+    def device_capabilities(self):
+        """Return a snapshot of this runtime's enabled device capability levels.
+
+        Missing names have level zero. This cold query neither allocates device
+        storage nor loads operation providers. Combine it with registered modes
+        and provider probes before selecting a route; prepare still validates
+        actual layouts and device limits. Unknown future IDs retain numeric keys.
+        """
+        with self._lock:
+            self._check()
+            count = abi.UInt()
+            query = self._api.ti_get_runtime_capabilities
+            self._api.call(query, self._handle, C.byref(count), None)
+            entries = (abi.CapabilityLevelInfo * count.value)()
+            self._api.call(query, self._handle, C.byref(count), entries)
+            if count.value > len(entries):
+                raise RuntimeError("Device capabilities changed during enumeration")
+            return {
+                abi.CAPABILITY_NAMES.get(entry.capability, entry.capability): entry.level
+                for entry in entries[: count.value]
+            }
+
     def native_operation_capabilities(self, kind, *, version=1):
         """Registered composition modes for this backend and operation version.
 
