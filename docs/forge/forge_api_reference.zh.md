@@ -440,6 +440,10 @@ SPIR-V 避免新增 shader-toolchain 依赖，也不增加官方 wheel 变体。
 不再设置固定软件 draw 数量上限；各条命令仍保留设备及整数范围检查。
 AOT 光栅描述符数组使用 `pass_direct` v3，见 [SDK 合同](aot_sdk.zh.md)。
 
+AOT 直接 mesh/task 导出使用 graphics `pipeline` v2 与 `pass_direct` v4，复用
+同一准备和录制核心，覆盖普通/已选整图 graphics-queue Graph。indirect 和分段/
+fork-join 保持原边界；绑定方式与设备资格见 [SDK 合同](aot_sdk.zh.md)。
+
 shader 输入也接受 `graphics.SpirvShader(code, stage, entry_point="main",
 build=graphics.ShaderBuildInfo(...))`。光栅接口要求匹配 vertex/fragment/task/mesh stage
 的 `main` 入口。`SpirvShader.from_file(path, stage=...)` 只读取预编译产物，不调用编译器。

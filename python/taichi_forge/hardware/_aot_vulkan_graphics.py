@@ -22,7 +22,7 @@ def freeze_pipeline(
         targets = ((True, 15, 6, 7, 0, 6, 7, 0),)
     factors, ops = tuple(_BLEND_FACTORS), tuple(_BLEND_OPS)
     spec = dict(
-        shader_count=2,
+        shader_count=len(pipeline._shader_artifacts),
         shaders=[dict(stage=value.stage) for value in pipeline._shader_artifacts],
         vertices=[dict(binding=v.binding, stride=v.stride, instance=v.instance) for v in pipeline.vertex_bindings],
         attributes=[
@@ -64,9 +64,9 @@ def freeze_pipeline(
         digest.update(encoded)
 
     text("forge-vulkan-graphics-v1")
-    number(2)
+    number(len(pipeline._shader_artifacts))
     for shader in pipeline._shader_artifacts:
-        number({"vertex": 2, "fragment": 1}[shader.stage])
+        number({"vertex": 2, "fragment": 1, "task": 6, "mesh": 7}[shader.stage])
         text(shader.code_sha256)
     for value in (topology, polygon_mode, front_cull, back_cull, depth_test, depth_write, depth[0]):
         number(value)
@@ -108,7 +108,10 @@ def _pipeline(context, pipeline):
                 if type(asset) is not SpirvShader or _digest(asset.to_dict()) != _digest(fact):
                     raise TaichiRuntimeError("AOT graphics shader asset differs from the source pipeline contract")
                 inputs[port] = asset._export_aot_resource(context)
-        return context.resource(pipeline, "vulkan_graphics", "pipeline", parameters=spec, bindings=inputs)
+        version = 2 if any(shader["stage"] == "mesh" for shader in spec["shaders"]) else 1
+        return context.resource(
+            pipeline, "vulkan_graphics", "pipeline", version=version, parameters=spec, bindings=inputs
+        )
 
     cache[id(pipeline)] = (
         context.resource_once(pipeline, build, policy="vulkan_graphics_code"),
@@ -137,7 +140,7 @@ def _parts(recording):
 
 
 def preflight(recording, context):
-    from ._graphics import Draw, VulkanGraphicsPipeline
+    from ._graphics import Draw, MeshDraw, VulkanGraphicsPipeline, VulkanMeshPipeline
 
     cache = context._native_export_facts.setdefault("vulkan_graphics_recordings", {})
     if id(recording) in cache:
@@ -147,8 +150,11 @@ def preflight(recording, context):
     parts = _parts(recording)
     draws, colors, _ = parts
     for item in draws:
-        if type(item.pipeline) is not VulkanGraphicsPipeline or type(item.draw) is not Draw:
-            raise TaichiRuntimeError("AOT graphics recording currently requires direct/indexed raster draws")
+        if (type(item.pipeline), type(item.draw)) not in (
+            (VulkanGraphicsPipeline, Draw),
+            (VulkanMeshPipeline, MeshDraw),
+        ):
+            raise TaichiRuntimeError("AOT graphics recording currently requires direct/indexed raster or mesh draws")
     for name in (*(value.name for value in colors), recording.depth):
         if name is not None:
             context.source_images.require_attachment(name)
@@ -171,15 +177,16 @@ def _clear_bits(fmt, values):
 
 
 def export(recording, context):
-    from ._graphics import ShaderBufferArrayBinding
+    from ._graphics import MeshDraw, ShaderBufferArrayBinding
 
     draws, colors, depth_load = preflight(recording, context)
     bindings, groups, descriptions = {}, {name: {} for name in ("pipeline", "array", "image")}, []
     has_scenes = any(item.shader_acceleration_structures for item in draws)
+    has_mesh = any(type(item.draw) is MeshDraw for item in draws)
     has_arrays = any(
         isinstance(value, ShaderBufferArrayBinding) for item in draws for value in item.pipeline.shader_buffer_bindings
     )
-    if has_scenes or has_arrays:
+    if has_scenes or has_arrays or has_mesh:
         groups["scene"] = {}
 
     def index(group, resource):
@@ -216,12 +223,6 @@ def export(recording, context):
         result = dict(
             pipeline=index("pipeline", pipeline),
             expected_pipeline=contract,
-            element_count=draw.element_count,
-            instance_count=draw.instance_count,
-            first_vertex=draw.first_vertex,
-            first_index=draw.first_index,
-            first_instance=draw.first_instance,
-            vertex_offset=draw.vertex_offset,
             vertices=[
                 dict(binding=binding, array=index("array", context.binding(name)))
                 for binding, name in item._ordered_vertex_buffers
@@ -234,6 +235,17 @@ def export(recording, context):
                 for key, name in item._ordered_shader_images
             ],
         )
+        if type(draw) is MeshDraw:
+            result["mesh"] = [draw.group_count_x, draw.group_count_y, draw.group_count_z]
+        else:
+            result.update(
+                element_count=draw.element_count,
+                instance_count=draw.instance_count,
+                first_vertex=draw.first_vertex,
+                first_index=draw.first_index,
+                first_instance=draw.first_instance,
+                vertex_offset=draw.vertex_offset,
+            )
         if item.index_buffer is not None:
             result.update(
                 index=index("array", context.binding(item.index_buffer)),
@@ -270,7 +282,7 @@ def export(recording, context):
     context.native(
         "vulkan_graphics",
         "pass_direct",
-        version=3 if has_arrays else (2 if has_scenes else 1),
+        version=4 if has_mesh else (3 if has_arrays else (2 if has_scenes else 1)),
         parameters=parameters,
         bindings=bindings,
     )

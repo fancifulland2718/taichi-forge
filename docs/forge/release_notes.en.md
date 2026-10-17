@@ -49,6 +49,12 @@ lifetimes. The entries below describe the changes.
   ordinary and update-after-bind layouts are distinguished. Recorded descriptor
   sets continue to retain their resources through completion.
 
+- AOT direct mesh/task draws now use graphics pipeline v2 and pass_direct v4,
+  with ordinary/selected complete graphics-queue export and public/private
+  owners. Preparation shares overflow-safe task/mesh device-limit checks with
+  JIT. Windows standalone/borrowed tests include compute-to-mesh updates and
+  downstream gradients; mesh/task AS reads and indirect draws remain separate.
+
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache

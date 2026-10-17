@@ -42,6 +42,11 @@
   身份包含实际 binding flags，区分普通和 update-after-bind 布局。已录制 descriptor set
   继续将实际资源保活至完成。
 
+- AOT 直接 mesh/task 绘制接通 graphics pipeline v2、pass_direct v4，支持普通/
+  已选整图 graphics-queue 导出及公私 owner。准备与 JIT 共用防溢出的 task/mesh
+  设备限值检查。Windows 独立/借用验证包含 compute→mesh 更新与下游梯度；
+  mesh/task AS 读取和 indirect 绘制仍为独立余项。
+
 - GFX AOT 补齐 RWTexture 格式及 mip 层级元数据，包括仅访问 shape 的内核。
   对应导出要求 metadata v4 和配对 ABI90；普通产物保持原版本。不兼容的 SPIR-V
   缓存会重新编译，CPU/CUDA 缓存格式不变。

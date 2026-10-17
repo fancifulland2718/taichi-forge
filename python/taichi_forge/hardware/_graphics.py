@@ -1336,6 +1336,16 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
 class VulkanMeshPassRecording(VulkanGraphicsPassRecording):
     """Mesh/task specialization of the low-level Vulkan graphics pass."""
 
+    def _export_aot_bindings(self, context):
+        from ._aot_vulkan_graphics import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_vulkan_graphics import export
+
+        return export(self, context)
+
     def __init__(self, *args, **kwargs):
         VulkanGraphicsPassRecording.__init__.__wrapped__(self, *args, **kwargs)
 
@@ -1789,6 +1799,14 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         )
         self.vertex_bindings = ()
         self.vertex_attributes = ()
+        from ._aot_vulkan_graphics import freeze_pipeline
+
+        self._aot_pipeline_spec = freeze_pipeline(
+            self, topology=topology_value, polygon_mode=polygon_value,
+            front_cull=front_cull, back_cull=back_cull,
+            depth_test=bool(depth_test), depth_write=bool(depth_write),
+            depth=depth_params, targets=targets, blending=bool(blending),
+        )
         self.shader_buffer_bindings = shader_buffer_bindings
         self._shader_buffer_by_key = MappingProxyType(shader_buffer_by_key)
         self.shader_image_bindings = shader_image_bindings

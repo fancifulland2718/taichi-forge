@@ -666,7 +666,7 @@ clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样
 
 Windows 验证覆盖独立/借用执行、直接和索引/实例化绘制、uniform/采样描述符、颜色/深度
 clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度；不提供光栅化求导。
-mesh/indirect 仍为后续工作；storage 描述符数组使用下文的 v3。
+indirect 仍为后续工作；storage 数组与直接 mesh 绘制使用下文的对应版本。
 
 普通 Vulkan Graph 中的 `VulkanGraphicsDrawRecording` 和
 `VulkanGraphicsPassRecording` 可通过 `module.add_execution_plan` 导出上述合格的
@@ -713,7 +713,27 @@ pipeline 资源仍为 v1。每个 `buffers` 项互斥选择标量 `array` 或至
 显式 AOT 计划可以绑定公开/私有 parent 的 `ndarray_view`，逐元素的偏移和有限字节范围
 进入同一 descriptor 缓存与录制路径，不复制数组载荷。Windows 独立/借用消费检查包括
 shader 实际观察数组长度、别名、公私 parent、GPU selector 更新、替换绑定、退休及下游
-梯度。mesh/indirect、分段/fork-join 的提交资格保持原边界。
+梯度。
+
+直接 mesh 绘制使用 `vulkan_graphics/pipeline` v2 与 `pass_direct` v4。通过
+`native_resource_capabilities("vulkan_graphics_pipeline", version=2)` 和
+`native_operation_capabilities("vulkan_graphics_pass_direct", version=4)` 查询工厂；
+准备阶段另行检查实际 mesh/task feature 及各自的工作组限值。pipeline v2 接受
+mesh/fragment（可选 task）或已有 vertex/fragment；代码/布局摘要与 shader blob
+端口合同保持，mesh pipeline 的 `vertices`、`attributes` 为空。
+
+mesh draw 使用 `"mesh": [x, y, z]`，代替 `element_count` 及其他 vertex/index 绘制
+字段，`vertices` 为空，且须绑定 mesh pipeline。混填字段、绑定顶点/索引输入或超过
+设备容量均在录制前拒绝。pass v4 继承 v3 的描述符数组与 AS 字段，无 AS 时指定
+`scene_count=0`。mesh/task stage 的 AS 读取尚未资格化，会明确拒绝；原有
+vertex/fragment AS 合同保持。
+
+`VulkanMeshPassRecording` 可通过普通和已选整图 graphics-queue Graph 导出，复用
+同一个 prepared pass、描述符与退休路径。按 pipeline stage 顺序指定每份 shader
+资产（有 task 时也包含 task），或绑定公共 pipeline。Windows 验证覆盖 mesh-only、
+task+mesh、compute→mesh 数据更新、公私 owner、替换绑定、close/reset，以及独立/
+借用消费的下游数值梯度；consumer 不需要 shader compiler。旧 raster 导出继续采用
+所需的最低版本；indirect 和分段/fork-join 提交资格保持原边界。
 
 显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
 `mip_levels` 和 `attachment`，复用同一所有者及 `image/upload`、`image/upload_mips`。
@@ -1895,6 +1915,7 @@ operation 查询返回空结果，保持原有发现行为。C API 为
 | `image/sampled` v1 | `sampled_image` | CUDA、Vulkan |
 | `image/storage` v1 | `storage_image` | Vulkan |
 | `vulkan_graphics/pipeline` v1 | `vulkan_graphics_pipeline` | Vulkan |
+| `vulkan_graphics/pipeline` v2（mesh/task） | `vulkan_graphics_pipeline` | Vulkan |
 
 这些查询供 SDK 在准备期选择路线，重放不查询。probe 成功不表示所有格式、尺寸、
 shader 或硬件功能都可用，创建仍校验具体描述。它查询已注册的 native 资源工厂，

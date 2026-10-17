@@ -859,8 +859,8 @@ executor, with no per-draw Python callback or extra host wait.
 Windows qualification covers standalone and borrowed execution, direct and
 indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
 LOAD, changed inputs and bindings, shared/private retirement, and downstream
-numeric gradients. This is not differentiation of rasterization. Mesh/indirect
-draws remain separate work; storage descriptor arrays use version 3 below.
+numeric gradients. This is not differentiation of rasterization. Indirect draws
+remain separate work; storage arrays and direct mesh draws use the versions below.
 
 Ordinary Vulkan Graphs containing `VulkanGraphicsDrawRecording` or
 `VulkanGraphicsPassRecording` can export these qualified direct/indexed/instanced
@@ -923,8 +923,33 @@ for `ShaderBufferArrayBinding`. Explicit AOT plans may bind public/private
 through descriptor caching and recording. No array payload copy is required.
 Windows tests cover actual shader array-length observations, aliases, public
 and private parents, GPU selector updates, replacement bindings, retirement and
-downstream gradients in standalone and borrowed consumers. Mesh/indirect and
-segmented/fork-join submission coverage remains unchanged.
+downstream gradients in standalone and borrowed consumers.
+
+Direct mesh draws use `vulkan_graphics/pipeline` v2 and `pass_direct` v4.
+Query `native_resource_capabilities("vulkan_graphics_pipeline", version=2)` and
+`native_operation_capabilities("vulkan_graphics_pass_direct", version=4)` for
+factory availability; preparation also checks the physical mesh/task features
+and their separate workgroup limits. Pipeline v2 accepts mesh/fragment with an
+optional task stage, or the existing vertex/fragment form. Its code/layout
+contract and shader blob ports are unchanged; mesh pipelines have empty
+`vertices` and `attributes`.
+
+A mesh draw replaces `element_count` and the other vertex/index draw fields
+with `"mesh": [x, y, z]` and has empty `vertices`. It must bind a mesh pipeline;
+mixing these fields, binding a vertex/index input, or exceeding device limits is
+rejected before recording. Pass v4 retains v3's descriptor arrays and AS fields
+(`scene_count=0` when unused). AS reads in mesh/task stages remain unqualified
+and are rejected; the existing vertex/fragment AS contract is unchanged.
+
+`VulkanMeshPassRecording` exports through ordinary or selected complete
+graphics-queue Graphs using the same prepared pass, descriptors and retirement
+path as raster draws. Provide every shader asset, including task when present,
+in pipeline stage order, or bind a public pipeline. Windows tests cover mesh-only
+and task+mesh, compute-to-mesh data updates, public/private owners, replacement
+bindings, close/reset and downstream numeric gradients in standalone and
+borrowed consumers. No consumer shader compiler is required. Older raster
+exports keep their lowest required versions. Indirect and segmented/fork-join
+submission coverage remains unchanged.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use
@@ -2487,6 +2512,7 @@ existing operation-discovery behavior. The C equivalents are
 | `image/sampled` v1 | `sampled_image` | CUDA, Vulkan |
 | `image/storage` v1 | `storage_image` | Vulkan |
 | `vulkan_graphics/pipeline` v1 | `vulkan_graphics_pipeline` | Vulkan |
+| `vulkan_graphics/pipeline` v2 (mesh/task) | `vulkan_graphics_pipeline` | Vulkan |
 
 These are preparation-time SDK choices, not replay queries. A successful probe
 does not admit every format, extent, shader or device feature; creation still

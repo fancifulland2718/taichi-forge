@@ -106,6 +106,9 @@ struct PipelineDescription {
   std::vector<VertexInputAttribute> attributes;
   std::string expected;
 };
+struct MeshPipelineDescription : PipelineDescription {
+  static constexpr uint32_t version = 2;
+};
 
 // Typed, length-delimited contract, independent of JSON spelling/defaults.
 std::string pipeline_contract(const PipelineDescription &d) {
@@ -170,6 +173,8 @@ class PipelineAccess : public NativeResource {
  public:
   virtual const std::string &contract() const = 0;
   virtual const std::vector<VertexInputBinding> &vertices() const = 0;
+  virtual bool mesh_pipeline() const = 0;
+  virtual bool task_shader() const = 0;
 #ifdef TI_WITH_VULKAN
   virtual vulkan::VulkanPipeline &pipeline() const = 0;
 #endif
@@ -177,6 +182,7 @@ class PipelineAccess : public NativeResource {
 struct DrawDescription {
   uint32_t pipeline{0};
   VulkanGraphicsDrawInfo draw;
+  std::optional<VulkanGraphicsMeshDrawInfo> mesh;
   std::string expected;
   struct Vertex {
     uint32_t binding, array;
@@ -222,6 +228,9 @@ struct ShaderPassDescription : PassDescription {
 struct ArrayPassDescription : PassDescription {
   static constexpr uint32_t version = 3;
 };
+struct MeshPassDescription : PassDescription {
+  static constexpr uint32_t version = 4;
+};
 
 #ifdef TI_WITH_VULKAN
 vulkan::VulkanDevice &owner_device(NativePreparationContext &c) {
@@ -244,6 +253,8 @@ class PreparedPipeline final : public PipelineAccess {
     std::vector<PipelineSourceDesc> sources;
     words.reserve(d.shaders.size());
     for (const auto &shader : d.shaders) {
+      mesh_ |= shader.stage == PipelineStageType::mesh;
+      task_ |= shader.stage == PipelineStageType::task;
       const auto &bytes = shader.code->bytes();
       if (bytes.size() < 20 || bytes.size() % 4)
         throw std::invalid_argument(
@@ -279,6 +290,12 @@ class PreparedPipeline final : public PipelineAccess {
   const std::vector<VertexInputBinding> &vertices() const override {
     return vertices_;
   }
+  bool mesh_pipeline() const override {
+    return mesh_;
+  }
+  bool task_shader() const override {
+    return task_;
+  }
   vulkan::VulkanPipeline &pipeline() const override {
     return *static_cast<vulkan::VulkanPipeline *>(pipeline_.get());
   }
@@ -288,6 +305,7 @@ class PreparedPipeline final : public PipelineAccess {
   std::shared_ptr<RuntimeFaultDomain> fault_;
   std::vector<VertexInputBinding> vertices_;
   std::string contract_;
+  bool mesh_{false}, task_{false};
   std::unique_ptr<Pipeline> pipeline_;
 };
 
@@ -295,6 +313,7 @@ class PreparedPass final : public NativeOperation {
   struct Draw {
     std::shared_ptr<PipelineAccess> pipeline;
     VulkanGraphicsDrawInfo info;
+    std::optional<VulkanGraphicsMeshDrawInfo> mesh;
     VulkanGraphicsDrawResources resources;
   };
   struct Payload {
@@ -357,6 +376,17 @@ class PreparedPass final : public NativeOperation {
     for (const auto &input : d.draws) {
       auto pipeline = indexed(d.pipelines, input.pipeline);
       match_contract(input.expected, pipeline->contract());
+      if (input.mesh.has_value() != pipeline->mesh_pipeline())
+        throw std::invalid_argument(
+            "Graphics pipeline and draw command kinds must agree");
+      if (input.mesh) {
+        const auto &mesh = *input.mesh;
+        if (!device_.vk_caps().mesh_group_count_valid(
+                mesh.group_count_x, mesh.group_count_y, mesh.group_count_z,
+                pipeline->task_shader()))
+          throw std::invalid_argument(
+              "Vulkan mesh draw group counts exceed the active device limits");
+      }
       validate_vulkan_graphics_pipeline_targets(pipeline->pipeline(),
                                                 payload_->targets);
       std::vector<VulkanGraphicsVertexRange> ranges;
@@ -373,8 +403,9 @@ class PreparedPass final : public NativeOperation {
           throw std::invalid_argument("Graphics index array must use u32");
         indices = VulkanGraphicsBufferRange{a.pointer, size_t(a.bytes)};
       }
-      validate_vulkan_graphics_vertex_ranges(device_, pipeline->vertices(),
-                                             ranges, indices, input.draw, {});
+      if (!input.mesh)
+        validate_vulkan_graphics_vertex_ranges(device_, pipeline->vertices(),
+                                               ranges, indices, input.draw, {});
       std::vector<VulkanGraphicsShaderBufferView> buffers;
       for (const auto &v : input.buffers) {
         VulkanGraphicsShaderBufferView buffer;
@@ -422,7 +453,7 @@ class PreparedPass final : public NativeOperation {
       auto resources = prepare_vulkan_graphics_draw_resources(
           device_, pipeline->pipeline(), buffers, sampled, vertices,
           indices ? indices->pointer : kDeviceNullPtr, input.draw.indexed,
-          false, [&](VulkanGraphicsResourceSets &sets) {
+          input.mesh.has_value(), [&](VulkanGraphicsResourceSets &sets) {
             for (const auto &v : input.scenes) {
               auto scene = indexed(d.scenes, v.scene);
               auto &set = sets[v.set];
@@ -454,7 +485,7 @@ class PreparedPass final : public NativeOperation {
             }
           });
       payload_->draws.push_back(
-          {std::move(pipeline), input.draw, std::move(resources)});
+          {std::move(pipeline), input.draw, input.mesh, std::move(resources)});
     }
   }
   ~PreparedPass() override {
@@ -486,8 +517,9 @@ class PreparedPass final : public NativeOperation {
       scene->record_shader_read(commands, stages, true);
     begin_vulkan_graphics_pass(commands, payload_->targets);
     for (const auto &draw : payload_->draws)
-      record_vulkan_graphics_draw(commands, &draw.pipeline->pipeline(), false,
-                                  draw.info, {}, {}, draw.resources);
+      record_vulkan_graphics_draw(commands, &draw.pipeline->pipeline(),
+                                  draw.pipeline->task_shader(), draw.info, {},
+                                  draw.mesh, draw.resources);
     commands->end_renderpass();
   }
 
@@ -499,7 +531,7 @@ class PreparedPass final : public NativeOperation {
 };
 #endif
 
-PipelineDescription pipeline_parameters(const Json &p) {
+PipelineDescription pipeline_parameters(const Json &p, uint32_t version) {
   fields(p, {"shader_count", "shaders", "vertices", "attributes", "topology",
              "polygon_mode", "front_face_cull", "back_face_cull", "depth_test",
              "depth_write", "depth_compare", "depth_bias_constant",
@@ -509,12 +541,21 @@ PipelineDescription pipeline_parameters(const Json &p) {
   for (const auto &s : array(p, "shaders")) {
     fields(s, {"stage"});
     const auto stage = name(s["stage"]);
-    if (stage != "vertex" && stage != "fragment")
+    if (version == 1 && stage != "vertex" && stage != "fragment")
       throw std::invalid_argument(
           "AOT graphics v1 requires vertex/fragment shaders");
-    d.shaders.push_back({stage == "vertex" ? PipelineStageType::vertex
-                                           : PipelineStageType::fragment,
-                         {}});
+    PipelineStageType type;
+    if (stage == "vertex")
+      type = PipelineStageType::vertex;
+    else if (stage == "fragment")
+      type = PipelineStageType::fragment;
+    else if (stage == "mesh")
+      type = PipelineStageType::mesh;
+    else if (stage == "task")
+      type = PipelineStageType::task;
+    else
+      throw std::invalid_argument("Unsupported AOT graphics shader stage");
+    d.shaders.push_back({type, {}});
   }
   if (d.shaders.size() != u32(p["shader_count"]))
     throw std::invalid_argument("Graphics shader count differs from its array");
@@ -617,7 +658,7 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
     fields(v, {"pipeline", "vertices", "index", "buffers", "images",
                "element_count", "instance_count", "first_vertex", "first_index",
                "first_instance", "vertex_offset", "index_min", "index_max",
-               "expected_pipeline", "scenes"});
+               "expected_pipeline", "scenes", "mesh"});
     if (!shader_scenes && v.obj.inner.count("scenes"))
       throw std::invalid_argument(
           "Graphics AS bindings require pass_direct version 2");
@@ -631,7 +672,25 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
     };
     draw.pipeline = u32(v["pipeline"]);
     draw.expected = expected_contract(v);
-    draw.draw.element_count = u32(v["element_count"]);
+    if (v.obj.inner.count("mesh")) {
+      if (version < 4)
+        throw std::invalid_argument(
+            "Graphics mesh draws require pass_direct version 4");
+      for (const auto *key : {"element_count", "instance_count", "first_vertex",
+                              "first_index", "first_instance", "vertex_offset",
+                              "index_min", "index_max", "index"})
+        if (v.obj.inner.count(key))
+          throw std::invalid_argument(
+              "Graphics mesh draws cannot declare vertex/index draw fields");
+      const auto &groups = array(v, "mesh");
+      if (groups.size() != 3)
+        throw std::invalid_argument(
+            "Graphics mesh requires three group counts");
+      draw.mesh = VulkanGraphicsMeshDrawInfo{u32(groups[0]), u32(groups[1]),
+                                             u32(groups[2])};
+    } else {
+      draw.draw.element_count = u32(v["element_count"]);
+    }
     draw.draw.instance_count = opt_u32(v, "instance_count", 1);
     draw.draw.first_vertex = opt_u32(v, "first_vertex", 0);
     draw.draw.first_index = opt_u32(v, "first_index", 0);
@@ -651,6 +710,9 @@ PassDescription pass_parameters(const Json &p, uint32_t version) {
       fields(vertex, {"binding", "array"});
       draw.vertices.push_back({u32(vertex["binding"]), u32(vertex["array"])});
     }
+    if (draw.mesh && !draw.vertices.empty())
+      throw std::invalid_argument(
+          "Graphics mesh draws cannot bind vertex inputs");
     for (const auto &b : array(v, "buffers")) {
       fields(b, {"set", "binding", "array", "arrays", "storage"});
       claim(u32(b["set"]), u32(b["binding"]));
@@ -770,17 +832,20 @@ static void register_graphics_pass(NativeOperationRegistry &registry) {
 #endif
 }
 
-void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
-  registry.define<PipelineDescription>(
-      [](Device &device, const PipelineDescription &d) {
+template <typename Descriptor>
+static void register_graphics_pipeline(NativeOperationRegistry &registry) {
+  registry.define<Descriptor>(
+      [](Device &device, const Descriptor &d) {
         for (const auto &s : d.shaders)
           same_device(device, s.code);
       },
       NativeObjectKind::resource);
-  registry.register_schema<PipelineDescription>(
+  registry.register_schema<Descriptor>(
       "vulkan_graphics", "pipeline", {},
       [](const Json &p) {
-        auto d = pipeline_parameters(p);
+        Descriptor d;
+        static_cast<PipelineDescription &>(d) =
+            pipeline_parameters(p, Descriptor::version);
         return [d](const NativeOperationBindings &b) mutable {
           auto result = d;
           for (size_t i = 0; i < result.shaders.size(); ++i)
@@ -791,14 +856,20 @@ void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
       },
       {}, {}, {{"shader_count", {"shader"}}});
 #ifdef TI_WITH_VULKAN
-  registry.register_context_factory<PipelineDescription>(
+  registry.register_context_factory<Descriptor>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
-      [](NativePreparationContext &c, const PipelineDescription &d) {
+      [](NativePreparationContext &c, const Descriptor &d) {
         return std::make_shared<PreparedPipeline>(c, d);
       });
 #endif
+}
+
+void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
+  register_graphics_pipeline<PipelineDescription>(registry);
+  register_graphics_pipeline<MeshPipelineDescription>(registry);
   register_graphics_pass<PassDescription>(registry);
   register_graphics_pass<ShaderPassDescription>(registry);
   register_graphics_pass<ArrayPassDescription>(registry);
+  register_graphics_pass<MeshPassDescription>(registry);
 }
 }  // namespace taichi::lang

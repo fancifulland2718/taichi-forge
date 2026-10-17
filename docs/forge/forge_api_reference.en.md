@@ -553,6 +553,12 @@ storage descriptor limits. Passes require at least one draw and have no fixed
 software draw-count cap; individual commands retain their device and integer
 range checks. AOT raster arrays use `pass_direct` v3; see the [SDK contract](aot_sdk.en.md).
 
+AOT direct mesh/task exports use graphics `pipeline` v2 and `pass_direct` v4,
+sharing the same preparation and recording core. Ordinary and selected complete
+graphics-queue Graphs are covered; indirect and segmented/fork-join routes retain
+their existing boundaries. See the [SDK contract](aot_sdk.en.md) for bindings and
+device qualification.
+
 Shader inputs also accept `graphics.SpirvShader(code, stage, entry_point="main",
 build=graphics.ShaderBuildInfo(...))`. Graphics requires `main` in the declared
 vertex/fragment/task/mesh stage. `SpirvShader.from_file(path, stage=...)` reads a
