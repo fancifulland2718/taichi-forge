@@ -1,20 +1,12 @@
 #include "taichi/program/program.h"
 #include "taichi/program/texture.h"
 #include "taichi/runtime/gfx/graph_recording.h"
+#include "taichi/runtime/vulkan_spd.h"
 
 #ifdef TI_WITH_VULKAN
 #include "taichi/rhi/vulkan/vulkan_device.h"
 
 namespace taichi::lang {
-namespace {
-struct SpdResources final : vkapi::DeviceObj {
-  std::shared_ptr<void> textures;
-  DeviceAllocationUnique counter;
-  std::unique_ptr<Pipeline> pipeline;
-  std::unique_ptr<ShaderResourceSet> bindings;
-};
-}  // namespace
-
 class VulkanSpdPlan {
  public:
   Program *program{nullptr};
@@ -38,110 +30,32 @@ std::uint64_t Program::create_vulkan_spd_plan(
                   source->get_dimension() != ImageDimension::d2D ||
                   output->get_dimension() != ImageDimension::d2D,
               "SPD requires distinct local 2D textures.");
-  const auto size = source->get_size();
-  const auto dest_size = output->get_size();
-  const auto levels = output->get_mip_levels();
-  const auto src_format = source->get_buffer_format();
-  const auto dst_format = output->get_buffer_format();
-  TI_ERROR_IF(
-      size[0] < 2 || size[1] < 2 || size[0] > 4096 || size[1] > 4096 ||
-          dest_size[0] != size[0] / 2 || dest_size[1] != size[1] / 2 ||
-          levels < 1 || levels > 12 || (size[0] >> levels) < 1 ||
-          (size[1] >> levels) < 1,
-      "SPD requires half-size output and 2D mip levels within a 2..4096 source.");
-  TI_ERROR_IF(
-      !((src_format == BufferFormat::r32f && dst_format == BufferFormat::r32f) ||
-        ((src_format == BufferFormat::rgba8 ||
-          src_format == BufferFormat::rgba32f) &&
-         dst_format == BufferFormat::rgba32f)),
-      "SPD requires R32F to R32F or RGBA8/RGBA32F to RGBA32F.");
-  TI_ERROR_IF(shader.empty() || shader.front() != 0x07230203u ||
-                  shader.size() > (4u << 20),
-              "SPD requires a bounded SPIR-V binary.");
-  auto *dev = static_cast<vulkan::VulkanDevice *>(get_graphics_device());
-  const auto &props = dev->get_vk_physical_device_props();
-  TI_ERROR_IF(props.limits.maxComputeWorkGroupInvocations < 256 ||
-                  props.limits.maxComputeWorkGroupSize[0] < 256 ||
-                  props.limits.maxComputeSharedMemorySize < 4100 ||
-                  props.limits.maxPerStageDescriptorStorageImages < levels + 1,
-              "SPD compute or storage-image limits are unavailable.");
-  auto resources = std::make_shared<SpdResources>();
-  resources->device = dev->vk_device();
-  resources->textures = std::make_shared<TextureLaunchLeases>(
-      acquire_texture_leases({source, output}));
+  auto *device = static_cast<vulkan::VulkanDevice *>(get_graphics_device());
+  const auto parameters = [](Texture *texture) {
+    ImageParams p{};
+    const auto size = texture->get_size();
+    p.dimension = texture->get_dimension();
+    p.format = texture->get_buffer_format();
+    p.x = size[0];
+    p.y = size[1];
+    p.z = size[2];
+    p.mip_levels = texture->get_mip_levels();
+    return p;
+  };
   const auto src = source->get_device_allocation();
   const auto dst = output->get_device_allocation();
-  TI_ERROR_IF(src.device != dev || dst.device != dev || src == dst,
-              "SPD texture allocations must be distinct on the active device.");
-  auto [counter, alloc_result] =
-      dev->allocate_memory_unique({4, false, false, false, AllocUsage::Storage});
-  TI_ERROR_IF(alloc_result != RhiResult::success, "SPD counter allocation failed.");
-  resources->counter = std::move(counter);
-  PipelineSourceDesc desc{PipelineSourceType::spirv_binary, shader.data(),
-                          shader.size() * 4, PipelineStageType::compute};
-  auto [pipeline, result] = dev->create_pipeline_unique(desc, "fidelityfx_spd");
-  TI_ERROR_IF(result != RhiResult::success, "SPD pipeline creation failed.");
-  resources->pipeline = std::move(pipeline);
-  resources->bindings.reset(dev->create_resource_set());
-  resources->bindings->rw_image(0, src, 0);
-  resources->bindings->rw_buffer(1, *resources->counter);
-  for (int mip = 0; mip < levels; ++mip) {
-    resources->bindings->rw_image(mip + 2, dst, mip);
-  }
-  const uint32_t groups_x = (size[0] + 63) / 64;
-  const uint32_t groups_y = (size[1] + 63) / 64;
+  auto prepared = prepare_vulkan_spd(
+      *device, parameters(source), src, parameters(output), dst, shader,
+      std::make_shared<TextureLaunchLeases>(acquire_texture_leases({source, output})));
   auto plan = std::make_shared<VulkanSpdPlan>();
   plan->program = this;
-  plan->record_inline = [resources, groups_x, groups_y,
-                         levels](CommandList *commands) {
-    auto *list = static_cast<vulkan::VulkanCommandList *>(commands);
-    // Attach the cold pipeline/texture/counter owner to the final command
-    // buffer, without retaining a public plan token across runtime reset.
-    list->begin_external_compute(resources);
-    list->bind_pipeline(resources->pipeline.get());
-    TI_ERROR_IF(list->bind_shader_resources(resources->bindings.get()) !=
-                    RhiResult::success,
-                "SPD inline binding failed.");
-    const uint32_t constants[]{uint32_t(levels), groups_x * groups_y};
-    list->push_constants(constants, sizeof(constants));
-    TI_ERROR_IF(list->dispatch(groups_x, groups_y) != RhiResult::success,
-                "SPD inline dispatch failed.");
-  };
-  auto commands = dev->get_compute_stream()->new_secondary_command_list();
-  TI_ERROR_IF(!commands, "SPD requires secondary compute recording.");
-  auto *list = static_cast<vulkan::VulkanCommandList *>(commands.get());
-  list->memory_barrier();
-  plan->record_inline(list);
-  list->memory_barrier();
-  plan->replay = list->finalize_secondary(resources);
-  TI_ERROR_IF(!plan->replay, "SPD secondary command finalization failed.");
+  plan->record_inline = std::move(prepared.record_inline);
+  plan->replay = std::move(prepared.replay);
+  plan->statistics = std::move(prepared.statistics);
   plan->images = {{src, ImageLayout::shader_read_write, ImageLayout::shader_read},
                   {dst, ImageLayout::shader_read_write, ImageLayout::shader_read}};
-  plan->statistics = {{"width", uint64_t(size[0])},
-                      {"height", uint64_t(size[1])},
-                      {"levels", uint64_t(levels)},
-                      {"dispatch_count", 1},
-                      {"barrier_count", 2},
-                      {"workspace_bytes", 4},
-                      {"inline_recording_available", 1},
-                      {"initial_counter_clear_count", 1},
-                      {"per_run_counter_clear_count", 0},
-                      {"threadgroups", groups_x * groups_y},
-                      {"device_copy_count", 0},
-                      {"device_vendor_id", props.vendorID},
-                      {"device_id", props.deviceID},
-                      {"vulkan_driver_version", props.driverVersion}};
-  // Initialize once on the same stream, without host synchronization. Secondary
-  // ownership retains counter/textures even if a later publication step fails.
-  auto initialize = dev->get_compute_stream()->new_secondary_command_list();
-  TI_ERROR_IF(!initialize, "SPD counter initialization recording failed.");
-  initialize->buffer_fill(resources->counter->get_ptr(0), 4, 0);
-  initialize->memory_barrier();
-  auto initialize_replay =
-      static_cast<vulkan::VulkanCommandList *>(initialize.get())
-          ->finalize_secondary(resources);
-  TI_ERROR_IF(!initialize_replay,
-              "SPD counter initialization finalization failed.");
+  // Keep initialization ordered on this Program's existing submission path.
+  auto initialize_replay = std::move(prepared.initialize);
   const auto handle = next_vulkan_spd_plan_handle_++;
   vulkan_spd_plans_.emplace(handle, plan);
   try {
