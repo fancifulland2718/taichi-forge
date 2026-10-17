@@ -10,6 +10,7 @@
 #include "taichi/ui/utils/utils.h"
 
 #include <limits>
+#include <shared_mutex>
 #include <unordered_map>
 
 using taichi::lang::Program;
@@ -23,6 +24,39 @@ using namespace taichi::lang::vulkan;
 
 static_assert(sizeof(SetImage::DirectUniformBufferObject) == 48);
 
+namespace {
+
+// The renderer owns device teardown, while Python may wait on a display
+// ticket from another thread. Keep backend readers alive through retirement
+// without holding the ticket's status lock or changing its exported layout.
+class DisplaySubmission final : public StreamSemaphoreObject {
+ public:
+  explicit DisplaySubmission(StreamSemaphore completion)
+      : completion_(std::move(completion)) {
+  }
+
+  bool is_ready() const override {
+    std::shared_lock<std::shared_mutex> lock(backend_mutex_);
+    return !completion_ || completion_->is_ready();
+  }
+
+  bool wait() const override {
+    std::shared_lock<std::shared_mutex> lock(backend_mutex_);
+    return !completion_ || completion_->wait();
+  }
+
+  void retire() {
+    std::unique_lock<std::shared_mutex> lock(backend_mutex_);
+    completion_.reset();
+  }
+
+ private:
+  mutable std::shared_mutex backend_mutex_;
+  StreamSemaphore completion_;
+};
+
+}  // namespace
+
 bool DisplayCompletion::done() {
   std::lock_guard<std::mutex> lock(mutex_);
   TI_ERROR_IF(status_ == "cancelled",
@@ -31,25 +65,31 @@ bool DisplayCompletion::done() {
               "Display completion was invalidated by window teardown");
   if (status_ == "submitted" && completion_->is_ready()) {
     status_ = "complete";
-    completion_.reset();
   }
   return status_ == "complete";
 }
 
 void DisplayCompletion::wait() {
+  StreamSemaphore completion;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(status_ == "pending",
+                "Display frame has not been submitted by Window.show()");
+    TI_ERROR_IF(status_ == "cancelled",
+                "Display frame was cancelled before submission");
+    TI_ERROR_IF(status_ == "invalidated",
+                "Display completion was invalidated by window teardown");
+    if (status_ == "complete")
+      return;
+    completion = completion_;
+  }
+  TI_ERROR_IF(!completion->wait(),
+              "Display submission has no host completion");
   std::lock_guard<std::mutex> lock(mutex_);
-  TI_ERROR_IF(status_ == "pending",
-              "Display frame has not been submitted by Window.show()");
-  TI_ERROR_IF(status_ == "cancelled",
-              "Display frame was cancelled before submission");
   TI_ERROR_IF(status_ == "invalidated",
               "Display completion was invalidated by window teardown");
-  if (status_ == "submitted") {
-    TI_ERROR_IF(!completion_->wait(),
-                "Display submission has no host completion");
+  if (status_ == "submitted")
     status_ = "complete";
-    completion_.reset();
-  }
 }
 
 std::string DisplayCompletion::status() {
@@ -61,26 +101,35 @@ void DisplayCompletion::attach(StreamSemaphore completion) {
   std::lock_guard<std::mutex> lock(mutex_);
   TI_ERROR_IF(status_ != "pending" || !completion,
               "Invalid display completion attachment");
-  completion_ = std::move(completion);
+  completion_ = std::make_shared<DisplaySubmission>(std::move(completion));
   status_ = "submitted";
 }
 
 void DisplayCompletion::retire() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (status_ == "submitted") {
-    status_ = "complete";
-    completion_.reset();
+  StreamSemaphore completion;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (status_ == "submitted")
+      status_ = "complete";
+    completion = std::move(completion_);
   }
+  if (completion)
+    static_cast<DisplaySubmission *>(completion.get())->retire();
 }
 
 void DisplayCompletion::cancel() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (status_ == "pending") {
-    status_ = "cancelled";
-  } else if (status_ == "submitted") {
-    status_ = "invalidated";
-    completion_.reset();
+  StreamSemaphore completion;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (status_ == "pending") {
+      status_ = "cancelled";
+    } else if (status_ == "submitted") {
+      status_ = "invalidated";
+    }
+    completion = std::move(completion_);
   }
+  if (completion)
+    static_cast<DisplaySubmission *>(completion.get())->retire();
 }
 
 class SharedCudaVulkanImage::Impl {

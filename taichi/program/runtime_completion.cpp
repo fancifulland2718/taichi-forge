@@ -6,6 +6,7 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -423,7 +424,7 @@ class CudaEventCompletion final : public CompletionPrimitive {
   void wait() override {
     auto context_guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
-    const std::uint32_t result = driver.event_synchronize.call(event_);
+    const std::uint32_t result = driver.event_synchronize.call_concurrent(event_);
     if (result != CUDA_SUCCESS) {
       throw BackendRuntimeError(
           Arch::cuda, result, "event_synchronize",
@@ -440,7 +441,7 @@ class CudaEventCompletion final : public CompletionPrimitive {
   void *event_{nullptr};
   std::weak_ptr<RuntimeFaultDomain> fault_domain_;
   std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool_;
-  bool reusable_{false};
+  std::atomic<bool> reusable_{false};
 };
 #endif
 
@@ -487,8 +488,9 @@ struct RuntimeCompletion::State {
       rethrow_first_error();
     }
 
-    std::unique_ptr<CompletionPrimitive> retired_primitive;
     std::shared_ptr<RuntimeCompletionResources> retired_resources;
+    std::shared_lock<std::shared_mutex> backend_lock(backend_mutex);
+    std::shared_ptr<CompletionPrimitive> retired_primitive;
     {
       std::lock_guard<std::mutex> lock(mutex);
       current = status.load(std::memory_order_relaxed);
@@ -519,8 +521,9 @@ struct RuntimeCompletion::State {
       retired_resources = std::move(resources);
     }
     // Lease release and backend-handle destruction are outside the state lock.
-    retired_resources.reset();
     retired_primitive.reset();
+    backend_lock.unlock();
+    retired_resources.reset();
     return true;
   }
 
@@ -534,8 +537,10 @@ struct RuntimeCompletion::State {
       rethrow_first_error();
     }
 
-    std::unique_ptr<CompletionPrimitive> retired_primitive;
     std::shared_ptr<RuntimeCompletionResources> retired_resources;
+    std::shared_lock<std::shared_mutex> backend_lock(backend_mutex);
+    std::shared_ptr<CompletionPrimitive> waiting_primitive;
+    std::shared_ptr<CompletionPrimitive> retired_primitive;
     {
       std::lock_guard<std::mutex> lock(mutex);
       current = status.load(std::memory_order_relaxed);
@@ -546,25 +551,42 @@ struct RuntimeCompletion::State {
           current == CompletionStatus::invalidated) {
         rethrow_first_error_locked();
       }
-      try {
-        primitive->wait();
-      } catch (const BackendRuntimeError &error) {
-        report_backend_error_locked(error);
-        record_first_error_locked(std::current_exception(),
-                                  CompletionStatus::failed);
-        throw;
-      } catch (...) {
-        record_first_error_locked(std::current_exception(),
-                                  CompletionStatus::failed);
-        throw;
-      }
-      freeze_gpu_timings_locked(CompletionStatus::completed);
-      status.store(CompletionStatus::completed, std::memory_order_release);
-      retired_primitive = std::move(primitive);
-      retired_resources = std::move(resources);
+      waiting_primitive = primitive;
     }
-    retired_resources.reset();
+    std::exception_ptr wait_error;
+    try {
+      waiting_primitive->wait();
+    } catch (...) {
+      wait_error = std::current_exception();
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      current = status.load(std::memory_order_relaxed);
+      if (wait_error) {
+        try {
+          std::rethrow_exception(wait_error);
+        } catch (const BackendRuntimeError &error) {
+          report_backend_error_locked(error);
+        } catch (...) {
+        }
+        record_first_error_locked(
+            wait_error, current == CompletionStatus::invalidated
+                            ? current : CompletionStatus::failed);
+      }
+      if (first_error) {
+        rethrow_first_error_locked();
+      }
+      if (current == CompletionStatus::pending) {
+        freeze_gpu_timings_locked(CompletionStatus::completed);
+        status.store(CompletionStatus::completed, std::memory_order_release);
+        retired_primitive = std::move(primitive);
+        retired_resources = std::move(resources);
+      }
+    }
+    waiting_primitive.reset();
     retired_primitive.reset();
+    backend_lock.unlock();
+    retired_resources.reset();
   }
 
   void attach(std::shared_ptr<RuntimeCompletionResources> value) {
@@ -581,8 +603,11 @@ struct RuntimeCompletion::State {
   }
 
   void mark_completed() noexcept {
-    std::unique_ptr<CompletionPrimitive> retired_primitive;
     std::shared_ptr<RuntimeCompletionResources> retired_resources;
+    // Program teardown must drain backend readers before destroying its device.
+    // Wait/query share this gate, but never hold the state mutex while waiting.
+    std::unique_lock<std::shared_mutex> backend_lock(backend_mutex);
+    std::shared_ptr<CompletionPrimitive> retired_primitive;
     {
       std::lock_guard<std::mutex> lock(mutex);
       const auto current = status.load(std::memory_order_relaxed);
@@ -609,8 +634,9 @@ struct RuntimeCompletion::State {
       retired_primitive = std::move(primitive);
       retired_resources = std::move(resources);
     }
-    retired_resources.reset();
     retired_primitive.reset();
+    backend_lock.unlock();
+    retired_resources.reset();
   }
 
   void invalidate(const std::string &reason) noexcept {
@@ -641,7 +667,14 @@ struct RuntimeCompletion::State {
   }
 
   bool has_backend_work() const noexcept {
-    return status.load(std::memory_order_acquire) == CompletionStatus::pending;
+    if (status.load(std::memory_order_acquire) == CompletionStatus::pending) {
+      return true;
+    }
+    // A query can observe GPU completion before a concurrent host wait returns.
+    // Keep this state in Program's teardown registry until its backend handles
+    // are no longer accessed, without making the submission thread wait.
+    std::unique_lock<std::shared_mutex> lock(backend_mutex, std::try_to_lock);
+    return !lock.owns_lock();
   }
 
   StreamGpuTimingSnapshot timing_snapshot() const {
@@ -792,9 +825,10 @@ struct RuntimeCompletion::State {
 
   std::atomic<CompletionStatus> status;
   mutable std::mutex mutex;
+  mutable std::shared_mutex backend_mutex;
   std::shared_ptr<RuntimeFaultDomain> fault_domain;
   std::uint64_t sequence{0};
-  std::unique_ptr<CompletionPrimitive> primitive;
+  std::shared_ptr<CompletionPrimitive> primitive;
   StreamGpuTiming gpu_timing;
   std::vector<RuntimeGpuRegionTiming> gpu_region_timings;
   bool gpu_timings_frozen{false};

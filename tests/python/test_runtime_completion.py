@@ -1,11 +1,71 @@
 import gc
 import threading
+import time
 
 import numpy as np
 
 import taichi_forge as ti
 from taichi_forge.lang import impl
 from tests import test_utils
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_wait_query_and_paced_submit_share_a_pending_ticket():
+    value = ti.ndarray(ti.i32, 32)
+    scratch = ti.ndarray(ti.f32, 4096)
+    scratch.fill(0)
+
+    @ti.kernel
+    def delay(a: ti.types.ndarray(dtype=ti.f32, ndim=1), rounds: ti.i32):
+        for i in a:
+            x = a[i]
+            for j in range(rounds):
+                x = (x + 0.000001) * 0.99999
+            a[i] = x
+
+    @ti.kernel
+    def advance(dst: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in dst:
+            dst[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(delay, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "scratch", ti.f32, ndim=1),
+                     ti.graph.Arg(ti.graph.ArgKind.SCALAR, "rounds", ti.i32))
+    builder.dispatch(advance, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=1))
+    graph = builder.compile()
+    bound = graph.bind({"dst": value, "scratch": scratch, "rounds": 100000000})
+    graph.submit(bound).wait()
+    value.fill(0)
+    ti.sync()
+    pacer = ti.graph.SubmissionPacer(2, max_in_flight_per_lane=1, max_queued=2)
+    first = graph.submit(bound, pacer=pacer, lane="first")
+    started = threading.Event()
+    failures = []
+
+    def wait():
+        started.set()
+        try:
+            first.wait()
+        except BaseException as error:
+            failures.append(error)
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    assert started.wait(2)
+    time.sleep(0.001)
+    try:
+        assert not first.done()
+        second = graph.submit(bound, pacer=pacer, lane="second")
+        assert not first.done(), "submission waited for the first ticket"
+        second.wait()
+    finally:
+        waiter.join(3)
+        graph.close()
+    assert not waiter.is_alive()
+    assert not failures
+    np.testing.assert_array_equal(value.to_numpy(), np.full(32, 2, dtype=np.int32))
+    ti.reset()
+    assert first.done()
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

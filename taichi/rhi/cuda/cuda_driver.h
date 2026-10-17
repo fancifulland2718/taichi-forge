@@ -170,6 +170,14 @@ class CUDADriverFunction {
     auto lock = driver_lock_telemetry_
                     ? driver_lock_telemetry_->acquire(*driver_lock_)
                     : std::unique_lock<std::mutex>(*driver_lock_);
+    return call_concurrent(args...);
+  }
+
+  // For read-only backend waits whose caller independently pins the event and
+  // context lifetime. A host wait must not own the process-wide submission
+  // lock; CUDA supports concurrent event waits/queries and stream submission.
+  uint32 call_concurrent(Args... args) {
+    TI_ASSERT(function_ != nullptr);
     if (wait_telemetry_ == nullptr) {
       return (uint32)function_(args...);
     }

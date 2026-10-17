@@ -1,12 +1,23 @@
 #include "gtest/gtest.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 
 #include "taichi/program/runtime_completion.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/backend_error.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_driver.h"
+#endif
+#ifdef TI_TEST_DISPLAY_COMPLETION
+struct GLFWwindow;
+#include "taichi/ui/ggui/renderables/set_image.h"
+#endif
 
 namespace taichi::lang {
 namespace {
@@ -55,6 +66,230 @@ class CountedResources final : public RuntimeCompletionResources {
   std::atomic<int> *released_;
   std::size_t count_;
 };
+
+// Completion is independently observable while the host waiter is still
+// inside its backend call, including the interval before it returns to State.
+class GatedSemaphore final : public StreamSemaphoreObject {
+ public:
+  bool is_ready() const override {
+    if (fail_query.load()) {
+      throw std::runtime_error("first query failure");
+    }
+    return ready.load();
+  }
+
+  bool wait() const override {
+    std::unique_lock<std::mutex> lock(mutex);
+    ++entered;
+    changed.notify_all();
+    changed.wait(lock, [this] { return released; });
+    if (fail_wait.load()) {
+      throw std::runtime_error("later wait failure");
+    }
+    ready.store(true);
+    return true;
+  }
+
+  bool await_waiters(int count) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return changed.wait_for(lock, std::chrono::seconds(2),
+                            [&] { return entered >= count; });
+  }
+
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex);
+    released = true;
+    changed.notify_all();
+  }
+
+  mutable std::atomic<bool> ready{false};
+  std::atomic<bool> fail_query{false};
+  std::atomic<bool> fail_wait{false};
+
+ private:
+  mutable std::mutex mutex;
+  mutable std::condition_variable changed;
+  mutable int entered{0};
+  bool released{false};
+};
+
+TEST(RuntimeCompletion, WaitDoesNotBlockPendingQueryAndSubmission) {
+  auto semaphore = std::make_shared<GatedSemaphore>();
+  auto completion = RuntimeCompletion::from_stream_semaphore(
+      Arch::vulkan, 17, 1, semaphore);
+  auto waiter = std::async(std::launch::async, [&] { completion.wait(); });
+  EXPECT_TRUE(semaphore->await_waiters(1));
+  auto admission = std::async(std::launch::async, [&] {
+    const bool ready = completion.done();
+    auto next = RuntimeCompletion::completed(Arch::vulkan, 17, 2);
+    next.wait();
+    return ready;
+  });
+  const bool responsive = admission.wait_for(std::chrono::milliseconds(200)) ==
+                          std::future_status::ready;
+  semaphore->release();
+  waiter.get();
+  EXPECT_TRUE(responsive);
+  if (responsive) {
+    EXPECT_FALSE(admission.get());
+  } else {
+    admission.get();
+  }
+}
+
+#ifdef TI_WITH_CUDA
+TEST(RuntimeCompletion, ConcurrentDriverWaitLeavesSubmissionMutexAvailable) {
+  GatedSemaphore gate;
+  std::mutex driver_mutex;
+  CUDADriverFunction<void *> wait;
+  wait.set(reinterpret_cast<void *>(+[](void *value) -> uint32 {
+    return static_cast<GatedSemaphore *>(value)->wait() ? 0 : 1;
+  }));
+  wait.set_lock(&driver_mutex);
+  CUDADriverFunction<> query;
+  query.set(reinterpret_cast<void *>(+[]() -> uint32 { return 0; }));
+  query.set_lock(&driver_mutex);
+  auto waiter = std::async(std::launch::async,
+                          [&] { return wait.call_concurrent(&gate); });
+  EXPECT_TRUE(gate.await_waiters(1));
+  auto submission = std::async(std::launch::async, [&] { return query.call(); });
+  EXPECT_EQ(submission.wait_for(std::chrono::milliseconds(200)),
+            std::future_status::ready);
+  gate.release();
+  EXPECT_EQ(submission.get(), 0);
+  EXPECT_EQ(waiter.get(), 0);
+}
+#endif
+
+TEST(RuntimeCompletion, QueryRetiresResourcesWhileWaitCallReturns) {
+  auto semaphore = std::make_shared<GatedSemaphore>();
+  auto completion = RuntimeCompletion::from_stream_semaphore(
+      Arch::vulkan, 17, 1, semaphore);
+  std::atomic<int> released{0};
+  completion.attach_resources(std::make_shared<CountedResources>(&released, 1));
+  auto waiter = std::async(std::launch::async, [&] { completion.wait(); });
+  EXPECT_TRUE(semaphore->await_waiters(1));
+  semaphore->ready.store(true);
+  auto query = std::async(std::launch::async, [&] { return completion.done(); });
+  const bool responsive = query.wait_for(std::chrono::milliseconds(200)) ==
+                          std::future_status::ready;
+  EXPECT_TRUE(responsive);
+  if (responsive) {
+    EXPECT_EQ(released.load(), 1);
+    EXPECT_TRUE(completion.has_backend_work());
+  }
+  semaphore->release();
+  EXPECT_TRUE(query.get());
+  waiter.get();
+  completion.mark_completed();
+  EXPECT_FALSE(completion.has_backend_work());
+  EXPECT_EQ(released.load(), 1);
+}
+
+TEST(RuntimeCompletion, InvalidationAndFirstErrorWinAgainstPendingWait) {
+  for (bool query_failure : {false, true}) {
+    auto semaphore = std::make_shared<GatedSemaphore>();
+    auto completion = RuntimeCompletion::from_stream_semaphore(
+        Arch::vulkan, 17, 1, semaphore);
+    std::atomic<int> released{0};
+    completion.attach_resources(std::make_shared<CountedResources>(&released, 1));
+    auto waiter = std::async(std::launch::async, [&] {
+      try {
+        completion.wait();
+        return std::string{};
+      } catch (const std::exception &error) {
+        return std::string(error.what());
+      }
+    });
+    EXPECT_TRUE(semaphore->await_waiters(1));
+    auto invalidator = std::async(std::launch::async, [&] {
+      if (query_failure) {
+        semaphore->fail_query.store(true);
+        try {
+          completion.done();
+        } catch (const std::exception &) {
+        }
+      } else {
+        completion.invalidate("runtime reset");
+      }
+    });
+    const bool responsive = invalidator.wait_for(std::chrono::milliseconds(200)) ==
+                            std::future_status::ready;
+    semaphore->fail_wait.store(true);
+    semaphore->release();
+    invalidator.get();
+    EXPECT_TRUE(responsive);
+    const auto expected = query_failure ? "first query failure" : "runtime reset";
+    EXPECT_EQ(waiter.get(), expected);
+    completion.mark_completed();
+    EXPECT_EQ(released.load(), 1);
+    EXPECT_EQ(completion.first_error_message(), expected);
+  }
+}
+
+TEST(RuntimeCompletion, TeardownDrainsConcurrentBackendWaiters) {
+  auto semaphore = std::make_shared<GatedSemaphore>();
+  auto completion = RuntimeCompletion::from_stream_semaphore(
+      Arch::vulkan, 17, 1, semaphore);
+  std::atomic<int> released{0};
+  completion.attach_resources(std::make_shared<CountedResources>(&released, 1));
+  auto first = std::async(std::launch::async, [&] { completion.wait(); });
+  auto second = std::async(std::launch::async, [&] { completion.wait(); });
+  EXPECT_TRUE(semaphore->await_waiters(2));
+  auto teardown = std::async(std::launch::async, [&] { completion.mark_completed(); });
+  EXPECT_EQ(teardown.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  semaphore->release();
+  first.get();
+  second.get();
+  teardown.get();
+  EXPECT_TRUE(completion.done());
+  EXPECT_EQ(released.load(), 1);
+}
+
+#ifdef TI_TEST_DISPLAY_COMPLETION
+TEST(DisplayCompletion, QueryAndStatusDoNotWaitForHostWaiter) {
+  auto semaphore = std::make_shared<GatedSemaphore>();
+  taichi::ui::vulkan::DisplayCompletion completion;
+  completion.attach(semaphore);
+  auto waiter = std::async(std::launch::async, [&] { completion.wait(); });
+  EXPECT_TRUE(semaphore->await_waiters(1));
+  auto query = std::async(std::launch::async, [&] {
+    EXPECT_EQ(completion.status(), "submitted");
+    return completion.done();
+  });
+  const bool responsive = query.wait_for(std::chrono::milliseconds(200)) ==
+                          std::future_status::ready;
+  EXPECT_TRUE(responsive);
+  if (responsive)
+    EXPECT_FALSE(query.get());
+  semaphore->release();
+  waiter.get();
+  if (!responsive)
+    query.get();
+  completion.retire();
+  EXPECT_TRUE(completion.done());
+}
+
+TEST(DisplayCompletion, TeardownDrainsWaitEvenAfterReadyQuery) {
+  auto semaphore = std::make_shared<GatedSemaphore>();
+  taichi::ui::vulkan::DisplayCompletion completion;
+  completion.attach(semaphore);
+  auto waiter = std::async(std::launch::async, [&] { completion.wait(); });
+  EXPECT_TRUE(semaphore->await_waiters(1));
+  semaphore->ready.store(true);
+  auto query = std::async(std::launch::async, [&] { return completion.done(); });
+  EXPECT_EQ(query.wait_for(std::chrono::milliseconds(200)), std::future_status::ready);
+  auto teardown = std::async(std::launch::async, [&] { completion.retire(); });
+  EXPECT_EQ(teardown.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  semaphore->release();
+  EXPECT_TRUE(query.get());
+  waiter.get();
+  teardown.get();
+  EXPECT_EQ(completion.status(), "complete");
+  completion.wait();
+}
+#endif
 
 class FatalBackendSemaphore final : public StreamSemaphoreObject {
  public:

@@ -3745,7 +3745,9 @@ bool VulkanStreamSemaphoreObject::wait() const {
   if (fault_reporter_) {
     fault_reporter_->throw_if_submission_disallowed("Vulkan fence wait");
   }
-  std::lock_guard<std::mutex> lock(fence_ref->mutex);
+  // Wait and query are read-only host operations. Our fences are never reset
+  // in place and fence_ref retains this handle throughout the call. Taking
+  // the query mutex here would stall queue retirement and new submissions.
   VkResult result = VK_SUCCESS;
   {
     ScopedBackendWaitTelemetry wait_scope(wait_telemetry_);

@@ -92,6 +92,10 @@
   Python 诊断接口调用，不增加重放扫描。要求配对 ABI89，计数不含公共资源和
   驱动私有驻留，不能当作实际显存总量。
 
+- completion 等待不再占用票据状态锁、CUDA 提交锁或 Vulkan fence 查询锁。同一票据被其他
+  线程等待时，查询与 pacer Graph 提交仍可继续。runtime reset 和显示关闭会在销毁后端句柄前
+  排空使用它们的线程，并保留首次错误与资源只释放一次的语义。
+
 - `ti.ui.Window.get_scroll_delta()` 返回并清空 GLFW 累积的水平、垂直滚轮增量，保留小数值，
   不额外轮询事件。ImGui 回调按所属窗口切换上下文，关闭与重建不会重放旧增量。
   原始增量仍交给 ImGui；相机输入应使用现有的 `is_render_input_available()` 判断 UI 占用。

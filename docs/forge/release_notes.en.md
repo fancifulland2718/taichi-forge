@@ -116,6 +116,12 @@ lifetimes. The entries below describe the changes.
   it adds no replay scan. Requires paired ABI89 components; these counts exclude
   public resources and driver-private residency.
 
+- Completion waits release the ticket's status lock and avoid holding the CUDA
+  submission lock or Vulkan fence query lock. Queries and paced Graph submission
+  can proceed while another thread waits on the same ticket. Runtime reset and
+  display teardown drain backend readers before destroying their handles, while
+  preserving the first error and exactly-once resource release.
+
 - `ti.ui.Window.get_scroll_delta()` consumes accumulated horizontal and vertical
   GLFW scroll offsets, preserving fractional values without polling events.
   ImGui callbacks select the event window's context; closing and recreating a

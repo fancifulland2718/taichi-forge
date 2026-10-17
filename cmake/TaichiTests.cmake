@@ -1,6 +1,28 @@
 cmake_minimum_required(VERSION 3.17)
 
 set(TESTS_NAME taichi_cpp_tests)
+if(TARGET taichi_runtime AND TI_WITH_SPLIT_PYTHON_RUNTIME)
+  add_executable(taichi_completion_tests
+    tests/cpp/program/runtime_completion_test.cpp)
+  target_link_libraries(taichi_completion_tests PRIVATE taichi_runtime gtest_main)
+  target_compile_definitions(taichi_completion_tests PRIVATE
+    TI_WITH_SPLIT_PYTHON_RUNTIME)
+  target_include_directories(taichi_completion_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/external/spdlog/include
+    ${LLVM_INCLUDE_DIRS})
+  if(TI_WITH_GGUI AND TI_WITH_VULKAN)
+    target_compile_definitions(taichi_completion_tests PRIVATE TI_TEST_DISPLAY_COMPLETION)
+    target_include_directories(taichi_completion_tests PRIVATE
+      ${PROJECT_SOURCE_DIR}/external/eigen
+      ${PROJECT_SOURCE_DIR}/external/FP16/include
+      ${PROJECT_SOURCE_DIR}/external/glm
+      ${PROJECT_SOURCE_DIR}/external/volk
+      ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include
+      ${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include)
+  endif()
+  add_test(NAME taichi_completion_tests COMMAND taichi_completion_tests)
+endif()
 if(TI_WITH_GGUI AND NOT ANDROID)
   add_executable(taichi_glfw_input_tests
     tests/cpp/ui/glfw_input_test.cpp

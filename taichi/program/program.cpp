@@ -8151,7 +8151,7 @@ void Program::collect_ready_runtime_completions(std::size_t max_polls) {
     // Query before mutating the registry. A backend exception therefore keeps
     // the completion tracked for reset/synchronize, and appending before
     // popping gives the same guarantee if deque growth reports OOM.
-    if (completion.done()) {
+    if (completion.done() && !completion.has_backend_work()) {
       runtime_completions_.pop_front();
     } else {
       runtime_completions_.push_back(std::move(completion));
