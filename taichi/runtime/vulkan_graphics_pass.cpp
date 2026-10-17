@@ -9,6 +9,7 @@
 #include "taichi/program/texture.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/vulkan_shader_bindings.h"
 
 namespace taichi::lang {
 VulkanGraphicsPassTargets prepare_vulkan_graphics_pass_targets(
@@ -481,31 +482,8 @@ VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
   }
   if (extra_bindings)
     extra_bindings(resource_sets);
-  const auto &expected = pipeline.get_resource_set_templates();
-  TI_ERROR_IF(
-      resource_sets.size() != expected.size(),
-      "Vulkan graphics descriptor sets do not match shader reflection.");
-  for (const auto &[index, expected_set] : expected) {
-    const auto found = resource_sets.find(index);
-    TI_ERROR_IF(
-        found == resource_sets.end() || !found->second ||
-            !vulkan::VulkanResourceSet::SetLayoutCmp{}(
-                expected_set,
-                *static_cast<vulkan::VulkanResourceSet *>(found->second.get())),
-        "Vulkan graphics descriptor type/count/coverage mismatch in set {}.",
-        index);
-  }
-  draw_resources.shader_resource_sets.reserve(resource_sets.size());
-  for (auto &[set_index, resource_set] : resource_sets) {
-    const RhiResult prepare_result =
-        resource_set->prepare_for_replay(/*patch_existing=*/false);
-    TI_ERROR_IF(prepare_result != RhiResult::success,
-                "Vulkan graphics shader resource set {} preparation failed: "
-                "RhiResult({}).",
-                set_index, prepare_result);
-    draw_resources.shader_resource_sets.emplace_back(set_index,
-                                                     std::move(resource_set));
-  }
+  draw_resources.shader_resource_sets =
+      prepare_vulkan_shader_bindings(pipeline, std::move(resource_sets));
   if (!mesh) {
     draw_resources.raster = device.create_raster_resources_unique();
     TI_ERROR_IF(!draw_resources.raster,
