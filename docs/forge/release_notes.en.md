@@ -55,6 +55,12 @@ lifetimes. The entries below describe the changes.
   it adds no replay scan. Requires paired ABI89 components; these counts exclude
   public resources and driver-private residency.
 
+- Inlined `ti.func` calls inside `ti.real_func` now use the active function's AST
+  builder, keeping control flow and local variables in the same callable. This
+  fixes `MatrixPtrStmt` assertions and access violations in nested tensor helpers,
+  as well as incorrect scalar loop and branch results. Real function call
+  boundaries and the native ABI are unchanged.
+
 - Vulkan shader reflection maintains a parser-local result-ID index instead of
   repeatedly scanning the module. Validation without an artifact capture skips
   unused diagnostic reflection. `ti.compile_profile()` separates SPIR-V emission,

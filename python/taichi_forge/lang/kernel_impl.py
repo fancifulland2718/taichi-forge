@@ -461,7 +461,8 @@ class Func:
             self,
             is_kernel=False,
             args=args,
-            ast_builder=impl.get_runtime().current_kernel.ast_builder(),
+            # Inline control flow must share the owner of its local variables.
+            ast_builder=runtime.compiling_callable.ast_builder(),
             is_real_function=self.is_real_function,
         )
         # P3.b — enforce @ti.func inline recursion depth cap. 0 = disabled.

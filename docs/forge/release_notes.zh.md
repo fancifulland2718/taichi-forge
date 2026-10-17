@@ -46,6 +46,10 @@
   Python 诊断接口调用，不增加重放扫描。要求配对 ABI89，计数不含公共资源和
   驱动私有驻留，不能当作实际显存总量。
 
+- `ti.real_func` 内调用的 `ti.func` 现在使用当前函数的 AST builder，保持控制流与局部变量
+  属于同一函数。修复嵌套张量辅助函数的 `MatrixPtrStmt` 断言、访问冲突，以及标量循环和
+  条件分支可能产生错误数值的问题；保持真实函数调用边界和 native ABI 不变。
+
 - Vulkan shader 反射在解析期间维护 result-ID 索引，避免每次查询都扫描整个模块。
   只启用验证、不导出产物时，跳过不会使用的诊断反射。`ti.compile_profile()` 可区分
   SPIR-V 生成、优化、验证、反射/布局准备和驱动 pipeline 创建；编译档位、shader
