@@ -34,6 +34,9 @@
 - AOT 新增固定 SPIR-V、标量 buffer 描述符的 Vulkan compute pipeline/dispatch
   资源；代码、布局和范围在冷准备时校验，复用资源 owner 与图形描述符校验，
   已验证独立/借用消费及下游梯度。
+- Vulkan RasterPass lines 可经公共原生 compute 展开和 graphics 导出 AOT，重放复用
+  持久展开存储；索引/非索引偏移、数量、逐顶点颜色和奇数末尾保持 JIT 行为，
+  零完整线段不保留展开资源。
 - Vulkan RasterPass 的 mesh／mesh_instance／particles 可从显式普通 Graph 导出 AOT，
   复用准备核与原生 graphics pass。相机需显式快照；固定布局的几何/位姿可更新，附件可
   公共绑定或重建。零绘制仅清屏，不生成几何准备工作；lines 的 compute 重建尚未接通。

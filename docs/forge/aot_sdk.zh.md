@@ -777,11 +777,11 @@ workspace 为零不包括驱动 pipeline/descriptor 驻留及调用方数组。
 
 Windows 夹具验证独立/借用消费、串联 compute、数组更新、错误绑定拒绝、owner
 退休及下游 DSL 梯度核；外部 shader 本身不参与求导。CPU/CUDA 不声明这些 Vulkan
-能力。此项提供原生前处理的公共基础，高层 RasterPass lines 导出尚未接线。
+能力。此项提供原生前处理的公共基础，包括下面的 RasterPass lines 展开。
 
 ### 高层 RasterPass 导出
 
-Vulkan `RasterPass` 的 `mesh`、`mesh_instance` 和 `particles` 录制可经普通显式
+Vulkan `RasterPass` 的 `mesh`、`mesh_instance`、`particles` 和 `lines` 录制可经普通显式
 Graph 导出。准备核、私有几何暂存与原生 graphics pass 在同一 AOT 执行序列中，
 不把 Window、Camera 或 producer Python 对象写入包。消费端不导入 Forge、不调用
 UI 前端，也不需要 shader compiler；仍会在首次准备时创建原生 pipeline/描述符。
@@ -805,7 +805,8 @@ module.archive("renderer.tcm")
 只为实际使用的外部 ndarray 指定 `source_bindings`；模板 Field 沿用显式 dense-root
 快照。相机在导出时冻结，环境光及点光源沿用录制值；改变这些参数须在冷边界重新
 导出。固定布局的几何、索引和实例矩阵内容可继续由消费端更新，不增加逐帧 host
-校验。外部索引数组须带 `index` usage，若准备核也读取它则同时带 `storage` usage；
+校验。外部 mesh 索引数组须带 `index` usage，若准备核也读取它则同时带 `storage`
+usage；lines 索引供 compute 展开读取，要求 `storage` usage。
 索引仍须满足原绘制的有效顶点范围承诺，不进行 host 扫描。
 
 省略 `resource_bindings` 时，附件由计划重建并先清屏，无需像素 seed。公共附件用
@@ -814,9 +815,17 @@ depth32f depth；准备阶段核对布局，关闭公共附件会退休依赖计
 kernel 通过相应 `source_bindings` 与录制共享同一图像。零绘制保留清屏，不保留
 无用几何准备、uniform 或 pipeline。
 
-Windows 小场景测试覆盖非索引/索引 mesh、实例偏移与数量裁剪、粒子范围、几何更新、
-颜色/深度对照、独立/借用 owner、关闭及下游实际梯度。光栅化本身不可自动微分。
-`lines` 的 compute 展开重建尚未接通，会在导出前拒绝；未扩大 JIT 自动 admission
+Lines 使用包内 compute shader，通过 `vulkan_compute_pipeline` 与
+`vulkan_compute_dispatch` v1 展开后交给同一个 graphics pass，选择路线前也应查询
+这两项能力。除公共源几何打包缓冲外，每个完整线段需要 152B 持久展开顶点/索引
+存储；重复 recording 共用这些数组并按顺序覆盖，重放不分配几何存储。偏移、数量、
+逐顶点颜色保持 JIT 语义，包括舍弃奇数末尾的不完整线段；零完整线段不重建展开
+资源。公共 line uniform 构造在窄化前验证 shader 实际有符号索引运算范围，dispatch
+及 buffer 范围还须满足当前 Vulkan 设备限制。
+
+Windows 小场景测试覆盖非索引/索引 mesh、实例偏移与数量裁剪、粒子范围、线段偏移
+及奇数末尾、几何/索引/颜色更新、混合绘制、颜色/深度对照、独立/借用 owner、关闭
+及下游实际梯度。光栅化本身不可自动微分。未扩大 JIT 自动 admission
 或 selected recipe 的资格。
 
 ### 显式 Vulkan 光栅计划

@@ -1,4 +1,4 @@
-"""High-level mesh/particle recordings export without a consumer GGUI frontend."""
+"""Mixed mesh/instance/particle/line recordings export without a consumer UI frontend."""
 
 import json
 import os
@@ -65,6 +65,7 @@ def test_aot_raster_mesh_particle_recordings(tmp_path, monkeypatch):
             two_sided=True,
         )
         raster.particles(centers, radius=0.15, color=(0, 0, 1), index_count=1, index_offset=1)
+        raster.lines(vertices, width=1, color=(1, 1, 0), vertex_count=3)
         start = time.perf_counter()
         recording = raster.record()
         record_ms = (time.perf_counter() - start) * 1000
@@ -126,8 +127,9 @@ def test_aot_raster_mesh_particle_recordings(tmp_path, monkeypatch):
             )
             assert len(module._exported_kernels) == kernels
         document = json.loads(plan.to_json())
-        assert len([r for r in document["resources"] if r.get("operation") == "pipeline"]) == 2
-        assert len(document["initialization"]) == 3
+        assert len([r for r in document["resources"] if r.get("operation") == "pipeline"]) == 4
+        assert len(document["initialization"]) == 4
+        assert len([op for op in document["operations"] if op.get("provider") == "vulkan_compute"]) == 2
         assert len([op for op in document["operations"] if op.get("operation") == "pass_direct"]) == 2
         graph.close()
 
@@ -144,12 +146,6 @@ def test_aot_raster_mesh_particle_recordings(tmp_path, monkeypatch):
         empty.close()
         # Mutating the producer camera after export cannot change any artifact.
         camera.position(4, 3, 2)
-        raster.clear().lines(vertices, width=1)
-        lines = graph_for(raster.record())
-        with pytest.raises(ti.TaichiRuntimeError, match="line expansion"):
-            module.add_execution_plan("lines", lines, snapshot_state=True, source_bindings=sources)
-        assert not module._graph_export_failed
-        lines.close()
     artifact = tmp_path / "raster.tcm"
     module.archive(str(artifact))
     (tmp_path / "references.json").write_text(json.dumps(references))

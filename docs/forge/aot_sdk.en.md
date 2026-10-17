@@ -1003,11 +1003,11 @@ Windows qualification covers independent and borrowed consumption, chained
 compute dispatches, array updates, rejected bindings, owner retirement and a
 downstream DSL gradient kernel. The external shader is not differentiated.
 CPU/CUDA do not advertise these Vulkan capabilities. This is a shared foundation
-for native preprocessing; high-level RasterPass line export is not yet wired.
+for native preprocessing, including the RasterPass line expansion below.
 
 ### Exporting high-level RasterPass recordings
 
-Vulkan `RasterPass` mesh, mesh_instance and particles recordings export through
+Vulkan `RasterPass` mesh, mesh_instance, particles and lines recordings export through
 ordinary explicit Graphs. Preparation kernels, private geometry scratch and the
 native graphics pass share one AOT execution sequence. The artifact contains no
 Window, Camera or producer Python objects. Consumers do not import Forge, call
@@ -1035,8 +1035,9 @@ the explicit dense-root snapshot contract. Camera state freezes at export;
 ambient and point lights retain their recorded values. Change these parameters
 by exporting again at a cold boundary. Consumer code can update geometry, indices
 and instance matrices with the same layouts, with no new per-frame host checks.
-External indices require `index` allocation usage, plus `storage` when preparation
-kernels also read them. Index values must satisfy the source draw's valid vertex
+External mesh indices require `index` allocation usage, plus `storage` when preparation
+kernels also read them. Line indices require `storage` usage for compute expansion.
+Index values must satisfy the source draw's valid vertex
 range contract; export does not scan device indices on the host.
 
 Without `resource_bindings`, plans rebuild and clear their attachments without
@@ -1046,11 +1047,22 @@ layouts; closing public attachments retires dependent executions. A downstream
 Texture kernel uses matching `source_bindings` to share the same image. Empty
 draws retain the clear but omit unused geometry preparation, uniforms and pipelines.
 
+Lines use the packaged compute shader through `vulkan_compute_pipeline` and
+`vulkan_compute_dispatch` v1, followed by the same graphics pass. Discover both
+compute capabilities before choosing this route. Each complete line needs 152B
+of persistent expanded vertex/index storage in addition to the common source
+packing buffers. Repeated recording occurrences share this storage and overwrite
+it in sequence; replay performs no geometry allocation. Requested offsets/counts
+and per-vertex colors retain JIT semantics, including discarding an incomplete
+odd tail. No complete lines means no expansion resources. The shared line uniform
+builder checks the shader's actual signed-index arithmetic before narrowing;
+dispatch and buffer ranges also obey the active Vulkan device limits.
+
 Small Windows fixtures compare JIT color/depth with standalone and borrowed
 consumers for indexed/non-indexed meshes, instance offsets/count clipping,
-particle ranges, updated geometry, close/reset and downstream numeric gradients.
-Rasterization itself is not differentiated. `lines` compute expansion is not yet
-reconstructed and is rejected before export. JIT automatic admission and selected
+particle ranges, line offsets and odd tails, updated geometry/indices/colors,
+mixed draws, close/reset and downstream numeric gradients.
+Rasterization itself is not differentiated. JIT automatic admission and selected
 recipe qualification are unchanged.
 
 ### Explicit Vulkan raster plans

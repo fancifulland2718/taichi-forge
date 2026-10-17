@@ -38,6 +38,10 @@ lifetimes. The entries below describe the changes.
   with scalar buffer descriptors. Cold code/layout/range checks and prepared
   replay share the existing resource owner and graphics descriptor validation;
   independent/borrowed consumers and downstream gradients are qualified.
+- Vulkan RasterPass lines now export through shared native compute expansion and
+  graphics. Persistent expansion storage is reused across replay; indexed and
+  non-indexed offsets/counts, per-vertex color and incomplete tails retain JIT
+  behavior, and empty draws omit the expansion resources.
 - Vulkan RasterPass mesh/mesh_instance/particles export from explicit ordinary
   Graphs through shared preparation kernels and native graphics passes. Camera
   state requires an explicit snapshot; fixed-layout geometry/transforms can change,
