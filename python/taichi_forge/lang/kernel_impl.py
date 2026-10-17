@@ -667,6 +667,9 @@ class Func:
                 raise TaichiTypeError(
                     f"Unsupported return type for return value {i}: {return_type}"
                 )
+        # Read return values at the call site: later argument/expression lowering
+        # can emit a top-level loop and split the kernel into separate tasks.
+        ret = [impl.expr_init(value) for value in ret]
         if len(ret) == 1:
             return ret[0]
         return tuple(ret)

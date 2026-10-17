@@ -61,6 +61,11 @@ lifetimes. The entries below describe the changes.
   as well as incorrect scalar loop and branch results. Real function call
   boundaries and the native ABI are unchanged.
 
+- `ti.real_func` reads returned values at the call site. A subsequent inline loop
+  in the same expression can split execution into tasks; scalar and tensor
+  results no longer retain references to another task's local return storage.
+  Multiple returns retain their value semantics.
+
 - Vulkan shader reflection maintains a parser-local result-ID index instead of
   repeatedly scanning the module. Validation without an artifact capture skips
   unused diagnostic reflection. `ti.compile_profile()` separates SPIR-V emission,
