@@ -867,6 +867,10 @@ task+mesh、compute→mesh 数据更新、公私 owner、替换绑定、close/re
 通过 `native_operation_capabilities("vulkan_graphics_pass_direct", version=5)` 查询。
 旧版本不接受此合同，也不改变原有空绘制拒绝行为。
 
+传统绘制的索引数组接受 `i32/u32` 存储，均按 Vulkan 的 uint32 索引解释，不进行
+转换复制。`i32` 值同样必须非负且满足声明的 `index_min/index_max`；这些是调用者
+对设备数据的范围承诺，不是 host 扫描结果。indirect command/count 数组仍要求 `u32`。
+
 传统间接绘制使用 `vulkan_graphics/pass_indirect` v1，选择前查询
 `native_operation_capabilities("vulkan_graphics_pass_indirect")`；准备阶段另查设备
 count/multi-draw 特性及容量。普通和已选整图 graphics-queue Graph 自动导出

@@ -207,6 +207,15 @@ def main(mode, artifact, output):
             "image", "sampled", parameters=dict(shape=[8, 8], format="rgba32f")
         ) as wrong_usage:
             raises(lambda: prepare([pass_spec()], dict(target=wrong_usage)), "attachment usage")
+        with closing(runtime.ndarray("i32", 3, usage=("index",))) as signed:
+            write(signed, [0, 1, 2], "i")
+            with prepare(operations()[:3], dict(indices=signed)) as signed_draw:
+                signed_draw()
+                assert read(frame["features"]) == [
+                    v for i in range(64) for v in ([0.5, 0, 0, 1] if i % 8 < 4 else [0, 1, 0, 1])
+                ]
+        with closing(runtime.ndarray("f32", 3, usage=("index",))) as invalid:
+            raises(lambda: prepare([pass_spec(), pass_spec(True)], dict(indices=invalid)), "i32 or u32")
 
         for changed in (dict(width=9), dict(colors=["rgba8"]), dict(depth="depth16")):
             bad = contract_pass()

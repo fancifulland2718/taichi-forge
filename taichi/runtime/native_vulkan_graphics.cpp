@@ -435,8 +435,11 @@ class PreparedPass final : public NativeOperation {
       std::optional<VulkanGraphicsBufferRange> indices;
       if (input.indices) {
         const auto &a = indexed(d.arrays, *input.indices);
-        if (a.scalar_type != PrimitiveType::u32)
-          throw std::invalid_argument("Graphics index array must use u32");
+        if (a.scalar_type != PrimitiveType::u32 &&
+            a.scalar_type != PrimitiveType::i32)
+          throw std::invalid_argument("Graphics index array must use i32 or u32");
+        // Both source APIs use the same Vulkan uint32 index representation.
+        // Signed storage still promises nonnegative values within index bounds.
         indices = VulkanGraphicsBufferRange{a.pointer, size_t(a.bytes)};
       }
       std::optional<VulkanGraphicsIndirectPacket> indirect;

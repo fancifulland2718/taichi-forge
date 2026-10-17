@@ -1123,6 +1123,11 @@ is no depth attachment. The color format list matches `color_count`; specify
 `native_operation_capabilities("vulkan_graphics_pass_direct", version=5)`.
 Earlier versions reject this contract and retain their nonempty-draw requirement.
 
+Classic draw indices accept `i32/u32` storage, both interpreted as Vulkan uint32
+indices without conversion copies. Signed values must also be nonnegative and
+within the declared `index_min/index_max`: these are caller promises about device
+contents, not host scan results. Indirect command/count arrays still require `u32`.
+
 Classic indirect draws use `vulkan_graphics/pass_indirect` v1. Query
 `native_operation_capabilities("vulkan_graphics_pass_indirect")` before choosing
 this operation; preparation separately checks device count/multi-draw features
