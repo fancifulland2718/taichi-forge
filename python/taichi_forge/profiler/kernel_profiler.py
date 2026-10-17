@@ -1,8 +1,30 @@
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Optional
+import warnings
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.profiler.kernel_metrics import default_cupti_metrics
+
+
+@dataclass(frozen=True)
+class KernelProfilerCoverage:
+    """Coverage of this Program's submissions since the last profiler clear.
+
+    ``recorded_tasks`` counts instrumented tasks, not logical kernel calls.
+    Completeness concerns device kernel timing only: it does not include host
+    work, transfers, or work submitted outside this Program.
+    """
+
+    backend: str
+    toolkit: str
+    status: str
+    complete: bool
+    reasons: tuple[str, ...]
+    recorded_tasks: int
+    backend_graph_launches: Optional[int]
+    native_submissions: Optional[int]
 
 
 class StatisticalResult:
@@ -57,6 +79,8 @@ class KernelProfiler:
         self._total_time_ms = 0.0
         self._traced_records = []
         self._statistical_results = {}
+        self._coverage_baseline = None
+        self._coverage_warnings = set()
 
     # public methods
 
@@ -64,6 +88,8 @@ class KernelProfiler:
         """Turn on or off :class:`~taichi_forge.profiler.kernel_profiler.KernelProfiler`."""
         if type(mode) is bool:
             self._profiling_mode = mode
+            self._coverage_baseline = None
+            self._coverage_warnings.clear()
         else:
             raise TypeError(f"Arg `mode` must be of type boolean. Type {type(mode)} is not supported.")
 
@@ -93,7 +119,91 @@ class KernelProfiler:
             return 0.0
         self._update_records()  # kernel records
         self._count_statistics()  # _total_time_ms is counted here
+        self._warn_incomplete_coverage()
         return self._total_time_ms / 1000  # ms to s
+
+    def get_coverage(self):
+        """Return coverage without treating missing event records as timings."""
+        if not self._profiling_mode or impl.get_runtime().prog is None:
+            return KernelProfilerCoverage(
+                "",
+                self._profiling_toolkit,
+                "disabled",
+                False,
+                ("kernel_profiler_disabled",),
+                0,
+                None,
+                None,
+            )
+        self._update_records()
+        return self._coverage()
+
+    def _coverage_snapshot(self):
+        snapshot = getattr(impl.get_runtime().prog, "_runtime_statistics_snapshot", None)
+        if snapshot is None:
+            return None
+        raw = snapshot()
+        submission = raw["submission"]
+        return (
+            raw["program_domain"],
+            int(submission["backend_graph_launches"]),
+            int(submission["native_submissions"]),
+        )
+
+    def _coverage(self):
+        backend = _ti_core.arch_name(impl.current_cfg().arch)
+        snapshot = self._coverage_snapshot()
+        recorded = len(self._traced_records)
+        if snapshot is None:
+            return KernelProfilerCoverage(
+                backend,
+                self._profiling_toolkit,
+                "unknown",
+                False,
+                ("runtime_submission_statistics_unavailable",),
+                recorded,
+                None,
+                None,
+            )
+        baseline = self._coverage_baseline
+        if baseline is None or baseline[0] != snapshot[0]:
+            baseline = (snapshot[0], 0, 0)
+        graph_launches = snapshot[1] - baseline[1]
+        native_submissions = snapshot[2] - baseline[2]
+        reasons = []
+        if graph_launches:
+            reasons.append(
+                "cuda_graph_node_timing_unavailable" if backend == "cuda" else "backend_graph_timing_not_qualified"
+            )
+        if native_submissions:
+            reasons.append("native_submission_timing_not_qualified")
+        status = "complete" if not reasons else ("partial" if recorded else "unsupported")
+        return KernelProfilerCoverage(
+            backend,
+            self._profiling_toolkit,
+            status,
+            not reasons,
+            tuple(reasons),
+            recorded,
+            graph_launches,
+            native_submissions,
+        )
+
+    def _warn_incomplete_coverage(self):
+        coverage = self._coverage()
+        if not coverage.complete and coverage.reasons not in self._coverage_warnings:
+            warnings.warn(
+                "Kernel profiler coverage is "
+                + coverage.status
+                + ": "
+                + ", ".join(coverage.reasons)
+                + ". Counts and times describe recorded tasks only; missing Graph/native "
+                "records are not zero execution time. Use "
+                "ti.profiler.get_kernel_profiler_coverage() to inspect coverage.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            self._coverage_warnings.add(coverage.reasons)
 
     def clear_info(self):
         """Clear all records both in front-end :class:`~taichi_forge.profiler.kernel_profiler.KernelProfiler` and back-end instance ``KernelProfilerBase``.
@@ -108,6 +218,8 @@ class KernelProfiler:
         # then clear backend & frontend info
         impl.get_runtime().prog.clear_kernel_profiler()
         self._clear_frontend()
+        self._coverage_baseline = self._coverage_snapshot()
+        self._coverage_warnings.clear()
 
         return None
 
@@ -117,6 +229,7 @@ class KernelProfiler:
             return None
         self._update_records()  # kernel records
         self._count_statistics()  # statistics results
+        self._warn_incomplete_coverage()
         # TODO : query self.StatisticalResult in python scope
         return impl.get_runtime().prog.query_kernel_profile_info(name)
 
@@ -161,6 +274,13 @@ class KernelProfiler:
             return None
         self._update_records()  # kernel records
         self._count_statistics()  # statistics results
+
+        coverage = self._coverage()
+        if not coverage.complete:
+            print(
+                f"Kernel profiler coverage: {coverage.status} "
+                f"({', '.join(coverage.reasons)}); recorded tasks only."
+            )
 
         # COUNT mode (default) : print statistics of all kernel
         if mode == self.COUNT:
@@ -446,6 +566,19 @@ def get_kernel_profiler_total_time():
     return get_default_kernel_profiler().get_total_time()
 
 
+def get_kernel_profiler_coverage():
+    """Describe timing coverage since the last clear (or Program creation).
+
+    CUDA Graph replay currently bypasses per-task timing. For Graph-only work,
+    ``status`` is ``unsupported``; mixed recorded/unrecorded work is ``partial``.
+    Call ``ti.sync()`` and inspect ``complete`` and ``reasons`` before interpreting
+    counts or total time.
+    Clearing the profiler also starts a new coverage interval. This query syncs
+    profiler records; it does not instrument Graph nodes or read device counts.
+    """
+    return get_default_kernel_profiler().get_coverage()
+
+
 def set_kernel_profiler_toolkit(toolkit_name="default"):
     """Set the toolkit used by KernelProfiler.
 
@@ -583,6 +716,8 @@ __all__ = [
     "clear_kernel_profiler_info",
     "collect_kernel_profiler_metrics",
     "get_kernel_profiler_total_time",
+    "get_kernel_profiler_coverage",
+    "KernelProfilerCoverage",
     "print_kernel_profiler_info",
     "query_kernel_profiler_info",
     "set_kernel_profiler_metrics",

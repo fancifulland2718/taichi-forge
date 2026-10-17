@@ -40,7 +40,28 @@ ti.profiler.print_scoped_profiler_info()
 
 ## KernelProfiler
 
-`KernelProfiler` retrieves kernel profiling records from the backend, aggregates them in the Python scope, and prints the results to the console. Note that `kernelProfiler` supports CPU and CUDA only. Ensure that you call `ti.sync()` before performance profiling if your program runs on GPU.
+### Timing coverage
+
+After `ti.sync()`, call `ti.profiler.get_kernel_profiler_coverage()` before
+interpreting kernel counts or total time. Its immutable result reports `complete`, `status`, `reasons`,
+`recorded_tasks`, `backend_graph_launches`, and `native_submissions` for the current
+Program since the last `clear_kernel_profiler_info()` (or Program creation).
+Recorded tasks are backend tasks, not logical kernel invocations.
+
+CUDA Graph replay bypasses per-task profiler events, including flat and conditional
+Graphs. Graph-only execution reports `unsupported`; mixed Direct/Graph execution
+reports `partial`. Missing Graph records do not mean zero execution time. Legacy
+count/time queries warn once per uncovered reason and clear interval, and printed
+tables label incomplete coverage. Their numeric results retain the recorded-task
+meaning. Native submissions whose timing is not qualified also make coverage
+incomplete. If submission statistics are unavailable, coverage is `unknown`.
+
+Clearing profiler data starts a new coverage interval; it does not reset runtime
+statistics or change Graph execution. This API does not add node instrumentation
+or read device iteration counters. Even complete kernel timing excludes host
+preparation, transfers, and work submitted outside the current Program.
+
+`KernelProfiler` retrieves kernel profiling records from the backend, aggregates them in the Python scope, and prints the results to the console. Coverage depends on the backend and execution route described above. Ensure that you call `ti.sync()` before performance profiling if your program runs on GPU.
 
  1. To enable the profiler, set `kernel_profiler=True` when calling `ti.init()`.
  2. Use `ti.profiler.print_kernel_profiler_info()` to display profiling results. There are two printing modes:
