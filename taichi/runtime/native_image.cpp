@@ -327,6 +327,8 @@ BufferImageCopyParams packed_image_copy(const ImageParams &p) {
   copy.buffer_row_length = p.x;
   copy.buffer_image_height = p.y;
   copy.image_extent = {p.x, p.y, p.z};
+  if (p.format == BufferFormat::depth16 || p.format == BufferFormat::depth32f)
+    copy.image_aspect_flag = VK_IMAGE_ASPECT_DEPTH_BIT;
   return copy;
 }
 
@@ -356,13 +358,18 @@ class VulkanSampledImage final : public NativeSampledImage {
       const auto source = d.pixels->pointer;
       const auto copy = packed_image_copy(params);
       initialization_pending_ = true;
-      runtime_.enqueue_compute_op_lambda(
-          [image, source, copy](Device *, CommandList *commands) {
-            commands->buffer_barrier(source);
-            commands->buffer_to_image(image, source, ImageLayout::transfer_dst,
-                                      copy);
-          },
-          {{image, ImageLayout::transfer_dst, ImageLayout::shader_read}});
+      auto upload = [image, source, copy](Device *, CommandList *commands) {
+        commands->buffer_barrier(source);
+        commands->buffer_to_image(image, source, ImageLayout::transfer_dst,
+                                  copy);
+      };
+      const std::vector<ComputeOpImageRef> refs{
+          {image, ImageLayout::transfer_dst, ImageLayout::shader_read}};
+      if (copy.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT) {
+        runtime_.enqueue_graphics_op_lambda(upload, refs);
+      } else {
+        runtime_.enqueue_compute_op_lambda(upload, refs);
+      }
       runtime_.synchronize();
       initialization_pending_ = false;
     }
@@ -425,9 +432,12 @@ class VulkanImageUpload final : public NativeOperation {
   void validate_recording(NativeRecordingState &state) const override {
     state.initialized.insert(image_.get());
   }
-  std::vector<std::pair<DeviceAllocation, ImageLayout>> vulkan_image_bindings()
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {{image_->gfx_sampled_allocation(), ImageLayout::transfer_dst}};
+    // Depth transfers are not universally supported by compute-only queues.
+    // Use the existing graphics-capable recording for portable correctness.
+    return {{{image_->gfx_sampled_allocation(), ImageLayout::transfer_dst}},
+            copy_.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT};
   }
   void record_vulkan(Device *, CommandList *commands) override {
     commands->buffer_barrier(source_);

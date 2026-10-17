@@ -57,6 +57,11 @@ struct NativeRecordingState {
   std::unordered_map<const NativeResource *, std::any> provider_states;
 };
 
+struct NativeVulkanRecordingRequirements {
+  std::vector<std::pair<DeviceAllocation, ImageLayout>> images;
+  bool graphics_queue{false};
+};
+
 // Prepared backend commands own their scratch and recording state. The
 // enclosing execution retains input/output leases and retires submitted work
 // before releasing this object.
@@ -115,8 +120,7 @@ class NativeOperation : public NativeResource {
   }
   // Required layouts while recording this command. The enclosing GFX recorder
   // owns entry/exit transitions and restores its replay layout invariant.
-  virtual std::vector<std::pair<DeviceAllocation, ImageLayout>>
-  vulkan_image_bindings() const {
+  virtual NativeVulkanRecordingRequirements vulkan_recording_requirements() const {
     return {};
   }
 };

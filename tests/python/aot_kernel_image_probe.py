@@ -149,6 +149,8 @@ def main(mode, artifact, adapter, output, arch="cuda"):
         module = runtime.load_module(artifact)
         load_ms = (time.perf_counter() - start) * 1000
         policies = ["seeded", "updated"] + (["family"] if arch == "cuda" else [])
+        if arch == "vulkan":
+            policies += ["depth", "depth_seeded"]
         policies += ["ordered"] if adapter else []
         shapes = dict(
             pixels1=(4,),
@@ -180,7 +182,14 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                     for name in plan.argument_names
                 }
                 write(frame["pixels1"], [0, 64, 128, 255], "B")
-                write(frame["pixels2"], list(range(15)))
+                write(
+                    frame["pixels2"],
+                    (
+                        [i / 16 for i in range(15)]
+                        if policy == "depth_seeded"
+                        else list(range(15))
+                    ),
+                )
                 write(frame["pixels3"], list(range(24)))
                 write(frame["output"], [-99] * 9)
                 if policy == "ordered":
@@ -273,9 +282,17 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                     else "cuda_ordered" if policy == "ordered" else "cuda_graph"
                 )
                 assert read(frame["output"]) == [-99] * 9
-                if policy == "seeded":
+                if policy.endswith("seeded"):
                     write(frame["pixels2"], [99] * 15)
-                for scale in ((1,) if policy == "seeded" else (1, -2, 0, 3)):
+                for scale in (
+                    (1,)
+                    if policy == "seeded"
+                    else (
+                        (1 / 16,)
+                        if policy == "depth_seeded"
+                        else (1 / 16, 0, 1 / 32) if policy == "depth" else (1, -2, 0, 3)
+                    )
+                ):
                     if "scale" in frame:
                         write(frame["scale"], [scale])
                     call()

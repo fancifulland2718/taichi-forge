@@ -55,13 +55,25 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="backward")
     policies = ["seeded", "updated"] + (["family"] if arch == "cuda" else [])
+    if arch == "vulkan":
+        policies += ["depth", "depth_seeded"]
     adapter = (
         os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER") if arch == "cuda" else None
     )
     if adapter:
         policies.append("ordered")
     for policy in policies:
-        module.add_execution_plan(policy, ti.aot.ExecutionPlan(**plan_parts(policy)))
+        base = (
+            "seeded"
+            if policy == "depth_seeded"
+            else "updated" if policy == "depth" else policy
+        )
+        parts = plan_parts(base)
+        if policy.startswith("depth"):
+            next(r for r in parts["resources"] if r["name"] == "nearest")["parameters"][
+                "format"
+            ] = "depth32f"
+        module.add_execution_plan(policy, ti.aot.ExecutionPlan(**parts))
     costs = dict(build_ms=(time.perf_counter() - start) * 1000)
     artifact = tmp_path / "kernel-images.tcm"
     module.archive(str(artifact))
@@ -90,6 +102,7 @@ def test_aot_sampled_kernel_images_and_gradients(tmp_path):
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr
+        assert "Validation Error" not in result.stdout + result.stderr
     (tmp_path / "producer.json").write_text(json.dumps(costs, indent=2))
 
 

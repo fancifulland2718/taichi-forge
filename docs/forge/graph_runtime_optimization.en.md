@@ -185,7 +185,7 @@ Important current boundaries:
   nested JIT now shares the AOT/GFX capacity contract: positive uint32 loop/chunk
   budgets, no fixed 4096-action cap, and the recorder's storage/address/overflow
   checks. Budgets travel through int64 bindings before checked conversion;
-  private ABI 78 requires matching Python/native components. This change does
+  private ABI 79 requires matching Python/native components. This change does
   not alter flat Vulkan admission. Masked control still issues
   inactive nodes, so large budgets can increase materialization and replay cost;
   removing an admission cutoff is not a speedup.

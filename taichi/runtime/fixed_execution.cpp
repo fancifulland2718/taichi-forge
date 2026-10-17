@@ -946,7 +946,9 @@ FixedExecution::FixedExecution(
                          &operation)) {
         gfx::GfxRuntime::GraphRecordingOperation op;
         op.inline_recording = true;
-        op.images = (*external)->vulkan_image_bindings();
+        auto requirements = (*external)->vulkan_recording_requirements();
+        op.images = std::move(requirements.images);
+        op.graphics_queue = requirements.graphics_queue;
         op.external = [external = *external](Device *device,
                                              CommandList *commands) {
           commands->memory_barrier();
