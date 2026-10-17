@@ -559,7 +559,35 @@ alpha recording 可通过下述显式图像重建合同自动导出。
 
 Windows CUDA 已验证归一化 1D、非方形 2D 线性/最近邻采样、3D 轴顺序、初始 seed 与
 GPU 更新、captured 和 OptiX ordered 计划、共享绑定退休及后续数值 kernel 的真实梯度。
-这不提供纹理采样求导。CUDA RWTexture、TextureCollection 和普通公开 C API 图像句柄仍需分别接通。
+这不提供纹理采样求导。CUDA RWTexture、CUDA TextureCollection 和普通公开 C API 图像句柄仍需分别接通。
+
+Vulkan `texture_collection` kernel 参数可在显式 `ExecutionPlan` 中绑定受管集合。
+导出时声明目标所需的非统一采样索引及最小描述符容量，例如：
+
+```python
+module = ti.aot.Module(caps=[
+    "spirv_has_sampled_image_array_non_uniform_indexing",
+    "max_sampled_texture_collection_size=3",
+])
+# collection 是资源描述；其成员也是同一 owner 的 image/sampled 资源。
+collection = dict(
+    kind="native", name="table", provider="image", operation="collection", version=1,
+    parameters=dict(dimensions=2, image_count=3),
+    bindings=dict(image_0="second", image_1="first", image_2="second"),
+)
+```
+
+对应 `Module.add_kernel()` 产物要求 GFX metadata v5；旧运行库会在加载时拒绝。
+已有普通/RWTexture 产物保留原有最低版本。容量预算须覆盖一个 shader 的所有采样绑定，
+不是必须等于单个集合容量。消费者先查询
+`native_resource_capabilities("sampled_image_collection")`，再按实际设备能力准备。
+也可用 `runtime.native_resource("image", "collection", ...)` 创建公共集合，绑定现有
+`NativeResource` 图像。成员顺序固定，可重复、可有不同尺寸及 sampler；维数一致且使用
+浮点/归一化 sampled 格式。完整替换成员需新建集合并重新准备，原位上传不改变集合。
+集合只存 CPU 表及 owner，不复制图像；关闭成员会退休依赖集合和执行对象。
+每个成员须有初始像素或执行序列中无条件先行的上传，GPU 索引范围由应用保证。
+独立与借用消费者已验证二维 fetch/sample_lod、GPU 更新、重绑定、退休和下游数值梯度；
+不支持纹理采样求导。Graph 自动集合重建、旧 CGraph 和 kernel-template 接口仍未开放。
 
 Vulkan 复用相同的 `image/sampled`、`image/upload` 描述，并接入所属 runtime 已有的
 GFX 执行器。通过 `image_upload` v1 的 `vulkan_inline` 能力协商；创建与初始像素上传在
@@ -1940,6 +1968,7 @@ operation 查询返回空结果，保持原有发现行为。C API 为
 | 资源工厂 | 查询 kind | 已编译后端 |
 | --- | --- | --- |
 | `image/sampled` v1 | `sampled_image` | CUDA、Vulkan |
+| `image/collection` v1 | `sampled_image_collection` | Vulkan |
 | `image/storage` v1 | `storage_image` | Vulkan |
 | `vulkan_graphics/pipeline` v1 | `vulkan_graphics_pipeline` | Vulkan |
 | `vulkan_graphics/pipeline` v2（mesh/task） | `vulkan_graphics_pipeline` | Vulkan |

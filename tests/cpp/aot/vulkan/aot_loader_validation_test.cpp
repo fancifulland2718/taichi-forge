@@ -190,6 +190,54 @@ TEST(GfxAotValidation, RejectsUndeclaredRootBindings) {
   EXPECT_TRUE(dir.load()->is_corrupted());
 }
 
+TEST(GfxAotValidation, TextureCollectionsRequireQualifiedMetadata) {
+  MemoryAotDir dir;
+  dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
+  gfx::TaichiAotData data;
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]),
+                           data);
+  spirv::KernelContextAttributes::ArgAttributes argument;
+  argument.ptype = ParameterType::kTextureCollection;
+  argument.is_array = true;
+  argument.field_dim = 1;  // total_dim(2) - element_shape.size(1).
+  argument.element_shape = {3};
+  auto update = [&] {
+    auto json = liong::json::serialize(data.kernels[0].ctx_attribs);
+    json["arg_attribs_vec_"] = liong::json::serialize(
+        std::vector<std::pair<std::vector<int>,
+                              spirv::KernelContextAttributes::ArgAttributes>>{
+            {{0}, argument}});
+    liong::json::deserialize(json, data.kernels[0].ctx_attribs);
+    dir.files["metadata.json"] =
+        liong::json::print(liong::json::serialize(data));
+    return dir.load()->is_corrupted();
+  };
+  EXPECT_FALSE(update());
+  data.metadata_version = 4;
+  EXPECT_TRUE(update());
+  data.metadata_version = 5;
+  for (auto shape : {std::vector<int>{}, std::vector<int>{0},
+                     std::vector<int>{-1}, std::vector<int>{2, 3}}) {
+    argument.element_shape = shape;
+    EXPECT_TRUE(update());
+  }
+  argument.element_shape = {3};
+  argument.field_dim = 3;
+  EXPECT_TRUE(update());
+  argument.field_dim = 1;
+  argument.is_array = false;
+  EXPECT_TRUE(update());
+  argument.is_array = true;
+  argument.is_argpack = true;
+  EXPECT_TRUE(update());
+  argument.is_argpack = false;
+  argument.format = BufferFormat::r32f;
+  EXPECT_TRUE(update());
+  argument.format = BufferFormat::unknown;
+  argument.texture_lod = 1;
+  EXPECT_TRUE(update());
+}
+
 TEST(GfxAotValidation, StorageImageArgumentsRequireQualifiedMetadata) {
   MemoryAotDir dir;
   dir.add_shader({0x07230203, 0x10300, 0, 1, 0});

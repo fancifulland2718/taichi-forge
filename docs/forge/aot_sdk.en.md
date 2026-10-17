@@ -715,8 +715,43 @@ source. This restriction follows the [CUDA Graph update rules](https://docs.nvid
 Windows CUDA checks cover normalized 1D, non-square 2D linear/nearest sampling,
 3D axis order, seeded and GPU-updated images, captured and OptiX-ordered plans,
 shared binding retirement, and real gradients of downstream numeric kernels.
-This does not differentiate texture sampling. CUDA RWTexture, TextureCollection and
+This does not differentiate texture sampling. CUDA RWTexture, CUDA TextureCollection and
 ordinary public C API image handles still require separate qualification.
+
+Vulkan `texture_collection` kernel arguments can bind managed tables in explicit
+`ExecutionPlan` objects. Declare the target indexing feature and minimum sampled
+descriptor budget when exporting, for example:
+
+```python
+module = ti.aot.Module(caps=[
+    "spirv_has_sampled_image_array_non_uniform_indexing",
+    "max_sampled_texture_collection_size=3",
+])
+collection = dict(
+    kind="native", name="table", provider="image", operation="collection", version=1,
+    parameters=dict(dimensions=2, image_count=3),
+    bindings=dict(image_0="second", image_1="first", image_2="second"),
+)
+```
+
+Members are same-owner `image/sampled` resources. These `Module.add_kernel()`
+artifacts require GFX metadata v5, so older loaders reject them explicitly.
+Ordinary and RWTexture artifacts keep their previous minimum version. The
+descriptor budget must cover all sampled bindings in one shader, including
+other tables. Query `native_resource_capabilities("sampled_image_collection")`
+before selecting this route; preparation checks the actual device limits.
+Public tables can also be created with `runtime.native_resource("image",
+"collection", ...)` and existing image `NativeResource` bindings. Slots retain
+their order and may repeat owners; sizes and samplers may differ, but dimensions
+must agree and formats must support floating/normalized sampling. Replacing
+members requires a new table and preparation; uploading pixels preserves the
+table. Collections own CPU metadata and image leases, without copying images.
+Closing a member retires dependent tables and executions. Every member needs
+initial pixels or an unconditional preceding upload; the application guarantees
+valid GPU indices. Standalone and borrowed checks cover 2D fetch/sample_lod,
+GPU updates, rebinding, retirement and downstream numeric gradients. Texture
+sampling itself is not differentiated. Automatic Graph collection reconstruction,
+legacy CGraph and the kernel-template interface remain unsupported.
 
 Vulkan uses the same `image/sampled` and `image/upload` descriptions, backed by
 the owner's existing GFX runtime. Discover `image_upload` version 1 with
@@ -2542,6 +2577,7 @@ existing operation-discovery behavior. The C equivalents are
 | Resource factory | Query kind | Compiled backends |
 | --- | --- | --- |
 | `image/sampled` v1 | `sampled_image` | CUDA, Vulkan |
+| `image/collection` v1 | `sampled_image_collection` | Vulkan |
 | `image/storage` v1 | `storage_image` | Vulkan |
 | `vulkan_graphics/pipeline` v1 | `vulkan_graphics_pipeline` | Vulkan |
 | `vulkan_graphics/pipeline` v2 (mesh/task) | `vulkan_graphics_pipeline` | Vulkan |

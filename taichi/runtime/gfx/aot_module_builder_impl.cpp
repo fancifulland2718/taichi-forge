@@ -136,6 +136,9 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
           TI_ERROR_IF(argument.format == BufferFormat::unknown,
                       "AOT RWTexture metadata lacks its format; recompile the "
                       "kernel without the old cache.");
+          artifact.metadata_version =
+              std::max(artifact.metadata_version, uint32_t(4));
+        } else if (argument.ptype == ParameterType::kTextureCollection) {
           artifact.metadata_version = TaichiAotData::kMetadataVersion;
         }
       }

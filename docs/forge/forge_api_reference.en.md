@@ -438,8 +438,11 @@ Graph dispatch uses `ti.graph.Arg(ti.graph.ArgKind.TEXTURE_COLLECTION,
 replacing membership creates a new collection and requires explicit
 `bindings.update(textures=new_table)`. Its `snapshot_id` identifies that local
 resource instance, not a portable recipe or executable plan. Do not reuse the
-collection after runtime reset. This is Vulkan JIT support, not CUDA, AOT, or
-an automatically faster replacement for buffer lookup. Measure the complete
+collection after runtime reset. Vulkan JIT and explicit AOT kernel bindings through
+managed `image/collection` resources are supported; AOT requires target capabilities
+and GFX metadata v5, as described in the [AOT SDK](aot_sdk.en.md). Automatic Graph
+collection export and CUDA collections remain unsupported. This is not an
+automatically faster replacement for buffer lookup. Measure the complete
 consumer, especially when many tiny textures make submission cost significant.
 
 For repeated complete graphs, the Vulkan immutable binding-frame recipe also

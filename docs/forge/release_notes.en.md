@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan AOT explicit plans bind `texture_collection` kernel parameters through
+  `image/collection` v1, sharing immutable tables, layouts and retirement with
+  JIT/GFX without copying images. These artifacts require target indexing/capacity
+  capabilities and GFX metadata v5. Tests cover 2D dynamic indexing, GPU updates,
+  replacement, retirement and downstream gradients. Automatic Graph collection
+  export, legacy CGraph and CUDA collections remain unsupported.
 - Vulkan AOT `pass_indirect` v1 reconstructs classic direct/indirect passes from
   ordinary or selected complete graphics-queue Graphs. Shared preparation checks
   finite command/count views, device limits and shader-write aliases; tests cover

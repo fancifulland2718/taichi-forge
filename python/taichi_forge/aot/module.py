@@ -401,7 +401,7 @@ class Module:
         kernel_name = name or default_name
         if self._arch != _ti_core.Arch.vulkan:
             reject_acceleration_structure_arguments(kernel, "AOT Module.add_kernel() on this backend")
-        reject_texture_collection_arguments(kernel, "AOT Module.add_kernel()")
+            reject_texture_collection_arguments(kernel, "AOT Module.add_kernel() on this backend")
         if template_args is not None:
             if set(template_args) & set(bound_args):
                 raise TaichiCompilationError("Cannot override the owner of a bound AOT kernel")

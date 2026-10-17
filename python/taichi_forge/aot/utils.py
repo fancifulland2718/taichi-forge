@@ -47,7 +47,7 @@ def reject_acceleration_structure_arguments(kernel, integration):
 
 
 def reject_texture_collection_arguments(kernel, integration):
-    """Fail closed until the serialized AOT ABI carries descriptor tables."""
+    """Reject integrations without a qualified collection resource binding."""
 
     names = [
         arg.name
@@ -56,7 +56,7 @@ def reject_texture_collection_arguments(kernel, integration):
     ]
     if names:
         raise TaichiCompilationError(
-            "TextureCollection kernel arguments are JIT-only; "
+            "TextureCollection kernel arguments are JIT-only in this integration; "
             f"{integration} does not support them (arguments: "
             + ", ".join(names)
             + ")"
@@ -79,6 +79,8 @@ def produce_injected_args_from_template(kernel, template_args):
             injected_args.append(template_args[arg.name])
         elif isinstance(anno, AccelerationStructureType):
             injected_args.append(None)
+        elif isinstance(anno, TextureCollectionType):
+            injected_args.append(_produce_injected_arg(arg))
         elif isinstance(anno, RWTextureType):
             texture_shape = (2,) * anno.num_dimensions
             fmt = anno.fmt

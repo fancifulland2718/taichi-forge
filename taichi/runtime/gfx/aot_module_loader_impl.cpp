@@ -118,6 +118,16 @@ class AotModuleImpl : public aot::Module {
       for (const auto &[indices, argument] :
            ti_aot_data_.kernels[i].ctx_attribs.args()) {
         const bool storage = argument.ptype == ParameterType::kRWTexture;
+        if (argument.ptype == ParameterType::kTextureCollection &&
+            (ti_aot_data_.metadata_version < 5 || !argument.is_array ||
+             argument.is_argpack || argument.element_shape.size() != 1 ||
+             argument.element_shape[0] <= 0 || argument.field_dim > 2 ||
+             argument.format != BufferFormat::unknown ||
+             argument.texture_lod != 0)) {
+          mark_corrupted();
+          TI_WARN("Invalid GFX AOT texture-collection argument metadata");
+          return;
+        }
         if ((!storage && argument.texture_lod != 0) ||
             (argument.texture_lod != 0 && ti_aot_data_.metadata_version < 4) ||
             (ti_aot_data_.metadata_version >= 4 && storage &&
