@@ -208,6 +208,14 @@ void CUDAContext::launch(void *func,
   }
 }
 
+void CUDAContext::launch_graph(void *executable, void *stream) {
+  if (auto *profiler = dynamic_cast<KernelProfilerCUDA *>(profiler_)) {
+    profiler->launch_graph(executable, stream);
+  } else {
+    driver_.graph_launch(executable, stream);
+  }
+}
+
 CUDAContext::~CUDAContext() {
   // TODO: restore these?
   /*

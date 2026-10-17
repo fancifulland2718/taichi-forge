@@ -859,7 +859,7 @@ bool DeviceGMRES::try_submit_cuda_cycle(
       entry.operator_numeric_revision =
           key.operator_stamp.numeric_revision;
     }
-    driver.graph_launch(entry.executable, nullptr);
+    CUDAContext::get_instance().launch_graph(entry.executable, nullptr);
     ++solver_chunk_reuses_;
     ++solver_chunk_replays_;
     cuda_replay_->unavailable_reason = "none";
@@ -935,7 +935,7 @@ bool DeviceGMRES::try_submit_cuda_cycle(
       program_->acquire_ndarray_external_lease(key.rhs));
   ++solver_chunk_builds_;
   cuda_replay_->unavailable_reason = "none";
-  driver.graph_launch(entry.executable, nullptr);
+  CUDAContext::get_instance().launch_graph(entry.executable, nullptr);
   return true;
 #else
   return false;

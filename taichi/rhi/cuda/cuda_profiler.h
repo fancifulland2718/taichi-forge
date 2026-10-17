@@ -37,6 +37,7 @@ class KernelProfilerCUDA : public KernelProfilerBase {
   void update() override;
   void clear() override;
   void stop(KernelProfilerBase::TaskHandle handle) override;
+  void launch_graph(void *executable, void *stream);
 
   bool set_profiler_toolkit(std::string toolkit_name) override;
 
@@ -51,6 +52,7 @@ class KernelProfilerCUDA : public KernelProfilerBase {
                                 uint32_t dynamic_smem_size);
 
  private:
+  void stop_on_stream(KernelProfilerBase::TaskHandle handle, void *stream);
   ProfilingToolkit tool_ = ProfilingToolkit::undef;
 
   // Instances of these toolkits may exist at the same time,
@@ -68,7 +70,8 @@ class EventToolkit {
   void update_record(uint32_t records_size_after_sync,
                      std::vector<KernelProfileTracedRecord> &traced_records);
   KernelProfilerBase::TaskHandle start_with_handle(
-      const std::string &kernel_name);
+      const std::string &kernel_name, void *stream = nullptr);
+  void discard_current() noexcept;
   void update_timeline(
       uint32_t first_record,
       const std::vector<KernelProfileTracedRecord> &traced_records);

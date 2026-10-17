@@ -2416,7 +2416,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     if (exact_match) {
       CUDAContext::get_instance().make_current();
       state->collect_ready_deferred_resources();
-      CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(),
                                               select_replay_stream());
       state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -2463,7 +2463,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   state->collect_ready_deferred_resources();
   if (state->graph_exec &&
       state->signature == signature->entries) {
-    CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
+    CUDAContext::get_instance().launch_graph(state->graph_exec.get(),
                                             select_replay_stream());
     state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -2523,7 +2523,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       // one more graph execution than correctness requires.
       state->defer_replay_resources(std::move(old_allocation_leases),
                                     std::move(host_arg_buffers), replay_stream);
-      CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(),
                                               replay_stream);
       state->stats.last_path =
           CompiledGraphExecutionPath::cuda_patched_replay;
@@ -2733,7 +2733,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       statistics->record_graph_recapture();
     }
   }
-  driver.graph_launch(state->graph_exec.get(), select_replay_stream());
+  CUDAContext::get_instance().launch_graph(state->graph_exec.get(), select_replay_stream());
   return true;
 }
 
@@ -2876,7 +2876,7 @@ bool try_run_cuda_masked_control_graph(
   if (topology_matches && state->graph_exec &&
       state->signature == signature->entries &&
       state->allocations == signature->allocations) {
-    driver.graph_launch(state->graph_exec.get(), nullptr);
+    CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
     state->stats.last_path = CompiledGraphExecutionPath::cuda_masked_replay;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
     if (state->diagnostics_enabled) {
@@ -2921,7 +2921,7 @@ bool try_run_cuda_masked_control_graph(
       state->signature = std::move(signature->entries);
       state->defer_replay_resources(std::move(old_allocation_leases),
                                     std::move(host_arg_buffers));
-      driver.graph_launch(state->graph_exec.get(), nullptr);
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
       state->stats.last_path =
           CompiledGraphExecutionPath::cuda_masked_patched_replay;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -3080,7 +3080,7 @@ bool try_run_cuda_masked_control_graph(
       statistics->record_graph_recapture();
     }
   }
-  driver.graph_launch(state->graph_exec.get(), nullptr);
+  CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
   return true;
 }
 
@@ -3140,7 +3140,7 @@ bool try_run_cuda_conditional_nested_control_graph(
     if (same) {
       CUDAContext::get_instance().make_current();
       state->collect_ready_deferred_resources();
-      CUDADriver::get_instance().graph_launch(state->graph_exec.get(), nullptr);
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
       state->stats.last_path =
           CompiledGraphExecutionPath::cuda_conditional_nested_replay;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -3235,7 +3235,7 @@ bool try_run_cuda_conditional_nested_control_graph(
       state->stats.last_driver_error = 0;
     }
     auto launch = [&](CompiledGraphExecutionPath path) {
-      driver.graph_launch(state->graph_exec.get(), nullptr);
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
       state->stats.last_path = path;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
     };
@@ -3596,7 +3596,7 @@ bool try_run_cuda_device_update_nested_control_graph(
   if (topology_matches && state->graph_exec &&
       state->signature == signature->entries &&
       state->allocations == signature->allocations) {
-    driver.graph_launch(state->graph_exec.get(), nullptr);
+    CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
     state->stats.last_path =
         CompiledGraphExecutionPath::cuda_device_update_nested_replay;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -3646,7 +3646,7 @@ bool try_run_cuda_device_update_nested_control_graph(
       state->signature = std::move(signature->entries);
       state->defer_replay_resources(std::move(old_allocation_leases),
                                     std::move(host_arg_buffers));
-      driver.graph_launch(state->graph_exec.get(), nullptr);
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
       state->stats.last_path =
           CompiledGraphExecutionPath::cuda_device_update_nested_patched_replay;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -3840,7 +3840,7 @@ bool try_run_cuda_device_update_nested_control_graph(
       statistics->record_graph_recapture();
     }
   }
-  driver.graph_launch(state->graph_exec.get(), nullptr);
+  CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
   return true;
 }
 
@@ -4030,7 +4030,7 @@ bool try_run_cuda_masked_nested_control_graph(
   if (topology_matches && state->graph_exec &&
       state->signature == signature->entries &&
       state->allocations == signature->allocations) {
-    driver.graph_launch(state->graph_exec.get(), nullptr);
+    CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
     state->stats.last_path = CompiledGraphExecutionPath::cuda_masked_replay;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
     if (state->diagnostics_enabled) {
@@ -4079,7 +4079,7 @@ bool try_run_cuda_masked_nested_control_graph(
       state->signature = std::move(signature->entries);
       state->defer_replay_resources(std::move(old_allocation_leases),
                                     std::move(host_arg_buffers));
-      driver.graph_launch(state->graph_exec.get(), nullptr);
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
       state->stats.last_path =
           CompiledGraphExecutionPath::cuda_masked_patched_replay;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -4252,7 +4252,7 @@ bool try_run_cuda_masked_nested_control_graph(
       statistics->record_graph_recapture();
     }
   }
-  driver.graph_launch(state->graph_exec.get(), nullptr);
+  CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
   return true;
 }
 
@@ -4375,7 +4375,7 @@ bool try_run_cuda_bounded_graph(
   auto launch = [&](CompiledGraphExecutionPath path) {
     auto host_buffers = update_control();
     try {
-      driver.graph_launch(state->graph_exec.get(), nullptr);
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
     } catch (...) {
       if (!host_buffers.empty()) {
         state->defer_replay_resources({}, std::move(host_buffers));
@@ -4744,14 +4744,14 @@ bool try_run_cuda_conditional_graph(
     if (control_changed) {
       auto host_buffers = update_control();
       try {
-        driver.graph_launch(state->graph_exec.get(), nullptr);
+        CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
       } catch (...) {
         state->defer_replay_resources({}, std::move(host_buffers));
         throw;
       }
       state->defer_replay_resources({}, std::move(host_buffers));
     } else {
-      driver.graph_launch(state->graph_exec.get(), nullptr);
+      CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
     }
     state->stats.last_path = path;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;

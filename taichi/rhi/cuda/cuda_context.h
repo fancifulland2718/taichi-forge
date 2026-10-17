@@ -69,6 +69,10 @@ class CUDAContext {
     profiler_ = profiler;
   }
 
+  // Callers own the same context/submission transaction as raw graph_launch.
+  // With the default profiler, one record covers the entire backend replay.
+  void launch_graph(void *executable, void *stream);
+
   void set_debug(bool debug) {
     debug_ = debug;
   }

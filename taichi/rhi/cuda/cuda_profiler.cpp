@@ -131,9 +131,36 @@ void KernelProfilerCUDA::trace(KernelProfilerBase::TaskHandle &task_handle,
 }
 
 void KernelProfilerCUDA::stop(KernelProfilerBase::TaskHandle handle) {
+  stop_on_stream(handle, nullptr);
+}
+
+void KernelProfilerCUDA::launch_graph(void *executable, void *stream) {
+  auto &driver = CUDADriver::get_instance();
+  if (tool_ != ProfilingToolkit::event) {
+    driver.graph_launch(executable, stream);
+    return;
+  }
+  ensure_record_capacity();
+  // Reserved aggregate name: never attribute a replay to one of its kernels,
+  // and never add synthetic per-node records (conditional trips are dynamic).
+  KernelProfileTracedRecord record;
+  record.name = "__cuda_graph_replay__";
+  auto handle = event_toolkit_->start_with_handle(record.name, stream);
+  try {
+    driver.graph_launch(executable, stream);
+    stop_on_stream(handle, stream);
+  } catch (...) {
+    event_toolkit_->discard_current();
+    throw;
+  }
+  traced_records_.push_back(std::move(record));
+}
+
+void KernelProfilerCUDA::stop_on_stream(KernelProfilerBase::TaskHandle handle,
+                                       void *stream) {
   if (tool_ == ProfilingToolkit::event) {
-    CUDADriver::get_instance().event_record(handle, 0);
-    CUDADriver::get_instance().stream_synchronize(nullptr);
+    CUDADriver::get_instance().event_record(handle, stream);
+    CUDADriver::get_instance().event_synchronize(handle);
 
     // get elapsed time and destroy events
     auto record = event_toolkit_->get_current_event_record();
@@ -144,7 +171,9 @@ void KernelProfilerCUDA::stop(KernelProfilerBase::TaskHandle handle) {
         record->start_event);
 
     CUDADriver::get_instance().event_destroy(record->start_event);
+    record->start_event = nullptr;
     CUDADriver::get_instance().event_destroy(record->stop_event);
+    record->stop_event = nullptr;
   }
 }
 
@@ -259,6 +288,9 @@ void KernelProfilerCUDA::trace(KernelProfilerBase::TaskHandle &task_handle,
 void KernelProfilerCUDA::stop(KernelProfilerBase::TaskHandle handle) {
   TI_NOT_IMPLEMENTED;
 }
+void KernelProfilerCUDA::launch_graph(void *executable, void *stream) {
+  TI_NOT_IMPLEMENTED;
+}
 void KernelProfilerCUDA::sync() {
   TI_NOT_IMPLEMENTED;
 }
@@ -280,7 +312,7 @@ bool KernelProfilerCUDA::record_kernel_attributes(void *kernel,
 // for now put it together with KernelProfilerCUDA
 #if defined(TI_WITH_CUDA)
 KernelProfilerBase::TaskHandle EventToolkit::start_with_handle(
-    const std::string &kernel_name) {
+    const std::string &kernel_name, void *stream) {
   EventRecord record;
   record.name = kernel_name;
 
@@ -288,9 +320,6 @@ KernelProfilerBase::TaskHandle EventToolkit::start_with_handle(
                                           CU_EVENT_DEFAULT);
   CUDADriver::get_instance().event_create(&(record.stop_event),
                                           CU_EVENT_DEFAULT);
-  CUDADriver::get_instance().event_record((record.start_event), 0);
-  event_records_.push_back(record);
-
   if (!base_event_) {
     // Note that CUDA driver API only allows querying relative time difference
     // between two events, therefore we need to manually build a mapping
@@ -304,7 +333,7 @@ KernelProfilerBase::TaskHandle EventToolkit::start_with_handle(
     for (int i = 0; i < n_iters; i++) {
       void *e;
       CUDADriver::get_instance().event_create(&e, CU_EVENT_DEFAULT);
-      CUDADriver::get_instance().event_record(e, 0);
+      CUDADriver::get_instance().event_record(e, stream);
       CUDADriver::get_instance().event_synchronize(e);
       auto final_t = Time::get_time();
       if (i == n_iters - 1) {
@@ -323,7 +352,20 @@ KernelProfilerBase::TaskHandle EventToolkit::start_with_handle(
       }
     }
   }
+  // Calibration is setup, not part of the first kernel/Graph interval.
+  CUDADriver::get_instance().event_record(record.start_event, stream);
+  event_records_.push_back(record);
   return record.stop_event;
+}
+
+void EventToolkit::discard_current() noexcept {
+  auto &record = event_records_.back();
+  auto &driver = CUDADriver::get_instance();
+  if (record.start_event)
+    driver.event_destroy.call(record.start_event);
+  if (record.stop_event)
+    driver.event_destroy.call(record.stop_event);
+  event_records_.pop_back();
 }
 
 void EventToolkit::update_record(
@@ -372,8 +414,10 @@ void EventToolkit::update_timeline(
 
 #else
 KernelProfilerBase::TaskHandle EventToolkit::start_with_handle(
-    const std::string &kernel_name) {
+    const std::string &kernel_name, void *stream) {
   TI_NOT_IMPLEMENTED;
+}
+void EventToolkit::discard_current() noexcept {
 }
 void EventToolkit::update_record(
     uint32_t records_size_after_sync,

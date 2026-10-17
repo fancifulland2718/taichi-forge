@@ -882,7 +882,7 @@ void FixedGraph::run() {
   auto lock = cuda.get_submission_lock_guard();
   state_->submitted = true;
   try {
-    CUDADriver::get_instance().graph_launch(state_->executable, nullptr);
+    CUDAContext::get_instance().launch_graph(state_->executable, nullptr);
   } catch (const BackendRuntimeError &error) {
     if (state_->fault_domain)
       state_->fault_domain->report_backend_error(error, 0);

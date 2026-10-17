@@ -940,7 +940,7 @@ bool CUCG::try_submit_solver_chunk(
           preconditioner_stamp.numeric_revision;
       ++solver_chunk_rebinds_;
     }
-    CUDADriver::get_instance().graph_launch(entry.executable, nullptr);
+    CUDAContext::get_instance().launch_graph(entry.executable, nullptr);
     if (preconditioner_) {
       preconditioner_->record_replayed_apply_calls(chunk_iterations);
     } else if (block_preconditioner_) {
@@ -1033,7 +1033,7 @@ bool CUCG::try_submit_solver_chunk(
       program->acquire_ndarray_external_lease(key.solution));
   ++solver_chunk_builds_;
   replay.unavailable_reason = "none";
-  driver.graph_launch(entry.executable, nullptr);
+  CUDAContext::get_instance().launch_graph(entry.executable, nullptr);
   return true;
 #else
   return false;
@@ -1106,7 +1106,7 @@ bool CUCG::try_submit_conditional_solver(
           preconditioner_stamp.numeric_revision;
       ++solver_chunk_rebinds_;
     }
-    driver.graph_launch(entry.executable, nullptr);
+    CUDAContext::get_instance().launch_graph(entry.executable, nullptr);
     ++solver_chunk_reuses_;
     ++solver_chunk_replays_;
     replay.unavailable_reason = "none";
@@ -1269,7 +1269,7 @@ bool CUCG::try_submit_conditional_solver(
   replay.conditional_handle = conditional_handle;
   replay.unavailable_reason = "none";
   ++solver_chunk_builds_;
-  driver.graph_launch(entry.executable, nullptr);
+  CUDAContext::get_instance().launch_graph(entry.executable, nullptr);
   return true;
 #else
   return false;

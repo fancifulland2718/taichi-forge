@@ -7,14 +7,16 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.profiler.kernel_metrics import default_cupti_metrics
 
+_CUDA_GRAPH_RECORD = "__cuda_graph_replay__"
+
 
 @dataclass(frozen=True)
 class KernelProfilerCoverage:
     """Coverage of this Program's submissions since the last profiler clear.
 
-    ``recorded_tasks`` counts instrumented tasks, not logical kernel calls.
-    Completeness concerns device kernel timing only: it does not include host
-    work, transfers, or work submitted outside this Program.
+    ``complete`` describes individual task timing. ``total_time_complete``
+    also admits disjoint whole-Graph event intervals. Graph intervals include
+    all nodes and scheduling within the replay, not host preparation time.
     """
 
     backend: str
@@ -25,6 +27,9 @@ class KernelProfilerCoverage:
     recorded_tasks: int
     backend_graph_launches: Optional[int]
     native_submissions: Optional[int]
+    recorded_graphs: int = 0
+    graph_time_seconds: float = 0.0
+    total_time_complete: bool = False
 
 
 class StatisticalResult:
@@ -119,7 +124,7 @@ class KernelProfiler:
             return 0.0
         self._update_records()  # kernel records
         self._count_statistics()  # _total_time_ms is counted here
-        self._warn_incomplete_coverage()
+        self._warn_incomplete_coverage(total_only=True)
         return self._total_time_ms / 1000  # ms to s
 
     def get_coverage(self):
@@ -154,6 +159,9 @@ class KernelProfiler:
         backend = _ti_core.arch_name(impl.current_cfg().arch)
         snapshot = self._coverage_snapshot()
         recorded = len(self._traced_records)
+        graph_records = tuple(record for record in self._traced_records if record.name == _CUDA_GRAPH_RECORD)
+        recorded_graphs = len(graph_records)
+        graph_time_seconds = sum(record.kernel_time for record in graph_records) / 1000
         if snapshot is None:
             return KernelProfilerCoverage(
                 backend,
@@ -171,10 +179,12 @@ class KernelProfiler:
         graph_launches = snapshot[1] - baseline[1]
         native_submissions = snapshot[2] - baseline[2]
         reasons = []
-        if graph_launches:
+        if graph_launches or recorded_graphs:
             reasons.append(
                 "cuda_graph_node_timing_unavailable" if backend == "cuda" else "backend_graph_timing_not_qualified"
             )
+            if backend == "cuda" and recorded_graphs != graph_launches:
+                reasons.append("cuda_graph_aggregate_timing_incomplete")
         if native_submissions:
             reasons.append("native_submission_timing_not_qualified")
         status = "complete" if not reasons else ("partial" if recorded else "unsupported")
@@ -184,13 +194,21 @@ class KernelProfiler:
             status,
             not reasons,
             tuple(reasons),
-            recorded,
+            recorded - recorded_graphs,
             graph_launches,
             native_submissions,
+            recorded_graphs,
+            graph_time_seconds,
+            not native_submissions and (
+                not graph_launches and not recorded_graphs
+                or backend == "cuda" and recorded_graphs == graph_launches
+            ),
         )
 
-    def _warn_incomplete_coverage(self):
+    def _warn_incomplete_coverage(self, *, total_only=False):
         coverage = self._coverage()
+        if total_only and coverage.total_time_complete:
+            return
         if not coverage.complete and coverage.reasons not in self._coverage_warnings:
             warnings.warn(
                 "Kernel profiler coverage is "
@@ -229,7 +247,7 @@ class KernelProfiler:
             return None
         self._update_records()  # kernel records
         self._count_statistics()  # statistics results
-        self._warn_incomplete_coverage()
+        self._warn_incomplete_coverage(total_only=name == _CUDA_GRAPH_RECORD)
         # TODO : query self.StatisticalResult in python scope
         return impl.get_runtime().prog.query_kernel_profile_info(name)
 
@@ -280,6 +298,12 @@ class KernelProfiler:
             print(
                 f"Kernel profiler coverage: {coverage.status} "
                 f"({', '.join(coverage.reasons)}); recorded tasks only."
+            )
+        if coverage.recorded_graphs:
+            print(
+                f"CUDA Graph aggregate timing: {coverage.recorded_graphs} replays, "
+                f"{coverage.graph_time_seconds:.6f} s; "
+                f"total time complete: {coverage.total_time_complete}."
             )
 
         # COUNT mode (default) : print statistics of all kernel

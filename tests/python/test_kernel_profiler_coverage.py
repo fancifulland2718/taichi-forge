@@ -9,7 +9,9 @@ from tests import test_utils
 from tests.python.test_graph_cuda_while_region import _require_conditional
 
 
-@pytest.mark.parametrize("route", ["direct", "flat", "while", "embedded_while"])
+@pytest.mark.parametrize(
+    "route", ["direct", "flat", "while", "embedded_while", "nested_while"]
+)
 @test_utils.test(arch=ti.cuda, offline_cache=False, kernel_profiler=True)
 def test_cuda_profiler_coverage_clear_replay_and_mixed(route, capsys):
     if "while" in route:
@@ -24,7 +26,9 @@ def test_cuda_profiler_coverage_clear_replay_and_mixed(route, capsys):
         c[0] = 0
 
     @ti.kernel
-    def condition(p: ti.types.ndarray(ti.i32, 1), c: ti.types.ndarray(ti.i32, 1), limit: ti.i32):
+    def condition(
+        p: ti.types.ndarray(ti.i32, 1), c: ti.types.ndarray(ti.i32, 1), limit: ti.i32
+    ):
         p[0] = ti.cast(c[0] < limit, ti.i32)
 
     @ti.kernel
@@ -44,7 +48,11 @@ def test_cuda_profiler_coverage_clear_replay_and_mixed(route, capsys):
     pp = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=1)
     limit = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "limit", ti.i32)
     builder = ti.graph.GraphBuilder()
-    step = builder.create_sequential() if route == "embedded_while" else builder
+    step = (
+        builder.create_sequential()
+        if route in ("embedded_while", "nested_while")
+        else builder
+    )
     step.dispatch(reset_counter, pc)
     if "while" in route:
         cond, body = builder.create_sequential(), builder.create_sequential()
@@ -68,6 +76,29 @@ def test_cuda_profiler_coverage_clear_replay_and_mixed(route, capsys):
     step.dispatch(finish)
     if route == "embedded_while":
         builder.append(step)
+    if route == "nested_while":
+        outer_counter, outer_predicate = (ti.ndarray(ti.i32, shape=1) for _ in range(2))
+        oc = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "outer_counter", ti.i32, ndim=1)
+        op = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "outer_predicate", ti.i32, ndim=1)
+        outer_cond, outer_body = builder.create_sequential(), step
+        outer_cond.dispatch(
+            condition,
+            op,
+            oc,
+            ti.graph.Arg(ti.graph.ArgKind.SCALAR, "outer_limit", ti.i32),
+        )
+        outer_body.dispatch(advance, oc)
+        builder.dispatch(reset_counter, oc)
+        builder.while_loop(
+            outer_cond,
+            outer_body,
+            predicate=op,
+            counter=oc,
+            max_iterations=3,
+            masked_execution=True,
+            lowering_mode="native_required",
+            name="outer_coverage",
+        )
     graph = builder.compile()
 
     def run(iterations):
@@ -81,6 +112,12 @@ def test_cuda_profiler_coverage_clear_replay_and_mixed(route, capsys):
             args = {"counter": counter}
             if "while" in route:
                 args.update(predicate=predicate, limit=iterations)
+            if route == "nested_while":
+                args.update(
+                    outer_counter=outer_counter,
+                    outer_predicate=outer_predicate,
+                    outer_limit=2,
+                )
             graph.run(args)
 
     assert ti.profiler.set_kernel_profiler_toolkit("default")
@@ -105,26 +142,43 @@ def test_cuda_profiler_coverage_clear_replay_and_mixed(route, capsys):
             assert ti.profiler.query_kernel_profiler_info("payload").counter == 15
             assert ti.profiler.get_kernel_profiler_total_time() > 0
         else:
-            assert coverage.status == "unsupported" and not coverage.complete
+            assert coverage.status == "partial" and not coverage.complete
             assert coverage.backend_graph_launches >= 5
+            assert coverage.recorded_graphs == coverage.backend_graph_launches
+            assert coverage.recorded_tasks == 0
+            assert coverage.graph_time_seconds > 0
+            assert coverage.total_time_complete
             assert coverage.reasons == ("cuda_graph_node_timing_unavailable",)
+            total = ti.profiler.get_kernel_profiler_total_time()
+            assert total == pytest.approx(coverage.graph_time_seconds)
+            assert (
+                ti.profiler.query_kernel_profiler_info("__cuda_graph_replay__").counter
+                == coverage.recorded_graphs
+            )
             with pytest.warns(RuntimeWarning, match="not zero execution time"):
-                assert ti.profiler.get_kernel_profiler_total_time() == 0
+                assert ti.profiler.query_kernel_profiler_info("payload").counter == 0
             with warnings.catch_warnings(record=True) as caught:
                 assert ti.profiler.query_kernel_profiler_info("payload").counter == 0
                 ti.profiler.get_kernel_profiler_total_time()
             assert not caught  # Warn once per coverage reason and clear interval.
             ti.profiler.print_kernel_profiler_info()
-            assert "coverage: unsupported" in capsys.readouterr().out
+            ti.profiler.print_kernel_profiler_info("trace")
+            printed = capsys.readouterr().out
+            assert "coverage: partial" in printed
+            assert "CUDA Graph aggregate timing:" in printed
         # Read back only after coverage queries, since accessor kernels are timed.
         count = iterations if "while" in route else 3
-        np.testing.assert_array_equal(state.to_numpy(), np.full(8192, 5 * count))
-        assert tail[None] == 5
+        repeats = 10 if route == "nested_while" else 5
+        np.testing.assert_array_equal(state.to_numpy(), np.full(8192, repeats * count))
+        assert tail[None] == repeats
         assert counter.to_numpy()[0] == count
         if route != "direct":
             payload()
             mixed = ti.profiler.get_kernel_profiler_coverage()
             assert mixed.status == "partial" and not mixed.complete
+            assert mixed.total_time_complete
+            assert mixed.recorded_graphs == coverage.recorded_graphs
+            assert mixed.graph_time_seconds == coverage.graph_time_seconds
             assert ti.profiler.query_kernel_profiler_info("payload").counter == 1
             assert ti.profiler.get_kernel_profiler_total_time() > 0
 
@@ -144,7 +198,9 @@ def test_direct_profiler_coverage_and_missing_statistics(monkeypatch):
     profiler = get_default_kernel_profiler()
     monkeypatch.setattr(profiler, "_coverage_snapshot", lambda: None)
     assert profiler.get_coverage().status == "unknown"
-    with pytest.warns(RuntimeWarning, match="runtime_submission_statistics_unavailable"):
+    with pytest.warns(
+        RuntimeWarning, match="runtime_submission_statistics_unavailable"
+    ):
         profiler.query_info("increment")
 
 
@@ -177,6 +233,8 @@ def test_profiler_coverage_marks_native_submissions():
         assert not coverage.complete
         assert coverage.native_submissions > 0
         assert "native_submission_timing_not_qualified" in coverage.reasons
-        with pytest.warns(RuntimeWarning, match="native_submission_timing_not_qualified"):
+        with pytest.warns(
+            RuntimeWarning, match="native_submission_timing_not_qualified"
+        ):
             ti.profiler.get_kernel_profiler_total_time()
     np.testing.assert_array_equal(values.to_numpy(), [1, 1, 2, 3])

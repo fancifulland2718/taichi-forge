@@ -123,7 +123,7 @@ void BindingFrameReplay::run(void *source_graph,
                              const std::shared_ptr<void> &frame) {
   select(source_graph, frame);
   try {
-    CUDADriver::get_instance().graph_launch(state_->executable, nullptr);
+    CUDAContext::get_instance().launch_graph(state_->executable, nullptr);
   } catch (const BackendRuntimeError &error) {
     if (state_->fault_domain)
       state_->fault_domain->report_backend_error(error, 0);
