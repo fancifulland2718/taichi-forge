@@ -18,7 +18,7 @@
 
 #if defined(TI_WITH_VULKAN)
 #include "taichi/rhi/vulkan/vulkan_device.h"
-#include "taichi/program/vulkan_micromap.h"
+#include "taichi/runtime/vulkan_micromap.h"
 #include "taichi/runtime/gfx/kernel_launcher.h"
 
 namespace taichi::lang {

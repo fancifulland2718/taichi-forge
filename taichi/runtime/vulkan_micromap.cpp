@@ -1,4 +1,4 @@
-#include "taichi/program/vulkan_micromap.h"
+#include "taichi/runtime/vulkan_micromap.h"
 
 #if defined(TI_WITH_VULKAN)
 #include <algorithm>

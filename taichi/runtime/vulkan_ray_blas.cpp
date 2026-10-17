@@ -2,7 +2,7 @@
 
 #if defined(TI_WITH_VULKAN)
 #include "taichi/runtime/vulkan_ray_build.h"
-#include "taichi/program/vulkan_micromap.h"
+#include "taichi/runtime/vulkan_micromap.h"
 #include <algorithm>
 #include <array>
 #include <limits>
