@@ -101,6 +101,32 @@ def export_blas_refit(recording, context):
     return ()
 
 
+def export_blas_build(recording, context):
+    recording.validate_graph_lifetime()
+    context.native(
+        "vulkan_ray",
+        "blas_build",
+        bindings=dict(scene=_geometry(context, recording.blas), vertices=recording.vertices, indices=recording.indices),
+    )
+    return ()
+
+
+def export_instance_update(recording, context):
+    recording.validate_graph_lifetime()
+    context.native(
+        "vulkan_ray",
+        "instance_update",
+        bindings=dict(scene=_scene(context, recording.tlas)),
+        parameters=dict(
+            transforms=[list(instance.transform) for instance in recording.instances],
+            custom_indices=[instance.custom_index for instance in recording.instances],
+            visibility_masks=[instance.mask for instance in recording.instances],
+            update=recording.update,
+        ),
+    )
+    return ()
+
+
 def export_instance_transforms(recording, context):
     recording.validate_graph_lifetime()
     context.native(

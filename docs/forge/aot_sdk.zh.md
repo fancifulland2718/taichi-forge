@@ -202,7 +202,9 @@ Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray
 | `triangle_blas` | 资源：`vertices`、`indices` | `vertex_count`、`triangle_count`，可选 `opaque`（默认 true） |
 | `instance_tlas` | 资源：`transforms`、`blas_0` ... `blas_(instance_count-1)` | `instance_count`，可选 `custom_indices`、`visibility_masks` |
 | `refit` | 操作：`scene`、`vertices` | 空对象 |
+| `blas_build` | 操作：`scene`（BLAS）、`vertices`、`indices` | 空对象 |
 | `instance_refit` | 操作：`scene`、`transforms` | 空对象 |
+| `instance_update` | 操作：`scene`（TLAS） | 捕获的 `transforms`，可选 `custom_indices`、`visibility_masks`、`update`（默认 true） |
 | `query` | 操作：`scene`、`rays`、`hits`，可选 `hit_indices` | `ray_count` |
 
 资源可写入 ExecutionPlan 的 `resources`，或用
@@ -215,7 +217,7 @@ Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray
 origin.xyz、t_min、direction.xyz、t_max。所有端口也接受同宽紧凑 AoS vector ndarray。
 记录数精确匹配。调用方提供有限几何、合法索引 `[0,V)` 和有效 ray 区间；沿用 JIT
 合同，不增加每帧 host 回读。工厂在所属 GFX 队列复制几何并完成 AS build 后返回，
-成功后可关闭 seed 数组。拓扑变化需新建资源；triangle_scene 的 refit 更新相同顶点数的设备数据及 TLAS
+成功后可关闭 seed 数组。顶点/三角形数量或有序实例 BLAS 引用变化需新建资源；triangle_scene 的 refit 更新相同顶点数的设备数据及 TLAS
 边界。查询和 refit 录制在同一原生命令序列中，重放不查询注册表。
 
 提供 `hit_indices` 时，输出 f32 `[N,4]` 为 t/u/v/0，i32/u32 `[N,4]` 为
@@ -247,8 +249,14 @@ scalar `[I,12]` / `[I,3,4]` 或 element shape `[3,4]` 的 AoS `[I]`。沿用 JIT
 
 Windows Vulkan 小型检查覆盖共享/重复 BLAS、独立实例 ID/custom ID/mask、首次设备
 矩阵 build、GPU 几何/变换更新、矩阵子区间、typed/legacy 命中及 miss 清零、跨模块
-退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 host metadata 更新、
-micromap 或 kernel/graphics AS 绑定。
+退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 micromap 或 kernel/graphics AS 绑定。
+
+`blas_build` 用原有顶点/三角形数量重建已有 BLAS，允许索引内容变化；查询前仍需刷新
+各依赖 TLAS。`instance_update` 在 JSON 中捕获 `I` 行矩阵，每行12个有限 f32 数值；
+可选 metadata 数组沿用工厂的位宽与默认值。准备期检查 `I` 与绑定 TLAS 的实例数一致。
+默认录制 UPDATE，`update=False` 录制 BUILD；保留 BLAS 顺序，写回所有捕获的矩阵、
+mask 和 custom ID。这与 Vulkan host `record_refit()` 一致：会覆盖此前的设备矩阵，
+并非仅刷新缓存边界。后续 `instance_refit` 仅覆盖矩阵、保留这些 metadata，不回读 GPU。
 
 Graph 内 `TriangleScene.record_refit()`、`record_typed()` 和 `record()` 可自动导出：
 
@@ -261,8 +269,8 @@ module.add_execution_plan(
 module.add_execution_plan("shared_step", graph, resource_bindings={scene: "scene"})
 ```
 
-`TriangleBLAS.record_refit()`、`InstanceTLAS.record_refit_transforms()` 及其 typed/legacy
-批次查询录制也沿用同一导出路径：
+`TriangleBLAS.record_build()` / `record_refit()`、`InstanceTLAS.record_build()` /
+`record_refit()` / `record_refit_transforms()` 及其 typed/legacy 批次查询录制也沿用同一导出路径：
 
 ```python
 module.add_execution_plan("step", graph, resource_bindings={
@@ -279,10 +287,12 @@ module.add_execution_plan("mixed_step", graph, resource_bindings={
 同一源 BLAS 的重复引用只重建一次；v17 resource-alias 约束保持公共 TLAS 的共享关系，
 不同 BLAS 即使几何相同也不能替代所要求的资源身份。公共 TLAS 的依赖不能在同一 plan
 里另外私有重建。原始 BLAS handle 关闭后，仍存活的源 TLAS 可导出其保留的几何。
-构建输入仍需显式提供，不会快照当前 AS 内存或保留的源数组。host TLAS metadata/build
-录制、BLAS rebuild 录制、micromap 及非零 SBT offset 尚未由此 exporter 覆盖。
+构建输入仍需显式提供，不会快照当前 AS 内存或保留的源数组。host 矩阵和 metadata
+从各不可变录制中导出，不因源 TLAS 随后的修改而改变。micromap 及非零 SBT offset 尚未由此 exporter 覆盖。
 Windows 小型测试覆盖私有/公共/混合导出、发布 kernel 前拒绝错误映射、执行前拒绝
-alias 不匹配、保留的源几何、独立/借用消费端和下游梯度。
+alias 不匹配、保留的源几何、独立/借用消费端和下游梯度。另有 JIT/AOT 对照覆盖索引绕序
+重建、host UPDATE/BUILD 后设备矩阵更新、metadata 保持、区间 miss 和准备失败后的重放。
+AS 构建和遍历本身不提供自动梯度。
 
 前者的种子须在准备前就绪，多次查询/refit只重建同一个生产端scene一次；不会序列化
 生产端句柄或猜测当前AS内容。后者的公共scene可供其他模块的query-only计划共享，

@@ -253,7 +253,9 @@ under provider `vulkan_ray`, version 1:
 | `triangle_blas` | Resource: `vertices`, `indices` | `vertex_count`, `triangle_count`, optional `opaque` (default true) |
 | `instance_tlas` | Resource: `transforms`, `blas_0` ... `blas_(instance_count-1)` | `instance_count`, optional `custom_indices`, `visibility_masks` |
 | `refit` | Operation: `scene`, `vertices` | Empty object |
+| `blas_build` | Operation: `scene` (BLAS), `vertices`, `indices` | Empty object |
 | `instance_refit` | Operation: `scene`, `transforms` | Empty object |
+| `instance_update` | Operation: `scene` (TLAS) | Captured `transforms`, optional `custom_indices`, `visibility_masks`, `update` (default true) |
 | `query` | Operation: `scene`, `rays`, `hits`, optional `hit_indices` | `ray_count` |
 
 Declare the resource in an ExecutionPlan's `resources`, or create it with
@@ -269,7 +271,8 @@ packed AoS vector ndarray with the corresponding width. Record counts must match
 exactly. Callers provide finite geometry, indices in `[0,V)` and valid ray
 intervals, following the JIT contract without per-frame host readback. The factory
 copies geometry and completes AS construction on its owner's GFX queue before
-returning; seed arrays can then close. Topology changes require a new resource.
+returning; seed arrays can then close. Changing vertex/triangle counts or the
+ordered instance BLAS references requires a new resource.
 For `triangle_scene`, refit updates device vertices with the same count and
 refreshes TLAS bounds.
 Queries and refits record into the same native command sequence; replay performs
@@ -316,8 +319,18 @@ Small Windows Vulkan checks cover shared/repeated BLAS, distinct instance/custom
 IDs and masks, direct initial device build, GPU geometry/transform updates,
 subrange matrices, typed/legacy hit and miss reset, cross-module retirement,
 standalone/borrowed owners, and downstream gradient kernels. This factory coverage
-does not yet include host metadata updates, micromaps or kernel/graphics AS
-bindings.
+does not yet include micromaps or kernel/graphics AS bindings.
+
+`blas_build` rebuilds an existing BLAS with vertices and indices of the original
+counts; index contents may change. Refresh each dependent TLAS before querying.
+`instance_update` captures host matrices as a JSON list of `I` rows, each with 12
+finite f32 scalars, and optional metadata arrays using the same widths/defaults as
+the resource factory. Preparation checks that `I` matches the bound TLAS. It
+records UPDATE by default or BUILD with `update=False`, preserving BLAS order and
+writing all captured matrices/masks/custom IDs. This matches Vulkan's host
+`record_refit()` semantics: it replaces previously packed device matrices, rather
+than only refreshing cached bounds. A subsequent `instance_refit` replaces matrices
+while preserving those metadata values. No GPU data is read back.
 
 Graphs containing `TriangleScene.record_refit()`, `record_typed()` and `record()`
 can be exported automatically:
@@ -331,8 +344,9 @@ module.add_execution_plan(
 module.add_execution_plan("shared_step", graph, resource_bindings={scene: "scene"})
 ```
 
-`TriangleBLAS.record_refit()`, `InstanceTLAS.record_refit_transforms()`, and its
-typed/legacy batch query recordings also export through the same path:
+`TriangleBLAS.record_build()` / `record_refit()`, `InstanceTLAS.record_build()` /
+`record_refit()` / `record_refit_transforms()`, and its typed/legacy batch query
+recordings also export through the same path:
 
 ```python
 module.add_execution_plan("step", graph, resource_bindings={
@@ -352,11 +366,15 @@ geometry in a different BLAS is insufficient. A public TLAS dependency cannot al
 be reconstructed privately in the same plan. A still-live source TLAS may export
 its retained geometry after the original BLAS handle closes. Construction inputs
 remain explicit; export does not snapshot live AS memory or retained source
-arrays. Graphs with host TLAS metadata/build recordings, BLAS rebuild recordings,
-micromaps or nonzero SBT offsets are not covered by this exporter yet. Small
+arrays. Captured host matrices and metadata are taken from each immutable
+recording, even if the source TLAS is changed later. Graphs with micromaps or
+nonzero SBT offsets are not covered by this exporter yet. Small
 Windows tests cover private/public/mixed export, invalid mappings before kernel
 publication, alias rejection before execution, retained-source geometry,
-standalone/borrowed consumers, and downstream gradients.
+standalone/borrowed consumers, and downstream gradients. An additional JIT/AOT
+comparison covers index winding rebuilds, host UPDATE/BUILD followed by device
+matrix updates, metadata preservation, interval misses and replay after rejected
+preparation. AS construction and traversal have no automatic derivatives.
 
 The first form requires seeds ready before preparation and reconstructs each
 source scene once across repeated queries/refits. It serializes no producer

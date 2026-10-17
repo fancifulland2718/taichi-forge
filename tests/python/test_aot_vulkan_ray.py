@@ -16,7 +16,13 @@ from tests.python.aot_vulkan_ray_probe import plan_parts
 @test_utils.test(arch=[ti.cpu, ti.cuda])
 def test_vulkan_ray_not_registered_on_other_backends():
     with ti.aot.borrow_runtime() as runtime:
-        for kind in ("vulkan_ray_query", "vulkan_ray_refit", "vulkan_ray_instance_refit"):
+        for kind in (
+            "vulkan_ray_query",
+            "vulkan_ray_refit",
+            "vulkan_ray_instance_refit",
+            "vulkan_ray_blas_build",
+            "vulkan_ray_instance_update",
+        ):
             assert not runtime.probe_native_operation(kind)["available"]
 
 

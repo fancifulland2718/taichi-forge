@@ -531,6 +531,11 @@ class TriangleScene(_TypedRayScene):
 class VulkanBLASBuildRecording(_GeometryRecording, BackendCommandRecording):
     """One explicit triangle BLAS rebuild with fixed allocation shape."""
 
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray import export_blas_build
+
+        return export_blas_build(self, context)
+
     def __init__(self, blas, *, vertices="vertices", indices="indices"):
         if not isinstance(blas, TriangleBLAS):
             raise TypeError("Vulkan BLAS build recording requires a TriangleBLAS")
@@ -971,6 +976,11 @@ class _VulkanTLASRecording(BackendCommandRecording):
 class VulkanTLASBuildRecording(_VulkanTLASRecording):
     """One explicit TLAS rebuild with captured instance descriptors."""
 
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray import export_instance_update
+
+        return export_instance_update(self, context)
+
     def __init__(self, tlas, instances):
         super().__init__(tlas, instances, update=False)
 
@@ -978,6 +988,11 @@ class VulkanTLASBuildRecording(_VulkanTLASRecording):
 @instrument_hardware_recording("ray.as_refit.vulkan")
 class VulkanTLASRefitRecording(_VulkanTLASRecording):
     """One TLAS update with fixed BLAS order and captured descriptors."""
+
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray import export_instance_update
+
+        return export_instance_update(self, context)
 
     def __init__(self, tlas, instances):
         super().__init__(tlas, instances, update=True)
