@@ -1,6 +1,7 @@
 """Fixed RasterPass draw preparation; leaves ordinary GGUI staging unchanged."""
 
 import inspect
+from types import MappingProxyType
 
 import numpy as np
 import taichi_forge as ti
@@ -86,6 +87,8 @@ class PreparedRasterDraw:
         bound.apply_defaults()
         args = dict(bound.arguments)
         args.pop("self")
+        self.kind = kind
+        self._resolved_arguments = MappingProxyType(args)
         self._updates = []
         self._owned_arrays = []
         self._sources = tuple(arguments.values())
@@ -97,10 +100,13 @@ class PreparedRasterDraw:
             raise ValueError("RasterPass requires nonempty one-dimensional vertex/center storage")
         vbo = ti.Vector.ndarray(12, ti.f32, count)
         self._owned_arrays.append(vbo)
+        self._buffers = {"vertices": vbo}
         color = args.get("per_vertex_color")
         has_color = color is not None
 
         indices = self._buffer(args.get("indices"), transforms=False)
+        if indices is not None:
+            self._buffers["indices"] = indices
         normals = args.get("normals")
         generated = kind in ("mesh", "mesh_instance") and normals is None
         if generated:
@@ -187,6 +193,8 @@ class PreparedRasterDraw:
                 )
             else:
                 transforms = self._buffer(args["transforms"], transforms=True)
+                if transforms is not None:
+                    self._buffers["transforms"] = transforms
                 instances = (
                     1
                     if transforms is None
@@ -205,6 +213,29 @@ class PreparedRasterDraw:
                     args["show_wireframe"],
                 )
         self.requested_bytes = sum(array._get_nelement() * array._get_element_size() for array in self._owned_arrays)
+        self._updates = tuple(self._updates)
+        self._owned_arrays = tuple(self._owned_arrays)
+        self._buffers = MappingProxyType(self._buffers)
+
+    def _export_aot_preparation(self, context):
+        """Lower device preparation only; the caller must also export the draw."""
+        from taichi_forge.aot._graph_export_calls import export_array_template_call
+        from taichi_forge.lang.exception import TaichiRuntimeError
+
+        if self.has_host_upload:
+            raise TaichiRuntimeError("AOT raster preparation requires device geometry, not host uploads")
+        for owner in self._owned_arrays:
+            context.retained_arrays.declare_scratch(owner)
+        buffers = {port: context.retained_arrays.require(owner) for port, owner in self._buffers.items()}
+        # Optional VBO attributes are not written by every helper. Define them
+        # once without copying producer scratch or clearing geometry every frame.
+        initialized = context._native_export_facts.setdefault("raster_vertex_initialization", set())
+        if buffers["vertices"] not in initialized:
+            context.initialization.append(dict(kind="fill32", destination=buffers["vertices"], value=0))
+            initialized.add(buffers["vertices"])
+        for kernel, arguments in self._updates:
+            export_array_template_call(context, kernel, arguments, label="raster_prepare")
+        return buffers
 
     def _kernel(self, kernel, *args):
         # Compilation and allocation must finish before Graph.submit's batch.
