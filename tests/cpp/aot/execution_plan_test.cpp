@@ -5,6 +5,28 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, ResourceAliasesRequireV17AndNamedInputPaths) {
+  const std::string source = R"({"version":17,"operations":[
+    {"kind":"kernel","entry":"consume","arguments":["scene","gas"]}],
+    "constraints":[{"kind":"resource_alias","left":"scene","right":"gas",
+                    "left_path":["gas_0"],"right_path":[]}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &alias = std::get<ExecutionPlan::ResourceAlias>(plan.constraints[0]);
+  EXPECT_EQ(alias.left_path, (std::vector<std::string>{"gas_0"}));
+  EXPECT_TRUE(alias.right_path.empty());
+  for (const auto &[before, after] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":17", "\"version\":16"},
+           {"\"left\":\"scene\"", "\"left\":\"unused\""},
+           {"\"left_path\":[\"gas_0\"]", "\"left_path\":\"gas_0\""},
+           {"\"left_path\":[\"gas_0\"]", "\"left_path\":[\"\"]"},
+           {"\"right_path\":[]", "\"right_path\":[],\"extra\":true"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(before), before.size(), after);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument);
+  }
+}
+
 TEST(ExecutionPlan, MaskedBranchesRequireV16AndFlatKernelRegions) {
   const std::string source = R"({"version":16,"operations":[
     {"kind":"branch","selector":"p","selection":"indexed",
@@ -24,7 +46,7 @@ TEST(ExecutionPlan, MaskedBranchesRequireV16AndFlatKernelRegions) {
   for (const auto &[from, to] :
        std::vector<std::pair<std::string, std::string>>{
            {"\"version\":16", "\"version\":15"},
-           {"\"version\":16", "\"version\":17"},
+           {"\"version\":16", "\"version\":18"},
            {"\"version\":1}", "\"version\":2}"},
            {"\"version\":1}", "\"version\":1,\"gate\":1234}"},
            {"\"kind\":\"kernel\",\"entry\":\"gated\",\"arguments\":[\"x\"]",
@@ -454,7 +476,7 @@ TEST(ExecutionPlan, SelectedCudaNestedControlRetainsStaticClosure) {
     for (const auto &[from, to] :
          std::vector<std::pair<std::string, std::string>>{
              {version, masked ? "\"version\":13" : "\"version\":12"},
-             {version, "\"version\":17"},
+             {version, "\"version\":18"},
              {"\"version\":1,", "\"version\":2,"},
              {"\"condition_begin\":1", "\"condition_begin\":0"},
              {"\"body_begin\":2", "\"body_begin\":1"},
@@ -494,7 +516,7 @@ TEST(ExecutionPlan, FlatCudaMaskedKeepsPolarityAndStaticClosure) {
   for (const auto &[from, to] :
        std::vector<std::pair<std::string, std::string>>{
            {"\"version\":15", "\"version\":14"},
-           {"\"version\":15", "\"version\":17"},
+           {"\"version\":15", "\"version\":18"},
            {"\"version\":1}", "\"version\":2}"},
            {"\"version\":1}", "\"version\":1,\"inners\":[]}"},
            {"\"continue_while_nonzero\":false", "\"continue_while_nonzero\":0"},

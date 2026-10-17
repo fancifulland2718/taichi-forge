@@ -852,6 +852,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
       else if (const auto *pair =
                    std::get_if<aot::ExecutionPlan::Disjoint>(&constraint))
         relevant = used(pair->left) && used(pair->right);
+      else if (const auto *pair =
+                   std::get_if<aot::ExecutionPlan::ResourceAlias>(&constraint))
+        relevant = used(pair->left) && used(pair->right);
       if (!relevant)
         continue;
     }
@@ -878,6 +881,21 @@ static TiPreparedExecution prepare_execution_plan_impl(
               std::string("Cannot prove array bindings disjoint") +
               (pair.allow_same_view ? " or the same view: " : ": ") +
               pair.left + " and " + pair.right);
+      } else if (const auto *pair =
+                     std::get_if<aot::ExecutionPlan::ResourceAlias>(&constraint)) {
+        const auto resolve = [&](const std::string &name,
+                                 const std::vector<std::string> &path) {
+          const auto found = arguments.find(name);
+          if (found == arguments.end() ||
+              found->second->type != TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+            throw MemoryBindingError("Resource alias requires public native resources: " + name);
+          return rt.native_resource_registry().resolve(
+              found->second->value.native_resource, path);
+        };
+        if (resolve(pair->left, pair->left_path) !=
+            resolve(pair->right, pair->right_path))
+          throw MemoryBindingError("Native resource alias mismatch: " + pair->left +
+                                   " and " + pair->right);
       } else {
         const auto &group =
             std::get<aot::ExecutionPlan::DisjointWrites>(constraint);

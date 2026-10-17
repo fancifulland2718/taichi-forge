@@ -86,6 +86,45 @@ def image_checks(runtime, module, artifact, arch):
         "step", dict(second, image=image, alias=image)
     )
     prepare_ms = (time.perf_counter() - start) * 1000
+    alias_document = json.loads(other_module.execution_plan("step").to_json())
+    alias_document["version"] = 17
+    if arch == "cuda":
+        alias_document["binding_strategy"] = "cuda_immutable_argument_frames"
+    alias_document["constraints"] = [
+        dict(
+            kind="resource_alias",
+            left="image",
+            right="alias",
+            left_path=[],
+            right_path=[],
+        )
+    ]
+    alias_plan = ExecutionPlan.from_json(json.dumps(alias_document))
+    accepted = alias_plan.prepare(other_module, dict(second, image=image, alias=image))
+    accepted()
+    check(second, list(range(15)), arch)
+    if arch == "cuda":
+        sibling = accepted.prepare_binding(first)
+        accepted.close()
+        sibling()
+        check(first, list(range(15)), arch)
+        sibling.close()
+    accepted.close()
+    different = create_image(runtime, list(range(15)))
+    raises(
+        lambda: alias_plan.prepare(
+            other_module, dict(second, image=image, alias=different)
+        ),
+        "alias mismatch",
+    )
+    different.close()
+    alias_document["constraints"][0]["left_path"] = ["missing"]
+    raises(
+        lambda: ExecutionPlan.from_json(json.dumps(alias_document)).prepare(
+            other_module, dict(second, image=image, alias=image)
+        ),
+        "retained input port",
+    )
     for prepared, frame in ((call, first), (other, second)):
         prepared()
         check(frame, list(range(15)), arch)
@@ -246,7 +285,7 @@ def optix_checks(runtime, module, adapter):
         gas = runtime.native_resource(
             "optix",
             "triangle_gas",
-            parameters=dict(vertex_count=3, triangle_count=1),
+            parameters=dict(vertex_count=3, triangle_count=1, allow_update=True),
             bindings=dict(context=context, vertices=vertices, indices=indices),
         )
         transforms = runtime.ndarray("f32", (1, 12))
@@ -265,27 +304,57 @@ def optix_checks(runtime, module, adapter):
         write(rays, [0, 0, 0, 0.01, 0, 0, 1, 3])
         plan = ExecutionPlan(
             [
+                native("optix", "refit", dict(scene="gas", vertices="vertices")),
                 native(
                     "optix",
                     "query",
                     dict(scene="scene", rays="rays", hits="hits", hit_indices="ids"),
                     ray_count=1,
-                )
-            ]
+                ),
+            ],
+            constraints=[
+                dict(
+                    kind="resource_alias",
+                    left="scene",
+                    right="gas",
+                    left_path=["gas_0"],
+                    right_path=[],
+                ),
+                dict(
+                    kind="resource_alias",
+                    left="scene",
+                    right="gas",
+                    left_path=["gas_0", "context"],
+                    right_path=["context"],
+                ),
+            ],
         )
-        call = plan.prepare(module, dict(scene=scene, rays=rays, hits=hits, ids=ids))
+        arguments = dict(
+            scene=scene, gas=gas, vertices=vertices, rays=rays, hits=hits, ids=ids
+        )
+        wrong = runtime.native_resource(
+            "optix",
+            "triangle_gas",
+            parameters=dict(vertex_count=3, triangle_count=1, allow_update=True),
+            bindings=dict(context=context, vertices=vertices, indices=indices),
+        )
+        raises(
+            lambda: plan.prepare(module, dict(arguments, gas=wrong)), "alias mismatch"
+        )
+        wrong.close()
+        call = plan.prepare(module, arguments)
         call()
         assert read(hits)[0] == 1
         assert read(ids, "i")[0] == 0
         call()
         (vertices if close_root == "vertices" else context).close()
         raises(call)
+        replacement_vertices = runtime.ndarray("f32", (3, 3))
         raises(
-            lambda: plan.prepare(
-                module, dict(scene=scene, rays=rays, hits=hits, ids=ids)
-            ),
+            lambda: plan.prepare(module, dict(arguments, vertices=replacement_vertices)),
             "retired dependency",
         )
+        replacement_vertices.close()
         call.close()
         for owner in (
             scene,
@@ -321,6 +390,25 @@ def main(mode, arch, artifact, adapter, result):
             frame = arrays(runtime)
             write(frame["output"], [1, 2, 3, 4])
             call = module.prepare_execution("step", frame)
+            document = json.loads(module.execution_plan("step").to_json())
+            document.update(
+                version=17,
+                constraints=[
+                    dict(
+                        kind="resource_alias",
+                        left="output",
+                        right="loss",
+                        left_path=[],
+                        right_path=[],
+                    )
+                ],
+            )
+            raises(
+                lambda: ExecutionPlan.from_json(json.dumps(document)).prepare(
+                    module, frame
+                ),
+                "public native resources",
+            )
             call()
             assert read(frame["doutput"]) == [1, 2, 3, 4]
             costs = {}

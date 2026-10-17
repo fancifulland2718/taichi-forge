@@ -26,7 +26,8 @@ std::unique_ptr<NativePreparationContext> make_native_preparation_context(
 TiNativeResource NativeResourceRegistry::publish(
     std::shared_ptr<NativeResource> object,
     std::vector<TiMemory> memories,
-    std::vector<TiNativeResource> parents) {
+    std::vector<TiNativeResource> parents,
+    ParentLinks parent_links) {
   if (!object || object->arch() != runtime_.arch ||
       &object->device() != &runtime_.get())
     throw MemoryBindingError("Native resource belongs to another device");
@@ -35,6 +36,13 @@ TiNativeResource NativeResourceRegistry::publish(
     handles.erase(std::unique(handles.begin(), handles.end()), handles.end());
   };
   deduplicate(memories);
+  const auto by_port = [](const auto &a, const auto &b) {
+    return a.first < b.first;
+  };
+  if (!std::is_sorted(parent_links.begin(), parent_links.end(), by_port))
+    std::sort(parent_links.begin(), parent_links.end(), by_port);
+  for (const auto &[port, parent] : parent_links)
+    parents.push_back(parent);
   deduplicate(parents);
   for (auto memory : memories)
     runtime_.get_memory(memory);
@@ -45,7 +53,7 @@ TiNativeResource NativeResourceRegistry::publish(
   const auto it =
       entries_
           .emplace(handle, Entry{std::move(object), std::move(memories),
-                                 std::move(parents)})
+                                 std::move(parents), std::move(parent_links)})
           .first;
   try {
     for (auto memory : it->second.memories)
@@ -67,6 +75,22 @@ std::shared_ptr<NativeResource> NativeResourceRegistry::get(
     throw MemoryBindingError(
         "Native resource is foreign, closed or has a retired dependency");
   return found->second.object;
+}
+
+TiNativeResource NativeResourceRegistry::resolve(
+    TiNativeResource handle, const std::vector<std::string> &path) const {
+  get(handle);
+  for (const auto &port : path) {
+    const auto &links = entries_.at(handle).parent_links;
+    const auto found = std::lower_bound(
+        links.begin(), links.end(), port,
+        [](const auto &entry, const auto &name) { return entry.first < name; });
+    if (found == links.end() || found->first != port)
+      throw MemoryBindingError("Native resource has no retained input port: " + port);
+    handle = found->second;
+    get(handle);
+  }
+  return handle;
 }
 
 void NativeResourceRegistry::remove_edges(TiNativeResource handle,
@@ -112,6 +136,7 @@ void NativeResourceRegistry::retire(std::vector<TiNativeResource> roots) {
     entry.object.reset();
     entry.memories.clear();
     entry.parents.clear();
+    entry.parent_links.clear();
   }
 }
 
@@ -224,6 +249,7 @@ TiNativeResource ti_create_native_resource_ext(TiRuntime runtime,
     std::vector<uint32_t> retained(arg_count, 0);
     std::vector<TiMemory> memories;
     std::vector<TiNativeResource> parents;
+    capi::NativeResourceRegistry::ParentLinks parent_links;
     for (const auto &[port, slot] : request.bindings) {
       if (!object->retains_input(port))
         continue;
@@ -233,10 +259,11 @@ TiNativeResource ti_create_native_resource_ext(TiRuntime runtime,
       if (arg.type == TI_ARGUMENT_TYPE_NDARRAY)
         memories.push_back(arg.value.ndarray.memory);
       else
-        parents.push_back(arg.value.native_resource);
+        parent_links.emplace_back(port, arg.value.native_resource);
     }
     auto handle = rt.native_resource_registry().publish(
-        std::move(object), std::move(memories), std::move(parents));
+        std::move(object), std::move(memories), std::move(parents),
+        std::move(parent_links));
     if (retained_args)
       std::copy(retained.begin(), retained.end(), retained_args);
     return handle;

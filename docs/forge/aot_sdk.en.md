@@ -373,7 +373,7 @@ are `product(shape) * channels * channel_bytes`, separate from reported query
 workspace, which does not include image residency. Alpha recordings can export
 through the image reconstruction contract below.
 
-With matching private ABI81 components, explicit execution-plan kernels on CUDA or Vulkan
+With matching private ABI82 components, explicit execution-plan kernels on CUDA or Vulkan
 may bind sampled `Texture` arguments directly to `image/sampled` resource names:
 
 ```python
@@ -483,7 +483,7 @@ continue to require their documented reconstruction inputs. Windows ordinary and
 selected CUDA/Vulkan checks cover standalone creation, borrowed JIT Texture
 imports, aliases, downstream gradients, CUDA siblings and resource retirement.
 
-Matching ABI81 components also expose runtime-owned native resources, shared
+Matching ABI82 components also expose runtime-owned native resources, shared
 across modules and plans through the existing factory catalog:
 
 ```python
@@ -690,7 +690,7 @@ checks cover JIT→AOT→JIT ordering, explicit gradients, tensors, two borrower
 source-wrapper GC and in-flight reset. This adds shared storage, not provider
 operation coverage.
 
-With paired ABI81 components, CUDA/Vulkan borrowers can also call
+With paired ABI82 components, CUDA/Vulkan borrowers can also call
 `image = runtime.import_texture(jit_texture)`. It returns the same public
 `NativeResource` type used by execution plans and sampled kernel bindings,
 retaining the Program's generation-qualified Texture lease. No image storage,
@@ -934,7 +934,7 @@ defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
 nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
 signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
 retirement are verified. Branches share code entries and replay does not parse
-descriptions. A v16 consumer and matching ABI81 components are required.
+descriptions. A v16 consumer and matching ABI82 components are required.
 `add_execution_plan(name, graph, gradients=...)` also exports IF/SWITCH selected
 for `cuda_masked_bounded_graph` under `native_required`, preserving physical
 boundaries, conditions and prefix/suffix operations. It deduplicates code by
@@ -1056,7 +1056,7 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI81 components.
+This requires a v14 consumer and matching private ABI82 components.
 `add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
 `masked`, preserving its physical dispatch boundaries and generating only the
 required body variants. Code is deduplicated by source specialization and launch
@@ -1076,7 +1076,7 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-format requires a v15 consumer and matching ABI81 components.
+format requires a v15 consumer and matching ABI82 components.
 `add_execution_plan(name, graph)` also exports materialized flat Graphs selected
 for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
 condition, generates only their gated variants, and shares code across plans.
@@ -1421,6 +1421,25 @@ count, and cold validation uses O(N log N) time and O(N) temporary storage on
 CPU/CUDA/Vulkan. Imported Vulkan memory must provide enough identity to prove
 the relationships; the same-buffer case also works without a memory handle.
 Older readers reject this unknown constraint; replay adds no validation or work.
+
+Execution-plan v17 adds a cold `resource_alias` constraint for public native
+owners. For example, this requires the scene's retained GAS to be the same
+registered resource supplied separately for refitting:
+
+```python
+{"kind": "resource_alias", "left": "scene", "left_path": ["gas_0"],
+ "right": "gas", "right_path": []}
+```
+
+Paths follow retained resource input ports from the common factory catalog;
+`[]` denotes the public owner itself, and `['gas_0', 'context']` follows two
+levels. Both roots must already be used public NativeResource arguments. Cold
+preparation rejects missing ports, retired owners and identity mismatches before
+recording. Equality means the same registered resource handle, not equal contents
+or a coincident device address; reuse an owner when aliasing is required. Named
+links share the existing retirement graph and are stored in compact sorted
+vectors. Warm replay performs no path traversal. Use a v17 reader and paired
+private ABI82 components; v1–v16 plans keep their original requirements.
 
 Preparation validates these requirements before recording commands or creating
 provider state. Failures execute no user kernels. Fixed replay performs no new

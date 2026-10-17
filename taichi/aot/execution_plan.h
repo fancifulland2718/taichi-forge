@@ -124,7 +124,14 @@ struct ExecutionPlan {
     std::vector<std::string> reads;
     std::vector<Write> writes;
   };
-  using Constraint = std::variant<ArrayLayout, Disjoint, DisjointWrites>;
+  struct ResourceAlias {
+    std::string left;
+    std::string right;
+    std::vector<std::string> left_path;
+    std::vector<std::string> right_path;
+  };
+  using Constraint =
+      std::variant<ArrayLayout, Disjoint, DisjointWrites, ResourceAlias>;
   std::vector<Constraint> constraints;
   std::vector<Operation> operations;
   std::vector<Operation> initialization;

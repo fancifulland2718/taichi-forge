@@ -67,5 +67,15 @@ def validate_constraints(constraints, used):
                     integer(index)
                     if index >= len(reads):
                         raise ValueError("In-place read index is outside the access group")
+        elif constraint.get("kind") == "resource_alias":
+            if set(constraint) != {"kind", "left", "right", "left_path", "right_path"}:
+                raise ValueError("Invalid resource alias constraint fields")
+            binding(constraint["left"])
+            binding(constraint["right"])
+            for key in ("left_path", "right_path"):
+                if not isinstance(constraint[key], list):
+                    raise ValueError("Resource alias path must be a list")
+                for port in constraint[key]:
+                    _name(port)
         else:
             raise ValueError("Unsupported execution constraint")

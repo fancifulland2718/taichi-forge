@@ -79,7 +79,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 16)
+    if (version < 1 || version > 17)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -547,6 +547,21 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             group.writes.push_back(std::move(port));
           }
           plan.constraints.emplace_back(std::move(group));
+        } else if (kind == "resource_alias") {
+          if (version < 17)
+            throw std::invalid_argument("Resource aliases require execution plan version 17");
+          fields(constraint, {"kind", "left", "right", "left_path", "right_path"});
+          auto path = [&](const JsonValue &value) {
+            if (!value.is_arr())
+              throw std::invalid_argument("Resource alias path must be an array");
+            std::vector<std::string> result;
+            for (const auto &port : value.arr.inner)
+              result.push_back(name(port));
+            return result;
+          };
+          plan.constraints.emplace_back(ResourceAlias{
+              binding(constraint["left"]), binding(constraint["right"]),
+              path(constraint["left_path"]), path(constraint["right_path"])});
         } else {
           throw std::invalid_argument("Unsupported execution constraint: " +
                                       kind);

@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT v17 adds public resource relationship checks, preventing a refit GAS from
+  differing from the GAS retained by a queried scene. Named retained-input paths
+  are checked at preparation, with no replay lookup and the existing retirement
+  contract. Requires paired ABI82 components; older plans remain supported.
+
 - Sampled Texture Graph export accepts `resource_bindings={texture: "public_name"}`
   to reuse created or imported NativeResources without private images or seed
   uploads. Ordinary/selected CUDA/Vulkan paths, aliases, downstream gradients
@@ -42,7 +47,7 @@ lifetimes. The entries below describe the changes.
 - Borrowed CUDA/Vulkan AOT runtimes can `import_texture()` from their JIT
   Program, retaining storage and sampler without copying pixels. JIT/AOT
   updates, independent imports, source-wrapper collection and in-flight
-  retirement are covered. Requires paired ABI81 components; current sampled
+  retirement are covered. Requires paired ABI82 components; current sampled
   image format/mip/sampler boundaries still apply.
 
 - AOT adds `Runtime.native_resource()` through the existing factory catalog,

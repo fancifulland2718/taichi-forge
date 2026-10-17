@@ -7,7 +7,11 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 16
+_MAX_EXECUTION_PLAN_VERSION = 17
+
+
+def _constraint_version(constraints):
+    return 17 if any(isinstance(c, dict) and c.get("kind") == "resource_alias" for c in constraints) else 1
 
 
 def _unique_fields(pairs):
@@ -59,7 +63,7 @@ def _control_version(steps):
 class ExecutionPlan:
     """Persistent kernels, native operations and private resource reconstruction.
 
-    Arguments are symbolic names bound to a loaded module and arrays/scalars at
+    Arguments are symbolic names bound to a loaded module and arrays/scalars/resources at
     prepare time. Preparation records native commands without executing kernels
     or modifying buffers. Rebind by preparing another independent instance.
     """
@@ -89,7 +93,8 @@ class ExecutionPlan:
             document["binding_strategy"] = binding_strategy
             document["version"] = 10
         document["version"] = max(
-            document["version"], _control_version(document["operations"] + document.get("initialization", []))
+            document["version"], _control_version(document["operations"] + document.get("initialization", [])),
+            _constraint_version(document.get("constraints", [])),
         )
         # Own a snapshot, including nested arrays; caller mutations cannot alter
         # a saved plan. This module remains usable without a native library.
@@ -128,13 +133,14 @@ class ExecutionPlan:
             raise ValueError("Execution gradients must be a name mapping")
         if "constraints" in value and not isinstance(value["constraints"], list):
             raise ValueError("Execution constraints must be a list")
-        required = _control_version(value["operations"] + value.get("initialization", []))
+        required = max(_control_version(value["operations"] + value.get("initialization", [])),
+                       _constraint_version(value.get("constraints", [])))
         if "binding_strategy" in value:
             if value["binding_strategy"] != "cuda_immutable_argument_frames":
                 raise ValueError("Unsupported execution binding strategy")
             required = max(required, 10)
         if value["version"] < required:
-            raise ValueError(f"Structured control requires execution plan version {required}")
+            raise ValueError(f"Execution features require execution plan version {required}")
         return cls(
             value["operations"],
             resources=value.get("resources"),

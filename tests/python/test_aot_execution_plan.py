@@ -6,6 +6,22 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
+def test_resource_alias_constraints_require_v17_and_validate_paths():
+    operations = [dict(kind="kernel", entry="consume", arguments=["scene", "gas"])]
+    alias = dict(kind="resource_alias", left="scene", right="gas", left_path=["gas_0"], right_path=[])
+    plan = ExecutionPlan(operations, constraints=[alias])
+    assert json.loads(plan.to_json())["version"] == 17
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 17"):
+        ExecutionPlan.from_json(json.dumps(dict(json.loads(plan.to_json()), version=16)))
+    for changed in (dict(left="unused"), dict(left_path="gas_0"), dict(left_path=[""]),
+                    dict(right_path=["bad\0port"]), dict(extra=True)):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, constraints=[dict(alias, **changed)])
+    alias["left_path"].append("context")
+    assert json.loads(plan.to_json())["constraints"][0]["left_path"] == ["gas_0"]
+
+
 def test_branch_snapshot_closes_all_paths_and_requires_explicit_lowering():
     branch = dict(
         kind="branch",

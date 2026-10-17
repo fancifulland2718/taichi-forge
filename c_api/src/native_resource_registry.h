@@ -13,13 +13,17 @@ make_native_preparation_context(Runtime &runtime);
 // Retired entries remain tombstones until their public handle is destroyed.
 class NativeResourceRegistry {
  public:
+  using ParentLinks = std::vector<std::pair<std::string, TiNativeResource>>;
   explicit NativeResourceRegistry(Runtime &runtime) : runtime_(runtime) {
   }
   TiNativeResource publish(std::shared_ptr<taichi::lang::NativeResource> object,
                            std::vector<TiMemory> memories,
-                           std::vector<TiNativeResource> parents);
+                           std::vector<TiNativeResource> parents,
+                           ParentLinks parent_links = {});
   std::shared_ptr<taichi::lang::NativeResource> get(
       TiNativeResource handle) const;
+  TiNativeResource resolve(TiNativeResource handle,
+                            const std::vector<std::string> &path) const;
   void destroy(TiNativeResource handle);
   void retire_memory(TiMemory memory);
   void clear(bool synchronize);
@@ -29,6 +33,7 @@ class NativeResourceRegistry {
     std::shared_ptr<taichi::lang::NativeResource> object;
     std::vector<TiMemory> memories;
     std::vector<TiNativeResource> parents;
+    ParentLinks parent_links;
   };
   void retire(std::vector<TiNativeResource> roots);
   void remove_edges(TiNativeResource handle, const Entry &entry);
