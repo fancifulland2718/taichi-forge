@@ -126,6 +126,7 @@ def main(mode, artifact, output):
                 start = time.perf_counter()
                 call = plan.prepare(module, arguments)
                 call.initialize()
+                assert call.info["native_resource_bytes"] == (72 if kind == "private" else 0)
                 costs[recipe + "_" + kind] = dict(ready_ms=(time.perf_counter() - start) * 1000)
                 costs[recipe + "_" + kind]["resource_bytes"] = call.info["resource_bytes"]
                 call()

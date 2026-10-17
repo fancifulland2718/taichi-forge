@@ -332,6 +332,13 @@ typedef struct TiPreparedExecutionInfo {
   uint64_t launches;
 } TiPreparedExecutionInfo;
 
+// Additive memory diagnostics; the original prepared-info ABI is unchanged.
+typedef struct TiPreparedExecutionMemoryInfo {
+  uint64_t resource_bytes;
+  uint64_t native_resource_bytes;
+  uint64_t workspace_bytes;
+} TiPreparedExecutionMemoryInfo;
+
 // Cold diagnostics for an explicitly shared CUDA binding family. Zero fields
 // mean the prepared execution does not use a family. Resource bytes are shared
 // once per identity, not additive across sibling bindings.
@@ -1341,6 +1348,19 @@ ti_get_prepared_execution_workspace_bytes_ext(TiRuntime runtime,
 TI_DLL_EXPORT uint64_t TI_API_CALL
 ti_get_prepared_execution_resource_bytes_ext(TiRuntime runtime,
                                              TiPreparedExecution execution);
+// Known device payload of privately reconstructed native resources. Managed
+// images report packed texel bytes, including mip levels. Excludes public or
+// borrowed resources, algorithm scratch, host code and driver-private memory;
+// zero is not a promise of zero residency for an opaque provider. Shared family
+// payload appears in each sibling; do not sum it across siblings. Cached during
+// preparation/retirement, with no backend query or replay scan.
+// Returns all three memory counters under one owner lock. The legacy array
+// and workspace getters retain their original contracts.
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_prepared_execution_memory_info_ext(
+    TiRuntime runtime,
+    TiPreparedExecution execution,
+    TiPreparedExecutionMemoryInfo *info);
 // Completes submitted work before retirement. Destroy invalidated executions
 // too; automatic dependency invalidation does not consume the public handle.
 TI_DLL_EXPORT void TI_API_CALL

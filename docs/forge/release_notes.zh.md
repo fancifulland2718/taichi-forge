@@ -41,6 +41,11 @@
   数据及 view 用途继承；不声明该字段的计划保留原格式与默认值。要求配对 ABI88
   组件，已验证三后端私有数组梯度和 Vulkan 从归档私有缓冲绘制。
 
+- AOT 新增 `native_resource_bytes`，统计已知私有 native 设备载荷，包含
+  CUDA/Vulkan 图像和完整 mip 链；数组/workspace 含义保持。批量内存查询减少
+  Python 诊断接口调用，不增加重放扫描。要求配对 ABI89，计数不含公共资源和
+  驱动私有驻留，不能当作实际显存总量。
+
 - Vulkan shader 反射在解析期间维护 result-ID 索引，避免每次查询都扫描整个模块。
   只启用验证、不导出产物时，跳过不会使用的诊断反射。`ti.compile_profile()` 可区分
   SPIR-V 生成、优化、验证、反射/布局准备和驱动 pipeline 创建；编译档位、shader

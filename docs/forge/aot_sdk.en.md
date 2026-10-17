@@ -2187,6 +2187,20 @@ Shape-only and unused arrays still allocate nothing. These bytes are separate fr
 algorithm `workspace_bytes` and exclude allocator/driver overhead. Small Windows CPU/CUDA/Vulkan checks cover
 primal computation, explicit reverse gradients and these ownership transitions.
 
+`prepared.info["native_resource_bytes"]` separately reports known device
+payload owned by private native resources (paired ABI89 components). Managed
+CUDA/Vulkan images report packed texel bytes, including all mip levels. This
+does not change the array-only `resource_bytes` or provider `workspace_bytes`
+counters. Public/borrowed resources, host shader code/descriptors, allocation
+padding and driver-private residency are excluded. An opaque provider reporting
+zero does not promise zero GPU memory. The common resource interface supplies
+this number; the executor does not special-case image types or query a driver.
+Totals are cached during preparation and refreshed when initialization-only
+resources retire. Shared family payload appears in each sibling's report, so
+do not sum those values across siblings. Python reads the three memory counters
+through one `ti_get_prepared_execution_memory_info_ext` call under one owner
+lock; the legacy array/workspace C getters remain available.
+
 Artifact data can supply the initial contents of a private ndarray:
 
 ```python

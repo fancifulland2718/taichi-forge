@@ -871,18 +871,19 @@ class PreparedCall(_Resource):
             runtime._api.call(
                 runtime._api.ti_get_prepared_execution_info_ext, runtime._handle, self._handle, C.byref(native)
             )
+            memory = abi.PreparedMemoryInfo()
+            runtime._api.call(
+                runtime._api.ti_get_prepared_execution_memory_info_ext, runtime._handle, self._handle, C.byref(memory)
+            )
             return dict(
                 dispatch_count=native.dispatch_count,
                 execution_kind=("cpu_batch", "cuda_graph", "vulkan_commands", "cuda_mixed", "cuda_ordered", "host_control")[
                     native.execution_kind
                 ],
                 argument_bytes=native.argument_bytes,
-                workspace_bytes=runtime._api.call(
-                    runtime._api.ti_get_prepared_execution_workspace_bytes_ext, runtime._handle, self._handle
-                ),
-                resource_bytes=runtime._api.call(
-                    runtime._api.ti_get_prepared_execution_resource_bytes_ext, runtime._handle, self._handle
-                ),
+                workspace_bytes=memory.workspace_bytes,
+                resource_bytes=memory.resource_bytes,
+                native_resource_bytes=memory.native_resource_bytes,
                 launches=native.launches,
             )
 

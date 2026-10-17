@@ -328,6 +328,9 @@ class CudaSampledImage final : public NativeSampledImage {
   size_t logical_bytes() const override {
     return storage_->logical_bytes();
   }
+  size_t device_payload_bytes() const override {
+    return logical_bytes();
+  }
   uint64_t cuda_sampled_object() const override {
     return storage_->sampled_object();
   }
@@ -460,6 +463,9 @@ class VulkanSampledImage final : public NativeSampledImage {
   }
   size_t logical_bytes() const override {
     return bytes_;
+  }
+  size_t device_payload_bytes() const override {
+    return logical_bytes();
   }
   DeviceAllocation gfx_sampled_allocation() const override {
     return image_;

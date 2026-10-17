@@ -40,6 +40,7 @@ struct PreparedExecution {
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
   uint64_t native_resource_workspace_bytes{0};
+  uint64_t native_resource_payload_bytes{0};
   // The backend consumes these cold descriptors before they are released.
   std::unique_ptr<BoundKernelArguments> kernel_arguments;
   std::unique_ptr<BoundGraphArguments> graph_arguments;
@@ -52,16 +53,46 @@ struct PreparedExecution {
     while (!native_resources.empty())
       native_resources.pop_back();
     native_resource_workspace_bytes = 0;
+    native_resource_payload_bytes = 0;
   }
-  void refresh_resource_workspace_bytes() {
-    uint64_t total = 0;
+  void refresh_resource_bytes() {
+    uint64_t workspace = 0, payload = 0;
+    std::unordered_set<const NativeResource *> counted;
+    counted.reserve(native_resources.size());
     for (const auto &resource : native_resources) {
+      if (!counted.insert(resource.get()).second)
+        continue;
       const auto bytes = resource->workspace_bytes();
-      if (bytes > std::numeric_limits<uint64_t>::max() - total)
+      if (bytes > std::numeric_limits<uint64_t>::max() - workspace)
         throw MemoryBindingError("Native resource workspace size overflow");
+      workspace += bytes;
+      const auto contents = resource->device_payload_bytes();
+      if (contents > std::numeric_limits<uint64_t>::max() - payload)
+        throw MemoryBindingError("Native resource payload size overflow");
+      payload += contents;
+    }
+    native_resource_workspace_bytes = workspace;
+    native_resource_payload_bytes = payload;
+  }
+  uint64_t workspace_bytes() const {
+    uint64_t total = native_resource_workspace_bytes;
+    for (const auto bytes :
+         {native ? native->workspace_bytes() : 0,
+          initialization ? initialization->workspace_bytes() : 0}) {
+      if (bytes > std::numeric_limits<uint64_t>::max() - total)
+        throw MemoryBindingError("Prepared workspace size overflow");
       total += bytes;
     }
-    native_resource_workspace_bytes = total;
+    return total;
+  }
+  uint64_t array_bytes() const {
+    const auto local = resources ? resources->bytes() : 0;
+    const auto shared = family && family->arrays->storage
+                            ? family->arrays->storage->bytes()
+                            : 0;
+    if (shared > std::numeric_limits<uint64_t>::max() - local)
+      throw MemoryBindingError("Prepared resource size overflow");
+    return local + shared;
   }
   ~PreparedExecution() {
     initialization.reset();
@@ -183,7 +214,7 @@ struct PreparedExecution {
                            : family && family->initialization
                                ? family->initialization->argument_bytes()
                                : 0);
-    refresh_resource_workspace_bytes();
+    refresh_resource_bytes();
     release_source_bindings();
     live = true;
   }
@@ -228,7 +259,7 @@ struct PreparedExecution {
     for (std::size_t i = native_resources.size(); i-- > 0;)
       if (!replay_resources.count(native_resources[i].get()))
         native_resources.erase(native_resources.begin() + i);
-    refresh_resource_workspace_bytes();
+    refresh_resource_bytes();
     if (resources)
       resources->retain(replay_memories);
     info.argument_bytes = native->argument_bytes();
@@ -1693,15 +1724,7 @@ uint64_t ti_get_prepared_execution_workspace_bytes_ext(
   }
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
-  const auto &prepared = rt.prepared_registry().get(execution);
-  const auto operations =
-      (prepared.native ? prepared.native->workspace_bytes() : 0) +
-      (prepared.initialization ? prepared.initialization->workspace_bytes()
-                               : 0);
-  if (operations > std::numeric_limits<uint64_t>::max() -
-                       prepared.native_resource_workspace_bytes)
-    throw MemoryBindingError("Prepared workspace size overflow");
-  return operations + prepared.native_resource_workspace_bytes;
+  return rt.prepared_registry().get(execution).workspace_bytes();
   TI_CAPI_TRY_CATCH_END();
   return 0;
 }
@@ -1726,14 +1749,23 @@ uint64_t ti_get_prepared_execution_resource_bytes_ext(
   }
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
-  const auto &prepared = rt.prepared_registry().get(execution);
-  const auto local = prepared.resources ? prepared.resources->bytes() : 0;
-  const auto shared = prepared.family && prepared.family->arrays->storage
-                          ? prepared.family->arrays->storage->bytes()
-                          : 0;
-  if (shared > std::numeric_limits<uint64_t>::max() - local)
-    throw MemoryBindingError("Prepared resource size overflow");
-  return local + shared;
+  return rt.prepared_registry().get(execution).array_bytes();
   TI_CAPI_TRY_CATCH_END();
   return 0;
+}
+
+void ti_get_prepared_execution_memory_info_ext(
+    TiRuntime runtime,
+    TiPreparedExecution execution,
+    TiPreparedExecutionMemoryInfo *info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(execution);
+  TI_CAPI_ARGUMENT_NULL(info);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &prepared = rt.prepared_registry().get(execution);
+  *info = {prepared.array_bytes(), prepared.native_resource_payload_bytes,
+           prepared.workspace_bytes()};
+  TI_CAPI_TRY_CATCH_END();
 }

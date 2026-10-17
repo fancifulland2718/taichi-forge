@@ -209,6 +209,8 @@ def main(mode, artifact, output):
             supplied = {k: available[k] for k in module.execution_plan(name).argument_names}
             start = time.perf_counter()
             call = module.prepare_execution(name, supplied)
+            assert call.info["native_resource_bytes"] == (0 if name == "public" else 1296)
+            assert call.info["resource_bytes"] == (148 if name == "private_arrays" else 4)
             costs["cases"][name] = dict(prepare_ms=(time.perf_counter() - start) * 1000, info=call.info)
             calls[name] = call
             for color in ([0, 1, 0], [0, 0, 0.25], [0, 1, 0]):
@@ -252,6 +254,10 @@ def main(mode, artifact, output):
         if mode == "borrowed":
             ti.reset()
             raises(calls["private_arrays"])
+        else:
+            module.close()
+            assert calls["private_arrays"].info["native_resource_bytes"] == 0
+            assert calls["private_arrays"].info["resource_bytes"] == 0
         for call in calls.values():
             call.close()
         for resource in owners.values():

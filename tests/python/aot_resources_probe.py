@@ -47,6 +47,12 @@ def check(arch, path):
             assert read(bindings["dx"]) == [-91] * n
             assert prepared.info["resource_bytes"] == 2 * max(1, 4 * n)
             assert prepared.info["workspace_bytes"] == 0
+            assert prepared.info["native_resource_bytes"] == 0
+            for field, function in (
+                ("resource_bytes", runtime._api.ti_get_prepared_execution_resource_bytes_ext),
+                ("workspace_bytes", runtime._api.ti_get_prepared_execution_workspace_bytes_ext),
+            ):
+                assert prepared.info[field] == runtime._api.call(function, runtime._handle, prepared._handle)
             for step in range(3):
                 xs = [(i % 19) - 7 + step * 0.125 for i in range(n)]
                 seeds = [(i % 4 + 1) * 0.25 for i in range(n)]

@@ -661,6 +661,16 @@ clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度
 graphics Graph 自动导出、mesh/indirect、描述符数组、shader AS、整数 MRT 和 RWTexture
 kernel 消费仍为后续工作。
 
+`prepared.info["native_resource_bytes"]` 独立报告私有 native 资源已知的设备载荷，
+要求配对 ABI89 组件。CUDA/Vulkan 受管图像按紧凑 texel 字节统计，包含全部 mip；
+不改变仅统计私有数组的 `resource_bytes` 和 provider 的 `workspace_bytes` 含义。
+公共/借用资源、host shader 代码和 descriptor、分配对齐以及驱动私有驻留均不计入；
+未知 provider 返回0不代表没有显存占用。数字由公共资源接口提供，执行器不按图像
+类型硬编码，也不查询驱动。在准备期及仅初始化资源退休时缓存/刷新，不增加重放扫描。
+共享 family 的每个兄弟报告都包含共享载荷，不能跨兄弟简单累加。
+Python 通过一次 `ti_get_prepared_execution_memory_info_ext` 在同一 owner 锁内读取
+三个内存计数；旧数组/workspace C 查询接口继续可用。
+
 CUDA/Vulkan Graph 自动导出也支持 sampled Texture kernel 参数，包括合格的不可变 compute
 录制方案。CUDA 保留 `cuda_immutable_argument_frames` 的资源共享策略，Vulkan 保留每次
 准备对应的完整有序 compute 序列：

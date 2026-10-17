@@ -49,6 +49,12 @@ lifetimes. The entries below describe the changes.
   ABI88 components; CPU/CUDA/Vulkan private-array gradients and Vulkan drawing
   from archived private buffers are qualified.
 
+- AOT diagnostics add `native_resource_bytes` for known private native device
+  payload, including CUDA/Vulkan image mip chains. Array and workspace meanings
+  remain unchanged. A batch memory query reduces Python diagnostic crossings;
+  it adds no replay scan. Requires paired ABI89 components; these counts exclude
+  public resources and driver-private residency.
+
 - Vulkan shader reflection maintains a parser-local result-ID index instead of
   repeatedly scanning the module. Validation without an artifact capture skips
   unused diagnostic reflection. `ti.compile_profile()` separates SPIR-V emission,

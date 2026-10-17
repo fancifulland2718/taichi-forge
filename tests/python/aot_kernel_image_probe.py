@@ -200,6 +200,18 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                 )
                 write(frame["pixels3"], list(range(24)))
                 write(frame["output"], [-99] * 9)
+                if policy == "seeded" and binding == 0:
+                    temporary = dict(native("image", "sampled", {}, shape=[4], format="r8"), name="temporary")
+                    initial_only = ExecutionPlan(
+                        [dict(kind="fill32", destination="loss", value=0)],
+                        resources=[temporary],
+                        initialization=[native("image", "upload", dict(image="temporary", pixels="pixels"))],
+                    )
+                    with initial_only.prepare(module, dict(loss=frame["loss"], pixels=frame["pixels1"])) as initial_call:
+                        assert initial_call.info["native_resource_bytes"] == 4
+                        initial_call.initialize()
+                        assert initial_call.info["native_resource_bytes"] == 0
+                        initial_call()
                 if policy == "ordered":
                     write(frame["vertices"], [-1, -1, 1, 1, -1, 1, 0, 1, 1])
                     write(frame["indices"], [0, 1, 2], "i")
@@ -283,6 +295,7 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                     assert read(frame["output"]) == [-99] * 9
                 start = time.perf_counter()
                 call = plan.prepare(module, frame)
+                assert call.info["native_resource_bytes"] == 220
                 prepare_ms = (time.perf_counter() - start) * 1000
                 assert call.info["execution_kind"] == (
                     "vulkan_commands"
@@ -294,6 +307,7 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                 if policy.endswith("initialized"):
                     start = time.perf_counter()
                     call.initialize()
+                    assert call.info["native_resource_bytes"] == 220
                     initialize_ms = (time.perf_counter() - start) * 1000
                     for name in ("pixels1", "pixels2", "pixels3"):
                         frame[name].close()
@@ -334,6 +348,7 @@ def main(mode, artifact, adapter, output, arch="cuda"):
                     ):
                         sibling_frame[name] = runtime.ndarray("f32", shapes[name])
                     sibling = call.prepare_binding(sibling_frame)
+                    assert sibling.info["native_resource_bytes"] == 220
                     write(sibling_frame["scale"], [-1])
                     sibling()
                     check(sibling_frame, -1)
