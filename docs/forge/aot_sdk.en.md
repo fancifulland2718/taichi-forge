@@ -859,9 +859,29 @@ executor, with no per-draw Python callback or extra host wait.
 Windows qualification covers standalone and borrowed execution, direct and
 indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
 LOAD, changed inputs and bindings, shared/private retirement, and downstream
-numeric gradients. This is not differentiation of rasterization. Automatic
-graphics Graph export, mesh/indirect draws, descriptor arrays, shader AS
-bindings remain separate work.
+numeric gradients. This is not differentiation of rasterization. Mesh/indirect
+draws, descriptor arrays and shader AS bindings remain separate work.
+
+Ordinary Vulkan Graphs containing `VulkanGraphicsDrawRecording` or
+`VulkanGraphicsPassRecording` can export these qualified direct/indexed/instanced
+draws through `module.add_execution_plan`. Supply the producer Textures in
+`source_bindings`; drawing ndarrays keep their Graph names and require the
+appropriate consumer buffer usages. For a privately reconstructed pipeline,
+`resource_bindings={pipeline: {"shader_0": vertex_shader, "shader_1": fragment_shader}}`
+accepts the original immutable `SpirvShader` assets or consumer host-blob names.
+Alternatively bind the pipeline owner to a public consumer resource name.
+The frozen creation-state and shader-digest contract checks public pipelines
+and consumer-supplied blobs before recording; no driver handles are archived.
+
+Image aliases collect attachment/storage usage before reconstruction. A first
+full clear permits an unseeded private attachment; earlier reads or LOAD require
+explicit pixel seeds or initialized public images. Native preparation checks
+initialization along the complete control flow, including conditional clears.
+Windows validation covers both recording classes, integer MRT clears, sampled
+and uniform descriptors, aliases, public/private owners, replay, retirement and
+actual downstream kernel gradients. Selected graphics binding-frame and
+fork/join recipes still require their own persistent queue contract. This cold
+export reuses the existing GFX executor and compiled kernel entries.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use
@@ -885,8 +905,8 @@ Windows qualification covers 2D floating/unsigned/signed images, integer MRT
 clear/draw → kernel load/store → readback, public/private owners, non-square
 mip updates, replay, close/reset and downstream numeric gradients. Neither
 storage-image operations nor rasterization become differentiable. This does
-not qualify automatic graphics Graph export or legacy CGraph texture arguments;
-these plans use compiled kernel entries directly.
+not qualify legacy CGraph texture arguments; these plans use compiled kernel
+entries directly. Qualified ordinary graphics export is described above.
 
 Ordinary and selected Vulkan compute Graphs can also export RWTexture kernel
 arguments through `module.add_execution_plan`. Supply producer Textures in
@@ -901,9 +921,9 @@ copied. Wrong dimensions/formats fail before publishing module kernels.
 Windows checks cover ordinary/selected export, aliased sampling and writes,
 unsigned image updates, nonzero mip shape/load/store, public/private resources,
 initialization-only seed retirement, replay and real downstream kernel gradients.
-Private/public variants reuse the same compiled kernel entries. CUDA RWTexture,
-automatic graphics recordings and imported integer Program Textures remain
-outside this qualification. The export adds no submission or runtime layer.
+Private/public variants reuse the same compiled kernel entries. CUDA RWTexture
+and imported integer Program Textures remain outside this qualification. The
+export adds no submission or runtime layer.
 
 CUDA and Vulkan Graph export also accept sampled Texture kernel arguments,
 including qualified immutable compute recipes. CUDA preserves its

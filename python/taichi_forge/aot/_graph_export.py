@@ -52,6 +52,7 @@ class _ExportContext:
         self.reconstructed_derived_bindings = set()
         self.binding_constraints = []
         self._provider_data = {}
+        self._native_export_facts = {}
         self.bounded_extents = {}
         self.private_bindings = {}
         self._private_names = {}

@@ -44,16 +44,17 @@ lifetimes. The entries below describe the changes.
   They reuse the image owner, upload, initialization and GFX recording paths.
   Standalone/borrowed replay and downstream numeric gradients are qualified;
   ordinary/selected Vulkan compute Graph export includes RWTexture aliases,
-  complete mip seeds and shared compiled entries. Automatic graphics recording
-  export remains pending.
+  complete mip seeds and shared compiled entries.
 
 - Explicit Vulkan AOT plans reconstruct raster pipelines and color/depth
   attachments, then record direct, indexed and instanced draws through the
   shared JIT graphics core. Complete clears need no seed uploads; LOAD and
   sampling retain initialization checks. The lightweight runtime accepts
   explicit vertex/index/uniform array usages. Standalone/borrowed execution,
-  resource retirement and downstream gradients are qualified; automatic
-  graphics Graph export and mesh/indirect coverage remain pending. See the
+  resource retirement and downstream gradients are qualified. Ordinary Graphs
+  export draw/pass recordings, immutable shader assets or public pipelines,
+  attachment aliases and integer MRT clears. Selected graphics queue recipes
+  and mesh/indirect coverage remain pending. See the
   [AOT SDK contract](aot_sdk.en.md#explicit-vulkan-raster-plans).
 
 - AOT v18 preserves explicit storage/uniform/vertex/index usages on private

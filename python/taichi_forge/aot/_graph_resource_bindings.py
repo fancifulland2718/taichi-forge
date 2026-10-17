@@ -61,6 +61,10 @@ class ResourceInputBindings:
         self.used_names.add(entry[1])
         return entry[1]
 
+    def has_inputs(self, owner):
+        """Whether this owner has explicit construction inputs (without consuming them)."""
+        return id(owner) in self.owners
+
     def require(self, owner, ports, *, asset_ports=()):
         if id(owner) in self.public_owners:
             raise TaichiRuntimeError("This resource exporter does not support a public owner binding")

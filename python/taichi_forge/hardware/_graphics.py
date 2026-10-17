@@ -732,6 +732,16 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
     def _graph_identity_factory(self):
         return graphics_recording_identity(self, single_draw=True)
 
+    def _export_aot_bindings(self, context):
+        from ._aot_vulkan_graphics import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_vulkan_graphics import export
+
+        return export(self, context)
+
     @property
     def resource_effects(self):
         effects = [ResourceEffect(self.color, GraphAccess.WRITE)]
@@ -867,6 +877,16 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
     """One renderer-neutral Vulkan render pass containing one or more draws."""
 
     _supports_prepared_graphics_graph_command = True
+
+    def _export_aot_bindings(self, context):
+        from ._aot_vulkan_graphics import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_vulkan_graphics import export
+
+        return export(self, context)
 
     def __init__(
         self,
@@ -1467,6 +1487,14 @@ class VulkanGraphicsPipeline:
         self._shader_image_by_key = shader_image_by_key
         self.shader_acceleration_structure_bindings = shader_acceleration_structure_bindings
         self._shader_as_by_key = shader_as_by_key
+        from ._aot_vulkan_graphics import freeze_pipeline
+
+        self._aot_pipeline_spec = freeze_pipeline(
+            self, topology=topology_value, polygon_mode=polygon_value,
+            front_cull=front_cull, back_cull=back_cull,
+            depth_test=bool(depth_test), depth_write=bool(depth_write),
+            depth=depth_params, targets=targets, blending=bool(blending),
+        )
         with hardware_failure_phase("provider_plan_failure"):
             self._handle = int(
                 program._create_vulkan_graphics_pipeline(

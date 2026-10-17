@@ -18,6 +18,7 @@ class SourceImageBindings:
         }
         self.used = set()
         self._storage_owners = set()
+        self._attachment_owners = set()
         for name, owner in bindings.items():
             if not isinstance(name, str) or not name or "\0" in name:
                 raise ValueError(
@@ -52,6 +53,13 @@ class SourceImageBindings:
             raise TaichiRuntimeError("AOT storage image source differs from its fixed launch binding")
         self._storage_owners.add(id(owner))
 
+    def require_attachment(self, name):
+        owner = self.require(name)
+        _, shape, mip_levels, _ = owner._creation_metadata
+        if len(shape) != 2 or mip_levels != 1:
+            raise TaichiRuntimeError("AOT graphics attachments require single-mip 2D textures")
+        self._attachment_owners.add(id(owner))
+
     def validate_argument(self, arch, arg):
         owner = self.require(arg.name)
         fmt, shape, _, _ = owner._creation_metadata
@@ -77,14 +85,17 @@ class SourceImageBindings:
         for arg in requirements:
             self.validate_argument(arch, arg)
 
-    def resource(self, context, name):
+    def resource(self, context, name, *, first_clear=False):
         from taichi_forge.hardware._sampling import SamplerConfig
 
         owner = self.require(name)
         fmt, shape, mip_levels, sampler = owner._creation_metadata
         sampled = is_float_sampled_texture_format(fmt)
-        if not sampled and (context.arch != core.Arch.vulkan or id(owner) not in self._storage_owners):
-            raise TaichiRuntimeError("AOT integer image requires a Vulkan storage-image use")
+        attachment = id(owner) in self._attachment_owners
+        if first_clear and not attachment:
+            raise TaichiRuntimeError("AOT image clear requires a qualified attachment")
+        if not sampled and (context.arch != core.Arch.vulkan or not (attachment or id(owner) in self._storage_owners)):
+            raise TaichiRuntimeError("AOT integer image requires a Vulkan storage-image or attachment use")
         if context.arch not in (core.Arch.cuda, core.Arch.vulkan) or (
             mip_levels != 1 and (context.arch != core.Arch.vulkan or len(shape) != 2)
         ):
@@ -110,7 +121,13 @@ class SourceImageBindings:
 
         def build():
             ports = ("pixels",) if mip_levels == 1 else tuple(f"pixels_{i}" for i in range(mip_levels))
-            inputs = context.resource_inputs.require(owner, ports)
+            # This only permits allocation without a seed. The shared native
+            # recorder proves initialization along the selected control flow;
+            # a conditional clear cannot authorize a later unconditional read.
+            inputs = (
+                context.resource_inputs.require(owner, ports)
+                if not first_clear or context.resource_inputs.has_inputs(owner) else None
+            )
             sampling = (
                 dict(
                     filter=sampler.min_filter,
@@ -128,15 +145,17 @@ class SourceImageBindings:
                     **({"mip_levels": mip_levels} if mip_levels != 1 else {}),
                     **(sampling if sampled else {}),
                     **({"storage": True} if sampled and id(owner) in self._storage_owners else {}),
+                    **({"attachment": True} if attachment else {}),
                 ),
             )
-            context.initialize_native_once(
-                resource,
-                "image",
-                "upload" if mip_levels == 1 else "upload_mips",
-                parameters={} if mip_levels == 1 else dict(mip_levels=mip_levels),
-                bindings=dict(image=resource, **inputs),
-            )
+            if inputs is not None:
+                context.initialize_native_once(
+                    resource,
+                    "image",
+                    "upload" if mip_levels == 1 else "upload_mips",
+                    parameters={} if mip_levels == 1 else dict(mip_levels=mip_levels),
+                    bindings=dict(image=resource, **inputs),
+                )
             return resource
 
         resource = context.resource_once(

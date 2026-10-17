@@ -163,6 +163,13 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         freeze = getattr(self._recording, "_freeze_graph_recipe_source", None)
         return None if freeze is None else freeze()
 
+    def _export_aot_bindings(self, context):
+        # Existing frozen leases provide one cold preflight, including uses
+        # occurring after an earlier kernel. Never inherit a subclass recipe.
+        preflight = type(self._recording).__dict__.get("_export_aot_bindings")
+        if preflight is not None:
+            preflight(self._recording, context)
+
 
 class HardwareRecordingNode(NativeGraphNode):
     def __init__(
