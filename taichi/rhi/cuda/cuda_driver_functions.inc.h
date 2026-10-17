@@ -30,6 +30,7 @@ PER_CUDA_FUNCTION(memcpy_device_to_host, cuMemcpyDtoH_v2, void *, void *, std::s
 PER_CUDA_FUNCTION(memcpy_device_to_device, cuMemcpyDtoD_v2, void *, void *, std::size_t);
 PER_CUDA_FUNCTION(memcpy_device_to_device_async, cuMemcpyDtoDAsync_v2, void *, void *, std::size_t, void *);
 PER_CUDA_FUNCTION(memcpy_3d, cuMemcpy3D_v2, const CUDA_MEMCPY3D *);
+PER_CUDA_FUNCTION(memcpy_3d_async, cuMemcpy3DAsync_v2, const CUDA_MEMCPY3D *, void *);
 PER_CUDA_FUNCTION(memcpy_host_to_device_async, cuMemcpyHtoDAsync_v2, void *, void *, std::size_t, void *);
 PER_CUDA_FUNCTION(memcpy_device_to_host_async, cuMemcpyDtoHAsync_v2, void *, void *, std::size_t, void *);
 PER_CUDA_FUNCTION(malloc, cuMemAlloc_v2, void **, std::size_t);

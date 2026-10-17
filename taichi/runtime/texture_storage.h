@@ -36,8 +36,12 @@ class CudaTextureStorage {
   // Complete packed upload, preserving Forge's logical ndarray axis order.
   // Caller validates source ownership/shape/size and orders prior producers.
   void upload_device(std::uint64_t source);
+  // Enqueue the same packed transfer on the enclosing execution's stream.
+  // Source and image remain leased through its completion.
+  void upload_device_async(std::uint64_t source, void *stream);
 
  private:
+  void upload(std::uint64_t source, void *stream, bool asynchronous);
   void *array_{nullptr};
   std::uint64_t sampled_object_{0};
   std::array<std::size_t, 3> physical_extent_{};

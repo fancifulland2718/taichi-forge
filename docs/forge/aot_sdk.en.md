@@ -319,6 +319,61 @@ Discover this capability before preparation using
 `runtime.native_operation_capabilities("optix_query", version=2)`; the CUDA
 factory reports `{"cuda_ordered"}`. Existing v1 plans retain frozen-table behavior.
 
+Explicit query version 3 adds managed alpha images while preserving the v2 face
+rules. `alpha_masks` has one entry per instance: `null` for no mask, or
+`{"cutoff": 0.5, "channel": 0}` (both values have these defaults). Set `mask_count`
+to the number of non-null entries and bind `uvs_0`/`image_0`, etc. in their order.
+UVs are live compact f32 `[V_i,2]` or AoS float2 `[V_i]` in the GAS vertex order;
+the image binding names a managed resource, never a raw texture handle. Alpha
+uses the same frozen index table as the GAS. A mask on an `opaque=True` instance
+is rejected during preparation. Face and alpha rules both have to accept a
+candidate; rejecting it continues traversal for typed and compact occlusion
+queries. The adapter must advertise face/alpha composition when both are used.
+
+Create the image through the common native resource registry:
+
+```python
+image = {
+    "kind": "native", "name": "alpha_image", "provider": "image",
+    "operation": "sampled", "version": 1,
+    "parameters": {"shape": [2, 4], "format": "r32f", "filter": "nearest",
+                   "address_modes": ["clamp_to_edge", "clamp_to_edge"]},
+    "bindings": {"pixels": "initial_alpha"},
+}
+upload = {
+    "kind": "native", "provider": "image", "operation": "upload", "version": 1,
+    "parameters": {}, "bindings": {"image": "alpha_image", "pixels": "next_alpha"},
+}
+```
+
+The optional `pixels` resource input is copied once at preparation. Without it,
+an unconditional `image/upload` must precede sampling; a write only inside one
+branch or a zero-trip loop is insufficient. Uploads read the current device array
+on the execution stream and can follow a kernel that generates texels. They do
+not add a host readback or a whole-context fence on replay. A changed source array
+alone does not change the image. Shape and sampler stay fixed until preparation
+of a new resource. Images shared by queries are retained through execution
+retirement, including independent prepared bindings and borrowed-runtime reset.
+
+For OptiX, images must be single-level 2D `r32f` or `rgba32f`; channel is 0 or 0–3
+respectively and cutoff is finite in `[0,1]`. Scalar pixel arrays use the logical
+image shape, followed by a channel axis for RGBA; packed AoS channel vectors are
+also accepted. CUDA preserves the existing Forge layout: logical `[X,Y]` is a
+physical CUDA array of width `Y`, height `X`; the OptiX shader reverses the CUDA
+coordinates so normalized UV `(u,v)` samples the first and second logical axes.
+The default filter is `linear` and
+address mode is `repeat`; `nearest`, `clamp_to_edge` and `mirrored_repeat` are
+available. These defaults match managed JIT textures.
+
+Discover `optix_query` version 3 (`cuda_ordered`) and `image_upload` version 1
+(`cuda_capture`) before preparing. Opaque queries still use their prepared-query
+fast path. Alpha uses the existing ordered adapter API; this does not qualify
+OptiX stream capture. CUDA array residency is driver-private: packed texel bytes
+are `product(shape) * channels * channel_bytes`, separate from reported query
+workspace, which does not include image residency. This explicit resource/query
+path does not yet enable ordinary AOT kernel texture arguments or automatic
+export of alpha recordings.
+
 `refit` also accepts an updateable GAS. `instance_refit` requires an updateable
 instance scene: supplying `transforms` updates its matrices from device memory;
 omitting them refreshes IAS bounds while preserving current matrices, as required
@@ -337,8 +392,10 @@ bounds-only updates, refit hit/miss transitions and
 retirement. Real gradients of
 following kernels work; intersection differentiation with respect to vertices or
 rays is not provided. CPU/Vulkan do not register these factories. Operations use
-`cuda_ordered`; CUDA capture, alpha/textures, OMM and programmable pipelines remain
-pending.
+`cuda_ordered`; CUDA capture, OMM and programmable pipelines remain pending.
+Explicit v3 alpha qualification additionally covers non-square r32f/RGBA images,
+GPU texel/UV/face updates, shared-GAS instances, first-hit and closest queries,
+compact occlusion, hit/miss writeback, device refit and post-query kernel gradients.
 
 Compiled Graphs containing triangle or instance scene typed queries, compact
 occlusion, GAS refits and IAS transform/bounds refits can export automatically.

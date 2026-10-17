@@ -4,6 +4,7 @@
 #include <utility>
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
+#include "taichi/runtime/native_image.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/operation_json.h"
@@ -16,6 +17,82 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, ImageDescriptionsRejectMalformedStorageBeforePreparation) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription image;
+  image.provider = "image";
+  image.operation = "sampled";
+  image.parameters = liong::json::parse_complete(
+      R"({"shape":[2,4],"format":"rgba32f","filter":"nearest","address_modes":["repeat","clamp_to_edge"]})");
+  image.bindings = {{"pixels", "source"}};
+  EXPECT_EQ(registry.decode(image, NativeObjectKind::resource).kind(), "sampled_image");
+  image.bindings.clear();
+  EXPECT_NO_THROW(registry.decode(image, NativeObjectKind::resource));
+  for (const char *parameters : {
+      R"({"shape":[],"format":"r32f"})",
+      R"({"shape":[1,2,3,4],"format":"r32f"})",
+      R"({"shape":[0,2],"format":"r32f"})",
+      R"({"shape":[4294967296,2],"format":"r32f"})",
+      R"({"shape":[true,2],"format":"r32f"})",
+      R"({"shape":[2,4],"format":"missing"})",
+      R"({"shape":[2,4],"format":"r32f","filter":"cubic"})",
+      R"({"shape":[2,4],"format":"r32f","address_modes":["repeat"]})",
+      R"({"shape":[2,4],"format":"r32f","address_modes":["repeat","bad"]})",
+      R"({"shape":[2,4],"format":"r32f","raw_handle":1})"}) {
+    image.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(image, NativeObjectKind::resource), std::invalid_argument) << parameters;
+  }
+  EXPECT_EQ(registry.find("sampled_image", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("sampled_image", 1, Arch::vulkan), nullptr);
+  EXPECT_EQ(registry.find("image_upload", 1, Arch::x64), nullptr);
+  EXPECT_EQ(registry.find("image_upload", 1, Arch::vulkan), nullptr);
+}
+
+TEST(NativeOperationRegistry, OptixAlphaDescriptionsValidateIndependentBindings) {
+  const auto &registry = native_operation_registry();
+  auto query = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"optix","operation":"query","version":3,
+      "parameters":{"ray_count":4,"face_rules":["table","two_sided"],"face_table_count":1,
+      "alpha_masks":[null,{"cutoff":0.25,"channel":3}],"mask_count":1},
+      "bindings":{"scene":"scene","rays":"rays","hits":"hits","hit_indices":"ids",
+      "faces_0":"face_table","uvs_0":"uv","image_0":"texture"}})"));
+  EXPECT_EQ(registry.decode(query).kind(), "optix_query");
+  for (const char *masks : {R"([null])", R"([null,true])", R"([null,{"channel":4}])",
+                           R"([null,{"channel":-1}])", R"([null,{"cutoff":1.1}])",
+                           R"([null,{"cutoff":true}])", R"([null,{"texture":42}])",
+                           R"([null,null])"}) {
+    auto bad = query;
+    bad.parameters.obj.inner["alpha_masks"] = liong::json::parse_complete(masks);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << masks;
+  }
+  auto all_opaque = query;
+  all_opaque.parameters.obj.inner["alpha_masks"] = liong::json::parse_complete("[null,null]");
+  all_opaque.parameters.obj.inner["mask_count"] = liong::json::parse_complete("0");
+  all_opaque.bindings.erase("uvs_0");
+  all_opaque.bindings.erase("image_0");
+  EXPECT_NO_THROW(registry.decode(all_opaque));
+}
+
+TEST(NativeOperationRegistry, ImageInitializationIsAControlFlowFact) {
+  class Image final : public NativeSampledImage {
+   public:
+    explicit Image(bool initialized) : NativeSampledImage(ImageParams{}, initialized) {}
+    Arch arch() const override { return Arch::cuda; }
+    Device &device() const override { throw std::logic_error("No device in cold test"); }
+    size_t workspace_bytes() const override { return 0; }
+    size_t logical_bytes() const override { return 0; }
+  } image(false), seeded(true);
+  NativeRecordingState outer;
+  EXPECT_NO_THROW(seeded.validate_sampling(outer));
+  EXPECT_THROW(image.validate_sampling(outer), std::invalid_argument);
+  auto conditional = outer.control_branch();
+  conditional.initialized.insert(&image);
+  EXPECT_NO_THROW(image.validate_sampling(conditional));
+  EXPECT_THROW(image.validate_sampling(outer), std::invalid_argument);
+  outer.initialized.insert(&image);
+  EXPECT_NO_THROW(image.validate_sampling(outer.control_branch()));
+}
+
 TEST(NativeOperationRegistry, OptixResourcesDecodeWithoutLoadingAProvider) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription context;

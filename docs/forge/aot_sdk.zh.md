@@ -250,6 +250,47 @@ v2 保留表地址，遍历时读取当前设备值；不冻结表，也不把�
 `runtime.native_operation_capabilities("optix_query", version=2)` 发现此能力，
 CUDA工厂返回 `{"cuda_ordered"}`。旧v1计划仍保留冻结表行为。
 
+显式 query version 3 在保留v2面规则的基础上增加受管alpha图像。`alpha_masks` 按实例列出：
+无mask为 `null`，有mask为 `{"cutoff": 0.5, "channel": 0}`（这也是两个参数的默认值）。
+`mask_count` 等于非null项数量，按出现顺序绑定 `uvs_0`/`image_0` 等。UV为GAS顶点顺序的
+活设备f32 `[V_i,2]` 或AoS float2 `[V_i]`；image绑定受管资源名，不接受裸纹理句柄。
+alpha索引使用GAS构建时冻结的同一张拓扑表。`opaque=True` 的实例绑定mask在准备期拒绝。
+候选须同时通过面规则和alpha；typed与compact occlusion均在拒绝后继续遍历。
+组合使用时，adapter须声明面过滤与alpha组合能力。
+
+图像通过公共原生资源注册表创建：
+
+```python
+image = {
+    "kind": "native", "name": "alpha_image", "provider": "image",
+    "operation": "sampled", "version": 1,
+    "parameters": {"shape": [2, 4], "format": "r32f", "filter": "nearest",
+                   "address_modes": ["clamp_to_edge", "clamp_to_edge"]},
+    "bindings": {"pixels": "initial_alpha"},
+}
+upload = {
+    "kind": "native", "provider": "image", "operation": "upload", "version": 1,
+    "parameters": {}, "bindings": {"image": "alpha_image", "pixels": "next_alpha"},
+}
+```
+
+资源的可选 `pixels` 输入只在准备期复制一次。省略时，采样前必须有无条件的 `image/upload`；
+仅在某一分支或可能零轮的循环内上传不满足初始化合同。上传在执行流中读取当前设备数组，
+可紧跟生成texel的kernel，重放不增加host读回或全context同步。单独修改源数组不会改变图像。
+shape与sampler冻结至重建资源；共享图像随查询保留至执行退休，覆盖独立绑定和借用运行时reset。
+
+OptiX接受单mip二维 `r32f` 或 `rgba32f`，channel分别为0或0–3，cutoff为 `[0,1]` 内有限值。
+标量像素数组为逻辑图像shape，RGBA另加最后一个channel轴；也接受紧凑AoS通道向量。
+CUDA沿用现有Forge布局：逻辑 `[X,Y]` 对应物理CUDA array的宽Y、高X；OptiX shader反转CUDA
+采样坐标，使归一化UV `(u,v)` 分别采样第一、第二逻辑轴。默认filter为 `linear`、address mode为 `repeat`；另支持
+`nearest`、`clamp_to_edge`、`mirrored_repeat`，与受管JIT纹理默认值一致。
+
+准备前可发现 `optix_query` version 3（`cuda_ordered`）和 `image_upload` version 1
+（`cuda_capture`）。opaque查询仍使用prepared-query快路径；alpha使用原有有序adapter API，
+不据此声明OptiX stream capture已合格。CUDA array驻留由驱动管理，逻辑texel字节为
+`product(shape) * channels * channel_bytes`，与查询workspace分开；workspace统计不含图像驻留。
+此显式资源/查询路径尚不代表普通AOT kernel纹理参数或alpha recording自动导出已接通。
+
 `refit` 也接受可更新 GAS。`instance_refit` 要求可更新的实例场景：传入 `transforms`
 时直接读取设备矩阵；省略时保留当前矩阵，仅刷新 IAS 包围盒。引用的 GAS 包围盒变化后，
 应在下次查询前安排 GAS refit 和 IAS 刷新。准备期拒绝非有限或不可逆的初始矩阵；后续
@@ -260,8 +301,9 @@ IAS、context 和 provider owner，直到在途完成与退休。
 Windows CUDA已验证独立/借用消费、双绑定、前后kernel、共享GAS的实例差异规则、
 设备镜像/非均匀变换、设备生成/共享面表、仅包围盒刷新、refit后命中/miss及退休；后续
 kernel的真实梯度可运行，但不提供求交对顶点/ray的自动微分。CPU/Vulkan不注册这些
-工厂。当前操作使用 `cuda_ordered`，CUDA capture、alpha/纹理、OMM、
-programmable pipeline 仍待接通。
+工厂。当前操作使用 `cuda_ordered`，CUDA capture、OMM、programmable pipeline 仍待接通。
+显式v3 alpha另验证非方形r32f/RGBA图像、设备texel/UV/面表更新、共享GAS实例、首个/最近查询、
+compact occlusion、命中/miss写回、设备refit和后续kernel梯度。
 
 包含 triangle/instance scene 的 typed query、compact occlusion、GAS refit 和 IAS
 变换/包围盒 refit recording 的已编译 Graph 可自动导出，须显式提供资源重建输入：

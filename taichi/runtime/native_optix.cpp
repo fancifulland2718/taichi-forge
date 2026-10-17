@@ -7,6 +7,7 @@
 #include "taichi/common/operation_json.h"
 #include "taichi/optix/forge_optix_runtime_provider.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_image.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/cuda/cuda_device.h"
@@ -116,6 +117,13 @@ struct OptixBoundFaceRule {
   std::optional<NativeArrayBinding> primitives;
 };
 
+struct OptixBoundAlphaMask {
+  NativeArrayBinding uvs;
+  std::shared_ptr<NativeSampledImage> image;
+  float cutoff{0.5f};
+  uint32_t channel{0};
+};
+
 struct OptixQueryOperation {
   static constexpr const char *kind = "optix_query";
   static constexpr uint32_t version = 1;
@@ -125,12 +133,18 @@ struct OptixQueryOperation {
   uint32_t ray_count{0};
   bool occlusion{false}, any_hit{false}, front_only{false};
   std::vector<OptixBoundFaceRule> face_rules;
+  std::vector<std::optional<OptixBoundAlphaMask>> alpha_masks;
 };
 
 // Version 1 freezes a flat table; version 2 binds live per-instance tables.
-// Both lower to the same query owner, output ABI and ordered execution path.
+// Version 3 also binds managed alpha images. All retain the output ABI and
+// ordered execution path.
 struct OptixBoundFaceQueryOperation : OptixQueryOperation {
   static constexpr uint32_t version = 2;
+};
+
+struct OptixAlphaQueryOperation : OptixQueryOperation {
+  static constexpr uint32_t version = 3;
 };
 
 struct OptixRefitOperation {
@@ -225,6 +239,28 @@ void validate_query(Device &device, const OptixQueryOperation &op) {
         throw std::invalid_argument("OptiX face rule has incompatible table binding");
       if (rule.primitives)
         reads.push_back(layout(device, *rule.primitives, counts[i], 1, true));
+    }
+  }
+  if (!op.alpha_masks.empty()) {
+    if (op.alpha_masks.size() != op.scene->instance_count())
+      throw std::invalid_argument("OptiX masks must match the instance count");
+    for (size_t i = 0; i < op.alpha_masks.size(); ++i) {
+      if (!op.alpha_masks[i]) continue;
+      const auto &mask = *op.alpha_masks[i];
+      if (!mask.image || &mask.image->device() != &device ||
+          mask.image->arch() != Arch::cuda)
+        throw std::invalid_argument("OptiX mask requires a local managed CUDA image");
+      const auto &p = mask.image->parameters();
+      if (p.dimension != ImageDimension::d2D || p.mip_levels != 1 ||
+          (p.format != BufferFormat::r32f && p.format != BufferFormat::rgba32f) ||
+          mask.channel >= (p.format == BufferFormat::r32f ? 1u : 4u) ||
+          !std::isfinite(mask.cutoff) || mask.cutoff < 0 || mask.cutoff > 1)
+        throw std::invalid_argument("OptiX mask requires a 2D r32f/rgba32f image and valid channel/cutoff");
+      if (op.scene->is_instances() && op.scene->instances().opaque[i])
+        throw std::invalid_argument("OptiX opaque instance cannot bind an alpha mask");
+      const auto &geometry = op.scene->is_instances()
+          ? op.scene->instances().gas[i]->geometry() : op.scene->geometry();
+      reads.push_back(layout(device, mask.uvs, geometry.vertex_count, 2, false));
     }
   }
   // Scene inputs can remain public arguments; a query must not corrupt them
@@ -593,6 +629,7 @@ class CudaOptixScene final : public OptixSceneResource,
 // together, including when backend failure makes destruction unsafe.
 struct OptixQueryLease {
   std::shared_ptr<CudaOptixScene> scene;
+  std::vector<std::shared_ptr<NativeSampledImage>> images;
   DeviceAllocationUnique workspace;
   TiForgeOptixPreparedQuery prepared{nullptr};
 };
@@ -606,29 +643,37 @@ class CudaOptixQuery final : public NativeOperation {
       throw std::invalid_argument("OptiX query requires a native scene");
     lease_ = std::make_unique<OptixQueryLease>();
     lease_->scene = scene_;
+    for (const auto &mask : op_.alpha_masks)
+      if (mask) lease_->images.push_back(mask->image);
   }
   void initialize() {
     auto &context = *scene_->lease->context;
     const auto &api = context.lease->api;
     const auto &queries = context.lease->queries;
+    const bool alpha = !lease_->images.empty();
+    const bool use_prepared = queries.prepare && !alpha;
     faces_ = op_.front_only || bool(op_.faces) ||
              std::any_of(op_.face_rules.begin(), op_.face_rules.end(),
                          [](const auto &rule) { return rule.mode != 0; });
-    extended_ = faces_ || op_.occlusion || op_.any_hit;
+    if (faces_ && alpha && !(api.info.features & TI_FORGE_OPTIX_FEATURE_FACE_FILTER_ALPHA))
+      throw std::invalid_argument("OptiX adapter does not support face and alpha filtering together");
+    extended_ = faces_ || op_.occlusion || op_.any_hit || alpha;
     typed_trace_ = scene_->is_instances() ? api.trace_instance_scene_typed : api.trace_typed;
     extended_trace_ = scene_->is_instances()
                           ? (op_.occlusion ? api.trace_instance_occlusion : api.trace_instance_alpha)
                           : (op_.occlusion ? api.trace_occlusion : api.trace_alpha);
     face_trace_ = scene_->is_instances() ? api.trace_instance_faces : api.trace_faces;
-    if (!queries.prepare)
+    if (!use_prepared)
       check(api, (faces_ ? api.prepare_faces
                         : extended_ ? api.prepare_alpha : api.prepare_typed)(
                    context.lease->handle),
           "prepare query pipeline");
-    face_records_offset_ = queries.prepare ? 0 : 64;
+    face_records_offset_ = use_prepared ? 0 : 64;
     const bool legacy_opaque_first =
-        !queries.prepare && op_.any_hit && !op_.occlusion && !faces_;
-    if (faces_ || (extended_ && !queries.prepare)) {
+        !use_prepared && op_.any_hit && !op_.occlusion && !faces_;
+    const bool mask_table = alpha || legacy_opaque_first;
+    size_t mask_records_offset = 0;
+    if (faces_ || (extended_ && !use_prepared)) {
       if (faces_ && scene_->instance_count() >
                         (std::numeric_limits<size_t>::max() - face_records_offset_) /
                             sizeof(TiForgeOptixFaceRule))
@@ -636,16 +681,17 @@ class CudaOptixQuery final : public NativeOperation {
       const size_t table_offset = face_records_offset_ +
           size_t(scene_->instance_count()) * sizeof(TiForgeOptixFaceRule);
       bytes_ = faces_ ? table_offset : 48;
-      if (legacy_opaque_first) {
-        if (scene_->instance_count() >
-            (std::numeric_limits<size_t>::max() - bytes_) / sizeof(TiForgeOptixAlphaMask))
-          throw std::overflow_error("OptiX empty mask table size overflows");
-        bytes_ += size_t(scene_->instance_count()) * sizeof(TiForgeOptixAlphaMask);
-      }
       if (op_.faces) {
         if (op_.faces->bytes > std::numeric_limits<size_t>::max() - bytes_)
           throw std::overflow_error("OptiX face workspace size overflows");
         bytes_ += op_.faces->bytes;
+      }
+      if (mask_table) {
+        mask_records_offset = bytes_;
+        if (scene_->instance_count() >
+            (std::numeric_limits<size_t>::max() - bytes_) / sizeof(TiForgeOptixAlphaMask))
+          throw std::overflow_error("OptiX mask table size overflows");
+        bytes_ += size_t(scene_->instance_count()) * sizeof(TiForgeOptixAlphaMask);
       }
       auto allocation = device().allocate_memory_unique({bytes_});
       if (allocation.second != RhiResult::success)
@@ -653,12 +699,22 @@ class CudaOptixQuery final : public NativeOperation {
       lease_->workspace = std::move(allocation.first);
       workspace_address_ = reinterpret_cast<uint64_t>(
           static_cast<cuda::CudaDevice &>(device()).get_memory_addr(*lease_->workspace));
-      if (legacy_opaque_first) {
-        // Older adapters require a mask record even for fully opaque first-hit
-        // traversal. Upload this compatibility table once, never on replay.
+      if (mask_table) {
+        // Upload immutable mask descriptions once. Older adapters also require
+        // zero-texture records for fully opaque first-hit traversal.
         std::vector<TiForgeOptixAlphaMask> masks(scene_->instance_count());
+        for (size_t i = 0; i < op_.alpha_masks.size(); ++i) {
+          if (!op_.alpha_masks[i]) continue;
+          const auto &mask = *op_.alpha_masks[i];
+          const auto &geometry = scene_->is_instances()
+              ? *scene_->lease->gas[i] : *scene_;
+          // Use the same frozen topology as GAS construction, not a public
+          // index array that the consumer may subsequently update.
+          masks[i] = {address(mask.uvs), geometry.lease->desc.indices,
+                      mask.image->cuda_sampled_object(), mask.cutoff, mask.channel};
+        }
         CUDADriver::get_instance().memcpy_host_to_device(
-            reinterpret_cast<void *>(workspace_address_ + 48), masks.data(),
+            reinterpret_cast<void *>(workspace_address_ + mask_records_offset), masks.data(),
             masks.size() * sizeof(TiForgeOptixAlphaMask));
       }
       if (faces_) {
@@ -700,11 +756,11 @@ class CudaOptixQuery final : public NativeOperation {
               op_.ray_count, address(op_.rays), address(op_.hits),
               op_.hit_indices ? address(*op_.hit_indices) : 0,
               0, 0, workspace_address_, 0, uint32_t(op_.any_hit)};
-    if (legacy_opaque_first) {
-      query_.masks = workspace_address_ + 48;
+    if (mask_table) {
+      query_.masks = workspace_address_ + mask_records_offset;
       query_.mask_count = scene_->instance_count();
     }
-    if (queries.prepare) {
+    if (use_prepared) {
       const TiForgeOptixFixedQueryDesc desc{
           sizeof(desc), uint32_t(scene_->is_instances()), scene_->lease->handle,
           op_.ray_count, uint32_t(op_.occlusion),
@@ -752,6 +808,9 @@ class CudaOptixQuery final : public NativeOperation {
   Arch arch() const override { return Arch::cuda; }
   Device &device() const override { return scene_->device(); }
   size_t workspace_bytes() const override { return bytes_; }
+  void validate_recording(NativeRecordingState &state) const override {
+    for (const auto &image : lease_->images) image->validate_sampling(state);
+  }
   NativeOperationMode execution_mode() const override {
     return NativeOperationMode::cuda_ordered;
   }
@@ -865,24 +924,29 @@ std::shared_ptr<Owner> prepare(NativePreparationContext &context,
 template <typename Description>
 void register_query(NativeOperationRegistry &registry) {
   registry.define<Description>([](Device &device, const Description &op) {
-    if constexpr (Description::version == 2) {
+    if constexpr (Description::version >= 2) {
       if (op.face_rules.empty())
-        throw std::invalid_argument("OptiX query v2 requires per-instance face rules");
+        throw std::invalid_argument("OptiX query requires per-instance face rules");
     }
     validate_query(device, op);
   });
   std::vector<std::string> optional_ports{"hit_indices"};
   std::vector<NativeOperationRegistry::BindingGroup> groups;
-  if constexpr (Description::version == 2)
+  if constexpr (Description::version >= 2)
     groups.push_back({"face_table_count", {"faces"}});
   else
     optional_ports.push_back("faces");
+  if constexpr (Description::version == 3)
+    groups.push_back({"mask_count", {"uvs", "image"}});
   registry.register_schema<Description>(
       "optix", "query", {"scene", "rays", "hits"},
       [](const liong::json::JsonValue &p)
           -> NativeOperationRegistry::Binder<Description> {
         using namespace operation_json;
-        if constexpr (Description::version == 2)
+        if constexpr (Description::version == 3)
+          fields(p, {"ray_count", "occlusion", "any_hit", "face_rules",
+                     "face_table_count", "alpha_masks", "mask_count"});
+        else if constexpr (Description::version == 2)
           fields(p, {"ray_count", "occlusion", "any_hit", "face_rules", "face_table_count"});
         else
           fields(p, {"ray_count", "occlusion", "any_hit", "front_only"});
@@ -893,7 +957,7 @@ void register_query(NativeOperationRegistry &registry) {
         if (occlusion && !any_hit)
           throw std::invalid_argument("OptiX occlusion requires any-hit acceptance");
         std::vector<uint32_t> modes;
-        if constexpr (Description::version == 2) {
+        if constexpr (Description::version >= 2) {
           const auto &rules = p["face_rules"];
           if (!rules.is_arr() || rules.arr.inner.empty() ||
               rules.arr.inner.size() > std::numeric_limits<uint32_t>::max())
@@ -916,6 +980,28 @@ void register_query(NativeOperationRegistry &registry) {
           if (integer(p["face_table_count"]) != tables)
             throw std::invalid_argument("OptiX face table count does not match face rules");
         }
+        std::vector<std::optional<std::pair<float, uint32_t>>> masks;
+        if constexpr (Description::version == 3) {
+          const auto &entries = p["alpha_masks"];
+          if (!entries.is_arr() || entries.arr.inner.size() != modes.size())
+            throw std::invalid_argument("OptiX alpha masks must match face-rule instances");
+          uint64_t active = 0;
+          for (const auto &entry : entries.arr.inner) {
+            if (entry.is_null()) {
+              masks.push_back(std::nullopt);
+              continue;
+            }
+            fields(entry, {"cutoff", "channel"});
+            const float cutoff = optional_f32(entry, "cutoff", 0.5f);
+            const auto channel = optional_integer(entry, "channel").value_or(0);
+            if (cutoff < 0 || cutoff > 1 || channel > 3)
+              throw std::invalid_argument("OptiX alpha cutoff/channel is out of range");
+            masks.push_back(std::make_pair(cutoff, uint32_t(channel)));
+            ++active;
+          }
+          if (integer(p["mask_count"]) != active)
+            throw std::invalid_argument("OptiX mask count does not match active masks");
+        }
         return [=](const NativeOperationBindings &b) {
           Description op;
           op.scene = b.at("scene").resource<OptixSceneResource>();
@@ -926,7 +1012,7 @@ void register_query(NativeOperationRegistry &registry) {
           op.any_hit = any_hit;
           op.front_only = front_only;
           if (b.count("hit_indices")) op.hit_indices = b.at("hit_indices").array();
-          if constexpr (Description::version == 2) {
+          if constexpr (Description::version >= 2) {
             size_t table = 0;
             op.face_rules.reserve(modes.size());
             for (auto mode : modes) {
@@ -937,6 +1023,20 @@ void register_query(NativeOperationRegistry &registry) {
             }
           } else if (b.count("faces")) {
             op.faces = b.at("faces").array();
+          }
+          if constexpr (Description::version == 3) {
+            size_t binding = 0;
+            for (const auto &mask : masks) {
+              if (!mask) {
+                op.alpha_masks.push_back(std::nullopt);
+                continue;
+              }
+              const auto suffix = "_" + std::to_string(binding++);
+              op.alpha_masks.push_back(OptixBoundAlphaMask{
+                  b.at("uvs" + suffix).array(),
+                  b.at("image" + suffix).resource<NativeSampledImage>(),
+                  mask->first, mask->second});
+            }
           }
           return op;
         };
@@ -1025,6 +1125,7 @@ void register_optix_operations(NativeOperationRegistry &registry) {
       }, {}, {}, {{"instance_count", {"gas"}}});
   register_query<OptixQueryOperation>(registry);
   register_query<OptixBoundFaceQueryOperation>(registry);
+  register_query<OptixAlphaQueryOperation>(registry);
   registry.define<OptixRefitOperation>(validate_refit);
   registry.register_schema<OptixRefitOperation>(
       "optix", "refit", {"scene", "vertices"},

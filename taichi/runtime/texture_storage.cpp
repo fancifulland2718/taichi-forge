@@ -152,6 +152,17 @@ CudaTextureStorage::CudaTextureStorage(const ImageParams &params) {
 }
 
 void CudaTextureStorage::upload_device(std::uint64_t source) {
+  upload(source, nullptr, false);
+}
+
+void CudaTextureStorage::upload_device_async(std::uint64_t source,
+                                             void *stream) {
+  upload(source, stream, true);
+}
+
+void CudaTextureStorage::upload(std::uint64_t source,
+                                void *stream,
+                                bool asynchronous) {
 #ifdef TI_WITH_CUDA
   TI_ERROR_IF(!source, "CUDA texture upload source is null");
   CUDA_MEMCPY3D copy{};
@@ -165,7 +176,11 @@ void CudaTextureStorage::upload_device(std::uint64_t source) {
   copy.Height = physical_extent_[1];
   copy.Depth = physical_extent_[2];
   auto guard = CUDAContext::get_instance().get_guard();
-  CUDADriver::get_instance().memcpy_3d(&copy);
+  auto &driver = CUDADriver::get_instance();
+  if (asynchronous)
+    driver.memcpy_3d_async(&copy, stream);
+  else
+    driver.memcpy_3d(&copy);
 #else
   TI_ERROR("CUDA texture upload requires a CUDA-enabled runtime");
 #endif
