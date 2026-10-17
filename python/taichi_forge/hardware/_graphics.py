@@ -904,8 +904,8 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         viewport=None,
     ):
         draws = tuple(draws)
-        if not draws or len(draws) > (1 << 20):
-            raise ValueError("graphics passes require 1 to 1048576 draws")
+        if not draws:
+            raise ValueError("graphics passes require at least one draw")
         if not all(isinstance(item, GraphicsPassDraw) for item in draws):
             raise TypeError("draws must contain GraphicsPassDraw values")
         for item in draws:
@@ -1429,10 +1429,10 @@ class VulkanGraphicsPipeline:
                     "fixed-count Vulkan storage-buffer descriptor arrays are "
                     "unavailable on the active device"
                 )
-            provider_limit = min(int(capabilities["max_fixed_count"]), 64)
-            if any(item.descriptor_count > provider_limit for item in array_bindings):
+            device_limit = int(capabilities["max_fixed_count"])
+            if any(item.descriptor_count > device_limit for item in array_bindings):
                 raise ValueError(
-                    "descriptor_count exceeds the Vulkan graphics provider limit"
+                    "descriptor_count exceeds the Vulkan graphics device limit"
                 )
         try:
             topology_value = _TOPOLOGIES[topology]
@@ -1737,10 +1737,10 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
                     "fixed-count Vulkan storage-buffer descriptor arrays are "
                     "unavailable on the active device"
                 )
-            provider_limit = min(int(capabilities["max_fixed_count"]), 64)
-            if any(item.descriptor_count > provider_limit for item in array_bindings):
+            device_limit = int(capabilities["max_fixed_count"])
+            if any(item.descriptor_count > device_limit for item in array_bindings):
                 raise ValueError(
-                    "descriptor_count exceeds the Vulkan graphics provider limit"
+                    "descriptor_count exceeds the Vulkan graphics device limit"
                 )
         try:
             topology_value = _TOPOLOGIES[topology]

@@ -544,6 +544,15 @@ SPIR-V rather than adding a shader-toolchain dependency, and adds no official
 wheel variant. Driver-owned pipeline and shader-module memory is reported as
 opaque rather than estimated.
 
+Fixed storage-buffer descriptor arrays use `ShaderBufferArrayBinding` and the
+device's `bindless_buffer_capabilities()["max_fixed_count"]`; 0.6.4 removes the
+former 64-element provider cap. This is a per-array ceiling, not a guarantee that
+several such arrays fit together. Preparation checks the merged shader layout,
+including shared binding type/count agreement and ordinary/update-after-bind
+storage descriptor limits. Passes require at least one draw and have no fixed
+software draw-count cap; individual commands retain their device and integer
+range checks. AOT raster descriptor-array bindings remain a separate coverage gap.
+
 Shader inputs also accept `graphics.SpirvShader(code, stage, entry_point="main",
 build=graphics.ShaderBuildInfo(...))`. Graphics requires `main` in the declared
 vertex/fragment/task/mesh stage. `SpirvShader.from_file(path, stage=...)` reads a

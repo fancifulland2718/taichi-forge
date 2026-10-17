@@ -24,7 +24,107 @@ const uint32_t sampled_vertex[] =
 const uint32_t sampled_fragment[] =
 #include "cpp_examples/rhi_examples/shaders/3_triangle.frag.spv.h"
     ;
+// glslc --target-env=vulkan1.2 -O -mfmt=c -o <output> <source>
+// Shared: -DCOLOR_BINDING=0; mismatch additionally: -DCOLOR_COUNT=3.
+const uint32_t storage_vertex[] =
+#include "tests/cpp/aot/vulkan/shaders/graphics_storage.vert.spv.h"
+    ;
+const uint32_t storage_fragment[] =
+#include "tests/cpp/aot/vulkan/shaders/graphics_storage.frag.spv.h"
+    ;
+const uint32_t shared_storage_fragment[] =
+#include "tests/cpp/aot/vulkan/shaders/graphics_storage_shared.frag.spv.h"
+    ;
+const uint32_t mismatched_storage_fragment[] =
+#include "tests/cpp/aot/vulkan/shaders/graphics_storage_mismatch.frag.spv.h"
+    ;
 }  // namespace
+
+TEST(VulkanGraphicsPipeline, StorageCapacityUsesMergedLayoutAndActualFlags) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto &caps = device.vk_caps();
+  const auto physical_caps = caps;
+  if (caps.max_per_stage_descriptor_storage_buffers < 8 ||
+      caps.max_descriptor_set_storage_buffers < 8)
+    GTEST_SKIP() << "Fixture requires eight storage descriptors";
+  // Only tighten the test device's advertised limits. Rejection must occur
+  // before creating a driver layout, without allocating oversized tables.
+  caps.descriptor_update_after_bind = false;
+  caps.descriptor_storage_buffer_update_after_bind = false;
+  caps.max_per_stage_descriptor_storage_buffers = 4;
+  caps.max_descriptor_set_storage_buffers = 4;
+  caps.max_per_stage_descriptor_update_after_bind_storage_buffers = 0;
+  caps.max_descriptor_set_update_after_bind_storage_buffers = 0;
+  auto create = [&](const uint32_t *fragment_words, size_t bytes) {
+    return prepare_vulkan_graphics_pipeline(
+        device,
+        {{PipelineSourceType::spirv_binary, storage_vertex,
+          sizeof(storage_vertex), PipelineStageType::vertex},
+         {PipelineSourceType::spirv_binary, fragment_words, bytes,
+          PipelineStageType::fragment}},
+        RasterParams{}, {}, {}, "merged_storage_capacity");
+  };
+  EXPECT_NO_THROW(
+      create(shared_storage_fragment, sizeof(shared_storage_fragment)));
+  EXPECT_THROW(
+      create(mismatched_storage_fragment, sizeof(mismatched_storage_fragment)),
+      std::invalid_argument);
+  EXPECT_THROW(create(storage_fragment, sizeof(storage_fragment)),
+               std::invalid_argument);
+  caps.max_per_stage_descriptor_storage_buffers = 8;
+  EXPECT_THROW(create(storage_fragment, sizeof(storage_fragment)),
+               std::invalid_argument);
+  caps.max_per_stage_descriptor_storage_buffers = 4;
+  caps.max_descriptor_set_storage_buffers = 8;
+  EXPECT_THROW(create(storage_fragment, sizeof(storage_fragment)),
+               std::invalid_argument);
+  caps.max_per_stage_descriptor_storage_buffers = 8;
+  EXPECT_NO_THROW(create(storage_fragment, sizeof(storage_fragment)));
+  caps = physical_caps;
+}
+
+TEST(VulkanGraphicsPipeline, StorageCapacityHonorsUpdateAfterBindSetFlags) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto &caps = device.vk_caps();
+  const auto physical_caps = caps;
+  if (!caps.descriptor_storage_buffer_update_after_bind ||
+      caps.max_per_stage_descriptor_storage_buffers < 4 ||
+      caps.max_descriptor_set_storage_buffers < 4 ||
+      caps.max_per_stage_descriptor_update_after_bind_storage_buffers < 8 ||
+      caps.max_descriptor_set_update_after_bind_storage_buffers < 8)
+    GTEST_SKIP() << "Fixture requires eight UAB storage descriptors";
+  auto create = [&]() {
+    return prepare_vulkan_graphics_pipeline(
+        device,
+        {{PipelineSourceType::spirv_binary, storage_vertex,
+          sizeof(storage_vertex), PipelineStageType::vertex},
+         {PipelineSourceType::spirv_binary, storage_fragment,
+          sizeof(storage_fragment), PipelineStageType::fragment}},
+        RasterParams{}, {}, {}, "update_after_bind_storage_capacity");
+  };
+  caps.descriptor_update_after_bind = false;
+  caps.descriptor_storage_buffer_update_after_bind = false;
+  caps.max_per_stage_descriptor_storage_buffers = 4;
+  caps.max_descriptor_set_storage_buffers = 4;
+  caps.max_per_stage_descriptor_update_after_bind_storage_buffers = 8;
+  caps.max_descriptor_set_update_after_bind_storage_buffers = 8;
+  // A larger UAB limit must not exempt a normal set from its own limit.
+  EXPECT_THROW(create(), std::invalid_argument);
+  caps.descriptor_storage_buffer_update_after_bind = true;
+  EXPECT_NO_THROW(create());
+  caps.max_per_stage_descriptor_update_after_bind_storage_buffers = 7;
+  EXPECT_THROW(create(), std::invalid_argument);
+  caps.max_per_stage_descriptor_update_after_bind_storage_buffers = 8;
+  caps.max_descriptor_set_update_after_bind_storage_buffers = 7;
+  EXPECT_THROW(create(), std::invalid_argument);
+  caps = physical_caps;
+}
 
 TEST(VulkanGraphicsPipeline, SharedConstructionUsesPhysicalInputLimits) {
   if (!is_vulkan_api_available())

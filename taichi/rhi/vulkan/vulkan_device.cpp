@@ -32,6 +32,24 @@ namespace vulkan {
 
 using namespace rhi_impl;
 
+namespace {
+VkDescriptorBindingFlags descriptor_binding_flags(
+    const VulkanResourceSet::Binding &binding,
+    const VulkanCapabilities &caps) {
+  const bool array =
+      std::holds_alternative<VulkanResourceSet::BufferArray>(binding.res);
+  const bool buffer = binding.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                      binding.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  return ((array && caps.descriptor_storage_buffer_update_after_bind) ||
+          (!array && caps.descriptor_update_after_bind && buffer))
+             ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                   (caps.descriptor_binding_partially_bound
+                        ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+                        : VkDescriptorBindingFlags{0})
+             : VkDescriptorBindingFlags{0};
+}
+}  // namespace
+
 const BidirMap<BufferFormat, VkFormat> buffer_format_map = {
     {BufferFormat::r8, VK_FORMAT_R8_UNORM},
     {BufferFormat::rg8, VK_FORMAT_R8G8_UNORM},
@@ -397,7 +415,8 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline_dynamic(
 void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
   TI_COMPILE_PROFILER("cpp.vulkan.descriptor_reflection_and_layout");
   std::map<std::pair<std::uint32_t, std::uint32_t>,
-           std::pair<SpvReflectDescriptorType, std::uint32_t>> ray_descriptors;
+           std::pair<SpvReflectDescriptorType, std::uint32_t>>
+      interface_descriptors;
   for (auto &code_view : params.code) {
     spv_reflect::ShaderModule reflection(code_view.size, code_view.data);
     RHI_THROW_UNLESS(reflection.GetResult() == SPV_REFLECT_RESULT_SUCCESS,
@@ -458,16 +477,25 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
     for (const SpvReflectDescriptorSet *desc_set : desc_sets) {
       for (std::uint32_t i = 0; i < desc_set->binding_count; ++i) {
         const SpvReflectDescriptorBinding *binding = desc_set->bindings[i];
-        if (bind_point_ == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
-          const auto declaration = std::make_pair(binding->descriptor_type, binding->count);
-          const auto [found, inserted] = ray_descriptors.emplace(
+        if (bind_point_ != VK_PIPELINE_BIND_POINT_COMPUTE) {
+          const auto declaration =
+              std::make_pair(binding->descriptor_type, binding->count);
+          const auto [found, inserted] = interface_descriptors.emplace(
               std::make_pair(desc_set->set, binding->binding), declaration);
-          RHI_THROW_UNLESS(inserted || found->second == declaration,
-                           std::invalid_argument("Ray stages must agree on descriptor type and array count"));
-          RHI_THROW_UNLESS(binding->count == 1 ||
-                               binding->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
-                               binding->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                           std::invalid_argument("Ray descriptor arrays are supported for storage buffers and combined samplers"));
+          RHI_THROW_UNLESS(
+              inserted || found->second == declaration,
+              std::invalid_argument("Shader stages must agree on descriptor "
+                                    "type and array count"));
+        }
+        if (bind_point_ == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+          RHI_THROW_UNLESS(
+              binding->count == 1 ||
+                  binding->descriptor_type ==
+                      SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                  binding->descriptor_type ==
+                      SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              std::invalid_argument("Ray descriptor arrays are supported for "
+                                    "storage buffers and combined samplers"));
         }
         RHI_THROW_UNLESS(
             binding->count > 0,
@@ -654,6 +682,40 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
                 default_state);
     }
   }
+
+  // Layouts expose each merged binding to VK_SHADER_STAGE_ALL. Count each
+  // binding once across stages, and each set's update-after-bind policy once.
+  // Per-stage reflection alone misses the union of distinct stage resources.
+  const auto &caps = ti_device_.vk_caps();
+  std::uint64_t storage_total = 0;
+  std::uint64_t storage_without_update_after_bind = 0;
+  for (const auto &[index, resources] : set_templates_) {
+    std::uint64_t storage = 0;
+    bool update_after_bind = false;
+    for (const auto &[binding, descriptor] : resources.get_bindings()) {
+      if (descriptor.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+        storage += VulkanResourceSet::descriptor_count(descriptor);
+      update_after_bind |= descriptor_binding_flags(descriptor, caps) != 0;
+    }
+    storage_total += storage;
+    if (!update_after_bind)
+      storage_without_update_after_bind += storage;
+  }
+  RHI_THROW_UNLESS(
+      storage_without_update_after_bind <=
+              caps.max_per_stage_descriptor_storage_buffers &&
+          storage_without_update_after_bind <=
+              caps.max_descriptor_set_storage_buffers &&
+          storage_total <=
+              std::max(
+                  caps.max_per_stage_descriptor_storage_buffers,
+                  caps.max_per_stage_descriptor_update_after_bind_storage_buffers) &&
+          storage_total <=
+              std::max(
+                  caps.max_descriptor_set_storage_buffers,
+                  caps.max_descriptor_set_update_after_bind_storage_buffers),
+      std::invalid_argument(
+          "Merged storage-buffer descriptors exceed Vulkan device limits"));
 
   // A program can have no binding sets at all.
   if (set_templates_.size()) {
@@ -4488,22 +4550,7 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
         /*binding=*/pair.first, pair.second.type, descriptor_count,
         VK_SHADER_STAGE_ALL,
         /*pImmutableSamplers=*/nullptr});
-    const bool is_buffer_array =
-        std::holds_alternative<VulkanResourceSet::BufferArray>(
-            pair.second.res);
-    const bool is_patchable_buffer =
-        pair.second.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-        pair.second.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    const auto flags =
-        ((is_buffer_array &&
-          vk_caps().descriptor_storage_buffer_update_after_bind) ||
-         (!is_buffer_array && vk_caps().descriptor_update_after_bind &&
-          is_patchable_buffer))
-            ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-                  (vk_caps().descriptor_binding_partially_bound
-                       ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
-                       : VkDescriptorBindingFlags{0})
-            : VkDescriptorBindingFlags{0};
+    const auto flags = descriptor_binding_flags(pair.second, vk_caps());
     binding_flags.push_back(flags);
     has_update_after_bind_binding |= flags != 0;
   }

@@ -24,8 +24,6 @@ class VulkanGraphicsPipelineResource;
 
 namespace {
 
-constexpr std::size_t kMaximumPassDraws = 1u << 20;
-
 using RecordedGraphicsShaderBuffer = VulkanGraphicsShaderBufferView;
 
 using RecordedGraphicsShaderImage = VulkanGraphicsShaderImageView;
@@ -634,9 +632,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
   prepared.generation = runtime_program_generation();
   TI_ERROR_IF(!vulkan_graphics_pipeline_available(), "Graphics passes require Vulkan");
   auto *device = static_cast<vulkan::VulkanDevice *>(get_graphics_device());
-  TI_ERROR_IF(commands.empty() || commands.size() > kMaximumPassDraws,
-              "Vulkan graphics pass requires 1 to {} draws.",
-              kMaximumPassDraws);
+  TI_ERROR_IF(commands.empty(), "Vulkan graphics pass requires at least one draw.");
   std::vector<VulkanGraphicsColorTarget> color_targets;
   std::vector<const Ndarray *> arrays;
   std::vector<const Texture *> textures;
@@ -849,17 +845,14 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                   shader.set_index, shader.binding);
       if (!shader.array_elements.empty()) {
         const auto bindless_caps = vulkan_bindless_buffer_capabilities();
-        constexpr std::size_t kMaximumProviderBindlessBuffers = 64;
-        const std::size_t limit = std::min<std::size_t>(
-            bindless_caps.at("max_fixed_count"),
-            kMaximumProviderBindlessBuffers);
+        const std::size_t limit = bindless_caps.at("max_fixed_count");
         TI_ERROR_IF(bindless_caps.at("fixed_count") == 0 || !shader.storage,
                     "Vulkan bindless graphics requires fixed-count storage "
                     "buffer descriptor indexing.");
         TI_ERROR_IF(shader.array_elements.size() < 2 ||
                         shader.array_elements.size() > limit,
                     "Vulkan bindless graphics table size must be between 2 "
-                    "and the provider/device limit {}.",
+                    "and the device limit {}.",
                     limit);
         RecordedGraphicsShaderBuffer recorded_shader;
         recorded_shader.set_index = shader.set_index;

@@ -1180,8 +1180,8 @@ def _passive_core_statuses(runtime_initialized, backend):
                 "bindless_storage_buffer_runtime_array": bool(
                     graphics_bindless_buffers["runtime_array"]
                 ),
-                "max_bindless_storage_buffer_fixed_count": min(
-                    int(graphics_bindless_buffers["max_fixed_count"]), 64
+                "max_bindless_storage_buffer_fixed_count": int(
+                    graphics_bindless_buffers["max_fixed_count"]
                 ),
             },
         },

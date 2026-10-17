@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan graphics removes the fixed 64-buffer table and million-draw pass
+  caps. Device capacities and command ranges remain checked; shared reflection
+  rejects incompatible cross-stage declarations and excessive merged storage
+  descriptor counts. AOT raster descriptor arrays are not enabled by this change.
+
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache

@@ -261,8 +261,13 @@ def _storage_image_pipeline():
 
 
 def _bindless_triangle_pipeline(*, descriptor_count=4):
+    shader_name = (
+        "hardware_graphics_bindless_65.vert.spv"
+        if descriptor_count == 65
+        else "hardware_graphics_bindless.vert.spv"
+    )
     vertex_path = (
-        Path(__file__).parent / "assets" / "hardware_graphics_bindless.vert.spv"
+        Path(__file__).parent / "assets" / shader_name
     )
     return ti.hardware.graphics.VulkanGraphicsPipeline(
         vertex_path.read_bytes(),
@@ -532,8 +537,8 @@ def test_vulkan_bindless_buffer_feature_report_keeps_axes_independent():
     assert operation.native_facts["bindless_storage_buffer_fixed_count"] == bool(
         capabilities["fixed_count"]
     )
-    assert operation.native_facts["max_bindless_storage_buffer_fixed_count"] == min(
-        capabilities["max_fixed_count"], 64
+    assert operation.native_facts["max_bindless_storage_buffer_fixed_count"] == (
+        capabilities["max_fixed_count"]
     )
 
 
@@ -642,12 +647,21 @@ def test_vulkan_task_mesh_pipeline_uses_independent_task_admission():
         assert _texture_rgb(target)[32, 32].max() > 32
 
 
+@pytest.mark.parametrize("descriptor_count", (4, 65))
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_vulkan_bindless_buffer_table_executes_and_rebinds_graph_generation():
+def test_vulkan_bindless_buffer_table_executes_and_rebinds_graph_generation(
+    descriptor_count,
+):
     if not ti.hardware.graphics.is_bindless_buffer_available():
         pytest.skip("Vulkan bindless graphics buffers are unavailable")
+    limit = ti.hardware.graphics.bindless_buffer_capabilities()["max_fixed_count"]
+    if descriptor_count > limit:
+        pytest.skip("Device storage descriptor limit is below the fixture size")
+    if limit < 0xFFFFFFFF:
+        with pytest.raises(ValueError, match="device limit"):
+            _bindless_triangle_pipeline(descriptor_count=limit + 1)
 
-    with _bindless_triangle_pipeline() as pipeline:
+    with _bindless_triangle_pipeline(descriptor_count=descriptor_count) as pipeline:
         with pytest.raises(ValueError, match="count must match"):
             pipeline.pass_draw(
                 ti.hardware.graphics.Draw(3),
@@ -657,23 +671,21 @@ def test_vulkan_bindless_buffer_table_executes_and_rebinds_graph_generation():
 
         vertices = _triangle_vertices()
         colors = []
-        for value in (
-            (1.0, 0.0, 0.0, 1.0),
-            (1.0, 1.0, 0.0, 1.0),
-            (0.0, 0.0, 1.0, 1.0),
-            (1.0, 0.0, 1.0, 1.0),
-        ):
+        for value in ((1.0, 0.0, 0.0, 1.0), (0.0, 0.0, 1.0, 1.0)):
             color = ti.ndarray(ti.f32, shape=4)
             color.from_numpy(np.array(value, dtype=np.float32))
             colors.append(color)
         selector = ti.ndarray(ti.u32, shape=4)
-        selector.from_numpy(np.array([2, 0, 0, 0], dtype=np.uint32))
+        selector.from_numpy(
+            np.array([descriptor_count - 1, 0, 0, 0], dtype=np.uint32)
+        )
+        color_names = tuple(f"color{i}" for i in range(descriptor_count))
 
         draw = pipeline.pass_draw(
             ti.hardware.graphics.Draw(3),
             vertex_buffers={0: "vertices"},
             shader_buffers={
-                (0, 0): ("color0", "color1", "color2", "color3"),
+                (0, 0): color_names,
                 (0, 1): "selector",
             },
         )
@@ -683,37 +695,32 @@ def test_vulkan_bindless_buffer_table_executes_and_rebinds_graph_generation():
         ) == (
             ("target", GraphAccess.WRITE),
             ("vertices", GraphAccess.READ),
-            ("color0", GraphAccess.READ),
-            ("color1", GraphAccess.READ),
-            ("color2", GraphAccess.READ),
-            ("color3", GraphAccess.READ),
+            *((name, GraphAccess.READ) for name in color_names),
             ("selector", GraphAccess.READ),
         )
 
         builder = ti.graph.GraphBuilder()
         builder.append_native(recording, admission="auto")
         graph = builder.compile()
-        target = ti.Texture(ti.Format.rgba8, (64, 64))
+        target = ti.Texture(ti.Format.rgba8, (8, 8))
         bindings = {
             "target": target,
             "vertices": vertices,
-            "color0": colors[0],
-            "color1": colors[1],
-            "color2": colors[2],
-            "color3": colors[3],
+            **{name: colors[0] for name in color_names},
+            color_names[-1]: colors[1],
             "selector": selector,
         }
         graph.run(bindings)
         ti.sync()
-        first = _texture_rgb(target)[32, 32]
+        first = _texture_rgb(target)[4, 4]
         assert first[0] < 8 and first[1] < 8 and first[2] > 32
 
         replacement = ti.ndarray(ti.f32, shape=4)
         replacement.from_numpy(np.array((0.0, 1.0, 0.0, 1.0), dtype=np.float32))
-        bindings["color2"] = replacement
+        bindings[color_names[-1]] = replacement
         graph.run(bindings)
         ti.sync()
-        second = _texture_rgb(target)[32, 32]
+        second = _texture_rgb(target)[4, 4]
         assert second[0] < 8 and second[1] > 32 and second[2] < 8
 
         assert graph._debug_info["optimization"]["backend_command_nodes"] == 1

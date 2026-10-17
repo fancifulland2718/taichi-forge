@@ -1,12 +1,16 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : require
 
+#ifndef COLOR_COUNT
+#define COLOR_COUNT 4
+#endif
+
 layout(location = 0) in vec2 in_position;
 layout(location = 0) out vec3 out_color;
 
 layout(set = 0, binding = 0, std430) readonly buffer Color {
   vec4 value;
-} colors[4];
+} colors[COLOR_COUNT];
 
 layout(set = 0, binding = 1, std140) uniform Parameters {
   uint selector;
