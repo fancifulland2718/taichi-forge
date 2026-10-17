@@ -174,6 +174,77 @@ def test_graph_borrowed_display_storage_retention_and_retirement():
         assert final[key] == baseline[key]
 
 
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=ti.cuda)
+def test_repeat_reuses_shared_images_under_active_simulation():
+    window = ti.ui.Window("active repeat", (16, 12), show_window=False)
+    canvas = window.get_canvas()
+    program = impl.get_runtime().prog
+    baseline = dict(program._debug_external_dense_storage_stats())
+    state = ti.ndarray(ti.f32, 4096)
+    state.fill(0)
+
+    @ti.kernel
+    def simulate(a: ti.types.ndarray(dtype=ti.f32, ndim=1), rounds: ti.i32):
+        for i in a:
+            x = a[i]
+            for j in range(rounds):
+                x = (x + 0.000001) * 0.99999
+            a[i] = x
+
+    @ti.kernel
+    def paint(a: ti.types.ndarray(dtype=ti.u32, ndim=2), value: ti.u32):
+        for i, j in a:
+            a[i, j] = value
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(simulate, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a", ti.f32, ndim=1),
+                     ti.graph.Arg(ti.graph.ArgKind.SCALAR, "rounds", ti.i32))
+    graph = builder.compile()
+    bound = graph.bind({"a": state, "rounds": 20000000})
+    graph.submit(bound).wait()
+
+    def display(value):
+        with canvas.acquire_frame(16, 12) as frame:
+            paint(frame.pixels, value)
+            assert canvas.submit_frame(frame)
+        assert window.show()
+        return frame.completion
+
+    try:
+        display(0xFF0000FF).wait()
+        for _ in range(16):
+            display(0xFF0000FF).wait()
+            producer = graph.submit(bound)
+            latest = display(0xFF332211)
+            tail = graph.submit(bound)
+            repeated = canvas.repeat_frame()
+            assert repeated is not None
+            assert window.show()
+            repeated.wait()
+            latest.wait()
+            producer.wait()
+            tail.wait()
+        stats = dict(program._debug_external_dense_storage_stats())
+        # The alternating new/repeat sequence must reuse storage, even when
+        # the last image's renderable is still in flight at repeat admission.
+        assert stats["created_total"] - baseline["created_total"] <= 3
+        assert stats["released_total"] == baseline["released_total"]
+        assert canvas.repeat_frame() is not None
+        observed = window.get_image_buffer_as_numpy()
+        np.testing.assert_allclose(
+            observed, np.broadcast_to(np.array([17, 34, 51, 255]) / 255, observed.shape), atol=1 / 255 + 1e-5
+        )
+        assert np.isfinite(state.to_numpy()).all()
+    finally:
+        window.destroy()
+        graph.close()
+    ti.sync()
+    final = dict(program._debug_external_dense_storage_stats())
+    for key in ("live", "retiring", "leases"):
+        assert final[key] == baseline[key]
+
+
 def _continuous_display_ring(kind, *, visible=False, window_action=None):
     """Reuse application storage only after the corresponding display read."""
     shape = (24, 16)

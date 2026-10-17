@@ -416,14 +416,24 @@ SetImage *Renderer::get_set_image_renderable() {
 }
 
 SetImage *Renderer::get_set_image_renderable(bool reuse_last_image) {
+  retire_completed_frames();
   std::unique_ptr<SetImage> r;
   auto reusable = reusable_set_images_.end();
-  if (last_shared_display_image_ && !reuse_last_image) {
+  if (last_shared_display_image_) {
     reusable = std::find_if(
         reusable_set_images_.begin(), reusable_set_images_.end(),
-        [this](const auto &item) {
-          return item->shared_image() != last_shared_display_image_;
+        [this, reuse_last_image](const auto &item) {
+          auto image = item->shared_image();
+          return reuse_last_image ? image == last_shared_display_image_
+                                  : image && image != last_shared_display_image_;
         });
+    if (reusable == reusable_set_images_.end()) {
+      // Replacing a different image can synchronize unrelated CUDA work when
+      // its imported memory is freed. Retain that storage for future writes.
+      reusable = std::find_if(
+          reusable_set_images_.begin(), reusable_set_images_.end(),
+          [](const auto &item) { return !item->shared_image(); });
+    }
   } else if (!reusable_set_images_.empty()) {
     reusable = std::prev(reusable_set_images_.end());
   }
@@ -433,6 +443,18 @@ SetImage *Renderer::get_set_image_renderable(bool reuse_last_image) {
   }
   if (!r) {
     r = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
+  }
+  if (!reuse_last_image) {
+    auto image = r->shared_image();
+    if (image && image != last_shared_display_image_) {
+      // Completed repeats can alias one image. Detach idle aliases before a
+      // new write; in-flight renderables and the last display remain pinned.
+      // Empty renderables are then reused by subsequent repeats.
+      for (const auto &item : reusable_set_images_) {
+        if (item->shared_image() == image)
+          item->use_shared_image(nullptr);
+      }
+    }
   }
   SetImage *ret = r.get();
   renderables_.push_back(std::move(r));

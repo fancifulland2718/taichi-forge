@@ -96,6 +96,10 @@
   线程等待时，查询与 pacer Graph 提交仍可继续。runtime reset 和显示关闭会在销毁后端句柄前
   排空使用它们的线程，并保留首次错误与资源只释放一次的语义。
 
+- `Canvas.repeat_frame()` 优先复用持有当前共享图像的 renderable 或空 renderable，保留其他
+  已完成图像供后续写入，并在重用前解除已完成 renderable 的别名引用。CUDA/Vulkan 重复显示
+  不再因释放导入图像存储而等待无关 CUDA 工作；外部 semaphore 所有权和关闭同步仍然保留。
+
 - `ti.ui.Window.get_scroll_delta()` 返回并清空 GLFW 累积的水平、垂直滚轮增量，保留小数值，
   不额外轮询事件。ImGui 回调按所属窗口切换上下文，关闭与重建不会重放旧增量。
   原始增量仍交给 ImGui；相机输入应使用现有的 `is_render_input_available()` 判断 UI 占用。

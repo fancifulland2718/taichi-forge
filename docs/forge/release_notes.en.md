@@ -122,6 +122,12 @@ lifetimes. The entries below describe the changes.
   display teardown drain backend readers before destroying their handles, while
   preserving the first error and exactly-once resource release.
 
+- `Canvas.repeat_frame()` reuses a renderable holding the current shared image,
+  or an empty renderable, and retains other completed images for future writes.
+  Completed aliases are detached before reuse. Repeating a CUDA/Vulkan frame no
+  longer frees imported image storage and waits for unrelated CUDA work; external
+  semaphore ownership and teardown synchronization remain in place.
+
 - `ti.ui.Window.get_scroll_delta()` consumes accumulated horizontal and vertical
   GLFW scroll offsets, preserving fractional values without polling events.
   ImGui callbacks select the event window's context; closing and recreating a

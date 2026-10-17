@@ -571,6 +571,14 @@ bool SetImage::has_pending_shared_cuda_vulkan_image() const noexcept {
 
 void SetImage::use_shared_image(std::shared_ptr<SharedCudaVulkanImage> image) {
   shared_cuda_vulkan_image_ = std::move(image);
+  if (!shared_cuda_vulkan_image_) {
+    pending_shared_cuda_vulkan_ = false;
+    if (auto *state = find_direct_state(this)) {
+      state->display_buffer = kDeviceNullPtr;
+      state->enabled = false;
+    }
+    return;
+  }
   width_ = shared_cuda_vulkan_image_->width();
   height_ = shared_cuda_vulkan_image_->height();
   format_ = BufferFormat::rgba8;
