@@ -478,7 +478,8 @@ Contents and sampler come from the consumer object. Its kernel dimension/format
 and operation contracts are checked at preparation; export does not copy producer
 resource state. Names cannot collide with array/scalar/gradient arguments, private
 Graph storage or construction inputs. Distinct owners require distinct names.
-The public-owner form currently opts in sampled Textures only; other families
+The public-owner form opts in sampled Textures and the qualified OptiX resources
+described below; other families
 continue to require their documented reconstruction inputs. Windows ordinary and
 selected CUDA/Vulkan checks cover standalone creation, borrowed JIT Texture
 imports, aliases, downstream gradients, CUDA siblings and resource retirement.
@@ -611,6 +612,34 @@ GAS handle. Windows CUDA checks cover shared geometry, device transforms,
 bounds-only refits, independent bindings and downstream gradients. Legacy untyped
 hits, OMM/program recordings and nonzero SBT offsets remain unsupported by
 this automatic route and are rejected during export.
+
+These qualified OptiX contexts, triangle scenes, GAS and instance scenes may
+instead be public resource inputs. Map a source object to a string name:
+
+```python
+module.add_execution_plan(
+    "step", compiled_graph,
+    resource_bindings={instance_scene: "shared_scene", gas_a: "shared_gas"},
+)
+# The consumer creates these with runtime.native_resource("optix", ...).
+call = module.prepare_execution("step", {**arrays, "shared_scene": scene, "shared_gas": gas})
+```
+
+Include the GAS mapping when a recording refits that GAS separately. A query-only
+graph only needs the scene mapping. No private AS or context is rebuilt for those
+public owners; multiple modules may bind the same runtime-local owners. To rebuild
+only an IAS, provide public context/GAS mappings and retain the IAS transform-seed
+mapping. Preparation still validates operation layouts and factory contracts.
+
+Export preserves source sharing with v17 `resource_alias` constraints: a public
+IAS must reference the separately bound GAS at the corresponding `gas_N` ports,
+repeated source GAS instances must share one registered owner, and shared source
+contexts must resolve to one owner. These checks run at prepare/rebind, not replay.
+A source dependency cannot both remain inside a public owner and be rebuilt
+privately elsewhere in the same plan; make the shared dependency public too.
+This prevents updating unrelated geometry with identical counts. It does not
+serialize AS data or borrow JIT OptiX handles. Consumer scene contents are explicit
+inputs, and public resource storage is not included in private workspace counters.
 
 For alpha recordings, supply the live Texture associated with each public Graph
 texture name in `source_bindings`, and an explicit initial pixel input through

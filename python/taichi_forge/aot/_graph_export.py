@@ -38,6 +38,8 @@ class _ExportContext:
         self.root_payloads = ()
         self._resource_owners = {}
         self._resource_policies = {}
+        self._public_resource_owners = {}
+        self._resource_links = {}
         self._indices = {}
         self._names = set(reserved_names) | set(module._exported_kernels) | set(module._fields)
         self._kernel_names = {
@@ -104,6 +106,55 @@ class _ExportContext:
             raise ValueError("AOT resource factory did not register its owner")
         self._resource_policies[id(owner)] = policy
         return name
+
+    def public_resource(self, owner):
+        name = self.resource_inputs.public(owner)
+        if name is not None:
+            self._public_resource_owners[id(owner)] = (owner, name)
+        return name
+
+    def resource_links(self, owner, links):
+        """Record qualified source relationships; never serialize source handles."""
+        links = tuple(sorted(links.items()))
+        previous = self._resource_links.get(id(owner))
+        if previous is not None:
+            if len(previous[1]) != len(links) or any(
+                old_port != port or old_child is not child
+                for (old_port, old_child), (port, child) in zip(previous[1], links)
+            ):
+                raise ValueError("Native resource relationships changed during export")
+        else:
+            self._resource_links[id(owner)] = (owner, links)
+
+    def resolve_resource_aliases(self):
+        # Visit each source resource's children once; repeated occurrences emit
+        # only an identity certificate instead of expanding a shared DAG again.
+        canonical = {}
+        for owner, name in self._public_resource_owners.values():
+            stack = [(owner, ())]
+            while stack:
+                resource, path = stack.pop()
+                key = id(resource)
+                if key in self._resource_owners:
+                    raise ValueError(
+                        "A public resource dependency is also rebuilt privately; bind the shared dependency publicly"
+                    )
+                if key in canonical:
+                    left, left_path = canonical[key]
+                    if (left, left_path) != (name, path):
+                        self.binding_constraints.append(
+                            dict(
+                                kind="resource_alias",
+                                left=left,
+                                right=name,
+                                left_path=list(left_path),
+                                right_path=list(path),
+                            )
+                        )
+                    continue
+                canonical[key] = (name, path)
+                if key in self._resource_links:
+                    stack.extend((child, path + (port,)) for port, child in self._resource_links[key][1])
 
     def _resource(self, owner, description, *, name=None):
         """Share only an identical producer resource, with an identical description."""
@@ -1060,6 +1111,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         source_arrays.validate_used(spec.runtime_arg_names)
         source_images.validate_used()
         resource_inputs.validate_used()
+        context.resolve_resource_aliases()
         context.binding_constraints.extend(source_arrays.constraints)
         if context.control_names != context._control_bindings:
             raise TaichiRuntimeError("AOT Graph requires complete selected control binding metadata")

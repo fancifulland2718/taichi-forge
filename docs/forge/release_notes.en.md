@@ -39,6 +39,12 @@ lifetimes. The entries below describe the changes.
   are checked at preparation, with no replay lookup and the existing retirement
   contract. Requires paired ABI82 components; older plans remain supported.
 
+- OptiX Graph export can bind public contexts, triangle scenes, GAS and IAS,
+  reusing resources across AOT modules without rebuilding them per plan.
+  v17 alias certificates preserve source GAS/context sharing and reject
+  mismatched resources before execution. Typed/occlusion queries, refits,
+  downstream gradients and transitive retirement are qualified on CUDA.
+
 - Sampled Texture Graph export accepts `resource_bindings={texture: "public_name"}`
   to reuse created or imported NativeResources without private images or seed
   uploads. Ordinary/selected CUDA/Vulkan paths, aliases, downstream gradients

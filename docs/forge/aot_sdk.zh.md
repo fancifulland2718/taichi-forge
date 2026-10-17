@@ -374,7 +374,7 @@ prepared = loaded_module.prepare_execution(
 统一引用该公开资源名，复用 kernel 条目及选中的 CUDA 绑定族策略。内容与 sampler
 由消费对象提供，准备时检查 kernel 维数/格式和操作合同；导出不复制生产资源状态。
 名称不可与数组/标量/梯度参数、私有 Graph 存储或构造输入冲突，不同 owner 须使用
-不同名称。当前只有 sampled Texture 显式接通这种公共 owner 形式，其他家族仍按
+不同名称。sampled Texture 和下述合格 OptiX 资源已接通这种公共 owner 形式，其他家族仍按
 各自文档提供重建输入。Windows 普通/selected CUDA/Vulkan 已验证独立创建、JIT
 Texture 借用、别名、后续梯度、CUDA 兄弟绑定及资源退休。
 
@@ -472,6 +472,30 @@ module.add_execution_plan("step", compiled_graph, resource_bindings=resource_bin
 关闭的 GAS 句柄直接 refit。Windows CUDA 已验证共享几何、设备变换、包围盒刷新、
 独立绑定及后续梯度。旧 untyped hit、OMM/program recording 和非零 SBT offset
 仍未接通自动导出，会在导出阶段明确拒绝。
+
+这些合格 OptiX context、triangle scene、GAS 和 instance scene 也可作为公开资源输入，
+将源对象映射为字符串名称：
+
+```python
+module.add_execution_plan(
+    "step", compiled_graph,
+    resource_bindings={instance_scene: "shared_scene", gas_a: "shared_gas"},
+)
+# 消费端通过 runtime.native_resource("optix", ...) 创建这些资源。
+call = module.prepare_execution("step", {**arrays, "shared_scene": scene, "shared_gas": gas})
+```
+
+当 recording 单独 refit GAS 时，提供相应 GAS 映射；仅查询的 Graph 只需 scene 映射。
+这些公开 owner 不再重建私有 AS/context，多个模块可绑定同一 runtime 内的 owner。
+若只重建 IAS，可公开 context/GAS，同时保留 IAS 的 transform seed 映射。
+操作布局和工厂合同仍在准备阶段检查。
+
+导出使用 v17 `resource_alias` 约束保留源共享关系：公开 IAS 的对应 `gas_N` 端口须
+引用单独绑定的 GAS；源场景中重复使用的 GAS 必须对应同一注册 owner；共享 context
+也须保持身份一致。检查仅发生在 prepare/rebind。若某源依赖已包含在公开 owner 内，
+同一计划不能又将它重建为另一份私有资源，须将该共享依赖也公开。这可避免更新一份
+几何却查询另一份同形状几何。不序列化 AS 数据，也不借用 JIT OptiX 句柄；消费端场景
+内容由显式输入决定。公共资源的设备存储不计入 prepared 私有 workspace 字节数。
 
 alpha recording 的公开 Graph 纹理名通过 `source_bindings` 对应到存活的 Texture，
 初始像素仍通过公共 `resource_bindings` 明确指定：

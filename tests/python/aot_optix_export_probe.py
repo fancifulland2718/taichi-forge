@@ -38,6 +38,7 @@ def main(mode, artifact, adapter, output):
             dhits=(4, 4),
             faces=(2,),
         )
+        costs["public_resources"] = check_public_resources(runtime, module, artifact, shapes)
         for policy in ("two_sided", "front_only", "table", "query_only"):
             for binding in range(2):
                 plan = module.execution_plan(policy)
@@ -105,6 +106,93 @@ def main(mode, artifact, adapter, output):
     if mode == "standalone":
         assert "taichi_forge" not in sys.modules
     Path(output).write_text(json.dumps(costs, indent=2))
+
+
+def check_public_resources(runtime, module, artifact, shapes):
+    seed = runtime.ndarray("f32", shapes["seed"])
+    indices = runtime.ndarray("i32", shapes["indices"])
+    write(seed, VERTICES)
+    write(indices, range(6), "i")
+    context = runtime.native_resource("optix", "context")
+    scene = runtime.native_resource(
+        "optix",
+        "triangle_scene",
+        parameters=dict(vertex_count=6, triangle_count=2, allow_update=True),
+        bindings=dict(context=context, vertices=seed, indices=indices),
+    )
+    peer = runtime.load_module(artifact)
+    prepared = []
+    records = []
+    for owner, policy in ((module, "table"), (peer, "query_only")):
+        plan = owner.execution_plan(policy + "_public")
+        frame = {
+            name: runtime.ndarray("i32" if name in ("ids", "occluded", "faces") else "f32", shapes[name])
+            for name in plan.argument_names
+            if name != "shared_scene"
+        }
+        write(frame["rays"], sum(RAYS, []))
+        write(frame["hits"], [-99] * 16)
+        if policy == "table":
+            write(frame["seed"], VERTICES)
+            write(frame["faces"], [1, 1], "i")
+        start = time.perf_counter()
+        call = plan.prepare(owner, dict(frame, shared_scene=scene))
+        records.append(dict(policy=policy, prepare_ms=(time.perf_counter() - start) * 1000, info=call.info))
+        assert read(frame["hits"]) == [-99] * 16
+        prepared.append((frame, call))
+    for shift in (0, 4, -0.25, 0):
+        write(prepared[0][0]["shift"], [shift])
+        for frame, call in prepared:
+            call()
+            check(frame, shift, [1, 1])
+    # Query and refit plans in different modules retain one scene. Closing its
+    # context waits for in-flight work and retires both plans transitively.
+    for record, (_, call) in zip(records, prepared):
+        samples = []
+        for _ in range(8):
+            start = time.perf_counter_ns()
+            call()
+            runtime.wait()
+            samples.append((time.perf_counter_ns() - start) / 1000)
+        record["warm_complete_us"] = statistics.median(samples)
+    # Compare the same table plan and array bindings in alternating order; the
+    # functional test's earlier/later samples are sensitive to cold GPU clocks.
+    frame, public_call = prepared[0]
+    private_call = module.execution_plan("table").prepare(module, dict(frame, indices=indices))
+    calls = (public_call, private_call)
+    for _ in range(4):
+        for call in calls:
+            call()
+            runtime.wait()
+    samples = [[], []]
+    submits = [[], []]
+    for _ in range(4):
+        for index in (0, 1, 1, 0):
+            start = time.perf_counter_ns()
+            calls[index]()
+            submitted = time.perf_counter_ns()
+            runtime.wait()
+            samples[index].append((time.perf_counter_ns() - start) / 1000)
+            submits[index].append((submitted - start) / 1000)
+    check(frame, 0, [1, 1])
+    records[0]["alternating"] = {
+        name: dict(complete_us=statistics.median(samples[i]), submit_us=statistics.median(submits[i]))
+        for i, name in enumerate(("public", "private"))
+    }
+    private_call.close()
+    prepared[0][1]()
+    prepared[1][1]()
+    context.close()
+    for frame, call in prepared:
+        raises(call)
+        call.close()
+        for value in frame.values():
+            value.close()
+    scene.close()
+    seed.close()
+    indices.close()
+    peer.close()
+    return records
 
 
 if __name__ == "__main__":

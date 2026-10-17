@@ -35,6 +35,10 @@
   校验沿具名保留输入在准备期完成，重放不增加查询；复用已有资源退休合同。
   需要配对的 ABI82 组件，旧计划兼容。
 
+- OptiX Graph 导出可绑定公共 context、triangle scene、GAS 和 IAS，供不同 AOT
+  模块共享，省去每计划的重复构建。v17 别名约束保留源 GAS/context 共享关系，
+  在执行前拒绝错绑。CUDA 已验证 typed/遮挡查询、refit、后续梯度及依赖退休。
+
 - sampled Texture Graph 导出可用 `resource_bindings={texture: "public_name"}`
   声明公共资源参数，复用创建或借用的 NativeResource，省掉私有图像及 seed 上传。
   普通/selected CUDA/Vulkan 路径、别名、梯度和退休已验证；未默认扩展其他 provider。

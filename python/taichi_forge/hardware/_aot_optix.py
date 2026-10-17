@@ -5,6 +5,8 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 def _provider(context, provider):
     provider._validate_lifetime()
+    if (public := context.public_resource(provider)) is not None:
+        return public
     return context.resource_once(
         provider,
         lambda: context.resource(provider, "optix", "context", parameters=dict(validation=provider._validation)),
@@ -30,6 +32,9 @@ def _geometry(context, geometry, *, retained_by=None):
     shared = type(geometry) is OptixTriangleGAS
     if shared and geometry._micromap_id is not None:
         raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM geometry")
+    context.resource_links(geometry, dict(context=geometry.provider))
+    if (public := context.public_resource(geometry)) is not None:
+        return public
 
     def build():
         # AS contents cannot be recovered from a retained input array: it may
@@ -60,6 +65,17 @@ def _scene(context, scene):
     scene._validate_lifetime()
     if scene._has_micromaps or any(scene._sbt_offsets):
         raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM or nonzero SBT offsets")
+    context.resource_links(
+        scene,
+        dict(
+            context=scene.provider,
+            **{f"gas_{i}": gas for i, gas in enumerate(scene._topology)},
+        ),
+    )
+    for gas in dict.fromkeys(scene._topology):
+        context.resource_links(gas, dict(context=scene.provider))
+    if (public := context.public_resource(scene)) is not None:
+        return public
 
     def build():
         inputs = context.resource_inputs.require(scene, ("transforms",))

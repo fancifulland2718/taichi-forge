@@ -121,6 +121,18 @@ def test_optix_recording_export_and_consumer_scene_reconstruction(tmp_path):
                 assert len(resources) == 2
                 assert {r["operation"] for r in resources} == {"context", "triangle_scene"}
                 assert "indices" in plan.argument_names
+                if policy in ("table", "query_only"):
+                    public = module.add_execution_plan(
+                        policy + "_public",
+                        graph,
+                        gradients=dict(hits="dhits", loss="dloss"),
+                        resource_bindings={scene: "shared_scene"},
+                    )
+                    assert not json.loads(public.to_json()).get("resources")
+                    assert "shared_scene" in public.argument_names
+                    assert "indices" not in public.argument_names
+                    timings[policy + "_plan_bytes"] = len(plan.to_json().encode())
+                    timings[policy + "_public_plan_bytes"] = len(public.to_json().encode())
                 graph.close()
             legacy = ti.graph.GraphBuilder()
             legacy.append_native(scene.record(4), admission="explicit")

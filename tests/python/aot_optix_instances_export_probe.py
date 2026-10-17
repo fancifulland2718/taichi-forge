@@ -42,12 +42,25 @@ def main(mode, artifact, adapter, output):
             faces1=(1,),
         )
         retained = []
+        costs["public_resources"] = check_public_resources(runtime, module, artifact, shapes)
         for policy in ("two_sided", "table", "query_only"):
             for binding in range(2):
                 plan = module.execution_plan(policy)
                 frame = {
                     name: runtime.ndarray(
-                        "i32" if name in ("indices", "indices1", "ids", "occluded", "faces0", "faces1") else "f32",
+                        (
+                            "i32"
+                            if name
+                            in (
+                                "indices",
+                                "indices1",
+                                "ids",
+                                "occluded",
+                                "faces0",
+                                "faces1",
+                            )
+                            else "f32"
+                        ),
                         shapes[name],
                     )
                     for name in plan.argument_names
@@ -115,7 +128,14 @@ def main(mode, artifact, adapter, output):
                         info=call.info,
                     )
                 )
-                retained.append((frame, call, initial if policy == "query_only" else BASE_TRANSFORMS, rules))
+                retained.append(
+                    (
+                        frame,
+                        call,
+                        initial if policy == "query_only" else BASE_TRANSFORMS,
+                        rules,
+                    )
+                )
         for frame, call, transforms, rules in retained[:-1]:
             call()
             check(frame, [0, 0, 0], transforms, rules)
@@ -134,6 +154,166 @@ def main(mode, artifact, adapter, output):
     if mode == "standalone":
         assert "taichi_forge" not in sys.modules
     Path(output).write_text(json.dumps(costs, indent=2))
+
+
+def check_public_resources(runtime, module, artifact, shapes):
+    owners = []
+
+    def array(dtype, shape, values):
+        value = runtime.ndarray(dtype, shape)
+        write(value, values, "i" if dtype == "i32" else "f")
+        owners.append(value)
+        return value
+
+    context = runtime.native_resource("optix", "context")
+    seed = array("f32", (6, 3), VERTICES)
+    topology = array("i32", (2, 3), range(6))
+    gas = runtime.native_resource(
+        "optix",
+        "triangle_gas",
+        parameters=dict(vertex_count=6, triangle_count=2, allow_update=True),
+        bindings=dict(context=context, vertices=seed, indices=topology),
+    )
+    gas1 = runtime.native_resource(
+        "optix",
+        "triangle_gas",
+        parameters=dict(vertex_count=3, triangle_count=1),
+        bindings=dict(
+            context=context,
+            vertices=array("f32", (3, 3), SECOND),
+            indices=array("i32", (1, 3), range(3)),
+        ),
+    )
+    scene = runtime.native_resource(
+        "optix",
+        "instance_scene",
+        parameters=dict(
+            instance_count=3,
+            allow_update=True,
+            custom_indices=[17, 29, 37],
+            visibility_masks=[255, 7, 255],
+            opaque=[True, False, True],
+        ),
+        bindings=dict(
+            context=context,
+            transforms=array("f32", (3, 12), sum(BASE_TRANSFORMS, [])),
+            gas_0=gas,
+            gas_1=gas,
+            gas_2=gas1,
+        ),
+    )
+    resources = dict(shared_context=context, shared_gas=gas, other_gas=gas1, shared_scene=scene)
+    records, calls = [], []
+
+    def frame_for(name):
+        frame = {}
+        for key in module.execution_plan(name).argument_names:
+            if key in resources:
+                frame[key] = resources[key]
+                continue
+            integer = key in (
+                "indices",
+                "indices1",
+                "ids",
+                "occluded",
+                "faces0",
+                "faces1",
+            )
+            frame[key] = runtime.ndarray("i32" if integer else "f32", shapes[key])
+            owners.append(frame[key])
+        for key, values, dtype in (
+            ("seed", VERTICES, "f"),
+            ("seed1", SECOND, "f"),
+            ("indices", range(6), "i"),
+            ("indices1", range(3), "i"),
+            ("initial_transforms", sum(BASE_TRANSFORMS, []), "f"),
+            ("rays", sum(RAYS, []), "f"),
+            ("faces0", [1, 1], "i"),
+            ("faces1", [1], "i"),
+        ):
+            if key in frame:
+                write(frame[key], values, dtype)
+        return frame
+
+    peer = runtime.load_module(artifact)
+    query_frame = frame_for("public_query")
+    query = peer.prepare_execution("public_query", query_frame)
+    wrong = runtime.native_resource(
+        "optix",
+        "triangle_gas",
+        parameters=dict(vertex_count=6, triangle_count=2, allow_update=True),
+        bindings=dict(context=context, vertices=seed, indices=topology),
+    )
+    public_frame = frame_for("public")
+    raises(
+        lambda: module.prepare_execution("public", dict(public_frame, shared_gas=wrong)),
+        "alias mismatch",
+    )
+    wrong_scene = runtime.native_resource(
+        "optix",
+        "instance_scene",
+        parameters=dict(
+            instance_count=3,
+            allow_update=True,
+            custom_indices=[17, 29, 37],
+            visibility_masks=[255, 7, 255],
+            opaque=[True, False, True],
+        ),
+        bindings=dict(
+            context=context,
+            transforms=array("f32", (3, 12), sum(BASE_TRANSFORMS, [])),
+            gas_0=gas,
+            gas_1=wrong,
+            gas_2=gas1,
+        ),
+    )
+    # Even a query-only plan must preserve sharing inside one public IAS. It
+    # does not have a second public GAS root to catch this mismatch indirectly.
+    raises(
+        lambda: peer.prepare_execution("public_query", dict(query_frame, shared_scene=wrong_scene)),
+        "alias mismatch",
+    )
+    wrong_scene.close()
+    wrong.close()
+    wrong_context = runtime.native_resource("optix", "context")
+    mixed_frame = frame_for("mixed")
+    raises(
+        lambda: module.prepare_execution("mixed", dict(mixed_frame, shared_context=wrong_context)),
+        "alias mismatch",
+    )
+    wrong_context.close()
+    for name in ("public", "mixed", "public_context"):
+        frame = public_frame if name == "public" else mixed_frame if name == "mixed" else frame_for(name)
+        start = time.perf_counter()
+        call = module.prepare_execution(name, frame)
+        prepare_ms = (time.perf_counter() - start) * 1000
+        for shift in ([0, 0, 0], [0, 0, 4], [0, 0, 0]):
+            write(frame["shift"], shift)
+            write(frame["requested"], sum(BASE_TRANSFORMS, []))
+            call()
+            check(frame, shift, BASE_TRANSFORMS, [1] * 5)
+            if name == "public":
+                # An independent module observes exactly the updated GAS/IAS.
+                query()
+                check(query_frame, shift, BASE_TRANSFORMS, [1] * 5)
+        records.append(
+            dict(
+                policy=name,
+                prepare_ms=prepare_ms,
+                resource_bytes=call.info["resource_bytes"],
+            )
+        )
+        calls.append(call)
+    # Both public and partially reconstructed resource chains retire together.
+    calls[0]()
+    context.close()
+    for call in (*calls, query):
+        raises(call)
+        call.close()
+    peer.close()
+    for owner in (scene, gas, gas1, *owners):
+        owner.close()
+    return records
 
 
 if __name__ == "__main__":
