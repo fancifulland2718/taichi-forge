@@ -89,12 +89,20 @@ OPTIONAL_PROVIDER_EXPORTS = {
             "taichi_forge_cudss_configuration_query",
             "taichi_forge_cudss_allocator_query",
             "taichi_forge_cudss_factor_statistics_query",
+            "taichi_forge_cudss_runtime_provider_query",
+        }
+    ),
+    "taichi_forge_optix_provider_query": frozenset(
+        {
+            "taichi_forge_optix_runtime_provider_query",
+            "taichi_forge_optix_fixed_query_api",
         }
     ),
     "taichi_forge_vkfft_provider_query": frozenset(
         {
             "taichi_forge_vkfft_recipe_query",
             "taichi_forge_vkfft_record_inline",
+            "taichi_forge_vkfft_runtime_provider_query",
         }
     ),
 }

@@ -144,17 +144,38 @@ def test_strict_elf_export_audit_matches_final_binary(monkeypatch, tmp_path):
         wheel.close()
 
 
-@pytest.mark.parametrize("provider", ("cudss", "vkfft"))
-def test_windows_provider_optional_exports_are_owner_scoped(
-    provider, monkeypatch, tmp_path
+@pytest.mark.parametrize("platform", ("windows", "manylinux"))
+@pytest.mark.parametrize(
+    "provider,extensions",
+    (
+        ("cudss", (
+            "taichi_forge_cudss_configuration_query",
+            "taichi_forge_cudss_allocator_query",
+            "taichi_forge_cudss_factor_statistics_query",
+            "taichi_forge_cudss_runtime_provider_query",
+        )),
+        ("optix", (
+            "taichi_forge_optix_runtime_provider_query",
+            "taichi_forge_optix_fixed_query_api",
+        )),
+        ("vkfft", (
+            "taichi_forge_vkfft_recipe_query",
+            "taichi_forge_vkfft_record_inline",
+            "taichi_forge_vkfft_runtime_provider_query",
+        )),
+    ),
+)
+def test_provider_optional_exports_are_owner_scoped(
+    provider, extensions, platform, monkeypatch, tmp_path
 ):
     required = f"taichi_forge_{provider}_provider_query"
-    stem = (
-        validate_runtime_wheel.VKFFT_ADAPTER_STEM
-        if provider == "vkfft"
-        else "taichi_forge_cudss_provider_abi1_cudss080"
-    )
-    member = f"taichi_forge_runtime/_lib/hardware_providers/{stem}.dll"
+    stem = {
+        "vkfft": validate_runtime_wheel.VKFFT_ADAPTER_STEM,
+        "cudss": "taichi_forge_cudss_provider_abi1_cudss080",
+        "optix": "taichi_forge_optix_provider_abi1_optix118",
+    }[provider]
+    binary = f"{stem}.dll" if platform == "windows" else f"lib{stem}.so"
+    member = f"taichi_forge_runtime/_lib/hardware_providers/{binary}"
     monkeypatch.setattr(validate_runtime_wheel.shutil, "which", lambda name: name)
     exports = set()
     monkeypatch.setattr(
@@ -163,7 +184,8 @@ def test_windows_provider_optional_exports_are_owner_scoped(
         lambda *args, **kwargs: SimpleNamespace(
             returncode=0,
             stdout="\n".join(
-                f"    {index} 0 00001000 {symbol}"
+                (f"    {index} 0 00001000 {symbol}" if platform == "windows"
+                 else f"{symbol} T 1000 4")
                 for index, symbol in enumerate(sorted(exports), 1)
             ),
         ),
@@ -171,16 +193,12 @@ def test_windows_provider_optional_exports_are_owner_scoped(
     with _wheel_with_member(tmp_path / "runtime.whl", member) as wheel:
         def audit():
             validate_runtime_wheel._strict_provider_exports(
-                wheel, {member: required}, "windows"
+                wheel, {member: required}, platform
             )
 
         exports.add(required)
         audit()  # Previous adapters do not need the new extension symbols.
-        if provider == "cudss":
-            # A real adapter export must be checked independently of the allowlist.
-            exports.add("taichi_forge_cudss_factor_statistics_query")
-            audit()
-        extensions = validate_runtime_wheel.OPTIONAL_PROVIDER_EXPORTS[required]
+        # Keep actual adapter exports independent of the implementation allowlist.
         for extension in sorted(extensions):
             exports.add(extension)
             audit()
@@ -188,6 +206,14 @@ def test_windows_provider_optional_exports_are_owner_scoped(
         with pytest.raises(RuntimeError, match="requires"):
             audit()
         exports.add(required)
+        foreign_extension = (
+            "taichi_forge_optix_fixed_query_api" if provider != "optix"
+            else "taichi_forge_cudss_runtime_provider_query"
+        )
+        exports.add(foreign_extension)
+        with pytest.raises(RuntimeError, match="permits only"):
+            audit()
+        exports.remove(foreign_extension)
         exports.add("taichi_forge_other_provider_query")
         with pytest.raises(RuntimeError, match="permits only"):
             audit()
