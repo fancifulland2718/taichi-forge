@@ -374,6 +374,7 @@ bool calls_safe(const std::shared_ptr<RuntimeFaultDomain> &fault) {
 struct ContextLease {
   std::shared_ptr<NativeProviderRuntime> runtime;
   TiForgeOptixProviderApi api;
+  TiForgeOptixFixedQueryApi queries{};
   TiForgeOptixContext handle{nullptr};
 };
 
@@ -384,6 +385,17 @@ class CudaOptixContext final : public OptixContextResource {
     lease = std::make_unique<ContextLease>();
     lease->runtime = context.providers.runtime(definition);
     lease->api = execution_api(*lease->runtime);
+    if (lease->api.info.features & TI_FORGE_OPTIX_FEATURE_PREPARED_FIXED_QUERY) {
+      const auto execution =
+          lease->runtime->execution_api<TiForgeOptixExecutionApiV2>(2);
+      lease->queries = execution.queries;
+      if (lease->queries.struct_size != sizeof(lease->queries) ||
+          lease->queries.revision != TI_FORGE_OPTIX_FIXED_QUERY_REVISION ||
+          !lease->queries.prepare || !lease->queries.launch ||
+          !lease->queries.destroy || !lease->queries.memory)
+        throw NativeProviderError(TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH,
+                                  "OptiX fixed query table is incomplete");
+    }
   }
   void initialize(bool validation) {
     TiForgeOptixContextDesc desc{};
@@ -577,6 +589,14 @@ class CudaOptixScene final : public OptixSceneResource,
   size_t bytes_{0};
 };
 
+// Keep the adapter query, its device tables and complete scene/context lease
+// together, including when backend failure makes destruction unsafe.
+struct OptixQueryLease {
+  std::shared_ptr<CudaOptixScene> scene;
+  DeviceAllocationUnique workspace;
+  TiForgeOptixPreparedQuery prepared{nullptr};
+};
+
 class CudaOptixQuery final : public NativeOperation {
  public:
   explicit CudaOptixQuery(const OptixQueryOperation &op)
@@ -584,10 +604,13 @@ class CudaOptixQuery final : public NativeOperation {
         op_(op) {
     if (!scene_)
       throw std::invalid_argument("OptiX query requires a native scene");
+    lease_ = std::make_unique<OptixQueryLease>();
+    lease_->scene = scene_;
   }
   void initialize() {
     auto &context = *scene_->lease->context;
     const auto &api = context.lease->api;
+    const auto &queries = context.lease->queries;
     faces_ = op_.front_only || bool(op_.faces) ||
              std::any_of(op_.face_rules.begin(), op_.face_rules.end(),
                          [](const auto &rule) { return rule.mode != 0; });
@@ -597,16 +620,19 @@ class CudaOptixQuery final : public NativeOperation {
                           ? (op_.occlusion ? api.trace_instance_occlusion : api.trace_instance_alpha)
                           : (op_.occlusion ? api.trace_occlusion : api.trace_alpha);
     face_trace_ = scene_->is_instances() ? api.trace_instance_faces : api.trace_faces;
-    check(api, (faces_ ? api.prepare_faces
+    if (!queries.prepare)
+      check(api, (faces_ ? api.prepare_faces
                         : extended_ ? api.prepare_alpha : api.prepare_typed)(
                    context.lease->handle),
           "prepare query pipeline");
-    scene_->update_memory();
-    if (extended_) {
+    face_records_offset_ = queries.prepare ? 0 : 64;
+    if (faces_ || (extended_ && !queries.prepare)) {
       if (faces_ && scene_->instance_count() >
-                        (std::numeric_limits<size_t>::max() - 64) / sizeof(TiForgeOptixFaceRule))
+                        (std::numeric_limits<size_t>::max() - face_records_offset_) /
+                            sizeof(TiForgeOptixFaceRule))
         throw std::overflow_error("OptiX instance face records size overflows");
-      const size_t table_offset = 64 + size_t(scene_->instance_count()) * sizeof(TiForgeOptixFaceRule);
+      const size_t table_offset = face_records_offset_ +
+          size_t(scene_->instance_count()) * sizeof(TiForgeOptixFaceRule);
       bytes_ = faces_ ? table_offset : 48;
       if (op_.faces) {
         if (op_.faces->bytes > std::numeric_limits<size_t>::max() - bytes_)
@@ -616,9 +642,9 @@ class CudaOptixQuery final : public NativeOperation {
       auto allocation = device().allocate_memory_unique({bytes_});
       if (allocation.second != RhiResult::success)
         throw std::runtime_error("OptiX query workspace allocation failed");
-      workspace_ = std::move(allocation.first);
+      lease_->workspace = std::move(allocation.first);
       workspace_address_ = reinterpret_cast<uint64_t>(
-          static_cast<cuda::CudaDevice &>(device()).get_memory_addr(*workspace_));
+          static_cast<cuda::CudaDevice &>(device()).get_memory_addr(*lease_->workspace));
       if (faces_) {
         std::vector<TiForgeOptixFaceRule> records(scene_->instance_count(), {0, 1, 0});
         auto &driver = CUDADriver::get_instance();
@@ -649,7 +675,7 @@ class CudaOptixQuery final : public NativeOperation {
           }
         }
         driver.memcpy_host_to_device(
-            reinterpret_cast<void *>(workspace_address_ + 64), records.data(),
+            reinterpret_cast<void *>(workspace_address_ + face_records_offset_), records.data(),
             records.size() * sizeof(TiForgeOptixFaceRule));
       }
     }
@@ -658,21 +684,49 @@ class CudaOptixQuery final : public NativeOperation {
               op_.ray_count, address(op_.rays), address(op_.hits),
               op_.hit_indices ? address(*op_.hit_indices) : 0,
               0, 0, workspace_address_, 0, uint32_t(op_.any_hit)};
+    if (queries.prepare) {
+      const TiForgeOptixFixedQueryDesc desc{
+          sizeof(desc), uint32_t(scene_->is_instances()), scene_->lease->handle,
+          op_.ray_count, uint32_t(op_.occlusion),
+          uint32_t(op_.occlusion || op_.any_hit),
+          faces_ ? scene_->instance_count() : 0,
+          query_.rays, query_.hits, query_.hit_indices,
+          faces_ ? workspace_address_ + face_records_offset_ : 0};
+      check(api, queries.prepare(context.lease->handle, &desc, &lease_->prepared),
+            "prepare fixed query");
+      if (!lease_->prepared)
+        throw std::runtime_error("OptiX returned a null prepared query");
+      TiForgeOptixFixedQueryMemory memory{sizeof(memory)};
+      check(api, queries.memory(lease_->prepared, &memory), "query fixed storage");
+      if (memory.device_bytes > std::numeric_limits<size_t>::max() - bytes_)
+        throw std::overflow_error("OptiX fixed query storage accounting overflows");
+      bytes_ += size_t(memory.device_bytes);
+    }
+    scene_->update_memory();
   }
   ~CudaOptixQuery() override {
-    if (!workspace_)
+    if (!lease_ || (!lease_->workspace && !lease_->prepared))
       return;
     if (!calls_safe(scene_->lease->context->fault)) {
-      workspace_.release();
+      lease_.release();
       return;
     }
     try {
       auto &cuda = CUDAContext::get_instance();
       auto lock = cuda.get_submission_lock_guard();
       auto guard = cuda.get_guard();
-      workspace_.reset();
+      if (lease_->prepared) {
+        const auto &queries = scene_->lease->context->lease->queries;
+        const auto result = queries.destroy(lease_->prepared);
+        if (result != TI_FORGE_OPTIX_SUCCESS) {
+          TI_WARN("OptiX fixed query cleanup failed (result {}).", int(result));
+          lease_.release();
+          return;
+        }
+      }
+      lease_.reset();
     } catch (...) {
-      workspace_.release();
+      lease_.release();
     }
   }
   Arch arch() const override { return Arch::cuda; }
@@ -687,9 +741,15 @@ class CudaOptixQuery final : public NativeOperation {
   }
   void run_cuda_ordered(void *stream) override {
     const auto &api = scene_->lease->context->lease->api;
+    if (lease_->prepared) {
+      check(api, scene_->lease->context->lease->queries.launch(
+                     lease_->prepared, reinterpret_cast<uint64_t>(stream)),
+            "launch fixed query");
+      return;
+    }
     query_.cuda_stream = reinterpret_cast<uint64_t>(stream);
     if (faces_) {
-      TiForgeOptixFaceTraceDesc desc{query_, workspace_address_ + 64, scene_->instance_count(),
+      TiForgeOptixFaceTraceDesc desc{query_, workspace_address_ + face_records_offset_, scene_->instance_count(),
                                     uint32_t(op_.occlusion)};
       check(api, face_trace_(scene_->lease->handle, &desc), "trace faces");
     } else if (extended_) {
@@ -706,7 +766,8 @@ class CudaOptixQuery final : public NativeOperation {
  private:
   std::shared_ptr<CudaOptixScene> scene_;
   OptixQueryOperation op_;
-  DeviceAllocationUnique workspace_;
+  std::unique_ptr<OptixQueryLease> lease_;
+  size_t face_records_offset_{0};
   uint64_t workspace_address_{0};
   size_t bytes_{0};
   bool faces_{false}, extended_{false};

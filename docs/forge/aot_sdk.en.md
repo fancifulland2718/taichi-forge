@@ -238,8 +238,11 @@ once. The query retains its scene; callers retain arrays and retire all launches
 before destruction. In-place AS refit is supported; replacement/rebuild requires
 preparation again. Launches remain ordered and serialized through the owning
 context: this extension does not declare CUDA stream-capture support. The legacy
-provider ABI/table and common execution table v1 remain available. This adapter
-extension alone does not change AOT query selection or add alpha/OMM support.
+provider ABI/table and common execution table v1 remain available. AOT query
+preparation negotiates this extension once per context and uses it when advertised;
+older adapters retain the existing ordered path. There is no per-launch capability
+probe or host parameter upload on the prepared path, and no alpha/OMM expansion.
+The adapter query, device face records and scene/context leases retire together.
 
 Explicit AOT plans can use `runtime.configure_provider("optix", adapter_path=...,
 library_path=...)` with these version 1 native resources/operations, all under

@@ -190,7 +190,9 @@ OptiX adapter 另提供 `taichi_forge_optix_runtime_provider_query` 公共会话
 查询保留场景引用；调用方保留数组，并在全部提交退休后销毁查询。允许原地 AS refit；
 替换或重建 AS 必须重新准备。查询仍由所属 context 串行、有序执行，此扩展不声明
 CUDA stream capture 支持。旧 provider ABI/执行表和公共执行表 v1 均保留。
-仅此 adapter 扩展不会改变 AOT 查询选择，也不新增 alpha/OMM 支持。
+AOT 在创建 context 时协商一次，adapter 声明此扩展时采用固定参数查询；旧 adapter
+保留原有有序路径。准备后的热路径不再探测能力或上传主机参数，也不新增 alpha/OMM
+支持。adapter 查询、设备面规则和 scene/context 引用一起退休。
 
 显式 AOT 计划可通过 `runtime.configure_provider("optix", adapter_path=..., library_path=...)`
 使用以下 version 1 原生资源/操作（provider 均为 `optix`）：
