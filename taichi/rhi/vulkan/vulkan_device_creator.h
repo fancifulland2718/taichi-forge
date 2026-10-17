@@ -38,6 +38,11 @@ bool supports_8bit_storage(uint32_t device_api_version, bool has_extension);
 bool supports_shader_atomic_int64(uint32_t device_api_version,
                                   bool has_extension);
 
+// Fold the promoted feature structures used by this creator into the 1.2
+// aggregate, preserving exact enabled bits and unrelated pNext nodes.
+void *fold_vulkan12_feature_chain(void *chain,
+                                  VkPhysicalDeviceVulkan12Features &features);
+
 void record_shader_atomic_float2_capabilities(
     DeviceCapabilityConfig &caps,
     const VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT &features);

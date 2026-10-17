@@ -298,6 +298,81 @@ TEST(VulkanDeviceCapabilityTest, PromotedCoreFeaturesDoNotNeedExtensionNames) {
       VK_API_VERSION_1_2, false));
 }
 
+TEST(VulkanDeviceCapabilityTest,
+     Vulkan12ChainPreservesSelectedBitsAndOtherNodes) {
+  VkPhysicalDevice8BitStorageFeatures storage{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
+  VkPhysicalDevice16BitStorageFeatures keep{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
+  VkPhysicalDeviceShaderAtomicInt64Features atomic{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES};
+  VkPhysicalDeviceDescriptorIndexingFeatures indexing{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+  VkPhysicalDeviceShaderFloat16Int8Features narrow{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
+  VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT keep_tail{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT};
+  VkPhysicalDeviceBufferDeviceAddressFeatures address{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+  storage.pNext = &keep;
+  keep.pNext = &atomic;
+  atomic.pNext = &indexing;
+  indexing.pNext = &narrow;
+  narrow.pNext = &keep_tail;
+  keep_tail.pNext = &address;
+  storage.storageBuffer8BitAccess = VK_TRUE;
+  keep.storageBuffer16BitAccess = VK_TRUE;
+  atomic.shaderBufferInt64Atomics = VK_TRUE;
+  indexing.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+  indexing.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+  indexing.runtimeDescriptorArray = VK_TRUE;
+  narrow.shaderFloat16 = VK_TRUE;
+  keep_tail.shaderBufferFloat16AtomicAdd = VK_TRUE;
+  address.bufferDeviceAddress = VK_TRUE;
+  VkPhysicalDeviceVulkan12Features enabled{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  enabled.drawIndirectCount = VK_TRUE;
+  enabled.descriptorIndexing = VK_TRUE;
+  enabled.shaderInt8 =
+      VK_TRUE;  // Exact selected false must replace this value.
+  auto *chain = vulkan::detail::fold_vulkan12_feature_chain(&storage, enabled);
+  EXPECT_EQ(chain, &enabled);
+  EXPECT_EQ(enabled.pNext, &keep);
+  EXPECT_EQ(keep.pNext, &keep_tail);
+  EXPECT_EQ(keep_tail.pNext, nullptr);
+  EXPECT_TRUE(keep.storageBuffer16BitAccess);
+  EXPECT_TRUE(keep_tail.shaderBufferFloat16AtomicAdd);
+  EXPECT_TRUE(enabled.drawIndirectCount);
+  EXPECT_TRUE(enabled.descriptorIndexing);
+  EXPECT_TRUE(enabled.storageBuffer8BitAccess);
+  EXPECT_FALSE(enabled.uniformAndStorageBuffer8BitAccess);
+  EXPECT_FALSE(enabled.storagePushConstant8);
+  EXPECT_TRUE(enabled.shaderBufferInt64Atomics);
+  EXPECT_FALSE(enabled.shaderSharedInt64Atomics);
+  EXPECT_TRUE(enabled.shaderFloat16);
+  EXPECT_FALSE(enabled.shaderInt8);
+  EXPECT_TRUE(enabled.shaderStorageBufferArrayNonUniformIndexing);
+  EXPECT_TRUE(enabled.descriptorBindingStorageBufferUpdateAfterBind);
+  EXPECT_TRUE(enabled.runtimeDescriptorArray);
+  EXPECT_FALSE(enabled.descriptorBindingUniformBufferUpdateAfterBind);
+  EXPECT_FALSE(enabled.shaderSampledImageArrayNonUniformIndexing);
+  EXPECT_TRUE(enabled.bufferDeviceAddress);
+  EXPECT_FALSE(enabled.bufferDeviceAddressCaptureReplay);
+  EXPECT_FALSE(enabled.bufferDeviceAddressMultiDevice);
+  EXPECT_FALSE(enabled.timelineSemaphore);
+}
+
+TEST(VulkanDeviceCapabilityTest, EmptyVulkan12ChainKeepsExplicitCoreFeatures) {
+  VkPhysicalDeviceVulkan12Features enabled{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  enabled.drawIndirectCount = VK_TRUE;
+  EXPECT_EQ(vulkan::detail::fold_vulkan12_feature_chain(nullptr, enabled),
+            &enabled);
+  EXPECT_EQ(enabled.pNext, nullptr);
+  EXPECT_TRUE(enabled.drawIndirectCount);
+  EXPECT_FALSE(enabled.descriptorIndexing);
+}
+
 TEST(VulkanDeviceCapabilityTest, AtomicFloat2FeaturesMapIndependently) {
   VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT features{};
   features.sType =

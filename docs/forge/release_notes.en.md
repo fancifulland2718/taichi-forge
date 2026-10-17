@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan 1.2 graphics enables `drawIndirectCount` only when the queried feature
+  is supported, fixing validation errors for GPU-count indirect draws. Device
+  creation folds selected promoted features into the Vulkan 1.2 structure while
+  preserving other enabled features.
+
 - Vulkan graphics removes the fixed 64-buffer table and million-draw pass
   caps. Device capacities and command ranges remain checked; shared reflection
   rejects incompatible cross-stage declarations and excessive merged storage

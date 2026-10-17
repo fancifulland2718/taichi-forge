@@ -262,6 +262,84 @@ bool detail::supports_shader_atomic_int64(uint32_t device_api_version,
   return device_api_version >= VK_API_VERSION_1_2 || has_extension;
 }
 
+void *detail::fold_vulkan12_feature_chain(
+    void *chain,
+    VkPhysicalDeviceVulkan12Features &features) {
+  auto *head = static_cast<VkBaseOutStructure *>(chain);
+  auto **link = &head;
+  while (auto *node = *link) {
+    switch (node->sType) {
+#define COPY_FEATURE(member) features.member = source.member
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES: {
+        const auto &source =
+            *reinterpret_cast<VkPhysicalDevice8BitStorageFeatures *>(node);
+        COPY_FEATURE(storageBuffer8BitAccess);
+        COPY_FEATURE(uniformAndStorageBuffer8BitAccess);
+        COPY_FEATURE(storagePushConstant8);
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES: {
+        const auto &source =
+            *reinterpret_cast<VkPhysicalDeviceShaderAtomicInt64Features *>(
+                node);
+        COPY_FEATURE(shaderBufferInt64Atomics);
+        COPY_FEATURE(shaderSharedInt64Atomics);
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES: {
+        const auto &source =
+            *reinterpret_cast<VkPhysicalDeviceShaderFloat16Int8Features *>(
+                node);
+        COPY_FEATURE(shaderFloat16);
+        COPY_FEATURE(shaderInt8);
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES: {
+        const auto &source =
+            *reinterpret_cast<VkPhysicalDeviceBufferDeviceAddressFeatures *>(
+                node);
+        COPY_FEATURE(bufferDeviceAddress);
+        COPY_FEATURE(bufferDeviceAddressCaptureReplay);
+        COPY_FEATURE(bufferDeviceAddressMultiDevice);
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES: {
+        const auto &source =
+            *reinterpret_cast<VkPhysicalDeviceDescriptorIndexingFeatures *>(
+                node);
+        COPY_FEATURE(shaderInputAttachmentArrayDynamicIndexing);
+        COPY_FEATURE(shaderUniformTexelBufferArrayDynamicIndexing);
+        COPY_FEATURE(shaderStorageTexelBufferArrayDynamicIndexing);
+        COPY_FEATURE(shaderUniformBufferArrayNonUniformIndexing);
+        COPY_FEATURE(shaderSampledImageArrayNonUniformIndexing);
+        COPY_FEATURE(shaderStorageBufferArrayNonUniformIndexing);
+        COPY_FEATURE(shaderStorageImageArrayNonUniformIndexing);
+        COPY_FEATURE(shaderInputAttachmentArrayNonUniformIndexing);
+        COPY_FEATURE(shaderUniformTexelBufferArrayNonUniformIndexing);
+        COPY_FEATURE(shaderStorageTexelBufferArrayNonUniformIndexing);
+        COPY_FEATURE(descriptorBindingUniformBufferUpdateAfterBind);
+        COPY_FEATURE(descriptorBindingSampledImageUpdateAfterBind);
+        COPY_FEATURE(descriptorBindingStorageImageUpdateAfterBind);
+        COPY_FEATURE(descriptorBindingStorageBufferUpdateAfterBind);
+        COPY_FEATURE(descriptorBindingUniformTexelBufferUpdateAfterBind);
+        COPY_FEATURE(descriptorBindingStorageTexelBufferUpdateAfterBind);
+        COPY_FEATURE(descriptorBindingUpdateUnusedWhilePending);
+        COPY_FEATURE(descriptorBindingPartiallyBound);
+        COPY_FEATURE(descriptorBindingVariableDescriptorCount);
+        COPY_FEATURE(runtimeDescriptorArray);
+        break;
+      }
+#undef COPY_FEATURE
+      default:
+        link = &node->pNext;
+        continue;
+    }
+    *link = node->pNext;
+  }
+  features.pNext = head;
+  return &features;
+}
+
 void detail::record_shader_atomic_float2_capabilities(
     DeviceCapabilityConfig &caps,
     const VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT &features) {
@@ -907,7 +985,6 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     ti_device_->vk_caps().draw_indirect_first_instance = true;
   }
   ti_device_->vk_caps().draw_indirect_count =
-      vk_api_version >= VK_API_VERSION_1_2 ||
       draw_indirect_count_extension_available;
   ti_device_->vk_caps().max_draw_indirect_count =
       physical_device_properties.limits.maxDrawIndirectCount;
@@ -961,6 +1038,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   create_info.ppEnabledExtensionNames = enabled_extensions.data();
 
   void **pNextEnd = (void **)&create_info.pNext;
+  VkPhysicalDeviceVulkan12Features core12_features{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
 
   // Use physicalDeviceFeatures2 to features enabled by extensions
   VkPhysicalDeviceVariablePointersFeaturesKHR variable_ptr_feature{};
@@ -1036,6 +1115,29 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     uint32_t vk_api_version = ti_device_->vk_caps().vk_api_version;
 #define CHECK_VERSION(major, minor) \
   vk_api_version >= VK_MAKE_API_VERSION(0, major, minor, 0)
+
+    if (CHECK_VERSION(1, 2)) {
+      features2.pNext = &core12_features;
+      query_physical_device_features2(&features2);
+      const auto supported = core12_features;
+      core12_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+      core12_features.drawIndirectCount = supported.drawIndirectCount;
+      ti_device_->vk_caps().draw_indirect_count = supported.drawIndirectCount;
+      // These aggregate bits are implied by explicitly enabled extension names.
+      // Preserve that intent without copying every supported core feature.
+      if (CHECK_EXTENSION(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))
+        core12_features.descriptorIndexing = supported.descriptorIndexing;
+      if (CHECK_EXTENSION(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME))
+        core12_features.samplerMirrorClampToEdge =
+            supported.samplerMirrorClampToEdge;
+      if (CHECK_EXTENSION(VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME))
+        core12_features.samplerFilterMinmax = supported.samplerFilterMinmax;
+      if (CHECK_EXTENSION(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME)) {
+        core12_features.shaderOutputViewportIndex =
+            supported.shaderOutputViewportIndex;
+        core12_features.shaderOutputLayer = supported.shaderOutputLayer;
+      }
+    }
 
     // Variable ptr
     if (CHECK_VERSION(1, 1) ||
@@ -1491,6 +1593,14 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         pNextEnd = &present_mode_fifo_latest_ready_feature.pNext;
       }
     }
+  }
+
+  if (vk_api_version >= VK_API_VERSION_1_2 &&
+      ti_device_->vk_caps().physical_device_features2) {
+    // VkDeviceCreateInfo-02830 forbids the aggregate alongside its promoted
+    // individual structures. Fold only the bits selected by the code above.
+    create_info.pNext = detail::fold_vulkan12_feature_chain(
+        const_cast<void *>(create_info.pNext), core12_features);
   }
 
   if (params_.enable_validation_layer) {
