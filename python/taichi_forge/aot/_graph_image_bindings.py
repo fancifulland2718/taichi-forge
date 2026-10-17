@@ -14,6 +14,7 @@ class SourceImageBindings:
             if type(owner) is Texture
         }
         self.used = set()
+        self._storage_owners = set()
         for name, owner in bindings.items():
             if not isinstance(name, str) or not name or "\0" in name:
                 raise ValueError(
@@ -40,6 +41,13 @@ class SourceImageBindings:
             )
         self._validate_owner(owner)
         return owner
+
+    def require_storage(self, name, owner):
+        # Qualified binding preflight runs before any resource is reconstructed.
+        # Keep one image owner even when sampling precedes a later shader write.
+        if self.require(name) is not owner:
+            raise TaichiRuntimeError("AOT ray image source differs from its fixed launch binding")
+        self._storage_owners.add(id(owner))
 
     def resource(self, context, name):
         from taichi_forge.hardware._sampling import SamplerConfig
@@ -82,6 +90,7 @@ class SourceImageBindings:
                         sampler.address_mode_v,
                         sampler.address_mode_w,
                     ][: len(shape)],
+                    **({"storage": True} if id(owner) in self._storage_owners else {}),
                 ),
             )
             context.initialize_native_once(

@@ -351,8 +351,27 @@ owner 队列构建并初始化 SBT 一次；重放复用 pipeline/descriptor/SBT
 
 Windows Vulkan 小夹具覆盖独立/借用消费、真实实例 SBT 选择与 any-hit 过滤、
 hit/miss/refit、采样图像→storage 写入→普通采样、下游梯度及关闭。外部 shader 本身
-没有自动导数。ray-program recording 的 Graph 自动导出、mip 链重建及光栅 graphics
-资源仍单独接通。
+没有自动导数。mip 链重建及光栅 graphics 资源仍属后续工作。
+
+Graph 自动导出接受已初始化的 `launch.graph_recording()`，覆盖普通 Graph 和已选择的
+有序 Vulkan compute binding frame，包括具有具体导出合同的 AS refit 等计算边界。
+导出保留已选择节点的顺序；graphics 队列及 fork/join recipe 仍需单独的持久合同。
+将固定 buffer 和 Texture owner 按 Graph 参数名放入 `source_bindings`，AS/图像继续用
+既有 `resource_bindings` 声明消费端种子或公共资源。pipeline 可映射为公共资源名，
+或 `{"shader_0": shader0, ...}` 的端口表，提供原不可变 `SpirvShader`。编号按原首次使用
+顺序：排序后的 raygen/miss/hit group，hit 内 closest-hit/any-hit，按 artifact identity
+去重。也可提供符号 host-blob 端口。JIT pipeline 不必为了将来导出而长期保留代码字节。
+
+导出先核对所给 asset 与源 metadata；launch 和私有重建的 pipeline 都携带
+`expected_pipeline` SHA256 合同，覆盖有序 shader stage/entry/code、group 索引、递归
+深度和 micromap 模式。原生创建阶段从实际字节计算一次，准备时拒绝不匹配的公共
+pipeline。group 名和构建路径不属于原生 ABI 输入；显式计划可省略这个可选合同。
+SBT 标量与 push constant 合成按内容寻址的 host blob，shader 代码在归档内同样去重，
+不保存生产端 driver 句柄。
+
+导出在创建资源前从已选择 launch 的租约收集图像 usage，因此先被 kernel 采样、随后
+被 RT 写入的同一图像只重建一次并同时申请两种 usage。单 mip、基本 sampler 与初始化
+检查保持。小夹具覆盖普通/已选择 Graph、不同代码/组顺序拒绝、公私 owner 和下游梯度。
 
 Graph 的 AS 参数通过 `source_bindings={"acceleration": tlas}` 声明源 owner，
 `resource_bindings` 沿用下述 TLAS/BLAS 的公共绑定或显式构建种子合同。固定绑定的

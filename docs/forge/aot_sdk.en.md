@@ -441,9 +441,36 @@ remain responsible for shader memory bounds and data-dependent record indices.
 Small Windows Vulkan tests cover standalone/borrowed consumers, real instance
 SBT selection and any-hit filtering, hit/miss/refit, sampled-to-storage image
 processing followed by ordinary sampling, downstream gradients and retirement.
-The external shaders have no automatic derivative. Graph automatic export of
-ray-program recordings, mip-chain reconstruction and raster graphics resources
-remain separate work.
+The external shaders have no automatic derivative. Mip-chain reconstruction and
+raster graphics resources remain separate work.
+
+Graph export accepts an initialized `launch.graph_recording()` in ordinary
+Graphs and selected ordered Vulkan compute binding frames, including qualified
+compute boundaries such as AS refit. The exporter preserves selected node order;
+graphics queues and fork/join recipes still require their own export contract.
+Supply fixed buffer and Texture owners under their Graph names in
+`source_bindings`. Use the existing AS and image `resource_bindings` for consumer
+seeds or public resources. For the pipeline, choose either a public resource name
+or a port mapping `{"shader_0": shader0, ...}` containing the original immutable
+`SpirvShader` artifacts, in their original first-use order (sorted raygen/miss/hit
+groups, then closest-hit/any-hit, deduplicated by artifact identity). Symbolic
+host-blob ports are also accepted. JIT pipelines need not retain code bytes just
+to enable a later export.
+
+Export verifies supplied artifacts against the source metadata. It stores an
+`expected_pipeline` SHA256 contract in the launch and any reconstructed pipeline,
+covering ordered shader stage/entry/code and groups, recursion depth and micromap
+mode. Native creation computes the contract from actual bytes once; preparation
+rejects incompatible public pipelines before recording. Group names and build
+paths are not native ABI inputs. Explicit plans may omit this optional contract.
+SBT scalar data and push constants share content-addressed host blobs. Code blobs
+are likewise deduplicated within the archive; no producer driver handles are saved.
+
+Image usage is collected from selected launch leases before resources are emitted.
+An image sampled by an earlier kernel and written by a later RT launch is rebuilt
+once with both usages. Single-mip/basic-sampler qualification and initialization
+requirements remain in force. Small tests cover both ordinary and selected Graph
+export, changed-code/group rejection, public/private owners and downstream gradients.
 
 Declare a Graph AS source owner with `source_bindings={"acceleration": tlas}`;
 `resource_bindings` uses the TLAS/BLAS public-owner or explicit-seed contracts below.

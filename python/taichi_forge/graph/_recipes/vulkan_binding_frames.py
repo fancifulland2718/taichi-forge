@@ -195,9 +195,16 @@ class VulkanBindingFrameExecutor:
         # Both executors freeze one ordered compute sequence per binding and
         # retain it through completion. Export the already-selected nodes; do
         # not regenerate their logical dispatches or provider alternatives.
-        # Segmented/graphics queues require their own persistent recipe.
-        if not eligible(spec, backend) or prepared_boundaries(spec):
-            raise TaichiRuntimeError("AOT binding frames require one complete ordered Vulkan compute sequence")
+        # A qualified compute boundary is reconstructed through its concrete
+        # exporter on that same ordered queue. Graphics/fork-join execution
+        # still requires a separate persistent recipe.
+        boundaries = prepared_boundaries(spec)
+        if not eligible(spec, backend) or any(
+            node.executable._recording.queue != "compute"
+            or not callable(type(node.executable._recording).__dict__.get("_export_aot"))
+            for node in boundaries
+        ):
+            raise TaichiRuntimeError("AOT binding frames require a qualified ordered Vulkan compute sequence")
 
     def __init__(self, instance):
         from taichi_forge._lib import core

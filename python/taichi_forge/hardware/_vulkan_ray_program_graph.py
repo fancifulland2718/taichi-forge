@@ -12,6 +12,11 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 
 class _PreparedVulkanProgramRecording(BackendCommandRecording):
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray_program import export_launch
+
+        return export_launch(self, context)
+
     def __init__(self, launch):
         launch._require_initialized()
         source = launch.recording

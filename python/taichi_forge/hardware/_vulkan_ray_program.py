@@ -436,6 +436,14 @@ class VulkanPreparedLaunch:
 
         return _PreparedVulkanProgramRecording(self)
 
+    def _export_aot_bindings(self, context):
+        # The selected Graph retains this launch as a lifetime lease. Collect
+        # usage before an earlier sampling kernel can reconstruct the image.
+        self._require_initialized()
+        for name, binding in self.recording.bindings.items():
+            if binding.kind == "storage_image":
+                context.source_images.require_storage(name, self._bindings[name])
+
     def _as_graph_native_node(self):
         return self.graph_recording()._as_graph_native_node()
 
