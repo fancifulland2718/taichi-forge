@@ -239,7 +239,7 @@ NativeStorageRange resolve_native_storage_range(Arch arch,
           "Native Vulkan storage requires a Vulkan device");
     const auto [memory, offset, capacity] =
         device->get_vkmemory_offset_size(pointer);
-    extent(pointer.offset, bytes, capacity);
+    extent(pointer.offset, bytes, device->get_vkbuffer_size(pointer));
     const auto buffer = device->get_vkbuffer(pointer);
     if (!buffer)
       throw std::invalid_argument("Native Vulkan buffer is unavailable");

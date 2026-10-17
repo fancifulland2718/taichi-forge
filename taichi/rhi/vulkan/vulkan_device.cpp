@@ -2776,6 +2776,7 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   alloc.generation =
       allocation_generation_counter_.fetch_add(1, std::memory_order_relaxed);
   alloc.usage = params.usage;
+  alloc.buffer_size = params.size;
 
   RHI_ASSERT(params.size > 0);
 
@@ -4036,7 +4037,7 @@ vkapi::IVkBuffer VulkanDevice::get_vkbuffer(
 size_t VulkanDevice::get_vkbuffer_size(const DeviceAllocation &alloc) const {
   const AllocationInternal &alloc_int = get_alloc_internal(alloc);
 
-  return alloc_int.alloc_info.size;
+  return alloc_int.buffer_size;
 }
 
 std::tuple<vkapi::IVkImage, vkapi::IVkImageView, VkFormat>
@@ -4151,6 +4152,7 @@ DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,
   alloc_int.external = true;
   alloc_int.usage = usage;
   alloc_int.buffer = buffer;
+  alloc_int.buffer_size = size;
   alloc_int.mapped = nullptr;
   const bool import_needs_device_address =
       int(usage & AllocUsage::DeviceAddress) ||

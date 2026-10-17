@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// GfxRuntime owns the pipeline-cache policy and diagnostic provenance.
+// Vulkan allocation metadata distinguishes buffer extents from memory padding.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 86;
+inline constexpr int kForgeNativeAbiRevision = 87;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

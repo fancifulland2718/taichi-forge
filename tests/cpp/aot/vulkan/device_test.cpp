@@ -449,6 +449,27 @@ TEST(VulkanDeviceTest, IndependentDevicesKeepDispatchAlive) {
   }
 }
 
+TEST(VulkanDeviceTest, NativeStorageRangesExcludeAllocationPadding) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "No Vulkan compute device";
+  vulkan::VulkanDeviceCreator creator({});
+  auto *device = creator.device();
+  constexpr size_t bytes = 20;
+  auto [buffer, status] = device->allocate_memory_unique(
+      {bytes, false, false, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  const auto [memory, offset, allocated] =
+      device->get_vkmemory_offset_size(*buffer);
+  EXPECT_GE(allocated, bytes);
+  EXPECT_EQ(device->get_vkbuffer_size(*buffer), bytes);
+  EXPECT_EQ(resolve_native_storage_range(Arch::vulkan, buffer->get_ptr(), bytes).bytes,
+            bytes);
+  EXPECT_THROW(resolve_native_storage_range(Arch::vulkan, buffer->get_ptr(), bytes + 1),
+               std::invalid_argument);
+  EXPECT_THROW(resolve_native_storage_range(Arch::vulkan, buffer->get_ptr(bytes), 1),
+               std::invalid_argument);
+}
+
 TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
   if (!vulkan::is_vulkan_api_available()) {
     GTEST_SKIP() << "No Vulkan compute device";

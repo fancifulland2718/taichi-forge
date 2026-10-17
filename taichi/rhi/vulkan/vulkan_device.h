@@ -1394,6 +1394,9 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     VmaAllocationInfo alloc_info;
     // VkBuffer handle (reference counted)
     vkapi::IVkBuffer buffer{nullptr};
+    // VkBufferCreateInfo::size (or declared imported size), excluding VMA
+    // allocation padding. Memory interop still uses alloc_info.size.
+    size_t buffer_size{0};
     // Buffer Device Address
     VkDeviceAddress addr{0};
     // If mapped, the currently mapped address
