@@ -4202,7 +4202,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
     device = capabilities["device_control"]
     arch = ti.lang.impl.current_cfg().arch
-    assert capabilities["schema_version"] == 8
+    assert capabilities["schema_version"] == 9
     assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
     assert (
         set(
@@ -4296,16 +4296,16 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         ("while_while",) if expected_nested_native else ()
     )
     assert device["nested_native_outer_iteration_limit"] == (
-        ((1 << 63) - 1 if arch == ti.cuda else 64) if expected_nested_native else 0
+        ((1 << 63) - 1 if arch == ti.cuda else (1 << 32) - 1) if expected_nested_native else 0
     )
     assert device["nested_native_inner_iteration_limit"] == (
-        ((1 << 63) - 1 if arch == ti.cuda else 64) if expected_nested_native else 0
+        ((1 << 63) - 1 if arch == ti.cuda else (1 << 32) - 1) if expected_nested_native else 0
     )
     assert device["nested_native_max_ordered_inner_regions"] == (
         None if expected_nested_native else 0
     )
     assert device["nested_native_max_encoded_actions"] == (
-        (None if arch == ti.cuda else 4096) if expected_nested_native else 0
+        None if expected_nested_native else 0
     )
     assert device["nested_native_stop_telemetry"] == expected_nested_native
     if expected_nested_native and arch == ti.cuda:

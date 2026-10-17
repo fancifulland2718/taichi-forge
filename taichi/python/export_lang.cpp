@@ -5980,7 +5980,7 @@ void export_lang(py::module &m) {
     Ndarray *outer_status{nullptr};
     std::vector<aot::CompiledGraphNestedInnerControl> inner_controls;
     std::size_t outer_condition_dispatch_count{0};
-    int outer_max_iterations{0};
+    std::int64_t outer_max_iterations{0};
     bool wait_for_result{true};
     aot::CompiledGraphNestedStructuredResult *result{nullptr};
   };
@@ -6037,7 +6037,7 @@ void export_lang(py::module &m) {
            boundary[1].cast<std::size_t>(),
            boundary[2].cast<std::size_t>(),
            max_iterations[i].cast<std::int64_t>(),
-           chunk_sizes.is_none() ? 1 : chunks[i].cast<int>()});
+           chunk_sizes.is_none() ? 1 : chunks[i].cast<std::int64_t>()});
     }
     return controls;
   };
@@ -7121,8 +7121,8 @@ void export_lang(py::module &m) {
               std::size_t inner_condition_dispatch_begin,
               std::size_t inner_body_dispatch_begin,
               std::size_t outer_suffix_dispatch_begin,
-              int outer_max_iterations, int inner_max_iterations,
-              int inner_chunk_size, Ndarray *outer_status,
+              std::int64_t outer_max_iterations, std::int64_t inner_max_iterations,
+              std::int64_t inner_chunk_size, Ndarray *outer_status,
               Ndarray *inner_status,
               bool wait_for_result) {
             aot::CompiledGraphNestedStructuredResult result;
@@ -7215,7 +7215,7 @@ void export_lang(py::module &m) {
               const py::sequence &inner_counters,
               std::size_t outer_condition_dispatch_count,
               const py::sequence &inner_boundaries,
-              int outer_max_iterations,
+              std::int64_t outer_max_iterations,
               const py::sequence &inner_max_iterations,
               const py::sequence &inner_chunk_sizes,
               Ndarray *outer_status, const py::sequence &inner_statuses,

@@ -166,23 +166,27 @@ Important current boundaries:
   Profiler/dispatch-cache configurations can prevent this replay route.
 - The supported asynchronous depth-two GPU shape is an outer while containing
   one or more ordered inner whiles, with eligible dispatch/action gaps. There
-  is no separate region-count cap; structured-control capability schema 8
+  is no separate region-count cap; structured-control capability schema 9
   reports `nested_native_max_ordered_inner_regions=None` when available.
   Each loop needs a separate counter; predicate, counter and optional status
   controls are distinct one-element i32 arrays from the same runtime.
-  Expanded CUDA routes use positive int64 loop budgets; Vulkan currently retains
-  budgets of 1–64. Other nested shapes can require portable parent
+  Expanded CUDA routes use positive int64 loop budgets; Vulkan uses
+  positive uint32 budgets. Other nested shapes can require portable parent
   control and may reject asynchronous submission.
 - Explicit CUDA nested device-update/masked recipes no longer have the old
   64-iteration/4096-action software admission limits. Shared recorders still check
-  count overflow, node-field representation and actual storage. Capability schema 8
+  count overflow, node-field representation and actual storage. Capability schema 9
   reports `nested_native_max_encoded_actions=None`, meaning no fixed software
   action cap, not unlimited resources. Default cost preferences may still choose
   qualified compact control beyond the old scale; explicit recipes retain their
   selected route. Flat CUDA masked control also removes its 4096-dispatch limit
   and reports `max_encoded_dispatches=None`; encoding multiplication overflow and
   branch-count consistency with the physical sequence are still checked. Vulkan
-  nested expansion retains its 4096-action limit. Masked control still issues
+  nested JIT now shares the AOT/GFX capacity contract: positive uint32 loop/chunk
+  budgets, no fixed 4096-action cap, and the recorder's storage/address/overflow
+  checks. Budgets travel through int64 bindings before checked conversion;
+  private ABI 76 requires matching Python/native components. This change does
+  not alter flat Vulkan admission. Masked control still issues
   inactive nodes, so large budgets can increase materialization and replay cost;
   removing an admission cutoff is not a speedup.
   Complete-recipe search can offer compressed nested conditional execution on
@@ -199,6 +203,13 @@ the [v13/v14 AOT SDK contracts](aot_sdk.en.md). Four-element checks cover explic
 65-by-1 and 1-by-65 budgets, about 4098 expanded dispatches, and actual suffix
 `kernel.grad`. This qualifies those boundaries, not low construction cost for
 arbitrarily large expanded graphs.
+
+The Vulkan checks additionally cover 65-by-1, 1-by-65, 64-by-20 (4097 encoded
+dispatches) and 1-by-513, including zero trips, early exit, exhausted budgets,
+standalone/borrowed AOT gradients and retirement. The artifact retains each static
+kernel once, but driver command recording and replay still scale with the encoded
+budget. A representable budget is not a promise of low materialization or runtime
+cost.
 
 Compressed control can help large budgets with early exit; highly active small
 kernels can favor expanded control. Choose using actual workload measurements,

@@ -137,16 +137,18 @@ Sequential 控制区域只有一个 owner，组成树；当前结构化深度上
 - Vulkan 原生 replay 支持有界 while，不支持原生 if/switch。单 region 最多八个 chunk，
   每个最多 64 轮、合计 512 轮；profiler/dispatch-cache 配置可能阻止该路径。
 - GPU 可异步执行的二层形状是 outer while 内含一个或更多有序 inner while，间隔为合格 dispatch/action。
-  不单独限制 region 数量；结构控制能力 schema 8 在路线可用时报告
+  不单独限制 region 数量；结构控制能力 schema 9 在路线可用时报告
   `nested_native_max_ordered_inner_regions=None`。
   每个 loop 需要独立 counter；predicate、counter、可选 status 是同一 runtime 的互异单元素 i32 数组。
-  CUDA 展开式各 loop 使用正 int64 预算；Vulkan 当前仍为 1–64。其他嵌套形状可能需要 portable parent control，并可能拒绝异步提交。
+  CUDA 展开式各 loop 使用正 int64 预算；Vulkan 使用正 uint32 预算。其他嵌套形状可能需要 portable parent control，并可能拒绝异步提交。
 - CUDA 显式选择的嵌套 device-update/masked recipe 不再受旧 64 轮/4096 action 软件准入限制。
-  共用录制器继续检查计数溢出、节点字段表示和实际存储；能力 schema 8 报告
+  共用录制器继续检查计数溢出、节点字段表示和实际存储；能力 schema 9 报告
   `nested_native_max_encoded_actions=None`，表示没有固定软件 action 上限，不表示无限资源。
   默认成本偏好仍可在超过旧量级时选择合格的紧凑路线；显式 recipe 保持用户选择。
   flat CUDA masked 同样不再限制 4096 dispatch，`max_encoded_dispatches=None`；
-  仍检查编码乘法溢出及分支计数与实际序列的一致性。Vulkan 展开式嵌套目前仍限制 4096 action。
+  仍检查编码乘法溢出及分支计数与实际序列的一致性。Vulkan嵌套JIT与AOT/GFX使用同一容量合同：
+  loop/chunk为正uint32，不设固定4096 action上限，保留录制器的存储/地址/溢出检查。
+  预算经int64绑定传递后检查转换，私有ABI76要求Python/native组件成对更新；不改变flat Vulkan准入。
   masked 路线仍会 issue 未激活节点，大预算可能增加物化和重放成本；解除准入限制不代表加速。
   支持的 CUDA runtime 可通过完整 recipe 搜索
   提供压缩 nested conditional 路线，使用 int64 预算、每个静态 region 仅一份，不另设静态 dispatch 上限。
@@ -157,6 +159,10 @@ Windows 小用例覆盖 CUDA device-update、CUDA masked 与 Vulkan replay 的�
 也支持保存和恢复，见 [AOT SDK 的 v13/v14 合同](aot_sdk.zh.md)；它与 JIT 共用录制器。
 四元素用例覆盖显式 65×1、1×65 与约4098个展开dispatch，以及实际后段 `kernel.grad`；
 这证明上述资格边界，不代表大展开图具有低构建成本。
+
+Vulkan另覆盖65×1、1×65、64×20（4097个编码dispatch）和1×513，含零轮、早停、预算耗尽、
+独立/借用AOT真实梯度及退休。产物保留每个静态kernel一份，但驱动命令录制和重放仍随编码预算
+增长；预算可表示不代表物化或运行成本低。
 
 压缩控制可能适合大预算、早退出；高度活跃的小 kernel 可能更适合展开路线。
 应按实际 workload 测量，不设固定加速门槛。

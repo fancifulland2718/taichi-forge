@@ -196,7 +196,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path, *, inner_
             ]
         if route == "conditional":
             assert nested_stats[0]["known_bounded_control_bytes"] == (regions + 1) * 32
-        if route in ("masked", "device_update"):
+        if route in ("masked", "device_update", "vulkan"):
             arrays["limits"].from_numpy(np.array([2, 1], dtype=np.int32))
             owner.executor.submit(arrays).wait()
             samples = []
@@ -320,6 +320,43 @@ def test_vulkan_nested_region_count_and_aot_gradient(tmp_path):
     if not ti.graph.structured_control_capabilities()["nested_native_lowering"]:
         pytest.skip("nested Vulkan control unavailable")
     _check_nested_capacity(2, 9, "native_required", "vulkan", tmp_path)
+
+
+@pytest.mark.parametrize("budget,inner_budget", ((65, 1), (1, 65), (64, 20), (1, 513)))
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_nested_expanded_capacity_and_aot_gradient(budget, inner_budget, tmp_path):
+    if not ti.graph.structured_control_capabilities()["nested_native_lowering"]:
+        pytest.skip("nested Vulkan control unavailable")
+    _check_nested_capacity(budget, 1, "native_required", "vulkan", tmp_path, inner_budget=inner_budget)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_nested_budget_representation_rejects_before_materialization():
+    from types import SimpleNamespace
+    from taichi_forge.graph._graph import _compile_native_nested_while_runtime_node
+
+    if not ti.graph.structured_control_capabilities()["nested_native_lowering"]:
+        pytest.skip("nested Vulkan control unavailable")
+    # No CGraph or expanded commands are created. A non-plain condition stops
+    # valid budgets after admission, including values above signed int32.
+    condition = SimpleNamespace(_items=[("structured", None)], _ir_nodes=[None])
+    body = SimpleNamespace(_items=[], _ir_nodes=[])
+    for budget in (0, -1, 1 << 32, (1 << 31) + 1, (1 << 32) - 1):
+        result = _compile_native_nested_while_runtime_node(
+            condition,
+            body,
+            outer_name="boundary",
+            outer_predicate="p",
+            outer_counter="c",
+            outer_status=None,
+            outer_max_iterations=budget,
+        )
+        expected_reason = (
+            "outer_iteration_budget_out_of_range"
+            if budget <= 0 or budget >= 1 << 32
+            else "outer_condition_must_be_plain"
+        )
+        assert result[-1] == expected_reason
 
 
 @pytest.mark.parametrize(

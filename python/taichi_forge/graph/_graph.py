@@ -4325,15 +4325,15 @@ def structured_control_capabilities():
             "nested_native_lowering_compiled": nested_native_compiled,
             "nested_native_kinds": (("while_while",) if nested_native else ()),
             "nested_native_outer_iteration_limit": (
-                ((1 << 63) - 1 if backend == "cuda" else 64) if nested_native else 0
+                ((1 << 63) - 1 if backend == "cuda" else (1 << 32) - 1) if nested_native else 0
             ),
             "nested_native_inner_iteration_limit": (
-                ((1 << 63) - 1 if backend == "cuda" else 64) if nested_native else 0
+                ((1 << 63) - 1 if backend == "cuda" else (1 << 32) - 1) if nested_native else 0
             ),
             # Dynamic storage and backend representation determine capacity.
             "nested_native_max_ordered_inner_regions": (None if nested_native else 0),
             "nested_native_max_encoded_actions": (
-                (None if backend == "cuda" else 4096) if nested_native else 0
+                None if nested_native else 0
             ),
             # These scalar limits describe expanded command routes. Compact
             # conditional control owns one copy per static region, not budget.
@@ -6565,7 +6565,7 @@ def _compile_native_nested_while_runtime_node(
     if outer_counter is None:
         return unavailable("outer_counter_required")
     if outer_max_iterations <= 0 or (
-        arch == _ti_core.Arch.vulkan and outer_max_iterations > 64
+        arch == _ti_core.Arch.vulkan and outer_max_iterations > (1 << 32) - 1
     ):
         return unavailable("outer_iteration_budget_out_of_range")
     if (
@@ -6599,11 +6599,11 @@ def _compile_native_nested_while_runtime_node(
         if inner.counter is None:
             return unavailable("inner_counter_required")
         if inner.max_iterations <= 0 or (
-            arch == _ti_core.Arch.vulkan and inner.max_iterations > 64
+            arch == _ti_core.Arch.vulkan and inner.max_iterations > (1 << 32) - 1
         ):
             return unavailable("inner_iteration_budget_out_of_range")
         if inner.compound_chunk_limit <= 0 or (
-            arch == _ti_core.Arch.vulkan and inner.compound_chunk_limit > 64
+            arch == _ti_core.Arch.vulkan and inner.compound_chunk_limit > (1 << 32) - 1
         ):
             return unavailable("inner_chunk_size_out_of_range")
         if not inner._native_upgrade_eligible:
@@ -6676,13 +6676,7 @@ def _compile_native_nested_while_runtime_node(
     encoded_action_count = outer_condition_count + outer_max_iterations * (
         outer_static_dispatches + repeated_dispatches
     )
-    if (
-        flattened_dispatch_count <= 0
-        or (
-            arch == _ti_core.Arch.vulkan
-            and (flattened_dispatch_count > 4096 or encoded_action_count > 4096)
-        )
-    ):
+    if flattened_dispatch_count <= 0:
         return unavailable("encoded_action_budget_exceeded")
 
     compiled = _compile_plain_sequential_runtime_node(

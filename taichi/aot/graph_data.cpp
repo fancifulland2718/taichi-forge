@@ -6963,9 +6963,9 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
     std::size_t inner_condition_dispatch_begin,
     std::size_t inner_body_dispatch_begin,
     std::size_t outer_suffix_dispatch_begin,
-    int outer_max_iterations,
-    int inner_max_iterations,
-    int inner_chunk_size,
+    std::int64_t outer_max_iterations,
+    std::int64_t inner_max_iterations,
+    std::int64_t inner_chunk_size,
     bool wait_for_result) const {
   CompiledGraphNestedInnerControl inner;
   inner.predicate = inner_predicate;
@@ -6992,16 +6992,18 @@ CompiledGraph::jit_run_bounded_vulkan_nested_sequence_cached(
     Ndarray *outer_status,
     const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
     std::size_t outer_condition_dispatch_count,
-    int outer_max_iterations,
+    std::int64_t outer_max_iterations,
     bool wait_for_result) const try {
   CompiledGraphNestedStructuredResult result;
 #if defined(TI_WITH_VULKAN)
-  constexpr int kNestedMaximumOuterIterations = 64;
-  constexpr int kNestedMaximumChunkIterations = 64;
+  // GFX encodes these budgets in uint32 fields. Its nested recorder owns
+  // storage, address and accumulated-cost checks; flat packet caps do not
+  // describe this separate path.
+  constexpr auto kMaximumIterations = std::numeric_limits<std::uint32_t>::max();
   if (compile_config.arch != Arch::vulkan || outer_predicate == nullptr ||
       outer_counter == nullptr || inner_controls.empty() ||
       outer_max_iterations <= 0 ||
-      outer_max_iterations > kNestedMaximumOuterIterations ||
+      outer_max_iterations > kMaximumIterations ||
       outer_condition_dispatch_count == 0) {
     return result;
   }
@@ -7029,8 +7031,8 @@ CompiledGraph::jit_run_bounded_vulkan_nested_sequence_cached(
     if (!valid_control(inner.predicate) || !valid_control(inner.counter) ||
         (inner.status != nullptr && !valid_control(inner.status)) ||
         inner.max_iterations <= 0 || inner.chunk_size <= 0 ||
-        inner.max_iterations > kNestedMaximumChunkIterations ||
-        inner.chunk_size > kNestedMaximumChunkIterations ||
+        inner.max_iterations > kMaximumIterations ||
+        inner.chunk_size > kMaximumIterations ||
         inner.chunk_size > inner.max_iterations ||
         boundary_cursor > inner.condition_dispatch_begin ||
         inner.condition_dispatch_begin >= inner.body_dispatch_begin ||

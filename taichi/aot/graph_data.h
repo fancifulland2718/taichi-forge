@@ -678,7 +678,7 @@ struct CompiledGraphNestedInnerControl {
   std::size_t body_dispatch_begin{0};
   std::size_t dispatch_end{0};
   std::int64_t max_iterations{0};
-  int chunk_size{0};
+  std::int64_t chunk_size{0};
 };
 
 // A transient capture error must not permanently disable an otherwise valid
@@ -945,9 +945,9 @@ struct TI_DLL_EXPORT CompiledGraph {
       std::size_t inner_condition_dispatch_begin,
       std::size_t inner_body_dispatch_begin,
       std::size_t outer_suffix_dispatch_begin,
-      int outer_max_iterations,
-      int inner_max_iterations,
-      int inner_chunk_size,
+      std::int64_t outer_max_iterations,
+      std::int64_t inner_max_iterations,
+      std::int64_t inner_chunk_size,
       bool wait_for_result = true) const;
   CompiledGraphNestedStructuredResult
   jit_run_bounded_vulkan_nested_sequence_cached(
@@ -959,7 +959,7 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *outer_status,
       const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
       std::size_t outer_condition_dispatch_count,
-      int outer_max_iterations,
+      std::int64_t outer_max_iterations,
       bool wait_for_result = true) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,

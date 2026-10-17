@@ -545,7 +545,7 @@ condition 与各 body 可以为空。非空分支每次出现使用独立的 4 �
 非选中 task 仍可能发射，因此不等同于 conditional node 的跳过成本，也不改变默认策略。
 CPU/Vulkan 不接受此 lowering，provider 与嵌套控制尚不属于此切片。
 已验证 IF/SWITCH、空 case、default/no-op、signed selector、实际 `kernel.grad`、独立/借用
-消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI75
+消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI76
 组件。`add_execution_plan(name, graph, gradients=...)` 也可导出 `native_required` 下已选
 `cuda_masked_bounded_graph` 的 IF/SWITCH：沿用物理边界、条件与前后段，按源特化和调用 ABI
 去重代码，不保存未用的普通 body 变体。实际分支内 `kernel.grad`、四种分支与重复计划共用
@@ -638,7 +638,7 @@ body/尾部边界、预算、私有资源和标量/互不别名约束；不在�
 schema 8声明的 `cuda_graph_gate_v1` 代码。prepare在零预算时也检查ABI，不在消费端生成
 kernel或device-update节点，不静默切换路线。每份prepare独立拥有gate存储，在提交完成
 后退休。静态代码可由多个计划共享，捕获的命令存储仍随预算增长。需v14消费端与匹配的
-私有ABI75组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
+私有ABI76组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
 嵌套Graph，保留物理dispatch边界，只生成body需要的变体；按源特化和调用ABI跨计划去重，
 普通入口不能覆盖gated入口。九个内层区域的小用例验证了真实前向/后段梯度、双绑定、活跃
 后零轮和独立/借用退休，消费端无需编译gated变体。未冻结auto、native provider body、
@@ -650,7 +650,7 @@ kernel合同。
 非空body中的所有kernel（包括尾条件）须为预编译的 `cuda_graph_gate_v1` 代码。非空初始
 condition使用普通入口，零预算也执行一次。静态代码不随预算复制，但录制命令仍随预算增长。
 prepare复用绑定、梯度与退休合同，拒绝非CUDA runtime、native provider body和launch override。
-此格式需要v15消费端及匹配的ABI75组件。`add_execution_plan(name, graph)` 也可自动导出
+此格式需要v15消费端及匹配的ABI76组件。`add_execution_plan(name, graph)` 也可自动导出
 已物化且选择 `cuda_masked_bounded_graph` 的单层Graph，保留已选物理body及尾条件，
 只生成其所需gated变体，跨计划共享代码。零预算只导出初始条件与前后段，不带无用body变体。
 公开/私有控制存储、标量和互不别名约束、显式梯度绑定均保留；消费端环境变化不重选路线，
