@@ -1,6 +1,9 @@
+from numbers import Integral
+
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.lang import impl
+from taichi_forge.lang import expr, impl, ops
 from taichi_forge.lang.exception import TaichiCompilationError
+from taichi_forge.types.primitive_types import i32, u32
 
 
 _SHUFFLE_CAPABILITIES = {
@@ -35,6 +38,15 @@ def _shuffle(operation, intrinsic, value, index):
             f"{_SHUFFLE_CAPABILITIES[operation]} "
             f"(current backend: {_ti_core.arch_name(impl.current_cfg().arch)})"
         )
+    if isinstance(index, Integral) and not isinstance(index, bool):
+        if not 0 <= index <= 0xFFFFFFFF:
+            raise ValueError(f"ti.simt.subgroup.{operation} index must be in [0, 2**32 - 1]")
+        index = expr.Expr(int(index), dtype=u32)
+    else:
+        index = expr.Expr(index)
+        if index.is_tensor() or index.ptr.get_rvalue_type() not in (i32, u32):
+            raise TypeError(f"ti.simt.subgroup.{operation} index must be a scalar i32 or u32")
+        index = ops.cast(index, u32)
     return impl.call_internal(intrinsic, value, index, with_runtime_context=False)
 
 
@@ -172,22 +184,28 @@ def exclusive_xor(value):
 
 
 def shuffle(value, index):
-    """Read an active source lane by its subgroup-local index."""
+    """Read an active source lane by its subgroup-local index.
+
+    The index accepts a Python integer in [0, 2**32 - 1] or a scalar i32/u32
+    expression. Signed expressions are converted to u32 and must be nonnegative
+    at execution. The source must be active and within the subgroup; otherwise
+    the result is undefined. No clamping or host readback is performed.
+    """
     return _shuffle("shuffle", "subgroupShuffle", value, index)
 
 
 def shuffle_xor(value, mask):
-    """Read active lane ``invocation_id() ^ mask``."""
+    """Read active lane ``invocation_id() ^ mask``; same integer contract as shuffle."""
     return _shuffle("shuffle_xor", "subgroupShuffleXor", value, mask)
 
 
 def shuffle_up(value, offset):
-    """Read active lane ``invocation_id() - offset``."""
+    """Read active lane ``invocation_id() - offset``; same integer contract as shuffle."""
     return _shuffle("shuffle_up", "subgroupShuffleUp", value, offset)
 
 
 def shuffle_down(value, offset):
-    """Read active lane ``invocation_id() + offset``."""
+    """Read active lane ``invocation_id() + offset``; same integer contract as shuffle."""
     return _shuffle("shuffle_down", "subgroupShuffleDown", value, offset)
 
 

@@ -64,8 +64,11 @@ For AOT export, also declare the corresponding target capabilities in
 "spirv_has_subgroup_shuffle_relative"])`; the current device does not implicitly
 enable capabilities on the export target.
 
-All four operations accept scalar `i32`, `u32`, or `f32` values and a `u32`
-lane index, mask, or offset. They preserve the value's type. The source lane is
+All four operations accept scalar `i32`, `u32`, or `f32` values. The lane index,
+mask, or offset accepts a Python integer in `[0, 2**32 - 1]` or a scalar
+`i32`/`u32` expression; signed expressions must be nonnegative at execution and
+are converted to `u32`. Floating-point, tensor and wider integer expressions
+are rejected rather than truncated. They preserve the value's type. The source lane is
 respectively `index`, `invocation_id() ^ mask`, `invocation_id() - offset`, or
 `invocation_id() + offset`. Use `group_size()` to obtain the actual subgroup
 width; Vulkan does not promise CUDA's 32-lane width.
@@ -78,5 +81,7 @@ boundary results so that lanes supplying valid values still participate.
 These are the [SPIR-V group shuffle semantics](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#OpGroupNonUniformShuffle).
 
 Vulkan 子组交换支持标量 `i32/u32/f32`，可通过 `is_shuffle_supported` 按操作查询当前设备。
+索引、掩码和偏移接受 `[0, 2**32 - 1]` 内的 Python 整数或标量 `i32/u32` 表达式；
+有符号表达式在执行时须非负，包装层统一转换为 `u32`，不截断浮点数、张量或宽整数。
 子组宽度由 `group_size()` 给出；越界或未参与同一次指令的源 lane 结果未定义，不能按 CUDA
 固定 32 lane 或边界返回自身值的假设使用。共享内存和 barrier 的块尺寸约束仍由调用方保证。

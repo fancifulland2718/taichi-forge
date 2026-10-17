@@ -14,6 +14,48 @@ from tests import test_utils
 OPERATIONS = ("shuffle", "shuffle_up", "shuffle_down", "shuffle_xor")
 
 
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize("index_kind", ["literal", "signed", "unsigned"])
+@test_utils.test(arch=ti.vulkan, offline_cache=False, compile_tier="fast")
+def test_shuffle_integer_indices(operation, index_kind, tmp_path, monkeypatch):
+    if not subgroup.is_shuffle_supported(operation):
+        pytest.skip("device lacks the required shuffle capability")
+    monkeypatch.setenv("TI_VULKAN_VALIDATE_SPIRV", "1")
+    out = ti.field(ti.i32, shape=32)
+    exchange = getattr(subgroup, operation)
+
+    @ti.kernel
+    def run(offset: ti.i32):
+        ti.loop_config(block_dim=32)
+        for i in range(32):
+            # Uniform values let this test exercise plain zero for all four
+            # operations without assuming a hardware subgroup width.
+            if ti.static(index_kind == "literal"):
+                out[i] = exchange(37, 0)
+            elif ti.static(index_kind == "signed"):
+                out[i] = exchange(37, offset)
+            else:
+                out[i] = exchange(37, ti.u32(offset))
+
+    ti.tools.export_vulkan_kernel(run, 0, directory=tmp_path / "jit", validate=True)
+    run(0)
+    np.testing.assert_array_equal(out.to_numpy(), np.full(32, 37, np.int32))
+
+
+@pytest.mark.parametrize("index", [-1, 2**32, 0.5])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_shuffle_rejects_invalid_python_indices(index):
+    if not subgroup.is_shuffle_supported():
+        pytest.skip("device lacks shuffle support")
+
+    @ti.kernel
+    def run() -> ti.i32:
+        return subgroup.shuffle(1, ti.static(index))
+
+    with pytest.raises(ti.TaichiCompilationError, match="index must be"):
+        run()
+
+
 @pytest.mark.parametrize("dtype", [ti.i32, ti.u32, ti.f32])
 @pytest.mark.parametrize("block_dim", [32, 64, 128])
 @pytest.mark.parametrize("divergent", [False, True])
@@ -92,11 +134,7 @@ def test_shuffle_values_and_spirv(dtype, block_dim, divergent, tmp_path):
                 origin = i - int(lane) + source
                 if 0 <= source < width and 0 <= origin < count:
                     if not divergent or source % 2 == 0:
-                        adjustment = (
-                            0x80000000
-                            if dtype == ti.u32
-                            else (-1000 if dtype == ti.i32 else -1000.25)
-                        )
+                        adjustment = 0x80000000 if dtype == ti.u32 else (-1000 if dtype == ti.i32 else -1000.25)
                         assert actual[i, operation] == origin * 3 + 17 + adjustment
                         checked += 1
         if delta in (0, 2):
@@ -113,9 +151,7 @@ def test_shuffle_rejects_unsupported_backend(operation):
     def invoke() -> ti.i32:
         return op(1, ti.u32(0))
 
-    with pytest.raises(
-        ti.TaichiCompilationError, match="requires Vulkan device capability"
-    ):
+    with pytest.raises(ti.TaichiCompilationError, match="requires Vulkan device capability"):
         invoke()
 
 
