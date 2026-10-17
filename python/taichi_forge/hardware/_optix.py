@@ -1735,6 +1735,11 @@ class OptixRayRefitRecording(BackendCommandRecording):
 class OptixGASRefitRecording(BackendCommandRecording):
     """One fixed-topology update of an independently shared triangle GAS."""
 
+    def _export_aot(self, context):
+        from ._aot_optix import export_gas_refit
+
+        return export_gas_refit(self, context)
+
     def __init__(self, gas, *, vertices="vertices"):
         if not isinstance(gas, OptixTriangleGAS):
             raise TypeError("OptiX GAS refit recording requires an OptixTriangleGAS")
@@ -1852,6 +1857,11 @@ def _instance_transform_storage(value, instance_count, name):
 @instrument_hardware_recording("ray.as_refit.optix")
 class OptixInstanceRefitRecording(BackendCommandRecording):
     """Refit one fixed-topology IAS, optionally from device transforms."""
+
+    def _export_aot(self, context):
+        from ._aot_optix import export_instance_refit
+
+        return export_instance_refit(self, context)
 
     def __init__(self, scene, *, transforms=None):
         if not isinstance(scene, OptixInstanceScene):

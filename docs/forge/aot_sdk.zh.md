@@ -250,8 +250,8 @@ kernel的真实梯度可运行，但不提供求交对顶点/ray的自动微分�
 工厂。当前操作使用 `cuda_ordered`，CUDA capture、alpha/纹理、OMM、
 programmable pipeline 仍待接通。
 
-包含单个 triangle scene 的 typed query、compact occlusion 和 refit recording 的
-已编译 Graph 可自动导出，须显式提供资源重建输入：
+包含 triangle/instance scene 的 typed query、compact occlusion、GAS refit 和 IAS
+变换/包围盒 refit recording 的已编译 Graph 可自动导出，须显式提供资源重建输入：
 
 ```python
 module.add_execution_plan(
@@ -270,8 +270,23 @@ module.add_execution_plan(
 与 AS 内容不同。`snapshot_state=True` 不替代显式输入。准备只构建场景，不执行查询；
 随后 refit 和活面表保持有序语义。相同 scene/provider 的 recording 共用资源描述，
 不归档 provider 路径、设备指针或生产端回调；消费端仍自行配置外部 adapter。
-共享 GAS/实例 recording、旧 untyped hit、alpha/OMM/program recording 的自动导出
-尚未接通；上面的共享 GAS 显式计划仍可使用。
+实例场景需为每个不同 GAS 指定初始化数组，并为 IAS 指定初始变换：
+
+```python
+resource_bindings = {
+    gas_a: {"vertices": "vertices_a", "indices": "indices_a"},
+    gas_b: {"vertices": "vertices_b", "indices": "indices_b"},
+    instance_scene: {"transforms": "initial_transforms"},
+}
+module.add_execution_plan("step", compiled_graph, resource_bindings=resource_bindings)
+```
+
+共享 GAS 的实例只重建一份几何资源，保留 instance ordinal、custom ID、visibility mask
+和 opaque 的独立语义；初始矩阵由消费端提供，不取可能已过期的构造时 transform。
+存活 IAS 可用其保留的元数据和显式 seed 重建原始句柄已关闭的 GAS；这不允许通过
+关闭的 GAS 句柄直接 refit。Windows CUDA 已验证共享几何、设备变换、包围盒刷新、
+独立绑定及后续梯度。旧 untyped hit、alpha/OMM/program recording 和非零 SBT offset
+仍未接通自动导出，会在导出阶段明确拒绝。
 
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
 或 Vulkan GFX runtime、设备和分配器：

@@ -322,9 +322,9 @@ rays is not provided. CPU/Vulkan do not register these factories. Operations use
 `cuda_ordered`; CUDA capture, alpha/textures, OMM and programmable pipelines remain
 pending.
 
-Compiled Graphs containing a single triangle scene's typed query, compact
-occlusion and refit recordings can export automatically. Supply explicit resource
-reconstruction inputs:
+Compiled Graphs containing triangle or instance scene typed queries, compact
+occlusion, GAS refits and IAS transform/bounds refits can export automatically.
+Supply explicit resource reconstruction inputs:
 
 ```python
 module.add_execution_plan(
@@ -348,9 +348,27 @@ arrays or the last refit inputs, which may no longer match its contents.
 without executing queries; subsequent refits and live face tables keep their
 ordered semantics. Recordings sharing a scene/provider reuse their reconstruction
 descriptions. No provider path, device pointer or producer callback is archived.
-Consumer configuration still selects the external adapter. Shared GAS/instance
-recording export, legacy untyped hits and alpha/OMM/program recordings remain
-unsupported by this automatic route; explicit shared-GAS plans above remain usable.
+Consumer configuration still selects the external adapter. For an instance scene,
+name each distinct GAS's seed arrays and the IAS's initial transform array:
+
+```python
+resource_bindings = {
+    gas_a: {"vertices": "vertices_a", "indices": "indices_a"},
+    gas_b: {"vertices": "vertices_b", "indices": "indices_b"},
+    instance_scene: {"transforms": "initial_transforms"},
+}
+module.add_execution_plan("step", compiled_graph, resource_bindings=resource_bindings)
+```
+
+Instances sharing a GAS reuse one resource description. Instance ordinal,
+custom ID, visibility mask and opaque metadata remain distinct; initial matrices
+come from the consumer, not potentially stale constructor transforms. A live IAS
+can reconstruct geometry whose original GAS handle has closed, using its retained
+metadata and explicit seeds. This does not enable direct refits through a closed
+GAS handle. Windows CUDA checks cover shared geometry, device transforms,
+bounds-only refits, independent bindings and downstream gradients. Legacy untyped
+hits, alpha/OMM/program recordings and nonzero SBT offsets remain unsupported by
+this automatic route and are rejected during export.
 
 When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
 its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:
