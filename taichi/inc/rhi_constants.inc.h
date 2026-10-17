@@ -47,6 +47,7 @@ PER_DEVICE_CAPABILITY(max_sampled_texture_collection_size)
 PER_DEVICE_CAPABILITY(vulkan_has_opacity_micromap)
 PER_DEVICE_CAPABILITY(spirv_has_subgroup_shuffle)
 PER_DEVICE_CAPABILITY(spirv_has_subgroup_shuffle_relative)
+PER_DEVICE_CAPABILITY(vulkan_has_ray_tracing_pipeline)
 #endif
 
 #ifdef PER_BUFFER_FORMAT

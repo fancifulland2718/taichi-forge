@@ -130,7 +130,7 @@ BufferFormat image_format(const std::string &name) {
 
 ImageParams parameters(const liong::json::JsonValue &p) {
   using namespace operation_json;
-  fields(p, {"shape", "format", "filter", "address_modes"});
+  fields(p, {"shape", "format", "filter", "address_modes", "storage"});
   const auto &shape = p["shape"];
   if (!shape.is_arr() || shape.arr.inner.empty() || shape.arr.inner.size() > 3)
     throw std::invalid_argument(
@@ -147,6 +147,9 @@ ImageParams parameters(const liong::json::JsonValue &p) {
           "Image extent must fit the positive uint32 RHI ABI");
     *extents[i] = uint32_t(extent);
   }
+  result.usage = ImageAllocUsage::Sampled;
+  if (optional_bool(p, "storage"))
+    result.usage = result.usage | ImageAllocUsage::Storage;
   result.format = image_format(name(p["format"]));
   if (!is_float_sampled_texture_format(result.format))
     throw std::invalid_argument(
@@ -351,7 +354,6 @@ class VulkanSampledImage final : public NativeSampledImage {
   }
   void initialize(const SampledImageDescription &d) {
     auto params = d.parameters;
-    params.usage = ImageAllocUsage::Sampled;
     image_ = runtime_.create_image(params);
     if (d.pixels) {
       const auto image = image_;
@@ -492,6 +494,8 @@ void register_image_operations(NativeOperationRegistry &registry) {
   registry.register_context_factory<SampledImageDescription>(
       Arch::cuda, NativeOperationMode::cuda_capture,
       [](NativePreparationContext &c, const SampledImageDescription &d) {
+        if (bool(d.parameters.usage & ImageAllocUsage::Storage))
+          throw std::invalid_argument("Managed storage images require Vulkan");
         if (!c.fault_domain || !dynamic_cast<cuda::CudaDevice *>(&c.device))
           throw std::invalid_argument(
               "Sampled image requires a CUDA owner and fault domain");

@@ -470,7 +470,8 @@ VulkanRayTransformPacket transform_packet(Device &device,
 }
 
 class PreparedTlas final
-    : public OwnedRayResource<VulkanInstanceTlas, NativeAccelerationStructure>,
+    : public OwnedRayResource<VulkanInstanceTlas,
+                              NativeShaderAccelerationStructure>,
       public QueryAccess,
       public InstanceAccess {
  public:
@@ -507,6 +508,32 @@ class PreparedTlas final
                        int binding,
                        CommandList *commands) override {
     core_->bind_for_kernel(bindings, binding, commands);
+  }
+  void bind_for_shader(ShaderResourceSet *bindings, int binding) override {
+    core_->bind_for_shader(bindings, binding);
+  }
+  void record_shader_read(CommandList *commands,
+                          PipelineStageType stage,
+                          bool graphics_queue) override {
+    VkPipelineStageFlags stages;
+    switch (stage) {
+      case PipelineStageType::compute:
+        stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        break;
+      case PipelineStageType::fragment:
+        stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        break;
+      case PipelineStageType::raytracing:
+        stages = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+        break;
+      default:
+        throw std::invalid_argument(
+            "Unqualified acceleration structure shader stage");
+    }
+    core_->record_shader_read(commands, stages, graphics_queue);
+  }
+  std::uint32_t max_sbt_record_offset() const override {
+    return core_->max_sbt_record_offset();
   }
   void record_transforms(CommandList *commands,
                          const VulkanRayTransformPacket &p) override {

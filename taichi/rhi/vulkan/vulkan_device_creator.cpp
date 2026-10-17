@@ -1505,6 +1505,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
        !vkGetDeviceProcAddr(device_, "vkCmdTraceRaysKHR"))) {
     ti_device_->vk_caps().ray_tracing_pipeline = false;
   }
+  if (ti_device_->vk_caps().ray_tracing_pipeline)
+    caps.set(DeviceCapability::vulkan_has_ray_tracing_pipeline, true);
 
   if (queue_family_indices_.compute_family.has_value()) {
     get_device_queue(device_, queue_family_indices_.compute_family.value(), 0,
