@@ -22,6 +22,7 @@
 #include <taichi/program/runtime_completion.h>
 #include "taichi/runtime/cuda/provider_completion_resource.h"
 #include "taichi/runtime/vulkan_ray_query_packet.h"
+#include "taichi/runtime/vulkan_ray_types.h"
 #include <taichi/program/runtime_fault.h>
 #include <taichi/program/runtime_trace.h>
 #include <taichi/program/primitive_workspace.h>
@@ -230,22 +231,6 @@ class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
 class ExternalAccessEpoch;
 struct ExternalStreamDomain;
-
-struct VulkanTriangleRaySceneMemoryStatistics {
-  std::size_t geometry_input_requested_bytes{0};
-  std::size_t acceleration_structure_requested_bytes{0};
-  std::size_t build_scratch_requested_bytes{0};
-  std::size_t known_requested_bytes{0};
-  std::size_t known_allocation_count{0};
-};
-
-struct VulkanRayInstanceInfo {
-  std::array<float, 12> transform{1.0f, 0.0f, 0.0f, 0.0f,
-                                  0.0f, 1.0f, 0.0f, 0.0f,
-                                  0.0f, 0.0f, 1.0f, 0.0f};
-  std::uint32_t mask{0xff};
-  std::uint32_t custom_index{0};
-};
 
 struct VulkanGraphicsVertexBinding {
   std::uint32_t binding{0};
