@@ -498,7 +498,7 @@ TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,
   taichi::lang::FixedExecution::Dispatch dispatch{
       prepared->kernel_arguments->kernel,
       prepared->kernel_arguments->context.get()};
-  dispatch.images = prepared->kernel_arguments->images;
+  dispatch.resources = prepared->kernel_arguments->kernel_resources;
   prepared->prepare_operations(rt, {std::move(dispatch)});
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
@@ -1213,7 +1213,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
                                      indirect_packet, bounded_extent,
                                      bounded_capacity, adaptive_block_dim,
                                      grouped_update, bounded_binding_identity,
-                                     bound->images});
+                                     bound->kernel_resources});
         prepared->plan_arguments.push_back(std::move(bound));
       } else if (const auto *copy =
                      std::get_if<aot::ExecutionPlan::Copy>(&operation)) {

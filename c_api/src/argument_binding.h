@@ -11,8 +11,8 @@
 
 namespace taichi::lang {
 class NativeSampledImage;
-class NativeImageKernelBinding;
-}
+class NativeKernelResourceBinding;
+}  // namespace taichi::lang
 
 namespace capi {
 struct NdArrayStorageLayout {
@@ -28,7 +28,7 @@ uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,
                                  uint64_t *element_bytes = nullptr);
 taichi::lang::NativeArrayBinding bind_native_array(Runtime &runtime,
-                                                  const TiNdArray &array);
+                                                   const TiNdArray &array);
 
 // Cold ABI marshalling shared by ordinary launch and prepared execution. These
 // own the host descriptors referenced by LaunchContextBuilder, not device data.
@@ -41,7 +41,8 @@ struct BoundKernelArguments {
   std::vector<std::unique_ptr<taichi::lang::storage::DenseStorageDescriptor>>
       views;
   std::unique_ptr<taichi::lang::LaunchContextBuilder> context;
-  std::vector<std::shared_ptr<taichi::lang::NativeImageKernelBinding>> images;
+  std::vector<std::shared_ptr<taichi::lang::NativeKernelResourceBinding>>
+      kernel_resources;
 };
 
 struct BoundGraphArguments {

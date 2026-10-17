@@ -13,7 +13,7 @@
 namespace taichi::lang {
 class LaunchContextBuilder;
 class NativeOperation;
-class NativeImageKernelBinding;
+class NativeKernelResourceBinding;
 class RuntimeFaultDomain;
 struct NativeRecordingState;
 namespace aot {
@@ -41,7 +41,7 @@ class FixedExecution {
     bool grouped_update{false};
     // Cold-only logical binding identity; never dereferenced or retained.
     const void *bounded_binding_identity{nullptr};
-    std::vector<std::shared_ptr<NativeImageKernelBinding>> images;
+    std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
   };
   struct BufferCopy {
     DevicePtr destination;

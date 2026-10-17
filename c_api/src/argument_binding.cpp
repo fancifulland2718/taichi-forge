@@ -416,7 +416,7 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
             std::move(image), std::vector<int>{int(i)}, runtime2.arch,
             runtime2.get(), *ti_kernel, builder);
         binding->validate(runtime2.arch, runtime2.get(), *ti_kernel, builder, {});
-        result->images.push_back(std::move(binding));
+        result->kernel_resources.push_back(std::move(binding));
         result->native_resources.push_back(args[i].value.native_resource);
       } catch (const std::invalid_argument &error) {
         throw MemoryBindingError(error.what());
@@ -425,7 +425,7 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     }
     if (const auto image = images.find(i); image != images.end()) {
       try {
-        result->images.push_back(
+        result->kernel_resources.push_back(
             std::make_shared<taichi::lang::NativeImageKernelBinding>(
                 image->second, std::vector<int>{int(i)}, runtime2.arch,
                 runtime2.get(), *ti_kernel, builder));

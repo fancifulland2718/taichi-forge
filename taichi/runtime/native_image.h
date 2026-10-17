@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_kernel_resource.h"
 
 namespace taichi::lang {
 class CallableBase;
@@ -47,7 +48,7 @@ class NativeSampledImage : public NativeResource {
 // Cold kernel binding, never a public raw image handle. The backend copies the
 // sampled object into its launch packet; the enclosing execution retains this
 // owner until the packet's last submission retires.
-class NativeImageKernelBinding {
+class NativeImageKernelBinding final : public NativeKernelResourceBinding {
  public:
   NativeImageKernelBinding(std::shared_ptr<NativeSampledImage> image,
                            std::vector<int> argument,
@@ -58,14 +59,14 @@ class NativeImageKernelBinding {
   NativeImageKernelBinding(const NativeImageKernelBinding &) = delete;
   NativeImageKernelBinding &operator=(const NativeImageKernelBinding &) =
       delete;
-  const std::vector<int> &argument() const {
+  const std::vector<int> &argument() const override {
     return argument_;
   }
   void validate(Arch arch,
                 Device &device,
                 const CallableBase &kernel,
                 const LaunchContextBuilder &context,
-                const NativeRecordingState &state) const;
+                const NativeRecordingState &state) const override;
 
  private:
   void validate_parameter(Arch arch,
