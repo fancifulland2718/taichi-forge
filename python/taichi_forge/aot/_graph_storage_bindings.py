@@ -39,6 +39,7 @@ class RetainedArrayBindings:
         self.tree_ids = set()
         self.private_arrays = {}
         self.private_roles = {}
+        self.private_usages = {}
         self.existing = {_field_key(packed_description(module._fields[name])): name for name in module._array_fields}
 
     def require(self, owner):
@@ -86,9 +87,12 @@ class RetainedArrayBindings:
         self.fields[key] = (view, owner, resource)
         return resource
 
-    def declare_scratch(self, owner):
+    def declare_scratch(self, owner, *, usage=None):
         """A concrete recipe proves a full overwrite before any workspace read."""
         identity = self._private_identity(owner, "scratch")
+        required_usage = tuple(sorted(usage or ()))
+        if self.private_usages.setdefault(identity, required_usage) != required_usage:
+            raise TaichiRuntimeError("AOT scratch allocation usage changed within one export")
         if identity not in self.private_arrays:
             descriptor = packed_description(owner)
             self.private_arrays[identity] = self.context._resource(
@@ -98,6 +102,7 @@ class RetainedArrayBindings:
                     dtype=str(descriptor.scalar_type),
                     shape=list(descriptor.index_shape),
                     element_shape=list(descriptor.element_shape),
+                    **({"usage": list(required_usage)} if usage is not None else {}),
                 ),
             )
         return self.private_arrays[identity]

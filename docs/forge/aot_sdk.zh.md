@@ -738,6 +738,46 @@ plan 用 `{spd_plan: "public_plan"}`，同时公开其两个图像，导出器�
 约束。消费者拒绝仅形状相同但身份不同的替代图像。测试覆盖前置 kernel、同 plan
 两次调用、全 mip 读取、下游反向及初始化输入关闭后的复用；不改变 JIT recipe 资格。
 
+### 高层 RasterPass 导出
+
+Vulkan `RasterPass` 的 `mesh`、`mesh_instance` 和 `particles` 录制可经普通显式
+Graph 导出。准备核、私有几何暂存与原生 graphics pass 在同一 AOT 执行序列中，
+不把 Window、Camera 或 producer Python 对象写入包。消费端不导入 Forge、不调用
+UI 前端，也不需要 shader compiler；仍会在首次准备时创建原生 pipeline/描述符。
+选择前查询 `vulkan_graphics_pass_direct` version 5，CPU/CUDA 不提供此绘制路径。
+
+已有 `raster` 包含使用 `centers`/`transforms` ndarray 的绘制时，可以导出为：
+
+```python
+builder = ti.graph.GraphBuilder()
+builder.append_native(raster.record(), admission="explicit")
+graph = builder.compile()
+module = ti.aot.Module()
+module.add_execution_plan(
+    "draw", graph, snapshot_state=True,
+    source_bindings={"centers": centers, "transforms": transforms},
+    resource_bindings={raster.color_texture: "color", raster.depth_texture: "depth"},
+)
+module.archive("renderer.tcm")
+```
+
+只为实际使用的外部 ndarray 指定 `source_bindings`；模板 Field 沿用显式 dense-root
+快照。相机在导出时冻结，环境光及点光源沿用录制值；改变这些参数须在冷边界重新
+导出。固定布局的几何、索引和实例矩阵内容可继续由消费端更新，不增加逐帧 host
+校验。外部索引数组须带 `index` usage，若准备核也读取它则同时带 `storage` usage；
+索引仍须满足原绘制的有效顶点范围承诺，不进行 host 扫描。
+
+省略 `resource_bindings` 时，附件由计划重建并先清屏，无需像素 seed。公共附件用
+`image/sampled` 创建，需 `attachment=True`、与录制一致的尺寸、RGBA8 color 和
+depth32f depth；准备阶段核对布局，关闭公共附件会退休依赖计划。下游 Texture
+kernel 通过相应 `source_bindings` 与录制共享同一图像。零绘制保留清屏，不保留
+无用几何准备、uniform 或 pipeline。
+
+Windows 小场景测试覆盖非索引/索引 mesh、实例偏移与数量裁剪、粒子范围、几何更新、
+颜色/深度对照、独立/借用 owner、关闭及下游实际梯度。光栅化本身不可自动微分。
+`lines` 的 compute 展开重建尚未接通，会在导出前拒绝；未扩大 JIT 自动 admission
+或 selected recipe 的资格。
+
 ### 显式 Vulkan 光栅计划
 
 公共 native registry 提供 version 1 的 `vulkan_graphics/pipeline` 和

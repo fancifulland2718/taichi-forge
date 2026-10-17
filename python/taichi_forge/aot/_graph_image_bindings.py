@@ -56,12 +56,21 @@ class SourceImageBindings:
 
     def require_attachment(self, name):
         owner = self.require(name)
+        self.qualify_attachment(owner)
+
+    def qualify_attachment(self, owner):
+        """Qualify an exact retained attachment without inventing public names."""
         if type(owner) is not Texture:
             raise TaichiRuntimeError("AOT attachment requires a Texture, not a collection")
+        self._validate_owner(owner)
         _, shape, mip_levels, _ = owner._creation_metadata
         if len(shape) != 2 or mip_levels != 1:
             raise TaichiRuntimeError("AOT graphics attachments require single-mip 2D textures")
         self._attachment_owners.add(id(owner))
+
+    def retained_attachment(self, context, owner, *, first_clear=False):
+        self.qualify_attachment(owner)
+        return self._image_resource(context, owner, first_clear=first_clear)
 
     def require_transfer(self, name):
         owner = self.require(name)

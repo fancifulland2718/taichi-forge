@@ -225,7 +225,12 @@ class PreparedRasterDraw:
         if self.has_host_upload:
             raise TaichiRuntimeError("AOT raster preparation requires device geometry, not host uploads")
         for owner in self._owned_arrays:
-            context.retained_arrays.declare_scratch(owner)
+            usage = None
+            if owner is self._buffers["vertices"]:
+                usage = ("storage", "vertex")
+            elif owner is self._buffers.get("indices"):
+                usage = ("storage", "index")
+            context.retained_arrays.declare_scratch(owner, usage=usage)
         buffers = {port: context.retained_arrays.require(owner) for port, owner in self._buffers.items()}
         # Optional VBO attributes are not written by every helper. Define them
         # once without copying producer scratch or clearing geometry every frame.

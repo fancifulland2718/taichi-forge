@@ -954,6 +954,54 @@ when their shapes match. Tests cover a preceding kernel, two calls to one plan,
 every mip, downstream backward execution and reuse after initialization inputs
 close. JIT recipe admission is unchanged.
 
+### Exporting high-level RasterPass recordings
+
+Vulkan `RasterPass` mesh, mesh_instance and particles recordings export through
+ordinary explicit Graphs. Preparation kernels, private geometry scratch and the
+native graphics pass share one AOT execution sequence. The artifact contains no
+Window, Camera or producer Python objects. Consumers do not import Forge, call
+the UI frontend or need a shader compiler; first preparation still creates native
+pipelines and descriptors. Discover `vulkan_graphics_pass_direct` version 5 before
+choosing this route. CPU/CUDA do not provide this drawing path.
+
+For an existing `raster` whose draws use `centers`/`transforms` ndarrays:
+
+```python
+builder = ti.graph.GraphBuilder()
+builder.append_native(raster.record(), admission="explicit")
+graph = builder.compile()
+module = ti.aot.Module()
+module.add_execution_plan(
+    "draw", graph, snapshot_state=True,
+    source_bindings={"centers": centers, "transforms": transforms},
+    resource_bindings={raster.color_texture: "color", raster.depth_texture: "depth"},
+)
+module.archive("renderer.tcm")
+```
+
+Name only external ndarrays actually used by the draws. Template Fields retain
+the explicit dense-root snapshot contract. Camera state freezes at export;
+ambient and point lights retain their recorded values. Change these parameters
+by exporting again at a cold boundary. Consumer code can update geometry, indices
+and instance matrices with the same layouts, with no new per-frame host checks.
+External indices require `index` allocation usage, plus `storage` when preparation
+kernels also read them. Index values must satisfy the source draw's valid vertex
+range contract; export does not scan device indices on the host.
+
+Without `resource_bindings`, plans rebuild and clear their attachments without
+pixel seeds. Public `image/sampled` attachments require `attachment=True`, the
+recorded dimensions, RGBA8 color and depth32f depth. Preparation checks these
+layouts; closing public attachments retires dependent executions. A downstream
+Texture kernel uses matching `source_bindings` to share the same image. Empty
+draws retain the clear but omit unused geometry preparation, uniforms and pipelines.
+
+Small Windows fixtures compare JIT color/depth with standalone and borrowed
+consumers for indexed/non-indexed meshes, instance offsets/count clipping,
+particle ranges, updated geometry, close/reset and downstream numeric gradients.
+Rasterization itself is not differentiated. `lines` compute expansion is not yet
+reconstructed and is rejected before export. JIT automatic admission and selected
+recipe qualification are unchanged.
+
 ### Explicit Vulkan raster plans
 
 The common native registry exposes `vulkan_graphics/pipeline` and

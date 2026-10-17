@@ -166,6 +166,12 @@ def test_graph_export_stages_frozen_data_and_resource_initialization():
         context.data_resource(owner, b"\0\0\0\0", dtype="f32", shape=[1])
     with pytest.raises(TypeError, match="immutable"):
         context.data_resource(object(), bytearray(data), dtype="f32", shape=[1])
+    payloads = dict(context.data_payloads)
+    storage = context.data_resource(object(), data, dtype="f32", shape=[1], readonly=True, usage=("storage",))
+    uniform = context.data_resource(object(), data, dtype="f32", shape=[1], readonly=True, usage=("uniform",))
+    assert storage != uniform, "Equal bytes cannot share allocations with different GPU usage contracts"
+    assert uniform == context.data_resource(object(), data, dtype="f32", shape=[1], readonly=True, usage=("uniform",))
+    assert context.data_payloads == payloads, "Allocation usage must not duplicate the archived byte payload"
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

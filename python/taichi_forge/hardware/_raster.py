@@ -195,6 +195,11 @@ class VulkanRasterPassRecording(BackendCommandRecording):
             )
         return _VulkanRasterPassNode(self)
 
+    def _export_aot_bindings(self, context):
+        from ._aot_raster import preflight
+
+        preflight(self, context)
+
 
 class _VulkanRasterPassExecutable(NativeGraphExecutable):
     def __init__(self, recording):
@@ -205,13 +210,18 @@ class _VulkanRasterPassExecutable(NativeGraphExecutable):
             raise TaichiRuntimeError("Vulkan raster Graph execution has no public runtime bindings")
         return self._recording.execute()
 
+    def _export_aot(self, context):
+        from ._aot_raster import export
+
+        export(self._recording, context)
+
     @property
     def resource_effects(self):
         return self._recording.resource_effects
 
     @property
     def lifetime_leases(self):
-        return (self._recording._owner,)
+        return (self._recording._owner, self._recording)
 
     @property
     def backend_command_plan(self):

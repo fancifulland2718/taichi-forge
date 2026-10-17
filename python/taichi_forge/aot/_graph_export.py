@@ -219,7 +219,7 @@ class _ExportContext:
             )
             self.private_bindings[name] = owner
 
-    def data_resource(self, owner, data, *, dtype, shape, element_shape=(), name=None, readonly=False):
+    def data_resource(self, owner, data, *, dtype, shape, element_shape=(), name=None, readonly=False, usage=None):
         """Stage already frozen data; never sample a live owner during export."""
         if type(data) is not bytes:
             raise TypeError("AOT resource data must be an immutable byte snapshot")
@@ -237,11 +237,14 @@ class _ExportContext:
             # operation or expose it as mutable state.
             if name is not None:
                 raise ValueError("Shared read-only AOT data cannot reserve a private binding name")
-            identity = key, dtype, tuple(shape), tuple(element_shape)
+            identity = key, dtype, tuple(shape), tuple(element_shape), tuple(sorted(usage or ()))
             owner = self._readonly_data_owners.setdefault(identity, owner)
         return self._resource(
             owner,
-            dict(kind="ndarray", dtype=dtype, shape=shape, element_shape=element_shape, initial_data=key),
+            dict(
+                kind="ndarray", dtype=dtype, shape=shape, element_shape=element_shape, initial_data=key,
+                **({"usage": sorted(usage)} if usage is not None else {}),
+            ),
             name=name,
         )
 

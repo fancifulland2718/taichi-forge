@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan RasterPass 的 mesh／mesh_instance／particles 可从显式普通 Graph 导出 AOT，
+  复用准备核与原生 graphics pass。相机需显式快照；固定布局的几何/位姿可更新，附件可
+  公共绑定或重建。零绘制仅清屏，不生成几何准备工作；lines 的 compute 重建尚未接通。
 - RasterPass 录制时固定默认环境光，避免回放结果受同一 pass 后续录制的环境光影响。
 - 修复共享 Vulkan mesh shader 在禁用实例变换时仍读取占位缓冲的问题，避免未初始化
   NaN 污染顶点，以及非零 instance offset 访问无效变换位置。

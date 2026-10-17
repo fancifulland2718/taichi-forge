@@ -16,18 +16,50 @@ def freeze_pipeline(
     pipeline, *, topology, polygon_mode, front_cull, back_cull, depth_test, depth_write, depth, targets, blending
 ):
     """Snapshot the exact creation state; never inspect mutable attributes at export."""
+    spec = pipeline_description(
+        pipeline._shader_artifacts,
+        pipeline.vertex_bindings,
+        pipeline.vertex_attributes,
+        topology=topology,
+        polygon_mode=polygon_mode,
+        front_cull=front_cull,
+        back_cull=back_cull,
+        depth_test=depth_test,
+        depth_write=depth_write,
+        depth=depth,
+        targets=targets,
+        blending=blending,
+    )
+    return json.dumps(spec, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def pipeline_description(
+    shaders,
+    vertices,
+    attributes,
+    *,
+    topology,
+    polygon_mode,
+    front_cull,
+    back_cull,
+    depth_test,
+    depth_write,
+    depth,
+    targets,
+    blending,
+):
+    """The shared cold code/layout contract, without constructing a GPU pipeline."""
     from ._graphics import _BLEND_FACTORS, _BLEND_OPS, _DEPTH_COMPARE_OPS, _POLYGON_MODES, _TOPOLOGIES
 
     if blending and not targets:
         targets = ((True, 15, 6, 7, 0, 6, 7, 0),)
     factors, ops = tuple(_BLEND_FACTORS), tuple(_BLEND_OPS)
     spec = dict(
-        shader_count=len(pipeline._shader_artifacts),
-        shaders=[dict(stage=value.stage) for value in pipeline._shader_artifacts],
-        vertices=[dict(binding=v.binding, stride=v.stride, instance=v.instance) for v in pipeline.vertex_bindings],
+        shader_count=len(shaders),
+        shaders=[dict(stage=value.stage) for value in shaders],
+        vertices=[dict(binding=v.binding, stride=v.stride, instance=v.instance) for v in vertices],
         attributes=[
-            dict(location=v.location, binding=v.binding, format=v.format.name, offset=v.offset)
-            for v in pipeline.vertex_attributes
+            dict(location=v.location, binding=v.binding, format=v.format.name, offset=v.offset) for v in attributes
         ],
         topology=tuple(_TOPOLOGIES)[topology],
         polygon_mode=tuple(_POLYGON_MODES)[polygon_mode],
@@ -64,8 +96,8 @@ def freeze_pipeline(
         digest.update(encoded)
 
     text("forge-vulkan-graphics-v1")
-    number(len(pipeline._shader_artifacts))
-    for shader in pipeline._shader_artifacts:
+    number(len(shaders))
+    for shader in shaders:
         number({"vertex": 2, "fragment": 1, "task": 6, "mesh": 7}[shader.stage])
         text(shader.code_sha256)
     for value in (topology, polygon_mode, front_cull, back_cull, depth_test, depth_write, depth[0]):
@@ -85,7 +117,7 @@ def freeze_pipeline(
         for value in (v["location"], v["binding"], int(core.Format.__members__[v["format"]]), v["offset"]):
             number(value)
     spec["expected_pipeline"] = digest.hexdigest()
-    return json.dumps(spec, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return spec
 
 
 def _pipeline(context, pipeline):

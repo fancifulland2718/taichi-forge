@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan RasterPass mesh/mesh_instance/particles export from explicit ordinary
+  Graphs through shared preparation kernels and native graphics passes. Camera
+  state requires an explicit snapshot; fixed-layout geometry/transforms can change,
+  and attachments can be public or rebuilt. Empty draws only clear, with no geometry
+  preparation. The lines compute reconstruction path is not connected yet.
 - RasterPass recordings retain their effective default ambient light, so replay
   no longer inherits ambient changes from later recordings of the same pass.
 - The shared Vulkan mesh shader skips transform-buffer reads when instance
