@@ -12,6 +12,7 @@
 #include "taichi/program/program_impl.h"
 #include "taichi/program/texture.h"
 #include "taichi/runtime/gfx/graph_recording.h"
+#include "taichi/runtime/vulkan_graphics_pipeline.h"
 
 #if defined(TI_WITH_VULKAN)
 #include "taichi/rhi/vulkan/vulkan_device.h"
@@ -22,9 +23,6 @@ class VulkanGraphicsPipelineResource;
 
 namespace {
 
-constexpr std::size_t kMaximumShaderBytes = 16u * 1024u * 1024u;
-constexpr std::size_t kMaximumVertexBindings = 16;
-constexpr std::size_t kMaximumVertexAttributes = 32;
 constexpr std::size_t kMaximumPassDraws = 1u << 20;
 
 struct RecordedGraphicsShaderBuffer {
@@ -174,58 +172,6 @@ class PreparedVulkanGraphicsResourceDomain {
   std::vector<std::weak_ptr<PreparedVulkanGraphicsResourceLease>> leases_;
 };
 
-std::size_t vertex_format_bytes(BufferFormat format) {
-  switch (format) {
-    case BufferFormat::r8:
-    case BufferFormat::r8u:
-    case BufferFormat::r8i:
-      return 1;
-    case BufferFormat::rg8:
-    case BufferFormat::rg8u:
-    case BufferFormat::rg8i:
-    case BufferFormat::r16:
-    case BufferFormat::r16u:
-    case BufferFormat::r16i:
-    case BufferFormat::r16f:
-      return 2;
-    case BufferFormat::rgba8:
-    case BufferFormat::rgba8u:
-    case BufferFormat::rgba8i:
-    case BufferFormat::rg16:
-    case BufferFormat::rg16u:
-    case BufferFormat::rg16i:
-    case BufferFormat::rg16f:
-    case BufferFormat::r32u:
-    case BufferFormat::r32i:
-    case BufferFormat::r32f:
-      return 4;
-    case BufferFormat::rgb16:
-    case BufferFormat::rgb16u:
-    case BufferFormat::rgb16i:
-    case BufferFormat::rgb16f:
-      return 6;
-    case BufferFormat::rgba16:
-    case BufferFormat::rgba16u:
-    case BufferFormat::rgba16i:
-    case BufferFormat::rgba16f:
-    case BufferFormat::rg32u:
-    case BufferFormat::rg32i:
-    case BufferFormat::rg32f:
-      return 8;
-    case BufferFormat::rgb32u:
-    case BufferFormat::rgb32i:
-    case BufferFormat::rgb32f:
-      return 12;
-    case BufferFormat::rgba32u:
-    case BufferFormat::rgba32i:
-    case BufferFormat::rgba32f:
-      return 16;
-    default:
-      TI_ERROR("Unsupported Vulkan graphics vertex format {}.",
-               static_cast<std::uint32_t>(format));
-  }
-}
-
 TopologyType decode_topology(int value) {
   switch (value) {
     case 0:
@@ -320,65 +266,15 @@ class VulkanGraphicsPipelineResource {
       : program_(program), bindings_(vertex_bindings) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan graphics pipeline requires a live Program.");
-    TI_ERROR_IF(vertex_spirv.empty() || fragment_spirv.empty(),
-                "Vulkan graphics pipeline requires vertex and fragment "
-                "SPIR-V.");
-    TI_ERROR_IF(vertex_spirv.size() * sizeof(std::uint32_t) >
-                        kMaximumShaderBytes ||
-                    fragment_spirv.size() * sizeof(std::uint32_t) >
-                        kMaximumShaderBytes,
-                "Vulkan graphics shader exceeds the 16 MiB safety limit.");
-    TI_ERROR_IF(vertex_spirv.front() != 0x07230203u ||
-                    fragment_spirv.front() != 0x07230203u,
-                "Vulkan graphics shaders must contain SPIR-V binary magic.");
-    TI_ERROR_IF(bindings_.empty() ||
-                    bindings_.size() > kMaximumVertexBindings,
-                "Vulkan graphics pipeline requires 1 to {} vertex bindings.",
-                kMaximumVertexBindings);
-    TI_ERROR_IF(vertex_attributes.empty() ||
-                    vertex_attributes.size() > kMaximumVertexAttributes,
-                "Vulkan graphics pipeline requires 1 to {} vertex "
-                "attributes.",
-                kMaximumVertexAttributes);
-
-    std::unordered_map<std::uint32_t, std::size_t> strides;
-    std::unordered_set<std::uint32_t> locations;
     std::vector<VertexInputBinding> rhi_bindings;
-    rhi_bindings.reserve(bindings_.size());
-    for (const auto &binding : bindings_) {
-      TI_ERROR_IF(binding.stride == 0 || binding.stride > (1u << 20),
-                  "Vulkan graphics vertex stride must be in [1, 1 MiB].");
-      TI_ERROR_IF(!strides.emplace(binding.binding, binding.stride).second,
-                  "Vulkan graphics vertex binding {} is duplicated.",
-                  binding.binding);
-      rhi_bindings.push_back(
-          {binding.binding, binding.stride, binding.instance});
-    }
-
+    for (const auto &binding : bindings_)
+      rhi_bindings.push_back({binding.binding, binding.stride, binding.instance});
     std::vector<VertexInputAttribute> rhi_attributes;
-    rhi_attributes.reserve(vertex_attributes.size());
-    for (const auto &attribute : vertex_attributes) {
-      const auto found = strides.find(attribute.binding);
-      TI_ERROR_IF(found == strides.end(),
-                  "Vulkan graphics attribute {} references undeclared "
-                  "binding {}.",
-                  attribute.location, attribute.binding);
-      TI_ERROR_IF(!locations.insert(attribute.location).second,
-                  "Vulkan graphics attribute location {} is duplicated.",
-                  attribute.location);
-      const std::size_t format_bytes = vertex_format_bytes(attribute.format);
-      TI_ERROR_IF(attribute.offset > found->second ||
-                      format_bytes > found->second - attribute.offset,
-                  "Vulkan graphics attribute {} exceeds binding {} stride "
-                  "{}.",
-                  attribute.location, attribute.binding, found->second);
+    for (const auto &attribute : vertex_attributes)
       rhi_attributes.push_back({attribute.location, attribute.binding,
                                 attribute.format, attribute.offset});
-    }
-
-    auto *device = dynamic_cast<GraphicsDevice *>(program_->get_graphics_device());
-    TI_ERROR_IF(device == nullptr,
-                "Vulkan graphics pipeline has no graphics device.");
+    auto *device = dynamic_cast<vulkan::VulkanDevice *>(program_->get_graphics_device());
+    TI_ERROR_IF(!device, "Vulkan graphics pipeline has no Vulkan device.");
 
     std::vector<PipelineSourceDesc> sources(2);
     sources[0] = {PipelineSourceType::spirv_binary,
@@ -402,8 +298,8 @@ class VulkanGraphicsPipelineResource {
     if (blending && color_targets.empty()) {
       params.blending.emplace_back();
     }
-    pipeline_ = device->create_raster_pipeline(
-        sources, params, rhi_bindings, rhi_attributes,
+    pipeline_ = prepare_vulkan_graphics_pipeline(
+        *device, sources, params, rhi_bindings, rhi_attributes,
         name.empty() ? "Forge VulkanGraphicsPipeline" : name);
     TI_ERROR_IF(!pipeline_, "Vulkan graphics pipeline creation failed.");
   }
@@ -426,30 +322,8 @@ class VulkanGraphicsPipelineResource {
       : program_(program), mesh_pipeline_(true), task_shader_(!task_spirv.empty()) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan mesh pipeline requires a live Program.");
-    const auto caps = program_->vulkan_mesh_shader_capabilities();
-    TI_ERROR_IF(caps.at("mesh_shader") == 0 ||
-                    (task_shader_ && caps.at("task_shader") == 0),
-                "Vulkan mesh/task shader features are unavailable on the "
-                "active device.");
-    TI_ERROR_IF(mesh_spirv.empty() || fragment_spirv.empty(),
-                "Vulkan mesh pipelines require mesh and fragment SPIR-V.");
-    TI_ERROR_IF(mesh_spirv.size() * sizeof(std::uint32_t) >
-                        kMaximumShaderBytes ||
-                    fragment_spirv.size() * sizeof(std::uint32_t) >
-                        kMaximumShaderBytes ||
-                    task_spirv.size() * sizeof(std::uint32_t) >
-                        kMaximumShaderBytes,
-                "Vulkan mesh pipeline shader exceeds the 16 MiB safety "
-                "limit.");
-    TI_ERROR_IF(mesh_spirv.front() != 0x07230203u ||
-                    fragment_spirv.front() != 0x07230203u ||
-                    (task_shader_ && task_spirv.front() != 0x07230203u),
-                "Vulkan mesh pipeline shaders must contain SPIR-V binary "
-                "magic.");
-
-    auto *device = dynamic_cast<GraphicsDevice *>(program_->get_graphics_device());
-    TI_ERROR_IF(device == nullptr,
-                "Vulkan mesh pipeline has no graphics device.");
+    auto *device = dynamic_cast<vulkan::VulkanDevice *>(program_->get_graphics_device());
+    TI_ERROR_IF(!device, "Vulkan mesh pipeline has no Vulkan device.");
     std::vector<PipelineSourceDesc> sources;
     sources.reserve(task_shader_ ? 3 : 2);
     sources.push_back({PipelineSourceType::spirv_binary,
@@ -479,8 +353,8 @@ class VulkanGraphicsPipelineResource {
     if (blending && color_targets.empty()) {
       params.blending.emplace_back();
     }
-    pipeline_ = device->create_raster_pipeline(
-        sources, params, {}, {},
+    pipeline_ = prepare_vulkan_graphics_pipeline(
+        *device, sources, params, {}, {},
         name.empty() ? "Forge VulkanMeshPipeline" : name);
     TI_ERROR_IF(!pipeline_, "Vulkan mesh pipeline creation failed.");
   }
