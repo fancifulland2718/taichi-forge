@@ -837,6 +837,10 @@ ABI88 components. Omitted usage keeps the previous storage allocation and
 does not raise the plan version. `ndarray_view` inherits its parent's actual
 usages and cannot redeclare them. Archived `initial_data` works with vertex,
 index and uniform buffers, allowing fixed drawing data to remain private.
+Vulkan kernel/Graph bindings check actual storage-buffer usage for primal,
+gradient and struct ndarrays during preparation. A vertex-only allocation is
+valid for copies and drawing, but cannot be a kernel ndarray. Views inherit
+the physical allocation's restrictions; no replay-time usage check is added.
 For images, `image/sampled` accepts `attachment=true` on Vulkan. Attachments
 must be single-level 2D images. A first complete clear needs no seed image or
 upload, even with a partial draw viewport. LOAD and sampling require an earlier

@@ -254,6 +254,19 @@ NativeStorageRange resolve_native_storage_range(Arch arch,
   throw std::invalid_argument("Native storage requires CPU, CUDA or Vulkan");
 }
 
+void validate_native_shader_storage(Arch arch, DeviceAllocation allocation) {
+#ifdef TI_WITH_VULKAN
+  if (arch == Arch::vulkan) {
+    auto *device = dynamic_cast<vulkan::VulkanDevice *>(allocation.device);
+    if (!device ||
+        (device->allocation_usage(allocation) & AllocUsage::Storage) ==
+            AllocUsage::None)
+      throw std::invalid_argument(
+          "Vulkan kernel ndarray requires storage buffer usage");
+  }
+#endif
+}
+
 void validate_native_array_layout(
     const NativeArrayBinding &array,
     const NativeArrayLayoutRequirement &required) {

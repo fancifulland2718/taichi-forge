@@ -8,6 +8,7 @@
 #include "fp16.h"
 #include "taichi/runtime/native_kernel_resource.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_array_contract.h"
 
 namespace {
 constexpr uint32_t kTiNdShapeDimensionCapacity =
@@ -108,6 +109,7 @@ void validate_struct_argument(Runtime &runtime,
     bytes *= extent;
   }
   const auto memory = runtime.get_memory(array.memory);
+  taichi::lang::validate_native_shader_storage(runtime.arch, memory.allocation);
   if (memory.size < bytes) {
     throw MemoryBindingError(
         "Structure ndarray buffer is smaller than its declared shape");
@@ -176,9 +178,12 @@ capi::NdArrayStorageLayout array_storage_layout(const TiNdArray &array) {
 
 uint64_t validate_array_storage(Runtime &runtime,
                                 const TiNdArray &array,
-                                uint64_t *element_bytes = nullptr) {
+                                uint64_t *element_bytes = nullptr,
+                                bool shader_storage = false) {
   const auto layout = array_storage_layout(array);
   const auto memory = runtime.get_memory(array.memory);
+  if (shader_storage)
+    taichi::lang::validate_native_shader_storage(runtime.arch, memory.allocation);
   if (memory.size < layout.bytes)
     throw MemoryBindingError(
         "Ndarray buffer is smaller than its declared shape");
@@ -200,7 +205,7 @@ void validate_kernel_array(Runtime &runtime,
     throw MemoryBindingError(
         "Ndarray argument does not match the exported ABI");
   }
-  validate_array_storage(runtime, array);
+  validate_array_storage(runtime, array, nullptr, true);
   const auto &param = parameter->second;
   const auto *abi =
       kernel.args_type->get_element_type({int(index)})->as<StructType>();
@@ -440,7 +445,7 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
         validate_kernel_array(runtime2, *ti_kernel, i, arg.value.ndarray);
       result->memories.push_back(arg.value.ndarray.memory);
       if (gradient_args[i]) {
-        validate_array_storage(runtime2, *gradient_args[i]);
+        validate_array_storage(runtime2, *gradient_args[i], nullptr, true);
         result->memories.push_back(gradient_args[i]->memory);
       }
     }
@@ -780,7 +785,7 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
     if (arg.argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
       const auto &array = arg.argument.value.ndarray;
       if (!graph_binding.layouts.count(arg.name)) {
-        validate_array_storage(runtime2, array);
+        validate_array_storage(runtime2, array, nullptr, true);
         const auto found = graph.args.find(arg.name);
         if (found == graph.args.end() ||
             found->second.tag != taichi::lang::aot::ArgKind::kNdarray ||
@@ -798,7 +803,7 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
       result->memories.push_back(array.memory);
       const auto grad = gradient_args.find(arg.name);
       if (grad != gradient_args.end()) {
-        validate_array_storage(runtime2, *grad->second);
+        validate_array_storage(runtime2, *grad->second, nullptr, true);
         result->memories.push_back(grad->second->memory);
       }
     }

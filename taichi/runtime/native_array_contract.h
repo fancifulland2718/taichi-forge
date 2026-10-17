@@ -24,6 +24,10 @@ NativeStorageRange resolve_native_storage_range(Arch arch,
                                                 DevicePtr pointer,
                                                 std::uint64_t bytes);
 
+// Vulkan kernel ndarrays need physical storage-buffer usage. CPU/CUDA use
+// untyped allocations. Transfer and raster-only arrays must not use this gate.
+void validate_native_shader_storage(Arch arch, DeviceAllocation allocation);
+
 struct NativeStorageWrite {
   NativeStorageRange range;
   // Only this read port may overlap, and only as the exact same range. The

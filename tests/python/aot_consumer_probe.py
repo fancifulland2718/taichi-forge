@@ -73,6 +73,45 @@ def main(arch, module_path, order):
     x.write(floats([1, 2, 3, 4]))
     forward, backward = module.kernel("forward"), module.kernel("backward")
     graph = module.graph("differentiate")
+    if arch == "vulkan" and order == "pure":
+        non_storage = runtime.ndarray("f32", 4, usage=("vertex",))
+        non_storage.write(floats([1, 2, 3, 4]))
+        for graph_mode in (False, True):
+            for gradient in (False, True):
+                if graph_mode:
+                    invalid = lambda: graph.prepare(
+                        {"x": x if gradient else non_storage, "y": y},
+                        gradients={"x": non_storage if gradient else dx, "y": dy},
+                    )
+                else:
+                    invalid = lambda: forward.prepare(
+                        x if gradient else non_storage,
+                        y,
+                        gradients={0: non_storage if gradient else dx, 1: dy},
+                    )
+                try:
+                    invalid()
+                except aot.AotError as error:
+                    assert "storage buffer usage" in str(error), str(error)
+                else:
+                    raise AssertionError("Non-storage kernel array was accepted")
+        # Copies remain legal for a vertex-only allocation. Reject only actual
+        # shader storage bindings, including views of a private parent.
+        with aot.ExecutionPlan([dict(kind="copy", source="source", destination="out")]).prepare(
+            module, dict(source=non_storage, out=y)
+        ) as copy:
+            copy()
+            assert read(y) == [1, 2, 3, 4]
+        invalid_private = aot.ExecutionPlan(
+            [dict(kind="kernel", entry="forward", arguments=["view", "y"])],
+            resources=[
+                dict(kind="ndarray", name="private", dtype="f32", shape=[8], usage=["vertex"]),
+                dict(kind="ndarray_view", name="view", array="private", offset=4, shape=[4]),
+            ],
+            gradients=dict(view="dx", y="dy"),
+        )
+        raises(aot.AotError, lambda: invalid_private.prepare(module, dict(y=y, dx=dx, dy=dy)))
+        non_storage.close()
     for graph_mode in (False, True):
         seed = -0.5 if graph_mode else 1
         dx.write(floats([0] * 4))

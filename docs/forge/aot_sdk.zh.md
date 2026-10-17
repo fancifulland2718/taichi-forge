@@ -651,6 +651,9 @@ descriptor 完整性、类型/数量、真实用途、逻辑范围、对齐及�
 格式及配对 ABI88 组件；省略时保持 storage 分配，不提高计划版本。`ndarray_view`
 继承父分配的真实用途，不能重新声明。vertex/index/uniform 可结合归档 `initial_data`
 重建，使固定绘制数据保持私有。
+Vulkan kernel/Graph 在准备期检查 primal、gradient 和 struct ndarray 的实际 storage
+用途；vertex-only 分配仍可复制和绘制，但不能作为 kernel ndarray。view 沿用物理
+父分配的限制，不增加重放期用途检查。
 Vulkan `image/sampled` 可指定 `attachment=true`，附件须为单 mip 二维图像。首次完整
 clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样仍须有先前无条件初始化，
 仅条件分支内的 clear 不足以证明。单 pass 内采样附件别名会被拒绝。队列、布局转换、
