@@ -33,7 +33,7 @@
 
 - AOT v17 增加公共资源关联校验，防止更新的 GAS 与查询场景实际引用的 GAS 不一致。
   校验沿具名保留输入在准备期完成，重放不增加查询；复用已有资源退休合同。
-  需要配对的 ABI82 组件，旧计划兼容。
+  需要配对的 ABI83 组件，旧计划兼容。
 
 - OptiX Graph 导出可绑定公共 context、triangle scene、GAS 和 IAS，供不同 AOT
   模块共享，省去每计划的重复构建。v17 别名约束保留源 GAS/context 共享关系，
@@ -45,7 +45,7 @@
 
 - CUDA/Vulkan AOT 借用者新增 `import_texture()`，直接保留其 JIT Program 的图像
   存储和 sampler，不复制像素。覆盖 JIT/AOT 双向更新、独立导入、源包装回收及在途
-  退休；要求配对的 ABI82 组件，仍遵循当前 sampled image 的格式/mip/sampler 边界。
+  退休；要求配对的 ABI83 组件，仍遵循当前 sampled image 的格式/mip/sampler 边界。
 
 - AOT 新增 `Runtime.native_resource()`，通过现有工厂目录创建可跨模块/计划共享的
   公共资源。CUDA/Vulkan 图像和 CUDA OptiX 父子资源已验证，关闭输入会逐级退休依赖

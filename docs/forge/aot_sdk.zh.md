@@ -291,7 +291,7 @@ CUDA沿用现有Forge布局：逻辑 `[X,Y]` 对应物理CUDA array的宽Y、高
 `product(shape) * channels * channel_bytes`，与查询workspace分开；workspace统计不含图像驻留。
 alpha recording 可通过下述显式图像重建合同自动导出。
 
-使用匹配的私有 ABI82 组件时，CUDA/Vulkan 显式执行计划的 kernel 可将 sampled `Texture` 参数
+使用匹配的私有 ABI83 组件时，CUDA/Vulkan 显式执行计划的 kernel 可将 sampled `Texture` 参数
 绑定到 `image/sampled` 资源名：
 
 ```python
@@ -378,7 +378,7 @@ prepared = loaded_module.prepare_execution(
 各自文档提供重建输入。Windows 普通/selected CUDA/Vulkan 已验证独立创建、JIT
 Texture 借用、别名、后续梯度、CUDA 兄弟绑定及资源退休。
 
-匹配的 ABI82 组件另提供 runtime 所有的公共 native resource，复用同一工厂目录，
+匹配的 ABI83 组件另提供 runtime 所有的公共 native resource，复用同一工厂目录，
 可在多个模块、多个计划间共享：
 
 ```python
@@ -568,7 +568,7 @@ tensor、其他 Program 或任意外部指针；独立 Runtime 不提供该 JIT 
 Windows CPU/CUDA/Vulkan 已验证 JIT→AOT→JIT 顺序、显式梯度、tensor、两个借用者、
 源包装 GC 和在途 reset。这是共享存储能力，不扩大 provider 的操作覆盖。
 
-使用配对的 ABI82 组件，CUDA/Vulkan 借用者还可调用
+使用配对的 ABI83 组件，CUDA/Vulkan 借用者还可调用
 `image = runtime.import_texture(jit_texture)`。返回同一种公共 `NativeResource`，
 可绑定执行计划和 sampled kernel，保留 Program 带代次校验的 Texture 租约。
 不分配新图像、不复制像素、不替换 sampler。JIT 上传、AOT `image/upload` 及采样
@@ -750,7 +750,7 @@ condition 与各 body 可以为空。非空分支每次出现使用独立的 4 �
 非选中 task 仍可能发射，因此不等同于 conditional node 的跳过成本，也不改变默认策略。
 CPU/Vulkan 不接受此 lowering，provider 与嵌套控制尚不属于此切片。
 已验证 IF/SWITCH、空 case、default/no-op、signed selector、实际 `kernel.grad`、独立/借用
-消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI82
+消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI83
 组件。`add_execution_plan(name, graph, gradients=...)` 也可导出 `native_required` 下已选
 `cuda_masked_bounded_graph` 的 IF/SWITCH：沿用物理边界、条件与前后段，按源特化和调用 ABI
 去重代码，不保存未用的普通 body 变体。实际分支内 `kernel.grad`、四种分支与重复计划共用
@@ -843,7 +843,7 @@ body/尾部边界、预算、私有资源和标量/互不别名约束；不在�
 schema 8声明的 `cuda_graph_gate_v1` 代码。prepare在零预算时也检查ABI，不在消费端生成
 kernel或device-update节点，不静默切换路线。每份prepare独立拥有gate存储，在提交完成
 后退休。静态代码可由多个计划共享，捕获的命令存储仍随预算增长。需v14消费端与匹配的
-私有ABI82组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
+私有ABI83组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
 嵌套Graph，保留物理dispatch边界，只生成body需要的变体；按源特化和调用ABI跨计划去重，
 普通入口不能覆盖gated入口。九个内层区域的小用例验证了真实前向/后段梯度、双绑定、活跃
 后零轮和独立/借用退休，消费端无需编译gated变体。未冻结auto、native provider body、
@@ -855,7 +855,7 @@ kernel合同。
 非空body中的所有kernel（包括尾条件）须为预编译的 `cuda_graph_gate_v1` 代码。非空初始
 condition使用普通入口，零预算也执行一次。静态代码不随预算复制，但录制命令仍随预算增长。
 prepare复用绑定、梯度与退休合同，拒绝非CUDA runtime、native provider body和launch override。
-此格式需要v15消费端及匹配的ABI82组件。`add_execution_plan(name, graph)` 也可自动导出
+此格式需要v15消费端及匹配的ABI83组件。`add_execution_plan(name, graph)` 也可自动导出
 已物化且选择 `cuda_masked_bounded_graph` 的单层Graph，保留已选物理body及尾条件，
 只生成其所需gated变体，跨计划共享代码。零预算只导出初始条件与前后段，不带无用body变体。
 公开/私有控制存储、标量和互不别名约束、显式梯度绑定均保留；消费端环境变化不重选路线，
@@ -1072,7 +1072,7 @@ Vulkan导入必须提供足以证明这些关系的身份；同buffer范围可�
 参数。缺少端口、owner 已退休或身份不同，均在录制前的冷准备期拒绝。相等指同一
 注册句柄，不是内容相等或碰巧同一设备地址；需要别名时复用同一 owner。具名关联以
 紧凑有序 vector 保存，复用现有退休图；暖重放不遍历路径。需要 v17 reader 和配对的
-私有 ABI82 组件；v1–v16 计划保持原有要求。
+私有 ABI83 组件；v1–v16 计划保持原有要求。
 
 各索引维必须恰好匹配时，用 `exact_shape` 替代 `minimum_shape`，两者互斥。
 对本身支持原地执行的操作，disjoint 约束可设 `allow_same_view=True`，额外允许

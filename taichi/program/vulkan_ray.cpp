@@ -1,5 +1,6 @@
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/runtime/vulkan_ray_query.h"
 
 #include <algorithm>
 #include <array>
@@ -19,7 +20,7 @@
 namespace taichi::lang {
 namespace {
 
-constexpr std::uint32_t kRayQueryWorkgroupSize = 128;
+constexpr std::uint32_t kRayTransformWorkgroupSize = 128;
 
 void check_ray_storage(const storage::DenseStorageDescriptor &value,
                        std::size_t count,
@@ -63,95 +64,12 @@ void geometry_reuse_barrier(const vkapi::IVkCommandBuffer &commands) {
       0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
-static const std::uint32_t kRayQueryTrianglesSpv[] =
-#include "taichi/program/vulkan_sort_shaders/ray_query_triangles.comp.spv.h"
-    ;
-
-static const std::uint32_t kRayQueryTrianglesTypedSpv[] =
-#include "taichi/program/vulkan_sort_shaders/ray_query_triangles_typed.comp.spv.h"
-    ;
-
-static const std::uint32_t kRayQueryTrianglesSubrangeSpv[] =
-#include "taichi/program/vulkan_sort_shaders/ray_query_triangles_subrange.comp.spv.h"
-    ;
-static const std::uint32_t kRayQueryTrianglesTypedSubrangeSpv[] =
-#include "taichi/program/vulkan_sort_shaders/ray_query_triangles_typed_subrange.comp.spv.h"
-    ;
-
 static const std::uint32_t kRayInstanceTransformsSpv[] =
 #include "taichi/program/vulkan_sort_shaders/ray_instance_transforms.comp.spv.h"
     ;
 
 static_assert(sizeof(VkAccelerationStructureInstanceKHR) == 16 * sizeof(float));
 static_assert(offsetof(VkAccelerationStructureInstanceKHR, transform) == 0);
-
-// Scene and independent TLAS share query code, but each owns its pipelines and
-// resource sets. The owner's existing mutex protects prepare and record.
-class RayQueryPipelines {
- public:
-  void clear() {
-    bindings_ = {};
-    pipelines_ = {};
-  }
-
-  void prepare(vulkan::VulkanDevice *device, unsigned variant) {
-    TI_ERROR_IF(!device->vk_caps().ray_query,
-                "Vulkan inline/batch ray query is unavailable; AS construction alone does not enable it.");
-    if (pipelines_[variant]) {
-      return;
-    }
-    const std::array<std::pair<const std::uint32_t *, std::size_t>, 4> code{
-        {{kRayQueryTrianglesSpv, sizeof(kRayQueryTrianglesSpv)},
-         {kRayQueryTrianglesTypedSpv, sizeof(kRayQueryTrianglesTypedSpv)},
-         {kRayQueryTrianglesSubrangeSpv, sizeof(kRayQueryTrianglesSubrangeSpv)},
-         {kRayQueryTrianglesTypedSubrangeSpv,
-          sizeof(kRayQueryTrianglesTypedSubrangeSpv)}}};
-    PipelineSourceDesc source{PipelineSourceType::spirv_binary,
-                              code[variant].first, code[variant].second,
-                              PipelineStageType::compute};
-    auto [pipeline, result] = device->create_pipeline_unique(
-        source, "vulkan_ray_query_triangles_" + std::to_string(variant));
-    TI_ERROR_IF(result != RhiResult::success || !pipeline,
-                "Failed to create Vulkan ray query pipeline: {}.", result);
-    std::unique_ptr<ShaderResourceSet> bindings(device->create_resource_set());
-    pipelines_[variant] = std::move(pipeline);
-    bindings_[variant] = std::move(bindings);
-  }
-
-  void record(CommandList *commands,
-              const vkapi::IVkAccelerationStructureKHR &tlas,
-              const VulkanRayQueryCommand &packet) {
-    const bool typed = (packet.variant & 1u) != 0;
-    auto *bindings = static_cast<vulkan::VulkanResourceSet *>(
-        bindings_[packet.variant].get());
-    commands->buffer_barrier(packet.shader_bindings[0].pointer);
-    bindings->acceleration_structure(0, tlas);
-    for (unsigned i = 0; i < (typed ? 3u : 2u); ++i) {
-      const auto &binding = packet.shader_bindings[i];
-      bindings->rw_buffer(i + 1, binding.pointer, binding.bytes);
-    }
-    commands->bind_pipeline(pipelines_[packet.variant].get());
-    const auto bind_result = commands->bind_shader_resources(bindings, 0);
-    TI_ERROR_IF(bind_result != RhiResult::success,
-                "Failed to bind Vulkan ray query resources: {}.", bind_result);
-    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(commands);
-    vk_commands->push_constants(packet.parameters.data(),
-                                (packet.variant & 2u) ? 16 : 4);
-    const auto dispatch_result = commands->dispatch(static_cast<std::uint32_t>(
-        (packet.ray_count + kRayQueryWorkgroupSize - 1) /
-        kRayQueryWorkgroupSize));
-    TI_ERROR_IF(dispatch_result != RhiResult::success,
-                "Failed to dispatch Vulkan ray query: {}.", dispatch_result);
-    commands->buffer_barrier(packet.shader_bindings[1].pointer);
-    if (typed) {
-      commands->buffer_barrier(packet.shader_bindings[2].pointer);
-    }
-  }
-
- private:
-  std::array<std::unique_ptr<Pipeline>, 4> pipelines_;
-  std::array<std::unique_ptr<ShaderResourceSet>, 4> bindings_;
-};
 
 template <typename Function>
 Function load_vulkan_device_function(const vkapi::DeviceHandle &device,
@@ -417,7 +335,7 @@ class VulkanTriangleRayScene {
   }
 
   void record_query(CommandList *command_list,
-                    const VulkanRayQueryCommand &packet) {
+                    const VulkanRayQueryPacket &packet) {
     std::lock_guard<std::mutex> lock(mutex_);
     query_.record(command_list, tlas_, packet);
   }
@@ -653,7 +571,7 @@ class VulkanTriangleRayScene {
   DeviceAllocation tlas_scratch_{kDeviceNullAllocation};
   vkapi::IVkAccelerationStructureKHR blas_{nullptr};
   vkapi::IVkAccelerationStructureKHR tlas_{nullptr};
-  RayQueryPipelines query_;
+  VulkanRayQueryPipelines query_;
   PFN_vkGetAccelerationStructureBuildSizesKHR get_build_sizes_{nullptr};
   PFN_vkGetAccelerationStructureDeviceAddressKHR get_as_address_{nullptr};
   PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_{nullptr};
@@ -1239,7 +1157,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     vk_commands->push_constants(packet.parameters.data(),
                                 sizeof(packet.parameters));
     const auto dispatch_result = commands->dispatch(static_cast<std::uint32_t>(
-        (blases_.size() + kRayQueryWorkgroupSize - 1) / kRayQueryWorkgroupSize));
+        (blases_.size() + kRayTransformWorkgroupSize - 1) / kRayTransformWorkgroupSize));
     TI_ERROR_IF(dispatch_result != RhiResult::success,
                 "Failed to dispatch Vulkan TLAS transform packing: {}.",
                 dispatch_result);
@@ -1260,7 +1178,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   }
 
   void record_query(CommandList *command_list,
-                    const VulkanRayQueryCommand &packet) {
+                    const VulkanRayQueryPacket &packet) {
     std::lock_guard<std::mutex> lock(mutex_);
     query_.record(command_list, tlas_, packet);
     retain(static_cast<vulkan::VulkanCommandList *>(command_list)
@@ -1458,7 +1376,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   DeviceAllocation storage_{kDeviceNullAllocation};
   DeviceAllocation scratch_{kDeviceNullAllocation};
   vkapi::IVkAccelerationStructureKHR tlas_{nullptr};
-  RayQueryPipelines query_;
+  VulkanRayQueryPipelines query_;
   std::unique_ptr<Pipeline> transform_pipeline_;
   std::unique_ptr<ShaderResourceSet> transform_bindings_;
   bool initialized_{false};
@@ -1628,49 +1546,14 @@ VulkanRayQueryCommand Program::prepare_vulkan_ray_query_storage(
   packet.storage = prepare_native_storage(descriptors, writable);
   packet.scene_handle = handle;
   packet.instance_tlas = instance_tlas;
-  packet.ray_count = ray_count;
-  packet.parameters[0] = static_cast<std::uint32_t>(ray_count);
-  packet.variant = hit_indices ? 1u : 0u;
-  auto *device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
-  const auto &limits = device->get_vk_physical_device_props().limits;
-  TI_ERROR_IF(
-      (ray_count + kRayQueryWorkgroupSize - 1) / kRayQueryWorkgroupSize >
-          limits.maxComputeWorkGroupCount[0],
-      "Vulkan ray count exceeds the device's one-dimensional dispatch limit.");
-  // Descriptor offsets obey the device limit. std430 vec4 records additionally
-  // need 16-byte alignment; scalar subrange addressing handles the remainder.
-  const auto alignment =
-      std::max<VkDeviceSize>(16, limits.minStorageBufferOffsetAlignment);
+  std::array<VulkanRayQueryPacket::Binding, 3> bindings{};
   for (std::size_t i = 0; i < descriptors.size(); ++i) {
     const auto &binding = packet.storage->binding(i);
-    const auto expected =
-        checked_mul(ray_count, (i == 0 ? 8 : 4) * sizeof(float), "query bytes");
-    TI_ERROR_IF(
-        binding.bytes != expected || (binding.pointer.offset & 3u),
-        "Vulkan ray storage must be a compact four-byte-aligned record range.");
-    for (std::size_t j = 0; j < i; ++j) {
-      const auto &other = packet.storage->binding(j);
-      TI_ERROR_IF(
-          static_cast<const DeviceAllocation &>(binding.pointer) ==
-                  static_cast<const DeviceAllocation &>(other.pointer) &&
-              binding.pointer.offset < other.pointer.offset + other.bytes &&
-              other.pointer.offset < binding.pointer.offset + binding.bytes,
-          "Vulkan ray output ranges must not alias rays or each other.");
-    }
-    const auto remainder = binding.pointer.offset % alignment;
-    auto shader_binding = binding;
-    shader_binding.pointer.offset -= remainder;
-    TI_ERROR_IF(remainder > limits.maxStorageBufferRange ||
-                    binding.bytes > limits.maxStorageBufferRange - remainder,
-                "Vulkan ray descriptor range exceeds maxStorageBufferRange.");
-    shader_binding.bytes += remainder;
-    packet.shader_bindings[i] = shader_binding;
-    packet.parameters[i + 1] =
-        static_cast<std::uint32_t>(remainder / sizeof(float));
-    if (remainder) {
-      packet.variant |= 2u;
-    }
+    bindings[i] = {binding.pointer, binding.bytes};
   }
+  packet.query = prepare_vulkan_ray_query_packet(
+      static_cast<vulkan::VulkanDevice *>(get_compute_device()), ray_count,
+      hit_indices != nullptr, bindings);
   // Build only the selected shader variant at the cold boundary.
   auto submission_guard = acquire_runtime_resource_submission_guard();
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
@@ -1681,12 +1564,12 @@ VulkanRayQueryCommand Program::prepare_vulkan_ray_query_storage(
     auto resource =
         std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
     TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
-    resource->prepare_query_variant(packet.variant);
+    resource->prepare_query_variant(packet.query.variant);
   } else {
     const auto found = vulkan_ray_scenes_.find(handle);
     TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
                 "Vulkan triangle ray scene handle is stale or closed.");
-    found->second->prepare_query_variant(packet.variant);
+    found->second->prepare_query_variant(packet.query.variant);
   }
   return packet;
 }
@@ -1707,7 +1590,7 @@ std::size_t Program::execute_vulkan_ray_query(
       TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
       enqueue_compute_op_lambda(
           [resource, packet](Device *, CommandList *commands) {
-            resource->record_query(commands, packet);
+            resource->record_query(commands, packet.query);
           },
           {});
     } else {
@@ -1721,7 +1604,7 @@ std::size_t Program::execute_vulkan_ray_query(
       }
       enqueue_compute_op_lambda(
           [scene, packet](Device *, CommandList *commands) {
-            scene->record_query(commands, packet);
+            scene->record_query(commands, packet.query);
           },
           {});
     }
@@ -1977,8 +1860,8 @@ VulkanTLASTransformCommand Program::prepare_vulkan_tlas_transforms(
               "Vulkan TLAS transforms require compact four-byte-aligned storage.");
   auto *device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
   const auto &limits = device->get_vk_physical_device_props().limits;
-  TI_ERROR_IF((instance_count + kRayQueryWorkgroupSize - 1) /
-                      kRayQueryWorkgroupSize >
+  TI_ERROR_IF((instance_count + kRayTransformWorkgroupSize - 1) /
+                      kRayTransformWorkgroupSize >
                   limits.maxComputeWorkGroupCount[0],
               "Vulkan TLAS instance count exceeds the device dispatch limit.");
   const auto alignment =

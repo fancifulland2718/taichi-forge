@@ -21,6 +21,7 @@
 #include <taichi/program/runtime_resource_registry.h>
 #include <taichi/program/runtime_completion.h>
 #include "taichi/runtime/cuda/provider_completion_resource.h"
+#include "taichi/runtime/vulkan_ray_query_packet.h"
 #include <taichi/program/runtime_fault.h>
 #include <taichi/program/runtime_trace.h>
 #include <taichi/program/primitive_workspace.h>
@@ -180,10 +181,7 @@ struct VulkanRayQueryCommand {
   std::shared_ptr<PreparedNativeStorage> storage;
   std::uint64_t scene_handle{0};
   bool instance_tlas{false};
-  std::size_t ray_count{0};
-  unsigned variant{0};  // bit 0: typed hits, bit 1: scalar subrange addressing
-  std::array<PreparedNativeStorage::Binding, 3> shader_bindings{};
-  std::array<std::uint32_t, 4> parameters{};  // count, ray/hit/index scalar offset
+  VulkanRayQueryPacket query;
 };
 
 struct VulkanRayGeometryCommand {

@@ -37,7 +37,7 @@ lifetimes. The entries below describe the changes.
 - AOT v17 adds public resource relationship checks, preventing a refit GAS from
   differing from the GAS retained by a queried scene. Named retained-input paths
   are checked at preparation, with no replay lookup and the existing retirement
-  contract. Requires paired ABI82 components; older plans remain supported.
+  contract. Requires paired ABI83 components; older plans remain supported.
 
 - OptiX Graph export can bind public contexts, triangle scenes, GAS and IAS,
   reusing resources across AOT modules without rebuilding them per plan.
@@ -53,7 +53,7 @@ lifetimes. The entries below describe the changes.
 - Borrowed CUDA/Vulkan AOT runtimes can `import_texture()` from their JIT
   Program, retaining storage and sampler without copying pixels. JIT/AOT
   updates, independent imports, source-wrapper collection and in-flight
-  retirement are covered. Requires paired ABI82 components; current sampled
+  retirement are covered. Requires paired ABI83 components; current sampled
   image format/mip/sampler boundaries still apply.
 
 - AOT adds `Runtime.native_resource()` through the existing factory catalog,

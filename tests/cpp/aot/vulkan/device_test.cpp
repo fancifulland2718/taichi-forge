@@ -4,6 +4,8 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/vulkan_ray_query.h"
+#include <limits>
 #include "tests/cpp/aot/gfx_utils.h"
 
 #if defined(TI_WITH_CUDA)
@@ -23,6 +25,40 @@
 
 using namespace taichi;
 using namespace lang;
+
+TEST(VulkanRayQueryPacket, QualifiesSubrangesWithoutAProgram) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator(vulkan::VulkanDeviceCreator::Params{});
+  auto *device = creator.device();
+  auto [allocation, result] = device->allocate_memory_unique(
+      {128, false, false, false, AllocUsage::Storage});
+  ASSERT_EQ(result, RhiResult::success);
+  std::array<VulkanRayQueryPacket::Binding, 3> bindings{{
+      {allocation->get_ptr(4), 32},
+      {allocation->get_ptr(68), 16},
+      {allocation->get_ptr(100), 16},
+  }};
+  const auto packet =
+      prepare_vulkan_ray_query_packet(device, 1, true, bindings);
+  EXPECT_EQ(packet.variant, 3u);
+  for (unsigned i = 0; i < 3; ++i) {
+    EXPECT_EQ(
+        packet.shader_bindings[i].pointer.offset + packet.parameters[i + 1] * 4,
+        bindings[i].pointer.offset);
+    EXPECT_EQ(packet.shader_bindings[i].bytes - packet.parameters[i + 1] * 4,
+              bindings[i].bytes);
+  }
+  auto invalid = bindings;
+  invalid[1].pointer.offset = 20;  // Logical output overlaps the ray.
+  EXPECT_ANY_THROW(prepare_vulkan_ray_query_packet(device, 1, true, invalid));
+  invalid = bindings;
+  invalid[0].pointer.device = nullptr;
+  EXPECT_ANY_THROW(prepare_vulkan_ray_query_packet(device, 1, true, invalid));
+  invalid = bindings;
+  invalid[0].pointer.offset = (std::numeric_limits<std::uint64_t>::max)() - 3;
+  EXPECT_ANY_THROW(prepare_vulkan_ray_query_packet(device, 1, true, invalid));
+}
 
 namespace {
 
