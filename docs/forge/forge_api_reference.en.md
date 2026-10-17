@@ -598,8 +598,12 @@ Storage-image writes and graphics descriptor arrays are not part of this interfa
 the draw, and later kernel consumers are ordered without a host readback.
 
 `Graph.bind()` prepares layout/range/descriptor metadata once. Updating data in
-place reuses it; resource replacement needs an explicit binding update. Pipeline
-and runtime lifetime checks still apply. Execution is a native **rerecord** action,
+place reuses it; resource replacement needs an explicit binding update. Preparation
+rejects missing/extra descriptor sets or bindings, mismatched types or array
+counts, and buffer ranges that exceed the buffer or violate device usage,
+alignment or range limits. Vertex/index draw bounds use the declared logical
+view, excluding allocator padding; no index values are read back.
+Pipeline and runtime lifetime checks still apply. Execution is a native **rerecord** action,
 not an immutable draw-command replay promise; normal graphics/compute queue
 bridges remain. Prepared host packets do not keep a closed pipeline executable
 or extend its lifetime beyond `ti.reset()`.

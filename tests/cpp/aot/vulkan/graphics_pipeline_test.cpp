@@ -134,8 +134,9 @@ TEST(VulkanGraphicsPipeline, SharedDrawRecordsBufferRangesAndSampledImages) {
   uniform_view.offset = uniform_offset;
   uniform_view.bytes = 16;
   auto resources = prepare_vulkan_graphics_draw_resources(
-      device, {uniform_view}, {{0, 5, *sampled, {}}},
-      {{0, vertex_buffer->get_ptr(16)}}, {}, false, false);
+      device, *static_cast<VulkanPipeline *>(pipeline.get()), {uniform_view},
+      {{0, 5, *sampled, {}}}, {{0, vertex_buffer->get_ptr(16)}}, {}, false,
+      false);
   auto *stream = device.get_graphics_stream();
   auto [commands, command_result] = stream->new_command_list_unique();
   ASSERT_EQ(command_result, RhiResult::success);
@@ -181,6 +182,140 @@ TEST(VulkanGraphicsPipeline, SharedDrawRecordsBufferRangesAndSampledImages) {
     EXPECT_EQ(result[i + 2], 0);
     EXPECT_EQ(result[i + 3], 255);
   }
+}
+
+TEST(VulkanGraphicsPipeline, SharedVertexRangesRespectLogicalSubranges) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto [vertices, vr] = device.allocate_memory_unique(
+      {76, false, false, false, AllocUsage::Vertex});
+  auto [indices, ir] = device.allocate_memory_unique(
+      {16, false, false, false, AllocUsage::Index});
+  ASSERT_EQ(vr, RhiResult::success);
+  ASSERT_EQ(ir, RhiResult::success);
+  std::vector<VertexInputBinding> layout{{0, 20, false}};
+  std::vector<VulkanGraphicsVertexRange> views{
+      {0, {vertices->get_ptr(16), 60}}};
+  std::optional<VulkanGraphicsBufferRange> index;
+  VulkanGraphicsDrawInfo draw;
+  draw.element_count = 3;
+  std::optional<VulkanGraphicsIndirectPacket> indirect;
+  auto validate = [&] {
+    validate_vulkan_graphics_vertex_ranges(device, layout, views, index, draw,
+                                           indirect);
+  };
+  EXPECT_NO_THROW(validate());
+  views[0].range.bytes = 59;
+  EXPECT_ANY_THROW(validate());
+  views[0].range.bytes = 61;  // Cannot borrow allocator padding.
+  EXPECT_ANY_THROW(validate());
+  views[0].range.bytes = 60;
+  views.push_back(views.front());
+  EXPECT_ANY_THROW(validate());
+  views.pop_back();
+  views[0].binding = 1;
+  EXPECT_ANY_THROW(validate());
+  views[0].binding = 0;
+  draw.first_vertex = UINT32_MAX;
+  EXPECT_ANY_THROW(validate());
+  draw.first_vertex = 0;
+  draw.indexed = true;
+  draw.index_min = 0;
+  draw.index_max = 2;
+  EXPECT_ANY_THROW(validate());
+  index = VulkanGraphicsBufferRange{indices->get_ptr(4), 12};
+  EXPECT_NO_THROW(validate());
+  index->pointer.offset = 2;
+  EXPECT_ANY_THROW(validate());
+  index->pointer.offset = 4;
+  draw.vertex_offset = -1;
+  EXPECT_ANY_THROW(validate());
+  draw.vertex_offset = 0;
+  draw.first_index = 1;
+  EXPECT_ANY_THROW(validate());
+  draw.first_index = 0;
+  indirect.emplace();
+  indirect->vertex_record_limit = 3;
+  indirect->instance_record_limit = 1;
+  indirect->index_element_limit = 3;
+  EXPECT_NO_THROW(validate());
+  indirect->vertex_record_limit = 4;
+  EXPECT_ANY_THROW(validate());
+  indirect.reset();
+  layout[0].instance = true;
+  draw.instance_count = 3;
+  EXPECT_NO_THROW(validate());
+  draw.first_instance = 1;
+  EXPECT_ANY_THROW(validate());
+}
+
+TEST(VulkanGraphicsPipeline,
+     SharedDescriptorsRejectMismatchBeforeFinalization) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto pipeline = prepare_vulkan_graphics_pipeline(
+      device,
+      {{PipelineSourceType::spirv_binary, sampled_vertex,
+        sizeof(sampled_vertex), PipelineStageType::vertex},
+       {PipelineSourceType::spirv_binary, sampled_fragment,
+        sizeof(sampled_fragment), PipelineStageType::fragment}},
+      RasterParams{}, {{0, 28, false}},
+      {{0, 0, BufferFormat::rg32f, 0},
+       {1, 0, BufferFormat::rgb32f, 8},
+       {2, 0, BufferFormat::rg32f, 20}},
+      "descriptor_validation");
+  auto [buffer, status] = device.allocate_memory_unique(
+      {20, false, false, false, AllocUsage::Uniform | AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  ImageParams params;
+  params.dimension = ImageDimension::d2D;
+  params.format = BufferFormat::r32f;
+  params.x = params.y = params.z = 1;
+  params.usage = ImageAllocUsage::Sampled;
+  auto image = device.create_image_unique(params);
+  std::vector<VulkanGraphicsShaderBufferView> buffers{{0, 3, *buffer}};
+  std::vector<VulkanGraphicsShaderImageView> images{{0, 5, *image, {}}};
+  auto prepare = [&] {
+    return prepare_vulkan_graphics_draw_resources(
+        device, *static_cast<VulkanPipeline *>(pipeline.get()), buffers, images,
+        {}, {}, false, false);
+  };
+  EXPECT_NO_THROW(prepare());
+  buffers[0].bytes = 21;
+  EXPECT_ANY_THROW(prepare());
+  buffers[0].bytes = 0;
+  EXPECT_ANY_THROW(prepare());
+  buffers[0].bytes = 16;
+  buffers[0].offset = 1;
+  if (device.get_vk_physical_device_props()
+          .limits.minUniformBufferOffsetAlignment > 1)
+    EXPECT_ANY_THROW(prepare());
+  buffers[0].offset = 20;
+  EXPECT_ANY_THROW(prepare());
+  buffers[0].offset = 0;
+  buffers[0].storage = true;
+  EXPECT_ANY_THROW(prepare());
+  buffers[0].storage = false;
+  buffers[0].set_index = 63;
+  EXPECT_ANY_THROW(prepare());
+  buffers[0].set_index = 0;
+  buffers[0].binding = 4;
+  EXPECT_ANY_THROW(prepare());
+  buffers[0].binding = 3;
+  buffers.push_back(buffers.front());
+  EXPECT_ANY_THROW(prepare());
+  buffers.pop_back();
+  images.clear();
+  EXPECT_ANY_THROW(prepare());
+  images = {{0, 5, *image, {}}};
+  buffers.clear();
+  EXPECT_ANY_THROW(prepare());
+  buffers = {{0, 3, *buffer}};
+  EXPECT_NO_THROW(prepare());
 }
 
 TEST(VulkanGraphicsPipeline, SharedAttachmentContractRejectsInvalidViewsCold) {

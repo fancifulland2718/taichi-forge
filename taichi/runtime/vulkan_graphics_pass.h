@@ -86,13 +86,35 @@ struct VulkanGraphicsDrawResources {
   std::unique_ptr<RasterResources> raster;
 };
 
+struct VulkanGraphicsBufferRange {
+  DevicePtr pointer{kDeviceNullPtr};
+  size_t bytes{0};
+};
+struct VulkanGraphicsVertexRange {
+  uint32_t binding{0};
+  VulkanGraphicsBufferRange range;
+};
+
+// Validate logical subranges against physical buffers and the declared draw.
+// The caller qualifies index dtype (u32) and indirect/mesh device features.
+void validate_vulkan_graphics_vertex_ranges(
+    vulkan::VulkanDevice &device,
+    const std::vector<VertexInputBinding> &bindings,
+    const std::vector<VulkanGraphicsVertexRange> &vertices,
+    const std::optional<VulkanGraphicsBufferRange> &indices,
+    const VulkanGraphicsDrawInfo &draw,
+    const std::optional<VulkanGraphicsIndirectPacket> &indirect);
+
 using VulkanGraphicsResourceSets =
     std::map<uint32_t, std::unique_ptr<ShaderResourceSet>>;
-// Caller validates owners, reflection and ranges, and retains all resources
-// through completion. The optional binder is synchronous, for owner-specific
+// Validates physical descriptor ranges, usage and complete reflected layouts
+// before descriptor finalization. Caller validates vertex/index ranges above,
+// owners and image initialization, and retains all resources through
+// completion. The optional binder is synchronous, for owner-specific
 // descriptors such as managed acceleration structures. It is never retained.
 VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
-    GraphicsDevice &device,
+    vulkan::VulkanDevice &device,
+    vulkan::VulkanPipeline &pipeline,
     const std::vector<VulkanGraphicsShaderBufferView> &shader_buffers,
     const std::vector<VulkanGraphicsShaderImageView> &shader_images,
     const std::vector<std::pair<uint32_t, DevicePtr>> &vertex_buffers,

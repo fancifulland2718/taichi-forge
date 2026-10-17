@@ -157,8 +157,92 @@ void begin_vulkan_graphics_pass(CommandList *commands,
                                             int(viewport[1] + viewport[3]));
 }
 
+namespace {
+size_t validate_buffer_range(vulkan::VulkanDevice &device,
+                             DevicePtr pointer,
+                             size_t bytes,
+                             AllocUsage usage) {
+  TI_ERROR_IF(pointer == kDeviceNullPtr || pointer.device != &device,
+              "Vulkan graphics buffer belongs to another device or is null.");
+  const size_t capacity = device.get_vkbuffer_size(pointer);
+  TI_ERROR_IF(pointer.offset >= capacity,
+              "Vulkan graphics buffer offset is outside the buffer.");
+  if (bytes == kBufferSizeEntireSize)
+    bytes = capacity - pointer.offset;
+  TI_ERROR_IF(bytes == 0 || bytes > capacity - pointer.offset,
+              "Vulkan graphics buffer range is empty or exceeds the buffer.");
+  TI_ERROR_IF(!int(device.allocation_usage(pointer) & usage),
+              "Vulkan graphics buffer lacks the required usage.");
+  return bytes;
+}
+}  // namespace
+
+void validate_vulkan_graphics_vertex_ranges(
+    vulkan::VulkanDevice &device,
+    const std::vector<VertexInputBinding> &bindings,
+    const std::vector<VulkanGraphicsVertexRange> &vertices,
+    const std::optional<VulkanGraphicsBufferRange> &indices,
+    const VulkanGraphicsDrawInfo &draw,
+    const std::optional<VulkanGraphicsIndirectPacket> &indirect) {
+  TI_ERROR_IF(
+      draw.indexed != indices.has_value(),
+      "Vulkan graphics indexed draw and index-buffer binding must agree.");
+  TI_ERROR_IF(!indirect && (!draw.element_count || !draw.instance_count),
+              "Vulkan graphics direct draw counts must be positive.");
+  std::unordered_map<uint32_t, size_t> supplied;
+  for (const auto &vertex : vertices) {
+    const auto bytes = validate_buffer_range(
+        device, vertex.range.pointer, vertex.range.bytes, AllocUsage::Vertex);
+    TI_ERROR_IF(!supplied.emplace(vertex.binding, bytes).second,
+                "Vulkan graphics vertex binding {} is duplicated.",
+                vertex.binding);
+  }
+  TI_ERROR_IF(supplied.size() != bindings.size(),
+              "Vulkan graphics draw must bind every declared vertex buffer.");
+  for (const auto &binding : bindings) {
+    const auto found = supplied.find(binding.binding);
+    TI_ERROR_IF(found == supplied.end(),
+                "Vulkan graphics draw is missing vertex binding {}.",
+                binding.binding);
+    uint64_t records;
+    if (indirect) {
+      records = binding.instance ? indirect->instance_record_limit
+                                 : indirect->vertex_record_limit;
+    } else if (binding.instance) {
+      records = uint64_t(draw.first_instance) + draw.instance_count;
+    } else if (draw.indexed) {
+      const int64_t first = int64_t(draw.index_min) + draw.vertex_offset;
+      const int64_t last = int64_t(draw.index_max) + draw.vertex_offset;
+      TI_ERROR_IF(first < 0 || last < first,
+                  "Vulkan graphics indexed vertex binding {} has an invalid "
+                  "declared index range after applying vertex_offset.",
+                  binding.binding);
+      records = uint64_t(last) + 1;
+    } else {
+      records = uint64_t(draw.first_vertex) + draw.element_count;
+    }
+    TI_ERROR_IF(
+        !binding.stride || !records || records > found->second / binding.stride,
+        "Vulkan graphics vertex binding {} is too small for the declared draw "
+        "range.",
+        binding.binding);
+  }
+  if (indices) {
+    const auto bytes = validate_buffer_range(device, indices->pointer,
+                                             indices->bytes, AllocUsage::Index);
+    const uint64_t count =
+        indirect ? indirect->index_element_limit
+                 : uint64_t(draw.first_index) + draw.element_count;
+    TI_ERROR_IF(indices->pointer.offset % sizeof(uint32_t) || !count ||
+                    count > bytes / sizeof(uint32_t),
+                "Vulkan graphics index buffer is too small or misaligned for "
+                "the declared draw range.");
+  }
+}
+
 VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
-    GraphicsDevice &device,
+    vulkan::VulkanDevice &device,
+    vulkan::VulkanPipeline &pipeline,
     const std::vector<VulkanGraphicsShaderBufferView> &shader_buffers,
     const std::vector<VulkanGraphicsShaderImageView> &shader_images,
     const std::vector<std::pair<uint32_t, DevicePtr>> &vertex_buffers,
@@ -168,7 +252,42 @@ VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
     const std::function<void(VulkanGraphicsResourceSets &)> &extra_bindings) {
   VulkanGraphicsDrawResources draw_resources;
   VulkanGraphicsResourceSets resource_sets;
+  std::unordered_set<uint64_t> claimed;
+  auto claim = [&](uint32_t set, uint32_t binding) {
+    TI_ERROR_IF(set > uint32_t((std::numeric_limits<int>::max)()) ||
+                    binding > uint32_t((std::numeric_limits<int>::max)()) ||
+                    !claimed.insert((uint64_t(set) << 32) | binding).second,
+                "Vulkan graphics descriptor binding is duplicated or exceeds "
+                "the command ABI.");
+  };
+  const auto &limits = device.get_vk_physical_device_props().limits;
+  auto validate_descriptor_buffer = [&](DeviceAllocation allocation,
+                                        size_t offset, size_t bytes,
+                                        bool storage) {
+    bytes = validate_buffer_range(
+        device, allocation.get_ptr(offset), bytes,
+        storage ? AllocUsage::Storage : AllocUsage::Uniform);
+    const auto alignment = storage ? limits.minStorageBufferOffsetAlignment
+                                   : limits.minUniformBufferOffsetAlignment;
+    const auto maximum =
+        storage ? limits.maxStorageBufferRange : limits.maxUniformBufferRange;
+    TI_ERROR_IF(offset % alignment || bytes > maximum,
+                "Vulkan graphics descriptor buffer range or alignment exceeds "
+                "the device limits.");
+  };
   for (const auto &shader : shader_buffers) {
+    claim(shader.set_index, shader.binding);
+    if (!shader.array_elements.empty()) {
+      TI_ERROR_IF(!shader.storage || shader.offset != 0 ||
+                      shader.bytes != kBufferSizeEntireSize,
+                  "Vulkan graphics buffer arrays require whole storage-buffer "
+                  "bindings.");
+      for (const auto allocation : shader.array_elements)
+        validate_descriptor_buffer(allocation, 0, kBufferSizeEntireSize, true);
+    } else {
+      validate_descriptor_buffer(shader.allocation, shader.offset, shader.bytes,
+                                 shader.storage);
+    }
     auto &resource_set = resource_sets[shader.set_index];
     if (!resource_set) {
       resource_set = device.create_resource_set_unique();
@@ -193,6 +312,16 @@ VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
     }
   }
   for (const auto &image : shader_images) {
+    claim(image.set_index, image.binding);
+    TI_ERROR_IF(
+        image.allocation == kDeviceNullAllocation ||
+            image.allocation.device != &device,
+        "Vulkan graphics sampled image belongs to another device or is null.");
+    TI_ERROR_IF(!(std::get<0>(device.get_vk_image(image.allocation))->usage &
+                  VK_IMAGE_USAGE_SAMPLED_BIT),
+                "Vulkan graphics image lacks sampled usage.");
+    pipeline.validate_sampled_texture(image.set_index, image.binding,
+                                      image.sampler.compare_op >= 0);
     auto &resource_set = resource_sets[image.set_index];
     if (!resource_set) {
       resource_set = device.create_resource_set_unique();
@@ -203,6 +332,20 @@ VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
   }
   if (extra_bindings)
     extra_bindings(resource_sets);
+  const auto &expected = pipeline.get_resource_set_templates();
+  TI_ERROR_IF(
+      resource_sets.size() != expected.size(),
+      "Vulkan graphics descriptor sets do not match shader reflection.");
+  for (const auto &[index, expected_set] : expected) {
+    const auto found = resource_sets.find(index);
+    TI_ERROR_IF(
+        found == resource_sets.end() || !found->second ||
+            !vulkan::VulkanResourceSet::SetLayoutCmp{}(
+                expected_set,
+                *static_cast<vulkan::VulkanResourceSet *>(found->second.get())),
+        "Vulkan graphics descriptor type/count/coverage mismatch in set {}.",
+        index);
+  }
   draw_resources.shader_resource_sets.reserve(resource_sets.size());
   for (auto &[set_index, resource_set] : resource_sets) {
     const RhiResult prepare_result =

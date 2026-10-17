@@ -238,12 +238,11 @@ class VulkanGraphicsPipelineResource {
       const std::string &name,
       const RasterDepthParams &depth_params,
       const std::vector<BlendingParams> &color_targets)
-      : program_(program), bindings_(vertex_bindings) {
+      : program_(program) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan graphics pipeline requires a live Program.");
-    std::vector<VertexInputBinding> rhi_bindings;
-    for (const auto &binding : bindings_)
-      rhi_bindings.push_back({binding.binding, binding.stride, binding.instance});
+    for (const auto &binding : vertex_bindings)
+      bindings_.push_back({binding.binding, binding.stride, binding.instance});
     std::vector<VertexInputAttribute> rhi_attributes;
     for (const auto &attribute : vertex_attributes)
       rhi_attributes.push_back({attribute.location, attribute.binding,
@@ -274,7 +273,7 @@ class VulkanGraphicsPipelineResource {
       params.blending.emplace_back();
     }
     pipeline_ = prepare_vulkan_graphics_pipeline(
-        *device, sources, params, rhi_bindings, rhi_attributes,
+        *device, sources, params, bindings_, rhi_attributes,
         name.empty() ? "Forge VulkanGraphicsPipeline" : name);
     TI_ERROR_IF(!pipeline_, "Vulkan graphics pipeline creation failed.");
   }
@@ -338,7 +337,7 @@ class VulkanGraphicsPipelineResource {
     return pipeline_.get();
   }
 
-  const std::vector<VulkanGraphicsVertexBinding> &bindings() const noexcept {
+  const std::vector<VertexInputBinding> &bindings() const noexcept {
     return bindings_;
   }
 
@@ -366,7 +365,7 @@ class VulkanGraphicsPipelineResource {
 
  private:
   Program *program_{nullptr};
-  std::vector<VulkanGraphicsVertexBinding> bindings_;
+  std::vector<VertexInputBinding> bindings_;
   bool mesh_pipeline_{false};
   bool task_shader_{false};
   PreparedVulkanGraphicsResourceDomain prepared_resource_domain_;
@@ -814,96 +813,30 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
           indirect.index_element_limit,
           indirect.first_instance_may_be_nonzero};
     }
-    std::unordered_map<std::uint32_t, Ndarray *> supplied;
+    std::vector<VulkanGraphicsVertexRange> vertex_ranges;
     for (const auto &[binding, array] : command.vertex_buffers) {
-      TI_ERROR_IF(!array,
-                  "Vulkan graphics vertex binding {} is null.", binding);
-      TI_ERROR_IF(!supplied.emplace(binding, array).second,
-                  "Vulkan graphics vertex binding {} is duplicated.",
-                  binding);
-      TI_ERROR_IF(array->owning_program() != this ||
-                      array->get_device_allocation().device != device,
-                  "Vulkan graphics vertex binding {} belongs to another "
-                  "runtime or device.",
-                  binding);
-      TI_ERROR_IF(!int(device->allocation_usage(
-                           array->get_device_allocation()) &
-                       AllocUsage::Vertex),
-                  "Vulkan graphics vertex binding {} was not allocated for "
-                  "vertex input.",
-                  binding);
+      TI_ERROR_IF(!array || array->owning_program() != this,
+                  "Vulkan graphics vertex binding {} belongs to another Program or is null.", binding);
+      const auto allocation = array->get_device_allocation();
+      vertex_ranges.push_back({binding, {allocation.get_ptr(), ndarray_bytes(array, "vertex")}});
       arrays.push_back(array);
-      recorded.vertex_buffers.emplace_back(binding,
-                                           array->get_device_allocation());
+      recorded.vertex_buffers.emplace_back(binding, allocation);
     }
-
-    TI_ERROR_IF(supplied.size() != resource->bindings().size(),
-                "Vulkan graphics draw must bind every declared vertex buffer.");
-    for (const auto &binding : resource->bindings()) {
-      const auto found = supplied.find(binding.binding);
-      TI_ERROR_IF(found == supplied.end(),
-                  "Vulkan graphics draw is missing vertex binding {}.",
-                  binding.binding);
-      const std::size_t available = ndarray_bytes(found->second, "vertex");
-      std::uint64_t records = 0;
-      if (recorded.indirect.has_value()) {
-        records = binding.instance
-                      ? recorded.indirect->instance_record_limit
-                      : recorded.indirect->vertex_record_limit;
-      } else if (binding.instance) {
-        records = static_cast<std::uint64_t>(draw.first_instance) +
-                  draw.instance_count;
-      } else if (draw.indexed) {
-        const std::int64_t first_record =
-            static_cast<std::int64_t>(draw.index_min) + draw.vertex_offset;
-        const std::int64_t last_record =
-            static_cast<std::int64_t>(draw.index_max) + draw.vertex_offset;
-        TI_ERROR_IF(first_record < 0 || last_record < first_record,
-                    "Vulkan graphics indexed vertex binding {} has an invalid "
-                    "declared index range after applying vertex_offset.",
-                    binding.binding);
-        records = static_cast<std::uint64_t>(last_record) + 1;
-      } else {
-        records = static_cast<std::uint64_t>(draw.first_vertex) +
-                  draw.element_count;
-      }
-      TI_ERROR_IF(
-          records >
-                  (std::numeric_limits<std::size_t>::max)() / binding.stride ||
-              static_cast<std::size_t>(records) * binding.stride > available,
-          "Vulkan graphics vertex binding {} is too small for the declared "
-          "draw range.",
-          binding.binding);
-    }
-
+    std::optional<VulkanGraphicsBufferRange> index_range;
     if (command.index_buffer) {
-      Ndarray *index_buffer = command.index_buffer;
-      TI_ERROR_IF(index_buffer->owning_program() != this ||
-                      index_buffer->get_device_allocation().device != device,
-                  "Vulkan graphics index buffer belongs to another runtime or "
-                  "device.");
+      auto *index_buffer = command.index_buffer;
+      TI_ERROR_IF(index_buffer->owning_program() != this,
+                  "Vulkan graphics index buffer belongs to another Program.");
       TI_ERROR_IF(index_buffer->get_element_data_type() != PrimitiveType::u32,
                   "Vulkan graphics index buffer must use u32.");
-      TI_ERROR_IF(!int(device->allocation_usage(
-                           index_buffer->get_device_allocation()) &
-                       AllocUsage::Index),
-                  "Vulkan graphics index buffer was not allocated for index "
-                  "input.");
-      const std::uint64_t index_end = recorded.indirect.has_value()
-                                          ? recorded.indirect->index_element_limit
-                                          : static_cast<std::uint64_t>(
-                                                draw.first_index) +
-                                                draw.element_count;
-      TI_ERROR_IF(
-          index_end > (std::numeric_limits<std::size_t>::max)() /
-                          sizeof(std::uint32_t) ||
-              static_cast<std::size_t>(index_end) * sizeof(std::uint32_t) >
-                  ndarray_bytes(index_buffer, "index"),
-          "Vulkan graphics index buffer is too small for the declared draw "
-          "range.");
-      arrays.push_back(index_buffer);
       recorded.index_buffer = index_buffer->get_device_allocation();
+      index_range = VulkanGraphicsBufferRange{
+          recorded.index_buffer.get_ptr(), ndarray_bytes(index_buffer, "index")};
+      arrays.push_back(index_buffer);
     }
+    if (!mesh_draw)
+      validate_vulkan_graphics_vertex_ranges(*device, resource->bindings(), vertex_ranges,
+                                             index_range, draw, recorded.indirect);
 
     std::unordered_set<std::uint64_t> shader_bindings;
     for (const auto &shader : command.shader_buffers) {
@@ -1142,8 +1075,10 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     vertex_views.reserve(recorded.vertex_buffers.size());
     for (const auto &[binding, allocation] : recorded.vertex_buffers)
       vertex_views.emplace_back(binding, allocation.get_ptr());
+    auto pipeline = recorded.pipeline.lock();
+    TI_ERROR_IF(!pipeline, "Vulkan graphics pipeline closed during preparation.");
     auto draw_resources = prepare_vulkan_graphics_draw_resources(
-        *device, recorded.shader_buffers, recorded.shader_images, vertex_views,
+        *device, *static_cast<vulkan::VulkanPipeline *>(pipeline->pipeline()), recorded.shader_buffers, recorded.shader_images, vertex_views,
         recorded.index_buffer.get_ptr(), recorded.draw.indexed,
         recorded.mesh.has_value(), [&](VulkanGraphicsResourceSets &resource_sets) {
           for (const auto &as : recorded.shader_acceleration_structures) {

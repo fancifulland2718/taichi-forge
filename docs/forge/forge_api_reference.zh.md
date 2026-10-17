@@ -479,6 +479,9 @@ sampler 由 Texture 提供，SPIR-V image 类型和 descriptor 布局须与声�
 kernel 生产纹理、draw 消费、后续 kernel 消费可按设备依赖顺序执行，无 host readback。
 
 `Graph.bind()` 一次准备 layout/range/descriptor 元数据，数据原位变化继续复用；资源替换需显式更新绑定。
+准备阶段拒绝缺失/多余的 descriptor set 或绑定、类型/数组数量不匹配，以及越界或违反设备 usage、
+对齐和 range 限值的 buffer。顶点/索引 draw 范围按声明的逻辑视图校验，不把分配器填充当作可访问容量，
+也不读回索引值。
 pipeline/runtime 生命周期仍受约束。执行是 native **rerecord** action，不承诺 immutable draw-command replay，
 既有 graphics/compute queue bridge 保留。准备好的 host packet 不会让已关闭 pipeline 继续可执行，
 也不会把 GPU pipeline 生命周期延长到 `ti.reset()` 之后。

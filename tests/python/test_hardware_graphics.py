@@ -1296,6 +1296,37 @@ def test_vulkan_graphics_pass_load_and_depth_semantics():
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_descriptor_declarations_match_spirv_before_recording():
+    gfx = ti.hardware.graphics
+    shader_dir = Path(__file__).parents[2] / "python" / "taichi_forge" / "shaders"
+    vertices = _uniform_triangle_vertices()
+    parameters = ti.ndarray(ti.f32, 4)
+    color = ti.Texture(ti.Format.rgba8, (8, 8))
+    for declaration in (None, (0, 0, "storage"), (0, 1, "uniform"), (63, 0, "uniform")):
+        declarations = () if declaration is None else (gfx.ShaderBufferBinding(*declaration, "read"),)
+        with gfx.VulkanGraphicsPipeline(
+            (shader_dir / "Triangles_vk_vert.spv").read_bytes(),
+            (shader_dir / "Triangles_vk_frag.spv").read_bytes(),
+            vertex_bindings=(gfx.VertexBinding(0, 48),),
+            vertex_attributes=(
+                gfx.VertexAttribute(0, 0, ti.Format.rgb32f, 0),
+                gfx.VertexAttribute(1, 0, ti.Format.rgb32f, 12),
+                gfx.VertexAttribute(2, 0, ti.Format.rg32f, 24),
+                gfx.VertexAttribute(3, 0, ti.Format.rgba32f, 32),
+            ),
+            shader_buffer_bindings=declarations,
+        ) as pipeline:
+            buffers = {} if declaration is None else {declaration[:2]: "parameters"}
+            draw = pipeline.pass_draw(gfx.Draw(3), vertex_buffers={0: "vertices"}, shader_buffers=buffers)
+            recording = pipeline.record_pass((draw,), color="target")
+            bindings = dict(target=color, vertices=vertices)
+            if declaration is not None:
+                bindings["parameters"] = parameters
+            with pytest.raises(RuntimeError, match="descriptor"):
+                recording.prepare_graph_execute(bindings)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_graphics_pass_binds_real_uniform_descriptor():
     if not ti.hardware.graphics.is_available():
         pytest.skip("Vulkan graphics commands are unavailable")
