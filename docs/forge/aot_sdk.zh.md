@@ -370,7 +370,7 @@ SBT 标量与 push constant 合成按内容寻址的 host blob，shader 代码�
 不保存生产端 driver 句柄。
 
 导出在创建资源前从已选择 launch 的租约收集图像 usage，因此先被 kernel 采样、随后
-被 RT 写入的同一图像只重建一次并同时申请两种 usage。单 mip、基本 sampler 与初始化
+被 RT 写入的同一图像只重建一次并同时申请两种 usage。单 mip 与初始化
 检查保持。小夹具覆盖普通/已选择 Graph、不同代码/组顺序拒绝、公私 owner 和下游梯度。
 
 Graph 的 AS 参数通过 `source_bindings={"acceleration": tlas}` 声明源 owner，
@@ -563,7 +563,8 @@ GPU 更新、captured 和 OptiX ordered 计划、共享绑定退休及后续数�
 Vulkan 复用相同的 `image/sampled`、`image/upload` 描述，并接入所属 runtime 已有的
 GFX 执行器。通过 `image_upload` v1 的 `vulkan_inline` 能力协商；创建与初始像素上传在
 准备期完成，录制上传与采样共用现有 command list、布局转换和退休机制，暖态不增加
-host 复制或等待。本批 kernel 图像支持单 mip 的 1D/2D/3D 和上述基本 sampler；
+host 复制或等待。本批 kernel 图像支持单 mip 的 1D/2D/3D；Vulkan 还接受下述扩展
+sampler，CUDA 保持基本采样合同。
 合格 Graph 可使用下文的自动重建合同。
 
 像素布局遵守各后端现有纹理 ABI：Vulkan 图像 X 轴连续，标量 texel `(x,y,z)` 的紧凑
@@ -576,7 +577,21 @@ Vulkan `depth32f` 上传使用 depth aspect，并通过同一原生操作需求�
 的录制队列。初始化复用已有 GFX 有序 graphics 路径；重放将整个序列录入该队列，不为
 每次上传增加 host 等待。调用方提供 `[0,1]` 内的深度值，这是
 [Vulkan 复制合同](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html)的要求。
-本批覆盖单 mip 二维深度采样与上传；比较采样器、mip 链和向 AOT 图像附件渲染仍另行接通。
+本批覆盖单 mip 二维深度采样与上传；mip 链和向 AOT 图像附件渲染仍另行接通。
+
+`image/sampled` 可选 `sampler` 对象，字段与 `ti.hardware.sampling.SamplerConfig`
+一致：`min_filter`、`mag_filter`、`mip_filter`、`address_mode_u/v/w`、`lod_bias`、
+`min_lod`、`max_lod`、`max_anisotropy`、`compare_op`。省略字段使用相同默认值；
+`max_lod=null` 不限制上界，`compare_op=null` 关闭比较。不能与旧 `filter` 或
+`address_modes` 同时使用。
+
+Vulkan 重建和借用保留完整状态，复用已有 sampler cache，在使用前检查有限数、设备
+限制和格式能力。比较采样要求二维 `depth32f` 以及对应的 kernel 操作或 RT shader
+descriptor；普通过滤采样不能使用比较 sampler。CUDA 继续拒绝扩展状态及不相同的
+min/mag filter。Windows 小夹具覆盖颜色过滤/寻址、深度比较、可用设备上的各向异性、
+普通/已选择 Graph 的公私资源、上传、借用和下游真实梯度，不提供 sampler 求导。
+`Texture.from_ndarray()` 的深度上传也使用受管 depth-aspect graphics 传输，保留
+Graph 重放之间的布局跟踪。
 
 CUDA/Vulkan Graph 自动导出也支持 sampled Texture kernel 参数，包括合格的不可变 compute
 录制方案。CUDA 保留 `cuda_immutable_argument_frames` 的资源共享策略，Vulkan 保留每次
@@ -597,8 +612,8 @@ Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出�
 使用的输入；仍被重放读取的数组（包括通过 view 读取）继续保留。CUDA 兄弟绑定帧共享
 初始化后的图像；不同图像使用独立准备，输出数组
 可在 CUDA 兄弟绑定间切换。Vulkan 独立准备各自拥有图像和录制命令。重放不增加像素复制
-或 Python 元数据查询。min/mag filter 不同、mip 链及扩展 sampler 设置会在导出时拒绝，
-当前资源描述尚不能完整保存这些状态。
+或 Python 元数据查询。CUDA 仍拒绝不相同的 min/mag filter 与扩展 sampler；两后端
+的 mip 链仍需独立的重建/初始化合同。
 
 已有产物以及显式给 `image/sampled` 绑定 `pixels` 的资源，仍保持构造期复制及保留输入
 的合同。手工计划若需分阶段初始化，可省略该资源绑定，将 `image/upload` 放入
@@ -830,8 +845,8 @@ Texture 可作为 AOT ray-program 的 storage-image 目标，再由 JIT 直接�
 导入后可回收源 Python Texture。关闭导入句柄会完成在途使用并退休对应 AOT 使用者，
 独立导入和源 Texture 仍可使用。关闭 borrower 保留 Program；`ti.reset()` 在销毁
 后端前退休全部借用调用与租约。只接受同一 Program 中存活的受管 CUDA/Vulkan Texture。
-当前准入沿用 native sampled image 边界：单 mip、浮点/归一化采样格式，不接受扩展
-LOD、各向异性和 comparison sampler；不支持的设置在导入期拒绝。独立 Runtime
+当前准入沿用 native sampled image 边界：单 mip、浮点/归一化采样格式；Vulkan 保留
+合格的扩展 LOD、各向异性和 comparison 状态，CUDA 保持基本采样。不支持的设置在导入期拒绝。独立 Runtime
 不能导入 Program 资源。
 
 Windows 验证覆盖非方形 r32f、nearest/repeat sampler、JIT→AOT 与 AOT→JIT 更新、

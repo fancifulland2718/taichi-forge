@@ -130,7 +130,8 @@ BufferFormat image_format(const std::string &name) {
 
 ImageParams parameters(const liong::json::JsonValue &p) {
   using namespace operation_json;
-  fields(p, {"shape", "format", "filter", "address_modes", "storage"});
+  fields(p,
+         {"shape", "format", "filter", "address_modes", "storage", "sampler"});
   const auto &shape = p["shape"];
   if (!shape.is_arr() || shape.arr.inner.empty() || shape.arr.inner.size() > 3)
     throw std::invalid_argument(
@@ -154,12 +155,68 @@ ImageParams parameters(const liong::json::JsonValue &p) {
   if (!is_float_sampled_texture_format(result.format))
     throw std::invalid_argument(
         "Image format does not support floating sampling");
+  const auto filter = [](const liong::json::JsonValue &value) {
+    const auto label = name(value);
+    if (label == "nearest")
+      return ImageFilter::nearest;
+    if (label == "linear")
+      return ImageFilter::linear;
+    throw std::invalid_argument("Image filter must be nearest or linear");
+  };
+  const auto address = [](const liong::json::JsonValue &value) {
+    const auto label = name(value);
+    if (label == "repeat")
+      return ImageAddressMode::repeat;
+    if (label == "mirrored_repeat")
+      return ImageAddressMode::mirrored_repeat;
+    if (label == "clamp_to_edge")
+      return ImageAddressMode::clamp_to_edge;
+    throw std::invalid_argument("Unsupported image address mode");
+  };
+  if (p.obj.inner.count("sampler")) {
+    if (p.obj.inner.count("filter") || p.obj.inner.count("address_modes"))
+      throw std::invalid_argument(
+          "Image sampler cannot be mixed with legacy filter/address_modes");
+    const auto &s = p["sampler"];
+    fields(s, {"min_filter", "mag_filter", "mip_filter", "address_mode_u",
+               "address_mode_v", "address_mode_w", "lod_bias", "min_lod",
+               "max_lod", "max_anisotropy", "compare_op"});
+    auto &target = result.sampler_config;
+    for (auto entry : {std::make_pair("min_filter", &target.min_filter),
+                       std::make_pair("mag_filter", &target.mag_filter),
+                       std::make_pair("mip_filter", &target.mip_filter)})
+      if (s.obj.inner.count(entry.first))
+        *entry.second = filter(s[entry.first]);
+    for (auto entry :
+         {std::make_pair("address_mode_u", &target.address_mode_u),
+          std::make_pair("address_mode_v", &target.address_mode_v),
+          std::make_pair("address_mode_w", &target.address_mode_w)})
+      if (s.obj.inner.count(entry.first))
+        *entry.second = address(s[entry.first]);
+    target.lod_bias = optional_f32(s, "lod_bias", target.lod_bias);
+    target.min_lod = optional_f32(s, "min_lod", target.min_lod);
+    if (s.obj.inner.count("max_lod") && !s["max_lod"].is_null()) {
+      target.max_lod = optional_f32(s, "max_lod", target.max_lod);
+      if (target.max_lod < 0)
+        throw std::invalid_argument(
+            "Sampler max_lod must be nonnegative or null");
+    }
+    target.max_anisotropy =
+        optional_f32(s, "max_anisotropy", target.max_anisotropy);
+    if (s.obj.inner.count("compare_op") && !s["compare_op"].is_null()) {
+      const auto op = name(s["compare_op"]);
+      const std::vector<std::string> ops{
+          "never",   "less",      "equal",         "less_equal",
+          "greater", "not_equal", "greater_equal", "always"};
+      const auto found = std::find(ops.begin(), ops.end(), op);
+      if (found == ops.end())
+        throw std::invalid_argument("Unsupported sampler compare_op");
+      target.compare_op = int(found - ops.begin());
+    }
+  }
   if (p.obj.inner.count("filter")) {
-    const auto filter = name(p["filter"]);
-    if (filter != "nearest" && filter != "linear")
-      throw std::invalid_argument("Image filter must be nearest or linear");
     result.sampler_config.min_filter = result.sampler_config.mag_filter =
-        filter == "nearest" ? ImageFilter::nearest : ImageFilter::linear;
+        filter(p["filter"]);
   }
   if (p.obj.inner.count("address_modes")) {
     const auto &modes = p["address_modes"];
@@ -170,15 +227,7 @@ ImageParams parameters(const liong::json::JsonValue &p) {
                                    &result.sampler_config.address_mode_v,
                                    &result.sampler_config.address_mode_w};
     for (size_t i = 0; i < modes.arr.inner.size(); ++i) {
-      const auto mode = name(modes.arr.inner[i]);
-      if (mode == "repeat")
-        *targets[i] = ImageAddressMode::repeat;
-      else if (mode == "mirrored_repeat")
-        *targets[i] = ImageAddressMode::mirrored_repeat;
-      else if (mode == "clamp_to_edge")
-        *targets[i] = ImageAddressMode::clamp_to_edge;
-      else
-        throw std::invalid_argument("Unsupported image address mode");
+      *targets[i] = address(modes.arr.inner[i]);
     }
   }
   return result;

@@ -237,7 +237,7 @@ std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {
     state.program->validate_textures_for_external_submission(&texture, 1);
     auto lease = state.program->acquire_texture_external_lease(texture);
     if (lease->get_mip_levels() != 1 ||
-        lease->sampler_config_.has_extended_sampling() ||
+        (state.arch == Arch::cuda && lease->sampler_config_.has_extended_sampling()) ||
         !is_float_sampled_texture_format(lease->get_buffer_format()))
       throw std::invalid_argument(
           "AOT texture import requires the qualified single-level sampled format/sampler");

@@ -107,14 +107,14 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
                 )
             assert not module._exported_kernels and not module._graph_export_failed
             if arch == "vulkan":
-                extended = ti.Texture(
+                mipped = ti.Texture(
                     ti.Format.r32f,
                     (3, 5),
-                    sampler=ti.hardware.sampling.SamplerConfig(min_filter="nearest"),
+                    mip_levels=2,
                 )
-                with pytest.raises(ti.TaichiRuntimeError, match="basic sampler"):
+                with pytest.raises(ti.TaichiRuntimeError, match="single-level"):
                     module.add_execution_plan(
-                        "sampler", graph, source_bindings=dict(image=extended)
+                        "mips", graph, source_bindings=dict(image=mipped)
                     )
                 assert not module._exported_kernels and not module._graph_export_failed
         else:

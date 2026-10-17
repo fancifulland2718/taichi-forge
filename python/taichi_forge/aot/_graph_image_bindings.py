@@ -1,5 +1,7 @@
 """Cold sampled-image metadata and explicit consumer seeds for Graph export."""
 
+from dataclasses import asdict
+
 from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture
@@ -65,7 +67,7 @@ class SourceImageBindings:
             address_mode_v=sampler.address_mode_v,
             address_mode_w=sampler.address_mode_w,
         )
-        if sampler != basic:
+        if context.arch == core.Arch.cuda and sampler != basic:
             raise TaichiRuntimeError(
                 "AOT sampled-image reconstruction requires a basic sampler with matching min/mag filters"
             )
@@ -77,6 +79,13 @@ class SourceImageBindings:
 
         def build():
             inputs = context.resource_inputs.require(owner, ("pixels",))
+            sampling = (
+                dict(
+                    filter=sampler.min_filter,
+                    address_modes=[sampler.address_mode_u, sampler.address_mode_v, sampler.address_mode_w][: len(shape)],
+                )
+                if sampler == basic else dict(sampler=asdict(sampler))
+            )
             resource = context.resource(
                 owner,
                 "image",
@@ -84,12 +93,7 @@ class SourceImageBindings:
                 parameters=dict(
                     format=fmt.name,
                     shape=list(shape),
-                    filter=sampler.min_filter,
-                    address_modes=[
-                        sampler.address_mode_u,
-                        sampler.address_mode_v,
-                        sampler.address_mode_w,
-                    ][: len(shape)],
+                    **sampling,
                     **({"storage": True} if id(owner) in self._storage_owners else {}),
                 ),
             )
