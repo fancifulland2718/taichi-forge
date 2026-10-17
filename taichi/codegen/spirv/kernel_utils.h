@@ -281,6 +281,7 @@ class KernelContextAttributes {
     // Indices of the arg value in the host `Context`.
     std::vector<int> indices;
     bool is_argpack{false};
+    int texture_lod{0};
 
     TI_IO_DEF(name,
               stride,
@@ -292,7 +293,8 @@ class KernelContextAttributes {
               element_shape,
               field_dim,
               format,
-              ptype);
+              ptype,
+              texture_lod);
   };
 
   /**

@@ -743,6 +743,13 @@ as required by the [Vulkan copy contract](https://docs.vulkan.org/refpages/lates
 This qualifies 2D depth sampling and uploads, including complete mip chains.
 Explicit raster plans can render to AOT-owned attachments as described below.
 
+GFX AOT exports containing `rw_texture` arguments require metadata v4 and
+paired ABI90 components. Argument metadata preserves the exact format and mip
+level, including kernels that only inspect the image shape. Ordinary exports
+keep their earlier metadata version. Old SPIR-V offline-cache entries missing
+the new argument field are rejected by strict cache decoding and recompiled;
+CPU/CUDA cache formats are unchanged.
+
 `image/sampled` accepts an optional `sampler` object with the fields of
 `ti.hardware.sampling.SamplerConfig`: `min_filter`, `mag_filter`, `mip_filter`,
 `address_mode_u/v/w`, `lod_bias`, `min_lod`, `max_lod`, `max_anisotropy` and

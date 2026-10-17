@@ -23,6 +23,7 @@ class KernelImpl : public aot::Kernel {
           attrib.element_shape, attrib.format);
       parameter.name = attrib.name;
       parameter.ptype = attrib.ptype;
+      parameter.texture_lod = attrib.texture_lod;
       if (attrib.ptype == ParameterType::kNdarray) {
         // The serialized ABI already records the optional grad_ptr member.
         // Recover it without changing the artifact schema or guessing from

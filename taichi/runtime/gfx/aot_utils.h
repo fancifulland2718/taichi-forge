@@ -36,7 +36,7 @@ inline std::string kernel_identity(spirv::TaichiKernelAttributes attributes,
  * AOT module data for the Unified Device API backend.
  */
 struct TaichiAotData {
-  static constexpr uint32_t kMetadataVersion = 3;
+  static constexpr uint32_t kMetadataVersion = 4;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

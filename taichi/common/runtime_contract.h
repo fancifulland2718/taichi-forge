@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Native resources expose known owned device payload separately from scratch.
+// SPIR-V argument metadata retains the storage image mip level.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 89;
+inline constexpr int kForgeNativeAbiRevision = 90;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

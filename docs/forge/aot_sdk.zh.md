@@ -580,6 +580,11 @@ Vulkan `depth32f` 上传使用 depth aspect，并通过同一原生操作需求�
 [Vulkan 复制合同](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html)的要求。
 本批覆盖二维深度采样与上传，包括完整 mip 链；显式光栅计划可按下文向 AOT 附件渲染。
 
+含 `rw_texture` 参数的 GFX AOT 导出要求 metadata v4 及配对 ABI90 组件。参数元数据
+保存准确格式和 mip 层级，包括仅访问图像 shape 的内核；普通导出保持之前的版本。
+旧 SPIR-V 离线缓存缺少新增参数字段时，由严格解码拒绝并重新编译；CPU/CUDA 缓存
+格式不变。
+
 `image/sampled` 可选 `sampler` 对象，字段与 `ti.hardware.sampling.SamplerConfig`
 一致：`min_filter`、`mag_filter`、`mip_filter`、`address_mode_u/v/w`、`lod_bias`、
 `min_lod`、`max_lod`、`max_anisotropy`、`compare_op`。省略字段使用相同默认值；

@@ -117,7 +117,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       artifact.initial_root_data.push_back(std::move(local));
     }
     if (!artifact.initial_root_data.empty()) {
-      artifact.metadata_version = TaichiAotData::kMetadataVersion;
+      artifact.metadata_version = 3;
       aot::validate_initial_root_data(artifact.initial_root_data,
                                       artifact.root_buffer_sizes);
     }
@@ -131,6 +131,14 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       field.snode_tree_id = module_ids.at(field.snode_tree_id);
     }
     for (auto &kernel : artifact.kernels) {
+      for (const auto &[indices, argument] : kernel.ctx_attribs.args()) {
+        if (argument.ptype == ParameterType::kRWTexture) {
+          TI_ERROR_IF(argument.format == BufferFormat::unknown,
+                      "AOT RWTexture metadata lacks its format; recompile the "
+                      "kernel without the old cache.");
+          artifact.metadata_version = TaichiAotData::kMetadataVersion;
+        }
+      }
       for (auto &task : kernel.tasks_attribs) {
         for (auto &bind : task.buffer_binds) {
           if (bind.buffer.type == spirv::TaskAttributes::BufferType::Root) {

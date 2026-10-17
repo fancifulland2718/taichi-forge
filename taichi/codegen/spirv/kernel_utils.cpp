@@ -100,6 +100,8 @@ KernelContextAttributes::KernelContextAttributes(
     aa.element_shape = ka.element_shape;
     aa.field_dim = ka.total_dim - ka.element_shape.size();
     aa.ptype = ka.ptype;
+    aa.format = ka.format;
+    aa.texture_lod = ka.texture_lod;
     arg_attribs_vec_.push_back({k, aa});
     arr_access.push_back({k, irpass::ExternalPtrAccess(0)});
     grad_arr_access.push_back({k, irpass::ExternalPtrAccess(0)});

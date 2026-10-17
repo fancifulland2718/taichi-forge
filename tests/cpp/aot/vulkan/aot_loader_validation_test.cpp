@@ -190,5 +190,39 @@ TEST(GfxAotValidation, RejectsUndeclaredRootBindings) {
   EXPECT_TRUE(dir.load()->is_corrupted());
 }
 
+TEST(GfxAotValidation, StorageImageArgumentsRequireQualifiedMetadata) {
+  MemoryAotDir dir;
+  dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
+  gfx::TaichiAotData data;
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]), data);
+  spirv::KernelContextAttributes::ArgAttributes argument;
+  argument.ptype = ParameterType::kRWTexture;
+  argument.format = BufferFormat::r32u;
+  argument.field_dim = 2;
+  argument.texture_lod = 2;
+  auto update = [&] {
+    auto json = liong::json::serialize(data.kernels[0].ctx_attribs);
+    json["arg_attribs_vec_"] = liong::json::serialize(
+        std::vector<std::pair<std::vector<int>,
+                              spirv::KernelContextAttributes::ArgAttributes>>{
+            {{0}, argument}});
+    liong::json::deserialize(json, data.kernels[0].ctx_attribs);
+    dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+    return dir.load()->is_corrupted();
+  };
+  EXPECT_FALSE(update());
+  data.metadata_version = 2;
+  EXPECT_TRUE(update());
+  data.metadata_version = 4;
+  argument.format = BufferFormat::unknown;
+  EXPECT_TRUE(update());
+  argument.format = BufferFormat::r32u;
+  argument.texture_lod = -1;
+  EXPECT_TRUE(update());
+  argument.texture_lod = 2;
+  argument.field_dim = 3;
+  EXPECT_TRUE(update());
+}
+
 }  // namespace
 }  // namespace taichi::lang

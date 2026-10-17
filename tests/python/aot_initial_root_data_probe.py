@@ -89,7 +89,7 @@ def main(mode, arch, artifact):
                 elif failure == "downgrade":
                     document[version_key] -= 1
                 else:
-                    document[version_key] += 1
+                    document[version_key] = 0xFFFFFFFF
                 files[metadata_name] = json.dumps(document).encode()
                 path = Path(artifact).with_name("invalid-" + failure + ".tcm")
                 with ZipFile(path, "w") as archive:

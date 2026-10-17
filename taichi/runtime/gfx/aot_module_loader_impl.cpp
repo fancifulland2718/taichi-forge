@@ -98,9 +98,11 @@ class AotModuleImpl : public aot::Module {
       TI_WARN("GFX AOT kernel metadata count does not match kernel count");
       return;
     }
-    TI_ERROR_IF((ti_aot_data_.metadata_version == 3) !=
-                    !ti_aot_data_.initial_root_data.empty(),
-                "AOT initial root data requires GFX metadata version 3.");
+    TI_ERROR_IF((ti_aot_data_.metadata_version < 3 &&
+                 !ti_aot_data_.initial_root_data.empty()) ||
+                    (ti_aot_data_.metadata_version == 3 &&
+                     ti_aot_data_.initial_root_data.empty()),
+                "AOT initial root data requires compatible GFX metadata.");
     aot::validate_initial_root_data(ti_aot_data_.initial_root_data,
                                     ti_aot_data_.root_buffer_sizes);
     if (!source_) {
@@ -113,6 +115,20 @@ class AotModuleImpl : public aot::Module {
       }
     }
     for (std::size_t i = 0; i < ti_aot_data_.kernel_metadata.size(); ++i) {
+      for (const auto &[indices, argument] :
+           ti_aot_data_.kernels[i].ctx_attribs.args()) {
+        const bool storage = argument.ptype == ParameterType::kRWTexture;
+        if ((!storage && argument.texture_lod != 0) ||
+            (argument.texture_lod != 0 && ti_aot_data_.metadata_version < 4) ||
+            (ti_aot_data_.metadata_version >= 4 && storage &&
+             (argument.format == BufferFormat::unknown ||
+              argument.texture_lod < 0 || argument.texture_lod > 30 ||
+              (argument.texture_lod != 0 && argument.field_dim != 2)))) {
+          mark_corrupted();
+          TI_WARN("Invalid GFX AOT storage-image argument metadata");
+          return;
+        }
+      }
       const auto &metadata = ti_aot_data_.kernel_metadata[i];
       if (metadata.num_snode_trees != ti_aot_data_.root_buffer_sizes.size()) {
         mark_corrupted();
