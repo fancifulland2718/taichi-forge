@@ -50,3 +50,33 @@ foo()
 for i in range(1, 32):
     assert a[i] == (i - 1) * (i - 1)
 ```
+
+## Vulkan subgroup exchange
+
+After `ti.init(arch=ti.vulkan)`, query each operation with
+`ti.simt.subgroup.is_shuffle_supported("shuffle_down")`. The query checks the
+selected device's compute-stage subgroup capabilities. `shuffle` and
+`shuffle_xor` require `VK_SUBGROUP_FEATURE_SHUFFLE_BIT`; `shuffle_up` and
+`shuffle_down` require `VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT`. Unsupported
+devices and backends fail during compilation, before pipeline submission.
+For AOT export, also declare the corresponding target capabilities in
+`ti.aot.Module(..., caps=["spirv_has_subgroup_shuffle",
+"spirv_has_subgroup_shuffle_relative"])`; the current device does not implicitly
+enable capabilities on the export target.
+
+All four operations accept scalar `i32`, `u32`, or `f32` values and a `u32`
+lane index, mask, or offset. They preserve the value's type. The source lane is
+respectively `index`, `invocation_id() ^ mask`, `invocation_id() - offset`, or
+`invocation_id() + offset`. Use `group_size()` to obtain the actual subgroup
+width; Vulkan does not promise CUDA's 32-lane width.
+
+The source must be in range and active in the same dynamic instruction.
+Results from inactive or out-of-range sources are undefined, including at the
+edges of a partial subgroup. These operations do not clamp, wrap, or return the
+calling lane's value at the boundary. Call the exchange before filtering out
+boundary results so that lanes supplying valid values still participate.
+These are the [SPIR-V group shuffle semantics](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#OpGroupNonUniformShuffle).
+
+Vulkan 子组交换支持标量 `i32/u32/f32`，可通过 `is_shuffle_supported` 按操作查询当前设备。
+子组宽度由 `group_size()` 给出；越界或未参与同一次指令的源 lane 结果未定义，不能按 CUDA
+固定 32 lane 或边界返回自身值的假设使用。共享内存和 barrier 的块尺寸约束仍由调用方保证。

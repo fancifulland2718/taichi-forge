@@ -919,21 +919,32 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     query_physical_device_properties2(&physical_device_properties);
     ti_device_->vk_caps().subgroup_size = subgroup_properties.subgroupSize;
 
-    if (subgroup_properties.supportedOperations &
+    // Shader intrinsics are emitted in compute stages only.
+    const auto compute_operations =
+        (subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)
+            ? subgroup_properties.supportedOperations
+            : 0;
+    if (compute_operations &
         VK_SUBGROUP_FEATURE_BASIC_BIT) {
       caps.set(DeviceCapability::spirv_has_subgroup_basic, true);
     }
-    if (subgroup_properties.supportedOperations &
+    if (compute_operations &
         VK_SUBGROUP_FEATURE_VOTE_BIT) {
       caps.set(DeviceCapability::spirv_has_subgroup_vote, true);
     }
-    if (subgroup_properties.supportedOperations &
+    if (compute_operations &
         VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) {
       caps.set(DeviceCapability::spirv_has_subgroup_arithmetic, true);
     }
-    if (subgroup_properties.supportedOperations &
+    if (compute_operations &
         VK_SUBGROUP_FEATURE_BALLOT_BIT) {
       caps.set(DeviceCapability::spirv_has_subgroup_ballot, true);
+    }
+    if (compute_operations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) {
+      caps.set(DeviceCapability::spirv_has_subgroup_shuffle, true);
+    }
+    if (compute_operations & VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT) {
+      caps.set(DeviceCapability::spirv_has_subgroup_shuffle_relative, true);
     }
   }
 

@@ -511,6 +511,13 @@ class IRBuilder {
     if (gl_global_invocation_id_.id != 0) {
       ib_.add(gl_global_invocation_id_);
     }
+    // Input variables belong to the interface even before SPIR-V 1.4.
+    if (subgroup_local_invocation_id_.id != 0) {
+      ib_.add(subgroup_local_invocation_id_);
+    }
+    if (subgroup_size_.id != 0) {
+      ib_.add(subgroup_size_);
+    }
     if (gl_local_invocation_id_.id != 0) {
       ib_.add(gl_local_invocation_id_);
     }
@@ -677,6 +684,7 @@ class IRBuilder {
   Value rand_u32(Value global_tmp_);
   Value rand_f32(Value global_tmp_);
   Value rand_i32(Value global_tmp_);
+  Value subgroup_shuffle(spv::Op op, Value value, Value index);
 
  private:
   void declare_capability(spv::Capability capability);

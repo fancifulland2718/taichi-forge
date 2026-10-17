@@ -230,6 +230,25 @@ void IRBuilder::init_header() {
   this->init_pre_defs();
 }
 
+Value IRBuilder::subgroup_shuffle(spv::Op op, Value value, Value index) {
+  const bool relative = op == spv::OpGroupNonUniformShuffleUp ||
+                        op == spv::OpGroupNonUniformShuffleDown;
+  TI_ASSERT(relative || op == spv::OpGroupNonUniformShuffle ||
+            op == spv::OpGroupNonUniformShuffleXor);
+  const auto capability = relative
+                              ? DeviceCapability::spirv_has_subgroup_shuffle_relative
+                              : DeviceCapability::spirv_has_subgroup_shuffle;
+  TI_ERROR_IF(!caps_->get(capability),
+              "Subgroup shuffle requires device capability '{}'",
+              to_string(capability));
+  declare_capability(spv::CapabilityGroupNonUniform);
+  declare_capability(relative ? spv::CapabilityGroupNonUniformShuffleRelative
+                              : spv::CapabilityGroupNonUniformShuffle);
+  return make_value(op, value.stype,
+                    int_immediate_number(u32_type(), spv::ScopeSubgroup),
+                    value, index);
+}
+
 void IRBuilder::declare_capability(spv::Capability capability) {
   if (!dynamic_capabilities_.insert(capability).second) {
     return;
@@ -1682,6 +1701,7 @@ Value IRBuilder::get_global_invocation_id(uint32_t dim_index) {
 }
 
 Value IRBuilder::get_subgroup_invocation_id() {
+  declare_capability(spv::CapabilityGroupNonUniform);
   if (subgroup_local_invocation_id_.id == 0) {
     SType ptr_type = this->get_pointer_type(t_uint32_, spv::StorageClassInput);
     subgroup_local_invocation_id_ =
@@ -1693,7 +1713,6 @@ Value IRBuilder::get_subgroup_invocation_id() {
     this->decorate(spv::OpDecorate, subgroup_local_invocation_id_,
                    spv::DecorationBuiltIn,
                    spv::BuiltInSubgroupLocalInvocationId);
-    global_values.push_back(subgroup_local_invocation_id_);
   }
 
   return this->make_value(spv::OpLoad, t_uint32_,
@@ -1701,6 +1720,7 @@ Value IRBuilder::get_subgroup_invocation_id() {
 }
 
 Value IRBuilder::get_subgroup_size() {
+  declare_capability(spv::CapabilityGroupNonUniform);
   if (subgroup_size_.id == 0) {
     SType ptr_type = this->get_pointer_type(t_uint32_, spv::StorageClassInput);
     subgroup_size_ = new_value(ptr_type, ValueKind::kVariablePtr);
@@ -1709,7 +1729,6 @@ Value IRBuilder::get_subgroup_size() {
         .commit(&global_);
     this->decorate(spv::OpDecorate, subgroup_size_, spv::DecorationBuiltIn,
                    spv::BuiltInSubgroupSize);
-    global_values.push_back(subgroup_size_);
   }
 
   return this->make_value(spv::OpLoad, t_uint32_, subgroup_size_);

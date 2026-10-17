@@ -4608,7 +4608,8 @@ class TaskCodegen : public IRVisitor {
         "subgroupInclusiveXor"};
 
     const std::unordered_set<std::string> shuffle_ops{
-        "subgroupShuffleDown", "subgroupShuffleUp", "subgroupShuffle"};
+        "subgroupShuffleDown", "subgroupShuffleUp", "subgroupShuffle",
+        "subgroupShuffleXor"};
 
     if (stmt->func_name == "workgroupBarrier") {
       ir_->make_inst(
@@ -4719,9 +4720,12 @@ class TaskCodegen : public IRVisitor {
           ir_->int_immediate_number(ir_->i32_type(), spv::ScopeSubgroup),
           group_op, arg);
     } else if (shuffle_ops.find(stmt->func_name) != shuffle_ops.end()) {
+      const auto dtype = stmt->args[0]->ret_type;
+      TI_ERROR_IF(dtype != PrimitiveType::i32 && dtype != PrimitiveType::u32 &&
+                      dtype != PrimitiveType::f32,
+                  "{} supports scalar i32, u32, or f32 values", stmt->func_name);
       auto arg0 = ir_->query_value(stmt->args[0]->raw_name());
       auto arg1 = ir_->query_value(stmt->args[1]->raw_name());
-      auto stype = ir_->get_primitive_type(stmt->args[0]->ret_type);
       spv::Op spv_op;
 
       if (ends_with(stmt->func_name, "Down")) {
@@ -4730,14 +4734,13 @@ class TaskCodegen : public IRVisitor {
         spv_op = spv::OpGroupNonUniformShuffleUp;
       } else if (ends_with(stmt->func_name, "Shuffle")) {
         spv_op = spv::OpGroupNonUniformShuffle;
+      } else if (ends_with(stmt->func_name, "Xor")) {
+        spv_op = spv::OpGroupNonUniformShuffleXor;
       } else {
         TI_ERROR("Unsupported operation: {}", stmt->func_name);
       }
 
-      val = ir_->make_value(
-          spv_op, stype,
-          ir_->int_immediate_number(ir_->i32_type(), spv::ScopeSubgroup), arg0,
-          arg1);
+      val = ir_->subgroup_shuffle(spv_op, arg0, arg1);
     }
     // An unmatched intrinsic must never register the default Value (ID zero):
     // that would emit invalid SPIR-V and can crash the driver's compiler.

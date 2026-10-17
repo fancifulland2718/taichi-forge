@@ -390,9 +390,8 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert warp.backends == ("cuda",)
     assert subgroup.backends == ("vulkan",)
     assert "fail closed" in subgroup.notes[1]
-    assert "shuffle" not in subgroup.notes[0]
-    for operation in ("shuffle,", "shuffle-up", "shuffle-down", "shuffle-xor"):
-        assert operation in subgroup.notes[1]
+    assert "shuffle/up/down/xor" in subgroup.notes[0]
+    assert "is_shuffle_supported" in subgroup.notes[2]
 
     shared = ti.hardware.capability("kernel.shared_memory.cuda_vulkan")
     block_local = ti.hardware.capability("kernel.block_local.cuda")

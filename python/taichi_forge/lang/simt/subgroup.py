@@ -3,6 +3,41 @@ from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiCompilationError
 
 
+_SHUFFLE_CAPABILITIES = {
+    "shuffle": "spirv_has_subgroup_shuffle",
+    "shuffle_xor": "spirv_has_subgroup_shuffle",
+    "shuffle_up": "spirv_has_subgroup_shuffle_relative",
+    "shuffle_down": "spirv_has_subgroup_shuffle_relative",
+}
+
+
+def is_shuffle_supported(operation="shuffle"):
+    """Query a shuffle operation on the initialized device (Python scope).
+
+    This reports scalar i32/u32/f32 support. Source lanes must be active in
+    the same dynamic instruction; out-of-range or inactive sources have an
+    undefined result, as specified by SPIR-V.
+    """
+    if operation not in _SHUFFLE_CAPABILITIES:
+        raise ValueError(f"Unknown subgroup shuffle operation: {operation}")
+    runtime = impl.get_runtime()
+    if runtime.prog is None:
+        raise RuntimeError("Call ti.init() before querying subgroup support")
+    return impl.current_cfg().arch == _ti_core.vulkan and bool(
+        runtime.prog.get_device_caps().get(_SHUFFLE_CAPABILITIES[operation])
+    )
+
+
+def _shuffle(operation, intrinsic, value, index):
+    if not is_shuffle_supported(operation):
+        raise TaichiCompilationError(
+            f"ti.simt.subgroup.{operation} requires Vulkan device capability "
+            f"{_SHUFFLE_CAPABILITIES[operation]} "
+            f"(current backend: {_ti_core.arch_name(impl.current_cfg().arch)})"
+        )
+    return impl.call_internal(intrinsic, value, index, with_runtime_context=False)
+
+
 def _not_implemented(operation):
     arch = impl.current_cfg().arch
     raise TaichiCompilationError(
@@ -137,22 +172,27 @@ def exclusive_xor(value):
 
 
 def shuffle(value, index):
-    _not_implemented("shuffle")
+    """Read an active source lane by its subgroup-local index."""
+    return _shuffle("shuffle", "subgroupShuffle", value, index)
 
 
 def shuffle_xor(value, mask):
-    _not_implemented("shuffle_xor")
+    """Read active lane ``invocation_id() ^ mask``."""
+    return _shuffle("shuffle_xor", "subgroupShuffleXor", value, mask)
 
 
 def shuffle_up(value, offset):
-    _not_implemented("shuffle_up")
+    """Read active lane ``invocation_id() - offset``."""
+    return _shuffle("shuffle_up", "subgroupShuffleUp", value, offset)
 
 
 def shuffle_down(value, offset):
-    _not_implemented("shuffle_down")
+    """Read active lane ``invocation_id() + offset``."""
+    return _shuffle("shuffle_down", "subgroupShuffleDown", value, offset)
 
 
 __all__ = [
+    "is_shuffle_supported",
     "barrier",
     "memory_barrier",
     "elect",

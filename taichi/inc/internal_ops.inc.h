@@ -83,3 +83,9 @@ PER_INTERNAL_OP(vulkan_ray_query_proceed)
 PER_INTERNAL_OP(vulkan_ray_query_candidate)
 PER_INTERNAL_OP(vulkan_ray_query_confirm)
 PER_INTERNAL_OP(vulkan_ray_query_committed)
+
+// Append-only: keep existing intrinsic ordinals stable.
+PER_INTERNAL_OP(subgroupShuffle)
+PER_INTERNAL_OP(subgroupShuffleUp)
+PER_INTERNAL_OP(subgroupShuffleDown)
+PER_INTERNAL_OP(subgroupShuffleXor)

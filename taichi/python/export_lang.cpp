@@ -1241,8 +1241,9 @@ void export_lang(py::module &m) {
       .def("insert_snode_access_flag", &ASTBuilder::insert_snode_access_flag)
       .def("reset_snode_access_flag", &ASTBuilder::reset_snode_access_flag);
 
-  py::class_<DeviceCapabilityConfig>(
-      m, "DeviceCapabilityConfig");  // NOLINT(bugprone-unused-raii)
+  py::class_<DeviceCapabilityConfig>(m, "DeviceCapabilityConfig")
+      .def("get", [](const DeviceCapabilityConfig &caps,
+                     const std::string &name) { return caps.get(str2devcap(name)); });
 
   py::class_<CompiledKernelData>(
       m, "CompiledKernelData");  // NOLINT(bugprone-unused-raii)
