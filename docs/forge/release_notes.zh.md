@@ -31,9 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
-- AOT 新增 OptiX program 资源，复用已有可编程 adapter 扩展与 context 所有者。
-  已验证 PTX/布局校验、编译失败回滚及退休；prepared launch 与普通 program Graph
-  自动导出仍需分别接通。
+- AOT 新增 OptiX program 与 prepared launch 资源，复用已有可编程 adapter 扩展和
+  所有者。显式计划一次重建不含地址的参数/SBT，沿 CUDA ordered 路径重放；已验证
+  实例 refit、间接 buffer/texture 和下游 DSL 梯度。普通 program Graph 自动导出继续推进。
 - AOT 新增固定 SPIR-V、标量 buffer 描述符的 Vulkan compute pipeline/dispatch
   资源；代码、布局和范围在冷准备时校验，复用资源 owner 与图形描述符校验，
   已验证独立/借用消费及下游梯度。

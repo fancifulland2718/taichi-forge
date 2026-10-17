@@ -592,10 +592,46 @@ Discover `native_resource_capabilities("optix_program")` and explicitly probe
 the configured adapter with `probe_native_resource("optix_program")` before
 allocation. This requires its existing programmable-pipeline extension, with no
 new adapter ABI. CPU/Vulkan do not advertise this CUDA resource.
-This stage qualifies program creation/rollback/retirement with standalone and
-borrowed runtimes; AOT prepared launches and automatic program Graph export
-are not yet connected. It does not establish launch performance or total driver
-pipeline residency.
+Standalone and borrowed runtimes qualify program creation/rollback/retirement.
+Automatic program Graph export is separate from the explicit resources below.
+
+`optix/prepared_launch` v1 binds `program`, `data` (an immutable host blob),
+`array_N`, `image_N` and `scene_N`. Its parameters are:
+
+- `expected_program`: the code/group/configuration digest of the bound program;
+  `dimensions`: three positive uint32 values subject to OptiX launch limits.
+- `array_count`, `image_count`, `scene_count`, and `array_layouts` with one entry
+  per array: `dtype`, `shape`, `element_shape`, `record_bytes`, `alignment` and
+  `access` (`read`, `write`, `read_write`). Exact shape/type/alignment are checked;
+  exact-range aliases merge access, while overlapping distinct writable ranges
+  are rejected.
+- `parameters`, `raygen`, `miss`, `hit`: a parameter payload, one raygen record,
+  and arrays of miss/hit records. Each payload specifies `offset`, `size` into
+  `data` and `references`; SBT records additionally specify `group`. A reference
+  has `kind` (`buffer`, `texture`, `scene`), binding `index` and byte `offset`
+  within the payload. Its aligned 8-byte slot must initially be zero. Every
+  bound array/image/scene must be referenced. Raygen/miss/hit group kinds and
+  scene context ownership are checked before publication.
+
+Preparation resolves these owner-bearing references, lets the adapter pack the
+SBT, and completes its one initialization upload. The input blob can then close;
+the launch retains its program, arrays, images and scenes. Device array contents,
+image uploads and scene refits may change without rebuilding the packet. Changing
+fixed scalar bytes or resource bindings creates another launch. Native operation
+`optix/launch` v1 binds only `launch` with empty parameters. Discover
+`optix_prepared_launch` as a resource and `optix_program_launch` as an operation;
+both advertise `cuda_ordered`, not capture. Replay only calls the prepared launch,
+with surrounding work and completion retirement handled by the existing owner.
+Images require initial pixels or an unconditional preceding upload in the plan.
+
+The program digest encoding is defined in
+[`native_optix_program.cpp`](../../taichi/runtime/native_optix_program.cpp).
+Explicit plans are qualified with adapter ABI variants 93/105/118 for instance
+hit/miss, indirect SBT buffers/textures, refit, scalar rebinding, source-independent
+consumption, pending retirement and downstream DSL gradients. This does not
+differentiate user shaders, add nonzero IAS SBT-offset/micromap reconstruction,
+or establish total driver pipeline residency. Reported native device payload
+includes parameter/SBT storage; the adapter also retains a pinned host copy.
 
 Bindings use compact scalar ndarrays: f32 vertices `[V,3]`, i32/u32 indices `[T,3]`,
 and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed output

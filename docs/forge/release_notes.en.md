@@ -34,10 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
-- Added AOT OptiX program resources using the existing programmable adapter
-  extension and shared context ownership. PTX/layout validation, failed compile
-  rollback and retirement are qualified; prepared launches and automatic program
-  Graph export remain separate work.
+- Added AOT OptiX programs and prepared launch resources using the existing
+  programmable adapter extension and shared ownership. Explicit plans rebuild
+  address-free parameters/SBT once and replay on the ordered CUDA path; instance
+  refits, indirect buffers/textures and downstream DSL gradients are qualified.
+  Automatic program Graph export remains separate work.
 - Added native AOT Vulkan compute pipeline/dispatch resources for fixed SPIR-V
   with scalar buffer descriptors. Cold code/layout/range checks and prepared
   replay share the existing resource owner and graphics descriptor validation;

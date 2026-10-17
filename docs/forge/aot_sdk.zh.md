@@ -468,8 +468,36 @@ PTX blob 在创建期消费，program 保留 context。分配前可查询
 `native_resource_capabilities("optix_program")`，并通过
 `probe_native_resource("optix_program")` 显式探测配置的 adapter。
 此资源使用已有 programmable-pipeline 扩展，无需新 adapter ABI；CPU/Vulkan 不声明支持。
-本阶段已验证独立/借用 runtime 的 program 创建、失败回滚与退休；AOT prepared launch
-及普通 program Graph 自动导出尚未接通，不代表 launch 性能或完整 driver 管线驻留测量。
+已验证独立/借用 runtime 的 program 创建、失败回滚与退休。普通 program Graph 自动
+导出与下述显式资源支持分别推进。
+
+`optix/prepared_launch` v1 绑定 `program`、`data`（不可变 host blob）、`array_N`、
+`image_N`、`scene_N`，参数为：
+
+- `expected_program` 为绑定 program 的代码/group/配置摘要；`dimensions` 为三个
+  正 uint32，仍须满足 OptiX launch 底层限制。
+- `array_count`、`image_count`、`scene_count` 与逐数组 `array_layouts`，每项包括
+  `dtype`、`shape`、`element_shape`、`record_bytes`、`alignment`、`access`
+  （`read`、`write`、`read_write`）。校验精确形状/类型/对齐；完全相同范围的别名合并
+  访问模式，不同可写范围部分重叠会拒绝。
+- `parameters`、`raygen`、`miss`、`hit` 分别为参数 payload、单个 raygen record 和
+  miss/hit record 数组。每项指定 `data` 中的 `offset`、`size` 和 `references`；
+  SBT record 还指定 `group`。引用项为 `kind`（`buffer`、`texture`、`scene`）、绑定
+  `index` 和 payload 内字节 `offset`，其对齐的 8B 槽必须初始为零。每个数组/图像/scene
+  绑定都须被引用；发布前校验 group 类型与 scene context 归属。
+
+准备阶段解析受管引用，由 adapter 打包 SBT 并完成一次初始化上传，随后可关闭输入 blob；
+launch 保留 program、数组、图像和 scene。原位数组更新、图像上传及 scene refit 不重建
+packet；修改固定标量或资源绑定须创建另一 launch。`optix/launch` v1 操作仅绑定 `launch`，
+参数为空。资源能力名为 `optix_prepared_launch`，操作能力名为 `optix_program_launch`，
+均为 `cuda_ordered`，不支持 capture。重放仅调用 prepared launch，前后工作排序及完成退休
+继续由已有 owner 管理。图像需要初始像素或计划内无条件先行的上传。
+
+Program 摘要编码见 [`native_optix_program.cpp`](../../taichi/runtime/native_optix_program.cpp)。
+ABI 93/105/118 adapter 已验证显式计划的实例 hit/miss、SBT 间接 buffer/texture、refit、
+标量重绑定、无 producer 消费、在途退休和下游 DSL 梯度。不提供用户 shader 求导，
+非零 IAS SBT offset 与 micromap 重建仍需接通，也不代表完整 driver 管线驻留测量。
+原生设备 payload 统计包含参数/SBT 存储；adapter 另外保留一份 pinned host 副本。
 
 使用紧凑 scalar ndarray：顶点 f32 `[V,3]`、索引 i32/u32 `[T,3]`、ray f32 `[N,8]`
 （origin.xyz、t_min、direction.xyz、t_max）。typed 输出 f32 `[N,4]` 的 t/u/v/0
