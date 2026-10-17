@@ -166,8 +166,9 @@ TEST(VulkanRayScene, SharedBlasAndDeviceTransformsWithoutProgram) {
     weak.lock()->record_build(commands.get(), vertices.get_ptr(),
                               indices.get_ptr(), step != 0);
     if (step == 0)
-      tlas->record_build(commands.get(), metadata, false);
-    tlas->record_transforms(commands.get(), transform);
+      tlas->record_build_device(commands.get(), metadata, transform);
+    else
+      tlas->record_transforms(commands.get(), transform);
     tlas->record_query(commands.get(), query);
     stream->submit_synced(commands.get());
     blas.reset();  // TLAS retains one shared geometry across both ordinals.

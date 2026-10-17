@@ -32,6 +32,11 @@ class VulkanInstanceTlas {
   void record_build(CommandList *commands,
                     const std::vector<VulkanRayInstanceInfo> &instances,
                     bool update);
+  // Seed immutable IDs/BLAS addresses, pack device matrices, then build once.
+  // prepare_transforms() must have completed before recording this operation.
+  void record_build_device(CommandList *commands,
+                           const std::vector<VulkanRayInstanceInfo> &instances,
+                           const VulkanRayTransformPacket &packet);
   void prepare_transforms();
   void record_transforms(CommandList *commands,
                          const VulkanRayTransformPacket &packet);

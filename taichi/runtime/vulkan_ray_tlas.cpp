@@ -129,47 +129,7 @@ struct VulkanInstanceTlas::State {
                     const std::vector<VulkanRayInstanceInfo> &instances,
                     bool update) {
     std::lock_guard<std::mutex> lock(mutex_);
-    TI_ERROR_IF(instances.size() != blases_.size(),
-                "Vulkan instance TLAS build must preserve instance count {}.",
-                blases_.size());
-    std::vector<VkAccelerationStructureInstanceKHR> packed(instances.size());
-    for (std::size_t index = 0; index < instances.size(); ++index) {
-      const auto &source = instances[index];
-      TI_ERROR_IF(source.mask > 0xff || source.custom_index > 0xffffff,
-                  "Vulkan instance mask/custom index exceeds packed limits.");
-      for (float value : source.transform) {
-        TI_ERROR_IF(!std::isfinite(value),
-                    "Vulkan instance transform must be finite.");
-      }
-      auto &destination = packed[index];
-      std::memcpy(destination.transform.matrix, source.transform.data(),
-                  sizeof(destination.transform.matrix));
-      destination.instanceCustomIndex = source.custom_index;
-      destination.mask = source.mask;
-      destination.instanceShaderBindingTableRecordOffset =
-          sbt_record_offsets_[index];
-      destination.flags =
-          VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-      destination.accelerationStructureReference =
-          blases_[index]->device_address();
-    }
-
-    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
-    auto command_buffer = vk_commands->vk_command_buffer();
-    geometry_reuse_barrier(command_buffer);
-
-    const auto instance_vk_buffer =
-        device_->get_vkbuffer(instance_buffer_.get_ptr());
-    constexpr std::size_t kMaxUpdateBytes = 65536;
-    const auto *bytes = reinterpret_cast<const std::uint8_t *>(packed.data());
-    for (std::size_t offset = 0; offset < instance_bytes_;) {
-      const std::size_t chunk =
-          std::min(kMaxUpdateBytes, instance_bytes_ - offset);
-      command_buffer->device.functions().vkCmdUpdateBuffer(
-          command_buffer->buffer, instance_vk_buffer->buffer, offset, chunk,
-          bytes + offset);
-      offset += chunk;
-    }
+    const auto command_buffer = record_instance_inputs(command_list, instances);
 
     VkMemoryBarrier input_barrier{};
     input_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -181,6 +141,15 @@ struct VulkanInstanceTlas::State {
         &input_barrier, 0, nullptr, 0, nullptr);
 
     record_acceleration_structure(command_buffer, update);
+    initialized_ = true;
+  }
+
+  void record_build_device(CommandList *commands,
+                           const std::vector<VulkanRayInstanceInfo> &instances,
+                           const VulkanRayTransformPacket &packet) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    record_instance_inputs(commands, instances);
+    record_device_transform_commands(commands, packet, false);
     initialized_ = true;
   }
 
@@ -205,55 +174,8 @@ struct VulkanInstanceTlas::State {
                          const VulkanRayTransformPacket &packet) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(!initialized_,
-                "Vulkan TLAS device transforms require an initial host build.");
-    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(commands);
-    const auto command_buffer = vk_commands->vk_command_buffer();
-    // Publish device producers and order reuse of the instance input, TLAS and
-    // scratch after prior builds/queries, including repeated Graph executions.
-    VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    reuse.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
-                          VK_ACCESS_TRANSFER_WRITE_BIT |
-                          VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-                          VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    reuse.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                          VK_ACCESS_SHADER_WRITE_BIT |
-                          VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-                          VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    command_buffer->device.functions().vkCmdPipelineBarrier(
-        command_buffer->buffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
-            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        0, 1, &reuse, 0, nullptr, 0, nullptr);
-
-    transform_bindings_->rw_buffer(0, packet.shader_binding.pointer,
-                                   packet.shader_binding.bytes);
-    transform_bindings_->rw_buffer(1, instance_buffer_.get_ptr(),
-                                   instance_bytes_);
-    commands->bind_pipeline(transform_pipeline_.get());
-    const auto bind_result =
-        commands->bind_shader_resources(transform_bindings_.get(), 0);
-    TI_ERROR_IF(bind_result != RhiResult::success,
-                "Failed to bind Vulkan TLAS transform resources: {}.",
-                bind_result);
-    vk_commands->push_constants(packet.parameters.data(),
-                                sizeof(packet.parameters));
-    const auto dispatch_result = commands->dispatch(static_cast<std::uint32_t>(
-        (blases_.size() + kRayTransformWorkgroupSize - 1) /
-        kRayTransformWorkgroupSize));
-    TI_ERROR_IF(dispatch_result != RhiResult::success,
-                "Failed to dispatch Vulkan TLAS transform packing: {}.",
-                dispatch_result);
-
-    VkMemoryBarrier packed{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    packed.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    packed.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    command_buffer->device.functions().vkCmdPipelineBarrier(
-        command_buffer->buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &packed,
-        0, nullptr, 0, nullptr);
-    record_acceleration_structure(command_buffer, true);
+                "Vulkan TLAS device transforms require an initial build.");
+    record_device_transform_commands(commands, packet, true);
   }
 
   void prepare_query_variant(unsigned variant) {
@@ -313,6 +235,107 @@ struct VulkanInstanceTlas::State {
   }
 
  private:
+  vkapi::IVkCommandBuffer record_instance_inputs(
+      CommandList *command_list,
+      const std::vector<VulkanRayInstanceInfo> &instances) {
+    TI_ERROR_IF(instances.size() != blases_.size(),
+                "Vulkan instance TLAS build must preserve instance count {}.",
+                blases_.size());
+    std::vector<VkAccelerationStructureInstanceKHR> packed(instances.size());
+    for (std::size_t index = 0; index < instances.size(); ++index) {
+      const auto &source = instances[index];
+      TI_ERROR_IF(source.mask > 0xff || source.custom_index > 0xffffff,
+                  "Vulkan instance mask/custom index exceeds packed limits.");
+      for (float value : source.transform) {
+        TI_ERROR_IF(!std::isfinite(value),
+                    "Vulkan instance transform must be finite.");
+      }
+      auto &destination = packed[index];
+      std::memcpy(destination.transform.matrix, source.transform.data(),
+                  sizeof(destination.transform.matrix));
+      destination.instanceCustomIndex = source.custom_index;
+      destination.mask = source.mask;
+      destination.instanceShaderBindingTableRecordOffset =
+          sbt_record_offsets_[index];
+      destination.flags =
+          VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+      destination.accelerationStructureReference =
+          blases_[index]->device_address();
+    }
+
+    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
+    auto command_buffer = vk_commands->vk_command_buffer();
+    geometry_reuse_barrier(command_buffer);
+
+    const auto instance_vk_buffer =
+        device_->get_vkbuffer(instance_buffer_.get_ptr());
+    constexpr std::size_t kMaxUpdateBytes = 65536;
+    const auto *bytes = reinterpret_cast<const std::uint8_t *>(packed.data());
+    for (std::size_t offset = 0; offset < instance_bytes_;) {
+      const std::size_t chunk =
+          std::min(kMaxUpdateBytes, instance_bytes_ - offset);
+      command_buffer->device.functions().vkCmdUpdateBuffer(
+          command_buffer->buffer, instance_vk_buffer->buffer, offset, chunk,
+          bytes + offset);
+      offset += chunk;
+    }
+
+    return command_buffer;
+  }
+
+  void record_device_transform_commands(CommandList *commands,
+                                        const VulkanRayTransformPacket &packet,
+                                        bool update) {
+    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(commands);
+    const auto command_buffer = vk_commands->vk_command_buffer();
+    // Publish device producers and order reuse of the instance input, TLAS and
+    // scratch after prior builds/queries, including repeated Graph executions.
+    VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    reuse.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
+                          VK_ACCESS_TRANSFER_WRITE_BIT |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    reuse.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                          VK_ACCESS_SHADER_WRITE_BIT |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    command_buffer->device.functions().vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        0, 1, &reuse, 0, nullptr, 0, nullptr);
+
+    transform_bindings_->rw_buffer(0, packet.shader_binding.pointer,
+                                   packet.shader_binding.bytes);
+    transform_bindings_->rw_buffer(1, instance_buffer_.get_ptr(),
+                                   instance_bytes_);
+    commands->bind_pipeline(transform_pipeline_.get());
+    const auto bind_result =
+        commands->bind_shader_resources(transform_bindings_.get(), 0);
+    TI_ERROR_IF(bind_result != RhiResult::success,
+                "Failed to bind Vulkan TLAS transform resources: {}.",
+                bind_result);
+    vk_commands->push_constants(packet.parameters.data(),
+                                sizeof(packet.parameters));
+    const auto dispatch_result = commands->dispatch(static_cast<std::uint32_t>(
+        (blases_.size() + kRayTransformWorkgroupSize - 1) /
+        kRayTransformWorkgroupSize));
+    TI_ERROR_IF(dispatch_result != RhiResult::success,
+                "Failed to dispatch Vulkan TLAS transform packing: {}.",
+                dispatch_result);
+
+    VkMemoryBarrier packed{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    packed.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    packed.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    command_buffer->device.functions().vkCmdPipelineBarrier(
+        command_buffer->buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &packed,
+        0, nullptr, 0, nullptr);
+    record_acceleration_structure(command_buffer, update);
+  }
+
   void record_acceleration_structure(
       const vkapi::IVkCommandBuffer &command_buffer,
       bool update) {
@@ -534,6 +557,12 @@ void VulkanInstanceTlas::record_build(
     const std::vector<VulkanRayInstanceInfo> &instances,
     bool update) {
   state_->record_build(commands, instances, update);
+}
+void VulkanInstanceTlas::record_build_device(
+    CommandList *commands,
+    const std::vector<VulkanRayInstanceInfo> &instances,
+    const VulkanRayTransformPacket &packet) {
+  state_->record_build_device(commands, instances, packet);
 }
 void VulkanInstanceTlas::prepare_transforms() {
   state_->prepare_transforms();
