@@ -199,7 +199,10 @@ Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray
 | operation | 类型与绑定 | parameters |
 | --- | --- | --- |
 | `triangle_scene` | 资源：`vertices`、`indices` | `vertex_count`、`triangle_count` |
+| `triangle_blas` | 资源：`vertices`、`indices` | `vertex_count`、`triangle_count`，可选 `opaque`（默认 true） |
+| `instance_tlas` | 资源：`transforms`、`blas_0` ... `blas_(instance_count-1)` | `instance_count`，可选 `custom_indices`、`visibility_masks` |
 | `refit` | 操作：`scene`、`vertices` | 空对象 |
+| `instance_refit` | 操作：`scene`、`transforms` | 空对象 |
 | `query` | 操作：`scene`、`rays`、`hits`，可选 `hit_indices` | `ray_count` |
 
 资源可写入 ExecutionPlan 的 `resources`，或用
@@ -212,7 +215,7 @@ Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray
 origin.xyz、t_min、direction.xyz、t_max。所有端口也接受同宽紧凑 AoS vector ndarray。
 记录数精确匹配。调用方提供有限几何、合法索引 `[0,V)` 和有效 ray 区间；沿用 JIT
 合同，不增加每帧 host 回读。工厂在所属 GFX 队列复制几何并完成 AS build 后返回，
-成功后可关闭 seed 数组。拓扑变化需新建资源；refit 更新相同顶点数的设备数据及 TLAS
+成功后可关闭 seed 数组。拓扑变化需新建资源；triangle_scene 的 refit 更新相同顶点数的设备数据及 TLAS
 边界。查询和 refit 录制在同一原生命令序列中，重放不查询注册表。
 
 提供 `hit_indices` 时，输出 f32 `[N,4]` 为 t/u/v/0，i32/u32 `[N,4]` 为
@@ -225,7 +228,27 @@ t/primitive/custom/hit，miss 为 `[-1,-1,-1,0]`。均接受双面并返回区�
 请求分配计入 `workspace_bytes`，私有数组计入 `resource_bytes`；公共 scene 不重复
 计入每份 plan，这些数值不是驱动实际驻留量。Windows Vulkan 小型检查覆盖独立消费端、
 借用 owner、refit/miss、全部四种查询变体、共享关闭和命中后的下游梯度核；不表示
-AS 遍历本身可微。独立 BLAS/TLAS、面过滤及 compact occlusion 尚未由此 AOT 工厂提供。
+AS 遍历本身可微。面过滤及 compact occlusion 尚未由此 AOT 工厂提供。
+
+独立 `triangle_blas` 可供多个 `instance_tlas` 共享，也可在同一 TLAS 中重复引用。
+绑定按 instance ordinal 排列；primitive index 保持各 BLAS 的输入三角形顺序。
+可选 metadata 数组必须恰有 `instance_count` 项：custom ID 为24位（默认0），mask
+为8位（默认255）；批次查询使用 ray mask255。变换为紧凑 f32 行主序仿射矩阵，接受
+scalar `[I,12]` / `[I,3,4]` 或 element shape `[3,4]` 的 AoS `[I]`。沿用 JIT 合同，
+由调用方提供有限且可逆的变换。首次构建直接打包设备矩阵并 build TLAS 一次，不回读
+矩阵，也不先构建单位矩阵 TLAS。成功返回后可关闭种子；TLAS 继续持有依赖的 BLAS。
+
+几何变化时先执行 `refit(scene=blas, vertices=...)`，再对每个受影响的 TLAS 执行
+`instance_refit(scene=tlas, transforms=...)`，随后查询。单独 refit BLAS 不会自动刷新
+依赖 TLAS 的边界。类型合同区分三者：query 接受 triangle scene 或 TLAS，几何 refit
+接受 triangle scene 或 BLAS，instance refit 只接受 TLAS。关闭公共 BLAS 会传递退休
+依赖 TLAS 的录制；关闭某个 TLAS 不影响其兄弟对象。BLAS 的 `opaque` 构建标志不代表
+材质过滤能力：现有批次 shader 按 opaque 三角形查询，接受双面。
+
+Windows Vulkan 小型检查覆盖共享/重复 BLAS、独立实例 ID/custom ID/mask、首次设备
+矩阵 build、GPU 几何/变换更新、矩阵子区间、typed/legacy 命中及 miss 清零、跨模块
+退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 BLAS/TLAS 自动 Graph 导出、
+host metadata 更新、micromap 或 kernel/graphics AS 绑定。
 
 Graph 内 `TriangleScene.record_refit()`、`record_typed()` 和 `record()` 可自动导出：
 

@@ -3,27 +3,54 @@
 #include <limits>
 #include "taichi/common/operation_json.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/vulkan_ray_types.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/runtime/vulkan_ray_query.h"
 #include "taichi/runtime/vulkan_ray_scene.h"
+#include "taichi/runtime/vulkan_ray_tlas.h"
 #endif
 
 namespace taichi::lang {
 namespace {
-class VulkanRaySceneResource : public NativeResource {
+// Typed views share the NativeResource owner's control block. A TLAS is
+// queryable but is not geometry; a BLAS is geometry but cannot be queried
+// alone.
+class QueryAccess {
  public:
-  explicit VulkanRaySceneResource(uint32_t vertices) : vertices_(vertices) {
-  }
-  uint32_t vertex_count() const {
-    return vertices_;
-  }
+  virtual ~QueryAccess() = default;
+  virtual Device &device() const = 0;
 #ifdef TI_WITH_VULKAN
-  virtual VulkanTriangleRayScene &core() = 0;
+  virtual void prepare_query_variant(unsigned variant) = 0;
+  virtual void record_query(CommandList *, const VulkanRayQueryPacket &) = 0;
 #endif
- private:
-  uint32_t vertices_;
+};
+class GeometryAccess {
+ public:
+  virtual ~GeometryAccess() = default;
+  virtual Device &device() const = 0;
+  virtual size_t vertex_count() const = 0;
+#ifdef TI_WITH_VULKAN
+  virtual void record_refit(CommandList *, DevicePtr vertices) = 0;
+#endif
+};
+class BlasAccess : public GeometryAccess {
+ public:
+#ifdef TI_WITH_VULKAN
+  virtual VulkanTriangleBlas &blas_core() = 0;
+#endif
+};
+class InstanceAccess {
+ public:
+  virtual ~InstanceAccess() = default;
+  virtual Device &device() const = 0;
+  virtual size_t instance_count() const = 0;
+#ifdef TI_WITH_VULKAN
+  virtual void prepare_transforms() = 0;
+  virtual void record_transforms(CommandList *,
+                                 const VulkanRayTransformPacket &) = 0;
+#endif
 };
 
 struct SceneDescription {
@@ -32,10 +59,21 @@ struct SceneDescription {
   uint32_t vertex_count, triangle_count;
   NativeArrayBinding vertices, indices;
 };
+struct BlasDescription : SceneDescription {
+  static constexpr const char *kind = "vulkan_ray_triangle_blas";
+  bool opaque{true};
+};
+struct TlasDescription {
+  static constexpr const char *kind = "vulkan_ray_instance_tlas";
+  static constexpr uint32_t version = 1;
+  std::vector<std::shared_ptr<BlasAccess>> blases;
+  std::vector<VulkanRayInstanceInfo> instances;
+  NativeArrayBinding transforms;
+};
 struct QueryDescription {
   static constexpr const char *kind = "vulkan_ray_query";
   static constexpr uint32_t version = 1;
-  std::shared_ptr<VulkanRaySceneResource> scene;
+  std::shared_ptr<QueryAccess> scene;
   uint32_t ray_count;
   NativeArrayBinding rays, hits;
   std::optional<NativeArrayBinding> hit_indices;
@@ -43,8 +81,14 @@ struct QueryDescription {
 struct RefitDescription {
   static constexpr const char *kind = "vulkan_ray_refit";
   static constexpr uint32_t version = 1;
-  std::shared_ptr<VulkanRaySceneResource> scene;
+  std::shared_ptr<GeometryAccess> scene;
   NativeArrayBinding vertices;
+};
+struct InstanceRefitDescription {
+  static constexpr const char *kind = "vulkan_ray_instance_refit";
+  static constexpr uint32_t version = 1;
+  std::shared_ptr<InstanceAccess> scene;
+  NativeArrayBinding transforms;
 };
 
 uint32_t count(const liong::json::JsonValue &value) {
@@ -52,6 +96,29 @@ uint32_t count(const liong::json::JsonValue &value) {
   if (!n || n > std::numeric_limits<uint32_t>::max())
     throw std::invalid_argument("Vulkan ray count must fit positive uint32");
   return uint32_t(n);
+}
+
+std::vector<uint32_t> instance_values(const liong::json::JsonValue &p,
+                                      const char *name,
+                                      uint32_t size,
+                                      uint32_t maximum,
+                                      uint32_t fallback) {
+  const auto found = p.obj.inner.find(name);
+  if (found == p.obj.inner.end())
+    return std::vector<uint32_t>(size, fallback);
+  if (!found->second.is_arr() || found->second.arr.inner.size() != size)
+    throw std::invalid_argument(
+        "Vulkan instance metadata must match instance_count");
+  std::vector<uint32_t> result;
+  result.reserve(size);
+  for (const auto &value : found->second.arr.inner) {
+    const auto n = operation_json::integer(value);
+    if (n > maximum)
+      throw std::invalid_argument(
+          "Vulkan instance metadata exceeds its packed bit width");
+    result.push_back(uint32_t(n));
+  }
+  return result;
 }
 
 size_t array_bytes(Device &device,
@@ -77,38 +144,67 @@ size_t array_bytes(Device &device,
   return bytes;
 }
 
-void validate_scene(Device &device,
-                    const std::shared_ptr<VulkanRaySceneResource> &scene) {
-  if (!scene || scene->arch() != Arch::vulkan || &scene->device() != &device)
+size_t transform_bytes(Device &device,
+                       const NativeArrayBinding &array,
+                       size_t count) {
+  if (array.pointer.device != &device)
+    throw std::invalid_argument("Vulkan transforms belong to another device");
+  NativeArrayLayoutRequirement required{{count}, {}, 4, 4, true, "f32"};
+  if (array.element_shape.empty()) {
+    if (array.shape.size() == 2)
+      required.minimum_shape.push_back(12);
+    else
+      required.minimum_shape.insert(required.minimum_shape.end(), {3, 4});
+  } else {
+    required.element_shape = {3, 4};
+    required.record_bytes = 48;
+  }
+  validate_native_array_layout(array, required);
+  if (count > std::numeric_limits<size_t>::max() / 48)
+    throw std::overflow_error("Vulkan transform byte size overflows");
+  const auto bytes = count * 48;
+  if (array.bytes < bytes)
+    throw std::invalid_argument("Vulkan transform range is too small");
+  return bytes;
+}
+
+template <typename Access>
+void validate_scene(Device &device, const std::shared_ptr<Access> &scene) {
+  if (!scene || &scene->device() != &device)
     throw std::invalid_argument("Vulkan ray scene belongs to another device");
 }
 
 #ifdef TI_WITH_VULKAN
-class PreparedScene final : public VulkanRaySceneResource {
+vulkan::VulkanDevice &ray_device(NativePreparationContext &context) {
+  if (!context.gfx_runtime || !context.fault_domain)
+    throw std::invalid_argument("Vulkan ray resource requires its GFX owner");
+  return dynamic_cast<vulkan::VulkanDevice &>(context.device);
+}
+
+// All cores have the same ordered initialization and fault-safe retirement.
+// Native registry leases retain public input resources through dependent work.
+template <typename Core>
+class OwnedRayResource : public NativeResource {
  public:
-  PreparedScene(NativePreparationContext &context, const SceneDescription &d)
-      : VulkanRaySceneResource(d.vertex_count),
-        device_(context.device),
+  OwnedRayResource(NativePreparationContext &context,
+                   std::unique_ptr<Core> core)
+      : device_(ray_device(context)),
         runtime_(*context.gfx_runtime),
         fault_(context.fault_domain),
-        core_(std::make_unique<VulkanTriangleRayScene>(
-            &dynamic_cast<vulkan::VulkanDevice &>(device_),
-            d.vertex_count,
-            d.triangle_count)) {
+        core_(std::move(core)) {
   }
-  void initialize(const SceneDescription &d) {
-    auto *scene = core_.get();
-    const auto vertices = d.vertices.pointer, indices = d.indices.pointer;
+  template <typename Record>
+  void initialize(Record record) {
     initialization_pending_ = true;
     runtime_.enqueue_compute_op_lambda(
-        [scene, vertices, indices](Device *, CommandList *commands) {
-          scene->record_build(commands, vertices, indices);
+        [record = std::move(record)](Device *, CommandList *commands) {
+          record(commands);
         },
         {});
     runtime_.synchronize();
     initialization_pending_ = false;
   }
-  ~PreparedScene() override {
+  ~OwnedRayResource() override {
     // Registry retirement has already retired recorded uses. Failed cold
     // construction can still have initialization in flight on the same queue.
     if (!fault_->backend_calls_safe() ||
@@ -133,19 +229,148 @@ class PreparedScene final : public VulkanRaySceneResource {
   size_t workspace_bytes() const override {
     return core_->memory_statistics().known_requested_bytes;
   }
-  bool retains_input(const std::string &port) const override {
-    return port != "vertices" && port != "indices";
-  }
-  VulkanTriangleRayScene &core() override {
-    return *core_;
-  }
 
- private:
+ protected:
   Device &device_;
   gfx::GfxRuntime &runtime_;
   std::shared_ptr<RuntimeFaultDomain> fault_;
-  std::unique_ptr<VulkanTriangleRayScene> core_;
+  std::unique_ptr<Core> core_;
   bool initialization_pending_{false};
+};
+
+class PreparedScene final : public OwnedRayResource<VulkanTriangleRayScene>,
+                            public QueryAccess,
+                            public GeometryAccess {
+ public:
+  PreparedScene(NativePreparationContext &context, const SceneDescription &d)
+      : OwnedRayResource(
+            context,
+            std::make_unique<VulkanTriangleRayScene>(&ray_device(context),
+                                                     d.vertex_count,
+                                                     d.triangle_count)) {
+  }
+  void initialize(const SceneDescription &d) {
+    OwnedRayResource::initialize(
+        [scene = core_.get(), vertices = d.vertices.pointer,
+         indices = d.indices.pointer](CommandList *commands) {
+          scene->record_build(commands, vertices, indices);
+        });
+  }
+  Device &device() const override {
+    return device_;
+  }
+  size_t vertex_count() const override {
+    return core_->vertex_count();
+  }
+  bool retains_input(const std::string &port) const override {
+    return port != "vertices" && port != "indices";
+  }
+  void prepare_query_variant(unsigned variant) override {
+    core_->prepare_query_variant(variant);
+  }
+  void record_query(CommandList *commands,
+                    const VulkanRayQueryPacket &p) override {
+    core_->record_query(commands, p);
+  }
+  void record_refit(CommandList *commands, DevicePtr vertices) override {
+    core_->record_refit(commands, vertices);
+  }
+};
+
+class PreparedBlas final : public OwnedRayResource<VulkanTriangleBlas>,
+                           public BlasAccess {
+ public:
+  PreparedBlas(NativePreparationContext &context, const BlasDescription &d)
+      : OwnedRayResource(
+            context,
+            std::make_unique<VulkanTriangleBlas>(&ray_device(context),
+                                                 d.vertex_count,
+                                                 d.triangle_count,
+                                                 nullptr,
+                                                 d.opaque)) {
+  }
+  void initialize(const BlasDescription &d) {
+    OwnedRayResource::initialize(
+        [blas = core_.get(), vertices = d.vertices.pointer,
+         indices = d.indices.pointer](CommandList *commands) {
+          blas->record_build(commands, vertices, indices, false);
+        });
+  }
+  Device &device() const override {
+    return device_;
+  }
+  size_t vertex_count() const override {
+    return core_->vertex_count();
+  }
+  bool retains_input(const std::string &port) const override {
+    return port != "vertices" && port != "indices";
+  }
+  VulkanTriangleBlas &blas_core() override {
+    return *core_;
+  }
+  void record_refit(CommandList *commands, DevicePtr vertices) override {
+    core_->record_build(commands, vertices, {}, true);
+  }
+};
+
+std::unique_ptr<VulkanInstanceTlas> make_tlas(NativePreparationContext &context,
+                                              const TlasDescription &d) {
+  auto &device = ray_device(context);
+  std::vector<std::shared_ptr<VulkanTriangleBlas>> blases;
+  for (const auto &blas : d.blases)
+    // Retain the original owner, including its fault-domain retirement policy.
+    blases.emplace_back(blas, &blas->blas_core());
+  return std::make_unique<VulkanInstanceTlas>(
+      &device, std::move(blases), std::vector<uint32_t>(d.blases.size(), 0));
+}
+
+VulkanRayTransformPacket transform_packet(Device &device,
+                                          const NativeArrayBinding &array,
+                                          size_t count) {
+  const auto bytes = transform_bytes(device, array, count);
+  resolve_native_storage_range(Arch::vulkan, array.pointer, bytes);
+  return prepare_vulkan_ray_transform_packet(
+      &dynamic_cast<vulkan::VulkanDevice &>(device), count,
+      {array.pointer, bytes});
+}
+
+class PreparedTlas final : public OwnedRayResource<VulkanInstanceTlas>,
+                           public QueryAccess,
+                           public InstanceAccess {
+ public:
+  PreparedTlas(NativePreparationContext &context, const TlasDescription &d)
+      : OwnedRayResource(context, make_tlas(context, d)) {
+  }
+  void initialize(const TlasDescription &d, const VulkanRayTransformPacket &p) {
+    core_->prepare_transforms();
+    OwnedRayResource::initialize([tlas = core_.get(), instances = d.instances,
+                                  p](CommandList *commands) {
+      tlas->record_build_device(commands, instances, p);
+    });
+  }
+  Device &device() const override {
+    return device_;
+  }
+  size_t instance_count() const override {
+    return core_->instance_count();
+  }
+  bool retains_input(const std::string &port) const override {
+    return port != "transforms";
+  }
+  void prepare_query_variant(unsigned variant) override {
+    core_->prepare_query_variant(variant);
+  }
+  void record_query(CommandList *commands,
+                    const VulkanRayQueryPacket &p) override {
+    core_->record_query(commands, p);
+  }
+  void prepare_transforms() override {
+    core_->prepare_transforms();
+  }
+  void record_transforms(CommandList *commands,
+                         const VulkanRayTransformPacket &p) override {
+    core_->record_transforms(commands, p);
+  }
 };
 
 class PreparedQuery final : public NativeOperation {
@@ -176,7 +401,7 @@ class PreparedQuery final : public NativeOperation {
     validate_native_disjoint_writes(reads, writes);
     packet_ = prepare_vulkan_ray_query_packet(&device, d.ray_count,
                                               bool(d.hit_indices), bindings);
-    scene_->core().prepare_query_variant(packet_.variant);
+    scene_->prepare_query_variant(packet_.variant);
   }
   Arch arch() const override {
     return Arch::vulkan;
@@ -188,11 +413,11 @@ class PreparedQuery final : public NativeOperation {
     return 0;
   }
   void record_vulkan(Device *, CommandList *commands) override {
-    scene_->core().record_query(commands, packet_);
+    scene_->record_query(commands, packet_);
   }
 
  private:
-  std::shared_ptr<VulkanRaySceneResource> scene_;
+  std::shared_ptr<QueryAccess> scene_;
   VulkanRayQueryPacket packet_;
 };
 
@@ -214,17 +439,101 @@ class PreparedRefit final : public NativeOperation {
     return 0;
   }
   void record_vulkan(Device *, CommandList *commands) override {
-    scene_->core().record_refit(commands, vertices_);
+    scene_->record_refit(commands, vertices_);
   }
 
  private:
-  std::shared_ptr<VulkanRaySceneResource> scene_;
+  std::shared_ptr<GeometryAccess> scene_;
   DevicePtr vertices_;
+};
+
+class PreparedInstanceRefit final : public NativeOperation {
+ public:
+  explicit PreparedInstanceRefit(const InstanceRefitDescription &d)
+      : scene_(d.scene),
+        packet_(transform_packet(device(),
+                                 d.transforms,
+                                 scene_->instance_count())) {
+    scene_->prepare_transforms();
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return scene_->device();
+  }
+  size_t workspace_bytes() const override {
+    return 0;
+  }
+  void record_vulkan(Device *, CommandList *commands) override {
+    scene_->record_transforms(commands, packet_);
+  }
+
+ private:
+  std::shared_ptr<InstanceAccess> scene_;
+  VulkanRayTransformPacket packet_;
 };
 #endif
 }  // namespace
 
 void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
+  registry.define<BlasDescription>(
+      [](Device &device, const BlasDescription &d) {
+        array_bytes(device, d.vertices, d.vertex_count, 3, "f32");
+        array_bytes(device, d.indices, d.triangle_count, 3, "i32");
+      },
+      NativeObjectKind::resource);
+  registry.register_schema<BlasDescription>(
+      "vulkan_ray", "triangle_blas", {"vertices", "indices"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<BlasDescription> {
+        operation_json::fields(p, {"vertex_count", "triangle_count", "opaque"});
+        const auto vertices = count(p["vertex_count"]);
+        const auto triangles = count(p["triangle_count"]);
+        const auto opaque = operation_json::optional_bool(p, "opaque", true);
+        return [vertices, triangles, opaque](const NativeOperationBindings &b) {
+          BlasDescription d;
+          d.vertex_count = vertices;
+          d.triangle_count = triangles;
+          d.vertices = b.at("vertices").array();
+          d.indices = b.at("indices").array();
+          d.opaque = opaque;
+          return d;
+        };
+      });
+  registry.define<TlasDescription>(
+      [](Device &device, const TlasDescription &d) {
+        for (const auto &blas : d.blases)
+          validate_scene(device, blas);
+        transform_bytes(device, d.transforms, d.blases.size());
+      },
+      NativeObjectKind::resource);
+  registry.register_schema<TlasDescription>(
+      "vulkan_ray", "instance_tlas", {"transforms"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<TlasDescription> {
+        operation_json::fields(
+            p, {"instance_count", "custom_indices", "visibility_masks"});
+        const auto size = count(p["instance_count"]);
+        const auto ids =
+            instance_values(p, "custom_indices", size, 0xffffffu, 0);
+        const auto masks =
+            instance_values(p, "visibility_masks", size, 0xffu, 0xffu);
+        return [size, ids, masks](const NativeOperationBindings &b) {
+          TlasDescription d;
+          d.transforms = b.at("transforms").array();
+          d.instances.resize(size);
+          d.blases.reserve(size);
+          for (uint32_t i = 0; i < size; ++i) {
+            d.blases.push_back(
+                b.at("blas_" + std::to_string(i)).resource<BlasAccess>());
+            d.instances[i].custom_index = ids[i];
+            d.instances[i].mask = masks[i];
+          }
+          return d;
+        };
+      },
+      {}, {}, {{"instance_count", {"blas"}}});
   registry.define<SceneDescription>(
       [](Device &device, const SceneDescription &d) {
         array_bytes(device, d.vertices, d.vertex_count, 3, "f32");
@@ -260,8 +569,8 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
         operation_json::fields(p, {"ray_count"});
         const auto rays = count(p["ray_count"]);
         return [rays](const NativeOperationBindings &b) {
-          QueryDescription d{b.at("scene").resource<VulkanRaySceneResource>(),
-                             rays, b.at("rays").array(), b.at("hits").array(),
+          QueryDescription d{b.at("scene").resource<QueryAccess>(), rays,
+                             b.at("rays").array(), b.at("hits").array(),
                              std::nullopt};
           if (b.count("hit_indices"))
             d.hit_indices = b.at("hit_indices").array();
@@ -280,12 +589,52 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
           -> NativeOperationRegistry::Binder<RefitDescription> {
         operation_json::fields(p, {});
         return [](const NativeOperationBindings &b) {
-          return RefitDescription{
-              b.at("scene").resource<VulkanRaySceneResource>(),
-              b.at("vertices").array()};
+          return RefitDescription{b.at("scene").resource<GeometryAccess>(),
+                                  b.at("vertices").array()};
+        };
+      });
+  registry.define<InstanceRefitDescription>(
+      [](Device &device, const InstanceRefitDescription &d) {
+        validate_scene(device, d.scene);
+        transform_bytes(device, d.transforms, d.scene->instance_count());
+      });
+  registry.register_schema<InstanceRefitDescription>(
+      "vulkan_ray", "instance_refit", {"scene", "transforms"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<InstanceRefitDescription> {
+        operation_json::fields(p, {});
+        return [](const NativeOperationBindings &b) {
+          return InstanceRefitDescription{
+              b.at("scene").resource<InstanceAccess>(),
+              b.at("transforms").array()};
         };
       });
 #ifdef TI_WITH_VULKAN
+  registry.register_context_factory<BlasDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](NativePreparationContext &context, const BlasDescription &d) {
+        for (const auto &entry : {std::make_pair(&d.vertices, d.vertex_count),
+                                  std::make_pair(&d.indices, d.triangle_count)})
+          resolve_native_storage_range(Arch::vulkan, entry.first->pointer,
+                                       size_t(entry.second) * 12);
+        auto result = std::make_shared<PreparedBlas>(context, d);
+        result->initialize(d);
+        return result;
+      });
+  registry.register_context_factory<TlasDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](NativePreparationContext &context, const TlasDescription &d) {
+        const auto packet =
+            transform_packet(context.device, d.transforms, d.blases.size());
+        auto result = std::make_shared<PreparedTlas>(context, d);
+        result->initialize(d, packet);
+        return result;
+      });
+  registry.register_context_factory<InstanceRefitDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](NativePreparationContext &, const InstanceRefitDescription &d) {
+        return std::make_shared<PreparedInstanceRefit>(d);
+      });
   registry.register_context_factory<SceneDescription>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](NativePreparationContext &context, const SceneDescription &d) {

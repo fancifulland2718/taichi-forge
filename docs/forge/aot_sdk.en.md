@@ -250,7 +250,10 @@ under provider `vulkan_ray`, version 1:
 | operation | Kind and bindings | parameters |
 | --- | --- | --- |
 | `triangle_scene` | Resource: `vertices`, `indices` | `vertex_count`, `triangle_count` |
+| `triangle_blas` | Resource: `vertices`, `indices` | `vertex_count`, `triangle_count`, optional `opaque` (default true) |
+| `instance_tlas` | Resource: `transforms`, `blas_0` ... `blas_(instance_count-1)` | `instance_count`, optional `custom_indices`, `visibility_masks` |
 | `refit` | Operation: `scene`, `vertices` | Empty object |
+| `instance_refit` | Operation: `scene`, `transforms` | Empty object |
 | `query` | Operation: `scene`, `rays`, `hits`, optional `hit_indices` | `ray_count` |
 
 Declare the resource in an ExecutionPlan's `resources`, or create it with
@@ -267,7 +270,8 @@ exactly. Callers provide finite geometry, indices in `[0,V)` and valid ray
 intervals, following the JIT contract without per-frame host readback. The factory
 copies geometry and completes AS construction on its owner's GFX queue before
 returning; seed arrays can then close. Topology changes require a new resource.
-Refit updates device vertices with the same count and refreshes TLAS bounds.
+For `triangle_scene`, refit updates device vertices with the same count and
+refreshes TLAS bounds.
 Queries and refits record into the same native command sequence; replay performs
 no registry lookup.
 
@@ -285,9 +289,35 @@ contribute to `workspace_bytes`; private arrays contribute to `resource_bytes`.
 Public scenes are not counted again in every plan, and these figures are not
 driver residency. Small Windows Vulkan checks cover standalone consumers,
 borrowed owners, refit/miss reset, all four query variants, shared retirement and
-downstream gradient kernels. AS traversal itself is not differentiated. Separate
-BLAS/TLAS resources, face filtering and compact occlusion are not provided by this
-AOT factory yet.
+downstream gradient kernels. AS traversal itself is not differentiated. Face
+filtering and compact occlusion are not provided by this AOT factory yet.
+
+Independent `triangle_blas` resources can be shared by several `instance_tlas`
+resources and repeated within one TLAS. Bindings are in instance ordinal order;
+primitive indices retain each BLAS's input triangle order. Optional metadata arrays
+must have `instance_count` entries: custom IDs are 24-bit (default 0), masks are
+8-bit (default 255). Batch queries use ray mask 255. Transforms are packed f32
+row-major affine matrices, either scalar `[I,12]` / `[I,3,4]`, or AoS `[I]` with
+element shape `[3,4]`. As in JIT, the caller supplies finite, invertible transforms.
+Initial construction packs device matrices and builds the TLAS once; it does not
+read matrices back or first build an identity TLAS. Construction seeds may close
+after successful return; the TLAS continues to retain its BLAS dependencies.
+
+Use `refit(scene=blas, vertices=...)`, then `instance_refit(scene=tlas,
+transforms=...)` for each affected TLAS, before querying it. Geometry refit alone
+does not refresh dependent TLAS bounds. The two resources have distinct typed
+contracts: queries accept a triangle scene or TLAS, geometry refit accepts a
+triangle scene or BLAS, and instance refit accepts a TLAS. Closing a public BLAS
+retires dependent TLAS recordings transitively; closing one TLAS leaves siblings
+usable. The BLAS `opaque` build flag does not add material filtering: these batch
+query shaders treat triangles as opaque and accept both faces.
+
+Small Windows Vulkan checks cover shared/repeated BLAS, distinct instance/custom
+IDs and masks, direct initial device build, GPU geometry/transform updates,
+subrange matrices, typed/legacy hit and miss reset, cross-module retirement,
+standalone/borrowed owners, and downstream gradient kernels. This factory coverage
+does not yet include automatic BLAS/TLAS Graph export, host metadata updates,
+micromaps or kernel/graphics AS bindings.
 
 Graphs containing `TriangleScene.record_refit()`, `record_typed()` and `record()`
 can be exported automatically:
