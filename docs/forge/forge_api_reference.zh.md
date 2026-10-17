@@ -351,8 +351,9 @@ Graph 参数使用 `ti.graph.Arg(ti.graph.ArgKind.TEXTURE_COLLECTION, "textures"
 原位上传保留集合；成员替换需创建新集合并显式 `bindings.update(textures=new_table)`。
 `snapshot_id` 是进程内资源实例身份，不是可移植 recipe 或执行方案身份。runtime reset 后不得复用。
 此能力支持 Vulkan JIT，以及通过受管 `image/collection` 资源显式绑定的 AOT kernel；
-后者需要目标能力声明及 GFX metadata v5，见 [AOT SDK](aot_sdk.zh.md)。Graph 自动集合导出
-和 CUDA 集合仍未开放。它不保证比 buffer 查表更快；大量小纹理应测完整消费者的提交成本。
+后者需要目标能力声明及 GFX metadata v5，见 [AOT SDK](aot_sdk.zh.md)。普通及已选 Vulkan
+整图固定绑定 recipe 可自动重建集合，显式指定成员像素输入或公共资源；CUDA 集合仍未开放。
+它不保证比 buffer 查表更快；大量小纹理应测完整消费者的提交成本。
 
 重复完整图还可使用支持集合的 Vulkan immutable binding-frame recipe。经完整 Graph 搜索选择并物化后，
 `graph.bind(...)` 保留 descriptor table 和成员租约，未改变的 frame 复用 secondary commands。

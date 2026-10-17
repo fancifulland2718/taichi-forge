@@ -587,7 +587,17 @@ collection = dict(
 集合只存 CPU 表及 owner，不复制图像；关闭成员会退休依赖集合和执行对象。
 每个成员须有初始像素或执行序列中无条件先行的上传，GPU 索引范围由应用保证。
 独立与借用消费者已验证二维 fetch/sample_lod、GPU 更新、重绑定、退休和下游数值梯度；
-不支持纹理采样求导。Graph 自动集合重建、旧 CGraph 和 kernel-template 接口仍未开放。
+不支持纹理采样求导。旧 CGraph 和 kernel-template 接口仍未开放。
+
+普通 Graph 与已选 Vulkan 整图固定绑定 recipe 可自动重建集合。在 `source_bindings`
+中为集合参数提供原 `TextureCollection`；私有固定集合直接来自 Graph 的固定绑定。
+`resource_bindings` 逐唯一成员指定像素输入，或将成员映射为公共资源名。所有集合及单图像
+参数共享同一资源注册表，重复成员只分配/初始化一次；后续 RWTexture/附件用途在重建前
+预检，不因第一次是采样读取而丢失写入用途。导出不读取生产端纹理内容。
+也可将整个集合映射为公共资源；若成员还被其他 kernel/provider 单独使用，必须保持公共
+成员绑定的一致身份，消费准备阶段验证对应 `image_N` 路径别名。不能把公共集合的共享
+成员同时私有重建。验收覆盖私有、公共、混合成员，采样→storage 写入→再采样、初始化
+输入释放及退休；普通图含实际下游反向，已选图使用数值参考。未扩展分段/fork-join recipe。
 
 Vulkan 复用相同的 `image/sampled`、`image/upload` 描述，并接入所属 runtime 已有的
 GFX 执行器。通过 `image_upload` v1 的 `vulkan_inline` 能力协商；创建与初始像素上传在

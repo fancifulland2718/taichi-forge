@@ -440,8 +440,9 @@ replacing membership creates a new collection and requires explicit
 resource instance, not a portable recipe or executable plan. Do not reuse the
 collection after runtime reset. Vulkan JIT and explicit AOT kernel bindings through
 managed `image/collection` resources are supported; AOT requires target capabilities
-and GFX metadata v5, as described in the [AOT SDK](aot_sdk.en.md). Automatic Graph
-collection export and CUDA collections remain unsupported. This is not an
+and GFX metadata v5, as described in the [AOT SDK](aot_sdk.en.md). Ordinary and
+selected Vulkan whole-graph binding recipes reconstruct tables using explicit
+member pixel inputs or public resources. CUDA collections remain unsupported. This is not an
 automatically faster replacement for buffer lookup. Measure the complete
 consumer, especially when many tiny textures make submission cost significant.
 

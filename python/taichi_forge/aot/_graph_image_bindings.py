@@ -4,7 +4,7 @@ from dataclasses import asdict
 
 from taichi_forge._lib import core
 from taichi_forge.lang import impl
-from taichi_forge.lang._texture import Texture
+from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.texture_type import FORMAT2TY_CH, is_float_sampled_texture_format
 
@@ -14,7 +14,7 @@ class SourceImageBindings:
         self.owners = {
             name: owner
             for name, owner in fixed_bindings.items()
-            if type(owner) is Texture
+            if type(owner) in (Texture, TextureCollection)
         }
         self.used = set()
         self._storage_owners = set()
@@ -32,7 +32,8 @@ class SourceImageBindings:
 
     @staticmethod
     def _validate_owner(owner):
-        if owner.tex is None or owner._runtime_prog is not impl.get_runtime().prog:
+        native = owner.collection if type(owner) is TextureCollection else owner.tex
+        if native is None or owner._runtime_prog is not impl.get_runtime().prog:
             raise TaichiRuntimeError(
                 "Source texture belongs to a retired or different runtime"
             )
@@ -41,7 +42,7 @@ class SourceImageBindings:
         owner = self.owners.get(name)
         if owner is None:
             raise TaichiRuntimeError(
-                "AOT image needs its Texture in source_bindings"
+                "AOT image needs its Texture or TextureCollection in source_bindings"
             )
         self._validate_owner(owner)
         return owner
@@ -55,6 +56,8 @@ class SourceImageBindings:
 
     def require_attachment(self, name):
         owner = self.require(name)
+        if type(owner) is not Texture:
+            raise TaichiRuntimeError("AOT attachment requires a Texture, not a collection")
         _, shape, mip_levels, _ = owner._creation_metadata
         if len(shape) != 2 or mip_levels != 1:
             raise TaichiRuntimeError("AOT graphics attachments require single-mip 2D textures")
@@ -62,6 +65,17 @@ class SourceImageBindings:
 
     def validate_argument(self, arch, arg):
         owner = self.require(arg.name)
+        if arg.tag == core.ArgKind.TEXTURE_COLLECTION:
+            if (
+                arch != core.Arch.vulkan
+                or type(owner) is not TextureCollection
+                or owner.num_dims != arg.field_dim
+                or tuple(arg.element_shape) != (owner.capacity,)
+            ):
+                raise TaichiRuntimeError("AOT TextureCollection dimension/capacity differs from the Graph argument")
+            return
+        if type(owner) is not Texture:
+            raise TaichiRuntimeError("AOT Texture argument requires a Texture source")
         fmt, shape, _, _ = owner._creation_metadata
         if len(shape) != len(arg.texture_shape):
             raise TaichiRuntimeError("AOT Texture dimension differs from the Graph kernel argument")
@@ -86,9 +100,45 @@ class SourceImageBindings:
             self.validate_argument(arch, arg)
 
     def resource(self, context, name, *, first_clear=False):
+        owner = self.require(name)
+        if type(owner) is TextureCollection:
+            if first_clear:
+                raise TaichiRuntimeError("AOT image clear requires a Texture, not a collection")
+            result = self._collection_resource(context, owner)
+        else:
+            result = self._image_resource(context, owner, first_clear=first_clear)
+        self.used.add(name)
+        return result
+
+    def _collection_resource(self, context, owner):
+        if context.arch != core.Arch.vulkan:
+            raise TaichiRuntimeError("AOT TextureCollection reconstruction requires Vulkan")
+        unique = {id(member): member for member in owner.members}
+        for member in unique.values():
+            self._validate_owner(member)
+        links = {f"image_{i}": member for i, member in enumerate(owner.members)}
+        # Record all slots, including repeated members. Public consumers must
+        # preserve aliases with other kernel/provider uses of the same image.
+        context.resource_links(owner, links)
+        if (public := context.public_resource(owner)) is not None:
+            return public
+
+        def build():
+            resources = {key: self._image_resource(context, member) for key, member in unique.items()}
+            return context.resource(
+                owner,
+                "image",
+                "collection",
+                parameters=dict(dimensions=owner.num_dims, image_count=owner.capacity),
+                bindings={port: resources[id(member)] for port, member in links.items()},
+            )
+
+        return context.resource_once(owner, build, policy="image_collection_members")
+
+    def _image_resource(self, context, owner, *, first_clear=False):
         from taichi_forge.hardware._sampling import SamplerConfig
 
-        owner = self.require(name)
+        self._validate_owner(owner)
         fmt, shape, mip_levels, sampler = owner._creation_metadata
         sampled = is_float_sampled_texture_format(fmt)
         attachment = id(owner) in self._attachment_owners
@@ -116,7 +166,6 @@ class SourceImageBindings:
 
         public = context.public_resource(owner)
         if public is not None:
-            self.used.add(name)
             return public
 
         def build():
@@ -158,11 +207,9 @@ class SourceImageBindings:
                 )
             return resource
 
-        resource = context.resource_once(
+        return context.resource_once(
             owner, build, policy="image_consumer_seed"
         )
-        self.used.add(name)
-        return resource
 
     def kernel_resource(self, context, arg):
         self.validate_argument(context.arch, arg)

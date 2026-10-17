@@ -750,8 +750,24 @@ Closing a member retires dependent tables and executions. Every member needs
 initial pixels or an unconditional preceding upload; the application guarantees
 valid GPU indices. Standalone and borrowed checks cover 2D fetch/sample_lod,
 GPU updates, rebinding, retirement and downstream numeric gradients. Texture
-sampling itself is not differentiated. Automatic Graph collection reconstruction,
-legacy CGraph and the kernel-template interface remain unsupported.
+sampling itself is not differentiated. Legacy CGraph and the kernel-template
+interface remain unsupported.
+
+Ordinary Graphs and selected Vulkan whole-graph immutable binding recipes can
+reconstruct collections automatically. Supply the source `TextureCollection`
+for each symbolic collection in `source_bindings`; private fixed tables come
+from the Graph's existing bindings. Map unique members to pixel input ports or
+public resource names in `resource_bindings`. Tables and individual image
+arguments share one registry, allocating and initializing each repeated member
+once. Preflight includes later RWTexture/attachment uses, preserving write usage
+when sampling occurs first. Export never reads producer texture contents.
+The whole collection may instead be public. Members also used by other kernels
+or providers must retain consistent public identities; preparation checks aliases
+through the corresponding `image_N` resource paths. A public table's shared
+member cannot also be rebuilt privately. Checks cover private/public/mixed
+members, sampling then storage writes then sampling, released initialization
+inputs and retirement. Ordinary graphs include actual downstream reverse kernels;
+selected graphs use a numeric reference. Segmented/fork-join recipes are not expanded.
 
 Vulkan uses the same `image/sampled` and `image/upload` descriptions, backed by
 the owner's existing GFX runtime. Discover `image_upload` version 1 with

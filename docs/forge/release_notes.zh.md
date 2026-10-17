@@ -34,7 +34,8 @@
 - Vulkan AOT 显式计划可用 `image/collection` v1 绑定 `texture_collection` kernel
   参数，复用 JIT/GFX 的不可变表、布局及退休路径；集合不复制图像。对应产物要求
   目标索引/容量能力和 GFX metadata v5。二维动态索引、GPU 更新、替换、退休及
-  下游梯度已验证；自动 Graph 集合导出、旧 CGraph 和 CUDA 集合尚未开放。
+  下游梯度已验证。普通/已选 Vulkan 整图固定绑定 Graph 可自动导出公私/混合集合，
+  共享成员重建、初始化及读写用途，校验公共成员别名；旧 CGraph 和 CUDA 集合尚未开放。
 - Vulkan AOT `pass_indirect` v1 可从普通/已选整图 graphics-queue Graph 重建传统
   direct/indirect pass，共享检查有限 command/count view、设备容量及 shader 写入别名；
   验收覆盖 GPU 零/非零计数、替换绑定、退休及下游梯度。
