@@ -1,10 +1,17 @@
 #pragma once
 
+#include <map>
+
 #include "taichi_core_impl.h"
 #include "taichi/program/launch_context_builder.h"
 #include "taichi/program/matrix.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/texture.h"
+
+namespace taichi::lang {
+class NativeSampledImage;
+class NativeImageKernelBinding;
+}
 
 namespace capi {
 struct NdArrayStorageLayout {
@@ -30,6 +37,7 @@ struct BoundKernelArguments {
   std::vector<std::unique_ptr<taichi::lang::storage::DenseStorageDescriptor>>
       views;
   std::unique_ptr<taichi::lang::LaunchContextBuilder> context;
+  std::vector<std::shared_ptr<taichi::lang::NativeImageKernelBinding>> images;
 };
 
 struct BoundGraphArguments {
@@ -51,7 +59,9 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     const TiArgument *args,
     uint32_t binding_count,
     const TiNdArrayBinding *bindings,
-    bool cpu_bounded_range = false);
+    bool cpu_bounded_range = false,
+    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeSampledImage>>
+        &images = {});
 std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
     Runtime &runtime,
     TiComputeGraph graph,

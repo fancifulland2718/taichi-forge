@@ -3,6 +3,8 @@
 #include "taichi/runtime/native_operation.h"
 
 namespace taichi::lang {
+class CallableBase;
+class LaunchContextBuilder;
 
 // Provider-neutral managed sampled image. Backend handles are private to
 // same-device prepared consumers; serialized plans contain only descriptions.
@@ -33,6 +35,40 @@ class NativeSampledImage : public NativeResource {
  private:
   const ImageParams parameters_;
   const bool initialized_;
+};
+
+// Cold kernel binding, never a public raw image handle. The backend copies the
+// sampled object into its launch packet; the enclosing execution retains this
+// owner until the packet's last submission retires.
+class NativeImageKernelBinding {
+ public:
+  NativeImageKernelBinding(std::shared_ptr<NativeSampledImage> image,
+                           std::vector<int> argument,
+                           Arch arch,
+                           Device &device,
+                           const CallableBase &kernel,
+                           LaunchContextBuilder &context);
+  NativeImageKernelBinding(const NativeImageKernelBinding &) = delete;
+  NativeImageKernelBinding &operator=(const NativeImageKernelBinding &) =
+      delete;
+  const std::vector<int> &argument() const {
+    return argument_;
+  }
+  void validate(Arch arch,
+                Device &device,
+                const CallableBase &kernel,
+                const LaunchContextBuilder &context,
+                const NativeRecordingState &state) const;
+
+ private:
+  void validate_parameter(Arch arch,
+                          Device &device,
+                          const CallableBase &kernel) const;
+  const std::shared_ptr<NativeSampledImage> image_;
+  const std::vector<int> argument_;
+  const CallableBase *kernel_;
+  const LaunchContextBuilder *context_;
+  std::uint64_t cuda_object_{0};
 };
 
 }  // namespace taichi::lang

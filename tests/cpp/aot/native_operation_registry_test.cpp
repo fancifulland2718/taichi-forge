@@ -10,6 +10,9 @@
 #include "taichi/common/operation_json.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
+#include "taichi/program/kernel.h"
+#include "taichi/program/program.h"
+#include "taichi/program/launch_context_builder.h"
 #endif
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_device.h"
@@ -17,7 +20,83 @@
 #endif
 
 namespace taichi::lang {
-TEST(NativeOperationRegistry, ImageDescriptionsRejectMalformedStorageBeforePreparation) {
+#ifdef TI_WITH_LLVM
+TEST(NativeOperationRegistry, KernelImageBindingsRetainAndValidateQualifiedOwners) {
+  class Image final : public NativeSampledImage {
+   public:
+    Image(Device &device, ImageParams parameters)
+        : NativeSampledImage(parameters, false), device_(device) {
+    }
+    Arch arch() const override {
+      return Arch::cuda;
+    }
+    Device &device() const override {
+      return device_;
+    }
+    size_t workspace_bytes() const override {
+      return 0;
+    }
+    size_t logical_bytes() const override {
+      return 32;
+    }
+    uint64_t cuda_sampled_object() const override {
+      return 42;
+    }
+
+   private:
+    Device &device_;
+  };
+  Program program(Arch::x64);
+  Kernel kernel(program, [] {}, "cold_image_binding");
+  kernel.insert_texture_param(2);
+  kernel.finalize_params();
+  auto context = kernel.make_launch_context();
+  cpu::CpuDevice device, different_device;
+  ImageParams parameters{};
+  parameters.dimension = ImageDimension::d2D;
+  parameters.x = 2;
+  parameters.y = 4;
+  parameters.format = BufferFormat::r32f;
+  auto image = std::make_shared<Image>(device, parameters);
+  std::weak_ptr<Image> retained = image;
+  EXPECT_THROW((NativeImageKernelBinding(image, {0}, Arch::x64, device, kernel,
+                                         context)),
+               std::invalid_argument);
+  EXPECT_THROW((NativeImageKernelBinding(image, {0}, Arch::cuda,
+                                         different_device, kernel, context)),
+               std::invalid_argument);
+  EXPECT_THROW((NativeImageKernelBinding(image, {1}, Arch::cuda, device, kernel,
+                                         context)),
+               std::invalid_argument);
+  kernel.nested_parameters.at({0}).total_dim = 3;
+  EXPECT_THROW((NativeImageKernelBinding(image, {0}, Arch::cuda, device, kernel,
+                                         context)),
+               std::invalid_argument);
+  kernel.nested_parameters.at({0}).total_dim = 2;
+  auto binding = std::make_unique<NativeImageKernelBinding>(
+      image, std::vector<int>{0}, Arch::cuda, device, kernel, context);
+  NativeRecordingState state;
+  EXPECT_THROW(binding->validate(Arch::cuda, device, kernel, context, state),
+               std::invalid_argument);
+  state.initialized.insert(image.get());
+  EXPECT_NO_THROW(
+      binding->validate(Arch::cuda, device, kernel, context, state));
+  auto other = kernel.make_launch_context();
+  EXPECT_THROW(binding->validate(Arch::cuda, device, kernel, other, state),
+               std::invalid_argument);
+  context.device_allocation_type[{0}] =
+      LaunchContextBuilder::DevAllocType::kRWTexture;
+  EXPECT_THROW(binding->validate(Arch::cuda, device, kernel, context, state),
+               std::invalid_argument);
+  image.reset();
+  EXPECT_FALSE(retained.expired());
+  binding.reset();
+  EXPECT_TRUE(retained.expired());
+}
+#endif
+
+TEST(NativeOperationRegistry,
+     ImageDescriptionsRejectMalformedStorageBeforePreparation) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription image;
   image.provider = "image";

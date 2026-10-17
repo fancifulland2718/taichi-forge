@@ -12,6 +12,7 @@
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
+#include "taichi/runtime/native_image.h"
 #include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/binding_frame_replay.h"
@@ -1059,13 +1060,25 @@ static TiPreparedExecution prepare_execution_plan_impl(
                                    kernel->entry);
         std::vector<TiArgument> kernel_args;
         std::vector<TiNdArrayBinding> kernel_bindings;
+        std::map<uint32_t, std::shared_ptr<NativeSampledImage>> images;
         const auto &parameters =
             rt.get_kernel(handle).kernel->nested_parameters;
         for (std::size_t i = 0; i < kernel->arguments.size(); ++i) {
           const auto &name = kernel->arguments[i];
-          if (native_objects.count(name))
-            throw MemoryBindingError(
-                "Kernel arguments cannot bind native resources: " + name);
+          if (const auto object = native_objects.find(name);
+              object != native_objects.end()) {
+            auto image =
+                std::dynamic_pointer_cast<NativeSampledImage>(object->second);
+            if (!image)
+              throw MemoryBindingError(
+                  "Kernel native resource must be a managed sampled image: " +
+                  name);
+            images.emplace(static_cast<uint32_t>(i), std::move(image));
+            // The private owner map supplies this slot. Never synthesize or
+            // reinterpret a public TiImage handle.
+            kernel_args.emplace_back();
+            continue;
+          }
           kernel_args.push_back(*arguments.at(name));
           if (auto binding = layouts.find(name); binding != layouts.end()) {
             const auto &value = *binding->second;
@@ -1088,7 +1101,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
             rt, handle, static_cast<uint32_t>(kernel_args.size()),
             kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
             kernel_bindings.data(),
-            kernel->bounded_range && !kernel->bounded_range->cuda);
+            kernel->bounded_range && !kernel->bounded_range->cuda, images);
         if (!bound)
           return false;
         bound->context->append_dispatch_label(kernel->label);
@@ -1144,7 +1157,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
             FixedExecution::Dispatch{bound->kernel, bound->context.get(),
                                      indirect_packet, bounded_extent,
                                      bounded_capacity, adaptive_block_dim,
-                                     grouped_update, bounded_binding_identity});
+                                     grouped_update, bounded_binding_identity,
+                                     bound->images});
         prepared->plan_arguments.push_back(std::move(bound));
       } else if (const auto *copy =
                      std::get_if<aot::ExecutionPlan::Copy>(&operation)) {

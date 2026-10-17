@@ -1,6 +1,7 @@
 #include "taichi/runtime/cuda/binding_frame_replay.h"
 
 #include <deque>
+#include <optional>
 #include <stdexcept>
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -22,6 +23,7 @@ struct BindingFrameReplay::State {
   bool failed{false};
   bool closed{false};
   bool retired_safe{true};
+  std::optional<std::vector<std::vector<std::uint64_t>>> invariants;
 
   void retain(const std::shared_ptr<void> &frame) {
     pending.push_back({RuntimeCompletion::from_cuda_stream(
@@ -103,6 +105,18 @@ void BindingFrameReplay::prepare(void *source_graph,
                                  const std::shared_ptr<void> &frame) {
   select(source_graph, frame);
   state_->retain(frame);
+}
+
+void BindingFrameReplay::validate_invariants(
+    std::vector<std::vector<std::uint64_t>> invariants) {
+  if (state_->closed || state_->failed)
+    throw std::runtime_error("CUDA binding-frame executor is closed or failed");
+  if (state_->invariants && *state_->invariants != invariants)
+    throw std::invalid_argument(
+        "CUDA binding frame changed non-updatable native operands; retain the "
+        "original bindings or prepare an independent execution");
+  if (!state_->invariants)
+    state_->invariants = std::move(invariants);
 }
 
 void BindingFrameReplay::run(void *source_graph,

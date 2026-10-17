@@ -5,6 +5,7 @@
 #include <optional>
 #include <unordered_set>
 #include "fp16.h"
+#include "taichi/runtime/native_image.h"
 
 namespace {
 constexpr uint32_t kTiNdShapeDimensionCapacity =
@@ -288,7 +289,9 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     const TiArgument *args,
     uint32_t binding_count,
     const TiNdArrayBinding *bindings,
-    bool cpu_bounded_range) {
+    bool cpu_bounded_range,
+    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeSampledImage>>
+        &images) {
   TI_CAPI_ARGUMENT_NULL_RV(kernel);
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
@@ -304,6 +307,9 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     throw MemoryBindingError(
         "Argument count does not match the exported kernel ABI");
   }
+  for (const auto &[index, image] : images)
+    if (index >= arg_count || !image)
+      throw MemoryBindingError("Invalid managed kernel image argument");
 
   if (binding_count)
     TI_CAPI_ARGUMENT_NULL_RV(bindings);
@@ -388,6 +394,17 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
   auto &devallocs = result->allocations;
 
   for (uint32_t i = 0; i < arg_count; ++i) {
+    if (const auto image = images.find(i); image != images.end()) {
+      try {
+        result->images.push_back(
+            std::make_shared<taichi::lang::NativeImageKernelBinding>(
+                image->second, std::vector<int>{int(i)}, runtime2.arch,
+                runtime2.get(), *ti_kernel, builder));
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
+      continue;
+    }
     const auto &arg = args[i];
     if (arg.type == TI_ARGUMENT_TYPE_NDARRAY) {
       if (!kernel_binding.layouts.count(i))

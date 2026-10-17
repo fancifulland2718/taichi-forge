@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include "taichi/program/runtime_completion.h"
 
 namespace taichi::lang::cuda {
@@ -34,6 +35,7 @@ class BindingFrameReplay {
   bool is_active(const void *frame) const;
   bool failed() const;
   bool belongs_to(const std::shared_ptr<RuntimeFaultDomain> &owner) const;
+  void validate_invariants(std::vector<std::vector<std::uint64_t>> invariants);
   // Cold owner retirement after its stream wait (or an unsafe-backend fault).
   // Other published frames keep the executable and remain independently usable.
   void release_completed_frame(const void *frame, bool backend_safe) noexcept;

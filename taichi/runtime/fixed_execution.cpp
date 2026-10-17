@@ -6,9 +6,11 @@
 #include <functional>
 #include <stdexcept>
 #include <limits>
+#include <set>
 #include <unordered_set>
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_image.h"
 #include "taichi/program/launch_context_builder.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -36,6 +38,7 @@ struct FixedExecution::State {
   std::size_t workspace_bytes{0};
   // Destroy backend recordings before their retained workspace owners.
   std::vector<std::shared_ptr<NativeOperation>> native_operations;
+  std::vector<std::shared_ptr<NativeImageKernelBinding>> image_bindings;
   std::size_t native_workspace_bytes{0};
   // Host steps retire their native blocks and readback commands before staging
   // and provider owners. All selection storage/commands are prepared cold.
@@ -371,9 +374,19 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed execution requires loaded entries without returns or "
               "ArgPacks");
+        std::set<std::vector<int>> image_arguments;
+        for (const auto &image : dispatch->images) {
+          if (!image || !image_arguments.insert(image->argument()).second)
+            throw std::invalid_argument("Duplicate or null kernel image owner");
+          image->validate(arch, device, *dispatch->kernel, *dispatch->context,
+                          recording_state);
+          state_->image_bindings.push_back(image);
+        }
         for (const auto &[index, param] : dispatch->kernel->nested_parameters) {
-          if (param.ptype == ParameterType::kTexture ||
-              param.ptype == ParameterType::kRWTexture)
+          if ((param.ptype == ParameterType::kTexture &&
+               !image_arguments.count(index)) ||
+              param.ptype == ParameterType::kRWTexture ||
+              param.ptype == ParameterType::kTextureCollection)
             throw std::invalid_argument(
                 "Fixed textures require generation-qualified resource owners");
         }
@@ -420,6 +433,15 @@ FixedExecution::FixedExecution(
     }
   };
   validate(operations, recording_state, false);
+#ifdef TI_WITH_CUDA
+  if (binding_replay) {
+    std::vector<std::vector<std::uint64_t>> invariants;
+    invariants.reserve(state_->native_operations.size());
+    for (const auto &operation : state_->native_operations)
+      invariants.push_back(operation->cuda_binding_frame_invariants());
+    binding_replay->validate_invariants(std::move(invariants));
+  }
+#endif
   state_->native_workspace_bytes = state_->workspace_bytes;
   if (has_host_selection && !arch_is_cpu(arch)) {
     if (arch != Arch::cuda && arch != Arch::vulkan)
@@ -798,10 +820,12 @@ FixedExecution::FixedExecution(
       struct FrameOperands {
         std::shared_ptr<void> bindings;
         std::vector<std::shared_ptr<NativeOperation>> operations;
+        std::vector<std::shared_ptr<NativeImageKernelBinding>> images;
       };
       auto retained = std::make_shared<FrameOperands>();
       retained->bindings = std::move(binding_operands);
       retained->operations = state_->native_operations;
+      retained->images = state_->image_bindings;
       auto &cuda = CUDAContext::get_instance();
       auto lock = cuda.get_submission_lock_guard();
       auto guard = cuda.get_guard();

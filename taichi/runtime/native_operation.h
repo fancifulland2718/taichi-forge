@@ -80,6 +80,13 @@ class NativeOperation : public NativeResource {
   virtual void record_cuda(void *stream) {
     throw std::invalid_argument("Native operation has no CUDA recording");
   }
+  // Cold identity of operands that CUDA Graph update cannot change (for
+  // example, a multidimensional memcpy source). Values, not contents. Shared
+  // binding frames compare this before capture, so rejection cannot poison the
+  // current executable. Empty means no additional provider restriction.
+  virtual std::vector<std::uint64_t> cuda_binding_frame_invariants() const {
+    return {};
+  }
   // Transfer capture-local storage immediately after each recording, including
   // a failed recording. Repeated captures must produce independent storage.
   virtual std::shared_ptr<CudaGraphCaptureResources> take_cuda_capture_resources() {

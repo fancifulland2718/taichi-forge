@@ -3,6 +3,7 @@
 #include <limits>
 #include "taichi/common/operation_json.h"
 #include "taichi/program/texture.h"
+#include "taichi/program/launch_context_builder.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/texture_storage.h"
@@ -12,6 +13,81 @@
 #endif
 
 namespace taichi::lang {
+void NativeImageKernelBinding::validate_parameter(
+    Arch arch,
+    Device &device,
+    const CallableBase &kernel) const {
+  if (!image_ || arch != Arch::cuda || image_->arch() != arch ||
+      &image_->device() != &device)
+    throw std::invalid_argument(
+        "Kernel sampled image requires a qualified same-device CUDA owner");
+  const auto found = kernel.nested_parameters.find(argument_);
+  if (found == kernel.nested_parameters.end() ||
+      found->second.ptype != ParameterType::kTexture ||
+      found->second.needs_grad)
+    throw std::invalid_argument(
+        "Managed image requires a sampled Texture kernel parameter");
+  const auto &p = image_->parameters();
+  const auto dimensions = p.dimension == ImageDimension::d1D   ? 1u
+                          : p.dimension == ImageDimension::d2D ? 2u
+                          : p.dimension == ImageDimension::d3D ? 3u
+                                                               : 0u;
+  if (!dimensions || found->second.total_dim != dimensions ||
+      p.mip_levels != 1 || !is_float_sampled_texture_format(p.format))
+    throw std::invalid_argument(
+        "Sampled image does not match the kernel dimension/format contract");
+  for (auto extent : {p.x, p.y, p.z})
+    if (!extent || extent > std::numeric_limits<std::int32_t>::max())
+      throw std::invalid_argument(
+          "Kernel sampled-image shape must fit its positive i32 ABI");
+}
+
+NativeImageKernelBinding::NativeImageKernelBinding(
+    std::shared_ptr<NativeSampledImage> image,
+    std::vector<int> argument,
+    Arch arch,
+    Device &device,
+    const CallableBase &kernel,
+    LaunchContextBuilder &context)
+    : image_(std::move(image)),
+      argument_(std::move(argument)),
+      kernel_(&kernel),
+      context_(&context) {
+  validate_parameter(arch, device, kernel);
+  cuda_object_ = image_->cuda_sampled_object();
+  if (!cuda_object_)
+    throw std::invalid_argument("Managed CUDA sampled object is null");
+  context.set_arg_texture_impl(argument_,
+                               reinterpret_cast<intptr_t>(&cuda_object_));
+  const auto &p = image_->parameters();
+  const std::uint32_t shape[] = {p.x, p.y, p.z};
+  auto shape_index = argument_;
+  shape_index.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+  shape_index.push_back(0);
+  for (int i = 0; i < 3; ++i) {
+    shape_index.back() = i;
+    context.set_struct_arg(shape_index, static_cast<std::int32_t>(shape[i]));
+  }
+}
+
+void NativeImageKernelBinding::validate(
+    Arch arch,
+    Device &device,
+    const CallableBase &kernel,
+    const LaunchContextBuilder &context,
+    const NativeRecordingState &state) const {
+  validate_parameter(arch, device, kernel);
+  const auto pointer = context.array_ptrs.find(argument_);
+  const auto kind = context.device_allocation_type.find(argument_);
+  if (kernel_ != &kernel || context_ != &context ||
+      pointer == context.array_ptrs.end() || pointer->second != &cuda_object_ ||
+      kind == context.device_allocation_type.end() ||
+      kind->second != LaunchContextBuilder::DevAllocType::kTexture)
+    throw std::invalid_argument(
+        "Kernel sampled-image binding changed after qualification");
+  image_->validate_sampling(state);
+}
+
 namespace {
 struct SampledImageDescription {
   static constexpr const char *kind = "sampled_image";
@@ -196,6 +272,11 @@ class CudaImageUpload final : public NativeOperation {
   }
   size_t workspace_bytes() const override {
     return 0;
+  }
+  std::vector<std::uint64_t> cuda_binding_frame_invariants() const override {
+    // CUDA array/multidimensional copies cannot change operands in an
+    // instantiated graph. In-place source contents remain fully dynamic.
+    return {image_->cuda_sampled_object(), source_};
   }
   void validate_recording(NativeRecordingState &state) const override {
     state.initialized.insert(image_.get());

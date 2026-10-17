@@ -370,9 +370,36 @@ Discover `optix_query` version 3 (`cuda_ordered`) and `image_upload` version 1
 fast path. Alpha uses the existing ordered adapter API; this does not qualify
 OptiX stream capture. CUDA array residency is driver-private: packed texel bytes
 are `product(shape) * channels * channel_bytes`, separate from reported query
-workspace, which does not include image residency. Ordinary AOT kernel texture
-arguments remain unsupported; alpha recordings can export through the explicit
-image reconstruction contract below.
+workspace, which does not include image residency. Alpha recordings can export
+through the image reconstruction contract below.
+
+With matching private ABI77 components, explicit execution-plan kernels on CUDA
+may bind sampled `Texture` arguments directly to `image/sampled` resource names:
+
+```python
+{"kind": "kernel", "entry": "sample", "arguments": ["alpha_image", "output"]}
+```
+
+The compiled parameter must be a sampled Texture of the same dimension. Image
+owners stay alive through backend completion, including shared CUDA binding
+frames. Upload-before-sample is checked over the entire control flow: an upload
+only inside a conditional or zero-trip loop cannot initialize a later sample.
+Resource creation/qualification is cold; replay uses the existing CUDA launch
+packet without resolving Python texture names or inspecting texels.
+
+For `cuda_immutable_argument_frames`, image-upload source addresses must remain
+fixed across sibling bindings: CUDA cannot update the operands of captured
+multidimensional/array copies. Source contents and other kernel arguments may
+change. An incompatible sibling is rejected before CUDA Graph update and leaves
+the original executable usable; use independent preparation for a new upload
+source. This restriction follows the [CUDA Graph update rules](https://docs.nvidia.com/cuda/archive/12.2.2/cuda-c-programming-guide/index.html).
+
+Windows CUDA checks cover normalized 1D, non-square 2D linear/nearest sampling,
+3D axis order, seeded and GPU-updated images, captured and OptiX-ordered plans,
+shared binding retirement, and real gradients of downstream numeric kernels.
+This does not differentiate texture sampling. RWTexture, TextureCollection,
+Vulkan managed-image factories, ordinary public C API image handles, and automatic
+Graph export of kernel Texture arguments still require separate qualification.
 
 `refit` also accepts an updateable GAS. `instance_refit` requires an updateable
 instance scene: supplying `transforms` updates its matrices from device memory;
@@ -468,8 +495,8 @@ preparation; later seed-array writes do not implicitly upload the image. Native
 Public names and fixed private Graph bindings referring to the same Texture share
 one reconstructed image per preparation. UV and face-table bindings remain live.
 Missing/unused sources, retired textures and unsupported texture uses fail before
-publishing kernels. Ordinary kernel Texture arguments still require separate
-generation-qualified launch support.
+publishing kernels. Automatic export of ordinary kernel Texture arguments
+remains separate from the explicit-plan launch support described above.
 
 Windows CUDA automatic-export checks cover non-square r32f/RGBA images, shared
 public/private image bindings, producer/consumer contents that differ, separate
@@ -741,7 +768,7 @@ defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
 nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
 signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
 retirement are verified. Branches share code entries and replay does not parse
-descriptions. A v16 consumer and matching ABI76 components are required.
+descriptions. A v16 consumer and matching ABI77 components are required.
 `add_execution_plan(name, graph, gradients=...)` also exports IF/SWITCH selected
 for `cuda_masked_bounded_graph` under `native_required`, preserving physical
 boundaries, conditions and prefix/suffix operations. It deduplicates code by
@@ -863,7 +890,7 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI76 components.
+This requires a v14 consumer and matching private ABI77 components.
 `add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
 `masked`, preserving its physical dispatch boundaries and generating only the
 required body variants. Code is deduplicated by source specialization and launch
@@ -883,7 +910,7 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-format requires a v15 consumer and matching ABI76 components.
+format requires a v15 consumer and matching ABI77 components.
 `add_execution_plan(name, graph)` also exports materialized flat Graphs selected
 for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
 condition, generates only their gated variants, and shares code across plans.
