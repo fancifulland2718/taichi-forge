@@ -73,7 +73,6 @@ struct VulkanTriangleRayScene::State {
 
     create_blas();
     create_tlas();
-    create_query_pipeline();
   }
 
   ~State() {
@@ -439,10 +438,6 @@ struct VulkanTriangleRayScene::State {
     tlas_scratch_bytes_ = scratch_allocation_bytes(sizes.buildScratchSize);
     tlas_scratch_ = allocate(tlas_scratch_bytes_,
                              AllocUsage::Storage | AllocUsage::DeviceAddress);
-  }
-
-  void create_query_pipeline() {
-    query_.prepare(device_, 0);
   }
 
   void retain_build_resources(
