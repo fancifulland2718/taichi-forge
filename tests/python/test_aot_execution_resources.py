@@ -38,7 +38,13 @@ def test_source_free_execution_resources_and_gradients(tmp_path):
             {"kind": "copy", "source": "scratch_grad", "destination": "dx"},
         ],
         resources=[
-            {"kind": "ndarray", "name": "scratch", "dtype": "f32", "shape": [{"array": "shape_only", "axis": 0}]},
+            {
+                "kind": "ndarray",
+                "name": "scratch",
+                "dtype": "f32",
+                "shape": [{"array": "shape_only", "axis": 0}],
+                "usage": ["storage", "vertex", "uniform", "index"],
+            },
             {"kind": "ndarray", "name": "shape_only", "dtype": "f32", "shape": [{"array": "x", "axis": 0}, 3]},
             {"kind": "extent", "name": "n", "dtype": "i32", "array": "scratch", "axis": 0},
             {"kind": "ndarray", "name": "scratch_grad", "dtype": "f32", "shape": [{"array": "scratch", "axis": 0}]},

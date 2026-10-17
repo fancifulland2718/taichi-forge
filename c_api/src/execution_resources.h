@@ -15,7 +15,7 @@ class ExecutionResourceStorage {
   ExecutionResourceStorage(const ExecutionResourceStorage &) = delete;
   ExecutionResourceStorage &operator=(const ExecutionResourceStorage &) =
       delete;
-  TiMemory allocate(uint64_t bytes);
+  TiMemory allocate(uint64_t bytes, taichi::lang::AllocUsage usage);
   // Non-owning aliases; the execution resource closure retains their parents.
   TiMemory view(TiMemory parent, uint64_t offset, uint64_t bytes);
   // The enclosing prepared execution belongs to this same module and retires

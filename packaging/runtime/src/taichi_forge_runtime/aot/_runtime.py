@@ -523,19 +523,24 @@ class NativeResource(_Resource):
         self._owners = ()
 
 
+def _array_usage(usage):
+    flags = {"storage": 1, "uniform": 2, "vertex": 4, "index": 8}
+    if not isinstance(usage, (tuple, list)) or not usage or any(
+        not isinstance(item, str) or item not in flags for item in usage
+    ):
+        raise ValueError("Array usage must be a nonempty sequence of storage/uniform/vertex/index names")
+    bits = 0
+    for item in usage:
+        bits |= flags[item]
+    return bits
+
+
 class _Memory(_Resource):
     _kind = "memory"
 
     def __init__(self, runtime, size, usage=("storage",)):
         self.size = size
-        flags = {"storage": 1, "uniform": 2, "vertex": 4, "index": 8}
-        if not isinstance(usage, (tuple, list)) or not usage or any(
-            not isinstance(item, str) or item not in flags for item in usage
-        ):
-            raise ValueError("Array usage must be a nonempty sequence of storage/uniform/vertex/index names")
-        usage_bits = 0
-        for item in usage:
-            usage_bits |= flags[item]
+        usage_bits = _array_usage(usage)
         # Empty logical arrays still need a valid native binding token. Reserve
         # one physical byte; no transfer or array access uses that byte.
         info = abi.MemoryAllocateInfo(max(size, 1), False, False, False, usage_bits)

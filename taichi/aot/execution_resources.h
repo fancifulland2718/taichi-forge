@@ -29,6 +29,8 @@ struct ExecutionResources {
     // SHA-256 key of packed initial bytes in the module's data directory.
     // Each materialization receives independent mutable device storage.
     std::string initial_data;
+    // Physical buffer uses are fixed at allocation; views inherit them.
+    AllocUsage usage{AllocUsage::Storage};
   };
   struct Scalar {
     // Exact C API scalar payload, independent of JSON numeric precision.

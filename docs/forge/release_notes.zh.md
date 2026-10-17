@@ -37,6 +37,10 @@
   已验证独立/借用执行、资源退休和下游梯度；graphics Graph 自动导出及
   mesh/indirect 仍待接通，详见 [AOT SDK 合同](aot_sdk.zh.md#显式-vulkan-光栅计划)。
 
+- AOT v18 保存私有 ndarray 的 storage/uniform/vertex/index 用途，支持归档初始
+  数据及 view 用途继承；不声明该字段的计划保留原格式与默认值。要求配对 ABI88
+  组件，已验证三后端私有数组梯度和 Vulkan 从归档私有缓冲绘制。
+
 - Vulkan shader 反射在解析期间维护 result-ID 索引，避免每次查询都扫描整个模块。
   只启用验证、不导出产物时，跳过不会使用的诊断反射。`ti.compile_profile()` 可区分
   SPIR-V 生成、优化、验证、反射/布局准备和驱动 pipeline 创建；编译档位、shader

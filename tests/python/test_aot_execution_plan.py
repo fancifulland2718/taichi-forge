@@ -6,6 +6,26 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
+def test_private_array_usages_require_v18_and_preserve_views():
+    operations = [dict(kind="copy", source="view", destination="out")]
+    array = dict(kind="ndarray", name="vertices", dtype="f32", shape=[9], usage=["storage", "vertex"])
+    view = dict(kind="ndarray_view", name="view", array="vertices", offset=3, shape=[3])
+    plan = ExecutionPlan(operations, resources=[array, view])
+    document = json.loads(plan.to_json())
+    assert document["version"] == 18
+    assert plan.argument_names == ("out",)
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 18"):
+        ExecutionPlan.from_json(json.dumps(dict(document, version=17)))
+    for usage in ([], "vertex", ["unknown"], [True]):
+        with pytest.raises(ValueError, match="usage"):
+            ExecutionPlan(operations, resources=[dict(array, usage=usage), view])
+    with pytest.raises(ValueError, match="resource fields"):
+        ExecutionPlan(operations, resources=[array, dict(view, usage=["vertex"])])
+    del array["usage"]
+    assert json.loads(ExecutionPlan(operations, resources=[array, view]).to_json())["version"] == 1
+
+
 def test_resource_alias_constraints_require_v17_and_validate_paths():
     operations = [dict(kind="kernel", entry="consume", arguments=["scene", "gas"])]
     alias = dict(kind="resource_alias", left="scene", right="gas", left_path=["gas_0"], right_path=[])

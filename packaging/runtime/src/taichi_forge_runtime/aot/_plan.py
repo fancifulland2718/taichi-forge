@@ -7,7 +7,11 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 17
+_MAX_EXECUTION_PLAN_VERSION = 18
+
+
+def _resource_version(resources):
+    return 18 if any(isinstance(r, dict) and r.get("kind") == "ndarray" and "usage" in r for r in resources) else 1
 
 
 def _constraint_version(constraints):
@@ -95,6 +99,7 @@ class ExecutionPlan:
         document["version"] = max(
             document["version"], _control_version(document["operations"] + document.get("initialization", [])),
             _constraint_version(document.get("constraints", [])),
+            _resource_version(document.get("resources", [])),
         )
         # Own a snapshot, including nested arrays; caller mutations cannot alter
         # a saved plan. This module remains usable without a native library.
@@ -134,7 +139,8 @@ class ExecutionPlan:
         if "constraints" in value and not isinstance(value["constraints"], list):
             raise ValueError("Execution constraints must be a list")
         required = max(_control_version(value["operations"] + value.get("initialization", [])),
-                       _constraint_version(value.get("constraints", [])))
+                       _constraint_version(value.get("constraints", [])),
+                       _resource_version(value.get("resources", [])))
         if "binding_strategy" in value:
             if value["binding_strategy"] != "cuda_immutable_argument_frames":
                 raise ValueError("Unsupported execution binding strategy")

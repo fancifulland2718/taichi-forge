@@ -20,7 +20,7 @@ def retained_arguments(resources, gradients, arguments):
 
 
 def external_arguments(resources, gradients, arguments):
-    from ._runtime import _dtype, _name
+    from ._runtime import _dtype, _name, _array_usage
     from ._native import NATIVE_FIELDS, native_references
 
     if not isinstance(resources, list) or not isinstance(gradients, dict):
@@ -47,6 +47,7 @@ def external_arguments(resources, gradients, arguments):
                 "element_shape",
                 "zero_initialize",
                 "initial_data",
+                "usage",
             }
         elif kind == "extent":
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
@@ -88,6 +89,8 @@ def external_arguments(resources, gradients, arguments):
         elif kind == "module_array":
             _name(resource["view"])
         elif kind in ("ndarray", "ndarray_view"):
+            if "usage" in resource:
+                _array_usage(resource["usage"])
             if kind == "ndarray_view":
                 _name(resource["array"])
                 refs.append(resource["array"])

@@ -647,7 +647,10 @@ descriptor 完整性、类型/数量、真实用途、逻辑范围、对齐及�
 
 共享计算与绘制的数组使用 `runtime.ndarray(..., usage=("storage", "vertex"))`。
 用途支持 `storage`、`uniform`、`vertex`、`index`，默认保持 `("storage",)`；用途声明
-不添加同步，也不扫描索引内容。本版计划私有 ndarray 仍按 storage 分配，绘制数组由外部提供。
+不添加同步，也不扫描索引内容。计划私有 ndarray 可声明相同 `usage` 列表，要求 v18
+格式及配对 ABI88 组件；省略时保持 storage 分配，不提高计划版本。`ndarray_view`
+继承父分配的真实用途，不能重新声明。vertex/index/uniform 可结合归档 `initial_data`
+重建，使固定绘制数据保持私有。
 Vulkan `image/sampled` 可指定 `attachment=true`，附件须为单 mip 二维图像。首次完整
 clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样仍须有先前无条件初始化，
 仅条件分支内的 clear 不足以证明。单 pass 内采样附件别名会被拒绝。队列、布局转换、

@@ -832,7 +832,11 @@ Use `runtime.ndarray(..., usage=("storage", "vertex"))` for arrays shared by
 compute and drawing; supported allocation usages are `storage`, `uniform`,
 `vertex` and `index`. The default remains `("storage",)`. This declaration
 does not add synchronization or inspect index contents. Plan-private ndarray
-allocations still use storage; supply drawing arrays externally in this version.
+resources accept the same `usage` list with execution format v18 and paired
+ABI88 components. Omitted usage keeps the previous storage allocation and
+does not raise the plan version. `ndarray_view` inherits its parent's actual
+usages and cannot redeclare them. Archived `initial_data` works with vertex,
+index and uniform buffers, allowing fixed drawing data to remain private.
 For images, `image/sampled` accepts `attachment=true` on Vulkan. Attachments
 must be single-level 2D images. A first complete clear needs no seed image or
 upload, even with a partial draw viewport. LOAD and sampling require an earlier

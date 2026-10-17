@@ -15,7 +15,8 @@ ExecutionResourceStorage::~ExecutionResourceStorage() {
   }
 }
 
-TiMemory ExecutionResourceStorage::allocate(uint64_t bytes) {
+TiMemory ExecutionResourceStorage::allocate(uint64_t bytes,
+                                            taichi::lang::AllocUsage usage) {
   // Empty logical arrays still need a live, aligned binding identity.
   const auto physical = std::max<uint64_t>(1, bytes);
   if (physical > std::numeric_limits<std::size_t>::max() ||
@@ -23,7 +24,7 @@ TiMemory ExecutionResourceStorage::allocate(uint64_t bytes) {
     throw MemoryBindingError("Execution resources overflow address space");
   taichi::lang::Device::AllocParams params{};
   params.size = physical;
-  params.usage = taichi::lang::AllocUsage::Storage;
+  params.usage = usage;
   auto memory = runtime_.allocate_memory(params);
   try {
     sizes_.emplace(memory, physical);
@@ -390,15 +391,20 @@ ExecutionResourceBindings bind_execution_resources(
             resources.declarations[resources.order[pos]].value) &&
         resources.materialize[resources.order[pos]] &&
         argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
+      const auto usage = std::get<Recipes::Array>(
+                             resources.declarations[resources.order[pos]].value)
+                             .usage;
       if (shared) {
         if (shared_array(name, argument.value.ndarray))
           continue;
-        argument.value.ndarray.memory = shared->storage->allocate(sizes[pos]);
+        argument.value.ndarray.memory =
+            shared->storage->allocate(sizes[pos], usage);
         shared->arrays.emplace(name, argument.value.ndarray);
       } else {
         if (!result.storage)
           result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
-        argument.value.ndarray.memory = result.storage->allocate(sizes[pos]);
+        argument.value.ndarray.memory =
+            result.storage->allocate(sizes[pos], usage);
       }
       if (std::get<Recipes::Array>(
               resources.declarations[resources.order[pos]].value)

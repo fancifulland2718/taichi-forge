@@ -205,8 +205,7 @@ def main(mode, artifact, output):
                 v for i in range(64) for v in ([0.5, 0, 0, 1] if i % 8 < 4 else [0, 0, 1, 1])
             ]
         calls = {}
-        for private in (False, True):
-            name = "private" if private else "public"
+        for name in ("public", "private", "private_arrays"):
             supplied = {k: available[k] for k in module.execution_plan(name).argument_names}
             start = time.perf_counter()
             call = module.prepare_execution(name, supplied)
@@ -224,7 +223,7 @@ def main(mode, artifact, output):
                 runtime.wait()
                 times.append((time.perf_counter_ns() - start) / 1000)
             costs["cases"][name].update(host_us=statistics.median(hosts), complete_us=statistics.median(times))
-            if not private:
+            if name == "public":
                 with runtime.load_module(artifact) as sibling_module:
                     with sibling_module.prepare_execution(name, supplied) as sibling:
                         sibling()
@@ -244,9 +243,15 @@ def main(mode, artifact, output):
         raises(calls["public"])
         calls["private"]()
         check(frame, [0, 1, 0])
+        # Private drawing arrays, including the offset vertex view, are rebuilt
+        # from archived data and survive closing unrelated public storage.
+        frame["vertices"].close()
+        frame["positions"].close()
+        calls["private_arrays"]()
+        check(frame, [0, 1, 0])
         if mode == "borrowed":
             ti.reset()
-            raises(calls["private"])
+            raises(calls["private_arrays"])
         for call in calls.values():
             call.close()
         for resource in owners.values():

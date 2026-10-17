@@ -134,8 +134,29 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
       resource.dtype = name(value["dtype"]);
       if (kind == "ndarray") {
         fields(value, {"kind", "name", "dtype", "shape", "element_shape",
-                       "zero_initialize", "initial_data"});
+                       "zero_initialize", "initial_data", "usage"});
         auto &array = std::get<Array>(resource.value);
+        if (const auto usage = value.obj.inner.find("usage");
+            usage != value.obj.inner.end()) {
+          if (integer(root["version"]) < 18)
+            throw std::invalid_argument(
+                "Array usages require execution plan version 18");
+          if (!usage->second.is_arr() || usage->second.arr.inner.empty())
+            throw std::invalid_argument(
+                "Array usage must be a nonempty name array");
+          array.usage = AllocUsage::None;
+          for (const auto &item : usage->second.arr.inner) {
+            const auto label = name(item);
+            const auto flag = label == "storage"   ? AllocUsage::Storage
+                              : label == "uniform" ? AllocUsage::Uniform
+                              : label == "vertex"  ? AllocUsage::Vertex
+                              : label == "index"   ? AllocUsage::Index
+                                                   : AllocUsage::None;
+            if (flag == AllocUsage::None)
+              throw std::invalid_argument("Unknown array usage: " + label);
+            array.usage = array.usage | flag;
+          }
+        }
         array.shape = shape(value["shape"]);
         array.zero_initialize = optional_bool(value, "zero_initialize");
         if (const auto data = value.obj.inner.find("initial_data");

@@ -43,6 +43,12 @@ lifetimes. The entries below describe the changes.
   graphics Graph export and mesh/indirect coverage remain pending. See the
   [AOT SDK contract](aot_sdk.en.md#explicit-vulkan-raster-plans).
 
+- AOT v18 preserves explicit storage/uniform/vertex/index usages on private
+  ndarrays, including archived initial data and inherited view usages. Plans
+  without this field retain their existing format/default. Requires paired
+  ABI88 components; CPU/CUDA/Vulkan private-array gradients and Vulkan drawing
+  from archived private buffers are qualified.
+
 - Vulkan shader reflection maintains a parser-local result-ID index instead of
   repeatedly scanning the module. Validation without an artifact capture skips
   unused diagnostic reflection. `ti.compile_profile()` separates SPIR-V emission,

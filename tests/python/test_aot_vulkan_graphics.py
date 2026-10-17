@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import time
 
@@ -56,12 +57,33 @@ def test_aot_vulkan_graphics_reconstruction_and_gradients(tmp_path):
                 name="instance_pipeline" if instanced else "pipeline",
             )
         )
-    for private in (False, True):
+    arrays = []
+    for name, dtype, usage, values in [
+        ("vertices", "f32", "vertex", [v for xy in [(-1, -1), (3, -1), (-1, 3)] for v in [*xy, 1, 0, 0, 0.5, 0.5]]),
+        ("positions_storage", "f32", "vertex", [99, 99, -1, -1, 3, -1, -1, 3]),
+        ("indices", "u32", "index", [0, 1, 2]),
+        ("uniform", "f32", "uniform", [1, 0, 0, 0]),
+    ]:
+        payload = struct.pack(f"<{len(values)}{'I' if dtype == 'u32' else 'f'}", *values)
+        arrays.append(
+            dict(
+                kind="ndarray",
+                name=name,
+                dtype=dtype,
+                shape=[len(values)],
+                usage=[usage],
+                initial_data=module.add_data(payload),
+            )
+        )
+    arrays.append(dict(kind="ndarray_view", name="positions", array="positions_storage", offset=2, shape=[6]))
+    for name in ("public", "private", "private_arrays"):
         resources = [dict(kind="ndarray", name="dloss", dtype="f32", shape=[1])]
-        if private:
+        if name != "public":
             resources += pipelines + image_resources()
+        if name == "private_arrays":
+            resources += arrays
         module.add_execution_plan(
-            "private" if private else "public",
+            name,
             ti.aot.ExecutionPlan(operations(), resources=resources, gradients=dict(features="dfeatures", loss="dloss")),
         )
     costs = dict(compile_ms=(time.perf_counter() - start) * 1000)
