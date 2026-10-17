@@ -7,6 +7,7 @@
 #include "taichi/common/operation_json.h"
 #include "taichi/optix/forge_optix_runtime_provider.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_optix_access.h"
 #include "taichi/runtime/native_image.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/program/runtime_fault.h"
@@ -16,14 +17,15 @@
 
 namespace taichi::lang {
 namespace {
+using native_optix::calls_safe;
+using native_optix::check;
 struct OptixContextDescription {
   static constexpr const char *kind = "optix_context";
   static constexpr uint32_t version = 1;
   bool validation{false};
 };
 
-class OptixContextResource : public NativeResource {
-};
+using OptixContextResource = NativeOptixContext;
 
 struct OptixSceneDescription {
   static constexpr const char *kind = "optix_triangle_scene";
@@ -49,7 +51,7 @@ struct OptixInstancesDescription {
   bool allow_update{false};
 };
 
-class OptixSceneResource : public NativeResource {
+class OptixSceneResource : public NativeOptixScene {
  public:
   template <typename Description>
   explicit OptixSceneResource(Description description)
@@ -69,7 +71,7 @@ class OptixSceneResource : public NativeResource {
   const OptixInstancesDescription &instances() const {
     return std::get<OptixInstancesDescription>(description_);
   }
-  std::shared_ptr<OptixContextResource> context() const {
+  std::shared_ptr<OptixContextResource> context() const override {
     return std::visit([](const auto &d) { return d.context; }, description_);
   }
   bool allow_update() const {
@@ -331,9 +333,7 @@ std::vector<uint32_t> instance_values(const liong::json::JsonValue &p,
 }
 
 #ifdef TI_WITH_CUDA
-const NativeProviderDefinition definition{
-    "optix", TI_FORGE_OPTIX_RUNTIME_PROVIDER_QUERY_SYMBOL,
-    TI_FORGE_OPTIX_RUNTIME_VERSION_FAMILY};
+const auto &definition = native_optix::provider_definition();
 
 TiForgeOptixProviderApi execution_api(const NativeProviderRuntime &runtime) {
   const auto api = runtime.execution_api<TiForgeOptixExecutionApi>().provider;
@@ -385,24 +385,6 @@ NativeOperationAvailability probe(NativeProviderSession &providers) {
 uint64_t address(const NativeArrayBinding &array) {
   return resolve_native_storage_range(Arch::cuda, array.pointer, array.bytes)
       .memory_offset;
-}
-
-void check(const TiForgeOptixProviderApi &api,
-           TiForgeOptixResult result,
-           const char *operation) {
-  if (result == TI_FORGE_OPTIX_SUCCESS)
-    return;
-  const auto bytes = api.get_last_error(nullptr, 0);
-  std::vector<char> message(std::max(size_t(1), bytes), 0);
-  api.get_last_error(message.data(), message.size());
-  message.back() = 0;
-  throw std::runtime_error(std::string("OptiX ") + operation + " (" +
-                           std::to_string(int(result)) + "): " + message.data());
-}
-
-bool calls_safe(const std::shared_ptr<RuntimeFaultDomain> &fault) {
-  return fault && fault->backend_calls_safe() &&
-         fault->state() != RuntimeLifecycleState::kFinalized;
 }
 
 // On a lost/finalized device, preserve the complete adapter/context lease.
@@ -468,6 +450,11 @@ class CudaOptixContext final : public OptixContextResource {
   Arch arch() const override { return Arch::cuda; }
   Device &device() const override { return device_; }
   size_t workspace_bytes() const override { return sbt_bytes; }
+  const TiForgeOptixProviderApi &provider_api() const override {
+    return lease->api;
+  }
+  TiForgeOptixContext context_handle() const override { return lease->handle; }
+  std::shared_ptr<RuntimeFaultDomain> fault_domain() const override { return fault; }
   std::shared_ptr<RuntimeFaultDomain> fault;
   std::unique_ptr<ContextLease> lease;
   size_t sbt_bytes{0};
@@ -600,6 +587,11 @@ class CudaOptixScene final : public OptixSceneResource,
   Arch arch() const override { return Arch::cuda; }
   Device &device() const override { return context()->device(); }
   size_t workspace_bytes() const override { return bytes_; }
+  TiForgeOptixProgramScene program_scene() const override {
+    if (is_gas())
+      throw std::invalid_argument("OptiX program scene requires a triangle scene or IAS");
+    return {lease->handle, uint32_t(is_instances())};
+  }
   void update_memory() {
     TiForgeOptixSceneMemory memory{sizeof(memory)};
     const auto &api = lease->context->lease->api;
