@@ -69,9 +69,10 @@ bool NativeStorageRange::proven_same_range(
          memory_offset == other.memory_offset;
 }
 
-void validate_native_disjoint_writes(
-    const std::vector<NativeStorageRange> &reads,
-    const std::vector<NativeStorageWrite> &writes) {
+namespace {
+void validate_access_group(const std::vector<NativeStorageRange> &reads,
+                           const std::vector<NativeStorageWrite> &writes,
+                           bool exclusive_writes) {
   Device *owner = nullptr;
   std::map<uint64_t, std::pair<uint64_t, uint64_t>> buffers;
   auto validate_owner = [&](const NativeStorageRange &range) {
@@ -96,6 +97,7 @@ void validate_native_disjoint_writes(
   bool has_writes = false;
   std::optional<uint64_t> unknown_buffer;
   bool unknown_write = false;
+  bool unknown_read = false;
   auto unknown = [&](const NativeStorageRange &range, bool write) {
     if (range.bytes && !range.memory) {
       if (!range.buffer || (unknown_buffer && *unknown_buffer != range.buffer))
@@ -103,6 +105,7 @@ void validate_native_disjoint_writes(
             "Cannot prove imported array group disjoint");
       unknown_buffer = range.buffer;
       unknown_write |= write;
+      unknown_read |= !write;
     }
   };
   for (const auto &write : writes) {
@@ -114,6 +117,10 @@ void validate_native_disjoint_writes(
   }
   if (!has_writes)
     return;
+  if (!exclusive_writes &&
+      std::none_of(reads.begin(), reads.end(),
+                   [](const auto &range) { return range.bytes != 0; }))
+    return;
   for (const auto &read : reads)
     unknown(read, false);
   for (const auto &write : writes)
@@ -121,9 +128,10 @@ void validate_native_disjoint_writes(
   if (unknown_buffer) {
     // Unknown memory can only be certified against the same buffer. If an
     // unknown port writes, every nonempty read must also use that buffer.
-    for (const auto &write : writes)
-      if (write.range.bytes && write.range.buffer != *unknown_buffer)
-        throw std::invalid_argument("Cannot prove imported writes disjoint");
+    if (exclusive_writes || unknown_read)
+      for (const auto &write : writes)
+        if (write.range.bytes && write.range.buffer != *unknown_buffer)
+          throw std::invalid_argument("Cannot prove imported writes disjoint");
     if (unknown_write)
       for (const auto &read : reads)
         if (read.bytes && read.buffer != *unknown_buffer)
@@ -159,6 +167,21 @@ void validate_native_disjoint_writes(
       append(writes[i].range, true, i);
     std::sort(events.begin(), events.end(),
               [](const auto &a, const auto &b) { return a.key() < b.key(); });
+    if (!exclusive_writes) {
+      std::size_t active_reads = 0, active_writes = 0;
+      for (const auto &event : events) {
+        auto &active = event.write ? active_writes : active_reads;
+        if (!event.begin) {
+          --active;
+        } else {
+          if (event.write ? active_reads != 0 : active_writes != 0)
+            throw std::invalid_argument(
+                "Array read group overlaps write group");
+          ++active;
+        }
+      }
+      return;
+    }
     std::set<std::size_t> active_reads;
     std::optional<std::size_t> active_write;
     auto allowed = [&](std::size_t write, std::size_t read) {
@@ -186,10 +209,27 @@ void validate_native_disjoint_writes(
       }
     }
   };
-  if (!unknown_write)
+  if (!exclusive_writes || !unknown_write)
     sweep(false);
   if (unknown_buffer)
     sweep(true);
+}
+}  // namespace
+
+void validate_native_disjoint_writes(
+    const std::vector<NativeStorageRange> &reads,
+    const std::vector<NativeStorageWrite> &writes) {
+  validate_access_group(reads, writes, true);
+}
+
+void validate_native_read_write_disjoint(
+    const std::vector<NativeStorageRange> &reads,
+    const std::vector<NativeStorageRange> &writes) {
+  std::vector<NativeStorageWrite> outputs;
+  outputs.reserve(writes.size());
+  for (const auto &write : writes)
+    outputs.push_back({write, std::nullopt});
+  validate_access_group(reads, outputs, false);
 }
 
 NativeStorageRange resolve_native_storage_range(Arch arch,

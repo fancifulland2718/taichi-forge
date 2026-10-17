@@ -4,6 +4,7 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/vulkan_graphics_pass.h"
 #include "taichi/runtime/vulkan_ray_query.h"
 #include <limits>
 #include "tests/cpp/aot/gfx_utils.h"
@@ -573,7 +574,8 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
   } storage{device};
   VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   info.size = 64;
-  info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  info.usage =
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
   info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   for (auto &buffer : storage.buffers)
     ASSERT_EQ(vk.vkCreateBuffer(handle, &info, nullptr, &buffer), VK_SUCCESS);
@@ -602,7 +604,7 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
               VK_SUCCESS);
     storage.imports.push_back(device->import_vkbuffer(
         vkapi::create_buffer(handle, storage.buffers[i], info.usage), info.size,
-        storage.memory, offset));
+        storage.memory, offset, AllocUsage::Storage | AllocUsage::Indirect));
   }
   const auto range = [&](std::size_t i) {
     return resolve_native_storage_range(Arch::vulkan,
@@ -625,6 +627,27 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
   tail.offset = 48;
   EXPECT_THROW(resolve_native_storage_range(Arch::vulkan, tail, 17),
                std::invalid_argument);
+
+  // Distinct VkBuffers bound to the same memory must also participate in
+  // indirect-command/shader-write exclusion; write/write repeats are legal
+  // for this certificate, which does not qualify shader ordering.
+  VulkanGraphicsIndirectAccesses accesses;
+  accesses.reads = {{storage.imports[0].get_ptr(), 16}};
+  accesses.writes = {{storage.imports[1].get_ptr(16), 16},
+                     {storage.imports[1].get_ptr(16), 16}};
+  EXPECT_NO_THROW(accesses.validate(*device));
+  accesses.writes[1] = {storage.imports[1].get_ptr(15), 16};
+  EXPECT_ANY_THROW(accesses.validate(*device));
+  accesses.writes = {{storage.imports[2].get_ptr(), 64}};
+  EXPECT_NO_THROW(accesses.validate(*device));
+  auto unknown = device->import_vkbuffer(
+      vkapi::create_buffer(handle, storage.buffers[1], info.usage), info.size,
+      VK_NULL_HANDLE, 0, AllocUsage::Storage | AllocUsage::Indirect);
+  storage.imports.push_back(unknown);
+  accesses.writes = {{unknown.get_ptr(16), 16}};
+  EXPECT_ANY_THROW(accesses.validate(*device));
+  accesses.reads = {{storage.imports[1].get_ptr(), 16}};
+  EXPECT_NO_THROW(accesses.validate(*device));
 }
 
 TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {

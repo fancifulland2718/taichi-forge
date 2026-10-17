@@ -1092,6 +1092,61 @@ TEST(ExecutionPlan, DisjointWriteGroupsCertifyImportedBufferRanges) {
                std::invalid_argument);
 }
 
+TEST(ExecutionPlan, ReadWriteGroupsAllowSameSideOverlapOnly) {
+  auto *device = reinterpret_cast<Device *>(std::uintptr_t(1));
+  NativeStorageRange a{device, 1, 16, 4, 0, 16};
+  NativeStorageRange b{device, 1, 32, 4, 16, 16};
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({a, a}, {b, b}));
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({}, {a, a}));
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({a, a}, {}));
+  EXPECT_THROW(validate_native_read_write_disjoint({a}, {a}),
+               std::invalid_argument);
+  auto alias = a;
+  alias.buffer = 5;
+  EXPECT_THROW(validate_native_read_write_disjoint({a}, {alias}),
+               std::invalid_argument);
+  alias.memory_offset += 15;
+  EXPECT_THROW(validate_native_read_write_disjoint({a}, {alias}),
+               std::invalid_argument);
+  alias.memory_offset += 1;
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({a}, {alias}));
+  auto invalid = b;
+  invalid.memory = 2;
+  EXPECT_THROW(validate_native_read_write_disjoint({a}, {invalid}),
+               std::invalid_argument);
+  invalid = b;
+  invalid.device = reinterpret_cast<Device *>(std::uintptr_t(2));
+  EXPECT_THROW(validate_native_read_write_disjoint({a}, {invalid}),
+               std::invalid_argument);
+  invalid = b;
+  invalid.bytes = std::numeric_limits<uint64_t>::max();
+  EXPECT_THROW(validate_native_read_write_disjoint({a}, {invalid}),
+               std::invalid_argument);
+}
+
+TEST(ExecutionPlan, ReadWriteGroupsQualifyUnknownImportedMemory) {
+  auto *device = reinterpret_cast<Device *>(std::uintptr_t(1));
+  NativeStorageRange read{device, 3, 128, 9, 0, 16};
+  NativeStorageRange write{device, 0, 0, 9, 16, 16};
+  NativeStorageRange other{device, 3, 160, 10, 0, 16};
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({read}, {write, other}));
+  // The unknown-memory write does not suppress checking the known alias.
+  other.memory_offset = 128;
+  EXPECT_THROW(validate_native_read_write_disjoint({read}, {write, other}),
+               std::invalid_argument);
+  other.memory = 0;
+  EXPECT_THROW(validate_native_read_write_disjoint({read}, {other}),
+               std::invalid_argument);
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({}, {write, other}));
+  read.memory = 0;
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({read, read}, {write}));
+  write.buffer_offset = 15;
+  EXPECT_THROW(validate_native_read_write_disjoint({read}, {write}),
+               std::invalid_argument);
+  write.bytes = 0;
+  EXPECT_NO_THROW(validate_native_read_write_disjoint({read}, {write}));
+}
+
 TEST(ExecutionPlan, KernelLabelsBelongToDispatches) {
   const auto plan = ExecutionPlan::parse(R"({"version":2,
     "initialization":[{"kind":"kernel","entry":"shared","arguments":["x"],"label":"init"}],

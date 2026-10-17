@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include "taichi/program/texture.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/runtime/native_array_contract.h"
 
 namespace taichi::lang {
 VulkanGraphicsPassTargets prepare_vulkan_graphics_pass_targets(
@@ -224,44 +225,27 @@ void VulkanGraphicsIndirectAccesses::validate(
     vulkan::VulkanDevice &device) const {
   if (reads.empty() || writes.empty())
     return;
-  using Interval = std::pair<size_t, size_t>;
-  std::map<VkBuffer, std::vector<Interval>> by_buffer;
-  auto interval = [&](const DeviceBufferRange &range, AllocUsage usage) {
-    const auto bytes =
-        validate_buffer_range(device, range.pointer, range.bytes, usage);
-    return Interval{range.pointer.offset, range.pointer.offset + bytes};
-  };
-  for (const auto &write : writes) {
-    const auto bounds = interval(write, AllocUsage::Storage);
-    by_buffer[device.get_vkbuffer(write.pointer)->buffer].push_back(bounds);
-  }
-  for (auto &[buffer, intervals] : by_buffer) {
-    std::sort(intervals.begin(), intervals.end());
-    size_t retained = 0;
-    for (const auto &entry : intervals) {
-      if (retained && entry.first <= intervals[retained - 1].second)
-        intervals[retained - 1].second =
-            std::max(intervals[retained - 1].second, entry.second);
-      else
-        intervals[retained++] = entry;
+  auto resolve = [&](const auto &ranges, AllocUsage usage) {
+    std::vector<NativeStorageRange> result;
+    result.reserve(ranges.size());
+    for (const auto &range : ranges) {
+      const auto bytes =
+          validate_buffer_range(device, range.pointer, range.bytes, usage);
+      result.push_back(
+          resolve_native_storage_range(Arch::vulkan, range.pointer, bytes));
     }
-    intervals.resize(retained);
-  }
-  for (const auto &read : reads) {
-    const auto bounds = interval(read, AllocUsage::Indirect);
-    const auto found =
-        by_buffer.find(device.get_vkbuffer(read.pointer)->buffer);
-    if (found == by_buffer.end())
-      continue;
-    const auto &intervals = found->second;
-    const auto next = std::lower_bound(
-        intervals.begin(), intervals.end(), bounds.second,
-        [](const Interval &entry, size_t end) { return entry.first < end; });
-    TI_ERROR_IF(
-        next != intervals.begin() && std::prev(next)->second > bounds.first,
-        "Vulkan indirect command/count ranges overlap writable shader storage "
-        "in the same pass; "
-        "use separate passes for dependent draws.");
+    return result;
+  };
+  const auto command_reads = resolve(reads, AllocUsage::Indirect);
+  const auto shader_writes = resolve(writes, AllocUsage::Storage);
+  try {
+    validate_native_read_write_disjoint(command_reads, shader_writes);
+  } catch (const std::invalid_argument &error) {
+    TI_ERROR(
+        "Vulkan indirect command/count ranges may overlap writable shader "
+        "storage in the same pass; use separate passes for dependent draws. "
+        "{}",
+        error.what());
   }
 }
 

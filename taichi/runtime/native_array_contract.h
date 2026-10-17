@@ -43,6 +43,13 @@ void validate_native_disjoint_writes(
     const std::vector<NativeStorageRange> &reads,
     const std::vector<NativeStorageWrite> &writes);
 
+// Prove only cross-group separation. Repeated/overlapping ranges within either
+// group are legal here; this is not a certificate for write/write ordering.
+// Shares the owner, imported-memory and O(N log N) range validation above.
+void validate_native_read_write_disjoint(
+    const std::vector<NativeStorageRange> &reads,
+    const std::vector<NativeStorageRange> &writes);
+
 // Requirements on a packed scalar/AoS array. Adapters must qualify packed
 // storage first; shape metadata alone is not proof that an affine view is
 // packed.
