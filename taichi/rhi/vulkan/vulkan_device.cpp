@@ -310,6 +310,11 @@ bool VulkanPipeline::color_attachment_blends(std::size_t index) const {
   return graphics_pipeline_template_->blend_attachments.at(index).blendEnable;
 }
 
+const std::vector<uint64_t> &VulkanPipeline::graphics_writable_buffers() const {
+  RHI_ASSERT(graphics_pipeline_template_);
+  return graphics_pipeline_template_->writable_buffers;
+}
+
 void VulkanPipeline::validate_sampled_texture(std::uint32_t set,
                                              std::uint32_t binding,
                                              bool comparison) const {
@@ -504,6 +509,17 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
                                 VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
                                 VK_SHADER_STAGE_GEOMETRY_BIT)) &&
             !caps.vertex_pipeline_stores_and_atomics;
+        const bool storage_buffer = binding->descriptor_type ==
+                                    SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        const bool read_only =
+            (graphics_pipeline_template_ || fragment_needs_read_only ||
+             vertex_needs_read_only) &&
+            ((binding->decoration_flags &
+              SPV_REFLECT_DECORATION_NON_WRITABLE) ||
+             (storage_buffer && storage_members_read_only(binding->block)));
+        if (graphics_pipeline_template_ && storage_buffer && !read_only)
+          graphics_pipeline_template_->writable_buffers.push_back(
+              (uint64_t(desc_set->set) << 32) | binding->binding);
         if ((fragment_needs_read_only || vertex_needs_read_only) &&
             (binding->descriptor_type ==
                  SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
@@ -511,12 +527,6 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
                  SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
              binding->descriptor_type ==
                  SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)) {
-          const bool read_only =
-              (binding->decoration_flags &
-               SPV_REFLECT_DECORATION_NON_WRITABLE) ||
-              (binding->descriptor_type ==
-                   SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
-               storage_members_read_only(binding->block));
           RHI_THROW_UNLESS(
               read_only, std::invalid_argument(
                              fragment_needs_read_only
@@ -784,6 +794,11 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
 }
 
 void VulkanPipeline::create_shader_stages(const Params &params) {
+  if (graphics_pipeline_template_) {
+    auto &writable = graphics_pipeline_template_->writable_buffers;
+    std::sort(writable.begin(), writable.end());
+    writable.erase(std::unique(writable.begin(), writable.end()), writable.end());
+  }
   TI_COMPILE_PROFILER("cpp.vulkan.create_shader_modules");
   // Reserve before creating handles; allocation failure cannot strand a module.
   shader_modules_.reserve(params.code.size());

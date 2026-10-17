@@ -69,6 +69,11 @@ lifetimes. The entries below describe the changes.
   Mixed readonly/writable storage-block members remain writable for admission.
   Split native components require paired ABI94; AOT graphics formats are unchanged.
 
+- Indirect pass preparation rejects command/count spans overlapping writable
+  shader storage on the same Vulkan buffer, including descriptor-array views.
+  Readonly shader bindings are excluded, and adjacent/non-overlapping spans stay
+  valid. Cold checks merge repeated ranges; replay adds no alias scans.
+
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache

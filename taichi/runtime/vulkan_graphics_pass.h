@@ -88,6 +88,19 @@ struct VulkanGraphicsIndirectPacket : VulkanGraphicsIndirectParameters {
   DeviceAllocation count_buffer{kDeviceNullAllocation};
 };
 
+// Cold, temporary pass-wide access certificate. Readonly shader bindings do
+// not become alias candidates. No owners or per-draw access scans survive into
+// replay. The caller retains owners and validates each prepared packet/view.
+struct VulkanGraphicsIndirectAccesses {
+  std::vector<DeviceBufferRange> reads;
+  std::vector<DeviceBufferRange> writes;
+  void add_indirect(bool indexed, const VulkanGraphicsIndirectPacket &packet);
+  void add_shader_buffers(
+      const vulkan::VulkanPipeline &pipeline,
+      const std::vector<VulkanGraphicsShaderBufferView> &buffers);
+  void validate(vulkan::VulkanDevice &device) const;
+};
+
 // Produces physical offsets while retaining the caller's logical view bounds.
 // No command readback: vertex/instance/index limits are producer promises.
 // Caller qualifies u32 data and retains the array owners through completion.

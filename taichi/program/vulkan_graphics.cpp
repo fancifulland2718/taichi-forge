@@ -994,6 +994,21 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     }
   }
 
+  VulkanGraphicsIndirectAccesses indirect_accesses;
+  for (const auto &recorded : recorded_draws)
+    if (recorded.indirect)
+      indirect_accesses.add_indirect(recorded.draw.indexed, *recorded.indirect);
+  if (!indirect_accesses.reads.empty()) {
+    for (const auto &recorded : recorded_draws) {
+      auto pipeline = recorded.pipeline.lock();
+      TI_ERROR_IF(!pipeline, "Vulkan graphics pipeline closed during preparation.");
+      indirect_accesses.add_shader_buffers(
+          *static_cast<vulkan::VulkanPipeline *>(pipeline->pipeline()),
+          recorded.shader_buffers);
+    }
+    indirect_accesses.validate(*device);
+  }
+
   auto resource_payload =
       std::make_shared<PreparedVulkanGraphicsResourcePayload>();
   auto resource_lease =

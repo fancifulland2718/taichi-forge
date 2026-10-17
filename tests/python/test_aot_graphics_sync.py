@@ -17,6 +17,54 @@ from tests import test_utils
 from tests.python.test_aot_graphics_export import selected_graphics
 
 
+def _storage_write_pipeline():
+    graphics = ti.hardware.graphics
+    assets = Path(__file__).parent / "assets"
+    try:
+        return graphics.VulkanGraphicsPipeline(
+            (assets / "graphics_sync.vert.spv").read_bytes(),
+            (assets / "graphics_sync.frag.spv").read_bytes(),
+            vertex_bindings=(graphics.VertexBinding(0, 8),),
+            vertex_attributes=(graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),),
+            shader_buffer_bindings=(
+                graphics.ShaderBufferBinding(0, 0, "uniform"),
+                graphics.ShaderBufferBinding(0, 1, "storage", "write"),
+            ),
+        )
+    except (ValueError, RuntimeError) as exc:
+        if "requires fragmentStoresAndAtomics" in str(exc):
+            pytest.skip("Device lacks fragment storage writes")
+        raise
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_indirect_rejects_same_pass_shader_write_alias():
+    graphics = ti.hardware.graphics
+    pipeline = _storage_write_pipeline()
+    try:
+        draw = pipeline.pass_draw(
+            graphics.IndirectDraw(1, vertex_record_limit=3),
+            vertex_buffers={0: "vertices"},
+            indirect_buffer="commands",
+            shader_buffers={(0, 0): "parameters", (0, 1): "state"},
+        )
+        recording = pipeline.record_pass((draw,), color="target")
+        commands = ti.ndarray(ti.u32, 64)
+        commands.from_numpy(np.array([3, 1, 0, 0] + [0] * 60, dtype=np.uint32))
+        frame = dict(
+            target=ti.Texture(ti.Format.rgba32f, (8, 8)),
+            vertices=ti.ndarray(ti.f32, 6),
+            parameters=ti.ndarray(ti.u32, 4),
+            commands=commands,
+            state=commands,
+        )
+        # Different Graph names are deliberately bound to the same allocation.
+        with pytest.raises(RuntimeError, match="overlap writable shader storage"):
+            recording.prepare_graph_execute(frame)
+    finally:
+        pipeline.close()
+
+
 @pytest.mark.parametrize("recipe", ["ordinary", "selected"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_aot_graphics_buffer_dependencies(tmp_path, recipe):
@@ -52,22 +100,7 @@ def test_aot_graphics_buffer_dependencies(tmp_path, recipe):
             loss[0] += 0.5 * output[i] * output[i]
 
     graphics, arg, kind = ti.hardware.graphics, ti.graph.Arg, ti.graph.ArgKind
-    assets = Path(__file__).parent / "assets"
-    try:
-        pipeline = graphics.VulkanGraphicsPipeline(
-            (assets / "graphics_sync.vert.spv").read_bytes(),
-            (assets / "graphics_sync.frag.spv").read_bytes(),
-            vertex_bindings=(graphics.VertexBinding(0, 8),),
-            vertex_attributes=(graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),),
-            shader_buffer_bindings=(
-                graphics.ShaderBufferBinding(0, 0, "uniform"),
-                graphics.ShaderBufferBinding(0, 1, "storage", "write"),
-            ),
-        )
-    except (ValueError, RuntimeError) as exc:
-        if "requires fragmentStoresAndAtomics" in str(exc):
-            pytest.skip("Device lacks fragment storage writes")
-        raise
+    pipeline = _storage_write_pipeline()
     recording = pipeline.record_pass(
         (
             pipeline.pass_draw(

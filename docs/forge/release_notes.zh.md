@@ -58,6 +58,10 @@
   pipeline 准备阶段拒绝可写 shader 接口；混合只读/可写成员不能误判为全只读。
   拆分原生组件要求配对 ABI94，AOT 图形持久格式不变。
 
+- indirect pass 冷准备拒绝 command/count 范围与同一 Vulkan buffer 上可写 shader
+  storage 的重叠，包括描述符数组 view；排除真正只读的绑定，保留相邻/不重叠范围。
+  冷检查合并重复区间，重放不增加 alias 扫描。
+
 - GFX AOT 补齐 RWTexture 格式及 mip 层级元数据，包括仅访问 shape 的内核。
   对应导出要求 metadata v4 和配对 ABI90；普通产物保持原版本。不兼容的 SPIR-V
   缓存会重新编译，CPU/CUDA 缓存格式不变。

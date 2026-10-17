@@ -403,7 +403,74 @@ TEST(VulkanGraphicsPipeline, SharedDrawRecordsBufferRangesAndSampledImages) {
   }
 }
 
-TEST(VulkanGraphicsPipeline, SharedIndirectRangesRespectViewsAndDeviceFeatures) {
+TEST(VulkanGraphicsPipeline, IndirectAliasesUseWritablePhysicalRanges) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  if (!device.vk_caps().fragment_stores_and_atomics)
+    GTEST_SKIP() << "Fragment writes unavailable";
+  auto pipeline = prepare_vulkan_graphics_pipeline(
+      device,
+      {{PipelineSourceType::spirv_binary, storage_vertex,
+        sizeof(storage_vertex), PipelineStageType::vertex},
+       {PipelineSourceType::spirv_binary, mixed_fragment,
+        sizeof(mixed_fragment), PipelineStageType::fragment}},
+      RasterParams{}, {}, {}, "indirect_aliases");
+  auto &vk_pipeline = *static_cast<VulkanPipeline *>(pipeline.get());
+  auto [bank, result] = device.allocate_memory_unique(
+      {64, false, false, false, AllocUsage::Storage | AllocUsage::Indirect});
+  ASSERT_EQ(result, RhiResult::success);
+  VulkanGraphicsIndirectParameters p;
+  p.command_offset = 8;
+  p.stride = 16;
+  p.vertex_record_limit = 3;
+  p.instance_record_limit = 1;
+  std::optional<DeviceBufferRange> count;
+  if (device.vk_caps().draw_indirect_count)
+    count = DeviceBufferRange{bank->get_ptr(48), 4};
+  const auto packet = prepare_vulkan_graphics_indirect(
+      device, false, p, {bank->get_ptr(8), 24}, count);
+  VulkanGraphicsShaderBufferView view;
+  view.allocation = *bank;
+  view.storage = true;
+  view.offset = 16;
+  view.bytes = 16;
+  auto validate = [&] {
+    VulkanGraphicsIndirectAccesses accesses;
+    accesses.add_indirect(false, packet);  // Physical commands [16,32).
+    accesses.add_shader_buffers(vk_pipeline,
+                                {view, view});  // Repeated aliases merge.
+    accesses.validate(device);
+  };
+  view.binding = 0;  // Same command span, but reflected readonly across stages.
+  EXPECT_NO_THROW(validate());
+  view.binding =
+      1;  // The fragment block has both readonly and writable members.
+  EXPECT_ANY_THROW(validate());
+  view.offset = 0;
+  EXPECT_NO_THROW(validate());  // [0,16) abuts the command range.
+  view.offset = 32;
+  EXPECT_NO_THROW(validate());  // [32,48) lies between commands and count.
+  view.offset = 48;
+  view.bytes = 4;
+  if (count)
+    EXPECT_ANY_THROW(validate());
+  view.offset = 0;
+  view.bytes = kBufferSizeEntireSize;
+  EXPECT_ANY_THROW(validate());
+  auto [other, status] = device.allocate_memory_unique(
+      {64, false, false, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  view.allocation = *other;
+  EXPECT_NO_THROW(validate());
+  view.array_elements = {{other->get_ptr(0), 16}, {bank->get_ptr(16), 16}};
+  EXPECT_ANY_THROW(
+      validate());  // Array elements preserve their own view offsets.
+}
+
+TEST(VulkanGraphicsPipeline,
+     SharedIndirectRangesRespectViewsAndDeviceFeatures) {
   if (!is_vulkan_api_available())
     GTEST_SKIP() << "Vulkan unavailable";
   VulkanDeviceCreator creator({});

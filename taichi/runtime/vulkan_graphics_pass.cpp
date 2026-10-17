@@ -1,6 +1,7 @@
 #include "taichi/runtime/vulkan_graphics_pass.h"
 
 #ifdef TI_WITH_VULKAN
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -183,6 +184,86 @@ size_t validate_buffer_range(vulkan::VulkanDevice &device,
   return bytes;
 }
 }  // namespace
+
+void VulkanGraphicsIndirectAccesses::add_indirect(
+    bool indexed,
+    const VulkanGraphicsIndirectPacket &packet) {
+  const size_t command_size = indexed ? sizeof(VkDrawIndexedIndirectCommand)
+                                      : sizeof(VkDrawIndirectCommand);
+  const size_t bytes =
+      size_t(packet.max_draw_count - 1) * packet.stride + command_size;
+  reads.push_back(
+      {packet.command_buffer.get_ptr(packet.command_offset), bytes});
+  if (packet.count_buffer != kDeviceNullAllocation)
+    reads.push_back(
+        {packet.count_buffer.get_ptr(packet.count_offset), sizeof(uint32_t)});
+}
+
+void VulkanGraphicsIndirectAccesses::add_shader_buffers(
+    const vulkan::VulkanPipeline &pipeline,
+    const std::vector<VulkanGraphicsShaderBufferView> &buffers) {
+  const auto &writable = pipeline.graphics_writable_buffers();
+  if (writable.empty())
+    return;
+  for (const auto &buffer : buffers) {
+    if (!buffer.storage ||
+        !std::binary_search(
+            writable.begin(), writable.end(),
+            (uint64_t(buffer.set_index) << 32) | buffer.binding))
+      continue;
+    if (buffer.array_elements.empty())
+      writes.push_back(
+          {buffer.allocation.get_ptr(buffer.offset), buffer.bytes});
+    else
+      writes.insert(writes.end(), buffer.array_elements.begin(),
+                    buffer.array_elements.end());
+  }
+}
+
+void VulkanGraphicsIndirectAccesses::validate(
+    vulkan::VulkanDevice &device) const {
+  if (reads.empty() || writes.empty())
+    return;
+  using Interval = std::pair<size_t, size_t>;
+  std::map<VkBuffer, std::vector<Interval>> by_buffer;
+  auto interval = [&](const DeviceBufferRange &range, AllocUsage usage) {
+    const auto bytes =
+        validate_buffer_range(device, range.pointer, range.bytes, usage);
+    return Interval{range.pointer.offset, range.pointer.offset + bytes};
+  };
+  for (const auto &write : writes) {
+    const auto bounds = interval(write, AllocUsage::Storage);
+    by_buffer[device.get_vkbuffer(write.pointer)->buffer].push_back(bounds);
+  }
+  for (auto &[buffer, intervals] : by_buffer) {
+    std::sort(intervals.begin(), intervals.end());
+    size_t retained = 0;
+    for (const auto &entry : intervals) {
+      if (retained && entry.first <= intervals[retained - 1].second)
+        intervals[retained - 1].second =
+            std::max(intervals[retained - 1].second, entry.second);
+      else
+        intervals[retained++] = entry;
+    }
+    intervals.resize(retained);
+  }
+  for (const auto &read : reads) {
+    const auto bounds = interval(read, AllocUsage::Indirect);
+    const auto found =
+        by_buffer.find(device.get_vkbuffer(read.pointer)->buffer);
+    if (found == by_buffer.end())
+      continue;
+    const auto &intervals = found->second;
+    const auto next = std::lower_bound(
+        intervals.begin(), intervals.end(), bounds.second,
+        [](const Interval &entry, size_t end) { return entry.first < end; });
+    TI_ERROR_IF(
+        next != intervals.begin() && std::prev(next)->second > bounds.first,
+        "Vulkan indirect command/count ranges overlap writable shader storage "
+        "in the same pass; "
+        "use separate passes for dependent draws.");
+  }
+}
 
 VulkanGraphicsIndirectPacket prepare_vulkan_graphics_indirect(
     vulkan::VulkanDevice &device,

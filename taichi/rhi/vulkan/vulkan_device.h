@@ -458,6 +458,8 @@ class VulkanPipeline : public Pipeline {
   // Cold pass preparation: 1=float/normalized, 2=signed integer, 3=unsigned.
   void validate_color_attachment_types(const std::vector<int> &types) const;
   bool color_attachment_blends(std::size_t index) const;
+  // Sorted (set << 32 | binding) keys; immutable cold reflection facts.
+  const std::vector<uint64_t> &graphics_writable_buffers() const;
   void validate_sampled_texture(std::uint32_t set, std::uint32_t binding,
                                 bool comparison) const;
 
@@ -499,6 +501,7 @@ class VulkanPipeline : public Pipeline {
     VkPipelineColorBlendStateCreateInfo color_blending{};
     std::vector<VkPipelineColorBlendAttachmentState> blend_attachments{};
     std::vector<int> color_output_types;
+    std::vector<uint64_t> writable_buffers;
     std::vector<VkDynamicState> dynamic_state_enables = {
         VK_DYNAMIC_STATE_LINE_WIDTH, VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR};
