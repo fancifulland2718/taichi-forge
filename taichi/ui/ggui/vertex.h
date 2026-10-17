@@ -2,33 +2,14 @@
 
 #include <stddef.h>
 #include "taichi/common/platform_macros.h"
+#include "taichi/runtime/raster_vertex.h"
 
 #include <type_traits>
 
 namespace taichi {
 namespace ui {
 
-struct Vertex {
-  struct vec3 {
-    float x;
-    float y;
-    float z;
-  };
-  struct vec4 {
-    float x;
-    float y;
-    float z;
-    float w;
-  };
-  struct vec2 {
-    float x;
-    float y;
-  };
-  vec3 pos;
-  vec3 normal;
-  vec2 tex_coord;
-  vec4 color;
-};
+using Vertex = lang::RasterVertex;
 
 enum class VertexAttributes : char {
   kPos = 0b0001,

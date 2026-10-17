@@ -39,12 +39,7 @@ class Particles final : public Renderable {
   DevicePtr lights_ssbo_ptr;
   DevicePtr scene_ubo_ptr;
 
-  struct UBORenderable {
-    alignas(16) glm::vec3 color;
-    int use_per_vertex_color;
-    int use_per_vertex_radius;
-    float radius;
-  };
+  using UBORenderable = lang::RasterParticleUniforms;
 };
 
 }  // namespace vulkan

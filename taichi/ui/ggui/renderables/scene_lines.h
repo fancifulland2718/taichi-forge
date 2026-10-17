@@ -43,16 +43,7 @@ class SceneLines final : public Renderable {
   DevicePtr lights_ssbo_ptr;
   DevicePtr scene_ubo_ptr;
 
-  struct UBORenderable {
-    alignas(16) glm::vec3 color;
-    float line_width;
-    int per_vertex_color_offset;
-    int vertex_stride;
-    int start_vertex;
-    int start_index;
-    int num_vertices;
-    int is_indexed;
-  };
+  using UBORenderable = lang::RasterLineUniforms;
 
   void create_graphics_pipeline() final;
 

@@ -39,12 +39,7 @@ class Mesh final : public Renderable {
   DevicePtr lights_ssbo_ptr;
   DevicePtr scene_ubo_ptr;
 
-  struct UBORenderable {
-    alignas(16) glm::vec3 color;
-    int use_per_vertex_color;
-    int two_sided;
-    float has_attribute;
-  };
+  using UBORenderable = lang::RasterMeshUniforms;
 
   int num_instances_{0};
   int start_instance_{0};

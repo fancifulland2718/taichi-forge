@@ -6,13 +6,11 @@
 #include "taichi/ui/common/renderable_info.h"
 #include "taichi/ui/common/camera.h"
 #include "taichi/ui/utils/utils.h"
+#include "taichi/runtime/raster_data.h"
 
 namespace taichi::ui {
 
-struct alignas(16) PointLight {
-  glm::vec4 pos;
-  glm::vec4 color;
-};
+using PointLight = lang::RasterPointLight;
 
 struct MeshAttributeInfo {
   FieldInfo mesh_attribute;
@@ -53,22 +51,10 @@ class SceneBase {
   virtual void ambient_light(glm::vec3 color) = 0;
   virtual ~SceneBase() = default;
 
-  struct SceneData {
-    alignas(16) glm::vec3 camera_pos;
-    alignas(16) glm::mat4 view;
-    alignas(16) glm::mat4 projection;
-    alignas(16) glm::vec3 ambient_light;
-    int point_light_count;
-  };
+  using SceneData = lang::RasterSceneData;
   SceneData current_scene_data_;
 
-  struct UBOScene {
-    SceneData scene;
-    float window_width;
-    float window_height;
-    float tan_half_fov;
-    float aspect_ratio;
-  };
+  using UBOScene = lang::RasterSceneUniforms;
 
   void update_ubo(float aspect_ratio) {
     current_scene_data_.camera_pos = camera_.position;
