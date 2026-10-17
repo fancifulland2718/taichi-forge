@@ -11,8 +11,10 @@ def test_aot_device_capabilities_snapshot_and_retirement():
     if ti.cfg.arch == ti.vulkan:
         assert capabilities["spirv_version"] >= 0x10000
         assert capabilities.get("spirv_has_ray_query", 0) in (0, 1)
+        assert bool(capabilities.get("vulkan_has_opacity_micromap", 0)) == ti.hardware.ray.is_opacity_micromap_available()
     else:
         assert "spirv_has_ray_query" not in capabilities
+        assert "vulkan_has_opacity_micromap" not in capabilities
     capabilities["spirv_version"] = 0
     assert runtime.device_capabilities().get("spirv_version") != 0
     runtime.close()

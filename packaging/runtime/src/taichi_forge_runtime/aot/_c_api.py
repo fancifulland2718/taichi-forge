@@ -47,6 +47,7 @@ CAPABILITY_NAMES = dict(
             "cuda_ptx_version",
             "spirv_has_sampled_image_array_non_uniform_indexing",
             "max_sampled_texture_collection_size",
+            "vulkan_has_opacity_micromap",
         )
     )
 )

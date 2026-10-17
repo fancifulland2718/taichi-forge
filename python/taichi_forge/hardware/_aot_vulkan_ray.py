@@ -3,6 +3,31 @@
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
+def export_micromap(asset, context):
+    from ._vulkan_micromap import VulkanOpacityMicromap
+
+    if type(asset) is not VulkanOpacityMicromap:
+        raise TaichiRuntimeError("AOT Vulkan micromap requires a qualified baked asset")
+    if (public := context.public_resource(asset)) is not None:
+        return public
+
+    def build():
+        bindings = dict(
+            data=context.host_blob_resource(asset.data), descriptors=context.host_blob_resource(asset.descriptors)
+        )
+        if asset.triangle_indices is not None:
+            bindings["indices"] = context.host_blob_resource(asset.triangle_indices)
+        return context.resource(
+            asset,
+            "vulkan_ray",
+            "opacity_micromap",
+            parameters=dict(triangle_count=asset.triangle_count),
+            bindings=bindings,
+        )
+
+    return context.resource_once(asset, build, policy="vulkan_baked_opacity_micromap")
+
+
 def _geometry(context, scene, *, retained_by=None):
     from ._ray import TriangleBLAS, TriangleScene
 
@@ -17,15 +42,22 @@ def _geometry(context, scene, *, retained_by=None):
         if scene._runtime_prog is not retained_by._runtime_prog:
             raise TaichiRuntimeError("AOT Vulkan BLAS and TLAS require the same runtime")
     shared = type(scene) is TriangleBLAS
-    if shared and scene._micromap_id is not None:
-        raise TaichiRuntimeError("AOT Vulkan recording export does not yet reconstruct micromaps")
     if (public := context.public_resource(scene)) is not None:
         return public
 
     def build():
         # Source arrays may have changed since AS construction/refit. Require
         # consumer seeds instead of pretending to snapshot the live AS state.
-        inputs = context.resource_inputs.require(scene, ("vertices", "indices"))
+        has_micromap = shared and scene._micromap_id is not None
+        ports = ("vertices", "indices", "opacity_micromap") if has_micromap else ("vertices", "indices")
+        inputs = context.resource_inputs.require(scene, ports, asset_ports=("opacity_micromap",))
+        if has_micromap and not isinstance(inputs["opacity_micromap"], str):
+            from ._vulkan_micromap import VulkanOpacityMicromap
+
+            asset = inputs["opacity_micromap"]
+            if type(asset) is not VulkanOpacityMicromap or asset.fingerprint != scene._micromap_id:
+                raise TaichiRuntimeError("AOT Vulkan baked micromap must match the source BLAS fingerprint")
+            inputs["opacity_micromap"] = export_micromap(asset, context)
         parameters = dict(vertex_count=scene.vertex_count, triangle_count=scene.triangle_count)
         if shared:
             parameters["opaque"] = scene.opaque
@@ -48,10 +80,8 @@ def _scene(context, scene):
     if type(scene) is not InstanceTLAS:
         raise TaichiRuntimeError("AOT Vulkan query export requires a qualified scene")
     scene._validate_lifetime()
-    if any(scene.sbt_record_offsets) or any(blas._micromap_id is not None for blas in dict.fromkeys(scene._topology)):
-        raise TaichiRuntimeError(
-            "AOT Vulkan recording export does not yet reconstruct micromaps or nonzero SBT offsets"
-        )
+    if any(scene.sbt_record_offsets):
+        raise TaichiRuntimeError("AOT Vulkan recording export does not yet reconstruct nonzero SBT offsets")
     context.resource_links(scene, {f"blas_{i}": blas for i, blas in enumerate(scene._topology)})
     if (public := context.public_resource(scene)) is not None:
         return public

@@ -16,3 +16,8 @@ class VulkanOpacityMicromap(BakedOpacityMicromap):
     """
 
     _identity_tag = b"forge-vulkan-baked-omm1"
+
+    def _export_aot_resource(self, context):
+        from ._aot_vulkan_ray import export_micromap
+
+        return export_micromap(self, context)

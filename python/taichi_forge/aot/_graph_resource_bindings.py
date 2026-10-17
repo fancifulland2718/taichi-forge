@@ -5,6 +5,11 @@ from collections.abc import Mapping
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
+def _asset_exporter(value):
+    # Only concrete qualified adapters opt in; inherited hooks may lose state.
+    return type(value).__dict__.get("_export_aot_resource")
+
+
 class ResourceInputBindings:
     def __init__(self, bindings, private_names):
         if bindings is not None and not isinstance(bindings, Mapping):
@@ -30,13 +35,19 @@ class ResourceInputBindings:
             if owner is None or not isinstance(ports, Mapping) or not ports:
                 raise TypeError("Resource bindings require an owner and a nonempty port mapping")
             ports = dict(ports)
-            if any(not isinstance(value, str) or not value or "\0" in value for value in (*ports, *ports.values())):
+            names = [*ports, *(value for value in ports.values() if isinstance(value, str))]
+            if any(not isinstance(value, str) or not value or "\0" in value for value in names):
                 raise ValueError("Resource port and input names must be nonempty strings without NUL")
-            if set(ports.values()) & set(private_names):
+            if any(not isinstance(value, str) and not callable(_asset_exporter(value)) for value in ports.values()):
+                raise ValueError("Resource inputs require symbolic names or qualified immutable assets")
+            slots = {value for value in ports.values() if isinstance(value, str)}
+            if slots & set(private_names):
                 raise ValueError("Resource reconstruction inputs cannot name private Graph storage")
             self.owners[id(owner)] = (owner, ports)
-            self.names.update(ports.values())
-        if self.public_names & {name for _, ports in self.owners.values() for name in ports.values()}:
+            self.names.update(slots)
+        if self.public_names & {
+            name for _, ports in self.owners.values() for name in ports.values() if isinstance(name, str)
+        }:
             raise ValueError("Public resource and construction input names must be distinct")
 
     def public(self, owner):
@@ -50,7 +61,7 @@ class ResourceInputBindings:
         self.used_names.add(entry[1])
         return entry[1]
 
-    def require(self, owner, ports):
+    def require(self, owner, ports, *, asset_ports=()):
         if id(owner) in self.public_owners:
             raise TaichiRuntimeError("This resource exporter does not support a public owner binding")
         entry = self.owners.get(id(owner))
@@ -58,8 +69,10 @@ class ResourceInputBindings:
             raise TaichiRuntimeError("AOT resource reconstruction requires explicit resource_bindings")
         if entry[1].keys() != set(ports):
             raise ValueError("Resource reconstruction ports must be exactly: " + ", ".join(sorted(ports)))
+        if any(not isinstance(value, str) and port not in asset_ports for port, value in entry[1].items()):
+            raise ValueError("This resource port requires a symbolic input binding")
         self.used.add(id(owner))
-        self.used_names.update(entry[1].values())
+        self.used_names.update(value for value in entry[1].values() if isinstance(value, str))
         return dict(entry[1])
 
     def validate_used(self):

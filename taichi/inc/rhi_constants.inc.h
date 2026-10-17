@@ -44,6 +44,7 @@ PER_DEVICE_CAPABILITY(cuda_ptx_version)
 // Append-only: DeviceCapability ordinals are persisted in AOT/cache metadata.
 PER_DEVICE_CAPABILITY(spirv_has_sampled_image_array_non_uniform_indexing)
 PER_DEVICE_CAPABILITY(max_sampled_texture_collection_size)
+PER_DEVICE_CAPABILITY(vulkan_has_opacity_micromap)
 #endif
 
 #ifdef PER_BUFFER_FORMAT

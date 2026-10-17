@@ -4,6 +4,7 @@
 #include "taichi/common/operation_json.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_acceleration_structure.h"
+#include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/vulkan_ray_types.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/program/runtime_fault.h"
@@ -11,6 +12,7 @@
 #include "taichi/runtime/vulkan_ray_query.h"
 #include "taichi/runtime/vulkan_ray_scene.h"
 #include "taichi/runtime/vulkan_ray_tlas.h"
+#include "taichi/runtime/vulkan_micromap.h"
 #endif
 
 namespace taichi::lang {
@@ -67,9 +69,23 @@ struct SceneDescription {
   uint32_t vertex_count, triangle_count;
   NativeArrayBinding vertices, indices;
 };
+class MicromapAccess : public NativeResource {
+ public:
+  virtual size_t triangle_count() const = 0;
+#ifdef TI_WITH_VULKAN
+  virtual VulkanOpacityMicromap &micromap_core() = 0;
+#endif
+};
+struct MicromapDescription {
+  static constexpr const char *kind = "vulkan_ray_opacity_micromap";
+  static constexpr uint32_t version = 1;
+  uint32_t triangle_count;
+  std::shared_ptr<NativeHostBlobResource> data, descriptors, indices;
+};
 struct BlasDescription : SceneDescription {
   static constexpr const char *kind = "vulkan_ray_triangle_blas";
   bool opaque{true};
+  std::shared_ptr<MicromapAccess> micromap;
 };
 struct TlasDescription {
   static constexpr const char *kind = "vulkan_ray_instance_tlas";
@@ -296,6 +312,46 @@ class OwnedRayResource : public Owner {
   bool initialization_pending_{false};
 };
 
+class PreparedMicromap final
+    : public OwnedRayResource<VulkanOpacityMicromap, MicromapAccess> {
+ public:
+  PreparedMicromap(NativePreparationContext &context,
+                   const MicromapDescription &d)
+      : OwnedRayResource(
+            context,
+            std::make_unique<VulkanOpacityMicromap>(&ray_device(context))),
+        triangle_count_(d.triangle_count) {
+  }
+  void initialize(const MicromapDescription &d) {
+    // Drain the owner's existing commands before the core's cold synchronized
+    // import. Never synchronize recursively inside an enqueue callback.
+    runtime_.synchronize();
+    initialization_pending_ = true;
+    auto view = [](const std::shared_ptr<NativeHostBlobResource> &blob) {
+      if (!blob || blob->bytes().empty())
+        return std::string_view{};
+      const auto &bytes = blob->bytes();
+      return std::string_view(reinterpret_cast<const char *>(bytes.data()),
+                              bytes.size());
+    };
+    core_->build(view(d.data), view(d.descriptors), view(d.indices),
+                 bool(d.indices), d.triangle_count);
+    initialization_pending_ = false;
+  }
+  size_t triangle_count() const override {
+    return triangle_count_;
+  }
+  bool retains_input(const std::string &) const override {
+    return false;
+  }
+  VulkanOpacityMicromap &micromap_core() override {
+    return *core_;
+  }
+
+ private:
+  size_t triangle_count_;
+};
+
 class PreparedScene final : public OwnedRayResource<VulkanTriangleRayScene>,
                             public QueryAccess,
                             public GeometryAccess {
@@ -341,11 +397,16 @@ class PreparedBlas final : public OwnedRayResource<VulkanTriangleBlas>,
   PreparedBlas(NativePreparationContext &context, const BlasDescription &d)
       : OwnedRayResource(
             context,
-            std::make_unique<VulkanTriangleBlas>(&ray_device(context),
-                                                 d.vertex_count,
-                                                 d.triangle_count,
-                                                 nullptr,
-                                                 d.opaque)) {
+            std::make_unique<VulkanTriangleBlas>(
+                &ray_device(context),
+                d.vertex_count,
+                d.triangle_count,
+                d.micromap ? std::shared_ptr<VulkanOpacityMicromap>(
+                                 d.micromap,
+                                 &d.micromap->micromap_core())
+                           : nullptr,
+                d.opaque)),
+        micromap_bytes_(d.micromap ? d.micromap->workspace_bytes() : 0) {
   }
   void initialize(const BlasDescription &d) {
     OwnedRayResource::initialize(
@@ -363,6 +424,10 @@ class PreparedBlas final : public OwnedRayResource<VulkanTriangleBlas>,
   size_t triangle_count() const override {
     return core_->triangle_count();
   }
+  size_t workspace_bytes() const override {
+    // The dependency owner accounts for shared OMM storage exactly once.
+    return OwnedRayResource::workspace_bytes() - micromap_bytes_;
+  }
   bool retains_input(const std::string &port) const override {
     return port != "vertices" && port != "indices";
   }
@@ -377,6 +442,9 @@ class PreparedBlas final : public OwnedRayResource<VulkanTriangleBlas>,
   void record_refit(CommandList *commands, DevicePtr vertices) override {
     core_->record_build(commands, vertices, {}, true);
   }
+
+ private:
+  size_t micromap_bytes_;
 };
 
 std::unique_ptr<VulkanInstanceTlas> make_tlas(NativePreparationContext &context,
@@ -608,6 +676,35 @@ class PreparedInstanceUpdate final : public NativeOperation {
 }  // namespace
 
 void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
+  registry.define<MicromapDescription>(
+      [](Device &device, const MicromapDescription &d) {
+        for (const auto &blob : {d.data, d.descriptors, d.indices}) {
+          if (blob &&
+              (&blob->device() != &device || blob->arch() != Arch::vulkan))
+            throw std::invalid_argument(
+                "Vulkan micromap blob belongs to another device");
+        }
+        if (!d.data || !d.descriptors)
+          throw std::invalid_argument(
+              "Vulkan micromap requires baked data and descriptors");
+      },
+      NativeObjectKind::resource);
+  registry.register_schema<MicromapDescription>(
+      "vulkan_ray", "opacity_micromap", {"data", "descriptors"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<MicromapDescription> {
+        operation_json::fields(p, {"triangle_count"});
+        const auto triangles = count(p["triangle_count"]);
+        return [triangles](const NativeOperationBindings &b) {
+          return MicromapDescription{
+              triangles, b.at("data").resource<NativeHostBlobResource>(),
+              b.at("descriptors").resource<NativeHostBlobResource>(),
+              b.count("indices")
+                  ? b.at("indices").resource<NativeHostBlobResource>()
+                  : nullptr};
+        };
+      },
+      {}, {"indices"});
   registry.define<BlasBuildDescription>(
       [](Device &device, const BlasBuildDescription &d) {
         validate_scene(device, d.blas);
@@ -650,6 +747,15 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
       [](Device &device, const BlasDescription &d) {
         array_bytes(device, d.vertices, d.vertex_count, 3, "f32");
         array_bytes(device, d.indices, d.triangle_count, 3, "i32");
+        if (d.micromap) {
+          validate_scene(device, d.micromap);
+          if (d.micromap->triangle_count() != d.triangle_count)
+            throw std::invalid_argument(
+                "Vulkan micromap triangle count must match its BLAS");
+          if (d.opaque)
+            throw std::invalid_argument(
+                "Vulkan micromap BLAS cannot force opaque geometry");
+        }
       },
       NativeObjectKind::resource);
   registry.register_schema<BlasDescription>(
@@ -659,17 +765,24 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
         operation_json::fields(p, {"vertex_count", "triangle_count", "opaque"});
         const auto vertices = count(p["vertex_count"]);
         const auto triangles = count(p["triangle_count"]);
-        const auto opaque = operation_json::optional_bool(p, "opaque", true);
+        const auto opaque =
+            p.obj.inner.count("opaque")
+                ? std::optional<bool>(
+                      operation_json::optional_bool(p, "opaque"))
+                : std::nullopt;
         return [vertices, triangles, opaque](const NativeOperationBindings &b) {
           BlasDescription d;
           d.vertex_count = vertices;
           d.triangle_count = triangles;
           d.vertices = b.at("vertices").array();
           d.indices = b.at("indices").array();
-          d.opaque = opaque;
+          if (b.count("opacity_micromap"))
+            d.micromap = b.at("opacity_micromap").resource<MicromapAccess>();
+          d.opaque = opaque.value_or(!d.micromap);
           return d;
         };
-      });
+      },
+      {}, {"opacity_micromap"});
   registry.define<TlasDescription>(
       [](Device &device, const TlasDescription &d) {
         for (const auto &blas : d.blases)
@@ -779,6 +892,13 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry) {
         };
       });
 #ifdef TI_WITH_VULKAN
+  registry.register_context_factory<MicromapDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](NativePreparationContext &context, const MicromapDescription &d) {
+        auto result = std::make_shared<PreparedMicromap>(context, d);
+        result->initialize(d);
+        return result;
+      });
   registry.register_context_factory<BlasBuildDescription>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](NativePreparationContext &, const BlasBuildDescription &d) {

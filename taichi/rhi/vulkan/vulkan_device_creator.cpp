@@ -1170,6 +1170,7 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
             *pNextEnd = &synchronization2_feature;
             pNextEnd = &synchronization2_feature.pNext;
             ti_device_->vk_caps().opacity_micromap = true;
+            caps.set(DeviceCapability::vulkan_has_opacity_micromap, true);
           }
         }
       }

@@ -258,7 +258,8 @@ under provider `vulkan_ray`, version 1:
 | operation | Kind and bindings | parameters |
 | --- | --- | --- |
 | `triangle_scene` | Resource: `vertices`, `indices` | `vertex_count`, `triangle_count` |
-| `triangle_blas` | Resource: `vertices`, `indices` | `vertex_count`, `triangle_count`, optional `opaque` (default true) |
+| `triangle_blas` | Resource: `vertices`, `indices`, optional `opacity_micromap` | `vertex_count`, `triangle_count`, optional `opaque` (default false with a micromap, true otherwise) |
+| `opacity_micromap` | Resource: host blobs `data`, `descriptors`, optional `indices` | `triangle_count` |
 | `instance_tlas` | Resource: `transforms`, `blas_0` ... `blas_(instance_count-1)` | `instance_count`, optional `custom_indices`, `visibility_masks` |
 | `refit` | Operation: `scene`, `vertices` | Empty object |
 | `blas_build` | Operation: `scene` (BLAS), `vertices`, `indices` | Empty object |
@@ -326,8 +327,8 @@ query shaders treat triangles as opaque and accept both faces.
 Small Windows Vulkan checks cover shared/repeated BLAS, distinct instance/custom
 IDs and masks, direct initial device build, GPU geometry/transform updates,
 subrange matrices, typed/legacy hit and miss reset, cross-module retirement,
-standalone/borrowed owners, and downstream gradient kernels. This factory coverage
-does not yet include micromaps or graphics AS bindings.
+standalone/borrowed owners, and downstream gradient kernels. Graphics AS bindings
+are not yet covered by these factories.
 
 Vulkan `Module.add_kernel()` accepts `ti.types.acceleration_structure()` parameters
 when the module declares `caps=["spirv_has_ray_query"]`. Pass a public
@@ -345,6 +346,38 @@ reset, public/private bindings, close/reset and downstream gradients. AS travers
 has no automatic derivative. Both ordinary kernels and Graph execution sequences
 can be exported; `kernel_template` remains unavailable. CPU/CUDA do not accept
 Vulkan AS parameters.
+
+For baked opacity micromaps, also check
+`runtime.device_capabilities().get("vulkan_has_opacity_micromap", 0)` before
+allocating. The `opacity_micromap` factory accepts immutable host blobs using the
+same baked layout as `ti.hardware.ray.VulkanOpacityMicromap`: data bytes,
+8-byte triangle descriptors, and optional signed i32 triangle indices. It supports
+two-state/four-state formats and predefined indices -1 through -4. Existing
+physical subdivision limits and descriptor/index bounds are checked during import.
+
+```python
+with runtime.host_blob(baked_data) as data, runtime.host_blob(baked_descriptors) as descriptors:
+    omm = runtime.native_resource(
+        "vulkan_ray", "opacity_micromap",
+        parameters={"triangle_count": triangle_count},
+        bindings={"data": data, "descriptors": descriptors},
+    )
+# Construction is complete; the seed blobs may close.
+blas = runtime.native_resource(
+    "vulkan_ray", "triangle_blas",
+    parameters={"vertex_count": vertex_count, "triangle_count": triangle_count},
+    bindings={"vertices": vertices, "indices": indices, "opacity_micromap": omm},
+)
+```
+
+The BLAS retains the micromap, which must have the same triangle count. Explicit
+`opaque=True` conflicts with a micromap and is rejected. Use AS kernel queries
+with `respect_opacity=True` for opacity classification; the built-in batch `query`
+operation still uses its opaque query shaders. Several BLAS may share one public
+micromap; closing it retires dependent recordings transitively. Small Windows
+Vulkan tests cover both formats, indexed/predefined states, filtered closest/any
+queries, refit, miss reset, standalone/borrowed owners and downstream gradients.
+These do not establish differentiable AS construction or traversal.
 
 Declare a Graph AS source owner with `source_bindings={"acceleration": tlas}`;
 `resource_bindings` uses the TLAS/BLAS public-owner or explicit-seed contracts below.
@@ -402,8 +435,8 @@ be reconstructed privately in the same plan. A still-live source TLAS may export
 its retained geometry after the original BLAS handle closes. Construction inputs
 remain explicit; export does not snapshot live AS memory or retained source
 arrays. Captured host matrices and metadata are taken from each immutable
-recording, even if the source TLAS is changed later. Graphs with micromaps or
-nonzero SBT offsets are not covered by this exporter yet. Small
+recording, even if the source TLAS is changed later. Nonzero SBT offsets are not
+covered by this exporter yet. Small
 Windows tests cover private/public/mixed export, invalid mappings before kernel
 publication, alias rejection before execution, retained-source geometry,
 standalone/borrowed consumers, and downstream gradients. An additional JIT/AOT
@@ -411,13 +444,29 @@ comparison covers index winding rebuilds, host UPDATE/BUILD followed by device
 matrix updates, metadata preservation, interval misses and replay after rejected
 preparation. AS construction and traversal have no automatic derivatives.
 
+For a private BLAS with a micromap, explicitly supply its immutable baked asset:
+
+```python
+resource_bindings = {
+    blas: {"vertices": "seed", "indices": "triangles", "opacity_micromap": baked_micromap},
+    tlas: {"transforms": "initial_transforms"},
+}
+module.add_execution_plan("step", graph, resource_bindings=resource_bindings)
+```
+
+The asset fingerprint must match the source BLAS. Export stores content-addressed
+host blobs and reconstructs a shared asset object once per plan. Alternatively,
+use a symbolic public micromap name at that port, or bind the whole BLAS/TLAS as
+a public resource. Other construction ports continue to require symbolic names;
+the exporter does not serialize source GPU handles or read live AS storage.
+
 The first form requires seeds ready before preparation and reconstructs each
 source scene once across repeated queries/refits. It serializes no producer
 handles and does not infer current AS contents. The public form lets query-only
 plans in other modules share the same scene and observe device refits without
 rebuilding it. Small standalone/borrowed Vulkan fixtures qualify exported forward
 and downstream backward kernels, consumption after producer retirement and shared
-closure. InstanceTLAS recordings still require further resource-factory coverage.
+closure.
 
 Explicit AOT plans can use `runtime.configure_provider("optix", adapter_path=...,
 library_path=...)` with these version 1 native resources/operations, all under

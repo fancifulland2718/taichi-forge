@@ -204,7 +204,8 @@ Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray
 | operation | 类型与绑定 | parameters |
 | --- | --- | --- |
 | `triangle_scene` | 资源：`vertices`、`indices` | `vertex_count`、`triangle_count` |
-| `triangle_blas` | 资源：`vertices`、`indices` | `vertex_count`、`triangle_count`，可选 `opaque`（默认 true） |
+| `triangle_blas` | 资源：`vertices`、`indices`，可选 `opacity_micromap` | `vertex_count`、`triangle_count`，可选 `opaque`（有 micromap 时默认 false，否则 true） |
+| `opacity_micromap` | 资源：host blob `data`、`descriptors`，可选 `indices` | `triangle_count` |
 | `instance_tlas` | 资源：`transforms`、`blas_0` ... `blas_(instance_count-1)` | `instance_count`，可选 `custom_indices`、`visibility_masks` |
 | `refit` | 操作：`scene`、`vertices` | 空对象 |
 | `blas_build` | 操作：`scene`（BLAS）、`vertices`、`indices` | 空对象 |
@@ -254,7 +255,7 @@ scalar `[I,12]` / `[I,3,4]` 或 element shape `[3,4]` 的 AoS `[I]`。沿用 JIT
 
 Windows Vulkan 小型检查覆盖共享/重复 BLAS、独立实例 ID/custom ID/mask、首次设备
 矩阵 build、GPU 几何/变换更新、矩阵子区间、typed/legacy 命中及 miss 清零、跨模块
-退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 micromap 或 graphics AS 绑定。
+退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 graphics AS 绑定。
 
 Vulkan `Module.add_kernel()` 支持 `ti.types.acceleration_structure()` 参数，导出模块需
 声明 `caps=["spirv_has_ray_query"]`。消费端将上述 `instance_tlas` 公共资源直接传给
@@ -268,6 +269,35 @@ kernel 可使用既有 closest/any 及 filtered 查询。需要逐候选过滤�
 miss 写回、公共/私有绑定、关闭/reset 及命中后的下游梯度。AS 遍历本身不自动求导。
 普通 kernel 与 Graph 执行序列均可导出；`kernel_template` 尚未开放。
 CPU/CUDA 不接受 Vulkan AS 参数。
+
+使用 baked opacity micromap 时，分配前还需检查
+`runtime.device_capabilities().get("vulkan_has_opacity_micromap", 0)`。
+`opacity_micromap` 工厂接受不可变 host blob，布局与
+`ti.hardware.ray.VulkanOpacityMicromap` 一致：data 字节、每项8字节的 triangle
+descriptor，以及可选 signed i32 triangle index。支持 two-state/four-state 和
+-1 至 -4 的 predefined index；导入期检查物理 subdivision 上限及 descriptor/index 范围。
+
+```python
+with runtime.host_blob(baked_data) as data, runtime.host_blob(baked_descriptors) as descriptors:
+    omm = runtime.native_resource(
+        "vulkan_ray", "opacity_micromap",
+        parameters={"triangle_count": triangle_count},
+        bindings={"data": data, "descriptors": descriptors},
+    )
+# 构建已完成，种子 blob 可关闭。
+blas = runtime.native_resource(
+    "vulkan_ray", "triangle_blas",
+    parameters={"vertex_count": vertex_count, "triangle_count": triangle_count},
+    bindings={"vertices": vertices, "indices": indices, "opacity_micromap": omm},
+)
+```
+
+BLAS 持有 micromap，二者三角形数必须一致；显式 `opaque=True` 与 micromap 冲突，
+会被拒绝。AS kernel 查询用 `respect_opacity=True` 遵守 opacity 分类；内置批次
+`query` operation 仍使用原有 opaque shader。多个 BLAS 可共享公共 micromap，关闭
+该资源会传递退休依赖录制。Windows Vulkan 小型测试覆盖两种格式、索引/predefined
+状态、filtered closest/any、refit、miss 重置、独立/借用 owner 和下游梯度；不表示
+AS 构建或遍历本身可微。
 
 Graph 的 AS 参数通过 `source_bindings={"acceleration": tlas}` 声明源 owner，
 `resource_bindings` 沿用下述 TLAS/BLAS 的公共绑定或显式构建种子合同。固定绑定的
@@ -313,16 +343,30 @@ module.add_execution_plan("mixed_step", graph, resource_bindings={
 不同 BLAS 即使几何相同也不能替代所要求的资源身份。公共 TLAS 的依赖不能在同一 plan
 里另外私有重建。原始 BLAS handle 关闭后，仍存活的源 TLAS 可导出其保留的几何。
 构建输入仍需显式提供，不会快照当前 AS 内存或保留的源数组。host 矩阵和 metadata
-从各不可变录制中导出，不因源 TLAS 随后的修改而改变。micromap 及非零 SBT offset 尚未由此 exporter 覆盖。
+从各不可变录制中导出，不因源 TLAS 随后的修改而改变。非零 SBT offset 尚未由此 exporter 覆盖。
 Windows 小型测试覆盖私有/公共/混合导出、发布 kernel 前拒绝错误映射、执行前拒绝
 alias 不匹配、保留的源几何、独立/借用消费端和下游梯度。另有 JIT/AOT 对照覆盖索引绕序
 重建、host UPDATE/BUILD 后设备矩阵更新、metadata 保持、区间 miss 和准备失败后的重放。
 AS 构建和遍历本身不提供自动梯度。
 
+重建带 micromap 的私有 BLAS 时，显式提供不可变 baked asset：
+
+```python
+resource_bindings = {
+    blas: {"vertices": "seed", "indices": "triangles", "opacity_micromap": baked_micromap},
+    tlas: {"transforms": "initial_transforms"},
+}
+module.add_execution_plan("step", graph, resource_bindings=resource_bindings)
+```
+
+asset fingerprint 必须与源 BLAS 一致。导出保存按内容寻址的 host blob，在每个 plan
+内只重建一次共享 asset 对象。该端口也可写公共 micromap 的符号名，或将整个 BLAS/TLAS
+绑定为公共资源。其他构建端口仍须使用符号名；不归档源 GPU 句柄、不回读活 AS 存储。
+
 前者的种子须在准备前就绪，多次查询/refit只重建同一个生产端scene一次；不会序列化
 生产端句柄或猜测当前AS内容。后者的公共scene可供其他模块的query-only计划共享，
 设备refit后无需重新创建。自动导出的前向及下游反向、生产端退休后的消费、共享关闭
-均已在独立/借用Vulkan小夹具验证。InstanceTLAS recording仍需后续资源工厂覆盖。
+均已在独立/借用Vulkan小夹具验证。
 
 显式 AOT 计划可通过 `runtime.configure_provider("optix", adapter_path=..., library_path=...)`
 使用以下 version 1 原生资源/操作（provider 均为 `optix`）：

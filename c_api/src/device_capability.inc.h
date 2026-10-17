@@ -38,3 +38,4 @@ PER_CAPABILITY(SPIRV_HAS_SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING,
                spirv_has_sampled_image_array_non_uniform_indexing)
 PER_CAPABILITY(MAX_SAMPLED_TEXTURE_COLLECTION_SIZE,
                max_sampled_texture_collection_size)
+PER_CAPABILITY(VULKAN_HAS_OPACITY_MICROMAP, vulkan_has_opacity_micromap)

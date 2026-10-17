@@ -518,6 +518,11 @@ class Module:
         and native refits share the reconstructed AS and its alias constraints.
         The module must declare ``caps=["spirv_has_ray_query"]``.
 
+        A Vulkan BLAS with a micromap also requires an ``opacity_micromap``
+        construction port: either its matching immutable VulkanOpacityMicromap
+        asset or a symbolic public resource name. Other construction ports
+        continue to require symbolic names.
+
         ``resource_bindings`` maps qualified opaque resource owners to input
         port/public array name mappings. Construction inputs must be ready
         before preparation; image seeds before initialization. Resource creation precedes plan initialization and
