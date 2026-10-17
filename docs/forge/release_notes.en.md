@@ -59,6 +59,11 @@ lifetimes. The entries below describe the changes.
   without constructing per-draw capability maps. Prepared offsets use 64 bits
   and preserve view bounds; split native components require paired ABI93.
 
+- JIT/AOT graphics passes now establish memory dependencies with surrounding
+  commands at both pass boundaries. This fixes compute-written uniforms being
+  read by vertex shaders without a matching dependency; the existing compute-only
+  barrier did not cover graphics stages. No per-buffer replay scan is added.
+
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache

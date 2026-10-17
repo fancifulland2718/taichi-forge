@@ -1712,6 +1712,23 @@ void VulkanCommandList::memory_barrier() noexcept {
       /*pImageMemoryBarriers=*/nullptr);
 }
 
+void VulkanCommandList::graphics_memory_barrier(bool before_renderpass) noexcept {
+  VkMemoryBarrier barrier{};
+  barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+  barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+  // A pass may consume compute output or publish shader storage writes. The
+  // compute-only memory_barrier() does not cover those graphics stages. Keep
+  // this dependency at pass boundaries, without scanning every bound buffer.
+  buffer_->device.functions().vkCmdPipelineBarrier(
+      buffer_->buffer,
+      before_renderpass ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                        : VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+      before_renderpass ? VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+                        : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      0, 1, &barrier, 0, nullptr, 0, nullptr);
+}
+
 void VulkanCommandList::buffer_copy(DevicePtr dst,
                                     DevicePtr src,
                                     size_t size) noexcept {

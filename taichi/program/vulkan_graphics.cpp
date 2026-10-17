@@ -1062,7 +1062,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
               commands, pipeline->pipeline(), pipeline->task_shader(),
               recorded.draw, recorded.indirect, recorded.mesh, draw_resources);
         }
-        commands->end_renderpass();
+        end_vulkan_graphics_pass(commands);
       };
   for (const auto allocation : color_allocations) {
     prepared.images.push_back({allocation, ImageLayout::color_attachment, ImageLayout::shader_read});

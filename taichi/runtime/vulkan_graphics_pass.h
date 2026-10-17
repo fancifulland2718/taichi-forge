@@ -64,6 +64,7 @@ void validate_vulkan_graphics_pipeline_targets(
     const VulkanGraphicsPassTargets &targets);
 void begin_vulkan_graphics_pass(CommandList *commands,
                                 const VulkanGraphicsPassTargets &targets);
+void end_vulkan_graphics_pass(CommandList *commands);
 
 struct VulkanGraphicsShaderBufferView {
   std::uint32_t set_index{0};

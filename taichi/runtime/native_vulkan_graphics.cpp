@@ -520,7 +520,7 @@ class PreparedPass final : public NativeOperation {
       record_vulkan_graphics_draw(commands, &draw.pipeline->pipeline(),
                                   draw.pipeline->task_shader(), draw.info, {},
                                   draw.mesh, draw.resources);
-    commands->end_renderpass();
+    end_vulkan_graphics_pass(commands);
   }
 
  private:

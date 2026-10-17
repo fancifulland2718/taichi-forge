@@ -143,6 +143,7 @@ void validate_vulkan_graphics_pipeline_targets(
 void begin_vulkan_graphics_pass(CommandList *commands,
                                 const VulkanGraphicsPassTargets &targets) {
   auto *vk = static_cast<vulkan::VulkanCommandList *>(commands);
+  vk->graphics_memory_barrier(true);
   vk->set_next_renderpass_color_final_layout(ImageLayout::color_attachment);
   vk->set_next_renderpass_depth_clear_value(targets.clear_depth);
   DeviceAllocation depth = targets.depth;
@@ -155,6 +156,12 @@ void begin_vulkan_graphics_pass(CommandList *commands,
   commands->set_raster_viewport_and_scissor(int(viewport[0]), int(viewport[1]),
                                             int(viewport[0] + viewport[2]),
                                             int(viewport[1] + viewport[3]));
+}
+
+void end_vulkan_graphics_pass(CommandList *commands) {
+  commands->end_renderpass();
+  static_cast<vulkan::VulkanCommandList *>(commands)->graphics_memory_barrier(
+      false);
 }
 
 namespace {

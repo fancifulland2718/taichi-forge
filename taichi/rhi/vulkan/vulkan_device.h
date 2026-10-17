@@ -557,6 +557,9 @@ class VulkanCommandList : public CommandList {
                          const BufferTransition &transition) noexcept final;
   void buffer_barrier(DeviceAllocation alloc) noexcept final;
   void memory_barrier() noexcept final;
+  // Outside a render pass: order graphics against the surrounding command
+  // stream, including shader, vertex/index, indirect and transfer accesses.
+  void graphics_memory_barrier(bool before_renderpass) noexcept;
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size) noexcept final;
   void buffer_fill(DevicePtr ptr, size_t size, uint32_t data) noexcept final;
   void push_constants(const void *data, uint32_t size) noexcept;
