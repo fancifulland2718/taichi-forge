@@ -10,7 +10,7 @@
 #include <stdexcept>
 
 #ifdef TI_WITH_VULKAN
-#include "taichi/rhi/vulkan/vulkan_ray_pipeline.h"
+#include "taichi/runtime/vulkan_ray_program.h"
 #include "taichi/runtime/gfx/kernel_launcher.h"
 
 namespace taichi::lang {
@@ -18,8 +18,7 @@ namespace {
 using vulkan::VulkanPipeline;
 using vulkan::VulkanResourceSet;
 using vulkan::VulkanShaderBindingTable;
-using ResourceSets =
-    std::map<std::uint32_t, std::unique_ptr<VulkanResourceSet>>;
+using ResourceSets = VulkanRayProgramResourceSets;
 
 struct RayLaunchPayload {
   std::shared_ptr<VulkanRayProgramResource> program;
@@ -45,47 +44,6 @@ class RayLaunchLease final : public PreparedResourceLease {
   std::shared_ptr<RayLaunchPayload> payload_;
 };
 
-VkShaderStageFlagBits stage_bits(VulkanRayProgramShader::Stage stage) {
-  switch (stage) {
-    case VulkanRayProgramShader::Stage::raygen:
-      return VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    case VulkanRayProgramShader::Stage::miss:
-      return VK_SHADER_STAGE_MISS_BIT_KHR;
-    case VulkanRayProgramShader::Stage::closest_hit:
-      return VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    case VulkanRayProgramShader::Stage::any_hit:
-      return VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-  }
-  throw std::invalid_argument("Unsupported Vulkan ray shader stage");
-}
-
-vulkan::VulkanShaderBindingRecord native_record(
-    const VulkanRayProgramRecord &record) {
-  return {record.group, record.data};
-}
-
-void check_descriptor_coverage(VulkanPipeline &pipeline,
-                               const ResourceSets &sets) {
-  const auto &expected = pipeline.get_resource_set_templates();
-  TI_ERROR_IF(sets.size() != expected.size(),
-              "Ray descriptor sets do not match shader reflection");
-  for (const auto &[index, expected_set] : expected) {
-    const auto found = sets.find(index);
-    TI_ERROR_IF(found == sets.end(), "Missing ray descriptor set {}", index);
-    const auto &actual = found->second->get_bindings();
-    TI_ERROR_IF(actual.size() != expected_set.get_bindings().size(),
-                "Ray descriptor binding coverage differs in set {}", index);
-    for (const auto &[binding, declaration] : expected_set.get_bindings()) {
-      const auto value = actual.find(binding);
-      TI_ERROR_IF(value == actual.end() ||
-                      value->second.type != declaration.type ||
-                      VulkanResourceSet::descriptor_count(value->second) !=
-                          VulkanResourceSet::descriptor_count(declaration),
-                  "Ray descriptor type/count mismatch at set {} binding {}",
-                  index, binding);
-    }
-  }
-}
 }  // namespace
 
 class VulkanRayProgramResource {
@@ -132,21 +90,9 @@ struct PreparedVulkanRayLaunch::State {
   void record(CommandList *commands) const {
     auto payload = resources->acquire();
     TI_ERROR_IF(!payload, "Vulkan ray launch was closed before recording");
-    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(commands);
-    vulkan::record_ray_program_begin(*vk_commands);
-    for (const auto &read : payload->scene_reads)
-      read(commands);
-    vk_commands->bind_pipeline(payload->program->pipeline.get());
-    for (const auto &[index, set] : payload->sets) {
-      TI_ERROR_IF(vk_commands->bind_shader_resources(set.get(), index) !=
-                      RhiResult::success,
-                  "Failed to bind prepared Vulkan ray resources");
-    }
-    if (!push_constants.empty())
-      vk_commands->push_constants(push_constants.data(), push_constants.size());
-    vk_commands->trace_rays(*payload->sbt, dimensions[0], dimensions[1],
-                            dimensions[2]);
-    vulkan::record_ray_program_end(*vk_commands);
+    record_vulkan_ray_program(commands, *payload->program->pipeline,
+                              *payload->sbt, payload->sets, payload->scene_reads,
+                              dimensions, push_constants);
   }
 };
 
@@ -166,42 +112,10 @@ std::uint64_t Program::create_vulkan_ray_program(
   auto guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_ray_program_available(),
               "Vulkan RT pipelines are unavailable");
-  VulkanPipeline::Params params;
-  params.device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
-  params.name = "forge_ray_program";
-  for (const auto &shader : shaders) {
-    TI_ERROR_IF(shader.words.size() < 5 || shader.words.front() != 0x07230203u,
-                "Ray shaders require a complete SPIR-V module");
-    vulkan::SpirvCodeView view;
-    view.data = shader.words.data();
-    view.size = shader.words.size() * sizeof(std::uint32_t);
-    view.stage = stage_bits(shader.stage);
-    view.entry_point = shader.entry;
-    params.code.push_back(std::move(view));
-  }
-  vulkan::VulkanRayTracingPipelineParams ray;
-  ray.max_recursion_depth = recursion_depth;
-  ray.opacity_micromap = opacity_micromap;
-  for (const auto &group : groups) {
-    vulkan::VulkanRayTracingGroup::Kind kind;
-    switch (group.kind) {
-      case VulkanRayProgramGroup::Kind::raygen:
-        kind = vulkan::VulkanRayTracingGroup::Kind::raygen;
-        break;
-      case VulkanRayProgramGroup::Kind::miss:
-        kind = vulkan::VulkanRayTracingGroup::Kind::miss;
-        break;
-      case VulkanRayProgramGroup::Kind::triangles:
-        kind = vulkan::VulkanRayTracingGroup::Kind::triangles;
-        break;
-      default:
-        throw std::invalid_argument("Invalid Vulkan ray group kind");
-    }
-    ray.groups.push_back(
-        {kind, group.general, group.closest_hit, group.any_hit});
-  }
   auto resource = std::make_shared<VulkanRayProgramResource>();
-  resource->pipeline = std::make_unique<VulkanPipeline>(params, ray);
+  resource->pipeline = prepare_vulkan_ray_program_pipeline(
+      *static_cast<vulkan::VulkanDevice *>(get_compute_device()), shaders,
+      groups, recursion_depth, opacity_micromap);
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   TI_ERROR_IF(!next_vulkan_ray_resource_handle_,
               "Vulkan ray dependency ID space exhausted");
@@ -224,14 +138,8 @@ std::shared_ptr<PreparedVulkanRayLaunch> Program::prepare_vulkan_ray_launch(
     program = found->second;
   }
   auto *device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
-  vulkan::validate_ray_dispatch(*device, launch.dimensions[0],
-                                launch.dimensions[1], launch.dimensions[2]);
-  TI_ERROR_IF(launch.push_constants.size() > 128 ||
-                  launch.push_constants.size() % 4 ||
-                  launch.push_constants.size() <
-                      program->pipeline->required_ray_push_constant_bytes(),
-              "Ray push constants must cover reflected blocks and fit the "
-              "aligned 128-byte layout");
+  validate_vulkan_ray_program_launch(*device, *program->pipeline,
+                                     launch.dimensions, launch.push_constants);
   auto packet = std::make_shared<PreparedVulkanRayLaunch>();
   packet->state = std::make_shared<PreparedVulkanRayLaunch::State>();
   auto &state = *packet->state;
@@ -343,18 +251,9 @@ std::shared_ptr<PreparedVulkanRayLaunch> Program::prepare_vulkan_ray_launch(
                   input.handle) == state.dependencies.end())
       state.dependencies.push_back(input.handle);
   }
-  check_descriptor_coverage(*program->pipeline, payload->sets);
-  for (const auto &[index, set] : payload->sets) {
-    TI_ERROR_IF(set->prepare_for_replay(false) != RhiResult::success,
-                "Ray descriptor set {} preparation failed", index);
-  }
-  std::vector<vulkan::VulkanShaderBindingRecord> miss, hit;
-  for (const auto &record : launch.miss)
-    miss.push_back(native_record(record));
-  for (const auto &record : launch.hit)
-    hit.push_back(native_record(record));
-  payload->sbt = std::make_unique<VulkanShaderBindingTable>(
-      *device, *program->pipeline, native_record(launch.raygen), miss, hit);
+  prepare_vulkan_ray_program_bindings(*program->pipeline, payload->sets);
+  payload->sbt = prepare_vulkan_ray_program_sbt(
+      *device, *program->pipeline, launch.raygen, launch.miss, launch.hit);
   {
     std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
     TI_ERROR_IF(!next_vulkan_ray_resource_handle_,

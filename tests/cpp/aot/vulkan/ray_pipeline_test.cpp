@@ -2,6 +2,7 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_ray_pipeline.h"
+#include "taichi/runtime/vulkan_ray_program.h"
 #include "taichi/program/program.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/storage_view.h"
@@ -102,16 +103,17 @@ TEST(VulkanRayPipeline, ExecutesPreparedSbtAndRetainsRecordedResources) {
   if (!device->vk_caps().ray_tracing_pipeline) {
     GTEST_SKIP() << "Vulkan RT pipeline unavailable";
   }
-  auto pipeline = std::make_unique<VulkanPipeline>(
-      record_pipeline_params(device), record_groups());
-  VulkanShaderBindingRecord record;
+  VulkanRayProgramShader shader;
+  shader.words.assign(std::begin(kRecordRaygen), std::end(kRecordRaygen));
+  const VulkanRayProgramGroup group{VulkanRayProgramGroup::Kind::raygen, 0};
+  auto pipeline = prepare_vulkan_ray_program_pipeline(*device, {shader},
+                                                      {group, group}, 1, false);
+  VulkanRayProgramRecord record;
   record.group = 1;  // Nonzero group handle and nonempty shader-record payload.
   std::uint32_t bias = 17;
   record.data.resize(sizeof(bias));
   std::memcpy(record.data.data(), &bias, sizeof(bias));
-  auto sbt = std::make_unique<VulkanShaderBindingTable>(
-      *device, *pipeline, record, std::vector<VulkanShaderBindingRecord>{},
-      std::vector<VulkanShaderBindingRecord>{});
+  auto sbt = prepare_vulkan_ray_program_sbt(*device, *pipeline, record, {}, {});
   const auto &props = device->vk_caps().ray_tracing_properties;
   EXPECT_EQ(sbt->raygen().deviceAddress % props.shaderGroupBaseAlignment, 0);
   EXPECT_EQ(sbt->raygen().stride % props.shaderGroupHandleAlignment, 0);
@@ -130,8 +132,11 @@ TEST(VulkanRayPipeline, ExecutesPreparedSbtAndRetainsRecordedResources) {
   std::size_t bytes = sizeof(values);
   ASSERT_EQ(device->upload_data(&pointer, &upload, &bytes, 1),
             RhiResult::success);
-  VulkanResourceSet bindings(device);
-  bindings.rw_buffer(0, pointer, bytes);
+  VulkanRayProgramResourceSets sets;
+  EXPECT_ANY_THROW(prepare_vulkan_ray_program_bindings(*pipeline, sets));
+  sets[0] = std::make_unique<VulkanResourceSet>(device);
+  sets[0]->rw_buffer(0, pointer, bytes);
+  prepare_vulkan_ray_program_bindings(*pipeline, sets);
   auto *stream = device->get_compute_stream();
   auto [commands, command_result] = stream->new_command_list_unique();
   ASSERT_EQ(command_result, RhiResult::success);
@@ -140,18 +145,19 @@ TEST(VulkanRayPipeline, ExecutesPreparedSbtAndRetainsRecordedResources) {
   sbt->record_initialization(*vk_commands);
   EXPECT_TRUE(sbt->initialization_recorded());
   EXPECT_THROW(sbt->record_initialization(*vk_commands), std::logic_error);
-  validate_ray_dispatch(*device, values.size(), 1, 1);
-  // Explicit producer/consumer dependency, not part of trace_rays hot logic.
-  publish_shader_writes(vk_commands);
-  vk_commands->bind_pipeline(pipeline.get());
-  ASSERT_EQ(vk_commands->bind_shader_resources(&bindings), RhiResult::success);
-  vk_commands->trace_rays(*sbt, values.size(), 1, 1);
-  publish_shader_writes(vk_commands);
-  vk_commands->trace_rays(*sbt, values.size(), 1, 1);
-  publish_shader_writes(vk_commands);
+  const std::array<uint32_t, 3> dimensions{uint32_t(values.size()), 1, 1};
+  validate_vulkan_ray_program_launch(*device, *pipeline, dimensions, {});
+  EXPECT_ANY_THROW(
+      validate_vulkan_ray_program_launch(*device, *pipeline, dimensions, {0}));
+  // The shared core records the producer/consumer dependencies on this queue.
+  record_vulkan_ray_program(commands.get(), *pipeline, *sbt, sets, {},
+                            dimensions, {});
+  record_vulkan_ray_program(commands.get(), *pipeline, *sbt, sets, {},
+                            dimensions, {});
   // Recorded Vk owners keep the allocation, layout and pipeline alive.
   sbt.reset();
   pipeline.reset();
+  sets.clear();
   stream->submit_synced(commands.get());
   void *readback = values.data();
   ASSERT_EQ(device->readback_data(&pointer, &readback, &bytes, 1),
