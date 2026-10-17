@@ -92,6 +92,40 @@ def main(mode, artifact, recipe, result, arch="cuda"):
             )
             retained.append((call, frame, values, pixels))
         check_seed_dependencies(runtime, module)
+        # An exported public owner replaces private reconstruction and uploads.
+        pixels = runtime.ndarray("f32", (3, 5))
+        values = list(range(2, 17))
+        write(pixels, values)
+        if mode == "borrowed":
+            jit_pixels = ti.ndarray(ti.f32, (3, 5))
+            imported = runtime.import_ndarray(jit_pixels)
+            write(imported, values)
+            imported.close()
+            texture = ti.Texture(ti.Format.r32f, (3, 5))
+            texture.from_ndarray(jit_pixels)
+            image = runtime.import_texture(texture)
+        else:
+            image = runtime.native_resource(
+                "image",
+                "sampled",
+                parameters=dict(shape=[3, 5], format="r32f", filter="nearest"),
+                bindings=dict(pixels=pixels),
+            )
+        pixels.close()
+        frame = arrays()
+        public = module.prepare_execution("public", dict(frame, public_image=image))
+        public()
+        check(frame, values, arch)
+        if recipe == "selected" and arch == "cuda":
+            other = arrays()
+            sibling = public.prepare_binding(other)
+            public.close()
+            public, frame = sibling, other
+            public()
+            check(frame, values, arch)
+        image.close()
+        raises(public)
+        public.close()
         for call, frame, values, _ in retained:
             call()
             check(frame, values, arch)

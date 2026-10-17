@@ -457,6 +457,32 @@ keep their construction-time copy and retained-input contract. To express staged
 initialization explicitly, omit that resource binding and put an `image/upload`
 operation in `ExecutionPlan(initialization=[...])`.
 
+For these qualified sampled Textures, export can instead name a public resource:
+
+```python
+module.add_execution_plan(
+    "sample", compiled_graph,
+    source_bindings={"image": texture},
+    resource_bindings={texture: "shared_image"},
+)
+# Consumer: image is a same-runtime NativeResource, created or explicitly imported.
+prepared = loaded_module.prepare_execution(
+    "sample", {"shared_image": image, "output": output},
+)
+```
+
+This explicit alternative emits no private image or seed upload. Public/private
+Graph aliases of that producer Texture refer to the same public resource name;
+compiled kernel entries and selected CUDA binding-family strategy are reused.
+Contents and sampler come from the consumer object. Its kernel dimension/format
+and operation contracts are checked at preparation; export does not copy producer
+resource state. Names cannot collide with array/scalar/gradient arguments, private
+Graph storage or construction inputs. Distinct owners require distinct names.
+The public-owner form currently opts in sampled Textures only; other families
+continue to require their documented reconstruction inputs. Windows ordinary and
+selected CUDA/Vulkan checks cover standalone creation, borrowed JIT Texture
+imports, aliases, downstream gradients, CUDA siblings and resource retirement.
+
 Matching ABI81 components also expose runtime-owned native resources, shared
 across modules and plans through the existing factory catalog:
 
@@ -477,8 +503,8 @@ kernel or a native operation; it does not declare a private resource of that nam
 objects. The same handle can feed multiple plans, image upload operations and
 ordinary sampled kernel `bind()`/`prepare()` calls. CUDA binding siblings retain
 the same resources and may omit them when rebinding outputs; changing a resource
-requires independent preparation. Existing Graph exports continue to reconstruct
-private resources from seeds. They do not automatically import these public owners.
+requires independent preparation. Graph exports reconstruct private resources from
+seeds by default; use the explicit public-resource mapping above to supply owners.
 
 Creation is a cold allocation/preparation boundary. Factories conservatively
 retain their inputs unless they explicitly confirm that construction has completed

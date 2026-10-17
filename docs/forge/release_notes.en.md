@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Sampled Texture Graph export accepts `resource_bindings={texture: "public_name"}`
+  to reuse created or imported NativeResources without private images or seed
+  uploads. Ordinary/selected CUDA/Vulkan paths, aliases, downstream gradients
+  and retirement are covered; other provider families remain opt-in work.
+
 - Borrowed CUDA/Vulkan AOT runtimes can `import_texture()` from their JIT
   Program, retaining storage and sampler without copying pixels. JIT/AOT
   updates, independent imports, source-wrapper collection and in-flight

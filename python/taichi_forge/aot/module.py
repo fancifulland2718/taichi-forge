@@ -515,6 +515,12 @@ class Module:
         before preparation; image seeds before initialization. Resource creation precedes plan initialization and
         replay. This explicitly rebuilds resources from consumer data, without
         claiming to snapshot the producer's current resource state.
+
+        For qualified sampled Textures, ``resource_bindings[texture]`` may instead
+        be a public resource name. No private image or seed upload is emitted;
+        the consumer supplies a same-runtime NativeResource from native_resource()
+        or import_texture(). Its contents and sampler come from that consumer
+        object. Other resource families must explicitly support public owners.
         """
         from taichi_forge_runtime.aot import ExecutionPlan
         from taichi_forge.graph._graph import Graph

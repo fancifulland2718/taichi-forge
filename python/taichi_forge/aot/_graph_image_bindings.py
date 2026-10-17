@@ -77,6 +77,11 @@ class SourceImageBindings:
                 "AOT sampled-image reconstruction requires a basic sampler with matching min/mag filters"
             )
 
+        public = context.resource_inputs.public(owner)
+        if public is not None:
+            self.used.add(name)
+            return public
+
         def build():
             inputs = context.resource_inputs.require(owner, ("pixels",))
             resource = context.resource(

@@ -356,6 +356,28 @@ Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出�
 的合同。手工计划若需分阶段初始化，可省略该资源绑定，将 `image/upload` 放入
 `ExecutionPlan(initialization=[...])`。
 
+对于这些合格的 sampled Texture，也可在导出时声明公开资源参数：
+
+```python
+module.add_execution_plan(
+    "sample", compiled_graph,
+    source_bindings={"image": texture},
+    resource_bindings={texture: "shared_image"},
+)
+# 消费端：image 是本 runtime 创建或显式借用的 NativeResource。
+prepared = loaded_module.prepare_execution(
+    "sample", {"shared_image": image, "output": output},
+)
+```
+
+这个显式选项不生成私有图像或 seed 上传。同一生产 Texture 的公开/私有 Graph 别名
+统一引用该公开资源名，复用 kernel 条目及选中的 CUDA 绑定族策略。内容与 sampler
+由消费对象提供，准备时检查 kernel 维数/格式和操作合同；导出不复制生产资源状态。
+名称不可与数组/标量/梯度参数、私有 Graph 存储或构造输入冲突，不同 owner 须使用
+不同名称。当前只有 sampled Texture 显式接通这种公共 owner 形式，其他家族仍按
+各自文档提供重建输入。Windows 普通/selected CUDA/Vulkan 已验证独立创建、JIT
+Texture 借用、别名、后续梯度、CUDA 兄弟绑定及资源退休。
+
 匹配的 ABI81 组件另提供 runtime 所有的公共 native resource，复用同一工厂目录，
 可在多个模块、多个计划间共享：
 
@@ -374,7 +396,8 @@ call()
 操作，不再声明同名私有资源。`bindings` 将工厂输入端口映射为同 runtime 的 ndarray
 或 `NativeResource`。同一句柄可供多个计划、图像上传操作及普通 sampled kernel 的
 `bind()`/`prepare()` 使用。CUDA 兄弟绑定保留原资源，换绑输出时可省略资源参数；
-替换资源须独立准备。现有 Graph 自动导出仍从 seed 重建私有资源，不自动导入公共 owner。
+替换资源须独立准备。Graph 自动导出默认从 seed 重建私有资源，须使用上述显式公共资源
+映射来提供 owner。
 
 创建属于冷分配/准备边界。工厂默认保留全部输入，仅在明确确认构造已完成所有输入使用时
 释放对应依赖；公共 sampled image 因此可立即关闭 seed。其他保留输入须保持打开，

@@ -159,7 +159,35 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
         count = len(module._exported_kernels)
         module.add_execution_plan("again", graph, **arguments)
         assert len(module._exported_kernels) == count
-        return dict(export_ms=elapsed, kernels=count)
+        public_arguments = dict(arguments, resource_bindings={texture: "public_image"})
+        with pytest.raises(ValueError, match="conflict"):
+            module.add_execution_plan(
+                "bad_public",
+                graph,
+                **dict(arguments, resource_bindings={texture: "output"}),
+            )
+        assert (
+            len(module._exported_kernels) == count and not module._graph_export_failed
+        )
+        public_start = time.perf_counter()
+        public = module.add_execution_plan("public", graph, **public_arguments)
+        public_ms = (time.perf_counter() - public_start) * 1000
+        assert public.argument_names == ("dout", "loss", "output", "public_image")
+        public_document = json.loads(public.to_json())
+        assert not public_document.get("initialization")
+        assert not any(
+            r.get("provider") == "image" for r in public_document["resources"]
+        )
+        assert public_document["operations"][0]["arguments"][:2] == ["public_image"] * 2
+        assert public.binding_strategy == plan.binding_strategy
+        assert len(module._exported_kernels) == count
+        return dict(
+            export_ms=elapsed,
+            public_export_ms=public_ms,
+            kernels=count,
+            seed_plan_bytes=len(plan.to_json().encode()),
+            public_plan_bytes=len(public.to_json().encode()),
+        )
 
     if recipe == "selected":
         with selected(builder.freeze()) as graph:
@@ -202,3 +230,25 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
         assert result.returncode == 0, result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr
     (tmp_path / "producer.json").write_text(json.dumps(costs, indent=2))
+
+
+@pytest.mark.parametrize(
+    "case", ["private", "duplicate", "seed", "nul", "unused", "unsupported"]
+)
+def test_public_resource_export_binding_boundaries(case):
+    from taichi_forge.aot._graph_resource_bindings import ResourceInputBindings
+
+    first, second = object(), object()
+    with pytest.raises((ValueError, ti.TaichiRuntimeError)):
+        if case == "private":
+            ResourceInputBindings({first: "private"}, {"private"})
+        elif case == "duplicate":
+            ResourceInputBindings({first: "image", second: "image"}, {})
+        elif case == "seed":
+            ResourceInputBindings({first: "image", second: {"pixels": "image"}}, {})
+        elif case == "nul":
+            ResourceInputBindings({first: "image\0"}, {})
+        elif case == "unused":
+            ResourceInputBindings({first: "image"}, {}).validate_used()
+        else:
+            ResourceInputBindings({first: "image"}, {}).require(first, ("pixels",))

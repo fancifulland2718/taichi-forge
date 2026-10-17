@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- sampled Texture Graph 导出可用 `resource_bindings={texture: "public_name"}`
+  声明公共资源参数，复用创建或借用的 NativeResource，省掉私有图像及 seed 上传。
+  普通/selected CUDA/Vulkan 路径、别名、梯度和退休已验证；未默认扩展其他 provider。
+
 - CUDA/Vulkan AOT 借用者新增 `import_texture()`，直接保留其 JIT Program 的图像
   存储和 sampler，不复制像素。覆盖 JIT/AOT 双向更新、独立导入、源包装回收及在途
   退休；要求配对的 ABI81 组件，仍遵循当前 sampled image 的格式/mip/sampler 边界。

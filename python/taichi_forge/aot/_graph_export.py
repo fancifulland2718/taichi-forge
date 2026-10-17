@@ -1026,6 +1026,13 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         source_arrays = SourceArrayBindings(array_bindings, spec.fixed_runtime_args)
         source_images = SourceImageBindings(image_bindings, spec.fixed_runtime_args)
         resource_inputs = ResourceInputBindings(resource_bindings, spec.fixed_runtime_args)
+        non_image_names = (
+            (set(spec.runtime_arg_names) - source_images.owners.keys())
+            | source_arrays.arrays.keys()
+            | gradient_names
+        )
+        if resource_inputs.public_names & non_image_names:
+            raise ValueError("Public resource names conflict with Graph array/scalar/gradient arguments")
         context = _ExportContext(
             module,
             set(spec.runtime_arg_names)
