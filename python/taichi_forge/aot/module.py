@@ -497,6 +497,13 @@ class Module:
         frozen and consumers supply a one-dimensional f32 array in that order.
         Unnamed sparse matrices retain the default value snapshot behavior.
 
+        For qualified sampled-image operations, ``source_bindings`` may also
+        map Graph texture names to live Textures. Export preserves creation
+        metadata and sampler state; ``resource_bindings[texture]`` must supply
+        ``{"pixels": "consumer_seed"}``. The consumer seed replaces the texture
+        handle in the public plan arguments and is copied once at preparation.
+        Ordinary kernel Texture arguments are not yet supported by this path.
+
         ``resource_bindings`` maps qualified opaque resource owners to input
         port/public array name mappings. Consumers provide initialized arrays
         before preparation; resource creation precedes plan initialization and

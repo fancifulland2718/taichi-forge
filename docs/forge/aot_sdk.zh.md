@@ -289,7 +289,7 @@ CUDA沿用现有Forge布局：逻辑 `[X,Y]` 对应物理CUDA array的宽Y、高
 （`cuda_capture`）。opaque查询仍使用prepared-query快路径；alpha使用原有有序adapter API，
 不据此声明OptiX stream capture已合格。CUDA array驻留由驱动管理，逻辑texel字节为
 `product(shape) * channels * channel_bytes`，与查询workspace分开；workspace统计不含图像驻留。
-此显式资源/查询路径尚不代表普通AOT kernel纹理参数或alpha recording自动导出已接通。
+普通AOT kernel纹理参数仍未接通；alpha recording可通过下述显式图像重建合同自动导出。
 
 `refit` 也接受可更新 GAS。`instance_refit` 要求可更新的实例场景：传入 `transforms`
 时直接读取设备矩阵；省略时保留当前矩阵，仅刷新 IAS 包围盒。引用的 GAS 包围盒变化后，
@@ -340,8 +340,33 @@ module.add_execution_plan("step", compiled_graph, resource_bindings=resource_bin
 和 opaque 的独立语义；初始矩阵由消费端提供，不取可能已过期的构造时 transform。
 存活 IAS 可用其保留的元数据和显式 seed 重建原始句柄已关闭的 GAS；这不允许通过
 关闭的 GAS 句柄直接 refit。Windows CUDA 已验证共享几何、设备变换、包围盒刷新、
-独立绑定及后续梯度。旧 untyped hit、alpha/OMM/program recording 和非零 SBT offset
+独立绑定及后续梯度。旧 untyped hit、OMM/program recording 和非零 SBT offset
 仍未接通自动导出，会在导出阶段明确拒绝。
+
+alpha recording 的公开 Graph 纹理名通过 `source_bindings` 对应到存活的 Texture，
+初始像素仍通过公共 `resource_bindings` 明确指定：
+
+```python
+module.add_execution_plan(
+    "alpha_trace", compiled_graph,
+    source_bindings={"alpha_texture": texture},
+    resource_bindings={
+        scene: {"vertices": "initial_vertices", "indices": "initial_indices"},
+        texture: {"pixels": "initial_alpha"},
+    },
+)
+```
+
+纹理名须匹配 `OptixAlphaMask.texture`。导出冻结实际创建时的格式、尺寸和采样器，
+不读取生产端 texel。消费端绑定 `initial_alpha`，无需传入纹理句柄；冷准备时复制一次，
+后续修改 seed 数组不会隐式更新图像。手工编写的执行计划可使用 `image/upload` 显式上传。
+公开名或私有 Graph 绑定引用同一 Texture 时，每次准备只重建一份图像；UV 和面表仍读取
+当前设备值。缺失/未使用源、已退休纹理和不支持的纹理用途在发布 kernel 前拒绝。
+普通 kernel Texture 参数仍需独立的带代次校验的启动支持。
+
+Windows CUDA 自动导出已验证非方形 r32f/RGBA 图像、公开/私有共享绑定、生产端与消费端
+内容不同、独立 prepared 实例、活 UV/面表、refit 后命中转 miss、后续 kernel 真实梯度，
+以及独立/借用消费端的资源退休。
 
 已有 JIT Program 时，`ti.aot.borrow_runtime()` 可显式共享其 CPU/CUDA executor
 或 Vulkan GFX runtime、设备和分配器：

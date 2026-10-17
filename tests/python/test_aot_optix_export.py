@@ -134,8 +134,10 @@ def test_optix_recording_export_and_consumer_scene_reconstruction(tmp_path):
                 admission="explicit",
             )
             graph = alpha.compile()
-            with pytest.raises(ti.TaichiRuntimeError, match="alpha/OMM"):
-                module.add_execution_plan("alpha", graph)
+            with pytest.raises(ti.TaichiRuntimeError, match="source_bindings"):
+                module.add_execution_plan(
+                    "alpha", graph, resource_bindings={scene: {"vertices": "seed", "indices": "indices"}}
+                )
             graph.close()
             assert len(module._exported_kernels) == 4 and not module._data_payloads
             artifact = tmp_path / "export.tcm"

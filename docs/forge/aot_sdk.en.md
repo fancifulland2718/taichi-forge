@@ -370,9 +370,9 @@ Discover `optix_query` version 3 (`cuda_ordered`) and `image_upload` version 1
 fast path. Alpha uses the existing ordered adapter API; this does not qualify
 OptiX stream capture. CUDA array residency is driver-private: packed texel bytes
 are `product(shape) * channels * channel_bytes`, separate from reported query
-workspace, which does not include image residency. This explicit resource/query
-path does not yet enable ordinary AOT kernel texture arguments or automatic
-export of alpha recordings.
+workspace, which does not include image residency. Ordinary AOT kernel texture
+arguments remain unsupported; alpha recordings can export through the explicit
+image reconstruction contract below.
 
 `refit` also accepts an updateable GAS. `instance_refit` requires an updateable
 instance scene: supplying `transforms` updates its matrices from device memory;
@@ -442,8 +442,39 @@ can reconstruct geometry whose original GAS handle has closed, using its retaine
 metadata and explicit seeds. This does not enable direct refits through a closed
 GAS handle. Windows CUDA checks cover shared geometry, device transforms,
 bounds-only refits, independent bindings and downstream gradients. Legacy untyped
-hits, alpha/OMM/program recordings and nonzero SBT offsets remain unsupported by
+hits, OMM/program recordings and nonzero SBT offsets remain unsupported by
 this automatic route and are rejected during export.
+
+For alpha recordings, supply the live Texture associated with each public Graph
+texture name in `source_bindings`, and an explicit initial pixel input through
+the same `resource_bindings` contract:
+
+```python
+module.add_execution_plan(
+    "alpha_trace", compiled_graph,
+    source_bindings={"alpha_texture": texture},
+    resource_bindings={
+        scene: {"vertices": "initial_vertices", "indices": "initial_indices"},
+        texture: {"pixels": "initial_alpha"},
+    },
+)
+```
+
+The texture name must match `OptixAlphaMask.texture`. Export freezes the actual
+creation format, shape and sampler, without reading producer texels. The consumer
+binds `initial_alpha` instead of a texture handle. It is copied once during cold
+preparation; later seed-array writes do not implicitly upload the image. Native
+`image/upload` operations can explicitly update it in an authored execution plan.
+Public names and fixed private Graph bindings referring to the same Texture share
+one reconstructed image per preparation. UV and face-table bindings remain live.
+Missing/unused sources, retired textures and unsupported texture uses fail before
+publishing kernels. Ordinary kernel Texture arguments still require separate
+generation-qualified launch support.
+
+Windows CUDA automatic-export checks cover non-square r32f/RGBA images, shared
+public/private image bindings, producer/consumer contents that differ, separate
+prepared instances, live UV/face updates, refit hit-to-miss transitions, real
+post-query kernel gradients, and independent/borrowed consumer retirement.
 
 When a JIT Program already exists, `ti.aot.borrow_runtime()` explicitly shares
 its CPU/CUDA executor or Vulkan GFX runtime, device and allocator:

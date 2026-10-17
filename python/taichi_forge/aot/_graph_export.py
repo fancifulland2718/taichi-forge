@@ -17,10 +17,11 @@ def _snapshot(value):
 class _ExportContext:
     """One export transaction; object identities never become artifact data."""
 
-    def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None, resource_inputs=None):
+    def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None, source_images=None, resource_inputs=None):
         self.arch = module._arch
         self.snapshot_state = snapshot_state
         self.source_arrays = source_arrays
+        self.source_images = source_images
         self.resource_inputs = resource_inputs
         self.operations = []
         self.initialization = []
@@ -125,6 +126,11 @@ class _ExportContext:
         from taichi_forge.lang.util import cook_dtype
 
         for name, owner in bindings.items():
+            if self.source_images is not None and name in self.source_images.owners:
+                if self.source_images.owners[name] is not owner:
+                    raise TaichiRuntimeError("AOT private Texture changed within one export")
+                self.private_bindings[name] = owner
+                continue
             if type(owner) in (bool, int, float):
                 # The final spec value is the shared binding frame. Source
                 # nodes may retain equal but nonidentical earlier values.
@@ -192,6 +198,8 @@ class _ExportContext:
         return self._resource(owner, dict(kind="host_blob", data=key, byte_size=len(data)))
 
     def binding(self, name):
+        if self.source_images is not None and name in self.source_images.owners:
+            raise TaichiRuntimeError("AOT Texture bindings require a qualified sampled-image operation")
         if name in self._scalar_values:
             raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")
         return self._private_names.get(name, name)
@@ -1009,9 +1017,12 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             binding_strategy = binding_factory._validate_aot_export(spec, graph._execution_arch)
         gradient_names = set((gradients or {}).values())
         from ._graph_source_bindings import SourceArrayBindings
+        from ._graph_image_bindings import SourceImageBindings, split_source_bindings
         from ._graph_resource_bindings import ResourceInputBindings
 
-        source_arrays = SourceArrayBindings(source_bindings, spec.fixed_runtime_args)
+        array_bindings, image_bindings = split_source_bindings(source_bindings)
+        source_arrays = SourceArrayBindings(array_bindings, spec.fixed_runtime_args)
+        source_images = SourceImageBindings(image_bindings, spec.fixed_runtime_args)
         resource_inputs = ResourceInputBindings(resource_bindings, spec.fixed_runtime_args)
         context = _ExportContext(
             module,
@@ -1019,9 +1030,11 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             | set(spec.fixed_runtime_args)
             | gradient_names
             | source_arrays.arrays.keys()
+            | source_images.owners.keys()
             | resource_inputs.names,
             snapshot_state=snapshot_state,
             source_arrays=source_arrays,
+            source_images=source_images,
             resource_inputs=resource_inputs,
         )
         context.declare_private_bindings(spec.fixed_runtime_args)
@@ -1036,6 +1049,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         for node in graph._spec.nodes:
             _node(context, node)
         source_arrays.validate_used(spec.runtime_arg_names)
+        source_images.validate_used()
         resource_inputs.validate_used()
         context.binding_constraints.extend(source_arrays.constraints)
         if context.control_names != context._control_bindings:
@@ -1089,7 +1103,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             )
             # Provider workspace must not accidentally become a public input.
             expected_names = (
-                set(spec.runtime_arg_names)
+                (set(spec.runtime_arg_names) - source_images.used)
                 | source_arrays.used
                 | resource_inputs.used_names
                 | (gradient_names - context.private_bindings.keys())

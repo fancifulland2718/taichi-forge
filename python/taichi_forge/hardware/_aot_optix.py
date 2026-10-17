@@ -84,11 +84,13 @@ def _scene(context, scene):
 
 
 def export_query(recording, context):
+    from taichi_forge._lib import core
+
     from ._optix import OptixFaceRuleTable, OptixInstanceScene
 
     recording.validate_graph_lifetime()
-    if recording._micromap or any(mask is not None for mask in recording.alpha_masks or ()):
-        raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct alpha/OMM inputs")
+    if recording._micromap:
+        raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM inputs")
     if recording.hit_indices is None and not recording._occlusion:
         raise TaichiRuntimeError("AOT OptiX recording export requires typed or compact occlusion queries")
     bindings = dict(scene=_scene(context, recording.scene), rays=recording.rays, hits=recording.hits)
@@ -104,18 +106,37 @@ def export_query(recording, context):
             rules.append("table")
         else:
             rules.append(rule)
+    masks = []
+    mask_count = 0
+    for mask in recording.alpha_masks or ():
+        if mask is None:
+            masks.append(None)
+            continue
+        texture = context.source_images.require(mask.texture)
+        fmt, shape, mip_levels, _ = texture._creation_metadata
+        if len(shape) != 2 or mip_levels != 1 or fmt not in (core.Format.r32f, core.Format.rgba32f):
+            raise TaichiRuntimeError("AOT OptiX alpha requires a single-level 2D r32f/rgba32f texture")
+        if fmt == core.Format.r32f and mask.channel != 0:
+            raise ValueError("OptiX r32f alpha textures require channel=0")
+        bindings[f"uvs_{mask_count}"] = mask.uvs
+        bindings[f"image_{mask_count}"] = context.source_images.resource(context, mask.texture)
+        masks.append(dict(cutoff=mask.cutoff, channel=mask.channel))
+        mask_count += 1
+    parameters = dict(
+        ray_count=recording.ray_count,
+        occlusion=recording._occlusion,
+        any_hit=recording.any_hit,
+        face_rules=rules,
+        face_table_count=table_count,
+    )
+    if mask_count:
+        parameters.update(alpha_masks=masks, mask_count=mask_count)
     context.native(
         "optix",
         "query",
-        version=2,
+        version=3 if mask_count else 2,
         bindings=bindings,
-        parameters=dict(
-            ray_count=recording.ray_count,
-            occlusion=recording._occlusion,
-            any_hit=recording.any_hit,
-            face_rules=rules,
-            face_table_count=table_count,
-        ),
+        parameters=parameters,
     )
     return ()
 

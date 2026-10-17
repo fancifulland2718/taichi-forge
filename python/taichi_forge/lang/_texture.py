@@ -241,16 +241,15 @@ class Texture:
                 "this backend does not implement graphics texture allocation "
                 "and TextureOp lowering"
             )
-        if sampler is None:
-            sampler_config = _ti_core.ImageSamplerConfig()
-        else:
-            from taichi_forge.hardware._sampling import SamplerConfig
+        from taichi_forge.hardware._sampling import SamplerConfig
 
-            if not isinstance(sampler, SamplerConfig):
-                raise TypeError(
-                    "sampler must be a ti.hardware.sampling.SamplerConfig"
-                )
-            sampler_config = sampler._as_core_config()
+        if sampler is None:
+            sampler = SamplerConfig()
+        if not isinstance(sampler, SamplerConfig):
+            raise TypeError(
+                "sampler must be a ti.hardware.sampling.SamplerConfig"
+            )
+        sampler_config = sampler._as_core_config()
         self.tex = self._runtime_prog.create_texture(
             fmt, arr_shape, sampler_config, mip_levels
         )
@@ -258,6 +257,9 @@ class Texture:
         self.num_dims = len(arr_shape)
         self.shape = arr_shape
         self._mip_levels = mip_levels
+        # Immutable creation metadata; AOT reconstruction never reads texels or
+        # serializes the producer's device allocation / sampled-object handle.
+        self._creation_metadata = (fmt, arr_shape, mip_levels, sampler)
         runtime.register_runtime_object(self)
 
     @property
