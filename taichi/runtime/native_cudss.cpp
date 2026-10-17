@@ -515,7 +515,7 @@ void register_cudss_operations(NativeOperationRegistry &registry) {
         };
       },
       {}, {"values"},
-      NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}});
+      {NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}}});
 #ifdef TI_WITH_CUDA
   registry.register_context_factory<CudssPlanDescription>(
       Arch::cuda, NativeOperationMode::cuda_capture,

@@ -363,7 +363,7 @@ TEST(NativeOperationRegistry, BindingGroupsValidateTheCompleteInventory) {
         return [](const NativeOperationBindings &) { return TestDescriptor{}; };
       },
       {}, {"values"},
-      NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}});
+      {NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}}});
   auto description =
       NativeOperationDescription::parse(liong::json::parse_complete(
           R"({"kind":"native","provider":"test","operation":"group","version":1,
@@ -417,17 +417,64 @@ TEST(NativeOperationRegistry, BindingGroupsRejectAmbiguousRegistration) {
         Group{"count", {"optional"}}}) {
     EXPECT_THROW(
         registry.register_schema<TestDescriptor>(
-            "test", "group", {"fixed_0"}, decode, {}, {"optional_1"}, group),
+            "test", "group", {"fixed_0"}, decode, {}, {"optional_1"}, {group}),
         std::invalid_argument);
   }
   EXPECT_THROW(registry.register_schema<TestDescriptor>(
                    "test", "group", {}, decode, "legacy", {},
-                   Group{"count", {"rhs"}}),
+                   {Group{"count", {"rhs"}}}),
                std::invalid_argument);
   // Failed registration must not reserve the schema key.
   EXPECT_NO_THROW(registry.register_schema<TestDescriptor>(
       "test", "group", {"fixed_0"}, decode, {}, {"optional_1"},
-      Group{"count", {"rhs", "output"}}));
+      {Group{"count", {"rhs", "output"}}}));
+}
+
+TEST(NativeOperationRegistry, IndependentBindingGroupsRejectIncompleteInventory) {
+  NativeOperationRegistry registry;
+  registry.define<TestDescriptor>([](Device &, const TestDescriptor &) {});
+  int decoded = 0;
+  auto decode = [&](const liong::json::JsonValue &) {
+    ++decoded;
+    return [](const NativeOperationBindings &) { return TestDescriptor{}; };
+  };
+  EXPECT_THROW(registry.register_schema<TestDescriptor>(
+                   "test", "groups", {}, decode, {}, {},
+                   {{"count_a", {"image"}}, {"count_b", {"image"}}}),
+               std::invalid_argument);
+  registry.register_schema<TestDescriptor>(
+      "test", "groups", {"scene"}, decode, {}, {"output"},
+      {{"face_count", {"faces"}}, {"mask_count", {"uvs", "image"}}});
+  auto d = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"test","operation":"groups","version":1,
+      "parameters":{"face_count":1,"mask_count":2},
+      "bindings":{"scene":"scene","faces_0":"face_table","uvs_0":"uv",
+      "image_0":"texture","uvs_1":"uv","image_1":"texture"}})"));
+  EXPECT_NO_THROW(registry.decode(d));
+  EXPECT_EQ(decoded, 1);  // Shared slots across groups remain legal.
+  for (const char *parameters :
+       {R"({"face_count":1})", R"({"face_count":0,"mask_count":2})",
+        R"({"face_count":1,"mask_count":3})",
+        R"({"face_count":4,"mask_count":2})",
+        R"({"face_count":1,"mask_count":9223372036854775807})"}) {
+    auto bad = d;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  for (const char *port : {"faces_0", "uvs_1", "image_0"}) {
+    auto bad = d;
+    bad.bindings.erase(port);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  auto bad = d;
+  bad.bindings.emplace("image_2", "texture");
+  EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  EXPECT_EQ(decoded, 1);
+  d.parameters = liong::json::parse_complete(
+      R"({"face_count":0,"mask_count":0})");
+  d.bindings = {{"scene", "scene"}, {"output", "out"}};
+  EXPECT_NO_THROW(registry.decode(d));
+  EXPECT_EQ(decoded, 2);
 }
 
 TEST(NativeOperationRegistry, CsrDescriptionsDecodeWithoutLoadingProvider) {

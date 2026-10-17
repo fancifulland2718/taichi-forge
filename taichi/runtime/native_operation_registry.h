@@ -107,7 +107,7 @@ class NativeOperationRegistry {
                        Decoder<Descriptor> decode,
                        std::string legacy_kind = {},
                        std::vector<std::string> optional_ports = {},
-                       std::optional<BindingGroup> binding_group = {}) {
+                       std::vector<BindingGroup> binding_groups = {}) {
     if (!decode)
       throw std::invalid_argument("Native schema requires a decoder");
     register_schema_impl(
@@ -126,7 +126,7 @@ class NativeOperationRegistry {
               };
         },
         std::move(legacy_kind), std::move(optional_ports),
-        std::move(binding_group));
+        std::move(binding_groups));
   }
 
   DecodedOperation decode(
@@ -263,7 +263,7 @@ class NativeOperationRegistry {
     std::vector<std::string> ports;
     ErasedDecoder decode;
     std::vector<std::string> optional_ports;
-    std::optional<BindingGroup> binding_group;
+    std::vector<BindingGroup> binding_groups;
   };
   std::map<NativeOperationDescription::Key, Schema> schemas_;
   std::map<std::string, NativeOperationDescription::Key> legacy_schemas_;
@@ -275,7 +275,7 @@ class NativeOperationRegistry {
                             ErasedDecoder decode,
                             std::string legacy_kind,
                             std::vector<std::string> optional_ports,
-                            std::optional<BindingGroup> binding_group);
+                            std::vector<BindingGroup> binding_groups);
 
   void define_impl(const std::string &kind,
                    std::uint32_t version,

@@ -872,9 +872,9 @@ void register_query(NativeOperationRegistry &registry) {
     validate_query(device, op);
   });
   std::vector<std::string> optional_ports{"hit_indices"};
-  std::optional<NativeOperationRegistry::BindingGroup> group;
+  std::vector<NativeOperationRegistry::BindingGroup> groups;
   if constexpr (Description::version == 2)
-    group = NativeOperationRegistry::BindingGroup{"face_table_count", {"faces"}};
+    groups.push_back({"face_table_count", {"faces"}});
   else
     optional_ports.push_back("faces");
   registry.register_schema<Description>(
@@ -940,7 +940,7 @@ void register_query(NativeOperationRegistry &registry) {
           }
           return op;
         };
-      }, {}, optional_ports, group);
+      }, {}, optional_ports, groups);
 #ifdef TI_WITH_CUDA
   registry.register_context_factory<Description>(
       Arch::cuda, NativeOperationMode::cuda_ordered,
@@ -1022,7 +1022,7 @@ void register_optix_operations(NativeOperationRegistry &registry) {
             d.gas.push_back(b.at("gas_" + std::to_string(i)).resource<OptixSceneResource>());
           return d;
         };
-      }, {}, {}, NativeOperationRegistry::BindingGroup{"instance_count", {"gas"}});
+      }, {}, {}, {{"instance_count", {"gas"}}});
   register_query<OptixQueryOperation>(registry);
   register_query<OptixBoundFaceQueryOperation>(registry);
   registry.define<OptixRefitOperation>(validate_refit);

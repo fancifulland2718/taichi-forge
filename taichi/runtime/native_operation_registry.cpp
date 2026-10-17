@@ -12,7 +12,7 @@ void NativeOperationRegistry::register_schema_impl(
     ErasedDecoder decode,
     std::string legacy_kind,
     std::vector<std::string> optional_ports,
-    std::optional<BindingGroup> binding_group) {
+    std::vector<BindingGroup> binding_groups) {
   using operation_json::name;
   name(liong::json::JsonValue(std::get<0>(key)));
   name(liong::json::JsonValue(std::get<1>(key)));
@@ -28,13 +28,13 @@ void NativeOperationRegistry::register_schema_impl(
     if (!unique.insert(port).second)
       throw std::invalid_argument("Duplicate native schema binding: " + port);
   }
-  if (binding_group) {
-    name(liong::json::JsonValue(binding_group->count_parameter));
-    if (binding_group->prefixes.empty() || !legacy_kind.empty())
+  std::set<std::string> prefixes;
+  for (const auto &group : binding_groups) {
+    name(liong::json::JsonValue(group.count_parameter));
+    if (group.prefixes.empty() || !legacy_kind.empty())
       throw std::invalid_argument(
           "Binding groups require prefixes and a native schema");
-    std::set<std::string> prefixes;
-    for (const auto &prefix : binding_group->prefixes) {
+    for (const auto &prefix : group.prefixes) {
       name(liong::json::JsonValue(prefix));
       if (!prefixes.insert(prefix).second)
         throw std::invalid_argument("Duplicate binding group prefix: " +
@@ -57,7 +57,7 @@ void NativeOperationRegistry::register_schema_impl(
   auto inserted = schemas_.emplace(
       key, Schema{std::move(definition_key), type, std::move(ports),
                   std::move(decode), std::move(optional_ports),
-                  std::move(binding_group)});
+                  std::move(binding_groups)});
   try {
     if (!legacy_kind.empty())
       legacy_schemas_.emplace(std::move(legacy_kind), std::move(key));
@@ -80,17 +80,27 @@ NativeOperationRegistry::DecodedOperation NativeOperationRegistry::decode(
     throw std::invalid_argument(
         "Native operation/resource schema kind mismatch");
   std::set<std::string> required(schema.ports.begin(), schema.ports.end());
-  if (schema.binding_group) {
-    const auto &group = *schema.binding_group;
+  // Bound total expansion by the supplied inventory, including all groups.
+  // Reject before constructing names; no arbitrary count limit or count product.
+  size_t remaining = description.bindings.size();
+  if (schema.ports.size() > remaining)
+    throw std::invalid_argument("Missing native operation bindings");
+  remaining -= schema.ports.size();
+  for (const auto &group : schema.binding_groups) {
     if (!description.parameters.is_obj() ||
         !description.parameters.obj.inner.count(group.count_parameter))
       throw std::invalid_argument("Missing native binding group count: " +
                                   group.count_parameter);
     const auto count =
         operation_json::integer(description.parameters[group.count_parameter]);
-    if (count > description.bindings.size() / group.prefixes.size())
+    if (count > remaining / group.prefixes.size())
       throw std::invalid_argument(
           "Binding group count exceeds supplied bindings");
+    remaining -= size_t(count) * group.prefixes.size();
+  }
+  for (const auto &group : schema.binding_groups) {
+    const auto count =
+        operation_json::integer(description.parameters[group.count_parameter]);
     for (std::uint64_t i = 0; i < count; ++i)
       for (const auto &prefix : group.prefixes)
         required.insert(prefix + "_" + std::to_string(i));
