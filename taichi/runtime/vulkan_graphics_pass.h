@@ -3,6 +3,21 @@
 #include "taichi/runtime/vulkan_graphics_types.h"
 #include "taichi/rhi/device.h"
 
+namespace taichi::lang {
+// Backend-independent values also parsed when the Vulkan factory is disabled.
+struct VulkanGraphicsIndirectParameters {
+  // Relative to the supplied logical views until preparation resolves them.
+  std::uint64_t command_offset{0};
+  std::uint64_t count_offset{0};
+  std::uint32_t max_draw_count{1};
+  std::uint32_t stride{0};
+  std::uint32_t vertex_record_limit{0};
+  std::uint32_t instance_record_limit{0};
+  std::uint32_t index_element_limit{0};
+  bool first_instance_may_be_nonzero{false};
+};
+}  // namespace taichi::lang
+
 #ifdef TI_WITH_VULKAN
 #include "taichi/rhi/vulkan/vulkan_common.h"
 #include <functional>
@@ -67,18 +82,20 @@ struct VulkanGraphicsShaderImageView {
   ImageSamplerConfig sampler{};
 };
 
-struct VulkanGraphicsIndirectPacket {
+struct VulkanGraphicsIndirectPacket : VulkanGraphicsIndirectParameters {
   DeviceAllocation command_buffer{kDeviceNullAllocation};
   DeviceAllocation count_buffer{kDeviceNullAllocation};
-  std::uint32_t command_offset{0};
-  std::uint32_t count_offset{0};
-  std::uint32_t max_draw_count{1};
-  std::uint32_t stride{0};
-  std::uint32_t vertex_record_limit{0};
-  std::uint32_t instance_record_limit{0};
-  std::uint32_t index_element_limit{0};
-  bool first_instance_may_be_nonzero{false};
 };
+
+// Produces physical offsets while retaining the caller's logical view bounds.
+// No command readback: vertex/instance/index limits are producer promises.
+// Caller qualifies u32 data and retains the array owners through completion.
+VulkanGraphicsIndirectPacket prepare_vulkan_graphics_indirect(
+    vulkan::VulkanDevice &device,
+    bool indexed,
+    const VulkanGraphicsIndirectParameters &parameters,
+    const DeviceBufferRange &commands,
+    const std::optional<DeviceBufferRange> &count);
 
 struct VulkanGraphicsDrawResources {
   std::vector<std::pair<std::uint32_t, std::unique_ptr<ShaderResourceSet>>>

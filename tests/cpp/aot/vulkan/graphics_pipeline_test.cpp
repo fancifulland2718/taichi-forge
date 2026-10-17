@@ -353,6 +353,82 @@ TEST(VulkanGraphicsPipeline, SharedDrawRecordsBufferRangesAndSampledImages) {
   }
 }
 
+TEST(VulkanGraphicsPipeline, SharedIndirectRangesRespectViewsAndDeviceFeatures) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto [buffer, status] = device.allocate_memory_unique(
+      {64, false, false, false, AllocUsage::Indirect});
+  ASSERT_EQ(status, RhiResult::success);
+  VulkanGraphicsIndirectParameters p;
+  p.command_offset = 4;
+  p.stride = 16;
+  p.vertex_record_limit = 3;
+  p.instance_record_limit = 1;
+  DeviceBufferRange commands{buffer->get_ptr(8), 20};
+  std::optional<DeviceBufferRange> count;
+  bool indexed = false;
+  auto prepare = [&] {
+    return prepare_vulkan_graphics_indirect(device, indexed, p, commands, count);
+  };
+  auto packet = prepare();
+  EXPECT_EQ(packet.command_buffer, *buffer);
+  EXPECT_EQ(packet.command_offset, 12);
+  EXPECT_EQ(packet.count_buffer, kDeviceNullAllocation);
+  commands.bytes = 19;
+  EXPECT_ANY_THROW(prepare());  // The allocation is large enough; the view isn't.
+  commands.bytes = 20;
+  commands.pointer.offset = 9;
+  EXPECT_ANY_THROW(prepare());
+  commands.pointer.offset = 8;
+  p.command_offset = (uint64_t(1) << 32) + 4;
+  EXPECT_ANY_THROW(prepare());  // Must not truncate to the original valid offset.
+  p.command_offset = 4;
+  indexed = true;
+  p.index_element_limit = 3;
+  EXPECT_ANY_THROW(prepare());  // Indexed command needs a 20-byte stride.
+  p.stride = 20;
+  EXPECT_ANY_THROW(prepare());  // 20 bytes plus offset exceeds this view.
+  commands.bytes = 24;
+  EXPECT_NO_THROW(prepare());
+  auto [storage, sr] = device.allocate_memory_unique(
+      {64, false, false, false, AllocUsage::Storage});
+  ASSERT_EQ(sr, RhiResult::success);
+  commands.pointer = storage->get_ptr(8);
+  EXPECT_ANY_THROW(prepare());
+  commands.pointer = buffer->get_ptr(8);
+
+  auto &caps = device.vk_caps();
+  const auto original = caps;
+  p.first_instance_may_be_nonzero = true;
+  caps.draw_indirect_first_instance = false;
+  EXPECT_ANY_THROW(prepare());
+  p.first_instance_may_be_nonzero = false;
+  p.max_draw_count = 2;
+  caps.multi_draw_indirect = false;
+  EXPECT_ANY_THROW(prepare());
+  p.max_draw_count = 1;
+  caps.max_draw_indirect_count = 0;
+  EXPECT_ANY_THROW(prepare());
+  caps = original;
+  count = DeviceBufferRange{buffer->get_ptr(40), 8};
+  p.count_offset = 4;
+  if (caps.draw_indirect_count) {
+    packet = prepare();
+    EXPECT_EQ(packet.count_buffer, *buffer);
+    EXPECT_EQ(packet.count_offset, 44);
+    count->bytes = 7;
+    EXPECT_ANY_THROW(prepare());
+    count->bytes = 8;
+  }
+  caps.draw_indirect_count = false;
+  EXPECT_ANY_THROW(prepare());
+  caps = original;
+  count.reset();
+  EXPECT_ANY_THROW(prepare());  // Offset without a count owner is ambiguous.
+}
+
 TEST(VulkanGraphicsPipeline, SharedVertexRangesRespectLogicalSubranges) {
   if (!is_vulkan_api_available())
     GTEST_SKIP() << "Vulkan unavailable";

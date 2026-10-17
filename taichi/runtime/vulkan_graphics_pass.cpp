@@ -177,6 +177,79 @@ size_t validate_buffer_range(vulkan::VulkanDevice &device,
 }
 }  // namespace
 
+VulkanGraphicsIndirectPacket prepare_vulkan_graphics_indirect(
+    vulkan::VulkanDevice &device,
+    bool indexed,
+    const VulkanGraphicsIndirectParameters &p,
+    const DeviceBufferRange &commands,
+    const std::optional<DeviceBufferRange> &count) {
+  const auto &caps = device.vk_caps();
+  TI_ERROR_IF(
+      !p.max_draw_count || p.max_draw_count > caps.max_draw_indirect_count,
+      "Vulkan indirect graphics draw count exceeds the active device limit.");
+  TI_ERROR_IF(
+      p.max_draw_count > 1 && !caps.multi_draw_indirect,
+      "Vulkan multi-draw indirect is unavailable on the active device.");
+  TI_ERROR_IF(
+      p.first_instance_may_be_nonzero && !caps.draw_indirect_first_instance,
+      "Vulkan indirect firstInstance is unavailable on the active device.");
+  TI_ERROR_IF(
+      count && !caps.draw_indirect_count,
+      "Vulkan indirect-count commands are unavailable on the active device.");
+  const size_t command_size = indexed ? sizeof(VkDrawIndexedIndirectCommand)
+                                      : sizeof(VkDrawIndirectCommand);
+  TI_ERROR_IF(p.stride < command_size || p.stride % sizeof(uint32_t) ||
+                  p.command_offset % sizeof(uint32_t) ||
+                  p.count_offset % sizeof(uint32_t),
+              "Vulkan indirect command offsets and stride violate the "
+              "four-byte command ABI.");
+  TI_ERROR_IF(!count && p.count_offset,
+              "Vulkan indirect count offset requires a count buffer.");
+  TI_ERROR_IF(!p.vertex_record_limit || !p.instance_record_limit ||
+                  (indexed && !p.index_element_limit) ||
+                  (!indexed && p.index_element_limit),
+              "Vulkan indirect graphics requires positive declared "
+              "vertex/instance limits "
+              "and an indexed-only index limit.");
+  TI_ERROR_IF(
+      size_t(p.max_draw_count - 1) >
+          ((std::numeric_limits<size_t>::max)() - command_size) / p.stride,
+      "Vulkan indirect command byte range overflows size_t.");
+  const size_t required =
+      size_t(p.max_draw_count - 1) * p.stride + command_size;
+  auto resolve = [&](const DeviceBufferRange &view, uint64_t offset,
+                     size_t bytes, const char *role) {
+    const auto available = validate_buffer_range(
+        device, view.pointer, view.bytes, AllocUsage::Indirect);
+    TI_ERROR_IF(offset > available || bytes > available - offset,
+                "Vulkan graphics {} buffer is too small for the declared "
+                "command range.",
+                role);
+    DevicePtr pointer = view.pointer;
+    // Validated view + relative range implies this sum is within the
+    // allocation.
+    pointer.offset += offset;
+    TI_ERROR_IF(
+        pointer.offset % sizeof(uint32_t),
+        "Vulkan graphics {} buffer offset violates the four-byte command ABI.",
+        role);
+    return pointer;
+  };
+  const auto command_ptr =
+      resolve(commands, p.command_offset, required, "indirect command");
+  VulkanGraphicsIndirectPacket result;
+  static_cast<VulkanGraphicsIndirectParameters &>(result) = p;
+  result.command_buffer = command_ptr;
+  result.command_offset = command_ptr.offset;
+  if (count) {
+    const auto count_ptr =
+        resolve(*count, p.count_offset, sizeof(uint32_t), "indirect count");
+    result.count_buffer = count_ptr;
+    result.count_offset = count_ptr.offset;
+  }
+  return result;
+}
+
 void validate_vulkan_graphics_vertex_ranges(
     vulkan::VulkanDevice &device,
     const std::vector<VertexInputBinding> &bindings,

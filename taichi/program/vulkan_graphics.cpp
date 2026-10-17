@@ -709,46 +709,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     }
     if (command.indirect.has_value()) {
       const auto &indirect = *command.indirect;
-      const auto caps = vulkan_graphics_indirect_capabilities();
-      TI_ERROR_IF(caps.at("fixed_count") == 0,
-                  "Vulkan indirect graphics commands are unavailable.");
-      TI_ERROR_IF(indirect.command_buffer == nullptr,
-                  "Vulkan indirect graphics requires a command buffer.");
-      TI_ERROR_IF(indirect.max_draw_count == 0 ||
-                      indirect.max_draw_count > caps.at("max_draw_count"),
-                  "Vulkan indirect graphics draw count exceeds the active "
-                  "device limit.");
-      TI_ERROR_IF(indirect.max_draw_count > 1 && caps.at("multi_draw") == 0,
-                  "Vulkan multi-draw indirect is unavailable on the active "
-                  "device.");
-      TI_ERROR_IF(indirect.first_instance_may_be_nonzero &&
-                      caps.at("first_instance") == 0,
-                  "Vulkan indirect firstInstance is unavailable on the "
-                  "active device.");
-      TI_ERROR_IF(indirect.count_buffer != nullptr &&
-                      caps.at("count_buffer") == 0,
-                  "Vulkan indirect-count commands are unavailable on the "
-                  "active device.");
-      const std::size_t command_size =
-          draw.indexed ? sizeof(VkDrawIndexedIndirectCommand)
-                       : sizeof(VkDrawIndirectCommand);
-      TI_ERROR_IF(indirect.stride < command_size ||
-                      indirect.stride % sizeof(std::uint32_t) != 0 ||
-                      indirect.command_offset % sizeof(std::uint32_t) != 0 ||
-                      indirect.count_offset % sizeof(std::uint32_t) != 0,
-                  "Vulkan indirect command offsets and stride violate the "
-                  "four-byte command ABI.");
-      TI_ERROR_IF(indirect.vertex_record_limit == 0 ||
-                      indirect.instance_record_limit == 0 ||
-                      (draw.indexed && indirect.index_element_limit == 0) ||
-                      (!draw.indexed && indirect.index_element_limit != 0),
-                  "Vulkan indirect graphics requires positive declared "
-                  "vertex/instance limits and an indexed-only index limit.");
-
-      auto validate_indirect_array = [&](Ndarray *array,
-                                         const char *role,
-                                         std::size_t required_bytes,
-                                         std::size_t offset) {
+      auto array_range = [&](Ndarray *array, const char *role) {
         TI_ERROR_IF(array == nullptr || array->owning_program() != this ||
                         array->get_device_allocation().device != device,
                     "Vulkan graphics {} buffer belongs to another runtime "
@@ -756,56 +717,37 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                     role);
         TI_ERROR_IF(array->get_element_data_type() != PrimitiveType::u32,
                     "Vulkan graphics {} buffer must use u32.", role);
-        TI_ERROR_IF(!int(device->allocation_usage(
-                             array->get_device_allocation()) &
-                         AllocUsage::Indirect),
-                    "Vulkan graphics {} buffer lacks indirect usage.", role);
-        const auto available = ndarray_bytes(array, role);
-        TI_ERROR_IF(offset > available || required_bytes > available - offset,
-                    "Vulkan graphics {} buffer is too small for the declared "
-                    "command range.",
-                    role);
+        return DeviceBufferRange{array->get_device_allocation().get_ptr(),
+                                 ndarray_bytes(array, role)};
       };
-      const std::size_t command_count = indirect.max_draw_count;
-      TI_ERROR_IF(
-          command_count - 1 >
-              ((std::numeric_limits<std::size_t>::max)() - command_size) /
-                  indirect.stride,
-          "Vulkan indirect command byte range overflows size_t.");
-      const std::size_t required_command_bytes =
-          (command_count - 1) * indirect.stride + command_size;
-      validate_indirect_array(indirect.command_buffer, "indirect command",
-                              required_command_bytes,
-                              indirect.command_offset);
+      const auto command_range =
+          array_range(indirect.command_buffer, "indirect command");
+      std::optional<DeviceBufferRange> count_range;
       if (indirect.count_buffer != nullptr) {
-        validate_indirect_array(indirect.count_buffer, "indirect count",
-                                sizeof(std::uint32_t),
-                                indirect.count_offset);
+        count_range = array_range(indirect.count_buffer, "indirect count");
       }
+      recorded.indirect = prepare_vulkan_graphics_indirect(
+          *device, draw.indexed,
+          {indirect.command_offset, indirect.count_offset,
+           indirect.max_draw_count, indirect.stride,
+           indirect.vertex_record_limit, indirect.instance_record_limit,
+           indirect.index_element_limit,
+           indirect.first_instance_may_be_nonzero},
+          command_range, count_range);
       arrays.push_back(indirect.command_buffer);
       if (indirect.count_buffer != nullptr) {
         arrays.push_back(indirect.count_buffer);
       }
-      recorded.indirect = RecordedGraphicsIndirect{
-          indirect.command_buffer->get_device_allocation(),
-          indirect.count_buffer == nullptr
-              ? kDeviceNullAllocation
-              : indirect.count_buffer->get_device_allocation(),
-          indirect.command_offset,
-          indirect.count_offset,
-          indirect.max_draw_count,
-          indirect.stride,
-          indirect.vertex_record_limit,
-          indirect.instance_record_limit,
-          indirect.index_element_limit,
-          indirect.first_instance_may_be_nonzero};
     }
     std::vector<VulkanGraphicsVertexRange> vertex_ranges;
     for (const auto &[binding, array] : command.vertex_buffers) {
       TI_ERROR_IF(!array || array->owning_program() != this,
-                  "Vulkan graphics vertex binding {} belongs to another Program or is null.", binding);
+                  "Vulkan graphics vertex binding {} belongs to another "
+                  "Program or is null.",
+                  binding);
       const auto allocation = array->get_device_allocation();
-      vertex_ranges.push_back({binding, {allocation.get_ptr(), ndarray_bytes(array, "vertex")}});
+      vertex_ranges.push_back(
+          {binding, {allocation.get_ptr(), ndarray_bytes(array, "vertex")}});
       arrays.push_back(array);
       recorded.vertex_buffers.emplace_back(binding, allocation);
     }

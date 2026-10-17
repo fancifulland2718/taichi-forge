@@ -47,6 +47,9 @@
   设备限值检查。Windows 独立/借用验证包含 compute→mesh 更新与下游梯度；
   mesh/task AS 读取和 indirect 绘制仍为独立余项。
 
+- Vulkan indirect draw 共用设备与逻辑范围准备检查，不再逐 draw 构造能力 map。
+  准备后的偏移使用 64 位并保留 view 边界；拆分原生组件要求配对 ABI93。
+
 - GFX AOT 补齐 RWTexture 格式及 mip 层级元数据，包括仅访问 shape 的内核。
   对应导出要求 metadata v4 和配对 ABI90；普通产物保持原版本。不兼容的 SPIR-V
   缓存会重新编译，CPU/CUDA 缓存格式不变。

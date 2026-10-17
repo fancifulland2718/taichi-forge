@@ -55,6 +55,10 @@ lifetimes. The entries below describe the changes.
   JIT. Windows standalone/borrowed tests include compute-to-mesh updates and
   downstream gradients; mesh/task AS reads and indirect draws remain separate.
 
+- Vulkan indirect-draw preparation now shares device and logical-range checks
+  without constructing per-draw capability maps. Prepared offsets use 64 bits
+  and preserve view bounds; split native components require paired ABI93.
+
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache
