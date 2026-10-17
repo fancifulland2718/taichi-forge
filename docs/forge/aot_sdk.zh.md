@@ -258,7 +258,7 @@ scalar `[I,12]` / `[I,3,4]` 或 element shape `[3,4]` 的 AoS `[I]`。沿用 JIT
 
 Windows Vulkan 小型检查覆盖共享/重复 BLAS、独立实例 ID/custom ID/mask、首次设备
 矩阵 build、GPU 几何/变换更新、矩阵子区间、typed/legacy 命中及 miss 清零、跨模块
-退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括 graphics AS 绑定。
+退休、独立/借用 owner 和下游梯度核。此工厂覆盖尚不包括光栅 graphics AS 绑定。
 
 Vulkan `Module.add_kernel()` 支持 `ti.types.acceleration_structure()` 参数，导出模块需
 声明 `caps=["spirv_has_ray_query"]`。消费端将上述 `instance_tlas` 公共资源直接传给
@@ -301,6 +301,58 @@ BLAS 持有 micromap，二者三角形数必须一致；显式 `opaque=True` 与
 该资源会传递退休依赖录制。Windows Vulkan 小型测试覆盖两种格式、索引/predefined
 状态、filtered closest/any、refit、miss 重置、独立/借用 owner 和下游梯度；不表示
 AS 构建或遍历本身可微。
+
+显式 AOT 计划还可通过 `vulkan_ray_program` provider、version 1 重建程序化 RT。
+分配前检查 `vulkan_ray_program_pipeline` / `vulkan_ray_program_launch` 注册，以及
+独立设备能力 `vulkan_has_ray_tracing_pipeline`；它与 inline ray-query 能力不同。
+应用提供编译好的 SPIR-V，消费端无需 shader 编译器或外部 provider DLL。
+
+| operation | 类型与绑定 | parameters |
+| --- | --- | --- |
+| `pipeline` | 资源：host blob `shader_0` ... | `shader_count`、`shaders`、`groups`；可选 `max_trace_depth`（1）、`allow_opacity_micromaps`（false） |
+| `launch` | 操作：`pipeline`、host blob `payload`、`buffer_0` ...、`image_0` ...、`scene_0` ... | `dimensions`、`raygen`、`miss`、`hit`，可选 `push_constants`；`buffer_count`/`buffers`、`image_count`/`images`、`scene_count`/`scenes` |
+
+pipeline 的 `shaders` 每项声明 `stage`（`raygen`、`miss`、`closest_hit`、`any_hit`）
+及可选 `entry`（默认 `main`）。group 声明 `kind`（`raygen`、`miss`、`triangles`）
+及相应 shader 索引 `general`、`closest_hit`、`any_hit`；未使用的索引默认采用原生
+unused 值。例如：
+
+```python
+with runtime.host_blob(shader_bytes) as code:
+    pipeline = runtime.native_resource(
+        "vulkan_ray_program", "pipeline",
+        parameters={"shader_count": 1, "shaders": [{"stage": "raygen"}],
+                    "groups": [{"kind": "raygen", "general": 0}]},
+        bindings={"shader_0": code},
+    )
+```
+
+launch 的 `dimensions` 为三个正 uint32，按设备物理限制检查。`raygen` 是单条记录，
+`miss`/`hit` 是记录列表；每条有 `group` 及可选的字节 `offset`/`size`（默认均0），
+引用不可变 `payload` blob。`push_constants` 也是 offset/size 段。载荷是符合 shader
+ABI 的标量数据，不会为其中编码的设备地址建立所有权。
+
+buffer 描述包含 `set`、`binding`、`kind`（`storage_buffer`/`uniform_buffer`）和
+`access`（`read`/`write`/`read_write`）；uniform 只读。image 使用
+`sampled_image`/`storage_image`、同样的 access 及可选 storage-only `mip_level`（0）。
+scene 描述含 `set`/`binding`，绑定受管 TLAS。各 count 必须与描述列表长度和编号端口
+数量一致，包括0项。
+
+shader 要写入受管 Vulkan 图像时，在 `image/sampled` 参数中指定 `storage=True`；
+默认仍为 false，CUDA 拒绝该选项。既有工厂构建单 mip 图像。同次 launch 不能同时
+采样和存储同一图像。需要读取的图像应提供种子像素或此前无条件 upload；任意 shader
+写入本身不能证明全图已初始化。布局转换与 RT/compute 依赖继续由 Forge 管理。
+
+pipeline 创建同步消费 shader blob，返回后可关闭公共 code blob。launch 准备在
+owner 队列构建并初始化 SBT 一次；重放复用 pipeline/descriptor/SBT，不查 registry，
+不上传载荷。关闭公共 pipeline/image/AS 会退休依赖录制。反射检查描述符覆盖，准备期
+检查物理限制、载荷范围及实例基本 SBT offset；shader 内存边界和依赖数据的记录索引
+仍由应用负责。
+
+Windows Vulkan 小夹具覆盖独立/借用消费、真实实例 SBT 选择与 any-hit 过滤、
+hit/miss/refit、采样图像→storage 写入→普通采样、下游梯度及关闭。外部 shader 本身
+没有自动导数。ray-program recording 的 Graph 自动导出、mip 链重建及光栅 graphics
+资源仍单独接通。
 
 Graph 的 AS 参数通过 `source_bindings={"acceleration": tlas}` 声明源 owner，
 `resource_bindings` 沿用下述 TLAS/BLAS 的公共绑定或显式构建种子合同。固定绑定的

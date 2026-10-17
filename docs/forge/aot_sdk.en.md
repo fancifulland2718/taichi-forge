@@ -331,7 +331,7 @@ query shaders treat triangles as opaque and accept both faces.
 Small Windows Vulkan checks cover shared/repeated BLAS, distinct instance/custom
 IDs and masks, direct initial device build, GPU geometry/transform updates,
 subrange matrices, typed/legacy hit and miss reset, cross-module retirement,
-standalone/borrowed owners, and downstream gradient kernels. Graphics AS bindings
+standalone/borrowed owners, and downstream gradient kernels. Raster graphics AS bindings
 are not yet covered by these factories.
 
 Vulkan `Module.add_kernel()` accepts `ti.types.acceleration_structure()` parameters
@@ -382,6 +382,68 @@ micromap; closing it retires dependent recordings transitively. Small Windows
 Vulkan tests cover both formats, indexed/predefined states, filtered closest/any
 queries, refit, miss reset, standalone/borrowed owners and downstream gradients.
 These do not establish differentiable AS construction or traversal.
+
+Explicit AOT plans also reconstruct programmable RT through provider
+`vulkan_ray_program`, version 1. Check registration of
+`vulkan_ray_program_pipeline` / `vulkan_ray_program_launch` and the independent
+device capability `vulkan_has_ray_tracing_pipeline` before allocation. This is
+separate from inline ray-query capability. No runtime shader compiler or external
+provider DLL is required; the application supplies compiled SPIR-V.
+
+| operation | Kind and bindings | parameters |
+| --- | --- | --- |
+| `pipeline` | Resource: host blobs `shader_0` ... | `shader_count`, `shaders`, `groups`; optional `max_trace_depth` (1), `allow_opacity_micromaps` (false) |
+| `launch` | Operation: `pipeline`, host blob `payload`, `buffer_0` ..., `image_0` ..., `scene_0` ... | `dimensions`, `raygen`, `miss`, `hit`, optional `push_constants`; `buffer_count`/`buffers`, `image_count`/`images`, `scene_count`/`scenes` |
+
+Pipeline `shaders` entries declare `stage` (`raygen`, `miss`, `closest_hit`,
+`any_hit`) and optional `entry` (`main`). Each group declares `kind` (`raygen`,
+`miss`, `triangles`) and shader indices `general`, `closest_hit`, `any_hit` as
+applicable. Unused indices default to the native unused value. For example:
+
+```python
+with runtime.host_blob(shader_bytes) as code:
+    pipeline = runtime.native_resource(
+        "vulkan_ray_program", "pipeline",
+        parameters={"shader_count": 1, "shaders": [{"stage": "raygen"}],
+                    "groups": [{"kind": "raygen", "general": 0}]},
+        bindings={"shader_0": code},
+    )
+```
+
+Launch `dimensions` contains three positive uint32 values checked against device
+limits. `raygen` is one record; `miss` and `hit` are record lists. Each record has
+`group` plus optional byte `offset`/`size` (both default 0) into the immutable
+`payload` blob. `push_constants` is another offset/size section. Payloads contain
+scalar shader-ABI data; they do not establish ownership of encoded device addresses.
+
+Each buffer entry declares `set`, `binding`, `kind` (`storage_buffer` or
+`uniform_buffer`) and `access` (`read`, `write`, `read_write`); uniforms are
+read-only. Image entries use `sampled_image` or `storage_image`, the same access
+declaration, and optional storage-only `mip_level` (0). Scene entries declare
+`set` and `binding`, and bind managed TLAS resources. Each count must equal its
+metadata list length and numbered binding inventory, including zero counts.
+
+For a managed Vulkan image that shaders will write, request `storage=True` in
+`image/sampled` resource parameters; its default remains false and CUDA rejects
+this option. The existing factory constructs one mip level. A launch cannot
+sample and store the same image. Readable images need seed pixels or an earlier
+unconditional upload; arbitrary shader writes alone do not prove full image
+initialization. Layout transitions and RT/compute dependencies remain Forge-owned.
+
+Pipeline creation consumes shader blobs synchronously, so public code blobs may
+close afterward. Launch preparation constructs and initializes its SBT once on
+the owner's queue. Replay reuses pipeline, descriptors and SBT; it performs no
+registry lookup or payload upload. Closing a public pipeline/image/AS retires
+dependent recordings. Reflection checks descriptor coverage, and preparation
+checks physical limits, payload ranges and base instance SBT offsets; applications
+remain responsible for shader memory bounds and data-dependent record indices.
+
+Small Windows Vulkan tests cover standalone/borrowed consumers, real instance
+SBT selection and any-hit filtering, hit/miss/refit, sampled-to-storage image
+processing followed by ordinary sampling, downstream gradients and retirement.
+The external shaders have no automatic derivative. Graph automatic export of
+ray-program recordings, mip-chain reconstruction and raster graphics resources
+remain separate work.
 
 Declare a Graph AS source owner with `source_bindings={"acceleration": tlas}`;
 `resource_bindings` uses the TLAS/BLAS public-owner or explicit-seed contracts below.

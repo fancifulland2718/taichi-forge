@@ -5,6 +5,7 @@
 
 namespace taichi::lang {
 void register_vulkan_ray_operations(NativeOperationRegistry &registry);
+void register_vulkan_ray_program_operations(NativeOperationRegistry &registry);
 void NativeOperationRegistry::register_schema_impl(
     NativeOperationDescription::Key key,
     Key definition_key,
@@ -365,6 +366,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_optix_operations(result);
     register_image_operations(result);
     register_vulkan_ray_operations(result);
+    register_vulkan_ray_program_operations(result);
     register_blas_operations(result);
     register_cusparse_operations(result);
     register_cusparse_bsr_operations(result);
