@@ -124,8 +124,16 @@ class PreparedSortPlan(_PreparedNativePlan):
         self._workspace_effect = "forge-native-sort-workspace"
 
 
-def prepare_sort(keys, values=None, *, nan_policy="last"):
-    """Prepare a fixed-binding stable sort; see :class:`PreparedSortPlan`."""
+def prepare_sort(keys, values=None, *, count=None, nan_policy="last"):
+    """Prepare a stable full-range or device-count prefix sort.
+
+    With ``count``, use :class:`PreparedPrefixSortPlan`: preallocated scratch,
+    preserved tail, device overflow status, and a capturable Graph action.
+    """
+    if count is not None:
+        from ._prepared_prefix_sort import PreparedPrefixSortPlan
+
+        return PreparedPrefixSortPlan(keys, values, count=count, nan_policy=nan_policy)
     return PreparedSortPlan(keys, values, nan_policy=nan_policy)
 
 

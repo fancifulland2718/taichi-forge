@@ -96,6 +96,40 @@ scratch or waiting for GPU completion. Pending native work retains storage throu
 the existing runtime completion mechanism. Do not close a plan before its Graph's
 last submission; close the Graph first when retiring both objects.
 
+### Device-count prefix sort
+
+`prepare_sort(keys, values, count=count)` returns a `PreparedPrefixSortPlan`.
+`count` is a scalar i32 ndarray of shape `(1,)`, or a `DeviceExtent` with capacity
+equal to the key range. The same six scalar key/payload types and dense storage
+layouts are supported. Only `[0, count)` is sorted, stably and ascending with
+NaNs last; equal keys, both signed zeros, and NaNs retain their input order.
+The entire tail and all key/payload bits are preserved. Prefix sort currently
+accepts `nan_policy="last"` only.
+
+Preparation allocates index and gather scratch and compiles kernels without
+submitting the sort or reading count. The implementation performs parallel merge
+passes over the device prefix; the number of recorded dispatches is bounded by
+capacity. This avoids sorting a sentinel-filled capacity, but is not a claim of
+lower end-to-end latency. Pipeline creation and Graph capture still need normal
+warm-up before timing; workspace does not grow with count changes.
+
+`builder.append_native(plan.record(), admission="auto")` integrates its dispatches
+with neighboring kernels in the enclosing CUDA/Vulkan Graph. There is no nested
+Graph submission, host count observation, or separate native-sort segment.
+The JIT Graph tests qualify one backend submission for producer/sort/consumer.
+
+Negative count, count above capacity, or a DeviceExtent overflow flag rejects all
+key/payload writes. After execution `plan.status` is device i32 `[accepted_count,
+error_flag]`; consumers may gate on it without readback. `plan.check_status()` is
+an **explicit synchronizing observation** that raises on error. Counts never
+silently clamp into a partial sort. Count storage must be disjoint from data.
+
+Closing a prefix plan prevents new calls/recordings; existing Graph recordings
+retain an immutable workspace generation until their own retirement. This differs
+from the legacy full-range native plan described above. Retiring source storage or
+resetting the runtime invalidates execution. Use independent plans for concurrent
+workspaces. This extension does not qualify AOT export or automatic tuning.
+
 ## Prepared compact and consecutive unique (0.6.3)
 
 These plans have the same `run()`, `record()`, `report()` and `close()` lifecycle

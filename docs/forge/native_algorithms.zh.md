@@ -81,6 +81,29 @@ Vulkan 混合位宽 field 布局可能把 u64 放在仅 4 字节对齐的偏移�
 recording 失效，不清共享 scratch、不等待 GPU；已提交工作的存储由原有 runtime completion 保留。
 不要在 Graph 最后一次提交前关闭 plan；同时退休时先关闭 Graph。
 
+### 设备 count 有效前缀排序
+
+`prepare_sort(keys, values, count=count)` 返回 `PreparedPrefixSortPlan`。`count` 可为形状 `(1,)`
+的标量 i32 ndarray，或容量等于 key 范围的 `DeviceExtent`；key/payload 仍支持上述六种标量类型与
+dense field/view。只对 `[0, count)` 做升序稳定排序，保留完整尾部与所有 key/payload 位。
+相同 key、正负零、不同 NaN 保持输入次序；当前前缀路线仅支持 `nan_policy="last"`。
+
+准备时分配索引与 gather scratch、编译 kernel，不运行排序、不回读 count。设备端对有效前缀执行并行
+merge，录制 dispatch 数由容量限定，不再填尾部哨兵后排序全容量。该算法不承诺端到端性能收益；计时前仍需
+预热 pipeline 与 Graph 捕获，count 增减不会扩大 workspace。
+
+`builder.append_native(plan.record(), admission="auto")` 将这些 dispatch 与相邻 kernel 合入同一
+CUDA/Vulkan Graph，不嵌套提交 Graph、不回读 count，也不另加 native sort 分段。JIT Graph 回归已验证
+producer/sort/consumer 为一次后端提交。
+
+负 count、超容量 count 或 DeviceExtent overflow 会在设备端拒绝全部 key/payload 写回。执行后的
+`plan.status` 为设备 i32 `[accepted_count, error_flag]`，下游可据此做设备判断；`plan.check_status()`
+是显式同步观察，发现错误时抛异常。不会静默截断成部分排序。count 存储须与数据分离。
+
+关闭前缀 plan 后不能再次调用或创建 recording；已有 Graph 独立保留该代 workspace，直到自身退休。
+这与上面的旧全容量 native plan 生命周期不同。源存储退休或 runtime reset 会拒绝执行；并发 workspace
+需使用独立 plan。本扩展尚不声明 AOT 导出或自动调优资格。
+
 ## Prepared compact 与连续 unique（0.6.3）
 
 这两类 plan 与 prepared sort 一样提供 `run()`、`record()`、`report()`、`close()`。支持 CUDA/Vulkan 上紧凑、
