@@ -56,6 +56,10 @@ struct VulkanTriangleBlas::State {
     properties.pNext = &as_properties;
     device_->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
         device_->vk_physical_device(), &properties);
+    TI_ERROR_IF(triangle_count_ > as_properties.maxPrimitiveCount ||
+                    as_properties.maxGeometryCount == 0,
+                "Vulkan triangle BLAS exceeds the device's AS geometry or "
+                "primitive capacity.");
     scratch_alignment_ =
         as_properties.minAccelerationStructureScratchOffsetAlignment;
     TI_ERROR_IF(scratch_alignment_ == 0,

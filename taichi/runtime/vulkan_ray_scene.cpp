@@ -56,6 +56,11 @@ struct VulkanTriangleRayScene::State {
     properties.pNext = &as_properties;
     device_->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
         device_->vk_physical_device(), &properties);
+    TI_ERROR_IF(triangle_count_ > as_properties.maxPrimitiveCount ||
+                    as_properties.maxGeometryCount == 0 ||
+                    as_properties.maxInstanceCount == 0,
+                "Vulkan triangle scene exceeds the device's AS geometry, "
+                "primitive or instance capacity.");
     scratch_alignment_ =
         as_properties.minAccelerationStructureScratchOffsetAlignment;
     TI_ERROR_IF(scratch_alignment_ == 0,

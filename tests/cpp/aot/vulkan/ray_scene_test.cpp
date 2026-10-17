@@ -6,9 +6,44 @@
 #include "taichi/runtime/vulkan_ray_tlas.h"
 
 #include <array>
+#include <limits>
 #include <vector>
 
 namespace taichi::lang {
+
+TEST(VulkanRayScene, RejectsPhysicalPrimitiveOverflowBeforeAllocation) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator(vulkan::VulkanDeviceCreator::Params{});
+  auto *device = creator.device();
+  if (!device->vk_caps().acceleration_structure || !device->vk_caps().ray_query)
+    GTEST_SKIP();
+  VkPhysicalDeviceAccelerationStructurePropertiesKHR as_properties{};
+  as_properties.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+  VkPhysicalDeviceProperties2 properties{};
+  properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  properties.pNext = &as_properties;
+  device->vk_device().instance_functions().vkGetPhysicalDeviceProperties2(
+      device->vk_physical_device(), &properties);
+  if (as_properties.maxPrimitiveCount >=
+      (std::numeric_limits<std::uint32_t>::max)())
+    GTEST_SKIP() << "The uint32 ABI already bounds this device";
+  const auto count =
+      static_cast<std::size_t>(as_properties.maxPrimitiveCount + 1);
+  auto rejected = [&](auto construct) {
+    try {
+      construct();
+      FAIL() << "Physical AS capacity overflow was accepted";
+    } catch (const std::string &message) {
+      EXPECT_NE(message.find("capacity"), std::string::npos) << message;
+    }
+  };
+  // Only metadata is supplied. Both owners must reject before allocating the
+  // geometry buffers or asking the driver to size an unsupported AS.
+  rejected([&] { VulkanTriangleBlas blas(device, 3, count); });
+  rejected([&] { VulkanTriangleRayScene scene(device, 3, count); });
+}
 
 TEST(VulkanRayScene, BuildRefitAndTypedQueryWithoutProgram) {
   if (!vulkan::is_vulkan_api_available())
