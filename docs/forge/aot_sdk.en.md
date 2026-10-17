@@ -901,6 +901,36 @@ recordings currently use rerecording, so this does not add a selected immutable
 Vulkan whole-graph recipe. Tests include whole integer-image copy and region
 transfers followed by real numeric gradients.
 
+### Explicit Vulkan SPD pyramids
+
+The native registry provides version 1 resource `spd/plan` (capability kind
+`spd_plan`) and operation `spd/run` (`spd_run`, `vulkan_inline`). CPU/CUDA do not
+advertise them. A plan binds same-owner `source` and `output` images and immutable
+SPIR-V host blob `shader`. Its `reduction` parameter is `mean`, `min` or `max` and
+must match the producer's generated code. Consumers need neither SPD headers nor
+a shader compiler. Creation consumes the blob synchronously; image owners remain
+retained until recordings retire.
+
+Run binds `plan`, `source` and `output`, checking fixed image identities during
+preparation. Optional `expected_plan` is a length-delimited SHA256 contract over
+code, formats, dimensions, mip counts and reduction for public plan replacement;
+it does not prove the semantics of arbitrary shader code. Images require storage
+usage. Source initialization is required; SPD writes every allocated output mip,
+establishing the same initialization fact for later sampling.
+
+Existing SPD2.0 formats, half-size output, shorter-axis stopping and odd-edge crop
+semantics remain. Each new plan owns a four-byte counter, cleared and retired once
+during cold creation. Replay remains one dispatch without per-frame clearing,
+CPU readback or extra staging. AOT records inline without an unused secondary
+replay. Content-addressed code, GPU image/counter payload and opaque driver storage
+remain separate accounting categories.
+
+Small Windows Vulkan tests cover single-group and 129x131 seven-level multi-group
+paths, every mip, positive/zero/negative inputs, standalone/borrowed owners,
+public/private resources, invalid contracts/aliases and close. Real gradients
+exercise downstream numeric kernels, not differentiation of SPD or texture
+sampling itself. This node provides explicit execution-plan entry points.
+
 ### Explicit Vulkan raster plans
 
 The common native registry exposes `vulkan_graphics/pipeline` and

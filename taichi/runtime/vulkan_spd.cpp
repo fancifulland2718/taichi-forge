@@ -19,7 +19,8 @@ VulkanSpdCommands prepare_vulkan_spd(vulkan::VulkanDevice &device,
                                      const ImageParams &dst_params,
                                      DeviceAllocation dst,
                                      const std::vector<uint32_t> &shader,
-                                     std::shared_ptr<void> image_owners) {
+                                     std::shared_ptr<void> image_owners,
+                                     bool secondary_replay) {
   const auto width = src_params.x, height = src_params.y;
   const auto levels = dst_params.mip_levels;
   TI_ERROR_IF(!image_owners || src.device != &device || dst.device != &device ||
@@ -93,14 +94,16 @@ VulkanSpdCommands prepare_vulkan_spd(vulkan::VulkanDevice &device,
     TI_ERROR_IF(list->dispatch(groups_x, groups_y) != RhiResult::success,
                 "SPD inline dispatch failed.");
   };
-  auto commands = device.get_compute_stream()->new_secondary_command_list();
-  TI_ERROR_IF(!commands, "SPD requires secondary compute recording.");
-  auto *list = static_cast<vulkan::VulkanCommandList *>(commands.get());
-  list->memory_barrier();
-  prepared.record_inline(list);
-  list->memory_barrier();
-  prepared.replay = list->finalize_secondary(resources);
-  TI_ERROR_IF(!prepared.replay, "SPD secondary command finalization failed.");
+  if (secondary_replay) {
+    auto commands = device.get_compute_stream()->new_secondary_command_list();
+    TI_ERROR_IF(!commands, "SPD requires secondary compute recording.");
+    auto *list = static_cast<vulkan::VulkanCommandList *>(commands.get());
+    list->memory_barrier();
+    prepared.record_inline(list);
+    list->memory_barrier();
+    prepared.replay = list->finalize_secondary(resources);
+    TI_ERROR_IF(!prepared.replay, "SPD secondary command finalization failed.");
+  }
   prepared.statistics = {{"width", width},
                          {"height", height},
                          {"levels", levels},

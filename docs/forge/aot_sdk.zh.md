@@ -697,6 +697,28 @@ padding 不计入所需范围，区域之外的字节和 texel 保持不变。
 recording 当前使用重录制，因此不代表新增已选择的不可变 Vulkan 整图 recipe。
 测试覆盖整数整图复制及区域传输后的真实数值梯度。
 
+### 显式 Vulkan SPD 金字塔
+
+native registry 提供 version 1 的资源 `spd/plan`（能力种类 `spd_plan`）和操作
+`spd/run`（`spd_run`、`vulkan_inline`）。CPU/CUDA 不报告这些能力。plan 绑定同 owner
+的 `source`、`output` 图像及不可变 SPIR-V host blob `shader`，参数 `reduction` 为
+`mean`、`min` 或 `max`，必须与生产端生成的代码相符。消费端无需 SPD SDK 或 shader
+编译器。代码同步消费后可以关闭 blob；图像仍保留到录制退休。
+
+run 同时绑定 `plan`、`source`、`output`，在准备期核对固定图像身份。可选
+`expected_plan` 为长度编码的代码/格式/尺寸/mip/reduction SHA256 合同，保护公共
+plan 替换。它不是任意 shader 的语义证明。图像须具备 storage usage；源须已初始化，
+一次 SPD 写完全部已分配输出 mip，后续采样沿用同一初始化事实。
+
+保持既有 SPD2.0 格式、半尺寸输出、短轴停止与奇数边缘裁剪合同。每个新 plan 自有
+4 字节 counter，冷创建只清零一次并等待完成；每次回放仍为单 dispatch，无每帧清零、
+CPU 读回或额外 staging。AOT 直接 inline 录制，不创建未使用的 secondary replay。
+代码按内容保存，GPU 图像、counter 与 driver 私有占用分别计量。
+
+Windows Vulkan 小型测试覆盖单组及129×131七级多组路径、全部 mip、正/零/负输入、
+独立/借用 owner、公共/私有资源、错误合同/别名及关闭。真实梯度针对下游数值 kernel，
+不代表 SPD reduction 或纹理采样本身具有自动微分。此节点是显式计划入口。
+
 ### 显式 Vulkan 光栅计划
 
 公共 native registry 提供 version 1 的 `vulkan_graphics/pipeline` 和

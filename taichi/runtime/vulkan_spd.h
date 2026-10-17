@@ -27,6 +27,7 @@ VulkanSpdCommands prepare_vulkan_spd(vulkan::VulkanDevice &device,
                                      const ImageParams &output_parameters,
                                      DeviceAllocation output,
                                      const std::vector<uint32_t> &shader,
-                                     std::shared_ptr<void> image_owners);
+                                     std::shared_ptr<void> image_owners,
+                                     bool secondary_replay = true);
 }  // namespace taichi::lang
 #endif

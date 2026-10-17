@@ -372,6 +372,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_sort_operation(result);
     register_fft_operation(result);
     register_vkfft_operations(result);
+    register_spd_operations(result);
     register_optix_operations(result);
     register_image_operations(result);
     register_image_transfer_operations(result);

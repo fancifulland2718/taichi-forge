@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan AOT 增加 `spd/plan` 与 `spd/run` 原生注册：冻结代码消费、固定图像核对、
+  完整 mip 初始化及独立 counter，消费者无需 SPD SDK/编译器。小型独立/借用 owner
+  测试覆盖重复输入、关闭与下游梯度；不表示 SPD 本身可自动微分。
 - 修复 Vulkan `depth16` texel 类型映射缺失导致的 JIT/AOT 图像创建和 `u16` 上传失败。
   深度传输共享检查合成后的4字节 buffer 偏移，覆盖有限子 view 与 AOT 构造期 pixels。
 - Vulkan AOT 显式计划可经公共 native registry 重建区域 image copy、blit 和 buffer/image

@@ -321,6 +321,7 @@ void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
 void register_fft_operation(NativeOperationRegistry &registry);
 void register_vkfft_operations(NativeOperationRegistry &registry);
+void register_spd_operations(NativeOperationRegistry &registry);
 void register_optix_operations(NativeOperationRegistry &registry);
 void register_image_operations(NativeOperationRegistry &registry);
 void register_image_transfer_operations(NativeOperationRegistry &registry);
