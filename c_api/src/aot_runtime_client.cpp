@@ -14,6 +14,7 @@
 #endif
 #ifdef TI_WITH_VULKAN
 #include "taichi_vulkan_impl.h"
+#include "taichi/rhi/vulkan/vulkan_device.h"
 #endif
 
 namespace taichi::lang {
@@ -255,6 +256,23 @@ std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {
         (state.arch == Arch::vulkan &&
          lease->get_device_allocation().device != &state.runtime->get()))
       throw std::invalid_argument("AOT texture storage belongs to another backend/device");
+#ifdef TI_WITH_VULKAN
+    if (state.arch == Arch::vulkan) {
+      auto *device = dynamic_cast<vulkan::VulkanDevice *>(&state.runtime->get());
+      if (!device)
+        throw std::invalid_argument("AOT texture requires its Vulkan device");
+      const auto image = std::get<0>(device->get_vk_image(lease->get_device_allocation()));
+      // Preserve the allocation's capabilities; imports neither grant missing
+      // storage usage nor erase storage/attachment usage of a JIT image.
+      if (!(image->usage & VK_IMAGE_USAGE_SAMPLED_BIT))
+        throw std::invalid_argument("Vulkan texture import requires sampled image usage");
+      if (image->usage & VK_IMAGE_USAGE_STORAGE_BIT)
+        params.usage = params.usage | ImageAllocUsage::Storage;
+      if (image->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        params.usage = params.usage | ImageAllocUsage::Attachment;
+    }
+#endif
     // Import follows JIT's existing initialization contract: the caller provides
     // valid contents before sampling. No copy or new sampler is introduced.
     auto object = std::make_shared<BorrowedSampledImage>(

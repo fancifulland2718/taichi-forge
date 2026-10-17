@@ -823,6 +823,10 @@ Windows CPU/CUDA/Vulkan 已验证 JIT→AOT→JIT 顺序、显式梯度、tensor
 共享 owner 的队列与既有布局跟踪。调用者须依照 JIT Texture 合同在采样前准备有效
 texel；导入不清零或初始化内容。
 
+Vulkan 导入从实际原生分配保留 sampled/storage/attachment usage，因此合格的颜色
+Texture 可作为 AOT ray-program 的 storage-image 目标，再由 JIT 直接采样同一图像。
+不新建图像或复制像素，也不授予原分配没有的 usage；既有格式与初始化检查保持。
+
 导入后可回收源 Python Texture。关闭导入句柄会完成在途使用并退休对应 AOT 使用者，
 独立导入和源 Texture 仍可使用。关闭 borrower 保留 Program；`ti.reset()` 在销毁
 后端前退休全部借用调用与租约。只接受同一 Program 中存活的受管 CUDA/Vulkan Texture。

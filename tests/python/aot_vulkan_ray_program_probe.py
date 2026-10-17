@@ -226,6 +226,26 @@ def main(mode, artifact, output_file, recipe="explicit"):
                     parameters=spec["parameters"],
                     bindings={k: available[v] for k, v in spec["bindings"].items()},
                 )
+            if images and mode == "borrowed":
+                # Borrow the actual JIT storage-image allocation, including its
+                # original usage. The import must not allocate a replacement.
+                jit_pixels = ti.Vector.ndarray(4, ti.f32, shape=(3, 2))
+                imported = runtime.import_ndarray(jit_pixels)
+                write(imported, pixels)
+                imported.close()
+                jit_target = ti.Texture(ti.Format.rgba32f, (3, 2))
+                jit_target.from_ndarray(jit_pixels)
+                owners["target"].close()
+                owners["target"] = runtime.import_texture(jit_target)
+
+                @ti.kernel
+                def sample_jit(image: ti.types.texture(num_dimensions=2), output: ti.types.ndarray(ti.f32, 1)):
+                    for i in range(6):
+                        value = image.fetch(ti.Vector([i % 3, i // 3]), 0)
+                        for j in ti.static(range(4)):
+                            output[i * 4 + j] = value[j]
+
+                jit_output = ti.ndarray(ti.f32, 24)
             prefix = "images" if images else "rays"
             calls = {}
             for private in (False, True):
@@ -261,6 +281,11 @@ def main(mode, artifact, output_file, recipe="explicit"):
                             expected = [v + 0.25 if v > 0 else v for v in expected]
                     call()
                     check_gradients(frame, expected)
+                    if images and mode == "borrowed" and not private:
+                        sample_jit(jit_target, jit_output)
+                        imported = runtime.import_ndarray(jit_output)
+                        assert read(imported) == expected
+                        imported.close()
                     if not images:
                         values = read(frame["output"], "I")
                         expected_ids = [[1, 0, 7, 13], [0, 0, 7, 23], [1, 1, 11, 43], [0, 1, 11, 53]]
@@ -321,7 +346,7 @@ def main(mode, artifact, output_file, recipe="explicit"):
                 calls["rays_public"]()
                 check_gradients(frame, [2, 1, 2, 1, -1])
             calls[prefix + "_public"]()
-            (owners["source"] if images else pipeline).close()
+            (owners["target" if mode == "borrowed" else "source"] if images else pipeline).close()
             raises(calls[prefix + "_public"])
             write(frame["features"], [-99] * count)
             calls[prefix + "_private"]()

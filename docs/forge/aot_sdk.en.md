@@ -1054,6 +1054,12 @@ and sampling share the owner's queue and existing layout tracking. The caller
 must initialize valid texels before sampling, following the JIT Texture contract;
 import does not clear or initialize contents.
 
+Vulkan imports preserve sampled/storage/attachment usage from the actual native
+allocation. A qualified color Texture can therefore be the storage-image target
+of an AOT ray-program launch and then be sampled by JIT without another image or
+pixel copy. An import does not grant usage absent from the original allocation;
+the existing format and initialization checks still apply.
+
 The source Python Texture may be collected after import. Closing an imported
 handle completes in-flight use and retires its AOT users, while independent
 imports and the source Texture remain usable. Closing a borrower leaves the
