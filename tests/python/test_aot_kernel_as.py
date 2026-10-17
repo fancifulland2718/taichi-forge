@@ -10,11 +10,12 @@ import time
 import pytest
 import taichi_forge as ti
 from tests import test_utils
-from tests.python.aot_kernel_as_probe import plan_parts
+from tests.python.aot_kernel_as_probe import POSES, VERTICES, plan_parts
 
 
+@pytest.mark.parametrize("recipe", ["explicit", "graph"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_kernel_acceleration_structure(tmp_path):
+def test_aot_kernel_acceleration_structure(tmp_path, recipe):
     if not ti.hardware.ray.is_available():
         pytest.skip("Vulkan ray query unavailable")
 
@@ -61,8 +62,11 @@ def test_aot_kernel_acceleration_structure(tmp_path):
     module.add_kernel(query)
     module.add_kernel(energy)
     module.add_kernel(energy.grad, name="backward")
-    for private in (True, False):
-        module.add_execution_plan("private" if private else "public", ti.aot.ExecutionPlan(**plan_parts(private)))
+    if recipe == "graph":
+        _export_graph(module, query, energy)
+    else:
+        for private in (True, False):
+            module.add_execution_plan("private" if private else "public", ti.aot.ExecutionPlan(**plan_parts(private)))
     costs = dict(compile_ms=(time.perf_counter() - start) * 1000)
     artifact = tmp_path / "kernel-as.tcm"
     module.archive(str(artifact))
@@ -87,3 +91,65 @@ def test_aot_kernel_acceleration_structure(tmp_path):
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Validation Error" not in result.stdout + result.stderr
         assert "cleanup failed" not in result.stdout + result.stderr
+
+
+def _export_graph(module, query, energy):
+    import numpy as np
+
+    @ti.kernel
+    def seed(dhits: ti.types.ndarray(ti.f32, 2), loss: ti.types.ndarray(ti.f32, 1), dloss: ti.types.ndarray(ti.f32, 1)):
+        for i, j in dhits:
+            dhits[i, j] = 0
+        loss[0], dloss[0] = 0.0, 1.0
+
+    def array(name, dtype=ti.f32, ndim=2):
+        return ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, dtype, ndim=ndim)
+
+    vertices, indices = ti.ndarray(ti.f32, (3, 3)), ti.ndarray(ti.i32, (1, 3))
+    vertices.from_numpy(np.array(VERTICES, np.float32).reshape(3, 3))
+    indices.from_numpy(np.array([[0, 1, 2]], np.int32))
+    with ti.hardware.ray.TriangleBLAS(vertices, indices, opaque=False) as blas:
+        with ti.hardware.ray.InstanceTLAS([
+            ti.hardware.ray.RayInstance(blas, transform=tuple(POSES[:12]), custom_index=17),
+            ti.hardware.ray.RayInstance(blas, transform=tuple(POSES[12:]), custom_index=21),
+        ]) as scene:
+            builder = ti.graph.GraphBuilder()
+            symbolic = ti.graph.Arg(ti.graph.ArgKind.ACCELERATION_STRUCTURE, "scene")
+            alias = ti.graph.Arg(ti.graph.ArgKind.ACCELERATION_STRUCTURE, "alias")
+            builder._bind_internal_runtime_arg(alias, scene)
+            builder.append_native(blas.record_refit(), admission="explicit")
+            builder.append_native(scene.record_refit_transforms(transforms="poses"), admission="explicit")
+            arguments = [array("rays"), array("gates", ti.i32, 1), array("hits"), array("ids", ti.i32), array("occluded", ti.i32, 1)]
+            for acceleration in (symbolic, alias):
+                builder.dispatch(query, acceleration, *arguments)
+            dloss = builder.private_ndarray("dloss", ti.f32, 1)
+            builder.dispatch(seed, array("dhits"), array("loss", ndim=1), dloss)
+            builder.dispatch(energy, array("hits"), array("loss", ndim=1))
+            builder.dispatch(energy.grad, array("hits"), array("loss", ndim=1))
+            graph = builder.compile()
+            mappings = {blas: dict(vertices="vertices", indices="indices"), scene: dict(transforms="poses")}
+            sources = dict(scene=scene)
+            count = len(module._exported_kernels)
+            with pytest.raises(ti.TaichiRuntimeError, match="source_bindings"):
+                module.add_execution_plan("missing", graph, resource_bindings=mappings)
+            with pytest.raises(ValueError, match="unused"):
+                module.add_execution_plan("unused", graph, source_bindings=dict(sources, unused=scene), resource_bindings=mappings)
+            with pytest.raises(ValueError, match="conflict"):
+                module.add_execution_plan("conflict", graph, source_bindings=sources, resource_bindings={blas: "blas", scene: "hits"})
+            assert len(module._exported_kernels) == count and not module._graph_export_failed
+            for private in (True, False):
+                plan = module.add_execution_plan(
+                    "private" if private else "public", graph,
+                    source_bindings=sources,
+                    resource_bindings=mappings if private else {blas: "blas", scene: "scene"},
+                    gradients=dict(hits="dhits", loss="dloss"),
+                )
+                document = json.loads(plan.to_json())
+                resources = [r for r in document.get("resources", ()) if r["kind"] == "native"]
+                assert len(resources) == (2 if private else 0)
+                calls = [op for op in document["operations"] if op["kind"] == "kernel"]
+                assert calls[0]["arguments"][0] == calls[1]["arguments"][0]
+                assert "alias" not in plan.argument_names
+                assert any(c["kind"] == "resource_alias" for c in document.get("constraints", ())) == (not private)
+            graph.close()
+    assert not module._data_payloads  # No producer geometry or opaque handles are snapshotted.

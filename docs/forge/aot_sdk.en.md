@@ -334,9 +334,19 @@ Kernels may use existing closest/any and filtered queries. Build the BLAS with
 existing opaque semantics. Small standalone/borrowed Vulkan checks cover traversal
 after candidate rejection, occlusion, intervals/reverse rays, GPU refit, hit-to-miss
 reset, public/private bindings, close/reset and downstream gradients. AS traversal
-has no automatic derivative. This covers ordinary kernel export and explicit
-ExecutionPlans; automatic Graph AS argument export and `kernel_template` remain
-unavailable. CPU/CUDA do not accept Vulkan AS parameters.
+has no automatic derivative. Both ordinary kernels and Graph execution sequences
+can be exported; `kernel_template` remains unavailable. CPU/CUDA do not accept
+Vulkan AS parameters.
+
+Declare a Graph AS source owner with `source_bindings={"acceleration": tlas}`;
+`resource_bindings` uses the TLAS/BLAS public-owner or explicit-seed contracts below.
+Fixed TLAS bindings are recognized automatically. Kernel queries and native refit
+recordings share one resource; repeated parameters/fixed aliases reconstruct it
+once. Public TLAS bindings retain the BLAS alias constraints. Consumer geometry and
+transforms define the new AS; export stores no source handles and does not infer
+current geometry. Small tests cover public/private Graphs, fixed aliases, invalid
+mappings rejected before publication, consumer refit/filtering/downstream gradients,
+and execution after producer retirement.
 
 `blas_build` rebuilds an existing BLAS with vertices and indices of the original
 counts; index contents may change. Refresh each dependent TLAS before querying.

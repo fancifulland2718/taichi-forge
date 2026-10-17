@@ -261,8 +261,15 @@ kernel 可使用既有 closest/any 及 filtered 查询。需要逐候选过滤�
 `opaque=False` 的 BLAS；`respect_opacity=True` 仍遵守原有 opaque 语义。小型独立与
 借用 Vulkan 检查覆盖候选拒绝后继续遍历、遮挡、区间/反向 ray、GPU refit、命中后
 miss 写回、公共/私有绑定、关闭/reset 及命中后的下游梯度。AS 遍历本身不自动求导。
-此处支持普通 kernel 导出与显式 ExecutionPlan；自动 Graph AS 参数导出和
-`kernel_template` 尚未开放。CPU/CUDA 不接受 Vulkan AS 参数。
+普通 kernel 与 Graph 执行序列均可导出；`kernel_template` 尚未开放。
+CPU/CUDA 不接受 Vulkan AS 参数。
+
+Graph 的 AS 参数通过 `source_bindings={"acceleration": tlas}` 声明源 owner，
+`resource_bindings` 沿用下述 TLAS/BLAS 的公共绑定或显式构建种子合同。固定绑定的
+TLAS 自动识别。kernel 查询与原生 refit 录制共享同一资源，重复参数/固定别名仅重建
+一次；公共 TLAS 的 BLAS 关系继续由 alias 约束验证。消费者提供新的几何/变换，导出
+不保存源 AS 句柄或推断当前几何状态。小型测试覆盖公共/私有 Graph、固定别名、错误
+映射在发布前拒绝、消费者端 refit/过滤/下游梯度和源 runtime 退休后的执行。
 
 `blas_build` 用原有顶点/三角形数量重建已有 BLAS，允许索引内容变化；查询前仍需刷新
 各依赖 TLAS。`instance_update` 在 JSON 中捕获 `I` 行矩阵，每行12个有限 f32 数值；

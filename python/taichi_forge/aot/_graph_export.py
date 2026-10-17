@@ -17,11 +17,12 @@ def _snapshot(value):
 class _ExportContext:
     """One export transaction; object identities never become artifact data."""
 
-    def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None, source_images=None, resource_inputs=None):
+    def __init__(self, module, reserved_names, *, snapshot_state=False, source_arrays=None, source_resources=None, resource_inputs=None):
         self.arch = module._arch
         self.snapshot_state = snapshot_state
         self.source_arrays = source_arrays
-        self.source_images = source_images
+        self.source_resources = source_resources
+        self.source_images = source_resources.images if source_resources is not None else None
         self.resource_inputs = resource_inputs
         self.operations = []
         self.initialization = []
@@ -89,7 +90,7 @@ class _ExportContext:
                 operation=operation,
                 version=version,
                 parameters=parameters,
-                bindings={port: self.binding(slot) for port, slot in (bindings or {}).items()},
+                bindings={port: self.binding(slot, resource=True) for port, slot in (bindings or {}).items()},
             ),
         )
 
@@ -177,9 +178,9 @@ class _ExportContext:
         from taichi_forge.lang.util import cook_dtype
 
         for name, owner in bindings.items():
-            if self.source_images is not None and name in self.source_images.owners:
-                if self.source_images.owners[name] is not owner:
-                    raise TaichiRuntimeError("AOT private Texture changed within one export")
+            if self.source_resources is not None and name in self.source_resources.owners:
+                if self.source_resources.owners[name] is not owner:
+                    raise TaichiRuntimeError("AOT private resource changed within one export")
                 self.private_bindings[name] = owner
                 continue
             if type(owner) in (bool, int, float):
@@ -248,9 +249,12 @@ class _ExportContext:
         owner = self._readonly_data_owners.setdefault(("host_blob", key), object())
         return self._resource(owner, dict(kind="host_blob", data=key, byte_size=len(data)))
 
-    def binding(self, name):
-        if self.source_images is not None and name in self.source_images.owners:
-            raise TaichiRuntimeError("AOT Texture bindings require a qualified sampled-image operation")
+    def binding(self, name, *, resource=False):
+        if self.source_resources is not None and name in self.source_resources.owners:
+            owner = self.source_resources.owners[name]
+            qualified = self._public_resource_owners.get(id(owner))
+            if not resource or qualified is None or qualified[0] is not owner or qualified[1] != name:
+                raise TaichiRuntimeError("AOT resource bindings require a qualified typed operation")
         if name in self._scalar_values:
             raise TaichiRuntimeError("AOT fixed scalar requires a typed kernel argument")
         return self._private_names.get(name, name)
@@ -339,8 +343,8 @@ class _ExportContext:
             self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, name=name)
 
     def kernel_binding(self, arg):
-        if arg.tag == core.ArgKind.TEXTURE:
-            return self.source_images.kernel_resource(self, arg)
+        if arg.tag in (core.ArgKind.TEXTURE, core.ArgKind.ACCELERATION_STRUCTURE):
+            return self.source_resources.kernel_resource(self, arg)
         if arg.name in self.control_names:
             if arg.tag != core.ArgKind.NDARRAY or str(arg.dtype()) != "i32":
                 raise TaichiRuntimeError("AOT Graph control requires scalar i32 ndarray arguments")
@@ -414,7 +418,7 @@ class _ExportContext:
                 operation=operation,
                 version=version,
                 parameters=parameters or {},
-                bindings={port: self.binding(slot) for port, slot in bindings.items()},
+                bindings={port: self.binding(slot, resource=True) for port, slot in bindings.items()},
             )
         )
 
@@ -437,8 +441,8 @@ class _ExportContext:
         bindings = [self.kernel_binding(arg) for arg in args]
         if self.source_arrays is not None:
             self.source_arrays.validate_kernel(args, bindings)
-        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY, core.ArgKind.TEXTURE) for arg in args):
-            raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified sampled Texture bindings")
+        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY, core.ArgKind.TEXTURE, core.ArgKind.ACCELERATION_STRUCTURE) for arg in args):
+            raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified Texture/AS bindings")
         identity = (id(kernel), launch_abi)
         name = self._kernel_names.get(identity)
         if name is None:
@@ -1070,19 +1074,18 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             binding_strategy = binding_factory._validate_aot_export(spec, graph._execution_arch)
         gradient_names = set((gradients or {}).values())
         from ._graph_source_bindings import SourceArrayBindings
-        from ._graph_image_bindings import SourceImageBindings, split_source_bindings
+        from ._graph_resource_sources import SourceResourceBindings
         from ._graph_resource_bindings import ResourceInputBindings
 
-        array_bindings, image_bindings = split_source_bindings(source_bindings)
-        source_arrays = SourceArrayBindings(array_bindings, spec.fixed_runtime_args)
-        source_images = SourceImageBindings(image_bindings, spec.fixed_runtime_args)
+        source_resources = SourceResourceBindings(source_bindings, spec.fixed_runtime_args)
+        source_arrays = SourceArrayBindings(source_resources.arrays, spec.fixed_runtime_args)
         resource_inputs = ResourceInputBindings(resource_bindings, spec.fixed_runtime_args)
-        non_image_names = (
-            (set(spec.runtime_arg_names) - source_images.owners.keys())
+        non_resource_names = (
+            (set(spec.runtime_arg_names) - source_resources.owners.keys())
             | source_arrays.arrays.keys()
             | gradient_names
         )
-        if resource_inputs.public_names & non_image_names:
+        if resource_inputs.public_names & non_resource_names:
             raise ValueError("Public resource names conflict with Graph array/scalar/gradient arguments")
         context = _ExportContext(
             module,
@@ -1090,11 +1093,11 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             | set(spec.fixed_runtime_args)
             | gradient_names
             | source_arrays.arrays.keys()
-            | source_images.owners.keys()
+            | source_resources.owners.keys()
             | resource_inputs.names,
             snapshot_state=snapshot_state,
             source_arrays=source_arrays,
-            source_images=source_images,
+            source_resources=source_resources,
             resource_inputs=resource_inputs,
         )
         context.declare_private_bindings(spec.fixed_runtime_args)
@@ -1109,7 +1112,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         for node in graph._spec.nodes:
             _node(context, node)
         source_arrays.validate_used(spec.runtime_arg_names)
-        source_images.validate_used()
+        source_resources.validate_used()
         resource_inputs.validate_used()
         context.resolve_resource_aliases()
         context.binding_constraints.extend(source_arrays.constraints)
@@ -1164,7 +1167,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             )
             # Provider workspace must not accidentally become a public input.
             expected_names = (
-                (set(spec.runtime_arg_names) - source_images.used)
+                (set(spec.runtime_arg_names) - source_resources.used)
                 | source_arrays.used
                 | resource_inputs.used_names
                 | (gradient_names - context.private_bindings.keys())

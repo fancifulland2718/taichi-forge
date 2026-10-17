@@ -1,24 +1,9 @@
 """Cold sampled-image metadata and explicit consumer seeds for Graph export."""
 
-from collections.abc import Mapping
-
 from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiRuntimeError
-
-
-def split_source_bindings(bindings):
-    if bindings is None:
-        return {}, {}
-    if not isinstance(bindings, Mapping):
-        raise TypeError(
-            "source_bindings must map names to qualified producer arrays or textures"
-        )
-    arrays, images = {}, {}
-    for name, owner in bindings.items():
-        (images if type(owner) is Texture else arrays)[name] = owner
-    return arrays, images
 
 
 class SourceImageBindings:

@@ -511,6 +511,13 @@ class Module:
         sampler state is currently reconstructible. CUDA sibling binding frames
         share initialized images; independent preparation accepts new seeds.
 
+        Vulkan acceleration-structure kernel names may map to live InstanceTLAS
+        owners. Fixed AS bindings are recognized automatically. Their
+        ``resource_bindings`` use the same BLAS/TLAS public-owner or explicit
+        construction-seed contracts as native ray recordings. Kernel queries
+        and native refits share the reconstructed AS and its alias constraints.
+        The module must declare ``caps=["spirv_has_ray_query"]``.
+
         ``resource_bindings`` maps qualified opaque resource owners to input
         port/public array name mappings. Construction inputs must be ready
         before preparation; image seeds before initialization. Resource creation precedes plan initialization and
