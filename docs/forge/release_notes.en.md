@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- The shared Vulkan mesh shader skips transform-buffer reads when instance
+  transforms are disabled, preventing uninitialized NaNs from contaminating
+  vertices and nonzero instance offsets from accessing missing transforms.
 - Fixed Vulkan RasterPass line expansion ignoring requested draw counts. Indexed
   and non-indexed intervals/offsets are honored; zero complete lines skip expansion
   allocation and drawing.

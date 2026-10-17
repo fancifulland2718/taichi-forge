@@ -50,9 +50,13 @@ layout(binding = 3, std430) buffer MeshAttributeBuffer {
 mesh_attr_buffer;
 
 void main() {
-  mat4 model_tmp = transpose(mesh_attr_buffer.mesh_attr[gl_InstanceIndex].model);
-  // if mesh attributes not given, then use Identity as model matrix
-  mat4 model = mat4(1.0) * (1.0 - ubo_renderable.has_attribute) + model_tmp * ubo_renderable.has_attribute;
+  mat4 model = mat4(1.0);
+  // The dummy descriptor has no initialized instance data. Do not read it
+  // when transforms are disabled: NaN * 0 is not zero, and the instance
+  // index need not lie inside that descriptor.
+  if (ubo_renderable.has_attribute != 0.0) {
+    model = transpose(mesh_attr_buffer.mesh_attr[gl_InstanceIndex].model);
+  }
 
   gl_Position = ubo_scene.scene.projection * ubo_scene.scene.view * model * vec4(in_position, 1.0);
   gl_Position.y *= -1.0;
