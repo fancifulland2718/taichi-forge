@@ -2090,6 +2090,7 @@ TEST(NativeOperationRegistry,
   cpu::CpuDevice device;
   std::vector<int> retired;
   int factories = 0;
+  int probes = 0;
   NativeOperationRegistry registry;
   registry.define<ResourceDescriptor>(
       [](Device &device, const ResourceDescriptor &value) {
@@ -2102,6 +2103,10 @@ TEST(NativeOperationRegistry,
       [&](Arch, Device &device, const ResourceDescriptor &value) {
         ++factories;
         return std::make_shared<TestResource>(device, value, retired);
+      },
+      [&] {
+        ++probes;
+        return NativeOperationAvailability{true, 23};
       });
   registry.register_schema<ResourceDescriptor>(
       "test", "resource", {},
@@ -2123,12 +2128,20 @@ TEST(NativeOperationRegistry,
   EXPECT_THROW(registry.decode(root), std::invalid_argument);
   EXPECT_TRUE(registry.capabilities().empty());
   EXPECT_EQ(registry.find(ResourceDescriptor::kind, 1, host_arch()), nullptr);
+  const auto *capability = registry.find(ResourceDescriptor::kind, 1,
+                                         host_arch(), NativeObjectKind::resource);
+  ASSERT_NE(capability, nullptr);
+  EXPECT_EQ(capability->mode, NativeOperationMode::cpu);
+  EXPECT_EQ(registry.find(ResourceDescriptor::kind, 2, host_arch(),
+                         NativeObjectKind::resource), nullptr);
+  EXPECT_EQ(probes, 0);
   EXPECT_FALSE(
       registry.probe(ResourceDescriptor::kind, 1, host_arch()).available);
   EXPECT_TRUE(registry
                   .probe(ResourceDescriptor::kind, 1, host_arch(),
                          NativeObjectKind::resource)
                   .available);
+  EXPECT_EQ(probes, 1);
   const auto decoded = registry.decode(root, NativeObjectKind::resource);
   EXPECT_EQ(factories, 0);
   EXPECT_THROW(registry.prepare(host_arch(), device, decoded, {}),

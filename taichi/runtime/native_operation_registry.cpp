@@ -267,9 +267,17 @@ const NativeOperationCapability *NativeOperationRegistry::find(
     const std::string &kind,
     std::uint32_t version,
     Arch arch) const {
+  return find(kind, version, arch, NativeObjectKind::operation);
+}
+
+const NativeOperationCapability *NativeOperationRegistry::find(
+    const std::string &kind,
+    std::uint32_t version,
+    Arch arch,
+    NativeObjectKind object_kind) const {
   const auto found = definitions_.find({kind, version});
   if (found == definitions_.end() ||
-      found->second.kind != NativeObjectKind::operation)
+      found->second.kind != object_kind)
     return nullptr;
   const auto backend = found->second.backends.find(arch);
   return backend == found->second.backends.end() ? nullptr

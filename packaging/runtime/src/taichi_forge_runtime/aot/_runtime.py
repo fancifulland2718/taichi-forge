@@ -203,12 +203,28 @@ class Runtime:
         means unregistered. Concrete shapes, dtypes and device requirements are
         still checked at prepare time. It does not probe external providers.
         """
+        return self._native_capabilities(kind, version, resource=False)
+
+    def native_resource_capabilities(self, kind, *, version=1):
+        """Registered resource-factory modes without loading dependencies.
+
+        Resource kinds are distinct from operation kinds. A nonempty result
+        identifies a compiled factory; it does not admit every device/format.
+        """
+        return self._native_capabilities(kind, version, resource=True)
+
+    def _native_capabilities(self, kind, version, *, resource):
         kind = _name(kind)
         if type(version) is not int or not 1 <= version <= 0xFFFFFFFF:
             raise ValueError("Operation version must be a positive uint32")
         with self._lock:
             self._check()
-            flags = self._api.call(self._api.ti_get_native_operation_capabilities_ext, self._handle, kind, version)
+            query = (
+                self._api.ti_get_native_resource_capabilities_ext
+                if resource
+                else self._api.ti_get_native_operation_capabilities_ext
+            )
+            flags = self._api.call(query, self._handle, kind, version)
         return frozenset(name for bit, name in _NATIVE_OPERATION_MODES if flags & bit)
 
     def configure_provider(self, provider, *, adapter_path, library_path=None):
@@ -266,13 +282,25 @@ class Runtime:
         qualify every device/layout; preparation validates the actual binding.
         Replay does not repeat this query. Library versions are provider-specific.
         """
+        return self._probe_native(kind, version, resource=False)
+
+    def probe_native_resource(self, kind, *, version=1):
+        """Probe a resource factory's optional dependency without allocating it.
+
+        May load configured libraries. Successful probes leave device, format,
+        dimension and input-owner checks to cold resource creation.
+        """
+        return self._probe_native(kind, version, resource=True)
+
+    def _probe_native(self, kind, version, *, resource):
         kind = _name(kind)
         if type(version) is not int or not 1 <= version <= 0xFFFFFFFF:
             raise ValueError("Operation version must be a positive uint32")
         with self._lock:
             self._check()
             result = abi.NativeOperationAvailability()
-            self._api.call(self._api.ti_probe_native_operation_ext, self._handle, kind, version, C.byref(result))
+            query = self._api.ti_probe_native_resource_ext if resource else self._api.ti_probe_native_operation_ext
+            self._api.call(query, self._handle, kind, version, C.byref(result))
         return {
             "available": bool(result.available),
             "capabilities": frozenset(name for bit, name in _NATIVE_OPERATION_MODES if result.capabilities & bit),

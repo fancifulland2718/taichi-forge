@@ -91,7 +91,12 @@ def main(mode, artifact, output):
         runtime = Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0")))
     costs = {}
     with runtime:
-        assert "vulkan_inline" in runtime.native_operation_capabilities("image_mip_upload")
+        assert runtime.native_resource_capabilities("storage_image") == frozenset({"vulkan_inline"})
+        assert runtime.probe_native_resource("storage_image") == dict(
+            available=True, capabilities=frozenset({"vulkan_inline"}), library_version=None
+        )
+        assert not runtime.native_operation_capabilities("storage_image")
+        assert not runtime.probe_native_operation("storage_image")["available"]
         start = time.perf_counter()
         module = runtime.load_module(artifact)
         costs["load_ms"] = (time.perf_counter() - start) * 1000

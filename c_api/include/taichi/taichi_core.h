@@ -1278,6 +1278,13 @@ ti_get_native_operation_capabilities_ext(TiRuntime runtime,
                                          const char *kind,
                                          uint32_t version);
 
+// Same cold lookup for resource factories. Operation/resource kinds remain
+// separate; this does not load dependencies or allocate the described resource.
+TI_DLL_EXPORT TiFlags TI_API_CALL
+ti_get_native_resource_capabilities_ext(TiRuntime runtime,
+                                        const char *kind,
+                                        uint32_t version);
+
 typedef struct TiNativeOperationAvailabilityExt {
   TiFlags capabilities;
   TiBool available;
@@ -1294,6 +1301,14 @@ ti_probe_native_operation_ext(TiRuntime runtime,
                               const char *kind,
                               uint32_t version,
                               TiNativeOperationAvailabilityExt *availability);
+
+// Explicit resource-factory dependency probe, with the same availability
+// representation and no resource allocation. May load configured libraries.
+TI_DLL_EXPORT void TI_API_CALL
+ti_probe_native_resource_ext(TiRuntime runtime,
+                             const char *kind,
+                             uint32_t version,
+                             TiNativeOperationAvailabilityExt *availability);
 
 // Version 1 persistent execution description: ordered loaded kernels, native
 // buffer copy/fill32, sort, compact and fft_c2c_f32. JSON is consumed only

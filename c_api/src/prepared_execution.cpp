@@ -1619,9 +1619,11 @@ void ti_configure_native_provider_ext(TiRuntime runtime,
   TI_CAPI_TRY_CATCH_END();
 }
 
-TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
-                                                 const char *kind,
-                                                 uint32_t version) {
+namespace {
+TiFlags native_object_capabilities(TiRuntime runtime,
+                                   const char *kind,
+                                   uint32_t version,
+                                   taichi::lang::NativeObjectKind object_kind) {
   TI_CAPI_TRY_CATCH_BEGIN();
   if (!runtime || !kind) {
     ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "runtime or operation kind");
@@ -1633,8 +1635,8 @@ TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
   }
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
-  const auto *capability =
-      taichi::lang::native_operation_registry().find(kind, version, rt.arch);
+  const auto *capability = taichi::lang::native_operation_registry().find(
+      kind, version, rt.arch, object_kind);
   static_assert(static_cast<TiFlags>(taichi::lang::NativeOperationMode::cpu) ==
                 TI_NATIVE_OPERATION_CAPABILITY_CPU_BIT_EXT);
   static_assert(
@@ -1646,19 +1648,19 @@ TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
   static_assert(static_cast<TiFlags>(
                     taichi::lang::NativeOperationMode::cuda_synchronous) ==
                 TI_NATIVE_OPERATION_CAPABILITY_CUDA_SYNCHRONOUS_BIT_EXT);
-  static_assert(static_cast<TiFlags>(
-                    taichi::lang::NativeOperationMode::cuda_ordered) ==
-                TI_NATIVE_OPERATION_CAPABILITY_CUDA_ORDERED_BIT_EXT);
+  static_assert(
+      static_cast<TiFlags>(taichi::lang::NativeOperationMode::cuda_ordered) ==
+      TI_NATIVE_OPERATION_CAPABILITY_CUDA_ORDERED_BIT_EXT);
   return capability ? static_cast<TiFlags>(capability->mode) : 0;
   TI_CAPI_TRY_CATCH_END();
   return 0;
 }
 
-void ti_probe_native_operation_ext(
-    TiRuntime runtime,
-    const char *kind,
-    uint32_t version,
-    TiNativeOperationAvailabilityExt *availability) {
+void probe_native_object(TiRuntime runtime,
+                         const char *kind,
+                         uint32_t version,
+                         TiNativeOperationAvailabilityExt *availability,
+                         taichi::lang::NativeObjectKind object_kind) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(availability);
   *availability = {};
@@ -1671,16 +1673,50 @@ void ti_probe_native_operation_ext(
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   const auto &registry = taichi::lang::native_operation_registry();
-  const auto *capability = registry.find(kind, version, rt.arch);
+  const auto *capability = registry.find(kind, version, rt.arch, object_kind);
   if (capability) {
     taichi::lang::NativeProviderSession providers(
         rt.native_provider_locations(), rt.native_library_locations());
-    const auto status = registry.probe(kind, version, rt.arch, providers);
+    const auto status =
+        registry.probe(kind, version, rt.arch, providers, object_kind);
     availability->capabilities = static_cast<TiFlags>(capability->mode);
     availability->available = status.available ? TI_TRUE : TI_FALSE;
     availability->library_version = status.library_version;
   }
   TI_CAPI_TRY_CATCH_END();
+}
+}  // namespace
+
+TiFlags ti_get_native_operation_capabilities_ext(TiRuntime runtime,
+                                                 const char *kind,
+                                                 uint32_t version) {
+  return native_object_capabilities(runtime, kind, version,
+                                    taichi::lang::NativeObjectKind::operation);
+}
+
+TiFlags ti_get_native_resource_capabilities_ext(TiRuntime runtime,
+                                                const char *kind,
+                                                uint32_t version) {
+  return native_object_capabilities(runtime, kind, version,
+                                    taichi::lang::NativeObjectKind::resource);
+}
+
+void ti_probe_native_operation_ext(
+    TiRuntime runtime,
+    const char *kind,
+    uint32_t version,
+    TiNativeOperationAvailabilityExt *availability) {
+  probe_native_object(runtime, kind, version, availability,
+                      taichi::lang::NativeObjectKind::operation);
+}
+
+void ti_probe_native_resource_ext(
+    TiRuntime runtime,
+    const char *kind,
+    uint32_t version,
+    TiNativeOperationAvailabilityExt *availability) {
+  probe_native_object(runtime, kind, version, availability,
+                      taichi::lang::NativeObjectKind::resource);
 }
 
 void ti_initialize_prepared_ext(TiRuntime runtime,

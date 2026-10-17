@@ -226,6 +226,10 @@ class NativeOperationRegistry {
   const NativeOperationCapability *find(const std::string &kind,
                                         std::uint32_t version,
                                         Arch arch) const;
+  const NativeOperationCapability *find(const std::string &kind,
+                                        std::uint32_t version,
+                                        Arch arch,
+                                        NativeObjectKind object_kind) const;
   std::vector<NativeOperationCapability> capabilities() const;
   // Explicit cold probe: may load a dependency, never creates a plan or work
   // buffer. Capability enumeration and prepared replay never invoke it.

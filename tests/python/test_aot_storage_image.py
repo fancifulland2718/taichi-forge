@@ -18,6 +18,8 @@ from tests.python.test_hardware_graphics import _spirv_header
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_aot_storage_images_backend_isolation():
     with ti.aot.borrow_runtime() as runtime:
+        assert not runtime.native_resource_capabilities("storage_image")
+        assert not runtime.probe_native_resource("storage_image")["available"]
         with pytest.raises(RuntimeError, match="Native resource provider unavailable"):
             runtime.native_resource("image", "storage", parameters=dict(shape=[2, 2], format="r32u"))
 

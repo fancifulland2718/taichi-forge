@@ -2392,6 +2392,28 @@ and selection happen in the shared native preparation layer; replay uses the
 already prepared object and performs no registry lookup. These registrations do
 not imply that an optional provider is installed.
 
+Resource factories use the same catalog through
+`runtime.native_resource_capabilities(kind, version=1)` and
+`runtime.probe_native_resource(kind, version=1)`. The first query never loads
+dependencies or allocates a resource; the explicit probe may load configured
+libraries and returns `available`, `capabilities` and `library_version`, as for
+operations. Resource and operation kinds are checked separately: querying a
+resource through the operation API returns an empty result. This preserves
+existing operation-discovery behavior. The C equivalents are
+`ti_get_native_resource_capabilities_ext` and `ti_probe_native_resource_ext`.
+
+| Resource factory | Query kind | Compiled backends |
+| --- | --- | --- |
+| `image/sampled` v1 | `sampled_image` | CUDA, Vulkan |
+| `image/storage` v1 | `storage_image` | Vulkan |
+| `vulkan_graphics/pipeline` v1 | `vulkan_graphics_pipeline` | Vulkan |
+
+These are preparation-time SDK choices, not replay queries. A successful probe
+does not admit every format, extent, shader or device feature; creation still
+checks the concrete description. The query applies to registered native resource
+factories, not built-in ndarray or host-blob allocation. It adds no artifact
+fields, allocation or warm execution cost.
+
 `cuda_synchronous` is for a native provider action that cannot be captured or
 does not expose its execution stream. The native executor records adjacent
 capture-compatible operations as CUDA Graph segments and invokes the action

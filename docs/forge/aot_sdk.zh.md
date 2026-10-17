@@ -1824,6 +1824,23 @@ C/C++ 使用 `ti_initialize_prepared_ext` 或首次 launch 的自动路径。重
 `ti_get_native_operation_capabilities_ext`。注册与选择发生在共用的原生准备层，
 重放使用已准备对象，不再查询注册表。注册不代表可选 provider 已安装。
 
+资源工厂通过 `runtime.native_resource_capabilities(kind, version=1)` 和
+`runtime.probe_native_resource(kind, version=1)` 使用同一目录。前者不加载依赖或
+分配资源；显式 probe 可以加载已配置库，按 operation 相同格式返回 `available`、
+`capabilities`、`library_version`。resource/operation 类型分别检查，资源名传给
+operation 查询返回空结果，保持原有发现行为。C API 为
+`ti_get_native_resource_capabilities_ext`、`ti_probe_native_resource_ext`。
+
+| 资源工厂 | 查询 kind | 已编译后端 |
+| --- | --- | --- |
+| `image/sampled` v1 | `sampled_image` | CUDA、Vulkan |
+| `image/storage` v1 | `storage_image` | Vulkan |
+| `vulkan_graphics/pipeline` v1 | `vulkan_graphics_pipeline` | Vulkan |
+
+这些查询供 SDK 在准备期选择路线，重放不查询。probe 成功不表示所有格式、尺寸、
+shader 或硬件功能都可用，创建仍校验具体描述。它查询已注册的 native 资源工厂，
+不用于内置 ndarray 或 host blob 分配；不新增产物字段、分配或暖态执行成本。
+
 `cuda_synchronous` 用于不能 capture 或不暴露执行 stream 的原生 provider 动作。
 执行器将相邻可录制操作合成 CUDA Graph 片段，在 owner 提交锁内调用外部动作，
 并在两侧等待当前 context 完成；连续同步动作省去重复的前置等待。末尾普通图
