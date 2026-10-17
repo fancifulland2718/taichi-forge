@@ -10,21 +10,23 @@ from taichi_forge_runtime.aot import Runtime
 from aot_optix_probe import raises, read, write
 
 
-def check(frame, values):
+def check(frame, values, arch):
+    if arch == "vulkan":
+        values = [values[j * 3 + i] for i in range(3) for j in range(5)]
     expected = [2 * v for v in values]
     assert read(frame["output"]) == expected
     assert read(frame["dout"]) == expected
     assert read(frame["loss"]) == [sum(v * v * 0.5 for v in expected)]
 
 
-def main(mode, artifact, recipe, result):
+def main(mode, artifact, recipe, result, arch="cuda"):
     if mode == "borrowed":
         import taichi_forge as ti
 
-        ti.init(arch=ti.cuda, offline_cache=False)
+        ti.init(arch=getattr(ti, arch), offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime("cuda")
+        runtime = Runtime(arch)
     costs, retained = [], []
     with runtime:
         start = time.perf_counter()
@@ -52,8 +54,8 @@ def main(mode, artifact, recipe, result):
             # Seed changes after preparation must not silently alter the image.
             write(pixels, [77] * 15)
             call()
-            check(frame, values)
-            if recipe == "selected":
+            check(frame, values, arch)
+            if recipe == "selected" and arch == "cuda":
                 other = arrays()
                 sibling = call.prepare_binding(other)
                 assert sibling.binding_family_info["executables"] == 1
@@ -63,10 +65,10 @@ def main(mode, artifact, recipe, result):
                 )
                 for binding, target in ((sibling, other), (call, frame)):
                     binding()
-                    check(target, values)
+                    check(target, values, arch)
                 call.close()
                 sibling()
-                check(other, values)
+                check(other, values, arch)
                 call, frame = sibling, other
             submitted, completed = [], []
             for _ in range(8):
@@ -75,7 +77,7 @@ def main(mode, artifact, recipe, result):
                 submitted.append((time.perf_counter_ns() - start) / 1000)
                 runtime.wait()
                 completed.append((time.perf_counter_ns() - start) / 1000)
-            check(frame, values)
+            check(frame, values, arch)
             costs.append(
                 dict(
                     prepare_ms=prepare_ms,
@@ -89,7 +91,7 @@ def main(mode, artifact, recipe, result):
             retained.append((call, frame, values, pixels))
         for call, frame, values, _ in retained:
             call()
-            check(frame, values)
+            check(frame, values, arch)
         # Retire in flight through the actual parent owner on each route.
         retained[-1][0]()
         if mode == "borrowed":

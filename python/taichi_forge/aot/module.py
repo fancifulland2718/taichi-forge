@@ -502,9 +502,10 @@ class Module:
         metadata and sampler state; ``resource_bindings[texture]`` must supply
         ``{"pixels": "consumer_seed"}``. The consumer seed replaces the texture
         handle in the public plan arguments and is copied once at preparation.
-        CUDA sampled Texture kernel arguments use this same contract, including
-        qualified immutable binding-frame recipes. Pixel seeds belong to the
-        prepared resource family; independent preparation accepts new seeds.
+        CUDA/Vulkan sampled Texture kernel arguments use this same contract,
+        including qualified immutable compute recipes. Only basic single-level
+        sampler state is currently reconstructible. CUDA sibling binding frames
+        share pixel seeds; independent preparation accepts new seeds.
 
         ``resource_bindings`` maps qualified opaque resource owners to input
         port/public array name mappings. Consumers provide initialized arrays

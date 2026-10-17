@@ -316,7 +316,7 @@ Vulkan 复用相同的 `image/sampled`、`image/upload` 描述，并接入所属
 GFX 执行器。通过 `image_upload` v1 的 `vulkan_inline` 能力协商；创建与初始像素上传在
 准备期完成，录制上传与采样共用现有 command list、布局转换和退休机制，暖态不增加
 host 复制或等待。本批 kernel 图像支持单 mip 的 1D/2D/3D 和上述基本 sampler；
-Vulkan Graph 自动导出仍需单独接通。
+合格 Graph 可使用下文的自动重建合同。
 
 像素布局遵守各后端现有纹理 ABI：Vulkan 图像 X 轴连续，标量 texel `(x,y,z)` 的紧凑
 偏移为 `(z*Y+y)*X+x`；CUDA 受管逻辑 ndarray 轴沿用上文的物理反转映射。
@@ -330,8 +330,9 @@ Vulkan `depth32f` 上传使用 depth aspect，并通过同一原生操作需求�
 [Vulkan 复制合同](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html)的要求。
 本批覆盖单 mip 二维深度采样与上传；比较采样器、mip 链和向 AOT 图像附件渲染仍另行接通。
 
-CUDA Graph 自动导出也支持 sampled Texture kernel 参数，包括合格的
-`cuda_immutable_argument_frames` 方案：
+CUDA/Vulkan Graph 自动导出也支持 sampled Texture kernel 参数，包括合格的不可变 compute
+录制方案。CUDA 保留 `cuda_immutable_argument_frames` 的资源共享策略，Vulkan 保留每次
+准备对应的完整有序 compute 序列：
 
 ```python
 module.add_execution_plan(
@@ -344,12 +345,14 @@ module.add_execution_plan(
 Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出保留格式、维数和采样器，
 不复制生产端 texel；同一 Texture 的公开别名与已声明私有绑定共用一个图像资源。
 seed 在准备期复制一次，其数组沿用已有 prepared-resource 依赖寿命，须存活至相关
-prepared 调用退休。兄弟绑定帧共享图像与 seed 绑定；不同图像使用独立准备，输出数组
-可在兄弟绑定间切换。重放不增加像素复制或 Python 元数据查询。
+prepared 调用退休。CUDA 兄弟绑定帧共享图像与 seed 绑定；不同图像使用独立准备，输出数组
+可在 CUDA 兄弟绑定间切换。Vulkan 独立准备各自拥有图像和录制命令。重放不增加像素复制
+或 Python 元数据查询。min/mag filter 不同、mip 链及扩展 sampler 设置会在导出时拒绝，
+当前资源描述尚不能完整保存这些状态。
 
-Windows CUDA 导出已验证普通 Graph 的公开/私有别名及后续数值 kernel 真实梯度、
-selected 绑定帧的公开纹理别名与显式伴随、独立 seed、输出换绑，以及独立/借用 runtime
-的父对象退休；不扩展 selected JIT 方案现有的私有固定纹理或隐式梯度准入。
+Windows CUDA/Vulkan 导出已验证普通 Graph 的公开/私有别名及后续数值 kernel 真实梯度、
+selected 绑定帧的公开纹理别名与显式伴随、独立 seed，以及独立/借用 runtime 的父对象退休；
+CUDA 额外覆盖共享绑定族的输出换绑。不扩展 selected JIT 方案现有的私有固定纹理或隐式梯度准入。
 
 `refit` 也接受可更新 GAS。`instance_refit` 要求可更新的实例场景：传入 `transforms`
 时直接读取设备矩阵；省略时保留当前矩阵，仅刷新 IAS 包围盒。引用的 GAS 包围盒变化后，

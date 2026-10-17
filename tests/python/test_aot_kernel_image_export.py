@@ -15,8 +15,10 @@ from tests.python.test_aot_binding_recipe_export import selected
 
 
 @pytest.mark.parametrize("recipe", ["ordinary", "selected"])
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_aot_kernel_image_graph_export(tmp_path, recipe):
+    arch = ti.cfg.arch.name
+
     @ti.kernel
     def sample(
         image: ti.types.texture(num_dimensions=2),
@@ -104,6 +106,17 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
                     "bad", graph, source_bindings=dict(image=wrong)
                 )
             assert not module._exported_kernels and not module._graph_export_failed
+            if arch == "vulkan":
+                extended = ti.Texture(
+                    ti.Format.r32f,
+                    (3, 5),
+                    sampler=ti.hardware.sampling.SamplerConfig(min_filter="nearest"),
+                )
+                with pytest.raises(ti.TaichiRuntimeError, match="basic sampler"):
+                    module.add_execution_plan(
+                        "sampler", graph, source_bindings=dict(image=extended)
+                    )
+                assert not module._exported_kernels and not module._graph_export_failed
         else:
             arrays = dict(
                 output=ti.ndarray(ti.f32, (3, 5)),
@@ -128,7 +141,9 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
         assert images[0]["parameters"]["filter"] == "nearest"
         assert document["operations"][0]["arguments"][:2] == [images[0]["name"]] * 2
         assert plan.binding_strategy == (
-            "cuda_immutable_argument_frames" if recipe == "selected" else None
+            "cuda_immutable_argument_frames"
+            if recipe == "selected" and arch == "cuda"
+            else None
         )
         count = len(module._exported_kernels)
         module.add_execution_plan("again", graph, **arguments)
@@ -166,6 +181,7 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
                 str(artifact),
                 recipe,
                 str(tmp_path / f"{mode}.json"),
+                arch,
             ],
             env=os.environ.copy(),
             capture_output=True,

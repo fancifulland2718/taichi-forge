@@ -57,11 +57,24 @@ class SourceImageBindings:
         return owner
 
     def resource(self, context, name):
+        from taichi_forge.hardware._sampling import SamplerConfig
+
         owner = self.require(name)
         fmt, shape, mip_levels, sampler = owner._creation_metadata
-        if context.arch != core.Arch.cuda or mip_levels != 1:
+        if context.arch not in (core.Arch.cuda, core.Arch.vulkan) or mip_levels != 1:
             raise TaichiRuntimeError(
-                "AOT sampled-image reconstruction currently requires single-level CUDA textures"
+                "AOT sampled-image reconstruction requires single-level CUDA/Vulkan textures"
+            )
+        basic = SamplerConfig(
+            min_filter=sampler.min_filter,
+            mag_filter=sampler.min_filter,
+            address_mode_u=sampler.address_mode_u,
+            address_mode_v=sampler.address_mode_v,
+            address_mode_w=sampler.address_mode_w,
+        )
+        if sampler != basic:
+            raise TaichiRuntimeError(
+                "AOT sampled-image reconstruction requires a basic sampler with matching min/mag filters"
             )
 
         def build():

@@ -291,13 +291,12 @@ def test_image_source_metadata_validates_kernel_texture_export():
     )
     graph = builder.compile()
     module = ti.aot.Module()
-    message = "resource_bindings" if ti.cfg.arch == ti.cuda else "single-level CUDA"
-    with pytest.raises(ti.TaichiRuntimeError, match=message):
+    with pytest.raises(ti.TaichiRuntimeError, match="resource_bindings"):
         module.add_execution_plan(
             "unsupported",
             graph,
             source_bindings=sources,
-            resource_bindings={} if ti.cfg.arch == ti.cuda else {texture: dict(pixels="pixels")},
+            resource_bindings={},
         )
     assert not module._graph_export_failed and not module._exported_kernels
     graph.close()

@@ -406,7 +406,7 @@ the owner's existing GFX runtime. Discover `image_upload` version 1 with
 preparation; recorded uploads and sampling share the existing command list,
 layout transitions and retirement. There is no extra warm host copy or wait.
 Kernel images are single-level 1D/2D/3D with the basic sampler described above.
-Vulkan Graph automatic export remains a separate qualification step.
+Qualified Graphs use the automatic reconstruction contract below.
 
 Pixel layout follows each backend's existing texture ABI. Vulkan image X is
 contiguous: a packed scalar texel at `(x,y,z)` has index `(z*Y+y)*X+x`;
@@ -424,8 +424,10 @@ as required by the [Vulkan copy contract](https://docs.vulkan.org/refpages/lates
 This qualifies single-level 2D depth sampling and uploads; comparison samplers,
 mip chains and rendering to an AOT-owned attachment remain separate work.
 
-CUDA Graph export also accepts sampled Texture kernel arguments, including
-qualified `cuda_immutable_argument_frames` recipes:
+CUDA and Vulkan Graph export also accept sampled Texture kernel arguments,
+including qualified immutable compute recipes. CUDA preserves its
+`cuda_immutable_argument_frames` resource-sharing strategy; Vulkan preserves the
+complete ordered compute sequence per preparation:
 
 ```python
 module.add_execution_plan(
@@ -440,14 +442,18 @@ preserves format, dimensions and sampler, without copying producer texels. Publi
 aliases and declared private bindings to one Texture share one image resource.
 The seed is copied once during preparation; its array follows the existing
 prepared-resource dependency lifetime and must stay alive until the prepared
-calls retire. Sibling binding frames share that resource and seed binding; use
+calls retire. CUDA sibling binding frames share that resource and seed binding; use
 independent preparation for a different image. Output buffers can change across
-siblings. No extra pixel copy or Python metadata lookup is added to replay.
+CUDA siblings; separate Vulkan preparations own independent images and commands.
+No extra pixel copy or Python metadata lookup is added to replay. Nonmatching
+min/mag filters, mip chains and extended sampler settings fail during export;
+the current resource description cannot preserve them.
 
-Windows CUDA export checks cover ordinary Graph public/private aliases with real
+Windows CUDA/Vulkan export checks cover ordinary Graph public/private aliases with real
 downstream numeric gradients, selected binding frames with public texture aliases
-and an explicit adjoint, independent seeds, output rebinding and parent retirement
-in standalone and borrowed runtimes. This does not expand the JIT selected
+and an explicit adjoint, independent seeds and parent retirement in standalone
+and borrowed runtimes. CUDA additionally covers shared-family output rebinding.
+This does not expand the JIT selected
 recipe's existing qualification for private fixed textures or implicit gradients.
 
 `refit` also accepts an updateable GAS. `instance_refit` requires an updateable
