@@ -290,7 +290,12 @@ class Runtime:
             module._source_path = Path(path)
             return module
 
-    def ndarray(self, dtype, shape, *, element_shape=()):
+    def ndarray(self, dtype, shape, *, element_shape=(), usage=("storage",)):
+        """Allocate a packed array with explicit storage/uniform/vertex/index uses.
+
+        Usage describes the native allocation, not access synchronization.
+        Include ``storage`` when the same array is passed to an AOT kernel.
+        """
         with self._lock:
             self._check()
             code, _, width = _dtype(dtype)
@@ -298,7 +303,7 @@ class Runtime:
             size = math.prod(shape) * math.prod(element_shape) * width
             if size > 0xFFFFFFFFFFFFFFFF:
                 raise ValueError("Array byte size exceeds uint64")
-            memory = _Memory(self, size)
+            memory = _Memory(self, size, usage)
             return NdArray(memory, dtype, code, shape, element_shape)
 
     def host_blob(self, data):
@@ -521,11 +526,19 @@ class NativeResource(_Resource):
 class _Memory(_Resource):
     _kind = "memory"
 
-    def __init__(self, runtime, size):
+    def __init__(self, runtime, size, usage=("storage",)):
         self.size = size
+        flags = {"storage": 1, "uniform": 2, "vertex": 4, "index": 8}
+        if not isinstance(usage, (tuple, list)) or not usage or any(
+            not isinstance(item, str) or item not in flags for item in usage
+        ):
+            raise ValueError("Array usage must be a nonempty sequence of storage/uniform/vertex/index names")
+        usage_bits = 0
+        for item in usage:
+            usage_bits |= flags[item]
         # Empty logical arrays still need a valid native binding token. Reserve
         # one physical byte; no transfer or array access uses that byte.
-        info = abi.MemoryAllocateInfo(max(size, 1), False, False, False, 1)
+        info = abi.MemoryAllocateInfo(max(size, 1), False, False, False, usage_bits)
         handle = runtime._api.call(runtime._api.ti_allocate_memory, runtime._handle, C.byref(info))
         super().__init__(runtime, handle)
 
