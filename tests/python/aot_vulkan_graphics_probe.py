@@ -71,9 +71,19 @@ def image_resources():
     ]
 
 
-def operations():
+def contract_pass():
+    operation = pass_spec()
+    operation["version"] = 5
+    operation["parameters"].update(
+        scene_count=0,
+        attachment_contract=dict(width=8, height=8, colors=["rgba32f"], depth="depth32f"),
+    )
+    return operation
+
+
+def operations(*, contract=False):
     return [
-        pass_spec(),
+        contract_pass() if contract else pass_spec(),
         pass_spec(True),
         dict(kind="kernel", entry="sample", arguments=["target", "features"]),
         dict(kind="fill32", destination="dfeatures", value=0),
@@ -198,6 +208,23 @@ def main(mode, artifact, output):
         ) as wrong_usage:
             raises(lambda: prepare([pass_spec()], dict(target=wrong_usage)), "attachment usage")
 
+        for changed in (dict(width=9), dict(colors=["rgba8"]), dict(depth="depth16")):
+            bad = contract_pass()
+            bad["parameters"]["attachment_contract"].update(changed)
+            raises(lambda: prepare([bad]), "layout contract mismatch")
+        bad = contract_pass()
+        del bad["bindings"]["depth"]
+        raises(lambda: prepare([bad]), "depth contract mismatch")
+        bad = contract_pass()
+        bad["version"] = 4
+        raises(lambda: prepare([bad]), "version 5")
+        clear = contract_pass()
+        clear["parameters"].update(pipeline_count=0, array_count=0, image_count=0, draws=[])
+        clear["bindings"] = dict(color_0="target", depth="depth")
+        with prepare([clear, dict(kind="kernel", entry="sample", arguments=["target", "features"])]) as clearing:
+            clearing()
+            assert read(frame["features"]) == [0, 0, 1, 1] * 64
+
         # Clear covers the entire attachment even though the draw has half-width viewport.
         with prepare([pass_spec(), dict(kind="kernel", entry="sample", arguments=["target", "features"])]) as half:
             half()
@@ -205,7 +232,7 @@ def main(mode, artifact, output):
                 v for i in range(64) for v in ([0.5, 0, 0, 1] if i % 8 < 4 else [0, 0, 1, 1])
             ]
         calls = {}
-        for name in ("public", "private", "private_arrays"):
+        for name in ("public", "private", "private_arrays", "contract"):
             supplied = {k: available[k] for k in module.execution_plan(name).argument_names}
             start = time.perf_counter()
             call = module.prepare_execution(name, supplied)

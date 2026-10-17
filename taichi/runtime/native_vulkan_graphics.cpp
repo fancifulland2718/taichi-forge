@@ -212,6 +212,7 @@ struct DrawDescription {
 };
 struct PassFeatures {
   bool scenes, arrays, mesh, indirect;
+  bool attachment_contracts{false};
 };
 struct PassDescription {
   static constexpr const char *kind = "vulkan_graphics_pass_direct";
@@ -226,6 +227,12 @@ struct PassDescription {
   bool depth_clear{true};
   float clear_depth{0};
   std::array<uint32_t, 4> viewport{};
+  struct Attachments {
+    uint32_t width, height;
+    std::vector<BufferFormat> colors;
+    std::optional<BufferFormat> depth;
+  };
+  std::optional<Attachments> attachments;
   std::vector<DrawDescription> draws;
   std::vector<std::shared_ptr<PipelineAccess>> pipelines;
   std::vector<NativeArrayBinding> arrays;
@@ -244,6 +251,10 @@ struct ArrayPassDescription : PassDescription {
 struct MeshPassDescription : PassDescription {
   static constexpr uint32_t version = 4;
   static constexpr PassFeatures features{true, true, true, false};
+};
+struct ContractPassDescription : PassDescription {
+  static constexpr uint32_t version = 5;
+  static constexpr PassFeatures features{true, true, true, false, true};
 };
 struct IndirectPassDescription : PassDescription {
   static constexpr const char *kind = "vulkan_graphics_pass_indirect";
@@ -676,11 +687,29 @@ PipelineDescription pipeline_parameters(const Json &p, uint32_t version) {
 PassDescription pass_parameters(const Json &p, PassFeatures features) {
   fields(p, {"pipeline_count", "array_count", "image_count", "color_count",
              "colors", "draws", "viewport", "depth_clear", "clear_depth",
-             "scene_count"});
+             "scene_count", "attachment_contract"});
   if (!features.scenes && p.obj.inner.count("scene_count"))
     throw std::invalid_argument(
         "Graphics AS bindings require pass_direct version 2");
   PassDescription d;
+  if (p.obj.inner.count("attachment_contract")) {
+    if (!features.attachment_contracts)
+      throw std::invalid_argument(
+          "Graphics attachment contracts require pass_direct version 5");
+    const auto &value = p["attachment_contract"];
+    fields(value, {"width", "height", "colors", "depth"});
+    PassDescription::Attachments contract{u32(value["width"]),
+                                          u32(value["height"]), {}, {}};
+    if (!contract.width || !contract.height)
+      throw std::invalid_argument("Graphics attachment extent must be positive");
+    for (const auto &color : array(value, "colors"))
+      contract.colors.push_back(format(color));
+    if (value.obj.inner.count("depth"))
+      contract.depth = format(value["depth"]);
+    if (contract.colors.size() != u32(p["color_count"]))
+      throw std::invalid_argument("Graphics attachment contract color count mismatch");
+    d.attachments = std::move(contract);
+  }
   d.depth_clear = optional_bool(p, "depth_clear", true);
   d.clear_depth = optional_f32(p, "clear_depth", 0);
   if (p.obj.inner.count("viewport")) {
@@ -843,7 +872,7 @@ PassDescription pass_parameters(const Json &p, PassFeatures features) {
     }
     d.draws.push_back(std::move(draw));
   }
-  if (d.draws.empty())
+  if (d.draws.empty() && !features.attachment_contracts)
     throw std::invalid_argument("Graphics pass requires at least one draw");
   return d;
 }
@@ -869,6 +898,23 @@ static void register_graphics_pass(NativeOperationRegistry &registry) {
       same_device(device, scene);
     if (d.depth)
       same_device(device, d.depth);
+    if (d.attachments) {
+      const auto &contract = *d.attachments;
+      const auto match = [&](const NativeSampledImage &image,
+                             BufferFormat format) {
+        const auto &p = image.parameters();
+        if (p.dimension != ImageDimension::d2D || p.x != contract.width ||
+            p.y != contract.height || p.z != 1 || p.mip_levels != 1 ||
+            p.format != format)
+          throw std::invalid_argument("Graphics attachment layout contract mismatch");
+      };
+      for (size_t i = 0; i < d.targets.size(); ++i)
+        match(*d.targets[i], contract.colors[i]);
+      if (bool(d.depth) != contract.depth.has_value())
+        throw std::invalid_argument("Graphics attachment depth contract mismatch");
+      if (d.depth)
+        match(*d.depth, *contract.depth);
+    }
     for (const auto &a : d.arrays) {
       if (a.pointer.device != &device ||
           a.bytes > (std::numeric_limits<size_t>::max)() ||
@@ -957,6 +1003,7 @@ void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
   register_graphics_pass<ShaderPassDescription>(registry);
   register_graphics_pass<ArrayPassDescription>(registry);
   register_graphics_pass<MeshPassDescription>(registry);
+  register_graphics_pass<ContractPassDescription>(registry);
   register_graphics_pass<IndirectPassDescription>(registry);
 }
 }  // namespace taichi::lang

@@ -76,7 +76,7 @@ def test_aot_vulkan_graphics_reconstruction_and_gradients(tmp_path):
             )
         )
     arrays.append(dict(kind="ndarray_view", name="positions", array="positions_storage", offset=2, shape=[6]))
-    for name in ("public", "private", "private_arrays"):
+    for name in ("public", "private", "private_arrays", "contract"):
         resources = [dict(kind="ndarray", name="dloss", dtype="f32", shape=[1])]
         if name != "public":
             resources += pipelines + image_resources()
@@ -84,7 +84,11 @@ def test_aot_vulkan_graphics_reconstruction_and_gradients(tmp_path):
             resources += arrays
         module.add_execution_plan(
             name,
-            ti.aot.ExecutionPlan(operations(), resources=resources, gradients=dict(features="dfeatures", loss="dloss")),
+            ti.aot.ExecutionPlan(
+                operations(contract=name == "contract"),
+                resources=resources,
+                gradients=dict(features="dfeatures", loss="dloss"),
+            ),
         )
     costs = dict(compile_ms=(time.perf_counter() - start) * 1000)
     artifact = tmp_path / "graphics.tcm"

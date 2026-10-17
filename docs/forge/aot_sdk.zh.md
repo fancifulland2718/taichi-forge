@@ -860,6 +860,13 @@ task+mesh、compute→mesh 数据更新、公私 owner、替换绑定、close/re
 借用消费的下游数值梯度；consumer 不需要 shader compiler。旧 raster 导出继续采用
 所需的最低版本；mesh indirect 和分段/fork-join 提交资格保持原边界。
 
+`pass_direct` v5 继承 v4，并允许空 `draws` 执行仅 clear/load 的 pass。它可指定
+`attachment_contract={"width": w, "height": h, "colors": ["rgba8"], "depth": "depth32f"}`；
+没有深度附件时省略 `depth`。准备阶段核对所有附件的精确尺寸、格式与单 mip 2D 布局，
+不在每帧检查。颜色格式列表与 `color_count` 一致，无 AS 时仍指定 `scene_count=0`。
+通过 `native_operation_capabilities("vulkan_graphics_pass_direct", version=5)` 查询。
+旧版本不接受此合同，也不改变原有空绘制拒绝行为。
+
 传统间接绘制使用 `vulkan_graphics/pass_indirect` v1，选择前查询
 `native_operation_capabilities("vulkan_graphics_pass_indirect")`；准备阶段另查设备
 count/multi-draw 特性及容量。普通和已选整图 graphics-queue Graph 自动导出

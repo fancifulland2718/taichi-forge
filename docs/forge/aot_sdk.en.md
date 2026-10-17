@@ -1114,6 +1114,15 @@ borrowed consumers. No consumer shader compiler is required. Older raster
 exports keep their lowest required versions. Mesh indirect and segmented/fork-join
 submission coverage remains unchanged.
 
+`pass_direct` v5 retains v4 and permits empty `draws` for a clear/load-only pass.
+An optional `attachment_contract={"width": w, "height": h, "colors": ["rgba8"],
+"depth": "depth32f"}` checks exact attachment dimensions, formats and single-mip
+2D layouts during preparation, with no per-frame checks. Omit `depth` when there
+is no depth attachment. The color format list matches `color_count`; specify
+`scene_count=0` without AS bindings. Query
+`native_operation_capabilities("vulkan_graphics_pass_direct", version=5)`.
+Earlier versions reject this contract and retain their nonempty-draw requirement.
+
 Classic indirect draws use `vulkan_graphics/pass_indirect` v1. Query
 `native_operation_capabilities("vulkan_graphics_pass_indirect")` before choosing
 this operation; preparation separately checks device count/multi-draw features
