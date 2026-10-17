@@ -954,6 +954,57 @@ when their shapes match. Tests cover a preceding kernel, two calls to one plan,
 every mip, downstream backward execution and reuse after initialization inputs
 close. JIT recipe admission is unchanged.
 
+### Explicit Vulkan compute plans
+
+`vulkan_compute/pipeline@1` reconstructs a fixed SPIR-V compute pipeline from
+one `shader` host-blob binding. Its `expected_shader` parameter is the lowercase
+SHA256 of the code. The pipeline consumes the blob during preparation, so the
+blob can then close. `vulkan_compute/dispatch@1` binds this pipeline and arrays
+through the same resource registry, owner and prepared-execution contracts used
+by other native operations:
+
+```python
+operation = {
+    "kind": "native", "provider": "vulkan_compute", "operation": "dispatch",
+    "version": 1,
+    "bindings": {"pipeline": "compute", "array_0": "input", "array_1": "output"},
+    "parameters": {
+        "expected_shader": shader_sha256, "groups": [group_count, 1, 1],
+        "array_count": 2,
+        "buffers": [
+            {"set": 0, "binding": 0, "array": 0, "storage": True},
+            {"set": 0, "binding": 1, "array": 1, "storage": True},
+        ],
+    },
+}
+```
+
+The example requires a shader with exactly those two storage-buffer descriptors.
+V1 supports `main`, fixed local sizes, and scalar storage/uniform-buffer
+descriptors across descriptor sets; images, descriptor arrays, push constants
+and specialization overrides are outside this version. Uniform buffers use
+`storage=False`. Logical views must have the required physical usage,
+alignment and range. Shader reflection verifies descriptor coverage and fixed
+block sizes; valid dynamic indices, shader data types and safe aliasing remain
+the shader author's responsibility.
+
+Cold preparation checks the code digest, local/group counts against device
+limits, and all bindings before recording. Zero group counts perform no work.
+Replay uses prepared descriptors and the existing Vulkan command batch; it
+does not compile a DSL kernel, resolve names or rebuild pipelines. Buffer
+contents may change between runs; different array bindings prepare a new
+immutable execution. Pipelines and arrays retire with their owning execution.
+The artifact can own the shader/pipeline and scratch arrays or explicitly bind
+an external pipeline with the same code contract. Driver pipeline compilation
+still occurs at preparation. Reported zero provider workspace excludes driver
+pipeline/descriptor residency and caller-owned arrays.
+
+Windows qualification covers independent and borrowed consumption, chained
+compute dispatches, array updates, rejected bindings, owner retirement and a
+downstream DSL gradient kernel. The external shader is not differentiated.
+CPU/CUDA do not advertise these Vulkan capabilities. This is a shared foundation
+for native preprocessing; high-level RasterPass line export is not yet wired.
+
 ### Exporting high-level RasterPass recordings
 
 Vulkan `RasterPass` mesh, mesh_instance and particles recordings export through

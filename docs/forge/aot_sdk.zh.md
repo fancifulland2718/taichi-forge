@@ -738,6 +738,47 @@ plan 用 `{spd_plan: "public_plan"}`，同时公开其两个图像，导出器�
 约束。消费者拒绝仅形状相同但身份不同的替代图像。测试覆盖前置 kernel、同 plan
 两次调用、全 mip 读取、下游反向及初始化输入关闭后的复用；不改变 JIT recipe 资格。
 
+### 显式 Vulkan compute 计划
+
+`vulkan_compute/pipeline@1` 从 `shader` host-blob 绑定重建固定 SPIR-V compute
+pipeline，参数 `expected_shader` 是代码的小写 SHA256。准备结束后代码已被消费，
+host blob 可以关闭。`vulkan_compute/dispatch@1` 使用同一原生资源注册、owner 与
+prepared execution 合同绑定 pipeline 和数组：
+
+```python
+operation = {
+    "kind": "native", "provider": "vulkan_compute", "operation": "dispatch",
+    "version": 1,
+    "bindings": {"pipeline": "compute", "array_0": "input", "array_1": "output"},
+    "parameters": {
+        "expected_shader": shader_sha256, "groups": [group_count, 1, 1],
+        "array_count": 2,
+        "buffers": [
+            {"set": 0, "binding": 0, "array": 0, "storage": True},
+            {"set": 0, "binding": 1, "array": 1, "storage": True},
+        ],
+    },
+}
+```
+
+例子要求 shader 恰好声明这两个 storage buffer 描述符。V1 支持 `main`、固定
+local size、跨 descriptor set 的标量 storage/uniform buffer；暂不支持 image、
+描述符数组、push constants 或 specialization override。Uniform 使用
+`storage=False`。逻辑数组视图必须具备正确的物理 usage、对齐和范围；反射验证
+描述符完整覆盖与固定 block 大小，动态索引、shader 数据类型及别名安全仍由
+shader 作者保证。
+
+代码摘要、设备 local/group 限额与绑定均在冷准备时检查。零 group 不执行工作。
+重放使用准备好的描述符和现有 Vulkan 命令批次，不再编译 DSL 核、解析名字或
+重建 pipeline。每次运行可以改变数组内容；替换数组绑定则准备新的不可变执行。
+Pipeline、数组随所属执行退休。产物可以私有重建 shader/pipeline/暂存数组，也可以
+显式绑定代码合同一致的外部 pipeline。准备仍包含驱动 pipeline 编译；provider
+workspace 为零不包括驱动 pipeline/descriptor 驻留及调用方数组。
+
+Windows 夹具验证独立/借用消费、串联 compute、数组更新、错误绑定拒绝、owner
+退休及下游 DSL 梯度核；外部 shader 本身不参与求导。CPU/CUDA 不声明这些 Vulkan
+能力。此项提供原生前处理的公共基础，高层 RasterPass lines 导出尚未接线。
+
 ### 高层 RasterPass 导出
 
 Vulkan `RasterPass` 的 `mesh`、`mesh_instance` 和 `particles` 录制可经普通显式

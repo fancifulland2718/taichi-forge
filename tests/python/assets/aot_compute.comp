@@ -1,0 +1,17 @@
+#version 450
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float values[]; } src;
+layout(set = 0, binding = 1, std430) writeonly buffer Output { float values[]; } dst;
+layout(set = 1, binding = 3, std140) uniform Scale { vec4 value; } scale;
+#ifdef TEST_PUSH_CONSTANTS
+layout(push_constant) uniform Push { float offset; } pc;
+#endif
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < dst.values.length()) {
+        dst.values[i] = src.values[i] * scale.value.x;
+#ifdef TEST_PUSH_CONSTANTS
+        dst.values[i] += pc.offset;
+#endif
+    }
+}

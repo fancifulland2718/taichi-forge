@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 新增固定 SPIR-V、标量 buffer 描述符的 Vulkan compute pipeline/dispatch
+  资源；代码、布局和范围在冷准备时校验，复用资源 owner 与图形描述符校验，
+  已验证独立/借用消费及下游梯度。
 - Vulkan RasterPass 的 mesh／mesh_instance／particles 可从显式普通 Graph 导出 AOT，
   复用准备核与原生 graphics pass。相机需显式快照；固定布局的几何/位姿可更新，附件可
   公共绑定或重建。零绘制仅清屏，不生成几何准备工作；lines 的 compute 重建尚未接通。
