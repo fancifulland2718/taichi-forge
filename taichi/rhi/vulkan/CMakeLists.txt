@@ -2,6 +2,8 @@
 
 set(VULKAN_RHI vulkan_rhi)
 ti_add_native_library(${VULKAN_RHI})
+include(${PROJECT_SOURCE_DIR}/cmake/SpirvReflect.cmake)
+ti_prepare_spirv_reflect(TI_SPIRV_REFLECT_SOURCE)
 target_sources(${VULKAN_RHI}
   PRIVATE
     vulkan_api.cpp
@@ -11,7 +13,7 @@ target_sources(${VULKAN_RHI}
     vulkan_memory_allocator.cpp
     vulkan_pipeline_diagnostics.cpp
     vulkan_ray_pipeline.cpp
-    ${PROJECT_SOURCE_DIR}/external/SPIRV-Reflect/spirv_reflect.c
+    ${TI_SPIRV_REFLECT_SOURCE}
 
     vulkan_api.h
     vulkan_device.h

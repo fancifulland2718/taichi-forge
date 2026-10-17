@@ -139,6 +139,7 @@ def _assert_cursor_output(outputs):
     vulkan_spv_stats=True,
     vulkan_spv_stats_filter="all",
     num_compile_threads=2,
+    compile_tier="balanced",
 )
 def test_optimizer_runs_for_later_tasks_and_kernels(parallel, skip_unroll, disabled):
     ti.cfg.spirv_parallel_codegen = parallel

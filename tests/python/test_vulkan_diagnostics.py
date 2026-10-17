@@ -9,6 +9,31 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+@pytest.mark.parametrize("validate", [False, True])
+@test_utils.test(arch=ti.vulkan, offline_cache=False, compile_tier="fast")
+def test_compile_profile_separates_pipeline_preparation(validate, monkeypatch):
+    monkeypatch.delenv("TI_VULKAN_DIAGNOSTICS_DIR", raising=False)
+    monkeypatch.setenv("TI_VULKAN_VALIDATE_SPIRV", "1" if validate else "0")
+    values = ti.ndarray(ti.i32, 37)
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(out.shape[0]):
+            out[i] = i * i + 7
+
+    with ti.compile_profile() as profile:
+        fill(values)
+        ti.sync()
+    paths = [row["path"].split("/")[-1] for row in profile.records(include_python=False)]
+    assert "cpp.compile.spirv.emit_task" in paths
+    assert "cpp.vulkan.descriptor_reflection_and_layout" in paths
+    assert "cpp.vulkan.create_shader_modules" in paths
+    assert "cpp.vulkan.driver_create_compute_pipeline" in paths
+    assert ("cpp.vulkan.validate_spirv" in paths) == validate
+    assert "cpp.vulkan.diagnostic_reflection" not in paths
+    np.testing.assert_array_equal(values.to_numpy(), np.arange(37, dtype=np.int32) ** 2 + 7)
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False, compile_tier="balanced")
 def test_export_matches_actual_jit_pipeline_without_submission(tmp_path, monkeypatch):
     captures = tmp_path / "pipelines"

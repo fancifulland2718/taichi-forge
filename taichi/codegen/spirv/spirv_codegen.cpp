@@ -7801,7 +7801,10 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     tp.listgen_reuse = params_.vulkan_listgen_reuse;
 
     TaskCodegen cgen(tp);
-    auto task_res = cgen.run();
+    auto task_res = [&]() {
+      TI_COMPILE_PROFILER("cpp.compile.spirv.emit_task");
+      return cgen.run();
+    }();
 
     std::vector<uint32_t> optimized_spv(task_res.spirv_code);
     int task_spv_opt_level = params_.spv_opt_level;
@@ -7817,6 +7820,7 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     double opt_us = 0.0;
 
     if (task_spv_opt_level > 0) {
+      TI_COMPILE_PROFILER("cpp.compile.spirv.optimize_task");
       opt_run = true;
       auto opt_begin = std::chrono::steady_clock::now();
       auto opt =

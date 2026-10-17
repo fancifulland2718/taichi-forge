@@ -6,6 +6,7 @@
 #include "external/PicoSHA2/picosha2.h"
 #include "taichi/common/filesystem.hpp"
 #include "taichi/common/json_serde.h"
+#include "taichi/system/profiler.h"
 #include "spirv-tools/libspirv.hpp"
 #include "spirv_reflect.h"
 
@@ -91,6 +92,7 @@ VulkanPipelineDiagnostics::VulkanPipelineDiagnostics(
   const bool validate = validation && std::string(validation) == "1";
   if ((!root || !*root) && !validate)
     return;
+  TI_COMPILE_PROFILER("cpp.vulkan.pipeline_diagnostics");
   if (root && *root) {
     std::filesystem::create_directories(root);
     const auto stamp =
@@ -123,12 +125,9 @@ VulkanPipelineDiagnostics::VulkanPipelineDiagnostics(
       write_file(std::filesystem::u8path(directory_) / filename, bytes,
                  code.size);
     JsonObject shader;
-    shader.inner["file"] = JsonValue(filename);
-    shader.inner["sha256"] =
-        JsonValue(picosha2::hash256_hex_string(bytes, bytes + code.size));
-    shader.inner["bytes"] = JsonValue(code.size);
     bool validation_passed = true;
     if (validate) {
+      TI_COMPILE_PROFILER("cpp.vulkan.validate_spirv");
       const auto api = params.device->get_vk_physical_device_props().apiVersion;
       const auto env = api >= VK_API_VERSION_1_3   ? SPV_ENV_VULKAN_1_3
                        : api >= VK_API_VERSION_1_2 ? SPV_ENV_VULKAN_1_2
@@ -149,7 +148,16 @@ VulkanPipelineDiagnostics::VulkanPipelineDiagnostics(
       if (!validation_passed)
         validation_error += filename + ": " + messages;
     }
+    // Validation alone does not consume a manifest or reflection. The normal
+    // pipeline preparation reflects the shader after this validation succeeds.
+    if (directory_.empty())
+      continue;
+    shader.inner["file"] = JsonValue(filename);
+    shader.inner["sha256"] =
+        JsonValue(picosha2::hash256_hex_string(bytes, bytes + code.size));
+    shader.inner["bytes"] = JsonValue(code.size);
     // Validate before passing malformed code to reflection or the driver.
+    TI_COMPILE_PROFILER("cpp.vulkan.diagnostic_reflection");
     SpvReflectShaderModule reflection{};
     shader.inner["entry_point"] = JsonValue(code.entry_point);
     if (validation_passed &&

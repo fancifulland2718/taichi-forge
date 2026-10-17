@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan shader reflection maintains a parser-local result-ID index instead of
+  repeatedly scanning the module. Validation without an artifact capture skips
+  unused diagnostic reflection. `ti.compile_profile()` separates SPIR-V emission,
+  optimization, validation, reflection/layout preparation and driver pipeline
+  creation. Compiler tiers, shader bytes and native ABI remain unchanged.
+
 - AOT v17 adds public resource relationship checks, preventing a refit GAS from
   differing from the GAS retained by a queried scene. Named retained-input paths
   are checked at preparation, with no replay lookup and the existing retirement

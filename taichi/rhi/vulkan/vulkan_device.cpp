@@ -23,6 +23,7 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_pipeline_diagnostics.h"
+#include "taichi/system/profiler.h"
 
 #include "spirv_reflect.h"
 
@@ -229,6 +230,7 @@ VulkanPipeline::VulkanPipeline(const Params &params)
       device_(params.device->vk_device()),
       name_(params.name),
       cache_(params.cache) {
+  TI_COMPILE_PROFILER("cpp.vulkan.pipeline:" + params.name);
   VulkanPipelineDiagnostics diagnostics(params);
   try {
     diagnostics.event("preparing_layout_and_shader");
@@ -396,6 +398,7 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline_dynamic(
 }
 
 void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
+  TI_COMPILE_PROFILER("cpp.vulkan.descriptor_reflection_and_layout");
   std::map<std::pair<std::uint32_t, std::uint32_t>,
            std::pair<SpvReflectDescriptorType, std::uint32_t>> ray_descriptors;
   for (auto &code_view : params.code) {
@@ -669,6 +672,7 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
 }
 
 void VulkanPipeline::create_shader_stages(const Params &params) {
+  TI_COMPILE_PROFILER("cpp.vulkan.create_shader_modules");
   // Reserve before creating handles; allocation failure cannot strand a module.
   shader_modules_.reserve(params.code.size());
   shader_stages_.reserve(params.code.size());
@@ -691,6 +695,7 @@ void VulkanPipeline::create_shader_stages(const Params &params) {
 }
 
 void VulkanPipeline::create_pipeline_layout() {
+  TI_COMPILE_PROFILER("cpp.vulkan.create_pipeline_layout");
   VkPushConstantRange push_constant_range{};
   push_constant_range.stageFlags = VK_SHADER_STAGE_ALL;
   push_constant_range.offset = 0;
@@ -701,6 +706,7 @@ void VulkanPipeline::create_pipeline_layout() {
 }
 
 void VulkanPipeline::create_compute_pipeline(const Params &params) {
+  TI_COMPILE_PROFILER("cpp.vulkan.driver_create_compute_pipeline");
   std::array<char, 512> msg_buf;
   RHI_DEBUG_SNPRINTF(msg_buf.data(), msg_buf.size(),
                      "Compiling Vulkan pipeline %s", params.name.data());
