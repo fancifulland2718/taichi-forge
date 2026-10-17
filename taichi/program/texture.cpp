@@ -420,10 +420,7 @@ void Texture::from_ndarray(Ndarray *ndarray) {
   prog_->validate_ndarrays_for_external_submission({ndarray});
 
 #ifdef TI_WITH_VULKAN
-  if (prog_->compile_config().arch == Arch::vulkan &&
-      format_ != BufferFormat::depth16 &&
-      format_ != BufferFormat::depth24stencil8 &&
-      format_ != BufferFormat::depth32f) {
+  if (prog_->compile_config().arch == Arch::vulkan) {
     // Use the runtime's ordered transfer and layout tracking even for a
     // single mip. Direct RHI uploads leave cached Graphs expecting the old
     // layout and used to read shape[1] for one-dimensional arrays.

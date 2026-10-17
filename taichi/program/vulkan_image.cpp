@@ -274,7 +274,10 @@ PreparedVulkanBufferImageCopy Program::prepare_vulkan_buffer_image_copy(
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan || !program_impl_,
               "Vulkan buffer-image copy requires the Vulkan backend.");
-  validate_color_texture(this, texture, "buffer-copy image");
+  TI_ERROR_IF(!texture || texture->owning_program() != this,
+              "Vulkan buffer-copy image must belong to the active runtime.");
+  TI_ERROR_IF(texture->get_buffer_format() == BufferFormat::depth24stencil8,
+              "Packed depth/stencil transfers require separate aspect inputs.");
   const auto image_offset = checked_image_coordinates(
       image_offset_values, "buffer-copy image offset", false);
   const auto image_extent = checked_image_coordinates(
@@ -303,6 +306,8 @@ PreparedVulkanBufferImageCopy Program::prepare_vulkan_buffer_image_copy(
   packet.parameters = make_buffer_image_params(
       buffer_row_length, buffer_image_height, image_offset, image_extent,
       image_mip_level, image_base_layer, image_layer_count);
+  if (is_depth_format(texture->get_buffer_format()))
+    packet.parameters.image_aspect_flag = VK_IMAGE_ASPECT_DEPTH_BIT;
   return packet;
 }
 
@@ -323,17 +328,22 @@ void Program::execute_vulkan_buffer_image_copy(
     const auto to_image = packet.to_image;
     const auto layout =
         to_image ? ImageLayout::transfer_dst : ImageLayout::transfer_src;
-    enqueue_compute_op_lambda(
-        [image, buffer, params, to_image, layout](Device *, CommandList *commands) {
-          if (to_image) {
-            commands->buffer_barrier(buffer);
-            commands->buffer_to_image(image, buffer, layout, params);
-          } else {
-            commands->image_to_buffer(buffer, image, layout, params);
-            commands->buffer_barrier(buffer);
-          }
-        },
-        {{image, layout, ImageLayout::shader_read}});
+    auto copy = [image, buffer, params, to_image, layout](
+                    Device *, CommandList *commands) {
+      if (to_image) {
+        commands->buffer_barrier(buffer);
+        commands->buffer_to_image(image, buffer, layout, params);
+      } else {
+        commands->image_to_buffer(buffer, image, layout, params);
+        commands->buffer_barrier(buffer);
+      }
+    };
+    const std::vector<ComputeOpImageRef> refs{
+        {image, layout, ImageLayout::shader_read}};
+    if (params.image_aspect_flag == VK_IMAGE_ASPECT_DEPTH_BIT)
+      enqueue_graphics_op_lambda(copy, refs);
+    else
+      enqueue_compute_op_lambda(copy, refs);
     mark_runtime_submission_pending();
   });
 }
