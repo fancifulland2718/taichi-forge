@@ -37,6 +37,9 @@ lifetimes. The entries below describe the changes.
 - Fixed Vulkan RasterPass line expansion ignoring requested draw counts. Indexed
   and non-indexed intervals/offsets are honored; zero complete lines skip expansion
   allocation and drawing.
+- GGUI Vulkan passes reuse the shared graphics barriers for vertex/index reads
+  after compute expansion. Managed offscreen color attachments retain their
+  attachment final layout, matching Program layout tracking.
 - Vulkan AOT registers `spd/plan` and `spd/run` with frozen code, fixed image
   identity checks, complete mip initialization and independent counters. Consumers
   need no SPD SDK/compiler. Small standalone/borrowed tests cover repeated values,

@@ -619,6 +619,17 @@ void Renderer::record_renderpass(CommandList *commands,
     renderable->record_prepass_this_frame_commands(commands);
   }
 
+  if (app_context_.config.ggui_arch == Arch::vulkan) {
+    auto *vk = static_cast<VulkanCommandList *>(commands);
+    // Include vertex/index reads after compute expansion and transfer writes.
+    // The ordinary compute buffer barrier does not cover graphics consumers.
+    vk->graphics_memory_barrier(true);
+    if (has_offscreen_targets()) {
+      // The Program tracks managed attachments, not a presentation surface.
+      vk->set_next_renderpass_color_final_layout(ImageLayout::color_attachment);
+    }
+  }
+
   commands->begin_renderpass(
       /*x0=*/0, /*y0=*/0, /*x1=*/swap_chain_.width(),
       /*y1=*/swap_chain_.height(), /*num_color_attachments=*/1, &image,
@@ -677,6 +688,9 @@ void Renderer::record_renderpass(CommandList *commands,
   }
 
   commands->end_renderpass();
+  if (app_context_.config.ggui_arch == Arch::vulkan) {
+    static_cast<VulkanCommandList *>(commands)->graphics_memory_barrier(false);
+  }
 }
 
 bool Renderer::has_offscreen_targets() const noexcept {

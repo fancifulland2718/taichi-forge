@@ -33,6 +33,8 @@
 
 - 修复 Vulkan RasterPass 线段展开忽略绘制数量的问题：索引/非索引范围及偏移生效，
   零条完整线段跳过展开分配和绘制。
+- GGUI Vulkan pass 复用公共 graphics 屏障，覆盖 compute 展开后的 vertex/index
+  读取；受管离屏附件保持 color-attachment 最终布局，与 Program 布局跟踪一致。
 - Vulkan AOT 增加 `spd/plan` 与 `spd/run` 原生注册：冻结代码消费、固定图像核对、
   完整 mip 初始化及独立 counter，消费者无需 SPD SDK/编译器。小型独立/借用 owner
   测试覆盖重复输入、关闭与下游梯度；不表示 SPD 本身可自动微分。普通 Graph 与已有
