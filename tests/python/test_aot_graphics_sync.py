@@ -1,0 +1,136 @@
+"""Compute/graphics buffer dependencies, including vertex/index and SSBO writes.
+
+Run with Khronos synchronization validation and its shader-access heuristic to
+check visibility as well as numeric results. Consumers reject validation errors.
+"""
+
+from contextlib import closing
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import numpy as np
+import pytest
+import taichi_forge as ti
+from tests import test_utils
+from tests.python.test_aot_graphics_export import selected_graphics
+
+
+@pytest.mark.parametrize("recipe", ["ordinary", "selected"])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_aot_graphics_buffer_dependencies(tmp_path, recipe):
+    @ti.kernel
+    def publish(
+        base: ti.types.ndarray(ti.u32, 1),
+        parameters: ti.types.ndarray(ti.u32, 1),
+        vertices: ti.types.ndarray(ti.f32, 1),
+        indices: ti.types.ndarray(ti.u32, 1),
+    ):
+        parameters[0] = base[0]
+        vertices[0], vertices[1] = -1, -1
+        vertices[2], vertices[3] = 3, -1
+        vertices[4], vertices[5] = -1, 3
+        indices[0], indices[1], indices[2] = 0, 1, 2
+
+    @ti.kernel
+    def consume(state: ti.types.ndarray(ti.f32, 1), output: ti.types.ndarray(ti.f32, 1)):
+        for i in output:
+            output[i] = 2 * state[i]
+
+    @ti.kernel
+    def seed(dout: ti.types.ndarray(ti.f32, 1), loss: ti.types.ndarray(ti.f32, 1), dloss: ti.types.ndarray(ti.f32, 1)):
+        for i in dout:
+            dout[i] = 0
+        loss[0], dloss[0] = 0, 1
+
+    @ti.kernel
+    def energy(
+        output: ti.types.ndarray(ti.f32, 1, needs_grad=True), loss: ti.types.ndarray(ti.f32, 1, needs_grad=True)
+    ):
+        for i in output:
+            loss[0] += 0.5 * output[i] * output[i]
+
+    graphics, arg, kind = ti.hardware.graphics, ti.graph.Arg, ti.graph.ArgKind
+    assets = Path(__file__).parent / "assets"
+    try:
+        pipeline = graphics.VulkanGraphicsPipeline(
+            (assets / "graphics_sync.vert.spv").read_bytes(),
+            (assets / "graphics_sync.frag.spv").read_bytes(),
+            vertex_bindings=(graphics.VertexBinding(0, 8),),
+            vertex_attributes=(graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),),
+            shader_buffer_bindings=(
+                graphics.ShaderBufferBinding(0, 0, "uniform"),
+                graphics.ShaderBufferBinding(0, 1, "storage", "write"),
+            ),
+        )
+    except (ValueError, RuntimeError) as exc:
+        if "requires fragmentStoresAndAtomics" in str(exc):
+            pytest.skip("Device lacks fragment storage writes")
+        raise
+    recording = pipeline.record_pass(
+        (
+            pipeline.pass_draw(
+                graphics.Draw(3, index_bounds=(0, 2)),
+                vertex_buffers={0: "vertices"},
+                index_buffer="indices",
+                shader_buffers={(0, 0): "parameters", (0, 1): "state"},
+            ),
+        ),
+        color="target",
+    )
+    target = ti.Texture(ti.Format.rgba32f, (8, 8))
+    names = ("base", "parameters", "vertices", "indices", "state", "output", "dout", "loss")
+    dtypes = (ti.u32, ti.u32, ti.f32, ti.u32, ti.f32, ti.f32, ti.f32, ti.f32)
+    arguments = {name: arg(kind.NDARRAY, name, dtype, ndim=1) for name, dtype in zip(names, dtypes)}
+
+    def make_graph(adjoint):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(publish, *(arguments[name] for name in names[:4]))
+        builder.append_native(recording, admission="auto")
+        builder.dispatch(consume, arguments["state"], arguments["output"])
+        if adjoint:
+            builder.dispatch(seed, arguments["dout"], arguments["loss"], builder.private_ndarray("dloss", ti.f32, 1))
+            builder.dispatch(energy, arguments["output"], arguments["loss"])
+            builder.dispatch(energy.grad, arguments["output"], arguments["loss"])
+        return selected_graphics(builder.freeze()) if recipe == "selected" else closing(builder.compile())
+
+    frame = {name: ti.ndarray(dtype, count) for name, dtype, count in zip(names, dtypes, (1, 4, 6, 3, 64, 64, 64, 1))}
+    module = ti.aot.Module()
+    # JIT Graph's Python entry does not bind ndarray gradients; AOT does below.
+    with make_graph(False) as graph:
+        for base in (1, 3, 0):
+            frame["base"].from_numpy(np.array([base], dtype=np.uint32))
+            graph.run(dict({name: frame[name] for name in names[:6]}, target=target))
+            ti.sync()
+            expected = 2 * (np.arange(64) + base)
+            np.testing.assert_array_equal(frame["output"].to_numpy(), expected)
+    with make_graph(True) as graph:
+        module.add_execution_plan(
+            "step",
+            graph,
+            source_bindings=dict(target=target),
+            resource_bindings={pipeline: dict(zip(("shader_0", "shader_1"), pipeline._shader_artifacts))},
+            gradients=dict(output="dout", loss="dloss"),
+        )
+    artifact = tmp_path / "graphics-sync.tcm"
+    module.archive(str(artifact))
+    pipeline.close()
+    ti.reset()
+    for mode in ("standalone", "borrowed"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                *(["-S"] if mode == "standalone" else []),
+                str(Path(__file__).with_name("aot_graphics_sync_probe.py")),
+                mode,
+                str(artifact),
+            ],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Validation Error" not in result.stdout + result.stderr
+        assert "cleanup failed" not in result.stdout + result.stderr

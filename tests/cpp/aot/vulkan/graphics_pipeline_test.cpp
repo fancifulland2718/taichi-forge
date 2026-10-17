@@ -38,7 +38,57 @@ const uint32_t shared_storage_fragment[] =
 const uint32_t mismatched_storage_fragment[] =
 #include "tests/cpp/aot/vulkan/shaders/graphics_storage_mismatch.frag.spv.h"
     ;
+const uint32_t write_vertex[] =
+#include "tests/cpp/aot/vulkan/shaders/graphics_storage_write.vert.spv.h"
+    ;
+const uint32_t mixed_fragment[] =
+#include "tests/cpp/aot/vulkan/shaders/graphics_storage_mixed.frag.spv.h"
+    ;
 }  // namespace
+
+TEST(VulkanGraphicsPipeline, StorageWritesRequireEnabledStageFeatures) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto &caps = device.vk_caps();
+  const auto physical_caps = caps;
+  auto create = [&](const uint32_t *vert, size_t vert_bytes,
+                    const uint32_t *frag, size_t frag_bytes) {
+    return prepare_vulkan_graphics_pipeline(
+        device,
+        {{PipelineSourceType::spirv_binary, vert, vert_bytes,
+          PipelineStageType::vertex},
+         {PipelineSourceType::spirv_binary, frag, frag_bytes,
+          PipelineStageType::fragment}},
+        RasterParams{}, {}, {}, "storage_write_features");
+  };
+  caps.vertex_pipeline_stores_and_atomics = false;
+  caps.fragment_stores_and_atomics = false;
+  EXPECT_NO_THROW(create(storage_vertex, sizeof(storage_vertex),
+                         shared_storage_fragment,
+                         sizeof(shared_storage_fragment)));
+  EXPECT_THROW(
+      create(write_vertex, sizeof(write_vertex), fragment, sizeof(fragment)),
+      std::invalid_argument);
+  // One readonly member must not make the whole storage block read-only.
+  EXPECT_THROW(create(storage_vertex, sizeof(storage_vertex), mixed_fragment,
+                      sizeof(mixed_fragment)),
+               std::invalid_argument);
+  caps.vertex_pipeline_stores_and_atomics =
+      physical_caps.vertex_pipeline_stores_and_atomics;
+  if (caps.vertex_pipeline_stores_and_atomics) {
+    EXPECT_NO_THROW(
+        create(write_vertex, sizeof(write_vertex), fragment, sizeof(fragment)));
+    EXPECT_THROW(create(storage_vertex, sizeof(storage_vertex), mixed_fragment,
+                        sizeof(mixed_fragment)),
+                 std::invalid_argument);
+  }
+  caps = physical_caps;
+  if (caps.fragment_stores_and_atomics)
+    EXPECT_NO_THROW(create(storage_vertex, sizeof(storage_vertex),
+                           mixed_fragment, sizeof(mixed_fragment)));
+}
 
 TEST(VulkanGraphicsPipeline, MeshAdmissionUsesIndependentOverflowSafeLimits) {
   VulkanCapabilities caps;

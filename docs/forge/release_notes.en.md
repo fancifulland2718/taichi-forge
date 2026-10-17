@@ -64,6 +64,11 @@ lifetimes. The entries below describe the changes.
   read by vertex shaders without a matching dependency; the existing compute-only
   barrier did not cover graphics stages. No per-buffer replay scan is added.
 
+- Vulkan enables supported vertex/fragment storage-write device features and
+  rejects writable shader interfaces when the corresponding feature is disabled.
+  Mixed readonly/writable storage-block members remain writable for admission.
+  Split native components require paired ABI94; AOT graphics formats are unchanged.
+
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;
   ordinary artifacts retain their earlier version. Incompatible SPIR-V cache

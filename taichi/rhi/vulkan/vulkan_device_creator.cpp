@@ -864,6 +864,14 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
 
   device_features.independentBlend = device_supported_features.independentBlend;
   ti_device_->vk_caps().independent_blend = device_features.independentBlend;
+  device_features.vertexPipelineStoresAndAtomics =
+      device_supported_features.vertexPipelineStoresAndAtomics;
+  device_features.fragmentStoresAndAtomics =
+      device_supported_features.fragmentStoresAndAtomics;
+  ti_device_->vk_caps().vertex_pipeline_stores_and_atomics =
+      device_features.vertexPipelineStoresAndAtomics;
+  ti_device_->vk_caps().fragment_stores_and_atomics =
+      device_features.fragmentStoresAndAtomics;
   ti_device_->vk_caps().max_color_attachments = physical_device_properties.limits.maxColorAttachments;
 
   if (device_supported_features.samplerAnisotropy) {

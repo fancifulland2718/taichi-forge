@@ -559,6 +559,14 @@ graphics-queue Graphs are covered; indirect and segmented/fork-join routes retai
 their existing boundaries. See the [SDK contract](aot_sdk.en.md) for bindings and
 device qualification.
 
+Vertex/fragment storage writes require the corresponding Vulkan device feature;
+Forge enables it when supported and rejects writable shader interfaces when it
+is disabled. JIT/AOT share dependencies at pass boundaries, including surrounding
+compute access to shader buffers and vertex/index inputs. Put dependent buffer
+producer/consumer draws in separate passes: these boundaries do not establish
+dependencies between draws inside one pass. Graphics shaders remain outside AD;
+downstream numeric kernel gradients use the existing explicit bindings.
+
 Shader inputs also accept `graphics.SpirvShader(code, stage, entry_point="main",
 build=graphics.ShaderBuildInfo(...))`. Graphics requires `main` in the declared
 vertex/fragment/task/mesh stage. `SpirvShader.from_file(path, stage=...)` reads a

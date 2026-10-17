@@ -412,6 +412,23 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline_dynamic(
   return pipeline;
 }
 
+namespace {
+bool storage_members_read_only(const SpvReflectBlockVariable &block) {
+  // SPIRV-Reflect aggregates NonWritable from ANY member into the root block.
+  // A mixed readonly/writable block still requires stores support: inspect all
+  // members instead of trusting that aggregate (or the SRV resource flag).
+  if (!block.member_count)
+    return false;
+  for (uint32_t i = 0; i < block.member_count; ++i) {
+    const auto &member = block.members[i];
+    if (!(member.decoration_flags & SPV_REFLECT_DECORATION_NON_WRITABLE) &&
+        !storage_members_read_only(member))
+      return false;
+  }
+  return true;
+}
+}  // namespace
+
 void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
   TI_COMPILE_PROFILER("cpp.vulkan.descriptor_reflection_and_layout");
   std::map<std::pair<std::uint32_t, std::uint32_t>,
@@ -477,6 +494,37 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
     for (const SpvReflectDescriptorSet *desc_set : desc_sets) {
       for (std::uint32_t i = 0; i < desc_set->binding_count; ++i) {
         const SpvReflectDescriptorBinding *binding = desc_set->bindings[i];
+        const auto &caps = ti_device_.vk_caps();
+        const bool fragment_needs_read_only =
+            code_view.stage == VK_SHADER_STAGE_FRAGMENT_BIT &&
+            !caps.fragment_stores_and_atomics;
+        const bool vertex_needs_read_only =
+            (code_view.stage & (VK_SHADER_STAGE_VERTEX_BIT |
+                                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+                                VK_SHADER_STAGE_GEOMETRY_BIT)) &&
+            !caps.vertex_pipeline_stores_and_atomics;
+        if ((fragment_needs_read_only || vertex_needs_read_only) &&
+            (binding->descriptor_type ==
+                 SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+             binding->descriptor_type ==
+                 SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+             binding->descriptor_type ==
+                 SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)) {
+          const bool read_only =
+              (binding->decoration_flags &
+               SPV_REFLECT_DECORATION_NON_WRITABLE) ||
+              (binding->descriptor_type ==
+                   SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
+               storage_members_read_only(binding->block));
+          RHI_THROW_UNLESS(
+              read_only, std::invalid_argument(
+                             fragment_needs_read_only
+                                 ? "Writable fragment storage requires "
+                                   "fragmentStoresAndAtomics"
+                                 : "Writable vertex pipeline storage requires "
+                                   "vertexPipelineStoresAndAtomics"));
+        }
         if (bind_point_ != VK_PIPELINE_BIND_POINT_COMPUTE) {
           const auto declaration =
               std::make_pair(binding->descriptor_type, binding->count);

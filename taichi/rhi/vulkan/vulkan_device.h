@@ -963,6 +963,8 @@ struct VulkanCapabilities {
   bool wide_line{false};
   bool sampler_anisotropy{false};
   bool independent_blend{false};
+  bool vertex_pipeline_stores_and_atomics{false};
+  bool fragment_stores_and_atomics{false};
   std::uint32_t max_color_attachments{1};
   bool surface{false};
   bool present{false};

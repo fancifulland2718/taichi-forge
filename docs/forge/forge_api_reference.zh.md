@@ -444,6 +444,12 @@ AOT 直接 mesh/task 导出使用 graphics `pipeline` v2 与 `pass_direct` v4，
 同一准备和录制核心，覆盖普通/已选整图 graphics-queue Graph。indirect 和分段/
 fork-join 保持原边界；绑定方式与设备资格见 [SDK 合同](aot_sdk.zh.md)。
 
+vertex/fragment storage 写入要求对应 Vulkan 设备特性，Forge 在设备支持时启用，
+未启用时在准备阶段拒绝可写 shader 接口。JIT/AOT 共用 pass 边界依赖，涵盖周围
+compute 对 shader buffer、vertex/index 输入的访问。存在 buffer 读写依赖的 draw
+应放在不同 pass：边界依赖不会建立单个 pass 内 draw 之间的依赖。图形 shader
+本身不参与 AD，下游数值 kernel 梯度继续使用显式绑定。
+
 shader 输入也接受 `graphics.SpirvShader(code, stage, entry_point="main",
 build=graphics.ShaderBuildInfo(...))`。光栅接口要求匹配 vertex/fragment/task/mesh stage
 的 `main` 入口。`SpirvShader.from_file(path, stage=...)` 只读取预编译产物，不调用编译器。

@@ -54,6 +54,10 @@
   后 vertex shader 读取缺少依赖的问题。原有 compute barrier 未覆盖图形阶段；
   新实现不增加重放时的逐 buffer 扫描。
 
+- Vulkan 按实际设备能力启用 vertex/fragment storage 写入特性，缺少对应特性时在
+  pipeline 准备阶段拒绝可写 shader 接口；混合只读/可写成员不能误判为全只读。
+  拆分原生组件要求配对 ABI94，AOT 图形持久格式不变。
+
 - GFX AOT 补齐 RWTexture 格式及 mip 层级元数据，包括仅访问 shape 的内核。
   对应导出要求 metadata v4 和配对 ABI90；普通产物保持原版本。不兼容的 SPIR-V
   缓存会重新编译，CPU/CUDA 缓存格式不变。
