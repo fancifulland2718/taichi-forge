@@ -1057,6 +1057,68 @@ TEST(VulkanDescriptorSetTest, LargeSampledImageArrayGetsAdequatePool) {
   EXPECT_NE(descriptor_set->set, VK_NULL_HANDLE);
 }
 
+TEST(VulkanDescriptorSetTest, BufferArrayCacheIncludesOffsetsAndLengths) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  vulkan::VulkanDeviceCreator creator({});
+  auto *device = creator.device();
+  device->set_descriptor_set_cache_enabled(true);
+  const size_t alignment =
+      std::max<size_t>(32, device->get_vk_physical_device_props()
+                               .limits.minStorageBufferOffsetAlignment);
+  const size_t bytes = alignment * 3;
+  auto [allocation, status] = device->allocate_memory_unique(
+      {bytes, false, false, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  const std::vector<DeviceBufferRange> ranges{
+      {allocation->get_ptr(), 16}, {allocation->get_ptr(alignment), 16}};
+  vulkan::VulkanResourceSet original(device), duplicate(device), moved(device),
+      resized(device), legacy(device);
+  original.rw_buffer_array_ranges(0, ranges);
+  auto [first_status, first] = original.finalize();
+  ASSERT_EQ(first_status, RhiResult::success);
+  ASSERT_NE(first, nullptr);
+  duplicate.rw_buffer_array_ranges(0, ranges);
+  auto [duplicate_status, same] = duplicate.finalize();
+  ASSERT_EQ(duplicate_status, RhiResult::success);
+  EXPECT_EQ(same, first);
+  auto changed = ranges;
+  changed.back().pointer.offset = alignment * 2;
+  moved.rw_buffer_array_ranges(0, changed);
+  auto [moved_status, shifted] = moved.finalize();
+  ASSERT_EQ(moved_status, RhiResult::success);
+  EXPECT_NE(shifted, first);
+  changed = ranges;
+  changed.back().bytes = 32;
+  resized.rw_buffer_array_ranges(0, changed);
+  auto [resized_status, enlarged] = resized.finalize();
+  ASSERT_EQ(resized_status, RhiResult::success);
+  EXPECT_NE(enlarged, first);
+  const auto &descriptors = std::get<vulkan::VulkanResourceSet::BufferArray>(
+                                resized.get_bindings().at(0).res)
+                                .buffers;
+  EXPECT_EQ(descriptors.back().offset, alignment);
+  EXPECT_EQ(descriptors.back().size, 32u);
+  legacy.rw_buffer_array(0, {*allocation, *allocation});
+  const auto &whole = std::get<vulkan::VulkanResourceSet::BufferArray>(
+                          legacy.get_bindings().at(0).res)
+                          .buffers;
+  EXPECT_EQ(whole.front().offset, 0u);
+  EXPECT_EQ(whole.front().size, VK_WHOLE_SIZE);
+  auto [legacy_status, whole_set] = legacy.finalize();
+  EXPECT_EQ(legacy_status, RhiResult::success);
+  EXPECT_NE(whole_set, first);
+  EXPECT_THROW(original.rw_buffer_array_ranges(0, {}), std::invalid_argument);
+  EXPECT_THROW(original.rw_buffer_array_ranges(0, {{allocation->get_ptr(), 0}}),
+               std::invalid_argument);
+  EXPECT_THROW(
+      original.rw_buffer_array_ranges(0, {{allocation->get_ptr(bytes - 1), 2}}),
+      std::invalid_argument);
+  auto [preserved_status, preserved] = original.finalize();
+  EXPECT_EQ(preserved_status, RhiResult::success);
+  EXPECT_EQ(preserved, first);
+}
+
 TEST(VulkanDescriptorSetTest, DirtyResourceSetDoesNotMutateRecordedSet) {
   if (!vulkan::is_vulkan_api_available()) {
     return;

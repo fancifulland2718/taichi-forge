@@ -139,6 +139,12 @@ struct RHI_DLL_EXPORT DevicePtr : public DeviceAllocation {
 constexpr DeviceAllocation kDeviceNullAllocation{};
 constexpr DevicePtr kDeviceNullPtr{};
 
+// A logical byte range, independent of allocation padding or backend handles.
+struct DeviceBufferRange {
+  DevicePtr pointer{kDeviceNullPtr};
+  size_t bytes{0};
+};
+
 enum class ImageFilter : uint8_t {
   nearest,
   linear,
@@ -269,6 +275,13 @@ class RHI_DLL_EXPORT ShaderResourceSet {
   virtual ShaderResourceSet &rw_buffer_array(
       uint32_t binding,
       const std::vector<DeviceAllocation> &allocs) {
+    RHI_NOT_IMPLEMENTED
+  }
+
+  /** Bind finite logical ranges as one fixed storage-buffer descriptor array. */
+  virtual ShaderResourceSet &rw_buffer_array_ranges(
+      uint32_t binding,
+      const std::vector<DeviceBufferRange> &ranges) {
     RHI_NOT_IMPLEMENTED
   }
 

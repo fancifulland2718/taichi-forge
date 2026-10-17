@@ -54,7 +54,7 @@ struct VulkanGraphicsShaderBufferView {
   std::uint32_t set_index{0};
   std::uint32_t binding{0};
   DeviceAllocation allocation{kDeviceNullAllocation};
-  std::vector<DeviceAllocation> array_elements;
+  std::vector<DeviceBufferRange> array_elements;
   bool storage{false};
   size_t offset{0};
   size_t bytes{kBufferSizeEntireSize};
@@ -86,10 +86,7 @@ struct VulkanGraphicsDrawResources {
   std::unique_ptr<RasterResources> raster;
 };
 
-struct VulkanGraphicsBufferRange {
-  DevicePtr pointer{kDeviceNullPtr};
-  size_t bytes{0};
-};
+using VulkanGraphicsBufferRange = DeviceBufferRange;
 struct VulkanGraphicsVertexRange {
   uint32_t binding{0};
   VulkanGraphicsBufferRange range;

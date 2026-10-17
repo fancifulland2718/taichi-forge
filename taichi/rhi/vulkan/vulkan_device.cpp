@@ -1097,9 +1097,37 @@ ShaderResourceSet &VulkanResourceSet::rw_buffer_array(
         (alloc != kDeviceNullAllocation)
             ? device_->get_vkbuffer(alloc.get_ptr(0))
             : nullptr;
-    ba.buffers.push_back(buffer);
+    ba.buffers.push_back({buffer, 0, VK_WHOLE_SIZE});
   }
   set_binding(binding, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, std::move(ba)});
+  return *this;
+}
+
+ShaderResourceSet &VulkanResourceSet::rw_buffer_array_ranges(
+    uint32_t binding,
+    const std::vector<DeviceBufferRange> &ranges) {
+  RHI_THROW_UNLESS(
+      !ranges.empty() &&
+          ranges.size() <= (std::numeric_limits<uint32_t>::max)(),
+      std::invalid_argument(
+          "Storage descriptor arrays require a nonempty uint32 count"));
+  BufferArray array;
+  array.buffers.reserve(ranges.size());
+  for (const auto &range : ranges) {
+    const auto ptr = range.pointer;
+    RHI_THROW_UNLESS(
+        ptr != kDeviceNullPtr && ptr.device == device_ && range.bytes,
+        std::invalid_argument(
+            "Storage descriptor ranges require local nonempty buffers"));
+    const auto size = device_->get_vkbuffer_size(ptr);
+    RHI_THROW_UNLESS(
+        ptr.offset <= size && range.bytes <= size - ptr.offset,
+        std::invalid_argument(
+            "Storage descriptor range exceeds the logical buffer"));
+    array.buffers.push_back(
+        {device_->get_vkbuffer(ptr), ptr.offset, range.bytes});
+  }
+  set_binding(binding, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, std::move(array)});
   return *this;
 }
 
@@ -1307,11 +1335,11 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize_impl(
         infos.resize(ba->buffers.size());
         for (size_t i = 0; i < ba->buffers.size(); ++i) {
           const auto &b = ba->buffers[i];
-          infos[i].buffer = b ? b->buffer : VK_NULL_HANDLE;
-          infos[i].offset = 0;
-          infos[i].range = VK_WHOLE_SIZE;
-          if (b) {
-            set_->ref_binding_objs.push_back(b);
+          infos[i].buffer = b.buffer ? b.buffer->buffer : VK_NULL_HANDLE;
+          infos[i].offset = b.offset;
+          infos[i].range = b.size;
+          if (b.buffer) {
+            set_->ref_binding_objs.push_back(b.buffer);
           }
         }
         write.descriptorCount = static_cast<uint32_t>(infos.size());

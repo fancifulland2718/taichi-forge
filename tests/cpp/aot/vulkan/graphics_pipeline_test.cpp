@@ -179,6 +179,49 @@ TEST(VulkanGraphicsPipeline, SharedConstructionUsesPhysicalInputLimits) {
   EXPECT_NE(create(), nullptr);
 }
 
+TEST(VulkanGraphicsPipeline, DescriptorArraysKeepLogicalSubranges) {
+  if (!is_vulkan_api_available())
+    GTEST_SKIP() << "Vulkan unavailable";
+  VulkanDeviceCreator creator({});
+  auto &device = *creator.device();
+  auto pipeline = prepare_vulkan_graphics_pipeline(
+      device,
+      {{PipelineSourceType::spirv_binary, storage_vertex,
+        sizeof(storage_vertex), PipelineStageType::vertex},
+       {PipelineSourceType::spirv_binary, shared_storage_fragment,
+        sizeof(shared_storage_fragment), PipelineStageType::fragment}},
+      RasterParams{}, {}, {}, "storage_subranges");
+  const size_t alignment =
+      std::max<size_t>(16, device.get_vk_physical_device_props()
+                               .limits.minStorageBufferOffsetAlignment);
+  auto [allocation, status] = device.allocate_memory_unique(
+      {alignment * 4, false, false, false, AllocUsage::Storage});
+  ASSERT_EQ(status, RhiResult::success);
+  VulkanGraphicsShaderBufferView binding;
+  binding.storage = true;
+  for (size_t i = 0; i < 4; ++i)
+    binding.array_elements.push_back({allocation->get_ptr(i * alignment), 16});
+  auto prepare = [&] {
+    return prepare_vulkan_graphics_draw_resources(
+        device, *static_cast<VulkanPipeline *>(pipeline.get()), {binding}, {},
+        {}, kDeviceNullPtr, false, false);
+  };
+  EXPECT_NO_THROW(prepare());
+  auto &range = binding.array_elements.back();
+  range.bytes = alignment + 1;
+  EXPECT_ANY_THROW(prepare());
+  range.bytes = 0;
+  EXPECT_ANY_THROW(prepare());
+  range.bytes = 16;
+  if (device.get_vk_physical_device_props()
+          .limits.minStorageBufferOffsetAlignment > 1) {
+    ++range.pointer.offset;
+    EXPECT_ANY_THROW(prepare());
+    --range.pointer.offset;
+  }
+  EXPECT_NO_THROW(prepare());
+}
+
 TEST(VulkanGraphicsPipeline, SharedDrawRecordsBufferRangesAndSampledImages) {
   if (!is_vulkan_api_available())
     GTEST_SKIP() << "Vulkan unavailable";

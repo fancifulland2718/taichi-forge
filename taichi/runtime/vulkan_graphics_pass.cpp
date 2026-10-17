@@ -280,10 +280,14 @@ VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
     if (!shader.array_elements.empty()) {
       TI_ERROR_IF(!shader.storage || shader.offset != 0 ||
                       shader.bytes != kBufferSizeEntireSize,
-                  "Vulkan graphics buffer arrays require whole storage-buffer "
-                  "bindings.");
-      for (const auto allocation : shader.array_elements)
-        validate_descriptor_buffer(allocation, 0, kBufferSizeEntireSize, true);
+                  "Vulkan graphics buffer arrays require per-element storage "
+                  "ranges, without an outer buffer range.");
+      for (const auto &range : shader.array_elements) {
+        TI_ERROR_IF(range.pointer.offset > (std::numeric_limits<size_t>::max)(),
+                    "Vulkan graphics descriptor offset exceeds size_t.");
+        validate_descriptor_buffer(range.pointer, size_t(range.pointer.offset),
+                                   range.bytes, true);
+      }
     } else {
       validate_descriptor_buffer(shader.allocation, shader.offset, shader.bytes,
                                  shader.storage);
@@ -295,7 +299,7 @@ VulkanGraphicsDrawResources prepare_vulkan_graphics_draw_resources(
                   "Vulkan graphics shader resource set creation failed.");
     }
     if (!shader.array_elements.empty()) {
-      resource_set->rw_buffer_array(shader.binding, shader.array_elements);
+      resource_set->rw_buffer_array_ranges(shader.binding, shader.array_elements);
     } else if (shader.bytes != kBufferSizeEntireSize || shader.offset != 0) {
       if (shader.storage)
         resource_set->rw_buffer(shader.binding,

@@ -873,7 +873,8 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                       "contains an element without storage usage.",
                       shader.set_index, shader.binding);
           arrays.push_back(element);
-          recorded_shader.array_elements.push_back(allocation);
+          recorded_shader.array_elements.push_back(
+              {allocation.get_ptr(), ndarray_bytes(element, "shader buffer array")});
         }
         recorded.shader_buffers.push_back(std::move(recorded_shader));
         continue;
@@ -1007,8 +1008,10 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
           append_graphics_allocation_key(replay_key, device,
                                          shader.allocation);
         } else {
-          for (const auto allocation : shader.array_elements) {
-            append_graphics_allocation_key(replay_key, device, allocation);
+          for (const auto &range : shader.array_elements) {
+            append_graphics_allocation_key(replay_key, device, range.pointer);
+            replay_key.push_back(range.pointer.offset);
+            replay_key.push_back(range.bytes);
           }
         }
       }

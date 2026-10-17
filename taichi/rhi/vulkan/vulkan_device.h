@@ -158,23 +158,13 @@ class VulkanResourceSet : public ShaderResourceSet {
     }
   };
 
-  // C-2.5 (2026-05): descriptor array of storage buffers. Each entry maps
-  // to one VkDescriptorBufferInfo with offset=0, range=VK_WHOLE_SIZE; the
-  // SPIR-V side accesses chunk[k] via OpAccessChain on the array variable.
-  // descriptorCount = buffers.size() at finalize time.
+  // One VkDescriptorBufferInfo per element; old allocation-only bindings use
+  // offset=0/range=VK_WHOLE_SIZE, explicit views retain their logical ranges.
   struct BufferArray {
-    std::vector<vkapi::IVkBuffer> buffers;
+    std::vector<Buffer> buffers;
 
     bool operator==(const BufferArray &rhs) const {
-      if (buffers.size() != rhs.buffers.size()) {
-        return false;
-      }
-      for (size_t i = 0; i < buffers.size(); ++i) {
-        if (buffers[i] != rhs.buffers[i]) {
-          return false;
-        }
-      }
-      return true;
+      return buffers == rhs.buffers;
     }
 
     bool operator!=(const BufferArray &rhs) const {
@@ -234,7 +224,9 @@ class VulkanResourceSet : public ShaderResourceSet {
       } else if (const BufferArray *ba = std::get_if<BufferArray>(&res)) {
         rhi_impl::hash_combine(hash, ba->buffers.size());
         for (const auto &b : ba->buffers) {
-          rhi_impl::hash_combine(hash, (void *)b.get());
+          rhi_impl::hash_combine(hash, (void *)b.buffer.get());
+          rhi_impl::hash_combine(hash, size_t(b.offset));
+          rhi_impl::hash_combine(hash, size_t(b.size));
         }
       } else if (const AccelerationStructure *as =
                      std::get_if<AccelerationStructure>(&res)) {
@@ -340,6 +332,9 @@ class VulkanResourceSet : public ShaderResourceSet {
   ShaderResourceSet &rw_buffer_array(
       uint32_t binding,
       const std::vector<DeviceAllocation> &allocs) final;
+  ShaderResourceSet &rw_buffer_array_ranges(
+      uint32_t binding,
+      const std::vector<DeviceBufferRange> &ranges) final;
 
   // Vulkan-only descriptor used by explicit ray-query providers. This is not
   // part of the backend-neutral ShaderResourceSet contract because other
