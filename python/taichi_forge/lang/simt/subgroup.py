@@ -137,7 +137,7 @@ def exclusive_xor(value):
 
 
 def shuffle(value, index):
-    return impl.call_internal("subgroupShuffle", value, index, with_runtime_context=False)
+    _not_implemented("shuffle")
 
 
 def shuffle_xor(value, mask):
@@ -145,11 +145,11 @@ def shuffle_xor(value, mask):
 
 
 def shuffle_up(value, offset):
-    return impl.call_internal("subgroupShuffleUp", value, offset, with_runtime_context=False)
+    _not_implemented("shuffle_up")
 
 
 def shuffle_down(value, offset):
-    return impl.call_internal("subgroupShuffleDown", value, offset, with_runtime_context=False)
+    _not_implemented("shuffle_down")
 
 
 __all__ = [

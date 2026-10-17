@@ -210,8 +210,8 @@ def kernel_intrinsic_operations(_operation):
             requirements=("matching Vulkan subgroup capability for each operation",),
             public_api="ti.simt.subgroup",
             notes=(
-                "Qualified operations include barrier/elect, broadcast, size/id, reductions, inclusive scans, and shuffle/up/down.",
-                "all/any/equal, broadcast-first, exclusive scans, and shuffle-xor fail closed because no lowering is registered.",
+                "Implemented operations include barrier/elect, broadcast, size/id, reductions, and inclusive scans, subject to the matching device capability.",
+                "all/any/equal, broadcast-first, exclusive scans, shuffle, shuffle-up, shuffle-down, and shuffle-xor fail closed because no lowering is registered.",
             ),
         ),
         _operation(

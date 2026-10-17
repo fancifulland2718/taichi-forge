@@ -22,6 +22,9 @@ _UNIMPLEMENTED_SUBGROUP_OPERATIONS = [
     ("exclusive_and", subgroup.exclusive_and, (1,)),
     ("exclusive_or", subgroup.exclusive_or, (1,)),
     ("exclusive_xor", subgroup.exclusive_xor, (1,)),
+    ("shuffle", subgroup.shuffle, (1, 0)),
+    ("shuffle_up", subgroup.shuffle_up, (1, 1)),
+    ("shuffle_down", subgroup.shuffle_down, (1, 1)),
     ("shuffle_xor", subgroup.shuffle_xor, (1, 1)),
 ]
 
