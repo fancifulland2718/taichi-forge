@@ -834,8 +834,8 @@ establishes the whole-image initialization fact. Put it in the plan's
 updates. No per-level host wait is added. Single-level `image/upload` and the
 construction-time `pixels` binding reject mip chains; they cannot establish
 that other levels have valid contents. Conditional uploads alone cannot justify
-subsequent unconditional sampling. Partial-level/region AOT updates and automatic
-mip generation are not covered by this contract.
+subsequent unconditional sampling. Region updates use the transfer operations
+below; automatic mip generation is a separate capability.
 
 Graph export reconstructs a private mip chain with
 `resource_bindings={texture: {"pixels_0": "seed0", "pixels_1": "seed1", ...}}`,
@@ -844,6 +844,44 @@ from JIT, or initialized explicitly in the consuming plan. Windows tests cover
 non-square three-level color/depth chains, fractional LOD filtering, fetching,
 ordinary/selected export, borrowing, updates, retirement and downstream gradients.
 Logical texel bytes include every level; they are not driver residency estimates.
+
+### Explicit Vulkan image region transfers
+
+The common native registry provides version 1 operations under provider `image`:
+
+| Operation | Capability kind | Bindings | Parameters |
+| --- | --- | --- | --- |
+| `copy_region` | `image_copy_region` | `source`, `destination` images | `source_region`, `destination_region` |
+| `blit` | `image_blit` | `source`, `destination` images | Both regions; optional `filter`: `nearest` (default) or `linear` |
+| `buffer_to_image` | `buffer_to_image` | `buffer`, `image` | `region`; optional `byte_offset`, `row_length`, `image_height` |
+| `image_to_buffer` | `image_to_buffer` | `image`, `buffer` | Same buffer layout and region fields |
+
+Query `native_operation_capabilities(kind)` for `vulkan_inline`; CPU/CUDA do not
+advertise these operations. A region has a required three-component `extent`,
+optional `offset` (default zero), `mip_level` (zero), `base_layer` (zero), and
+`layer_count` (one). Current managed images have one array layer. Copy requires
+equal extents; copy/blit require distinct same-format, same-dimension color
+images. Blit also checks actual device format/filter support and uses a graphics
+queue. Buffer transfers support the existing color and `depth32f` owners; depth
+uses a graphics queue. Packed depth/stencil is not supported.
+
+Buffer offsets are bytes relative to the supplied finite array/view. Row length
+and image height are texel counts; zero means tightly packed. Shape/type need
+not mirror the image because these operations copy raw texels. Preparation checks
+actual allocation bounds, the finite view, texel/aspect alignment, pitch and
+overflow. Unaccessed padding after the last row/slice does not count toward the
+required range. Bytes and texels outside the region remain unchanged.
+
+Sources must already be initialized. A complete single-level destination write
+establishes initialization; partial regions or one level of a mip chain require
+an initialized destination. Use `upload_mips` to initialize a full chain first.
+The existing conditional-control initialization and resource retirement contracts
+apply. No warm host probes, extra workspaces or staging copies are introduced.
+Windows tests cover private/public resources, finite views, padding, mip updates,
+depth transfers, ownership retirement and downstream numeric gradients in both
+standalone and borrowed consumers. This does not differentiate image copies or
+sampling. Automatic export of the four Python transfer recordings is a separate
+integration step.
 
 ### Explicit Vulkan raster plans
 

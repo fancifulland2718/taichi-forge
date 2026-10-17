@@ -25,6 +25,35 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, ImageTransferSchemasAreVulkanOnlyAndTyped) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription d;
+  d.provider = "image";
+  for (const auto &op : {"buffer_to_image", "image_to_buffer"}) {
+    d.operation = op;
+    d.bindings = {{"image", "image"}, {"buffer", "view"}};
+    d.parameters = liong::json::parse_complete(
+        R"({"region":{"extent":[3,2,1]},"byte_offset":8589934592})");
+    EXPECT_EQ(registry.decode(d).kind(), op);
+    EXPECT_EQ(registry.find(op, 1, Arch::x64), nullptr);
+    EXPECT_EQ(registry.find(op, 1, Arch::cuda), nullptr);
+    for (const auto *p : {R"({"region":{"extent":[1,2]}})",
+                          R"({"region":{"extent":[1,0,1]}})",
+                          R"({"region":{"extent":[1,2,1]},"row_length":4294967296})",
+                          R"({"region":{"extent":[1,2,1]},"byte_offset":true})"}) {
+      d.parameters = liong::json::parse_complete(p);
+      EXPECT_THROW(registry.decode(d), std::invalid_argument);
+    }
+  }
+  d.operation = "blit";
+  d.bindings = {{"source", "a"}, {"destination", "b"}};
+  d.parameters = liong::json::parse_complete(
+      R"({"source_region":{"extent":[2,2,1]},"destination_region":{"extent":[4,4,1]},"filter":"nearest"})");
+  EXPECT_EQ(registry.decode(d).kind(), "image_blit");
+  d.parameters.obj.inner["filter"] = liong::json::parse_complete("\"cubic\"");
+  EXPECT_THROW(registry.decode(d), std::invalid_argument);
+}
+
 TEST(NativeOperationRegistry,
      ImageTransferRangesUseAccessedBytesAndPhysicalLimits) {
   EXPECT_EQ(required_buffer_image_bytes(8, 5, 4, {3, 2, 2}, 4), 120);

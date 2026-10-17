@@ -374,6 +374,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_vkfft_operations(result);
     register_optix_operations(result);
     register_image_operations(result);
+    register_image_transfer_operations(result);
     register_texture_collection_operations(result);
     register_vulkan_ray_operations(result);
     register_vulkan_ray_program_operations(result);

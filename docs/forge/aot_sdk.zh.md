@@ -646,14 +646,44 @@ depth-aspect graphics 传输，保留 Graph 重放之间的布局跟踪。Vulkan
 该操作把整链复制录入既有命令流，并建立整个图像的初始化事实。放入计划的
 `initialization` 段只上传一次，放入普通操作序列则可更新；不增加逐级 host 等待。
 旧单级 `image/upload` 及构造期 `pixels` 绑定拒绝 mip 链，不能将只上传第0级当作
-其他级已有有效内容。仅在条件分支内上传，也不能支撑随后无条件采样。本合同尚未覆盖
-局部级/区域 AOT 更新和自动生成 mip。
+其他级已有有效内容。仅在条件分支内上传，也不能支撑随后无条件采样。局部级/区域更新
+使用下文传输操作；自动生成 mip 属于独立能力。
 
 Graph 私有图像导出使用
 `resource_bindings={texture: {"pixels_0": "seed0", "pixels_1": "seed1", ...}}`，
 须覆盖全部已分配级。公开图像可借用已初始化的 JIT Texture，或在消费计划中显式初始化。
 Windows 小夹具验证非方形三级颜色/深度图像、分数 LOD 过滤、fetch、普通/已选择导出、
 借用、更新、退休及下游梯度。逻辑 texel 字节统计包含每一级，不代表驱动实际驻留大小。
+
+### 显式 Vulkan 图像区域传输
+
+公共 native registry 在 `image` provider 下提供以下 version 1 操作：
+
+| 操作 | capability kind | 绑定 | 参数 |
+| --- | --- | --- | --- |
+| `copy_region` | `image_copy_region` | `source`、`destination` 图像 | `source_region`、`destination_region` |
+| `blit` | `image_blit` | `source`、`destination` 图像 | 两个区域；可选 `filter` 为 `nearest`（默认）或 `linear` |
+| `buffer_to_image` | `buffer_to_image` | `buffer`、`image` | `region`；可选 `byte_offset`、`row_length`、`image_height` |
+| `image_to_buffer` | `image_to_buffer` | `image`、`buffer` | 同上缓冲布局与区域参数 |
+
+用 `native_operation_capabilities(kind)` 查询 `vulkan_inline`；CPU/CUDA 不报告这些
+操作。region 必须给出三分量 `extent`，可选 `offset`（默认零）、`mip_level`（零）、
+`base_layer`（零）、`layer_count`（一）；受管图像目前只有一层 array layer。
+copy 的两侧 extent 相等；copy/blit 要求互不别名、格式和维度相同的颜色图像。
+blit 另查实际设备格式/filter 能力并使用 graphics queue。buffer 传输覆盖现有颜色和
+`depth32f` 所有者，深度使用 graphics queue；尚不支持 packed depth/stencil。
+
+buffer 偏移是相对传入有限数组/view 的字节数，row length、image height 以 texel
+计，零表示紧凑布局。这是原始 texel 复制，数组形状/类型无需与图像相同；准备期检查
+实际分配范围、有限 view、texel/aspect 对齐、pitch 及溢出。末行/末层之后未访问的
+padding 不计入所需范围，区域之外的字节和 texel 保持不变。
+
+源图像必须已初始化；完整单级目标覆盖可建立初始化事实，部分区域或 mip 链的单级
+写入要求目标先初始化，可先用 `upload_mips` 初始化整链。保留条件控制初始化和资源
+退休合同，不引入热态 host 探测、额外 workspace 或 staging copy。Windows 小夹具
+覆盖独立/借用消费者、公私资源、有限 view、padding、mip 更新、深度传输、退休及
+下游数值梯度；不提供图像 copy 或采样本身求导。四类 Python transfer recording 的
+Graph 自动导出属于后续独立接入。
 
 ### 显式 Vulkan 光栅计划
 
