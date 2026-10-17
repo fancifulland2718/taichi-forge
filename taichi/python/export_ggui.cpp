@@ -365,6 +365,10 @@ struct PyScene {
 struct PySceneV2 {
   SceneBase *scene;  // not owned
 
+  py::tuple raster_ambient_light() const {
+    return vec3_to_tuple(scene->ambient_light_color_);
+  }
+
   void set_camera(PyCamera camera) {
     scene->set_camera(camera.camera);
   }
@@ -1120,6 +1124,7 @@ void export_ggui(py::module &m) {
 
   py::class_<PySceneV2>(m, "PySceneV2")
       .def("set_camera", &PySceneV2::set_camera)
+      .def("_raster_ambient_light", &PySceneV2::raster_ambient_light)
       .def("lines", &PySceneV2::lines)
       .def("mesh", &PySceneV2::mesh)
       .def("particles", &PySceneV2::particles)

@@ -107,7 +107,9 @@ class VulkanRasterPassRecording(BackendCommandRecording):
         object.__setattr__(self, "_owner", owner)
         object.__setattr__(self, "_draws", tuple(symbolic_draws))
         object.__setattr__(self, "_camera", camera)
-        object.__setattr__(self, "_ambient", ambient)
+        object.__setattr__(
+            self, "_ambient", ambient if ambient is not None else owner._scene.scene._raster_ambient_light()
+        )
         object.__setattr__(self, "_point_lights", tuple(point_lights))
         object.__setattr__(self, "_fixed_bindings", MappingProxyType(fixed_bindings))
         object.__setattr__(self, "_draw_binding_names", draw_binding_names)

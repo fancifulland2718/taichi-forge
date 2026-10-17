@@ -34,6 +34,8 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- RasterPass recordings retain their effective default ambient light, so replay
+  no longer inherits ambient changes from later recordings of the same pass.
 - The shared Vulkan mesh shader skips transform-buffer reads when instance
   transforms are disabled, preventing uninitialized NaNs from contaminating
   vertices and nonzero instance offsets from accessing missing transforms.

@@ -12,6 +12,25 @@ from tests import test_utils
 
 
 @pytest.mark.skipif(not core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_raster_recording_default_ambient_does_not_inherit_later_draws():
+    vertices = ti.Vector.field(3, ti.f32, 3)
+    vertices.from_numpy(np.array([[-0.5, -0.5, 0], [0.5, -0.5, 0], [0, 0.5, 0]], np.float32))
+    camera = ti.ui.Camera()
+    camera.position(0, 0, 2)
+    camera.lookat(0, 0, 0)
+    with ti.hardware.raster.RasterPass((24, 24)) as raster:
+        raster.set_camera(camera).mesh(vertices)
+        default = raster.record()
+        default.execute()
+        expected = raster.color_numpy()
+        raster.ambient_light((1, 1, 1)).execute()
+        assert not np.array_equal(raster.color_numpy(), expected)
+        default.execute()
+        np.testing.assert_array_equal(raster.color_numpy(), expected)
+
+
+@pytest.mark.skipif(not core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @pytest.mark.parametrize("kind", ["mesh", "particles"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_frozen_raster_uniforms_match_live_scene(kind):
