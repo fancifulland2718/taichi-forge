@@ -45,7 +45,11 @@ TEST(VulkanGraphicsPipeline, SharedConstructionUsesPhysicalInputLimits) {
                                             bindings, attributes,
                                             "shared_graphics");
   };
-  EXPECT_NE(create(), nullptr);
+  auto ordinary = create();
+  ASSERT_NE(ordinary, nullptr);
+  auto *reflected = static_cast<VulkanPipeline *>(ordinary.get());
+  EXPECT_NO_THROW(reflected->validate_acceleration_structure_bindings({}));
+  EXPECT_ANY_THROW(reflected->validate_acceleration_structure_bindings({{0, 0}}));
   // A device with >16 bindings is no longer truncated to the old software cap.
   if (limits.maxVertexInputBindings > 16) {
     for (uint32_t i = 1; i <= 16; ++i)

@@ -224,6 +224,11 @@ TEST(VulkanRayPipeline, TraversesSharedInstancesAndOrdersRefitAndConsumer) {
       {VulkanRayTracingGroup::Kind::miss, 1},
       {VulkanRayTracingGroup::Kind::triangles, VK_SHADER_UNUSED_KHR, 2, 3}};
   VulkanPipeline pipeline(params, ray_params);
+  EXPECT_NO_THROW(pipeline.validate_acceleration_structure_bindings({{0, 0}}));
+  EXPECT_ANY_THROW(pipeline.validate_acceleration_structure_bindings({}));
+  EXPECT_ANY_THROW(pipeline.validate_acceleration_structure_bindings({{0, 1}}));
+  EXPECT_ANY_THROW(
+      pipeline.validate_acceleration_structure_bindings({{0, 0}, {0, 0}}));
   std::vector<VulkanShaderBindingRecord> hits;
   for (unsigned i = 0; i < 6; ++i)
     hits.push_back(marker_record(2, 10 * i + 3));

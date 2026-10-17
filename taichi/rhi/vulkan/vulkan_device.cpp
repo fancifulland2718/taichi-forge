@@ -303,19 +303,16 @@ void VulkanPipeline::validate_sampled_texture(std::uint32_t set,
 void VulkanPipeline::validate_acceleration_structure_bindings(
     const std::vector<std::pair<std::uint32_t, std::uint32_t>> &bindings)
     const {
-  std::size_t expected = 0;
-  for (const auto &[set, resources] : set_templates_) {
-    for (const auto &[binding, descriptor] : resources.get_bindings()) {
-      if (descriptor.type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
-        ++expected;
-        TI_ERROR_IF(std::find(bindings.begin(), bindings.end(),
-                              std::make_pair(set, binding)) == bindings.end(),
-                    "Graphics shader AS set {} binding {} is missing", set,
-                    binding);
-      }
-    }
+  // Reflection already indexes exactly these descriptors across all stages.
+  // In particular, an ordinary draw with no AS must not scan every resource.
+  std::set<std::pair<std::uint32_t, std::uint32_t>> declared(bindings.begin(),
+                                                         bindings.end());
+  for (const auto &[point, stages] : acceleration_structure_stages_) {
+    TI_ERROR_IF(declared.find(point) == declared.end(),
+                "Graphics shader AS set {} binding {} is missing", point.first,
+                point.second);
   }
-  TI_ERROR_IF(expected != bindings.size(),
+  TI_ERROR_IF(acceleration_structure_stages_.size() != bindings.size(),
               "Graphics AS declarations do not match shader descriptors");
 }
 
