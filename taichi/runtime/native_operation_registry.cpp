@@ -8,6 +8,7 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry);
 void register_vulkan_ray_program_operations(NativeOperationRegistry &registry);
 void register_vulkan_graphics_operations(NativeOperationRegistry &registry);
 void register_vulkan_compute_operations(NativeOperationRegistry &registry);
+void register_optix_program_operations(NativeOperationRegistry &registry);
 void NativeOperationRegistry::register_schema_impl(
     NativeOperationDescription::Key key,
     Key definition_key,
@@ -375,6 +376,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_vkfft_operations(result);
     register_spd_operations(result);
     register_optix_operations(result);
+    register_optix_program_operations(result);
     register_image_operations(result);
     register_image_transfer_operations(result);
     register_texture_collection_operations(result);

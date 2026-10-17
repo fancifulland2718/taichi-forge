@@ -576,6 +576,27 @@ provider `optix`:
 | `refit` | Operation: `scene`, `vertices` | Empty object |
 | `instance_refit` | Operation: `scene`, optional `transforms` | Empty object |
 
+The optional `optix/program` v1 resource reconstructs an immutable programmable
+pipeline through the same context and adapter. Bind `context` and `module_0`
+through `module_{module_count-1}` to host blobs containing nonempty PTX without
+NUL bytes. Parameters are `module_count`, `module_sha256` (one lowercase SHA256
+per blob), `groups`, `parameter_name`, `parameter_size`, `payload_count`,
+`attribute_count`, `max_trace_depth`, and optional `allow_opacity_micromaps`.
+Each group has a unique `name`, `kind` (0 raygen, 1 miss, 2 triangle hit),
+`entry={module,name}` (nullable only for hit groups) and optional `any_hit`
+with the same entry shape. Module indices and OptiX stage prefixes must match.
+At least one raygen group is required. An optional `expected_program` digest
+also checks the complete code/group/configuration contract before compilation.
+PTX blobs are consumed during creation; the program retains its context.
+Discover `native_resource_capabilities("optix_program")` and explicitly probe
+the configured adapter with `probe_native_resource("optix_program")` before
+allocation. This requires its existing programmable-pipeline extension, with no
+new adapter ABI. CPU/Vulkan do not advertise this CUDA resource.
+This stage qualifies program creation/rollback/retirement with standalone and
+borrowed runtimes; AOT prepared launches and automatic program Graph export
+are not yet connected. It does not establish launch performance or total driver
+pipeline residency.
+
 Bindings use compact scalar ndarrays: f32 vertices `[V,3]`, i32/u32 indices `[T,3]`,
 and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed output
 is f32 `[N,4]` for t/u/v/0 and i32/u32 `[N,4]` for primitive/instance/custom/hit;

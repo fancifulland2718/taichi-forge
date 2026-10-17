@@ -456,6 +456,21 @@ asset fingerprint 必须与源 BLAS 一致。导出保存按内容寻址的 host
 | `refit` | 操作：`scene`、`vertices` | 空对象 |
 | `instance_refit` | 操作：`scene`，可选 `transforms` | 空对象 |
 
+可选 `optix/program` v1 资源复用相同 context 和 adapter 重建不可变可编程管线。
+绑定 `context` 和 `module_0` 至 `module_{module_count-1}`；module 为不含 NUL 的
+非空 PTX host blob。参数包括 `module_count`、`module_sha256`（逐 blob 小写 SHA256）、
+`groups`、`parameter_name`、`parameter_size`、`payload_count`、`attribute_count`、
+`max_trace_depth`，以及可选 `allow_opacity_micromaps`。每个 group 有唯一 `name`、
+`kind`（0 raygen、1 miss、2 triangle hit）、`entry={module,name}`（仅 hit 可为 null）
+及可选同格式 `any_hit`；module 索引和 OptiX stage 前缀须匹配，至少需要一个 raygen。
+可选 `expected_program` 摘要在编译前校验完整代码、group 与配置合同。
+PTX blob 在创建期消费，program 保留 context。分配前可查询
+`native_resource_capabilities("optix_program")`，并通过
+`probe_native_resource("optix_program")` 显式探测配置的 adapter。
+此资源使用已有 programmable-pipeline 扩展，无需新 adapter ABI；CPU/Vulkan 不声明支持。
+本阶段已验证独立/借用 runtime 的 program 创建、失败回滚与退休；AOT prepared launch
+及普通 program Graph 自动导出尚未接通，不代表 launch 性能或完整 driver 管线驻留测量。
+
 使用紧凑 scalar ndarray：顶点 f32 `[V,3]`、索引 i32/u32 `[T,3]`、ray f32 `[N,8]`
 （origin.xyz、t_min、direction.xyz、t_max）。typed 输出 f32 `[N,4]` 的 t/u/v/0
 及 i32/u32 `[N,4]` 的 primitive/instance/custom/hit；单场景的 instance/custom 为0。
