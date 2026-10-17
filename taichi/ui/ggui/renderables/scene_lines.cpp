@@ -28,7 +28,7 @@ void SceneLines::update_data(const SceneLinesInfo &info) {
   Renderable::update_data(info.renderable_info);
 
   lines_count_ =
-      (indexed_ ? config_.indices_count : config_.vertices_count) / 2;
+      (indexed_ ? config_.draw_index_count : config_.draw_vertex_count) / 2;
 
   // Update UBO
   {
@@ -88,6 +88,8 @@ void SceneLines::create_graphics_pipeline() {
 void SceneLines::record_prepass_this_frame_commands(CommandList *command_list) {
   vbo_translated_.reset();
   ibo_translated_.reset();
+  if (lines_count_ == 0)
+    return;
 
   struct TransformedVertex {
     glm::vec4 pos;
@@ -130,12 +132,14 @@ void SceneLines::record_prepass_this_frame_commands(CommandList *command_list) {
 
   command_list->bind_pipeline(quad_expand_pipeline_);
   command_list->bind_shader_resources(resource_set_.get());
-  command_list->dispatch(int(ceil(lines_count_ / 256.0f)));
+  command_list->dispatch(uint32_t((lines_count_ + 255) / 256));
   command_list->buffer_barrier(*vbo_translated_);
   command_list->buffer_barrier(*ibo_translated_);
 }
 
 void SceneLines::record_this_frame_commands(CommandList *command_list) {
+  if (lines_count_ == 0)
+    return;
   auto raster_state = app_context_->device().create_raster_resources_unique();
   raster_state->vertex_buffer(vbo_translated_->get_ptr(0), 0);
   raster_state->index_buffer(ibo_translated_->get_ptr(0), 32);

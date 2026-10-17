@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fixed Vulkan RasterPass line expansion ignoring requested draw counts. Indexed
+  and non-indexed intervals/offsets are honored; zero complete lines skip expansion
+  allocation and drawing.
 - Vulkan AOT registers `spd/plan` and `spd/run` with frozen code, fixed image
   identity checks, complete mip initialization and independent counters. Consumers
   need no SPD SDK/compiler. Small standalone/borrowed tests cover repeated values,
