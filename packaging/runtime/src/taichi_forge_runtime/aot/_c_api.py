@@ -74,6 +74,7 @@ class Texture(C.Structure):
 
 class ArgumentValue(C.Union):
     _fields_ = [
+        ("native_resource", Handle),
         ("i32", C.c_int32),
         ("f32", C.c_float),
         ("ndarray", NdArray),
@@ -191,6 +192,10 @@ class Api:
                 Handle,
             ),
             "ti_destroy_prepared_ext": ([Handle, Handle], None),
+            "ti_create_native_resource_ext": (
+                [Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument), C.POINTER(UInt)], Handle,
+            ),
+            "ti_destroy_native_resource_ext": ([Handle, Handle], None),
             "ti_prepare_execution_binding_ext": (
                 [Handle, Handle, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
                 Handle,

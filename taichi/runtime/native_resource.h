@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include "taichi/rhi/device.h"
 
 namespace taichi::lang {
@@ -14,6 +15,12 @@ class NativeResource {
   virtual Device &device() const = 0;
   // Own known scratch only; dependencies are accounted once by their owner.
   virtual std::size_t workspace_bytes() const = 0;
+  // Cold factory input ownership after successful construction. False means
+  // all use of this input has completed; no pending work or retained pointer
+  // may reference it. Unknown providers conservatively retain every input.
+  virtual bool retains_input(const std::string &) const {
+    return true;
+  }
 };
 
 enum class NativeObjectKind { operation, resource };

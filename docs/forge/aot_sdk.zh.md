@@ -291,7 +291,7 @@ CUDA沿用现有Forge布局：逻辑 `[X,Y]` 对应物理CUDA array的宽Y、高
 `product(shape) * channels * channel_bytes`，与查询workspace分开；workspace统计不含图像驻留。
 alpha recording 可通过下述显式图像重建合同自动导出。
 
-使用匹配的私有 ABI79 组件时，CUDA/Vulkan 显式执行计划的 kernel 可将 sampled `Texture` 参数
+使用匹配的私有 ABI80 组件时，CUDA/Vulkan 显式执行计划的 kernel 可将 sampled `Texture` 参数
 绑定到 `image/sampled` 资源名：
 
 ```python
@@ -355,6 +355,44 @@ Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出�
 已有产物以及显式给 `image/sampled` 绑定 `pixels` 的资源，仍保持构造期复制及保留输入
 的合同。手工计划若需分阶段初始化，可省略该资源绑定，将 `image/upload` 放入
 `ExecutionPlan(initialization=[...])`。
+
+匹配的 ABI80 组件另提供 runtime 所有的公共 native resource，复用同一工厂目录，
+可在多个模块、多个计划间共享：
+
+```python
+image = runtime.native_resource(
+    "image", "sampled",
+    parameters={"shape": [3, 5], "format": "r32f", "filter": "nearest"},
+    bindings={"pixels": initial_pixels},
+)
+initial_pixels.close()  # 此公共构造器已完成 seed 上传。
+call = module.prepare_execution("sample", {"image": image, "output": output})
+call()
+```
+
+这里的 `sample` 计划把公开 `image` 参数交给 sampled Texture kernel 或 native
+操作，不再声明同名私有资源。`bindings` 将工厂输入端口映射为同 runtime 的 ndarray
+或 `NativeResource`。同一句柄可供多个计划、图像上传操作及普通 sampled kernel 的
+`bind()`/`prepare()` 使用。CUDA 兄弟绑定保留原资源，换绑输出时可省略资源参数；
+替换资源须独立准备。现有 Graph 自动导出仍从 seed 重建私有资源，不自动导入公共 owner。
+
+创建属于冷分配/准备边界。工厂默认保留全部输入，仅在明确确认构造已完成所有输入使用时
+释放对应依赖；公共 sampled image 因此可立即关闭 seed。其他保留输入须保持打开，
+关闭输入会在在途工作完成后逐级退休依赖资源与 prepared call。关闭单个模块不会关闭
+共享资源或其他模块。关闭资源会退休使用者；仅回收 Python 变量不会退休仍被 prepared
+call 保留的资源。仅初始化使用的资源在 `initialize()` 成功后解除依赖，覆盖 CUDA 兄弟绑定。
+
+资源使用 runtime 所有的 opaque 身份，在冷绑定阶段检查外来、已关闭和依赖已退休的句柄；
+重放不增加 owner 扫描或 provider 查询。有 seed 的图像可在同 runtime 队列的不同计划间
+有序上传和采样。无 seed 图像仍要求每个采样计划内部包含无条件上传；单独录制或执行上传
+不会发布跨计划初始化事实。旧 CGraph 纹理参数、RWTexture 和现有 Program Texture 借用
+不在此接口范围内。
+
+Windows 已验证 CUDA/Vulkan 独立/借用 runtime 的图像跨模块采样与上传、CUDA 绑定族、
+初始化专用依赖退休及后续数值 kernel 的真实梯度；CUDA 另验证公共 OptiX context → GAS →
+instance scene，以及内存/父资源的逐级退休。CPU 明确拒绝图像工厂，保留数值前向/反向。
+这不代表全部 provider 工厂均已验证，也不提供图像采样或求交的自动微分。公共外部 owner
+不计入 prepared call 的私有资源/workspace 字节统计；这些统计也不代表实际 GPU 驻留量。
 
 Windows CUDA/Vulkan 导出已验证普通 Graph 的公开/私有别名及后续数值 kernel 真实梯度、
 selected 绑定帧的公开纹理别名与显式伴随、独立 seed，以及独立/借用 runtime 的父对象退休；
@@ -640,7 +678,7 @@ condition 与各 body 可以为空。非空分支每次出现使用独立的 4 �
 非选中 task 仍可能发射，因此不等同于 conditional node 的跳过成本，也不改变默认策略。
 CPU/Vulkan 不接受此 lowering，provider 与嵌套控制尚不属于此切片。
 已验证 IF/SWITCH、空 case、default/no-op、signed selector、实际 `kernel.grad`、独立/借用
-消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI79
+消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI80
 组件。`add_execution_plan(name, graph, gradients=...)` 也可导出 `native_required` 下已选
 `cuda_masked_bounded_graph` 的 IF/SWITCH：沿用物理边界、条件与前后段，按源特化和调用 ABI
 去重代码，不保存未用的普通 body 变体。实际分支内 `kernel.grad`、四种分支与重复计划共用
@@ -733,7 +771,7 @@ body/尾部边界、预算、私有资源和标量/互不别名约束；不在�
 schema 8声明的 `cuda_graph_gate_v1` 代码。prepare在零预算时也检查ABI，不在消费端生成
 kernel或device-update节点，不静默切换路线。每份prepare独立拥有gate存储，在提交完成
 后退休。静态代码可由多个计划共享，捕获的命令存储仍随预算增长。需v14消费端与匹配的
-私有ABI79组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
+私有ABI80组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
 嵌套Graph，保留物理dispatch边界，只生成body需要的变体；按源特化和调用ABI跨计划去重，
 普通入口不能覆盖gated入口。九个内层区域的小用例验证了真实前向/后段梯度、双绑定、活跃
 后零轮和独立/借用退休，消费端无需编译gated变体。未冻结auto、native provider body、
@@ -745,7 +783,7 @@ kernel合同。
 非空body中的所有kernel（包括尾条件）须为预编译的 `cuda_graph_gate_v1` 代码。非空初始
 condition使用普通入口，零预算也执行一次。静态代码不随预算复制，但录制命令仍随预算增长。
 prepare复用绑定、梯度与退休合同，拒绝非CUDA runtime、native provider body和launch override。
-此格式需要v15消费端及匹配的ABI79组件。`add_execution_plan(name, graph)` 也可自动导出
+此格式需要v15消费端及匹配的ABI80组件。`add_execution_plan(name, graph)` 也可自动导出
 已物化且选择 `cuda_masked_bounded_graph` 的单层Graph，保留已选物理body及尾条件，
 只生成其所需gated变体，跨计划共享代码。零预算只导出初始条件与前后段，不带无用body变体。
 公开/私有控制存储、标量和互不别名约束、显式梯度绑定均保留；消费端环境变化不重选路线，

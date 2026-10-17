@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT adds `Runtime.native_resource()` through the existing factory catalog,
+  allowing resources to be shared across modules and plans. CUDA/Vulkan images
+  and CUDA OptiX parent/child resources are qualified, including transitive
+  retirement; public image constructors release completed seed inputs. Paired
+  private ABI80 components are required. This does not import existing JIT
+  Textures or qualify every provider. See [AOT SDK](aot_sdk.en.md).
+
 - New AOT Graph exports batch sampled-image seeds into one-time initialization.
   After `prepared.initialize()`, seed arrays used only for initialization can
   close without invalidating replay. CUDA binding families share initialized

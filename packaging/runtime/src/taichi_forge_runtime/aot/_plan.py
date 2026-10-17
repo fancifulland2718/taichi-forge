@@ -542,7 +542,7 @@ class ExecutionPlan:
 
     def _prepare(self, module, arguments, *, gradients=None, source=None):
         from . import _c_api as abi
-        from ._runtime import NdArray, PreparedCall, _BindingFamily, _argument, _name
+        from ._runtime import NativeResource, NdArray, PreparedCall, _BindingFamily, _argument, _name
 
         runtime = module._runtime
         with runtime._lock:
@@ -558,7 +558,9 @@ class ExecutionPlan:
                     owners.extend(retained)
                 if name in self._replay_argument_names:
                     replay_owners.extend(retained)
-                if name in self._persistent_argument_names:
+                if name in self._persistent_argument_names or (
+                    isinstance(value, NativeResource) and name in self._replay_argument_names
+                ):
                     persistent_owners.extend(retained)
                 return abi.NamedArgument(_name(name), argument)
 

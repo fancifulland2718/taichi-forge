@@ -24,6 +24,8 @@ struct ExecutionBindingFamily {
   std::map<std::string, std::shared_ptr<taichi::lang::NativeResource>> objects;
   std::unordered_set<TiMemory> initialization_memories;
   std::unordered_set<TiMemory> persistent_memories;
+  std::unordered_set<TiNativeResource> initialization_external_resources;
+  std::unordered_set<TiNativeResource> persistent_external_resources;
   taichi::lang::NativeRecordingState initial_facts;
   std::shared_ptr<void> initialization_operands;
   std::unique_ptr<taichi::lang::FixedExecution> initialization;

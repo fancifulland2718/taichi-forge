@@ -18,6 +18,10 @@ class NativeSampledImage : public NativeResource {
   const ImageParams &parameters() const {
     return parameters_;
   }
+  bool retains_input(const std::string &port) const override {
+    // Both qualified factories finish the initial upload before returning.
+    return port != "pixels";
+  }
   void validate_sampling(const NativeRecordingState &state) const {
     if (!initialized_ && !state.initialized.count(this))
       throw std::invalid_argument(

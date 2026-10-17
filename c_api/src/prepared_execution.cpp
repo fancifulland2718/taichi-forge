@@ -1,6 +1,7 @@
 #include "argument_binding.h"
 #include "execution_resources.h"
 #include "execution_binding_family.h"
+#include "native_resource_registry.h"
 
 #include <algorithm>
 #include <functional>
@@ -29,6 +30,8 @@ struct PreparedExecution {
   std::shared_ptr<ExecutionBindingFamily> family;
   std::vector<TiMemory> memories;
   std::unordered_set<TiMemory> replay_memories;
+  std::vector<TiNativeResource> external_resources;
+  std::unordered_set<TiNativeResource> replay_external_resources;
   std::unordered_set<const NativeResource *> replay_resources;
   TiPreparedExecutionInfo info{};
   bool live{false};
@@ -273,6 +276,8 @@ class PreparedExecutionRegistry {
         families_[entry->family.get()].insert(handle);
       for (auto memory : memories)
         memories_[memory].insert(handle);
+      for (auto resource : entry->external_resources)
+        resources_[resource].insert(handle);
     } catch (...) {
       remove_dependencies(handle, *entry);
       entries_.erase(handle);
@@ -323,6 +328,16 @@ class PreparedExecutionRegistry {
           call.memories.end());
       call.replay_memories.clear();
       call.replay_resources.clear();
+      for (auto resource : call.external_resources)
+        if (!call.replay_external_resources.count(resource))
+          remove_edge(resources_, resource, member);
+      call.external_resources.erase(
+          std::remove_if(call.external_resources.begin(),
+                         call.external_resources.end(), [&](auto resource) {
+                           return !call.replay_external_resources.count(resource);
+                         }),
+          call.external_resources.end());
+      call.replay_external_resources.clear();
     };
     if (entry.family) {
       auto &family = *entry.family;
@@ -349,6 +364,7 @@ class PreparedExecutionRegistry {
       if (family.arrays->storage)
         family.arrays->storage->retain(retained);
       family.initialization_memories.clear();
+      family.initialization_external_resources.clear();
     } else {
       finish(handle);
     }
@@ -362,6 +378,9 @@ class PreparedExecutionRegistry {
   void retire_memory(TiMemory memory) {
     retire(memories_, memory);
   }
+  void retire_resource(TiNativeResource resource, bool synchronize) {
+    retire(resources_, resource, synchronize);
+  }
   void retire_module(AotModule *module) {
     retire(modules_, module);
   }
@@ -371,6 +390,7 @@ class PreparedExecutionRegistry {
       runtime_.wait();
     modules_.clear();
     memories_.clear();
+    resources_.clear();
     families_.clear();
     for (auto &entry : entries_)
       entry.second->retire_binding(true);
@@ -379,7 +399,7 @@ class PreparedExecutionRegistry {
 
  private:
   template <typename Map, typename Key>
-  void retire(Map &map, Key key) {
+  void retire(Map &map, Key key, bool synchronize = true) {
     auto found = map.find(key);
     if (found == map.end())
       return;
@@ -387,7 +407,7 @@ class PreparedExecutionRegistry {
     // executions and remove all their edges; warm replay never scans owners.
     const std::vector<TiPreparedExecution> handles(found->second.begin(),
                                                    found->second.end());
-    if (runtime_.runtime_fault_domain()->backend_calls_safe())
+    if (synchronize && runtime_.runtime_fault_domain()->backend_calls_safe())
       runtime_.wait();
     for (auto handle : handles) {
       auto &entry = get(handle);
@@ -411,8 +431,11 @@ class PreparedExecutionRegistry {
     remove_edge(modules_, entry.owner, handle);
     for (auto memory : entry.memories)
       remove_edge(memories_, memory, handle);
+    for (auto resource : entry.external_resources)
+      remove_edge(resources_, resource, handle);
     entry.owner = nullptr;
     entry.memories.clear();
+    entry.external_resources.clear();
   }
   Runtime &runtime_;
   std::unordered_map<TiPreparedExecution, std::unique_ptr<PreparedExecution>>
@@ -421,6 +444,8 @@ class PreparedExecutionRegistry {
       modules_;
   std::unordered_map<TiMemory, std::unordered_set<TiPreparedExecution>>
       memories_;
+  std::unordered_map<TiNativeResource, std::unordered_set<TiPreparedExecution>>
+      resources_;
   std::unordered_map<ExecutionBindingFamily *,
                      std::unordered_set<TiPreparedExecution>>
       families_;
@@ -435,6 +460,11 @@ capi::PreparedExecutionRegistry &Runtime::prepared_registry() {
 void Runtime::retire_prepared_memory(TiMemory memory) {
   if (prepared_)
     prepared_->retire_memory(memory);
+}
+void Runtime::retire_prepared_native_resource(TiNativeResource resource,
+                                             bool synchronize) {
+  if (prepared_)
+    prepared_->retire_resource(resource, synchronize);
 }
 void Runtime::retire_prepared_module(AotModule *owner) {
   if (prepared_)
@@ -463,9 +493,13 @@ TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = arguments->owner;
   prepared->memories = arguments->memories;
+  prepared->external_resources = arguments->native_resources;
   prepared->kernel_arguments = std::move(arguments);
-  prepared->prepare(rt, {{prepared->kernel_arguments->kernel,
-                          prepared->kernel_arguments->context.get()}});
+  taichi::lang::FixedExecution::Dispatch dispatch{
+      prepared->kernel_arguments->kernel,
+      prepared->kernel_arguments->context.get()};
+  dispatch.images = prepared->kernel_arguments->images;
+  prepared->prepare_operations(rt, {std::move(dispatch)});
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
@@ -613,15 +647,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
   auto local_preparation =
-      family ? nullptr
-             : std::make_unique<NativePreparationContext>(
-                   rt.arch, rt.get(), rt.native_provider_locations(),
-                   rt.runtime_fault_domain(), rt.native_library_locations());
+      family ? nullptr : capi::make_native_preparation_context(rt);
   auto &preparation = family ? *family->preparation : *local_preparation;
-#ifdef TI_WITH_VULKAN
-  if (auto *gfx = dynamic_cast<::GfxRuntime *>(&rt))
-    preparation.gfx_runtime = &gfx->get_gfx_runtime();
-#endif
   preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
   std::set<std::pair<std::string, std::uint32_t>> probed;
   std::map<const aot::ExecutionPlan::Native *,
@@ -709,6 +736,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
         continue;
       const auto &old = family->original_arguments.at(name);
       const auto &next = *arguments.at(name);
+      if (old.type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT &&
+          next.type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT) {
+        if (old.value.native_resource != next.value.native_resource)
+          throw MemoryBindingError(
+              "Shared native resource changed; prepare a new binding family: " +
+              name);
+        rt.native_resource_registry().get(next.value.native_resource);
+        continue;
+      }
       if (old.type != TI_ARGUMENT_TYPE_NDARRAY ||
           next.type != TI_ARGUMENT_TYPE_NDARRAY)
         throw MemoryBindingError(
@@ -770,25 +806,22 @@ static TiPreparedExecution prepare_execution_plan_impl(
   };
   std::map<std::string, NativeArrayBinding> native_arrays;
   std::map<std::string, std::shared_ptr<NativeResource>> native_objects;
+  for (const auto &[name, arg] : arguments) {
+    if (arg->type != TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+      continue;
+    auto object = rt.native_resource_registry().get(arg->value.native_resource);
+    native_objects.emplace(name, std::move(object));
+    prepared->external_resources.push_back(arg->value.native_resource);
+    if (family && !rebinding && plan.replay_bindings.count(name))
+      family->persistent_public_arguments.insert(name);
+  }
   auto array_binding =
       [&](const std::string &slot) -> const NativeArrayBinding & {
     auto found = native_arrays.find(slot);
     if (found == native_arrays.end()) {
-      const auto view = storage(slot, 0);
+      storage(slot, 0);
       const auto &array = arguments.at(slot)->value.ndarray;
-      found =
-          native_arrays
-              .emplace(slot,
-                       NativeArrayBinding{
-                           view.pointer,
-                           view.size,
-                           capi::ndarray_scalar_type(array.elem_type),
-                           {array.shape.dims,
-                            array.shape.dims + array.shape.dim_count},
-                           {array.elem_shape.dims,
-                            array.elem_shape.dims + array.elem_shape.dim_count},
-                           rt.get_memory(array.memory).base_offset})
-              .first;
+      found = native_arrays.emplace(slot, capi::bind_native_array(rt, array)).first;
     }
     return found->second;
   };
@@ -1323,6 +1356,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
     for (const auto &name : plan.initialization_bindings) {
       const auto found = arguments.find(name);
       if (found != arguments.end() &&
+          found->second->type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+        family->initialization_external_resources.insert(
+            found->second->value.native_resource);
+      if (found != arguments.end() &&
           found->second->type == TI_ARGUMENT_TYPE_NDARRAY)
         dependencies.push_back(found->second->value.ndarray.memory);
       if (const auto binding = layouts.find(name);
@@ -1341,6 +1378,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
       const auto &argument = *arguments.at(name);
       if (argument.type == TI_ARGUMENT_TYPE_NDARRAY)
         family->persistent_memories.insert(argument.value.ndarray.memory);
+      else if (argument.type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+        family->persistent_external_resources.insert(
+            argument.value.native_resource);
     }
   }
   if (!bind_steps(plan.operations, operations))
@@ -1350,6 +1390,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
         "Ndarray layout/gradient binding is unused by any kernel");
   {
     for (const auto &name : plan.replay_bindings) {
+      if (const auto arg = arguments.find(name); arg != arguments.end() &&
+          arg->second->type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+        prepared->replay_external_resources.insert(
+            arg->second->value.native_resource);
       if (const auto object = native_objects.find(name);
           object != native_objects.end()) {
         prepared->replay_resources.insert(object->second.get());
@@ -1368,6 +1412,18 @@ static TiPreparedExecution prepare_execution_plan_impl(
     }
   }
   if (family) {
+    if (!family->initialized)
+      prepared->external_resources.insert(
+          prepared->external_resources.end(),
+          family->initialization_external_resources.begin(),
+          family->initialization_external_resources.end());
+    prepared->external_resources.insert(
+        prepared->external_resources.end(),
+        family->persistent_external_resources.begin(),
+        family->persistent_external_resources.end());
+    prepared->replay_external_resources.insert(
+        family->persistent_external_resources.begin(),
+        family->persistent_external_resources.end());
     if (!family->initialized)
       prepared->memories.insert(prepared->memories.end(),
                                 family->initialization_memories.begin(),

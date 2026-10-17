@@ -148,7 +148,7 @@ Sequential 控制区域只有一个 owner，组成树；当前结构化深度上
   flat CUDA masked 同样不再限制 4096 dispatch，`max_encoded_dispatches=None`；
   仍检查编码乘法溢出及分支计数与实际序列的一致性。Vulkan嵌套JIT与AOT/GFX使用同一容量合同：
   loop/chunk为正uint32，不设固定4096 action上限，保留录制器的存储/地址/溢出检查。
-  预算经int64绑定传递后检查转换，私有ABI79要求Python/native组件成对更新；不改变flat Vulkan准入。
+  预算经int64绑定传递后检查转换，私有ABI80要求Python/native组件成对更新；不改变flat Vulkan准入。
   masked 路线仍会 issue 未激活节点，大预算可能增加物化和重放成本；解除准入限制不代表加速。
   支持的 CUDA runtime 可通过完整 recipe 搜索
   提供压缩 nested conditional 路线，使用 int64 预算、每个静态 region 仅一份，不另设静态 dispatch 上限。

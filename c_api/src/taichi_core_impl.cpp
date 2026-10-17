@@ -121,7 +121,7 @@ Runtime::~Runtime() {
 void Runtime::borrow_runtime_fault_domain(
     std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain) {
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
-  if (!domain || prepared_ || !modules_.empty() || !memories_.empty() ||
+  if (!domain || prepared_ || native_resources_ || !modules_.empty() || !memories_.empty() ||
       borrowed_fault_domain_)
     throw std::logic_error("Runtime fault domain must be bound before use");
   runtime_fault_domain_ = std::move(domain);
@@ -165,6 +165,7 @@ TiMemory Runtime::allocate_memory(
 }
 void Runtime::free_memory(TiMemory devmem) {
   std::lock_guard<std::recursive_mutex> submission_lock(submission_mutex());
+  retire_native_memory(devmem);
   retire_prepared_memory(devmem);
   std::lock_guard<std::mutex> lock(memory_mutex_);
   const auto found = memories_.find(devmem);
@@ -388,6 +389,7 @@ void ti_destroy_runtime(TiRuntime runtime) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   ((Runtime *)runtime)->clear_prepared();
+  ((Runtime *)runtime)->clear_native_resources();
   delete (Runtime *)runtime;
   TI_CAPI_TRY_CATCH_END();
 }

@@ -373,7 +373,7 @@ are `product(shape) * channels * channel_bytes`, separate from reported query
 workspace, which does not include image residency. Alpha recordings can export
 through the image reconstruction contract below.
 
-With matching private ABI79 components, explicit execution-plan kernels on CUDA or Vulkan
+With matching private ABI80 components, explicit execution-plan kernels on CUDA or Vulkan
 may bind sampled `Texture` arguments directly to `image/sampled` resource names:
 
 ```python
@@ -456,6 +456,56 @@ Existing artifacts and explicit `image/sampled` resources with a `pixels` bindin
 keep their construction-time copy and retained-input contract. To express staged
 initialization explicitly, omit that resource binding and put an `image/upload`
 operation in `ExecutionPlan(initialization=[...])`.
+
+Matching ABI80 components also expose runtime-owned native resources, shared
+across modules and plans through the existing factory catalog:
+
+```python
+image = runtime.native_resource(
+    "image", "sampled",
+    parameters={"shape": [3, 5], "format": "r32f", "filter": "nearest"},
+    bindings={"pixels": initial_pixels},
+)
+initial_pixels.close()  # This public constructor completes the seed upload.
+call = module.prepare_execution("sample", {"image": image, "output": output})
+call()
+```
+
+Here `sample` is a plan whose public `image` argument feeds a sampled Texture
+kernel or a native operation; it does not declare a private resource of that name.
+`bindings` maps factory input ports to same-runtime ndarrays or `NativeResource`
+objects. The same handle can feed multiple plans, image upload operations and
+ordinary sampled kernel `bind()`/`prepare()` calls. CUDA binding siblings retain
+the same resources and may omit them when rebinding outputs; changing a resource
+requires independent preparation. Existing Graph exports continue to reconstruct
+private resources from seeds. They do not automatically import these public owners.
+
+Creation is a cold allocation/preparation boundary. Factories conservatively
+retain their inputs unless they explicitly confirm that construction has completed
+all input use; public sampled images release their seed ownership immediately.
+Other retained inputs must remain open. Closing one retires dependent resources
+and prepared calls transitively after in-flight work completes. Closing a module
+leaves shared public resources and other modules usable. Closing a resource retires
+its users; Python variable collection alone cannot retire a resource still retained
+by a prepared call. Initialization-only resource dependencies are released after
+successful `initialize()`, including across CUDA binding siblings.
+
+Resources use owner-local opaque identities, checked at cold binding boundaries;
+foreign, closed and retired handles fail before recording. Replay adds no owner
+scan or provider lookup. Seeded images may be updated and sampled across plans
+on the same runtime queue. Unseeded images still require an unconditional upload
+within each sampling plan: recording or executing a separate upload does not
+publish a global initialization fact. Legacy CGraph texture arguments, RWTexture
+and borrowing an existing Program Texture are outside this interface.
+
+Windows qualification covers CUDA/Vulkan images in standalone and borrowed
+runtimes, cross-module sampling/upload, CUDA binding families, initialization-only
+retirement, and real downstream numeric gradients. CUDA also covers public OptiX
+context → GAS → instance-scene resources and transitive memory/parent retirement.
+CPU rejects image factories and retains its numeric forward/backward path. This
+does not qualify every provider's resource factory or differentiate image sampling
+or ray intersection. External owners are not included in prepared-call private
+resource/workspace byte counters; those counters are not GPU residency measures.
 
 Windows CUDA/Vulkan export checks cover ordinary Graph public/private aliases with real
 downstream numeric gradients, selected binding frames with public texture aliases
@@ -832,7 +882,7 @@ defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
 nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
 signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
 retirement are verified. Branches share code entries and replay does not parse
-descriptions. A v16 consumer and matching ABI79 components are required.
+descriptions. A v16 consumer and matching ABI80 components are required.
 `add_execution_plan(name, graph, gradients=...)` also exports IF/SWITCH selected
 for `cuda_masked_bounded_graph` under `native_required`, preserving physical
 boundaries, conditions and prefix/suffix operations. It deduplicates code by
@@ -954,7 +1004,7 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI79 components.
+This requires a v14 consumer and matching private ABI80 components.
 `add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
 `masked`, preserving its physical dispatch boundaries and generating only the
 required body variants. Code is deduplicated by source specialization and launch
@@ -974,7 +1024,7 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-format requires a v15 consumer and matching ABI79 components.
+format requires a v15 consumer and matching ABI80 components.
 `add_execution_plan(name, graph)` also exports materialized flat Graphs selected
 for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
 condition, generates only their gated variants, and shares code across plans.

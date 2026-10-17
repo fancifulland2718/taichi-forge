@@ -116,6 +116,7 @@ void Runtime::retire_resources(bool synchronize) {
   if (synchronize)
     cleanup([&] { wait(); });
   cleanup([&] { clear_prepared(false); });
+  cleanup([&] { clear_native_resources(false); });
   while (!modules_.empty()) {
     auto *module = *modules_.begin();
     modules_.erase(module);

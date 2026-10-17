@@ -317,6 +317,9 @@ typedef struct TiComputeGraph_t *TiComputeGraph;
 // closing any bound memory or its module invalidates future launches.
 typedef struct TiPreparedExecution_t *TiPreparedExecution;
 
+// Runtime-owned native resource. Distinct from raw TiImage/RHI handles.
+typedef struct TiNativeResource_t *TiNativeResource;
+
 typedef struct TiPreparedExecutionInfo {
   uint32_t dispatch_count;
   // 0: CPU ordered native batch; 1: CUDA Graph; 2: Vulkan fixed commands;
@@ -495,6 +498,8 @@ typedef enum TiArgumentType {
   TI_ARGUMENT_TYPE_SCALAR = 4,
   // Typed tensor.
   TI_ARGUMENT_TYPE_TENSOR = 5,
+  // Same-runtime resource created through ti_create_native_resource_ext.
+  TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT = 6,
   TI_ARGUMENT_TYPE_MAX_ENUM = 0xffffffff,
 } TiArgumentType;
 
@@ -936,6 +941,7 @@ typedef union TiArgumentValue {
   TiScalar scalar;
   // A tensor to be bound.
   TiTensor tensor;
+  TiNativeResource native_resource;
 } TiArgumentValue;
 
 // Structure `TiArgument` (1.4.0)
@@ -1328,6 +1334,25 @@ ti_get_prepared_execution_resource_bytes_ext(TiRuntime runtime,
 // too; automatic dependency invalidation does not consume the public handle.
 TI_DLL_EXPORT void TI_API_CALL
 ti_destroy_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
+
+// Create a registered resource from the same portable native envelope used in
+// execution plans. Args must exactly cover its symbolic input slots and contain
+// ndarrays or live same-runtime native resources. No operation is executed.
+// Factories may finish cold uploads. When non-null, retained_args points to
+// arg_count uint32 values: 1 means retain that argument through resource close;
+// 0 means construction has finished using it. Output is valid only on success.
+TI_DLL_EXPORT TiNativeResource TI_API_CALL
+ti_create_native_resource_ext(TiRuntime runtime,
+                              uint64_t description_size,
+                              const char *description,
+                              uint32_t arg_count,
+                              const TiNamedArgument *args,
+                              uint32_t *retained_args);
+
+// Retire dependent preparations/resources before releasing this owner. A
+// resource invalidated by closing an input can still be destroyed once.
+TI_DLL_EXPORT void TI_API_CALL
+ti_destroy_native_resource_ext(TiRuntime runtime, TiNativeResource resource);
 
 // Function `ti_flush` (1.4.0)
 //

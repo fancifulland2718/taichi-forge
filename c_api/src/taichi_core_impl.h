@@ -132,6 +132,7 @@ struct Error {
 namespace capi {
 class MetalRuntime;
 class PreparedExecutionRegistry;
+class NativeResourceRegistry;
 }  // namespace capi
 
 class Runtime {
@@ -176,6 +177,7 @@ class Runtime {
   std::unordered_set<class AotModule *> modules_;
   std::recursive_mutex submission_mutex_;
   std::shared_ptr<capi::PreparedExecutionRegistry> prepared_;
+  std::shared_ptr<capi::NativeResourceRegistry> native_resources_;
   taichi::lang::NativeProviderLocations native_provider_locations_;
   taichi::lang::NativeLibraryLocations native_library_locations_;
   std::shared_ptr<taichi::lang::RuntimeFaultDomain> runtime_fault_domain_;
@@ -242,6 +244,11 @@ class Runtime {
     return submission_mutex_;
   }
   capi::PreparedExecutionRegistry &prepared_registry();
+  capi::NativeResourceRegistry &native_resource_registry();
+  void retire_native_memory(TiMemory memory);
+  void clear_native_resources(bool synchronize = true);
+  void retire_prepared_native_resource(TiNativeResource resource,
+                                        bool synchronize = true);
   const taichi::lang::NativeProviderLocations &native_provider_locations()
       const {
     return native_provider_locations_;

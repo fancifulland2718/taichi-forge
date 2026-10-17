@@ -12,6 +12,7 @@ manager. ``bind()`` reuses Python argument descriptors across submissions.
 from __future__ import annotations
 
 import ctypes as C
+import json
 from dataclasses import dataclass
 import math
 import operator
@@ -30,6 +31,7 @@ __all__ = [
     "Runtime",
     "Module",
     "NdArray",
+    "NativeResource",
     "Kernel",
     "Graph",
     "BoundCall",
@@ -275,6 +277,51 @@ class Runtime:
             memory = _Memory(self, size)
             return NdArray(memory, dtype, code, shape, element_shape)
 
+    def native_resource(self, provider, operation, *, parameters=None, bindings=None, version=1):
+        """Create one resource through the common native factory catalog.
+
+        Bindings map factory ports to same-runtime arrays or NativeResources.
+        Plans may share the result; closing it retires all dependent calls and
+        resources. Factories identify completed construction-only inputs;
+        all other inputs remain retained. This is a cold allocation boundary.
+        """
+        from ._native import native_references
+
+        values = dict(bindings or {})
+        description = dict(
+            kind="native",
+            provider=provider,
+            operation=operation,
+            version=version,
+            parameters={} if parameters is None else parameters,
+            bindings={name: name for name in values},
+        )
+        native_references(description)
+        encoded = json.dumps(description, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        with self._lock:
+            self._check()
+            owners, arguments = [], []
+            for name, value in values.items():
+                retained = []
+                arguments.append(abi.NamedArgument(_name(name), _argument(self, value, retained)))
+                owners.append(retained)
+            flags = (abi.UInt * len(arguments))()
+            handle = self._api.call(
+                self._api.ti_create_native_resource_ext,
+                self._handle,
+                len(encoded),
+                encoded,
+                len(arguments),
+                (abi.NamedArgument * len(arguments))(*arguments),
+                flags,
+            )
+            try:
+                retained = tuple(dict.fromkeys(owner for keep, group in zip(flags, owners) if keep for owner in group))
+                return NativeResource(self, handle, retained)
+            except BaseException:
+                self._api.call(self._api.ti_destroy_native_resource_ext, self._handle, handle)
+                raise
+
     def wait(self):
         with self._lock:
             self._check()
@@ -324,7 +371,7 @@ class Runtime:
                 return
             self.wait()
             # Retire code and module-local storage before external arguments.
-            priority = {"prepared": 0, "module": 1, "memory": 2}
+            priority = {"prepared": 0, "module": 1, "native_resource": 2, "memory": 3}
             for kind, handle in sorted(self._resources, key=lambda item: priority[item[0]]):
                 self._destroy_resource(kind, handle)
             self._api.call(self._api.ti_destroy_runtime, self._handle)
@@ -340,6 +387,8 @@ class Runtime:
             self._api.call(self._api.ti_destroy_aot_module, handle)
         elif kind == "prepared":
             self._api.call(self._api.ti_destroy_prepared_ext, self._handle, handle)
+        elif kind == "native_resource":
+            self._api.call(self._api.ti_destroy_native_resource_ext, self._handle, handle)
         else:
             self._api.call(self._api.ti_free_memory, self._handle, handle)
         self._resources.remove((kind, handle))
@@ -394,6 +443,20 @@ class _Resource:
             self.close()
         except Exception:
             pass
+
+
+class NativeResource(_Resource):
+    """One runtime-owned native object, usable by multiple execution plans."""
+
+    _kind = "native_resource"
+
+    def __init__(self, runtime, handle, owners):
+        self._owners = owners
+        super().__init__(runtime, handle)
+
+    def close(self):
+        super().close()
+        self._owners = ()
 
 
 class _Memory(_Resource):
@@ -551,6 +614,14 @@ class Module(_Resource):
 
 
 def _argument(runtime, value, owners):
+    if isinstance(value, NativeResource):
+        value._check()
+        if value._runtime is not runtime:
+            raise ValueError("Native resource belongs to another runtime")
+        result = abi.Argument()
+        result.type, result.value.native_resource = 6, value._handle
+        owners.append(value)
+        return result
     if isinstance(value, NdArray):
         result = abi.Argument()
         result.type, result.value.ndarray = 2, value._descriptor(runtime)
@@ -562,7 +633,7 @@ def _argument(runtime, value, owners):
         return Scalar("i32", value)._argument()
     if isinstance(value, float):
         return Scalar("f32", value)._argument()
-    raise TypeError("AOT arguments must be ndarrays, Scalar, int or float")
+    raise TypeError("AOT arguments must be ndarrays, NativeResource, Scalar, int or float")
 
 
 class BoundCall:

@@ -1,4 +1,5 @@
 #include "argument_binding.h"
+#include "native_resource_registry.h"
 
 #include <algorithm>
 #include <limits>
@@ -282,6 +283,17 @@ NdArrayStorageLayout ndarray_storage_layout(const TiNdArray &array) {
   return array_storage_layout(array);
 }
 
+taichi::lang::NativeArrayBinding bind_native_array(Runtime &runtime,
+                                                  const TiNdArray &array) {
+  const auto bytes = validated_ndarray_bytes(runtime, array);
+  const auto memory = runtime.get_memory(array.memory);
+  return {memory.allocation.get_ptr(memory.byte_offset), bytes,
+          ndarray_scalar_type(array.elem_type),
+          {array.shape.dims, array.shape.dims + array.shape.dim_count},
+          {array.elem_shape.dims, array.elem_shape.dims + array.elem_shape.dim_count},
+          memory.base_offset};
+}
+
 std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     Runtime &runtime2,
     TiKernel kernel,
@@ -394,6 +406,23 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
   auto &devallocs = result->allocations;
 
   for (uint32_t i = 0; i < arg_count; ++i) {
+    if (args[i].type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT) {
+      auto image = std::dynamic_pointer_cast<taichi::lang::NativeSampledImage>(
+          runtime2.native_resource_registry().get(args[i].value.native_resource));
+      if (!image)
+        throw MemoryBindingError("Kernel native resource must be a sampled image");
+      try {
+        auto binding = std::make_shared<taichi::lang::NativeImageKernelBinding>(
+            std::move(image), std::vector<int>{int(i)}, runtime2.arch,
+            runtime2.get(), *ti_kernel, builder);
+        binding->validate(runtime2.arch, runtime2.get(), *ti_kernel, builder, {});
+        result->images.push_back(std::move(binding));
+        result->native_resources.push_back(args[i].value.native_resource);
+      } catch (const std::invalid_argument &error) {
+        throw MemoryBindingError(error.what());
+      }
+      continue;
+    }
     if (const auto image = images.find(i); image != images.end()) {
       try {
         result->images.push_back(

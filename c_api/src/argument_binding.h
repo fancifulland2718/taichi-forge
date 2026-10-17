@@ -7,6 +7,7 @@
 #include "taichi/program/matrix.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/texture.h"
+#include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang {
 class NativeSampledImage;
@@ -26,6 +27,8 @@ taichi::lang::DataType ndarray_scalar_type(TiDataType type);
 uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,
                                  uint64_t *element_bytes = nullptr);
+taichi::lang::NativeArrayBinding bind_native_array(Runtime &runtime,
+                                                  const TiNdArray &array);
 
 // Cold ABI marshalling shared by ordinary launch and prepared execution. These
 // own the host descriptors referenced by LaunchContextBuilder, not device data.
@@ -33,6 +36,7 @@ struct BoundKernelArguments {
   AotModule *owner{nullptr};
   taichi::lang::aot::Kernel *kernel{nullptr};
   std::vector<TiMemory> memories;
+  std::vector<TiNativeResource> native_resources;
   std::vector<std::unique_ptr<taichi::lang::DeviceAllocation>> allocations;
   std::vector<std::unique_ptr<taichi::lang::storage::DenseStorageDescriptor>>
       views;

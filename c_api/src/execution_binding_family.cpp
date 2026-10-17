@@ -1,4 +1,5 @@
 #include "execution_binding_family.h"
+#include "native_resource_registry.h"
 
 #include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_CUDA
@@ -28,9 +29,7 @@ ExecutionBindingFamily::ExecutionBindingFamily(Runtime &owner,
   throw MemoryBindingError(
       "CUDA binding families are unavailable in this runtime");
 #endif
-  preparation = std::make_unique<NativePreparationContext>(
-      runtime->arch, runtime->get(), runtime->native_provider_locations(),
-      runtime->runtime_fault_domain(), runtime->native_library_locations());
+  preparation = make_native_preparation_context(*runtime);
   for (auto gradient = frame_resources.gradients.begin();
        gradient != frame_resources.gradients.end();) {
     if (!plan.replay_bindings.count(gradient->first))
