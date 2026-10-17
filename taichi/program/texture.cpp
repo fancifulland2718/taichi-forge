@@ -1,4 +1,5 @@
 #include "taichi/program/texture.h"
+#include "taichi/runtime/image_transfer.h"
 #include "taichi/runtime/texture_storage.h"
 #include "taichi/runtime/texture_collection.h"
 
@@ -102,6 +103,7 @@ std::pair<DataType, uint32_t> buffer_format2type_channels(BufferFormat format) {
       return std::make_pair(PrimitiveType::i8, 2);
     case BufferFormat::rgba8i:
       return std::make_pair(PrimitiveType::i8, 4);
+    case BufferFormat::depth16:
     case BufferFormat::r16:
       return std::make_pair(PrimitiveType::u16, 1);
     case BufferFormat::rg16:
@@ -529,6 +531,9 @@ void Texture::from_snode(SNode *snode) {
                            static_cast<uint32_t>(depth_)};
     const bool depth =
         format_ == BufferFormat::depth16 || format_ == BufferFormat::depth32f;
+    validate_buffer_image_alignment(source.offset,
+                                     data_type_size(dtype_) * num_channels_,
+                                     depth);
     if (depth)
       params.image_aspect_flag = VK_IMAGE_ASPECT_DEPTH_BIT;
     const auto image = texture_alloc_;

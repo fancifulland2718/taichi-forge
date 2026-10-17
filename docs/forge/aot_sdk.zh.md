@@ -670,8 +670,12 @@ Windows 小夹具验证非方形三级颜色/深度图像、分数 LOD 过滤、
 操作。region 必须给出三分量 `extent`，可选 `offset`（默认零）、`mip_level`（零）、
 `base_layer`（零）、`layer_count`（一）；受管图像目前只有一层 array layer。
 copy 的两侧 extent 相等；copy/blit 要求互不别名、格式和维度相同的颜色图像。
-blit 另查实际设备格式/filter 能力并使用 graphics queue。buffer 传输覆盖现有颜色和
-`depth32f` 所有者，深度使用 graphics queue；尚不支持 packed depth/stencil。
+blit 另查实际设备格式/filter 能力并使用 graphics queue。buffer 传输覆盖颜色、
+`depth16` 和 `depth32f` 所有者，深度使用 graphics queue；尚不支持 packed depth/stencil。
+
+`depth16` 存储归一化无符号16位 texel（`u16` pixels），shader fetch 返回浮点深度。
+两种深度格式都要求 view 与操作偏移合成后的 buffer 地址按4字节对齐，构造期 pixels
+及 `upload`/`upload_mips` 同样检查。比较采样器仍限定于原有二维 `depth32f` 合同。
 
 buffer 偏移是相对传入有限数组/view 的字节数，row length、image height 以 texel
 计，零表示紧凑布局。这是原始 texel 复制，数组形状/类型无需与图像相同；准备期检查

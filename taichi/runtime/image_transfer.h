@@ -25,4 +25,9 @@ std::size_t required_buffer_image_bytes(std::size_t buffer_offset,
                                         const std::array<uint32_t, 3> &extent,
                                         std::size_t texel_bytes);
 
+// Offset in the actual VkBuffer, after composing all view/region offsets.
+void validate_buffer_image_alignment(std::size_t offset,
+                                     std::size_t texel_bytes,
+                                     bool depth_aspect);
+
 }  // namespace taichi::lang

@@ -862,8 +862,14 @@ optional `offset` (default zero), `mip_level` (zero), `base_layer` (zero), and
 `layer_count` (one). Current managed images have one array layer. Copy requires
 equal extents; copy/blit require distinct same-format, same-dimension color
 images. Blit also checks actual device format/filter support and uses a graphics
-queue. Buffer transfers support the existing color and `depth32f` owners; depth
+queue. Buffer transfers support color, `depth16` and `depth32f` owners; depth
 uses a graphics queue. Packed depth/stencil is not supported.
+
+`depth16` stores normalized unsigned 16-bit texels (`u16` pixels); shader fetches
+return floating depth. Both depth formats require four-byte buffer offsets after
+composing view and operation offsets. This also applies to construction-time
+pixels and `upload`/`upload_mips`. Comparison samplers remain limited to the
+existing 2D `depth32f` contract.
 
 Buffer offsets are bytes relative to the supplied finite array/view. Row length
 and image height are texel counts; zero means tightly packed. Shape/type need

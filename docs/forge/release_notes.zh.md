@@ -31,6 +31,8 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 修复 Vulkan `depth16` texel 类型映射缺失导致的 JIT/AOT 图像创建和 `u16` 上传失败。
+  深度传输共享检查合成后的4字节 buffer 偏移，覆盖有限子 view 与 AOT 构造期 pixels。
 - Vulkan AOT 显式计划可经公共 native registry 重建区域 image copy、blit 和 buffer/image
   传输，共享范围检查保留有限 view 与 padding；验证覆盖 mip/深度更新、退休及下游
   梯度。普通 Graph 可自动导出四类 recording，保留有限 view 和消费者种子，完整单级

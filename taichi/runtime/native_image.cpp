@@ -1,4 +1,5 @@
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/image_transfer.h"
 
 #include <limits>
 #include "taichi/common/operation_json.h"
@@ -324,6 +325,12 @@ void validate_pixels(Device &device,
     required.minimum_shape.push_back(channels);
   }
   validate_native_array_layout(pixels, required);
+#ifdef TI_WITH_VULKAN
+  if (dynamic_cast<vulkan::VulkanDevice *>(&device))
+    validate_buffer_image_alignment(
+        pixels.pointer.offset, scalar_bytes * channels,
+        p.format == BufferFormat::depth16 || p.format == BufferFormat::depth32f);
+#endif
   if (pixels.bytes != bytes)
     throw std::invalid_argument("Image pixels require exact packed storage");
 }

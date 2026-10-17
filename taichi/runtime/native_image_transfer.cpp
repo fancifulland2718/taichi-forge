@@ -117,10 +117,8 @@ void validate_transfer(Device &device, const ImageTransfer<T> &d) {
     resolve_native_storage_range(Arch::vulkan, d.buffer.pointer,
                                  d.buffer.bytes);
     // The range resolver proved pointer.offset + bytes cannot overflow.
-    const auto alignment = depth(format) ? size_t(4) : texel_bytes;
-    if ((d.buffer.pointer.offset + d.byte_offset) % alignment)
-      throw std::invalid_argument(
-          "Image transfer buffer offset is not aligned to its aspect");
+    validate_buffer_image_alignment(d.buffer.pointer.offset + d.byte_offset,
+                                    texel_bytes, depth(format));
   }
 }
 

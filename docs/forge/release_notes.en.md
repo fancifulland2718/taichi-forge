@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fixed the missing Vulkan `depth16` texel mapping for JIT/AOT image allocation
+  and `u16` uploads. Shared depth transfer validation checks the final four-byte
+  buffer offset, including finite subviews and construction-time AOT pixels.
 - Vulkan AOT explicit plans reconstruct region image copy, blit and buffer/image
   transfers through the common native registry. Shared range checks preserve finite
   views and padding; tests cover mip/depth updates, retirement and downstream

@@ -245,9 +245,9 @@ PreparedVulkanBufferImageCopy Program::prepare_vulkan_buffer_image_copy(
   TI_ERROR_IF(required_bytes > binding.bytes,
               "Vulkan buffer-image dense storage is too small for "
               "the declared layout and region.");
-  TI_ERROR_IF(binding.pointer.offset % texel_bytes != 0,
-              "Vulkan buffer-image dense range must be aligned to the image "
-              "texel block size.");
+  validate_buffer_image_alignment(binding.pointer.offset + buffer_offset,
+                                   texel_bytes,
+                                   is_depth_format(texture->get_buffer_format()));
   PreparedVulkanBufferImageCopy packet;
   packet.storage = std::move(storage);
   packet.texture_handle = texture->runtime_resource_handle();

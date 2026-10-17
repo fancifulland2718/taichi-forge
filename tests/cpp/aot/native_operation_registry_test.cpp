@@ -56,6 +56,9 @@ TEST(NativeOperationRegistry, ImageTransferSchemasAreVulkanOnlyAndTyped) {
 
 TEST(NativeOperationRegistry,
      ImageTransferRangesUseAccessedBytesAndPhysicalLimits) {
+  EXPECT_NO_THROW(validate_buffer_image_alignment(2, 2, false));
+  EXPECT_ANY_THROW(validate_buffer_image_alignment(2, 2, true));
+  EXPECT_NO_THROW(validate_buffer_image_alignment(4, 2, true));
   EXPECT_EQ(required_buffer_image_bytes(8, 5, 4, {3, 2, 2}, 4), 120);
   EXPECT_EQ(required_buffer_image_bytes(0, 0, 0, {3, 2, 1}, 1), 6);
   // Large unused slice padding must not reject a single-slice transfer.

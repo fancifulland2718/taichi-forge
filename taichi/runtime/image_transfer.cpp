@@ -5,6 +5,16 @@
 #include "taichi/common/core.h"
 
 namespace taichi::lang {
+void validate_buffer_image_alignment(std::size_t offset,
+                                     std::size_t texel_bytes,
+                                     bool depth_aspect) {
+  // VUID-vkCmdCopyBufferToImage-dstImage-07978 and the matching download rule.
+  const auto alignment = depth_aspect ? size_t(4) : texel_bytes;
+  TI_ERROR_IF(!alignment || offset % alignment,
+              "Vulkan buffer-image offset must be aligned to its texel/aspect "
+              "requirement.");
+}
+
 void validate_image_transfer_region(const std::array<uint32_t, 3> &size,
                                     uint32_t mip_levels,
                                     const std::array<uint32_t, 3> &offset,

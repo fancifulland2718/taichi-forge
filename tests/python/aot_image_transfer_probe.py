@@ -213,30 +213,56 @@ def main(mode, artifact, result):
         for seed in seeds:
             seed.close()
 
-        # The qualified depth32f owner requires a graphics queue and four-byte
-        # buffer offsets. Packed depth/stencil is not this contract.
-        depth_image = runtime.native_resource("image", "sampled", parameters=dict(shape=[2, 2], format="depth32f"))
-        depth_input, depth_output = (runtime.ndarray("f32", (5,)) for _ in range(2))
-        depth_values = [123, 0, 1, 0.25, 0.5]
-        write(depth_input, depth_values)
-        write(depth_output, [99] * 5)
-        depth_ops = [
-            native("image", "buffer_to_image", dict(image="image", buffer="input"), region=region(2, 2), byte_offset=4),
-            native(
-                "image", "image_to_buffer", dict(image="image", buffer="output"), region=region(2, 2), byte_offset=4
-            ),
-        ]
-        depth_args = dict(image=depth_image, input=depth_input, output=depth_output)
-        bad_depth = json.loads(ExecutionPlan(depth_ops).to_json())
-        bad_depth["operations"][0]["parameters"]["byte_offset"] = 2
-        raises(
-            lambda: ExecutionPlan.from_json(json.dumps(bad_depth)).prepare(module, depth_args), "aligned"
-        )
-        depth_call = ExecutionPlan(depth_ops).prepare(module, depth_args)
-        depth_call()
-        assert read(depth_output) == [99] + depth_values[1:]
-        for value in (depth_call, depth_image, depth_input, depth_output):
-            value.close()
+        # Both depth formats use graphics queues and four-byte buffer offsets.
+        for fmt, dtype, code, values in (
+            ("depth32f", "f32", "f", [123, 0, 1, 0.25, 0.5]),
+            ("depth16", "u16", "H", [123, 456, 0, 65535, 16384, 32768]),
+        ):
+            depth_image = runtime.native_resource("image", "sampled", parameters=dict(shape=[2, 2], format=fmt))
+            depth_input, depth_output = (runtime.ndarray(dtype, (len(values),)) for _ in range(2))
+            write(depth_input, values, code)
+            write(depth_output, [99] * len(values), code)
+            depth_ops = [
+                native(
+                    "image", "buffer_to_image", dict(image="image", buffer="input"), region=region(2, 2), byte_offset=4
+                ),
+                native(
+                    "image", "image_to_buffer", dict(image="image", buffer="output"), region=region(2, 2), byte_offset=4
+                ),
+            ]
+            depth_args = dict(image=depth_image, input=depth_input, output=depth_output)
+            bad_depth = json.loads(ExecutionPlan(depth_ops).to_json())
+            bad_depth["operations"][0]["parameters"]["byte_offset"] = 2
+            raises(lambda: ExecutionPlan.from_json(json.dumps(bad_depth)).prepare(module, depth_args), "aligned")
+            depth_call = ExecutionPlan(depth_ops).prepare(module, depth_args)
+            depth_call()
+            assert read(depth_output, code) == [99] * (len(values) - 4) + values[-4:]
+            if fmt == "depth16":
+                seed = runtime.ndarray(dtype, (2, 2))
+                write(seed, values[-4:], code)
+                seeded = runtime.native_resource(
+                    "image", "sampled", parameters=dict(shape=[2, 2], format=fmt), bindings=dict(pixels=seed)
+                )
+                seeded_call = ExecutionPlan(depth_ops[1:]).prepare(module, dict(image=seeded, output=depth_output))
+                seed.close()
+                seeded_call()
+                assert read(depth_output, code)[-4:] == values[-4:]
+                seeded_call.close()
+                seeded.close()
+                # Construction-time pixels must obey the same absolute aspect
+                # alignment, including a subview hidden behind a resource port.
+                misaligned_seed = ExecutionPlan(
+                    depth_ops[1:],
+                    resources=[
+                        dict(kind="ndarray_view", name="seed_view", array="input", offset=1, shape=[2, 2]),
+                        dict(
+                            native("image", "sampled", dict(pixels="seed_view"), shape=[2, 2], format=fmt), name="image"
+                        ),
+                    ],
+                )
+                raises(lambda: misaligned_seed.prepare(module, dict(input=depth_input, output=depth_output)), "aligned")
+            for value in (depth_call, depth_image, depth_input, depth_output):
+                value.close()
 
         retained[0]()
         if mode == "borrowed":
