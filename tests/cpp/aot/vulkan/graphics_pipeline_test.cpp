@@ -40,6 +40,28 @@ const uint32_t mismatched_storage_fragment[] =
     ;
 }  // namespace
 
+TEST(VulkanGraphicsPipeline, MeshAdmissionUsesIndependentOverflowSafeLimits) {
+  VulkanCapabilities caps;
+  caps.max_mesh_work_group_count = {8, 4, 2};
+  caps.max_mesh_work_group_total_count = 32;
+  caps.max_task_work_group_count = {2, 2, 2};
+  caps.max_task_work_group_total_count = 4;
+  EXPECT_TRUE(caps.mesh_group_count_valid(8, 4, 1, false));
+  EXPECT_FALSE(caps.mesh_group_count_valid(8, 4, 2, false));
+  EXPECT_FALSE(caps.mesh_group_count_valid(9, 1, 1, false));
+  EXPECT_FALSE(caps.mesh_group_count_valid(0, 1, 1, false));
+  EXPECT_TRUE(caps.mesh_group_count_valid(2, 2, 1, true));
+  EXPECT_FALSE(caps.mesh_group_count_valid(2, 2, 2, true));
+  EXPECT_FALSE(caps.mesh_group_count_valid(4, 1, 1, true));
+  EXPECT_TRUE(caps.mesh_group_count_valid(4, 1, 1, false));
+  caps.max_mesh_work_group_count = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
+  caps.max_mesh_work_group_total_count = UINT32_MAX;
+  // The old uint64 product wraps to zero for these dimensions. This is a
+  // host arithmetic check only; no oversized dispatch or allocation occurs.
+  EXPECT_FALSE(caps.mesh_group_count_valid(1u << 22, 1u << 22, 1u << 20, false));
+  EXPECT_TRUE(caps.mesh_group_count_valid(UINT32_MAX, 1, 1, false));
+}
+
 TEST(VulkanGraphicsPipeline, StorageCapacityUsesMergedLayoutAndActualFlags) {
   if (!is_vulkan_api_available())
     GTEST_SKIP() << "Vulkan unavailable";

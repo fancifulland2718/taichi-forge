@@ -700,18 +700,9 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     recorded.draw = draw;
     if (mesh_draw) {
       const auto &mesh = *command.mesh;
-      const auto caps = vulkan_mesh_shader_capabilities();
-      const std::string prefix =
-          resource->task_shader() ? "max_task_" : "max_mesh_";
-      const std::uint64_t total =
-          static_cast<std::uint64_t>(mesh.group_count_x) *
-          mesh.group_count_y * mesh.group_count_z;
-      TI_ERROR_IF(mesh.group_count_x == 0 || mesh.group_count_y == 0 ||
-                      mesh.group_count_z == 0 ||
-                      mesh.group_count_x > caps.at(prefix + "group_count_x") ||
-                      mesh.group_count_y > caps.at(prefix + "group_count_y") ||
-                      mesh.group_count_z > caps.at(prefix + "group_count_z") ||
-                      total > caps.at(prefix + "group_total_count"),
+      TI_ERROR_IF(!device->vk_caps().mesh_group_count_valid(
+                      mesh.group_count_x, mesh.group_count_y, mesh.group_count_z,
+                      resource->task_shader()),
                   "Vulkan mesh draw group counts exceed the active device "
                   "limits.");
       recorded.mesh = mesh;

@@ -1004,6 +1004,25 @@ struct VulkanCapabilities {
   std::uint32_t subgroup_size{0};
   VkShaderStageFlags cooperative_matrix_supported_stages{0};
   std::vector<VulkanCooperativeMatrixProperty> cooperative_matrix_properties;
+
+  // Shared cold admission and command-recording check. Avoid multiplying three
+  // uint32 dimensions: even uint64 cannot represent their full product.
+  bool mesh_group_count_valid(uint32_t x,
+                              uint32_t y,
+                              uint32_t z,
+                              bool uses_task_shader) const noexcept {
+    const auto &limits = uses_task_shader ? max_task_work_group_count
+                                          : max_mesh_work_group_count;
+    uint32_t remaining = uses_task_shader ? max_task_work_group_total_count
+                                          : max_mesh_work_group_total_count;
+    const std::array<uint32_t, 3> counts{x, y, z};
+    for (size_t i = 0; i < counts.size(); ++i) {
+      if (!counts[i] || counts[i] > limits[i] || counts[i] > remaining)
+        return false;
+      remaining /= counts[i];
+    }
+    return true;
+  }
 };
 
 class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {

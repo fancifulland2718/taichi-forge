@@ -2350,15 +2350,8 @@ RhiResult VulkanCommandList::draw_mesh_tasks(uint32_t group_count_x,
       group_count_y == 0 || group_count_z == 0) {
     return RhiResult::not_supported;
   }
-  const auto &limits = task_shader ? caps.max_task_work_group_count
-                                   : caps.max_mesh_work_group_count;
-  const std::uint64_t total = static_cast<std::uint64_t>(group_count_x) *
-                              group_count_y * group_count_z;
-  const std::uint64_t total_limit =
-      task_shader ? caps.max_task_work_group_total_count
-                  : caps.max_mesh_work_group_total_count;
-  if (group_count_x > limits[0] || group_count_y > limits[1] ||
-      group_count_z > limits[2] || total > total_limit) {
+  if (!caps.mesh_group_count_valid(group_count_x, group_count_y, group_count_z,
+                                    task_shader)) {
     return RhiResult::invalid_usage;
   }
   buffer_->device.functions().vkCmdDrawMeshTasksEXT(
