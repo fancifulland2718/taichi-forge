@@ -47,8 +47,11 @@ struct OptixInstancesDescription {
   std::shared_ptr<OptixContextResource> context;
   std::vector<std::shared_ptr<OptixSceneResource>> gas;
   NativeArrayBinding transforms;
-  std::vector<uint32_t> custom_indices, visibility_masks, opaque;
+  std::vector<uint32_t> custom_indices, visibility_masks, opaque, sbt_offsets;
   bool allow_update{false};
+};
+struct OptixSbtInstancesDescription : OptixInstancesDescription {
+  static constexpr uint32_t version = 2;
 };
 
 class OptixSceneResource : public NativeOptixScene {
@@ -292,7 +295,8 @@ void validate_instances(Device &device, const OptixInstancesDescription &d) {
       &d.context->device() != &device || d.gas.empty() ||
       d.gas.size() > std::numeric_limits<uint32_t>::max() ||
       d.custom_indices.size() != d.gas.size() ||
-      d.visibility_masks.size() != d.gas.size() || d.opaque.size() != d.gas.size())
+      d.visibility_masks.size() != d.gas.size() || d.opaque.size() != d.gas.size() ||
+      (!d.sbt_offsets.empty() && d.sbt_offsets.size() != d.gas.size()))
     throw std::invalid_argument("OptiX instance description is inconsistent");
   for (const auto &gas : d.gas)
     if (!gas || !gas->is_gas() || gas->context() != d.context ||
@@ -380,6 +384,16 @@ NativeOperationAvailability probe(NativeProviderSession &providers) {
       return {};
     throw;
   }
+}
+
+bool has_instance_sbt_api(const TiForgeOptixProviderApi &api) {
+  return (api.info.features & TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET) &&
+         api.create_instance_scene_sbt && api.prepare_instance_sbt;
+}
+
+NativeOperationAvailability probe_instance_sbt(NativeProviderSession &providers) {
+  if (!probe(providers).available) return {};
+  return {has_instance_sbt_api(execution_api(*providers.runtime(definition))), 0};
 }
 
 uint64_t address(const NativeArrayBinding &array) {
@@ -522,6 +536,9 @@ class CudaOptixScene final : public OptixSceneResource,
   }
   void initialize_instances() {
     const auto &d = instances();
+    const auto &api = lease->context->lease->api;
+    if (!d.sbt_offsets.empty() && !has_instance_sbt_api(api))
+      throw std::invalid_argument("OptiX adapter lacks instance SBT offsets");
     auto &driver = CUDADriver::get_instance();
     driver.context_synchronize();
     std::vector<float> transforms(d.gas.size() * 12);
@@ -545,11 +562,15 @@ class CudaOptixScene final : public OptixSceneResource,
     }
     TiForgeOptixInstanceSceneDesc desc{sizeof(desc), instance_count(),
                                       d.allow_update, 0, descriptions.data(), 0};
-    const auto &api = lease->context->lease->api;
     // The shared adapter checks finite/invertible transforms and vendor ID
     // limits before constructing its IAS; no second transform policy here.
-    check(api, api.create_instance_scene(lease->context->lease->handle,
-                                         &desc, &lease->handle),
+    // Its extended entry also queries the actual device SBT offset limit.
+    check(api, d.sbt_offsets.empty()
+                   ? api.create_instance_scene(lease->context->lease->handle,
+                                                &desc, &lease->handle)
+                   : api.create_instance_scene_sbt(lease->context->lease->handle,
+                                                    &desc, d.sbt_offsets.data(),
+                                                    &lease->handle),
           "create instance scene");
     if (!lease->handle)
       throw std::runtime_error("OptiX returned a null instance scene");
@@ -660,6 +681,15 @@ class CudaOptixQuery final : public NativeOperation {
                         : extended_ ? api.prepare_alpha : api.prepare_typed)(
                    context.lease->handle),
           "prepare query pipeline");
+    if (!use_prepared && scene_->is_instances() &&
+        std::any_of(scene_->instances().sbt_offsets.begin(),
+                    scene_->instances().sbt_offsets.end(),
+                    [](uint32_t offset) { return offset != 0; })) {
+      uint64_t bytes = 0;
+      check(api, api.prepare_instance_sbt(scene_->lease->handle,
+                                         faces_ ? 4 : extended_ ? 2 : 1, &bytes),
+            "prepare fixed instance SBT");
+    }
     face_records_offset_ = use_prepared ? 0 : 64;
     const bool legacy_opaque_first =
         !use_prepared && op_.any_hit && !op_.occlusion && !faces_;
@@ -1073,6 +1103,51 @@ void register_geometry(NativeOperationRegistry &registry, const char *operation)
       });
 #endif
 }
+template <typename Description>
+void register_instances(NativeOperationRegistry &registry) {
+  registry.define<Description>(validate_instances, NativeObjectKind::resource);
+  registry.register_schema<Description>(
+      "optix", "instance_scene", {"context", "transforms"},
+      [](const liong::json::JsonValue &p)
+          -> NativeOperationRegistry::Binder<Description> {
+        using namespace operation_json;
+        if constexpr (Description::version == 2)
+          fields(p, {"instance_count", "custom_indices", "visibility_masks", "opaque", "allow_update", "sbt_offsets"});
+        else
+          fields(p, {"instance_count", "custom_indices", "visibility_masks", "opaque", "allow_update"});
+        const auto size = count(p, "instance_count");
+        const auto ids = instance_values(p, "custom_indices", size, 0xffffffu, 0);
+        const auto masks = instance_values(p, "visibility_masks", size, 0xffu, 0xffu);
+        const auto opaque = instance_values(p, "opaque", size, 1, 0, true);
+        std::vector<uint32_t> offsets;
+        if constexpr (Description::version == 2)
+          offsets = instance_values(p, "sbt_offsets", size, UINT32_MAX, 0);
+        const bool update = optional_bool(p, "allow_update");
+        return [=](const NativeOperationBindings &b) {
+          Description d;
+          d.context = b.at("context").resource<OptixContextResource>();
+          d.transforms = b.at("transforms").array();
+          d.custom_indices = ids;
+          d.visibility_masks = masks;
+          d.opaque = opaque;
+          d.sbt_offsets = offsets;
+          d.allow_update = update;
+          d.gas.reserve(size);
+          for (uint32_t i = 0; i < size; ++i)
+            d.gas.push_back(b.at("gas_" + std::to_string(i)).resource<OptixSceneResource>());
+          return d;
+        };
+      }, {}, {}, {{"instance_count", {"gas"}}});
+#ifdef TI_WITH_CUDA
+  NativeOperationRegistry::ContextProbe availability;
+  if constexpr (Description::version == 2) availability = probe_instance_sbt;
+  registry.register_context_factory<Description>(
+      Arch::cuda, NativeOperationMode::cuda_ordered,
+      [](NativePreparationContext &c, const Description &d) {
+        return prepare<CudaOptixScene>(c, static_cast<const OptixInstancesDescription &>(d));
+      }, availability);
+#endif
+}
 }  // namespace
 
 void register_optix_operations(NativeOperationRegistry &registry) {
@@ -1089,32 +1164,8 @@ void register_optix_operations(NativeOperationRegistry &registry) {
       });
   register_geometry<OptixSceneDescription>(registry, "triangle_scene");
   register_geometry<OptixGasDescription>(registry, "triangle_gas");
-  registry.define<OptixInstancesDescription>(validate_instances, NativeObjectKind::resource);
-  registry.register_schema<OptixInstancesDescription>(
-      "optix", "instance_scene", {"context", "transforms"},
-      [](const liong::json::JsonValue &p)
-          -> NativeOperationRegistry::Binder<OptixInstancesDescription> {
-        using namespace operation_json;
-        fields(p, {"instance_count", "custom_indices", "visibility_masks", "opaque", "allow_update"});
-        const auto size = count(p, "instance_count");
-        const auto ids = instance_values(p, "custom_indices", size, 0xffffffu, 0);
-        const auto masks = instance_values(p, "visibility_masks", size, 0xffu, 0xffu);
-        const auto opaque = instance_values(p, "opaque", size, 1, 0, true);
-        const bool update = optional_bool(p, "allow_update");
-        return [=](const NativeOperationBindings &b) {
-          OptixInstancesDescription d;
-          d.context = b.at("context").resource<OptixContextResource>();
-          d.transforms = b.at("transforms").array();
-          d.custom_indices = ids;
-          d.visibility_masks = masks;
-          d.opaque = opaque;
-          d.allow_update = update;
-          d.gas.reserve(size);
-          for (uint32_t i = 0; i < size; ++i)
-            d.gas.push_back(b.at("gas_" + std::to_string(i)).resource<OptixSceneResource>());
-          return d;
-        };
-      }, {}, {}, {{"instance_count", {"gas"}}});
+  register_instances<OptixInstancesDescription>(registry);
+  register_instances<OptixSbtInstancesDescription>(registry);
   register_query<OptixQueryOperation>(registry);
   register_query<OptixBoundFaceQueryOperation>(registry);
   register_query<OptixAlphaQueryOperation>(registry);
@@ -1160,11 +1211,6 @@ void register_optix_operations(NativeOperationRegistry &registry) {
           throw;
         }
       }, probe);
-  registry.register_context_factory<OptixInstancesDescription>(
-      Arch::cuda, NativeOperationMode::cuda_ordered,
-      [](NativePreparationContext &c, const OptixInstancesDescription &d) {
-        return prepare<CudaOptixScene>(c, d);
-      });
   registry.register_context_factory<OptixRefitOperation>(
       Arch::cuda, NativeOperationMode::cuda_ordered,
       [](NativePreparationContext &, const OptixRefitOperation &op) {

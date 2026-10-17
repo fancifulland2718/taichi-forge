@@ -576,6 +576,16 @@ provider `optix`:
 | `refit` | Operation: `scene`, `vertices` | Empty object |
 | `instance_refit` | Operation: `scene`, optional `transforms` | Empty object |
 
+`instance_scene` v2 additionally accepts `sbt_offsets`, one uint32 per instance
+(default zero). The adapter checks its actual device SBT-offset limit at build
+time. Query `probe_native_resource("optix_instance_scene", version=2)` for the
+optional adapter capability. Ordinary Graph export preserves nonzero offsets
+through v2; zero-offset scenes keep v1. Device refit preserves these frozen
+offsets. Program launches and fixed typed/compact/alpha/face queries can share
+the scene: fixed-query compatibility SBTs are prepared only for the variants
+used, outside replay. Shader-dependent SBT indexing remains the application's
+responsibility; launch preparation checks base instance-offset coverage.
+
 The optional `optix/program` v1 resource reconstructs an immutable programmable
 pipeline through the same context and adapter. Bind `context` and `module_0`
 through `module_{module_count-1}` to host blobs containing nonempty PTX without
@@ -629,7 +639,7 @@ The program digest encoding is defined in
 Explicit plans are qualified with adapter ABI variants 93/105/118 for instance
 hit/miss, indirect SBT buffers/textures, refit, scalar rebinding, source-independent
 consumption, pending retirement and downstream DSL gradients. This does not
-differentiate user shaders, add nonzero IAS SBT-offset/micromap reconstruction,
+differentiate user shaders or add micromap reconstruction,
 or establish total driver pipeline residency. Reported native device payload
 includes parameter/SBT storage; the adapter also retains a pinned host copy.
 
@@ -666,8 +676,8 @@ mixing public and private children. The exporter reconstructs prepared launches;
 it does not currently accept public launch handles. ABI 93/105/118 tests cover
 ordinary private/public Graph exports, repeated recordings, context mismatch,
 refit/image updates, retirement after producer closure and downstream gradients.
-This does not expand CUDA capture/selected-recipe admission or the nonzero SBT
-offset/micromap scene boundary above.
+This does not expand CUDA capture/selected-recipe admission or add micromap
+scene reconstruction.
 
 Bindings use compact scalar ndarrays: f32 vertices `[V,3]`, i32/u32 indices `[T,3]`,
 and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed output
@@ -1589,9 +1599,10 @@ come from the consumer, not potentially stale constructor transforms. A live IAS
 can reconstruct geometry whose original GAS handle has closed, using its retained
 metadata and explicit seeds. This does not enable direct refits through a closed
 GAS handle. Windows CUDA checks cover shared geometry, device transforms,
-bounds-only refits, independent bindings and downstream gradients. Legacy untyped
-hits, OMM/program recordings and nonzero SBT offsets remain unsupported by
-this automatic route and are rejected during export.
+bounds-only refits, independent bindings and downstream gradients. Nonzero SBT
+offsets use instance-scene v2; programmable recordings use the program/launch
+export described above. Legacy untyped hits and OMM reconstruction remain
+unsupported by this automatic route and are rejected during export.
 
 These qualified OptiX contexts, triangle scenes, GAS and instance scenes may
 instead be public resource inputs. Map a source object to a string name:

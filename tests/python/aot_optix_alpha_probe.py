@@ -25,7 +25,7 @@ def native(provider, operation, bindings, version=1, **parameters):
     )
 
 
-def plan_parts(channels):
+def plan_parts(channels, sbt_offsets=None):
     resources = [
         dict(native("optix", "context", {}), name="context"),
         dict(
@@ -46,6 +46,8 @@ def plan_parts(channels):
                     context="context", gas_0="gas", gas_1="gas", transforms="transforms"
                 ),
                 instance_count=2,
+                version=2 if sbt_offsets is not None else 1,
+                **(dict(sbt_offsets=sbt_offsets) if sbt_offsets is not None else {}),
                 opaque=[False, False],
                 custom_indices=[11, 22],
                 allow_update=True,

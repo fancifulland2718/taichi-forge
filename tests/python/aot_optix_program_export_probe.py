@@ -22,6 +22,7 @@ def main(mode, artifact, adapter):
     records = []
     with runtime:
         runtime.configure_provider("optix", adapter_path=adapter)
+        assert runtime.probe_native_resource("optix_instance_scene", version=2)["available"]
         start = time.perf_counter()
         module = runtime.load_module(artifact)
         load_ms = (time.perf_counter() - start) * 1000
@@ -70,16 +71,28 @@ def main(mode, artifact, adapter):
             owners = [program, context]
             public_frame = dict(frame, shared_program=program)
             if prefix == "trace":
+                ias = next(r for r in document["resources"] if r.get("operation") == "instance_scene")
                 gas = runtime.native_resource(
                     "optix",
                     "triangle_gas",
                     parameters=dict(vertex_count=3, triangle_count=1),
                     bindings=dict(context=context, vertices=frame["vertices"], indices=frame["indices"]),
                 )
+                raises(
+                    lambda: runtime.native_resource(
+                        "optix",
+                        "instance_scene",
+                        version=2,
+                        parameters=dict(ias["parameters"], sbt_offsets=[0xFFFFFFFF]),
+                        bindings=dict(context=context, gas_0=gas, transforms=frame["transforms"]),
+                    ),
+                    "device limit",
+                )
                 scene = runtime.native_resource(
                     "optix",
                     "instance_scene",
-                    parameters=dict(instance_count=1, custom_indices=[17], allow_update=True),
+                    version=ias["version"],
+                    parameters=ias["parameters"],
                     bindings=dict(context=context, gas_0=gas, transforms=frame["transforms"]),
                 )
                 public_frame["shared_scene"] = scene
@@ -137,7 +150,50 @@ def main(mode, artifact, adapter):
                         info=call.info,
                     )
                 )
-            if prefix == "indirect":
+            if prefix == "trace":
+                # The same nonzero-offset scene also serves fixed typed and compact queries.
+                query_args = dict(
+                    scene=scene,
+                    rays=runtime.ndarray("f32", (1, 8)),
+                    hits=runtime.ndarray("f32", (1, 4)),
+                    ids=runtime.ndarray("i32", (1, 4)),
+                    occluded=runtime.ndarray("i32", 1),
+                )
+                write(query_args["rays"], [0, 0, -1, 0.01, 0, 0, 1, 3])
+                queries = ExecutionPlan(
+                    [
+                        dict(
+                            kind="native",
+                            provider="optix",
+                            operation="query",
+                            version=1,
+                            parameters=dict(ray_count=1),
+                            bindings=dict(scene="scene", rays="rays", hits="hits", hit_indices="ids"),
+                        ),
+                        dict(
+                            kind="native",
+                            provider="optix",
+                            operation="query",
+                            version=1,
+                            parameters=dict(ray_count=1, occlusion=True),
+                            bindings=dict(scene="scene", rays="rays", hits="occluded"),
+                        ),
+                    ]
+                ).prepare(module, query_args)
+                for shift in (0, 5, 0):
+                    transform = identity.copy()
+                    transform[3] = shift
+                    write(frame["transforms"], transform)
+                    calls[1]()
+                    queries()
+                    assert read(query_args["hits"]) == ([-1, 0, 0, 0] if shift else [1, 0.25, 0.5, 0])
+                    assert read(query_args["ids"], "i") == ([-1, -1, -1, 0] if shift else [0, 0, 17, 1])
+                    assert read(query_args["occluded"], "i") == [int(not shift)]
+                queries.close()
+                for name, value in query_args.items():
+                    if name != "scene":
+                        value.close()
+            else:
                 # Public texture data changes through the same native owner, without re-export.
                 upload = ExecutionPlan(
                     [

@@ -86,7 +86,9 @@ def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path):
                 vertices.from_numpy(np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], np.float32))
                 indices.from_numpy(np.array([[0, 1, 2]], np.int32))
                 gas = stack.enter_context(provider.triangle_gas(vertices, indices))
-                scene = stack.enter_context(provider.instance_scene((ray.OptixRayInstance(gas, custom_index=17),)))
+                scene = stack.enter_context(
+                    provider.instance_scene((ray.OptixRayInstance(gas, custom_index=17, sbt_record_offset=4),))
+                )
                 program = stack.enter_context(
                     provider.program(
                         (code,),
@@ -107,7 +109,8 @@ def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path):
                     8,
                     raygen="render",
                     miss=(miss, miss),
-                    hit=(
+                    hit=(ray.OptixSbtRecord("hit", layout=HIT, values=dict(value=999, accept=0)),) * 4
+                    + (
                         ray.OptixSbtRecord("hit", layout=HIT, values=dict(value=100, accept=1)),
                         ray.OptixSbtRecord("hit", layout=HIT, values=dict(value=200, accept=0)),
                     ),
@@ -156,6 +159,9 @@ def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path):
             assert sum(r.get("operation") == "prepared_launch" for r in document["resources"]) == 1
             assert sum(r.get("operation") == "program" for r in document["resources"]) == 1
             assert sum(r.get("operation") == "launch" for r in document["operations"]) == 2
+            if not indirect:
+                ias = next(r for r in document["resources"] if r.get("operation") == "instance_scene")
+                assert ias["version"] == 2 and ias["parameters"]["sbt_offsets"] == [4]
             shared = module.add_execution_plan(prefix + "_public", graph, **options, resource_bindings=public)
             document = json.loads(shared.to_json())
             assert not any(

@@ -18,6 +18,7 @@ def test_optix_program_factory_is_cuda_only():
         assert not runtime.native_resource_capabilities("optix_program")
         assert not runtime.probe_native_resource("optix_program")["available"]
         assert not runtime.native_resource_capabilities("optix_prepared_launch")
+        assert not runtime.probe_native_resource("optix_instance_scene", version=2)["available"]
         assert not runtime.native_operation_capabilities("optix_program_launch")
 
 

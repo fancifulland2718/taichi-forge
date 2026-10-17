@@ -92,7 +92,9 @@ def test_aot_managed_alpha_uploads_and_post_query_gradients(tmp_path):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="energy_grad")
     for channels in (1, 4):
-        operations, resources = plan_parts(channels)
+        # Keep the scalar case on v1; RGBA exercises the legacy alpha/face SBT
+        # compatibility path with two different nonzero instance offsets.
+        operations, resources = plan_parts(channels, sbt_offsets=[2, 4] if channels == 4 else None)
         module.add_execution_plan(
             f"alpha_{channels}",
             ti.aot.ExecutionPlan(

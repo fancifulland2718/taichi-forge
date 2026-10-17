@@ -63,8 +63,8 @@ def _scene(context, scene):
     if type(scene) is not OptixInstanceScene:
         raise TaichiRuntimeError("AOT OptiX recording export requires a qualified scene")
     scene._validate_lifetime()
-    if scene._has_micromaps or any(scene._sbt_offsets):
-        raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM or nonzero SBT offsets")
+    if scene._has_micromaps:
+        raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM inputs")
     context.resource_links(
         scene,
         dict(
@@ -86,6 +86,7 @@ def _scene(context, scene):
             scene,
             "optix",
             "instance_scene",
+            version=2 if any(scene._sbt_offsets) else 1,
             bindings=bindings,
             parameters=dict(
                 instance_count=scene.instance_count,
@@ -93,6 +94,7 @@ def _scene(context, scene):
                 custom_indices=[instance.custom_index for instance in scene._instances],
                 visibility_masks=[instance.mask for instance in scene._instances],
                 opaque=[instance.opaque for instance in scene._instances],
+                **(dict(sbt_offsets=list(scene._sbt_offsets)) if any(scene._sbt_offsets) else {}),
             ),
         )
 

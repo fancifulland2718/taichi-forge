@@ -35,7 +35,8 @@
   所有者。显式计划一次重建不含地址的参数/SBT，沿 CUDA ordered 路径重放；已验证
   实例 refit、间接 buffer/texture 和下游 DSL 梯度。普通 Graph 自动导出共享 program/
   scene/image 与重复 launch packet，显式不可变 PTX 沿用公共 shader 资产协议，
-  不新增 JIT 常驻 PTX；非零 IAS SBT offset 和 micromap 重建继续推进。
+  不新增 JIT 常驻 PTX。Instance-scene v2 在重建/refit 时保留非零 SBT offset，
+  同时支持固定查询兼容路径；micromap 重建继续推进。
 - AOT 新增固定 SPIR-V、标量 buffer 描述符的 Vulkan compute pipeline/dispatch
   资源；代码、布局和范围在冷准备时校验，复用资源 owner 与图形描述符校验，
   已验证独立/借用消费及下游梯度。

@@ -456,6 +456,14 @@ asset fingerprint 必须与源 BLAS 一致。导出保存按内容寻址的 host
 | `refit` | 操作：`scene`、`vertices` | 空对象 |
 | `instance_refit` | 操作：`scene`，可选 `transforms` | 空对象 |
 
+`instance_scene` v2 增加逐实例 uint32 `sbt_offsets`（默认全零），由 adapter 在构建时
+查询实际设备的 SBT offset 上限。通过
+`probe_native_resource("optix_instance_scene", version=2)` 协商可选 adapter 能力。
+普通 Graph 导出用 v2 保留非零 offset，零 offset 场景仍用 v1；设备 refit 保留冻结的
+offset。Program launch 和固定 typed/compact/alpha/face 查询可共享 scene，固定查询
+按实际使用的变体冷准备兼容 SBT，重放不再构建。依赖 shader 的 SBT 索引仍由应用保证，
+launch 准备会检查实例基本 offset 的覆盖范围。
+
 可选 `optix/program` v1 资源复用相同 context 和 adapter 重建不可变可编程管线。
 绑定 `context` 和 `module_0` 至 `module_{module_count-1}`；module 为不含 NUL 的
 非空 PTX host blob。参数包括 `module_count`、`module_sha256`（逐 blob 小写 SHA256）、
@@ -496,7 +504,7 @@ packet；修改固定标量或资源绑定须创建另一 launch。`optix/launch
 Program 摘要编码见 [`native_optix_program.cpp`](../../taichi/runtime/native_optix_program.cpp)。
 ABI 93/105/118 adapter 已验证显式计划的实例 hit/miss、SBT 间接 buffer/texture、refit、
 标量重绑定、无 producer 消费、在途退休和下游 DSL 梯度。不提供用户 shader 求导，
-非零 IAS SBT offset 与 micromap 重建仍需接通，也不代表完整 driver 管线驻留测量。
+micromap 重建仍需接通，也不代表完整 driver 管线驻留测量。
 原生设备 payload 统计包含参数/SBT 存储；adapter 另外保留一份 pinned host 副本。
 
 包含已初始化 `OptixPreparedLaunch` 的普通 Graph 可通过 `Module.add_execution_plan()`
@@ -526,7 +534,7 @@ groups 与 SBT payload 来自冻结 recording，不读取设备参数。相同 p
 重建。混合公共和私有子资源时，应把共同 context 也绑定为公共资源。导出器重建 prepared
 launch，暂不接受公共 launch 句柄。ABI 93/105/118 已验证普通 Graph 公私导出、重复录制、
 context 不匹配、refit/图像更新、生产端关闭后的消费退休和下游梯度；未扩展 CUDA capture、
-selected recipe 的资格，也未扩展上文非零 SBT offset/micromap 的 scene 支持边界。
+selected recipe 的资格，也未新增 micromap scene 重建。
 
 使用紧凑 scalar ndarray：顶点 f32 `[V,3]`、索引 i32/u32 `[T,3]`、ray f32 `[N,8]`
 （origin.xyz、t_min、direction.xyz、t_max）。typed 输出 f32 `[N,4]` 的 t/u/v/0
@@ -1238,8 +1246,9 @@ module.add_execution_plan("step", compiled_graph, resource_bindings=resource_bin
 和 opaque 的独立语义；初始矩阵由消费端提供，不取可能已过期的构造时 transform。
 存活 IAS 可用其保留的元数据和显式 seed 重建原始句柄已关闭的 GAS；这不允许通过
 关闭的 GAS 句柄直接 refit。Windows CUDA 已验证共享几何、设备变换、包围盒刷新、
-独立绑定及后续梯度。旧 untyped hit、OMM/program recording 和非零 SBT offset
-仍未接通自动导出，会在导出阶段明确拒绝。
+独立绑定及后续梯度。非零 SBT offset 使用 instance-scene v2，program recording 使用
+上文的 program/launch 导出合同。旧 untyped hit 和 OMM 重建仍未接通自动导出，
+会在导出阶段明确拒绝。
 
 这些合格 OptiX context、triangle scene、GAS 和 instance scene 也可作为公开资源输入，
 将源对象映射为字符串名称：
