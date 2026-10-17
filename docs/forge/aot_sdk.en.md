@@ -860,7 +860,7 @@ Windows qualification covers standalone and borrowed execution, direct and
 indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
 LOAD, changed inputs and bindings, shared/private retirement, and downstream
 numeric gradients. This is not differentiation of rasterization. Mesh/indirect
-draws, descriptor arrays and shader AS bindings remain separate work.
+draws and descriptor arrays remain separate work.
 
 Ordinary Vulkan Graphs containing `VulkanGraphicsDrawRecording` or
 `VulkanGraphicsPassRecording` can export these qualified direct/indexed/instanced
@@ -885,6 +885,26 @@ the same fixed GFX graph builder on the compute-capable graphics queue. This
 adds no format version or consumer interpreter. Segmented compute/graphics and
 independent fork/join recipes remain rejected until their distinct submission
 contracts are preserved. The cold export reuses compiled kernel entries.
+
+`vulkan_graphics/pass_direct` version 2 additionally accepts managed shader AS
+bindings. Query `native_operation_capabilities("vulkan_graphics_pass_direct",
+version=2)` before choosing this form; version 1 remains unchanged. Add
+`scene_count`, numbered `scene_N` bindings and each draw's `scenes` list of
+`{"set": 0, "binding": 0, "scene": 0}` records. These reference existing
+`vulkan_ray/instance_tlas` resources. Pipeline resources stay at version 1.
+The shared owner service binds descriptors and merges reflected vertex/fragment
+read stages per AS before recording the pass. Initialization, refit visibility,
+queue handoff and retirement reuse the existing AS core. Duplicate/missing
+descriptors and different-device owners are rejected before execution.
+
+Graph export selects pass version 2 only when AS descriptors occur. Supply each
+source `InstanceTLAS` under its Graph name in `source_bindings`; use the same
+explicit BLAS/TLAS seeds or public resource mapping as compute ray queries.
+Refit and raster consumers share the reconstructed scene. Paired private ABI91
+components are required for the shared shader-stage contract. Windows checks
+cover simultaneous vertex/fragment queries, device transform refit with
+hit/miss/hit output, private/public scenes, actual downstream kernel gradients
+and owner retirement. External ray queries and rasterization remain outside AD.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use

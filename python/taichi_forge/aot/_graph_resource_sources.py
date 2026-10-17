@@ -23,15 +23,18 @@ class SourceAccelerationStructures:
         for owner in self.owners.values():
             owner._validate_lifetime()
 
-    def kernel_resource(self, context, arg):
+    def resource(self, context, name):
         from taichi_forge.hardware._aot_vulkan_ray import _scene
 
-        owner = self.owners.get(arg.name)
+        owner = self.owners.get(name)
         if context.arch != core.Arch.vulkan or owner is None:
             raise TaichiRuntimeError("AOT Vulkan AS argument needs its InstanceTLAS in source_bindings")
         resource = _scene(context, owner)
-        self.used.add(arg.name)
+        self.used.add(name)
         return resource
+
+    def kernel_resource(self, context, arg):
+        return self.resource(context, arg.name)
 
     def validate_used(self):
         if self.owners.keys() - self.used:
@@ -56,6 +59,7 @@ class SourceResourceBindings:
             grouped.get(type(owner), self.arrays)[name] = owner
         self._handlers = {tag: factory(grouped[owner_type], fixed_bindings) for owner_type, tag, factory in handlers}
         self.images = self._handlers[core.ArgKind.TEXTURE]
+        self.acceleration_structures = self._handlers[core.ArgKind.ACCELERATION_STRUCTURE]
         self.owners = {name: owner for handler in self._handlers.values() for name, owner in handler.owners.items()}
 
     @property

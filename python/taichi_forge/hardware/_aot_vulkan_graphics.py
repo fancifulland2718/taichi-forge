@@ -149,10 +149,8 @@ def preflight(recording, context):
     for item in draws:
         if type(item.pipeline) is not VulkanGraphicsPipeline or type(item.draw) is not Draw:
             raise TaichiRuntimeError("AOT graphics recording currently requires direct/indexed raster draws")
-        if item.shader_acceleration_structures or any(
-            isinstance(value, ShaderBufferArrayBinding) for value in item.pipeline.shader_buffer_bindings
-        ):
-            raise TaichiRuntimeError("AOT graphics recording requires scalar buffer/image descriptors")
+        if any(isinstance(value, ShaderBufferArrayBinding) for value in item.pipeline.shader_buffer_bindings):
+            raise TaichiRuntimeError("AOT graphics recording requires scalar descriptors")
     for name in (*(value.name for value in colors), recording.depth):
         if name is not None:
             context.source_images.require_attachment(name)
@@ -177,6 +175,9 @@ def _clear_bits(fmt, values):
 def export(recording, context):
     draws, colors, depth_load = preflight(recording, context)
     bindings, groups, descriptions = {}, {name: {} for name in ("pipeline", "array", "image")}, []
+    has_scenes = any(item.shader_acceleration_structures for item in draws)
+    if has_scenes:
+        groups["scene"] = {}
 
     def index(group, resource):
         entries = groups[group]
@@ -227,6 +228,15 @@ def export(recording, context):
                 index_min=draw.index_bounds[0],
                 index_max=draw.index_bounds[1],
             )
+        if item.shader_acceleration_structures:
+            result["scenes"] = [
+                dict(
+                    set=key[0],
+                    binding=key[1],
+                    scene=index("scene", context.source_resources.acceleration_structures.resource(context, name)),
+                )
+                for key, name in item._ordered_shader_acceleration_structures
+            ]
         descriptions.append(result)
     parameters = dict(
         **{name + "_count": len(values) for name, values in groups.items()},
@@ -245,5 +255,7 @@ def export(recording, context):
         viewport=list(recording.viewport),
         draws=descriptions,
     )
-    context.native("vulkan_graphics", "pass_direct", parameters=parameters, bindings=bindings)
+    context.native(
+        "vulkan_graphics", "pass_direct", version=2 if has_scenes else 1, parameters=parameters, bindings=bindings
+    )
     return ()

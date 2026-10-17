@@ -48,6 +48,10 @@
   graphics 队列 recipe 复用同一 GFX 构建器；分段/fork-join 导出与 mesh/indirect
   仍待接通，详见 [AOT SDK 合同](aot_sdk.zh.md#显式-vulkan-光栅计划)。
 
+- Vulkan AOT 光栅 pass v2 可绑定既有受管 TLAS，合并 vertex/fragment 查询阶段，
+  消费设备 refit 后的 scene；Graph 导出复用公共 AS 重建和退休路径，保留 v1。
+  要求配对 ABI91；小规模独立/借用验证覆盖命中/miss/再次命中、公私所有者和下游梯度。
+
 - AOT v18 保存私有 ndarray 的 storage/uniform/vertex/index 用途，支持归档初始
   数据及 view 用途继承；不声明该字段的计划保留原格式与默认值。要求配对 ABI88
   组件，已验证三后端私有数组梯度和 Vulkan 从归档私有缓冲绘制。

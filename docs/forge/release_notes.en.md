@@ -58,6 +58,12 @@ lifetimes. The entries below describe the changes.
   coverage remain pending. See the
   [AOT SDK contract](aot_sdk.en.md#explicit-vulkan-raster-plans).
 
+- Vulkan AOT raster pass v2 binds existing managed TLAS resources, including
+  shared vertex/fragment query stages and device-refitted scenes. Graph export
+  uses the common AS reconstruction and retirement paths; v1 remains available.
+  Requires paired ABI91 components. Small standalone/borrowed tests cover
+  hit/miss/hit, private/public owners and downstream numeric gradients.
+
 - AOT v18 preserves explicit storage/uniform/vertex/index usages on private
   ndarrays, including archived initial data and inherited view usages. Plans
   without this field retain their existing format/default. Requires paired

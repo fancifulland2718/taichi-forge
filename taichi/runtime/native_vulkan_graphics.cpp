@@ -1,5 +1,6 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/vulkan_graphics_pipeline.h"
@@ -191,6 +192,10 @@ struct DrawDescription {
     uint32_t set, binding, image;
   };
   std::vector<Image> images;
+  struct Scene {
+    uint32_t set, binding, scene;
+  };
+  std::vector<Scene> scenes;
 };
 struct PassDescription {
   static constexpr const char *kind = "vulkan_graphics_pass_direct";
@@ -208,6 +213,10 @@ struct PassDescription {
   std::vector<NativeArrayBinding> arrays;
   std::vector<std::shared_ptr<NativeSampledImage>> targets, images;
   std::shared_ptr<NativeSampledImage> depth;
+  std::vector<std::shared_ptr<NativeShaderAccelerationStructure>> scenes;
+};
+struct ShaderPassDescription : PassDescription {
+  static constexpr uint32_t version = 2;
 };
 
 #ifdef TI_WITH_VULKAN
@@ -288,6 +297,9 @@ class PreparedPass final : public NativeOperation {
     VulkanGraphicsPassTargets targets;
     std::vector<Draw> draws;
     std::vector<std::shared_ptr<NativeSampledImage>> reads, clears;
+    std::vector<std::pair<std::shared_ptr<NativeShaderAccelerationStructure>,
+                          NativeShaderStages>>
+        scene_reads;
   };
 
  public:
@@ -298,6 +310,8 @@ class PreparedPass final : public NativeOperation {
     std::map<VkImage, ImageLayout> image_layouts;
     std::unordered_map<const NativeSampledImage *, ImageLayout>
         resource_layouts;
+    std::unordered_map<const NativeShaderAccelerationStructure *, size_t>
+        scene_reads;
     std::vector<VulkanGraphicsColorTarget> colors;
     for (size_t i = 0; i < d.colors.size(); ++i)
       colors.push_back({d.targets[i]->gfx_sampled_allocation(),
@@ -379,10 +393,45 @@ class PreparedPass final : public NativeOperation {
         sampled.push_back({v.set, v.binding, image->gfx_sampled_allocation(),
                            image->parameters().sampler_config});
       }
+      std::vector<std::pair<uint32_t, uint32_t>> scene_points;
+      for (const auto &v : input.scenes)
+        scene_points.emplace_back(v.set, v.binding);
+      pipeline->pipeline().validate_acceleration_structure_bindings(
+          scene_points);
       auto resources = prepare_vulkan_graphics_draw_resources(
           device_, pipeline->pipeline(), buffers, sampled, vertices,
           indices ? indices->pointer : kDeviceNullPtr, input.draw.indexed,
-          false);
+          false, [&](VulkanGraphicsResourceSets &sets) {
+            for (const auto &v : input.scenes) {
+              auto scene = indexed(d.scenes, v.scene);
+              auto &set = sets[v.set];
+              if (!set)
+                set = device_.create_resource_set_unique();
+              if (!set)
+                throw std::runtime_error(
+                    "Graphics AS descriptor allocation failed");
+              scene->bind_for_shader(set.get(), v.binding);
+              const auto stages =
+                  pipeline->pipeline().acceleration_structure_stages(v.set,
+                                                                     v.binding);
+              if (!stages ||
+                  (stages & ~(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)))
+                throw std::invalid_argument(
+                    "Graphics AS requires qualified vertex/fragment stages");
+              NativeShaderStages qualified = 0;
+              if (stages & VK_PIPELINE_STAGE_VERTEX_SHADER_BIT)
+                qualified |= native_shader_stage(PipelineStageType::vertex);
+              if (stages & VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                qualified |= native_shader_stage(PipelineStageType::fragment);
+              auto [it, inserted] = scene_reads.emplace(
+                  scene.get(), payload_->scene_reads.size());
+              if (inserted)
+                payload_->scene_reads.emplace_back(scene, qualified);
+              else
+                payload_->scene_reads[it->second].second |= qualified;
+            }
+          });
       payload_->draws.push_back(
           {std::move(pipeline), input.draw, std::move(resources)});
     }
@@ -412,6 +461,8 @@ class PreparedPass final : public NativeOperation {
     return {images_, true};
   }
   void record_vulkan(Device *, CommandList *commands) override {
+    for (const auto &[scene, stages] : payload_->scene_reads)
+      scene->record_shader_read(commands, stages, true);
     begin_vulkan_graphics_pass(commands, payload_->targets);
     for (const auto &draw : payload_->draws)
       record_vulkan_graphics_draw(commands, &draw.pipeline->pipeline(), false,
@@ -507,9 +558,13 @@ PipelineDescription pipeline_parameters(const Json &p) {
   return d;
 }
 
-PassDescription pass_parameters(const Json &p) {
+PassDescription pass_parameters(const Json &p, bool shader_scenes) {
   fields(p, {"pipeline_count", "array_count", "image_count", "color_count",
-             "colors", "draws", "viewport", "depth_clear", "clear_depth"});
+             "colors", "draws", "viewport", "depth_clear", "clear_depth",
+             "scene_count"});
+  if (!shader_scenes && p.obj.inner.count("scene_count"))
+    throw std::invalid_argument(
+        "Graphics AS bindings require pass_direct version 2");
   PassDescription d;
   d.depth_clear = optional_bool(p, "depth_clear", true);
   d.clear_depth = optional_f32(p, "clear_depth", 0);
@@ -540,8 +595,18 @@ PassDescription pass_parameters(const Json &p) {
     fields(v, {"pipeline", "vertices", "index", "buffers", "images",
                "element_count", "instance_count", "first_vertex", "first_index",
                "first_instance", "vertex_offset", "index_min", "index_max",
-               "expected_pipeline"});
+               "expected_pipeline", "scenes"});
+    if (!shader_scenes && v.obj.inner.count("scenes"))
+      throw std::invalid_argument(
+          "Graphics AS bindings require pass_direct version 2");
     DrawDescription draw;
+    std::set<std::pair<uint32_t, uint32_t>> descriptors;
+    auto claim = [&](uint32_t set, uint32_t binding) {
+      if (set > INT32_MAX || binding > INT32_MAX ||
+          !descriptors.emplace(set, binding).second)
+        throw std::invalid_argument(
+            "Graphics descriptor binding is duplicated or exceeds int32 ABI");
+    };
     draw.pipeline = u32(v["pipeline"]);
     draw.expected = expected_contract(v);
     draw.draw.element_count = u32(v["element_count"]);
@@ -566,13 +631,23 @@ PassDescription pass_parameters(const Json &p) {
     }
     for (const auto &b : array(v, "buffers")) {
       fields(b, {"set", "binding", "array", "storage"});
+      claim(u32(b["set"]), u32(b["binding"]));
       draw.buffers.push_back({u32(b["set"]), u32(b["binding"]), u32(b["array"]),
                               optional_bool(b, "storage")});
     }
     for (const auto &i : array(v, "images")) {
       fields(i, {"set", "binding", "image"});
+      claim(u32(i["set"]), u32(i["binding"]));
       draw.images.push_back(
           {u32(i["set"]), u32(i["binding"]), u32(i["image"])});
+    }
+    if (v.obj.inner.count("scenes")) {
+      for (const auto &s : array(v, "scenes")) {
+        fields(s, {"set", "binding", "scene"});
+        claim(u32(s["set"]), u32(s["binding"]));
+        draw.scenes.push_back(
+            {u32(s["set"]), u32(s["binding"]), u32(s["scene"])});
+      }
     }
     d.draws.push_back(std::move(draw));
   }
@@ -581,6 +656,75 @@ PassDescription pass_parameters(const Json &p) {
   return d;
 }
 }  // namespace
+
+template <typename Descriptor>
+static void register_graphics_pass(NativeOperationRegistry &registry) {
+  std::vector<NativeOperationRegistry::BindingGroup> groups{
+      {"pipeline_count", {"pipeline"}},
+      {"array_count", {"array"}},
+      {"image_count", {"image"}},
+      {"color_count", {"color"}}};
+  if constexpr (Descriptor::version >= 2)
+    groups.push_back({"scene_count", {"scene"}});
+  registry.define<Descriptor>([](Device &device, const Descriptor &d) {
+    for (const auto &p : d.pipelines)
+      same_device(device, p);
+    for (const auto &i : d.targets)
+      same_device(device, i);
+    for (const auto &i : d.images)
+      same_device(device, i);
+    for (const auto &scene : d.scenes)
+      same_device(device, scene);
+    if (d.depth)
+      same_device(device, d.depth);
+    for (const auto &a : d.arrays) {
+      if (a.pointer.device != &device ||
+          a.bytes > (std::numeric_limits<size_t>::max)() ||
+          a.pointer.offset > (std::numeric_limits<size_t>::max)())
+        throw std::invalid_argument(
+            "Graphics array requires a local size_t range");
+      resolve_native_storage_range(Arch::vulkan, a.pointer, a.bytes);
+    }
+  });
+  registry.register_schema<Descriptor>(
+      "vulkan_graphics", "pass_direct", {},
+      [](const Json &p) {
+        Descriptor d;
+        static_cast<PassDescription &>(d) =
+            pass_parameters(p, Descriptor::version >= 2);
+        return [d, p](const NativeOperationBindings &b) mutable {
+          auto result = d;
+          for (uint32_t i = 0; i < u32(p["pipeline_count"]); ++i)
+            result.pipelines.push_back(b.at("pipeline_" + std::to_string(i))
+                                           .resource<PipelineAccess>());
+          for (uint32_t i = 0; i < u32(p["array_count"]); ++i)
+            result.arrays.push_back(b.at("array_" + std::to_string(i)).array());
+          for (uint32_t i = 0; i < u32(p["image_count"]); ++i)
+            result.images.push_back(b.at("image_" + std::to_string(i))
+                                        .resource<NativeSampledImage>());
+          for (uint32_t i = 0; i < u32(p["color_count"]); ++i)
+            result.targets.push_back(b.at("color_" + std::to_string(i))
+                                         .resource<NativeSampledImage>());
+          if constexpr (Descriptor::version >= 2) {
+            for (uint32_t i = 0; i < u32(p["scene_count"]); ++i)
+              result.scenes.push_back(
+                  b.at("scene_" + std::to_string(i))
+                      .resource<NativeShaderAccelerationStructure>());
+          }
+          if (b.count("depth"))
+            result.depth = b.at("depth").resource<NativeSampledImage>();
+          return result;
+        };
+      },
+      {}, {"depth"}, groups);
+#ifdef TI_WITH_VULKAN
+  registry.register_context_factory<Descriptor>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](NativePreparationContext &c, const Descriptor &d) {
+        return std::make_shared<PreparedPass>(c, d);
+      });
+#endif
+}
 
 void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
   registry.define<PipelineDescription>(
@@ -602,63 +746,14 @@ void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
         };
       },
       {}, {}, {{"shader_count", {"shader"}}});
-  registry.define<PassDescription>(
-      [](Device &device, const PassDescription &d) {
-        for (const auto &p : d.pipelines)
-          same_device(device, p);
-        for (const auto &i : d.targets)
-          same_device(device, i);
-        for (const auto &i : d.images)
-          same_device(device, i);
-        if (d.depth)
-          same_device(device, d.depth);
-        for (const auto &a : d.arrays) {
-          if (a.pointer.device != &device ||
-              a.bytes > (std::numeric_limits<size_t>::max)() ||
-              a.pointer.offset > (std::numeric_limits<size_t>::max)())
-            throw std::invalid_argument(
-                "Graphics array requires a local size_t range");
-          resolve_native_storage_range(Arch::vulkan, a.pointer, a.bytes);
-        }
-      });
-  registry.register_schema<PassDescription>(
-      "vulkan_graphics", "pass_direct", {},
-      [](const Json &p) {
-        auto d = pass_parameters(p);
-        return [d, p](const NativeOperationBindings &b) mutable {
-          auto result = d;
-          for (uint32_t i = 0; i < u32(p["pipeline_count"]); ++i)
-            result.pipelines.push_back(b.at("pipeline_" + std::to_string(i))
-                                           .resource<PipelineAccess>());
-          for (uint32_t i = 0; i < u32(p["array_count"]); ++i)
-            result.arrays.push_back(b.at("array_" + std::to_string(i)).array());
-          for (uint32_t i = 0; i < u32(p["image_count"]); ++i)
-            result.images.push_back(b.at("image_" + std::to_string(i))
-                                        .resource<NativeSampledImage>());
-          for (uint32_t i = 0; i < u32(p["color_count"]); ++i)
-            result.targets.push_back(b.at("color_" + std::to_string(i))
-                                         .resource<NativeSampledImage>());
-          if (b.count("depth"))
-            result.depth = b.at("depth").resource<NativeSampledImage>();
-          return result;
-        };
-      },
-      {}, {"depth"},
-      {{"pipeline_count", {"pipeline"}},
-       {"array_count", {"array"}},
-       {"image_count", {"image"}},
-       {"color_count", {"color"}}});
 #ifdef TI_WITH_VULKAN
   registry.register_context_factory<PipelineDescription>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](NativePreparationContext &c, const PipelineDescription &d) {
         return std::make_shared<PreparedPipeline>(c, d);
       });
-  registry.register_context_factory<PassDescription>(
-      Arch::vulkan, NativeOperationMode::vulkan_inline,
-      [](NativePreparationContext &c, const PassDescription &d) {
-        return std::make_shared<PreparedPass>(c, d);
-      });
 #endif
+  register_graphics_pass<PassDescription>(registry);
+  register_graphics_pass<ShaderPassDescription>(registry);
 }
 }  // namespace taichi::lang

@@ -513,23 +513,27 @@ class PreparedTlas final
     core_->bind_for_shader(bindings, binding);
   }
   void record_shader_read(CommandList *commands,
-                          PipelineStageType stage,
+                          NativeShaderStages shader_stages,
                           bool graphics_queue) override {
-    VkPipelineStageFlags stages;
-    switch (stage) {
-      case PipelineStageType::compute:
-        stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        break;
-      case PipelineStageType::fragment:
-        stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        break;
-      case PipelineStageType::raytracing:
-        stages = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
-        break;
-      default:
-        throw std::invalid_argument(
-            "Unqualified acceleration structure shader stage");
+    VkPipelineStageFlags stages = 0;
+    for (const auto &[source, target] :
+         {std::make_pair(PipelineStageType::compute,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
+          std::make_pair(PipelineStageType::vertex,
+                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT),
+          std::make_pair(PipelineStageType::fragment,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
+          std::make_pair(PipelineStageType::raytracing,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)}) {
+      const auto bit = native_shader_stage(source);
+      if (shader_stages & bit) {
+        stages |= target;
+        shader_stages &= ~bit;
+      }
     }
+    if (!stages || shader_stages)
+      throw std::invalid_argument(
+          "Unqualified acceleration structure shader stages");
     core_->record_shader_read(commands, stages, graphics_queue);
   }
   std::uint32_t max_sbt_record_offset() const override {

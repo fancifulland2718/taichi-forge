@@ -370,8 +370,9 @@ class PreparedLaunch final : public NativeOperation {
             "Ray hit records do not cover bound instance SBT offsets");
       input.scene->bind_for_shader(&get_set(input.point), input.point.binding);
       payload_->reads.push_back([scene = input.scene](CommandList *commands) {
-        scene->record_shader_read(commands, PipelineStageType::raytracing,
-                                  false);
+        scene->record_shader_read(
+            commands, native_shader_stage(PipelineStageType::raytracing),
+            false);
       });
     }
     prepare_vulkan_ray_program_bindings(pipeline, payload_->sets);

@@ -16,11 +16,15 @@ class NativeAccelerationStructure : public NativeResource {
 
 // Qualified shader reads are prepared once, then recorded on the owner's
 // queue. Kernel-only resources do not implicitly acquire this capability.
+using NativeShaderStages = std::uint32_t;
+constexpr NativeShaderStages native_shader_stage(PipelineStageType stage) {
+  return NativeShaderStages(1) << static_cast<unsigned>(stage);
+}
 class NativeShaderAccelerationStructure : public NativeAccelerationStructure {
  public:
   virtual void bind_for_shader(ShaderResourceSet *bindings, int binding) = 0;
   virtual void record_shader_read(CommandList *commands,
-                                  PipelineStageType stage,
+                                  NativeShaderStages stages,
                                   bool graphics_queue) = 0;
   virtual std::uint32_t max_sbt_record_offset() const = 0;
 };

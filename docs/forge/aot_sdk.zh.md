@@ -666,7 +666,7 @@ clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样
 
 Windows 验证覆盖独立/借用执行、直接和索引/实例化绘制、uniform/采样描述符、颜色/深度
 clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度；不提供光栅化求导。
-mesh/indirect、描述符数组和 shader AS 仍为后续工作。
+mesh/indirect 和描述符数组仍为后续工作。
 
 普通 Vulkan Graph 中的 `VulkanGraphicsDrawRecording` 和
 `VulkanGraphicsPassRecording` 可通过 `module.add_execution_plan` 导出上述合格的
@@ -685,6 +685,21 @@ MRT clear、采样/uniform 描述符、别名、公私资源、重放、退休�
 支持 compute 的 graphics 队列调用同一个 GFX 固定图构建器，无需新增格式版本或
 consumer 解释层。分段 compute/graphics 和独立 fork/join recipe 在各自提交合同
 接通前仍拒绝导出。冷导出复用已编译 kernel entry。
+
+`vulkan_graphics/pass_direct` v2 进一步支持受管 shader AS 绑定。选择前查询
+`native_operation_capabilities("vulkan_graphics_pass_direct", version=2)`；v1 保持
+原合同。新增 `scene_count`、编号 `scene_N` 绑定，以及每个 draw 的 `scenes` 列表，
+其中记录形如 `{"set": 0, "binding": 0, "scene": 0}`，引用已有
+`vulkan_ray/instance_tlas` 资源。pipeline 资源仍为 v1。公共所有者服务绑定描述符，
+并在录制 pass 前按 AS 合并反射得到的 vertex/fragment 读取阶段；初始化、refit
+可见性、队列交接和退休复用原 AS 核心。重复/缺失描述符及跨设备 owner 在执行前拒绝。
+
+Graph 只有存在 AS 描述符才选择 pass v2。在 `source_bindings` 按 Graph 名指定
+producer `InstanceTLAS`，继续用 compute ray query 相同的显式 BLAS/TLAS seed 或
+公共资源映射；refit 与 raster 消费同一重建 scene。公共 shader 阶段合同要求配对
+私有 ABI91 组件。Windows 验证覆盖 vertex/fragment 同时查询、设备变换 refit 后
+命中/miss/再次命中、公私 scene、真实下游 kernel 梯度和退休；外部 ray query 与
+光栅化自身不参与 AD。
 
 显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
 `mip_levels` 和 `attachment`，复用同一所有者及 `image/upload`、`image/upload_mips`。
