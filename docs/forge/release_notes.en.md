@@ -68,6 +68,14 @@ lifetimes. The entries below describe the changes.
   it adds no replay scan. Requires paired ABI89 components; these counts exclude
   public resources and driver-private residency.
 
+- `ti.ui.Window.get_scroll_delta()` consumes accumulated horizontal and vertical
+  GLFW scroll offsets, preserving fractional values without polling events.
+  ImGui callbacks select the event window's context; closing and recreating a
+  window cannot replay old offsets. ImGui still receives the raw events; camera
+  controls should use `is_render_input_available()` to respect UI capture.
+  Windows candidate tests exercised native windows; Ubuntu desktop and released
+  wheel application acceptance remain separate checks.
+
 - Inlined `ti.func` calls inside `ti.real_func` now use the active function's AST
   builder, keeping control flow and local variables in the same callable. This
   fixes `MatrixPtrStmt` assertions and access violations in nested tensor helpers,

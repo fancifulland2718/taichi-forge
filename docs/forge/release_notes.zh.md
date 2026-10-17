@@ -55,6 +55,11 @@
   Python 诊断接口调用，不增加重放扫描。要求配对 ABI89，计数不含公共资源和
   驱动私有驻留，不能当作实际显存总量。
 
+- `ti.ui.Window.get_scroll_delta()` 返回并清空 GLFW 累积的水平、垂直滚轮增量，保留小数值，
+  不额外轮询事件。ImGui 回调按所属窗口切换上下文，关闭与重建不会重放旧增量。
+  原始增量仍交给 ImGui；相机输入应使用现有的 `is_render_input_available()` 判断 UI 占用。
+  Windows 候选已做真实窗口事件测试；Ubuntu 实机与发行 wheel 的应用验收仍需独立完成。
+
 - `ti.real_func` 内调用的 `ti.func` 现在使用当前函数的 AST builder，保持控制流与局部变量
   属于同一函数。修复嵌套张量辅助函数的 `MatrixPtrStmt` 断言、访问冲突，以及标量循环和
   条件分支可能产生错误数值的问题；保持真实函数调用边界和 native ABI 不变。

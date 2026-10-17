@@ -1,4 +1,5 @@
 #include "gui_metal.h"
+#include "taichi/ui/common/glfw_input.h"
 #include "taichi/ui/ggui/app_context.h"
 #include "taichi/ui/ggui/edge_layout_imgui.h"
 #include "taichi/ui/ggui/swap_chain.h"
@@ -51,12 +52,14 @@ GuiMetal::GuiMetal(AppContext *app_context,
 
   IMGUI_CHECKVERSION();
   imgui_context_ = ImGui::CreateContext();
+  ImGui::SetCurrentContext(imgui_context_);
   [[maybe_unused]] ImGuiIO &io = ImGui::GetIO();
 
   ImGui::StyleColorsDark();
 
   if (app_context->config.show_window) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
+    attach_glfw_imgui_context(window, imgui_context_);
     glfwGetWindowSize(window, &widthBeforeDPIScale, &heightBeforeDPIScale);
   } else {
     widthBeforeDPIScale = app_context->config.width;
@@ -218,11 +221,17 @@ void GuiMetal::cleanup_render_resources() {
 }
 
 GuiMetal::~GuiMetal() {
+  auto *previous_context = ImGui::GetCurrentContext();
+  ImGui::SetCurrentContext(imgui_context_);
+  auto *remaining_context = detach_glfw_imgui_context(imgui_context_);
   if (app_context_->config.show_window) {
     ImGui_ImplGlfw_Shutdown();
   }
   cleanup_render_resources();
   ImGui::DestroyContext(imgui_context_);
+  ImGui::SetCurrentContext(previous_context == imgui_context_
+                               ? remaining_context
+                               : previous_context);
 }
 
 bool GuiMetal::has_widgets() const { return !is_empty_; }

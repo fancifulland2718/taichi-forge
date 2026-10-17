@@ -92,6 +92,21 @@ class Window:
         """
         return self.window.poll_events()
 
+    def get_scroll_delta(self):
+        """Consume accumulated horizontal and vertical GLFW scroll offsets.
+
+        Returns a pair of floats, preserving fractional offsets. Reading clears
+        both axes and does not poll events; use the existing ``show()`` or
+        ``poll_events()`` event pump. Headless windows return ``(0.0, 0.0)``.
+
+        These are raw offsets, also delivered to ImGui. Consume them even when
+        UI input is captured, and gate camera changes with
+        ``is_render_input_available()`` to avoid replaying UI scrolls later.
+        """
+        if self.window is None:
+            raise RuntimeError("Display window is closed")
+        return self.window.get_scroll_delta()
+
     def get_events(self, tag=None, poll=True):
         """Get the current list of unprocessed events.
 

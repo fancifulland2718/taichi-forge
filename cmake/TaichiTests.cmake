@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.17)
 
 set(TESTS_NAME taichi_cpp_tests)
+if(TI_WITH_GGUI AND NOT ANDROID)
+  add_executable(taichi_glfw_input_tests
+    tests/cpp/ui/glfw_input_test.cpp
+    taichi/ui/common/glfw_input.cpp)
+  target_include_directories(taichi_glfw_input_tests PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(taichi_glfw_input_tests PRIVATE gtest_main glfw imgui)
+  add_test(NAME taichi_glfw_input_tests COMMAND taichi_glfw_input_tests)
+endif()
 if (WIN32)
     # Prevent overriding the parent project's compiler/linker
     # settings on Windows

@@ -53,6 +53,8 @@ class WindowBase {
 
   std::pair<float, float> get_cursor_pos();
 
+  std::pair<double, double> get_scroll_delta();
+
   std::pair<float, float> get_render_cursor_pos(bool clamp = false);
 
   bool is_cursor_in_render_viewport();

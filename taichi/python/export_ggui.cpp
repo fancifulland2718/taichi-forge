@@ -924,6 +924,14 @@ struct PyWindow {
   }
 
   // this is so that the GUI class does not need to use any pybind related stuff
+  py::tuple get_scroll_delta() {
+    if (!window) {
+      throw std::runtime_error("Display window is closed");
+    }
+    auto [x, y] = window->get_scroll_delta();
+    return py::make_tuple(x, y);
+  }
+
   py::tuple py_get_cursor_pos() {
     auto pos = window->get_cursor_pos();
     float x = std::get<0>(pos);
@@ -982,6 +990,7 @@ void export_ggui(py::module &m) {
       .def("get_image_buffer_as_numpy", &PyWindow::get_image_buffer)
       .def("is_pressed", &PyWindow::is_pressed)
       .def("get_cursor_pos", &PyWindow::py_get_cursor_pos)
+      .def("get_scroll_delta", &PyWindow::get_scroll_delta)
       .def("get_render_cursor_pos", &PyWindow::get_render_cursor_pos,
            py::arg("clamp") = false)
       .def("is_cursor_in_render_viewport",

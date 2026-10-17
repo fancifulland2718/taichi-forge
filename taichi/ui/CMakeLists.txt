@@ -9,7 +9,7 @@ ti_add_native_library(taichi_ui
   )
 
 if(TI_WITH_GGUI AND NOT ANDROID)
-  target_sources(taichi_ui PRIVATE common/window_base.cpp)
+  target_sources(taichi_ui PRIVATE common/window_base.cpp common/glfw_input.cpp)
 endif()
 
 target_include_directories(taichi_ui

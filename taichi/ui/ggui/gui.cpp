@@ -2,6 +2,9 @@
 #include "taichi/ui/ggui/swap_chain.h"
 #include "taichi/ui/ggui/app_context.h"
 #include "taichi/ui/ggui/edge_layout_imgui.h"
+#ifndef ANDROID
+#include "taichi/ui/common/glfw_input.h"
+#endif
 
 using namespace taichi::lang::vulkan;
 using namespace taichi::lang;
@@ -59,6 +62,7 @@ Gui::Gui(AppContext *app_context,
 
   IMGUI_CHECKVERSION();
   imgui_context_ = ImGui::CreateContext();
+  ImGui::SetCurrentContext(imgui_context_);
   ImGuiIO &io = ImGui::GetIO();
   // GGUI owns GLFW cursor visibility through InputHandler. The ImGui GLFW
   // backend otherwise writes the native cursor every frame, which can add
@@ -74,6 +78,7 @@ Gui::Gui(AppContext *app_context,
     heightBeforeDPIScale = (int)ANativeWindow_getHeight(window);
 #else
     ImGui_ImplGlfw_InitForVulkan(window, true);
+    attach_glfw_imgui_context(window, imgui_context_);
     glfwGetWindowSize(window, &widthBeforeDPIScale, &heightBeforeDPIScale);
 #endif
   } else {
@@ -369,7 +374,12 @@ void Gui::cleanup_render_resources() {
 }
 
 Gui::~Gui() {
+  auto *previous_context = ImGui::GetCurrentContext();
+  ImGuiContext *remaining_context = nullptr;
   cleanup_render_resources();
+#ifndef ANDROID
+  remaining_context = detach_glfw_imgui_context(imgui_context_);
+#endif
   if (app_context_->config.show_window) {
 #ifdef ANDROID
     ImGui_ImplAndroid_Shutdown();
@@ -386,6 +396,9 @@ Gui::~Gui() {
     descriptor_pool_ = VK_NULL_HANDLE;
   }
   ImGui::DestroyContext(imgui_context_);
+  ImGui::SetCurrentContext(previous_context == imgui_context_
+                               ? remaining_context
+                               : previous_context);
 }
 
 bool Gui::has_widgets() const {

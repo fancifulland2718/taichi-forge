@@ -1,4 +1,5 @@
 #include "taichi/ui/common/window_base.h"
+#include "taichi/ui/common/glfw_input.h"
 #include "taichi/program/runtime_statistics.h"
 #include "taichi/rhi/common/window_system.h"
 
@@ -20,6 +21,7 @@ WindowBase::WindowBase(AppConfig config) : config_(config) {
                                        config_.window_pos_y, config_.vsync);
     glfwSetWindowUserPointer(glfw_window_, this);
     set_callbacks();
+    initialize_glfw_input(glfw_window_);
     last_record_time_ = glfwGetTime();
   }
 }
@@ -222,6 +224,10 @@ std::pair<float, float> WindowBase::get_render_cursor_pos(bool clamp) {
   return window_layout_.render_cursor_position(x, y, clamp);
 }
 
+std::pair<double, double> WindowBase::get_scroll_delta() {
+  return consume_glfw_scroll(glfw_window_);
+}
+
 bool WindowBase::is_cursor_in_render_viewport() {
   const auto [x, y] = get_cursor_pos();
   return window_layout_.cursor_in_render_viewport(x, y);
@@ -323,6 +329,7 @@ void WindowBase::set_current_event(const Event &event) {
 
 WindowBase::~WindowBase() {
   if (config_.show_window) {
+    destroy_glfw_input(glfw_window_);
     glfwDestroyWindow(glfw_window_);
     taichi::lang::window_system::glfw_context_release();
   }
