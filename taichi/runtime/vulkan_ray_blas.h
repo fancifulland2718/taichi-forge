@@ -22,6 +22,7 @@ class VulkanTriangleBlas {
   VulkanTriangleBlas &operator=(const VulkanTriangleBlas &) = delete;
 
   VulkanTriangleRaySceneMemoryStatistics memory_statistics() const;
+  vulkan::VulkanDevice *device() const;
   std::size_t vertex_count() const;
   std::size_t triangle_count() const;
   VkDeviceAddress device_address() const;

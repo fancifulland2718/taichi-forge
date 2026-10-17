@@ -111,6 +111,10 @@ struct VulkanTriangleBlas::State {
     return result;
   }
 
+  vulkan::VulkanDevice *device() const {
+    return device_;
+  }
+
   std::size_t vertex_count() const {
     return vertex_count_;
   }
@@ -332,6 +336,9 @@ VulkanTriangleBlas::VulkanTriangleBlas(
                                      opaque)) {
 }
 VulkanTriangleBlas::~VulkanTriangleBlas() = default;
+vulkan::VulkanDevice *VulkanTriangleBlas::device() const {
+  return state_->device();
+}
 VulkanTriangleRaySceneMemoryStatistics VulkanTriangleBlas::memory_statistics()
     const {
   return state_->memory_statistics();
