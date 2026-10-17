@@ -129,14 +129,27 @@ def private_resources(images=False):
     ]
 
 
-def public_pipeline(runtime, directory, images):
+def public_pipeline(runtime, directory, images, variant=None):
     spec = pipeline_spec(images)
-    shaders = [
-        runtime.host_blob((directory / f"{'image' if images else 'ray'}_{i}.spv").read_bytes())
-        for i in range(spec["shader_count"])
-    ]
+    code = [(directory / f"{'image' if images else 'ray'}_{i}.spv").read_bytes() for i in range(spec["shader_count"])]
+    if variant == "code":
+        # A valid changed generator word leaves behavior unchanged but changes code identity.
+        code[0] = code[0][:8] + bytes([code[0][8] ^ 1]) + code[0][9:]
+    elif variant == "groups":
+        spec["groups"][2], spec["groups"][3] = spec["groups"][3], spec["groups"][2]
+    shaders = [runtime.host_blob(value) for value in code]
     try:
-        if not images:
+        if variant is None:
+            raises(
+                lambda: runtime.native_resource(
+                    "vulkan_ray_program",
+                    "pipeline",
+                    parameters=dict(spec, expected_pipeline="0" * 64),
+                    bindings={f"shader_{i}": value for i, value in enumerate(shaders)},
+                ),
+                "contract mismatch",
+            )
+        if not images and variant is None:
             with runtime.host_blob(b"bad") as bad:
                 bindings = {f"shader_{i}": v for i, v in enumerate(shaders)}
                 raises(
@@ -163,7 +176,7 @@ def check_gradients(frame, expected):
     assert abs(read(frame["loss"])[0] - sum(0.5 * v * v for v in gradient)) < 1e-4
 
 
-def main(mode, artifact, output_file):
+def main(mode, artifact, output_file, recipe="explicit"):
     start = time.perf_counter()
     if mode == "borrowed":
         import taichi_forge as ti
@@ -223,10 +236,17 @@ def main(mode, artifact, output_file):
                 call = module.prepare_execution(name, supplied)
                 costs["cases"][name] = dict(prepare_ms=(time.perf_counter() - start) * 1000, info=call.info)
                 calls[name] = call
+                if not private and recipe != "explicit":
+                    for variant in (("code",) if images else ("code", "groups")):
+                        with public_pipeline(runtime, directory, images, variant) as wrong:
+                            raises(
+                                lambda: module.prepare_execution(name, dict(supplied, pipeline=wrong)),
+                                "contract mismatch",
+                            )
                 for state in (0, 1, 2, 0):
                     if images:
                         write(frame["gain"], [state + 1])
-                        pixels = [(i + state) * 0.25 for i in range(24)]
+                        pixels = [(i + (state if recipe == "explicit" else 0)) * 0.25 for i in range(24)]
                         write(frame["pixels"], pixels)
                         expected = [v * (state + 1) + 0.5 for v in pixels]
                     else:
@@ -291,6 +311,7 @@ def main(mode, artifact, output_file):
                     bindings = dict(pipeline=pipeline, payload=blob, scene_0=owners["scene"], buffer_0=frame["output"])
                     for patch, message in (
                         (dict(dimensions=[0, 1, 1]), "dispatch"),
+                        (dict(expected_pipeline="0" * 64), "contract mismatch"),
                         (dict(hit=params["hit"][:4]), "SBT offsets"),
                         (dict(raygen=dict(group=0, offset=len(payload), size=4)), "payload"),
                         (dict(buffers=[dict(params["buffers"][0], binding=0)]), "Duplicate"),

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include "picosha2.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/gfx/runtime.h"
@@ -68,9 +69,63 @@ struct PipelineDescription {
   std::vector<VulkanRayProgramGroup> groups;
   uint32_t depth{1};
   bool micromap{false};
+  std::string expected_pipeline;
 };
+
+// Stable, length-delimited little-endian contract, independent of JSON
+// spelling, driver handles and build paths. Hash compiled code only at cold
+// creation.
+std::string pipeline_contract(const PipelineDescription &d) {
+  picosha2::hash256_one_by_one hash;
+  auto integer = [&](uint64_t value, size_t width) {
+    uint8_t bytes[8];
+    for (size_t i = 0; i < width; ++i)
+      bytes[i] = uint8_t(value >> (8 * i));
+    hash.process(bytes, bytes + width);
+  };
+  auto text = [&](const std::string &value) {
+    integer(value.size(), 8);
+    hash.process(value.begin(), value.end());
+  };
+  text("forge-vulkan-ray-program-v1");
+  integer(d.shaders.size(), 8);
+  for (const auto &shader : d.shaders) {
+    integer(uint32_t(shader.stage), 4);
+    text(shader.entry);
+    const auto &bytes = shader.code->bytes();
+    text(picosha2::hash256_hex_string(bytes.begin(), bytes.end()));
+  }
+  integer(d.groups.size(), 8);
+  for (const auto &group : d.groups) {
+    integer(uint32_t(group.kind), 4);
+    integer(group.general, 4);
+    integer(group.closest_hit, 4);
+    integer(group.any_hit, 4);
+  }
+  integer(d.depth, 4);
+  integer(d.micromap, 4);
+  hash.finish();
+  return picosha2::get_hash_hex_string(hash);
+}
+
+std::string expected_pipeline(const Json &p) {
+  if (!p.obj.inner.count("expected_pipeline"))
+    return {};
+  const auto value = name(p["expected_pipeline"]);
+  if (value.size() != 64 ||
+      value.find_first_not_of("0123456789abcdef") != std::string::npos)
+    throw std::invalid_argument(
+        "Expected ray pipeline must be a SHA256 contract");
+  return value;
+}
+void validate_pipeline(const std::string &expected, const std::string &actual) {
+  if (!expected.empty() && expected != actual)
+    throw std::invalid_argument(
+        "Ray pipeline code or layout contract mismatch");
+}
 class ProgramAccess : public NativeResource {
  public:
+  virtual const std::string &contract() const = 0;
 #ifdef TI_WITH_VULKAN
   virtual vulkan::VulkanPipeline &pipeline() const = 0;
 #endif
@@ -146,6 +201,7 @@ struct LaunchDescription {
   std::vector<BufferInput> buffers;
   std::vector<ImageInput> images;
   std::vector<SceneInput> scenes;
+  std::string expected_pipeline;
 };
 
 #ifdef TI_WITH_VULKAN
@@ -162,7 +218,10 @@ vulkan::VulkanDevice &owner_device(NativePreparationContext &c) {
 class PreparedPipeline final : public ProgramAccess {
  public:
   PreparedPipeline(NativePreparationContext &c, const PipelineDescription &d)
-      : device_(owner_device(c)), fault_(c.fault_domain) {
+      : device_(owner_device(c)),
+        fault_(c.fault_domain),
+        contract_(pipeline_contract(d)) {
+    validate_pipeline(d.expected_pipeline, contract_);
     std::vector<VulkanRayProgramShader> shaders;
     shaders.reserve(d.shaders.size());
     for (const auto &input : d.shaders) {
@@ -197,6 +256,9 @@ class PreparedPipeline final : public ProgramAccess {
   bool retains_input(const std::string &) const override {
     return false;
   }
+  const std::string &contract() const override {
+    return contract_;
+  }
   vulkan::VulkanPipeline &pipeline() const override {
     return *pipeline_;
   }
@@ -204,6 +266,7 @@ class PreparedPipeline final : public ProgramAccess {
  private:
   vulkan::VulkanDevice &device_;
   std::shared_ptr<RuntimeFaultDomain> fault_;
+  const std::string contract_;
   std::unique_ptr<vulkan::VulkanPipeline> pipeline_;
 };
 class PreparedLaunch final : public NativeOperation {
@@ -224,6 +287,7 @@ class PreparedLaunch final : public NativeOperation {
         dimensions_(d.dimensions),
         push_(d.push),
         payload_(std::make_unique<Payload>()) {
+    validate_pipeline(d.expected_pipeline, d.program->contract());
     payload_->program = d.program;
     auto &pipeline = d.program->pipeline();
     validate_vulkan_ray_program_launch(device_, pipeline, dimensions_, push_);
@@ -387,8 +451,9 @@ void register_vulkan_ray_program_operations(NativeOperationRegistry &registry) {
       "vulkan_ray_program", "pipeline", {},
       [](const Json &p) {
         fields(p, {"shader_count", "shaders", "groups", "max_trace_depth",
-                   "allow_opacity_micromaps"});
+                   "allow_opacity_micromaps", "expected_pipeline"});
         PipelineDescription d;
+        d.expected_pipeline = expected_pipeline(p);
         for (const auto &shader : group_array(p, "shaders", "shader_count")) {
           fields(shader, {"stage", "entry"});
           const auto stage = name(shader["stage"]);
@@ -453,7 +518,7 @@ void register_vulkan_ray_program_operations(NativeOperationRegistry &registry) {
       [](const Json &p) {
         fields(p, {"dimensions", "raygen", "miss", "hit", "push_constants",
                    "buffer_count", "buffers", "image_count", "images",
-                   "scene_count", "scenes"});
+                   "scene_count", "scenes", "expected_pipeline"});
         group_array(p, "buffers", "buffer_count");
         group_array(p, "images", "image_count");
         group_array(p, "scenes", "scene_count");
@@ -462,6 +527,7 @@ void register_vulkan_ray_program_operations(NativeOperationRegistry &registry) {
           const auto &images = array(p, "images");
           const auto &scenes = array(p, "scenes");
           LaunchDescription d;
+          d.expected_pipeline = expected_pipeline(p);
           d.program = b.at("pipeline").resource<ProgramAccess>();
           d.payload = b.at("payload").resource<NativeHostBlobResource>();
           const auto &dims = array(p, "dimensions");
