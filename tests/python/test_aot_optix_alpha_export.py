@@ -232,6 +232,22 @@ def test_optix_alpha_recording_export(tmp_path):
                     )
                     assert not {"alpha_a", "alpha_b"} & set(plan.argument_names)
                     assert "pixels" in plan.argument_names and not module._data_payloads
+                    public = module.add_execution_plan(
+                        f"alpha_public_{channels}",
+                        graph,
+                        source_bindings=sources,
+                        resource_bindings={scene: "shared_scene", texture: "shared_image"},
+                        gradients=dict(hits="dhits", loss="dloss"),
+                    )
+                    public_description = json.loads(public.to_json())
+                    assert not public_description.get("resources")
+                    assert public_description["version"] == 17
+                    assert {"shared_scene", "shared_image"} <= set(public.argument_names)
+                    assert not {"pixels", "alpha_a", "alpha_b", "indices", "vertices"} & set(public.argument_names)
+                    timings[-1].update(
+                        private_plan_bytes=len(plan.to_json().encode()),
+                        public_plan_bytes=len(public.to_json().encode()),
+                    )
                     graph.close()
                     jit_graph.close()
                     texture._delete_runtime_texture()
@@ -242,6 +258,7 @@ def test_optix_alpha_recording_export(tmp_path):
 
                         SourceImageBindings(sources, {})
     artifact = tmp_path / "alpha-export.tcm"
+    assert len(module._exported_kernels) == 4 and not module._data_payloads
     module.archive(str(artifact))
     (tmp_path / "producer.json").write_text(
         json.dumps(dict(plans=timings, bytes=artifact.stat().st_size), indent=2)

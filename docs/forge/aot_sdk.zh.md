@@ -519,6 +519,13 @@ module.add_execution_plan(
 当前设备值。缺失/未使用源、已退休纹理和不支持的纹理用途在发布 kernel 前拒绝。
 普通 sampled Texture kernel 参数复用上面的重建合同。
 
+也可使用 `resource_bindings={scene: "shared_scene", texture: "shared_image"}`，
+保留相同的 `source_bindings`。消费端绑定公共 OptiX 场景，以及通过
+`Runtime.native_resource()` 创建或借用 runtime 的 `import_texture()` 导入的图像。
+此时不生成私有 AS、图像或初始化上传。CUDA 已验证 r32f/rgba32f、JIT 上传对 AOT
+alpha 查询可见、AOT 图像上传、面与 alpha 同时过滤、miss 写回、后续梯度及 Program
+reset 退休；不新增 OptiX 交点或纹理采样自身的导数。
+
 Windows CUDA 自动导出已验证非方形 r32f/RGBA 图像、公开/私有共享绑定、生产端与消费端
 内容不同、独立 prepared 实例、活 UV/面表、refit 后命中转 miss、后续 kernel 真实梯度，
 以及独立/借用消费端的资源退休。

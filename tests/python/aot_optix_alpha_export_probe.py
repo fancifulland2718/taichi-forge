@@ -6,7 +6,7 @@ import statistics
 import sys
 import time
 
-from taichi_forge_runtime.aot import Runtime
+from taichi_forge_runtime.aot import ExecutionPlan, Runtime
 from aot_optix_alpha_probe import check
 from aot_optix_probe import RAYS, raises, read, write
 
@@ -136,6 +136,9 @@ def main(mode, artifact, adapter, output):
                     )
                 )
                 retained.append((frame, call, config))
+            public_timings, public_calls = check_public_images(runtime, module, channels, shapes, transforms, mode)
+            timings.extend(public_timings)
+            retained.extend(public_calls)
         for frame, call, config in retained:
             call()
             check(frame, config)
@@ -155,6 +158,114 @@ def main(mode, artifact, adapter, output):
     Path(output).write_text(
         json.dumps(dict(load_ms=load_ms, bindings=timings), indent=2)
     )
+
+
+def check_public_images(runtime, module, channels, shapes, transforms, mode):
+    vertices = runtime.ndarray("f32", (3, 3))
+    indices = runtime.ndarray("i32", (1, 3))
+    initial = runtime.ndarray("f32", (2, 12))
+    write(vertices, [-1, -1, 1, 1, -1, 1, 0, 1, 1])
+    write(indices, [0, 1, 2], "i")
+    write(initial, transforms)
+    context = runtime.native_resource("optix", "context")
+    gas = runtime.native_resource(
+        "optix", "triangle_gas", parameters=dict(vertex_count=3, triangle_count=1),
+        bindings=dict(context=context, vertices=vertices, indices=indices),
+    )
+    scene = runtime.native_resource(
+        "optix", "instance_scene",
+        parameters=dict(instance_count=2, allow_update=True, custom_indices=[11, 22], opaque=[False, False]),
+        bindings=dict(context=context, gas_0=gas, gas_1=gas, transforms=initial),
+    )
+    records, calls = [], []
+    for policy in (("created", "borrowed_texture") if mode == "borrowed" else ("created",)):
+        pixels = runtime.ndarray("f32", shapes["pixels"])
+        write(pixels, [1.0] * (8 * channels))
+        if policy == "created":
+            image = runtime.native_resource(
+                "image",
+                "sampled",
+                parameters=dict(
+                    format="r32f" if channels == 1 else "rgba32f",
+                    shape=[2, 4],
+                    filter="nearest",
+                    address_modes=["clamp_to_edge", "clamp_to_edge"],
+                ),
+                bindings=dict(pixels=pixels),
+            )
+        else:
+            import taichi_forge as ti
+
+            texture = ti.Texture(
+                ti.Format.r32f if channels == 1 else ti.Format.rgba32f,
+                (2, 4),
+                sampler=ti.hardware.sampling.SamplerConfig(
+                    min_filter="nearest",
+                    mag_filter="nearest",
+                    address_mode_u="clamp_to_edge",
+                    address_mode_v="clamp_to_edge",
+                ),
+            )
+            image = runtime.import_texture(texture)
+        plan = module.execution_plan(f"alpha_public_{channels}")
+        frame = {
+            name: runtime.ndarray("i32" if name in ("faces", "ids", "occluded") else "f32", shapes[name])
+            for name in plan.argument_names
+            if name not in ("shared_scene", "shared_image")
+        }
+        frame.update(shared_scene=scene, shared_image=image)
+        write(frame["transforms"], transforms)
+        write(frame["rays"], sum(RAYS, []))
+        write(frame["hits"], [-99] * 16)
+        start = time.perf_counter()
+        call = plan.prepare(module, frame)
+        prepare_ms = (time.perf_counter() - start) * 1000
+        assert read(frame["hits"]) == [-99] * 16
+        upload = ExecutionPlan(
+            [
+                dict(
+                    kind="native",
+                    provider="image",
+                    operation="upload",
+                    version=1,
+                    parameters={},
+                    bindings=dict(image="image", pixels="pixels"),
+                )
+            ]
+        ).prepare(module, dict(image=image, pixels=pixels))
+        for alpha_a, alpha_b, face, swapped in ((1, 1, 0, 0), (1, 0, 1, 0), (0, 1, 0, 1), (0, 0, 0, 0), (1, 1, 0, 0)):
+            values = [0.0] * (8 * channels)
+            values[channels - 1], values[-1] = alpha_a, alpha_b
+            if policy == "borrowed_texture":
+                import numpy as np
+
+                jit_pixels = ti.ndarray(ti.f32 if channels == 1 else ti.math.vec4, (2, 4))
+                jit_pixels.from_numpy(np.array(values, np.float32).reshape(shapes["pixels"]))
+                texture.from_ndarray(jit_pixels)
+            else:
+                write(pixels, values)
+                upload()
+            config = (alpha_a, alpha_b, face, swapped)
+            write(frame["config"], config)
+            call()
+            check(frame, config)
+        # Also update a borrowed image through AOT, after the JIT uploads.
+        write(pixels, [0.0] * (8 * channels))
+        upload()
+        call()
+        check(frame, (0, 0, 0, 0))
+        write(pixels, [1.0] * (8 * channels))
+        upload()
+        call()
+        check(frame, config)
+        upload.close()
+        pixels.close()
+        records.append(dict(channels=channels, binding=policy, prepare_ms=prepare_ms, info=call.info))
+        # Keep root inputs explicit for retirement checks at Program reset/module
+        # close. They are retained dependencies, not additional plan arguments.
+        frame.update(_context=context, _gas=gas, _vertices=vertices, _indices=indices, _initial=initial)
+        calls.append((frame, call, config))
+    return records, calls
 
 
 if __name__ == "__main__":

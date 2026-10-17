@@ -668,6 +668,15 @@ Missing/unused sources, retired textures and unsupported texture uses fail befor
 publishing kernels. Ordinary sampled Texture kernel arguments use the same
 reconstruction contract described above.
 
+Alternatively use `resource_bindings={scene: "shared_scene", texture: "shared_image"}`
+with the same `source_bindings`. The consumer binds a public OptiX scene and an
+image created by `Runtime.native_resource()` or imported with the borrowed
+runtime's `import_texture()`. No private AS, image or initialization upload is
+generated. Qualified CUDA checks cover both r32f and rgba32f, JIT uploads visible
+to AOT alpha queries, AOT image uploads, face-and-alpha filtering, miss writeback,
+downstream gradients and Program-reset retirement. This does not add derivatives
+of OptiX intersections or texture sampling.
+
 Windows CUDA automatic-export checks cover non-square r32f/RGBA images, shared
 public/private image bindings, producer/consumer contents that differ, separate
 prepared instances, live UV/face updates, refit hit-to-miss transitions, real
