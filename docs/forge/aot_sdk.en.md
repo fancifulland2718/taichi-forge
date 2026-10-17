@@ -244,6 +244,51 @@ older adapters retain the existing ordered path. There is no per-launch capabili
 probe or host parameter upload on the prepared path, and no alpha/OMM expansion.
 The adapter query, device face records and scene/context leases retire together.
 
+Vulkan triangle queries can also be reconstructed through the common registry,
+under provider `vulkan_ray`, version 1:
+
+| operation | Kind and bindings | parameters |
+| --- | --- | --- |
+| `triangle_scene` | Resource: `vertices`, `indices` | `vertex_count`, `triangle_count` |
+| `refit` | Operation: `scene`, `vertices` | Empty object |
+| `query` | Operation: `scene`, `rays`, `hits`, optional `hit_indices` | `ray_count` |
+
+Declare the resource in an ExecutionPlan's `resources`, or create it with
+`runtime.native_resource("vulkan_ray", "triangle_scene", parameters=..., bindings=...)`
+and bind it across modules. Before allocating, check that
+`runtime.native_operation_capabilities("vulkan_ray_query")` contains `vulkan_inline`
+and `runtime.device_capabilities().get("spirv_has_ray_query", 0)` is nonzero.
+No external provider DLL is needed.
+
+Geometry uses f32 `[V,3]` vertices and i32 `[T,3]` indices. Rays use f32 `[N,8]`
+containing origin.xyz, t_min, direction.xyz and t_max. Each port also accepts a
+packed AoS vector ndarray with the corresponding width. Record counts must match
+exactly. Callers provide finite geometry, indices in `[0,V)` and valid ray
+intervals, following the JIT contract without per-frame host readback. The factory
+copies geometry and completes AS construction on its owner's GFX queue before
+returning; seed arrays can then close. Topology changes require a new resource.
+Refit updates device vertices with the same count and refreshes TLAS bounds.
+Queries and refits record into the same native command sequence; replay performs
+no registry lookup.
+
+With `hit_indices`, f32 `[N,4]` holds t/u/v/0 and i32/u32 `[N,4]` holds
+primitive/instance/custom/hit. This single scene uses zero instance/custom IDs.
+Misses write `[-1,0,0,0]` and `[-1,-1,-1,0]`. Without `hit_indices`, legacy f32
+`[N,4]` contains t/primitive/custom/hit, with `[-1,-1,-1,0]` for a miss.
+Both variants accept both faces and return the closest hit in each ray's interval.
+Adjacent subranges may share a buffer; preparation rejects overlapping inputs and
+outputs, including duplicate imports of the same physical storage.
+
+Closing a resource retires its dependent recordings; the runtime owns public
+scenes shared across modules. Known requested allocations for private scenes
+contribute to `workspace_bytes`; private arrays contribute to `resource_bytes`.
+Public scenes are not counted again in every plan, and these figures are not
+driver residency. Small Windows Vulkan checks cover standalone consumers,
+borrowed owners, refit/miss reset, all four query variants, shared retirement and
+downstream gradient kernels. AS traversal itself is not differentiated. Automatic
+Graph export, separate BLAS/TLAS resources, face filtering and compact occlusion
+are not provided by this AOT factory yet.
+
 Explicit AOT plans can use `runtime.configure_provider("optix", adapter_path=...,
 library_path=...)` with these version 1 native resources/operations, all under
 provider `optix`:

@@ -194,6 +194,40 @@ AOT 在创建 context 时协商一次，adapter 声明此扩展时采用固定�
 保留原有有序路径。准备后的热路径不再探测能力或上传主机参数，也不新增 alpha/OMM
 支持。adapter 查询、设备面规则和 scene/context 引用一起退休。
 
+Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray`，version 为 1：
+
+| operation | 类型与绑定 | parameters |
+| --- | --- | --- |
+| `triangle_scene` | 资源：`vertices`、`indices` | `vertex_count`、`triangle_count` |
+| `refit` | 操作：`scene`、`vertices` | 空对象 |
+| `query` | 操作：`scene`、`rays`、`hits`，可选 `hit_indices` | `ray_count` |
+
+资源可写入 ExecutionPlan 的 `resources`，或用
+`runtime.native_resource("vulkan_ray", "triangle_scene", parameters=..., bindings=...)`
+创建并跨模块绑定。分配前分别检查
+`runtime.native_operation_capabilities("vulkan_ray_query")` 含 `vulkan_inline`，以及
+`runtime.device_capabilities().get("spirv_has_ray_query", 0)` 非零；无需外部 provider DLL。
+
+几何端口为 f32 `[V,3]` 和 i32 `[T,3]`；ray 为 f32 `[N,8]`，依次包含
+origin.xyz、t_min、direction.xyz、t_max。所有端口也接受同宽紧凑 AoS vector ndarray。
+记录数精确匹配。调用方提供有限几何、合法索引 `[0,V)` 和有效 ray 区间；沿用 JIT
+合同，不增加每帧 host 回读。工厂在所属 GFX 队列复制几何并完成 AS build 后返回，
+成功后可关闭 seed 数组。拓扑变化需新建资源；refit 更新相同顶点数的设备数据及 TLAS
+边界。查询和 refit 录制在同一原生命令序列中，重放不查询注册表。
+
+提供 `hit_indices` 时，输出 f32 `[N,4]` 为 t/u/v/0，i32/u32 `[N,4]` 为
+primitive/instance/custom/hit；此单场景的 instance/custom 均为0。miss 分别写
+`[-1,0,0,0]` 和 `[-1,-1,-1,0]`。省略时沿用 legacy f32 `[N,4]` 的
+t/primitive/custom/hit，miss 为 `[-1,-1,-1,0]`。均接受双面并返回区间内最近命中。
+合法相邻子区间可共享缓冲，输入/输出或输出之间的重叠在准备期拒绝，包括重复导入。
+
+资源关闭会退休依赖录制；跨模块公共 scene 由 runtime owner 管理。私有 scene 的已知
+请求分配计入 `workspace_bytes`，私有数组计入 `resource_bytes`；公共 scene 不重复
+计入每份 plan，这些数值不是驱动实际驻留量。Windows Vulkan 小型检查覆盖独立消费端、
+借用 owner、refit/miss、全部四种查询变体、共享关闭和命中后的下游梯度核；不表示
+AS 遍历本身可微。Graph 自动导出、独立 BLAS/TLAS、面过滤及 compact occlusion 尚未
+由此 AOT 工厂提供。
+
 显式 AOT 计划可通过 `runtime.configure_provider("optix", adapter_path=..., library_path=...)`
 使用以下 version 1 原生资源/操作（provider 均为 `optix`）：
 
