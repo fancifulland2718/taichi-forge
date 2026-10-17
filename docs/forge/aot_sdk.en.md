@@ -398,8 +398,34 @@ Windows CUDA checks cover normalized 1D, non-square 2D linear/nearest sampling,
 3D axis order, seeded and GPU-updated images, captured and OptiX-ordered plans,
 shared binding retirement, and real gradients of downstream numeric kernels.
 This does not differentiate texture sampling. RWTexture, TextureCollection,
-Vulkan managed-image factories, ordinary public C API image handles, and automatic
-Graph export of kernel Texture arguments still require separate qualification.
+Vulkan managed-image factories and ordinary public C API image handles still
+require separate qualification.
+
+CUDA Graph export also accepts sampled Texture kernel arguments, including
+qualified `cuda_immutable_argument_frames` recipes:
+
+```python
+module.add_execution_plan(
+    "sample", compiled_graph,
+    source_bindings={"image": texture},
+    resource_bindings={texture: {"pixels": "initial_pixels"}},
+)
+```
+
+The Graph's `image` port is replaced by consumer array `initial_pixels`. Export
+preserves format, dimensions and sampler, without copying producer texels. Public
+aliases and declared private bindings to one Texture share one image resource.
+The seed is copied once during preparation; its array follows the existing
+prepared-resource dependency lifetime and must stay alive until the prepared
+calls retire. Sibling binding frames share that resource and seed binding; use
+independent preparation for a different image. Output buffers can change across
+siblings. No extra pixel copy or Python metadata lookup is added to replay.
+
+Windows CUDA export checks cover ordinary Graph public/private aliases with real
+downstream numeric gradients, selected binding frames with public texture aliases
+and an explicit adjoint, independent seeds, output rebinding and parent retirement
+in standalone and borrowed runtimes. This does not expand the JIT selected
+recipe's existing qualification for private fixed textures or implicit gradients.
 
 `refit` also accepts an updateable GAS. `instance_refit` requires an updateable
 instance scene: supplying `transforms` updates its matrices from device memory;
@@ -495,8 +521,8 @@ preparation; later seed-array writes do not implicitly upload the image. Native
 Public names and fixed private Graph bindings referring to the same Texture share
 one reconstructed image per preparation. UV and face-table bindings remain live.
 Missing/unused sources, retired textures and unsupported texture uses fail before
-publishing kernels. Automatic export of ordinary kernel Texture arguments
-remains separate from the explicit-plan launch support described above.
+publishing kernels. Ordinary sampled Texture kernel arguments use the same
+reconstruction contract described above.
 
 Windows CUDA automatic-export checks cover non-square r32f/RGBA images, shared
 public/private image bindings, producer/consumer contents that differ, separate

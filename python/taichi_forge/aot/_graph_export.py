@@ -288,6 +288,8 @@ class _ExportContext:
             self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, name=name)
 
     def kernel_binding(self, arg):
+        if arg.tag == core.ArgKind.TEXTURE:
+            return self.source_images.kernel_resource(self, arg)
         if arg.name in self.control_names:
             if arg.tag != core.ArgKind.NDARRAY or str(arg.dtype()) != "i32":
                 raise TaichiRuntimeError("AOT Graph control requires scalar i32 ndarray arguments")
@@ -384,8 +386,8 @@ class _ExportContext:
         bindings = [self.kernel_binding(arg) for arg in args]
         if self.source_arrays is not None:
             self.source_arrays.validate_kernel(args, bindings)
-        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
-            raise TaichiRuntimeError("AOT execution Graph currently requires scalar or ndarray kernel bindings")
+        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY, core.ArgKind.TEXTURE) for arg in args):
+            raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified sampled Texture bindings")
         identity = (id(kernel), launch_abi)
         name = self._kernel_names.get(identity)
         if name is None:

@@ -310,8 +310,29 @@ alpha recording 可通过下述显式图像重建合同自动导出。
 
 Windows CUDA 已验证归一化 1D、非方形 2D 线性/最近邻采样、3D 轴顺序、初始 seed 与
 GPU 更新、captured 和 OptiX ordered 计划、共享绑定退休及后续数值 kernel 的真实梯度。
-这不提供纹理采样求导。RWTexture、TextureCollection、Vulkan 受管图像工厂、普通公开
-C API 图像句柄，以及含 kernel Texture 参数的 Graph 自动导出，仍需分别接通。
+这不提供纹理采样求导。RWTexture、TextureCollection、Vulkan 受管图像工厂和普通公开
+C API 图像句柄仍需分别接通。
+
+CUDA Graph 自动导出也支持 sampled Texture kernel 参数，包括合格的
+`cuda_immutable_argument_frames` 方案：
+
+```python
+module.add_execution_plan(
+    "sample", compiled_graph,
+    source_bindings={"image": texture},
+    resource_bindings={texture: {"pixels": "initial_pixels"}},
+)
+```
+
+Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出保留格式、维数和采样器，
+不复制生产端 texel；同一 Texture 的公开别名与已声明私有绑定共用一个图像资源。
+seed 在准备期复制一次，其数组沿用已有 prepared-resource 依赖寿命，须存活至相关
+prepared 调用退休。兄弟绑定帧共享图像与 seed 绑定；不同图像使用独立准备，输出数组
+可在兄弟绑定间切换。重放不增加像素复制或 Python 元数据查询。
+
+Windows CUDA 导出已验证普通 Graph 的公开/私有别名及后续数值 kernel 真实梯度、
+selected 绑定帧的公开纹理别名与显式伴随、独立 seed、输出换绑，以及独立/借用 runtime
+的父对象退休；不扩展 selected JIT 方案现有的私有固定纹理或隐式梯度准入。
 
 `refit` 也接受可更新 GAS。`instance_refit` 要求可更新的实例场景：传入 `transforms`
 时直接读取设备矩阵；省略时保留当前矩阵，仅刷新 IAS 包围盒。引用的 GAS 包围盒变化后，
@@ -384,7 +405,7 @@ module.add_execution_plan(
 后续修改 seed 数组不会隐式更新图像。手工编写的执行计划可使用 `image/upload` 显式上传。
 公开名或私有 Graph 绑定引用同一 Texture 时，每次准备只重建一份图像；UV 和面表仍读取
 当前设备值。缺失/未使用源、已退休纹理和不支持的纹理用途在发布 kernel 前拒绝。
-普通 kernel Texture 参数的自动导出仍需另行接通，与上述显式计划的启动支持分别声明。
+普通 sampled Texture kernel 参数复用上面的重建合同。
 
 Windows CUDA 自动导出已验证非方形 r32f/RGBA 图像、公开/私有共享绑定、生产端与消费端
 内容不同、独立 prepared 实例、活 UV/面表、refit 后命中转 miss、后续 kernel 真实梯度，

@@ -90,9 +90,9 @@ class _BindingFrameExecutor:
     def _validate_aot_export(spec, backend):
         from taichi_forge.lang.exception import TaichiRuntimeError
 
-        if not _eligible(spec, backend) or spec._texture_binding_requirements:
+        if not _eligible(spec, backend):
             raise TaichiRuntimeError(
-                "AOT CUDA binding frames require one qualified fixed buffer Graph without textures"
+                "AOT CUDA binding frames require one qualified fixed buffer/sampled-Texture Graph"
             )
         # The persistent consumer must retain the shared executable, private
         # state and provider plans. An ordinary fixed plan would lose that

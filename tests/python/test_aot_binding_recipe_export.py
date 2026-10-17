@@ -132,6 +132,6 @@ def test_aot_selected_cuda_binding_fft_recipe(tmp_path):
 def test_aot_selected_cuda_binding_texture_rejects_before_export():
     with selected(_texture_definition()) as graph:
         module = ti.aot.Module()
-        with pytest.raises(ti.TaichiRuntimeError, match="without textures"):
+        with pytest.raises(ti.TaichiRuntimeError, match="source_bindings"):
             module.add_execution_plan("step", graph)
         assert not module._exported_kernels and not module._execution_plans

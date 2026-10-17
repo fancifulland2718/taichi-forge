@@ -89,6 +89,14 @@ class SourceImageBindings:
         self.used.add(name)
         return resource
 
+    def kernel_resource(self, context, arg):
+        owner = self.require(arg.name)
+        if len(owner._creation_metadata[1]) != len(arg.texture_shape):
+            raise TaichiRuntimeError(
+                "AOT sampled Texture dimension differs from the Graph kernel argument"
+            )
+        return self.resource(context, arg.name)
+
     def validate_used(self):
         if self.owners.keys() - self.used:
             raise ValueError(
