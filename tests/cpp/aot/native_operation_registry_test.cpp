@@ -6,6 +6,7 @@
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/texture_storage.h"
+#include "taichi/runtime/texture_collection.h"
 #include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
@@ -22,6 +23,33 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, TextureCollectionUsesPhysicalAndAbiCapacities) {
+  DeviceCapabilityConfig caps;
+  EXPECT_ANY_THROW(validate_texture_collection_capacity(Arch::vulkan, caps, 1));
+  caps.set(DeviceCapability::spirv_has_sampled_image_array_non_uniform_indexing,
+           1);
+  caps.set(DeviceCapability::max_sampled_texture_collection_size, 257);
+  EXPECT_NO_THROW(
+      validate_texture_collection_capacity(Arch::vulkan, caps, 257));
+  EXPECT_ANY_THROW(
+      validate_texture_collection_capacity(Arch::vulkan, caps, 258));
+  EXPECT_ANY_THROW(validate_texture_collection_capacity(Arch::vulkan, caps, 0));
+  EXPECT_ANY_THROW(validate_texture_collection_capacity(Arch::cuda, caps, 1));
+  EXPECT_ANY_THROW(validate_texture_collection_capacity(Arch::x64, caps, 1));
+  caps.set(DeviceCapability::max_sampled_texture_collection_size, UINT32_MAX);
+  EXPECT_ANY_THROW(validate_texture_collection_capacity(
+      Arch::vulkan, caps, size_t((std::numeric_limits<int>::max)()) + 1));
+  EXPECT_NO_THROW(validate_texture_collection_member(2, ImageDimension::d2D,
+                                                     BufferFormat::r32f));
+  EXPECT_ANY_THROW(validate_texture_collection_member(3, ImageDimension::d2D,
+                                                      BufferFormat::r32f));
+  EXPECT_ANY_THROW(validate_texture_collection_member(2, ImageDimension::d2D,
+                                                      BufferFormat::r32u));
+  const auto first = allocate_texture_collection_snapshot_id();
+  EXPECT_NE(first, 0);
+  EXPECT_GT(allocate_texture_collection_snapshot_id(), first);
+}
+
 TEST(NativeOperationRegistry, MipStorageAccountsForTheCompleteChain) {
   ImageParams params{};
   params.format = BufferFormat::r32f;

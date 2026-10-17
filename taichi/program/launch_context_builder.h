@@ -58,6 +58,13 @@ class LaunchContextBuilder {
 
   void set_arg_texture_collection(const std::vector<int> &arg_id,
                                    const TextureCollection &collection);
+  // Cold table binding shared with managed native resource owners. The caller
+  // qualifies and retains every member; this only writes the existing packet.
+  void set_arg_texture_collection_impl(
+      const std::vector<int> &arg_id,
+      int dimensions,
+      std::vector<DeviceAllocation> allocations,
+      std::uint64_t snapshot_id);
 
   struct DenseStorageResourceRef {
     int arg_offset{-1};
