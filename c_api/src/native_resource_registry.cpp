@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <limits>
+#include <cstring>
 #include "taichi/program/runtime_fault.h"
+#include "taichi/runtime/native_host_blob.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -270,6 +272,29 @@ TiNativeResource ti_create_native_resource_ext(TiRuntime runtime,
   } catch (const std::invalid_argument &error) {
     throw MemoryBindingError(error.what());
   }
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
+
+TiNativeResource ti_create_host_blob_ext(TiRuntime runtime,
+                                         uint64_t size,
+                                         const void *data) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  if ((size && !data) || size > std::numeric_limits<std::size_t>::max())
+    throw MemoryBindingError("Invalid immutable host blob input");
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  rt.runtime_fault_domain()->throw_if_submission_disallowed(
+      "create AOT host blob");
+  using taichi::lang::NativeHostBlobResource;
+  auto bytes = std::make_shared<NativeHostBlobResource::Bytes>(size);
+  if (size)
+    std::memcpy(bytes->data(), data, size);
+  return rt.native_resource_registry().publish(
+      std::make_shared<NativeHostBlobResource>(rt.arch, rt.get(),
+                                               std::move(bytes)),
+      {}, {});
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
 }

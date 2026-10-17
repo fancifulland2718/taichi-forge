@@ -301,6 +301,23 @@ class Runtime:
             memory = _Memory(self, size)
             return NdArray(memory, dtype, code, shape, element_shape)
 
+    def host_blob(self, data):
+        """Copy immutable host bytes for native provider preparation.
+
+        This uses the same owner and retirement contract as NativeResource,
+        with no device allocation or transfer. Mutating or releasing the source
+        after return is safe. A blob cannot serve as an ndarray or kernel AS.
+        """
+        payload = data if type(data) is bytes else memoryview(data).tobytes()
+        with self._lock:
+            self._check()
+            handle = self._api.call(self._api.ti_create_host_blob_ext, self._handle, len(payload), payload)
+            try:
+                return NativeResource(self, handle, ())
+            except BaseException:
+                self._api.call(self._api.ti_destroy_native_resource_ext, self._handle, handle)
+                raise
+
     def native_resource(self, provider, operation, *, parameters=None, bindings=None, version=1):
         """Create one resource through the common native factory catalog.
 

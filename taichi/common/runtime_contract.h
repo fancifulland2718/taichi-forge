@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Launch contexts can bind independently owned native acceleration structures.
-// Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 84;
+// The matching consumer exposes immutable host blobs through the native registry.
+// Reject older component pairs before loading the extended entry surface.
+inline constexpr int kForgeNativeAbiRevision = 85;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

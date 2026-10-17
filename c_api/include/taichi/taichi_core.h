@@ -1358,6 +1358,12 @@ ti_create_native_resource_ext(TiRuntime runtime,
                               const TiNamedArgument *args,
                               uint32_t *retained_args);
 
+// Copy immutable host bytes into a same-runtime native resource, with no device
+// allocation or transfer. data may be null only when size is zero. The caller
+// may release/change the source after return. Destroy via the common function.
+TI_DLL_EXPORT TiNativeResource TI_API_CALL
+ti_create_host_blob_ext(TiRuntime runtime, uint64_t size, const void *data);
+
 // Retire dependent preparations/resources before releasing this owner. A
 // resource invalidated by closing an input can still be destroyed once.
 TI_DLL_EXPORT void TI_API_CALL

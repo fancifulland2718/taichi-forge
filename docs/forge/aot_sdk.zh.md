@@ -194,6 +194,11 @@ AOT 在创建 context 时协商一次，adapter 声明此扩展时采用固定�
 保留原有有序路径。准备后的热路径不再探测能力或上传主机参数，也不新增 alpha/OMM
 支持。adapter 查询、设备面规则和 scene/context 引用一起退休。
 
+`runtime.host_blob(data)` 将 bytes 或其他 buffer 对象复制为只读的公共 NativeResource，
+供 provider 在准备阶段读取。它与包内 `host_blob` 资源共用表示，不分配设备内存或发起
+设备传输；返回后可修改/释放源数据。空 blob 合法，blob 不能作为 ndarray、纹理或 AS
+参数。关闭及跨 runtime 检查沿用公共资源合同；构建工厂决定完成后是否仍需保留输入。
+
 Vulkan 三角查询也可通过公共 registry 重建，provider 为 `vulkan_ray`，version 为 1：
 
 | operation | 类型与绑定 | parameters |

@@ -12,6 +12,35 @@
 #endif
 #include "c_api/tests/gtest_fixture.h"
 
+TEST_F(CapiTest, ImmutableHostBlobsUseRuntimeResourceOwnership) {
+  EXPECT_EQ(ti_create_host_blob_ext(nullptr, 0, nullptr), nullptr);
+  EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_NULL, "runtime");
+  for (TiArch arch :
+       {TI_ARCH_X64, TI_ARCH_ARM64, TI_ARCH_CUDA, TI_ARCH_VULKAN}) {
+    if (!ti::is_arch_available(arch))
+      continue;
+    SCOPED_TRACE(int(arch));
+    ti::Runtime left(arch), right(arch);
+    EXPECT_EQ(ti_create_host_blob_ext(left, 1, nullptr), nullptr);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "host blob");
+    unsigned char data[]{0, 255, 17, 0};
+    auto first = ti_create_host_blob_ext(left, sizeof(data), data);
+    auto empty = ti_create_host_blob_ext(left, 0, nullptr);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(empty, nullptr);
+    ASSERT_NE(first, empty);
+    ASSERT_TAICHI_SUCCESS();
+    data[1] = 0;
+    ti_destroy_native_resource_ext(right, first);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+    ti_destroy_native_resource_ext(left, first);
+    ASSERT_TAICHI_SUCCESS();
+    ti_destroy_native_resource_ext(left, first);
+    EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_ARGUMENT, "this runtime");
+    // The empty blob deliberately retires with its runtime.
+  }
+}
+
 TEST_F(CapiTest, MemoryHandlesBelongToTheirRuntime) {
   for (TiArch arch : {TI_ARCH_X64, TI_ARCH_ARM64, TI_ARCH_CUDA, TI_ARCH_VULKAN}) {
     if (!ti::is_arch_available(arch))

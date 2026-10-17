@@ -244,6 +244,14 @@ older adapters retain the existing ordered path. There is no per-launch capabili
 probe or host parameter upload on the prepared path, and no alpha/OMM expansion.
 The adapter query, device face records and scene/context leases retire together.
 
+`runtime.host_blob(data)` copies bytes or another buffer object into an immutable
+public NativeResource for provider preparation. It uses the same representation
+as artifact `host_blob` resources, without device allocation or transfer. The
+source may change or be released after return. Empty blobs are valid; blobs cannot
+serve as ndarray, texture or AS arguments. Closure and cross-runtime checks follow
+the public resource contract; factories declare whether inputs remain needed after
+construction.
+
 Vulkan triangle queries can also be reconstructed through the common registry,
 under provider `vulkan_ray`, version 1:
 

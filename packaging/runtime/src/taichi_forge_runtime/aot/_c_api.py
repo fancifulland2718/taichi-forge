@@ -243,6 +243,7 @@ class Api:
                 [Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument), C.POINTER(UInt)], Handle,
             ),
             "ti_destroy_native_resource_ext": ([Handle, Handle], None),
+            "ti_create_host_blob_ext": ([Handle, C.c_uint64, C.c_void_p], Handle),
             "ti_prepare_execution_binding_ext": (
                 [Handle, Handle, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
                 Handle,
