@@ -1,4 +1,5 @@
 #include "taichi/optix/forge_optix_provider.h"
+#include "taichi/optix/forge_optix_query.h"
 #include "taichi/optix/provider/program_internal.h"
 
 #if defined(_WIN32) && !defined(NOMINMAX)
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 #include <map>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -47,7 +49,7 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances2-alpha2-omm1-program1-occlusion1-faces1";
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances2-alpha2-omm1-program1-occlusion1-faces1-query1";
 constexpr uint64_t kFeatures =
     TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
     TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
@@ -69,7 +71,8 @@ constexpr uint64_t kFeatures =
     TI_FORGE_OPTIX_FEATURE_FACE_FILTER_TYPED |
     TI_FORGE_OPTIX_FEATURE_FACE_FILTER_OCCLUSION |
     TI_FORGE_OPTIX_FEATURE_FACE_FILTER_PER_PRIMITIVE |
-    TI_FORGE_OPTIX_FEATURE_FACE_FILTER_ALPHA;
+    TI_FORGE_OPTIX_FEATURE_FACE_FILTER_ALPHA |
+    TI_FORGE_OPTIX_FEATURE_PREPARED_FIXED_QUERY;
 
 void clear_error_state() {
   last_error.clear();
@@ -2041,9 +2044,188 @@ void release_program_scene(const TiForgeOptixProgramScene &binding) {
   else static_cast<InstanceScene *>(binding.scene)->program_refs.fetch_sub(1);
 }
 
+namespace {
+
+struct FixedQuery {
+  TiForgeOptixProgramScene scene{};
+  bool retained{false};
+  DeviceBuffer parameters;
+  OptixPipeline pipeline{};
+  OptixShaderBindingTable sbt{};
+  uint32_t ray_count{};
+
+  ~FixedQuery() {
+    parameters.reset();
+    if (retained)
+      release_program_scene(scene);
+  }
+};
+
+template <typename Fn>
+TiForgeOptixResult fixed_query_boundary(Fn &&call) noexcept {
+  try {
+    clear_error_state();
+    return call();
+  } catch (const std::bad_alloc &) {
+    last_error.clear();
+    return TI_FORGE_OPTIX_ERROR_OUT_OF_MEMORY;
+  } catch (...) {
+    last_error.clear();
+    return TI_FORGE_OPTIX_ERROR_INTERNAL;
+  }
+}
+
+TiForgeOptixResult prepare_fixed_query(TiForgeOptixContext raw_context,
+                                       const TiForgeOptixFixedQueryDesc *desc,
+                                       TiForgeOptixPreparedQuery *out) {
+  if (out)
+    *out = nullptr;
+  return fixed_query_boundary([&] {
+    if (!raw_context || !desc || desc->struct_size < sizeof(*desc) || !out ||
+        !desc->scene || desc->scene_kind > 1 || !desc->ray_count ||
+        !desc->rays || !desc->hits || desc->any_hit > 1 ||
+        desc->occlusion > 1 ||
+        (desc->occlusion ? (desc->hit_indices || desc->any_hit != 1)
+                         : !desc->hit_indices) ||
+        bool(desc->faces) != bool(desc->face_count) ||
+        (desc->rays | desc->hits | desc->hit_indices) % 4 ||
+        desc->faces % alignof(TiForgeOptixFaceRule)) {
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                  "invalid fixed query description");
+    }
+    auto *context = static_cast<Context *>(raw_context);
+    auto query = std::make_unique<FixedQuery>();
+    query->scene = {desc->scene, desc->scene_kind};
+    TiForgeOptixProgramSceneInfo info{};
+    info.struct_size = sizeof(info);
+    auto result = retain_program_scene(raw_context, query->scene, &info);
+    if (result != TI_FORGE_OPTIX_SUCCESS)
+      return result;
+    query->retained = true;
+    if (info.has_opacity_micromaps)
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                  "fixed query revision 1 does not support opacity micromaps");
+    const uint32_t instances =
+        desc->scene_kind
+            ? static_cast<InstanceScene *>(desc->scene)->instance_count
+            : 1;
+    if (desc->faces && desc->face_count != instances)
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                  "fixed query face records must match the instance count");
+    const uint32_t variant = desc->faces                        ? 4
+                             : desc->occlusion || desc->any_hit ? 2
+                                                                : 1;
+    auto prepare = variant == 4   ? prepare_faces
+                   : variant == 2 ? prepare_alpha
+                                  : prepare_typed;
+    result = prepare(raw_context);
+    if (result != TI_FORGE_OPTIX_SUCCESS)
+      return result;
+    auto &pipeline = variant == 4   ? context->faces
+                     : variant == 2 ? context->alpha
+                                    : context->typed;
+    if (desc->scene_kind) {
+      auto *scene = static_cast<InstanceScene *>(desc->scene);
+      uint64_t bytes = 0;
+      result = prepare_instance_sbt(scene, variant, &bytes);
+      if (result != TI_FORGE_OPTIX_SUCCESS)
+        return result;
+      query->sbt = *fixed_query_sbt(scene, variant, pipeline);
+    } else {
+      query->sbt = pipeline.sbt;
+    }
+    // All three device parameter layouts share this exact prefix. Upload once
+    // during cold preparation; no stack address survives into execution.
+    const FaceLaunchParams parameters{
+        {{desc->rays, desc->hits, info.traversable, desc->hit_indices},
+         0,
+         desc->any_hit,
+         desc->occlusion},
+        desc->faces,
+        0};
+    const size_t bytes = variant == 4   ? sizeof(FaceLaunchParams)
+                         : variant == 2 ? sizeof(AlphaLaunchParams)
+                                        : sizeof(LaunchParams);
+    result = query->parameters.allocate(bytes);
+    if (result == TI_FORGE_OPTIX_SUCCESS)
+      result = cuda_check(
+          cuMemcpyHtoD(query->parameters.pointer, &parameters, bytes),
+          "cuMemcpyHtoD(fixed query preparation)");
+    if (result != TI_FORGE_OPTIX_SUCCESS)
+      return result;
+    query->pipeline = pipeline.pipeline;
+    query->ray_count = desc->ray_count;
+    *out = query.release();
+    return TI_FORGE_OPTIX_SUCCESS;
+  });
+}
+
+TiForgeOptixResult launch_fixed_query(TiForgeOptixPreparedQuery raw,
+                                      uint64_t cuda_stream) {
+  return fixed_query_boundary([&] {
+    auto *query = static_cast<FixedQuery *>(raw);
+    if (!query)
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "fixed query is null");
+    return optix_check(
+        optixLaunch(query->pipeline, reinterpret_cast<CUstream>(cuda_stream),
+                    query->parameters.pointer, query->parameters.bytes,
+                    &query->sbt, query->ray_count, 1, 1),
+        "optixLaunch(prepared fixed query)");
+  });
+}
+
+TiForgeOptixResult destroy_fixed_query(TiForgeOptixPreparedQuery raw) {
+  return fixed_query_boundary([&] {
+    auto *query = static_cast<FixedQuery *>(raw);
+    if (!query)
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "fixed query is null");
+    auto result = cuda_check(cuMemFree(query->parameters.pointer),
+                             "cuMemFree(fixed query)");
+    if (result != TI_FORGE_OPTIX_SUCCESS)
+      return result;  // Keep the scene lease until safe retirement is possible.
+    query->parameters.pointer = 0;
+    query->parameters.bytes = 0;
+    delete query;
+    return TI_FORGE_OPTIX_SUCCESS;
+  });
+}
+
+TiForgeOptixResult fixed_query_memory(TiForgeOptixPreparedQuery raw,
+                                      TiForgeOptixFixedQueryMemory *out) {
+  return fixed_query_boundary([&] {
+    auto *query = static_cast<FixedQuery *>(raw);
+    if (!query || !out || out->struct_size < sizeof(*out))
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                  "invalid fixed query memory output");
+    *out = {sizeof(*out), uint32_t(query->parameters.bytes),
+            query->parameters.bytes};
+    return TI_FORGE_OPTIX_SUCCESS;
+  });
+}
+
+}  // namespace
+
 }  // namespace taichi::optix_provider
 
 using namespace taichi::optix_provider;
+
+extern "C" TI_FORGE_OPTIX_EXPORT TiForgeOptixResult
+taichi_forge_optix_fixed_query_api(uint32_t revision,
+                                   size_t api_size,
+                                   TiForgeOptixFixedQueryApi *out_api) {
+  return fixed_query_boundary([&] {
+    if (revision != TI_FORGE_OPTIX_FIXED_QUERY_REVISION)
+      return fail(TI_FORGE_OPTIX_ERROR_ABI_MISMATCH,
+                  "unsupported fixed query revision");
+    if (!out_api || api_size < sizeof(*out_api))
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                  "fixed query API table is too small");
+    *out_api = {sizeof(*out_api),    revision,
+                prepare_fixed_query, launch_fixed_query,
+                destroy_fixed_query, fixed_query_memory};
+    return TI_FORGE_OPTIX_SUCCESS;
+  });
+}
 
 extern "C" TI_FORGE_OPTIX_EXPORT TiForgeOptixResult
 taichi_forge_optix_provider_query(uint32_t requested_abi_version,

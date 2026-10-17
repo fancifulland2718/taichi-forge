@@ -153,6 +153,7 @@ function(_ti_add_optix_provider target_name root)
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/runtime_provider.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_provider.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_runtime_provider.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_query.h"
         ${_ptx_headers})
     target_compile_features(${target_name} PRIVATE cxx_std_17)
     target_compile_definitions(${target_name}
@@ -181,6 +182,7 @@ function(_ti_add_optix_provider target_name root)
         PUBLIC_HEADERS
             "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_provider.h"
             "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_runtime_provider.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_query.h"
         LICENSE_FILES "${root}/LICENSE.txt" "${root}/license_info.txt"
         EXTERNAL_REQUIREMENTS
             "NVIDIA GPU driver with OptiX ABI ${_header_abi} and ${_ptx_requirement} support"

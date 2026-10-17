@@ -206,7 +206,7 @@ Consumers need neither OptiX SDK headers nor nvcc. Manifests are named
 `optix_abi93.json`, `optix_abi105.json` and `optix_abi118.json`, with `provider_id`
 remaining `optix` and a separate `variant` field. License directories are also
 variant-specific. Components can coexist without replacing each other's inventory
-or the base SDK manifest. Qualified Windows payloads are about 214 KiB each;
+or the base SDK manifest. Qualified Windows payloads are about 221 KiB each;
 the existing runtime-wheel adapter selection is unchanged. Installing a component
 does not select it automatically: pass its path to `runtime.configure_provider`.
 
@@ -229,6 +229,18 @@ not be interpreted as common provider results. Each scene/query owner must retai
 its session through in-flight work and resource destruction; live leases in one
 adapter require the same library path. The execution table identifies the exact
 SDK/OptiX ABI; unknown driver runtime versions are zero, never the SDK version.
+
+The optional domain execution table v2 adds the fixed-query extension declared in
+`forge_optix_query.h`, also available through `taichi_forge_optix_fixed_query_api`.
+It prepares opaque typed/first-accepted and compact occlusion queries, optionally
+with live face tables, and uploads each query's immutable 32–64-byte parameters
+once. The query retains its scene; callers retain arrays and retire all launches
+before destruction. In-place AS refit is supported; replacement/rebuild requires
+preparation again. Launches remain ordered and serialized through the owning
+context: this extension does not declare CUDA stream-capture support. The legacy
+provider ABI/table and common execution table v1 remain available. This adapter
+extension alone does not change AOT query selection or add alpha/OMM support.
+
 Explicit AOT plans can use `runtime.configure_provider("optix", adapter_path=...,
 library_path=...)` with these version 1 native resources/operations, all under
 provider `optix`:

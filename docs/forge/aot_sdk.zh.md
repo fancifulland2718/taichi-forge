@@ -166,7 +166,7 @@ cmake --install BUILD --prefix SDK --component TaichiSDKProvider_optix_abi118
 库仍是外部依赖，消费端不需要 OptiX SDK 头文件或 nvcc。清单分别为 `optix_abi93.json`、
 `optix_abi105.json`、`optix_abi118.json`，`provider_id` 保持 `optix`，另有 `variant`
 字段；许可目录也按变体区分。多组件共存不会覆盖彼此清单或基础 SDK 清单。已验证的
-Windows 单组件约214KiB，现有runtime wheel的adapter选择方式不变。安装不会自动选择
+Windows 单组件约221KiB，现有runtime wheel的adapter选择方式不变。安装不会自动选择
 adapter；请将实际路径传给 `runtime.configure_provider`。
 
 普通单变体组件安装 adapter
@@ -183,6 +183,15 @@ OptiX adapter 另提供 `taichi_forge_optix_runtime_provider_query` 公共会话
 执行表保留旧 OptiX 返回码，不能当作公共 provider 返回码解释。每个场景/查询 owner
 须持有会话直到在途工作和资源销毁完成；同一 adapter 的活引用必须使用同一库路径。
 具体 SDK/OptiX ABI 从执行表查询，驱动运行库版本未知时返回 0，不用 SDK 版本替代。
+
+可选的 domain execution table v2 增加 `forge_optix_query.h` 定义的固定查询扩展，
+也可通过 `taichi_forge_optix_fixed_query_api` 获取。它支持 opaque 的 typed 最近/首个
+接受命中、紧凑遮挡及可选活设备面表，每个查询的32–64字节固定参数只在准备时上传。
+查询保留场景引用；调用方保留数组，并在全部提交退休后销毁查询。允许原地 AS refit；
+替换或重建 AS 必须重新准备。查询仍由所属 context 串行、有序执行，此扩展不声明
+CUDA stream capture 支持。旧 provider ABI/执行表和公共执行表 v1 均保留。
+仅此 adapter 扩展不会改变 AOT 查询选择，也不新增 alpha/OMM 支持。
+
 显式 AOT 计划可通过 `runtime.configure_provider("optix", adapter_path=..., library_path=...)`
 使用以下 version 1 原生资源/操作（provider 均为 `optix`）：
 

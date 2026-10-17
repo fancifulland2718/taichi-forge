@@ -1,6 +1,7 @@
 #include "taichi/optix/forge_optix_runtime_provider.h"
 
 #include <exception>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <string>
@@ -138,22 +139,34 @@ TiForgeRuntimeProviderResult execution(TiForgeRuntimeProviderRuntime runtime,
                                        size_t api_size,
                                        void *out_api) {
   return guarded([&] {
-    if (version != TI_FORGE_RUNTIME_PROVIDER_EXECUTION_ABI_VERSION) {
+    if (version != TI_FORGE_RUNTIME_PROVIDER_EXECUTION_ABI_VERSION && version != 2) {
       return translate(fail(TI_FORGE_OPTIX_ERROR_ABI_MISMATCH,
                             "unsupported OptiX execution ABI"));
     }
-    if (!runtime || !out_api || api_size < sizeof(TiForgeOptixExecutionApi)) {
+    const auto required = version == 2 ? sizeof(TiForgeOptixExecutionApiV2)
+                                       : sizeof(TiForgeOptixExecutionApi);
+    if (!runtime || !out_api || api_size < required) {
       return invalid("OptiX execution API requires a runtime and full table");
     }
-    TiForgeOptixExecutionApi api{};
-    api.struct_size = sizeof(api);
+    static_assert(offsetof(TiForgeOptixExecutionApiV2, queries) ==
+                  sizeof(TiForgeOptixExecutionApi));
+    static_assert(offsetof(TiForgeOptixExecutionApiV2, provider) ==
+                  offsetof(TiForgeOptixExecutionApi, provider));
+    TiForgeOptixExecutionApiV2 api{};
+    api.struct_size = uint32_t(required);
     api.execution_abi_version = version;
     const auto result = taichi_forge_optix_provider_query(
         TI_FORGE_OPTIX_PROVIDER_ABI_VERSION, sizeof(api.provider), &api.provider);
     if (result != TI_FORGE_OPTIX_SUCCESS) {
       return translate(result);
     }
-    *static_cast<TiForgeOptixExecutionApi *>(out_api) = api;
+    if (version == 2) {
+      const auto query_result = taichi_forge_optix_fixed_query_api(
+          TI_FORGE_OPTIX_FIXED_QUERY_REVISION, sizeof(api.queries), &api.queries);
+      if (query_result != TI_FORGE_OPTIX_SUCCESS)
+        return translate(query_result);
+    }
+    std::memcpy(out_api, &api, required);
     return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;
   });
 }

@@ -112,7 +112,7 @@ TEST_F(OptixCommonProvider, SharesLegacyLoaderWithoutCreatingADeviceContext) {
   expect_error([&] { module->create_runtime(missing_runtime); },
                TI_FORGE_RUNTIME_PROVIDER_ERROR_LIFETIME);
 
-  expect_error([&] { first->execution_api<TiForgeOptixExecutionApi>(2); },
+  expect_error([&] { first->execution_api<TiForgeOptixExecutionApi>(99); },
                TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH);
   TiForgeOptixExecutionApi output{};
   EXPECT_EQ(api.query_execution_api(first->handle(), 1, sizeof(output) - 1,
@@ -157,6 +157,45 @@ TEST_F(OptixCommonProvider, SessionAndResourcesRetainOneLazyRuntime) {
             nullptr);
   runtime.reset();
   EXPECT_TRUE(weak.expired());
+}
+
+TEST_F(OptixCommonProvider, OptionalFixedQueryTablePreservesVersionOne) {
+  decltype(&taichi_forge_optix_fixed_query_api) get_queries{};
+  library->load_function(TI_FORGE_OPTIX_FIXED_QUERY_API_SYMBOL, get_queries);
+  ASSERT_NE(get_queries, nullptr);
+  TiForgeOptixFixedQueryApi queries{};
+  EXPECT_EQ(get_queries(0, sizeof(queries), &queries), TI_FORGE_OPTIX_ERROR_ABI_MISMATCH);
+  EXPECT_EQ(get_queries(1, sizeof(queries) - 1, &queries), TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT);
+  EXPECT_EQ(get_queries(1, sizeof(queries), nullptr), TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT);
+  ASSERT_EQ(get_queries(1, sizeof(queries), &queries), TI_FORGE_OPTIX_SUCCESS);
+  EXPECT_EQ(queries.revision, 1);
+  TiForgeOptixPreparedQuery query_handle = reinterpret_cast<void *>(1);
+  EXPECT_EQ(queries.prepare(nullptr, nullptr, &query_handle), TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT);
+  EXPECT_EQ(query_handle, nullptr);
+  EXPECT_EQ(queries.launch(nullptr, 0), TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT);
+  EXPECT_EQ(queries.destroy(nullptr), TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT);
+  EXPECT_EQ(queries.memory(nullptr, nullptr),
+            TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT);
+  auto runtime = module->create_runtime();
+  const auto legacy = runtime->execution_api<TiForgeOptixExecutionApi>();
+  const auto extended = runtime->execution_api<TiForgeOptixExecutionApiV2>(2);
+  EXPECT_EQ(legacy.struct_size, sizeof(legacy));
+  EXPECT_EQ(extended.provider.trace_faces, legacy.provider.trace_faces);
+  EXPECT_EQ(extended.queries.prepare, queries.prepare);
+  EXPECT_TRUE(extended.provider.info.features &
+              TI_FORGE_OPTIX_FEATURE_PREPARED_FIXED_QUERY);
+  EXPECT_EQ(
+      api.query_execution_api(runtime->handle(), 2, sizeof(legacy), &queries),
+      TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT);
+  // Version 1 must not write an optional suffix into an old client's storage.
+  struct OldClient {
+    TiForgeOptixExecutionApi table;
+    uint64_t canary = 0x1234567812345678;
+  } old{};
+  EXPECT_EQ(api.query_execution_api(runtime->handle(), 1, sizeof(old.table),
+                                    &old.table),
+            TI_FORGE_RUNTIME_PROVIDER_SUCCESS);
+  EXPECT_EQ(old.canary, 0x1234567812345678);
 }
 
 }  // namespace

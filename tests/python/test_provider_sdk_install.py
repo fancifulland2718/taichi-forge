@@ -23,7 +23,7 @@ def test_provider_sdk_variants_coexist_without_changing_plain_components(tmp_pat
         folder = tmp_path / variant
         folder.mkdir()
         (folder / "LICENSE.txt").write_text(f"{variant} fixture license\n")
-    probe = "#include <taichi/forge_optix_runtime_provider.h>\nint abi_size(void) { return sizeof(TiForgeOptixExecutionApi); }\n"
+    probe = "#include <taichi/forge_optix_runtime_provider.h>\nint abi_size(void) { return sizeof(TiForgeOptixExecutionApiV2); }\n"
     (tmp_path / "probe.c").write_text(probe)
     (tmp_path / "probe.cpp").write_text(probe)
     (tmp_path / "CMakeLists.txt").write_text(f"""cmake_minimum_required(VERSION 3.22)
@@ -35,6 +35,7 @@ endforeach()
 foreach(name first second)
     ti_install_provider_sdk(${{name}} optix VARIANT ${{name}}
         PUBLIC_HEADERS "{root.as_posix()}/taichi/optix/forge_optix_provider.h"
+            "{root.as_posix()}/taichi/optix/forge_optix_query.h"
             "{root.as_posix()}/taichi/optix/forge_optix_runtime_provider.h"
         LICENSE_FILES "${{CMAKE_CURRENT_SOURCE_DIR}}/${{name}}/LICENSE.txt"
         EXTERNAL_REQUIREMENTS "application-managed driver")

@@ -8,6 +8,7 @@
 #include "../external_runtime/forge_runtime_provider.h"
 #endif
 #include "forge_optix_provider.h"
+#include "forge_optix_query.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,15 @@ typedef struct TiForgeOptixExecutionApi {
   uint32_t execution_abi_version;
   TiForgeOptixProviderApi provider;
 } TiForgeOptixExecutionApi;
+
+// Optional domain execution version 2. Version 1 and its exact table layout
+// remain supported for existing consumers; older adapters reject version 2.
+typedef struct TiForgeOptixExecutionApiV2 {
+  uint32_t struct_size;
+  uint32_t execution_abi_version;
+  TiForgeOptixProviderApi provider;
+  TiForgeOptixFixedQueryApi queries;
+} TiForgeOptixExecutionApiV2;
 
 // The family describes the bundled adapter set. provider.info identifies the
 // specific SDK/OptiX ABI of this adapter. Runtime version fields are zero

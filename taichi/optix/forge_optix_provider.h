@@ -56,6 +56,7 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_FACE_FILTER_OCCLUSION = 1ull << 18,
   TI_FORGE_OPTIX_FEATURE_FACE_FILTER_PER_PRIMITIVE = 1ull << 19,
   TI_FORGE_OPTIX_FEATURE_FACE_FILTER_ALPHA = 1ull << 20,
+  TI_FORGE_OPTIX_FEATURE_PREPARED_FIXED_QUERY = 1ull << 21,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
