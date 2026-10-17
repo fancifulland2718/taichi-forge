@@ -285,9 +285,29 @@ contribute to `workspace_bytes`; private arrays contribute to `resource_bytes`.
 Public scenes are not counted again in every plan, and these figures are not
 driver residency. Small Windows Vulkan checks cover standalone consumers,
 borrowed owners, refit/miss reset, all four query variants, shared retirement and
-downstream gradient kernels. AS traversal itself is not differentiated. Automatic
-Graph export, separate BLAS/TLAS resources, face filtering and compact occlusion
-are not provided by this AOT factory yet.
+downstream gradient kernels. AS traversal itself is not differentiated. Separate
+BLAS/TLAS resources, face filtering and compact occlusion are not provided by this
+AOT factory yet.
+
+Graphs containing `TriangleScene.record_refit()`, `record_typed()` and `record()`
+can be exported automatically:
+
+```python
+module.add_execution_plan(
+    "step", graph,
+    resource_bindings={scene: {"vertices": "seed", "indices": "triangles"}},
+)
+# Or bind a public consumer scene without creating a private AS:
+module.add_execution_plan("shared_step", graph, resource_bindings={scene: "scene"})
+```
+
+The first form requires seeds ready before preparation and reconstructs each
+source scene once across repeated queries/refits. It serializes no producer
+handles and does not infer current AS contents. The public form lets query-only
+plans in other modules share the same scene and observe device refits without
+rebuilding it. Small standalone/borrowed Vulkan fixtures qualify exported forward
+and downstream backward kernels, consumption after producer retirement and shared
+closure. InstanceTLAS recordings still require further resource-factory coverage.
 
 Explicit AOT plans can use `runtime.configure_provider("optix", adapter_path=...,
 library_path=...)` with these version 1 native resources/operations, all under

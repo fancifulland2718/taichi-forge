@@ -86,6 +86,11 @@ def _ray_storage(value, width, dtypes, name):
 class VulkanRayQueryRecording(BackendCommandRecording):
     """One batch query over compact dense storage against a fixed scene/TLAS."""
 
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray import export_query
+
+        return export_query(self, context)
+
     def __init__(self, scene, ray_count, *, rays="rays", hits="hits", hit_indices=None):
         if not isinstance(scene, (TriangleScene, InstanceTLAS)):
             raise TypeError(
@@ -270,6 +275,11 @@ class _GeometryRecording:
 @instrument_hardware_recording("ray.as_refit.vulkan")
 class VulkanRayRefitRecording(_GeometryRecording, BackendCommandRecording):
     """One vertex-only BLAS update for a :class:`TriangleScene`."""
+
+    def _export_aot(self, context):
+        from ._aot_vulkan_ray import export_refit
+
+        return export_refit(self, context)
 
     def __init__(self, scene, *, vertices="vertices"):
         if not isinstance(scene, TriangleScene):

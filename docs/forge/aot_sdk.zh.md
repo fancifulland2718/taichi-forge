@@ -225,8 +225,23 @@ t/primitive/custom/hit，miss 为 `[-1,-1,-1,0]`。均接受双面并返回区�
 请求分配计入 `workspace_bytes`，私有数组计入 `resource_bytes`；公共 scene 不重复
 计入每份 plan，这些数值不是驱动实际驻留量。Windows Vulkan 小型检查覆盖独立消费端、
 借用 owner、refit/miss、全部四种查询变体、共享关闭和命中后的下游梯度核；不表示
-AS 遍历本身可微。Graph 自动导出、独立 BLAS/TLAS、面过滤及 compact occlusion 尚未
-由此 AOT 工厂提供。
+AS 遍历本身可微。独立 BLAS/TLAS、面过滤及 compact occlusion 尚未由此 AOT 工厂提供。
+
+Graph 内 `TriangleScene.record_refit()`、`record_typed()` 和 `record()` 可自动导出：
+
+```python
+module.add_execution_plan(
+    "step", graph,
+    resource_bindings={scene: {"vertices": "seed", "indices": "triangles"}},
+)
+# 或由消费端绑定公共 scene，不生成私有 AS：
+module.add_execution_plan("shared_step", graph, resource_bindings={scene: "scene"})
+```
+
+前者的种子须在准备前就绪，多次查询/refit只重建同一个生产端scene一次；不会序列化
+生产端句柄或猜测当前AS内容。后者的公共scene可供其他模块的query-only计划共享，
+设备refit后无需重新创建。自动导出的前向及下游反向、生产端退休后的消费、共享关闭
+均已在独立/借用Vulkan小夹具验证。InstanceTLAS recording仍需后续资源工厂覆盖。
 
 显式 AOT 计划可通过 `runtime.configure_provider("optix", adapter_path=..., library_path=...)`
 使用以下 version 1 原生资源/操作（provider 均为 `optix`）：
