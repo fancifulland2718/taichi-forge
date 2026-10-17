@@ -418,6 +418,20 @@ class VulkanGraphicsQueueBindingExecutor(VulkanBindingFrameExecutor):
     physical_execution_queue = "graphics"
     independent_graphics = False
 
+    @staticmethod
+    def _validate_aot_export(spec, backend):
+        from taichi_forge.lang.exception import TaichiRuntimeError
+
+        # The shared AOT fixed executor passes this flat operation sequence to
+        # GfxRuntime::prepare_fixed_graph, as does this selected JIT recipe.
+        # A qualified graphics operation selects the compute-capable graphics
+        # queue for the complete recording. No segmented or fork/join fallback.
+        if not eligible(spec, backend) or not graphics_queue_eligible(spec) or any(
+            not callable(type(node.executable._recording).__dict__.get("_export_aot"))
+            for node in prepared_boundaries(spec)
+        ):
+            raise TaichiRuntimeError("AOT graphics queue frames require a qualified complete Vulkan recording")
+
     def __init__(self, instance):
         super().__init__(instance)
         if not graphics_queue_eligible(instance.spec):

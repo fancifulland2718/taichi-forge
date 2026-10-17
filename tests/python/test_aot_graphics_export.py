@@ -6,16 +6,32 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 
 import pytest
 import taichi_forge as ti
 from tests import test_utils
 from tests.python.test_hardware_graphics import _spirv_header
 from tests.python.aot_vulkan_graphics_probe import pipeline_spec
+from tests.python.test_graph_binding_frame_recipe import _catalog
 
 
+@contextmanager
+def selected_graphics(definition, choice="graphics-queue-argument-images"):
+    catalog = _catalog(definition)
+    recipe = next(
+        entry.recipe
+        for entry in catalog.entries()
+        if any(fragment.fragment_key.endswith(":" + choice) for fragment in entry.recipe.fragments)
+    )
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(recipe) as materialized:
+            yield materialized.executor
+
+
+@pytest.mark.parametrize("recipe", ["ordinary", "selected"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_graphics_recording_export_and_gradients(tmp_path):
+def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe):
     @ti.kernel
     def sample(image: ti.types.texture(2), output: ti.types.ndarray(ti.f32, 1)):
         for i in range(64):
@@ -146,11 +162,19 @@ def test_aot_graphics_recording_export_and_gradients(tmp_path):
                 assert len(module._exported_kernels) == count
             costs.append(dict(seeded=early_read, export_ms=(time.perf_counter() - start) * 1000))
 
-        graph = builder.compile()
-        try:
-            export(graph)
-        finally:
-            graph.close()
+        if recipe == "selected":
+            definition = builder.freeze()
+            with selected_graphics(definition) as graph:
+                export(graph)
+            with selected_graphics(definition, "immutable-argument-images") as graph:
+                with pytest.raises(ti.TaichiRuntimeError, match="ordered Vulkan compute"):
+                    ti.aot.Module().add_execution_plan("bad", graph)
+        else:
+            graph = builder.compile()
+            try:
+                export(graph)
+            finally:
+                graph.close()
 
     # The legacy single-draw recording shares the same explicit pass factory.
     single = ti.graph.GraphBuilder()
@@ -276,6 +300,15 @@ def test_aot_graphics_recording_export_and_gradients(tmp_path):
             ti.aot.Module().add_execution_plan("bad", graph, source_bindings=dict(color=sources["color"]))
     finally:
         graph.close()
+
+    if recipe == "selected":
+        fork = ti.graph.GraphBuilder()
+        fork.dispatch(seed, dout, loss, fork.private_ndarray("dloss", ti.f32, 1))
+        fork.append_native(last, admission="auto")
+        fork.dispatch(sample, arg(kind.TEXTURE, "color", ndim=2), output)
+        with selected_graphics(fork.freeze(), "independent-graphics-argument-images") as graph:
+            with pytest.raises(ti.TaichiRuntimeError, match="selected storage/binding recipe"):
+                ti.aot.Module().add_execution_plan("bad", graph)
 
     artifact = tmp_path / "graphics-export.tcm"
     module.archive(str(artifact))

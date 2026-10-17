@@ -53,8 +53,9 @@ lifetimes. The entries below describe the changes.
   explicit vertex/index/uniform array usages. Standalone/borrowed execution,
   resource retirement and downstream gradients are qualified. Ordinary Graphs
   export draw/pass recordings, immutable shader assets or public pipelines,
-  attachment aliases and integer MRT clears. Selected graphics queue recipes
-  and mesh/indirect coverage remain pending. See the
+  attachment aliases and integer MRT clears. Selected complete graphics queue
+  recipes reuse the same GFX builder; segmented/fork-join export and mesh/indirect
+  coverage remain pending. See the
   [AOT SDK contract](aot_sdk.en.md#explicit-vulkan-raster-plans).
 
 - AOT v18 preserves explicit storage/uniform/vertex/index usages on private

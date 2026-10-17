@@ -443,12 +443,12 @@ Small Windows Vulkan tests cover standalone/borrowed consumers, real instance
 SBT selection and any-hit filtering, hit/miss/refit, sampled-to-storage image
 processing followed by ordinary sampling, downstream gradients and retirement.
 The external shaders have no automatic derivative. Ray-program tests currently
-use the base mip. Raster graphics resources remain separate work.
+use the base mip. Raster graphics resources have a separate qualification below.
 
 Graph export accepts an initialized `launch.graph_recording()` in ordinary
 Graphs and selected ordered Vulkan compute binding frames, including qualified
 compute boundaries such as AS refit. The exporter preserves selected node order;
-graphics queues and fork/join recipes still require their own export contract.
+this ray-program coverage does not qualify mixed graphics queues or fork/join.
 Supply fixed buffer and Texture owners under their Graph names in
 `source_bindings`. Use the existing AS and image `resource_bindings` for consumer
 seeds or public resources. For the pipeline, choose either a public resource name
@@ -879,9 +879,12 @@ explicit pixel seeds or initialized public images. Native preparation checks
 initialization along the complete control flow, including conditional clears.
 Windows validation covers both recording classes, integer MRT clears, sampled
 and uniform descriptors, aliases, public/private owners, replay, retirement and
-actual downstream kernel gradients. Selected graphics binding-frame and
-fork/join recipes still require their own persistent queue contract. This cold
-export reuses the existing GFX executor and compiled kernel entries.
+actual downstream kernel gradients. The explicitly selected complete graphics
+queue recipe can also export qualified pass recordings: both JIT and AOT use
+the same fixed GFX graph builder on the compute-capable graphics queue. This
+adds no format version or consumer interpreter. Segmented compute/graphics and
+independent fork/join recipes remain rejected until their distinct submission
+contracts are preserved. The cold export reuses compiled kernel entries.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use

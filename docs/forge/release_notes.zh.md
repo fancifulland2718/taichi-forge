@@ -44,8 +44,9 @@
   核心录制直接、索引及实例化绘制。完整 clear 无需 seed 上传，LOAD 和采样保留
   初始化检查；轻量 runtime 可显式声明 vertex/index/uniform 数组用途。
   已验证独立/借用执行、资源退休和下游梯度；普通 Graph 可导出 draw/pass recording、
-  不可变 shader 资产或公共 pipeline、附件别名及整数 MRT clear。selected graphics
-  队列 recipe 与 mesh/indirect 仍待接通，详见 [AOT SDK 合同](aot_sdk.zh.md#显式-vulkan-光栅计划)。
+  不可变 shader 资产或公共 pipeline、附件别名及整数 MRT clear。selected 整图
+  graphics 队列 recipe 复用同一 GFX 构建器；分段/fork-join 导出与 mesh/indirect
+  仍待接通，详见 [AOT SDK 合同](aot_sdk.zh.md#显式-vulkan-光栅计划)。
 
 - AOT v18 保存私有 ndarray 的 storage/uniform/vertex/index 用途，支持归档初始
   数据及 view 用途继承；不声明该字段的计划保留原格式与默认值。要求配对 ABI88

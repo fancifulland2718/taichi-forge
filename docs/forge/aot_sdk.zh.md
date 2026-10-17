@@ -352,11 +352,11 @@ owner 队列构建并初始化 SBT 一次；重放复用 pipeline/descriptor/SBT
 
 Windows Vulkan 小夹具覆盖独立/借用消费、真实实例 SBT 选择与 any-hit 过滤、
 hit/miss/refit、采样图像→storage 写入→普通采样、下游梯度及关闭。外部 shader 本身
-没有自动导数。ray-program 本身目前用 base mip 验证；光栅 graphics 资源仍属后续工作。
+没有自动导数。ray-program 本身目前用 base mip 验证；光栅 graphics 资源的独立验证见后文。
 
 Graph 自动导出接受已初始化的 `launch.graph_recording()`，覆盖普通 Graph 和已选择的
 有序 Vulkan compute binding frame，包括具有具体导出合同的 AS refit 等计算边界。
-导出保留已选择节点的顺序；graphics 队列及 fork/join recipe 仍需单独的持久合同。
+导出保留已选择节点的顺序；本批 ray-program 验证不扩展到混合 graphics 队列或 fork/join。
 将固定 buffer 和 Texture owner 按 Graph 参数名放入 `source_bindings`，AS/图像继续用
 既有 `resource_bindings` 声明消费端种子或公共资源。pipeline 可映射为公共资源名，
 或 `{"shader_0": shader0, ...}` 的端口表，提供原不可变 `SpirvShader`。编号按原首次使用
@@ -681,8 +681,10 @@ Graph 参数名，consumer 分配须有对应 buffer usage。私有重建 pipeli
 更早的读取或 LOAD 仍要求显式像素 seed 或已初始化公共图像。原生准备层沿完整控制流
 检查初始化，条件 clear 不能成为无条件证明。Windows 验证覆盖两种 recording、整数
 MRT clear、采样/uniform 描述符、别名、公私资源、重放、退休和真实下游 kernel 梯度。
-selected graphics binding-frame 与 fork/join recipe 仍须单独接通持久队列合同。
-本次冷导出复用现有 GFX 执行器和已编译 kernel entry。
+显式选择的整图 graphics queue recipe 也可导出合格 pass recording：JIT/AOT 都在
+支持 compute 的 graphics 队列调用同一个 GFX 固定图构建器，无需新增格式版本或
+consumer 解释层。分段 compute/graphics 和独立 fork/join recipe 在各自提交合同
+接通前仍拒绝导出。冷导出复用已编译 kernel entry。
 
 显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
 `mip_levels` 和 `attachment`，复用同一所有者及 `image/upload`、`image/upload_mips`。
