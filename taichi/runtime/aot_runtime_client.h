@@ -11,6 +11,7 @@
 namespace taichi::lang {
 class Program;
 class Ndarray;
+class Texture;
 
 // Private split-runtime bridge. Consumers use the existing C API only while
 // holding this client's scope. The Program owns the backend, never this client.
@@ -34,6 +35,8 @@ class AotRuntimeClient final : public RuntimeClient {
                                    std::vector<int>,
                                    std::vector<int>>;
   NdarrayImport import_ndarray(const Ndarray *array);
+  // Opaque native-resource token; retains the Program's texture storage lease.
+  std::uintptr_t import_texture(const Texture *texture);
 
  private:
   struct State;

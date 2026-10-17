@@ -95,6 +95,7 @@ class TI_DLL_EXPORT Texture {
 
  private:
   friend class Program;
+  friend class AotRuntimeClient;
 
   void bind_runtime_resource_handle(RuntimeResourceHandle handle) noexcept {
     runtime_resource_handle_ = handle;

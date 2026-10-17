@@ -609,6 +609,8 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("import_ndarray", &AotRuntimeClient::import_ndarray,
            py::call_guard<py::gil_scoped_release>())
+      .def("import_texture", &AotRuntimeClient::import_texture,
+           py::call_guard<py::gil_scoped_release>())
       .def_property_readonly("closed", &AotRuntimeClient::closed)
       .def_property_readonly("handle", &AotRuntimeClient::handle)
       .def_property_readonly("device_identity",

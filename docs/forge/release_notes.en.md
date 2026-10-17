@@ -34,12 +34,18 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Borrowed CUDA/Vulkan AOT runtimes can `import_texture()` from their JIT
+  Program, retaining storage and sampler without copying pixels. JIT/AOT
+  updates, independent imports, source-wrapper collection and in-flight
+  retirement are covered. Requires paired ABI81 components; current sampled
+  image format/mip/sampler boundaries still apply.
+
 - AOT adds `Runtime.native_resource()` through the existing factory catalog,
   allowing resources to be shared across modules and plans. CUDA/Vulkan images
   and CUDA OptiX parent/child resources are qualified, including transitive
   retirement; public image constructors release completed seed inputs. Paired
-  private ABI80 components are required. This does not import existing JIT
-  Textures or qualify every provider. See [AOT SDK](aot_sdk.en.md).
+  private components are required. This does not qualify every provider.
+  See [AOT SDK](aot_sdk.en.md).
 
 - New AOT Graph exports batch sampled-image seeds into one-time initialization.
   After `prepared.initialize()`, seed arrays used only for initialization can

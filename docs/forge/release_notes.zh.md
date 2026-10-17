@@ -31,10 +31,14 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CUDA/Vulkan AOT 借用者新增 `import_texture()`，直接保留其 JIT Program 的图像
+  存储和 sampler，不复制像素。覆盖 JIT/AOT 双向更新、独立导入、源包装回收及在途
+  退休；要求配对的 ABI81 组件，仍遵循当前 sampled image 的格式/mip/sampler 边界。
+
 - AOT 新增 `Runtime.native_resource()`，通过现有工厂目录创建可跨模块/计划共享的
   公共资源。CUDA/Vulkan 图像和 CUDA OptiX 父子资源已验证，关闭输入会逐级退休依赖
-  资源与执行对象；公共图像构造完成即可关闭 seed。要求配对的私有 ABI80 组件，
-  不自动导入现有 JIT Texture，也不代表全部 provider 已完成验证。详见 [AOT SDK](aot_sdk.zh.md)。
+  资源与执行对象；公共图像构造完成即可关闭 seed。要求配对的私有组件，
+  不代表全部 provider 已完成验证。详见 [AOT SDK](aot_sdk.zh.md)。
 
 - 新导出的 AOT Graph 将 sampled image 的 seed 上传合并到一次初始化段。
   `prepared.initialize()` 完成后，仅供初始化的 seed 数组可关闭，重放继续有效；

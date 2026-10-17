@@ -17,6 +17,8 @@ def borrow_runtime():
     owns its AOT resources; closing it leaves the JIT Program alive. Resetting
     the Program retires all its borrowers. ``runtime.import_ndarray(array)``
     retains an explicit zero-copy storage lease on an existing JIT ndarray.
+    CUDA/Vulkan ``runtime.import_texture(texture)`` retains a sampled Texture's
+    existing storage and sampler through the same owner boundary.
     """
     from taichi_forge._lib import core, utils
     from taichi_forge.lang import impl
@@ -28,7 +30,10 @@ def borrow_runtime():
     runtime = impl.get_runtime()
     runtime.materialize()
     client = factory(runtime.prog)
-    result = Runtime._from_borrowed(client, utils._loaded_native_runtime_path, ndarray_importer=_import_ndarray)
+    result = Runtime._from_borrowed(
+        client, utils._loaded_native_runtime_path,
+        ndarray_importer=_import_ndarray, texture_importer=_import_texture,
+    )
     runtime.register_runtime_object(result)
     return result
 
@@ -43,6 +48,16 @@ def _import_ndarray(client, array):
     if array.arr is None:
         raise RuntimeError("Cannot import an ndarray after its runtime was reset")
     return client.import_ndarray(array.arr)
+
+
+def _import_texture(client, texture):
+    from taichi_forge.lang._texture import Texture
+
+    if not isinstance(texture, Texture):
+        raise TypeError("AOT import requires a JIT Texture")
+    if texture.tex is None:
+        raise RuntimeError("Cannot import a Texture after its runtime was reset")
+    return client.import_texture(texture.tex)
 
 
 def __getattr__(name):

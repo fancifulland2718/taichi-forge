@@ -373,7 +373,7 @@ are `product(shape) * channels * channel_bytes`, separate from reported query
 workspace, which does not include image residency. Alpha recordings can export
 through the image reconstruction contract below.
 
-With matching private ABI80 components, explicit execution-plan kernels on CUDA or Vulkan
+With matching private ABI81 components, explicit execution-plan kernels on CUDA or Vulkan
 may bind sampled `Texture` arguments directly to `image/sampled` resource names:
 
 ```python
@@ -457,7 +457,7 @@ keep their construction-time copy and retained-input contract. To express staged
 initialization explicitly, omit that resource binding and put an `image/upload`
 operation in `ExecutionPlan(initialization=[...])`.
 
-Matching ABI80 components also expose runtime-owned native resources, shared
+Matching ABI81 components also expose runtime-owned native resources, shared
 across modules and plans through the existing factory catalog:
 
 ```python
@@ -495,8 +495,9 @@ foreign, closed and retired handles fail before recording. Replay adds no owner
 scan or provider lookup. Seeded images may be updated and sampled across plans
 on the same runtime queue. Unseeded images still require an unconditional upload
 within each sampling plan: recording or executing a separate upload does not
-publish a global initialization fact. Legacy CGraph texture arguments, RWTexture
-and borrowing an existing Program Texture are outside this interface.
+publish a global initialization fact. Legacy CGraph texture arguments and RWTexture
+are outside this interface. Existing Program Textures require the explicit borrowed
+runtime import described below.
 
 Windows qualification covers CUDA/Vulkan images in standalone and borrowed
 runtimes, cross-module sampling/upload, CUDA binding families, initialization-only
@@ -662,6 +663,31 @@ Standalone Runtime instances cannot import JIT storage. Windows CPU/CUDA/Vulkan
 checks cover JIT→AOT→JIT ordering, explicit gradients, tensors, two borrowers,
 source-wrapper GC and in-flight reset. This adds shared storage, not provider
 operation coverage.
+
+With paired ABI81 components, CUDA/Vulkan borrowers can also call
+`image = runtime.import_texture(jit_texture)`. It returns the same public
+`NativeResource` type used by execution plans and sampled kernel bindings,
+retaining the Program's generation-qualified Texture lease. No image storage,
+pixel copy or replacement sampler is created. JIT uploads, AOT `image/upload`
+and sampling share the owner's queue and existing layout tracking. The caller
+must initialize valid texels before sampling, following the JIT Texture contract;
+import does not clear or initialize contents.
+
+The source Python Texture may be collected after import. Closing an imported
+handle completes in-flight use and retires its AOT users, while independent
+imports and the source Texture remain usable. Closing a borrower leaves the
+Program alive; `ti.reset()` retires all borrowed calls and leases before backend
+destruction. Imports accept only live managed Textures from that Program, on
+CUDA or Vulkan. Current qualification follows the native sampled-image boundary:
+one mip level, floating/normalized sampled formats, and no extended LOD,
+anisotropy or comparison sampler settings. Unsupported settings fail at import.
+Standalone runtimes cannot import Program resources.
+
+Windows checks cover non-square r32f images, nearest filtering and repeat
+addressing, JIT→AOT and AOT→JIT updates, two borrowers and multiple imports,
+source-wrapper GC, stale-view rejection, in-flight close/reset, and downstream
+numeric gradients. Vulkan additionally requests validation. These checks do not
+qualify RWTexture/legacy CGraph bindings or differentiation through sampling.
 
 The runtime wheel includes `taichi_forge_runtime.aot`, a Python consumer using
 the standard library and this shared C API. Ordinary kernel/CGraph execution
@@ -882,7 +908,7 @@ defaults are unchanged. CPU/Vulkan reject this lowering; provider bodies and
 nested control are outside this slice. IF/SWITCH, empty cases, default/no-op,
 signed selectors, actual `kernel.grad`, standalone/borrowed consumers and in-flight
 retirement are verified. Branches share code entries and replay does not parse
-descriptions. A v16 consumer and matching ABI80 components are required.
+descriptions. A v16 consumer and matching ABI81 components are required.
 `add_execution_plan(name, graph, gradients=...)` also exports IF/SWITCH selected
 for `cuda_masked_bounded_graph` under `native_required`, preserving physical
 boundaries, conditions and prefix/suffix operations. It deduplicates code by
@@ -1004,7 +1030,7 @@ rejects an ABI mismatch, including for zero budgets. It generates neither kernel
 code nor device-update nodes, and does not silently change the selected route.
 Each prepared instance owns its gate storage until submitted work retires.
 Static code is shared across plans; captured command storage grows with budgets.
-This requires a v14 consumer and matching private ABI80 components.
+This requires a v14 consumer and matching private ABI81 components.
 `add_execution_plan(name, graph)` exports a materialized nested Graph frozen to
 `masked`, preserving its physical dispatch boundaries and generating only the
 required body variants. Code is deduplicated by source specialization and launch
@@ -1024,7 +1050,7 @@ A nonempty initial condition runs once even for a zero budget and uses ordinary
 entries. Static code does not grow with the budget, but recorded commands do.
 Preparation retains the same binding, gradient and retirement contracts and
 rejects non-CUDA runtimes, native provider bodies and launch overrides. This
-format requires a v15 consumer and matching ABI80 components.
+format requires a v15 consumer and matching ABI81 components.
 `add_execution_plan(name, graph)` also exports materialized flat Graphs selected
 for `cuda_masked_bounded_graph`. It preserves the selected physical body and tail
 condition, generates only their gated variants, and shares code across plans.

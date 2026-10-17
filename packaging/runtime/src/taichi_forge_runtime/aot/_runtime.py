@@ -128,6 +128,7 @@ class Runtime:
         self._lock = threading.RLock()
         self._borrower = None
         self._ndarray_importer = None
+        self._texture_importer = None
         self._handle = None
         # Keep native registrations independently of Python wrapper lifetimes.
         # Cyclic GC can finalize a runtime and its pending argument owners in
@@ -152,10 +153,11 @@ class Runtime:
             raise RuntimeError("Native AOT runtime creation returned no handle")
 
     @classmethod
-    def _from_borrowed(cls, client, library_path, *, ndarray_importer=None):
+    def _from_borrowed(cls, client, library_path, *, ndarray_importer=None, texture_importer=None):
         result = cls.__new__(cls)
         result._lock = result._borrower = client
         result._ndarray_importer = ndarray_importer
+        result._texture_importer = texture_importer
         result._handle = None
         result._resources, result._pending = set(), set()
         try:
@@ -355,6 +357,24 @@ class Runtime:
                     self._api.call(self._api.ti_free_memory, self._handle, handle)
                 else:
                     memory.close()
+                raise
+
+    def import_texture(self, texture):
+        """Borrow existing JIT texture storage and sampler without copying pixels.
+
+        The source must follow the JIT initialization contract before sampling.
+        Source wrapper collection is safe; Program reset retires all borrowers.
+        Closing this handle leaves the source and independent borrowers usable.
+        """
+        with self._lock:
+            self._check()
+            if self._texture_importer is None:
+                raise RuntimeError("JIT Texture import requires ti.aot.borrow_runtime()")
+            handle = self._texture_importer(self._borrower, texture)
+            try:
+                return NativeResource(self, handle, ())
+            except BaseException:
+                self._api.call(self._api.ti_destroy_native_resource_ext, self._handle, handle)
                 raise
 
     def close(self):

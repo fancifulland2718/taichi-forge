@@ -291,7 +291,7 @@ CUDA沿用现有Forge布局：逻辑 `[X,Y]` 对应物理CUDA array的宽Y、高
 `product(shape) * channels * channel_bytes`，与查询workspace分开；workspace统计不含图像驻留。
 alpha recording 可通过下述显式图像重建合同自动导出。
 
-使用匹配的私有 ABI80 组件时，CUDA/Vulkan 显式执行计划的 kernel 可将 sampled `Texture` 参数
+使用匹配的私有 ABI81 组件时，CUDA/Vulkan 显式执行计划的 kernel 可将 sampled `Texture` 参数
 绑定到 `image/sampled` 资源名：
 
 ```python
@@ -356,7 +356,7 @@ Graph 的 `image` 端口改由消费端数组 `initial_pixels` 提供。导出�
 的合同。手工计划若需分阶段初始化，可省略该资源绑定，将 `image/upload` 放入
 `ExecutionPlan(initialization=[...])`。
 
-匹配的 ABI80 组件另提供 runtime 所有的公共 native resource，复用同一工厂目录，
+匹配的 ABI81 组件另提供 runtime 所有的公共 native resource，复用同一工厂目录，
 可在多个模块、多个计划间共享：
 
 ```python
@@ -385,8 +385,8 @@ call 保留的资源。仅初始化使用的资源在 `initialize()` 成功后�
 资源使用 runtime 所有的 opaque 身份，在冷绑定阶段检查外来、已关闭和依赖已退休的句柄；
 重放不增加 owner 扫描或 provider 查询。有 seed 的图像可在同 runtime 队列的不同计划间
 有序上传和采样。无 seed 图像仍要求每个采样计划内部包含无条件上传；单独录制或执行上传
-不会发布跨计划初始化事实。旧 CGraph 纹理参数、RWTexture 和现有 Program Texture 借用
-不在此接口范围内。
+不会发布跨计划初始化事实。旧 CGraph 纹理参数、RWTexture 不在此接口范围内。
+现有 Program Texture 须使用下文显式 borrowed runtime 导入接口。
 
 Windows 已验证 CUDA/Vulkan 独立/借用 runtime 的图像跨模块采样与上传、CUDA 绑定族、
 初始化专用依赖退休及后续数值 kernel 的真实梯度；CUDA 另验证公共 OptiX context → GAS →
@@ -513,6 +513,24 @@ owner 的存储。`ti.reset()` 则使全部旧视图失效。当前不接受 Str
 tensor、其他 Program 或任意外部指针；独立 Runtime 不提供该 JIT 导入能力。
 Windows CPU/CUDA/Vulkan 已验证 JIT→AOT→JIT 顺序、显式梯度、tensor、两个借用者、
 源包装 GC 和在途 reset。这是共享存储能力，不扩大 provider 的操作覆盖。
+
+使用配对的 ABI81 组件，CUDA/Vulkan 借用者还可调用
+`image = runtime.import_texture(jit_texture)`。返回同一种公共 `NativeResource`，
+可绑定执行计划和 sampled kernel，保留 Program 带代次校验的 Texture 租约。
+不分配新图像、不复制像素、不替换 sampler。JIT 上传、AOT `image/upload` 及采样
+共享 owner 的队列与既有布局跟踪。调用者须依照 JIT Texture 合同在采样前准备有效
+texel；导入不清零或初始化内容。
+
+导入后可回收源 Python Texture。关闭导入句柄会完成在途使用并退休对应 AOT 使用者，
+独立导入和源 Texture 仍可使用。关闭 borrower 保留 Program；`ti.reset()` 在销毁
+后端前退休全部借用调用与租约。只接受同一 Program 中存活的受管 CUDA/Vulkan Texture。
+当前准入沿用 native sampled image 边界：单 mip、浮点/归一化采样格式，不接受扩展
+LOD、各向异性和 comparison sampler；不支持的设置在导入期拒绝。独立 Runtime
+不能导入 Program 资源。
+
+Windows 验证覆盖非方形 r32f、nearest/repeat sampler、JIT→AOT 与 AOT→JIT 更新、
+两个 borrower、多次导入、源包装 GC、陈旧 view 拒绝、在途 close/reset 及后续数值梯度。
+Vulkan 另请求 validation。不据此扩大 RWTexture、旧 CGraph 绑定或采样求导的支持面。
 
 runtime wheel 提供 `taichi_forge_runtime.aot`，仅用 Python 标准库和共库 C API
 消费普通 kernel/CGraph，无需 NumPy、DSL 前端或 CPython shim。导入本身不会加载
@@ -678,7 +696,7 @@ condition 与各 body 可以为空。非空分支每次出现使用独立的 4 �
 非选中 task 仍可能发射，因此不等同于 conditional node 的跳过成本，也不改变默认策略。
 CPU/Vulkan 不接受此 lowering，provider 与嵌套控制尚不属于此切片。
 已验证 IF/SWITCH、空 case、default/no-op、signed selector、实际 `kernel.grad`、独立/借用
-消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI80
+消费和在途退休。所有分支共享代码条目，准备后不再解析描述；需要 v16 消费端与匹配的 ABI81
 组件。`add_execution_plan(name, graph, gradients=...)` 也可导出 `native_required` 下已选
 `cuda_masked_bounded_graph` 的 IF/SWITCH：沿用物理边界、条件与前后段，按源特化和调用 ABI
 去重代码，不保存未用的普通 body 变体。实际分支内 `kernel.grad`、四种分支与重复计划共用
@@ -771,7 +789,7 @@ body/尾部边界、预算、私有资源和标量/互不别名约束；不在�
 schema 8声明的 `cuda_graph_gate_v1` 代码。prepare在零预算时也检查ABI，不在消费端生成
 kernel或device-update节点，不静默切换路线。每份prepare独立拥有gate存储，在提交完成
 后退休。静态代码可由多个计划共享，捕获的命令存储仍随预算增长。需v14消费端与匹配的
-私有ABI80组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
+私有ABI81组件。`add_execution_plan(name, graph)` 可自动导出已冻结为 `masked` 的物化
 嵌套Graph，保留物理dispatch边界，只生成body需要的变体；按源特化和调用ABI跨计划去重，
 普通入口不能覆盖gated入口。九个内层区域的小用例验证了真实前向/后段梯度、双绑定、活跃
 后零轮和独立/借用退休，消费端无需编译gated变体。未冻结auto、native provider body、
@@ -783,7 +801,7 @@ kernel合同。
 非空body中的所有kernel（包括尾条件）须为预编译的 `cuda_graph_gate_v1` 代码。非空初始
 condition使用普通入口，零预算也执行一次。静态代码不随预算复制，但录制命令仍随预算增长。
 prepare复用绑定、梯度与退休合同，拒绝非CUDA runtime、native provider body和launch override。
-此格式需要v15消费端及匹配的ABI80组件。`add_execution_plan(name, graph)` 也可自动导出
+此格式需要v15消费端及匹配的ABI81组件。`add_execution_plan(name, graph)` 也可自动导出
 已物化且选择 `cuda_masked_bounded_graph` 的单层Graph，保留已选物理body及尾条件，
 只生成其所需gated变体，跨计划共享代码。零预算只导出初始条件与前后段，不带无用body变体。
 公开/私有控制存储、标量和互不别名约束、显式梯度绑定均保留；消费端环境变化不重选路线，

@@ -4,6 +4,9 @@
 #include <exception>
 #include <limits>
 #include "taichi/program/program.h"
+#include "taichi/runtime/native_image.h"
+#include "taichi/runtime/texture_storage.h"
+#include "native_resource_registry.h"
 #include "taichi_core_impl.h"
 #ifdef TI_WITH_LLVM
 #include "taichi_llvm_impl.h"
@@ -15,6 +18,54 @@
 
 namespace taichi::lang {
 namespace {
+class BorrowedSampledImage final : public NativeSampledImage {
+ public:
+  BorrowedSampledImage(ImageParams parameters,
+                       Program::TextureResourceLease lease,
+                       Arch arch,
+                       Device &device,
+                       CudaTextureStorage *cuda_storage)
+      : NativeSampledImage(parameters, true),
+        lease_(std::move(lease)),
+        arch_(arch),
+        device_(device),
+        cuda_storage_(cuda_storage) {
+    const auto [dtype, channels] = buffer_format2type_channels(parameters.format);
+    bytes_ = data_type_size(dtype) * channels;
+    for (auto extent : {parameters.x, parameters.y, parameters.z}) {
+      if (!extent || extent > std::numeric_limits<std::size_t>::max() / bytes_)
+        throw std::invalid_argument("Borrowed image byte extent overflows");
+      bytes_ *= extent;
+    }
+  }
+  Arch arch() const override { return arch_; }
+  Device &device() const override { return device_; }
+  std::size_t workspace_bytes() const override { return 0; }
+  std::size_t logical_bytes() const override { return bytes_; }
+  std::uint64_t cuda_sampled_object() const override {
+    return lease_->get_cuda_texture_object();
+  }
+  void upload_cuda(std::uint64_t source, void *stream) override {
+#ifdef TI_WITH_CUDA
+    if (!cuda_storage_)
+      throw std::invalid_argument("Borrowed image has no CUDA storage");
+    cuda_storage_->upload_device_async(source, stream);
+#else
+    throw std::invalid_argument("CUDA image upload is unavailable");
+#endif
+  }
+  DeviceAllocation gfx_sampled_allocation() const override {
+    return lease_->get_device_allocation();
+  }
+
+ private:
+  Program::TextureResourceLease lease_;
+  Arch arch_;
+  Device &device_;
+  CudaTextureStorage *cuda_storage_;
+  std::size_t bytes_;
+};
+
 #ifdef TI_WITH_VULKAN
 class BorrowedVulkanRuntime final : public ::VulkanRuntime {
  public:
@@ -169,6 +220,57 @@ std::uintptr_t AotRuntimeClient::device_identity() const {
 }
 Arch AotRuntimeClient::arch() const {
   return state_->arch;
+}
+
+std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {
+  enter();
+  try {
+    auto &state = *state_;
+    if (state.closed || !state.runtime || !state.scopes.back().owns_lock())
+      throw std::runtime_error("AOT runtime is closed");
+    if (state.arch != Arch::cuda && state.arch != Arch::vulkan)
+      throw std::invalid_argument("AOT texture import requires CUDA or Vulkan");
+    if (!texture)
+      throw std::invalid_argument("AOT import requires a live JIT Texture");
+    // Validate the owner's live view before dereferencing the foreign pointer.
+    state.program->validate_textures_for_external_submission(&texture, 1);
+    auto lease = state.program->acquire_texture_external_lease(texture);
+    if (lease->get_mip_levels() != 1 ||
+        lease->sampler_config_.has_extended_sampling() ||
+        !is_float_sampled_texture_format(lease->get_buffer_format()))
+      throw std::invalid_argument(
+          "AOT texture import requires the qualified single-level sampled format/sampler");
+    ImageParams params{};
+    const auto size = lease->get_size();
+    params.x = size[0];
+    params.y = size[1];
+    params.z = size[2];
+    params.dimension = lease->get_dimension();
+    params.format = lease->get_buffer_format();
+    params.sampler_config = lease->sampler_config_;
+    params.mip_levels = lease->get_mip_levels();
+    params.usage = ImageAllocUsage::Sampled;
+    auto *cuda_storage = lease->cuda_texture_.get();
+    if ((state.arch == Arch::cuda && !cuda_storage) ||
+        (state.arch == Arch::vulkan &&
+         lease->get_device_allocation().device != &state.runtime->get()))
+      throw std::invalid_argument("AOT texture storage belongs to another backend/device");
+    // Import follows JIT's existing initialization contract: the caller provides
+    // valid contents before sampling. No copy or new sampler is introduced.
+    auto object = std::make_shared<BorrowedSampledImage>(
+        params, std::move(lease), state.arch, state.runtime->get(), cuda_storage);
+    TiNativeResource handle;
+    {
+      std::lock_guard<std::recursive_mutex> lock(state.runtime->submission_mutex());
+      handle = state.runtime->native_resource_registry().publish(
+          std::move(object), {}, {});
+    }
+    leave();
+    return reinterpret_cast<std::uintptr_t>(handle);
+  } catch (...) {
+    leave();
+    throw;
+  }
 }
 
 AotRuntimeClient::NdarrayImport AotRuntimeClient::import_ndarray(
