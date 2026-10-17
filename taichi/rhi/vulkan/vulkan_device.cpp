@@ -411,17 +411,22 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
                      std::invalid_argument("SPIR-V entry point is missing or has the wrong shader stage"));
     SpvReflectResult result;
 
-    if (bind_point_ == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+    if (bind_point_ == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR ||
+        bind_point_ == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       std::uint32_t count = 0;
       result = reflection.EnumerateEntryPointPushConstantBlocks(
           code_view.entry_point.c_str(), &count, nullptr);
       RHI_THROW_UNLESS(result == SPV_REFLECT_RESULT_SUCCESS,
-                       std::invalid_argument("Cannot reflect ray push constants"));
+                       std::invalid_argument("Cannot reflect shader push constants"));
+      // Neither the JIT nor native raster draw contract supplies push constants.
+      // Reject this interface before accepting a pipeline with undefined inputs.
+      RHI_THROW_UNLESS(bind_point_ != VK_PIPELINE_BIND_POINT_GRAPHICS || !count,
+                       std::invalid_argument("Graphics push constants require an explicit binding contract"));
       std::vector<SpvReflectBlockVariable *> blocks(count);
       result = reflection.EnumerateEntryPointPushConstantBlocks(
           code_view.entry_point.c_str(), &count, blocks.data());
       RHI_THROW_UNLESS(result == SPV_REFLECT_RESULT_SUCCESS,
-                       std::invalid_argument("Cannot reflect ray push constants"));
+                       std::invalid_argument("Cannot reflect shader push constants"));
       for (const auto *block : blocks) {
         RHI_THROW_UNLESS(block->offset <= 128 && block->size <= 128 - block->offset,
                          std::invalid_argument("Ray push constants exceed the 128-byte pipeline layout"));

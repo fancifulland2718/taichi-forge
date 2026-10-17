@@ -741,7 +741,7 @@ the existing ordered GFX graphics path; replay records the complete sequence on
 that queue without a per-upload host wait. Callers supply depth values in `[0,1]`,
 as required by the [Vulkan copy contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html).
 This qualifies 2D depth sampling and uploads, including complete mip chains.
-Rendering to an AOT-owned attachment remains separate work.
+Explicit raster plans can render to AOT-owned attachments as described below.
 
 `image/sampled` accepts an optional `sampler` object with the fields of
 `ti.hardware.sampling.SamplerConfig`: `min_filter`, `mag_filter`, `mip_filter`,
@@ -786,6 +786,67 @@ from JIT, or initialized explicitly in the consuming plan. Windows tests cover
 non-square three-level color/depth chains, fractional LOD filtering, fetching,
 ordinary/selected export, borrowing, updates, retirement and downstream gradients.
 Logical texel bytes include every level; they are not driver residency estimates.
+
+### Explicit Vulkan raster plans
+
+The common native registry exposes `vulkan_graphics/pipeline` and
+`vulkan_graphics/pass_direct`, both version 1. Discover the resource kind
+`vulkan_graphics_pipeline` and operation kind `vulkan_graphics_pass_direct`
+before allocating; the latter requires `vulkan_inline`. CPU and CUDA do not
+advertise these operations. Pipelines and images may be private plan resources
+or externally shared native resources, with the existing owner/retirement rules.
+
+Pipeline parameters contain `shader_count`, `shaders` (each with `stage` equal
+to `vertex` or `fragment`), `vertices` (`binding`, byte `stride`, optional
+`instance`) and `attributes` (`location`, `binding`, format name, byte `offset`).
+Bind SPIR-V host blobs as `shader_0`, `shader_1`, etc. Creation consumes their
+bytes synchronously; the blobs may then close. Optional raster parameters are
+`topology`, `polygon_mode`, `front_face_cull`, `back_face_cull`, `depth_test`,
+`depth_write`, `depth_compare`, `depth_bias_constant`, `depth_bias_slope`, plus
+per-target blend/write-mask descriptions in `color_targets`. These use the same
+states as `VulkanGraphicsPipeline`. Push-constant shaders are rejected because
+this draw contract has no push-constant binding.
+
+Pass parameters declare `pipeline_count`, `array_count`, `image_count` and
+`color_count`, bound respectively as `pipeline_N`, `array_N`, `image_N` and
+`color_N`; `depth` is optional. `colors` contains one `{clear, clear_bits}` per
+attachment, where `clear_bits` is four uint32 words containing the float clear
+values. `depth_clear`, `clear_depth` and `[x,y,width,height]` `viewport` are
+optional. Each entry in `draws` specifies:
+
+- `pipeline`: the pipeline ordinal, and `element_count`;
+- `vertices`: `{binding, array}` entries, and optional `index` array ordinal;
+- `buffers`: `{set, binding, array, storage}` descriptors (`storage=false` is uniform);
+- `images`: `{set, binding, image}` sampled-image descriptors;
+- optional `instance_count`, `first_vertex`, `first_index`, `first_instance`
+  and `vertex_offset`. Indexed draws require u32 indices and explicit inclusive
+  `index_min`/`index_max`, which the caller must maintain when indices change.
+
+Resource ordinals address those numbered groups, not allocation IDs. Both a
+pipeline description and a draw may specify `expected_pipeline`, a SHA-256
+contract over compiled code and normalized raster/vertex state. Mismatch is
+rejected before recording. Descriptor coverage/type/count, physical usage,
+logical ranges, alignment and device limits are checked during preparation.
+
+Use `runtime.ndarray(..., usage=("storage", "vertex"))` for arrays shared by
+compute and drawing; supported allocation usages are `storage`, `uniform`,
+`vertex` and `index`. The default remains `("storage",)`. This declaration
+does not add synchronization or inspect index contents. Plan-private ndarray
+allocations still use storage; supply drawing arrays externally in this version.
+For images, `image/sampled` accepts `attachment=true` on Vulkan. Attachments
+must be single-level 2D images. A first complete clear needs no seed image or
+upload, even with a partial draw viewport. LOAD and sampling require an earlier
+unconditional initialization; a conditional-only clear does not suffice.
+Sampling an attachment alias within the same pass is rejected. Queue choice,
+layout transitions, completion and resource retirement use the existing GFX
+executor, with no per-draw Python callback or extra host wait.
+
+Windows qualification covers standalone and borrowed execution, direct and
+indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
+LOAD, changed inputs and bindings, shared/private retirement, and downstream
+numeric gradients. This is not differentiation of rasterization. Automatic
+graphics Graph export, mesh/indirect draws, descriptor arrays, shader AS
+bindings, integer MRT and RWTexture kernel consumption remain separate work.
 
 CUDA and Vulkan Graph export also accept sampled Texture kernel arguments,
 including qualified immutable compute recipes. CUDA preserves its

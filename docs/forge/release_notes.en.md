@@ -34,6 +34,15 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Explicit Vulkan AOT plans reconstruct raster pipelines and color/depth
+  attachments, then record direct, indexed and instanced draws through the
+  shared JIT graphics core. Complete clears need no seed uploads; LOAD and
+  sampling retain initialization checks. The lightweight runtime accepts
+  explicit vertex/index/uniform array usages. Standalone/borrowed execution,
+  resource retirement and downstream gradients are qualified; automatic
+  graphics Graph export and mesh/indirect coverage remain pending. See the
+  [AOT SDK contract](aot_sdk.en.md#explicit-vulkan-raster-plans).
+
 - Vulkan shader reflection maintains a parser-local result-ID index instead of
   repeatedly scanning the module. Validation without an artifact capture skips
   unused diagnostic reflection. `ti.compile_profile()` separates SPIR-V emission,

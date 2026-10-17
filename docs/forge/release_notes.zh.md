@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 显式 Vulkan AOT 计划可重建光栅 pipeline、颜色/深度附件，并通过 JIT 共用图形
+  核心录制直接、索引及实例化绘制。完整 clear 无需 seed 上传，LOAD 和采样保留
+  初始化检查；轻量 runtime 可显式声明 vertex/index/uniform 数组用途。
+  已验证独立/借用执行、资源退休和下游梯度；graphics Graph 自动导出及
+  mesh/indirect 仍待接通，详见 [AOT SDK 合同](aot_sdk.zh.md#显式-vulkan-光栅计划)。
+
 - Vulkan shader 反射在解析期间维护 result-ID 索引，避免每次查询都扫描整个模块。
   只启用验证、不导出产物时，跳过不会使用的诊断反射。`ti.compile_profile()` 可区分
   SPIR-V 生成、优化、验证、反射/布局准备和驱动 pipeline 创建；编译档位、shader

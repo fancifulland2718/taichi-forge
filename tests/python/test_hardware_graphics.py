@@ -47,6 +47,21 @@ def _triangle_pipeline():
     )
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_rejects_unbound_push_constants():
+    code = (Path(__file__).parent / "assets/hardware_graphics_push_constant.vert.spv").read_bytes()
+    with pytest.raises((RuntimeError, ValueError), match="push constants"):
+        ti.hardware.graphics.VulkanGraphicsPipeline(
+            code,
+            _spirv_header("2_triangle.frag.spv.h"),
+            vertex_bindings=(ti.hardware.graphics.VertexBinding(0, 20),),
+            vertex_attributes=(
+                ti.hardware.graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),
+                ti.hardware.graphics.VertexAttribute(1, 0, ti.Format.rgb32f, 8),
+            ),
+        )
+
+
 def _depth_triangle_pipeline(*, enabled, **depth_state):
     vertex_path = (
         Path(__file__).parent / "assets" / "hardware_graphics_depth.vert.spv.h"

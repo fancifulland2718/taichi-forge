@@ -578,7 +578,7 @@ Vulkan `depth32f` 上传使用 depth aspect，并通过同一原生操作需求�
 的录制队列。初始化复用已有 GFX 有序 graphics 路径；重放将整个序列录入该队列，不为
 每次上传增加 host 等待。调用方提供 `[0,1]` 内的深度值，这是
 [Vulkan 复制合同](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html)的要求。
-本批覆盖二维深度采样与上传，包括完整 mip 链；向 AOT 图像附件渲染仍另行接通。
+本批覆盖二维深度采样与上传，包括完整 mip 链；显式光栅计划可按下文向 AOT 附件渲染。
 
 `image/sampled` 可选 `sampler` 对象，字段与 `ti.hardware.sampling.SamplerConfig`
 一致：`min_filter`、`mag_filter`、`mip_filter`、`address_mode_u/v/w`、`lod_bias`、
@@ -611,6 +611,52 @@ Graph 私有图像导出使用
 须覆盖全部已分配级。公开图像可借用已初始化的 JIT Texture，或在消费计划中显式初始化。
 Windows 小夹具验证非方形三级颜色/深度图像、分数 LOD 过滤、fetch、普通/已选择导出、
 借用、更新、退休及下游梯度。逻辑 texel 字节统计包含每一级，不代表驱动实际驻留大小。
+
+### 显式 Vulkan 光栅计划
+
+公共 native registry 提供 version 1 的 `vulkan_graphics/pipeline` 和
+`vulkan_graphics/pass_direct`。分配前查询资源种类 `vulkan_graphics_pipeline` 与
+操作种类 `vulkan_graphics_pass_direct`；后者需要 `vulkan_inline`。CPU/CUDA 不报告
+这两项能力。pipeline 和图像既可由计划私有重建，也可作为外部共享 native resource，
+沿用已有 owner 与退休合同。
+
+pipeline 参数包括 `shader_count`、`shaders`（各项 `stage` 为 `vertex` 或
+`fragment`）、`vertices`（`binding`、字节 `stride`、可选 `instance`）和
+`attributes`（`location`、`binding`、格式名、字节 `offset`）。SPIR-V host blob
+依次绑定为 `shader_0`、`shader_1` 等；创建同步消费代码，之后可关闭 blob。
+可选光栅参数为 `topology`、`polygon_mode`、`front_face_cull`、`back_face_cull`、
+`depth_test`、`depth_write`、`depth_compare`、`depth_bias_constant`、`depth_bias_slope`
+和 `color_targets` 中的逐附件混合/写掩码，状态与 `VulkanGraphicsPipeline` 一致。
+此绘制合同没有 push constant 绑定，相关 shader 在创建期拒绝。
+
+pass 声明 `pipeline_count`、`array_count`、`image_count`、`color_count`，分别绑定
+`pipeline_N`、`array_N`、`image_N`、`color_N`；`depth` 可选。`colors` 每项为
+`{clear, clear_bits}`，`clear_bits` 用四个 uint32 保存浮点清除值的位模式；另可设置
+`depth_clear`、`clear_depth` 和 `[x,y,width,height]` 的 `viewport`。`draws` 每项包含：
+
+- pipeline 序号 `pipeline` 和 `element_count`；
+- `vertices` 的 `{binding, array}` 列表，可选索引数组序号 `index`；
+- `buffers` 的 `{set, binding, array, storage}`（`storage=false` 表示 uniform）；
+- `images` 的 `{set, binding, image}` sampled-image 列表；
+- 可选 `instance_count`、`first_vertex`、`first_index`、`first_instance`、`vertex_offset`。
+  索引绘制要求 u32 索引及显式闭区间 `index_min`/`index_max`；改变索引内容时调用方须维持该范围。
+
+这些序号引用上述编号资源组，不是分配 ID。pipeline 描述和 draw 都可指定
+`expected_pipeline`，以编译代码和规范化光栅/顶点状态的 SHA-256 合同检查匹配。
+descriptor 完整性、类型/数量、真实用途、逻辑范围、对齐及设备限制均在准备期校验。
+
+共享计算与绘制的数组使用 `runtime.ndarray(..., usage=("storage", "vertex"))`。
+用途支持 `storage`、`uniform`、`vertex`、`index`，默认保持 `("storage",)`；用途声明
+不添加同步，也不扫描索引内容。本版计划私有 ndarray 仍按 storage 分配，绘制数组由外部提供。
+Vulkan `image/sampled` 可指定 `attachment=true`，附件须为单 mip 二维图像。首次完整
+clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样仍须有先前无条件初始化，
+仅条件分支内的 clear 不足以证明。单 pass 内采样附件别名会被拒绝。队列、布局转换、
+完成和退休沿用 GFX 执行器，不增加逐 draw Python 回调或 host 等待。
+
+Windows 验证覆盖独立/借用执行、直接和索引/实例化绘制、uniform/采样描述符、颜色/深度
+clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度；不提供光栅化求导。
+graphics Graph 自动导出、mesh/indirect、描述符数组、shader AS、整数 MRT 和 RWTexture
+kernel 消费仍为后续工作。
 
 CUDA/Vulkan Graph 自动导出也支持 sampled Texture kernel 参数，包括合格的不可变 compute
 录制方案。CUDA 保留 `cuda_immutable_argument_frames` 的资源共享策略，Vulkan 保留每次

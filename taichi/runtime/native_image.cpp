@@ -139,7 +139,7 @@ BufferFormat image_format(const std::string &name) {
 ImageParams parameters(const liong::json::JsonValue &p) {
   using namespace operation_json;
   fields(p, {"shape", "format", "filter", "address_modes", "storage", "sampler",
-             "mip_levels"});
+             "mip_levels", "attachment"});
   const auto &shape = p["shape"];
   if (!shape.is_arr() || shape.arr.inner.empty() || shape.arr.inner.size() > 3)
     throw std::invalid_argument(
@@ -159,6 +159,8 @@ ImageParams parameters(const liong::json::JsonValue &p) {
   result.usage = ImageAllocUsage::Sampled;
   if (optional_bool(p, "storage"))
     result.usage = result.usage | ImageAllocUsage::Storage;
+  if (optional_bool(p, "attachment"))
+    result.usage = result.usage | ImageAllocUsage::Attachment;
   result.format = image_format(name(p["format"]));
   if (!is_float_sampled_texture_format(result.format))
     throw std::invalid_argument(
@@ -608,6 +610,8 @@ void register_image_operations(NativeOperationRegistry &registry) {
       [](NativePreparationContext &c, const SampledImageDescription &d) {
         if (bool(d.parameters.usage & ImageAllocUsage::Storage))
           throw std::invalid_argument("Managed storage images require Vulkan");
+        if (bool(d.parameters.usage & ImageAllocUsage::Attachment))
+          throw std::invalid_argument("Managed attachment images require Vulkan");
         if (!c.fault_domain || !dynamic_cast<cuda::CudaDevice *>(&c.device))
           throw std::invalid_argument(
               "Sampled image requires a CUDA owner and fault domain");
