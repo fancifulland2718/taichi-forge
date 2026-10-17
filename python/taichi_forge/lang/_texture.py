@@ -304,6 +304,9 @@ class Texture:
     def from_field(self, field):
         """Loads a field to texture.
 
+        Vulkan requires matching shape/type and tightly packed root-dense
+        storage. Only mip zero is updated; other allocated levels are preserved.
+
         Args:
             field (ti.Field): Source field to load from.
         """

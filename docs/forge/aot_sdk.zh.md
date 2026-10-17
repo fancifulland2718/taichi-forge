@@ -591,8 +591,9 @@ Vulkan 重建和借用保留完整状态，复用已有 sampler cache，在使�
 descriptor；普通过滤采样不能使用比较 sampler。CUDA 继续拒绝扩展状态及不相同的
 min/mag filter。Windows 小夹具覆盖颜色过滤/寻址、深度比较、可用设备上的各向异性、
 普通/已选择 Graph 的公私资源、上传、借用和下游真实梯度，不提供 sampler 求导。
-`Texture.from_ndarray()` 的深度上传也使用受管 depth-aspect graphics 传输，保留
-Graph 重放之间的布局跟踪。
+`Texture.from_ndarray()` 和 `Texture.from_field()` 的深度上传也使用受管
+depth-aspect graphics 传输，保留 Graph 重放之间的布局跟踪。Vulkan Field 输入要求
+形状/类型匹配的紧凑 root-dense 存储；便捷上传仅修改第0级 mip。
 
 二维 Vulkan `image/sampled` 还接受 `mip_levels`（默认 `1`），级数受尺寸决定的完整链
 上限及设备限制约束。使用 `image/upload_mips` version 1 初始化所有已分配级：参数为

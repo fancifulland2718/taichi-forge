@@ -757,9 +757,11 @@ shader descriptor; ordinary filtered sampling cannot use a comparison sampler.
 CUDA rejects extended state and unequal min/mag filters. Windows tests cover
 color filtering/addressing, depth comparison, anisotropy where available,
 public/private ordinary and selected Graphs, uploads, borrowing and downstream
-gradients. Sampler derivatives are not provided. `Texture.from_ndarray()` depth
-uploads also use the managed depth-aspect graphics transfer path, preserving
-layout tracking between Graph replays.
+gradients. Sampler derivatives are not provided. Depth uploads through
+`Texture.from_ndarray()` and `Texture.from_field()` also use the managed
+depth-aspect graphics transfer path, preserving layout tracking between Graph
+replays. Vulkan Field uploads require matching shape/type and tightly packed
+root-dense storage; convenience uploads update only mip zero.
 
 For 2D Vulkan images, `image/sampled` also accepts `mip_levels` (default `1`).
 The count cannot exceed the complete chain implied by the dimensions or device

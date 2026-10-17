@@ -7,10 +7,12 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("source_kind", ["ndarray", "field"])
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, debug=True)
-def test_texture_upload_1d_reuses_live_graph():
-    pixels = ti.ndarray(ti.u8, 4)
+def test_texture_upload_1d_reuses_live_graph(source_kind):
+    pixels = ti.ndarray(ti.u8, 4) if source_kind == "ndarray" else ti.field(ti.u8, shape=4)
     image = ti.Texture(ti.Format.r8, (4,))
+    upload = image.from_ndarray if source_kind == "ndarray" else image.from_field
     result = ti.ndarray(ti.f32, 4, needs_grad=True)
     loss = ti.ndarray(ti.f32, 1, needs_grad=True)
 
@@ -39,7 +41,7 @@ def test_texture_upload_1d_reuses_live_graph():
     bound = graph.bind(dict(image=image, output=result))
     for values in ([0, 64, 128, 255], [255, 128, 64, 0]):
         pixels.from_numpy(np.array(values, np.uint8))
-        image.from_ndarray(pixels)
+        upload(pixels)
         graph.run(bound)
         result.grad.fill(0)
         loss.fill(0)

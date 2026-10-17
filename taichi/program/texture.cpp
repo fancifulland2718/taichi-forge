@@ -13,6 +13,9 @@
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_device.h"
 #endif
+#ifdef TI_WITH_VULKAN
+#include "taichi/rhi/vulkan/vulkan_common.h"
+#endif
 
 namespace taichi::lang {
 
@@ -522,31 +525,49 @@ void Texture::from_snode(SNode *snode) {
   auto resource_guard = prog_->acquire_runtime_resource_submission_guard();
   auto texture_lease = prog_->acquire_texture_external_lease(this);
 #ifdef TI_WITH_VULKAN
-  if (mip_levels_ > 1) {
+  if (prog_->compile_config().arch == Arch::vulkan) {
+    const int dimensions = dimension_ == ImageDimension::d1D   ? 1
+                           : dimension_ == ImageDimension::d2D ? 2
+                                                               : 3;
     TI_ERROR_IF(!snode->is_path_all_dense || !snode->parent ||
                     !snode->parent->parent ||
                     snode->parent->parent->type != SNodeType::root ||
+                    snode->num_active_indices != dimensions ||
                     snode->shape_along_axis(0) != width_ ||
-                    snode->shape_along_axis(1) != height_ ||
+                    (dimensions > 1 && snode->shape_along_axis(1) != height_) ||
+                    (dimensions > 2 && snode->shape_along_axis(2) != depth_) ||
+                    snode->dt != dtype_ ||
                     snode->parent->cell_size_bytes !=
                         data_type_size(dtype_) * num_channels_,
-                "Mipped Texture upload requires a matching tightly packed "
+                "Vulkan Texture upload requires matching shape/type and a "
+                "tightly packed "
                 "root-dense Field");
+    TI_ERROR_IF(
+        format_ == BufferFormat::depth24stencil8,
+        "Packed depth/stencil transfers require separate aspect inputs");
     const auto source = get_device_ptr(prog_, snode);
     BufferImageCopyParams params;
-    params.buffer_row_length = snode->shape_along_axis(0);
-    params.buffer_image_height = snode->shape_along_axis(1);
+    params.buffer_row_length = width_;
+    params.buffer_image_height = height_;
     params.image_extent = {static_cast<uint32_t>(width_),
                            static_cast<uint32_t>(height_),
                            static_cast<uint32_t>(depth_)};
+    const bool depth =
+        format_ == BufferFormat::depth16 || format_ == BufferFormat::depth32f;
+    if (depth)
+      params.image_aspect_flag = VK_IMAGE_ASPECT_DEPTH_BIT;
     const auto image = texture_alloc_;
-    prog_->enqueue_compute_op_lambda(
-        [source, image, params](Device *, CommandList *commands) {
-          commands->buffer_barrier(source);
-          commands->buffer_to_image(image, source, ImageLayout::transfer_dst,
-                                    params);
-        },
-        {{image, ImageLayout::transfer_dst, ImageLayout::shader_read}});
+    const auto copy = [source, image, params](Device *, CommandList *commands) {
+      commands->buffer_barrier(source);
+      commands->buffer_to_image(image, source, ImageLayout::transfer_dst,
+                                params);
+    };
+    const std::vector<ComputeOpImageRef> refs{
+        {image, ImageLayout::transfer_dst, ImageLayout::shader_read}};
+    if (depth)
+      prog_->enqueue_graphics_op_lambda(copy, refs);
+    else
+      prog_->enqueue_compute_op_lambda(copy, refs);
     prog_->synchronize();
     return;
   }
