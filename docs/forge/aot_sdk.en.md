@@ -593,7 +593,7 @@ the configured adapter with `probe_native_resource("optix_program")` before
 allocation. This requires its existing programmable-pipeline extension, with no
 new adapter ABI. CPU/Vulkan do not advertise this CUDA resource.
 Standalone and borrowed runtimes qualify program creation/rollback/retirement.
-Automatic program Graph export is separate from the explicit resources below.
+Ordinary Graph recordings also reconstruct these resources as described below.
 
 `optix/prepared_launch` v1 binds `program`, `data` (an immutable host blob),
 `array_N`, `image_N` and `scene_N`. Its parameters are:
@@ -632,6 +632,42 @@ consumption, pending retirement and downstream DSL gradients. This does not
 differentiate user shaders, add nonzero IAS SBT-offset/micromap reconstruction,
 or establish total driver pipeline residency. Reported native device payload
 includes parameter/SBT storage; the adapter also retains a pinned host copy.
+
+An ordinary Graph containing an initialized `OptixPreparedLaunch` can export
+through `Module.add_execution_plan()` using its existing `append_native` order:
+
+```python
+module.add_execution_plan(
+    "render", graph,
+    source_bindings={"out": output},  # fixed Graph buffer names and owners
+    resource_bindings={
+        program: {"module_0": ptx_module},  # immutable ray.PtxModule
+        gas: {"vertices": "vertices", "indices": "indices"},
+        scene: {"transforms": "transforms"},
+    },
+)
+```
+
+Supply every PTX module through `module_N`. Immutable assets are checked against
+the source manifest and embedded once per content hash; a symbolic port may
+instead bind a consumer host blob, checked at preparation. This follows the
+Vulkan shader-asset convention and does not retain PTX in the JIT program.
+Buffers need their exact fixed Graph names in `source_bindings`; textures use
+the existing source image and consumer pixel-seed contracts. Scalars, dimensions,
+groups and SBT payloads come from the frozen recording, never device readback.
+Repeated occurrences of the same prepared launch share one native packet, and
+different launches can share one reconstructed program/context/scene/image.
+
+`resource_bindings[program]` can be a public program name instead of module ports.
+Public scenes and images use their existing contracts. Shared program/scene
+contexts are checked through resource-alias constraints; a public dependency
+cannot also be reconstructed privately. Bind the shared context publicly when
+mixing public and private children. The exporter reconstructs prepared launches;
+it does not currently accept public launch handles. ABI 93/105/118 tests cover
+ordinary private/public Graph exports, repeated recordings, context mismatch,
+refit/image updates, retirement after producer closure and downstream gradients.
+This does not expand CUDA capture/selected-recipe admission or the nonzero SBT
+offset/micromap scene boundary above.
 
 Bindings use compact scalar ndarrays: f32 vertices `[V,3]`, i32/u32 indices `[T,3]`,
 and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed output

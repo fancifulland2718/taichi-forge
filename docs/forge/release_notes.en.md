@@ -38,7 +38,10 @@ lifetimes. The entries below describe the changes.
   programmable adapter extension and shared ownership. Explicit plans rebuild
   address-free parameters/SBT once and replay on the ordered CUDA path; instance
   refits, indirect buffers/textures and downstream DSL gradients are qualified.
-  Automatic program Graph export remains separate work.
+  Ordinary Graph export shares program/scene/image ownership and repeated launch
+  packets. Explicit immutable PTX assets use the common shader-asset binding
+  protocol, without adding JIT PTX residency; nonzero IAS SBT offsets and
+  micromap reconstruction remain separate work.
 - Added native AOT Vulkan compute pipeline/dispatch resources for fixed SPIR-V
   with scalar buffer descriptors. Cold code/layout/range checks and prepared
   replay share the existing resource owner and graphics descriptor validation;

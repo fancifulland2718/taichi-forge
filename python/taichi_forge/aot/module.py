@@ -498,6 +498,13 @@ class Module:
         frozen and consumers supply a one-dimensional f32 array in that order.
         Unnamed sparse matrices retain the default value snapshot behavior.
 
+        Ordinary OptiX prepared-launch recordings use these same fixed array
+        names. ``resource_bindings[program]`` supplies ``module_N`` PtxModule
+        assets or consumer host-blob names, or a public program resource name.
+        Repeated recordings share one rebuilt packet; program/scene contexts
+        preserve their public-owner alias relationships. Program PTX is not
+        retained in JIT; supplied assets must match its immutable manifest.
+
         For qualified sampled-image operations, ``source_bindings`` may also
         map Graph texture names to live Textures. Export preserves creation
         metadata and sampler state; ``resource_bindings[texture]`` must supply

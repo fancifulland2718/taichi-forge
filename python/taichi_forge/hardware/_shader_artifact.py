@@ -181,3 +181,6 @@ class PtxModule:
             "ptx_target": self.ptx_target,
             "build": asdict(self.build),
         }
+
+    def _export_aot_resource(self, context):
+        return context.host_blob_resource(self.code)

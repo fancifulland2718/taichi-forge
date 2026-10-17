@@ -468,8 +468,8 @@ PTX blob 在创建期消费，program 保留 context。分配前可查询
 `native_resource_capabilities("optix_program")`，并通过
 `probe_native_resource("optix_program")` 显式探测配置的 adapter。
 此资源使用已有 programmable-pipeline 扩展，无需新 adapter ABI；CPU/Vulkan 不声明支持。
-已验证独立/借用 runtime 的 program 创建、失败回滚与退休。普通 program Graph 自动
-导出与下述显式资源支持分别推进。
+已验证独立/借用 runtime 的 program 创建、失败回滚与退休；普通 Graph recording 也可
+按下文合同自动重建这些资源。
 
 `optix/prepared_launch` v1 绑定 `program`、`data`（不可变 host blob）、`array_N`、
 `image_N`、`scene_N`，参数为：
@@ -498,6 +498,35 @@ ABI 93/105/118 adapter 已验证显式计划的实例 hit/miss、SBT 间接 buff
 标量重绑定、无 producer 消费、在途退休和下游 DSL 梯度。不提供用户 shader 求导，
 非零 IAS SBT offset 与 micromap 重建仍需接通，也不代表完整 driver 管线驻留测量。
 原生设备 payload 统计包含参数/SBT 存储；adapter 另外保留一份 pinned host 副本。
+
+包含已初始化 `OptixPreparedLaunch` 的普通 Graph 可通过 `Module.add_execution_plan()`
+导出，保留现有 `append_native` 次序：
+
+```python
+module.add_execution_plan(
+    "render", graph,
+    source_bindings={"out": output},  # 固定 Graph buffer 名称与原所有者
+    resource_bindings={
+        program: {"module_0": ptx_module},  # 不可变 ray.PtxModule
+        gas: {"vertices": "vertices", "indices": "indices"},
+        scene: {"transforms": "transforms"},
+    },
+)
+```
+
+通过 `module_N` 提供全部 PTX module。不可变资产须匹配原 program manifest，按内容摘要
+仅嵌入一份；也可使用符号输入名绑定消费者 host blob，在准备时校验。这沿用 Vulkan 的
+shader 资产合同，不让 JIT program 常驻 PTX。Buffer 的 `source_bindings` 名须匹配
+固定 Graph 名；texture 使用已有 source image 和消费者 pixel seed 合同。标量、维度、
+groups 与 SBT payload 来自冻结 recording，不读取设备参数。相同 prepared launch 的
+重复录制共享一个原生 packet，不同 launch 也可共享 program/context/scene/image。
+
+`resource_bindings[program]` 可改为公共 program 名；公共 scene/image 保持原有合同。
+通过 resource-alias 约束校验 program 与 scene 共享的 context，不能把公共依赖同时私有
+重建。混合公共和私有子资源时，应把共同 context 也绑定为公共资源。导出器重建 prepared
+launch，暂不接受公共 launch 句柄。ABI 93/105/118 已验证普通 Graph 公私导出、重复录制、
+context 不匹配、refit/图像更新、生产端关闭后的消费退休和下游梯度；未扩展 CUDA capture、
+selected recipe 的资格，也未扩展上文非零 SBT offset/micromap 的 scene 支持边界。
 
 使用紧凑 scalar ndarray：顶点 f32 `[V,3]`、索引 i32/u32 `[T,3]`、ray f32 `[N,8]`
 （origin.xyz、t_min、direction.xyz、t_max）。typed 输出 f32 `[N,4]` 的 t/u/v/0
