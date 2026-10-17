@@ -38,6 +38,8 @@ lifetimes. The entries below describe the changes.
   identity checks, complete mip initialization and independent counters. Consumers
   need no SPD SDK/compiler. Small standalone/borrowed tests cover repeated values,
   close and downstream gradients; SPD itself is not claimed differentiable.
+  Ordinary Graphs and existing selected whole-Graph recipes export SPD recordings,
+  sharing frozen code/plans across repeated calls and preserving public image aliases.
 - Fixed the missing Vulkan `depth16` texel mapping for JIT/AOT image allocation
   and `u16` uploads. Shared depth transfer validation checks the final four-byte
   buffer offset, including finite subviews and construction-time AOT pixels.

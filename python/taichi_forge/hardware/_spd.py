@@ -85,6 +85,9 @@ class VulkanSpdPlan:
             self._statistics = dict(program._vulkan_spd_plan_statistics(self._handle))
             self._facts = facts
             self._reduction = reduction
+            from ._aot_spd import freeze
+
+            self._aot_shader, self._aot_plan_spec = freeze(self, shader)
             self._semantic_id = _digest(
                 (
                     "image-reduction-pyramid-v1",
@@ -194,6 +197,16 @@ class _Recording(BackendCommandRecording):
         object.__setattr__(self, "_graph_physical_plan_id", plan._physical_id)
 
     source = property(lambda self: self.plan)
+
+    def _export_aot_bindings(self, context):
+        from ._aot_spd import preflight
+
+        preflight(self, context)
+
+    def _export_aot(self, context):
+        from ._aot_spd import export
+
+        return export(self, context)
 
     def _vulkan_graph_command(self):
         self.plan.validate_graph_lifetime()

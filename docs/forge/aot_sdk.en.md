@@ -929,7 +929,30 @@ Small Windows Vulkan tests cover single-group and 129x131 seven-level multi-grou
 paths, every mip, positive/zero/negative inputs, standalone/borrowed owners,
 public/private resources, invalid contracts/aliases and close. Real gradients
 exercise downstream numeric kernels, not differentiation of SPD or texture
-sampling itself. This node provides explicit execution-plan entry points.
+sampling itself.
+
+`VulkanSpdPlan.record()` also exports ordinary Graphs and existing selected Vulkan
+whole-Graph recipes. Plan construction freezes the actual shader and code/image
+contract. Export invokes no shader compiler and serializes no local SDK paths or
+handles. Repeated recordings share one code blob and plan resource. Supply the
+original textures through `source_bindings`, for example:
+
+```python
+module.add_execution_plan(
+    "step", graph,
+    source_bindings={"source": source, "pyramid": pyramid},
+    resource_bindings={source: {"pixels": "source_seed"}},
+)
+```
+
+This assumes `record(source="source", output="pyramid")`. Source seeds use the
+existing explicit one-time initialization; fully overwritten outputs need none.
+A source already initialized by a provable earlier upload reuses that fact.
+For a public plan, use `{spd_plan: "public_plan"}` and also expose both images.
+Export records shared dependency aliases; consumers reject different images even
+when their shapes match. Tests cover a preceding kernel, two calls to one plan,
+every mip, downstream backward execution and reuse after initialization inputs
+close. JIT recipe admission is unchanged.
 
 ### Explicit Vulkan raster plans
 

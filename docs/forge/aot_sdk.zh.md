@@ -717,7 +717,26 @@ CPU 读回或额外 staging。AOT 直接 inline 录制，不创建未使用的 s
 
 Windows Vulkan 小型测试覆盖单组及129×131七级多组路径、全部 mip、正/零/负输入、
 独立/借用 owner、公共/私有资源、错误合同/别名及关闭。真实梯度针对下游数值 kernel，
-不代表 SPD reduction 或纹理采样本身具有自动微分。此节点是显式计划入口。
+不代表 SPD reduction 或纹理采样本身具有自动微分。
+
+`VulkanSpdPlan.record()` 还支持普通 Graph 与已有 selected Vulkan 整图 recipe 的自动
+导出。plan 创建时冻结实际 shader 和代码/图像合同；导出不再调用编译器，不写入本地
+SDK 路径或句柄。重复 recording 共用一份代码和一个 plan 资源。提供原始图像作为
+`source_bindings`，例如：
+
+```python
+module.add_execution_plan(
+    "step", graph,
+    source_bindings={"source": source, "pyramid": pyramid},
+    resource_bindings={source: {"pixels": "source_seed"}},
+)
+```
+
+此例假定 `record(source="source", output="pyramid")`。源种子沿用显式一次初始化，
+SPD 完整覆盖的输出无需种子；源已由前序可证明上传初始化时也可复用该事实。公开
+plan 用 `{spd_plan: "public_plan"}`，同时公开其两个图像，导出器生成共享依赖别名
+约束。消费者拒绝仅形状相同但身份不同的替代图像。测试覆盖前置 kernel、同 plan
+两次调用、全 mip 读取、下游反向及初始化输入关闭后的复用；不改变 JIT recipe 资格。
 
 ### 显式 Vulkan 光栅计划
 
