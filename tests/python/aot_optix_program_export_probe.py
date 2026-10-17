@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import statistics
+import struct
 import sys
 import time
 
@@ -72,12 +73,27 @@ def main(mode, artifact, adapter):
             public_frame = dict(frame, shared_program=program)
             if prefix == "trace":
                 ias = next(r for r in document["resources"] if r.get("operation") == "instance_scene")
+                gas_bindings = dict(context=context, vertices=frame["vertices"], indices=frame["indices"])
+                if spec.get("allow_opacity_micromaps"):
+                    blobs = {
+                        name: runtime.host_blob(value)
+                        for name, value in dict(data=b"", descriptors=b"", indices=struct.pack("<i", -3)).items()
+                    }
+                    omm = runtime.native_resource(
+                        "optix", "opacity_micromap", parameters=dict(triangle_count=1), bindings=blobs
+                    )
+                    gas_bindings["opacity_micromap"] = omm
                 gas = runtime.native_resource(
                     "optix",
                     "triangle_gas",
+                    version=2 if spec.get("allow_opacity_micromaps") else 1,
                     parameters=dict(vertex_count=3, triangle_count=1),
-                    bindings=dict(context=context, vertices=frame["vertices"], indices=frame["indices"]),
+                    bindings=gas_bindings,
                 )
+                if spec.get("allow_opacity_micromaps"):
+                    omm.close()
+                    for blob in blobs.values():
+                        blob.close()
                 raises(
                     lambda: runtime.native_resource(
                         "optix",

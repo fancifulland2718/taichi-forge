@@ -55,6 +55,11 @@ class OptixOpacityMicromap(BakedOpacityMicromap):
 
     _identity_tag = b"forge-optix-baked-omm1"
 
+    def _export_aot_resource(self, context):
+        from ._aot_optix import export_micromap
+
+        return export_micromap(self, context)
+
     def _native(self):
         # ctypes pointers retain the immutable bytes for the synchronous import.
         data = ctypes.c_char_p(self.data)

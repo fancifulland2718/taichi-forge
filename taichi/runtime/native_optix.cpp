@@ -8,6 +8,7 @@
 #include "taichi/optix/forge_optix_runtime_provider.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_optix_access.h"
+#include "taichi/runtime/native_optix_micromap.h"
 #include "taichi/runtime/native_image.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/program/runtime_fault.h"
@@ -34,10 +35,16 @@ struct OptixSceneDescription {
   NativeArrayBinding vertices, indices;
   uint32_t vertex_count{0}, triangle_count{0};
   bool allow_update{false};
+  bool has_micromap{false};
 };
 
 struct OptixGasDescription : OptixSceneDescription {
   static constexpr const char *kind = "optix_triangle_gas";
+};
+struct OptixMicromapGasDescription : OptixGasDescription {
+  static constexpr uint32_t version = 2;
+  std::shared_ptr<NativeOptixMicromap> micromap;
+  std::string expected_micromap;
 };
 
 class OptixSceneResource;
@@ -79,6 +86,11 @@ class OptixSceneResource : public NativeOptixScene {
   }
   bool allow_update() const {
     return std::visit([](const auto &d) { return d.allow_update; }, description_);
+  }
+  bool has_micromaps() const {
+    if (!is_instances()) return geometry().has_micromap;
+    return std::any_of(instances().gas.begin(), instances().gas.end(),
+                       [](const auto &gas) { return gas->has_micromaps(); });
   }
   uint32_t instance_count() const {
     return is_instances() ? uint32_t(instances().gas.size()) : 1;
@@ -302,6 +314,9 @@ void validate_instances(Device &device, const OptixInstancesDescription &d) {
     if (!gas || !gas->is_gas() || gas->context() != d.context ||
         &gas->device() != &device)
       throw std::invalid_argument("OptiX instances require same-context GAS resources");
+  for (size_t i = 0; i < d.gas.size(); ++i)
+    if (d.opaque[i] && d.gas[i]->has_micromaps())
+      throw std::invalid_argument("OptiX OMM instance cannot be declared opaque");
   layout(device, d.transforms, d.gas.size(), 12, false, true);
 }
 
@@ -394,6 +409,16 @@ bool has_instance_sbt_api(const TiForgeOptixProviderApi &api) {
 NativeOperationAvailability probe_instance_sbt(NativeProviderSession &providers) {
   if (!probe(providers).available) return {};
   return {has_instance_sbt_api(execution_api(*providers.runtime(definition))), 0};
+}
+
+bool has_micromap_api(const TiForgeOptixProviderApi &api) {
+  return (api.info.features & TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT) &&
+         api.create_triangle_gas_micromap && api.trace_instance_micromap &&
+         api.trace_instance_micromap_occlusion;
+}
+NativeOperationAvailability probe_micromap(NativeProviderSession &providers) {
+  if (!probe(providers).available) return {};
+  return {has_micromap_api(execution_api(*providers.runtime(definition))), 0};
 }
 
 uint64_t address(const NativeArrayBinding &array) {
@@ -498,6 +523,10 @@ class CudaOptixScene final : public OptixSceneResource,
     if (!lease->context)
       throw std::invalid_argument("OptiX requires its native context owner");
   }
+  explicit CudaOptixScene(const OptixMicromapGasDescription &description)
+      : CudaOptixScene(static_cast<const OptixGasDescription &>(description)) {
+    micromap_input_ = description.micromap;
+  }
   void initialize() {
     if (is_instances()) {
       initialize_instances();
@@ -526,12 +555,22 @@ class CudaOptixScene final : public OptixSceneResource,
     lease->desc = {sizeof(lease->desc), d.vertex_count, d.triangle_count,
                     d.allow_update, address(d.vertices), indices_address, 0};
     auto &api = lease->context->lease->api;
-    auto create = is_gas() ? api.create_triangle_gas : api.create_triangle_scene;
-    check(api, create(lease->context->lease->handle, &lease->desc, &lease->handle),
-          "create triangle geometry");
+    if (micromap_input_) {
+      if (!has_micromap_api(api))
+        throw std::invalid_argument("OptiX adapter lacks opacity micromap import");
+      const auto imported = micromap_input_->description();
+      check(api, api.create_triangle_gas_micromap(
+                     lease->context->lease->handle, &lease->desc, &imported,
+                     &lease->handle, &micromap_memory_), "create micromap GAS");
+    } else {
+      auto create = is_gas() ? api.create_triangle_gas : api.create_triangle_scene;
+      check(api, create(lease->context->lease->handle, &lease->desc, &lease->handle),
+            "create triangle geometry");
+    }
     if (!lease->handle)
       throw std::runtime_error("OptiX returned a null scene");
     driver.stream_synchronize(nullptr);
+    micromap_input_.reset();  // Import finished; no retained baked host pointer.
     update_memory();
   }
   void initialize_instances() {
@@ -608,6 +647,9 @@ class CudaOptixScene final : public OptixSceneResource,
   Arch arch() const override { return Arch::cuda; }
   Device &device() const override { return context()->device(); }
   size_t workspace_bytes() const override { return bytes_; }
+  bool retains_input(const std::string &port) const override {
+    return port != "opacity_micromap";
+  }
   TiForgeOptixProgramScene program_scene() const override {
     if (is_gas())
       throw std::invalid_argument("OptiX program scene requires a triangle scene or IAS");
@@ -622,7 +664,8 @@ class CudaOptixScene final : public OptixSceneResource,
     uint64_t bytes = is_instances() ? 0 : geometry().indices.bytes;
     for (auto value : {memory.gas_bytes, memory.ias_bytes,
                        memory.build_update_scratch_bytes, memory.instance_bytes,
-                       memory.launch_params_bytes}) {
+                       memory.launch_params_bytes, micromap_memory_.array_bytes,
+                       micromap_memory_.index_bytes}) {
       if (value > std::numeric_limits<size_t>::max() - bytes)
         throw std::overflow_error("OptiX scene storage accounting overflows");
       bytes += value;
@@ -636,6 +679,8 @@ class CudaOptixScene final : public OptixSceneResource,
 
  private:
   size_t bytes_{0};
+  std::shared_ptr<NativeOptixMicromap> micromap_input_;
+  TiForgeOptixMicromapMemory micromap_memory_{sizeof(TiForgeOptixMicromapMemory)};
 };
 
 // Keep the adapter query, its device tables and complete scene/context lease
@@ -664,19 +709,26 @@ class CudaOptixQuery final : public NativeOperation {
     const auto &api = context.lease->api;
     const auto &queries = context.lease->queries;
     const bool alpha = !lease_->images.empty();
-    const bool use_prepared = queries.prepare && !alpha;
+    const bool micromap = scene_->has_micromaps();
+    const bool use_prepared = queries.prepare && !alpha && !micromap;
     faces_ = op_.front_only || bool(op_.faces) ||
              std::any_of(op_.face_rules.begin(), op_.face_rules.end(),
                          [](const auto &rule) { return rule.mode != 0; });
+    if (faces_ && micromap)
+      throw std::invalid_argument("OptiX face filtering with opacity micromaps is unsupported");
     if (faces_ && alpha && !(api.info.features & TI_FORGE_OPTIX_FEATURE_FACE_FILTER_ALPHA))
       throw std::invalid_argument("OptiX adapter does not support face and alpha filtering together");
-    extended_ = faces_ || op_.occlusion || op_.any_hit || alpha;
+    extended_ = faces_ || op_.occlusion || op_.any_hit || alpha || micromap;
     typed_trace_ = scene_->is_instances() ? api.trace_instance_scene_typed : api.trace_typed;
     extended_trace_ = scene_->is_instances()
                           ? (op_.occlusion ? api.trace_instance_occlusion : api.trace_instance_alpha)
                           : (op_.occlusion ? api.trace_occlusion : api.trace_alpha);
     face_trace_ = scene_->is_instances() ? api.trace_instance_faces : api.trace_faces;
-    if (!use_prepared)
+    if (micromap)
+      extended_trace_ = op_.occlusion ? api.trace_instance_micromap_occlusion
+                                     : api.trace_instance_micromap;
+    // OMM's pipeline is prepared once by the importing GAS adapter.
+    if (!use_prepared && !micromap)
       check(api, (faces_ ? api.prepare_faces
                         : extended_ ? api.prepare_alpha : api.prepare_typed)(
                    context.lease->handle),
@@ -687,13 +739,13 @@ class CudaOptixQuery final : public NativeOperation {
                     [](uint32_t offset) { return offset != 0; })) {
       uint64_t bytes = 0;
       check(api, api.prepare_instance_sbt(scene_->lease->handle,
-                                         faces_ ? 4 : extended_ ? 2 : 1, &bytes),
+                                         micromap ? 3 : faces_ ? 4 : extended_ ? 2 : 1, &bytes),
             "prepare fixed instance SBT");
     }
     face_records_offset_ = use_prepared ? 0 : 64;
     const bool legacy_opaque_first =
         !use_prepared && op_.any_hit && !op_.occlusion && !faces_;
-    const bool mask_table = alpha || legacy_opaque_first;
+    const bool mask_table = alpha || legacy_opaque_first || (micromap && !op_.occlusion);
     size_t mask_records_offset = 0;
     if (faces_ || (extended_ && !use_prepared)) {
       if (faces_ && scene_->instance_count() >
@@ -1075,13 +1127,34 @@ void register_query(NativeOperationRegistry &registry) {
 template <typename Description>
 void register_geometry(NativeOperationRegistry &registry, const char *operation) {
   registry.define<Description>(
-      [](Device &device, const Description &d) { validate_scene(device, d); },
+      [](Device &device, const Description &d) {
+        validate_scene(device, d);
+        if constexpr (Description::version == 2) {
+          if (!d.micromap || &d.micromap->device() != &device ||
+              d.micromap->description().triangle_count != d.triangle_count ||
+              (!d.expected_micromap.empty() && d.expected_micromap != d.micromap->fingerprint()))
+            throw std::invalid_argument("OptiX micromap must match local GAS triangle count and fingerprint");
+        }
+      },
       NativeObjectKind::resource);
+  std::vector<std::string> ports{"context", "vertices", "indices"};
+  if constexpr (Description::version == 2) ports.push_back("opacity_micromap");
   registry.register_schema<Description>(
-      "optix", operation, {"context", "vertices", "indices"},
+      "optix", operation, ports,
       [](const liong::json::JsonValue &p)
           -> NativeOperationRegistry::Binder<Description> {
-        operation_json::fields(p, {"vertex_count", "triangle_count", "allow_update"});
+        if constexpr (Description::version == 2)
+          operation_json::fields(p, {"vertex_count", "triangle_count", "allow_update", "expected_micromap"});
+        else
+          operation_json::fields(p, {"vertex_count", "triangle_count", "allow_update"});
+        std::string expected;
+        if constexpr (Description::version == 2) {
+          if (p.obj.inner.count("expected_micromap")) {
+            expected = operation_json::name(p["expected_micromap"]);
+            if (expected.size() != 64 || expected.find_first_not_of("0123456789abcdef") != std::string::npos)
+              throw std::invalid_argument("OptiX micromap fingerprint must be lowercase SHA256");
+          }
+        }
         const auto vertices = count(p, "vertex_count"), triangles = count(p, "triangle_count");
         const bool update = operation_json::optional_bool(p, "allow_update");
         return [=](const NativeOperationBindings &b) {
@@ -1092,15 +1165,22 @@ void register_geometry(NativeOperationRegistry &registry, const char *operation)
           d.vertex_count = vertices;
           d.triangle_count = triangles;
           d.allow_update = update;
+          if constexpr (Description::version == 2) {
+            d.has_micromap = true;
+            d.micromap = b.at("opacity_micromap").resource<NativeOptixMicromap>();
+            d.expected_micromap = expected;
+          }
           return d;
         };
       });
 #ifdef TI_WITH_CUDA
+  NativeOperationRegistry::ContextProbe availability;
+  if constexpr (Description::version == 2) availability = probe_micromap;
   registry.register_context_factory<Description>(
       Arch::cuda, NativeOperationMode::cuda_ordered,
       [](NativePreparationContext &c, const Description &d) {
         return prepare<CudaOptixScene>(c, d);
-      });
+      }, availability);
 #endif
 }
 template <typename Description>
@@ -1164,6 +1244,7 @@ void register_optix_operations(NativeOperationRegistry &registry) {
       });
   register_geometry<OptixSceneDescription>(registry, "triangle_scene");
   register_geometry<OptixGasDescription>(registry, "triangle_gas");
+  register_geometry<OptixMicromapGasDescription>(registry, "triangle_gas");
   register_instances<OptixInstancesDescription>(registry);
   register_instances<OptixSbtInstancesDescription>(registry);
   register_query<OptixQueryOperation>(registry);

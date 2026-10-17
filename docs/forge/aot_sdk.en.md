@@ -586,6 +586,37 @@ the scene: fixed-query compatibility SBTs are prepared only for the variants
 used, outside replay. Shader-dependent SBT indexing remains the application's
 responsibility; launch preparation checks base instance-offset coverage.
 
+`optix/opacity_micromap` v1 is immutable baked host input: bind host blobs
+`data`, `descriptors` and optional `indices`, with `triangle_count`. Their packed
+layout matches `OptixOpacityMicromap` (little-endian descriptors and int32 mapping).
+`optix/triangle_gas` v2 requires an additional `opacity_micromap` resource binding;
+optional `expected_micromap` checks its SHA256 fingerprint. Probe
+`optix_triangle_gas` version 2 before allocation for adapter import/query support.
+The adapter validates native levels/formats/mappings and device support during
+import. The asset itself is host-only and does not establish GPU support.
+
+Each GAS imports its own OMM array/indices once; refit preserves classification.
+Direct GAS creation consumes the baked asset, so its handle can then close.
+The asset retains its data blob, while descriptor/index blobs are consumed.
+Public plan arguments retain the usual binding lifetime: closing one retires
+that plan. GAS workspace accounting includes persistent OMM array/index storage,
+excluding released import scratch and driver-private residency. No per-replay
+classification, host scan or asset upload is added.
+
+Fixed typed/first-hit/compact queries select the existing OMM pipeline, including
+nonzero instance SBT offsets. Classified transparent/opaque cells bypass fallback
+alpha; unknown states use the supplied mask or are accepted without a mask.
+OMM instances cannot declare `opaque=True`, and face filtering with OMM remains
+unsupported. Programmable launches require `allow_opacity_micromaps=True`.
+Ordinary Graph export accepts
+`resource_bindings[gas] = {"vertices": "vertices", "indices": "indices",
+"opacity_micromap": baked_asset}`. Supply an immutable `OptixOpacityMicromap`
+matching the source GAS fingerprint, or a public asset name checked at preparation.
+The exporter does not retain baked bytes in the JIT GAS or read back its device
+allocation. Small standalone/borrowed CUDA tests cover two/four-state, indexed
+and predefined-state inputs, refit, hit/miss writeback, alpha fallback, program
+launches, retirement and downstream DSL gradients with adapters 93/105/118.
+
 The optional `optix/program` v1 resource reconstructs an immutable programmable
 pipeline through the same context and adapter. Bind `context` and `module_0`
 through `module_{module_count-1}` to host blobs containing nonempty PTX without
@@ -639,8 +670,7 @@ The program digest encoding is defined in
 Explicit plans are qualified with adapter ABI variants 93/105/118 for instance
 hit/miss, indirect SBT buffers/textures, refit, scalar rebinding, source-independent
 consumption, pending retirement and downstream DSL gradients. This does not
-differentiate user shaders or add micromap reconstruction,
-or establish total driver pipeline residency. Reported native device payload
+differentiate user shaders or establish total driver pipeline residency. Reported native device payload
 includes parameter/SBT storage; the adapter also retains a pinned host copy.
 
 An ordinary Graph containing an initialized `OptixPreparedLaunch` can export
@@ -676,8 +706,8 @@ mixing public and private children. The exporter reconstructs prepared launches;
 it does not currently accept public launch handles. ABI 93/105/118 tests cover
 ordinary private/public Graph exports, repeated recordings, context mismatch,
 refit/image updates, retirement after producer closure and downstream gradients.
-This does not expand CUDA capture/selected-recipe admission or add micromap
-scene reconstruction.
+This does not expand CUDA capture/selected-recipe admission. Micromap scene
+reconstruction follows the baked-asset contract above.
 
 Bindings use compact scalar ndarrays: f32 vertices `[V,3]`, i32/u32 indices `[T,3]`,
 and f32 rays `[N,8]` containing origin.xyz, t_min, direction.xyz, t_max. Typed output
@@ -1550,7 +1580,8 @@ bounds-only updates, refit hit/miss transitions and
 retirement. Real gradients of
 following kernels work; intersection differentiation with respect to vertices or
 rays is not provided. CPU/Vulkan do not register these factories. Operations use
-`cuda_ordered`; CUDA capture, OMM and programmable pipelines remain pending.
+`cuda_ordered`; CUDA capture remains pending. OMM and programmable pipelines
+follow the separate resource contracts above.
 Explicit v3 alpha qualification additionally covers non-square r32f/RGBA images,
 GPU texel/UV/face updates, shared-GAS instances, first-hit and closest queries,
 compact occlusion, hit/miss writeback, device refit and post-query kernel gradients.
@@ -1601,8 +1632,8 @@ metadata and explicit seeds. This does not enable direct refits through a closed
 GAS handle. Windows CUDA checks cover shared geometry, device transforms,
 bounds-only refits, independent bindings and downstream gradients. Nonzero SBT
 offsets use instance-scene v2; programmable recordings use the program/launch
-export described above. Legacy untyped hits and OMM reconstruction remain
-unsupported by this automatic route and are rejected during export.
+export described above. OMM geometry uses the explicit baked-asset contract above.
+Legacy untyped hits remain unsupported and are rejected during export.
 
 These qualified OptiX contexts, triangle scenes, GAS and instance scenes may
 instead be public resource inputs. Map a source object to a string name:

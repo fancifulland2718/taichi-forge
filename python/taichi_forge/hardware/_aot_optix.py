@@ -3,6 +3,31 @@
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
+def export_micromap(asset, context):
+    from ._optix_micromap import OptixOpacityMicromap
+
+    if type(asset) is not OptixOpacityMicromap:
+        raise TaichiRuntimeError("AOT OptiX micromap requires a qualified baked asset")
+    if (public := context.public_resource(asset)) is not None:
+        return public
+
+    def build():
+        bindings = dict(
+            data=context.host_blob_resource(asset.data), descriptors=context.host_blob_resource(asset.descriptors)
+        )
+        if asset.triangle_indices is not None:
+            bindings["indices"] = context.host_blob_resource(asset.triangle_indices)
+        return context.resource(
+            asset,
+            "optix",
+            "opacity_micromap",
+            parameters=dict(triangle_count=asset.triangle_count),
+            bindings=bindings,
+        )
+
+    return context.resource_once(asset, build, policy="optix_baked_opacity_micromap")
+
+
 def _provider(context, provider):
     provider._validate_lifetime()
     if (public := context.public_resource(provider)) is not None:
@@ -30,8 +55,6 @@ def _geometry(context, geometry, *, retained_by=None):
         if geometry.provider is not retained_by.provider:
             raise TaichiRuntimeError("AOT OptiX GAS and instance scene require the same provider")
     shared = type(geometry) is OptixTriangleGAS
-    if shared and geometry._micromap_id is not None:
-        raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM geometry")
     context.resource_links(geometry, dict(context=geometry.provider))
     if (public := context.public_resource(geometry)) is not None:
         return public
@@ -39,15 +62,26 @@ def _geometry(context, geometry, *, retained_by=None):
     def build():
         # AS contents cannot be recovered from a retained input array: it may
         # have changed since the last build/refit. Require a fresh consumer seed.
-        inputs = context.resource_inputs.require(geometry, ("vertices", "indices"))
+        has_micromap = shared and geometry._micromap_id is not None
+        ports = ("vertices", "indices", "opacity_micromap") if has_micromap else ("vertices", "indices")
+        inputs = context.resource_inputs.require(geometry, ports, asset_ports=("opacity_micromap",))
+        if has_micromap and not isinstance(inputs["opacity_micromap"], str):
+            from ._optix_micromap import OptixOpacityMicromap
+
+            asset = inputs["opacity_micromap"]
+            if type(asset) is not OptixOpacityMicromap or asset.fingerprint != geometry._micromap_id:
+                raise TaichiRuntimeError("AOT OptiX baked micromap must match the source GAS fingerprint")
+            inputs["opacity_micromap"] = export_micromap(asset, context)
         return context.resource(
             geometry,
             "optix",
             "triangle_gas" if shared else "triangle_scene",
+            version=2 if has_micromap else 1,
             parameters=dict(
                 vertex_count=geometry.vertex_count,
                 triangle_count=geometry.triangle_count,
                 allow_update=geometry.allow_update,
+                **(dict(expected_micromap=geometry._micromap_id) if has_micromap else {}),
             ),
             bindings=dict(context=_provider(context, geometry.provider), **inputs),
         )
@@ -63,8 +97,6 @@ def _scene(context, scene):
     if type(scene) is not OptixInstanceScene:
         raise TaichiRuntimeError("AOT OptiX recording export requires a qualified scene")
     scene._validate_lifetime()
-    if scene._has_micromaps:
-        raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM inputs")
     context.resource_links(
         scene,
         dict(
@@ -107,8 +139,6 @@ def export_query(recording, context):
     from ._optix import OptixFaceRuleTable, OptixInstanceScene
 
     recording.validate_graph_lifetime()
-    if recording._micromap:
-        raise TaichiRuntimeError("AOT OptiX recording export does not yet reconstruct OMM inputs")
     if recording.hit_indices is None and not recording._occlusion:
         raise TaichiRuntimeError("AOT OptiX recording export requires typed or compact occlusion queries")
     bindings = dict(scene=_scene(context, recording.scene), rays=recording.rays, hits=recording.hits)

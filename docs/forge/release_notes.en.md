@@ -42,7 +42,9 @@ lifetimes. The entries below describe the changes.
   packets. Explicit immutable PTX assets use the common shader-asset binding
   protocol, without adding JIT PTX residency. Instance-scene v2 preserves nonzero
   SBT offsets through reconstruction/refit, including fixed-query compatibility;
-  micromap reconstruction remains separate work.
+  baked OMM resources and GAS v2 also reconstruct fixed/program queries, alpha
+  fallback and refit without new JIT asset residency. Face filtering with OMM
+  remains unsupported; qualified contracts are in the AOT SDK guide.
 - Added native AOT Vulkan compute pipeline/dispatch resources for fixed SPIR-V
   with scalar buffer descriptors. Cold code/layout/range checks and prepared
   replay share the existing resource owner and graphics descriptor validation;

@@ -16,7 +16,8 @@ from tests.python.test_hardware_optix_program_public import PARAMS, HIT, MISS
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path):
+@pytest.mark.parametrize("micromap", [False, True])
+def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path, micromap):
     adapter = os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER")
     if not adapter:
         pytest.skip("explicit common OptiX adapter required")
@@ -85,7 +86,8 @@ def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path):
                 vertices, indices = ti.ndarray(ti.f32, (3, 3)), ti.ndarray(ti.i32, (1, 3))
                 vertices.from_numpy(np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], np.float32))
                 indices.from_numpy(np.array([[0, 1, 2]], np.int32))
-                gas = stack.enter_context(provider.triangle_gas(vertices, indices))
+                baked = ray.OptixOpacityMicromap(b"", b"", [-3]) if micromap else None
+                gas = stack.enter_context(provider.triangle_gas(vertices, indices, opacity_micromap=baked))
                 scene = stack.enter_context(
                     provider.instance_scene((ray.OptixRayInstance(gas, custom_index=17, sbt_record_offset=4),))
                 )
@@ -102,6 +104,7 @@ def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path):
                         },
                         parameters=PARAMS,
                         payload_count=1,
+                        allow_opacity_micromaps=micromap,
                     )
                 )
                 miss = ray.OptixSbtRecord("miss", layout=MISS, values=dict(value=7))
@@ -118,6 +121,8 @@ def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path):
                     scenes=dict(scene=scene),
                 )
                 seeds.update({gas: dict(vertices="vertices", indices="indices"), scene: dict(transforms="transforms")})
+                if micromap:
+                    seeds[gas]["opacity_micromap"] = baked
                 public = {scene: "shared_scene", program: "shared_program"}
             launch = stack.enter_context(record.prepare(sources))
             launch.initialize().run()
