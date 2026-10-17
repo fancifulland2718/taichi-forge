@@ -37,7 +37,12 @@ lifetimes. The entries below describe the changes.
 - Vulkan graphics removes the fixed 64-buffer table and million-draw pass
   caps. Device capacities and command ranges remain checked; shared reflection
   rejects incompatible cross-stage declarations and excessive merged storage
-  descriptor counts. AOT raster descriptor arrays are not enabled by this change.
+  descriptor counts.
+
+- Vulkan AOT `pass_direct` v3 and Graph export support fixed storage descriptor
+  arrays. Shared RHI range bindings preserve offsets, finite lengths, aliases and
+  retirement; paired components require ABI92. Standalone/borrowed tests include
+  shader-observed view lengths and downstream numeric gradients.
 
 - GFX AOT preserves RWTexture formats and mip levels, including shape-only
   kernels. These exports require metadata v4 and paired ABI90 components;

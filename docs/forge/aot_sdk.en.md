@@ -860,7 +860,7 @@ Windows qualification covers standalone and borrowed execution, direct and
 indexed/instanced draws, uniform/sampled descriptors, color/depth clear and
 LOAD, changed inputs and bindings, shared/private retirement, and downstream
 numeric gradients. This is not differentiation of rasterization. Mesh/indirect
-draws and descriptor arrays remain separate work.
+draws remain separate work; storage descriptor arrays use version 3 below.
 
 Ordinary Vulkan Graphs containing `VulkanGraphicsDrawRecording` or
 `VulkanGraphicsPassRecording` can export these qualified direct/indexed/instanced
@@ -897,7 +897,7 @@ read stages per AS before recording the pass. Initialization, refit visibility,
 queue handoff and retirement reuse the existing AS core. Duplicate/missing
 descriptors and different-device owners are rejected before execution.
 
-Graph export selects pass version 2 only when AS descriptors occur. Supply each
+Graph export selects pass version 2 when AS descriptors occur without arrays. Supply each
 source `InstanceTLAS` under its Graph name in `source_bindings`; use the same
 explicit BLAS/TLAS seeds or public resource mapping as compute ray queries.
 Refit and raster consumers share the reconstructed scene. Paired private ABI91
@@ -905,6 +905,26 @@ components are required for the shared shader-stage contract. Windows checks
 cover simultaneous vertex/fragment queries, device transform refit with
 hit/miss/hit output, private/public scenes, actual downstream kernel gradients
 and owner retirement. External ray queries and rasterization remain outside AD.
+
+`vulkan_graphics/pass_direct` version 3 adds fixed storage-buffer descriptor
+arrays, with paired ABI92 components. Query
+`native_operation_capabilities("vulkan_graphics_pass_direct", version=3)` for
+schema availability; preparation also checks device descriptor-indexing/count
+limits and the reflected shader interface. Pipeline resources remain version 1.
+Each `buffers` item has either scalar `array` or an `arrays` list of at least
+two ordinals, for example `{"set": 0, "binding": 0, "arrays": [0, 1, 2, 0],
+"storage": true}`. These reference the existing `array_N` ports and may repeat
+an owner. Version 3 retains version 2's AS fields; supply `scene_count=0` when
+unused. Versions 1/2 reject the new array form.
+
+Ordinary and selected complete graphics-queue Graphs automatically choose v3
+for `ShaderBufferArrayBinding`. Explicit AOT plans may bind public/private
+`ndarray_view` resources, preserving each element's offset and finite byte range
+through descriptor caching and recording. No array payload copy is required.
+Windows tests cover actual shader array-length observations, aliases, public
+and private parents, GPU selector updates, replacement bindings, retirement and
+downstream gradients in standalone and borrowed consumers. Mesh/indirect and
+segmented/fork-join submission coverage remains unchanged.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use

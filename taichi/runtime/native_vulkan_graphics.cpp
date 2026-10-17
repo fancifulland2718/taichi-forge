@@ -184,8 +184,9 @@ struct DrawDescription {
   std::vector<Vertex> vertices;
   std::optional<uint32_t> indices;
   struct Buffer {
-    uint32_t set, binding, array;
-    bool storage;
+    uint32_t set, binding, array{0};
+    bool storage{false};
+    std::vector<uint32_t> arrays;
   };
   std::vector<Buffer> buffers;
   struct Image {
@@ -217,6 +218,9 @@ struct PassDescription {
 };
 struct ShaderPassDescription : PassDescription {
   static constexpr uint32_t version = 2;
+};
+struct ArrayPassDescription : PassDescription {
+  static constexpr uint32_t version = 3;
 };
 
 #ifdef TI_WITH_VULKAN
@@ -373,14 +377,31 @@ class PreparedPass final : public NativeOperation {
                                              ranges, indices, input.draw, {});
       std::vector<VulkanGraphicsShaderBufferView> buffers;
       for (const auto &v : input.buffers) {
-        const auto &a = indexed(d.arrays, v.array);
-        buffers.push_back({v.set,
-                           v.binding,
-                           {a.pointer.device, a.pointer.alloc_id},
-                           {},
-                           v.storage,
-                           size_t(a.pointer.offset),
-                           size_t(a.bytes)});
+        VulkanGraphicsShaderBufferView buffer;
+        buffer.set_index = v.set;
+        buffer.binding = v.binding;
+        buffer.storage = v.storage;
+        if (v.arrays.empty()) {
+          const auto &a = indexed(d.arrays, v.array);
+          buffer.allocation = a.pointer;
+          buffer.offset = size_t(a.pointer.offset);
+          buffer.bytes = size_t(a.bytes);
+        } else {
+          const auto &caps = device_.vk_caps();
+          if (!caps.descriptor_storage_buffer_array_non_uniform_indexing ||
+              v.arrays.size() >
+                  std::min(caps.max_per_stage_descriptor_storage_buffers,
+                           caps.max_descriptor_set_storage_buffers))
+            throw std::invalid_argument(
+                "Graphics storage descriptor array exceeds the device "
+                "capability");
+          buffer.array_elements.reserve(v.arrays.size());
+          for (const auto index : v.arrays) {
+            const auto &a = indexed(d.arrays, index);
+            buffer.array_elements.push_back({a.pointer, size_t(a.bytes)});
+          }
+        }
+        buffers.push_back(std::move(buffer));
       }
       std::vector<VulkanGraphicsShaderImageView> sampled;
       for (const auto &v : input.images) {
@@ -558,7 +579,8 @@ PipelineDescription pipeline_parameters(const Json &p) {
   return d;
 }
 
-PassDescription pass_parameters(const Json &p, bool shader_scenes) {
+PassDescription pass_parameters(const Json &p, uint32_t version) {
+  const bool shader_scenes = version >= 2;
   fields(p, {"pipeline_count", "array_count", "image_count", "color_count",
              "colors", "draws", "viewport", "depth_clear", "clear_depth",
              "scene_count"});
@@ -630,10 +652,32 @@ PassDescription pass_parameters(const Json &p, bool shader_scenes) {
       draw.vertices.push_back({u32(vertex["binding"]), u32(vertex["array"])});
     }
     for (const auto &b : array(v, "buffers")) {
-      fields(b, {"set", "binding", "array", "storage"});
+      fields(b, {"set", "binding", "array", "arrays", "storage"});
       claim(u32(b["set"]), u32(b["binding"]));
-      draw.buffers.push_back({u32(b["set"]), u32(b["binding"]), u32(b["array"]),
-                              optional_bool(b, "storage")});
+      const bool elements = b.obj.inner.count("arrays");
+      if (elements && version < 3)
+        throw std::invalid_argument(
+            "Graphics descriptor arrays require pass_direct version 3");
+      if (bool(b.obj.inner.count("array")) == elements)
+        throw std::invalid_argument(
+            "Graphics buffer requires exactly one of array or arrays");
+      DrawDescription::Buffer buffer;
+      buffer.set = u32(b["set"]);
+      buffer.binding = u32(b["binding"]);
+      buffer.storage = optional_bool(b, "storage");
+      if (elements) {
+        const auto &indices = array(b, "arrays");
+        if (!buffer.storage || indices.size() < 2 ||
+            indices.size() > (std::numeric_limits<uint32_t>::max)())
+          throw std::invalid_argument(
+              "Graphics descriptor arrays require at least two storage buffers "
+              "and a uint32 count");
+        for (const auto &index : indices)
+          buffer.arrays.push_back(u32(index));
+      } else {
+        buffer.array = u32(b["array"]);
+      }
+      draw.buffers.push_back(std::move(buffer));
     }
     for (const auto &i : array(v, "images")) {
       fields(i, {"set", "binding", "image"});
@@ -691,7 +735,7 @@ static void register_graphics_pass(NativeOperationRegistry &registry) {
       [](const Json &p) {
         Descriptor d;
         static_cast<PassDescription &>(d) =
-            pass_parameters(p, Descriptor::version >= 2);
+            pass_parameters(p, Descriptor::version);
         return [d, p](const NativeOperationBindings &b) mutable {
           auto result = d;
           for (uint32_t i = 0; i < u32(p["pipeline_count"]); ++i)
@@ -755,5 +799,6 @@ void register_vulkan_graphics_operations(NativeOperationRegistry &registry) {
 #endif
   register_graphics_pass<PassDescription>(registry);
   register_graphics_pass<ShaderPassDescription>(registry);
+  register_graphics_pass<ArrayPassDescription>(registry);
 }
 }  // namespace taichi::lang

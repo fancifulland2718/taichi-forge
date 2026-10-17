@@ -551,7 +551,7 @@ several such arrays fit together. Preparation checks the merged shader layout,
 including shared binding type/count agreement and ordinary/update-after-bind
 storage descriptor limits. Passes require at least one draw and have no fixed
 software draw-count cap; individual commands retain their device and integer
-range checks. AOT raster descriptor-array bindings remain a separate coverage gap.
+range checks. AOT raster arrays use `pass_direct` v3; see the [SDK contract](aot_sdk.en.md).
 
 Shader inputs also accept `graphics.SpirvShader(code, stage, entry_point="main",
 build=graphics.ShaderBuildInfo(...))`. Graphics requires `main` in the declared

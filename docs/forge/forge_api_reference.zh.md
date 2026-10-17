@@ -438,7 +438,7 @@ SPIR-V 避免新增 shader-toolchain 依赖，也不增加官方 wheel 变体。
 该值不保证多个数组合并后仍可容纳：准备阶段检查跨 shader 的共享 binding 类型/数量一致性，
 以及普通和 update-after-bind set 的 storage 描述符合计。pass 至少包含一个 draw，
 不再设置固定软件 draw 数量上限；各条命令仍保留设备及整数范围检查。
-AOT 光栅描述符数组绑定仍是独立的覆盖缺口。
+AOT 光栅描述符数组使用 `pass_direct` v3，见 [SDK 合同](aot_sdk.zh.md)。
 
 shader 输入也接受 `graphics.SpirvShader(code, stage, entry_point="main",
 build=graphics.ShaderBuildInfo(...))`。光栅接口要求匹配 vertex/fragment/task/mesh stage

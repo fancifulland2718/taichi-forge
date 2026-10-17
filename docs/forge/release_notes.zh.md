@@ -33,7 +33,10 @@
 
 - Vulkan 图形移除固定 64 个 buffer 表元素及百万 draw 的 pass 上限，保留设备容量和命令
   范围检查；共享反射层拒绝跨 shader 不一致的声明及合并后超量的 storage 描述符。
-  此项不开放 AOT 光栅描述符数组绑定。
+
+- Vulkan AOT `pass_direct` v3 和 Graph 导出支持固定 storage 描述符数组，共享 RHI 范围
+  绑定保留偏移、有限长度、别名与退休，要求配对 ABI92 组件。独立/借用消费验证包括
+  shader 实际观察 view 长度与下游数值梯度。
 
 - GFX AOT 补齐 RWTexture 格式及 mip 层级元数据，包括仅访问 shape 的内核。
   对应导出要求 metadata v4 和配对 ABI90；普通产物保持原版本。不兼容的 SPIR-V

@@ -666,7 +666,7 @@ clear 不需要 seed 或上传，即使 draw 使用局部视口；LOAD 与采样
 
 Windows 验证覆盖独立/借用执行、直接和索引/实例化绘制、uniform/采样描述符、颜色/深度
 clear 与 LOAD、数据及绑定更新、公私资源退休、下游数值梯度；不提供光栅化求导。
-mesh/indirect 和描述符数组仍为后续工作。
+mesh/indirect 仍为后续工作；storage 描述符数组使用下文的 v3。
 
 普通 Vulkan Graph 中的 `VulkanGraphicsDrawRecording` 和
 `VulkanGraphicsPassRecording` 可通过 `module.add_execution_plan` 导出上述合格的
@@ -694,12 +694,26 @@ consumer 解释层。分段 compute/graphics 和独立 fork/join recipe 在各�
 并在录制 pass 前按 AS 合并反射得到的 vertex/fragment 读取阶段；初始化、refit
 可见性、队列交接和退休复用原 AS 核心。重复/缺失描述符及跨设备 owner 在执行前拒绝。
 
-Graph 只有存在 AS 描述符才选择 pass v2。在 `source_bindings` 按 Graph 名指定
+Graph 存在 AS 描述符且没有数组时选择 pass v2。在 `source_bindings` 按 Graph 名指定
 producer `InstanceTLAS`，继续用 compute ray query 相同的显式 BLAS/TLAS seed 或
 公共资源映射；refit 与 raster 消费同一重建 scene。公共 shader 阶段合同要求配对
 私有 ABI91 组件。Windows 验证覆盖 vertex/fragment 同时查询、设备变换 refit 后
 命中/miss/再次命中、公私 scene、真实下游 kernel 梯度和退休；外部 ray query 与
 光栅化自身不参与 AD。
+
+`vulkan_graphics/pass_direct` v3 新增固定 storage-buffer 描述符数组，要求配对 ABI92
+组件。使用 `native_operation_capabilities("vulkan_graphics_pass_direct", version=3)`
+查询 schema 可用性；准备阶段仍检查实际设备的 descriptor-indexing/容量及 shader 反射。
+pipeline 资源仍为 v1。每个 `buffers` 项互斥选择标量 `array` 或至少两个 ordinal 的
+`arrays`，例如 `{"set": 0, "binding": 0, "arrays": [0, 1, 2, 0], "storage": true}`。
+它们引用已有 `array_N` 端口，可以重复引用同一 owner。v3 保留 v2 的 AS 字段，无 AS 时
+传 `scene_count=0`；v1/v2 明确拒绝数组新形式。
+
+普通和已选整图 graphics-queue Graph 遇到 `ShaderBufferArrayBinding` 时自动选择 v3。
+显式 AOT 计划可以绑定公开/私有 parent 的 `ndarray_view`，逐元素的偏移和有限字节范围
+进入同一 descriptor 缓存与录制路径，不复制数组载荷。Windows 独立/借用消费检查包括
+shader 实际观察数组长度、别名、公私 parent、GPU selector 更新、替换绑定、退休及下游
+梯度。mesh/indirect、分段/fork-join 的提交资格保持原边界。
 
 显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
 `mip_levels` 和 `attachment`，复用同一所有者及 `image/upload`、`image/upload_mips`。

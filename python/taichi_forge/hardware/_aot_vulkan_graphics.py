@@ -137,7 +137,7 @@ def _parts(recording):
 
 
 def preflight(recording, context):
-    from ._graphics import Draw, ShaderBufferArrayBinding, VulkanGraphicsPipeline
+    from ._graphics import Draw, VulkanGraphicsPipeline
 
     cache = context._native_export_facts.setdefault("vulkan_graphics_recordings", {})
     if id(recording) in cache:
@@ -149,8 +149,6 @@ def preflight(recording, context):
     for item in draws:
         if type(item.pipeline) is not VulkanGraphicsPipeline or type(item.draw) is not Draw:
             raise TaichiRuntimeError("AOT graphics recording currently requires direct/indexed raster draws")
-        if any(isinstance(value, ShaderBufferArrayBinding) for value in item.pipeline.shader_buffer_bindings):
-            raise TaichiRuntimeError("AOT graphics recording requires scalar descriptors")
     for name in (*(value.name for value in colors), recording.depth):
         if name is not None:
             context.source_images.require_attachment(name)
@@ -173,10 +171,15 @@ def _clear_bits(fmt, values):
 
 
 def export(recording, context):
+    from ._graphics import ShaderBufferArrayBinding
+
     draws, colors, depth_load = preflight(recording, context)
     bindings, groups, descriptions = {}, {name: {} for name in ("pipeline", "array", "image")}, []
     has_scenes = any(item.shader_acceleration_structures for item in draws)
-    if has_scenes:
+    has_arrays = any(
+        isinstance(value, ShaderBufferArrayBinding) for item in draws for value in item.pipeline.shader_buffer_bindings
+    )
+    if has_scenes or has_arrays:
         groups["scene"] = {}
 
     def index(group, resource):
@@ -185,6 +188,21 @@ def export(recording, context):
             entries[resource] = len(entries)
             bindings[f"{group}_{entries[resource]}"] = resource
         return entries[resource]
+
+    def buffer_description(key, name, declaration):
+        if isinstance(declaration, ShaderBufferArrayBinding):
+            return dict(
+                set=key[0],
+                binding=key[1],
+                storage=True,
+                arrays=[index("array", context.binding(element)) for element in name],
+            )
+        return dict(
+            set=key[0],
+            binding=key[1],
+            storage=declaration.kind == "storage",
+            array=index("array", context.binding(name)),
+        )
 
     for i, color in enumerate(colors):
         bindings[f"color_{i}"] = context.source_images.resource(
@@ -209,13 +227,7 @@ def export(recording, context):
                 for binding, name in item._ordered_vertex_buffers
             ],
             buffers=[
-                dict(
-                    set=key[0],
-                    binding=key[1],
-                    array=index("array", context.binding(name)),
-                    storage=declaration.kind == "storage",
-                )
-                for key, name, declaration in item._ordered_shader_buffers
+                buffer_description(key, name, declaration) for key, name, declaration in item._ordered_shader_buffers
             ],
             images=[
                 dict(set=key[0], binding=key[1], image=index("image", context.source_images.resource(context, name)))
@@ -256,6 +268,10 @@ def export(recording, context):
         draws=descriptions,
     )
     context.native(
-        "vulkan_graphics", "pass_direct", version=2 if has_scenes else 1, parameters=parameters, bindings=bindings
+        "vulkan_graphics",
+        "pass_direct",
+        version=3 if has_arrays else (2 if has_scenes else 1),
+        parameters=parameters,
+        bindings=bindings,
     )
     return ()
