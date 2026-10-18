@@ -104,6 +104,17 @@ std::size_t driver_add_scaled_strided(void *src,
                                       double scale,
                                       void *stream);
 
+// Resolve the shared six-type code before capture. Fixed packed operations use
+// the kernel's uint32 count/bound ABI and explicitly supplied stream.
+void driver_prepare_scatter_add(CudaTransformValueType value_type);
+std::size_t driver_scatter_add_on_stream(void *src,
+                                        void *indices,
+                                        void *dst,
+                                        std::uint32_t num_items,
+                                        std::uint32_t index_bound,
+                                        CudaTransformValueType value_type,
+                                        void *stream);
+
 std::size_t driver_scatter_add_strided(void *src,
                                        void *indices,
                                        void *dst,

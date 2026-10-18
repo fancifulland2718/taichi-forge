@@ -849,21 +849,20 @@ std::size_t driver_add_scaled_strided(void *src,
   return 0;
 }
 
-std::size_t driver_scatter_add_strided(void *src,
-                                       void *indices,
-                                       void *dst,
-                                       int num_items,
-                                       int index_bound,
-                                       CudaTransformValueType value_type,
-                                       std::size_t src_offset,
-                                       std::size_t src_stride,
-                                       std::size_t indices_offset,
-                                       std::size_t indices_stride,
-                                       std::size_t dst_offset,
-                                       std::size_t dst_stride,
-                                       void *stream) {
-  TI_ERROR_IF(num_items < 0 || index_bound < 0,
-              "CUDA Driver scatter-add received a negative size.");
+static std::size_t driver_scatter_add_strided_impl(
+    void *src,
+    void *indices,
+    void *dst,
+    std::uint32_t num_items,
+    std::uint32_t index_bound,
+    CudaTransformValueType value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t indices_offset,
+    std::size_t indices_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    void *stream) {
   const std::size_t value_size = value_type_size(value_type);
   TI_ERROR_IF((num_items > 0 && (!src || !indices || !dst)) ||
                   src_stride < value_size ||
@@ -889,11 +888,50 @@ std::size_t driver_scatter_add_strided(void *src,
       &indices_arg, &indices_offset_arg, &indices_stride_arg,
       &dst_arg,     &dst_offset_arg,     &dst_stride_arg,
       &count_arg,   &bound_arg};
-  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  const unsigned grid = count_arg / kBlockDim + (count_arg % kBlockDim != 0);
   CUDAContext::get_instance().launch(
       kernels().scatter_add[value_type_index(value_type)],
       "cuda_driver_scatter_add", args, {}, grid, kBlockDim, 0, stream);
   return 0;
+}
+
+void driver_prepare_scatter_add(CudaTransformValueType value_type) {
+  const auto type = value_type_index(value_type);
+  (void)kernels().scatter_add[type];
+}
+
+std::size_t driver_scatter_add_on_stream(void *src,
+                                         void *indices,
+                                         void *dst,
+                                         std::uint32_t num_items,
+                                         std::uint32_t index_bound,
+                                         CudaTransformValueType value_type,
+                                         void *stream) {
+  const auto width = value_type_size(value_type);
+  return driver_scatter_add_strided_impl(
+      src, indices, dst, num_items, index_bound, value_type, 0, width, 0,
+      sizeof(std::int32_t), 0, width, stream);
+}
+
+std::size_t driver_scatter_add_strided(void *src,
+                                       void *indices,
+                                       void *dst,
+                                       int num_items,
+                                       int index_bound,
+                                       CudaTransformValueType value_type,
+                                       std::size_t src_offset,
+                                       std::size_t src_stride,
+                                       std::size_t indices_offset,
+                                       std::size_t indices_stride,
+                                       std::size_t dst_offset,
+                                       std::size_t dst_stride,
+                                       void *stream) {
+  TI_ERROR_IF(num_items < 0 || index_bound < 0,
+              "CUDA Driver scatter-add received a negative size.");
+  return driver_scatter_add_strided_impl(
+      src, indices, dst, num_items, index_bound, value_type, src_offset,
+      src_stride, indices_offset, indices_stride, dst_offset, dst_stride,
+      stream);
 }
 
 std::size_t driver_gather_add_strided(void *src,
