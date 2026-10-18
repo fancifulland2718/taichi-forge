@@ -1,7 +1,8 @@
 """Allocation ownership at assembly/instance boundaries, with real Graph work."""
 
-from types import SimpleNamespace
+from dataclasses import replace
 from math import prod
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -101,6 +102,32 @@ def _materialize(definition, assembly, *, lanes=1):
     return definition._runtime_spec.materialize_complete_recipe(
         definition, baseline, assembly, workspace_lanes=lanes, workspace_saturation="wait"
     )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_workspace_lane_capacity_uses_dynamic_storage():
+    definition = _private_definition(size=1)
+    for invalid in (0, -1, True, 1.5):
+        with pytest.raises(ti.TaichiRuntimeError, match="integer"):
+            definition.compile(workspace_lanes=invalid)
+    graph = definition.compile(workspace_lanes=65, workspace_saturation="raise")
+    memory = graph.execution_stats().memory
+    assert memory.workspace_lane_capacity == 65
+    assert memory.workspace_lanes_materialized == 1
+    assert memory.persistent_internal_storage_bytes == 2 * 4
+    first, second = ti.ndarray(ti.i32, 1), ti.ndarray(ti.i32, 1)
+    a = graph.submit(dict(value=3, output=first), workspace_lane=64)
+    b = graph.submit(dict(value=7, output=second), workspace_lane=0)
+    a.wait()
+    b.wait()
+    np.testing.assert_array_equal(first.to_numpy(), [13])
+    np.testing.assert_array_equal(second.to_numpy(), [21])
+    graph.submit(dict(value=9, output=first), workspace_lane=64).wait()
+    np.testing.assert_array_equal(first.to_numpy(), [25])
+    memory = graph.execution_stats().memory
+    assert memory.workspace_lanes_materialized == 2
+    assert memory.persistent_internal_storage_bytes == 2 * 2 * 4
+    graph.close()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -233,9 +260,11 @@ class _TemporaryWork(NativeGraphNode, NativeGraphExecutable):
         self.kernel(raw.storage, raw.offset // 4, typed.storage, runtime_args["output"])
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_selected_temporary_ring_is_prepared_eagerly_and_reuses_registered_storage(monkeypatch):
-    monkeypatch.setenv("TI_GRAPH_TEMPORARY_ARENA_SLOTS", "3")
+@pytest.mark.parametrize("slots,size", [(3, 131), (65, 1)])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_selected_temporary_ring_is_prepared_eagerly_and_reuses_registered_storage(monkeypatch, slots, size):
+    monkeypatch.setenv("TI_GRAPH_TEMPORARY_ARENA_SLOTS", str(slots))
+    monkeypatch.setenv("TI_GRAPH_TELEMETRY_SLOTS", str(slots))
 
     @ti.kernel
     def work(
@@ -250,28 +279,29 @@ def test_selected_temporary_ring_is_prepared_eagerly_and_reuses_registered_stora
             output[i] = ti.cast(typed[i] * 2, ti.i32) + 1
 
     builder = ti.graph.GraphBuilder()
-    builder.append_native(_TemporaryWork(work, 131))
+    builder.append_native(_TemporaryWork(work, size))
     definition = builder.freeze()
     baseline = definition.compile()
     assert baseline.execution_stats().memory.temporary_arena_slots == 0
     owners, events = [], []
-    assembly = _assembly(definition, (_plan("arena", (), owners, events, arena=True),))
+    arena_plan = replace(_plan("arena", (), owners, events, arena=True), temporary_capacity=slots)
+    assembly = _assembly(definition, (arena_plan,))
     graph = _materialize(definition, assembly)
     memory = graph.execution_stats().memory
-    assert memory.temporary_arena_slots == memory.temporary_arena_capacity == 3
-    assert memory.temporary_arena_allocations == 3
-    assert len(owners[0].allocations) == 6
+    assert memory.temporary_arena_slots == memory.temporary_arena_capacity == slots
+    assert memory.temporary_arena_allocations == slots
+    assert len(owners[0].allocations) == slots * 2
     assert memory.persistent_temporary_bytes == sum(
         prod(shape) * core.data_type_size(dtype) for dtype, shape in owners[0].allocations
     )
-    output = ti.ndarray(ti.i32, 131)
+    output = ti.ndarray(ti.i32, size)
     for _ in range(13):
         graph.run(dict(output=output))
-    np.testing.assert_array_equal(output.to_numpy(), (np.arange(131, dtype=np.int32) * 3 + 5) * 3 + 1)
-    assert graph.execution_stats().memory.temporary_arena_allocations == 3
-    assert len(owners[0].allocations) == 6
+    np.testing.assert_array_equal(output.to_numpy(), (np.arange(size, dtype=np.int32) * 3 + 5) * 3 + 1)
+    assert graph.execution_stats().memory.temporary_arena_allocations == slots
+    assert len(owners[0].allocations) == slots * 2
     if owners[0].pool is not None:
-        assert owners[0].pool.snapshot()["used_current_bytes"] >= 3 * 2 * 131 * 4
+        assert owners[0].pool.snapshot()["used_current_bytes"] >= slots * 2 * size * 4
     assembly.executor_release(graph)
     assert owners[0].closed
     failed_owners, failed_events = [], []
@@ -284,4 +314,4 @@ def test_selected_temporary_ring_is_prepared_eagerly_and_reuses_registered_stora
     assert len(failed_owners[0].allocations) == 3
     # Failure half-way through the second slot does not alter the source spec.
     baseline.run(dict(output=output))
-    np.testing.assert_array_equal(output.to_numpy(), (np.arange(131, dtype=np.int32) * 3 + 5) * 3 + 1)
+    np.testing.assert_array_equal(output.to_numpy(), (np.arange(size, dtype=np.int32) * 3 + 5) * 3 + 1)

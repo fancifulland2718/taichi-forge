@@ -476,6 +476,19 @@ class _GraphExclusiveInternalStorageLease:
             self._instance = None
 
 
+def _graph_slot_capacity(value, name):
+    # These are host-owned dynamic collections, not fixed-width device masks.
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer, str)):
+        raise TaichiRuntimeError(f"{name} must be a positive integer")
+    try:
+        value = int(value)
+    except ValueError as error:
+        raise TaichiRuntimeError(f"{name} must be a positive integer") from error
+    if value < 1:
+        raise TaichiRuntimeError(f"{name} must be a positive integer")
+    return value
+
+
 class _GraphTemporaryArena:
     """Runtime-owned byte arenas with a bounded async submission ring."""
 
@@ -484,15 +497,12 @@ class _GraphTemporaryArena:
 
     def __init__(self, plan, capacity=None):
         self.plan = plan
-        self.capacity = int(
+        self.capacity = _graph_slot_capacity(
             capacity
             if capacity is not None
-            else os.environ.get("TI_GRAPH_TEMPORARY_ARENA_SLOTS", "4")
+            else os.environ.get("TI_GRAPH_TEMPORARY_ARENA_SLOTS", "4"),
+            "TI_GRAPH_TEMPORARY_ARENA_SLOTS",
         )
-        if self.capacity < 1 or self.capacity > 64:
-            raise TaichiRuntimeError(
-                "TI_GRAPH_TEMPORARY_ARENA_SLOTS must be between 1 and 64"
-            )
         self._slots = []
         self._allocations = 0
         self._reuses = 0
@@ -806,11 +816,7 @@ class _GraphObservationArena:
             if capacity is not None
             else os.environ.get("TI_GRAPH_OBSERVATION_SLOTS", "4")
         )
-        self.capacity = int(configured)
-        if self.capacity < 1 or self.capacity > 64:
-            raise TaichiRuntimeError(
-                "TI_GRAPH_OBSERVATION_SLOTS must be between 1 and 64"
-            )
+        self.capacity = _graph_slot_capacity(configured, "TI_GRAPH_OBSERVATION_SLOTS")
         self._slots = []
         self._next_sequence = 1
         self._allocations = 0
@@ -1366,15 +1372,12 @@ class _GraphStructuredTelemetryArena:
         self._pipeline_definition = pipeline_definition
         self._pipeline_definition_cache = None
         self._bounded_sources_cache = None
-        self.capacity = int(
+        self.capacity = _graph_slot_capacity(
             capacity
             if capacity is not None
-            else os.environ.get("TI_GRAPH_TELEMETRY_SLOTS", "4")
+            else os.environ.get("TI_GRAPH_TELEMETRY_SLOTS", "4"),
+            "TI_GRAPH_TELEMETRY_SLOTS",
         )
-        if self.capacity < 1 or self.capacity > 64:
-            raise TaichiRuntimeError(
-                "TI_GRAPH_TELEMETRY_SLOTS must be between 1 and 64"
-            )
         self._slots = []
         self._next_sequence = 1
         self._allocations = 0
@@ -18538,9 +18541,7 @@ def _workspace_lane_configuration(workspace_lanes, workspace_saturation):
         workspace_lanes, (int, np.integer)
     ):
         raise TaichiRuntimeError("Graph workspace_lanes must be an integer")
-    workspace_lanes = int(workspace_lanes)
-    if workspace_lanes < 1 or workspace_lanes > 64:
-        raise TaichiRuntimeError("Graph workspace_lanes must be between 1 and 64")
+    workspace_lanes = _graph_slot_capacity(workspace_lanes, "Graph workspace_lanes")
     if workspace_saturation not in ("wait", "raise"):
         raise TaichiRuntimeError("Graph workspace_saturation must be 'wait' or 'raise'")
     return workspace_lanes, workspace_saturation

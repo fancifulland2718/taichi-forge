@@ -9,7 +9,9 @@ from tests import test_utils
 def test_observation_dense_scalar_bindings_are_cold_and_snapshots_are_independent(
     monkeypatch,
 ):
-    monkeypatch.setenv("TI_GRAPH_OBSERVATION_SLOTS", "2")
+    # Capacity controls lazy admission; two live snapshots must not allocate
+    # the entire ring or depend on the former arbitrary 64-slot ceiling.
+    monkeypatch.setenv("TI_GRAPH_OBSERVATION_SLOTS", "65")
     padding = ti.field(ti.i32)
     counter, residual = ti.field(ti.i32), ti.field(ti.f32)
     fields = ti.FieldsBuilder()
@@ -40,6 +42,9 @@ def test_observation_dense_scalar_bindings_are_cold_and_snapshots_are_independen
     before = ti.lang.impl.get_runtime().prog._graph_observation_staging_stats()
     first = graph.submit(binding)
     second = graph.submit(binding)
+    memory = graph.execution_stats().memory
+    assert memory.observation_arena_capacity == 65
+    assert memory.observation_arena_slots == 2
     # Completion/snapshot storage is existing machinery: no host materialization
     # is needed to submit two independent snapshots of the same in-place state.
     assert graph.execution_stats().memory.observation_host_readback_bytes == 0

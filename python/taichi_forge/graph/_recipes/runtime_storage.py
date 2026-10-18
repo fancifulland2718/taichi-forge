@@ -51,9 +51,9 @@ class GraphRuntimeStoragePlan:
             not self.temporary_arena
             or isinstance(self.temporary_capacity, bool)
             or not isinstance(self.temporary_capacity, int)
-            or not 1 <= self.temporary_capacity <= 64
+            or self.temporary_capacity < 1
         ):
-            raise ValueError("Graph storage temporary capacity requires an arena and a bounded slot count")
+            raise ValueError("Graph storage temporary capacity requires an arena and a positive slot count")
         if not isinstance(self.ordered_temporary_reuse, bool) or (
             self.ordered_temporary_reuse
             and (not self.temporary_arena or self.temporary_capacity != 1)
