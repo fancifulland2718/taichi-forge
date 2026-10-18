@@ -43,5 +43,10 @@ struct SNodeTreeResources {
 SNodeTreeResources describe_snode_tree_resources(
     const spirv::CompiledSNodeStructs &compiled);
 
+// Validate cold layout facts before allocating any device storage. The same
+// contract applies to compiler projections and independently loaded artifacts.
+// Limits follow the shader's uint32 addressing and the actual buffer extents.
+void validate_snode_tree_resources(const SNodeTreeResources &resources);
+
 }  // namespace gfx
 }  // namespace taichi::lang

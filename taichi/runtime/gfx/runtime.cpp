@@ -6472,6 +6472,11 @@ void GfxRuntime::materialize_snode_tree_resources(
     int root_id,
     const SNodeTreeResources &resources) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  validate_snode_tree_resources(resources);
+#if !defined(TI_WITH_VULKAN_POINTER)
+  TI_ERROR_IF(!resources.pointer_pools.empty(),
+              "This runtime was built without GFX pointer pool support.");
+#endif
   if (resources.listgen_capacity_entries > 0) {
     ensure_listgen_capacity_entries(resources.listgen_capacity_entries,
                                     "SNodeTree materialization");

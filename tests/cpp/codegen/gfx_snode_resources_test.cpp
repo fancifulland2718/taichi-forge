@@ -159,6 +159,7 @@ TEST(GfxSNodeResources, DenseLayoutHasNoSparseResources) {
   EXPECT_EQ(resources.snode_ids.size(), compiled.snode_descriptors.size());
   EXPECT_TRUE(resources.pointer_pools.empty());
   EXPECT_TRUE(resources.hash_watches.empty());
+  EXPECT_NO_THROW(gfx::validate_snode_tree_resources(resources));
 }
 
 TEST(GfxSNodeResources, PointerPoliciesSurviveSourceTreeRetirement) {
@@ -194,6 +195,7 @@ TEST(GfxSNodeResources, PointerPoliciesSurviveSourceTreeRetirement) {
       }
       EXPECT_EQ(resources.pointer_pools[0].contract.snode_id, pointer_id);
       EXPECT_EQ(resources.listgen_capacity_entries, 32);
+      EXPECT_NO_THROW(gfx::validate_snode_tree_resources(resources));
     }
   }
 }
@@ -228,9 +230,103 @@ TEST(GfxSNodeResources, HashCapacityAndCounterOffsetsRemainPhysical) {
   EXPECT_EQ(resources.hash_watches[0].overflow_offset, 164);
   EXPECT_EQ(resources.hash_watches[0].tombstone_offset,
             static_cast<std::size_t>(-1));
+  EXPECT_NO_THROW(gfx::validate_snode_tree_resources(resources));
   table.hash_tombstone_count_offset = 136;
   resources = gfx::describe_snode_tree_resources(compiled);
   EXPECT_EQ(resources.hash_watches[0].tombstone_offset, 168);
+  EXPECT_NO_THROW(gfx::validate_snode_tree_resources(resources));
+}
+
+TEST(GfxSNodeResources, RejectsMalformedPoolOwnershipAndRanges) {
+  gfx::SNodeTreeResources valid;
+  valid.root_size = 64;
+  valid.snode_ids = {3, 4, 5};
+  spirv::SpirvAllocatorContract c;
+  c.snode_id = 4;
+  c.pool_capacity = 4;
+  c.cell_stride_bytes = 4;
+  c.has_freelist = true;
+  c.freelist_head_offset = 4;
+  c.freelist_links_offset = 8;
+  c.pool_data_offset = 24;
+  c.has_ambient_zone = true;
+  c.ambient_offset = 40;
+  valid.pointer_pools.push_back({c, 0});
+  valid.hash_watches.push_back({5, 48, 52, 56});
+  EXPECT_NO_THROW(gfx::validate_snode_tree_resources(valid));
+  auto rejects = [&](auto mutate) {
+    auto invalid = valid;
+    mutate(invalid);
+    EXPECT_THROW(gfx::validate_snode_tree_resources(invalid),
+                 std::invalid_argument);
+  };
+  rejects([](auto &r) { r.snode_ids = {3, 4, 4}; });
+  rejects([](auto &r) { r.snode_ids = {4, 3, 5}; });
+  rejects([](auto &r) { r.snode_ids = {3, 5}; });
+  rejects([](auto &r) { r.pointer_pools.push_back(r.pointer_pools[0]); });
+  rejects([](auto &r) { r.pointer_pools[0].independent_size = 64; });
+  rejects(
+      [](auto &r) { r.pointer_pools[0].contract.pool_buffer_binding_id = 5; });
+  rejects([](auto &r) { r.pointer_pools[0].contract.cell_stride_bytes = 3; });
+  rejects([](auto &r) { r.pointer_pools[0].contract.pool_capacity = 0; });
+  rejects([](auto &r) { r.pointer_pools[0].contract.pool_capacity = 16; });
+  rejects([](auto &r) { r.pointer_pools[0].contract.pool_data_offset = 16; });
+  rejects([](auto &r) { r.pointer_pools[0].contract.ambient_offset = 48; });
+  rejects([](auto &r) { r.pointer_pools[0].contract.watermark_offset = 1; });
+  rejects([](auto &r) { r.hash_watches[0].snode_id = 4; });
+  rejects([](auto &r) { r.hash_watches[0].overflow_offset = 64; });
+  rejects([](auto &r) { r.hash_watches[0].active_count_offset = 48; });
+  rejects([](auto &r) {
+    r.pointer_pools[0].contract.pool_fraction =
+        std::numeric_limits<double>::quiet_NaN();
+  });
+  rejects([](auto &r) {
+    r.pointer_pools[0].contract.alloc_protocol =
+        static_cast<spirv::SpirvAllocatorContract::AllocProtocol>(2);
+  });
+  rejects([](auto &r) {
+    r.pointer_pools[0].contract.allocator_kind =
+        static_cast<spirv::SpirvAllocatorContract::AllocatorKind>(2);
+  });
+  valid.pointer_pools[0].contract.pool_buffer_binding_id = 4;
+  valid.pointer_pools[0].independent_size = 44;
+  valid.root_size = 60;
+  EXPECT_NO_THROW(gfx::validate_snode_tree_resources(valid));
+  rejects([](auto &r) { r.pointer_pools[0].independent_size = 40; });
+}
+
+TEST(GfxSNodeResources, ChecksShaderBoundsWithoutAllocatingLargeBuffers) {
+  gfx::SNodeTreeResources resources;
+  resources.snode_ids = {1};
+  resources.listgen_capacity_entries = std::numeric_limits<uint32_t>::max();
+  resources.root_size = uint64_t(1) << 32;
+  spirv::SpirvAllocatorContract c;
+  c.snode_id = 1;
+  c.pool_capacity = std::numeric_limits<uint32_t>::max() / 4;
+  c.cell_stride_bytes = 4;
+  c.pool_data_offset = 4;
+  resources.pointer_pools.push_back({c, 0});
+  EXPECT_NO_THROW(gfx::validate_snode_tree_resources(resources));
+  ++resources.listgen_capacity_entries;
+  EXPECT_THROW(gfx::validate_snode_tree_resources(resources),
+               std::invalid_argument);
+  --resources.listgen_capacity_entries;
+  ++resources.pointer_pools[0].contract.pool_capacity;
+  resources.root_size += 4;
+  EXPECT_THROW(gfx::validate_snode_tree_resources(resources),
+               std::invalid_argument);
+  auto &chunk = resources.pointer_pools[0].contract;
+  chunk.allocator_kind = spirv::SpirvAllocatorContract::AllocatorKind::Chunked;
+  chunk.pool_capacity = 8;
+  chunk.chunk_log2_capacity = 2;
+  chunk.max_chunks = 2;
+  EXPECT_NO_THROW(gfx::validate_snode_tree_resources(resources));
+  chunk.max_chunks = 1;
+  EXPECT_THROW(gfx::validate_snode_tree_resources(resources),
+               std::invalid_argument);
+  chunk.chunk_log2_capacity = 32;
+  EXPECT_THROW(gfx::validate_snode_tree_resources(resources),
+               std::invalid_argument);
 }
 
 TEST(GfxSNodeResources, GeometryOverflowIsRejectedWithoutCapacityThreshold) {
