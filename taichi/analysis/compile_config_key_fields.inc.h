@@ -10,6 +10,11 @@
   CACHE_FIELD(external_optimization_level);
   CACHE_FIELD(llvm_opt_level);
   CACHE_FIELD(llvm_aot_relocatable_roots);
+  if (config.llvm_aot_relocatable_roots) {
+    // Sparse traversal and GC now relocate their packed tree/local keys too.
+    // Keep ordinary JIT cache identities unchanged.
+    CACHE_VALUE(std::string("llvm-aot-snode-keys-v2"));
+  }
   CACHE_FIELD(compile_tier);
   CACHE_FIELD(tiered_full_simplify);
   CACHE_FIELD(full_simplify_global_iter_cap);

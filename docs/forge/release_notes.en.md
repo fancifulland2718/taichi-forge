@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Added `sparse_v1` resource relocation for CPU/CUDA pointer, bitmasked and
+  dynamic AOT trees with dense-loop demotion enabled. Independent module
+  instances, sparse-field gradients and close/reload are tested with CPU
+  bitcode and CUDA bitcode/PTX/cubin. Sparse fixed Graphs, root snapshots and
+  hash/mesh/quantized layouts remain separate; old artifacts keep their contract.
 - Fixed tree-ID collisions when JIT fields are created after AOT modules load
   on a borrowed CPU/CUDA/Vulkan runtime. Both owners now share cold resource
   reservations, including compile-only JIT layouts; kernel launch paths are
@@ -597,7 +602,8 @@ lifetimes. The entries below describe the changes.
   Independent instances can share one runtime without sharing primal/gradient
   storage; close/reload and ordinary Graph replay are verified for bitcode and
   CUDA PTX. Unused PTX relocation constants are removed after optimization.
-  Sparse/list-managed resources retain their legacy binding contract.
+  The `sparse_v1` extension above separately covers pointer/bitmasked/dynamic
+  trees; unsupported layouts and non-demoted dense lists retain their contract.
 - Correct CUDA driver JIT option encoding for register limits and diagnostic
   buffer lengths. Explicit register limits now reach the shared JIT/PTX AOT
   loader as integer values instead of host addresses.

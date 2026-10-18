@@ -6,20 +6,34 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import shutil
+import zipfile
 
+import pytest
 import taichi_forge as ti
 from tests import test_utils
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_aot_sparse_list_close_reload(tmp_path):
-    # Legacy sparse artifacts retain producer tree IDs. Leave ID 0 for the
-    # borrowed Program's default root; relocation is a separate contract.
+    _sparse_module(tmp_path, "bc")
+
+
+@pytest.mark.parametrize("artifact_format", ["ptx", "cubin"])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_sparse_device_artifact_isolation(tmp_path, artifact_format):
+    if artifact_format == "cubin" and not (os.environ.get("TI_CUDA_PTXAS_PATH") or shutil.which("ptxas")):
+        pytest.skip("External ptxas is required for cubin export")
+    _sparse_module(tmp_path, artifact_format)
+
+
+def _sparse_module(tmp_path, artifact_format):
+    # Ensure the producer tree ID differs from the compact artifact ID.
     unrelated = ti.field(ti.i32, shape=1)
     unrelated[0] = 7
-    values = ti.field(ti.f32)
+    values = ti.field(ti.f32, needs_grad=True)
     blocks = ti.root.pointer(ti.i, 4)
-    blocks.bitmasked(ti.i, 2).place(values)
+    blocks.bitmasked(ti.i, 2).place(values, values.grad)
     entries = ti.field(ti.f32)
     dynamic = ti.root.dynamic(ti.i, 8, chunk_size=4)
     dynamic.place(entries)
@@ -28,6 +42,8 @@ def test_aot_sparse_list_close_reload(tmp_path):
     def activate(scale: ti.f32):
         values[2] = scale
         values[5] = 2 * scale
+        values.grad[2] = 0
+        values.grad[5] = 0
         ti.append(dynamic, [], scale)
         ti.append(dynamic, [], 3 * scale)
 
@@ -50,16 +66,41 @@ def test_aot_sparse_list_close_reload(tmp_path):
         for i in range(2):
             loss[0] += 0.5 * out[i] * out[i]
 
+    @ti.kernel
+    def sparse_energy(loss: ti.types.ndarray(ti.f32, 1, needs_grad=True)):
+        for i in values:
+            loss[0] += 0.5 * values[i] * values[i]
+
+    @ti.kernel
+    def gather_grad(out: ti.types.ndarray(ti.f32, 1)):
+        for i in values:
+            out[0] += values.grad[i]
+
     arch = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
     start = time.perf_counter()
-    module = ti.aot.Module(artifact_format="ptx" if arch == "cuda" else "bc")
-    for kernel in (activate, gather, deactivate, energy):
+    caps = (
+        [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
+        if artifact_format == "cubin"
+        else None
+    )
+    module = ti.aot.Module(artifact_format=artifact_format, caps=caps)
+    for kernel in (activate, gather, deactivate, energy, sparse_energy, gather_grad):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="backward")
+    module.add_kernel(sparse_energy.grad, name="sparse_backward")
     artifact = tmp_path / "sparse.tcm"
     module.archive(str(artifact))
+    with zipfile.ZipFile(artifact) as archive:
+        metadata = json.loads(archive.read("aot_metadata.json"))
+    assert metadata["resource_binding"] == "sparse_v1"
     (tmp_path / "producer.json").write_text(
-        json.dumps(dict(compile_export_ms=(time.perf_counter() - start) * 1000, bytes=artifact.stat().st_size))
+        json.dumps(
+            dict(
+                compile_export_ms=(time.perf_counter() - start) * 1000,
+                bytes=artifact.stat().st_size,
+                format=artifact_format,
+            )
+        )
     )
     ti.reset()
     for mode in ("standalone", "borrowed"):

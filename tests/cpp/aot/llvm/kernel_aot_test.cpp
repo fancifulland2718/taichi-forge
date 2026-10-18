@@ -4,6 +4,7 @@
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
+#include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/runtime/dx12/aot_module_loader_impl.h"
@@ -131,6 +132,57 @@ TEST(LlvmAotMetadataTest, DenseRelocationHasAnExplicitFormatContract) {
   metadata.schema_version = LLVM::kRelocatableLlvmAotSchemaVersion;
   metadata.resource_binding = "guess";
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+}
+
+TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshotsOrMesh) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.resource_binding = "sparse_v1";
+  metadata.abi_sha256 = std::string(64, 'b');
+  for (const auto *format : {"bc", "ptx", "cubin"}) {
+    metadata.kernel_format = format;
+    metadata.schema_version = metadata.kernel_format == "cubin"
+                                  ? LLVM::kCudaCubinAotSchemaVersion
+                                  : LLVM::kRelocatableLlvmAotSchemaVersion;
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  }
+  metadata.schema_version = LLVM::kInitialRootDataAotSchemaVersion;
+  metadata.initial_root_data.push_back({0, 32, std::string(64, 'b')});
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  EXPECT_FALSE(LLVM::is_relocatable_aot_task(OffloadedTaskType::mesh_for, true));
+  EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::hash, true));
+  EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::quant_array, true));
+}
+
+TEST(LlvmAotMetadataTest, SparseParentClosureIsValidatedBeforeAllocation) {
+  LlvmOfflineCache::FieldCacheData field;
+  field.root_id = 42;
+  field.root_runtime_local_id = 2;
+  field.snode_metas.resize(3);
+  for (int i = 0; i < 3; ++i) {
+    auto &node = field.snode_metas[i];
+    node.id = 42 + i;
+    node.parent_id = i == 0 ? -1 : 41 + i;
+    node.runtime_local_id = (i + 2) % 3;
+    node.type = i == 0 ? SNodeType::root
+                      : i == 1 ? SNodeType::pointer : SNodeType::place;
+  }
+  EXPECT_NO_THROW(LLVM::validate_relocatable_aot_field(field, true));
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(field, false));
+  auto invalid = field;
+  invalid.snode_metas[1].parent_id = 43;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(invalid, true));
+  invalid = field;
+  invalid.snode_metas[1].parent_id = 999;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(invalid, true));
+  invalid = field;
+  invalid.snode_metas[2].id = 43;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(invalid, true));
+  invalid = field;
+  invalid.snode_metas[2].runtime_local_id = 2;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(invalid, true));
+  invalid = field;
+  invalid.root_runtime_local_id = 0;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(invalid, true));
 }
 
 TEST(LlvmAotMetadataTest, CubinRequiresNewSchemaAndBinaryCompatibleTarget) {

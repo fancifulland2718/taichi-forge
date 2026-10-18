@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CPU/CUDA pointer、bitmasked、dynamic AOT 树在启用 dense 循环降级时支持
+  `sparse_v1` 重定位。CPU bitcode 和 CUDA bitcode/PTX/cubin 已验证独立模块实例、
+  稀疏 field 梯度及关闭重载；sparse 固定 Graph、根快照、hash/mesh/quantized 仍单列，
+  旧产物保留原合同。
 - 修复 borrowed CPU/CUDA/Vulkan runtime 中先加载 AOT、再创建 JIT 字段造成的树 ID
   冲突。双方共用冷路径资源预留，包含尚未分配存储的 JIT 布局；kernel 启动路径不变。
   配套生产端/runtime 组件使用私有 ABI 95。
@@ -432,7 +436,8 @@
 - CPU/CUDA dense field 的 AOT schema 5 在加载时绑定模块局部资源，同一 runtime
   可独立加载多个实例，前向及梯度存储互不影响。bitcode 与 CUDA PTX 已验证
   关闭/重载及普通 Graph；优化后不再使用的 PTX 重定位常量会被清除。
-  sparse/依赖 element list 的资源仍沿用原有绑定合同。
+  上述 `sparse_v1` 扩展另行覆盖 pointer/bitmasked/dynamic；未覆盖布局和未降级的
+  dense list 仍保留原合同。
 - 修正 CUDA driver JIT 的寄存器上限和诊断缓冲区长度传参；显式寄存器限制现在
   按整数值传入 JIT/PTX AOT 共用加载路径，避免将宿主变量地址误作选项值。
 - 修复 Windows C API 对分离 runtime 对象库的链接及 Graph 纹理对象所有权，恢复

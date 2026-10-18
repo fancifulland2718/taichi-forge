@@ -12,6 +12,7 @@
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
+#include "taichi/runtime/llvm/aot_snode_resources.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
@@ -93,18 +94,17 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       !cache_.fields.empty() && compile_config_.demote_dense_struct_fors &&
       (arch_is_cpu(compile_config_.arch) || compile_config_.arch == Arch::cuda);
   std::map<int, int> tree_mapping;
+  bool sparse = false;
   for (const auto &[id, field] : cache_.fields) {
     tree_mapping.emplace(id, id);
     for (const auto &node : field.snode_metas) {
-      relocatable &= node.type == SNodeType::root ||
-                     node.type == SNodeType::dense ||
-                     node.type == SNodeType::place;
+      sparse |= !LLVM::is_dense_aot_snode(node.type);
+      relocatable &= LLVM::is_relocatable_aot_snode(node.type, true);
     }
   }
   for (const auto &[name, kernel] : cache_.kernels) {
     for (const auto &task : kernel.compiled_data.tasks) {
-      relocatable &= task.task_type == OffloadedTaskType::serial ||
-                     task.task_type == OffloadedTaskType::range_for;
+      relocatable &= LLVM::is_relocatable_aot_task(task.task_type, sparse);
     }
   }
   if (relocatable) {
@@ -117,11 +117,11 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       fields.emplace(field.tree_id, std::move(field));
     }
     exported.fields = std::move(fields);
-    metadata.resource_binding = "dense_v1";
+    metadata.resource_binding = sparse ? "sparse_v1" : "dense_v1";
   }
-  TI_ERROR_IF(!initial_root_data_.empty() && !relocatable,
+  TI_ERROR_IF(!initial_root_data_.empty() && (!relocatable || sparse),
               "AOT initial root state requires relocatable dense trees.");
-  TI_ERROR_IF(!root_storage_views_.empty() && !relocatable,
+  TI_ERROR_IF(!root_storage_views_.empty() && (!relocatable || sparse),
               "AOT root storage views require relocatable dense trees.");
   aot::write_root_storage_views(root_storage_views_, tree_mapping, output_dir);
   for (const auto &[producer, entry] : initial_root_data_) {
@@ -143,7 +143,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       for (int &id : kernel.used_snode_tree_ids)
         id = tree_mapping.at(id);
     } else {
-      // Sparse/list-managed and legacy targets retain their embedded-ID ABI.
+      // Unsupported layouts/tasks and legacy targets retain embedded IDs.
       LLVM::resolve_aot_tree_ids(*module, tree_mapping);
     }
     return module;

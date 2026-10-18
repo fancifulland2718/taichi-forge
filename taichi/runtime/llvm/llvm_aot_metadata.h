@@ -26,6 +26,10 @@ inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
 }
 
+inline bool is_relocatable_aot_resource_binding(const std::string &binding) {
+  return binding == "dense_v1" || binding == "sparse_v1";
+}
+
 struct CudaAotArtifactMetadata {
   std::string sha256;
   uint64_t size{0};
@@ -127,16 +131,18 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
     TI_ERROR_IF(metadata.kernel_format != "cubin" ||
                     metadata.abi_sha256.size() != 64 ||
                     (!metadata.resource_binding.empty() &&
-                     metadata.resource_binding != "dense_v1"),
+                     !is_relocatable_aot_resource_binding(
+                         metadata.resource_binding)),
                 "CUDA cubin AOT requires cubin, an ABI checksum and a supported "
                 "resource binding");
   } else if (schema == kRelocatableLlvmAotSchemaVersion) {
     TI_ERROR_IF(
-        metadata.resource_binding != "dense_v1" ||
+        !is_relocatable_aot_resource_binding(metadata.resource_binding) ||
             (metadata.kernel_format != "bc" &&
              metadata.kernel_format != "ptx") ||
             metadata.abi_sha256.size() != 64,
-        "Relocatable LLVM AOT requires dense_v1, BC/PTX and an ABI checksum");
+        "Relocatable LLVM AOT requires dense_v1/sparse_v1, BC/PTX and an ABI "
+        "checksum");
   } else if (schema == 2) {
     TI_ERROR_IF(!metadata.kernel_format.empty() && metadata.kernel_format != "ll",
                 "Legacy LLVM AOT schema 2 requires text kernel format.");

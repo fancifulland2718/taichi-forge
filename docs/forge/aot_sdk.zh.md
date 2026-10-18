@@ -3162,12 +3162,15 @@ CPU/CUDA/Vulkan runtime 为 JIT 布局和 AOT 模块共用树 ID 注册表，尚
 CPU/CUDA 模块关闭会等待已提交工作完成，退休代码注册，释放已降为普通循环的
 dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。稀疏树共用 JIT
 退休逻辑：CPU 回收或释放 list/allocator/ambient，CUDA 等待设备注销完成后释放树所属
-的池。小型 pointer/bitmasked/dynamic 测试覆盖三次关闭/重载、激活/停用、后续 ndarray
-梯度，以及 borrowed runtime 内另一棵存活 JIT 稀疏树。旧产物和需要
-sparse/list/mesh/quantized 操作的模块仍使用生产端 ID；ID 重叠时需使用独立 runtime，
-冲突在初始化前拒绝。关闭 sparse 模块后可以重新加载并复用 ID，但不表示重叠 ID 的
-模块可同时加载，也未扩展 CUDA sparse 遍历的固定 Graph 支持。共享 runtime 分配缓存
-可继续常驻。Vulkan dense AOT 也使用模块局部映射。
+的池。小型 pointer/bitmasked/dynamic 测试覆盖三次关闭/重载、激活/停用、稀疏 field
+自身及后续 ndarray 的梯度，以及 borrowed runtime 内另一棵存活 JIT 稀疏树。
+新导出的 CPU/CUDA pointer、bitmasked、dynamic 模块在
+`demote_dense_struct_fors=True` 下采用 `sparse_v1` 模块局部资源绑定；同 runtime 的
+两个实例拥有独立活跃集与梯度，覆盖 CPU bitcode 和 CUDA bitcode/PTX/cubin。遍历和
+GC 的 tree/local-node key 在执行前重定位。该能力不扩展 CUDA sparse 固定 Graph，
+也不把 sparse 活跃存储序列化为根快照或 flat view。旧产物、未降级的 dense list 及
+hash/mesh/quantized 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
+共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
 
 CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令也支持
@@ -3182,7 +3185,7 @@ capability 80、PTX 7.0，面向 Ampere 及更新设备；已知部署设备时�
 `compile_options` 已固化到 PTX 中。schema 4/5 记录目标、入口、寄存器上限、数值
 策略和载荷校验和，并将载荷与启动元数据绑定。缺失或损坏的 PTX 不会回退读取旧
 bitcode；同一模块内失败的 kernel 查询保持失败，替换产物后需重新加载模块。
-schema 5 还会校验 dense 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
+schema 5 还会校验声明的 `dense_v1` 或 `sparse_v1` 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
 及 schema 4 PTX 仍可读取。
 
 Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、

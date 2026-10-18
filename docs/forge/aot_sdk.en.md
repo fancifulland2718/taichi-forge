@@ -4131,13 +4131,17 @@ registrations and releases its tree roots, runtime state and reservations.
 Sparse/list trees use the shared JIT retirement path: CPU list/allocator/ambient
 storage is recycled or released, and CUDA tree-owned pools are released after
 device unregistration completes. Small pointer/bitmasked/dynamic tests cover
-three close/reload cycles, activation/deactivation, downstream ndarray gradients
-and an unrelated live JIT sparse tree in a borrowed runtime. Legacy
-artifacts and modules requiring sparse/list/mesh/quantized operations retain
-producer IDs; overlapping IDs require separate runtimes and are rejected before
-initialization. Closing a sparse module now allows its IDs to be reused by a
-later load; this does not enable simultaneous overlapping modules or CUDA fixed
-Graphs for sparse traversal. Shared runtime allocation caches may remain resident.
+three close/reload cycles, activation/deactivation, sparse-field and downstream
+ndarray gradients, and an unrelated live JIT sparse tree in a borrowed runtime.
+New CPU/CUDA exports using pointer, bitmasked and dynamic trees with
+`demote_dense_struct_fors=True` use `sparse_v1` module-local resource binding.
+Two instances can run with independent active sets and gradients on one runtime;
+CPU bitcode and CUDA bitcode/PTX/cubin are covered. Traversal and garbage
+collection relocate their tree/local-node keys before execution. This does not
+add CUDA fixed Graph support for sparse traversal or serialize active sparse
+storage as a root snapshot/view. Old artifacts, non-demoted dense lists and
+hash/mesh/quantized layouts retain their embedded-ID contract: overlapping IDs
+are rejected before initialization. Shared runtime allocation caches may remain resident.
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
 
@@ -4157,7 +4161,8 @@ into PTX. Schemas 4/5 record the target, entry points, register limit, numerical
 policy and payload checksum, and binds the payloads to their launch metadata.
 Missing or damaged PTX never falls back to a stale bitcode file. A failed kernel
 lookup remains failed within that module; reload the module after replacing
-an artifact. Schema 5 additionally checks the dense resource relocation contract.
+an artifact. Schema 5 additionally checks the declared `dense_v1` or `sparse_v1`
+resource relocation contract.
 Legacy schema 2 text, schema 3 bitcode and schema 4 PTX remain readable.
 
 PTX deployment was checked on Windows CUDA with dense-field and scalar/vector/
