@@ -1586,10 +1586,20 @@ void GfxRuntime::check_hash_overflow_counters() {
   std::vector<void *> host_ptrs;
   std::vector<size_t> sizes;
   std::vector<HashOverflowWatch> live_watches;
-  ptrs.reserve(hash_overflow_watches_.size());
+  std::vector<const SparseDiagnosticDomain *> domains;
+  if (hash_overflow_buffer_)
+    domains.push_back(nullptr);
+  for (const auto &[id, domain] : sparse_diagnostic_domains_)
+    domains.push_back(&domain);
+  std::vector<std::array<uint32_t, 6>> aggregates(domains.size());
+  const auto read_count = hash_overflow_watches_.size() + domains.size();
+  TI_ERROR_IF(
+      read_count > std::numeric_limits<int>::max(),
+      "Sparse diagnostic read count exceeds the device API representation");
+  ptrs.reserve(read_count);
   values.resize(hash_overflow_watches_.size());
-  host_ptrs.reserve(hash_overflow_watches_.size());
-  sizes.reserve(hash_overflow_watches_.size());
+  host_ptrs.reserve(read_count);
+  sizes.reserve(read_count);
   live_watches.reserve(hash_overflow_watches_.size());
 
   for (const auto &watch : hash_overflow_watches_) {
@@ -1603,6 +1613,15 @@ void GfxRuntime::check_hash_overflow_counters() {
     host_ptrs.push_back(&values[ptrs.size() - 1]);
     sizes.push_back(sizeof(uint32_t));
     live_watches.push_back(watch);
+  }
+  // One synchronization/readback batch covers JIT and all live AOT domains.
+  // No module identity lookup or buffer rebinding occurs during dispatch.
+  for (std::size_t i = 0; i < domains.size(); ++i) {
+    const auto *buffer =
+        domains[i] ? domains[i]->buffer.get() : hash_overflow_buffer_.get();
+    ptrs.push_back(buffer->get_ptr());
+    host_ptrs.push_back(aggregates[i].data());
+    sizes.push_back(kHashOverflowBufferSize);
   }
   int first_overflow = -1;
   if (!ptrs.empty()) {
@@ -1656,21 +1675,22 @@ void GfxRuntime::check_hash_overflow_counters() {
         watch.root_id, watch.snode_id, active_count, tombstone_count);
   }
 
-  if (!hash_overflow_buffer_) {
+  const auto failed =
+      std::find_if(aggregates.begin(), aggregates.end(),
+                   [](const auto &record) { return record[0] != 0; });
+  if (failed == aggregates.end())
     return;
-  }
-  std::array<uint32_t, 6> aggregate{};
-  std::array<void *, 1> aggregate_host_ptrs{aggregate.data()};
-  std::array<DevicePtr, 1> aggregate_ptrs{
-      hash_overflow_buffer_->get_ptr(0)};
-  std::array<size_t, 1> aggregate_sizes{aggregate.size() * sizeof(uint32_t)};
-  auto aggregate_status = device_->readback_data(
-      aggregate_ptrs.data(), aggregate_host_ptrs.data(),
-      aggregate_sizes.data(), int(aggregate_ptrs.size()));
-  TI_ERROR_IF(aggregate_status != RhiResult::success,
-              "Failed to read sparse SNode overflow diagnostics.");
-  if (aggregate[0] == 0) {
-    return;
+  auto aggregate = *failed;
+  const auto *domain = domains[std::distance(aggregates.begin(), failed)];
+  if (domain) {
+    TI_ERROR_IF(aggregate[1] > uint32_t(std::numeric_limits<int>::max()),
+                "Sparse diagnostic contains an invalid source tree ID");
+    const auto physical =
+        domain->source_to_runtime_tree.find(int(aggregate[1]));
+    TI_ERROR_IF(physical == domain->source_to_runtime_tree.end(),
+                "Sparse diagnostic references undeclared source tree {}",
+                aggregate[1]);
+    aggregate[1] = physical->second;
   }
   const auto overflow_kind =
       static_cast<spirv::SparseOverflowKind>(aggregate[5]);
@@ -1761,6 +1781,13 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
   }
   params.global_tmps_buffer = global_tmps_buffer_.get();
   params.hash_overflow_buffer = hash_overflow_buffer_.get();
+  if (reg_params.sparse_diagnostic_domain >= 0) {
+    const auto domain =
+        sparse_diagnostic_domains_.find(reg_params.sparse_diagnostic_domain);
+    TI_ERROR_IF(domain == sparse_diagnostic_domains_.end(),
+                "GFX sparse diagnostic domain is unavailable");
+    params.hash_overflow_buffer = domain->second.buffer.get();
+  }
   params.listgen_buffer = listgen_buffer_.get();
 #if defined(TI_WITH_VULKAN_POINTER)
   std::unordered_map<int, bool> used_pools;
@@ -6598,6 +6625,51 @@ std::vector<int> GfxRuntime::allocate_aot_root_buffers(
   return ids;
 }
 
+std::vector<int> GfxRuntime::allocate_aot_snode_trees(
+    const std::vector<SNodeTreeResourceSource> &sources) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  if (sources.empty())
+    return {};
+  SparseDiagnosticDomain domain;
+  for (const auto &source : sources) {
+    TI_ERROR_IF(
+        source.tree_id < 0 || source.resources == nullptr ||
+            !domain.source_to_runtime_tree.emplace(source.tree_id, -1).second,
+        "GFX SNode reconstruction requires unique valid source trees");
+    validate_snode_tree_resources(*source.resources);
+  }
+  auto ids = snode_tree_id_registry_.reserve(sources.size());
+  std::size_t allocated = 0;
+  try {
+    for (; allocated < sources.size(); ++allocated) {
+      materialize_snode_tree_resources(ids[allocated],
+                                       *sources[allocated].resources);
+      domain.source_to_runtime_tree.at(sources[allocated].tree_id) =
+          ids[allocated];
+    }
+    auto [buffer, result] = device_->allocate_memory_unique(
+        {kHashOverflowBufferSize, /*host_write=*/false, /*host_read=*/true,
+         /*export_sharing=*/false, AllocUsage::Storage});
+    TI_ERROR_IF(result != RhiResult::success,
+                "GFX module sparse diagnostics allocation failed");
+    auto *stream = device_->get_compute_stream();
+    auto [commands, status] = stream->new_command_list_unique();
+    TI_ERROR_IF(status != RhiResult::success,
+                "GFX module sparse diagnostics initialization failed");
+    commands->buffer_fill(buffer->get_ptr(), kBufferSizeEntireSize, 0);
+    stream->submit_synced(commands.get());
+    domain.buffer = std::move(buffer);
+    TI_ASSERT(sparse_diagnostic_domains_.emplace(ids.front(), std::move(domain))
+                  .second);
+  } catch (...) {
+    for (std::size_t i = 0; i < allocated; ++i)
+      remove_root_buffer(ids[i]);
+    snode_tree_id_registry_.release(ids);
+    throw;
+  }
+  return ids;
+}
+
 void GfxRuntime::release_aot_resources(
     const std::vector<KernelHandle> &kernels,
     const std::vector<int> &roots) {
@@ -6673,6 +6745,7 @@ void GfxRuntime::remove_root_buffer(int root_id) {
   }
   retire_sparse_tree_state(root_id);
   snode_resource_trees_.erase(root_id);
+  sparse_diagnostic_domains_.erase(root_id);
   root_buffers_size_map_.erase(root_buffers_[root_id].get());
   root_buffers_[root_id].reset();
 #if defined(TI_WITH_VULKAN_POINTER)

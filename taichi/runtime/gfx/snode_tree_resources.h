@@ -43,6 +43,13 @@ struct SNodeTreeResources {
 SNodeTreeResources describe_snode_tree_resources(
     const spirv::CompiledSNodeStructs &compiled);
 
+// Borrowed only during synchronous cold reconstruction. Source IDs are the
+// identities embedded in compiled diagnostic records, not runtime slots.
+struct SNodeTreeResourceSource {
+  int tree_id{-1};
+  const SNodeTreeResources *resources{nullptr};
+};
+
 // Validate cold layout facts before allocating any device storage. The same
 // contract applies to compiler projections and independently loaded artifacts.
 // Limits follow the shader's uint32 addressing and the actual buffer extents.

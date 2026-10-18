@@ -91,19 +91,36 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       referenced.insert(field.snode_tree_id);
     }
     std::map<int, int> module_ids;
+    bool sparse_resources = false;
     for (int tree_id : referenced) {
       TI_ERROR_IF(tree_id < 0 ||
                       static_cast<size_t>(tree_id) >= compiled_structs_.size() ||
                       !compiled_structs_[tree_id].root,
                   "GFX AOT references inactive SNodeTree {}.", tree_id);
-      TI_ERROR_IF(!is_dense_tree(compiled_structs_[tree_id].root),
-                  "GFX AOT resource relocation supports dense SNodeTrees; "
-                  "SNodeTree {} requires sparse runtime state.", tree_id);
+      sparse_resources |= !is_dense_tree(compiled_structs_[tree_id].root);
       module_ids.emplace(tree_id, static_cast<int>(artifact.root_buffer_sizes.size()));
       artifact.root_buffer_sizes.push_back(compiled_structs_[tree_id].root_size);
     }
     if (!artifact.root_buffer_sizes.empty()) {
       artifact.root_buffer_size = artifact.root_buffer_sizes.front();
+    }
+    if (sparse_resources) {
+      TI_ERROR_IF(config_.arch != Arch::vulkan,
+                  "Sparse GFX AOT resource reconstruction requires Vulkan");
+      artifact.metadata_version = 6;
+      for (int tree_id : referenced) {
+        const auto &compiled = compiled_structs_[tree_id];
+        AotSNodeTreeResources entry;
+        entry.producer_tree_id = tree_id;
+        using Kind = AotSNodeTreeResources::StorageKind;
+        entry.storage_kind = !is_dense_tree(compiled.root) ? Kind::Sparse
+                             : is_dense_tree(compiled.root, true)
+                                 ? Kind::PlainDense
+                                 : Kind::PackedDense;
+        entry.resources = describe_snode_tree_resources(compiled);
+        entry.validate();
+        artifact.snode_tree_resources.push_back(std::move(entry));
+      }
     }
     for (const auto &[producer, entry] : initial_root_data_) {
       const auto id = module_ids.find(producer);
@@ -117,7 +134,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       artifact.initial_root_data.push_back(std::move(local));
     }
     if (!artifact.initial_root_data.empty()) {
-      artifact.metadata_version = 3;
+      artifact.metadata_version =
+          std::max(artifact.metadata_version, uint32_t(3));
       aot::validate_initial_root_data(artifact.initial_root_data,
                                       artifact.root_buffer_sizes);
     }
@@ -139,7 +157,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
           artifact.metadata_version =
               std::max(artifact.metadata_version, uint32_t(4));
         } else if (argument.ptype == ParameterType::kTextureCollection) {
-          artifact.metadata_version = TaichiAotData::kMetadataVersion;
+          artifact.metadata_version =
+              std::max(artifact.metadata_version, uint32_t(5));
         }
       }
       for (auto &task : kernel.tasks_attribs) {

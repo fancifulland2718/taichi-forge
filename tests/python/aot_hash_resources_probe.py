@@ -49,6 +49,18 @@ def main(arch, mode, artifact, nested):
             calls = []
             for scale in (1, -3):
                 clear_outputs()
+                if arch == "vulkan":
+                    # Ordinary sparse resource reconstruction does not by
+                    # itself qualify fixed listgen recording and retirement.
+                    raises(
+                        lambda: module.graph("step").prepare(
+                            dict(scale=Scalar("f32", scale), loss=loss, out=out), gradients={"loss": dloss}
+                        ),
+                        "topology-stable",
+                    )
+                    assert read(loss) == [0]
+                    check(module, scale)
+                    continue
                 call = module.graph("step").prepare(
                     dict(scale=Scalar("f32", scale), loss=loss, out=out), gradients={"loss": dloss}
                 )
@@ -58,12 +70,16 @@ def main(arch, mode, artifact, nested):
                     check(module, scale, call)
                     check(module, 4)
                 calls.append(call)
-            calls[0].close()
-            check(module, -3, calls[1])
-            calls[1]()
+            if calls:
+                calls[0].close()
+                check(module, -3, calls[1])
+                calls[1]()
+            else:
+                module.kernel("gather")(out)  # Submitted work survives close.
             module.close()
-            raises(calls[1])
-            calls[1].close()
+            if calls:
+                raises(calls[1])
+                calls[1].close()
             clear_outputs()
             other.kernel("gather")(out)
             assert read(out) == [49, 49, count]

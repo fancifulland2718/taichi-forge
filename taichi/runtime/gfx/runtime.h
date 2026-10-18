@@ -296,6 +296,8 @@ class TI_DLL_EXPORT GfxRuntime {
     // AOT-local root index -> this runtime's physical tree id. Empty keeps
     // the JIT/legacy identity mapping. Dependencies above use physical ids.
     std::vector<int> root_buffer_bindings;
+    // Explicit module diagnostic domain; -1 retains the JIT global domain.
+    int sparse_diagnostic_domain{-1};
     // AOT modules and loaded kernels share immutable host code storage.
     std::shared_ptr<const std::vector<std::vector<uint32_t>>>
         shared_task_spirv_source_codes;
@@ -621,6 +623,8 @@ class TI_DLL_EXPORT GfxRuntime {
   void add_root_buffer(size_t root_buffer_size);
 
   std::vector<int> allocate_aot_root_buffers(const std::vector<size_t> &sizes);
+  std::vector<int> allocate_aot_snode_trees(
+      const std::vector<SNodeTreeResourceSource> &sources);
 
   SNodeTreeIdRegistry &snode_tree_id_registry() {
     return snode_tree_id_registry_;
@@ -821,6 +825,13 @@ class TI_DLL_EXPORT GfxRuntime {
 #endif
   std::unique_ptr<DeviceAllocationGuard> global_tmps_buffer_;
   std::unique_ptr<DeviceAllocationGuard> hash_overflow_buffer_;
+  struct SparseDiagnosticDomain {
+    std::unique_ptr<DeviceAllocationGuard> buffer;
+    std::unordered_map<int, int> source_to_runtime_tree;
+  };
+  // Keyed by the first reserved module root. Ordinary execution only uses
+  // the cold-bound buffer; synchronization reads all records in one batch.
+  std::unordered_map<int, SparseDiagnosticDomain> sparse_diagnostic_domains_;
   std::unique_ptr<DeviceAllocationGuard> listgen_buffer_;
   bool listgen_dynamic_size_{false};
   bool listgen_explicit_size_{false};

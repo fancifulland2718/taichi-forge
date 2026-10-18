@@ -153,11 +153,13 @@ TEST(GfxAotValidation, RejectsInvalidAliases) {
   MemoryAotDir dir;
   dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
   gfx::TaichiAotData data;
-  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]), data);
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]),
+                           data);
   for (const gfx::AotKernelAlias &alias :
        std::vector<gfx::AotKernelAlias>{{"alias", 1}, {"test", 0}, {"", 0}}) {
     data.kernel_aliases = {alias};
-    dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+    dir.files["metadata.json"] =
+        liong::json::print(liong::json::serialize(data));
     EXPECT_TRUE(dir.load()->is_corrupted());
   }
   data.kernel_aliases = {{"alias", 0}, {"alias", 0}};
@@ -173,7 +175,9 @@ TEST(GfxAotValidation, RejectsUndeclaredRootBindings) {
   MemoryAotDir dir;
   dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
   gfx::TaichiAotData data;
-  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]), data);
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]),
+                           data);
+  data.metadata_version = 2;
   data.root_buffer_size = 4;
   data.root_buffer_sizes = {4};
   data.kernel_metadata[0] = {1, {0}};
@@ -242,7 +246,8 @@ TEST(GfxAotValidation, StorageImageArgumentsRequireQualifiedMetadata) {
   MemoryAotDir dir;
   dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
   gfx::TaichiAotData data;
-  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]), data);
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]),
+                           data);
   spirv::KernelContextAttributes::ArgAttributes argument;
   argument.ptype = ParameterType::kRWTexture;
   argument.format = BufferFormat::r32u;
@@ -255,7 +260,8 @@ TEST(GfxAotValidation, StorageImageArgumentsRequireQualifiedMetadata) {
                               spirv::KernelContextAttributes::ArgAttributes>>{
             {{0}, argument}});
     liong::json::deserialize(json, data.kernels[0].ctx_attribs);
-    dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+    dir.files["metadata.json"] =
+        liong::json::print(liong::json::serialize(data));
     return dir.load()->is_corrupted();
   };
   EXPECT_FALSE(update());
@@ -270,6 +276,100 @@ TEST(GfxAotValidation, StorageImageArgumentsRequireQualifiedMetadata) {
   argument.texture_lod = 2;
   argument.field_dim = 3;
   EXPECT_TRUE(update());
+}
+
+TEST(GfxAotValidation, SparseResourcesRequireCompleteOwnedLayouts) {
+  MemoryAotDir dir;
+  dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
+  gfx::TaichiAotData data;
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]),
+                           data);
+  data.root_buffer_size = 64;
+  data.root_buffer_sizes = {64, 16};
+  gfx::AotSNodeTreeResources sparse, dense;
+  sparse.producer_tree_id = 17;
+  sparse.storage_kind = gfx::AotSNodeTreeResources::StorageKind::Sparse;
+  sparse.resources.root_size = 64;
+  sparse.resources.listgen_capacity_entries = 2;
+  sparse.resources.snode_ids = {10, 11};
+  spirv::SpirvAllocatorContract pool;
+  pool.snode_id = 11;
+  pool.pool_buffer_binding_id = 11;
+  pool.pool_capacity = 2;
+  pool.cell_stride_bytes = 4;
+  pool.pool_data_offset = 4;
+  sparse.resources.pointer_pools.push_back({pool, 12});
+  dense.producer_tree_id = 31;
+  dense.resources.root_size = 16;
+  dense.resources.snode_ids = {20, 21};
+  data.snode_tree_resources = {sparse, dense};
+  data.kernel_metadata[0] = {2, {0}};
+  auto &task = data.kernels[0].tasks_attribs[0];
+  task.sparse_list_snode_id = 11;
+  task.sparse_list_parent_snode_id = 10;
+  task.buffer_binds.push_back(
+      {{spirv::TaskAttributes::BufferType::NodeAllocatorPool, 11}, 0});
+  const auto valid = liong::json::serialize(data);
+  dir.files["metadata.json"] = liong::json::print(valid);
+  EXPECT_FALSE(dir.load()->is_corrupted());
+  auto rejects = [&](auto mutate) {
+    auto json = valid;
+    mutate(json);
+    dir.files["metadata.json"] = liong::json::print(json);
+    EXPECT_TRUE(dir.load()->is_corrupted());
+  };
+  using liong::json::JsonValue;
+  rejects([](auto &j) { j["metadata_version"] = JsonValue(5); });
+  rejects([](auto &j) { j.obj.inner.erase("snode_tree_resources"); });
+  rejects([](auto &j) { j["snode_tree_resources"].arr.inner.pop_back(); });
+  rejects([](auto &j) {
+    j["snode_tree_resources"][size_t(1)]["producer_tree_id"] = JsonValue(17);
+  });
+  rejects([](auto &j) {
+    j["snode_tree_resources"][size_t(0)]["root_size"] = JsonValue(60);
+  });
+  rejects([](auto &j) {
+    j["kernels"][size_t(0)]["tasks_attribs"][size_t(0)]
+     ["sparse_list_snode_id"] = JsonValue(99);
+  });
+  rejects([](auto &j) {
+    j["kernel_metadata"][size_t(0)]["used_snode_tree_ids"][size_t(0)] =
+        JsonValue(1);
+  });
+  rejects([](auto &j) {
+    j["kernels"][size_t(0)]["tasks_attribs"][size_t(0)]["buffer_binds"]
+     [size_t(0)]["buffer"]["root_id"][size_t(0)] = JsonValue(10);
+  });
+}
+
+TEST(GfxAotValidation, SparseAndPackedStorageCannotExposePlainRootViews) {
+  MemoryAotDir dir;
+  gfx::TaichiAotData data;
+  data.metadata_version = 6;
+  data.root_buffer_size = 16;
+  data.root_buffer_sizes = {16};
+  gfx::AotSNodeTreeResources tree;
+  tree.producer_tree_id = 17;
+  tree.resources.root_size = 16;
+  tree.resources.snode_ids = {10, 11};
+  data.snode_tree_resources = {tree};
+  dir.files["root_storage.json"] = R"({"version":1,"views":{"values":{
+    "tree_id":0,"byte_offset":0,"dtype":"f32","shape":[4],"element_shape":[]}}})";
+  auto update = [&] {
+    dir.files["metadata.json"] =
+        liong::json::print(liong::json::serialize(data));
+    return dir.load()->is_corrupted();
+  };
+  EXPECT_FALSE(update());
+  for (auto kind : {gfx::AotSNodeTreeResources::StorageKind::PackedDense,
+                    gfx::AotSNodeTreeResources::StorageKind::Sparse}) {
+    data.snode_tree_resources[0].storage_kind = kind;
+    EXPECT_TRUE(update());
+  }
+  dir.files.erase("root_storage.json");
+  EXPECT_FALSE(update());
+  data.initial_root_data = {{0, 16, std::string(64, 'a')}};
+  EXPECT_TRUE(update());  // Reject before attempting to read a sparse snapshot.
 }
 
 }  // namespace

@@ -5,6 +5,7 @@
 
 #include "taichi/codegen/spirv/kernel_utils.h"
 #include "taichi/aot/module_loader.h"
+#include "taichi/runtime/gfx/aot_snode_resources.h"
 
 namespace taichi::lang {
 namespace gfx {
@@ -36,9 +37,9 @@ inline std::string kernel_identity(spirv::TaichiKernelAttributes attributes,
  * AOT module data for the Unified Device API backend.
  */
 struct TaichiAotData {
-  // v5 qualifies immutable sampled-image collection arguments. Existing
-  // scalar/array and storage-image artifacts keep their older minimum version.
-  static constexpr uint32_t kMetadataVersion = 5;
+  // v6 reconstructs sparse resources and their diagnostic identity. Existing
+  // dense/image artifacts retain their older minimum version.
+  static constexpr uint32_t kMetadataVersion = 6;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;
@@ -54,6 +55,7 @@ struct TaichiAotData {
   size_t root_buffer_size{0};
   std::vector<size_t> root_buffer_sizes;
   std::vector<aot::InitialRootData> initial_root_data;
+  std::vector<AotSNodeTreeResources> snode_tree_resources;
 
   TI_IO_DEF(metadata_version,
             kernels,
@@ -63,7 +65,8 @@ struct TaichiAotData {
             required_caps,
             root_buffer_size,
             root_buffer_sizes,
-            initial_root_data);
+            initial_root_data,
+            snode_tree_resources);
 };
 
 }  // namespace gfx

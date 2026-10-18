@@ -16,6 +16,78 @@
 
 namespace taichi::lang {
 
+TEST(GfxSNodeResources, ReconstructedModulesOwnDiagnosticIdentity) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator::Params device_params;
+  vulkan::VulkanDeviceCreator creator(device_params);
+  gfx::GfxRuntime::Params runtime_params;
+  runtime_params.device = creator.device();
+  gfx::GfxRuntime runtime(runtime_params);
+  gfx::SNodeTreeResources resources;
+  resources.root_size = 16;
+  resources.snode_ids = {3, 4};
+  EXPECT_ANY_THROW(
+      runtime.allocate_aot_snode_trees({{17, &resources}, {17, &resources}}));
+  const std::vector<gfx::SNodeTreeResourceSource> sources{{17, &resources},
+                                                          {31, &resources}};
+  auto first = runtime.allocate_aot_snode_trees(sources);
+  auto second = runtime.allocate_aot_snode_trees(sources);
+  EXPECT_EQ(first, (std::vector<int>{0, 1}));
+  EXPECT_EQ(second, (std::vector<int>{2, 3}));
+  runtime.release_aot_resources({}, first);
+  auto replacement = runtime.allocate_aot_snode_trees(sources);
+  EXPECT_EQ(replacement, first);
+
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto buffer =
+      builder.buffer_argument(builder.u32_type(), 0, 0, "diagnostic");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+  const uint32_t record[] = {
+      1, 31, 4, 8, 0, uint32_t(spirv::SparseOverflowKind::Pointer)};
+  for (uint32_t i = 0; i < 6; ++i) {
+    const auto ptr = builder.struct_array_access(
+        builder.u32_type(), buffer,
+        builder.uint_immediate_number(builder.u32_type(), i));
+    builder.store_variable(
+        ptr, builder.uint_immediate_number(builder.u32_type(), record[i]));
+  }
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  builder.commit_kernel_function(function, "main", {}, {1, 1, 1});
+  gfx::GfxRuntime::RegisterParams params;
+  params.num_snode_trees = 2;
+  params.root_buffer_bindings = second;
+  params.snode_tree_ids = second;
+  params.sparse_diagnostic_domain = second.front();
+  spirv::TaskAttributes task;
+  task.name = "module_diagnostic";
+  task.task_type = OffloadedTaskType::serial;
+  task.advisory_total_num_threads = 1;
+  task.advisory_num_threads_per_group = 1;
+  task.buffer_binds.push_back(
+      {spirv::TaskAttributes::BufferType::HashOverflow, 0});
+  params.kernel_attribs.tasks_attribs.push_back(task);
+  params.task_spirv_source_codes = {builder.finalize()};
+  auto kernel = runtime.register_taichi_kernel(std::move(params));
+  CallableBase callable;
+  LaunchContextBuilder context(&callable);
+  runtime.launch_kernel(kernel, context);
+  try {
+    runtime.synchronize();
+    FAIL() << "Expected module-owned sparse overflow";
+  } catch (const std::string &message) {
+    EXPECT_NE(message.find("root 3 SNode 4"), std::string::npos) << message;
+    EXPECT_EQ(message.find("root 31 SNode 4"), std::string::npos) << message;
+  }
+  runtime.release_aot_resources({kernel}, second);
+  runtime.release_aot_resources({}, replacement);
+}
+
 TEST(GfxSNodeResources, RepeatedLocalIdsHaveIndependentListsAndRetirement) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();

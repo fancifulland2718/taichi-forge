@@ -13,7 +13,7 @@ def main(arch, mode, artifact, legacy=""):
     if mode == "borrowed":
         import taichi_forge as ti
 
-        ti.init(arch=ti.cuda if arch == "cuda" else ti.cpu, offline_cache=False)
+        ti.init(arch={"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}[arch], offline_cache=False)
         survivor = ti.field(ti.i32)
         ti.root.pointer(ti.i, 2).dense(ti.i, 2).place(survivor)
         survivor[0] = 7

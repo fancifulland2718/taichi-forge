@@ -15,7 +15,7 @@ from tests.python.test_hash_snode_cpu import _collision_keys
 
 
 @pytest.mark.parametrize("nested", [False, True])
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_aot_hash_module_isolation_and_gradients(tmp_path, nested):
     cfg = ti.lang.impl.current_cfg()
     cfg.hash_snode_active_list = nested
@@ -68,8 +68,8 @@ def test_aot_hash_module_isolation_and_gradients(tmp_path, nested):
             out[2] += 1
 
     start = time.perf_counter()
-    arch = "cuda" if cfg.arch == ti.cuda else "cpu"
-    module = ti.aot.Module(artifact_format="ptx" if arch == "cuda" else "bc")
+    arch = {ti.cpu: "cpu", ti.cuda: "cuda", ti.vulkan: "vulkan"}[cfg.arch]
+    module = ti.aot.Module(artifact_format={"cpu": "bc", "cuda": "ptx", "vulkan": None}[arch])
     for kernel in (clear, seed, churn, energy, gather):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="backward")
@@ -111,5 +111,9 @@ def test_aot_hash_module_isolation_and_gradients(tmp_path, nested):
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Failed to retire" not in result.stdout + result.stderr
     with zipfile.ZipFile(artifact) as archive:
-        metadata = json.loads(archive.read("aot_metadata.json"))
-    assert metadata["resource_binding"] == ("sparse_v2" if arch == "cuda" else "sparse_v1")
+        metadata = json.loads(archive.read("metadata.json" if arch == "vulkan" else "aot_metadata.json"))
+    if arch == "vulkan":
+        assert metadata["metadata_version"] == 6
+        assert any(tree["storage_kind"] == 2 for tree in metadata["snode_tree_resources"])
+    else:
+        assert metadata["resource_binding"] == ("sparse_v2" if arch == "cuda" else "sparse_v1")

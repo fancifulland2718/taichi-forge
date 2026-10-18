@@ -3181,6 +3181,15 @@ mesh 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
 共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
 
+Vulkan 稀疏导出采用 GFX metadata 6，与 JIT 共用资源物化入口。Windows 小型测试覆盖
+pointer/bitmasked/dynamic 的 inline、independent 和扁平化 chunked 池，直接/嵌套
+hash、实际 field 与下游 ndarray 反向梯度、双模块，以及独立/借用 runtime 的关闭和
+重载。当前验证范围是普通执行；固定稀疏 Graph 仍拒绝拓扑修改/listgen 任务，待补齐
+缓冲持有和缓存合同后单独验证。稀疏根不能作为普通 flat view 或初始根快照导出。
+每个稀疏模块持有 24 字节诊断记录，冷路径建立 producer→runtime 树映射；同步时将
+所有存活记录放进同一批既有读回，dispatch 不查询模块身份。dense/image 导出继续使用
+原有 metadata 2–5；metadata 6 需要配套的私有 ABI 100 runtime 与 shim。
+
 Hash 树现在复用同一套模块局部稀疏资源绑定。Windows CPU bitcode/CUDA PTX 的小型
 测试覆盖直接 hash 和嵌套 `hash -> hash -> dense`、碰撞、删除/重插入、实际 field
 反向梯度、双模块、普通/固定调用，以及独立/借用 runtime 的关闭/重载。容量、活跃

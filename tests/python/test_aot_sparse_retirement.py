@@ -32,6 +32,15 @@ def test_aot_sparse_multilevel_fixed(tmp_path):
     _sparse_module(tmp_path, "ptx", multilevel=True)
 
 
+@pytest.mark.parametrize("pool", ["inline", "independent", "chunked"])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_aot_vulkan_sparse_resource_reconstruction(tmp_path, pool):
+    ti.cfg.vulkan_pointer_independent_pool = pool != "inline"
+    ti.cfg.vulkan_pointer_allocator_kind = "chunked" if pool == "chunked" else "bump"
+    ti.cfg.vulkan_pointer_max_chunks = 2 if pool == "chunked" else 1
+    _sparse_module(tmp_path, None, consumer="aot_sparse_retirement_probe.py")
+
+
 def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=None, consumer=None):
     # Ensure the producer tree ID differs from the compact artifact ID.
     unrelated = ti.field(ti.i32, shape=1)
@@ -83,7 +92,7 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=
         for i in values:
             out[0] += values.grad[i]
 
-    arch = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    arch = {ti.cpu: "cpu", ti.cuda: "cuda", ti.vulkan: "vulkan"}[ti.cfg.arch]
     start = time.perf_counter()
     caps = (
         [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
@@ -112,8 +121,13 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=
     artifact = tmp_path / "sparse.tcm"
     module.archive(str(artifact))
     with zipfile.ZipFile(artifact) as archive:
-        metadata = json.loads(archive.read("aot_metadata.json"))
-    assert metadata["resource_binding"] == ("sparse_v2" if arch == "cuda" else "sparse_v1")
+        metadata = json.loads(archive.read("metadata.json" if arch == "vulkan" else "aot_metadata.json"))
+    if arch == "vulkan":
+        assert metadata["metadata_version"] == 6
+        assert len(metadata["snode_tree_resources"]) == len(metadata["root_buffer_sizes"])
+        assert any(tree["storage_kind"] == 2 for tree in metadata["snode_tree_resources"])
+    else:
+        assert metadata["resource_binding"] == ("sparse_v2" if arch == "cuda" else "sparse_v1")
     legacy = None
     if artifact_format == "ptx" and consumer is None:
         # v1 keeps ordinary loading, but cannot promise the new device listgen

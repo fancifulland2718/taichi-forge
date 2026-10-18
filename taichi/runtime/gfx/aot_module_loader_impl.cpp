@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <type_traits>
+#include <unordered_set>
 
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/aot/graph_data.h"
@@ -105,6 +106,45 @@ class AotModuleImpl : public aot::Module {
                 "AOT initial root data requires compatible GFX metadata.");
     aot::validate_initial_root_data(ti_aot_data_.initial_root_data,
                                     ti_aot_data_.root_buffer_sizes);
+    SNodeResourceTreeMap resource_trees;
+    try {
+      const auto &resources = ti_aot_data_.snode_tree_resources;
+      if (ti_aot_data_.metadata_version < 6) {
+        if (!resources.empty())
+          throw std::invalid_argument(
+              "Sparse resource metadata requires GFX v6");
+      } else {
+        if (resources.size() != ti_aot_data_.root_buffer_sizes.size())
+          throw std::invalid_argument(
+              "GFX resource count does not match root layouts");
+        std::unordered_set<int> producer_ids;
+        for (std::size_t i = 0; i < resources.size(); ++i) {
+          const auto &entry = resources[i];
+          entry.validate();
+          if (entry.resources.root_size != ti_aot_data_.root_buffer_sizes[i] ||
+              !producer_ids.insert(entry.producer_tree_id).second)
+            throw std::invalid_argument(
+                "GFX resource layout or producer identity is inconsistent");
+          resource_trees.emplace(int(i), entry.resources.snode_ids);
+        }
+        auto require_plain = [&](int tree_id) {
+          if (tree_id < 0 || std::size_t(tree_id) >= resources.size() ||
+              resources[tree_id].storage_kind !=
+                  AotSNodeTreeResources::StorageKind::PlainDense)
+            throw std::invalid_argument(
+                "AOT root snapshots and flat views require plain dense "
+                "storage");
+        };
+        for (const auto &entry : ti_aot_data_.initial_root_data)
+          require_plain(entry.tree_id);
+        for (const auto &[name, view] : root_storage_views_)
+          require_plain(view.tree_id);
+      }
+    } catch (const std::exception &error) {
+      mark_corrupted();
+      TI_WARN("Invalid GFX AOT SNode resources: {}", error.what());
+      return;
+    }
     if (!source_) {
       // The legacy borrowed VirtualDir need only live through construction.
       // Keep these verified bytes only until roots are allocated, like eager
@@ -158,6 +198,47 @@ class AotModuleImpl : public aot::Module {
                       })) {
         mark_corrupted();
         TI_WARN("GFX AOT kernel {} has invalid SNodeTree dependencies", i);
+        return;
+      }
+      try {
+        SNodeResourceResolver resolver(resource_trees,
+                                       metadata.used_snode_tree_ids);
+        for (const auto &task : ti_aot_data_.kernels[i].tasks_attribs) {
+          if (ti_aot_data_.metadata_version >= 6) {
+            const auto list = resolver.resolve(task.sparse_list_snode_id);
+            const auto parent =
+                resolver.resolve(task.sparse_list_parent_snode_id);
+            resolver.resolve(task.sparse_mutation_snode_id);
+            if (list.valid() && parent.valid() &&
+                list.tree_id != parent.tree_id)
+              throw std::invalid_argument(
+                  "Sparse list and parent belong to different trees");
+            for (const auto &bind : task.buffer_binds) {
+              if (bind.buffer.type !=
+                  spirv::TaskAttributes::BufferType::NodeAllocatorPool)
+                continue;
+              if (bind.buffer.root_id.size() != 1 ||
+                  bind.buffer.root_id[0] < 0 || bind.chunk_count != 0)
+                throw std::invalid_argument("Invalid AOT pointer pool binding");
+              const auto id = resolver.resolve(bind.buffer.root_id[0]);
+              const auto &pools = ti_aot_data_.snode_tree_resources[id.tree_id]
+                                      .resources.pointer_pools;
+              const auto pool =
+                  std::lower_bound(pools.begin(), pools.end(), id.snode_id,
+                                   [](const auto &entry, int node) {
+                                     return entry.contract.snode_id < node;
+                                   });
+              if (pool == pools.end() ||
+                  pool->contract.snode_id != id.snode_id ||
+                  pool->independent_size == 0)
+                throw std::invalid_argument(
+                    "AOT task references an undeclared independent pool");
+            }
+          }
+        }
+      } catch (const std::exception &error) {
+        mark_corrupted();
+        TI_WARN("Invalid GFX AOT kernel resources: {}", error.what());
         return;
       }
       for (const auto &task : ti_aot_data_.kernels[i].tasks_attribs) {
@@ -263,6 +344,10 @@ class AotModuleImpl : public aot::Module {
           handles.push_back(handle);
         }
         runtime_->release_aot_resources(handles, root_bindings_);
+      } catch (const std::string &error) {
+        // TI_ERROR reports sparse overflow as a string. Destruction must not
+        // terminate the process; the runtime still owns the unretired roots.
+        TI_WARN("Cannot retire GFX AOT resources: {}", error);
       } catch (const std::exception &e) {
         // A failed device synchronization must not free resources still in
         // flight or throw from a destructor. The runtime retains them.
@@ -279,7 +364,15 @@ class AotModuleImpl : public aot::Module {
     }
     TI_ERROR_IF(!registered_kernels_.empty(),
                 "GFX AOT resources must be bound before loading kernels.");
-    root_bindings_ = runtime_->allocate_aot_root_buffers(ti_aot_data_.root_buffer_sizes);
+    if (ti_aot_data_.snode_tree_resources.empty()) {
+      root_bindings_ =
+          runtime_->allocate_aot_root_buffers(ti_aot_data_.root_buffer_sizes);
+    } else {
+      std::vector<SNodeTreeResourceSource> sources;
+      for (const auto &entry : ti_aot_data_.snode_tree_resources)
+        sources.push_back({entry.producer_tree_id, &entry.resources});
+      root_bindings_ = runtime_->allocate_aot_snode_trees(sources);
+    }
     owns_runtime_resources_ = true;
     try {
       for (size_t i = 0; i < ti_aot_data_.initial_root_data.size(); ++i) {
@@ -366,6 +459,8 @@ class AotModuleImpl : public aot::Module {
           ti_aot_data_.kernel_metadata[i].used_snode_tree_ids;
       if (owns_runtime_resources_) {
         kernel.root_buffer_bindings = root_bindings_;
+        if (!ti_aot_data_.snode_tree_resources.empty())
+          kernel.sparse_diagnostic_domain = root_bindings_.front();
         for (int &id : kernel.snode_tree_ids) {
           id = root_bindings_.at(id);
         }
