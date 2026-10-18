@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 修复 borrowed CPU/CUDA/Vulkan runtime 中先加载 AOT、再创建 JIT 字段造成的树 ID
+  冲突。双方共用冷路径资源预留，包含尚未分配存储的 JIT 布局；kernel 启动路径不变。
+  配套生产端/runtime 组件使用私有 ABI 95。
 - 修复 CPU/CUDA AOT sparse/list 树退休后仍占用 ID，导致同 runtime 无法重载模块的问题。
   JIT/AOT 共用 list/allocator/root 回收，保留其他存活 JIT 树；旧产物 ID 冲突的并行加载仍拒绝。
 - AOT 新增 OptiX program 与 prepared launch 资源，复用已有可编程 adapter 扩展和

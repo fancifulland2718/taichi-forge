@@ -921,7 +921,7 @@ class TI_DLL_EXPORT Program {
    * @return The SNode tree id allocated
    *
    * Returns and consumes a free SNode tree id if there is any,
-   * Otherwise returns the size of `snode_trees_`
+   * Otherwise grows the slot table, skipping IDs reserved by AOT modules.
    */
   int allocate_snode_tree_id();
 

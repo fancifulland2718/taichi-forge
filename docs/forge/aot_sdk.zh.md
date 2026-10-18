@@ -3153,6 +3153,12 @@ CPU/CUDA 导出 field kernel 时，不会为生产端仅编译布局的树分配
 转换的前向结果、反向及前向模式微分；这是生产端生命周期修复，与消费端 AOT
 模块资源隔离是两项独立能力。
 
+CPU/CUDA/Vulkan runtime 为 JIT 布局和 AOT 模块共用树 ID 注册表，尚未分配存储的
+仅编译 JIT 布局也会预留编号。AOT 模块加载后可继续创建 JIT 字段，双方可以复用已
+退休的 ID，而不会共用仍存活的存储。小型测试覆盖两种创建顺序、模块/树关闭与重载，
+以及模块退休前后的 JIT 前向结果、反向和前向模式微分。该登记只发生在资源冷路径，
+不会为每次 kernel 启动增加工作。
+
 CPU/CUDA 模块关闭会等待已提交工作完成，退休代码注册，释放已降为普通循环的
 dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。稀疏树共用 JIT
 退休逻辑：CPU 回收或释放 list/allocator/ambient，CUDA 等待设备注销完成后释放树所属

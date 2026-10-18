@@ -6176,6 +6176,7 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
         std::unique_lock<std::shared_mutex>(snode_tree_lifecycle_mutex_);
   }
   TI_ERROR_IF(snode_tree == nullptr, "Cannot destroy a null SNodeTree.");
+  auto submission_guard = acquire_runtime_resource_submission_guard();
   const int tree_id = snode_tree->id();
   TI_ERROR_IF(tree_id < 0 ||
                   static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
@@ -6335,6 +6336,8 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
     field->snode_retired = true;
   }
   snode_tree_active_[tree_id] = 0;
+  if (auto *registry = program_impl_->get_snode_tree_id_registry())
+    registry->release(tree_id);
   free_snode_tree_ids_.push(tree_id);
   advance_snode_tree_epoch(snode_tree_mutation_epoch_);
 }
@@ -6348,6 +6351,7 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
     lifecycle_lock =
         std::unique_lock<std::shared_mutex>(snode_tree_lifecycle_mutex_);
   }
+  auto submission_guard = acquire_runtime_resource_submission_guard();
   const int id = allocate_snode_tree_id();
   if (static_cast<std::size_t>(id) == snode_tree_generations_.size()) {
     snode_tree_generations_.push_back(1);
@@ -6381,6 +6385,8 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
       tree->refresh_layout_fingerprint();
     }
   } catch (...) {
+    if (auto *registry = program_impl_->get_snode_tree_id_registry())
+      registry->release(id);
     free_snode_tree_ids_.push(id);
     throw;
   }
@@ -6399,6 +6405,7 @@ void Program::materialize_compiled_snode_tree(int tree_id,
                                               std::uint64_t generation) {
   std::unique_lock<std::shared_mutex> lifecycle_lock(
       snode_tree_lifecycle_mutex_);
+  auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(tree_id < 0 ||
                   static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
                   !snode_tree_active_[tree_id] ||
@@ -22774,6 +22781,39 @@ std::unique_ptr<AotModuleBuilder> Program::make_aot_module_builder(
 }
 
 int Program::allocate_snode_tree_id() {
+  if (auto *registry = program_impl_->get_snode_tree_id_registry()) {
+    // AOT may occupy a retired JIT slot or the next index. Preserve those
+    // holes for later reuse without exposing them as active JIT trees.
+    std::vector<int> occupied;
+    try {
+      while (true) {
+        const bool reuse = !free_snode_tree_ids_.empty();
+        TI_ERROR_IF(!reuse && snode_trees_.size() >=
+                                 std::size_t(std::numeric_limits<int>::max()),
+                    "Program SNode tree ID space exhausted");
+        const int id = reuse ? free_snode_tree_ids_.top()
+                             : static_cast<int>(snode_trees_.size());
+        if (registry->try_reserve(id)) {
+          if (reuse) free_snode_tree_ids_.pop();
+          for (auto it = occupied.rbegin(); it != occupied.rend(); ++it)
+            free_snode_tree_ids_.push(*it);
+          return id;
+        }
+        occupied.push_back(id);
+        if (reuse) {
+          free_snode_tree_ids_.pop();
+        } else {
+          snode_trees_.emplace_back(nullptr);
+          snode_tree_generations_.push_back(0);
+          snode_tree_active_.push_back(0);
+        }
+      }
+    } catch (...) {
+      for (auto it = occupied.rbegin(); it != occupied.rend(); ++it)
+        free_snode_tree_ids_.push(*it);
+      throw;
+    }
+  }
   if (free_snode_tree_ids_.empty()) {
     return snode_trees_.size();
   } else {

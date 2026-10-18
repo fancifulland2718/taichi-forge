@@ -647,23 +647,14 @@ void *LlvmRuntimeExecutor::get_snode_tree_root_ptr(int tree_id) {
 
 bool LlvmRuntimeExecutor::has_snode_tree_binding(int tree_id) const {
   return has_snode_tree_runtime_state(tree_id) ||
-         reserved_aot_snode_tree_ids_.count(tree_id) != 0;
+         snode_tree_id_registry_.contains(tree_id);
 }
 
 std::vector<int> LlvmRuntimeExecutor::reserve_aot_snode_tree_ids(
     std::size_t count) {
-  std::vector<int> ids;
-  ids.reserve(count);
-  for (std::int64_t candidate = 0; ids.size() < count; ++candidate) {
-    TI_ERROR_IF(candidate > std::numeric_limits<int>::max(),
-                "LLVM runtime SNode tree ID space exhausted");
-    const int id = static_cast<int>(candidate);
-    if (!has_snode_tree_binding(id)) {
-      ids.push_back(id);
-    }
-  }
-  reserve_aot_snode_tree_ids(ids);
-  return ids;
+  return snode_tree_id_registry_.reserve(count, [this](int id) {
+    return has_snode_tree_runtime_state(id);
+  });
 }
 
 void LlvmRuntimeExecutor::reserve_aot_snode_tree_ids(
@@ -677,24 +668,12 @@ void LlvmRuntimeExecutor::reserve_aot_snode_tree_ids(
                 "load this artifact in a separate runtime.",
                 id);
   }
-  std::size_t inserted = 0;
-  try {
-    for (int id : ids) {
-      reserved_aot_snode_tree_ids_.insert(id);
-      ++inserted;
-    }
-  } catch (...) {
-    for (std::size_t i = 0; i < inserted; ++i) {
-      reserved_aot_snode_tree_ids_.erase(ids[i]);
-    }
-    throw;
-  }
+  snode_tree_id_registry_.reserve(ids);
 }
 
 void LlvmRuntimeExecutor::release_aot_snode_tree_ids(
     const std::vector<int> &ids) {
-  for (int id : ids)
-    reserved_aot_snode_tree_ids_.erase(id);
+  snode_tree_id_registry_.release(ids);
 }
 
 bool LlvmRuntimeExecutor::has_snode_tree_runtime_state(int tree_id) const {

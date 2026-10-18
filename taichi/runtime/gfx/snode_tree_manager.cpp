@@ -70,15 +70,11 @@ void SNodeTreeManager::materialize_snode_tree(
   }
   runtime_->node_allocators_[root_id] = std::move(allocators_for_tree);
 #endif
-  if (static_cast<std::size_t>(root_id) == compiled_snode_structs_.size()) {
-    compiled_snode_structs_.push_back(std::move(compiled_structs));
-  } else {
-    TI_ASSERT(root_id >= 0 &&
-              static_cast<std::size_t>(root_id) <
-                  compiled_snode_structs_.size());
-    TI_ASSERT(compiled_snode_structs_[root_id].root == nullptr);
-    compiled_snode_structs_[root_id] = std::move(compiled_structs);
-  }
+  TI_ASSERT(root_id >= 0);
+  if (static_cast<std::size_t>(root_id) >= compiled_snode_structs_.size())
+    compiled_snode_structs_.resize(static_cast<std::size_t>(root_id) + 1);
+  TI_ASSERT(compiled_snode_structs_[root_id].root == nullptr);
+  compiled_snode_structs_[root_id] = std::move(compiled_structs);
 }
 
 void SNodeTreeManager::destroy_snode_tree(SNodeTree *snode_tree) {

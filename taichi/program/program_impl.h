@@ -13,6 +13,7 @@
 #include "taichi/program/kernel_profiler.h"
 #include "taichi/program/kernel_launcher.h"
 #include "taichi/program/sparse_runtime_statistics.h"
+#include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/rhi/device.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/codegen/kernel_compiler.h"
@@ -51,6 +52,10 @@ class ProgramImpl {
    * JIT compiles @param tree to backend-specific data types.
    */
   virtual void compile_snode_tree_types(SNodeTree *tree);
+
+  virtual SNodeTreeIdRegistry *get_snode_tree_id_registry() {
+    return nullptr;
+  }
 
   /**
    * Compiles the @param tree types and allocates runtime buffer for it.

@@ -1,4 +1,5 @@
 #pragma once
+#include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/util/lang_util.h"
 
 #include <array>
@@ -612,6 +613,10 @@ class TI_DLL_EXPORT GfxRuntime {
   void add_root_buffer(size_t root_buffer_size);
 
   std::vector<int> allocate_aot_root_buffers(const std::vector<size_t> &sizes);
+
+  SNodeTreeIdRegistry &snode_tree_id_registry() {
+    return snode_tree_id_registry_;
+  }
   // Ordinary AOT modules own these registrations and roots. Synchronizes
   // their submitted work before retirement; not a native Graph ownership API.
   void release_aot_resources(const std::vector<KernelHandle> &kernels,
@@ -791,7 +796,7 @@ class TI_DLL_EXPORT GfxRuntime {
   // Fixed Graph command payloads share root allocations until their last
   // parent command retires, independently of the active tree table.
   std::vector<std::shared_ptr<DeviceAllocationGuard>> root_buffers_;
-  std::vector<int> free_aot_root_ids_;
+  SNodeTreeIdRegistry snode_tree_id_registry_;
 #if defined(TI_WITH_VULKAN_POINTER)
   // 路线 B B-1（2026-04-30）：每棵 SNode tree 上每个 pointer SNode 对应
   // 一个 DeviceNodeAllocator。outer key = root_id（与 root_buffers_ 同步），

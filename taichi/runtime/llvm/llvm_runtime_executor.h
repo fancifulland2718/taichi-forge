@@ -9,6 +9,7 @@
 #include "taichi/rhi/llvm/llvm_device.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
 #include "taichi/runtime/llvm/snode_tree_buffer_manager.h"
+#include "taichi/runtime/snode_tree_id_registry.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/struct/snode_tree.h"
 #include "taichi/program/compile_config.h"
@@ -57,6 +58,9 @@ class LlvmRuntimeExecutor {
   // SNodeTree Allocation
   bool has_snode_tree_runtime_state(int tree_id) const;
   bool has_snode_tree_binding(int tree_id) const;
+  SNodeTreeIdRegistry &snode_tree_id_registry() {
+    return snode_tree_id_registry_;
+  }
   std::vector<int> reserve_aot_snode_tree_ids(std::size_t count);
   void reserve_aot_snode_tree_ids(const std::vector<int> &ids);
   void release_aot_snode_tree_ids(const std::vector<int> &ids);
@@ -219,7 +223,7 @@ class LlvmRuntimeExecutor {
   std::uint64_t snode_tree_runtime_directory_growth_events_{0};
   std::unordered_map<int, ActiveSNodeTreeRuntimeState>
       active_snode_tree_runtime_states_;
-  std::unordered_set<int> reserved_aot_snode_tree_ids_;
+  SNodeTreeIdRegistry snode_tree_id_registry_;
   DeviceAllocationUnique preallocated_runtime_objects_allocs_ = nullptr;
   DeviceAllocationUnique preallocated_runtime_memory_allocs_ = nullptr;
   std::unordered_map<DeviceAllocationId, DeviceAllocation>

@@ -6535,25 +6535,16 @@ void GfxRuntime::add_root_buffer(size_t root_buffer_size) {
 std::vector<int> GfxRuntime::allocate_aot_root_buffers(
     const std::vector<size_t> &sizes) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  std::vector<int> ids;
-  ids.reserve(sizes.size());
-  free_aot_root_ids_.reserve(free_aot_root_ids_.size() + sizes.size());
+  auto ids = snode_tree_id_registry_.reserve(sizes.size());
+  std::size_t allocated = 0;
   try {
-    for (size_t size : sizes) {
-      const bool reuse = !free_aot_root_ids_.empty();
-      const int id = reuse ? free_aot_root_ids_.back()
-                           : static_cast<int>(root_buffers_.size());
-      add_root_buffer(id, size);
-      if (reuse) {
-        free_aot_root_ids_.pop_back();
-      }
-      ids.push_back(id);
+    for (; allocated < sizes.size(); ++allocated) {
+      add_root_buffer(ids[allocated], sizes[allocated]);
     }
   } catch (...) {
-    for (int id : ids) {
-      remove_root_buffer(id);
-      free_aot_root_ids_.push_back(id);
-    }
+    for (std::size_t i = 0; i < allocated; ++i)
+      remove_root_buffer(ids[i]);
+    snode_tree_id_registry_.release(ids);
     throw;
   }
   return ids;
@@ -6566,7 +6557,6 @@ void GfxRuntime::release_aot_resources(
   if (kernels.empty() && roots.empty()) {
     return;
   }
-  free_aot_root_ids_.reserve(free_aot_root_ids_.size() + roots.size());
   synchronize();
   for (const auto handle : kernels) {
     const int id = handle.get_launch_id();
@@ -6575,14 +6565,15 @@ void GfxRuntime::release_aot_resources(
   }
   for (int id : roots) {
     remove_root_buffer(id);
-    free_aot_root_ids_.push_back(id);
   }
+  snode_tree_id_registry_.release(roots);
 }
 
 void GfxRuntime::add_root_buffer(int root_id, size_t root_buffer_size) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   TI_ERROR_IF(root_id < 0 ||
-                  static_cast<std::size_t>(root_id) > root_buffers_.size(),
+                  (static_cast<std::size_t>(root_id) > root_buffers_.size() &&
+                   !snode_tree_id_registry_.contains(root_id)),
               "Cannot install root buffer at invalid id {}.", root_id);
   TI_ERROR_IF(static_cast<std::size_t>(root_id) < root_buffers_.size() &&
                   root_buffers_[root_id],
@@ -6603,11 +6594,11 @@ void GfxRuntime::add_root_buffer(int root_id, size_t root_buffer_size) {
   cmdlist->buffer_fill(new_buffer->get_ptr(0), kBufferSizeEntireSize,
                        /*data=*/0);
   stream->submit_synced(cmdlist.get());
-  if (static_cast<std::size_t>(root_id) == root_buffers_.size()) {
-    root_buffers_.push_back(std::move(new_buffer));
-  } else {
-    root_buffers_[root_id] = std::move(new_buffer);
-  }
+  if (static_cast<std::size_t>(root_id) >= root_buffers_.size())
+    root_buffers_.resize(static_cast<std::size_t>(root_id) + 1);
+  // Legacy native callers can install roots without a Program reservation.
+  snode_tree_id_registry_.try_reserve(root_id);
+  root_buffers_[root_id] = std::move(new_buffer);
   // cache the root buffer size
   root_buffers_size_map_[root_buffers_[root_id].get()] = root_buffer_size;
 }

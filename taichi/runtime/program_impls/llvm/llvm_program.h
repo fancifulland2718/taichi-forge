@@ -44,6 +44,10 @@ class LlvmProgramImpl : public ProgramImpl {
 
   void compile_snode_tree_types(SNodeTree *tree) override;
 
+  SNodeTreeIdRegistry *get_snode_tree_id_registry() override {
+    return &runtime_exec_->snode_tree_id_registry();
+  }
+
   // Reuses a compile-only layout and allocates its storage once, or compiles
   // and allocates a new tree in the ordinary JIT path.
   void materialize_snode_tree(SNodeTree *tree, uint64 *result_buffer) override;

@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fixed tree-ID collisions when JIT fields are created after AOT modules load
+  on a borrowed CPU/CUDA/Vulkan runtime. Both owners now share cold resource
+  reservations, including compile-only JIT layouts; kernel launch paths are
+  unchanged. Matching producer/runtime components require private ABI 95.
 - Fixed CPU/CUDA AOT sparse/list tree retirement so a closed module can reload
   in the same runtime. JIT and AOT share list/allocator/root cleanup; live JIT
   trees remain intact. Simultaneous legacy tree-ID collisions remain rejected.

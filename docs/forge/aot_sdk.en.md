@@ -4118,6 +4118,14 @@ preserved. Small CPU/CUDA/Vulkan tests cover this transition with primal,
 reverse and forward-mode differentiation; this is separate from consumer-side
 AOT module resource isolation.
 
+CPU/CUDA/Vulkan runtimes share a tree-ID registry between JIT layouts and AOT
+modules. This includes compile-only JIT layouts before their storage exists.
+New JIT fields may therefore be created after AOT modules load, and retired
+IDs can be reused by either owner without aliasing live storage. Small tests
+cover both creation orders, module/tree close and reload, and JIT primal,
+reverse and forward-mode results before and after module retirement. This
+cold resource bookkeeping does not add work to individual kernel launches.
+
 Destroying a CPU/CUDA module waits for submitted work, retires its executable
 registrations and releases its tree roots, runtime state and reservations.
 Sparse/list trees use the shared JIT retirement path: CPU list/allocator/ambient

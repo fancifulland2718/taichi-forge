@@ -19,6 +19,10 @@ class GfxProgramImpl : public ProgramImpl {
 
   void compile_snode_tree_types(SNodeTree *tree) override;
 
+  SNodeTreeIdRegistry *get_snode_tree_id_registry() override {
+    return runtime_ ? &runtime_->snode_tree_id_registry() : nullptr;
+  }
+
   void materialize_snode_tree(SNodeTree *tree, uint64 *result_buffer) override;
 
   void synchronize() override {
