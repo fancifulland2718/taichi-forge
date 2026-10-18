@@ -19627,6 +19627,7 @@ class Graph:
         on_saturation="wait",
         telemetry=False,
         workspace_lane=None,
+        wait_mode="default",
     ):
         """Submit one Graph invocation and return a ``SubmissionTicket``.
 
@@ -19642,7 +19643,22 @@ class Graph:
         ``SubmissionTicket.telemetry()``.
         Graphs compiled with multiple workspace lanes select a ready lane
         automatically. ``workspace_lane`` pins a submission to one lane.
+        ``wait_mode="blocking"`` selects a low CPU host wait for this ticket:
+        CUDA uses a blocking event, Vulkan uses its fence wait, and CPU is
+        already complete. The default CUDA event retains its low-latency
+        busy wait. Select the mode at submission; event flags are immutable.
         """
+        if not isinstance(wait_mode, str) or wait_mode not in ("default", "blocking"):
+            raise ValueError("wait_mode must be 'default' or 'blocking'")
+        if wait_mode == "blocking":
+            arch = impl.current_cfg().arch
+            if arch not in (
+                _ti_core.Arch.x64,
+                _ti_core.Arch.arm64,
+                _ti_core.Arch.cuda,
+                _ti_core.Arch.vulkan,
+            ):
+                raise ValueError("blocking wait_mode requires CPU, CUDA or Vulkan")
         telemetry = _normalize_submission_telemetry_mode(telemetry)
         telemetry_enabled = telemetry is not False
         timestamp_telemetry = telemetry == "timestamps"
@@ -19797,7 +19813,11 @@ class Graph:
                         )
                     if observation_lease is not None:
                         observation_lease.enqueue_tail_readback()
-                    completion = transaction._finish()
+                    completion = (
+                        transaction._finish_blocking()
+                        if wait_mode == "blocking"
+                        else transaction._finish()
+                    )
                     submission_statistics = (
                         transaction._submission_statistics()
                         if telemetry_enabled

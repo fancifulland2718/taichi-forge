@@ -1331,6 +1331,12 @@ void export_lang(py::module &m) {
         result["native_submissions"] = snapshot.native_submissions;
         return result;
       })
+      .def(
+          "_finish_blocking",
+          [](Program::RuntimeSubmissionTransaction &value) {
+            return value.finish_with_wait_mode(true);
+          },
+          py::call_guard<py::gil_scoped_release>())
       .def("_finish", &Program::RuntimeSubmissionTransaction::finish,
            py::call_guard<py::gil_scoped_release>());
 

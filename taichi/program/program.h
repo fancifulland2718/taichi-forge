@@ -434,6 +434,7 @@ class TI_DLL_EXPORT Program {
     void *register_cuda_concurrent_stream(void *stream);
     void abort() noexcept;
     RuntimeCompletion finish();
+    RuntimeCompletion finish_with_wait_mode(bool blocking_sync);
     RuntimeSubmissionStatistics submission_statistics() const noexcept {
       return submission_statistics_;
     }
@@ -657,6 +658,10 @@ class TI_DLL_EXPORT Program {
   // F2 internal completion API. Existing kernel calls, Graph.run(), native
   // primitives and ti.sync() retain their public return values.
   RuntimeCompletion record_runtime_completion(
+      StreamGpuTiming gpu_timing = nullptr,
+      std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {});
+  RuntimeCompletion record_runtime_completion_with_wait_mode(
+      bool blocking_sync,
       StreamGpuTiming gpu_timing = nullptr,
       std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {});
   std::unique_ptr<RuntimeSubmissionTransaction>

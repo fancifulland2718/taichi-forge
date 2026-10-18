@@ -3,14 +3,16 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from taichi_forge.lang import impl
 from tests import test_utils
 
 
+@pytest.mark.parametrize("wait_mode", ["default", "blocking"])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_wait_query_and_paced_submit_share_a_pending_ticket():
+def test_cuda_wait_query_and_paced_submit_share_a_pending_ticket(wait_mode):
     value = ti.ndarray(ti.i32, 32)
     scratch = ti.ndarray(ti.f32, 4096)
     scratch.fill(0)
@@ -38,7 +40,7 @@ def test_cuda_wait_query_and_paced_submit_share_a_pending_ticket():
     value.fill(0)
     ti.sync()
     pacer = ti.graph.SubmissionPacer(2, max_in_flight_per_lane=1, max_queued=2)
-    first = graph.submit(bound, pacer=pacer, lane="first")
+    first = graph.submit(bound, pacer=pacer, lane="first", wait_mode=wait_mode)
     started = threading.Event()
     failures = []
 
@@ -55,7 +57,7 @@ def test_cuda_wait_query_and_paced_submit_share_a_pending_ticket():
     time.sleep(0.001)
     try:
         assert not first.done()
-        second = graph.submit(bound, pacer=pacer, lane="second")
+        second = graph.submit(bound, pacer=pacer, lane="second", wait_mode=wait_mode)
         assert not first.done(), "submission waited for the first ticket"
         second.wait()
     finally:
@@ -68,8 +70,9 @@ def test_cuda_wait_query_and_paced_submit_share_a_pending_ticket():
     assert first.done()
 
 
+@pytest.mark.parametrize("wait_mode", ["default", "blocking"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_vulkan_graph_ticket_reuses_batch_fence_and_orders_following_work():
+def test_vulkan_graph_ticket_reuses_batch_fence_and_orders_following_work(wait_mode):
     value = ti.ndarray(ti.i32, shape=4096)
 
     @ti.kernel
@@ -85,7 +88,7 @@ def test_vulkan_graph_ticket_reuses_batch_fence_and_orders_following_work():
     graph.submit(bindings).wait()
     program = impl.get_runtime().prog
     before = dict(program._debug_vulkan_queue_submission_stats())
-    first = graph.submit(bindings)
+    first = graph.submit(bindings, wait_mode=wait_mode)
     after = dict(program._debug_vulkan_queue_submission_stats())
     # One batched dispatch, no separate empty completion command/submit.
     assert after["queue_submit_calls"] - before["queue_submit_calls"] == 1

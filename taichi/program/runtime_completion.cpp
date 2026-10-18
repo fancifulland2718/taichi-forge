@@ -1,5 +1,6 @@
 #include "taichi/program/runtime_completion.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -38,7 +39,8 @@ struct RuntimeCompletionCudaEventPool::Impl {
   const std::size_t max_cached_events;
   const Retention retention;
   mutable std::mutex mutex;
-  std::vector<void *> cached_events;
+  // Event flags are immutable. Keep blocking and default events separate.
+  std::array<std::vector<void *>, 2> cached_events;
   std::atomic<std::uint64_t> created{0};
   std::atomic<std::uint64_t> reused{0};
   std::atomic<std::uint64_t> returned{0};
@@ -60,12 +62,17 @@ RuntimeCompletionCudaEventPool::~RuntimeCompletionCudaEventPool() {
 }
 
 void *RuntimeCompletionCudaEventPool::acquire() {
+  return acquire(false);
+}
+
+void *RuntimeCompletionCudaEventPool::acquire(bool blocking_sync) {
 #ifdef TI_WITH_CUDA
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (!impl_->cached_events.empty()) {
-      void *event = impl_->cached_events.back();
-      impl_->cached_events.pop_back();
+    auto &cached = impl_->cached_events[blocking_sync];
+    if (!cached.empty()) {
+      void *event = cached.back();
+      cached.pop_back();
       impl_->reused.fetch_add(1, std::memory_order_relaxed);
       return event;
     }
@@ -73,8 +80,9 @@ void *RuntimeCompletionCudaEventPool::acquire() {
   auto context_guard = CUDAContext::get_instance().get_guard();
   auto &driver = CUDADriver::get_instance();
   void *event = nullptr;
-  const std::uint32_t result =
-      driver.event_create.call(&event, CU_EVENT_DISABLE_TIMING);
+  const auto flags = CU_EVENT_DISABLE_TIMING |
+                     (blocking_sync ? CU_EVENT_BLOCKING_SYNC : 0);
+  const std::uint32_t result = driver.event_create.call(&event, flags);
   if (result != CUDA_SUCCESS) {
     throw BackendRuntimeError(
         Arch::cuda, result, "event_create",
@@ -88,7 +96,13 @@ void *RuntimeCompletionCudaEventPool::acquire() {
 }
 
 void RuntimeCompletionCudaEventPool::release(void *event,
-                                              bool reusable) noexcept {
+                                            bool reusable) noexcept {
+  release(event, reusable, false);
+}
+
+void RuntimeCompletionCudaEventPool::release(void *event,
+                                            bool reusable,
+                                            bool blocking_sync) noexcept {
   if (event == nullptr) {
     return;
   }
@@ -96,8 +110,9 @@ void RuntimeCompletionCudaEventPool::release(void *event,
   if (reusable && impl_->backend_calls_safe()) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->retention == Retention::until_clear ||
-        impl_->cached_events.size() < impl_->max_cached_events) {
-      impl_->cached_events.push_back(event);
+        impl_->cached_events[0].size() + impl_->cached_events[1].size() <
+            impl_->max_cached_events) {
+      impl_->cached_events[blocking_sync].push_back(event);
       impl_->returned.fetch_add(1, std::memory_order_relaxed);
       return;
     }
@@ -126,31 +141,34 @@ void RuntimeCompletionCudaEventPool::abandon(void *event) noexcept {
 }
 
 void RuntimeCompletionCudaEventPool::clear() noexcept {
-  std::vector<void *> events;
+  std::array<std::vector<void *>, 2> events;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     events.swap(impl_->cached_events);
   }
-  if (events.empty()) {
+  const auto count = events[0].size() + events[1].size();
+  if (count == 0) {
     return;
   }
 #ifdef TI_WITH_CUDA
   if (!impl_->backend_calls_safe()) {
-    impl_->abandoned.fetch_add(events.size(), std::memory_order_relaxed);
+    impl_->abandoned.fetch_add(count, std::memory_order_relaxed);
     return;
   }
   try {
     auto context_guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
-    for (void *event : events) {
-      driver.event_destroy.call_with_warning(event);
+    for (const auto &group : events) {
+      for (void *event : group) {
+        driver.event_destroy.call_with_warning(event);
+      }
     }
-    impl_->destroyed.fetch_add(events.size(), std::memory_order_relaxed);
+    impl_->destroyed.fetch_add(count, std::memory_order_relaxed);
   } catch (...) {
-    impl_->abandoned.fetch_add(events.size(), std::memory_order_relaxed);
+    impl_->abandoned.fetch_add(count, std::memory_order_relaxed);
   }
 #else
-  impl_->abandoned.fetch_add(events.size(), std::memory_order_relaxed);
+  impl_->abandoned.fetch_add(count, std::memory_order_relaxed);
 #endif
 }
 
@@ -164,7 +182,7 @@ RuntimeCompletionCudaEventPool::snapshot() const noexcept {
   result.abandoned = impl_->abandoned.load(std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    result.cached = impl_->cached_events.size();
+    result.cached = impl_->cached_events[0].size() + impl_->cached_events[1].size();
   }
   return result;
 }
@@ -337,16 +355,19 @@ class CudaEventCompletion final : public CompletionPrimitive {
   CudaEventCompletion(void *stream,
                       std::weak_ptr<RuntimeFaultDomain> fault_domain,
                       std::shared_ptr<RuntimeCompletionCudaEventPool>
-                          event_pool)
+                          event_pool,
+                      bool blocking_sync)
       : fault_domain_(std::move(fault_domain)),
-        event_pool_(std::move(event_pool)) {
+        event_pool_(std::move(event_pool)),
+        blocking_sync_(blocking_sync) {
     auto context_guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
     if (event_pool_) {
-      event_ = event_pool_->acquire();
+      event_ = event_pool_->acquire(blocking_sync_);
     } else {
-      const std::uint32_t create_result =
-          driver.event_create.call(&event_, CU_EVENT_DISABLE_TIMING);
+      const auto flags = CU_EVENT_DISABLE_TIMING |
+                         (blocking_sync_ ? CU_EVENT_BLOCKING_SYNC : 0);
+      const std::uint32_t create_result = driver.event_create.call(&event_, flags);
       if (create_result != CUDA_SUCCESS) {
         throw BackendRuntimeError(
             Arch::cuda, create_result, "event_create",
@@ -362,7 +383,7 @@ class CudaEventCompletion final : public CompletionPrimitive {
         if (fatal) {
           event_pool_->abandon(event_);
         } else {
-          event_pool_->release(event_, false);
+          event_pool_->release(event_, false, blocking_sync_);
         }
       } else if (!fatal) {
         driver.event_destroy.call_with_warning(event_);
@@ -391,7 +412,7 @@ class CudaEventCompletion final : public CompletionPrimitive {
       return;
     }
     if (event_pool_) {
-      event_pool_->release(event_, reusable_);
+      event_pool_->release(event_, reusable_, blocking_sync_);
       event_ = nullptr;
       return;
     }
@@ -441,6 +462,7 @@ class CudaEventCompletion final : public CompletionPrimitive {
   void *event_{nullptr};
   std::weak_ptr<RuntimeFaultDomain> fault_domain_;
   std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool_;
+  const bool blocking_sync_;
   std::atomic<bool> reusable_{false};
 };
 #endif
@@ -893,10 +915,24 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
     std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool,
     StreamGpuTiming gpu_timing,
     std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
+  return from_cuda_stream_with_wait_mode(
+      false, program_domain, sequence, stream, std::move(fault_domain),
+      std::move(event_pool), std::move(gpu_timing), std::move(gpu_region_timings));
+}
+
+RuntimeCompletion RuntimeCompletion::from_cuda_stream_with_wait_mode(
+    bool blocking_sync,
+    std::uint64_t program_domain,
+    std::uint64_t sequence,
+    void *stream,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool,
+    StreamGpuTiming gpu_timing,
+    std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
 #ifdef TI_WITH_CUDA
   try {
     auto primitive = std::make_unique<CudaEventCompletion>(
-        stream, fault_domain, std::move(event_pool));
+        stream, fault_domain, std::move(event_pool), blocking_sync);
     auto state = std::make_shared<State>(std::move(primitive), fault_domain,
                                          sequence, std::move(gpu_timing),
                                          std::move(gpu_region_timings));
@@ -910,6 +946,7 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
     throw;
   }
 #else
+  (void)blocking_sync;
   (void)program_domain;
   (void)sequence;
   (void)stream;

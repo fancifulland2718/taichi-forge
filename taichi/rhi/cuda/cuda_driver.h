@@ -33,6 +33,7 @@ namespace taichi::lang {
 // Driver constants from cuda.h
 
 constexpr uint32 CU_EVENT_DEFAULT = 0x0;
+constexpr uint32 CU_EVENT_BLOCKING_SYNC = 0x1;
 constexpr uint32 CU_EVENT_DISABLE_TIMING = 0x2;
 constexpr uint32 CU_STREAM_DEFAULT = 0x0;
 constexpr uint32 CU_STREAM_NON_BLOCKING = 0x1;

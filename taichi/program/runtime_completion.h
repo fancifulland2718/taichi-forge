@@ -48,7 +48,9 @@ class TI_DLL_EXPORT RuntimeCompletionCudaEventPool {
       const RuntimeCompletionCudaEventPool &) = delete;
 
   void *acquire();
+  void *acquire(bool blocking_sync);
   void release(void *event, bool reusable) noexcept;
+  void release(void *event, bool reusable, bool blocking_sync) noexcept;
   void abandon(void *event) noexcept;
   void clear() noexcept;
   RuntimeCompletionCudaEventPoolSnapshot snapshot() const noexcept;
@@ -112,6 +114,15 @@ class TI_DLL_EXPORT RuntimeCompletion {
                                             std::vector<RuntimeGpuRegionTiming>
                                                 gpu_region_timings = {});
 
+  static RuntimeCompletion from_cuda_stream_with_wait_mode(
+      bool blocking_sync,
+      std::uint64_t program_domain,
+      std::uint64_t sequence,
+      void *stream,
+      std::shared_ptr<RuntimeFaultDomain> fault_domain,
+      std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool,
+      StreamGpuTiming gpu_timing,
+      std::vector<RuntimeGpuRegionTiming> gpu_region_timings);
   static StreamGpuTiming begin_cuda_gpu_timing(
       void *stream,
       std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr);

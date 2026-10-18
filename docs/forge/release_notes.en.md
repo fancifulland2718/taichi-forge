@@ -217,6 +217,11 @@ lifetimes. The entries below describe the changes.
   display teardown drain backend readers before destroying their handles, while
   preserving the first error and exactly-once resource release.
 
+- `Graph.submit(..., wait_mode="blocking")` opts CUDA tickets into low CPU event
+  waiting; the default wait is unchanged. The mode is fixed at submission, with
+  separate event reuse under a combined cache limit. Vulkan retains fence waits,
+  CPU is normally complete, and other backends reject explicit blocking before
+  submission. Measure wake latency and complete-step throughput.
 - `Canvas.repeat_frame()` reuses a renderable holding the current shared image,
   or an empty renderable, and retains other completed images for future writes.
   Completed aliases are detached before reuse. Repeating a CUDA/Vulkan frame no

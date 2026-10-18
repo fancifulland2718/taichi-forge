@@ -243,6 +243,21 @@ Keep application resources valid until completion. Dropping a ticket is not a
 cancellation or permission to overwrite its buffers. A completion or observation
 failure must be surfaced; do not rerun side-effecting work through a fallback.
 
+Choose `graph.submit(bindings, wait_mode="blocking")` at submission, then use
+the existing `ticket.wait()`. CUDA uses an untimed blocking event so the waiting
+thread can sleep. `wait_mode="default"` preserves the original busy wait.
+Blocking waits save CPU time but can increase wake latency; measure short work
+and end-to-end throughput separately. Vulkan uses its existing fence wait in
+both modes; CPU submissions are normally already complete. Explicit blocking
+mode on other backends is rejected before submission.
+
+The mode is fixed when the ticket is created, not when `wait()` is called.
+No replacement event is recorded and unrelated later stream work is not added
+to the wait. CUDA event caches keep the two modes separate under the existing
+combined cache limit. `done()` remains a nonblocking query. Backend waiting
+does not hold the completion state lock; first-error, reset and resource-release
+contracts are unchanged.
+
 For related asynchronous producers, optionally share a `SubmissionPacer`:
 
 ```python

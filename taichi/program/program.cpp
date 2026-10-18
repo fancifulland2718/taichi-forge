@@ -538,6 +538,11 @@ void Program::retain_recorded_gpu_timings(
 }
 
 RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
+  return finish_with_wait_mode(false);
+}
+
+RuntimeCompletion Program::RuntimeSubmissionTransaction::finish_with_wait_mode(
+    bool blocking_sync) {
   TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
   TI_ERROR_IF(!active_gpu_region_timings_.empty(),
               "Runtime submission transaction has unfinished GPU region timing");
@@ -568,8 +573,8 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   // to Python. Old tickets retain their own backend completion, not this gate.
   auto tree_guard = std::move(tree_lifecycle_guard_);
   auto resource_guard = std::move(resource_submission_guard_);
-  return program->record_runtime_completion(
-      std::move(gpu_timing_), std::move(gpu_region_timings_));
+  return program->record_runtime_completion_with_wait_mode(
+      blocking_sync, std::move(gpu_timing_), std::move(gpu_region_timings_));
 }
 
 std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
@@ -8241,6 +8246,18 @@ std::size_t Program::runtime_completion_resource_count(
 RuntimeCompletion Program::record_runtime_completion(
     StreamGpuTiming gpu_timing,
     std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
+  return record_runtime_completion_with_wait_mode(
+      false, std::move(gpu_timing), std::move(gpu_region_timings));
+}
+
+RuntimeCompletion Program::record_runtime_completion_with_wait_mode(
+    bool blocking_sync,
+    StreamGpuTiming gpu_timing,
+    std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
+  TI_ERROR_IF(blocking_sync && !arch_is_cpu(compile_config().arch) &&
+                  compile_config().arch != Arch::cuda &&
+                  compile_config().arch != Arch::vulkan,
+              "Blocking completion wait requires CPU, CUDA or Vulkan");
   ensure_runtime_submission_allowed("runtime completion recording");
   // Bound host polling work, not the number of valid in-flight submissions.
   // Synchronize/reset/finalize fully drain the registry; until then the
@@ -8296,8 +8313,8 @@ RuntimeCompletion Program::record_runtime_completion(
       } else if (compile_config().arch == Arch::cuda) {
         // Existing Driver API symbols are loaded dynamically; no cudart or
         // Toolkit-versioned runtime dependency is introduced.
-        result = RuntimeCompletion::from_cuda_stream(
-            runtime_completion_domain_, sequence, nullptr,
+        result = RuntimeCompletion::from_cuda_stream_with_wait_mode(
+            blocking_sync, runtime_completion_domain_, sequence, nullptr,
             runtime_fault_domain_, runtime_completion_cuda_event_pool_,
             std::move(gpu_timing),
             std::move(gpu_region_timings));

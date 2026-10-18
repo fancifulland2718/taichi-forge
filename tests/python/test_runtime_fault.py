@@ -41,6 +41,7 @@ def test_faulted_runtime_rejects_work_and_reset_creates_healthy_program():
         lambda: advance(value),
         lambda: graph.run({"dst": value}),
         lambda: graph.submit({"dst": value}),
+        lambda: graph.submit({"dst": value}, wait_mode="blocking"),
         ti.sync,
         prog._record_runtime_completion,
     ):

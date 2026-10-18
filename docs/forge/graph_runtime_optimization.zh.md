@@ -187,6 +187,16 @@ indirect/bounded dispatch、嵌套控制，以及显式选择融合或并行的�
 资源应保持有效直到执行完成。丢弃 ticket 不是取消，也不代表可以覆盖 buffer。
 完成或观测失败应显式处理，不要通过 fallback 重跑有副作用的工作。
 
+可在提交时选择 `graph.submit(bindings, wait_mode="blocking")`，再调用原有的
+`ticket.wait()`。CUDA 使用带 blocking 标志的无计时事件，让等待线程休眠；默认
+`wait_mode="default"` 保留原来的忙等方式。blocking 适合需要释放 CPU 的等待线程，
+但唤醒延迟可能增加，短工作和端到端吞吐应分别测量。Vulkan 两种模式都使用已有的
+fence 等待；CPU 提交通常已经完成。其他后端显式选择 blocking 会在提交前报错。
+
+模式在创建票据时固定，不能在 `wait()` 时切换；不会补录事件或等待后续无关的 stream
+工作。两类 CUDA 事件分别复用，共用原有缓存总量限制。`done()` 仍是非阻塞查询，
+同票据的后端等待不占用状态查询锁；首次错误、reset 和资源释放合同保持不变。
+
 相关异步 producer 可选地共享 `SubmissionPacer`：
 
 ```python

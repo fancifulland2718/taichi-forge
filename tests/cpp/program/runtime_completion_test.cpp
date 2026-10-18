@@ -138,6 +138,24 @@ TEST(RuntimeCompletion, WaitDoesNotBlockPendingQueryAndSubmission) {
 }
 
 #ifdef TI_WITH_CUDA
+TEST(RuntimeCompletion, BlockingAndDefaultEventCachesDoNotMix) {
+  RuntimeCompletionCudaEventPool pool({}, 2);
+  // These sentinels stay in the cache and are checked out before destruction;
+  // the test does not call CUDA with synthetic handles or require a GPU.
+  auto *default_event = reinterpret_cast<void *>(std::uintptr_t{1});
+  auto *blocking_event = reinterpret_cast<void *>(std::uintptr_t{2});
+  for (int iteration = 0; iteration < 8; ++iteration) {
+    pool.release(default_event, true);
+    pool.release(blocking_event, true, true);
+    EXPECT_EQ(pool.snapshot().cached, 2);
+    EXPECT_EQ(pool.acquire(), default_event);
+    EXPECT_EQ(pool.acquire(true), blocking_event);
+  }
+  EXPECT_EQ(pool.snapshot().cached, 0);
+  EXPECT_EQ(pool.snapshot().reused, 16);
+  EXPECT_EQ(pool.snapshot().created, 0);
+}
+
 TEST(RuntimeCompletion, ConcurrentDriverWaitLeavesSubmissionMutexAvailable) {
   GatedSemaphore gate;
   std::mutex driver_mutex;
