@@ -53,6 +53,9 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 构建匹配的 shim 和私有导出合同需要 Python，C/C++ 消费进程无需加载 Python。
 `TI_WITH_RUNTIME_C_API` 在独立 CMake 配置中默认关闭，0.6.4 runtime wheel 构建
 会开启它；此前构建的 wheel 可能没有这些入口。shim 与原生库必须配对。
+通过 `TI_PREBUILT_PYTHON_RUNTIME_DIR` 单独构建 shim 时，对包含兼容 C API 的
+runtime 同样启用 `TI_WITH_RUNTIME_C_API=ON`。这会编译 `borrow_runtime()` 绑定，
+核心及 SDK 文件仍由 runtime 分发包持有；发行 shim 配置已启用此选项。
 共用二进制库不会自动共用可变 runtime 实例，
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
@@ -1426,8 +1429,9 @@ CPU/CUDA 稀疏树的版本与固定执行合同见下文资源章节；其他�
 接入。产物不保存设备 Graph 句柄，消费者加载代码后再准备。
 
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
-选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、任意 native Graph、
-未列出的 provider 和任意外部内存导入，不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
+选择同一套兼容核心和资源。Python 消费入口支持本文列出的 texture、native resource
+和执行计划，以及显式借用 owner 的 ndarray/texture 导入；尚不包括结构数组、任意
+外部设备内存或未声明的 native Graph/provider。不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
 后端的前向/反向与两种 AOT/JIT 加载顺序。
 
 安装后的 `examples/aot_sdk` 包含导出脚本及独立消费程序。`SDK`、`MODULE`

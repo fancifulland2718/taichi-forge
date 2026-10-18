@@ -219,7 +219,7 @@ if (TI_WITH_C_API)
   if (TI_BUILD_TESTS)
     include(cmake/TaichiCAPITests.cmake)
   endif()
-elseif(TI_WITH_RUNTIME_C_API)
+elseif(TI_WITH_RUNTIME_C_API AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
   # A runtime wheel can also supply a standalone public-header SDK without
   # building another library containing the backend core.
   include(cmake/TaichiCAPISources.cmake)

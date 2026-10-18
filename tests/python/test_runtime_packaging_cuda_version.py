@@ -1374,6 +1374,7 @@ def test_prebuilt_linux_shim_disables_llvm_abi_link_sentinel():
 def test_shim_publish_workflow_validates_wheel_boundaries():
     workflow = (REPO_ROOT / ".github" / "workflows" / "publish_pypi.yml").read_text(encoding="utf-8")
 
+    assert workflow.count("-DTI_WITH_RUNTIME_C_API:BOOL=ON") == 2
     assert workflow.count("scripts/validate_runtime_wheel.py") == 2
     assert workflow.count("scripts/validate_shim_wheel.py") == 2
     assert "--wheel-dir wheelhouse --platform manylinux" in workflow

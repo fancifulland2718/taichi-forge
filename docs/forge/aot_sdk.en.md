@@ -61,6 +61,10 @@ and its private export contract, but the C/C++ consumer does not load Python.
 `TI_WITH_RUNTIME_C_API` defaults to `OFF` for standalone CMake configuration;
 the 0.6.4 runtime-wheel build enables it. Previously built wheels may lack the
 C API. Keep the shim and native library paired.
+When building only the shim with `TI_PREBUILT_PYTHON_RUNTIME_DIR`, also enable
+`TI_WITH_RUNTIME_C_API=ON` for a compatible C API runtime. This includes the
+`borrow_runtime()` bindings while leaving the core and SDK files in the runtime
+distribution. The release shim configurations enable this option.
 Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
@@ -1830,8 +1834,10 @@ Closing an array/module waits before retiring it. The runtime context manager
 waits and closes its children; later calls on them fail. Prefer explicit lifetime
 management to GC timing. Optional `library_path` and `runtime_path` select the
 shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
-core/resource set. The Python consumer currently excludes structure arrays,
-textures, arbitrary native Graphs, unlisted providers and arbitrary external-memory imports; the C/C++
+core/resource set. The Python consumer supports the textures, native resources,
+execution plans and explicit owner-borrowed ndarray/texture imports described
+here. Structure arrays, arbitrary external device memory and undeclared native
+Graphs/providers remain outside that contract; the C/C++
 capabilities below are separate. Windows x64 checks cover all three backends,
 forward/reverse work and both AOT/JIT loading orders.
 

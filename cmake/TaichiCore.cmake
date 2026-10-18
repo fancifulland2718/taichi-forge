@@ -27,9 +27,12 @@ option(TI_WITH_SPLIT_PYTHON_RUNTIME
        "Build taichi_python as a small shim linked against a shared native runtime"
        OFF)
 option(TI_WITH_RUNTIME_C_API
-       "Include the public AOT C API in the shared native runtime"
+       "Build or link a split native runtime containing the public AOT C API"
        OFF)
 if(TI_WITH_RUNTIME_C_API)
+    # A prebuilt-runtime shim needs the same borrowing bindings as an in-tree
+    # build. The imported runtime supplies their implementation; no C API core
+    # is compiled or installed by the shim-only branch below.
     set_property(SOURCE taichi/python/export_lang.cpp APPEND PROPERTY
         COMPILE_DEFINITIONS TI_WITH_RUNTIME_C_API)
 endif()
@@ -42,10 +45,9 @@ if(TI_WITH_SPLIT_PYTHON_RUNTIME AND TI_PREBUILT_PYTHON_RUNTIME_DIR)
     set(TI_WITH_PREBUILT_PYTHON_RUNTIME ON)
 endif()
 if(TI_WITH_RUNTIME_C_API AND
-   (NOT TI_WITH_SPLIT_PYTHON_RUNTIME OR NOT TI_WITH_PYTHON OR
-    TI_WITH_PREBUILT_PYTHON_RUNTIME))
+   (NOT TI_WITH_SPLIT_PYTHON_RUNTIME OR NOT TI_WITH_PYTHON))
     message(FATAL_ERROR
-        "TI_WITH_RUNTIME_C_API requires building the split Python runtime")
+        "TI_WITH_RUNTIME_C_API requires the split Python runtime")
 endif()
 
 # Force symbols to be 'hidden' by default so nothing is exported from the Taichi

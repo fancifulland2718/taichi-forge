@@ -509,6 +509,24 @@ def _validate_cpu_field_roundtrips() -> None:
             _checkpoint(f"cpu field roundtrip ({mode}): reset passed")
 
 
+def _validate_cpu_aot_borrowing() -> None:
+    """Require the installed shim to bind the shared runtime's AOT bridge."""
+    ti.init(arch=ti.cpu, offline_cache=False)
+    try:
+        owner = ti.ndarray(ti.f32, shape=4)
+        values = np.arange(4, dtype=np.float32)
+        owner.from_numpy(values)
+        with ti.aot.borrow_runtime() as runtime:
+            imported = runtime.import_ndarray(owner)
+            np.testing.assert_array_equal(np.frombuffer(imported.read(), dtype=np.float32), values)
+            imported.write((values + 3).tobytes())
+            runtime.wait()
+        # Retiring the borrower must preserve the original JIT storage.
+        np.testing.assert_array_equal(owner.to_numpy(), values + 3)
+    finally:
+        ti.reset()
+
+
 def main() -> None:
     _checkpoint("distribution versions: start")
     version = _validate_distribution_versions()
@@ -526,6 +544,10 @@ def main() -> None:
     _checkpoint("cpu native AD: passed")
     _validate_cpu_dynamic_workload()
     _checkpoint("cpu dynamic workload: passed")
+    if (Version(version).release >= (0, 6, 4)
+            and Version(metadata.version("taichi-forge-runtime")).release >= (0, 6, 4)):
+        _validate_cpu_aot_borrowing()
+        _checkpoint("cpu AOT borrowing: passed")
     if cudart is None:
         dependency = "driver-only; bundled CUDART=none"
     else:
