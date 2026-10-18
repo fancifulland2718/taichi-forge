@@ -3134,6 +3134,13 @@ CGraph，不包含任意 stride/切片、指针成员、结构梯度或 native G
 Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重绑定、退休，以及
 同一 Graph 中结构前向工作与显式绑定的普通 ndarray 反向微分组合。
 
+同一模块的普通 `add_graph` 按编译对象身份和 launch ABI 复用已有 kernel 入口；
+重复 Graph 导出和后续 `add_execution_plan` 共享这些入口，不重复生成相同导出载荷。
+这不修改原 Graph，也不合并不同 ndarray 特化、普通/门控 ABI 或用户显式声明的公共别名。
+入口同名但指向不同特化/ABI 时会在导出前拒绝。CPU/CUDA 避免多份 LLVM/PTX/cubin
+载荷；Vulkan 沿用已有 shader 复用，并减少冗余入口别名。查找只发生在生产端导出期间，
+消费端格式和调用路径保持不变；配套组件使用私有 ABI 97。
+
 Vulkan 模块可导出在 `Module()` 之后创建的 dense field，也可复用无关 field 创建前
 已编译的 kernel。归档只包含导出 kernel 或显式 `add_field()` 引用的布局；仅使用
 ndarray 的模块不保留 field 根存储。实际引用的树必须保持存活直到导出完成。该行为

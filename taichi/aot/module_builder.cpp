@@ -38,20 +38,51 @@ void AotModuleBuilder::add_root_storage_view(
         "AOT root storage name has conflicting layouts");
 }
 
+bool AotModuleBuilder::needs_kernel_export(
+    const std::string &name,
+    Kernel *kernel,
+    const std::string &launch_abi) const {
+  TI_ERROR_IF(kernel == nullptr, "AOT kernel {} has no compiled identity",
+              name);
+  const auto found = kernel_exports_.find(name);
+  if (found == kernel_exports_.end())
+    return true;
+  TI_ERROR_IF(
+      found->second.kernel != kernel || found->second.launch_abi != launch_abi,
+      "AOT kernel name {} is already bound to another specialization or "
+      "launch ABI",
+      name);
+  return false;
+}
+
+void AotModuleBuilder::record_kernel_export(const std::string &name,
+                                            Kernel *kernel,
+                                            const std::string &launch_abi) {
+  kernel_exports_.emplace(name, ExportIdentity{kernel, launch_abi});
+  if (launch_abi == "ordinary")
+    ordinary_export_names_.emplace(kernel, name);
+}
+
 void AotModuleBuilder::add(const std::string &identifier, Kernel *kernel) {
+  if (!needs_kernel_export(identifier, kernel, "ordinary"))
+    return;
   compile_options_frozen_ = true;
   add_per_backend(identifier, kernel);
+  record_kernel_export(identifier, kernel, "ordinary");
 }
 
 void AotModuleBuilder::add_with_launch_abi(const std::string &identifier,
-                                         Kernel *kernel,
-                                         const std::string &launch_abi) {
+                                           Kernel *kernel,
+                                           const std::string &launch_abi) {
   if (launch_abi == "ordinary") {
     add(identifier, kernel);
     return;
   }
+  if (!needs_kernel_export(identifier, kernel, launch_abi))
+    return;
   add_with_launch_abi_per_backend(identifier, kernel, launch_abi);
   compile_options_frozen_ = true;
+  record_kernel_export(identifier, kernel, launch_abi);
 }
 
 void AotModuleBuilder::add_field(const std::string &identifier,
@@ -68,8 +99,12 @@ void AotModuleBuilder::add_field(const std::string &identifier,
 void AotModuleBuilder::add_kernel_template(const std::string &identifier,
                                            const std::string &key,
                                            Kernel *kernel) {
+  const auto name = identifier + "__tmpl__" + key;
+  if (!needs_kernel_export(name, kernel, "ordinary"))
+    return;
   compile_options_frozen_ = true;
   add_per_backend_tmpl(identifier, key, kernel);
+  record_kernel_export(name, kernel, "ordinary");
 }
 
 bool AotModuleBuilder::all_fields_are_dense_in_container(
@@ -124,17 +159,19 @@ void AotModuleBuilder::dump_graph(std::string output_dir) const {
   // Old readers see no exports they cannot represent; ordinary artifacts keep
   // their existing binary representation and remain readable by old loaders.
   const aot::GraphMap empty;
-  write_to_binary_file(aot::has_struct_graph_arguments(graphs_) ? empty : graphs_,
-                       graph_file);
+  write_to_binary_file(
+      aot::has_struct_graph_arguments(graphs_) ? empty : graphs_, graph_file);
 }
 
-void AotModuleBuilder::add_graph(const std::string &name,
-                                 const aot::CompiledGraph &graph) {
+std::unordered_map<std::string, Kernel *> AotModuleBuilder::add_graph(
+    const std::string &name,
+    const aot::CompiledGraph &graph) {
   compile_options_frozen_ = true;
   for (const auto &[arg_name, arg] : graph.args) {
-    TI_ERROR_IF(arg.tag == aot::ArgKind::kAccelerationStructure,
-                "AOT Graph {} contains JIT-only acceleration-structure argument {}",
-                name, arg_name);
+    TI_ERROR_IF(
+        arg.tag == aot::ArgKind::kAccelerationStructure,
+        "AOT Graph {} contains JIT-only acceleration-structure argument {}",
+        name, arg_name);
     TI_ERROR_IF(arg.tag == aot::ArgKind::kTextureCollection,
                 "AOT Graph {} contains JIT-only TextureCollection argument {}",
                 name, arg_name);
@@ -146,14 +183,38 @@ void AotModuleBuilder::add_graph(const std::string &name,
   if (graphs_.count(name) != 0) {
     TI_ERROR("Graph {} already exists", name);
   }
-  // Handle adding kernels separately.
-  std::unordered_map<std::string, lang::Kernel *> kernels;
-  for (const auto &dispatch : graph.dispatches) {
-    kernels[dispatch.kernel_name] = dispatch.ti_kernel;
+  // Resolve the entire closure before compiling anything. Export only a copy:
+  // the source Graph may still execute or be exported through another module.
+  auto exported = graph;
+  std::unordered_map<std::string, Kernel *> kernels;
+  std::unordered_map<Kernel *, std::string> pending_names;
+  std::vector<std::pair<std::string, Kernel *>> pending;
+  for (auto &dispatch : exported.dispatches) {
+    auto *kernel = dispatch.ti_kernel;
+    const auto published = ordinary_export_names_.find(kernel);
+    if (published != ordinary_export_names_.end()) {
+      dispatch.kernel_name = published->second;
+    } else {
+      const auto planned = pending_names.find(kernel);
+      if (planned != pending_names.end()) {
+        dispatch.kernel_name = planned->second;
+      } else {
+        needs_kernel_export(dispatch.kernel_name, kernel, "ordinary");
+        const auto [found, inserted] =
+            kernels.emplace(dispatch.kernel_name, kernel);
+        TI_ERROR_IF(!inserted && found->second != kernel,
+                    "AOT Graph {} has conflicting kernel name {}", name,
+                    dispatch.kernel_name);
+        pending_names.emplace(kernel, dispatch.kernel_name);
+        pending.emplace_back(dispatch.kernel_name, kernel);
+      }
+    }
+    kernels.emplace(dispatch.kernel_name, kernel);
   }
-  for (auto &e : kernels) {
+  for (const auto &e : pending) {
     add(e.first, e.second);
   }
-  graphs_[name] = graph;
+  graphs_.emplace(name, std::move(exported));
+  return kernels;
 }
 }  // namespace taichi::lang

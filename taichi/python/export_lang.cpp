@@ -5643,7 +5643,15 @@ void export_lang(py::module &m) {
       .def("add", &AotModuleBuilder::add)
       .def("_add_with_launch_abi", &AotModuleBuilder::add_with_launch_abi)
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)
-      .def("add_graph", &AotModuleBuilder::add_graph)
+      .def("add_graph", [](AotModuleBuilder *builder, const std::string &name,
+                           const aot::CompiledGraph &graph) {
+        py::dict entries;
+        for (const auto &[entry, kernel] : builder->add_graph(name, graph)) {
+          entries[py::str(entry)] =
+              py::cast(kernel, py::return_value_policy::reference);
+        }
+        return entries;
+      })
       .def("_used_snode_tree_ids", &AotModuleBuilder::used_snode_tree_ids)
       .def("_add_root_storage_view", &AotModuleBuilder::add_root_storage_view)
       .def("_add_initial_root_data",

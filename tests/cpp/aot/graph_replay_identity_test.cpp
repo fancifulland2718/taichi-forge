@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 #include <taichi/aot/graph_data.h>
+#include <taichi/aot/module_builder.h>
 
 namespace taichi::lang::aot {
 
@@ -84,11 +85,9 @@ TEST(GraphCaptureRetryStateTest, TransientBackoffIsBoundedAndRecoverable) {
   for (uint32_t failure = 0; failure < 10; ++failure) {
     EXPECT_TRUE(retry.should_attempt());
     retry.record_transient_failure();
-    const uint32_t skipped =
-        uint32_t{1} << std::min<uint32_t>(failure, 5);
+    const uint32_t skipped = uint32_t{1} << std::min<uint32_t>(failure, 5);
     EXPECT_EQ(retry.retry_backoff_remaining(), skipped);
-    EXPECT_LE(skipped,
-              CompiledGraphCaptureRetryState::kMaxBackoffInvocations);
+    EXPECT_LE(skipped, CompiledGraphCaptureRetryState::kMaxBackoffInvocations);
     for (uint32_t i = 0; i < skipped; ++i) {
       EXPECT_FALSE(retry.should_attempt());
     }
@@ -109,6 +108,131 @@ TEST(GraphCaptureRetryStateTest, StructuralFailureDoesNotRetry) {
   EXPECT_FALSE(retry.should_attempt());
   retry.record_success();
   EXPECT_FALSE(retry.should_attempt());
+}
+
+namespace {
+class ExportBuilder final : public AotModuleBuilder {
+ public:
+  int compilations{0};
+  void dump(const std::string &, const std::string &) const override {
+  }
+  const CompiledGraph &graph(const std::string &name) const {
+    return graphs_.at(name);
+  }
+
+ private:
+  void add_per_backend(const std::string &, lang::Kernel *) override {
+    ++compilations;
+  }
+  void add_with_launch_abi_per_backend(const std::string &,
+                                       lang::Kernel *,
+                                       const std::string &abi) override {
+    if (abi != "cuda_graph_gate_v1")
+      throw std::invalid_argument("Unsupported test launch ABI");
+    ++compilations;
+  }
+  void add_per_backend_tmpl(const std::string &,
+                            const std::string &,
+                            lang::Kernel *) override {
+    ++compilations;
+  }
+};
+
+class AotExportIdentityTest : public ::testing::Test {
+ protected:
+  // The counting backend never dereferences these distinct identity tokens.
+  int identities_[3]{};
+  lang::Kernel *kernel(int index) {
+    return reinterpret_cast<lang::Kernel *>(&identities_[index]);
+  }
+  CompiledGraph source(
+      std::initializer_list<std::pair<std::string, int>> entries) {
+    CompiledGraph graph;
+    for (const auto &[name, index] : entries) {
+      graph.dispatches.emplace_back();
+      graph.dispatches.back().kernel_name = name;
+      graph.dispatches.back().ti_kernel = kernel(index);
+    }
+    return graph;
+  }
+  ExportBuilder builder;
+};
+}  // namespace
+
+TEST_F(AotExportIdentityTest, ReusesPublishedEntriesWithoutChangingSource) {
+  builder.add("public", kernel(0));
+  const auto original = source({{"generated", 0}, {"other_name", 0}});
+  const auto entries = builder.add_graph("first", original);
+  builder.add_graph("second", original);
+  EXPECT_EQ(entries.size(), 1);
+  EXPECT_EQ(entries.at("public"), kernel(0));
+  EXPECT_EQ(builder.compilations, 1);
+  EXPECT_EQ(original.dispatches[0].kernel_name, "generated");
+  EXPECT_EQ(original.dispatches[1].kernel_name, "other_name");
+  EXPECT_EQ(builder.graph("first").dispatches[0].kernel_name, "public");
+  EXPECT_EQ(builder.graph("second").dispatches[1].kernel_name, "public");
+  EXPECT_ANY_THROW(builder.add_graph("first", original));
+}
+
+TEST_F(AotExportIdentityTest, KeepsSpecializationsAndExplicitAliases) {
+  const auto entries = builder.add_graph(
+      "first",
+      source({{"generated", 0}, {"duplicate", 0}, {"specialized", 1}}));
+  EXPECT_EQ(entries.size(), 2);
+  EXPECT_EQ(builder.compilations, 2);
+  builder.add("generated", kernel(0));
+  EXPECT_EQ(builder.compilations, 2);
+  builder.add("public_alias", kernel(0));
+  EXPECT_EQ(builder.compilations, 3);
+  EXPECT_ANY_THROW(builder.add("generated", kernel(1)));
+  EXPECT_EQ(builder.compilations, 3);
+}
+
+TEST_F(AotExportIdentityTest, PreflightsWholeGraphBeforePublishing) {
+  builder.add("occupied", kernel(0));
+  EXPECT_ANY_THROW(
+      builder.add_graph("bad", source({{"new", 1}, {"occupied", 2}})));
+  EXPECT_EQ(builder.compilations, 1);
+  EXPECT_ANY_THROW(
+      builder.add_graph("bad", source({{"duplicate", 1}, {"duplicate", 2}})));
+  EXPECT_EQ(builder.compilations, 1);
+  builder.add_graph("bad", source({{"new", 1}, {"distinct", 2}}));
+  EXPECT_EQ(builder.compilations, 3);
+}
+
+TEST_F(AotExportIdentityTest, SeparatesLaunchAbisAndRejectsOverwrites) {
+  builder.add_with_launch_abi("gated", kernel(0), "cuda_graph_gate_v1");
+  builder.add_with_launch_abi("gated", kernel(0), "cuda_graph_gate_v1");
+  EXPECT_EQ(builder.compilations, 1);
+  EXPECT_ANY_THROW(builder.add_graph("graph", source({{"gated", 0}})));
+  EXPECT_ANY_THROW(builder.add("gated", kernel(0)));
+  builder.add_graph("graph", source({{"ordinary", 0}}));
+  EXPECT_EQ(builder.graph("graph").dispatches[0].kernel_name, "ordinary");
+  EXPECT_EQ(builder.compilations, 2);
+  EXPECT_ANY_THROW(
+      builder.add_with_launch_abi("ordinary", kernel(0), "cuda_graph_gate_v1"));
+  EXPECT_ANY_THROW(
+      builder.add_with_launch_abi("failed", kernel(1), "unsupported"));
+  builder.add("failed", kernel(1));
+  EXPECT_EQ(builder.compilations, 3);
+}
+
+TEST_F(AotExportIdentityTest, ReusesTemplateEntriesWithTheirPublishedNames) {
+  builder.add_kernel_template("template", "x=1", kernel(0));
+  builder.add_kernel_template("template", "x=1", kernel(0));
+  builder.add_graph("graph", source({{"generated", 0}}));
+  EXPECT_EQ(builder.compilations, 1);
+  EXPECT_EQ(builder.graph("graph").dispatches[0].kernel_name,
+            "template__tmpl__x=1");
+  EXPECT_ANY_THROW(builder.add_kernel_template("template", "x=1", kernel(1)));
+  EXPECT_EQ(builder.compilations, 1);
+}
+
+TEST_F(AotExportIdentityTest, RejectsMissingKernelBeforeExport) {
+  auto graph = source({{"valid", 0}, {"missing", 1}});
+  graph.dispatches[1].ti_kernel = nullptr;
+  EXPECT_ANY_THROW(builder.add_graph("graph", graph));
+  EXPECT_EQ(builder.compilations, 0);
 }
 
 }  // namespace taichi::lang::aot

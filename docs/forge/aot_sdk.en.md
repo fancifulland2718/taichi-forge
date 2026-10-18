@@ -4093,6 +4093,16 @@ Small Windows CPU/CUDA/Vulkan and CUDA PTX consumers verify nested mixed-type
 records, rebinding, retirement, and Graphs combining structure forward work
 with explicitly bound primitive-array reverse differentiation.
 
+Within one module, ordinary `add_graph` reuses published kernel entries by
+compiled object identity and launch ABI. Repeated Graph exports and subsequent
+`add_execution_plan` exports share those entries without duplicate payloads.
+The source Graph is unchanged. Distinct ndarray specializations, ordinary/gated
+ABIs, and explicitly requested public aliases remain separate. Conflicting
+specializations or ABIs cannot overwrite a published name. CPU/CUDA avoid extra
+LLVM/PTX/cubin payloads; Vulkan retains its existing shader reuse and avoids
+redundant entry aliases. These lookups run only during producer export; consumer
+formats and dispatch paths are unchanged. Paired components use private ABI 97.
+
 Vulkan modules can export dense fields created after `Module()` and reuse kernels
 compiled before unrelated fields were created. The archive includes only layouts
 referenced by exported kernels or explicit `add_field()` entries; ndarray-only

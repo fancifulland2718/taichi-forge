@@ -3,6 +3,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <unordered_map>
 
 #include "taichi/aot/module_data.h"
 #include "taichi/rhi/device.h"
@@ -29,8 +30,9 @@ class AotModuleBuilder {
   }
 
   void set_compile_options(KernelCompileOptions options) {
-    TI_ERROR_IF(compile_options_frozen_,
-                "AOT compile options must be selected before exporting kernels.");
+    TI_ERROR_IF(
+        compile_options_frozen_,
+        "AOT compile options must be selected before exporting kernels.");
     compile_options_ = std::move(options);
   }
 
@@ -58,7 +60,11 @@ class AotModuleBuilder {
   virtual void dump(const std::string &output_dir,
                     const std::string &filename) const = 0;
 
-  void add_graph(const std::string &name, const aot::CompiledGraph &graph);
+  // Return the resolved ordinary entries so other producer paths can reuse the
+  // same exports. The Program retains ownership of the Kernel objects.
+  std::unordered_map<std::string, Kernel *> add_graph(
+      const std::string &name,
+      const aot::CompiledGraph &graph);
 
   // Producer IDs are relocated by dump(). Reject conflicting re-snapshots.
   void add_initial_root_data(const std::vector<aot::InitialRootData> &entries);
@@ -75,10 +81,9 @@ class AotModuleBuilder {
    */
   virtual void add_per_backend(const std::string &identifier,
                                Kernel *kernel) = 0;
-  virtual void add_with_launch_abi_per_backend(
-      const std::string &identifier,
-      Kernel *kernel,
-      const std::string &launch_abi) {
+  virtual void add_with_launch_abi_per_backend(const std::string &identifier,
+                                               Kernel *kernel,
+                                               const std::string &launch_abi) {
     TI_ERROR("AOT kernel launch ABI '{}' is unsupported by this backend",
              launch_abi);
   }
@@ -123,6 +128,20 @@ class AotModuleBuilder {
   aot::RootStorageViews root_storage_views_;
   KernelCompileOptions compile_options_;
   bool compile_options_frozen_{false};
+
+ private:
+  struct ExportIdentity {
+    Kernel *kernel;
+    std::string launch_abi;
+  };
+  bool needs_kernel_export(const std::string &name,
+                           Kernel *kernel,
+                           const std::string &launch_abi) const;
+  void record_kernel_export(const std::string &name,
+                            Kernel *kernel,
+                            const std::string &launch_abi);
+  std::unordered_map<std::string, ExportIdentity> kernel_exports_;
+  std::unordered_map<Kernel *, std::string> ordinary_export_names_;
 };
 
 }  // namespace taichi::lang

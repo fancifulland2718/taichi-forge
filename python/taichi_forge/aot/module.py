@@ -430,7 +430,8 @@ class Module:
                 "nodes into the CGraph format. Use Module.add_execution_plan(name, graph) "
                 "for recordings with an AOT reconstruction contract."
             )
-        self._aot_builder.add_graph(name, graph._compiled_graph)
+        entries = self._aot_builder.add_graph(name, graph._compiled_graph)
+        self._exported_kernels.update(entries)
         self._content += ["cgraph:" + name]
 
     def add_data(self, data):

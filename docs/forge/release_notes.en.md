@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT ordinary CGraphs and execution plans share exports with the same compiled
+  kernel identity and launch ABI, reducing duplicate LLVM/PTX/cubin payloads
+  and Vulkan aliases. Distinct specializations and explicit public aliases are
+  preserved; conflicting overwrites are rejected. Source Graphs and consumer
+  formats are unchanged. Paired components use private ABI 97.
 - CUDA sparse list reuse now latches its rebuild decision in the serial clear
   phase, preventing one generation block from publishing completion early.
   Ordinary and hash lists keep the same kernel count and execution order.
