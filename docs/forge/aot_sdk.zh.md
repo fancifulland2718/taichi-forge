@@ -3351,8 +3351,9 @@ schema 5 还会校验声明的 `dense_v1`、`list_v1`、`sparse_v1` 或 `sparse_
 经校验的调用声明，旧读取器在执行前拒绝未知布局。该布局需要配对的私有 ABI106
 组件，本身不代表已经公开独立 stream，也不代表所有 prepared execution 均可并发复用。
 Windows CUDA 已在独立原生 runtime 中交错执行保存的普通/gated kernel 实例，分别
-绑定参数和临时区，覆盖 compute capability 120 的 BC/PTX/cubin。这段 `real_func`
-用例需要默认 PTX 7.0 导出目标不具备的 NVPTX 栈指令，因此不将该目标列入本测试覆盖。
+绑定参数和临时区，在 compute capability 120 上覆盖 fast/balanced/full 的 BC/PTX/cubin。
+导出目标包含默认 SM80/PTX7.0 与显式 SM120/PTX8.7。CUDA range/mesh 循环在生成的调用方
+分配对齐的定长线程临时区，避免运行时 helper 的变长数组引入多余动态栈指令；默认部署目标保持不变。
 
 Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、
 反向和普通 CGraph 部署。这不代表已获得运行加速，也不改变上述 field 资源及

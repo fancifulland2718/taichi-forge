@@ -4401,9 +4401,11 @@ requires matching private ABI106 components and does not itself expose
 independent streams or make every prepared execution concurrently reusable.
 Windows CUDA tests interleave ordinary and gated instances of a saved kernel
 in a separate native runtime, with independent argument and temporary storage,
-for BC/PTX/cubin on compute capability 120. The `real_func` fixture requires
-NVPTX stack instructions unavailable with the default PTX 7.0 export target;
-that target is not qualified by this test.
+for BC/PTX/cubin at fast/balanced/full compilation tiers on compute capability
+120. Exports cover both the default SM80/PTX7.0 target and explicit SM120/PTX8.7.
+CUDA range and mesh loops allocate aligned thread-local storage with a static
+size in the generated caller, avoiding unnecessary dynamic-stack instructions
+from runtime helper arrays. The default deployment target is unchanged.
 
 PTX deployment was checked on Windows CUDA with dense-field and scalar/vector/
 matrix ndarray forward/reverse kernels and ordinary CGraphs. This does not

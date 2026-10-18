@@ -11,9 +11,12 @@ import taichi_forge as ti
 from tests import test_utils
 
 
-@pytest.mark.parametrize("artifact_format", ("bc", "ptx", "cubin"))
+@pytest.mark.parametrize(
+    "artifact_format,explicit_target", (("bc", False), ("ptx", False), ("ptx", True), ("cubin", True))
+)
+@pytest.mark.parametrize("tier", ("fast", "balanced", "full"))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_saved_execution_context_isolates_temporary_storage(artifact_format, tmp_path):
+def test_saved_execution_context_isolates_temporary_storage(artifact_format, explicit_target, tier, tmp_path):
     executable = Path(
         os.environ.get(
             "TI_TEST_CPP_EXECUTABLE",
@@ -41,7 +44,7 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, tmp
     def carried_value(value: ti.types.vector(2, ti.f32)) -> ti.f32:
         return transform(value)
 
-    @ti.kernel
+    @ti.kernel(opt_level=tier)
     def stage(out: ti.types.ndarray(ti.f32, 1), seed: ti.f32, n: ti.i32):
         carried = carried_value(ti.Vector([seed, seed * 2.0]))
         total = 0.0
@@ -50,9 +53,11 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, tmp
         for j in range(n):
             out[j] = total + j
 
-    # real_func requires a target with LLVM NVPTX stack support. Use the exact
-    # consumer target for all formats, as required for cubin deployment.
-    caps = [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
+    caps = (
+        [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
+        if explicit_target
+        else None
+    )
     module = ti.aot.Module(artifact_format=artifact_format, caps=caps)
     module.add_kernel(stage, name="stage")
     module._aot_builder._add_with_launch_abi("gated_stage", module._exported_kernels["stage"], "cuda_graph_gate_v1")
@@ -62,6 +67,13 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, tmp
     metadata = json.loads((directory / "aot_metadata.json").read_text(encoding="utf-8"))
     assert metadata["schema_version"] == 8
     assert metadata["kernel_format"] == artifact_format
+    if not explicit_target:
+        assert {item["key"]: item["value"] for item in metadata["required_caps"]} == {
+            "cuda_compute_capability": 80,
+            "cuda_ptx_version": 70,
+        }
+        if artifact_format == "ptx":
+            assert b".version 7.0" in (directory / "stage.ptx").read_bytes()
     assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == {
         "stage": "runtime_context_v2",
         "gated_stage": "cuda_graph_gate_context_v2",

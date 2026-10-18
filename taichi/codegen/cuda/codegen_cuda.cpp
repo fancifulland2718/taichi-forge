@@ -716,6 +716,13 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     create_naive_range_for(for_stmt);
   }
 
+  llvm::Value *create_static_tls_buffer(std::size_t tls_size) {
+    TI_ASSERT(tls_size > 0);
+    auto *type = llvm::ArrayType::get(builder->getInt8Ty(), tls_size);
+    auto *storage = create_entry_block_alloca(type, 8);
+    return builder->CreatePointerCast(storage, get_tls_buffer_type());
+  }
+
   void create_offload_range_for(OffloadedStmt *stmt) override {
     auto tls_prologue = create_xlogue(stmt->tls_prologue);
 
@@ -743,24 +750,23 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     }
 
     auto epilogue = create_xlogue(stmt->tls_epilogue);
+    auto *tls_storage = create_static_tls_buffer(stmt->tls_size);
 
     auto [begin, end] = get_range_for_bounds(stmt);
     if (stmt->external_shared_staged) {
       TI_ASSERT(bls_prologue != nullptr);
       if (stmt->external_shared_iteration_shape.size() == 2) {
         TI_ASSERT(stmt->external_shared_tile_shape.size() == 2);
-        call("gpu_parallel_range_for_shared_staged_2d", get_arg(0), begin,
-             end,
+        call("gpu_parallel_range_for_shared_staged_2d_with_tls", get_arg(0),
+             begin, end,
              tlctx->get_constant(stmt->external_shared_iteration_shape[0]),
              tlctx->get_constant(stmt->external_shared_iteration_shape[1]),
              tlctx->get_constant(stmt->external_shared_tile_shape[0]),
              tlctx->get_constant(stmt->external_shared_tile_shape[1]),
-             tls_prologue, bls_prologue, body, epilogue,
-             tlctx->get_constant(stmt->tls_size));
+             tls_prologue, bls_prologue, body, epilogue, tls_storage);
       } else {
-        call("gpu_parallel_range_for_shared_staged", get_arg(0), begin, end,
-             tls_prologue, bls_prologue, body, epilogue,
-             tlctx->get_constant(stmt->tls_size));
+        call("gpu_parallel_range_for_shared_staged_with_tls", get_arg(0), begin,
+             end, tls_prologue, bls_prologue, body, epilogue, tls_storage);
       }
     } else if (stmt->one_to_one) {
       // CUDA bounded Graph payloads keep the backend's ordinary
@@ -778,12 +784,11 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
           end_i64);
       auto *bounded_end =
           builder->CreateTrunc(bounded_end_i64, builder->getInt32Ty());
-      call("gpu_parallel_range_for", get_arg(0), begin, bounded_end,
-           tls_prologue, body, epilogue,
-           tlctx->get_constant(stmt->tls_size));
+      call("gpu_parallel_range_for_with_tls", get_arg(0), begin, bounded_end,
+           tls_prologue, body, epilogue, tls_storage);
     } else {
-      call("gpu_parallel_range_for", get_arg(0), begin, end, tls_prologue,
-           body, epilogue, tlctx->get_constant(stmt->tls_size));
+      call("gpu_parallel_range_for_with_tls", get_arg(0), begin, end,
+           tls_prologue, body, epilogue, tls_storage);
     }
   }
 
@@ -856,9 +861,9 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
 
     auto tls_epilogue = create_mesh_xlogue(stmt->tls_epilogue);
 
-    call("gpu_parallel_mesh_for", get_arg(0),
+    call("gpu_parallel_mesh_for_with_tls", get_arg(0),
          tlctx->get_constant(stmt->mesh->num_patches), tls_prologue, body,
-         tls_epilogue, tlctx->get_constant(stmt->tls_size));
+         tls_epilogue, create_static_tls_buffer(stmt->tls_size));
   }
 
   void emit_cuda_gc(OffloadedStmt *stmt) {

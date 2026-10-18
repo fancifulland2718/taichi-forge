@@ -2962,22 +2962,14 @@ void cpu_parallel_range_for_bounded_cancellable(
       body, epilogue, tls_size);
 }
 
-void gpu_parallel_range_for(RuntimeContext *context,
-                            int begin,
-                            int end,
-                            range_for_xlogue prologue,
-                            RangeForTaskFunc *func,
-                            range_for_xlogue epilogue,
-                            const std::size_t tls_size) {
+void gpu_parallel_range_for_with_tls(RuntimeContext *context,
+                                     int begin,
+                                     int end,
+                                     range_for_xlogue prologue,
+                                     RangeForTaskFunc *func,
+                                     range_for_xlogue epilogue,
+                                     char *tls_ptr) {
   int idx = thread_idx() + block_dim() * block_idx() + begin;
-#ifdef ARCH_amdgpu
-  // AMDGPU doesn't support dynamic array
-  // TODO: find a better way to set the tls_size (maybe like struct_for
-  alignas(8) char tls_buffer[64];
-#else
-  alignas(8) char tls_buffer[tls_size];
-#endif
-  auto tls_ptr = &tls_buffer[0];
   if (prologue)
     prologue(context, tls_ptr);
   while (idx < end) {
@@ -2986,6 +2978,25 @@ void gpu_parallel_range_for(RuntimeContext *context,
   }
   if (epilogue)
     epilogue(context, tls_ptr);
+}
+
+// Legacy and non-CUDA code retains its historical helper signature. CUDA
+// codegen supplies fixed-size, aligned thread storage directly to _with_tls
+// so even low optimization tiers need no dynamic stack save/restore.
+void gpu_parallel_range_for(RuntimeContext *context,
+                            int begin,
+                            int end,
+                            range_for_xlogue prologue,
+                            RangeForTaskFunc *func,
+                            range_for_xlogue epilogue,
+                            const std::size_t tls_size) {
+#ifdef ARCH_amdgpu
+  alignas(8) char tls_buffer[64];
+#else
+  alignas(8) char tls_buffer[tls_size];
+#endif
+  gpu_parallel_range_for_with_tls(context, begin, end, prologue, func, epilogue,
+                                  tls_buffer);
 }
 
 void gpu_parallel_range_for_one_to_one(RuntimeContext *context,
@@ -3006,6 +3017,26 @@ void gpu_parallel_range_for_one_to_one(RuntimeContext *context,
     epilogue(context, tls_ptr);
 }
 
+void gpu_parallel_range_for_shared_staged_with_tls(
+    RuntimeContext *context,
+    int begin,
+    int end,
+    range_for_xlogue prologue,
+    range_for_xlogue bls_prologue,
+    RangeForTaskFunc *func,
+    range_for_xlogue epilogue,
+    char *tls_ptr) {
+  int idx = thread_idx() + block_dim() * block_idx() + begin;
+  if (prologue)
+    prologue(context, tls_ptr);
+  bls_prologue(context, tls_ptr);
+  block_barrier();
+  if (idx < end)
+    func(context, tls_ptr, idx);
+  if (epilogue)
+    epilogue(context, tls_ptr);
+}
+
 void gpu_parallel_range_for_shared_staged(RuntimeContext *context,
                                           int begin,
                                           int end,
@@ -3014,14 +3045,37 @@ void gpu_parallel_range_for_shared_staged(RuntimeContext *context,
                                           RangeForTaskFunc *func,
                                           range_for_xlogue epilogue,
                                           const std::size_t tls_size) {
-  int idx = thread_idx() + block_dim() * block_idx() + begin;
   alignas(8) char tls_buffer[tls_size];
-  auto tls_ptr = &tls_buffer[0];
+  gpu_parallel_range_for_shared_staged_with_tls(
+      context, begin, end, prologue, bls_prologue, func, epilogue, tls_buffer);
+}
+
+void gpu_parallel_range_for_shared_staged_2d_with_tls(
+    RuntimeContext *context,
+    int begin,
+    int end,
+    int logical_height,
+    int logical_width,
+    int tile_height,
+    int tile_width,
+    range_for_xlogue prologue,
+    range_for_xlogue bls_prologue,
+    RangeForTaskFunc *func,
+    range_for_xlogue epilogue,
+    char *tls_ptr) {
+  int tiles_per_row = (logical_width + tile_width - 1) / tile_width;
+  int tile_row = block_idx() / tiles_per_row;
+  int tile_column = block_idx() % tiles_per_row;
+  int local_row = thread_idx() / tile_width;
+  int local_column = thread_idx() % tile_width;
+  int row = tile_row * tile_height + local_row;
+  int column = tile_column * tile_width + local_column;
+  int idx = begin + row * logical_width + column;
   if (prologue)
     prologue(context, tls_ptr);
   bls_prologue(context, tls_ptr);
   block_barrier();
-  if (idx < end)
+  if (row < logical_height && column < logical_width && idx < end)
     func(context, tls_ptr, idx);
   if (epilogue)
     epilogue(context, tls_ptr);
@@ -3039,24 +3093,10 @@ void gpu_parallel_range_for_shared_staged_2d(RuntimeContext *context,
                                              RangeForTaskFunc *func,
                                              range_for_xlogue epilogue,
                                              const std::size_t tls_size) {
-  int tiles_per_row = (logical_width + tile_width - 1) / tile_width;
-  int tile_row = block_idx() / tiles_per_row;
-  int tile_column = block_idx() % tiles_per_row;
-  int local_row = thread_idx() / tile_width;
-  int local_column = thread_idx() % tile_width;
-  int row = tile_row * tile_height + local_row;
-  int column = tile_column * tile_width + local_column;
-  int idx = begin + row * logical_width + column;
   alignas(8) char tls_buffer[tls_size];
-  auto tls_ptr = &tls_buffer[0];
-  if (prologue)
-    prologue(context, tls_ptr);
-  bls_prologue(context, tls_ptr);
-  block_barrier();
-  if (row < logical_height && column < logical_width && idx < end)
-    func(context, tls_ptr, idx);
-  if (epilogue)
-    epilogue(context, tls_ptr);
+  gpu_parallel_range_for_shared_staged_2d_with_tls(
+      context, begin, end, logical_height, logical_width, tile_height,
+      tile_width, prologue, bls_prologue, func, epilogue, tls_buffer);
 }
 
 struct mesh_task_helper_context {
@@ -3119,20 +3159,12 @@ void cpu_parallel_mesh_for(RuntimeContext *context,
                         &ctx, cpu_parallel_mesh_for_task);
 }
 
-void gpu_parallel_mesh_for(RuntimeContext *context,
-                           int num_patches,
-                           mesh_for_xlogue prologue,
-                           MeshForTaskFunc *func,
-                           mesh_for_xlogue epilogue,
-                           const std::size_t tls_size) {
-#ifdef ARCH_amdgpu
-  // AMDGPU doesn't support dynamic array
-  // TODO: find a better way to set the tls_size (maybe like struct_for
-  alignas(8) char tls_buffer[64];
-#else
-  alignas(8) char tls_buffer[tls_size];
-#endif
-  auto tls_ptr = &tls_buffer[0];
+void gpu_parallel_mesh_for_with_tls(RuntimeContext *context,
+                                    int num_patches,
+                                    mesh_for_xlogue prologue,
+                                    MeshForTaskFunc *func,
+                                    mesh_for_xlogue epilogue,
+                                    char *tls_ptr) {
   for (int idx = block_idx(); idx < num_patches; idx += grid_dim()) {
     if (prologue)
       prologue(context, tls_ptr, idx);
@@ -3140,6 +3172,21 @@ void gpu_parallel_mesh_for(RuntimeContext *context,
     if (epilogue)
       epilogue(context, tls_ptr, idx);
   }
+}
+
+void gpu_parallel_mesh_for(RuntimeContext *context,
+                           int num_patches,
+                           mesh_for_xlogue prologue,
+                           MeshForTaskFunc *func,
+                           mesh_for_xlogue epilogue,
+                           const std::size_t tls_size) {
+#ifdef ARCH_amdgpu
+  alignas(8) char tls_buffer[64];
+#else
+  alignas(8) char tls_buffer[tls_size];
+#endif
+  gpu_parallel_mesh_for_with_tls(context, num_patches, prologue, func, epilogue,
+                                 tls_buffer);
 }
 
 i32 linear_thread_idx(RuntimeContext *context) {
