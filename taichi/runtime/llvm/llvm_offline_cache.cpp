@@ -13,6 +13,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/program/kernel.h"
 #include "taichi/runtime/llvm/llvm_context.h"
+#include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/llvm_module_codec.h"
 #include "taichi/util/io.h"
 #include "taichi/util/lock.h"
@@ -191,6 +192,11 @@ bool LlvmOfflineCacheFileReader::get_field_cache(
   const auto &loaded_field_cache = itr->second;
   res = loaded_field_cache;  // copy assign
   return true;
+}
+
+std::unordered_set<int> LlvmOfflineCacheFileReader::get_element_list_tree_ids(
+    bool exact) const {
+  return LLVM::aot_element_list_tree_ids(data_, exact);
 }
 
 bool LlvmOfflineCacheFileReader::has_kernel(const std::string &key) const {

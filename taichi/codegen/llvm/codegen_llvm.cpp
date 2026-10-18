@@ -2528,6 +2528,15 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;
 
+  // Resource ownership is needed even when host list reuse is disabled.
+  // Keep sparse_list_op independent so this does not enable reuse implicitly.
+  if ((stmt->task_type == OffloadedStmt::TaskType::listgen ||
+       stmt->task_type == OffloadedStmt::TaskType::struct_for) && stmt->snode) {
+    current_task->sparse_list_snode_id = stmt->snode->id;
+    current_task->sparse_list_parent_snode_id =
+        stmt->snode->parent ? stmt->snode->parent->id : -1;
+  }
+
   const bool needs_sparse_list_metadata =
       arch_is_cpu(compile_config.arch) ||
       (compile_config.arch == Arch::cuda &&

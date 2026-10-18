@@ -40,6 +40,10 @@ lifetimes. The entries below describe the changes.
 - Fix CUDA pool ownership for multiple non-demoted dense list trees. The
   default automatic pool path assigns independent pools even without a
   NodeManager, preventing a second tree from reusing a sealed global pool.
+- CPU/CUDA non-demoted dense AOT declares exact task/tree list requirements
+  through `list_v1`, with per-tree allocation, relocation and dense initial
+  state. This fixes missing storage when consumer settings differ. CPU bitcode
+  and CUDA PTX checks cover ordinary/fixed calls, actual field gradients and lifetimes.
 - AOT ordinary CGraphs and execution plans share exports with the same compiled
   kernel identity and launch ABI, reducing duplicate LLVM/PTX/cubin payloads
   and Vulkan aliases. Distinct specializations and explicit public aliases are
@@ -638,8 +642,8 @@ lifetimes. The entries below describe the changes.
   Independent instances can share one runtime without sharing primal/gradient
   storage; close/reload and ordinary Graph replay are verified for bitcode and
   CUDA PTX. Unused PTX relocation constants are removed after optimization.
-  The `sparse_v1` extension above separately covers pointer/bitmasked/dynamic
-  trees; unsupported layouts and non-demoted dense lists retain their contract.
+  The sparse extension above separately covers pointer/bitmasked/dynamic trees;
+  `list_v1` covers non-demoted dense lists. Unsupported layouts retain their contract.
 - Correct CUDA driver JIT option encoding for register limits and diagnostic
   buffer lengths. Explicit register limits now reach the shared JIT/PTX AOT
   loader as integer values instead of host addresses.

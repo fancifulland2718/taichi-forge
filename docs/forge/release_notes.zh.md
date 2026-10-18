@@ -35,6 +35,9 @@
   后续变化的 `demote_dense_struct_fors` 配置；配套组件使用私有 ABI 98。
 - 修复 CUDA 多棵未降级 dense 列表树的池所有权：默认自动池路径也为没有
   NodeManager 的列表树分配独立池，避免第二棵树沿用已封存全局池而触发设备断言。
+- CPU/CUDA 未降级 dense AOT 通过 `list_v1` 声明精确的任务/树列表需求，加载时
+  按树分配并重定位，支持纯 dense 初始状态；修复消费者配置不同导致的漏分配。
+  CPU bitcode/CUDA PTX 已验证普通及固定调用、真实 field 梯度和生命周期。
 - AOT 普通 CGraph 与执行计划按相同编译对象和 launch ABI 共享导出入口，减少重复
   LLVM/PTX/cubin 载荷及 Vulkan 别名。保留不同特化和显式公共别名，拒绝冲突覆盖；
   不修改原 Graph 或消费端格式，配套组件使用私有 ABI 97。
@@ -459,8 +462,8 @@
 - CPU/CUDA dense field 的 AOT schema 5 在加载时绑定模块局部资源，同一 runtime
   可独立加载多个实例，前向及梯度存储互不影响。bitcode 与 CUDA PTX 已验证
   关闭/重载及普通 Graph；优化后不再使用的 PTX 重定位常量会被清除。
-  上述 `sparse_v1` 扩展另行覆盖 pointer/bitmasked/dynamic；未覆盖布局和未降级的
-  dense list 仍保留原合同。
+  上述 sparse 扩展另行覆盖 pointer/bitmasked/dynamic，`list_v1` 覆盖未降级的
+  dense list；未覆盖布局仍保留原合同。
 - 修正 CUDA driver JIT 的寄存器上限和诊断缓冲区长度传参；显式寄存器限制现在
   按整数值传入 JIT/PTX AOT 共用加载路径，避免将宿主变量地址误作选项值。
 - 修复 Windows C API 对分离 runtime 对象库的链接及 Graph 纹理对象所有权，恢复

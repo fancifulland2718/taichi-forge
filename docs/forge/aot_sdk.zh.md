@@ -3139,7 +3139,7 @@ Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重�
 这不修改原 Graph，也不合并不同 ndarray 特化、普通/门控 ABI 或用户显式声明的公共别名。
 入口同名但指向不同特化/ABI 时会在导出前拒绝。CPU/CUDA 避免多份 LLVM/PTX/cubin
 载荷；Vulkan 沿用已有 shader 复用，并减少冗余入口别名。查找只发生在生产端导出期间，
-消费端格式和调用路径保持不变；配套组件使用私有 ABI 97。
+消费端格式和调用路径保持不变；配套组件使用私有 ABI 98。
 
 Vulkan 模块可导出在 `Module()` 之后创建的 dense field，也可复用无关 field 创建前
 已编译的 kernel。归档只包含导出 kernel 或显式 `add_field()` 引用的布局；仅使用
@@ -3176,10 +3176,21 @@ dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。�
 `sparse_v2`）；同 runtime 的
 两个实例拥有独立活跃集与梯度，覆盖 CPU bitcode 和 CUDA bitcode/PTX/cubin。遍历和
 GC 的 tree/local-node key 在执行前重定位。这不把 sparse 活跃存储序列化为根快照或
-flat view。旧嵌入 ID 产物、未降级的 dense list 及
+flat view。旧嵌入 ID 产物及
 hash/mesh/quantized 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
 共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
+
+`demote_dense_struct_fors=False` 下需要元素列表的新 CPU/CUDA 产物声明 `list_v1`。
+加载器仅解析已有的任务和 SNode 元数据，按树分配列表；同一 kernel 读取的其他
+dense 根不会因此分配列表，LLVM 代码仍按需加载。分配不依赖消费者的 demote 设置，
+统计与退休使用同一份创建时合同。纯 dense 布局仍可保存初始根数据和使用存储视图。
+CPU bitcode/CUDA PTX 的小型测试覆盖普通/固定调用、实际 field 梯度、根快照、双模块、
+关闭/重载及独立/借用 runtime；CUDA 列表复用开关两种设置均通过。
+旧产物缺少精确任务归属时，仅对对应 kernel 的依赖树保守分配列表，可能多分配；
+旧 CPU bitcode/CUDA PTX 的普通前向/反向兼容性已检查，未扩大旧 CUDA fixed 准入。
+新 `list_v1` 会被不认识该合同的旧 runtime 拒绝。编译默认选项和持久字段布局不变，
+配套组件使用私有 ABI 98。
 
 CPU 支持稀疏 prepared batch；新 CUDA `sparse_v2` 的 `.prepare()` 使用原生固定
 Graph，覆盖 pointer/bitmasked/dynamic 的激活、遍历、GC 和实际 field 梯度。
@@ -3195,7 +3206,7 @@ host 回读。不同模块不共享该缓存。关闭依赖会等待在途工作
 固定重放会减少 host 提交，却仍执行设备列表检查，不能据此保证稳定拓扑的小任务更快。
 默认固定重放使用编译器已有的父列表容量上界缩小 listgen 网格，沿用 grid-stride
 遍历；不读回活跃数量、不新增编译产物，显式 task plan 保持其选择的启动策略。
-该扩展不改变普通 JIT Graph 的稀疏准入。配套组件使用私有 ABI 97。
+该扩展不改变普通 JIT Graph 的稀疏准入。配套组件使用私有 ABI 98。
 
 Windows CUDA bitcode/PTX/cubin 还验证了稀疏 `cuda_immutable_argument_frames`
 参数族：多个参数帧共用一个可执行图，切换标量/数组后保留实际 field 梯度和普通调用
@@ -3214,7 +3225,7 @@ capability 80、PTX 7.0，面向 Ampere 及更新设备；已知部署设备时�
 `compile_options` 已固化到 PTX 中。schema 4/5 记录目标、入口、寄存器上限、数值
 策略和载荷校验和，并将载荷与启动元数据绑定。缺失或损坏的 PTX 不会回退读取旧
 bitcode；同一模块内失败的 kernel 查询保持失败，替换产物后需重新加载模块。
-schema 5 还会校验声明的 `dense_v1`、`sparse_v1` 或 `sparse_v2` 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
+schema 5 还会校验声明的 `dense_v1`、`list_v1`、`sparse_v1` 或 `sparse_v2` 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
 及 schema 4 PTX 仍可读取。
 
 Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、

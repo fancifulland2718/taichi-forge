@@ -188,6 +188,80 @@ TEST(LlvmAotMetadataTest, SparseParentClosureIsValidatedBeforeAllocation) {
   EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(invalid, true));
 }
 
+TEST(LlvmAotMetadataTest, ListOwnersFollowTasksInsteadOfAllKernelDependencies) {
+  LlvmOfflineCache cache;
+  for (int id : {0, 1}) {
+    auto &field = cache.fields[id];
+    field.tree_id = id;
+    field.snode_metas.resize(1);
+    field.snode_metas[0].id = 10 + id;
+    field.snode_metas[0].type = SNodeType::dense;
+  }
+  auto &kernel = cache.kernels["energy"];
+  kernel.used_snode_tree_ids = {0, 1};
+  kernel.compiled_data.tasks.emplace_back("loop");
+  auto &task = kernel.compiled_data.tasks.back();
+  task.task_type = OffloadedTaskType::struct_for;
+  task.sparse_list_snode_id = 10;
+  EXPECT_EQ(LLVM::aot_element_list_tree_ids(cache, true),
+            (std::unordered_set<int>{0}));
+  task.task_type = OffloadedTaskType::listgen;
+  // CUDA reuse-off still declares list ownership without sparse_list_op.
+  EXPECT_EQ(LLVM::aot_element_list_tree_ids(cache, true),
+            (std::unordered_set<int>{0}));
+  task.task_type = OffloadedTaskType::range_for;
+  EXPECT_TRUE(LLVM::aot_element_list_tree_ids(cache, true).empty());
+  cache.fields[1].snode_metas[0].type = SNodeType::pointer;
+  EXPECT_EQ(LLVM::aot_element_list_tree_ids(cache, true),
+            (std::unordered_set<int>{1}));
+}
+
+TEST(LlvmAotMetadataTest, ListOwnersValidateClosureAndBoundLegacyFallback) {
+  LlvmOfflineCache cache;
+  for (int id : {0, 1, 2}) {
+    auto &field = cache.fields[id];
+    field.tree_id = id;
+    field.snode_metas.resize(1);
+    field.snode_metas[0].id = 10 + id;
+    field.snode_metas[0].type = SNodeType::dense;
+  }
+  auto &kernel = cache.kernels["energy"];
+  kernel.used_snode_tree_ids = {0, 1};
+  kernel.compiled_data.tasks.emplace_back("loop");
+  auto &task = kernel.compiled_data.tasks.back();
+  task.task_type = OffloadedTaskType::struct_for;
+  EXPECT_ANY_THROW(LLVM::aot_element_list_tree_ids(cache, true));
+  EXPECT_EQ(LLVM::aot_element_list_tree_ids(cache, false),
+            (std::unordered_set<int>{0, 1}));
+  task.sparse_list_snode_id = 12;  // Valid tree, absent from kernel closure.
+  EXPECT_ANY_THROW(LLVM::aot_element_list_tree_ids(cache, true));
+  EXPECT_ANY_THROW(LLVM::aot_element_list_tree_ids(cache, false));
+  task.sparse_list_snode_id = 999;
+  EXPECT_ANY_THROW(LLVM::aot_element_list_tree_ids(cache, false));
+  task.sparse_list_snode_id = 10;
+  kernel.used_snode_tree_ids.push_back(99);
+  EXPECT_ANY_THROW(LLVM::aot_element_list_tree_ids(cache, true));
+}
+
+TEST(LlvmAotMetadataTest, ExactListBindingPreservesDenseSnapshotFormat) {
+  LLVM::LlvmAotMetadata metadata;
+  metadata.resource_binding = "list_v1";
+  metadata.abi_sha256 = std::string(64, 'a');
+  for (const auto *format : {"bc", "ptx", "cubin"}) {
+    metadata.kernel_format = format;
+    metadata.schema_version = metadata.kernel_format == "cubin"
+                                  ? LLVM::kCudaCubinAotSchemaVersion
+                                  : LLVM::kRelocatableLlvmAotSchemaVersion;
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+    metadata.schema_version = LLVM::kInitialRootDataAotSchemaVersion;
+    metadata.initial_root_data.push_back({0, 32, std::string(64, 'b')});
+    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+    metadata.initial_root_data.clear();
+  }
+  metadata.resource_binding = "list_v2";
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+}
+
 TEST(LlvmAotMetadataTest, CubinRequiresNewSchemaAndBinaryCompatibleTarget) {
   LLVM::LlvmAotMetadata metadata;
   metadata.schema_version = LLVM::kCudaCubinAotSchemaVersion;

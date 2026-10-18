@@ -31,7 +31,10 @@ inline bool is_sparse_aot_resource_binding(const std::string &binding) {
 }
 
 inline bool is_relocatable_aot_resource_binding(const std::string &binding) {
-  return binding == "dense_v1" || is_sparse_aot_resource_binding(binding);
+  // list_v1 certifies exact task-to-tree list ownership and CUDA's current
+  // device list protocol. Node layouts, not this name, govern root snapshots.
+  return binding == "dense_v1" || binding == "list_v1" ||
+         is_sparse_aot_resource_binding(binding);
 }
 
 struct CudaAotArtifactMetadata {
@@ -116,8 +119,9 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   const bool initial_state =
       base_schema == kInitialRootDataAotSchemaVersion;
   TI_ERROR_IF(initial_state != !metadata.initial_root_data.empty() ||
-                  (initial_state && metadata.resource_binding != "dense_v1"),
-              "AOT initial root data requires schema 7 and dense_v1 binding.");
+                  (initial_state && metadata.resource_binding != "dense_v1" &&
+                   metadata.resource_binding != "list_v1"),
+              "AOT initial root data requires schema 7 and dense root binding.");
   // Reuse the exact BC/PTX or cubin contract without copying payload metadata.
   const auto schema = initial_state ? (metadata.kernel_format == "cubin"
                                            ? kCudaCubinAotSchemaVersion
@@ -145,7 +149,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
             (metadata.kernel_format != "bc" &&
              metadata.kernel_format != "ptx") ||
             metadata.abi_sha256.size() != 64,
-        "Relocatable LLVM AOT requires dense_v1/sparse_v1/sparse_v2, BC/PTX and an ABI "
+        "Relocatable LLVM AOT requires dense_v1/list_v1/sparse_v1/sparse_v2, BC/PTX and an ABI "
         "checksum");
   } else if (schema == 2) {
     TI_ERROR_IF(!metadata.kernel_format.empty() && metadata.kernel_format != "ll",

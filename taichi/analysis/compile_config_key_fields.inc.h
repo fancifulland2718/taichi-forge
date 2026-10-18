@@ -20,6 +20,10 @@
   CACHE_FIELD(full_simplify_global_iter_cap);
   CACHE_FIELD(move_loop_invariant_outside_if);
   CACHE_FIELD(demote_dense_struct_fors);
+  if (!config.demote_dense_struct_fors &&
+      (arch_is_cpu(config.arch) || config.arch == Arch::cuda)) {
+    CACHE_VALUE(std::string("llvm-dense-list-owner-v1"));
+  }
   CACHE_FIELD(spirv_skip_intermediate_listgen);
   CACHE_FIELD(spirv_listgen_subgroup_ballot);
   CACHE_FIELD(listgen_static_grid_dim);

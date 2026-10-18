@@ -99,7 +99,9 @@ class LlvmAotModule final : public aot::Module {
   std::unordered_map<std::string, std::string> artifact_failures_;
   std::vector<int> snode_tree_ids_;
   std::vector<std::size_t> root_storage_sizes_;
+  bool dense_root_storage_{false};
   std::map<int, int> tree_bindings_;
+  std::unordered_set<int> element_list_tree_ids_;
   std::vector<int> reserved_tree_ids_;
   std::map<int, aot::InitialRootData> initial_root_data_;
 

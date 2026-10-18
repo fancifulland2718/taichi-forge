@@ -91,7 +91,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
   metadata.kernel_format = artifact_format_;
   bool relocatable =
-      !cache_.fields.empty() && compile_config_.demote_dense_struct_fors &&
+      !cache_.fields.empty() &&
       (arch_is_cpu(compile_config_.arch) || compile_config_.arch == Arch::cuda);
   std::map<int, int> tree_mapping;
   bool sparse = false;
@@ -104,10 +104,12 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   }
   for (const auto &[name, kernel] : cache_.kernels) {
     for (const auto &task : kernel.compiled_data.tasks) {
-      relocatable &= LLVM::is_relocatable_aot_task(task.task_type, sparse);
+      relocatable &= LLVM::is_relocatable_aot_task(task.task_type, true);
     }
   }
   if (relocatable) {
+    const auto list_trees = LLVM::aot_element_list_tree_ids(
+        cache_, !compile_config_.demote_dense_struct_fors);
     int local_id = 0;
     for (auto &[producer, local] : tree_mapping)
       local = local_id++;
@@ -119,11 +121,14 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     exported.fields = std::move(fields);
     // v2 qualifies CUDA's serially latched listgen decision for fixed replay.
     // Old sparse_v1 artifacts remain valid for ordinary execution only.
-    metadata.resource_binding = sparse
-                                    ? (compile_config_.arch == Arch::cuda
-                                           ? "sparse_v2"
-                                           : "sparse_v1")
-                                    : "dense_v1";
+    if (!compile_config_.demote_dense_struct_fors && !list_trees.empty()) {
+      metadata.resource_binding = "list_v1";
+    } else if (sparse) {
+      metadata.resource_binding =
+          compile_config_.arch == Arch::cuda ? "sparse_v2" : "sparse_v1";
+    } else {
+      metadata.resource_binding = "dense_v1";
+    }
   }
   TI_ERROR_IF(!initial_root_data_.empty() && (!relocatable || sparse),
               "AOT initial root state requires relocatable dense trees.");

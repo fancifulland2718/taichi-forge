@@ -110,16 +110,19 @@ LlvmAotModule::LlvmAotModule(
   }
   const bool relocatable =
       is_relocatable_aot_resource_binding(metadata.resource_binding);
-  const bool sparse = is_sparse_aot_resource_binding(metadata.resource_binding);
+  const bool exact_lists = metadata.resource_binding == "list_v1";
+  const bool allows_sparse =
+      exact_lists || is_sparse_aot_resource_binding(metadata.resource_binding);
+  bool sparse = false;
 #if defined(TI_WITH_CUDA)
-  if (arch() == Arch::cuda && metadata.resource_binding == "sparse_v2") {
+  if (arch() == Arch::cuda &&
+      (metadata.resource_binding == "sparse_v2" || exact_lists)) {
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
     TI_ASSERT(launcher != nullptr);
     launcher->enable_sparse_graph_replay();
   }
 #endif
   std::vector<size_t> root_sizes;
-  std::unordered_set<int> snode_ids;
   // Validate the complete resource closure before reserving or allocating any
   // tree. Legacy artifacts retain their original ID collision contract.
   for (std::size_t i = 0; i < snode_tree_ids_.size(); ++i) {
@@ -129,15 +132,11 @@ LlvmAotModule::LlvmAotModule(
         !cache_reader_->get_field_cache(field, id) || field.tree_id != id,
         "Invalid LLVM AOT field metadata for tree {}", id);
     root_sizes.push_back(field.root_size);
+    for (const auto &node : field.snode_metas)
+      sparse |= !is_dense_aot_snode(node.type);
     if (relocatable) {
-      TI_ERROR_IF(id != i || !executor_->get_config().demote_dense_struct_fors,
-                  "Invalid relocatable LLVM AOT tree {} or runtime "
-                  "configuration", id);
-      validate_relocatable_aot_field(field, sparse);
-      for (const auto &node : field.snode_metas) {
-        TI_ERROR_IF(!snode_ids.insert(node.id).second,
-                    "Duplicate module-local LLVM AOT SNode id {}", node.id);
-      }
+      TI_ERROR_IF(id != i, "Invalid relocatable LLVM AOT tree {}", id);
+      validate_relocatable_aot_field(field, allows_sparse);
     } else {
       TI_ERROR_IF(executor_->has_snode_tree_binding(id),
                   "LLVM AOT SNode tree id {} conflicts with an active module; "
@@ -145,6 +144,13 @@ LlvmAotModule::LlvmAotModule(
                   id);
     }
   }
+  // This single node-to-tree index also rejects duplicate module SNode IDs.
+  const auto list_trees = cache_reader_->get_element_list_tree_ids(exact_lists);
+  TI_ERROR_IF(metadata.resource_binding == "dense_v1" && !list_trees.empty(),
+              "Dense LLVM AOT binding cannot contain list tasks");
+  dense_root_storage_ = relocatable && !sparse;
+  TI_ERROR_IF(!metadata.initial_root_data.empty() && !dense_root_storage_,
+              "AOT initial root state requires relocatable dense trees.");
   aot::validate_initial_root_data(metadata.initial_root_data, root_sizes);
   root_storage_views_ = aot::load_root_storage_views(*directory_);
   TI_ERROR_IF(!root_storage_views_.empty() && (!relocatable || sparse),
@@ -168,6 +174,8 @@ LlvmAotModule::LlvmAotModule(
     for (const auto &entry : metadata.initial_root_data) {
       initial_root_data_.emplace(tree_bindings_.at(entry.tree_id), entry);
     }
+    for (int id : list_trees)
+      element_list_tree_ids_.insert(tree_bindings_.at(id));
   } catch (...) {
     executor_->release_aot_snode_tree_ids(reserved_tree_ids_);
     throw;
@@ -225,7 +233,7 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
         "Relocatable LLVM AOT tree dependencies must be sorted and unique");
     for (const auto &task : loaded.compiled_data.tasks) {
       TI_ERROR_IF(!is_relocatable_aot_task(
-                      task.task_type, is_sparse_aot_resource_binding(metadata_.resource_binding)),
+                      task.task_type, metadata_.resource_binding != "dense_v1"),
                   "Task is incompatible with the LLVM AOT resource binding");
     }
     if (loaded.compiled_data.module) {
@@ -378,7 +386,7 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
 
 LlvmAotModule::RootStorage LlvmAotModule::get_root_storage(int tree_id) {
   const auto binding = tree_bindings_.find(tree_id);
-  if (metadata_.resource_binding != "dense_v1" ||
+  if (!dense_root_storage_ ||
       binding == tree_bindings_.end() || tree_id < 0 ||
       static_cast<std::size_t>(tree_id) >= root_storage_sizes_.size() ||
       !is_snode_tree_initialized(binding->second))
@@ -432,7 +440,8 @@ void LlvmAotModule::initialize_snode_tree(
   TI_ERROR_IF(is_corrupted(), "Cannot initialize an invalid LLVM AOT module.");
   if (is_snode_tree_initialized(field.tree_id))
     return;
-  executor_->initialize_llvm_runtime_snodes(field, result_buffer);
+  executor_->initialize_llvm_runtime_snodes(
+      field, result_buffer, element_list_tree_ids_.count(field.tree_id) != 0);
   // Record ownership before upload so a failed payload also retires the root.
   set_initialized_snode_tree(field.tree_id);
   const auto initial = initial_root_data_.find(field.tree_id);

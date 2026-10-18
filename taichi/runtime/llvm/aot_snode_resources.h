@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "taichi/ir/offloaded_task_type.h"
@@ -21,12 +22,58 @@ inline bool is_relocatable_aot_snode(SNodeType type, bool sparse) {
                                                  type == SNodeType::dynamic));
 }
 
-inline bool is_relocatable_aot_task(OffloadedTaskType type, bool sparse) {
+inline bool is_relocatable_aot_task(OffloadedTaskType type, bool lists) {
   return type == OffloadedTaskType::serial ||
          type == OffloadedTaskType::range_for ||
-         (sparse && (type == OffloadedTaskType::struct_for ||
-                     type == OffloadedTaskType::listgen ||
-                     type == OffloadedTaskType::gc));
+         (lists && (type == OffloadedTaskType::struct_for ||
+                    type == OffloadedTaskType::listgen ||
+                    type == OffloadedTaskType::gc));
+}
+
+// Cold metadata only: no LLVM decoding, kernel registration or root allocation.
+// A list task identifies one tree even when its kernel reads other dense roots.
+// Older artifacts can lack task identities; conservatively cover their declared
+// dependencies without weakening the exact contract of new list_v1 exports.
+inline std::unordered_set<int> aot_element_list_tree_ids(
+    const LlvmOfflineCache &cache,
+    bool exact) {
+  std::unordered_map<int, int> node_trees;
+  std::unordered_set<int> result;
+  for (const auto &[id, field] : cache.fields) {
+    TI_ERROR_IF(field.tree_id != id, "Inconsistent LLVM AOT tree {}", id);
+    for (const auto &node : field.snode_metas) {
+      TI_ERROR_IF(!node_trees.emplace(node.id, id).second,
+                  "Duplicate LLVM AOT SNode id {}", node.id);
+      if (!is_dense_aot_snode(node.type))
+        result.insert(id);
+    }
+  }
+  for (const auto &[name, kernel] : cache.kernels) {
+    std::unordered_set<int> dependencies;
+    for (int id : kernel.used_snode_tree_ids) {
+      TI_ERROR_IF(!cache.fields.count(id),
+                  "LLVM AOT kernel {} is missing SNodeTree {}", name, id);
+      dependencies.insert(id);
+    }
+    for (const auto &task : kernel.compiled_data.tasks) {
+      if (task.task_type != OffloadedTaskType::listgen &&
+          task.task_type != OffloadedTaskType::struct_for &&
+          task.sparse_list_op == OffloadedTask::kSparseListOpNone)
+        continue;
+      if (task.sparse_list_snode_id < 0) {
+        TI_ERROR_IF(exact || dependencies.empty(),
+                    "LLVM AOT list task {} has no tree identity", task.name);
+        result.insert(dependencies.begin(), dependencies.end());
+        continue;
+      }
+      const auto owner = node_trees.find(task.sparse_list_snode_id);
+      TI_ERROR_IF(owner == node_trees.end() ||
+                      !dependencies.count(owner->second),
+                  "LLVM AOT list task {} has an undeclared tree", task.name);
+      result.insert(owner->second);
+    }
+  }
+  return result;
 }
 
 inline void validate_relocatable_aot_field(

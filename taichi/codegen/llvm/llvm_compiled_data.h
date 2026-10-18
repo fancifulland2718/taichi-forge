@@ -64,6 +64,7 @@ class OffloadedTask {
   std::vector<std::vector<std::vector<int>>>
       external_shared_access_offsets;
   int sparse_list_op{kSparseListOpNone};
+  // Also identifies a struct-for's owning tree; this does not enable reuse.
   int sparse_list_snode_id{-1};
   int sparse_list_parent_snode_id{-1};
   // Static CTA upper bound for this listgen task, derived from the maximum

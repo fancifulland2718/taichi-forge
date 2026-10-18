@@ -4101,7 +4101,7 @@ ABIs, and explicitly requested public aliases remain separate. Conflicting
 specializations or ABIs cannot overwrite a published name. CPU/CUDA avoid extra
 LLVM/PTX/cubin payloads; Vulkan retains its existing shader reuse and avoids
 redundant entry aliases. These lookups run only during producer export; consumer
-formats and dispatch paths are unchanged. Paired components use private ABI 97.
+formats and dispatch paths are unchanged. Paired components use private ABI 98.
 
 Vulkan modules can export dense fields created after `Module()` and reuse kernels
 compiled before unrelated fields were created. The archive includes only layouts
@@ -4151,11 +4151,26 @@ Two instances can run with independent active sets and gradients on one runtime;
 CPU bitcode and CUDA bitcode/PTX/cubin are covered. Traversal and garbage
 collection relocate their tree/local-node keys before execution. This does not
 serialize active sparse storage as a root snapshot/view. Old embedded-ID
-artifacts, non-demoted dense lists and
+artifacts and
 hash/mesh/quantized layouts retain their embedded-ID contract: overlapping IDs
 are rejected before initialization. Shared runtime allocation caches may remain resident.
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
+
+New CPU/CUDA exports requiring element lists with
+`demote_dense_struct_fors=False` declare `list_v1`. The loader derives per-tree
+list storage from existing task/SNode metadata; other dense roots read by the
+same kernel do not acquire lists. LLVM code remains lazy. Allocation ignores
+the consumer's demote setting, and accounting/retirement retain the creation
+contract. Purely dense layouts still support initial root data and storage views.
+Small CPU bitcode/CUDA PTX checks cover ordinary/fixed calls, actual field
+gradients, root snapshots, module isolation, close/reload and standalone/borrowed
+runtimes, with CUDA list reuse both enabled and disabled. Older artifacts lacking
+exact task identities conservatively allocate lists for the affected kernel's
+dependencies, which can allocate extra storage. Ordinary forward/backward
+compatibility is checked for old CPU bitcode/CUDA PTX; old CUDA fixed admission
+is unchanged. Old runtimes reject the unknown `list_v1` contract. Compilation
+defaults and serialized field layouts are unchanged; use paired ABI 98 components.
 
 CPU supports sparse prepared batches. CUDA `sparse_v2` exports support native
 fixed Graph preparation for pointer/bitmasked/dynamic activation, traversal,
@@ -4179,7 +4194,7 @@ small stable-topology workloads are not guaranteed to run faster. Default fixed
 replay caps listgen grids using the compiler's existing parent-list capacity
 bound and grid-stride traversal. It adds no active-count readback or generated
 artifact; explicit task plans retain their selected launch policy. Ordinary JIT
-Graph admission is unchanged. Matching components require private ABI 97.
+Graph admission is unchanged. Matching components require private ABI 98.
 
 Windows CUDA bitcode/PTX/cubin checks also cover sparse
 `cuda_immutable_argument_frames` families. Multiple scalar/array binding frames
@@ -4205,7 +4220,7 @@ into PTX. Schemas 4/5 record the target, entry points, register limit, numerical
 policy and payload checksum, and binds the payloads to their launch metadata.
 Missing or damaged PTX never falls back to a stale bitcode file. A failed kernel
 lookup remains failed within that module; reload the module after replacing
-an artifact. Schema 5 additionally checks the declared `dense_v1`, `sparse_v1` or `sparse_v2`
+an artifact. Schema 5 additionally checks the declared `dense_v1`, `list_v1`, `sparse_v1` or `sparse_v2`
 resource relocation contract.
 Legacy schema 2 text, schema 3 bitcode and schema 4 PTX remain readable.
 
