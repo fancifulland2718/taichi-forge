@@ -4166,8 +4166,13 @@ only on cold acquire/retirement transitions, with no host readback per replay.
 Modules keep independent caches. Closing a dependency waits for submitted work
 and invalidates its dependent calls. Tests cover sequential kernels, composed
 sequences, replacement bindings, ordinary/fixed interleaving and standalone or
-borrowed runtimes. Sparse tasks in parallel branches are rejected at preparation;
-conditional control requires separate qualification. Old CUDA `sparse_v1`
+borrowed runtimes. Small bitcode/PTX checks also qualify explicit `ExecutionPlan`
+CPU loops and native CUDA WHILE regions: zero iterations, early exit, exhausted
+budgets, topology changes inside the loop, actual final-state field gradients
+and in-flight closure. These gradients differentiate the final sparse state,
+not the whole dynamic loop. Sparse parallel branches remain rejected at
+preparation; control plans cannot use the flat-only
+`cuda_immutable_argument_frames` strategy. Old CUDA `sparse_v1`
 artifacts retain ordinary execution and require re-export for fixed Graphs.
 Fixed replay reduces host submissions but still executes device list checks;
 small stable-topology workloads are not guaranteed to run faster. Default fixed

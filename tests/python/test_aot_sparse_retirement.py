@@ -32,7 +32,7 @@ def test_aot_sparse_multilevel_fixed(tmp_path):
     _sparse_module(tmp_path, "ptx", multilevel=True)
 
 
-def _sparse_module(tmp_path, artifact_format, multilevel=False):
+def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=None, consumer=None):
     # Ensure the producer tree ID differs from the compact artifact ID.
     unrelated = ti.field(ti.i32, shape=1)
     unrelated[0] = 7
@@ -107,13 +107,15 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False):
     parent.dispatch(sparse_energy, loss_arg)
     parent.dispatch(sparse_energy.grad, loss_arg)
     module.add_graph("sparse_step", parent.compile())
+    if export_extra is not None:
+        export_extra(module)
     artifact = tmp_path / "sparse.tcm"
     module.archive(str(artifact))
     with zipfile.ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("aot_metadata.json"))
     assert metadata["resource_binding"] == ("sparse_v2" if arch == "cuda" else "sparse_v1")
     legacy = None
-    if artifact_format == "ptx":
+    if artifact_format == "ptx" and consumer is None:
         # v1 keeps ordinary loading, but cannot promise the new device listgen
         # publication contract. Never silently admit it to fixed replay.
         legacy = tmp_path / "sparse-v1.tcm"
@@ -132,6 +134,24 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False):
     )
     ti.reset()
     for mode in ("standalone", "borrowed"):
+        if consumer is not None:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    *(["-S"] if mode == "standalone" else []),
+                    str(Path(__file__).with_name(consumer)),
+                    arch,
+                    mode,
+                    str(artifact),
+                ],
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "Failed to retire" not in result.stdout + result.stderr
+            continue
         result = subprocess.run(
             [
                 sys.executable,
