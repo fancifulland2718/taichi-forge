@@ -7,6 +7,7 @@
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include "taichi/rhi/cpu/parallel_range.h"
 #include "taichi/system/threading.h"
 
 namespace taichi::lang::cpu {
@@ -22,11 +23,6 @@ inline int reduce_partitions(std::size_t n, int max_threads) {
   const auto target = static_cast<int>(std::min<std::size_t>(
       chunks, static_cast<std::size_t>(std::max(1, max_threads))));
   return use_parallel_aggregation(n, target) ? target : 1;
-}
-
-inline std::size_t partition_boundary(std::size_t n, int parts, int index) {
-  return (n / parts) * index +
-         (static_cast<std::uint64_t>(n % parts) * index) / parts;
 }
 
 template <typename T>

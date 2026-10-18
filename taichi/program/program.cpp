@@ -20,6 +20,7 @@
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/rhi/cpu/inclusive_scan.h"
 #include "taichi/rhi/cpu/reduce.h"
+#include "taichi/rhi/cpu/transform.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -1113,14 +1114,7 @@ struct CpuDenseFieldCopyTaskContext {
 };
 
 template <typename T>
-struct CpuTransformTaskContext {
-  const T *src{nullptr};
-  T *dst{nullptr};
-  std::size_t n{0};
-  T scale{};
-  T bias{};
-  int num_threads{1};
-};
+using CpuTransformTaskContext = cpu::TransformTaskContext<T>;
 
 template <typename T>
 struct CpuStridedTransformTaskContext {
@@ -1370,7 +1364,7 @@ ThreadPool *get_cpu_primitive_thread_pool(int max_threads) {
 }
 
 bool cpu_use_parallel_simple_loop(std::size_t n, int target_threads) {
-  return n >= 262144 && target_threads > 1;
+  return cpu::use_parallel_simple_loop(n, target_threads);
 }
 
 bool cpu_use_parallel_aggregation(std::size_t n, int target_threads) {
@@ -1634,21 +1628,6 @@ void cpu_compact_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
 }
 
 template <typename T>
-void cpu_transform_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuTransformTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    ctx->dst[i] = ctx->src[i] * ctx->scale + ctx->bias;
-  }
-}
-
-template <typename T>
 void cpu_strided_transform_task(void *raw_ctx,
                                 int /*thread_id*/,
                                 int task_id) {
@@ -1727,21 +1706,10 @@ void cpu_transform_run_typed(const T *src_ptr,
                              bool use_parallel,
                              int target_threads,
                              int max_threads) {
-  if (use_parallel) {
-    CpuTransformTaskContext<T> ctx;
-    ctx.src = src_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.scale = scale;
-    ctx.bias = bias;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx, cpu_transform_task<T>);
-    return;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    dst_ptr[i] = src_ptr[i] * scale + bias;
-  }
+  cpu::transform(src_ptr, dst_ptr, n, scale, bias,
+                 use_parallel ? target_threads : 1,
+                 use_parallel ? get_cpu_primitive_thread_pool(max_threads)
+                              : nullptr);
 }
 
 template <typename T>
