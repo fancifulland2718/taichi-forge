@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CUDA 稀疏列表复用改为在串行清理阶段锁存重建决定，避免并行生成时由一个 block
+  提前发布完成状态。沿用原有 kernel 数量和执行顺序，覆盖普通及 hash 列表；
+  启用复用的 CUDA 编译缓存会重新生成，旧 AOT 产物仍保留其原代码行为。
 - CPU/CUDA pointer、bitmasked、dynamic AOT 树在启用 dense 循环降级时支持
   `sparse_v1` 重定位。CPU bitcode 和 CUDA bitcode/PTX/cubin 已验证独立模块实例、
   稀疏 field 梯度及关闭重载；sparse 固定 Graph、根快照、hash/mesh/quantized 仍单列，

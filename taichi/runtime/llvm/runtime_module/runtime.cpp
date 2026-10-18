@@ -1387,10 +1387,12 @@ void mark_element_lists_dirty_if_reuse(StructMeta *meta) {
   }
   auto runtime = meta->context->runtime;
   auto *state = snode_runtime_state(runtime, meta);
-  if (state->element_list_dirty_flag != 0) {
+  // Bit 0 means topology-dirty. CUDA also uses bit 1 to latch a listgen
+  // decision across all blocks of the following generation kernel.
+  if ((state->element_list_dirty_flag & 1) != 0) {
     return;
   }
-  if (atomic_exchange_i32(&state->element_list_dirty_flag, 1) == 0) {
+  if ((atomic_exchange_i32(&state->element_list_dirty_flag, 1) & 1) == 0) {
     atomic_add_i32(&state->element_list_dirty_epoch, 1);
   }
 }
@@ -1419,6 +1421,31 @@ void mark_element_list_current(LLVMRuntime *runtime,
     child_state->element_list_dirty_flag = 0;
     atomic_add_i32(&child_state->element_list_version, 1);
   }
+}
+
+u1 element_listgen_is_reused(LLVMRuntime *runtime,
+                            StructMeta *parent,
+                            StructMeta *child) {
+  if (!child->listgen_reuse) {
+    return false;
+  }
+#if ARCH_cuda
+  // clear_list is a serial task on the same stream. Its decision remains
+  // immutable for the entire generation grid, including late-starting blocks.
+  return (snode_runtime_state(runtime, child)->element_list_dirty_flag & 2) == 0;
+#else
+  return element_list_is_current(runtime, parent, child);
+#endif
+}
+
+void finish_element_listgen(LLVMRuntime *runtime,
+                            StructMeta *parent,
+                            StructMeta *child) {
+#if !ARCH_cuda
+  if (child->listgen_reuse) {
+    mark_element_list_current(runtime, parent, child);
+  }
+#endif
 }
 
 void taichi_assert(RuntimeContext *context, u1 test, const char *msg) {
@@ -2216,10 +2243,23 @@ DEFINE_REDUCTION(xor, i32);
 
 void clear_list(LLVMRuntime *runtime, StructMeta *parent, StructMeta *child) {
   if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
+#if ARCH_cuda
+    snode_runtime_state(runtime, child)->element_list_dirty_flag = 0;
+#endif
     return;
   }
   auto child_list = snode_runtime_state(runtime, child)->element_list;
   child_list->clear();
+#if ARCH_cuda
+  if (child->listgen_reuse) {
+    // Publish the new epoch in this existing serial phase, then latch rebuild.
+    // The next clear/listgen/struct-for task runs after the generation kernel
+    // completes on the same stream. Publishing from block 0 of that kernel
+    // would let other blocks observe "current" before doing their own work.
+    mark_element_list_current(runtime, parent, child);
+    snode_runtime_state(runtime, child)->element_list_dirty_flag = 2;
+  }
+#endif
 }
 
 /*
@@ -2255,7 +2295,7 @@ template <bool RecordWork>
 void element_listgen_root_impl(LLVMRuntime *runtime,
                                StructMeta *parent,
                                StructMeta *child) {
-  if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
+  if (element_listgen_is_reused(runtime, parent, child)) {
     record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
@@ -2307,9 +2347,7 @@ void element_listgen_root_impl(LLVMRuntime *runtime,
     elem.pcoord = element.pcoord;
     child_list->append(&elem);
   }
-  if (child->listgen_reuse) {
-    mark_element_list_current(runtime, parent, child);
-  }
+  finish_element_listgen(runtime, parent, child);
   if constexpr (RecordWork) {
     record_sparse_listgen_work<RecordWork>(
         runtime, static_cast<uint64>(ch_num_elements),
@@ -2501,7 +2539,7 @@ template <bool RecordWork>
 void element_listgen_nonroot_impl(LLVMRuntime *runtime,
                                   StructMeta *parent,
                                   StructMeta *child) {
-  if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
+  if (element_listgen_is_reused(runtime, parent, child)) {
     record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
@@ -2562,9 +2600,7 @@ void element_listgen_nonroot_impl(LLVMRuntime *runtime,
       }
     }
   }
-  if (child->listgen_reuse) {
-    mark_element_list_current(runtime, parent, child);
-  }
+  finish_element_listgen(runtime, parent, child);
   if constexpr (RecordWork) {
     record_sparse_listgen_work<RecordWork>(
         runtime, scanned_elements,

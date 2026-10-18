@@ -132,6 +132,11 @@
     CACHE_FIELD(cuda_pointer_deterministic_pool_enabled());
     CACHE_FIELD(cuda_pointer_fast_reset);
     CACHE_FIELD(cuda_listgen_reuse);
+    if (config.cuda_listgen_reuse) {
+      // Device listgen now consumes one serially latched decision for the
+      // entire grid. Old cached kernels publish it from an unfinished block.
+      CACHE_VALUE(std::string("cuda-listgen-latched-v1"));
+    }
     CACHE_FIELD(bitmasked_clear_data_on_deactivate);
     CACHE_CUDA_TARGET();
   }

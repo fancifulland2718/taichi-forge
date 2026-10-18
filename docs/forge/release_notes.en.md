@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA sparse list reuse now latches its rebuild decision in the serial clear
+  phase, preventing one generation block from publishing completion early.
+  Ordinary and hash lists keep the same kernel count and execution order.
+  CUDA compilation caches with reuse enabled are regenerated; existing AOT
+  artifacts retain their original generated behavior.
 - Added `sparse_v1` resource relocation for CPU/CUDA pointer, bitmasked and
   dynamic AOT trees with dense-loop demotion enabled. Independent module
   instances, sparse-field gradients and close/reload are tested with CPU

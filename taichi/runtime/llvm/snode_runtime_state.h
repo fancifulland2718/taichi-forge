@@ -16,6 +16,8 @@ struct LlvmSNodeRuntimeState {
   NodeManager *node_allocator{nullptr};
   std::uint8_t *ambient_element{nullptr};
   std::int32_t element_list_dirty_epoch{1};
+  // Bit 0: topology dirty. Bit 1: CUDA rebuild decision, latched by the
+  // preceding serial clear task and immutable throughout parallel listgen.
   std::int32_t element_list_dirty_flag{1};
   std::int32_t element_list_version{0};
   std::int32_t element_list_clean_epoch{0};

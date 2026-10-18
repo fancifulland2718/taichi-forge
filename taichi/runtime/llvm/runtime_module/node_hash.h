@@ -400,8 +400,7 @@ template <bool RecordWork>
 void element_listgen_root_hash_impl(LLVMRuntime *runtime,
                                     StructMeta *parent,
                                     StructMeta *child_) {
-  if (child_->listgen_reuse &&
-      element_list_is_current(runtime, parent, child_)) {
+  if (element_listgen_is_reused(runtime, parent, child_)) {
     record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
@@ -452,9 +451,7 @@ void element_listgen_root_hash_impl(LLVMRuntime *runtime,
     Hash_append_list_element(child, ch_element, key, element.pcoord,
                              child_list);
   }
-  if (child->listgen_reuse) {
-    mark_element_list_current(runtime, parent, child_);
-  }
+  finish_element_listgen(runtime, parent, child_);
   if constexpr (RecordWork) {
     record_sparse_listgen_work<RecordWork>(
         runtime, static_cast<uint64>(scan_count),
@@ -480,8 +477,7 @@ template <bool RecordWork>
 void element_listgen_nonroot_hash_impl(LLVMRuntime *runtime,
                                        StructMeta *parent,
                                        StructMeta *child_) {
-  if (child_->listgen_reuse &&
-      element_list_is_current(runtime, parent, child_)) {
+  if (element_listgen_is_reused(runtime, parent, child_)) {
     record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
@@ -562,9 +558,7 @@ void element_listgen_nonroot_hash_impl(LLVMRuntime *runtime,
       }
     }
   }
-  if (child->listgen_reuse) {
-    mark_element_list_current(runtime, parent, child_);
-  }
+  finish_element_listgen(runtime, parent, child_);
   if constexpr (RecordWork) {
     record_sparse_listgen_work<RecordWork>(
         runtime, scanned_elements,
@@ -590,8 +584,7 @@ template <bool RecordWork>
 void element_listgen_nonroot_hash_parent_hash_impl(LLVMRuntime *runtime,
                                                    StructMeta *parent,
                                                    StructMeta *child_) {
-  if (child_->listgen_reuse &&
-      element_list_is_current(runtime, parent, child_)) {
+  if (element_listgen_is_reused(runtime, parent, child_)) {
     record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
@@ -655,9 +648,7 @@ void element_listgen_nonroot_hash_parent_hash_impl(LLVMRuntime *runtime,
                                child_list);
     }
   }
-  if (child->listgen_reuse) {
-    mark_element_list_current(runtime, parent, child_);
-  }
+  finish_element_listgen(runtime, parent, child_);
   if constexpr (RecordWork) {
     record_sparse_listgen_work<RecordWork>(
         runtime, scanned_elements,
