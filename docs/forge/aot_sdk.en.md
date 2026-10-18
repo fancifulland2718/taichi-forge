@@ -4654,10 +4654,20 @@ An expanded 534-module application profile also passes source-hidden offscreen
 compute raster rendering on Windows CPU/CUDA/Vulkan: consumer-created two-box
 and three-sphere mesh scenes, two resolutions, image/depth comparison with the
 source reference, and rigid-state updates. The 53 added application modules
-increase the compressed wheel by 4.75 MB; all 481 prior binaries, dependency
-declarations and the sole 0.926 MB CUDA SAP TCM remain unchanged. The independent
-Forge frontend specializes these new rendering cases; this does not put rendering
-in that fixed TCM or qualify hardware raster, OptiX, textures or all scene types.
+increase the compressed wheel by 4.75 MB while retaining all 481 prior binaries
+and dependency declarations. The independent Forge frontend specializes unseen
+static axes. Hardware raster, OptiX, textures and other scene types need separate
+application qualification.
+
+Fixed export of that production compute-render Graph also passes independent
+runtime-only consumption on CPU/CUDA/Vulkan, including position updates, image
+and depth comparisons, and module isolation. The qualified CUDA delivery profile
+puts the real SAP `solve` and fixed `render` entries in one 1.459 MB GeoPhys TCM.
+The installed 58.97 MB application wheel retains the same 534 host binaries and
+dependency declarations, with no Forge/vendor DLL or private Python source.
+Both entries alternate correctly without importing the application host, NumPy
+or the Forge frontend. This is two fixed entries sharing a module; it does not
+establish a physically coupled solve/render step or arbitrary-scene AOT coverage.
 
 The installed qualification also upgrades Forge runtime and its matching frontend
 independently while retaining the GeoPhys wheel and its single CUDA TCM. The
