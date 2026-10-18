@@ -25,6 +25,34 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, MemoryPoolSchemaIsColdAndBackendQualified) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription description;
+  description.provider = "memory";
+  description.operation = "pool";
+  description.parameters = liong::json::parse_complete(
+      R"({"retained_bytes":8589934592})");
+  EXPECT_EQ(registry.decode(description, NativeObjectKind::resource).kind(),
+            "memory_pool");
+  EXPECT_THROW(registry.decode(description), std::invalid_argument);
+  for (auto arch : {Arch::x64, Arch::vulkan})
+    EXPECT_EQ(registry.find("memory_pool", 1, arch, NativeObjectKind::resource),
+              nullptr);
+  for (const auto *parameters : {R"({"retained_bytes":-1})",
+                                 R"({"retained_bytes":true})",
+                                 R"({"retained_bytes":1.5})",
+                                 R"({"unknown":0})"}) {
+    description.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+                 std::invalid_argument);
+  }
+  description.parameters = liong::json::parse_complete("{}");
+  EXPECT_NO_THROW(registry.decode(description, NativeObjectKind::resource));
+  description.bindings = {{"array", "a"}};
+  EXPECT_THROW(registry.decode(description, NativeObjectKind::resource),
+               std::invalid_argument);
+}
+
 TEST(NativeOperationRegistry, ImageTransferSchemasAreVulkanOnlyAndTyped) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription d;

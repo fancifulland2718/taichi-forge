@@ -6,6 +6,8 @@
 #include <taichi/rhi/cuda/cuda_device.h>
 #include <taichi/rhi/cuda/cusparse_plan.h>
 #include <taichi/runtime/cuda/graph_memory_pool.h>
+#include <taichi/runtime/native_memory_allocator.h>
+#include <taichi/runtime/native_operation_registry.h>
 
 #include <algorithm>
 #include <atomic>
@@ -714,6 +716,39 @@ TEST(CUDAGraphMemoryPool, DeviceTeardownRetiresStandaloneFactory) {
   EXPECT_EQ(pool.snapshot().at("closed"), 1);
   EXPECT_ANY_THROW(pool.allocate_memory(4));
   pool.close();
+}
+
+TEST(CUDANativeMemoryAllocator, FactoryRetirementPreservesOwnedAllocations) {
+  if (!cuda::GraphMemoryPool::available())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  NativeOperationDescription description;
+  description.provider = "memory";
+  description.operation = "pool";
+  description.parameters = liong::json::parse_complete("{}");
+  const auto &registry = native_operation_registry();
+  auto factory = std::dynamic_pointer_cast<NativeMemoryAllocator>(
+      registry.prepare_resource(
+          Arch::cuda, device,
+          registry.decode(description, NativeObjectKind::resource), {}));
+  ASSERT_NE(factory, nullptr);
+  EXPECT_EQ(factory->workspace_bytes(), 0);
+  EXPECT_EQ(factory->device_payload_bytes(), 0);
+  const auto allocation = factory->allocate_memory(68, AllocUsage::Storage);
+  auto pointer = allocation.get_ptr();
+  std::array<int, 17> input{}, output{};
+  input.fill(37);
+  const void *source = input.data();
+  size_t bytes = sizeof(input);
+  ASSERT_EQ(device.upload_data(&pointer, &source, &bytes), RhiResult::success);
+  factory.reset();
+  void *destination = output.data();
+  ASSERT_EQ(device.readback_data(&pointer, &destination, &bytes),
+            RhiResult::success);
+  EXPECT_EQ(output, input);
+  device.dealloc_memory(allocation);
+  CUDADriver::get_instance().stream_synchronize(nullptr);
+  device.collect_graph_memory_pools();
 }
 
 TEST(CUDADevice, RejectsDeallocationWhileMapped) {

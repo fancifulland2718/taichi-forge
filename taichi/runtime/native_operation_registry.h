@@ -317,6 +317,7 @@ class NativeOperationRegistry {
 const NativeOperationRegistry &native_operation_registry();
 
 // Explicit entry points keep registration deterministic under static linking.
+void register_memory_allocator_resources(NativeOperationRegistry &registry);
 void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
 void register_fft_operation(NativeOperationRegistry &registry);

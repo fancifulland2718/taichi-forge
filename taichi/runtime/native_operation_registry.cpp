@@ -372,6 +372,7 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_impl(
 const NativeOperationRegistry &native_operation_registry() {
   static const auto registry = [] {
     NativeOperationRegistry result;
+    register_memory_allocator_resources(result);
     register_compact_operation(result);
     register_sort_operation(result);
     register_fft_operation(result);
