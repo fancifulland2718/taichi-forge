@@ -4,10 +4,37 @@
 #include <thread>
 
 #include "taichi/runtime/snode_tree_id_registry.h"
+#include "taichi/runtime/snode_resource_id.h"
 #include "taichi/runtime/sparse_replay_tracker.h"
 #include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
+
+TEST(SNodeResourceResolver, RepeatedModuleIdsResolveWithinDeclaredTrees) {
+  const SNodeResourceTreeMap trees{{2, {10, 11}}, {7, {10, 11}}, {8, {90}}};
+  const std::vector<int> first_trees{2}, second_trees{7};
+  SNodeResourceResolver first(trees, first_trees), second(trees, second_trees);
+  EXPECT_EQ(first.resolve(11), (SNodeResourceId{2, 11}));
+  EXPECT_EQ(second.resolve(11), (SNodeResourceId{7, 11}));
+  EXPECT_EQ(first.resolve(11), first.resolve(11));
+  EXPECT_NE(first.resolve(11), second.resolve(11));
+  EXPECT_FALSE(first.resolve(-1).valid());
+  EXPECT_THROW(first.resolve(90), std::invalid_argument);
+  std::unordered_map<SNodeResourceId, int, SNodeResourceIdHash> states;
+  states[first.resolve(11)] = 3;
+  states[second.resolve(11)] = 5;
+  EXPECT_EQ(states.size(), 2);
+}
+
+TEST(SNodeResourceResolver, AmbiguousOrMalformedScopesFailBeforeRegistration) {
+  const SNodeResourceTreeMap trees{{2, {10, 11}}, {7, {10, 11}}};
+  const std::vector<int> both{2, 7}, repeated{2, 2}, unsorted{7, 2};
+  SNodeResourceResolver resolver(trees, both);
+  EXPECT_THROW(resolver.resolve(11), std::invalid_argument);
+  EXPECT_THROW(resolver.resolve(11), std::invalid_argument);
+  EXPECT_THROW(SNodeResourceResolver(trees, repeated), std::invalid_argument);
+  EXPECT_THROW(SNodeResourceResolver(trees, unsorted), std::invalid_argument);
+}
 
 TEST(SNodeTree, GetSNodeToRootMapping) {
   constexpr int kSNodeSize = 16;
