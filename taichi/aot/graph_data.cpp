@@ -1194,13 +1194,17 @@ class CudaEventHandle {
     return event_;
   }
 
-  bool ready() const {
+  bool ready() {
     if (!recorded_) {
       return true;
     }
     auto &driver = CUDADriver::get_instance();
     const uint32_t result = driver.event_query.call(event_);
     if (result == CUDA_SUCCESS) {
+      // Reclamation already has a completion proof. Do not synchronize the
+      // same event again when recycling its host buffers and allocation leases.
+      // A subsequent record() starts a new pending use of this private event.
+      recorded_ = false;
       return true;
     }
     if (result == CUDA_ERROR_NOT_READY) {

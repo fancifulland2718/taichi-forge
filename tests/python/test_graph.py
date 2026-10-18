@@ -7962,6 +7962,23 @@ def test_cuda_cgraph_patches_scalar_matrix_and_ndarray_arguments():
     np.testing.assert_array_equal(output_a.to_numpy(), source_a_np * 4 - 3)
     np.testing.assert_array_equal(output_b.to_numpy(), source_b_np * -3 + 5)
 
+    # Readback above completes the previous replay. Recycling its immutable
+    # argument copy must query completion without another backend wait.
+    for scale in range(5, 13):
+        before = ti.runtime.stats().synchronization.backend_waits
+        graph.run(
+            {
+                "scale": scale,
+                "offset": ti.Vector([2, -1], dt=ti.i32),
+                "source": source_a,
+                "output": output_a,
+            }
+        )
+        assert ti.runtime.stats().synchronization.backend_waits == before
+        # This wait is the numerical oracle and completes the next retirement;
+        # it is deliberately outside the no-wait submission interval.
+        np.testing.assert_array_equal(output_a.to_numpy(), source_a_np * scale + 1)
+
 
 @test_utils.test(arch=ti.cuda)
 def test_cuda_cgraph_recaptures_when_ndarray_structure_changes():

@@ -234,6 +234,9 @@ lifetimes. The entries below describe the changes.
   `display_shared_image_reuse`, `completion_wait_concurrent` and
   `completion_blocking_wait`, also before initialization. Missing keys mean
   unknown; capabilities do not replace ABI/compiler checks or device/platform qualification.
+- CUDA Graph argument retirement reuses a successful event query as its
+  completion proof, avoiding a redundant event synchronize while recycling
+  completed parameter storage. Pending backlog and teardown waits remain.
 - Vulkan honors `Window(vsync=False)` by preferring IMMEDIATE when the surface
   supports it, instead of always selecting MAILBOX or FIFO. Disabling vsync can
   tear; supported synchronized modes remain the fallback. Vsync-enabled windows

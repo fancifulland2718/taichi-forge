@@ -170,6 +170,8 @@
 - `ti.validate_runtime_contract()["features"]` 新增 `display_shared_image_reuse`、
   `completion_wait_concurrent`、`completion_blocking_wait` 三项独立能力声明，初始化前即可查询。
   缺少字段表示未知；能力不替代 ABI/编译器兼容检查、设备检测或平台验收。
+- CUDA Graph 参数退休复用成功 event query 的完成证明，回收已完成参数存储时不再
+  重复 event synchronize；尚未完成的背压和关闭等待保留。
 - Vulkan 在 surface 支持时为 `Window(vsync=False)` 优先选择 IMMEDIATE，不再始终选择
   MAILBOX/FIFO。关闭 vsync 可能产生撕裂；不支持时回退到同步呈现模式。开启 vsync 时保留
   MAILBOX/latest-ready 优先策略与 adaptive FIFO 回退。这只改变呈现策略，不新增 CUDA
