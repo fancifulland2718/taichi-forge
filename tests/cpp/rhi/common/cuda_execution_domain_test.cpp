@@ -44,8 +44,8 @@ class CudaExecutionDependency : public ::testing::Test {
     return static_cast<std::uint32_t *>(data) + index;
   }
   RuntimeCompletion record(int index) {
-    return RuntimeCompletion::from_cuda_stream(71, ++sequence, streams[index],
-                                               fault, pool);
+    return RuntimeCompletion::from_cuda_stream(
+        71, fault->allocate_submission_sequence(), streams[index], fault, pool);
   }
   static bool poll_until(const RuntimeCompletion &completion) {
     const auto deadline =
@@ -63,7 +63,6 @@ class CudaExecutionDependency : public ::testing::Test {
       std::make_shared<RuntimeCompletionCudaEventPool>(fault, 8);
   std::array<void *, 3> streams{};
   void *data{};
-  std::uint64_t sequence{};
 };
 
 TEST_F(CudaExecutionDependency,
@@ -161,22 +160,25 @@ TEST_F(CudaExecutionDependency, DomainCapacityAndDependenciesAreIndependent) {
   EXPECT_GE(physics_info.effective_priority, physics_info.greatest_priority);
   std::atomic<int> released{0};
   auto blocked = output.submit(
-      1, {}, std::make_shared<DomainResources>(output, released),
+      {}, std::make_shared<DomainResources>(output, released),
       [&](void *stream) {
         gate.enqueue_wait(stream);
         CUDADriver::get_instance().memsetd32_async(at(0), 73, 1, stream);
       });
   bool attempted = false;
-  EXPECT_THROW(output.submit(2, {}, nullptr, [&](void *) { attempted = true; }),
+  EXPECT_THROW(output.submit({}, nullptr, [&](void *) { attempted = true; }),
                cuda::ExecutionDomainBusy);
   EXPECT_FALSE(attempted);
-  auto dependency = input.submit(3, {blocked}, nullptr, [&](void *stream) {
+  EXPECT_EQ(fault->next_submission_sequence(), blocked.sequence() + 1);
+  auto dependency = input.submit({blocked}, nullptr, [&](void *stream) {
     CUDADriver::get_instance().memcpy_device_to_device_async(at(1), at(0), 4,
                                                              stream);
   });
-  auto sentinel = physics.submit(4, {}, nullptr, [&](void *stream) {
+  auto sentinel = physics.submit({}, nullptr, [&](void *stream) {
     CUDADriver::get_instance().memsetd32_async(at(2), 79, 1, stream);
   });
+  EXPECT_EQ(dependency.sequence(), blocked.sequence() + 1);
+  EXPECT_EQ(sentinel.sequence(), dependency.sequence() + 1);
   EXPECT_TRUE(poll_until(sentinel));
   EXPECT_FALSE(blocked.done());
   EXPECT_FALSE(dependency.done());
@@ -187,7 +189,7 @@ TEST_F(CudaExecutionDependency, DomainCapacityAndDependenciesAreIndependent) {
   EXPECT_EQ(output.collect_ready(1), 1);
   EXPECT_EQ(released.load(), 1);
   EXPECT_EQ(output.snapshot().pending, 0);
-  auto reused = output.submit(5, {}, nullptr, [](void *) {});
+  auto reused = output.submit({}, nullptr, [](void *) {});
   reused.wait();
   output.close();
   EXPECT_TRUE(output.snapshot().closed);
@@ -206,12 +208,12 @@ TEST_F(CudaExecutionDependency,
   cuda::ExecutionDomain physics(fault, {1, 0});
   testing::CudaExternalGate gate;
   auto blocked = output.submit(
-      1, {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
   auto closer = std::async(std::launch::async, [&] { output.close(); });
   auto admission = std::async(std::launch::async, [&] {
     EXPECT_FALSE(blocked.done());
     (void)output.snapshot();
-    auto sentinel = physics.submit(2, {}, nullptr, [](void *) {});
+    auto sentinel = physics.submit({}, nullptr, [](void *) {});
     return poll_until(sentinel);
   });
   const bool responsive =
@@ -228,8 +230,7 @@ TEST_F(CudaExecutionDependency,
     admission.get();
   EXPECT_TRUE(blocked.done());
   EXPECT_TRUE(output.snapshot().closed);
-  EXPECT_THROW(output.submit(3, {}, nullptr, [](void *) {}),
-               std::runtime_error);
+  EXPECT_THROW(output.submit({}, nullptr, [](void *) {}), std::runtime_error);
 }
 
 TEST_F(CudaExecutionDependency,
@@ -239,7 +240,7 @@ TEST_F(CudaExecutionDependency,
   testing::CudaExternalGate gate;
   std::atomic<int> released{0};
   EXPECT_THROW(
-      output.submit(1, {}, std::make_shared<DomainResources>(output, released),
+      output.submit({}, std::make_shared<DomainResources>(output, released),
                     [&](void *stream) {
                       gate.enqueue_wait(stream);
                       CUDADriver::get_instance().memsetd32_async(at(0), 83, 1,
@@ -250,9 +251,8 @@ TEST_F(CudaExecutionDependency,
   EXPECT_EQ(released.load(), 0);
   EXPECT_EQ(output.collect_ready(1), 0);
   EXPECT_FALSE(output.snapshot().accepting);
-  EXPECT_THROW(output.submit(2, {}, nullptr, [](void *) {}),
-               std::runtime_error);
-  auto other = physics.submit(3, {}, nullptr, [](void *) {});
+  EXPECT_THROW(output.submit({}, nullptr, [](void *) {}), std::runtime_error);
+  auto other = physics.submit({}, nullptr, [](void *) {});
   EXPECT_TRUE(poll_until(other));
   EXPECT_FALSE(gate.timed_out());
   gate.release();
@@ -277,16 +277,15 @@ TEST_F(CudaExecutionDependency, InvalidDomainInputsHaveNoEnqueueSideEffects) {
   auto foreign = RuntimeCompletion::completed(Arch::cuda, 71, 1, other);
   int calls = 0;
   const auto enqueue = [&](void *) { ++calls; };
-  EXPECT_THROW(domain.submit(1, {foreign}, nullptr, enqueue),
+  EXPECT_THROW(domain.submit({foreign}, nullptr, enqueue),
                std::invalid_argument);
-  EXPECT_THROW(domain.submit(0, {}, nullptr, enqueue), std::invalid_argument);
   EXPECT_EQ(domain.snapshot().pending, 0);
   EXPECT_EQ(calls, 0);
-  auto valid = domain.submit(1, {}, nullptr, enqueue);
+  auto valid = domain.submit({}, nullptr, enqueue);
+  EXPECT_EQ(valid.sequence(), 1);
   valid.wait();
-  EXPECT_THROW(domain.submit(1, {}, nullptr, enqueue), std::invalid_argument);
   fault->begin_finalizing();
-  EXPECT_THROW(domain.submit(2, {}, nullptr, enqueue), std::exception);
+  EXPECT_THROW(domain.submit({}, nullptr, enqueue), std::exception);
   EXPECT_EQ(calls, 1);
   domain.close();
   fault->mark_finalized();
@@ -302,13 +301,13 @@ TEST_F(CudaExecutionDependency, WarmAdmissionProgressesBeforeExternalRelease) {
   RuntimeCompletion last;
   for (int i = 1; i <= 32; ++i) {
     // Warm driver paths outside the measured blocked interval.
-    last = physics.submit(i, {}, nullptr, fill);
+    last = physics.submit({}, nullptr, fill);
     last.wait();
   }
   physics.collect_ready(16);
   testing::CudaExternalGate gate;
   auto blocked = output.submit(
-      33, {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
   std::vector<double> duration_us;
   duration_us.reserve(1000);
   std::size_t busy = 0;
@@ -320,7 +319,7 @@ TEST_F(CudaExecutionDependency, WarmAdmissionProgressesBeforeExternalRelease) {
     for (std::uint64_t sequence = 34; sequence < 1034;) {
       const auto start = std::chrono::steady_clock::now();
       try {
-        last = physics.submit(sequence, {}, nullptr, fill);
+        last = physics.submit({}, nullptr, fill);
         duration_us.push_back(std::chrono::duration<double, std::micro>(
                                   std::chrono::steady_clock::now() - start)
                                   .count());

@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -10,6 +11,29 @@
 
 namespace taichi::lang {
 namespace {
+
+TEST(RuntimeFault, SubmissionIdentitiesAreUniqueAcrossConcurrentClients) {
+  RuntimeFaultDomain owner(Arch::cuda, 41);
+  constexpr std::size_t clients = 8;
+  constexpr std::size_t submissions = 1024;
+  std::vector<std::uint64_t> identities(clients * submissions);
+  std::vector<std::thread> threads;
+  for (std::size_t client = 0; client < clients; ++client) {
+    threads.emplace_back([&, client] {
+      for (std::size_t i = 0; i < submissions; ++i)
+        identities[client * submissions + i] =
+            owner.allocate_submission_sequence();
+    });
+  }
+  for (auto &thread : threads)
+    thread.join();
+  std::sort(identities.begin(), identities.end());
+  for (std::size_t i = 0; i < identities.size(); ++i)
+    ASSERT_EQ(identities[i], i + 1);
+  EXPECT_EQ(owner.next_submission_sequence(), identities.size() + 1);
+  RuntimeFaultDomain next_generation(Arch::cuda, 42);
+  EXPECT_EQ(next_generation.allocate_submission_sequence(), 1);
+}
 
 TEST(RuntimeFault, BackendErrorClassificationIsConservative) {
   EXPECT_EQ(classify_cuda_driver_error(CUDA_SUCCESS),

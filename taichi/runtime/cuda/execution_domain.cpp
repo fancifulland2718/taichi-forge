@@ -164,7 +164,6 @@ ExecutionDomain::~ExecutionDomain() {
 }
 
 RuntimeCompletion ExecutionDomain::submit(
-    std::uint64_t sequence,
     const std::vector<RuntimeCompletion> &dependencies,
     std::shared_ptr<RuntimeCompletionResources> resources,
     const std::function<void(void *)> &enqueue) {
@@ -182,15 +181,13 @@ RuntimeCompletion ExecutionDomain::submit(
     std::rethrow_exception(state.first_error);
   if (state.closing || state.closed)
     throw std::runtime_error("CUDA execution domain is closing or closed");
-  if (sequence == 0 || sequence <= state.last_sequence)
-    throw std::invalid_argument(
-        "CUDA submission sequence must increase within its domain");
   for (const auto &dependency : dependencies)
     dependency.validate_cuda_dependency(state.owner_id, state.owner);
   if (state.count == state.pending.size())
     throw ExecutionDomainBusy();
 
   auto context = CUDAContext::get_instance().get_guard();
+  const auto sequence = state.owner->allocate_submission_sequence();
   auto &slot = state.pending[(state.head + state.count) % state.pending.size()];
   slot.sequence = sequence;
   slot.resources = std::move(resources);

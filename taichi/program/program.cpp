@@ -8228,7 +8228,7 @@ void Program::debug_inject_runtime_fault(
     const std::string &operation,
     const std::string &message) {
   const std::uint64_t sequence =
-      next_runtime_completion_sequence_.load(std::memory_order_acquire);
+      runtime_fault_domain_->next_submission_sequence();
   runtime_fault_domain_->report_fatal(
       {compile_config().arch, backend_code, sequence, operation, message});
 }
@@ -8283,11 +8283,11 @@ RuntimeCompletion Program::record_runtime_completion_with_wait_mode(
 
     if (!runtime_submission_pending_.exchange(false,
                                               std::memory_order_acq_rel)) {
-      const std::uint64_t next =
-          next_runtime_completion_sequence_.load(std::memory_order_relaxed);
-      return RuntimeCompletion::completed(
-          compile_config().arch, runtime_completion_domain_,
-          next > 1 ? next - 1 : 0, runtime_fault_domain_);
+      if (last_default_runtime_completion_.valid())
+        return last_default_runtime_completion_;
+      return RuntimeCompletion::completed(compile_config().arch,
+                                          runtime_completion_domain_, 0,
+                                          runtime_fault_domain_);
     }
 
     const std::uint64_t previous_submission_epoch =
@@ -8297,10 +8297,7 @@ RuntimeCompletion Program::record_runtime_completion_with_wait_mode(
     const std::uint64_t submission_epoch = previous_submission_epoch + 1;
 
     const std::uint64_t sequence =
-        next_runtime_completion_sequence_.fetch_add(
-            1, std::memory_order_relaxed);
-    TI_ASSERT(sequence != 0 &&
-              sequence != (std::numeric_limits<std::uint64_t>::max)());
+        runtime_fault_domain_->allocate_submission_sequence();
 
     try {
       if (arch_is_cpu(compile_config().arch)) {
@@ -8345,6 +8342,7 @@ RuntimeCompletion Program::record_runtime_completion_with_wait_mode(
         release_completed_external_dense_storage_leases();
         release_completed_vulkan_native_resources();
       }
+      last_default_runtime_completion_ = result;
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
     } catch (...) {
@@ -8456,8 +8454,7 @@ Program::debug_runtime_completion_stats() const {
       {"completed_submission_epoch",
        last_runtime_completion_submission_epoch_.load(
            std::memory_order_acquire)},
-      {"next_sequence",
-       next_runtime_completion_sequence_.load(std::memory_order_acquire)},
+      {"next_sequence", runtime_fault_domain_->next_submission_sequence()},
       {"active", active},
       {"pending", pending},
       {"failed", failed},
@@ -8894,8 +8891,7 @@ void Program::synchronize() {
       program_impl_->synchronize();
     } catch (const BackendRuntimeError &error) {
       runtime_fault_domain_->report_backend_error(
-          error, next_runtime_completion_sequence_.load(
-                     std::memory_order_acquire));
+          error, runtime_fault_domain_->next_submission_sequence());
       if (runtime_fault_domain_->has_fatal_fault()) {
         runtime_submission_pending_.store(false, std::memory_order_release);
         const auto fault = runtime_fault_domain_->snapshot();

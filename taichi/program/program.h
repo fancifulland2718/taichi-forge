@@ -4611,7 +4611,10 @@ class TI_DLL_EXPORT Program {
       ~kRuntimeSubmissionWriterBit;
   std::atomic<std::uint64_t> runtime_submission_epoch_{0};
   std::atomic<std::uint64_t> last_runtime_completion_submission_epoch_{0};
-  std::atomic<std::uint64_t> next_runtime_completion_sequence_{1};
+  // Protected by RuntimeSubmissionWriteScope. A no-new-work recording must
+  // reuse this exact queue prefix, including its pending/error state; a
+  // sequence allocated by another domain cannot stand in for this prefix.
+  RuntimeCompletion last_default_runtime_completion_;
   mutable std::mutex runtime_completion_mutex_;
   std::deque<RuntimeCompletion> runtime_completions_;
   static constexpr std::size_t kRuntimeCompletionPollBudget = 8;

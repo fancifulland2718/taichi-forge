@@ -47,14 +47,13 @@ class ExecutionDomain {
   ExecutionDomain(const ExecutionDomain &) = delete;
   ExecutionDomain &operator=(const ExecutionDomain &) = delete;
 
-  // Caller supplies a unique sequence from the owning runtime, and has
-  // prepared independent executable/argument/scratch state before entering.
+  // Caller has prepared independent executable/argument/scratch state before
+  // entering. The owner assigns a unique sequence after successful admission.
   // Every device action in enqueue must use its supplied nonblocking stream.
   // Enqueue may not recursively submit/close this domain or wait on the host.
   // All predecessor validation and capacity checks precede device effects.
   // Capacity exhaustion is immediate; no other domain is polled or drained.
   RuntimeCompletion submit(
-      std::uint64_t sequence,
       const std::vector<RuntimeCompletion> &dependencies,
       std::shared_ptr<RuntimeCompletionResources> resources,
       const std::function<void(void *)> &enqueue);

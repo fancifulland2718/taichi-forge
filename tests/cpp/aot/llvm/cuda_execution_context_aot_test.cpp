@@ -67,7 +67,6 @@ TEST(CudaExecutionContextAot, IsolatesTemporariesInsideAnInterleavedKernel) {
   driver.memcpy_host_to_device(address(4), const_cast<std::uint32_t *>(&open),
                                sizeof(open));
   driver.stream_synchronize(nullptr);
-  std::uint64_t sequence = 0;
 
   for (const auto *name : {"stage", "gated_stage"}) {
     SCOPED_TRACE(name);
@@ -116,12 +115,12 @@ TEST(CudaExecutionContextAot, IsolatesTemporariesInsideAnInterleavedKernel) {
     auto suffix = captured.packets[0];
     suffix.offloaded_tasks.erase(suffix.offloaded_tasks.begin());
     RuntimeCompletion prelude_done;
-    const auto prelude_sequence = ++sequence;
+    const auto prelude_sequence = fault->allocate_submission_sequence();
     RuntimeCompletion a;
     {
       ScopedExternalProfilerAnnotation annotation(
           std::string("F3/context_first/") + name);
-      a = first.submit(++sequence, {}, nullptr, [&](void *stream) {
+      a = first.submit({}, nullptr, [&](void *stream) {
         launcher.capture_cuda_graph_launch(prelude, stream);
         prelude_done = RuntimeCompletion::from_cuda_stream(
             719, prelude_sequence, stream, fault, prelude_events);
@@ -140,7 +139,7 @@ TEST(CudaExecutionContextAot, IsolatesTemporariesInsideAnInterleavedKernel) {
     {
       ScopedExternalProfilerAnnotation annotation(
           std::string("F3/context_second/") + name);
-      b = second.submit(++sequence, {}, nullptr, [&](void *stream) {
+      b = second.submit({}, nullptr, [&](void *stream) {
         launcher.capture_cuda_graph_launch(captured.packets[1], stream);
       });
     }

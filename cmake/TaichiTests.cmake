@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.17)
 set(TESTS_NAME taichi_cpp_tests)
 if(TARGET taichi_runtime AND TI_WITH_SPLIT_PYTHON_RUNTIME)
   add_executable(taichi_completion_tests
-    tests/cpp/program/runtime_completion_test.cpp)
+    tests/cpp/program/runtime_completion_test.cpp
+    tests/cpp/program/runtime_fault_test.cpp)
   target_link_libraries(taichi_completion_tests PRIVATE taichi_runtime gtest_main)
   target_compile_definitions(taichi_completion_tests PRIVATE
     TI_WITH_SPLIT_PYTHON_RUNTIME)

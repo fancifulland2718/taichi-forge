@@ -1,5 +1,7 @@
 #include "taichi/program/runtime_fault.h"
 
+#include <limits>
+#include <stdexcept>
 #include <spdlog/fmt/fmt.h>
 
 #include "taichi/common/exceptions.h"
@@ -19,6 +21,16 @@ constexpr std::int32_t kVkSuboptimalKhr = 1000001003;
 constexpr std::int32_t kVkErrorOutOfDateKhr = -1000001004;
 
 }  // namespace
+
+std::uint64_t RuntimeFaultDomain::allocate_submission_sequence() {
+  auto sequence = next_submission_sequence_.load(std::memory_order_relaxed);
+  do {
+    if (sequence == (std::numeric_limits<std::uint64_t>::max)())
+      throw std::overflow_error("Runtime submission identity exhausted");
+  } while (!next_submission_sequence_.compare_exchange_weak(
+      sequence, sequence + 1, std::memory_order_relaxed));
+  return sequence;
+}
 
 BackendErrorClassification classify_cuda_driver_error(
     std::uint32_t error) noexcept {
