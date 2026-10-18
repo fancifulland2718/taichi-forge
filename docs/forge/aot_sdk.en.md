@@ -2686,6 +2686,12 @@ CPU/CUDA LLVM modules and Vulkan modules can load directly from `.tcm` files.
 The loader retains compressed archive bytes and reads kernel payloads on demand;
 it does not extract the whole archive to a temporary directory.
 
+`Module.archive()` omits LLVM's diagnostic `metadata.json` and cache lock file
+by default. CPU/CUDA loading still uses the unchanged `metadata.tcb` and
+`aot_metadata.json`; Vulkan's required `metadata.json` remains in the archive.
+Use `archive(path, include_debug_metadata=True)` to retain the diagnostic files.
+Directory exports with `Module.save()` continue to include them for inspection.
+
 `copy` defaults to the source's remaining logical bytes; optional
 `source_offset`, `destination_offset` and `size_bytes` select nonoverlapping
 ranges. `fill32.value` is a uint32 bit pattern; optional `offset/size_bytes`

@@ -2064,6 +2064,11 @@ baseline。若后续后端编译失败，该模块不能保存，须新建模块
 CPU/CUDA 的 LLVM 模块和 Vulkan 模块均可直接加载 `.tcm`。加载器保留压缩归档字节，
 按需读取内核载荷，不需要将整个归档展开到临时目录。
 
+`Module.archive()` 默认省略 LLVM 的调试用 `metadata.json` 和缓存锁文件。
+CPU/CUDA 仍使用原有的 `metadata.tcb` 与 `aot_metadata.json`；Vulkan 加载所需的
+`metadata.json` 始终保留。需要调试文件时使用
+`archive(path, include_debug_metadata=True)`；`Module.save()` 的目录导出仍保留这些文件。
+
 `copy` 默认复制 source 的逻辑剩余字节，可指定 `source_offset`、`destination_offset`
 及 `size_bytes`；区域不能重叠。`fill32` 的 `value` 是 uint32 位模式，默认覆盖目标
 逻辑剩余区域，可指定 `offset/size_bytes`；起点和大小必须为 4 字节倍数。Vulkan

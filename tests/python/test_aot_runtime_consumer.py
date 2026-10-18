@@ -90,7 +90,13 @@ def test_lightweight_aot_consumer_and_jit_coexistence(tmp_path):
         path.relative_to(tmp_path).as_posix(): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
     }
     module.archive(str(tmp_path / "packed.tcm"))
+    omitted = {"metadata.json", "metadata.lock"} if arch != "vulkan" else set()
     with ZipFile(tmp_path / "packed.tcm") as archive:
+        assert {name: archive.read(name) for name in archive.namelist()} == {
+            name: data for name, data in original.items() if name not in omitted
+        }
+    module.archive(str(tmp_path / "debug.tcm"), include_debug_metadata=True)
+    with ZipFile(tmp_path / "debug.tcm") as archive:
         assert {name: archive.read(name) for name in archive.namelist()} == original
 
     root = Path(__file__).resolve().parents[2]

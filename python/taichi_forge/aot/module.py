@@ -669,11 +669,15 @@ class Module:
         with open(f"{filepath}/__version__", "w") as f:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
 
-    def archive(self, filepath: str):
+    def archive(self, filepath: str, *, include_debug_metadata: bool = False):
         """
         Args:
           filepath (str): path to the stored archive of aot artifacts, MUST
             end with `.tcm`.
+          include_debug_metadata (bool): retain LLVM's diagnostic JSON and
+            cache lock file. By default these are omitted from deployment
+            archives; runtime metadata and the output of ``save()`` are
+            unchanged. GFX JSON metadata is always retained.
         """
         assert filepath.endswith(".tcm"), "AOT module artifact archive must ends with .tcm"
         if self._graph_export_failed:
@@ -686,14 +690,25 @@ class Module:
         self.save(temp_dir)
 
         fixed_time = datetime.datetime(2000, 12, 1).timestamp()
+        omitted = set()
+        if not include_debug_metadata and self._arch in (
+            _ti_core.x64, _ti_core.arm64, _ti_core.cuda, _ti_core.amdgpu
+        ):
+            # LLVM loads metadata.tcb plus aot_metadata.json. Its similarly
+            # named metadata.json is only a human-readable cache dump. GFX
+            # backends instead require metadata.json for loading.
+            omitted = {Path("metadata.json"), Path("metadata.lock")}
 
-        # Package all artifacts into a zip archive and attach contend data.
+        # Package deployment artifacts into a zip archive.
         with ZipFile(tcm_path, "w") as z:
             for path in sorted(Path(temp_dir).rglob("*")):
                 if not path.is_file():
                     continue
+                relative = path.relative_to(temp_dir)
+                if relative in omitted:
+                    continue
                 os.utime(path, (fixed_time, fixed_time))
-                z.write(path, Path.relative_to(Path(path), temp_dir))
+                z.write(path, relative)
 
         # Remove cached files
         rmtree(temp_dir)
