@@ -58,6 +58,8 @@ def _write_runtime_wheel(
     include_optional_runtime_providers: bool = True,
     include_cusolverdn_provider: bool = True,
     include_cublaslt_provider: bool = True,
+    include_cub_source_provider: bool = True,
+    include_cutlass_source_provider: bool = True,
     include_aot_consumer: bool = True,
     include_c_api: bool = True,
 ) -> None:
@@ -109,6 +111,10 @@ def _write_runtime_wheel(
                 stems += ("taichi_forge_cusolverdn_provider_abi2_generic_v1",)
             if include_cublaslt_provider and Version(version).release >= (0, 6, 4):
                 stems += ("taichi_forge_cublaslt_provider_abi2_configured_v1",)
+            if include_cub_source_provider and Version(version).release >= (0, 6, 4):
+                stems += ("taichi_forge_cub_source_provider_abi2_addon_v1",)
+            if include_cutlass_source_provider and Version(version).release >= (0, 6, 4):
+                stems += ("taichi_forge_cutlass_source_provider_abi2_addon_v1",)
             for stem in stems:
                 provider_name = f"{stem}.dll" if platform == "windows" else f"lib{stem}.so"
                 zf.writestr(f"{provider_dir}/{provider_name}", b"forge adapter")
@@ -1521,16 +1527,16 @@ def test_runtime_wheel_cli_checks_selected_link_version(tmp_path, monkeypatch, c
 
 @pytest.mark.parametrize("platform", ("windows", "manylinux"))
 @pytest.mark.parametrize("version", ("0.6.3", "0.6.4", "0.6.4.dev1"))
-@pytest.mark.parametrize("include_solver", (False, True))
-@pytest.mark.parametrize("provider", ("cusolverdn", "cublaslt"))
-def test_runtime_wheel_new_provider_membership_preserves_legacy(tmp_path, platform, version, include_solver, provider):
+@pytest.mark.parametrize("include_provider", (False, True))
+@pytest.mark.parametrize("provider", ("cusolverdn", "cublaslt", "cub_source", "cutlass_source"))
+def test_runtime_wheel_new_provider_membership_preserves_legacy(tmp_path, platform, version, include_provider, provider):
     tag = "win_amd64" if platform == "windows" else "manylinux_2_35_x86_64"
     wheel = tmp_path / f"taichi_forge_runtime-{version}-py3-none-{tag}.whl"
     _write_runtime_wheel(
         wheel, platform=platform, version=version, cuda_major=13,
-        dependency_class="driver-only", **{f"include_{provider}_provider": include_solver},
+        dependency_class="driver-only", **{f"include_{provider}_provider": include_provider},
     )
-    if Version(version).release >= (0, 6, 4) and not include_solver:
+    if Version(version).release >= (0, 6, 4) and not include_provider:
         with pytest.raises(RuntimeError, match="optional provider adapter set"):
             validate_runtime_wheel.inspect_runtime_wheel(wheel)
     else:

@@ -163,6 +163,8 @@ def test_strict_elf_export_audit_matches_final_binary(monkeypatch, tmp_path):
             "taichi_forge_vkfft_record_inline",
             "taichi_forge_vkfft_runtime_provider_query",
         )),
+        ("cub_source", ()),
+        ("cutlass_source", ()),
     ),
 )
 def test_provider_optional_exports_are_owner_scoped(
@@ -173,6 +175,8 @@ def test_provider_optional_exports_are_owner_scoped(
         "vkfft": validate_runtime_wheel.VKFFT_ADAPTER_STEM,
         "cudss": "taichi_forge_cudss_provider_abi1_cudss080",
         "optix": "taichi_forge_optix_provider_abi1_optix118",
+        "cub_source": "taichi_forge_cub_source_provider_abi2_addon_v1",
+        "cutlass_source": "taichi_forge_cutlass_source_provider_abi2_addon_v1",
     }[provider]
     binary = f"{stem}.dll" if platform == "windows" else f"lib{stem}.so"
     member = f"taichi_forge_runtime/_lib/hardware_providers/{binary}"

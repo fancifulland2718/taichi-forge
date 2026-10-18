@@ -79,6 +79,14 @@ OPTIONAL_RUNTIME_PROVIDERS = {
         "taichi_forge_cublaslt_provider_abi2_configured_v1",
         "taichi_forge_cublaslt_provider_query",
     ),
+    "cub_source": (
+        "taichi_forge_cub_source_provider_abi2_addon_v1",
+        "taichi_forge_cub_source_provider_query",
+    ),
+    "cutlass_source": (
+        "taichi_forge_cutlass_source_provider_abi2_addon_v1",
+        "taichi_forge_cutlass_source_provider_query",
+    ),
 }
 VKFFT_ADAPTER_STEM = "taichi_forge_vkfft_provider_abi1_vkfft134"
 # Additive C ABI extensions remain optional for older compatible adapters.
@@ -178,7 +186,8 @@ def _expected_optional_runtime_provider_members(platform: str, version: str) -> 
     providers = [
         stem
         for provider, (stem, _symbol) in OPTIONAL_RUNTIME_PROVIDERS.items()
-        if provider not in {"cusolverdn", "cublaslt"} or Version(version).release >= (0, 6, 4)
+        if provider not in {"cusolverdn", "cublaslt", "cub_source", "cutlass_source"}
+        or Version(version).release >= (0, 6, 4)
     ]
     if platform == "windows":
         return {f"{prefix}{stem}.dll" for stem in providers}
