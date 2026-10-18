@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
+#include <tuple>
 
 namespace taichi::lang {
 void RuntimeClientRegistry::attach(
@@ -20,10 +21,21 @@ void RuntimeClientRegistry::retain(const std::shared_ptr<RuntimeClient> &client,
   attach_impl(client, true, std::move(snode_tree_ids));
 }
 
+void RuntimeClientRegistry::retain_storage(
+    const std::shared_ptr<RuntimeClient> &client,
+    std::vector<RuntimeResourceHandle> storage,
+    std::shared_ptr<void> storage_owner) {
+  if (storage.empty())
+    throw std::invalid_argument("Runtime storage client requires dependencies");
+  attach_impl(client, true, {}, std::move(storage), std::move(storage_owner));
+}
+
 void RuntimeClientRegistry::attach_impl(
     const std::shared_ptr<RuntimeClient> &client,
     bool retain,
-    std::vector<int> snode_tree_ids) {
+    std::vector<int> snode_tree_ids,
+    std::vector<RuntimeResourceHandle> storage,
+    std::shared_ptr<void> storage_owner) {
   if (!client)
     throw std::invalid_argument("Cannot attach an empty runtime client");
   std::sort(snode_tree_ids.begin(), snode_tree_ids.end());
@@ -32,6 +44,14 @@ void RuntimeClientRegistry::attach_impl(
   snode_tree_ids.erase(
       std::unique(snode_tree_ids.begin(), snode_tree_ids.end()),
       snode_tree_ids.end());
+  for (const auto &handle : storage)
+    if (!handle)
+      throw std::invalid_argument("Runtime client has invalid storage");
+  std::sort(storage.begin(), storage.end(), [](const auto &a, const auto &b) {
+    return std::tie(a.domain, a.kind, a.index, a.generation) <
+           std::tie(b.domain, b.kind, b.index, b.generation);
+  });
+  storage.erase(std::unique(storage.begin(), storage.end()), storage.end());
   std::lock_guard<std::mutex> guard(mutex_);
   if (state_ != State::open)
     throw std::runtime_error("Runtime owner has retired");
@@ -42,8 +62,9 @@ void RuntimeClientRegistry::attach_impl(
   for (const auto &entry : clients_)
     if (entry.identity == client.get())
       throw std::invalid_argument("Runtime client is already attached");
-  clients_.push_back({client.get(), client, retain ? client : nullptr,
-                      std::move(snode_tree_ids)});
+  clients_.push_back({client.get(), std::move(storage_owner), client,
+                      retain ? client : nullptr, std::move(snode_tree_ids),
+                      std::move(storage), false});
 }
 
 void RuntimeClientRegistry::detach(RuntimeClient *client) {
@@ -56,9 +77,7 @@ void RuntimeClientRegistry::detach(RuntimeClient *client) {
     if (found != clients_.end()) {
       // A selected client stays retained until its retirement succeeds. A
       // callback's attempted detach must not discard a failed drain closure.
-      if (state_ == State::retiring_tree &&
-          std::binary_search(found->snode_tree_ids.begin(),
-                             found->snode_tree_ids.end(), retiring_tree_id_))
+      if (state_ == State::retiring_subset && found->selected)
         return;
       released = std::move(*found);
       clients_.erase(found);
@@ -71,14 +90,35 @@ void RuntimeClientRegistry::detach(RuntimeClient *client) {
 void RuntimeClientRegistry::retire_snode_tree(int tree_id) {
   if (tree_id < 0)
     throw std::invalid_argument("Cannot retire a negative SNode tree ID");
-  std::vector<std::shared_ptr<RuntimeClient>> clients;
+  retire_selected([&](const auto &entry) {
+    return std::binary_search(entry.snode_tree_ids.begin(),
+                              entry.snode_tree_ids.end(), tree_id);
+  });
+}
+
+void RuntimeClientRegistry::retire_storage(RuntimeResourceHandle storage) {
+  if (!storage)
+    throw std::invalid_argument("Cannot retire invalid runtime storage");
+  retire_selected([&](const auto &entry) {
+    return std::find(entry.storage.begin(), entry.storage.end(), storage) !=
+           entry.storage.end();
+  });
+}
+
+void RuntimeClientRegistry::retire_selected(
+    const std::function<bool(const Entry &)> &select) {
+  struct RetainedClient {
+    std::shared_ptr<void> storage_owner;
+    std::shared_ptr<RuntimeClient> client;
+  };
+  std::vector<RetainedClient> clients;
   {
     std::unique_lock<std::mutex> guard(mutex_);
-    if ((state_ == State::retiring_tree || state_ == State::retiring) &&
+    if ((state_ == State::retiring_subset || state_ == State::retiring) &&
         retiring_thread_ == std::this_thread::get_id())
-      throw std::logic_error("Reentrant SNode client retirement");
+      throw std::logic_error("Reentrant resource client retirement");
     retired_.wait(guard, [&] {
-      return state_ != State::retiring_tree && state_ != State::retiring;
+      return state_ != State::retiring_subset && state_ != State::retiring;
     });
     if (state_ == State::closed)
       throw std::runtime_error("Runtime owner has retired");
@@ -86,20 +126,21 @@ void RuntimeClientRegistry::retire_snode_tree(int tree_id) {
     // unchanged, and callbacks run with no registry mutex held.
     clients.reserve(clients_.size());
     for (const auto &entry : clients_) {
-      if (std::binary_search(entry.snode_tree_ids.begin(),
-                             entry.snode_tree_ids.end(), tree_id)) {
+      if (select(entry)) {
         if (auto client = entry.weak.lock())
-          clients.emplace_back(std::move(client));
+          clients.push_back({entry.storage_owner, std::move(client)});
       }
     }
     if (clients.empty())
       return;
-    state_ = State::retiring_tree;
-    retiring_tree_id_ = tree_id;
+    for (auto &entry : clients_)
+      entry.selected = select(entry);
+    state_ = State::retiring_subset;
     retiring_thread_ = std::this_thread::get_id();
   }
   std::exception_ptr failure;
-  for (const auto &client : clients) {
+  for (const auto &selected : clients) {
+    const auto &client = selected.client;
     try {
       client->retire();
     } catch (...) {
@@ -125,7 +166,8 @@ void RuntimeClientRegistry::retire_snode_tree(int tree_id) {
   {
     std::lock_guard<std::mutex> guard(mutex_);
     state_ = State::open;
-    retiring_tree_id_ = -1;
+    for (auto &entry : clients_)
+      entry.selected = false;
     retiring_thread_ = {};
   }
   retired_.notify_all();
@@ -137,12 +179,12 @@ void RuntimeClientRegistry::retire() {
   std::vector<Entry> clients;
   {
     std::unique_lock<std::mutex> guard(mutex_);
-    if (state_ == State::retiring_tree) {
+    if (state_ == State::retiring_subset) {
       if (retiring_thread_ == std::this_thread::get_id())
         throw std::logic_error(
-            "Cannot retire the runtime owner from an SNode retirement "
+            "Cannot retire the runtime owner from a resource retirement "
             "callback");
-      retired_.wait(guard, [&] { return state_ != State::retiring_tree; });
+      retired_.wait(guard, [&] { return state_ != State::retiring_subset; });
     }
     if (state_ == State::retiring) {
       // A callback may inspect/close its own registry. A different owner

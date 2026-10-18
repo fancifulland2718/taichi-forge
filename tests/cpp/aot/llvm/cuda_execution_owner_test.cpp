@@ -440,6 +440,87 @@ TEST(CudaExecutionOwner, SNodeRetirementDrainsDependentDomainBeforeRootFree) {
   program.finalize();
 }
 
+TEST(CudaExecutionOwner,
+     ExternalStorageRetirementDrainsOnlyItsDependentDomain) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto &device = static_cast<cuda::CudaDevice &>(*program.get_compute_device());
+  auto allocation = device.allocate_memory_unique({sizeof(std::uint32_t)});
+  auto peer_allocation = device.allocate_memory_unique({sizeof(std::uint32_t)});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  ASSERT_EQ(peer_allocation.second, RhiResult::success);
+  auto *address = device.get_memory_addr(*allocation.first);
+  auto *peer_address = device.get_memory_addr(*peer_allocation.first);
+  auto registry = program.cuda_execution_domains();
+  auto dependent = registry->create({1, 0});
+  auto peer = registry->create({1, 0});
+  std::atomic<int> frees{0};
+  const auto owner = program.register_external_dense_storage(
+      *allocation.first, sizeof(std::uint32_t), [&] {
+        EXPECT_TRUE(dependent->snapshot().closed);
+        auto context = CUDAContext::get_instance().get_guard();
+        std::uint32_t observed = 0;
+        CUDADriver::get_instance().memcpy_device_to_host(&observed, address,
+                                                         sizeof(observed));
+        EXPECT_EQ(observed, 0x1234ABCDu);
+        allocation.first.reset();
+        ++frees;
+      });
+  std::promise<void> entered;
+  class StorageClient final : public RuntimeClient {
+   public:
+    StorageClient(std::shared_ptr<cuda::ExecutionDomain> domain,
+                  std::promise<void> &entered)
+        : domain_(std::move(domain)), entered_(entered) {
+    }
+    void retire() override {
+      entered_.set_value();
+      domain_->close();
+    }
+
+   private:
+    std::shared_ptr<cuda::ExecutionDomain> domain_;
+    std::promise<void> &entered_;
+  };
+  program.retain_external_storage_client(
+      std::make_shared<StorageClient>(dependent, entered), owner);
+  program.synchronize();
+  testing::CudaExternalGate gate;
+  auto blocked = dependent->submit({}, nullptr, [&](void *stream) {
+    gate.enqueue_wait(stream);
+    CUDADriver::get_instance().memsetd32_async(address, 0x1234ABCD, 1, stream);
+  });
+  auto retirement = std::async(std::launch::async, [&] {
+    program.retire_external_dense_storage(owner);
+  });
+  entered.get_future().wait();
+  EXPECT_EQ(retirement.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_EQ(frees.load(), 0);
+  peer->submit({}, nullptr,
+               [&](void *stream) {
+                 CUDADriver::get_instance().memsetd32_async(
+                     peer_address, 0x9876FEDC, 1, stream);
+               })
+      .wait();
+  auto context = CUDAContext::get_instance().get_guard();
+  std::uint32_t observed = 0;
+  CUDADriver::get_instance().memcpy_device_to_host(&observed, peer_address,
+                                                   sizeof(observed));
+  EXPECT_EQ(observed, 0x9876FEDCu);
+  EXPECT_FALSE(blocked.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  retirement.get();
+  EXPECT_EQ(frees.load(), 1);
+  EXPECT_TRUE(blocked.done());
+  EXPECT_TRUE(peer->snapshot().accepting);
+  peer_allocation.first.reset();
+  program.finalize();
+}
+
 TEST(CudaExecutionOwner, LiveJitCodeLoanDrainsBeforeFieldAndCodeRetirement) {
   if (!cuda::ExecutionDomain::available())
     GTEST_SKIP();

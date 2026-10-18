@@ -180,6 +180,65 @@ TEST(RuntimeClientRegistry, SNodeRetirementIsSelectiveAndRetainsUntilDrain) {
   EXPECT_EQ(global, 1);
 }
 
+TEST(RuntimeClientRegistry, StorageRetirementUsesExactOwnerKindAndGeneration) {
+  RuntimeClientRegistry registry;
+  const RuntimeResourceHandle first{7, 5, 3, 1};
+  const RuntimeResourceHandle reused{7, 5, 3, 2};
+  const RuntimeResourceHandle foreign{8, 5, 3, 1};
+  const RuntimeResourceHandle different_kind{7, 6, 3, 1};
+  int selected = 0, peers = 0, trees = 0;
+  auto client = std::make_shared<TestClient>([&] { ++selected; });
+  registry.retain_storage(client, {first, first});
+  for (const auto handle : {reused, foreign, different_kind})
+    registry.retain_storage(std::make_shared<TestClient>([&] { ++peers; }),
+                            {handle});
+  registry.retain(std::make_shared<TestClient>([&] { ++trees; }), {3});
+  EXPECT_THROW(registry.retain_storage(std::make_shared<TestClient>([] {}), {}),
+               std::invalid_argument);
+  EXPECT_THROW(registry.retire_storage({}), std::invalid_argument);
+  registry.retire_storage(first);
+  EXPECT_EQ(selected, 1);
+  EXPECT_EQ(peers, 0);
+  EXPECT_EQ(trees, 0);
+  registry.retire_storage(first);
+  EXPECT_EQ(selected, 1);
+  registry.retire_snode_tree(3);
+  EXPECT_EQ(trees, 1);
+  EXPECT_EQ(peers, 0);
+  registry.retire();
+  EXPECT_EQ(peers, 3);
+}
+
+TEST(RuntimeClientRegistry, FailedStorageDrainRetainsAllocationAndClient) {
+  RuntimeClientRegistry registry;
+  const RuntimeResourceHandle storage{9, 5, 0, 1};
+  int attempts = 0;
+  auto allocation = std::make_shared<int>(42);
+  std::weak_ptr<int> owner = allocation;
+  TestClient *identity = nullptr;
+  auto client = std::make_shared<TestClient>(
+      [&] {
+        EXPECT_FALSE(owner.expired());
+        registry.detach(identity);
+        if (++attempts == 1)
+          throw std::runtime_error("pending external user");
+      },
+      [&] { EXPECT_FALSE(owner.expired()); });
+  identity = client.get();
+  std::weak_ptr<TestClient> weak = client;
+  registry.retain_storage(client, {storage}, allocation);
+  client.reset();
+  allocation.reset();
+  EXPECT_THROW(registry.retire_storage(storage), std::runtime_error);
+  EXPECT_FALSE(owner.expired());
+  EXPECT_FALSE(weak.expired());
+  EXPECT_FALSE(registry.closed());
+  registry.retire_storage(storage);
+  EXPECT_TRUE(owner.expired());
+  EXPECT_TRUE(weak.expired());
+  EXPECT_EQ(attempts, 2);
+}
+
 TEST(RuntimeClientRegistry, FailedSNodeDrainKeepsOwnerAndCanRetry) {
   RuntimeClientRegistry registry;
   int attempts = 0, other = 0;
@@ -399,6 +458,140 @@ TEST(RuntimeClientRegistry, ProgramFinalizationCannotOvertakeSNodeRetirement) {
   destroy.get();
   finalize.get();
   EXPECT_THROW(program.destroy_snode_tree(nullptr), std::runtime_error);
+}
+TEST(RuntimeClientRegistry, ExternalStorageFailureKeepsLiveGeneration) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  bool drained = false;
+  int releases = 0, attempts = 0;
+  const auto owner =
+      program.register_external_dense_storage(kDeviceNullAllocation, 0, [&] {
+        EXPECT_TRUE(drained);
+        ++releases;
+      });
+  auto client = std::make_shared<TestClient>([&] {
+    EXPECT_EQ(releases, 0);
+    if (++attempts == 1)
+      throw std::runtime_error("external storage user is still pending");
+    drained = true;
+  });
+  program.retain_external_storage_client(client, owner);
+  EXPECT_THROW(program.retire_external_dense_storage(owner),
+               std::runtime_error);
+  EXPECT_TRUE(program.validate_external_dense_storage_owner(owner));
+  EXPECT_EQ(releases, 0);
+  program.retire_external_dense_storage(owner);
+  EXPECT_EQ(releases, 1);
+  EXPECT_FALSE(program.validate_external_dense_storage_owner(owner));
+  const auto replacement = program.register_external_dense_storage(
+      kDeviceNullAllocation, 0, [&] { ++releases; });
+  EXPECT_EQ(replacement.external_slot, owner.external_slot);
+  EXPECT_NE(replacement.external_generation, owner.external_generation);
+  EXPECT_ANY_THROW(program.retain_external_storage_client(
+      std::make_shared<TestClient>([] {}), owner));
+  program.retire_external_dense_storage(replacement);
+  EXPECT_EQ(releases, 2);
+  program.finalize();
+}
+
+TEST(RuntimeClientRegistry, ExternalStorageLeaseOutlivesGlobalClientDrain) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  bool drained = false;
+  int releases = 0;
+  const auto owner =
+      program.register_external_dense_storage(kDeviceNullAllocation, 0, [&] {
+        EXPECT_TRUE(drained);
+        ++releases;
+      });
+  program.retain_external_storage_client(std::make_shared<TestClient>([&] {
+                                           EXPECT_EQ(releases, 0);
+                                           drained = true;
+                                         }),
+                                         owner);
+  program.finalize();
+  EXPECT_TRUE(drained);
+  EXPECT_EQ(releases, 1);
+}
+
+TEST(RuntimeClientRegistry, ExternalCloseFailureRemainsRetryable) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  bool fail = true;
+  int frees = 0;
+  const auto lifetime = program.weak_resource_lifetime_token();
+  const auto owner = program.register_external_dense_storage(
+      kDeviceNullAllocation, 0, [&] { ++frees; });
+  program.retain_external_storage_client(
+      std::make_shared<TestClient>([&] {
+        if (fail)
+          throw std::runtime_error("external client drain failed");
+      }),
+      owner);
+  EXPECT_THROW(
+      Program::close_external_dense_storage_if_alive(&program, lifetime, owner),
+      std::runtime_error);
+  EXPECT_FALSE(Program::retire_external_dense_storage_if_alive(
+      &program, lifetime, owner));
+  EXPECT_TRUE(program.validate_external_dense_storage_owner(owner));
+  EXPECT_EQ(frees, 0);
+  fail = false;
+  EXPECT_TRUE(Program::close_external_dense_storage_if_alive(&program, lifetime,
+                                                             owner));
+  EXPECT_EQ(frees, 1);
+  program.finalize();
+  EXPECT_FALSE(Program::close_external_dense_storage_if_alive(&program,
+                                                              lifetime, owner));
+  EXPECT_EQ(frees, 1);
+}
+
+TEST(RuntimeClientRegistry, ExternalRetirementCannotReenterBlockedFinalizer) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  std::promise<void> entered, release;
+  auto released = release.get_future();
+  std::atomic<bool> drained{false};
+  int frees = 0;
+  const auto owner =
+      program.register_external_dense_storage(kDeviceNullAllocation, 0, [&] {
+        EXPECT_TRUE(drained.load());
+        ++frees;
+      });
+  program.retain_external_storage_client(
+      std::make_shared<TestClient>([&] {
+        entered.set_value();
+        released.wait();
+        // The finalizer holds its cold mutex while waiting on our resource
+        // guard. Reentry must reject before trying to acquire that mutex.
+        EXPECT_THROW(program.finalize(), std::logic_error);
+        EXPECT_THROW(program.destroy_snode_tree(nullptr), std::logic_error);
+        EXPECT_THROW(
+            Program::close_external_dense_storage_if_alive(
+                &program, program.weak_resource_lifetime_token(), owner),
+            std::logic_error);
+        drained = true;
+      }),
+      owner);
+  auto retire = std::async(std::launch::async, [&] {
+    EXPECT_TRUE(Program::close_external_dense_storage_if_alive(
+        &program, program.weak_resource_lifetime_token(), owner));
+  });
+  entered.get_future().wait();
+  auto finalize = std::async(std::launch::async, [&] { program.finalize(); });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (program.runtime_fault_domain()->state() ==
+             RuntimeLifecycleState::kHealthy &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_EQ(program.runtime_fault_domain()->state(),
+            RuntimeLifecycleState::kFinalizing);
+  EXPECT_EQ(finalize.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  release.set_value();
+  retire.get();
+  finalize.get();
+  EXPECT_EQ(frees, 1);
 }
 #endif
 #ifdef TI_WITH_CUDA

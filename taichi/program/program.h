@@ -1185,6 +1185,12 @@ class TI_DLL_EXPORT Program {
   void retain_runtime_client(
       const std::shared_ptr<RuntimeClient> &client,
       const std::vector<SNodeTreeDependency> &snode_tree_dependencies);
+  // Cold borrowers of a window/external allocation must drain before its
+  // owner can release either API's backing device. Registration validates the
+  // exact external resource generation; submit performs no registry scan.
+  void retain_external_storage_client(
+      const std::shared_ptr<RuntimeClient> &client,
+      const storage::StorageOwnerRef &owner);
   void detach_runtime_client(RuntimeClient *client);
   gfx::GfxRuntime *get_gfx_runtime_for_borrowing();
   // Delayed resource owners use the typed token and helpers below to
@@ -1210,6 +1216,12 @@ class TI_DLL_EXPORT Program {
       Program *program,
       const std::weak_ptr<ProgramLifetimeToken> &lifetime,
       const storage::StorageOwnerRef &owner) noexcept;
+  // Explicit close propagates drain failures so callers can retry. A caller
+  // must not interpret a failed drain as permission to free backing storage.
+  static bool close_external_dense_storage_if_alive(
+      Program *program,
+      const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+      const storage::StorageOwnerRef &owner);
 
   using DenseStorageBindingCallback = std::function<void(
       const storage::ResolvedDenseBinding *, std::size_t)>;

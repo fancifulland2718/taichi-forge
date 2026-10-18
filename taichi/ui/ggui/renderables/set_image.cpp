@@ -327,13 +327,14 @@ class SharedCudaVulkanImage::Impl {
  private:
   void close_noexcept() noexcept {
     try {
-      const bool retired =
-          Program::retire_external_dense_storage_if_alive(
-              program_, program_lifetime_, owner_);
+      const bool retired = Program::close_external_dense_storage_if_alive(
+          program_, program_lifetime_, owner_);
       if (!retired && lifetime_) {
         lifetime_->close();
       }
     } catch (...) {
+      // A failed borrower drain leaves its registry lease and Lifetime alive.
+      // Do not turn that failure into permission to close external memory.
     }
     owner_ = {};
     lifetime_.reset();

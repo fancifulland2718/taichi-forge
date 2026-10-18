@@ -120,7 +120,7 @@ Program *&runtime_completion_detail::active_runtime_submission_program()
 namespace {
 
 thread_local Program *active_snode_tree_lifecycle_program = nullptr;
-thread_local Program *active_snode_tree_destruction_program = nullptr;
+thread_local Program *active_runtime_storage_retirement_program = nullptr;
 thread_local Program *active_runtime_resource_graph_program = nullptr;
 thread_local Program::RuntimeResourceGraphScope *active_runtime_resource_graph_scope = nullptr;
 
@@ -5776,6 +5776,8 @@ static void remove_snode_frontend_caches(
 
 void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   TI_COMPILE_PROFILER("cpp.snode.destroy.total");
+  if (active_runtime_storage_retirement_program)
+    throw std::logic_error("Reentrant runtime storage destruction");
   // Both destructive operations can retire borrowed clients. Serialize them
   // before taking tree/resource locks, so finalization cannot hold a client
   // retirement transaction while tree destruction waits for that transaction
@@ -5785,12 +5787,10 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   if (finalized_ || runtime_finalization_in_progress_)
     throw std::runtime_error(
         "Cannot destroy an SNode tree after runtime retirement");
-  if (active_snode_tree_destruction_program)
-    throw std::logic_error("Reentrant SNode tree destruction");
-  active_snode_tree_destruction_program = this;
+  active_runtime_storage_retirement_program = this;
   struct DestructionScope {
     ~DestructionScope() {
-      active_snode_tree_destruction_program = nullptr;
+      active_runtime_storage_retirement_program = nullptr;
     }
   } destruction_scope;
   TI_ASSERT(arch_uses_llvm(compile_config().arch) ||
@@ -8356,10 +8356,32 @@ storage::StorageOwnerRef Program::register_external_dense_storage(
 
 void Program::retire_external_dense_storage(
     const storage::StorageOwnerRef &owner) {
+  if (active_runtime_storage_retirement_program)
+    throw std::logic_error("Reentrant runtime storage destruction");
+  active_runtime_storage_retirement_program = this;
+  struct RetirementScope {
+    ~RetirementScope() {
+      active_runtime_storage_retirement_program = nullptr;
+    }
+  } retirement_scope;
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const auto handle = external_dense_storage_handle(owner);
   TI_ERROR_IF(!handle, "External dense storage belongs to another Program");
+  auto [result, lease] = external_dense_storage_resources_.acquire(handle);
+  TI_ERROR_IF(
+      result != ExternalDenseStorageRegistry::Result::kSuccess || !lease,
+      "External dense storage is stale or already retired");
+  const auto lifecycle = runtime_fault_domain_->state();
+  if (runtime_clients_ && lifecycle != RuntimeLifecycleState::kFinalizing &&
+      lifecycle != RuntimeLifecycleState::kFinalized) {
+    // Callbacks enter only their native Runtime gate, not the borrower scope.
+    // During whole-owner finalization, admission is already closed and the
+    // global client drain owns these leases. Do not wait on that transaction
+    // with a resource guard held: another borrower may need the same guard to
+    // exit before its owner callback can finish.
+    runtime_clients_->retire_storage(handle);
+  }
   TI_ERROR_IF(external_dense_storage_resources_.retire(handle) !=
                   ExternalDenseStorageRegistry::Result::kSuccess,
               "External dense storage is stale or already retired");
@@ -8724,6 +8746,27 @@ void Program::detach_runtime_client(RuntimeClient *client) {
   }
 }
 
+void Program::retain_external_storage_client(
+    const std::shared_ptr<RuntimeClient> &client,
+    const storage::StorageOwnerRef &owner) {
+  auto guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("retain external storage client");
+  const auto handle = external_dense_storage_handle(owner);
+  TI_ERROR_IF(!handle, "External dense storage belongs to another Program");
+  auto [result, lease] = external_dense_storage_resources_.acquire(handle);
+  TI_ERROR_IF(
+      result != ExternalDenseStorageRegistry::Result::kSuccess || !lease,
+      "External storage client references a retired generation");
+  if (!runtime_clients_)
+    runtime_clients_ = std::make_unique<RuntimeClientRegistry>();
+  // Whole-owner finalization closes registries before invoking client drains.
+  // Keep the allocation alive through that ordering and through failed subset
+  // retirement, even if the producer drops its own last view concurrently.
+  runtime_clients_->retain_storage(
+      client, {handle},
+      std::make_shared<ExternalDenseStorageLease>(std::move(lease)));
+}
+
 gfx::GfxRuntime *Program::get_gfx_runtime_for_borrowing() {
 #ifdef TI_WITH_VULKAN
   auto *impl = dynamic_cast<GfxProgramImpl *>(program_impl_.get());
@@ -8734,11 +8777,11 @@ gfx::GfxRuntime *Program::get_gfx_runtime_for_borrowing() {
 }
 
 void Program::finalize() {
+  if (active_runtime_storage_retirement_program == this)
+    throw std::logic_error(
+        "Cannot finalize a Program from a storage retirement callback");
   std::lock_guard<std::recursive_mutex> finalization_lock(
       runtime_finalization_mutex_);
-  if (active_snode_tree_destruction_program == this)
-    throw std::logic_error(
-        "Cannot finalize a Program from an SNode retirement callback");
   if (finalized_ || runtime_finalization_in_progress_) {
     return;
   }
@@ -9339,6 +9382,21 @@ bool Program::retire_external_dense_storage_if_alive(
     Program *program,
     const std::weak_ptr<ProgramLifetimeToken> &lifetime,
     const storage::StorageOwnerRef &owner) noexcept {
+  try {
+    return close_external_dense_storage_if_alive(program, lifetime, owner);
+  } catch (...) {
+    return false;
+  }
+}
+
+bool Program::close_external_dense_storage_if_alive(
+    Program *program,
+    const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+    const storage::StorageOwnerRef &owner) {
+  // A client callback can already hold this lifetime token through the outer
+  // close helper. Reject destructive reentry before its nonrecursive mutex.
+  if (active_runtime_storage_retirement_program)
+    throw std::logic_error("Reentrant runtime storage destruction");
   if (!program || !owner.valid()) {
     return false;
   }
@@ -9346,17 +9404,13 @@ bool Program::retire_external_dense_storage_if_alive(
   if (!token) {
     return false;
   }
-  try {
-    std::lock_guard<std::mutex> lock(token->mutex_);
-    if (token->program_ != program ||
-        !program->validate_external_dense_storage_owner(owner)) {
-      return false;
-    }
-    program->retire_external_dense_storage(owner);
-    return true;
-  } catch (...) {
+  std::lock_guard<std::mutex> lock(token->mutex_);
+  if (token->program_ != program ||
+      !program->validate_external_dense_storage_owner(owner)) {
     return false;
   }
+  program->retire_external_dense_storage(owner);
+  return true;
 }
 
 void Program::delete_argpack(ArgPack *argpack) {

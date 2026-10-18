@@ -389,6 +389,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   add_executable(taichi_cuda_execution_domain_tests
     tests/cpp/rhi/common/cuda_execution_domain_test.cpp
     tests/cpp/aot/runtime_client_test.cpp
+    tests/cpp/program/external_dense_storage_test.cpp
     tests/cpp/aot/cuda_ordered_submission_test.cpp
     tests/cpp/aot/cuda_execution_provider_test.cpp
     tests/cpp/aot/llvm/cuda_execution_context_aot_test.cpp
