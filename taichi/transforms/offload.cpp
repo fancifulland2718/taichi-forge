@@ -464,11 +464,13 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     current_offloaded_ = stmt;
     if (auto begin = offloaded_ranges_->begin_stmts.find(stmt);
         begin != offloaded_ranges_->begin_stmts.end()) {
-      test_and_allocate(begin->second);
+      // A dynamic start is still loaded from global temporary storage, even
+      // when its value could otherwise be cloned into the task body.
+      test_and_allocate(begin->second, true);
     }
     if (auto end = offloaded_ranges_->end_stmts.find(stmt);
         end != offloaded_ranges_->end_stmts.end()) {
-      test_and_allocate(end->second);
+      test_and_allocate(end->second, stmt->end_stmt == nullptr);
     }
     if (stmt->body)
       stmt->body->accept(this);
@@ -479,7 +481,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     TI_ASSERT(current_offloaded_);
   }
 
-  void test_and_allocate(Stmt *stmt) {
+  void test_and_allocate(Stmt *stmt, bool range_bound = false) {
     if (stmt == nullptr)
       return;
     if (stmt_to_offloaded_[stmt] == current_offloaded_)
@@ -503,7 +505,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
       return;
     if ((config_.arch == Arch::opengl || config_.arch == Arch::vulkan ||
          config_.arch == Arch::gles || config_.arch == Arch::metal) &&
-        demotable_axis_load(stmt))
+        !range_bound && demotable_axis_load(stmt))
       return;
     // Not yet allocated
     if (local_to_global_.find(top_level_ptr) == local_to_global_.end()) {

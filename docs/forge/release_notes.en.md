@@ -34,6 +34,8 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fix Vulkan compilation of dynamic range starts with ndarray-shape ends. Dynamic
+  starts retain temporary-storage snapshots, preserving device-memory bound semantics.
 - CPU/CUDA SNode trees retain their creation-time element-list storage contract.
   Memory accounting and retirement no longer depend on later changes to
   `demote_dense_struct_fors`. Paired components use private ABI 98.
