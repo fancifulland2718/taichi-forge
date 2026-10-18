@@ -154,7 +154,11 @@ TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshotsOrMesh) {
   EXPECT_FALSE(LLVM::is_relocatable_aot_task(OffloadedTaskType::mesh_for, true));
   EXPECT_TRUE(LLVM::is_relocatable_aot_snode(SNodeType::hash, true));
   EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::hash, false));
-  EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::quant_array, true));
+  for (auto type : {SNodeType::bit_struct, SNodeType::quant_array}) {
+    EXPECT_TRUE(LLVM::is_relocatable_aot_snode(type, true));
+    EXPECT_FALSE(LLVM::is_relocatable_aot_snode(type, false));
+    EXPECT_FALSE(LLVM::is_dense_aot_snode(type));
+  }
 }
 
 TEST(LlvmAotMetadataTest, SparseParentClosureIsValidatedBeforeAllocation) {

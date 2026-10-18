@@ -4152,7 +4152,7 @@ CPU bitcode and CUDA bitcode/PTX/cubin are covered. Traversal and garbage
 collection relocate their tree/local-node keys before execution. This does not
 serialize active sparse storage as a root snapshot/view. Old embedded-ID
 artifacts and
-mesh/quantized layouts retain their embedded-ID contract: overlapping IDs
+mesh layouts retain their embedded-ID contract: overlapping IDs
 are rejected before initialization. Shared runtime allocation caches may remain resident.
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
@@ -4166,6 +4166,16 @@ of the artifact; consumers do not copy the producer's global hash options.
 This qualification does not include hash root snapshots, general mesh/quantized
 layouts or differentiation through topology changes. Re-export old embedded-ID
 hash artifacts to obtain resource isolation.
+
+LLVM bit-struct and quant-array storage also uses the common relocatable
+resource path, without exposing packed words as ordinary ndarray storage views.
+Small CPU bitcode/CUDA PTX/Vulkan SPIR-V checks cover signed packed integers,
+neighbor fields, module isolation, ordinary/prepared calls, updates and
+close/reload. The reverse check differentiates a real ndarray multiplier of
+the stored values; it does not make quantized integers differentiable.
+Vulkan export retains the explicit `vulkan_quant_experimental=True` gate.
+This qualification does not include shared-exponent quantized floats or mesh
+resources. Old LLVM packed artifacts retain embedded IDs until re-export.
 
 New CPU/CUDA exports requiring element lists with
 `demote_dense_struct_fors=False` declare `list_v1`. The loader derives per-tree

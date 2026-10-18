@@ -3177,7 +3177,7 @@ dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。�
 两个实例拥有独立活跃集与梯度，覆盖 CPU bitcode 和 CUDA bitcode/PTX/cubin。遍历和
 GC 的 tree/local-node key 在执行前重定位。这不把 sparse 活跃存储序列化为根快照或
 flat view。旧嵌入 ID 产物及
-mesh/quantized 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
+mesh 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
 共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
 
@@ -3187,6 +3187,13 @@ Hash 树现在复用同一套模块局部稀疏资源绑定。Windows CPU bitcod
 列表和紧凑子池布局由编译产物携带，消费者无需复制生产者的全局 hash 选项。
 该验证不包含 hash 根快照、一般 mesh/quantized 布局或拓扑变化本身的微分。
 旧 embedded-ID hash 产物需要重新导出才能获得资源隔离。
+
+LLVM bit-struct 与 quant-array 存储也复用公共资源重定位路径，不把打包的物理字当作
+普通 ndarray 存储视图。CPU bitcode/CUDA PTX/Vulkan SPIR-V 的小型测试覆盖有符号
+打包整数、相邻字段、双模块隔离、普通/固定调用、更新及关闭/重载。反向检查针对乘以
+这些存储值的浮点 ndarray 输入，不代表量化整数本身可微。Vulkan 导出仍需显式启用
+`vulkan_quant_experimental=True`。本次验证不包含共享指数的量化浮点或 mesh 资源。
+旧 LLVM packed 产物仍使用嵌入 ID，需重新导出才能重定位。
 
 `demote_dense_struct_fors=False` 下需要元素列表的新 CPU/CUDA 产物声明 `list_v1`。
 加载器仅解析已有的任务和 SNode 元数据，按树分配列表；同一 kernel 读取的其他

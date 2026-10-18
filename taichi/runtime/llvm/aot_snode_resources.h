@@ -21,7 +21,9 @@ inline bool is_relocatable_aot_snode(SNodeType type, bool sparse) {
   return is_dense_aot_snode(type) || (sparse && (type == SNodeType::pointer ||
                                                  type == SNodeType::bitmasked ||
                                                  type == SNodeType::dynamic ||
-                                                 type == SNodeType::hash));
+                                                 type == SNodeType::hash ||
+                                                 type == SNodeType::bit_struct ||
+                                                 type == SNodeType::quant_array));
 }
 
 inline bool is_relocatable_aot_task(OffloadedTaskType type, bool lists) {
