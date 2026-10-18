@@ -25,6 +25,7 @@
 #include "taichi/rhi/cpu/scatter_validation.h"
 #include "taichi/rhi/cpu/scatter_add.h"
 #include "taichi/rhi/cpu/aggregation.h"
+#include "taichi/rhi/cpu/histogram.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -1073,15 +1074,6 @@ std::size_t sort_key_type_size(int key_type) {
       return 0;
   }
 }
-
-template <typename ValueT, typename CounterT>
-struct CpuHistogramTaskContext {
-  const ValueT *values{nullptr};
-  CounterT *partial{nullptr};
-  std::size_t n{0};
-  std::size_t num_bins{0};
-  int num_threads{1};
-};
 
 template <typename T>
 struct CpuStridedReduceTaskContext {
@@ -3803,31 +3795,7 @@ std::size_t histogram_bin_type_size(int bin_type) {
 
 template <typename ValueT>
 bool cpu_histogram_valid_bin(ValueT bin, std::size_t num_bins) {
-  if constexpr (std::is_unsigned_v<ValueT>) {
-    return static_cast<std::size_t>(bin) < num_bins;
-  } else {
-    return bin >= 0 && static_cast<std::size_t>(bin) < num_bins;
-  }
-}
-
-template <typename ValueT, typename CounterT>
-void cpu_histogram_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuHistogramTaskContext<ValueT, CounterT> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  CounterT *local =
-      ctx->partial + static_cast<std::size_t>(tid) * ctx->num_bins;
-  for (std::size_t i = begin; i < end; ++i) {
-    ValueT bin = ctx->values[i];
-    if (cpu_histogram_valid_bin(bin, ctx->num_bins)) {
-      local[static_cast<std::size_t>(bin)] += 1;
-    }
-  }
+  return cpu::histogram_valid_bin(bin, num_bins);
 }
 
 template <typename ValueT, typename CounterT>
@@ -3840,37 +3808,17 @@ std::size_t cpu_histogram_typed(const ValueT *values_ptr,
                                 bool use_parallel) {
   TI_ERROR_IF(!values_ptr || !bins_ptr,
               "CPU native histogram received a null data pointer.");
-  std::fill(bins_ptr, bins_ptr + num_bins, CounterT{});
-
   if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<CounterT> partial(
-        static_cast<std::size_t>(num_threads) * num_bins, CounterT{});
-    CpuHistogramTaskContext<ValueT, CounterT> ctx;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.num_bins = num_bins;
-    ctx.num_threads = num_threads;
+    const auto bytes =
+        cpu::aggregation_workspace_bytes<CounterT>(num_bins, target_threads);
+    std::vector<CounterT> partial(bytes / sizeof(CounterT), CounterT{});
     auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx,
-             cpu_histogram_task<ValueT, CounterT>);
-    for (std::size_t bin = 0; bin < num_bins; ++bin) {
-      CounterT total{};
-      for (int tid = 0; tid < num_threads; ++tid) {
-        total += partial[static_cast<std::size_t>(tid) * num_bins + bin];
-      }
-      bins_ptr[bin] = total;
-    }
-    return partial.size() * sizeof(CounterT);
+    cpu::histogram(values_ptr, bins_ptr, n, num_bins, target_threads,
+                   partial.data(), pool);
+    return bytes;
   }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    ValueT bin = values_ptr[i];
-    if (cpu_histogram_valid_bin(bin, num_bins)) {
-      bins_ptr[static_cast<std::size_t>(bin)] += 1;
-    }
-  }
+  cpu::histogram(values_ptr, bins_ptr, n, num_bins, 1,
+                 static_cast<CounterT *>(nullptr), nullptr);
   return 0;
 }
 
@@ -18118,12 +18066,8 @@ std::size_t Program::cpu_histogram_ndarray(Ndarray *values,
   const std::size_t num_bins = bins->get_nelement();
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = num_bins <= 4096 &&
-                            cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::histogram_partitions(n, num_bins, max_threads);
+  const bool use_parallel = target_threads > 1;
   if (value_type == 2 && bin_type == 4) {
     return cpu_histogram_typed(static_cast<const uint32_t *>(values_ptr),
                                static_cast<int64_t *>(bins_ptr), n, num_bins,
@@ -18182,15 +18126,10 @@ std::size_t Program::cpu_histogram_dense_field(SNode *values,
       &bin_stride);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
+  const int target_threads = cpu::histogram_partitions(n, num_bins, max_threads);
   const bool contiguous =
       value_stride == value_size && bin_stride == bin_size;
-  const bool use_parallel =
-      contiguous && num_bins <= 4096 &&
-      cpu_use_parallel_aggregation(n, target_threads);
+  const bool use_parallel = contiguous && target_threads > 1;
   if (value_type == 2 && bin_type == 4) {
     if (contiguous) {
       return cpu_histogram_typed(reinterpret_cast<const uint32_t *>(values_ptr),

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/rhi/cpu/reduce.h"
+#include "taichi/rhi/cpu/aggregation.h"
 
 namespace taichi::lang::cpu {
 
@@ -8,16 +9,7 @@ namespace taichi::lang::cpu {
 // overflow is rejected here; this is not a capacity or worker-count policy.
 template <typename T>
 std::size_t scatter_add_workspace_bytes(std::size_t dst_items, int partitions) {
-  if (partitions < 1)
-    throw std::invalid_argument("CPU scatter-add requires positive partitions");
-  if (partitions == 1 || !dst_items)
-    return 0;
-  const auto count = static_cast<std::size_t>(partitions);
-  const auto maximum = std::numeric_limits<std::size_t>::max();
-  if (dst_items > maximum / sizeof(T) / count)
-    throw std::invalid_argument(
-        "CPU scatter-add workspace exceeds address space");
-  return dst_items * count * sizeof(T);
+  return aggregation_workspace_bytes<T>(dst_items, partitions);
 }
 
 template <typename T>

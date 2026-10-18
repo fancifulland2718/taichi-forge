@@ -2,8 +2,25 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
 
 namespace taichi::lang::cpu {
+
+// The owner chooses partitions and storage retention. This calculation only
+// validates address-space arithmetic; it imposes no algorithm budget.
+template <typename T>
+std::size_t aggregation_workspace_bytes(std::size_t groups, int partitions) {
+  if (partitions < 1)
+    throw std::invalid_argument("CPU aggregation requires positive partitions");
+  if (partitions == 1 || !groups)
+    return 0;
+  const auto count = static_cast<std::size_t>(partitions);
+  if (groups > std::numeric_limits<std::size_t>::max() / sizeof(T) / count)
+    throw std::invalid_argument(
+        "CPU aggregation workspace exceeds address space");
+  return groups * count * sizeof(T);
+}
 
 // Existing algorithm/retention choices, not limits on input capacity. Freeze
 // the producer configuration when replay must preserve floating-point order.
