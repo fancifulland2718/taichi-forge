@@ -13,12 +13,14 @@
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_description.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
+#include "taichi/runtime/vulkan_submission_recipe.h"
 
 namespace taichi::lang::aot {
 // Versioned persistent operations, independent of live definitions, runtime
 // handles, backend commands and storage ownership. Binding consumes this only
 // in the cold phase; replay retains no JSON or symbolic argument lookups.
 struct ExecutionPlan {
+  static constexpr std::uint32_t kMaxVersion = 20;
   struct Kernel {
     struct BoundedRange {
       bool cuda{false};
@@ -141,6 +143,7 @@ struct ExecutionPlan {
   std::vector<std::string> arguments;
   ExecutionResources resources;
   bool cuda_binding_frames{false};
+  std::optional<VulkanSubmissionRecipe> vulkan_submission;
 
   static ExecutionPlan parse(const std::string &json);
 };

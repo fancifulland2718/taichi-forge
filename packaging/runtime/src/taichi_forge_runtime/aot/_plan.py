@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 19
+_MAX_EXECUTION_PLAN_VERSION = 20
 
 
 def _resource_version(resources):
@@ -83,6 +83,7 @@ class ExecutionPlan:
         initialization=None,
         constraints=None,
         binding_strategy=None,
+        submission_recipe=None,
     ):
         document = {"version": 1 if initialization is None else 2, "operations": list(operations)}
         if initialization is not None:
@@ -98,6 +99,9 @@ class ExecutionPlan:
                 raise ValueError("Unsupported execution binding strategy")
             document["binding_strategy"] = binding_strategy
             document["version"] = 10
+        if submission_recipe is not None:
+            document["submission_recipe"] = submission_recipe
+            document["version"] = 20
         document["version"] = max(
             document["version"], _control_version(document["operations"] + document.get("initialization", [])),
             _constraint_version(document.get("constraints", [])),
@@ -123,6 +127,7 @@ class ExecutionPlan:
                 "initialization",
                 "constraints",
                 "binding_strategy",
+                "submission_recipe",
             }
         ):
             raise ValueError("Execution plan requires version and operations")
@@ -147,6 +152,10 @@ class ExecutionPlan:
             if value["binding_strategy"] != "cuda_immutable_argument_frames":
                 raise ValueError("Unsupported execution binding strategy")
             required = max(required, 10)
+        if "submission_recipe" in value:
+            if value["submission_recipe"] is None:
+                raise ValueError("Submission recipe must be an object")
+            required = max(required, 20)
         if value["version"] < required:
             raise ValueError(f"Execution features require execution plan version {required}")
         return cls(
@@ -156,6 +165,7 @@ class ExecutionPlan:
             initialization=value.get("initialization"),
             constraints=value.get("constraints"),
             binding_strategy=value.get("binding_strategy"),
+            submission_recipe=value.get("submission_recipe"),
         )
 
     @classmethod
@@ -497,6 +507,9 @@ class ExecutionPlan:
                         arguments.update((column["values"], column["output"]))
 
         self.binding_strategy = document.get("binding_strategy")
+        from ._submission_recipe import validate_submission_recipe
+
+        validate_submission_recipe(document.get("submission_recipe"), operations, self.binding_strategy)
         if self.binding_strategy is not None:
             for operation in operations:
                 if isinstance(operation, dict) and (

@@ -121,9 +121,22 @@ FixedExecution::FixedExecution(
     NativeRecordingState *sequence_state,
     std::shared_ptr<RuntimeFaultDomain> fault_domain,
     std::shared_ptr<cuda::BindingFrameReplay> binding_replay,
-    std::shared_ptr<void> binding_operands)
+    std::shared_ptr<void> binding_operands,
+    const VulkanSubmissionRecipe *submission_recipe)
     : state_(std::make_unique<State>()) {
   state_->fault_domain = std::move(fault_domain);
+  if (submission_recipe) {
+    if (arch != Arch::vulkan)
+      throw std::invalid_argument("Selected Vulkan submission requires Vulkan");
+    submission_recipe->validate(operations.size());
+    for (const auto &operation : operations) {
+      if (std::holds_alternative<std::shared_ptr<const Branch>>(operation) ||
+          std::holds_alternative<std::shared_ptr<const While>>(operation) ||
+          std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
+        throw std::invalid_argument(
+            "Vulkan submission recipes require a flat replay sequence");
+    }
+  }
   if (binding_replay) {
     if (arch != Arch::cuda || !binding_operands)
       throw std::invalid_argument(
@@ -859,6 +872,10 @@ FixedExecution::FixedExecution(
 #ifdef TI_WITH_VULKAN
   if (arch == Arch::vulkan) {
     std::vector<gfx::GfxRuntime::GraphRecordingOperation> native;
+    const bool independent =
+        submission_recipe &&
+        submission_recipe->kind ==
+            VulkanSubmissionRecipe::Kind::independent_graphics;
     const auto bind_dispatch = [&](const Dispatch &dispatch) {
       auto *loaded = dynamic_cast<gfx::KernelImpl *>(dispatch.kernel);
       if (!loaded || (gfx_runtime && gfx_runtime != &loaded->runtime()))
@@ -882,10 +899,19 @@ FixedExecution::FixedExecution(
       if (!gfx_runtime)
         throw std::invalid_argument(
             "Fixed Vulkan operations require a runtime");
-      retain(gfx_runtime->prepare_fixed_graph(native, {}));
+      retain(gfx_runtime->prepare_fixed_graph(native, {}, {}, independent));
       native.clear();
     };
+    std::size_t operation_index = 0, segment_index = 0;
     for (const auto &operation : operations) {
+      // The descriptor is consumed at prepare time only. Existing registrations
+      // retain the actual commands, dependencies and completion protocol.
+      if (submission_recipe && !independent && operation_index &&
+          operation_index == submission_recipe->ends[segment_index]) {
+        flush();
+        ++segment_index;
+      }
+      ++operation_index;
       if (const auto *value =
               std::get_if<std::shared_ptr<const While>>(&operation)) {
         const auto &loop = **value;

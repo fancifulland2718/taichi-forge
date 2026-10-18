@@ -77,9 +77,10 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
   try {
     const auto root = liong::json::parse_complete(json);
     fields(root, {"version", "operations", "resources", "gradients",
-                  "initialization", "constraints", "binding_strategy"});
+                  "initialization", "constraints", "binding_strategy",
+                  "submission_recipe"});
     const auto version = integer(root["version"]);
-    if (version < 1 || version > 19)
+    if (version < 1 || version > kMaxVersion)
       throw std::invalid_argument("Unsupported execution plan version");
     const bool has_initialization = root.obj.inner.count("initialization");
     if (version < 3 && ((version == 2) != has_initialization))
@@ -580,6 +581,42 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           throw std::invalid_argument(
               "CUDA binding frames require fixed kernel dispatches");
       }
+    }
+    if (const auto selected = root.obj.inner.find("submission_recipe");
+        selected != root.obj.inner.end()) {
+      if (version < 20 || plan.cuda_binding_frames)
+        throw std::invalid_argument(
+            "Vulkan submission requires plan version 20 without CUDA binding frames");
+      const auto &recipe = selected->second;
+      const auto kind = name(recipe["kind"]);
+      VulkanSubmissionRecipe submission;
+      if (kind == "vulkan_segmented") {
+        fields(recipe, {"kind", "version", "ends"});
+        if (!recipe["ends"].is_arr())
+          throw std::invalid_argument("Vulkan submission ends must be an array");
+        for (const auto &item : recipe["ends"].arr.inner) {
+          const auto end = integer(item);
+          if (end > plan.operations.size())
+            throw std::invalid_argument("Vulkan submission end exceeds replay size");
+          submission.ends.push_back(static_cast<std::size_t>(end));
+        }
+      } else if (kind == "vulkan_independent_graphics") {
+        fields(recipe, {"kind", "version"});
+        submission.kind = VulkanSubmissionRecipe::Kind::independent_graphics;
+      } else {
+        throw std::invalid_argument("Unsupported Vulkan submission recipe");
+      }
+      if (integer(recipe["version"]) != 1)
+        throw std::invalid_argument("Unsupported submission recipe version");
+      submission.validate(plan.operations.size());
+      for (const auto &operation : plan.operations) {
+        if (std::holds_alternative<std::shared_ptr<const Branch>>(operation) ||
+            std::holds_alternative<std::shared_ptr<const While>>(operation) ||
+            std::holds_alternative<std::shared_ptr<const Parallel>>(operation))
+          throw std::invalid_argument(
+              "Vulkan submission recipes require a flat replay sequence");
+      }
+      plan.vulkan_submission = std::move(submission);
     }
     plan.resources.analyze(arguments);
     plan.arguments.assign(arguments.begin(), arguments.end());

@@ -27,6 +27,40 @@ def test_private_allocators_follow_storage_demand_and_require_v19():
         ExecutionPlan(operations, resources=[state, shape, dict(pool, bindings=dict(input="state"))])
 
 
+def test_vulkan_submission_recipe_snapshot_and_exact_cover():
+    operations = [dict(kind="kernel", entry="step", arguments=["x"])] * 3
+    recipe = dict(kind="vulkan_segmented", version=1, ends=[1, 3])
+    plan = ExecutionPlan(operations, submission_recipe=recipe)
+    snapshot = json.loads(plan.to_json())
+    assert snapshot["version"] == 20
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    recipe["ends"][0] = 2
+    assert json.loads(plan.to_json())["submission_recipe"]["ends"] == [1, 3]
+    with pytest.raises(ValueError, match="version 20"):
+        ExecutionPlan.from_json(json.dumps(dict(snapshot, version=19)))
+    for ends in ([], [0, 3], [1, 1, 3], [2, 1, 3], [1, 4], [1, 2], [True, 3], [1.0, 3], "3"):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, submission_recipe=dict(recipe, ends=ends))
+    for changed in (dict(version=True), dict(version=2), dict(extra=1), dict(kind="unknown")):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, submission_recipe=dict(recipe, **changed))
+    independent = dict(kind="vulkan_independent_graphics", version=1)
+    assert ExecutionPlan(operations, submission_recipe=independent).argument_names == ("x",)
+    for changed in (dict(independent, ends=[3]), dict(snapshot, submission_recipe=None)):
+        with pytest.raises(ValueError):
+            if "operations" in changed:
+                ExecutionPlan.from_json(json.dumps(changed))
+            else:
+                ExecutionPlan(operations, submission_recipe=changed)
+    with pytest.raises(ValueError, match="prefix"):
+        ExecutionPlan(operations[:2], submission_recipe=independent)
+    with pytest.raises(ValueError, match="CUDA binding"):
+        ExecutionPlan(operations, submission_recipe=independent, binding_strategy="cuda_immutable_argument_frames")
+    loop = dict(kind="while", predicate="p", max_iterations=1, condition=[], body=operations[:1])
+    with pytest.raises(ValueError, match="flat replay"):
+        ExecutionPlan([operations[0], loop, operations[0]], submission_recipe=independent)
+
+
 def test_private_array_usages_require_v18_and_preserve_views():
     operations = [dict(kind="copy", source="view", destination="out")]
     array = dict(kind="ndarray", name="vertices", dtype="f32", shape=[9], usage=["storage", "vertex", "indirect"])

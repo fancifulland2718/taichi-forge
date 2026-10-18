@@ -86,6 +86,28 @@ def check(arch, path):
             shaped()
             assert read(output) == [11] * 17
 
+        # Replay boundaries exclude initialization and apply only to Vulkan.
+        segmented = aot.ExecutionPlan(
+            [dict(kind="copy", source="state", destination="out"),
+             dict(kind="fill32", destination="state", value=13)],
+            resources=[dict(kind="ndarray", name="state", dtype="i32", shape=[17])],
+            initialization=[dict(kind="fill32", destination="state", value=7)],
+            submission_recipe=dict(kind="vulkan_segmented", version=1, ends=[1, 2]),
+        )
+        if arch == "vulkan":
+            with segmented.prepare(module, {"out": output}) as selected:
+                for value in (7, 13):
+                    selected()
+                    assert read(output) == [value] * 17
+        else:
+            try:
+                selected = segmented.prepare(module, {"out": output})
+            except (ValueError, RuntimeError) as error:
+                assert "requires Vulkan" in str(error), str(error)
+            else:
+                selected.close()
+                raise AssertionError("Vulkan submission accepted on another backend")
+
         bindings, prepared = frames[1]
         # Allocator factories are cold resources. Sharing an argument family
         # shares its private pool/arrays; an independent prepare does not.

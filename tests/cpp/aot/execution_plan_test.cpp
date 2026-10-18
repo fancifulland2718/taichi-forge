@@ -5,6 +5,45 @@
 #include "taichi/common/operation_json.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, VulkanSubmissionRequiresV20AndExactReplayCoverage) {
+  const std::string source = R"({"version":20,"operations":[
+    {"kind":"kernel","entry":"a","arguments":["x"]},
+    {"kind":"kernel","entry":"b","arguments":["x"]},
+    {"kind":"kernel","entry":"c","arguments":["x"]}],
+    "submission_recipe":{"kind":"vulkan_segmented","version":1,"ends":[1,3]}})";
+  const auto plan = ExecutionPlan::parse(source);
+  ASSERT_TRUE(plan.vulkan_submission);
+  EXPECT_EQ(plan.vulkan_submission->ends, (std::vector<std::size_t>{1, 3}));
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"x"}));
+  for (const auto &[before, after] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":20", "\"version\":19"},
+           {"[1,3]", "[]"}, {"[1,3]", "[0,3]"}, {"[1,3]", "[1,1,3]"},
+           {"[1,3]", "[2,1,3]"}, {"[1,3]", "[1,4]"}, {"[1,3]", "[1,2]"},
+           {"[1,3]", "[true,3]"}, {"[1,3]", "[1.0,3]"},
+           {"[1,3]", "\"3\""},
+           {"\"version\":1,", "\"version\":2,"},
+           {"\"version\":1,", "\"version\":true,"},
+           {"\"ends\":[1,3]", "\"ends\":[1,3],\"unknown\":1"},
+           {"vulkan_segmented", "unknown"},
+           {"\"version\":20", "\"version\":20,\"binding_strategy\":\"cuda_immutable_argument_frames\""},
+           {"{\"kind\":\"kernel\",\"entry\":\"b\",\"arguments\":[\"x\"]}",
+            "{\"kind\":\"while\",\"predicate\":\"p\",\"max_iterations\":1,\"condition\":[],"
+            "\"body\":[{\"kind\":\"kernel\",\"entry\":\"b\",\"arguments\":[\"x\"]}]}"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(before), before.size(), after);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument) << invalid;
+  }
+  auto independent = source;
+  const std::string segmented = "\"kind\":\"vulkan_segmented\",\"version\":1,\"ends\":[1,3]";
+  independent.replace(independent.find(segmented), segmented.size(),
+                      "\"kind\":\"vulkan_independent_graphics\",\"version\":1");
+  const auto fork = ExecutionPlan::parse(independent);
+  EXPECT_EQ(fork.vulkan_submission->kind,
+            VulkanSubmissionRecipe::Kind::independent_graphics);
+  EXPECT_TRUE(fork.vulkan_submission->ends.empty());
+}
+
 TEST(ExecutionPlan, PrivateArrayUsagesRequireV18AndDoNotRedefineViews) {
   const std::string source = R"({"version":18,"operations":[
     {"kind":"copy","source":"view","destination":"out"}],"resources":[
@@ -71,7 +110,7 @@ TEST(ExecutionPlan, MaskedBranchesRequireV16AndFlatKernelRegions) {
   for (const auto &[from, to] :
        std::vector<std::pair<std::string, std::string>>{
            {"\"version\":16", "\"version\":15"},
-           {"\"version\":16", "\"version\":18"},
+           {"\"version\":16", "\"version\":" + std::to_string(ExecutionPlan::kMaxVersion + 1)},
            {"\"version\":1}", "\"version\":2}"},
            {"\"version\":1}", "\"version\":1,\"gate\":1234}"},
            {"\"kind\":\"kernel\",\"entry\":\"gated\",\"arguments\":[\"x\"]",
@@ -501,7 +540,7 @@ TEST(ExecutionPlan, SelectedCudaNestedControlRetainsStaticClosure) {
     for (const auto &[from, to] :
          std::vector<std::pair<std::string, std::string>>{
              {version, masked ? "\"version\":13" : "\"version\":12"},
-             {version, "\"version\":18"},
+             {version, "\"version\":" + std::to_string(ExecutionPlan::kMaxVersion + 1)},
              {"\"version\":1,", "\"version\":2,"},
              {"\"condition_begin\":1", "\"condition_begin\":0"},
              {"\"body_begin\":2", "\"body_begin\":1"},
@@ -541,7 +580,7 @@ TEST(ExecutionPlan, FlatCudaMaskedKeepsPolarityAndStaticClosure) {
   for (const auto &[from, to] :
        std::vector<std::pair<std::string, std::string>>{
            {"\"version\":15", "\"version\":14"},
-           {"\"version\":15", "\"version\":18"},
+           {"\"version\":15", "\"version\":" + std::to_string(ExecutionPlan::kMaxVersion + 1)},
            {"\"version\":1}", "\"version\":2}"},
            {"\"version\":1}", "\"version\":1,\"inners\":[]}"},
            {"\"continue_while_nonzero\":false", "\"continue_while_nonzero\":0"},

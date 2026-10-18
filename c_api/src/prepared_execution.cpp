@@ -126,7 +126,8 @@ struct PreparedExecution {
   void prepare_operations(
       Runtime &runtime,
       const std::vector<FixedExecution::Operation> &operations,
-      const std::vector<FixedExecution::Operation> &initializers = {}) {
+      const std::vector<FixedExecution::Operation> &initializers = {},
+      const VulkanSubmissionRecipe *submission_recipe = nullptr) {
     gfx::GfxRuntime *gfx_runtime = nullptr;
 #ifdef TI_WITH_VULKAN
     if (auto *gfx = dynamic_cast<::GfxRuntime *>(&runtime))
@@ -169,7 +170,7 @@ struct PreparedExecution {
       native = std::make_unique<FixedExecution>(
           runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
           runtime.runtime_fault_domain(), family ? family->replay : nullptr,
-          family ? operands : nullptr);
+          family ? operands : nullptr, submission_recipe);
       if (family) {
         family->prepared = true;
         family->arrays->sealed = true;
@@ -626,6 +627,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
     }
   }
   const auto &plan = family ? family->plan : parsed;
+  if (plan.vulkan_submission && rt.arch != taichi::Arch::vulkan)
+    throw MemoryBindingError("Selected Vulkan submission requires Vulkan");
   const auto &resource_description =
       rebinding ? family->frame_resources : plan.resources;
   std::unordered_map<std::string, const TiArgument *> arguments;
@@ -1525,7 +1528,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
   const std::vector<FixedExecution::Operation> initializers(operations.begin(),
                                                             split);
   operations.erase(operations.begin(), split);
-  prepared->prepare_operations(rt, operations, initializers);
+  if (plan.vulkan_submission && operations.size() != plan.operations.size())
+    throw MemoryBindingError("Selected Vulkan submission changed replay boundaries");
+  prepared->prepare_operations(rt, operations, initializers,
+                              plan.vulkan_submission ? &*plan.vulkan_submission : nullptr);
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;

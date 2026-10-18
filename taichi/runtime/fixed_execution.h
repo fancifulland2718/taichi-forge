@@ -9,6 +9,7 @@
 #include "taichi/runtime/branch_selection.h"
 #include "taichi/runtime/cuda_control_recipe.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
+#include "taichi/runtime/vulkan_submission_recipe.h"
 
 namespace taichi::lang {
 class LaunchContextBuilder;
@@ -102,7 +103,8 @@ class FixedExecution {
                  NativeRecordingState *sequence_state = nullptr,
                  std::shared_ptr<RuntimeFaultDomain> fault_domain = {},
                  std::shared_ptr<cuda::BindingFrameReplay> binding_replay = {},
-                 std::shared_ptr<void> binding_operands = {});
+                 std::shared_ptr<void> binding_operands = {},
+                 const VulkanSubmissionRecipe *submission_recipe = nullptr);
   ~FixedExecution();
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;
