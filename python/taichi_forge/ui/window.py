@@ -35,7 +35,9 @@ class Window:
     Args:
         name (str): Window title.
         res (tuple[int]): resolution (width, height) of the window, in pixels.
-        vsync (bool): whether or not vertical sync should be enabled.
+        vsync (bool): whether or not vertical sync should be enabled. Vulkan
+            prefers immediate presentation when False and supported; this can
+            tear. Otherwise the surface's supported synchronized modes are used.
         show_window (bool): where or not display the window after initialization.
         pos (tuple[int]): position (left to right, up to bottom) of the window which origins from the left-top of your main screen, in pixels.
     """

@@ -12,6 +12,8 @@ if(TARGET taichi_runtime AND TI_WITH_SPLIT_PYTHON_RUNTIME)
     ${PROJECT_SOURCE_DIR}/external/spdlog/include
     ${LLVM_INCLUDE_DIRS})
   if(TI_WITH_GGUI AND TI_WITH_VULKAN)
+    target_sources(taichi_completion_tests PRIVATE
+      tests/cpp/rhi/common/vulkan_present_policy_test.cpp)
     target_compile_definitions(taichi_completion_tests PRIVATE TI_TEST_DISPLAY_COMPLETION)
     target_include_directories(taichi_completion_tests PRIVATE
       ${PROJECT_SOURCE_DIR}/external/eigen

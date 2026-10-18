@@ -297,6 +297,43 @@ independent GPU streams, parallel execution, priorities or memory limits.
 It affects only calls using that pacer. Start with a small queue and increase
 it only when useful overlap offsets retained memory and latency.
 
+## Keeping headed submission independent of completion
+
+For CUDA operations submitted on the same Forge runtime stream, enqueue
+`simulation(n) -> snapshot(n) -> render(n) -> pack(n)` in dependency order.
+Host completion between those stages is unnecessary if their storage stays
+alive and no other producer can overwrite it. Serialize each short submission
+sequence with any other host producers that could change this order; never
+hold that admission gate while waiting for a ticket. This does not establish
+dependencies for external streams or another Program.
+
+Use a bounded snapshot ring and enough workspace lanes for simultaneous Graph
+invocations. A submitted snapshot may be leased to an ordered device consumer
+before its CPU-visible publication is committed. Keep those two states distinct:
+only a completed simulation ticket may advance the completed physics clock.
+Retire a snapshot lease after its render ticket completes, and a framebuffer
+after the pack read completes. `Canvas.submit_frame(frame, track_source=True)`
+records `frame.source_completion` for the latter. CUDA/Vulkan shared-image
+ownership continues through the external semaphores and display completion;
+the application must not release that storage when the pack ticket alone ends.
+On close/reset/fault, stop admission and drain or invalidate users before
+releasing their owners.
+
+`acquire_frame()` may return `None`, and `Window.show()` may return `False` when
+the display cannot accept a frame. Keep simulation admission independent of
+such display pressure, preserve the previous image, and bound pending render
+work. Do not wait inside the simulation submission lock for a display fence.
+With Vulkan, `vsync=False` prefers IMMEDIATE presentation where supported;
+this permits tearing. Otherwise MAILBOX/latest-ready/FIFO remain fallbacks.
+Compositor and monitor scheduling still apply.
+
+Measure successful **new** presents and completed physics steps alongside
+host submission time and service p95. A render service interval includes prior
+device work on an ordered stream; it is not all host blocking. Replacing a busy
+wait with a blocking wait saves CPU but does not remove device queue latency.
+Moving waits out of a path is useful only if it improves useful work or latency
+without creating an unbounded queue, stale snapshots, or more dropped renders.
+
 ## Close, reset and failure recovery
 
 - Close Graph/materialization owners when finished. `Graph.close()` is

@@ -231,6 +231,32 @@ second.wait()
 pacer 限制已准入 invocation 与排队 caller，不保证独立 GPU stream、并行执行、优先级或内存上限。
 只有使用该 pacer 的调用受它管理。先用小队列，仅在有效重叠足以抵消保留内存与延迟时增加深度。
 
+## 让有头提交独立于完成等待
+
+对于提交到同一 Forge runtime stream 的 CUDA 操作，可以按依赖顺序排入
+`simulation(n) -> snapshot(n) -> render(n) -> pack(n)`。只要存储仍然有效、没有其他
+producer 提前覆盖它，阶段之间不需要主机 completion 等待。会改变该顺序的其他主机
+producer 应通过短提交段保证顺序；等待票据时不得持有准入锁。这不建立外部 stream 或
+另一个 Program 的依赖。
+
+使用有界 snapshot ring，并为同时在途的 Graph invocation 配置足够的 workspace lane。
+已提交快照可在 CPU 发布提交前租给同流有序的设备消费者，但必须区分这两种状态：只有
+simulation ticket 真正完成才可推进 completed 物理时钟。render ticket 完成后归还
+snapshot lease；pack 完成读取后再复用 framebuffer。后者可用
+`Canvas.submit_frame(frame, track_source=True)` 记录的 `frame.source_completion` 判断。
+CUDA/Vulkan 共享图像仍由外部 semaphore 和 display completion 管理，不能仅因 pack
+结束就释放共享存储。关闭/reset/fault 时停止准入，先排空或失效用户，再释放 owner。
+
+显示繁忙时 `acquire_frame()` 可以返回 `None`，`Window.show()` 可以返回 `False`。
+仿真准入应独立于显示背压，保留上一画面并限制待渲染工作数量；不得在仿真提交锁内等待
+显示 fence。Vulkan 的 `vsync=False` 在支持时优先选择 IMMEDIATE，允许撕裂；否则仍
+回退到 MAILBOX/latest-ready/FIFO。桌面合成器与显示器的调度约束依然存在。
+
+同时测量成功呈现的**新画面**、完成物理步数、主机提交耗时和服务 p95。同流 render 服务
+区间包含之前的设备工作，不能全部算作主机阻塞。将忙等改成 blocking wait 可以节省 CPU，
+但不消除设备排队。移出等待应带来有效工作或延迟收益，不能换来无界队列、过期快照或
+更多已计算却被丢弃的 render。
+
 ## 关闭、reset 与失败恢复
 
 - 不再使用时关闭 Graph/materialization owner。`Graph.close()` 幂等；调用者输入不转归 Graph 所有。

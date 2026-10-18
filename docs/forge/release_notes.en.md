@@ -231,6 +231,12 @@ lifetimes. The entries below describe the changes.
   `display_shared_image_reuse`, `completion_wait_concurrent` and
   `completion_blocking_wait`, also before initialization. Missing keys mean
   unknown; capabilities do not replace ABI/compiler checks or device/platform qualification.
+- Vulkan honors `Window(vsync=False)` by preferring IMMEDIATE when the surface
+  supports it, instead of always selecting MAILBOX or FIFO. Disabling vsync can
+  tear; supported synchronized modes remain the fallback. Vsync-enabled windows
+  retain MAILBOX/latest-ready preference and the adaptive FIFO fallback. This
+  changes presentation policy, not CUDA execution streams or the monitor's
+  refresh rate.
 - `Canvas.repeat_frame()` reuses a renderable holding the current shared image,
   or an empty renderable, and retains other completed images for future writes.
   Completed aliases are detached before reuse. Repeating a CUDA/Vulkan frame no

@@ -23,6 +23,7 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_pipeline_diagnostics.h"
+#include "taichi/rhi/vulkan/vulkan_present_policy.h"
 #include "taichi/system/profiler.h"
 
 #include "spirv_reflect.h"
@@ -4952,36 +4953,8 @@ VkPresentModeKHR choose_swap_present_mode(
     bool vsync,
     bool adaptive,
     bool fifo_latest_ready_supported) {
-  (void)vsync;
-  (void)adaptive;
-  auto find_present_mode = [&](VkPresentModeKHR mode) {
-    for (const auto &available_present_mode : available_present_modes) {
-      if (available_present_mode == mode) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  if (find_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)) {
-    return VK_PRESENT_MODE_MAILBOX_KHR;
-  }
-  if (fifo_latest_ready_supported &&
-      find_present_mode(VK_PRESENT_MODE_FIFO_LATEST_READY_KHR)) {
-    return VK_PRESENT_MODE_FIFO_LATEST_READY_KHR;
-  }
-  if (find_present_mode(VK_PRESENT_MODE_FIFO_KHR)) {
-    return VK_PRESENT_MODE_FIFO_KHR;
-  }
-  if (find_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
-    return VK_PRESENT_MODE_IMMEDIATE_KHR;
-  }
-
-  if (available_present_modes.size() == 0) {
-    throw std::runtime_error("no avialble present modes");
-  }
-
-  return available_present_modes[0];
+  return detail::select_present_mode(available_present_modes, vsync, adaptive,
+                                     fifo_latest_ready_supported);
 }
 
 uint32_t choose_swapchain_image_count(
