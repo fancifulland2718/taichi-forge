@@ -25,6 +25,7 @@ class ExecutionDomain {
   struct Options {
     std::size_t capacity{2};
     int priority{0};
+    std::size_t instance_capacity{64};
   };
   struct Snapshot {
     std::uint64_t identity{0};
@@ -66,6 +67,16 @@ class ExecutionDomain {
   // Cold owner retirement closes admission on every domain before draining
   // any one domain. Existing tickets remain queryable while a drain waits.
   void stop_accepting();
+  bool belongs_to(const std::shared_ptr<RuntimeFaultDomain> &owner) const;
+  // Reserve bounded ownership before preparation can create backend state.
+  // Preparation and failure cleanup run without the admission mutex; close
+  // waits for both before draining/releasing instances. The callback must not
+  // close this domain. A concurrent close may retire the prepared instance
+  // before this method returns, and subsequent submissions are then rejected.
+  // Retaining through cold close prevents wrapper/ticket drops from freeing
+  // CUDA storage on a completion-query hot path.
+  void prepare_instance(const std::shared_ptr<RuntimeClient> &instance,
+                        const std::function<void()> &prepare);
 
   // Cold, idempotent drain of this stream only. No domain admission lock or
   // global CUDA driver/submission lock is held across a host backend wait.

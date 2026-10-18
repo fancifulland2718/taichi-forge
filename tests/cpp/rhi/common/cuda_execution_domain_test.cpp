@@ -419,6 +419,127 @@ TEST_F(CudaExecutionDependency, RegistryReusesOnlyClosedDomainSlots) {
   EXPECT_TRUE(retained.lock()->snapshot().closed);
 }
 
+struct DomainInstance final : RuntimeClient {
+  std::function<void()> on_retire;
+  std::atomic<int> retire_calls{0};
+  void retire() override {
+    ++retire_calls;
+    if (on_retire)
+      on_retire();
+  }
+};
+
+TEST_F(CudaExecutionDependency, InstanceCapacityPrecedesPreparationEffects) {
+  cuda::ExecutionDomain domain(fault, {1, 0, 1});
+  auto failed = std::make_shared<DomainInstance>();
+  failed->on_retire = [&] { (void)domain.snapshot(); };
+  EXPECT_THROW(
+      domain.prepare_instance(
+          failed, [] { throw std::invalid_argument("invalid recipe"); }),
+      std::invalid_argument);
+  EXPECT_EQ(failed->retire_calls.load(), 1);
+  auto instance = std::make_shared<DomainInstance>();
+  instance->on_retire = [&] { domain.close(); };
+  int prepared = 0;
+  domain.prepare_instance(instance, [&] { ++prepared; });
+  EXPECT_THROW(domain.prepare_instance(std::make_shared<DomainInstance>(),
+                                       [&] { ++prepared; }),
+               std::runtime_error);
+  EXPECT_EQ(prepared, 1);
+  std::weak_ptr<DomainInstance> retained = instance;
+  instance.reset();
+  EXPECT_FALSE(retained.expired());
+  domain.close();
+  EXPECT_TRUE(retained.expired());
+  EXPECT_EQ(failed->retire_calls.load(), 1);
+  EXPECT_THROW(domain.prepare_instance(failed, [&] { ++prepared; }),
+               std::runtime_error);
+  EXPECT_EQ(prepared, 1);
+}
+
+TEST_F(CudaExecutionDependency, CloseWaitsForPreparationWithoutAdmissionLock) {
+  cuda::ExecutionDomain domain(fault, {1, 0, 1});
+  cuda::ExecutionDomain other(fault, {1, 0});
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  auto instance = std::make_shared<DomainInstance>();
+  auto preparing = std::async(std::launch::async, [&] {
+    domain.prepare_instance(instance, [&] {
+      entered.set_value();
+      released.wait();
+    });
+  });
+  entered.get_future().wait();
+  auto close = std::async(std::launch::async, [&] { domain.close(); });
+  auto query = std::async(std::launch::async, [&] {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (domain.snapshot().accepting &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    EXPECT_FALSE(domain.snapshot().closed);
+    EXPECT_FALSE(domain.snapshot().accepting);
+    EXPECT_ANY_THROW(domain.submit({}, nullptr, [](void *) {}));
+    return poll_until(other.submit({}, nullptr, [](void *) {}));
+  });
+  const bool responsive =
+      query.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(responsive);
+  EXPECT_EQ(close.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  EXPECT_EQ(instance->retire_calls.load(), 0);
+  release.set_value();
+  preparing.get();
+  close.get();
+  EXPECT_TRUE(query.get());
+  EXPECT_EQ(instance->retire_calls.load(), 1);
+  EXPECT_TRUE(domain.snapshot().closed);
+}
+
+TEST_F(CudaExecutionDependency, ConcurrentCloseWaitsForInstanceRetirement) {
+  cuda::ExecutionDomain domain(fault, {1, 0, 1});
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  auto instance = std::make_shared<DomainInstance>();
+  instance->on_retire = [&] {
+    EXPECT_FALSE(domain.snapshot().closed);
+    entered.set_value();
+    released.wait();
+  };
+  domain.prepare_instance(instance, [] {});
+  auto first = std::async(std::launch::async, [&] { domain.close(); });
+  entered.get_future().wait();
+  auto second = std::async(std::launch::async, [&] { domain.close(); });
+  EXPECT_EQ(second.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_FALSE(domain.snapshot().closed);
+  release.set_value();
+  first.get();
+  second.get();
+  EXPECT_EQ(instance->retire_calls.load(), 1);
+  EXPECT_TRUE(domain.snapshot().closed);
+}
+
+TEST_F(CudaExecutionDependency, FailedInstanceRetirementIsSticky) {
+  cuda::ExecutionDomainRegistry registry(fault, 1);
+  auto retained_domain = registry.create({1, 0, 1});
+  auto &domain = *retained_domain;
+  auto instance = std::make_shared<DomainInstance>();
+  instance->on_retire = [] {
+    throw std::runtime_error("instance retire error");
+  };
+  domain.prepare_instance(instance, [] {});
+  EXPECT_THROW(domain.close(), std::runtime_error);
+  EXPECT_THROW(domain.close(), std::runtime_error);
+  EXPECT_EQ(instance->retire_calls.load(), 1);
+  EXPECT_FALSE(domain.snapshot().accepting);
+  EXPECT_FALSE(domain.snapshot().closed);
+  EXPECT_ANY_THROW(registry.create({1, 0, 1}));
+  EXPECT_ANY_THROW(domain.submit({}, nullptr, [](void *) {}));
+  // Cold destruction quarantines this bounded instance instead of freeing
+  // storage after a failed retirement. The exception must remain observable.
+}
+
 }  // namespace
 }  // namespace taichi::lang
 #endif

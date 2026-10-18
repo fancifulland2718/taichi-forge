@@ -40,6 +40,8 @@ struct ExecutionDomain::State {
   const Options options;
   std::shared_ptr<RuntimeCompletionCudaEventPool> events;
   std::vector<Pending> pending;
+  std::vector<std::shared_ptr<RuntimeClient>> instances;
+  std::size_t preparing_instances{0};
   std::size_t head{0};
   std::size_t count{0};
   std::uint64_t last_sequence{0};
@@ -50,8 +52,10 @@ struct ExecutionDomain::State {
   int greatest_priority{0};
   bool accepting{true};
   bool closing{false};
+  std::thread::id closing_thread;
   bool closed{false};
   std::exception_ptr first_error;
+  std::exception_ptr instance_retirement_error;
 
   State(std::shared_ptr<RuntimeFaultDomain> owner, Options options)
       : owner(std::move(owner)),
@@ -65,6 +69,7 @@ struct ExecutionDomain::State {
     if (owner_id == 0 || identity == 0)
       throw std::invalid_argument(
           "CUDA execution domain requires a live runtime identity");
+    instances.reserve(options.instance_capacity);
   }
 
   void publish(Pending &slot) {
@@ -98,7 +103,8 @@ bool ExecutionDomain::available() {
 
 ExecutionDomain::ExecutionDomain(std::shared_ptr<RuntimeFaultDomain> owner,
                                  Options options) {
-  if (!owner || owner->backend() != Arch::cuda || options.capacity == 0)
+  if (!owner || owner->backend() != Arch::cuda || options.capacity == 0 ||
+      options.instance_capacity == 0)
     throw std::invalid_argument(
         "CUDA execution domain requires an owner and positive capacity");
   owner->throw_if_new_submission_disallowed("create CUDA execution domain");
@@ -273,7 +279,7 @@ ExecutionDomain::Snapshot ExecutionDomain::snapshot() const {
           state.count,
           state.accepting && !state.closing && !state.closed &&
               !state.first_error && state.owner->submission_allowed(),
-          state.closed};
+          state.closed && !state.instance_retirement_error};
 }
 
 RuntimeCompletion ExecutionDomain::latest_completion() const {
@@ -288,6 +294,56 @@ RuntimeCompletion ExecutionDomain::latest_completion() const {
                                       state.last_sequence, state.owner);
 }
 
+bool ExecutionDomain::belongs_to(
+    const std::shared_ptr<RuntimeFaultDomain> &owner) const {
+  return state_->owner == owner;
+}
+
+void ExecutionDomain::prepare_instance(
+    const std::shared_ptr<RuntimeClient> &instance,
+    const std::function<void()> &prepare) {
+  if (!instance || !prepare)
+    throw std::invalid_argument(
+        "CUDA execution instance requires an owner and preparation");
+  auto &state = *state_;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.owner->throw_if_new_submission_disallowed(
+        "prepare CUDA execution instance");
+    if (!state.accepting || state.closing || state.closed || state.first_error)
+      throw std::runtime_error(
+          "CUDA execution domain is not accepting instances");
+    if (state.instances.size() + state.preparing_instances ==
+        state.options.instance_capacity)
+      throw std::runtime_error("CUDA execution-instance capacity exhausted");
+    ++state.preparing_instances;
+  }
+  std::exception_ptr error, retirement_error;
+  try {
+    prepare();
+  } catch (...) {
+    error = std::current_exception();
+    try {
+      instance->retire();
+    } catch (...) {
+      retirement_error = std::current_exception();
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    // Storage was reserved at domain creation. Failed cleanup retains the
+    // instance until cold close can retry or quarantine its finite storage.
+    if (!error || retirement_error)
+      state.instances.push_back(instance);
+    --state.preparing_instances;
+    if (retirement_error)
+      state.report(retirement_error, state.last_sequence);
+    state.changed.notify_all();
+  }
+  if (error)
+    std::rethrow_exception(error);
+}
+
 void ExecutionDomain::stop_accepting() {
   std::lock_guard<std::mutex> lock(state_->mutex);
   state_->accepting = false;
@@ -299,11 +355,18 @@ void ExecutionDomain::close() {
   auto &state = *state_;
   {
     std::unique_lock<std::mutex> lock(state.mutex);
-    state.changed.wait(lock, [&] { return !state.closing; });
-    if (state.closed)
+    if (state.closing && state.closing_thread == std::this_thread::get_id())
       return;
+    state.changed.wait(lock, [&] { return !state.closing; });
+    if (state.closed) {
+      if (state.instance_retirement_error)
+        std::rethrow_exception(state.instance_retirement_error);
+      return;
+    }
     state.accepting = false;
     state.closing = true;
+    state.closing_thread = std::this_thread::get_id();
+    state.changed.wait(lock, [&] { return state.preparing_instances == 0; });
   }
   std::exception_ptr error;
   try {
@@ -323,18 +386,20 @@ void ExecutionDomain::close() {
     error = std::current_exception();
   }
   std::vector<State::Pending> retired;
+  std::vector<std::shared_ptr<RuntimeClient>> instances;
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     if (!error) {
       retired.swap(state.pending);
+      instances.swap(state.instances);
       state.count = 0;
-      state.closed = true;
       state.stream = nullptr;
     } else {
       state.report(error, state.last_sequence);
+      state.closing = false;
+      state.closing_thread = {};
+      state.changed.notify_all();
     }
-    state.closing = false;
-    state.changed.notify_all();
   }
   if (error)
     std::rethrow_exception(error);
@@ -342,6 +407,31 @@ void ExecutionDomain::close() {
     slot.completion.mark_completed();
   retired.clear();
   state.events->clear();
+  std::exception_ptr retirement_error;
+  for (const auto &instance : instances) {
+    try {
+      instance->retire();
+    } catch (...) {
+      if (!retirement_error)
+        retirement_error = std::current_exception();
+    }
+  }
+  if (!retirement_error)
+    instances.clear();
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (retirement_error) {
+      state.instances.swap(instances);
+      state.instance_retirement_error = retirement_error;
+      state.report(retirement_error, state.last_sequence);
+    }
+    state.closed = true;
+    state.closing = false;
+    state.closing_thread = {};
+    state.changed.notify_all();
+  }
+  if (retirement_error)
+    std::rethrow_exception(retirement_error);
 }
 
 struct ExecutionDomainRegistry::State {
