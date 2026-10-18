@@ -294,6 +294,44 @@ NativeStorageRange resolve_native_storage_range(Arch arch,
   throw std::invalid_argument("Native storage requires CPU, CUDA or Vulkan");
 }
 
+void validate_native_allocation_groups_disjoint(
+    Arch arch,
+    const std::vector<DeviceAllocation> &first,
+    const std::vector<DeviceAllocation> &second) {
+  if (first.empty() || second.empty())
+    return;
+  const auto resolve = [&](const std::vector<DeviceAllocation> &allocations) {
+    std::vector<NativeStorageRange> ranges;
+    std::set<std::pair<Device *, DeviceAllocationId>> seen;
+    for (const auto allocation : allocations) {
+      if (!seen.emplace(allocation.device, allocation.alloc_id).second)
+        continue;
+      std::optional<std::uint64_t> bytes;
+#ifdef TI_WITH_LLVM
+      if (arch_is_cpu(arch))
+        if (auto *device = dynamic_cast<cpu::CpuDevice *>(allocation.device))
+          bytes = device->get_alloc_info(allocation).size;
+#endif
+#ifdef TI_WITH_CUDA
+      if (arch == Arch::cuda)
+        if (auto *device = dynamic_cast<cuda::CudaDevice *>(allocation.device))
+          bytes = device->get_alloc_info(allocation).size;
+#endif
+#ifdef TI_WITH_VULKAN
+      if (arch == Arch::vulkan)
+        if (auto *device = dynamic_cast<vulkan::VulkanDevice *>(allocation.device))
+          bytes = device->get_vkbuffer_size(allocation);
+#endif
+      if (!bytes)
+        throw std::invalid_argument("Allocation group requires its backend device");
+      ranges.push_back(
+          resolve_native_storage_range(arch, allocation.get_ptr(), *bytes));
+    }
+    return ranges;
+  };
+  validate_native_read_write_disjoint(resolve(first), resolve(second));
+}
+
 void validate_native_shader_storage(Arch arch, DeviceAllocation allocation) {
 #ifdef TI_WITH_VULKAN
   if (arch == Arch::vulkan) {

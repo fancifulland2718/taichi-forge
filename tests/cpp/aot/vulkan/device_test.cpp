@@ -617,6 +617,14 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
   EXPECT_TRUE(first.proven_same_range(range(1)));
   EXPECT_TRUE(first.proven_disjoint(range(2)));
   EXPECT_FALSE(first.proven_same_range(range(2)));
+  // Queue partition proofs must resolve physical memory, even for distinct
+  // allocation wrappers and distinct VkBuffers. Repeated in-group uses are legal.
+  EXPECT_THROW(validate_native_allocation_groups_disjoint(
+                   Arch::vulkan, {storage.imports[0]}, {storage.imports[1]}),
+               std::invalid_argument);
+  EXPECT_NO_THROW(validate_native_allocation_groups_disjoint(
+      Arch::vulkan, {storage.imports[0], storage.imports[0]},
+      {storage.imports[2], storage.imports[2]}));
   auto shifted = storage.imports[1].get_ptr(4);
   const auto partial = resolve_native_storage_range(Arch::vulkan, shifted, 60);
   const auto prefix = resolve_native_storage_range(
@@ -644,6 +652,9 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
       vkapi::create_buffer(handle, storage.buffers[1], info.usage), info.size,
       VK_NULL_HANDLE, 0, AllocUsage::Storage | AllocUsage::Indirect);
   storage.imports.push_back(unknown);
+  EXPECT_THROW(validate_native_allocation_groups_disjoint(
+                   Arch::vulkan, {storage.imports[2]}, {unknown}),
+               std::invalid_argument);
   accesses.writes = {{unknown.get_ptr(16), 16}};
   EXPECT_ANY_THROW(accesses.validate(*device));
   accesses.reads = {{storage.imports[1].get_ptr(), 16}};

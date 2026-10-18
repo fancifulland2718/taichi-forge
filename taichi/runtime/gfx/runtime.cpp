@@ -12,6 +12,7 @@
 #include "taichi/system/profiler_annotation.h"
 #include "taichi/runtime/control_encoding_cost.h"
 #include "taichi/runtime/native_acceleration_structure.h"
+#include "taichi/runtime/native_array_contract.h"
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
@@ -3105,21 +3106,15 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                                 [](const auto &op) { return op.external != nullptr; }),
                 "Independent graphics requires compute prefix, one graphics "
                 "pass and compute consumer");
-    const auto conflicts = [&](DeviceAllocation allocation) {
-      return std::find(pass->buffers->begin(), pass->buffers->end(), allocation) !=
-             pass->buffers->end();
-    };
+    std::vector<DeviceAllocation> prefix_buffers;
     const auto prefix_size =
         static_cast<std::size_t>(std::distance(operations.begin(), pass));
     for (std::size_t i = 0; i < prefix_size; ++i) {
       const auto &pd = prepared[i];
-      TI_ERROR_IF(pd.indirect_dispatch != kDeviceNullPtr &&
-                      conflicts({pd.indirect_dispatch.device,
-                                 pd.indirect_dispatch.alloc_id}),
-                  "Independent graphics buffers alias an indirect packet");
+      if (pd.indirect_dispatch != kDeviceNullPtr)
+        prefix_buffers.push_back(pd.indirect_dispatch);
       for (const auto &[key, allocation] : *pd.any_arrays) {
-        TI_ERROR_IF(conflicts(allocation),
-                    "Independent graphics buffers alias the compute prefix");
+        prefix_buffers.push_back(allocation);
       }
       const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
       for (std::size_t t = 0; t < tasks.size(); ++t) {
@@ -3129,16 +3124,23 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         for (const auto &bind : pd.kernel->buffer_binding_plan(t)) {
           if (bind.kind == CompiledTaichiKernel::BufferBindingKind::StaticRw &&
               bind.static_alloc) {
-            TI_ERROR_IF(conflicts(*bind.static_alloc),
-                        "Independent graphics buffers alias a compute root");
+            prefix_buffers.push_back(*bind.static_alloc);
           } else if (bind.kind ==
                      CompiledTaichiKernel::BufferBindingKind::StaticLookupRw) {
             const auto *allocation = pd.kernel->get_buffer_bind(bind.buffer);
-            TI_ERROR_IF(!allocation || conflicts(*allocation),
+            TI_ERROR_IF(!allocation,
                         "Independent graphics cannot prove compute root separation");
+            prefix_buffers.push_back(*allocation);
           }
         }
       }
+    }
+    try {
+      validate_native_allocation_groups_disjoint(Arch::vulkan, prefix_buffers,
+                                                  *pass->buffers);
+    } catch (const std::invalid_argument &error) {
+      TI_ERROR("Independent graphics buffers alias the compute prefix or "
+               "separation cannot be proven: {}", error.what());
     }
   }
   slot.args_buffers.resize(prepared.size());

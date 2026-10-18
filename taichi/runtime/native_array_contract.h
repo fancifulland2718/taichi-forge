@@ -50,6 +50,14 @@ void validate_native_read_write_disjoint(
     const std::vector<NativeStorageRange> &reads,
     const std::vector<NativeStorageRange> &writes);
 
+// Conservative allocation-wide independence, for fixed queue partitions whose
+// kernel metadata does not describe exact accessed subranges. Resolve each
+// wrapper once per group; distinct wrappers are not proof of physical separation.
+void validate_native_allocation_groups_disjoint(
+    Arch arch,
+    const std::vector<DeviceAllocation> &first,
+    const std::vector<DeviceAllocation> &second);
+
 // Requirements on a packed scalar/AoS array. Adapters must qualify packed
 // storage first; shape metadata alone is not proof that an affine view is
 // packed.
