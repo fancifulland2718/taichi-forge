@@ -124,8 +124,17 @@ struct AotRuntimeClient::State {
     closed.store(true, std::memory_order_release);
     auto released = std::move(runtime);
     program = nullptr;
-    if (released)
-      released->retire_resources(synchronize);
+    if (released) {
+      try {
+        released->retire_resources(synchronize);
+      } catch (...) {
+        // The failed drain retains a finite code/storage closure. Its members
+        // reference Runtime, so quarantining only recordings would leave
+        // dangling resource destructors after this borrowed adapter is freed.
+        (void)released.release();
+        throw;
+      }
+    }
   }
 };
 

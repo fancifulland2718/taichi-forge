@@ -94,6 +94,33 @@ ti_collect_cuda_execution_domain_ext(TiCudaExecutionDomain domain,
 TI_DLL_EXPORT TiCompletion TI_API_CALL
 ti_get_cuda_execution_domain_completion_ext(TiCudaExecutionDomain domain);
 
+// Cold binding of an existing complete AOT plan. Runtime handles and stream
+// identity are not part of the artifact. Call ti_initialize_prepared_ext before
+// submitting, even if the artifact has no explicit initialization operations.
+// Only compiler-qualified independent CUDA routes are admitted.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_on_domain_ext(TiRuntime runtime,
+                                        TiAotModule module,
+                                        TiCudaExecutionDomain domain,
+                                        uint64_t description_size,
+                                        const char *description,
+                                        uint32_t arg_count,
+                                        const TiNamedArgument *args,
+                                        uint32_t binding_count,
+                                        const TiNamedNdArrayBinding *bindings);
+// True publishes an owned exact completion. False with no error means full;
+// no work/dependency wait is queued and *completion is null. All dependencies
+// must belong to the same runtime generation. Does not implicitly initialize.
+// Releasing a domain-bound prepared handle retains its finite recording and
+// dependency closure until domain close; explicit module/memory destruction is
+// a cold boundary and closes each affected domain before freeing storage.
+TI_DLL_EXPORT TiBool TI_API_CALL
+ti_try_submit_prepared_ext(TiRuntime runtime,
+                           TiPreparedExecution execution,
+                           uint32_t dependency_count,
+                           const TiCompletion *dependencies,
+                           TiCompletion *completion);
+
 // These calls do not access or lock the originating Runtime. Query, wait and
 // independent submission may proceed concurrently. Reset/fault remains visible
 // through the ticket's owner state; the caller must release each handle.

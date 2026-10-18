@@ -576,17 +576,27 @@ class ExecutionPlan:
         }
         self._persistent_argument_names = retained_arguments(resources, gradients, native_roots)
 
-    def prepare(self, module, arguments, *, gradients=None):
+    def prepare(self, module, arguments, *, gradients=None, execution_domain=None):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
-        return self._prepare(module, arguments, gradients=gradients)
+        return self._prepare(module, arguments, gradients=gradients, execution_domain=execution_domain)
 
-    def _prepare(self, module, arguments, *, gradients=None, source=None):
+    def _prepare(self, module, arguments, *, gradients=None, source=None, execution_domain=None):
         from . import _c_api as abi
         from ._runtime import NativeResource, NdArray, PreparedCall, _BindingFamily, _argument, _name
 
         runtime = module._runtime
         with runtime._lock:
             module._check()
+            if execution_domain is not None:
+                from ._domain import CudaExecutionDomain
+
+                if not isinstance(execution_domain, CudaExecutionDomain):
+                    raise TypeError("execution_domain must be a CudaExecutionDomain")
+                if execution_domain._api.library._handle != runtime._api.library._handle:
+                    raise ValueError("Execution domain belongs to another native runtime library")
+                if source is not None or self.binding_strategy is not None:
+                    raise ValueError("Independent execution domains require independent bindings")
+                runtime._api.load_cuda_domains()
             owners = [module]
             replay_owners = [module]
             persistent_owners = [module]
@@ -626,6 +636,9 @@ class ExecutionPlan:
                 if source is None
                 else (runtime._api.ti_prepare_execution_binding_ext, (runtime._handle, source._handle))
             )
+            if execution_domain is not None:
+                function = runtime._api.ti_prepare_execution_plan_on_domain_ext
+                prefix = (runtime._handle, module._handle, execution_domain._native_handle(), len(self._json), self._json)
             handle = runtime._api.call(
                 function,
                 *prefix,
@@ -647,4 +660,5 @@ class ExecutionPlan:
                     tuple(dict.fromkeys(replay_owners)) if self._has_initialization and family is None else None
                 ),
                 family=family,
+                execution_domain=execution_domain,
             )

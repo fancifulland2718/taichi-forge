@@ -113,9 +113,11 @@ void Runtime::retire_resources(bool synchronize) {
         failure = std::current_exception();
     }
   };
+  // Neither failed synchronization nor failed domain retirement proves that
+  // code/storage may be freed. Keep the entire owner closure on that failure.
   if (synchronize)
-    cleanup([&] { wait(); });
-  cleanup([&] { clear_prepared(false); });
+    wait();
+  clear_prepared(false);
   cleanup([&] { clear_native_resources(false); });
   while (!modules_.empty()) {
     auto *module = *modules_.begin();

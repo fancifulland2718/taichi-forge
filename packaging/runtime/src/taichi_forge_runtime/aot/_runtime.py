@@ -135,6 +135,7 @@ class Runtime:
         # either order; every native child must still retire before the device.
         self._resources = set()
         self._pending = set()
+        self._domain_owners = {}
         if arch == "cpu":
             arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
         try:
@@ -160,6 +161,7 @@ class Runtime:
         result._texture_importer = texture_importer
         result._handle = None
         result._resources, result._pending = set(), set()
+        result._domain_owners = {}
         try:
             result._api = abi.Api(library_path)
             result.arch = str(client.arch).split(".")[-1]
@@ -466,6 +468,7 @@ class Runtime:
                     self._handle = None
                     self._resources.clear()
                     self._pending.clear()
+                    self._domain_owners.clear()
                 return
             self.wait()
             # Retire code and module-local storage before external arguments.
@@ -474,6 +477,7 @@ class Runtime:
                 self._destroy_resource(kind, handle)
             self._api.call(self._api.ti_destroy_runtime, self._handle)
             self._handle = None
+            self._domain_owners.clear()
 
     def _invalidate_runtime(self):
         self.close()
@@ -697,7 +701,7 @@ class Module(_Resource):
             with ZipFile(self._source_path) as archive:
                 return ExecutionPlan.from_json(archive.read(relative))
 
-    def prepare_execution(self, plan, arguments, *, gradients=None):
+    def prepare_execution(self, plan, arguments, *, gradients=None, execution_domain=None):
         """Prepare a named or explicit ExecutionPlan for repeated native replay."""
         from ._plan import ExecutionPlan
 
@@ -705,7 +709,7 @@ class Module(_Resource):
             plan = self.execution_plan(plan)
         if not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or an exported plan name")
-        return plan.prepare(self, arguments, gradients=gradients)
+        return plan.prepare(self, arguments, gradients=gradients, execution_domain=execution_domain)
 
     def kernel(self, name):
         with self._runtime._lock:
@@ -833,11 +837,15 @@ class PreparedCall(_Resource):
 
     _kind = "prepared"
 
-    def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None):
+    def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None, execution_domain=None):
         self._owners = owners
         self._replay_owners = replay_owners
         self._family = family
+        self._execution_domain = execution_domain
         super().__init__(runtime, handle)
+        if execution_domain is not None:
+            execution_domain._clients.add(runtime)
+            runtime._domain_owners.setdefault(execution_domain._native_handle(), {})[handle] = owners
 
     def prepare_binding(self, arguments, *, gradients=None):
         """Prepare a sibling sharing the selected CUDA plan's state and executable.
@@ -857,8 +865,11 @@ class PreparedCall(_Resource):
         runtime = self._runtime
         with runtime._lock:
             self._check()
-            runtime._pending.add(self)
+            if self._execution_domain is None:
+                runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_initialize_prepared_ext, runtime._handle, self._handle)
+            if self._execution_domain is not None:
+                return
             if self._family is not None:
                 self._family.initialized = True
                 self._family.initial_owners = ()
@@ -866,12 +877,27 @@ class PreparedCall(_Resource):
                 self._owners, self._replay_owners = self._replay_owners, None
 
     def close(self):
-        super().close()
+        if self._execution_domain is None:
+            super().close()
+        else:
+            runtime = self._runtime
+            with runtime._lock:
+                if runtime._borrower is not None and runtime._borrower.closed:
+                    runtime.close()
+                if self._handle is not None and (self._kind, self._handle) in runtime._resources:
+                    runtime._destroy_resource(self._kind, self._handle)
+                self._handle = None
         self._owners = ()
         self._replay_owners = None
         self._family = None
 
     def run(self):
+        if self._execution_domain is not None:
+            completion = self.submit()
+            if completion is None:
+                raise RuntimeError("CUDA execution domain is full")
+            completion.close()
+            return
         runtime = self._runtime
         with runtime._lock:
             self._check()
@@ -879,6 +905,39 @@ class PreparedCall(_Resource):
                 self.initialize()
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
+
+    def submit(self, *, wait_for=()):
+        """Try one complete replay, returning an exact ticket or None if full.
+
+        Initialize explicitly in the cold phase. Dependencies enqueue device
+        waits on their exact prefixes; this method never waits on the host.
+        """
+        from ._domain import Completion
+
+        if self._execution_domain is None:
+            raise ValueError("submit() requires an execution-domain binding")
+        runtime = self._runtime
+        predecessors = tuple(wait_for)
+        if any(not isinstance(ticket, Completion) for ticket in predecessors):
+            raise TypeError("wait_for must contain Completion tickets")
+        if any(ticket._api.library._handle != runtime._api.library._handle for ticket in predecessors):
+            raise ValueError("Completion belongs to another native runtime library")
+        dependencies = (abi.Handle * len(predecessors))(*[ticket._native_handle() for ticket in predecessors])
+        with runtime._lock:
+            self._check()
+            handle = abi.Handle()
+            accepted = runtime._api.call(
+                runtime._api.ti_try_submit_prepared_ext,
+                runtime._handle, self._handle, len(dependencies), dependencies, C.byref(handle),
+            )
+        if not accepted:
+            return None
+        try:
+            return Completion(runtime._api, handle.value)
+        except BaseException:
+            if handle.value:
+                runtime._api.call(runtime._api.ti_release_completion_ext, handle.value)
+            raise
 
     __call__ = run
 

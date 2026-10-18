@@ -5,9 +5,11 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 import taichi_forge as ti
+from taichi_forge_runtime.aot import Scalar
 from tests import test_utils
 
 
@@ -81,6 +83,23 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
         module.add_kernel(
             field_stage, name=f"field_stage_{i}", template_args={"out": output_layout, "target": field}
         )
+    module.add_execution_plan(
+        "public_stage",
+        ti.aot.ExecutionPlan(
+            [dict(kind="kernel", entry="stage", arguments=["temporary", "seed", "n"]),
+             dict(kind="copy", source="temporary", destination="out")],
+            resources=[dict(kind="ndarray", name="temporary", dtype="f32", shape=[64]),
+                       Scalar("i32", 64).resource("n")],
+            initialization=[dict(kind="fill32", destination="temporary", value=0)],
+        ),
+    )
+    module.add_execution_plan(
+        "public_field",
+        ti.aot.ExecutionPlan(
+            [dict(kind="kernel", entry="field_stage_0", arguments=["out", "seed", "n"])],
+            resources=[Scalar("i32", 64).resource("n")],
+        ),
+    )
     directory = tmp_path / "module"
     module.save(directory)
     metadata = json.loads((directory / "aot_metadata.json").read_text(encoding="utf-8"))
@@ -105,11 +124,20 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
     }
     assert len(metadata["runtime_state_sha256"]) == 64
     result = subprocess.run(
-        [str(executable), "--gtest_filter=CudaExecutionContextAot.*"],
+        [str(executable), "--gtest_filter=CudaExecutionContextAot.*:CudaPublicExecutionAot.*"],
         env=dict(os.environ, TAICHI_F3_CONTEXT_AOT_FOLDER=str(directory)),
         capture_output=True,
         text=True,
         timeout=90,
     )
     (tmp_path / "native-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
-    assert result.returncode == 0 and "[  PASSED  ] 9 tests." in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0 and "[  PASSED  ] 10 tests." in result.stdout, result.stdout + result.stderr
+    consumer = Path(__file__).with_name("aot_execution_domain_probe.py")
+    result = subprocess.run([sys.executable, "-S", str(consumer), str(directory)],
+                            env=os.environ.copy(), capture_output=True, text=True, timeout=90)
+    (tmp_path / "public-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+    assert result.returncode == 0 and "PUBLIC_AOT_DOMAIN_OK" in result.stdout, result.stdout + result.stderr
+    from tests.python.aot_execution_domain_probe import check
+
+    with ti.aot.borrow_runtime() as borrower:
+        check(borrower, directory)

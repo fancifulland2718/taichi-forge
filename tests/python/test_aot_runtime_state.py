@@ -73,9 +73,45 @@ def test_aot_shared_runtime_state_is_not_admitted(artifact_format, dense_lists, 
     (tmp_path / "native-consumer.log").write_text(result.stdout + result.stderr, encoding="utf8")
     assert result.returncode == 0 and "[  PASSED  ] 1 test." in result.stdout, result.stdout + result.stderr
 
+    from taichi_forge_runtime.aot import AotError, ExecutionPlan, Runtime
+
+    # The public plan entry must reject the entire recipe before a preceding
+    # fill can run or private resources/initialization can consume a sequence.
+    with Runtime("cuda") as runtime:
+        loaded = runtime.load_module(directory)
+        out = runtime.ndarray("f32", 1)
+        out.write(b"\x00\x00\x80\x3f")
+        domain = runtime.execution_domain()
+        blocked = {
+            "random_direct": (["out"], "shared random-number state"),
+            "random_callee": (["out"], "shared random-number state"),
+            "print_value": (["out"], "shared device print state"),
+            "sparse_value": ([], "shared sparse list or allocator state"),
+        }
+        if dense_lists:
+            blocked["dense_value"] = ([], "shared sparse list or allocator state")
+        for entry, (arguments, reason) in blocked.items():
+            plan = ExecutionPlan(
+                [dict(kind="fill32", destination="private", value=0),
+                 dict(kind="copy", source="private", destination="out", size_bytes=4),
+                 dict(kind="kernel", entry=entry, arguments=arguments)],
+                resources=[dict(kind="ndarray", name="private", dtype="f32", shape=[16], zero_initialize=True)],
+            )
+            with pytest.raises(AotError, match=reason):
+                loaded.prepare_execution(plan, dict(out=out), execution_domain=domain)
+            with domain.latest_completion() as completion:
+                assert completion.info["sequence"] == 0
+            assert domain.info["accepting"]
+            assert out.read() == b"\x00\x00\x80\x3f"
+        with Runtime("cuda") as foreign:
+            wrong_domain = foreign.execution_domain()
+            plan = ExecutionPlan([dict(kind="fill32", destination="out", value=0)])
+            with pytest.raises(RuntimeError, match="another runtime generation"):
+                loaded.prepare_execution(plan, dict(out=out), execution_domain=wrong_domain)
+            assert wrong_domain.info["accepting"]
+
     # Runtime-state facts are independent from the original launch checksum.
     # Corrupting only this contract must fail before loading a kernel.
-    from taichi_forge_runtime.aot import Runtime
 
     metadata["kernel_runtime_state"][0]["value"] ^= 2
     (directory / "aot_metadata.json").write_text(json.dumps(metadata), encoding="utf8")

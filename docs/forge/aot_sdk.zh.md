@@ -2,6 +2,10 @@
 
 [English](aot_sdk.en.md)
 
+有界独立 CUDA 队列、精确设备依赖和显式初始化见
+[CUDA 执行域](cuda_execution_domains.zh.md)。开发接口在运行时绑定已保存计划，
+不序列化 stream 身份，也不改变已选择的执行路线。
+
 0.6.4 开发版可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
 消费端链接 `TaichiForge::c_api`，无需导入 Python。CPU/CUDA 仍使用随 SDK
 提供的 LLVM runtime 与编译器。这是一份完整 SDK，不是无编译器 runtime。

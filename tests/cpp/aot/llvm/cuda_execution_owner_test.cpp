@@ -3,6 +3,11 @@
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN) && \
     defined(TI_TEST_RUNTIME_C_API)
 #include <future>
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <cstring>
+#include <thread>
 #include "tests/cpp/rhi/common/cuda_external_gate.h"
 #include "c_api/src/taichi_llvm_impl.h"
 #include "c_api/src/execution_domain.h"
@@ -10,9 +15,186 @@
 #include "taichi/program/program.h"
 #include "taichi/runtime/aot_runtime_client.h"
 #include "taichi/runtime/cuda/execution_domain.h"
+#include "taichi/system/profiler_annotation.h"
 
 namespace taichi::lang {
 namespace {
+
+TEST(CudaPublicExecutionAot, ExactDependenciesBusyAndReleasedInstanceLifetime) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP() << "Requires the saved execution-context AOT fixture";
+  auto runtime = std::make_unique<capi::LlvmRuntime>(Arch::cuda);
+  auto foreign_runtime = std::make_unique<capi::LlvmRuntime>(Arch::cuda);
+  auto rt = reinterpret_cast<TiRuntime>(runtime.get());
+  const TiCudaExecutionDomainCreateInfo options{2, 4, 0};
+  auto output = ti_create_cuda_execution_domain_ext(rt, &options);
+  auto physics = ti_create_cuda_execution_domain_ext(rt, &options);
+  auto foreign = ti_create_cuda_execution_domain_ext(
+      reinterpret_cast<TiRuntime>(foreign_runtime.get()), &options);
+  ASSERT_NE(output, nullptr);
+  ASSERT_NE(physics, nullptr);
+  ASSERT_NE(foreign, nullptr);
+  auto foreign_ticket = ti_get_cuda_execution_domain_completion_ext(foreign);
+  auto module = ti_load_aot_module(rt, folder);
+  ASSERT_NE(module, nullptr);
+  constexpr int count = 64;
+  std::array<TiMemory, 2> memory{};
+  std::array<void *, 2> pointers{};
+  std::array<TiPreparedExecution, 2> calls{};
+  const std::string plan =
+      R"({"version":1,"operations":[{"kind":"kernel","entry":"stage","arguments":["out","seed","n"]}]})";
+  for (int i = 0; i < 2; ++i) {
+    TiMemoryAllocateInfo allocation_info{};
+    allocation_info.size = count * sizeof(float);
+    allocation_info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+    memory[i] = ti_allocate_memory(rt, &allocation_info);
+    auto &device = static_cast<cuda::CudaDevice &>(runtime->get());
+    pointers[i] =
+        device.get_memory_addr(runtime->get_memory(memory[i]).allocation);
+    TiNamedArgument arguments[3]{};
+    arguments[0].name = "out";
+    arguments[0].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+    arguments[0].argument.value.ndarray = {
+        memory[i], {1, {count}}, {0, {}}, TI_DATA_TYPE_F32};
+    arguments[1].name = "seed";
+    arguments[1].argument.type = TI_ARGUMENT_TYPE_F32;
+    arguments[1].argument.value.f32 = i == 0 ? 2.0f : 7.0f;
+    arguments[2].name = "n";
+    arguments[2].argument.type = TI_ARGUMENT_TYPE_I32;
+    arguments[2].argument.value.i32 = count;
+    calls[i] = ti_prepare_execution_plan_on_domain_ext(
+        rt, module, i == 0 ? output : physics, plan.size(), plan.c_str(), 3,
+        arguments, 0, nullptr);
+    ASSERT_NE(calls[i], nullptr);
+    // Mutating the source descriptor cannot change the immutable instance.
+    arguments[1].argument.value.f32 = -999.0f;
+  }
+  TiCompletion ticket = nullptr;
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  EXPECT_FALSE(ti_try_submit_prepared_ext(rt, calls[0], 0, nullptr, &ticket));
+  EXPECT_EQ(ticket, nullptr);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_INVALID_ARGUMENT);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  ti_initialize_prepared_ext(rt, calls[0]);
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+
+  testing::CudaExternalGate gate;
+  capi::get_execution_domain(output)->submit(
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  auto blocked = ti_get_cuda_execution_domain_completion_ext(output);
+  // Cold initialization waits only its published prefix, never the blocked
+  // output domain. This also proves the no-explicit-initializer contract.
+  {
+    ScopedExternalProfilerAnnotation annotation("F3/public/initialize");
+    ti_initialize_prepared_ext(rt, calls[1]);
+  }
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  EXPECT_FALSE(gate.timed_out());
+  EXPECT_FALSE(ti_query_completion_ext(blocked));
+  EXPECT_TRUE(ti_try_submit_prepared_ext(rt, calls[0], 1, &blocked, &ticket));
+  ASSERT_NE(ticket, nullptr);
+  TiCompletion busy = nullptr;
+  EXPECT_FALSE(ti_try_submit_prepared_ext(rt, calls[0], 0, nullptr, &busy));
+  EXPECT_EQ(busy, nullptr);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  const auto sequence =
+      capi::get_execution_domain(physics)->latest_completion().sequence();
+  TiCompletion rejected = nullptr;
+  EXPECT_FALSE(
+      ti_try_submit_prepared_ext(rt, calls[1], 1, &foreign_ticket, &rejected));
+  EXPECT_EQ(rejected, nullptr);
+  EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  EXPECT_EQ(capi::get_execution_domain(physics)->latest_completion().sequence(),
+            sequence);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  TiCompletion active = nullptr;
+  {
+    ScopedExternalProfilerAnnotation annotation("F3/public/submit");
+    ASSERT_TRUE(ti_try_submit_prepared_ext(rt, calls[1], 0, nullptr, &active));
+  }
+  ti_wait_completion_ext(active);
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  auto context = CUDAContext::get_instance().get_guard();
+  std::array<float, count> values{};
+  CUDADriver::get_instance().memcpy_device_to_host(values.data(), pointers[1],
+                                                   sizeof(values));
+  for (int i = 0; i < count; ++i)
+    EXPECT_EQ(values[i], 36.0f * count * (count + 1) / 2 + i);
+  std::vector<double> times;
+  times.reserve(1000);
+  std::size_t busy_count = 0;
+  {
+    ScopedExternalProfilerAnnotation annotation("F3/public/warm");
+    while (times.size() < 1000) {
+      TiCompletion completed = nullptr;
+      const auto begin = std::chrono::steady_clock::now();
+      const auto accepted =
+          ti_try_submit_prepared_ext(rt, calls[1], 0, nullptr, &completed);
+      const auto end = std::chrono::steady_clock::now();
+      ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+      if (!accepted) {
+        ++busy_count;
+        std::this_thread::yield();
+        continue;
+      }
+      times.push_back(
+          std::chrono::duration<double, std::micro>(end - begin).count());
+      ti_release_completion_ext(completed);
+    }
+  }
+  auto warm_end = ti_get_cuda_execution_domain_completion_ext(physics);
+  ti_wait_completion_ext(warm_end);
+  ti_release_completion_ext(warm_end);
+  std::sort(times.begin(), times.end());
+  std::cout << "public AOT submit_us p50=" << times[500]
+            << " p95=" << times[950] << " accepted=" << times.size()
+            << " busy=" << busy_count << std::endl;
+  EXPECT_FALSE(gate.timed_out());
+  EXPECT_FALSE(ti_query_completion_ext(ticket));
+  TiCompletion dependent = nullptr;
+  ASSERT_TRUE(ti_try_submit_prepared_ext(rt, calls[1], 1, &ticket, &dependent));
+  EXPECT_FALSE(ti_query_completion_ext(dependent));
+
+  // Public wrapper retirement must not wait, erase code/storage edges or
+  // release the still-pending independent execution instance.
+  {
+    ScopedExternalProfilerAnnotation annotation("F3/public/release_instance");
+    ti_destroy_prepared_ext(rt, calls[0]);
+  }
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  EXPECT_FALSE(gate.timed_out());
+  EXPECT_FALSE(ti_query_completion_ext(ticket));
+  ti_destroy_prepared_ext(rt, calls[1]);
+  auto close_module = std::async(std::launch::async, [&] {
+    ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+    ti_destroy_aot_module(module);
+    return ti_get_last_error(nullptr, nullptr);
+  });
+  EXPECT_EQ(close_module.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_FALSE(gate.timed_out());
+  {
+    ScopedExternalProfilerAnnotation annotation("F3/public/release_gate");
+    gate.release();
+  }
+  EXPECT_EQ(close_module.get(), TI_ERROR_SUCCESS);
+  EXPECT_TRUE(ti_query_completion_ext(ticket));
+  EXPECT_TRUE(ti_query_completion_ext(dependent));
+  CUDADriver::get_instance().memcpy_device_to_host(values.data(), pointers[0],
+                                                   sizeof(values));
+  for (int i = 0; i < count; ++i)
+    EXPECT_EQ(values[i], 11.0f * count * (count + 1) / 2 + i);
+  for (auto completion : {blocked, ticket, active, dependent, foreign_ticket})
+    ti_release_completion_ext(completion);
+  for (auto domain : {output, physics, foreign}) {
+    ti_close_cuda_execution_domain_ext(domain);
+    ti_release_cuda_execution_domain_ext(domain);
+  }
+  for (auto allocation : memory)
+    ti_free_memory(rt, allocation);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+}
 
 TEST(CudaExecutionOwner, PublicTicketWaitDoesNotLockQueryOrPeerSubmission) {
   if (!cuda::ExecutionDomain::available())

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi_core_impl.h"
+#include "taichi/taichi_cuda.h"
 #include "taichi/program/runtime_completion.h"
 
 #ifdef TI_WITH_CUDA

@@ -2,6 +2,7 @@
 #include "execution_resources.h"
 #include "execution_binding_family.h"
 #include "native_resource_registry.h"
+#include "execution_domain.h"
 
 #include <algorithm>
 #include <functional>
@@ -17,6 +18,10 @@
 #include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/binding_frame_replay.h"
+#include "taichi/runtime/cuda/execution_domain.h"
+#include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/rhi/cuda/cuda_context.h"
 #endif
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
@@ -36,6 +41,13 @@ struct PreparedExecution {
   TiPreparedExecutionInfo info{};
   bool live{false};
   bool binding_retired{false};
+  // Independent instances keep this registry entry and its reverse dependency
+  // edges after public handle release. Domain capacity bounds resident entries.
+  bool released{false};
+  bool domain_initialized{false};
+  std::shared_ptr<cuda::ExecutionDomain> domain;
+  std::shared_ptr<RuntimeCompletionCudaEventPool> bootstrap_events;
+  RuntimeCompletion bootstrap;
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
@@ -48,6 +60,29 @@ struct PreparedExecution {
   std::vector<std::unique_ptr<BoundKernelArguments>> plan_arguments;
   std::unique_ptr<FixedExecution> native;
   std::unique_ptr<FixedExecution> initialization;
+
+  void close_domain() {
+#ifdef TI_WITH_CUDA
+    if (domain)
+      domain->close();
+#endif
+  }
+
+  void publish_bootstrap(Runtime &runtime) {
+#ifdef TI_WITH_CUDA
+    if (!domain)
+      return;
+    auto &cuda_context = CUDAContext::get_instance();
+    auto submission = cuda_context.get_submission_lock_guard();
+    auto current = cuda_context.get_guard();
+    const auto &owner = runtime.runtime_fault_domain();
+    bootstrap_events =
+        std::make_shared<RuntimeCompletionCudaEventPool>(owner, 1);
+    bootstrap = RuntimeCompletion::from_cuda_stream(
+        owner->snapshot().program_domain, owner->allocate_submission_sequence(),
+        nullptr, owner, bootstrap_events);
+#endif
+  }
 
   void release_native_resources() {
     while (!native_resources.empty())
@@ -134,6 +169,22 @@ struct PreparedExecution {
       gfx_runtime = &gfx->get_gfx_runtime();
 #endif
     try {
+      FixedExecution::CudaExecutionBinding selected{domain, {}};
+      if (domain) {
+        struct DomainOperands final : RuntimeCompletionResources {
+          std::shared_ptr<ExecutionResourceStorage> arrays;
+          std::vector<std::shared_ptr<NativeResource>> objects;
+          std::size_t retained_resource_count(
+              std::uint32_t) const noexcept override {
+            return objects.size() + (arrays ? 1 : 0);
+          }
+        };
+        auto retained = std::make_shared<DomainOperands>();
+        retained->arrays = resources;
+        retained->objects = native_resources;
+        selected.operands = std::move(retained);
+      }
+      const auto *execution_binding = domain ? &selected : nullptr;
       NativeRecordingState sequence =
           family ? family->initial_facts : NativeRecordingState{};
       struct FrameOperands {
@@ -165,12 +216,14 @@ struct PreparedExecution {
       } else if (!family && !initializers.empty()) {
         initialization = std::make_unique<FixedExecution>(
             runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
-            runtime.runtime_fault_domain());
+            runtime.runtime_fault_domain(), nullptr, nullptr, nullptr, nullptr,
+            execution_binding);
       }
       native = std::make_unique<FixedExecution>(
           runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
           runtime.runtime_fault_domain(), family ? family->replay : nullptr,
-          family ? operands : nullptr, submission_recipe);
+          family ? operands : nullptr, submission_recipe, nullptr,
+          execution_binding);
       if (family) {
         family->prepared = true;
         family->arrays->sealed = true;
@@ -236,7 +289,14 @@ struct PreparedExecution {
     if (family && family->failed)
       throw MemoryBindingError(
           "Binding family initialization failed; prepare a new family");
-    native->run();
+    if (domain) {
+      if (!domain_initialized)
+        throw MemoryBindingError(
+            "Initialize the selected execution domain before submitting");
+      (void)native->submit();
+    } else {
+      native->run();
+    }
     ++info.launches;
   }
 
@@ -252,6 +312,8 @@ struct PreparedExecution {
   }
 
   bool needs_initialization() const {
+    if (domain)
+      return !domain_initialized;
     return family ? !family->initialized : bool(initialization);
   }
 
@@ -269,6 +331,26 @@ struct PreparedExecution {
   void initialize(Runtime &runtime) {
     if (!live)
       throw MemoryBindingError("Prepared execution has a retired dependency");
+    if (domain) {
+      if (domain_initialized)
+        return;
+      try {
+        // Publish the cold default-queue prefix, not an all-domain wait. The
+        // selected initialization follows it on the device. Keep both sets of
+        // recording operands until the domain retires; dropping an initializer
+        // wrapper must not free a still-resident graph's argument storage.
+        if (initialization)
+          initialization->submit({bootstrap}).wait();
+        else
+          bootstrap.wait();
+        bootstrap = {};
+        domain_initialized = true;
+      } catch (...) {
+        live = false;
+        throw;
+      }
+      return;
+    }
     if (family) {
       family->initialize();
       return;
@@ -294,6 +376,7 @@ class PreparedExecutionRegistry {
   explicit PreparedExecutionRegistry(Runtime &runtime) : runtime_(runtime) {
   }
   TiPreparedExecution publish(std::unique_ptr<PreparedExecution> execution) {
+    prune_released();
     const auto handle =
         reinterpret_cast<TiPreparedExecution>(Runtime::new_handle_token());
     auto &memories = execution->memories;
@@ -319,7 +402,7 @@ class PreparedExecutionRegistry {
   }
   PreparedExecution &get(TiPreparedExecution handle) {
     const auto found = entries_.find(handle);
-    if (found == entries_.end())
+    if (found == entries_.end() || found->second->released)
       throw MemoryBindingError("Prepared handle is not owned by this runtime");
     return *found->second;
   }
@@ -330,6 +413,12 @@ class PreparedExecutionRegistry {
   }
   void destroy(TiPreparedExecution handle) {
     auto &entry = get(handle);
+    if (entry.domain) {
+      // Host-only release. Code/storage edges remain authoritative through
+      // explicit domain close, dependency destruction or runtime retirement.
+      entry.released = true;
+      return;
+    }
     if ((entry.native || entry.initialization) &&
         runtime_.runtime_fault_domain()->backend_calls_safe())
       runtime_.wait();
@@ -341,6 +430,8 @@ class PreparedExecutionRegistry {
     auto &entry = get(handle);
     const bool needed = entry.needs_initialization();
     entry.initialize(runtime_);
+    if (entry.domain)
+      return;
     if (!needed)
       return;
     const auto finish = [&](TiPreparedExecution member) {
@@ -403,9 +494,29 @@ class PreparedExecutionRegistry {
   }
   void run(TiPreparedExecution handle) {
     auto &entry = get(handle);
-    if (entry.needs_initialization())
+    if (!entry.domain && entry.needs_initialization())
       initialize(handle);
     entry.run();
+  }
+  RuntimeCompletion submit(TiPreparedExecution handle,
+                           const std::vector<RuntimeCompletion> &dependencies) {
+    auto &entry = get(handle);
+    if (!entry.live || !entry.domain || !entry.domain_initialized)
+      throw MemoryBindingError(
+          "Submit requires an initialized live CUDA execution-domain instance");
+    auto result = entry.native->submit(dependencies);
+    ++entry.info.launches;
+    return result;
+  }
+  void preparation_failed(TiPreparedExecution handle) {
+    auto &entry = get(handle);
+    entry.live = false;
+    entry.released = true;
+    // All reverse edges were published before any independent recording.
+    // A failed drain leaves that finite closure pinned for cold retirement.
+    entry.close_domain();
+    remove_dependencies(handle, entry);
+    entries_.erase(handle);
   }
   void retire_memory(TiMemory memory) {
     retire(memories_, memory);
@@ -417,6 +528,10 @@ class PreparedExecutionRegistry {
     retire(modules_, module);
   }
   void clear(bool synchronize) {
+    // Close before erasing any entry: domain retirement may release recording
+    // references, but the registry still owns the actual C API storage here.
+    for (const auto &entry : entries_)
+      entry.second->close_domain();
     if (synchronize && !entries_.empty() &&
         runtime_.runtime_fault_domain()->backend_calls_safe())
       runtime_.wait();
@@ -430,6 +545,20 @@ class PreparedExecutionRegistry {
   }
 
  private:
+  void prune_released() {
+#ifdef TI_WITH_CUDA
+    for (auto it = entries_.begin(); it != entries_.end();) {
+      auto &entry = *it->second;
+      if (entry.released && entry.domain && entry.domain->snapshot().closed) {
+        entry.close_domain();  // A failed provider retirement is not a proof.
+        remove_dependencies(it->first, entry);
+        it = entries_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+#endif
+  }
   template <typename Map, typename Key>
   void retire(Map &map, Key key, bool synchronize = true) {
     auto found = map.find(key);
@@ -439,12 +568,22 @@ class PreparedExecutionRegistry {
     // executions and remove all their edges; warm replay never scans owners.
     const std::vector<TiPreparedExecution> handles(found->second.begin(),
                                                    found->second.end());
-    if (synchronize && runtime_.runtime_fault_domain()->backend_calls_safe())
+    bool default_queue = false;
+    for (auto handle : handles) {
+      auto &entry = *entries_.at(handle);
+      if (!entry.domain)
+        default_queue = true;
+      entry.close_domain();
+    }
+    if (synchronize && default_queue &&
+        runtime_.runtime_fault_domain()->backend_calls_safe())
       runtime_.wait();
     for (auto handle : handles) {
-      auto &entry = get(handle);
+      auto &entry = *entries_.at(handle);
       remove_dependencies(handle, entry);
       entry.invalidate();
+      if (entry.released)
+        entries_.erase(handle);
     }
   }
   template <typename Map, typename Key>
@@ -595,7 +734,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
     const TiNamedArgument *args,
     uint32_t binding_count,
     const TiNamedNdArrayBinding *bindings,
-    std::shared_ptr<capi::ExecutionBindingFamily> family) {
+    std::shared_ptr<capi::ExecutionBindingFamily> family,
+    TiCudaExecutionDomain selected_domain = nullptr) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(module);
@@ -605,6 +745,20 @@ static TiPreparedExecution prepare_execution_plan_impl(
     throw MemoryBindingError("Invalid execution plan input descriptors");
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain;
+  if (selected_domain) {
+#ifdef TI_WITH_CUDA
+    domain = capi::get_execution_domain(selected_domain);
+    if (rt.arch != taichi::Arch::cuda ||
+        !domain->belongs_to(rt.runtime_fault_domain()))
+      throw MemoryBindingError(
+          "Execution domain belongs to another runtime generation");
+    if (!domain->snapshot().accepting)
+      throw MemoryBindingError("Execution domain is closed for admission");
+#else
+    throw MemoryBindingError("Execution domains require CUDA support");
+#endif
+  }
   auto &mod = *reinterpret_cast<AotModule *>(module);
   if (&mod.runtime() != &rt)
     throw MemoryBindingError(
@@ -619,6 +773,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
     try {
       parsed =
           aot::ExecutionPlan::parse(std::string(description, description_size));
+      if (domain && parsed.cuda_binding_frames)
+        throw MemoryBindingError(
+            "Independent execution domains require independent bindings");
       if (parsed.cuda_binding_frames)
         family = std::make_shared<capi::ExecutionBindingFamily>(
             rt, mod, std::move(parsed));
@@ -682,6 +839,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = &mod;
   prepared->family = family;
+  prepared->domain = domain;
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
   auto local_preparation =
@@ -720,6 +878,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
                   &operation)) {
         const auto &branch = **value;
         using Lowering = aot::ExecutionPlan::Branch::Lowering;
+        if (domain && branch.lowering == Lowering::cuda_host)
+          throw MemoryBindingError(
+              "Independent execution domains require device branch selection");
         const bool matches = branch.lowering == Lowering::cpu
                                  ? arch_is_cpu(rt.arch)
                              : branch.lowering == Lowering::vulkan_host
@@ -758,6 +919,31 @@ static TiPreparedExecution prepare_execution_plan_impl(
   if (!rebinding)
     collect_steps(plan.initialization);
   collect_steps(plan.operations);
+#ifdef TI_WITH_CUDA
+  if (domain) {
+    // Reuse the cold flat operation inventory. Qualify code before private
+    // arrays or native provider objects can be materialized. No hot scans.
+    std::unordered_set<std::string> qualified;
+    for (const auto *step : steps) {
+      const auto *dispatch = std::get_if<aot::ExecutionPlan::Kernel>(step);
+      if (!dispatch || !qualified.insert(dispatch->entry).second)
+        continue;
+      auto handle = mod.get_kernel_handle(dispatch->entry);
+      if (!handle)
+        throw MemoryBindingError("Execution plan kernel was not exported: " +
+                                 dispatch->entry);
+      auto *kernel =
+          dynamic_cast<llvm_aot::KernelImpl *>(rt.get_kernel(handle).kernel);
+      auto *launcher =
+          kernel ? dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher())
+                 : nullptr;
+      if (!launcher)
+        throw MemoryBindingError(
+            "Execution domain requires a CUDA kernel launcher");
+      launcher->validate_execution_domain(kernel->handle());
+    }
+  }
+#endif
   for (const auto index : resource_description.order)
     if (const auto *native = std::get_if<NativeOperationDescription>(
             &resource_description.declarations[index].value))
@@ -1534,8 +1720,24 @@ static TiPreparedExecution prepare_execution_plan_impl(
   operations.erase(operations.begin(), split);
   if (plan.vulkan_submission && operations.size() != plan.operations.size())
     throw MemoryBindingError("Selected Vulkan submission changed replay boundaries");
-  prepared->prepare_operations(rt, operations, initializers,
-                              plan.vulkan_submission ? &*plan.vulkan_submission : nullptr);
+  if (domain) {
+    // Register the complete code/storage closure before a domain may retain
+    // any recording, including a partially prepared initializer.
+    auto &registry = rt.prepared_registry();
+    const auto handle = registry.publish(std::move(prepared));
+    try {
+      auto &entry = registry.get(handle);
+      entry.prepare_operations(rt, operations, initializers);
+      entry.publish_bootstrap(rt);
+    } catch (...) {
+      registry.preparation_failed(handle);
+      throw;
+    }
+    return handle;
+  }
+  prepared->prepare_operations(
+      rt, operations, initializers,
+      plan.vulkan_submission ? &*plan.vulkan_submission : nullptr);
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
@@ -1554,6 +1756,57 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
                                      description, arg_count, args,
                                      binding_count, bindings, {});
 }
+
+#ifdef TI_WITH_CUDA
+TiPreparedExecution ti_prepare_execution_plan_on_domain_ext(
+    TiRuntime runtime,
+    TiAotModule module,
+    TiCudaExecutionDomain domain,
+    uint64_t description_size,
+    const char *description,
+    uint32_t arg_count,
+    const TiNamedArgument *args,
+    uint32_t binding_count,
+    const TiNamedNdArrayBinding *bindings) {
+  if (!domain) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "domain");
+    return TI_NULL_HANDLE;
+  }
+  return prepare_execution_plan_impl(runtime, module, description_size,
+                                     description, arg_count, args,
+                                     binding_count, bindings, {}, domain);
+}
+
+TiBool ti_try_submit_prepared_ext(TiRuntime runtime,
+                                  TiPreparedExecution execution,
+                                  uint32_t dependency_count,
+                                  const TiCompletion *dependencies,
+                                  TiCompletion *completion) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(completion);
+  *completion = TI_NULL_HANDLE;
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(execution);
+  if (dependency_count && !dependencies)
+    throw MemoryBindingError("Missing completion dependency array");
+  std::vector<taichi::lang::RuntimeCompletion> predecessors;
+  predecessors.reserve(dependency_count);
+  for (uint32_t i = 0; i < dependency_count; ++i)
+    predecessors.push_back(capi::get_completion(dependencies[i]));
+  capi::CompletionPublication publication;
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  try {
+    *completion = publication.commit(
+        rt.prepared_registry().submit(execution, predecessors));
+  } catch (const taichi::lang::cuda::ExecutionDomainBusy &) {
+    return TI_FALSE;
+  }
+  return TI_TRUE;
+  TI_CAPI_TRY_CATCH_END();
+  return TI_FALSE;
+}
+#endif
 
 TiPreparedExecution ti_prepare_execution_binding_ext(
     TiRuntime runtime,

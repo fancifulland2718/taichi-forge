@@ -316,6 +316,11 @@ class Api:
             "ti_release_cuda_execution_domain_ext": ([Handle], None),
             "ti_collect_cuda_execution_domain_ext": ([Handle, UInt], UInt),
             "ti_get_cuda_execution_domain_completion_ext": ([Handle], Handle),
+            "ti_prepare_execution_plan_on_domain_ext": (
+                [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
+                Handle,
+            ),
+            "ti_try_submit_prepared_ext": ([Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle)], UInt),
             "ti_query_completion_ext": ([Handle], UInt),
             "ti_wait_completion_ext": ([Handle], None),
             "ti_get_completion_info_ext": ([Handle, C.POINTER(CompletionInfo)], None),

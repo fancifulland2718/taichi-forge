@@ -1,0 +1,113 @@
+# CUDA execution domains (development)
+
+[中文](cuda_execution_domains.zh.md)
+
+The independent AOT consumer can bind a saved execution plan to a bounded CUDA
+execution domain. Each domain owns a nonblocking stream, and each prepared
+instance owns its executable, immutable arguments and compiler temporaries.
+This API preserves the complete selected plan. Stream handles, priorities and
+completion tickets are runtime choices; they are never serialized into AOT.
+
+This is part of the F3 implementation. It does not yet establish independent
+JIT Graph or Canvas presentation support, cross-platform window qualification,
+or an application FPS improvement. Queue priority is a device scheduling hint;
+it does not guarantee concurrent kernels or priority preemption.
+
+## Prepare, initialize and submit
+
+Use the runtime package directly in a source-free consumer, or obtain the same
+interface through `ti.aot.borrow_runtime()` when explicitly sharing a JIT owner.
+Given a module exporting `step` and its argument dictionary:
+
+```python
+from taichi_forge_runtime.aot import Runtime
+
+with Runtime("cuda") as runtime:
+    module = runtime.load_module(module_path)
+    domain = runtime.execution_domain(capacity=2, instance_capacity=64, priority=0)
+    step = module.prepare_execution("step", arguments, execution_domain=domain)
+    step.initialize()  # cold: publish initialization before enabling submit
+
+    ticket = step.submit()
+    if ticket is not None:
+        # Other host work can run here. Waiting is an explicit caller decision.
+        ticket.wait()
+        ticket.close()
+    step.close()      # release the host handle without waiting
+    domain.close()    # cold destructive retirement
+```
+
+`initialize()` is required even without explicit initialization operations. It
+publishes the exact default-stream prefix containing module/storage setup, then
+executes any initializer in the selected domain. It never calls the runtime's
+all-domain wait. Its event and initializer storage remain bounded by the cold
+instance lifetime; completion does not immediately destroy driver objects.
+Initialize all steady-state bindings before starting the application pipeline.
+
+`submit(wait_for=[ticket, ...])` validates exact predecessor tickets, performs
+bounded admission, and enqueues the complete plan. It returns a `Completion`
+when accepted, or `None` when full. Full admission enqueues neither dependencies
+nor partial work. Initialization is never implicit in `submit()` or the selected
+domain's `run()`. `run()` discards the returned ticket and raises when full.
+
+Tickets belong to one runtime generation. Dependency admission rejects a
+foreign or reset owner.
+`done()` queries and `wait()` blocks without acquiring the runtime submission
+lock; a waiting thread does not lock out queries or peer-domain submission.
+`domain.latest_completion()` snapshots the already accepted prefix. Work
+submitted later cannot extend that ticket. Closing a ticket only releases its
+host handle and does not cancel work.
+
+## Ownership and supported state
+
+Cold preparation uses persisted compiler facts to qualify internal state.
+Qualified dense-field kernels, `real_func` calls, vector arguments and cross-task
+temporaries use the existing compiler and AOT loader. BC, PTX and cubin retain
+these facts. Unknown older artifacts and kernels using unisolated shared RNG,
+runtime errors, sparse lists/allocators, printing, mesh state or unqualified
+external calls are rejected for independent execution. Ordinary default-queue
+APIs remain available under their existing contracts. Selected binding families,
+storage rings and host-selected branches are not silently converted to another
+execution route. Each native operation must admit the independent domain route.
+
+The caller owns application data hazards. Domains do not infer that two array
+views or dense fields alias. Explicit dependencies must order every overlapping
+write/read or write/write, including snapshot overwrite and slot reuse.
+
+`capacity` bounds pending submissions; `instance_capacity` bounds resident
+recordings. A plan with an explicit initializer can retain both an initializer
+and replay recording. Releasing a prepared handle keeps its code, arrays and
+reverse dependency edges until domain retirement. Explicit module, memory or
+native-resource destruction closes dependent domains before freeing their
+storage. Runtime close/reset retires its domains. A failed retirement retains
+the unsafe closure and reports the failure instead of freeing in-flight state.
+
+`domain.release()` releases only the host handle; the runtime still owns its
+bounded resources. `domain.stop()` permanently stops admission. For a resumable
+pause, stop submitting on the host and retain the domain; wait only the exact
+prefix needed by the application. Explicit `domain.close()` is destructive and
+may encounter driver/provider synchronization during cleanup. It belongs at a
+cold boundary, with external producers able to signal already submitted waits.
+
+## Pipeline scheduling
+
+An independent simulation queue does not remove actual data dependencies.
+Express `simulation(n) → snapshot(n) → render(n)` with device tickets, also order
+`snapshot(n) → simulation(n+1)` before live state is overwritten, and reuse a
+snapshot slot only after its render ticket completes. Keep the host queues
+bounded. When presentation is busy, retain the latest completed frame and drop
+redundant presentation requests instead of blocking simulation admission.
+
+CPU `wait()` and byte-buffer host transfers are explicit synchronization
+boundaries. They are useful for cold initialization, final reads and shutdown;
+placing them between every simulation and render submission serializes the
+pipeline. Independent CUDA completion is distinct from Vulkan presentation and
+screen scanout. The external-display/Canvas dependency chain needs its own
+qualified integration before these queues can replace the headed path.
+
+The C equivalents are declared in `taichi_cuda.h`:
+`ti_prepare_execution_plan_on_domain_ext`, `ti_initialize_prepared_ext`,
+`ti_try_submit_prepared_ext`, and the execution-domain/completion handle APIs.
+A successful submit returns an owned completion handle. A false result with no
+C API error means busy; a false result with an error means rejection/failure.
+Bindings reserve public ticket bookkeeping before device effects.

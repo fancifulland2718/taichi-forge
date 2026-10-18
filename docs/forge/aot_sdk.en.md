@@ -7,6 +7,11 @@ Forge Python to export modules; the consumer links `TaichiForge::c_api` and does
 not import Python. CPU/CUDA still use the supplied LLVM runtime and compiler.
 This is a full SDK, not a compiler-free runtime.
 
+For bounded independent CUDA queues, exact device dependencies and explicit
+initialization, see [CUDA execution domains](cuda_execution_domains.en.md).
+The development interface binds saved plans at runtime without serializing
+stream identities or changing their selected execution recipes.
+
 A Vulkan-only SDK can also be built without LLVM, CUDA or Python. Configure a
 separate build directory with the following options, then build `taichi_c_api`
 and install the `TaichiSDK` component as below:

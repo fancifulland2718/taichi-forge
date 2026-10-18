@@ -2,6 +2,7 @@
 
 import ctypes as C
 import operator
+import weakref
 
 from . import _c_api as abi
 
@@ -77,6 +78,7 @@ class CudaExecutionDomain:
         if not handle:
             raise RuntimeError("Native execution-domain creation returned no handle")
         self._runtime, self._api, self._handle = runtime, runtime._api, handle
+        self._clients = weakref.WeakSet()
 
     def _native_handle(self):
         handle = self._handle
@@ -114,7 +116,12 @@ class CudaExecutionDomain:
 
     def close(self):
         if self._handle is not None:
-            self._api.call(self._api.ti_close_cuda_execution_domain_ext, self._native_handle())
+            handle = self._native_handle()
+            self._api.call(self._api.ti_close_cuda_execution_domain_ext, handle)
+            for runtime in tuple(self._clients):
+                with runtime._lock:
+                    runtime._domain_owners.pop(handle, None)
+            self._clients.clear()
             self.release()
 
     def release(self):
