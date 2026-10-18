@@ -110,7 +110,14 @@ LlvmAotModule::LlvmAotModule(
   }
   const bool relocatable =
       is_relocatable_aot_resource_binding(metadata.resource_binding);
-  const bool sparse = metadata.resource_binding == "sparse_v1";
+  const bool sparse = is_sparse_aot_resource_binding(metadata.resource_binding);
+#if defined(TI_WITH_CUDA)
+  if (arch() == Arch::cuda && metadata.resource_binding == "sparse_v2") {
+    auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
+    TI_ASSERT(launcher != nullptr);
+    launcher->enable_sparse_graph_replay();
+  }
+#endif
   std::vector<size_t> root_sizes;
   std::unordered_set<int> snode_ids;
   // Validate the complete resource closure before reserving or allocating any
@@ -218,7 +225,7 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
         "Relocatable LLVM AOT tree dependencies must be sorted and unique");
     for (const auto &task : loaded.compiled_data.tasks) {
       TI_ERROR_IF(!is_relocatable_aot_task(
-                      task.task_type, metadata_.resource_binding == "sparse_v1"),
+                      task.task_type, is_sparse_aot_resource_binding(metadata_.resource_binding)),
                   "Task is incompatible with the LLVM AOT resource binding");
     }
     if (loaded.compiled_data.module) {

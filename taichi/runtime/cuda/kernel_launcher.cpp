@@ -589,7 +589,8 @@ int64 KernelLauncher::get_sparse_list_version(int snode_id) const {
   return it->second.version;
 }
 
-bool KernelLauncher::sparse_list_task_is_current(const OffloadedTask &task) {
+bool KernelLauncher::sparse_list_task_is_current(const OffloadedTask &task,
+                                                bool device_replay) {
   SparseListgenNodeStatistics *telemetry = nullptr;
   if (sparse_listgen_telemetry_enabled_ &&
       task.sparse_list_op == OffloadedTask::kSparseListOpListgen &&
@@ -602,6 +603,12 @@ bool KernelLauncher::sparse_list_task_is_current(const OffloadedTask &task) {
   if (task.sparse_list_op == OffloadedTask::kSparseListOpNone ||
       task.sparse_list_snode_id < 0 ||
       task.sparse_list_parent_snode_id < 0) {
+    return false;
+  }
+
+  if (device_replay) {
+    if (telemetry)
+      telemetry->last_rebuild_reason = "graph_replay";
     return false;
   }
 
@@ -719,6 +726,12 @@ void KernelLauncher::invalidate_sparse_list_cache(
   }
 }
 
+void KernelLauncher::enable_sparse_graph_replay() {
+  std::unique_lock<std::shared_mutex> lock(registration_mutex());
+  TI_ASSERT(contexts_.empty());
+  sparse_graph_contract_ = true;
+}
+
 bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                                                 LaunchContextBuilder &ctx,
                                                 RuntimeContext &context,
@@ -728,7 +741,9 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                                                     *task_plan_identity,
                                                 std::size_t
                                                     *resolved_task_count,
-                                                KernelLaunchABI launch_abi) {
+                                                KernelLaunchABI launch_abi,
+                                                bool allow_sparse_replay,
+                                                std::shared_ptr<void> *sparse_lease) {
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   auto iter = contexts_.find(handle.get_launch_id());
@@ -757,12 +772,18 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
     return false;
   }
   const auto &offloaded_tasks = *offloaded_tasks_ptr;
+  bool uses_sparse = false;
   for (const auto &task : offloaded_tasks) {
     if (task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
-        task.may_mutate_sparse_topology) {
-      return false;
+        task.may_mutate_sparse_topology ||
+        task.task_type == OffloadedTaskType::listgen ||
+        task.task_type == OffloadedTaskType::gc ||
+        task.task_type == OffloadedTaskType::struct_for) {
+      uses_sparse = true;
     }
   }
+  if (uses_sparse && (!allow_sparse_replay || !sparse_graph_contract_))
+    return false;
   if (ctx.result_buffer_size > 0) {
     return false;
   }
@@ -874,6 +895,13 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
   if (task_plan_identity != nullptr) {
     *task_plan_identity = ctx.cuda_task_execution_plan_identity();
   }
+  if (sparse_lease) {
+    *sparse_lease = uses_sparse
+                        ? sparse_replay_tracker_.acquire(launcher_ctx->snode_tree_ids)
+                        : std::shared_ptr<void>{};
+    TI_ERROR_IF(uses_sparse && !*sparse_lease,
+                "Sparse CUDA Graph requires physical tree dependencies");
+  }
   return true;
 }
 
@@ -899,10 +927,13 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
 bool KernelLauncher::prepare_cuda_graph_launch_packet(
     Handle handle,
     LaunchContextBuilder &ctx,
-    GraphLaunchPacket &packet) {
+    GraphLaunchPacket &packet,
+    bool retain_sparse_replay) {
   RuntimeContext context;
   if (!prepare_cuda_graph_context(handle, ctx, context, &packet.offloaded_tasks,
-                                  &packet.task_execution_plan_identity)) {
+                                  &packet.task_execution_plan_identity, nullptr,
+                                  KernelLaunchABI::ordinary, retain_sparse_replay,
+                                  &packet.sparse_replay_lease)) {
     return false;
   }
   packet.handle = handle;
@@ -937,11 +968,12 @@ bool KernelLauncher::prepare_cuda_graph_bounded_packet(
     LaunchContextBuilder &ctx,
     GraphLaunchPacket &packet,
     void *extent,
-    std::uint32_t capacity) {
+    std::uint32_t capacity,
+    bool retain_sparse_replay) {
   if (extent == nullptr || capacity == 0 || capacity > 0x7fffffffu) {
     return false;
   }
-  if (!prepare_cuda_graph_launch_packet(handle, ctx, packet) ||
+  if (!prepare_cuda_graph_launch_packet(handle, ctx, packet, retain_sparse_replay) ||
       packet.offloaded_tasks.size() != 1 || !packet.offloaded_tasks[0].one_to_one) {
     return false;
   }
@@ -1014,7 +1046,8 @@ bool KernelLauncher::prepare_cuda_graph_gated_packet(
     LaunchContextBuilder &ctx,
     GraphLaunchPacket &packet,
     void *gate,
-    std::uint32_t expected) {
+    std::uint32_t expected,
+    bool retain_sparse_replay) {
   if (gate == nullptr || expected == 0) {
     return false;
   }
@@ -1022,7 +1055,8 @@ bool KernelLauncher::prepare_cuda_graph_gated_packet(
   if (!prepare_cuda_graph_context(handle, ctx, context,
                                   &packet.offloaded_tasks,
                                   &packet.task_execution_plan_identity,
-                                  nullptr, KernelLaunchABI::graph_gate_v1)) {
+                                  nullptr, KernelLaunchABI::graph_gate_v1,
+                                  retain_sparse_replay, &packet.sparse_replay_lease)) {
     return false;
   }
 
@@ -1056,7 +1090,8 @@ bool KernelLauncher::update_cuda_graph_launch(
   std::string task_plan_identity;
   if (!prepare_cuda_graph_context(packet.handle, ctx, context,
                                   nullptr, &task_plan_identity,
-                                  &resolved_task_count, packet.launch_abi)) {
+                                  &resolved_task_count, packet.launch_abi,
+                                  bool(packet.sparse_replay_lease))) {
     return false;
   }
   if (task_plan_identity != packet.task_execution_plan_identity ||
@@ -1579,6 +1614,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     ctx.get_context().arg_buffer = device_args;
   }
 
+  bool replay_checked = false;
+  bool device_sparse_replay = false;
   for (const auto &task : offloaded_tasks) {
     const bool uses_sparse_state =
         task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
@@ -1588,8 +1625,25 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     if (uses_sparse_state) {
       sparse_lock.lock();
       listgen_reuse_adaptive_ = listgen_reuse_adaptive;
+      if (!replay_checked) {
+        const auto epoch = sparse_replay_tracker_.epoch();
+        if (launcher_ctx->sparse_replay_epoch != epoch) {
+          const auto snapshot =
+              sparse_replay_tracker_.snapshot(launcher_ctx->snode_tree_ids);
+          launcher_ctx->sparse_replay_epoch = snapshot.epoch;
+          launcher_ctx->sparse_replay_intersects = snapshot.intersects;
+        }
+        if (sparse_replay_epoch_ != launcher_ctx->sparse_replay_epoch) {
+          // A graph may have changed topology without a host launcher call.
+          // Resynchronize once per cold acquire/retirement transition.
+          invalidate_sparse_list_cache(-1);
+          sparse_replay_epoch_ = launcher_ctx->sparse_replay_epoch;
+        }
+        device_sparse_replay = launcher_ctx->sparse_replay_intersects;
+        replay_checked = true;
+      }
     }
-    if (sparse_list_task_is_current(task)) {
+    if (sparse_list_task_is_current(task, device_sparse_replay)) {
       TI_TRACE("Skipping current sparse list kernel {}", task.name);
       continue;
     }

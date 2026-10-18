@@ -88,11 +88,32 @@ def _sparse_module(tmp_path, artifact_format):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="backward")
     module.add_kernel(sparse_energy.grad, name="sparse_backward")
+    out_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.f32, ndim=1)
+    loss_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "loss", ti.f32, ndim=1)
+    scale_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32)
+    parent = ti.graph.GraphBuilder()
+    child = parent.create_sequential()
+    child.dispatch(gather, out_arg)
+    parent.dispatch(deactivate)
+    parent.dispatch(activate, scale_arg)
+    parent.append(child)
+    parent.dispatch(sparse_energy, loss_arg)
+    parent.dispatch(sparse_energy.grad, loss_arg)
+    module.add_graph("sparse_step", parent.compile())
     artifact = tmp_path / "sparse.tcm"
     module.archive(str(artifact))
     with zipfile.ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("aot_metadata.json"))
-    assert metadata["resource_binding"] == "sparse_v1"
+    assert metadata["resource_binding"] == ("sparse_v2" if arch == "cuda" else "sparse_v1")
+    legacy = None
+    if artifact_format == "ptx":
+        # v1 keeps ordinary loading, but cannot promise the new device listgen
+        # publication contract. Never silently admit it to fixed replay.
+        legacy = tmp_path / "sparse-v1.tcm"
+        old_metadata = dict(metadata, resource_binding="sparse_v1")
+        with zipfile.ZipFile(artifact) as source, zipfile.ZipFile(legacy, "w") as target:
+            for name in source.namelist():
+                target.writestr(name, json.dumps(old_metadata) if name == "aot_metadata.json" else source.read(name))
     (tmp_path / "producer.json").write_text(
         json.dumps(
             dict(
@@ -120,3 +141,34 @@ def _sparse_module(tmp_path, artifact_format):
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Failed to retire" not in result.stdout + result.stderr
+        fixed = subprocess.run(
+            [
+                sys.executable,
+                *(["-S"] if mode == "standalone" else []),
+                str(Path(__file__).with_name("aot_sparse_fixed_probe.py")),
+                arch,
+                mode,
+                str(artifact),
+            ],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert fixed.returncode == 0, fixed.stdout + fixed.stderr
+        if legacy is not None:
+            old = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("aot_sparse_fixed_probe.py")),
+                    arch,
+                    mode,
+                    str(legacy),
+                    "legacy",
+                ],
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert old.returncode == 0, old.stdout + old.stderr

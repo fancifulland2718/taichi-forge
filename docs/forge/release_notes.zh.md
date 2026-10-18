@@ -35,9 +35,10 @@
   提前发布完成状态。沿用原有 kernel 数量和执行顺序，覆盖普通及 hash 列表；
   启用复用的 CUDA 编译缓存会重新生成，旧 AOT 产物仍保留其原代码行为。
 - CPU/CUDA pointer、bitmasked、dynamic AOT 树在启用 dense 循环降级时支持
-  `sparse_v1` 重定位。CPU bitcode 和 CUDA bitcode/PTX/cubin 已验证独立模块实例、
-  稀疏 field 梯度及关闭重载；sparse 固定 Graph、根快照、hash/mesh/quantized 仍单列，
-  旧产物保留原合同。
+  重定位（CPU `sparse_v1`、CUDA `sparse_v2`）。CPU bitcode 和 CUDA bitcode/PTX/cubin
+  已验证独立模块实例、稀疏 field 梯度及关闭重载；新产物支持顺序 prepared batch/
+  CUDA 固定 Graph，保持与普通调用交错时的列表一致性。稀疏并行分支拒绝，根快照、
+  hash/mesh/quantized 仍单列，旧产物保留原合同；配套组件使用私有 ABI 96。
 - 修复 borrowed CPU/CUDA/Vulkan runtime 中先加载 AOT、再创建 JIT 字段造成的树 ID
   冲突。双方共用冷路径资源预留，包含尚未分配存储的 JIT 布局；kernel 启动路径不变。
   配套生产端/runtime 组件使用私有 ABI 95。

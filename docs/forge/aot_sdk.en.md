@@ -1820,9 +1820,10 @@ without re-marshalling arguments or scanning every array owner.
 The corresponding C API is `ti_prepare_kernel_ext` /
 `ti_prepare_compute_graph_ext` with `TiNdArrayBinding` /
 `TiNamedNdArrayBinding`, followed by `ti_launch_prepared_ext` and
-`ti_destroy_prepared_ext`. This slice covers ordinary no-return kernel batches;
-textures, ArgPacks and GPU sparse topology tasks require later resource/control
-extensions. It does not serialize device Graph handles into the artifact.
+`ti_destroy_prepared_ext`. These entries cover ordinary no-return kernel batches;
+the resource section below specifies CPU/CUDA sparse versions and fixed execution.
+Other resources use their corresponding reconstruction contracts. Device Graph
+handles are not serialized into the artifact.
 
 Entries retain their module; submissions retain code and arrays until completion.
 Closing an array/module waits before retiring it. The runtime context manager
@@ -4134,16 +4135,33 @@ device unregistration completes. Small pointer/bitmasked/dynamic tests cover
 three close/reload cycles, activation/deactivation, sparse-field and downstream
 ndarray gradients, and an unrelated live JIT sparse tree in a borrowed runtime.
 New CPU/CUDA exports using pointer, bitmasked and dynamic trees with
-`demote_dense_struct_fors=True` use `sparse_v1` module-local resource binding.
+`demote_dense_struct_fors=True` use module-local resource binding: `sparse_v1`
+on CPU and `sparse_v2` on CUDA.
 Two instances can run with independent active sets and gradients on one runtime;
 CPU bitcode and CUDA bitcode/PTX/cubin are covered. Traversal and garbage
 collection relocate their tree/local-node keys before execution. This does not
-add CUDA fixed Graph support for sparse traversal or serialize active sparse
-storage as a root snapshot/view. Old artifacts, non-demoted dense lists and
+serialize active sparse storage as a root snapshot/view. Old embedded-ID
+artifacts, non-demoted dense lists and
 hash/mesh/quantized layouts retain their embedded-ID contract: overlapping IDs
 are rejected before initialization. Shared runtime allocation caches may remain resident.
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
+
+CPU supports sparse prepared batches. CUDA `sparse_v2` exports support native
+fixed Graph preparation for pointer/bitmasked/dynamic activation, traversal,
+garbage collection and actual field gradients. While a prepared object lives,
+ordinary calls on intersecting trees use device list state; after the last
+object retires, the host cache resynchronizes. Tree intersections are queried
+only on cold acquire/retirement transitions, with no host readback per replay.
+Modules keep independent caches. Closing a dependency waits for submitted work
+and invalidates its dependent calls. Tests cover sequential kernels, composed
+sequences, replacement bindings, ordinary/fixed interleaving and standalone or
+borrowed runtimes. Sparse tasks in parallel branches are rejected at preparation;
+conditional control requires separate qualification. Old CUDA `sparse_v1`
+artifacts retain ordinary execution and require re-export for fixed Graphs.
+Fixed replay reduces host submissions but still executes device list checks;
+small stable-topology workloads are not guaranteed to run faster. Ordinary JIT
+Graph admission is unchanged. Matching components require private ABI 96.
 
 CUDA exporters can select `ti.aot.Module(artifact_format="ptx")`, or pass
 `--artifact-format ptx` to the example exporter. The default remains LLVM
@@ -4161,7 +4179,7 @@ into PTX. Schemas 4/5 record the target, entry points, register limit, numerical
 policy and payload checksum, and binds the payloads to their launch metadata.
 Missing or damaged PTX never falls back to a stale bitcode file. A failed kernel
 lookup remains failed within that module; reload the module after replacing
-an artifact. Schema 5 additionally checks the declared `dense_v1` or `sparse_v1`
+an artifact. Schema 5 additionally checks the declared `dense_v1`, `sparse_v1` or `sparse_v2`
 resource relocation contract.
 Legacy schema 2 text, schema 3 bitcode and schema 4 PTX remain readable.
 

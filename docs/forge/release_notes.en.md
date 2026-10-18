@@ -39,11 +39,13 @@ lifetimes. The entries below describe the changes.
   Ordinary and hash lists keep the same kernel count and execution order.
   CUDA compilation caches with reuse enabled are regenerated; existing AOT
   artifacts retain their original generated behavior.
-- Added `sparse_v1` resource relocation for CPU/CUDA pointer, bitmasked and
-  dynamic AOT trees with dense-loop demotion enabled. Independent module
+- Added resource relocation for CPU/CUDA pointer, bitmasked and dynamic AOT
+  trees with dense-loop demotion enabled (`sparse_v1` on CPU, `sparse_v2` on CUDA). Independent module
   instances, sparse-field gradients and close/reload are tested with CPU
-  bitcode and CUDA bitcode/PTX/cubin. Sparse fixed Graphs, root snapshots and
-  hash/mesh/quantized layouts remain separate; old artifacts keep their contract.
+  bitcode and CUDA bitcode/PTX/cubin. New exports support sequential prepared
+  batches/CUDA fixed Graphs with coherent ordinary-call interleaving. Sparse
+  parallel branches are rejected; root snapshots and hash/mesh/quantized layouts
+  remain separate. Old artifacts keep their contract. Matching components use private ABI 96.
 - Fixed tree-ID collisions when JIT fields are created after AOT modules load
   on a borrowed CPU/CUDA/Vulkan runtime. Both owners now share cold resource
   reservations, including compile-only JIT layouts; kernel launch paths are

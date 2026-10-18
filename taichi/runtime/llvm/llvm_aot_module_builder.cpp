@@ -117,7 +117,13 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       fields.emplace(field.tree_id, std::move(field));
     }
     exported.fields = std::move(fields);
-    metadata.resource_binding = sparse ? "sparse_v1" : "dense_v1";
+    // v2 qualifies CUDA's serially latched listgen decision for fixed replay.
+    // Old sparse_v1 artifacts remain valid for ordinary execution only.
+    metadata.resource_binding = sparse
+                                    ? (compile_config_.arch == Arch::cuda
+                                           ? "sparse_v2"
+                                           : "sparse_v1")
+                                    : "dense_v1";
   }
   TI_ERROR_IF(!initial_root_data_.empty() && (!relocatable || sparse),
               "AOT initial root state requires relocatable dense trees.");

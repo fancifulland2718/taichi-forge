@@ -11,7 +11,7 @@ namespace taichi {
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Program and backend runtimes share JIT/AOT SNode tree ID reservations.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 95;
+inline constexpr int kForgeNativeAbiRevision = 96;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

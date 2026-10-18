@@ -138,12 +138,15 @@ TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshotsOrMesh) {
   LLVM::LlvmAotMetadata metadata;
   metadata.resource_binding = "sparse_v1";
   metadata.abi_sha256 = std::string(64, 'b');
-  for (const auto *format : {"bc", "ptx", "cubin"}) {
-    metadata.kernel_format = format;
-    metadata.schema_version = metadata.kernel_format == "cubin"
-                                  ? LLVM::kCudaCubinAotSchemaVersion
-                                  : LLVM::kRelocatableLlvmAotSchemaVersion;
-    EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+  for (const auto *binding : {"sparse_v1", "sparse_v2"}) {
+    metadata.resource_binding = binding;
+    for (const auto *format : {"bc", "ptx", "cubin"}) {
+      metadata.kernel_format = format;
+      metadata.schema_version = metadata.kernel_format == "cubin"
+                                    ? LLVM::kCudaCubinAotSchemaVersion
+                                    : LLVM::kRelocatableLlvmAotSchemaVersion;
+      EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
+    }
   }
   metadata.schema_version = LLVM::kInitialRootDataAotSchemaVersion;
   metadata.initial_root_data.push_back({0, 32, std::string(64, 'b')});

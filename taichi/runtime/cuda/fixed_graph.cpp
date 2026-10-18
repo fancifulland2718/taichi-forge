@@ -44,6 +44,8 @@ struct FixedGraph::State {
   std::size_t nodes{0};
   std::size_t capture_bytes{0};
   std::vector<std::shared_ptr<CudaGraphCaptureResources>> capture_resources;
+  // Remain alive through executable retirement, including parent ownership.
+  std::vector<std::shared_ptr<void>> sparse_replay_leases;
   std::vector<std::uint8_t> host_arguments;
   bool capturing{false};
   bool submitted{false};
@@ -221,6 +223,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   std::unordered_map<const Branch *, std::size_t> branch_index;
   std::unordered_map<const Parallel *, std::size_t> parallel_index;
   std::vector<const Parallel *> parallel_regions;
+  std::unordered_set<const Dispatch *> parallel_dispatches;
   // Each occurrence owns its control storage, even for a reused descriptor.
   // Masked packets contain gate addresses and cannot share across occurrences.
   std::unordered_map<const Operation *, std::size_t> selected_index;
@@ -315,6 +318,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                 dispatch->adaptive_block_dim)
               throw std::invalid_argument(
                   "Fixed CUDA parallel requires ordinary dispatch branches");
+            parallel_dispatches.insert(dispatch);
           }
           collect(branch);
         }
@@ -496,15 +500,20 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
             !(gate.pointer
                   ? dispatch.launcher->prepare_cuda_graph_gated_packet(
                         dispatch.handle, *dispatch.context, packets[i],
-                        gate.pointer, gate.expected)
+                        gate.pointer, gate.expected, true)
               : dispatch.bounded_extent
                   ? dispatch.launcher->prepare_cuda_graph_bounded_packet(
                         dispatch.handle, *dispatch.context, packets[i],
-                        dispatch.bounded_extent, dispatch.bounded_capacity)
+                        dispatch.bounded_extent, dispatch.bounded_capacity, true)
                   : dispatch.launcher->prepare_cuda_graph_launch_packet(
-                        dispatch.handle, *dispatch.context, packets[i])),
+                        dispatch.handle, *dispatch.context, packets[i], true)),
         "Unsupported fixed CUDA Graph dispatch");
     auto &packet = packets[i];
+    if (packet.sparse_replay_lease) {
+      TI_ERROR_IF(parallel_dispatches.count(&dispatch),
+                  "Sparse fixed CUDA dispatch cannot enter a parallel branch");
+      state.sparse_replay_leases.push_back(packet.sparse_replay_lease);
+    }
     if (dispatch.adaptive_block_dim) {
       TI_ERROR_IF(!controls.empty() || !branch_controls.empty() ||
                       !selected_regions.empty() || !masked_branches.empty() ||

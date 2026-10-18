@@ -13,6 +13,7 @@
 
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
+#include "taichi/runtime/sparse_replay_tracker.h"
 #define TI_RUNTIME_HOST
 #include "taichi/program/context.h"
 #undef TI_RUNTIME_HOST
@@ -124,6 +125,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
     bool uses_root_binding{false};
     bool uses_bounded_range{false};
     KernelLaunchABI launch_abi{KernelLaunchABI::ordinary};
+    // Accessed under sparse_list_mutex_, only after a cold lease epoch change.
+    mutable std::uint64_t sparse_replay_epoch{0};
+    mutable bool sparse_replay_intersects{false};
   };
 
  public:
@@ -163,7 +167,12 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::string dispatch_label;
     std::string task_execution_plan_identity;
     std::vector<OffloadedTask> offloaded_tasks;
+    std::shared_ptr<void> sparse_replay_lease;
   };
+
+  // Cold AOT qualification, before registering any kernels. Old persisted
+  // sparse code and ordinary JIT launchers retain their existing admission.
+  void enable_sparse_graph_replay();
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
@@ -199,12 +208,14 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // The caller must publish device argument storage before capture.
   bool prepare_cuda_graph_launch_packet(Handle handle,
                                         LaunchContextBuilder &ctx,
-                                        GraphLaunchPacket &packet);
+                                        GraphLaunchPacket &packet,
+                                        bool retain_sparse_replay = false);
   bool prepare_cuda_graph_bounded_packet(Handle handle,
                                          LaunchContextBuilder &ctx,
                                          GraphLaunchPacket &packet,
                                          void *extent,
-                                         std::uint32_t capacity);
+                                         std::uint32_t capacity,
+                                         bool retain_sparse_replay = false);
   // Resolved on the consumer executor/device, never from a producer address.
   std::uint32_t bounded_graph_grid_limit();
   bool prepare_cuda_graph_bounded_range(Handle handle,
@@ -223,7 +234,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                        LaunchContextBuilder &ctx,
                                        GraphLaunchPacket &packet,
                                        void *gate,
-                                       std::uint32_t expected);
+                                       std::uint32_t expected,
+                                       bool retain_sparse_replay = false);
   bool update_cuda_graph_launch(const GraphLaunchPacket &packet,
                                 LaunchContextBuilder &ctx,
                                 std::vector<uint8_t> &host_arg_buffer,
@@ -255,12 +267,15 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                       nullptr,
                                   std::size_t *offloaded_task_count = nullptr,
                                   KernelLaunchABI launch_abi =
-                                      KernelLaunchABI::ordinary);
+                                      KernelLaunchABI::ordinary,
+                                  bool allow_sparse_replay = false,
+                                  std::shared_ptr<void> *sparse_lease = nullptr);
   bool on_cuda_device(void *ptr);
   int64 get_sparse_list_version(int snode_id) const;
   void record_sparse_list_reuse_sample(SparseListState &state,
                                        bool would_skip) const;
-  bool sparse_list_task_is_current(const OffloadedTask &task);
+  bool sparse_list_task_is_current(const OffloadedTask &task,
+                                  bool device_replay = false);
   void mark_sparse_list_task_launched(const OffloadedTask &task);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
   void configure_launch_bindings(
@@ -282,6 +297,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // async host callers preserve submission order without a global launch lock.
   std::mutex sparse_list_mutex_;
   std::unordered_map<int, SparseListState> sparse_list_states_;
+  SparseReplayTracker sparse_replay_tracker_;
+  std::uint64_t sparse_replay_epoch_{0};
+  bool sparse_graph_contract_{false};
   bool sparse_listgen_telemetry_enabled_{false};
   std::unordered_map<int, SparseListgenNodeStatistics>
       sparse_listgen_telemetry_;

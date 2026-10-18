@@ -26,8 +26,12 @@ inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
 }
 
+inline bool is_sparse_aot_resource_binding(const std::string &binding) {
+  return binding == "sparse_v1" || binding == "sparse_v2";
+}
+
 inline bool is_relocatable_aot_resource_binding(const std::string &binding) {
-  return binding == "dense_v1" || binding == "sparse_v1";
+  return binding == "dense_v1" || is_sparse_aot_resource_binding(binding);
 }
 
 struct CudaAotArtifactMetadata {
@@ -141,7 +145,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
             (metadata.kernel_format != "bc" &&
              metadata.kernel_format != "ptx") ||
             metadata.abi_sha256.size() != 64,
-        "Relocatable LLVM AOT requires dense_v1/sparse_v1, BC/PTX and an ABI "
+        "Relocatable LLVM AOT requires dense_v1/sparse_v1/sparse_v2, BC/PTX and an ABI "
         "checksum");
   } else if (schema == 2) {
     TI_ERROR_IF(!metadata.kernel_format.empty() && metadata.kernel_format != "ll",

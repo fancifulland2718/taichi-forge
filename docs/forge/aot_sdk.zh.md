@@ -1421,9 +1421,9 @@ Vulkan 复用固定命令。返回对象可重复调用、读取 `info`，使用
 
 对应 C API 为 `ti_prepare_kernel_ext` / `ti_prepare_compute_graph_ext`，使用
 `TiNdArrayBinding` / `TiNamedNdArrayBinding`，随后调用 `ti_launch_prepared_ext`
-和 `ti_destroy_prepared_ext`。本批覆盖无 host 返回值的普通 kernel 批次；纹理、
-ArgPack 和 GPU sparse topology 任务仍需后续资源/控制扩展。产物不保存设备 Graph
-句柄，消费者加载代码后再准备。
+和 `ti_destroy_prepared_ext`。这些入口覆盖无 host 返回值的普通 kernel 批次，
+CPU/CUDA 稀疏树的版本与固定执行合同见下文资源章节；其他资源通过对应的重建合同
+接入。产物不保存设备 Graph 句柄，消费者加载代码后再准备。
 
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
 选择同一套兼容核心和资源。Python 消费入口暂不包括结构数组、纹理、任意 native Graph、
@@ -3165,13 +3165,25 @@ dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。�
 的池。小型 pointer/bitmasked/dynamic 测试覆盖三次关闭/重载、激活/停用、稀疏 field
 自身及后续 ndarray 的梯度，以及 borrowed runtime 内另一棵存活 JIT 稀疏树。
 新导出的 CPU/CUDA pointer、bitmasked、dynamic 模块在
-`demote_dense_struct_fors=True` 下采用 `sparse_v1` 模块局部资源绑定；同 runtime 的
+`demote_dense_struct_fors=True` 下采用模块局部资源绑定（CPU `sparse_v1`、CUDA
+`sparse_v2`）；同 runtime 的
 两个实例拥有独立活跃集与梯度，覆盖 CPU bitcode 和 CUDA bitcode/PTX/cubin。遍历和
-GC 的 tree/local-node key 在执行前重定位。该能力不扩展 CUDA sparse 固定 Graph，
-也不把 sparse 活跃存储序列化为根快照或 flat view。旧产物、未降级的 dense list 及
+GC 的 tree/local-node key 在执行前重定位。这不把 sparse 活跃存储序列化为根快照或
+flat view。旧嵌入 ID 产物、未降级的 dense list 及
 hash/mesh/quantized 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
 共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
+
+CPU 支持稀疏 prepared batch；新 CUDA `sparse_v2` 的 `.prepare()` 使用原生固定
+Graph，覆盖 pointer/bitmasked/dynamic 的激活、遍历、GC 和实际 field 梯度。
+同一模块的 prepared 对象存活时，相交树的普通调用采用设备列表状态判断；最后一个
+对象退休后，host 缓存重新同步。图创建/退休才重新查询树交集，不增加每次重放的
+host 回读。不同模块不共享该缓存。关闭依赖会等待在途工作并使关联调用失效。
+已验证顺序 kernel、组合序列、参数重新准备、普通/fixed 交错及独立/借用消费；
+稀疏任务进入并行分支会在准备时拒绝，条件控制资格另行验证。
+旧 CUDA `sparse_v1` 保留普通执行，但不接入 fixed Graph，需重新导出。
+固定重放会减少 host 提交，却仍执行设备列表检查，不能据此保证稳定拓扑的小任务更快。
+该扩展不改变普通 JIT Graph 的稀疏准入。配套组件使用私有 ABI 96。
 
 CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令也支持
 `--artifact-format ptx`；默认仍为 LLVM bitcode。PTX 在生产端完成用户 kernel
@@ -3185,7 +3197,7 @@ capability 80、PTX 7.0，面向 Ampere 及更新设备；已知部署设备时�
 `compile_options` 已固化到 PTX 中。schema 4/5 记录目标、入口、寄存器上限、数值
 策略和载荷校验和，并将载荷与启动元数据绑定。缺失或损坏的 PTX 不会回退读取旧
 bitcode；同一模块内失败的 kernel 查询保持失败，替换产物后需重新加载模块。
-schema 5 还会校验声明的 `dense_v1` 或 `sparse_v1` 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
+schema 5 还会校验声明的 `dense_v1`、`sparse_v1` 或 `sparse_v2` 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
 及 schema 4 PTX 仍可读取。
 
 Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、
