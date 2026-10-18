@@ -25,9 +25,7 @@ def test_fast_field_loads_observe_atomic_updates(advanced):
         assert list(observed[i]) == [i + 2, i + 2, i + 7]
 
 
-@test_utils.test(
-    arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, advanced_optimization=False, offline_cache=False
-)
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, advanced_optimization=False, offline_cache=False)
 @pytest.mark.parametrize("advanced", [False, True])
 def test_fast_sparse_lookup_observes_branch_deactivation_and_reactivation(advanced):
     ti.cfg.advanced_optimization = advanced
@@ -70,3 +68,38 @@ def test_fast_field_loads_observe_real_function_effects(advanced):
         return ti.Vector([before, value[0]])
 
     assert list(update()) == [7, 11]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], advanced_optimization=False, offline_cache=False)
+def test_fast_quantized_addresses_preserve_packed_neighbors():
+    signed = ti.field(ti.types.quant.int(7, signed=True))
+    unsigned = ti.field(ti.types.quant.int(9, signed=False))
+    packed = ti.BitpackedFields(max_num_bits=32)
+    packed.place(signed, unsigned)
+    ti.root.dense(ti.i, 8).place(packed)
+    bits = ti.field(ti.types.quant.int(7, signed=True))
+    ti.root.dense(ti.j, 2).quant_array(ti.j, 4, max_num_bits=32).place(bits)
+
+    @ti.kernel
+    def update():
+        for i in range(8):
+            signed[i] = -i - 1
+            unsigned[i] = i + 100
+            bits[i] = -i - 2
+            before = signed[i]
+            signed[i] += 3
+            bits[i] += 4
+            assert signed[i] == before + 3
+            assert unsigned[i] == i + 100
+
+    @ti.kernel
+    def verify() -> ti.types.vector(3, ti.i32):
+        errors = ti.Vector([0, 0, 0])
+        for i in range(8):
+            errors[0] += signed[i] != 2 - i
+            errors[1] += unsigned[i] != i + 100
+            errors[2] += bits[i] != 2 - i
+        return errors
+
+    update()
+    assert list(verify()) == [0, 0, 0]

@@ -553,7 +553,10 @@ class LocalCSE : public BasicStmtVisitor {
   struct Hash {
     size_t operator()(Stmt *stmt) const {
       size_t hash = std::hash<std::type_index>{}(std::type_index(typeid(*stmt)));
-      hash = hash * 33 ^ stmt->ret_type.hash();
+      // This table is local to one pass, and DataType equality compares the
+      // Type pointers. Use the same identity: structural hashing recursively
+      // walks aggregates and does not support every quantized address type.
+      hash = hash * 33 ^ std::hash<const Type *>{}(stmt->ret_type);
       for (int i = 0; i < stmt->num_operands(); ++i)
         hash = hash * 33 ^ std::hash<Stmt *>{}(stmt->operand(i));
       if (auto c = stmt->cast<ConstStmt>()) {
