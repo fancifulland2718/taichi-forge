@@ -429,7 +429,7 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
       meta->set("compact_child_pool_offset",
                 tlctx->get_constant((uint64)body_offset +
                                     tlctx->get_struct_element_offset(
-                                        body_struct, 3)));
+                                        body_struct, 4)));
       meta->set("compact_child_pool_capacity",
                 tlctx->get_constant(
                     (int64)get_hash_snode_expected_active(*snode)));

@@ -131,6 +131,7 @@ void StructCompilerLLVM::generate_types(SNode &snode) {
           static_cast<uint64_t>(get_hash_snode_expected_active(snode));
       body_type = llvm::StructType::get(
           *ctx, {llvm::ArrayType::get(i32_type, capacity), i32_type, i32_type,
+                 llvm::ArrayType::get(i32_type, (pool_capacity + 31) / 32),
                  llvm::ArrayType::get(ch_type, pool_capacity)});
     } else {
       body_type = llvm::ArrayType::get(ch_type, capacity);

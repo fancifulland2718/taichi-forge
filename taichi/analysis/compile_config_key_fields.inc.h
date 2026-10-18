@@ -74,6 +74,10 @@
   CACHE_FIELD(hash_snode_active_list);
   CACHE_FIELD(hash_snode_diagnostics);
   CACHE_FIELD(hash_snode_compact_child_pool);
+  if (config.hash_snode_compact_child_pool &&
+      (arch_is_cpu(config.arch) || config.arch == Arch::cuda)) {
+    CACHE_VALUE(std::string("llvm-hash-compact-recycling-v1"));
+  }
   // P9.A (F2/F3): auto_real_function gating + inline budget influence
   // FuncCallStmt presence and inliner behavior; both must invalidate cache.
   CACHE_FIELD(auto_real_function);

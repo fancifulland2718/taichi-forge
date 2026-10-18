@@ -75,6 +75,31 @@ inline i32 *Hash_compact_child_pool_overflow(HashMeta *meta, Ptr node) {
   return (i32 *)(node + meta->compact_child_pool_overflow_offset);
 }
 
+inline u32 *Hash_compact_child_pool_used(HashMeta *meta, Ptr node) {
+  // The occupancy words immediately follow the overflow counter. Keeping this
+  // derived avoids changing the runtime metadata layout for noncompact hash.
+  return (u32 *)(node + meta->compact_child_pool_overflow_offset + sizeof(i32));
+}
+
+inline i32 Hash_allocate_child_slot(HashMeta *meta, Ptr node) {
+  // A rotating start keeps uncontended allocation constant time. The bitmap
+  // permits independent releases without a lock or an ABA-prone free stack.
+  const auto capacity = (u32)meta->compact_child_pool_capacity;
+  auto slot = (u32)atomic_add_i32(Hash_compact_child_pool_next(meta, node), 1) %
+              capacity;
+  auto used = Hash_compact_child_pool_used(meta, node);
+  for (u32 attempt = 0; attempt < capacity; ++attempt) {
+    const u32 bit = 1U << (slot % 32);
+    if ((atomic_or_u32(&used[slot / 32], bit) & bit) == 0) {
+      return (i32)slot;
+    }
+    if (++slot == capacity) {
+      slot = 0;
+    }
+  }
+  return -1;
+}
+
 inline Ptr Hash_compact_child_pool_element(HashMeta *meta, Ptr node, i32 slot) {
   return node + meta->compact_child_pool_offset +
          meta->compact_child_pool_stride * slot;
@@ -115,7 +140,17 @@ inline i32 *Hash_tombstone_count(HashMeta *meta, Ptr node) {
 
 inline void Hash_clear_bucket_payload(HashMeta *meta, Ptr node, i32 bucket) {
   if (Hash_has_compact_child_pool(meta)) {
-    *Hash_compact_child_slot(meta, node, bucket) = 0;
+    auto slot_ptr = Hash_compact_child_slot(meta, node, bucket);
+    auto slot_plus_one = *slot_ptr;
+    *slot_ptr = 0;
+    if (slot_plus_one > 0) {
+      const auto slot = (u32)(slot_plus_one - 1);
+      // The bucket is busy. Complete prior payload accesses before another
+      // bucket may claim and zero this child container.
+      grid_memfence();
+      atomic_and_u32(&Hash_compact_child_pool_used(meta, node)[slot / 32],
+                     ~(1U << (slot % 32)));
+    }
   } else {
     std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
   }
@@ -177,8 +212,8 @@ inline Ptr Hash_resolve_payload(HashMeta *meta,
   }
   if (slot_plus_one == 0 && activate_child) {
     if (Hash_compare_exchange_i32(slot_ptr, 0, -1)) {
-      auto slot = atomic_add_i32(Hash_compact_child_pool_next(meta, node), 1);
-      if (slot < 0 || slot >= meta->compact_child_pool_capacity) {
+      auto slot = Hash_allocate_child_slot(meta, node);
+      if (slot < 0) {
         atomic_add_i32(Hash_compact_child_pool_overflow(meta, node), 1);
         atomic_add_i32(Hash_overflow_count(meta, node), 1);
         atomic_exchange_i32(slot_ptr, 0);
