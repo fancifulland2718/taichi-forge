@@ -2918,6 +2918,78 @@ RhiResult record_graph_dispatch(CommandList *commands,
 }
 }  // namespace
 
+struct GfxRuntime::FixedSparseReplayResources {
+  bool uses_listgen{false};
+  bool writes_listgen{false};
+  bool unknown_mutation{false};
+  size_t listgen_entries{0};
+  std::vector<int> mutated_trees;
+  std::shared_ptr<DeviceAllocationGuard> listgen;
+
+  void include(const CompiledTaichiKernel &kernel) {
+    const auto &tasks = kernel.ti_kernel_attribs().tasks_attribs;
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+      const bool writer = tasks[i].task_type == OffloadedTaskType::listgen;
+      const bool binding = kernel.task_uses_listgen_buffer(i);
+      TI_ERROR_IF(writer && !binding,
+                  "Prepared Vulkan list generation requires a list buffer");
+      uses_listgen |= binding;
+      writes_listgen |= writer;
+      if (tasks[i].may_mutate_sparse_topology) {
+        const auto mutation = kernel.sparse_task_resources(i).mutation;
+        if (mutation.valid())
+          mutated_trees.push_back(mutation.tree_id);
+        else
+          unknown_mutation = true;
+      }
+    }
+    listgen_entries =
+        std::max(listgen_entries, kernel.required_listgen_capacity_entries());
+  }
+};
+
+void GfxRuntime::prepare_fixed_sparse_resources(
+    FixedSparseReplayResources &resources,
+    std::vector<std::shared_ptr<void>> &owners) {
+  if (resources.uses_listgen) {
+    ensure_listgen_capacity_entries(resources.listgen_entries,
+                                    "fixed Graph preparation");
+    TI_ERROR_IF(!listgen_buffer_, "Prepared Vulkan list buffer is unavailable");
+    resources.listgen = listgen_buffer_;
+    owners.push_back(resources.listgen);
+  }
+  auto &trees = resources.mutated_trees;
+  std::sort(trees.begin(), trees.end());
+  trees.erase(std::unique(trees.begin(), trees.end()), trees.end());
+}
+
+void GfxRuntime::attach_fixed_sparse_resources(
+    GraphReplayState &state,
+    FixedSparseReplayResources resources) {
+  if (!resources.uses_listgen && !resources.unknown_mutation &&
+      resources.mutated_trees.empty())
+    return;
+  state.fixed_submit = [this, launch = std::move(state.fixed_submit),
+                        resources = std::move(resources)] {
+    const bool uses_current_list =
+        resources.listgen && resources.listgen == listgen_buffer_;
+    if (uses_current_list)
+      listgen_buffer_used_ = true;
+    // There is exactly one reusable ordinary list. Fixed commands either
+    // overwrite that allocation or may change its tree's active set.
+    // Other cached entries cannot be reused without first becoming
+    // resident, so no map walk or descendant discovery is needed here.
+    if ((uses_current_list && resources.writes_listgen) ||
+        resources.unknown_mutation ||
+        (resident_sparse_list_snode_id_.valid() &&
+         std::binary_search(resources.mutated_trees.begin(),
+                            resources.mutated_trees.end(),
+                            resident_sparse_list_snode_id_.tree_id)))
+      resident_sparse_list_snode_id_ = {};
+    launch();
+  };
+}
+
 std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     const std::vector<GraphRecordingOperation> &operations,
     std::vector<std::shared_ptr<void>> owners,
@@ -2967,11 +3039,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                                      operation.ray_resources.end());
   }
   std::vector<GraphReplayExecutable::PreparedDispatch> prepared;
-  bool uses_listgen = false;
-  bool writes_listgen = false;
-  bool unknown_sparse_mutation = false;
-  std::vector<int> mutated_trees;
-  size_t listgen_entries = 0;
+  FixedSparseReplayResources sparse;
   using ImageBinding = std::pair<DeviceAllocation, ImageLayout>;
   std::vector<ImageBinding> entry_images;
   std::unordered_map<DeviceAllocationId, ImageLayout> recorded_image_layouts;
@@ -3008,19 +3076,6 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                 "Prepared Vulkan indirect dispatch requires one task and an "
                 "aligned device packet");
     for (std::size_t i = 0; i < tasks.size(); ++i) {
-      const bool list_writer = tasks[i].task_type == OffloadedTaskType::listgen;
-      const bool list_binding = kernel->task_uses_listgen_buffer(i);
-      TI_ERROR_IF(list_writer && !list_binding,
-                  "Prepared Vulkan list generation requires a list buffer");
-      uses_listgen |= list_binding;
-      writes_listgen |= list_writer;
-      if (tasks[i].may_mutate_sparse_topology) {
-        const auto mutation = kernel->sparse_task_resources(i).mutation;
-        if (mutation.valid())
-          mutated_trees.push_back(mutation.tree_id);
-        else
-          unknown_sparse_mutation = true;
-      }
       for (const auto &bind : kernel->buffer_binding_plan(i)) {
         TI_ERROR_IF(
             bind.kind == CompiledTaichiKernel::BufferBindingKind::ArgPack ||
@@ -3029,21 +3084,12 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
             "Unsupported prepared Vulkan Graph resource binding");
       }
     }
-    listgen_entries =
-        std::max(listgen_entries, kernel->required_listgen_capacity_entries());
+    sparse.include(*kernel);
     prepared.push_back(
         {kernel, dispatch.host_ctx, nullptr, nullptr, packet});
   }
-  std::shared_ptr<DeviceAllocationGuard> listgen;
-  if (uses_listgen) {
-    ensure_listgen_capacity_entries(listgen_entries, "fixed Graph preparation");
-    TI_ERROR_IF(!listgen_buffer_, "Prepared Vulkan list buffer is unavailable");
-    listgen = listgen_buffer_;
-    slot.retained_owners.push_back(listgen);
-  }
-  std::sort(mutated_trees.begin(), mutated_trees.end());
-  mutated_trees.erase(std::unique(mutated_trees.begin(), mutated_trees.end()),
-                      mutated_trees.end());
+  prepare_fixed_sparse_resources(sparse, slot.retained_owners);
+  const auto &listgen = sparse.listgen;
   executable.refresh_prepared_cache({1}, prepared);
   if (independent_graphics) {
     // One bounded fork/join: buffer-only compute prefix, one independent
@@ -3431,26 +3477,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
           launch();
         };
   }
-  if (uses_listgen || unknown_sparse_mutation || !mutated_trees.empty()) {
-    state.fixed_submit = [this, launch = std::move(state.fixed_submit),
-                          listgen = std::move(listgen), writes_listgen,
-                          unknown_sparse_mutation,
-                          mutated_trees = std::move(mutated_trees)] {
-      const bool uses_current_list = listgen && listgen == listgen_buffer_;
-      if (uses_current_list)
-        listgen_buffer_used_ = true;
-      // There is exactly one reusable ordinary list. Fixed commands either
-      // overwrite that allocation or may change its tree's active set.
-      // Other cached entries cannot be reused without first becoming
-      // resident, so no map walk or descendant discovery is needed here.
-      if ((uses_current_list && writes_listgen) || unknown_sparse_mutation ||
-          (resident_sparse_list_snode_id_.valid() &&
-           std::binary_search(mutated_trees.begin(), mutated_trees.end(),
-                              resident_sparse_list_snode_id_.tree_id)))
-        resident_sparse_list_snode_id_ = {};
-      launch();
-    };
-  }
+  attach_fixed_sparse_resources(state, std::move(sparse));
   if (timings) {
     *timings = state.fixed_gpu_timings;
   }
@@ -3491,6 +3518,14 @@ GfxRuntime::prepare_fixed_control_graph(
   // if qualification, descriptor allocation or command recording fails.
   auto registration = register_graph_replay(1);
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  FixedSparseReplayResources sparse;
+  for (const auto &dispatch : dispatches) {
+    const auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
+    TI_ERROR_IF(found == ti_kernels_.end(),
+                "Prepared Vulkan control requires registered kernels");
+    sparse.include(*found->second);
+  }
+  prepare_fixed_sparse_resources(sparse, owners);
   for (const int tree_id : snode_tree_ids) {
     TI_ERROR_IF(tree_id < 0 ||
                     static_cast<std::size_t>(tree_id) >= root_buffers_.size() ||
@@ -3499,10 +3534,10 @@ GfxRuntime::prepare_fixed_control_graph(
                 tree_id);
     owners.push_back(root_buffers_[tree_id]);
   }
-  TI_ERROR_IF(
-      !launch_graph_impl(dispatches, registration->replay_key(), nullptr,
-                         control, nullptr, nested_control, nullptr, true),
-      "Prepared Vulkan control cannot record the selected strategy");
+  TI_ERROR_IF(!launch_graph_impl(dispatches, registration->replay_key(),
+                                 nullptr, control, nullptr, nested_control,
+                                 nullptr, true, sparse.listgen.get()),
+              "Prepared Vulkan control cannot record the selected strategy");
   auto &state = graph_replay_states_.at(registration->replay_key());
   auto &executable = state.executable;
   const auto found =
@@ -3520,6 +3555,7 @@ GfxRuntime::prepare_fixed_control_graph(
     flush_if_pending();
     slot->completion = submit_compute_commands(slot->cmdlist.get());
   };
+  attach_fixed_sparse_resources(state, std::move(sparse));
   executable.cached_prepared.clear();
   executable.cached_prepare_key.clear();
   return registration;
@@ -3592,7 +3628,8 @@ bool GfxRuntime::launch_graph_impl(
     GraphStructuredResult *structured_result,
     const GraphNestedStructuredControl *nested_control,
     GraphNestedStructuredResult *nested_result,
-    bool prepare_only) {
+    bool prepare_only,
+    DeviceAllocation *fixed_listgen) {
   TI_ASSERT(!prepare_only ||
             ((bool(structured_control) != bool(nested_control)) &&
              !structured_result && !nested_result));
@@ -4034,9 +4071,10 @@ bool GfxRuntime::launch_graph_impl(
       const auto &attribs = task_attribs[task_index];
       if (!attribs.texture_binds.empty() ||
           !attribs.acceleration_structure_binds.empty() ||
-          attribs.task_type == OffloadedTaskType::listgen ||
-          attribs.may_mutate_sparse_topology ||
-          ti_kernel->task_uses_listgen_buffer(task_index)) {
+          (!prepare_only &&
+           (attribs.task_type == OffloadedTaskType::listgen ||
+            attribs.may_mutate_sparse_topology ||
+            ti_kernel->task_uses_listgen_buffer(task_index)))) {
         return reject();
       }
       key.push_back(0xB000u);
@@ -4065,10 +4103,13 @@ bool GfxRuntime::launch_graph_impl(
                                                  : kDeviceNullAllocation);
             break;
           case CompiledTaichiKernel::BufferBindingKind::StaticLookupRw: {
-            if (bind.buffer.type == BufferType::ListGen) {
+            if (bind.buffer.type == BufferType::ListGen && !fixed_listgen) {
               return reject();
             }
-            DeviceAllocation *alloc = ti_kernel->get_buffer_bind(bind.buffer);
+            DeviceAllocation *alloc =
+                bind.buffer.type == BufferType::ListGen
+                    ? fixed_listgen
+                    : ti_kernel->get_buffer_bind(bind.buffer);
             key.push_back(0xB102u);
             key.push_back(static_cast<uint64_t>(bind.binding));
             push_graph_allocation_key(key,
@@ -4329,7 +4370,8 @@ bool GfxRuntime::launch_graph_impl(
   auto update_task_bindings = [&](PreparedDispatch &pd, int task_index,
                                   ShaderResourceSet *bindings,
                                   bool patch_existing) {
-    return bind_graph_task(pd, task_index, bindings, patch_existing);
+    return bind_graph_task(pd, task_index, bindings, patch_existing,
+                           fixed_listgen);
   };
 
   auto patch_all_task_bindings = [&]() {
@@ -5155,7 +5197,9 @@ bool GfxRuntime::launch_graph_impl(
             allocation = pd.any_arrays->at(bind.buffer.root_id);
           } else {
             DeviceAllocation *resolved =
-                pd.kernel->get_buffer_bind(bind.buffer);
+                bind.buffer.type == BufferType::ListGen && fixed_listgen
+                    ? fixed_listgen
+                    : pd.kernel->get_buffer_bind(bind.buffer);
             if (resolved != nullptr) {
               allocation = *resolved;
             }
@@ -5285,6 +5329,17 @@ bool GfxRuntime::launch_graph_impl(
     };
     auto dispatch_task = [&](const StructuredTask &task,
                              const DevicePtr *indirect) {
+      if (task.dispatch->kernel->ti_kernel_attribs()
+              .tasks_attribs[task.task_index]
+              .task_type == OffloadedTaskType::listgen) {
+        TI_ASSERT(fixed_listgen);
+        flush_structured_pending(/*exit_boundary=*/false);
+        // Scratch count resets may execute even for a gated-off dispatch.
+        // Every active traversal rebuilds its own list; fixed recordings never
+        // reuse a prior list, and submission invalidates ordinary residency.
+        cmdlist->buffer_fill(fixed_listgen->get_ptr(0), sizeof(uint32_t), 0);
+        cmdlist->buffer_barrier(fixed_listgen->get_ptr(0), sizeof(uint32_t));
+      }
       prepare_structured_task(task);
       cmdlist->bind_pipeline(
           task.dispatch->kernel->get_pipeline(task.task_index));

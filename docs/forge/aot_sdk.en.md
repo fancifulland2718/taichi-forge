@@ -4174,8 +4174,13 @@ ordinary/fixed interleaving, parent Graphs, rebinding and actual reverse gradien
 Recordings share and retain the list-buffer version they bind. Growth does not
 require old Graphs to be recorded again; old allocations retire with their last
 user. Fixed list generation resets its count, and submission invalidates only an
-affected ordinary resident list. Fixed WHILE/nested control with sparse tasks
-remains unsupported. Sparse roots cannot be exposed as plain flat views or initial
+affected ordinary resident list. Selected fixed WHILE and nested control share
+this resource contract. Small pointer/bitmasked/dynamic tests cover all four
+single-loop strategies and two-level control, zero iterations, early exit,
+budget exhaustion, ordinary/fixed interleaving, growth and retirement. Exported
+suffix gradients differentiate the final field state; they do not differentiate
+the enclosing loop. Ordinary mutable JIT replay retains its previous sparse
+admission boundary. Sparse roots cannot be exposed as plain flat views or initial
 root snapshots.
 Owned and imported-device Vulkan AOT runtimes grow shared list capacity from
 resource metadata. They no longer preallocate 32 MiB or treat it as a capacity

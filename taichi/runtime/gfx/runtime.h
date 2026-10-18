@@ -778,6 +778,12 @@ class TI_DLL_EXPORT GfxRuntime {
   GraphReplayStats debug_graph_replay_stats(uint64_t replay_token);
   GraphReplayStats snapshot_graph_replay_stats(uint64_t replay_token);
   void collect_ready_graph_replays(std::size_t max_polls);
+  struct FixedSparseReplayResources;
+  void prepare_fixed_sparse_resources(
+      FixedSparseReplayResources &resources,
+      std::vector<std::shared_ptr<void>> &owners);
+  void attach_fixed_sparse_resources(GraphReplayState &state,
+                                     FixedSparseReplayResources resources);
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_control_graph(
       const std::vector<GraphDispatch> &dispatches,
       const GraphStructuredControl *control,
@@ -791,7 +797,8 @@ class TI_DLL_EXPORT GfxRuntime {
                          GraphStructuredResult *structured_result,
                          const GraphNestedStructuredControl *nested_control,
                          GraphNestedStructuredResult *nested_result,
-                         bool prepare_only);
+                         bool prepare_only,
+                         DeviceAllocation *fixed_listgen = nullptr);
 
   struct HashOverflowWatch {
     int root_id{-1};

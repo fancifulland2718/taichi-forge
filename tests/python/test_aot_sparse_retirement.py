@@ -47,28 +47,31 @@ def test_aot_vulkan_sparse_fixed_execution(tmp_path, pool):
     ti.cfg.vulkan_pointer_independent_pool = True
     ti.cfg.vulkan_pointer_allocator_kind = "chunked" if pool == "chunked" else "bump"
     ti.cfg.vulkan_pointer_max_chunks = 2 if pool == "chunked" else 1
-    export_growth = None
-    if pool == "independent":
-        # A separate module grows the shared list after the consumer has
-        # recorded its first module. Only one sparse cell is ever touched.
-        extra = ti.field(ti.i32)
-        builder = ti.FieldsBuilder()
-        builder.pointer(ti.i, 4096).place(extra)
-        builder.finalize()
-
-        @ti.kernel
-        def touch(out: ti.types.ndarray(ti.f32, 1)):
-            extra[4095] = 91
-            out[0] = 0
-            for i in extra:
-                out[0] += extra[i]
-
-        def export_growth(_module):
-            growth = ti.aot.Module()
-            growth.add_kernel(touch)
-            growth.archive(str(tmp_path / "list-growth.tcm"))
-
+    export_growth = _make_list_growth_export(tmp_path) if pool == "independent" else None
     _sparse_module(tmp_path, None, consumer="aot_sparse_fixed_probe.py", export_extra=export_growth)
+
+
+def _make_list_growth_export(tmp_path):
+    # A separate module grows the shared list after the consumer has
+    # recorded its first module. Only one sparse cell is ever touched.
+    extra = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.pointer(ti.i, 4096).place(extra)
+    builder.finalize()
+
+    @ti.kernel
+    def touch(out: ti.types.ndarray(ti.f32, 1)):
+        extra[4095] = 91
+        out[0] = 0
+        for i in extra:
+            out[0] += extra[i]
+
+    def export_growth(_module):
+        growth = ti.aot.Module()
+        growth.add_kernel(touch)
+        growth.archive(str(tmp_path / "list-growth.tcm"))
+
+    return export_growth
 
 
 def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=None, consumer=None):
