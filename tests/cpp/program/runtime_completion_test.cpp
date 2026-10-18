@@ -137,6 +137,67 @@ TEST(RuntimeCompletion, WaitDoesNotBlockPendingQueryAndSubmission) {
   }
 }
 
+TEST(RuntimeCompletion, CompletedCudaDependencyRequiresExactLiveOwner) {
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 23);
+  auto other = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 23);
+  const auto completion =
+      RuntimeCompletion::completed(Arch::cuda, 23, 7, owner);
+  // Even a synthetic target is untouched on the completed fast path.
+  auto *stream = reinterpret_cast<void *>(std::uintptr_t{1});
+  EXPECT_FALSE(completion.enqueue_cuda_wait(stream, 23, owner));
+  EXPECT_THROW(completion.validate_cuda_dependency(24, owner),
+               std::invalid_argument);
+  EXPECT_THROW(completion.validate_cuda_dependency(23, other),
+               std::invalid_argument);
+  EXPECT_THROW(completion.validate_cuda_dependency(23, nullptr),
+               std::invalid_argument);
+  EXPECT_THROW(RuntimeCompletion{}.validate_cuda_dependency(23, owner),
+               std::invalid_argument);
+  const auto cpu = RuntimeCompletion::completed(Arch::x64, 23, 8, owner);
+  EXPECT_THROW(cpu.validate_cuda_dependency(23, owner), std::invalid_argument);
+  owner->mark_finalized();
+  // Historical observations remain valid, but a reset owner cannot supply a
+  // new device dependency, including when its original work had completed.
+  EXPECT_TRUE(completion.done());
+  EXPECT_THROW(completion.validate_cuda_dependency(23, owner), std::exception);
+}
+
+TEST(RuntimeCompletion,
+     CudaDependencyPreservesFirstFailureAndRetainedResources) {
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 24);
+  auto semaphore = std::make_shared<FakeSemaphore>();
+  auto completion = RuntimeCompletion::from_stream_semaphore(Arch::cuda, 24, 1,
+                                                             semaphore, owner);
+  std::atomic<int> released{0};
+  completion.attach_resources(std::make_shared<CountedResources>(&released, 3));
+  completion.invalidate("producer invalidated");
+  EXPECT_THROW(completion.enqueue_cuda_wait(nullptr, 24, owner),
+               std::exception);
+  EXPECT_EQ(completion.first_error_message(), "producer invalidated");
+  EXPECT_EQ(released.load(), 0);
+  EXPECT_EQ(semaphore->waits, 0);
+  completion.mark_completed();
+  EXPECT_EQ(released.load(), 1);
+  EXPECT_THROW(completion.validate_cuda_dependency(24, owner), std::exception);
+}
+
+TEST(RuntimeCompletion,
+     NonCudaPrimitiveCannotMasqueradeAsPendingCudaDependency) {
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 25);
+  auto semaphore = std::make_shared<FakeSemaphore>();
+  auto completion = RuntimeCompletion::from_stream_semaphore(Arch::cuda, 25, 1,
+                                                             semaphore, owner);
+  EXPECT_THROW(completion.validate_cuda_dependency(25, owner),
+               std::invalid_argument);
+  EXPECT_THROW(completion.enqueue_cuda_wait(nullptr, 25, owner),
+               std::invalid_argument);
+  EXPECT_EQ(semaphore->waits, 0);
+  EXPECT_TRUE(completion.first_error_message().empty());
+  semaphore->ready = true;
+  EXPECT_TRUE(completion.done());
+  EXPECT_FALSE(completion.enqueue_cuda_wait(nullptr, 25, owner));
+}
+
 #ifdef TI_WITH_CUDA
 TEST(RuntimeCompletion, BlockingAndDefaultEventCachesDoNotMix) {
   RuntimeCompletionCudaEventPool pool({}, 2);

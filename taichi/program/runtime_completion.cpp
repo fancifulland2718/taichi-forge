@@ -203,6 +203,12 @@ class CompletionPrimitive {
   virtual void wait() = 0;
   virtual void mark_backend_completed() noexcept {
   }
+  virtual void enqueue_cuda_wait(void *stream) {
+    throw std::invalid_argument("Completion does not own a CUDA event");
+  }
+  virtual bool supports_cuda_dependency() const noexcept {
+    return false;
+  }
 };
 
 class StreamSemaphoreCompletion final : public CompletionPrimitive {
@@ -458,6 +464,21 @@ class CudaEventCompletion final : public CompletionPrimitive {
     reusable_ = true;
   }
 
+  void enqueue_cuda_wait(void *stream) override {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    const auto result = driver.stream_wait_event.call(stream, event_, 0);
+    if (result != CUDA_SUCCESS) {
+      throw BackendRuntimeError(
+          Arch::cuda, result, "stream_wait_event",
+          driver.stream_wait_event.get_error_message(result));
+    }
+  }
+
+  bool supports_cuda_dependency() const noexcept override {
+    return true;
+  }
+
  private:
   void *event_{nullptr};
   std::weak_ptr<RuntimeFaultDomain> fault_domain_;
@@ -609,6 +630,52 @@ struct RuntimeCompletion::State {
     retired_primitive.reset();
     backend_lock.unlock();
     retired_resources.reset();
+  }
+
+  void validate_dependency() const {
+    if (status.load(std::memory_order_acquire) == CompletionStatus::completed) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto current = status.load(std::memory_order_relaxed);
+    if (current == CompletionStatus::completed) {
+      return;
+    }
+    if (current == CompletionStatus::failed ||
+        current == CompletionStatus::invalidated) {
+      rethrow_first_error_locked();
+    }
+    if (!primitive->supports_cuda_dependency()) {
+      throw std::invalid_argument("Completion does not own a CUDA event");
+    }
+  }
+
+  bool enqueue_cuda_wait(void *stream) {
+    if (status.load(std::memory_order_acquire) == CompletionStatus::completed) {
+      return false;
+    }
+    std::shared_lock<std::shared_mutex> backend_lock(backend_mutex);
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto current = status.load(std::memory_order_relaxed);
+    if (current == CompletionStatus::completed) {
+      return false;
+    }
+    if (current == CompletionStatus::failed ||
+        current == CompletionStatus::invalidated) {
+      rethrow_first_error_locked();
+    }
+    if (fault_domain) {
+      fault_domain->throw_if_submission_disallowed("enqueue CUDA dependency");
+    }
+    try {
+      primitive->enqueue_cuda_wait(stream);
+    } catch (const BackendRuntimeError &error) {
+      // A bad consumer stream must not fail an otherwise valid producer.
+      // Fatal context errors still poison their shared runtime fault domain.
+      report_backend_error_locked(error);
+      throw;
+    }
+    return true;
   }
 
   void attach(std::shared_ptr<RuntimeCompletionResources> value) {
@@ -1041,6 +1108,26 @@ void RuntimeCompletion::wait() const {
 
 bool RuntimeCompletion::has_backend_work() const noexcept {
   return state_ && state_->has_backend_work();
+}
+
+void RuntimeCompletion::validate_cuda_dependency(
+    std::uint64_t owner,
+    const std::shared_ptr<RuntimeFaultDomain> &fault_domain) const {
+  if (!valid() || backend_ != Arch::cuda || program_domain_ != owner ||
+      !fault_domain || fault_domain_ != fault_domain) {
+    throw std::invalid_argument(
+        "CUDA dependency must belong to the same live runtime and context");
+  }
+  fault_domain->throw_if_submission_disallowed("validate CUDA dependency");
+  state_->validate_dependency();
+}
+
+bool RuntimeCompletion::enqueue_cuda_wait(
+    void *stream,
+    std::uint64_t owner,
+    const std::shared_ptr<RuntimeFaultDomain> &fault_domain) const {
+  validate_cuda_dependency(owner, fault_domain);
+  return state_->enqueue_cuda_wait(stream);
 }
 
 std::size_t RuntimeCompletion::retained_resource_count(

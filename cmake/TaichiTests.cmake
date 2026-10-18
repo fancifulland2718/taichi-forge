@@ -375,4 +375,21 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   endif()
   add_test(NAME ${TAICHI_BACKEND_SAFETY_TESTS_NAME}
            COMMAND ${TAICHI_BACKEND_SAFETY_TESTS_NAME})
+
+  # Real CUDA/Vulkan gates qualify independent device progress without Python
+  # or a test spin kernel occupying the GPU. Link private RHI implementation
+  # objects rather than expanding the package ABI for test helpers.
+  add_executable(taichi_cuda_execution_domain_tests
+    tests/cpp/rhi/common/cuda_execution_domain_test.cpp)
+  target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE
+    taichi_core gtest_main ${_ti_backend_native_targets})
+  get_target_property(_ti_backend_test_includes
+    ${TAICHI_BACKEND_SAFETY_TESTS_NAME} INCLUDE_DIRECTORIES)
+  target_include_directories(taichi_cuda_execution_domain_tests PRIVATE
+    ${_ti_backend_test_includes})
+  set_target_properties(taichi_cuda_execution_domain_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+  add_test(NAME taichi_cuda_execution_domain_tests
+    COMMAND taichi_cuda_execution_domain_tests)
+  set_tests_properties(taichi_cuda_execution_domain_tests PROPERTIES TIMEOUT 30)
 endif()
