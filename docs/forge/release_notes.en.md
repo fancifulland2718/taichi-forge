@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fixed CPU/CUDA AOT sparse/list tree retirement so a closed module can reload
+  in the same runtime. JIT and AOT share list/allocator/root cleanup; live JIT
+  trees remain intact. Simultaneous legacy tree-ID collisions remain rejected.
 - Added AOT OptiX programs and prepared launch resources using the existing
   programmable adapter extension and shared ownership. Explicit plans rebuild
   address-free parameters/SBT once and replay on the ordered CUDA path; instance

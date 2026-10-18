@@ -65,9 +65,9 @@ class LlvmRuntimeExecutor {
       const LlvmOfflineCache::FieldCacheData &field_cache_data,
       uint64 *result_buffer);
 
-  // Dense AOT storage has no compiler-side SNodeTree or struct module. Returns
-  // false for sparse/list-managed trees, whose retirement is a separate path.
-  bool destroy_dense_aot_snode_tree(
+  // Retire tree-local runtime allocations after its launches have completed.
+  // Shared by JIT and AOT; compiler-side struct modules remain caller-owned.
+  void destroy_snode_tree_runtime(
       const LlvmOfflineCache::FieldCacheData &field);
 
   // Ndarray and ArgPack Allocation

@@ -4119,10 +4119,17 @@ reverse and forward-mode differentiation; this is separate from consumer-side
 AOT module resource isolation.
 
 Destroying a CPU/CUDA module waits for submitted work, retires its executable
-registrations and releases its demoted dense trees and reservations. Legacy
+registrations and releases its tree roots, runtime state and reservations.
+Sparse/list trees use the shared JIT retirement path: CPU list/allocator/ambient
+storage is recycled or released, and CUDA tree-owned pools are released after
+device unregistration completes. Small pointer/bitmasked/dynamic tests cover
+three close/reload cycles, activation/deactivation, downstream ndarray gradients
+and an unrelated live JIT sparse tree in a borrowed runtime. Legacy
 artifacts and modules requiring sparse/list/mesh/quantized operations retain
 producer IDs; overlapping IDs require separate runtimes and are rejected before
-initialization. Sparse/list-managed storage still lives until runtime teardown.
+initialization. Closing a sparse module now allows its IDs to be reused by a
+later load; this does not enable simultaneous overlapping modules or CUDA fixed
+Graphs for sparse traversal. Shared runtime allocation caches may remain resident.
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
 

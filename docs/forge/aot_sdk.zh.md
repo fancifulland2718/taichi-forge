@@ -3154,9 +3154,14 @@ CPU/CUDA 导出 field kernel 时，不会为生产端仅编译布局的树分配
 模块资源隔离是两项独立能力。
 
 CPU/CUDA 模块关闭会等待已提交工作完成，退休代码注册，释放已降为普通循环的
-dense tree 及预留 ID。旧产物和需要 sparse/list/mesh/quantized 操作的模块仍使用
-生产端 ID；ID 重叠时需使用独立 runtime，冲突在初始化前拒绝。sparse/依赖 element
-list 的 tree 存储仍保留到 runtime 关闭。Vulkan dense AOT 也使用模块局部映射。
+dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。稀疏树共用 JIT
+退休逻辑：CPU 回收或释放 list/allocator/ambient，CUDA 等待设备注销完成后释放树所属
+的池。小型 pointer/bitmasked/dynamic 测试覆盖三次关闭/重载、激活/停用、后续 ndarray
+梯度，以及 borrowed runtime 内另一棵存活 JIT 稀疏树。旧产物和需要
+sparse/list/mesh/quantized 操作的模块仍使用生产端 ID；ID 重叠时需使用独立 runtime，
+冲突在初始化前拒绝。关闭 sparse 模块后可以重新加载并复用 ID，但不表示重叠 ID 的
+模块可同时加载，也未扩展 CUDA sparse 遍历的固定 Graph 支持。共享 runtime 分配缓存
+可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
 
 CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令也支持

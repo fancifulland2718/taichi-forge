@@ -1801,21 +1801,39 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
   }
 }
 
-bool LlvmRuntimeExecutor::destroy_dense_aot_snode_tree(
+void LlvmRuntimeExecutor::destroy_snode_tree_runtime(
     const LlvmOfflineCache::FieldCacheData &field) {
-  if (!config_.demote_dense_struct_fors ||
-      !std::all_of(field.snode_metas.begin(), field.snode_metas.end(),
-                   [](const auto &node) {
-                     return node.type == SNodeType::root ||
-                            node.type == SNodeType::dense ||
-                            node.type == SNodeType::place;
-                   })) {
-    return false;
-  }
   const auto state = active_snode_tree_runtime_states_.find(field.tree_id);
   TI_ERROR_IF(state == active_snode_tree_runtime_states_.end() ||
                   state->second.generation != field.tree_generation,
-              "Cannot retire an unowned LLVM AOT SNode tree {}", field.tree_id);
+              "Cannot retire an unowned LLVM SNode tree {}", field.tree_id);
+  if (arch_is_cpu(config_.arch)) {
+    const bool all_dense = config_.demote_dense_struct_fors &&
+        std::all_of(field.snode_metas.begin(), field.snode_metas.end(),
+                    [](const auto &node) {
+                      return node.type == SNodeType::root ||
+                             node.type == SNodeType::dense ||
+                             node.type == SNodeType::place;
+                    });
+    auto *runtime_jit = get_runtime_jit_module();
+    for (size_t i = 0; i < field.snode_metas.size(); ++i) {
+      const auto &node = field.snode_metas[i];
+      const auto ambient = direct_ambient_size(
+          node.type, node.cell_size_bytes, node.chunk_size);
+      runtime_jit->call<void *, int, int, std::size_t, int, int>(
+          "runtime_prepare_snode_tree_destroy", llvm_runtime_, field.tree_id,
+          node.runtime_local_id, ambient, i == 0,
+          i + 1 == field.snode_metas.size());
+    }
+    for (const auto &node : field.snode_metas) {
+      const auto ambient = direct_ambient_size(
+          node.type, node.cell_size_bytes, node.chunk_size);
+      runtime_jit->call<void *, int, int, int, int, int, std::size_t>(
+          "runtime_destroy_snode_resources", llvm_runtime_, field.tree_id,
+          node.runtime_local_id, !all_dense && node.type != SNodeType::place,
+          is_gc_able(node.type), ambient > 0, ambient);
+    }
+  }
   get_runtime_jit_module()->call<void *, int, std::uint64_t>(
       "runtime_unregister_snode_tree_state", llvm_runtime_, field.tree_id,
       field.tree_generation);
@@ -1828,65 +1846,28 @@ bool LlvmRuntimeExecutor::destroy_dense_aot_snode_tree(
   llvm_device()->dealloc_memory(alloc->second);
   snode_tree_allocs_.erase(alloc);
   snode_tree_buffer_manager_->destroy(field.tree_id);
-  return true;
+  // CUDA per-tree pools include node allocators and traversal-list backing.
+  // The common/global allocator remains owned by the executor.
+  sparse_tree_pool_allocs_.erase(field.tree_id);
+  sparse_tree_pool_sizes_.erase(field.tree_id);
 }
 
 void LlvmRuntimeExecutor::destroy_snode_tree(SNodeTree *snode_tree) {
-  if (arch_is_cpu(config_.arch)) {
-    std::vector<SNode *> snodes;
-    bool all_dense = config_.demote_dense_struct_fors;
-    std::function<void(SNode *)> collect = [&](SNode *snode) {
-      snodes.push_back(snode);
-      if (snode->type != SNodeType::dense &&
-          snode->type != SNodeType::place &&
-          snode->type != SNodeType::root) {
-        all_dense = false;
-      }
-      for (const auto &child : snode->ch) {
-        collect(child.get());
-      }
-    };
-    collect(snode_tree->root());
-
-    auto *runtime_jit = get_runtime_jit_module();
-    for (std::size_t i = 0; i < snodes.size(); ++i) {
-      SNode *snode = snodes[i];
-      const std::size_t ambient_size = direct_ambient_size(
-          snode->type, snode->cell_size_bytes, snode->chunk_size);
-      runtime_jit->call<void *, int, int, std::size_t, int, int>(
-          "runtime_prepare_snode_tree_destroy", llvm_runtime_,
-          snode_tree->id(), snode->runtime_local_id, ambient_size,
-          i == 0 ? 1 : 0,
-          i + 1 == snodes.size() ? 1 : 0);
-    }
-    for (SNode *snode : snodes) {
-      const std::size_t ambient_size = direct_ambient_size(
-          snode->type, snode->cell_size_bytes, snode->chunk_size);
-      runtime_jit
-          ->call<void *, int, int, int, int, int, std::size_t>(
-              "runtime_destroy_snode_resources", llvm_runtime_,
-              snode_tree->id(), snode->runtime_local_id,
-              !all_dense && snode->type != SNodeType::place ? 1 : 0,
-              is_gc_able(snode->type) ? 1 : 0,
-              ambient_size > 0 ? 1 : 0, ambient_size);
-    }
-  }
-  const auto active_state =
-      active_snode_tree_runtime_states_.find(snode_tree->id());
-  TI_ASSERT(active_state != active_snode_tree_runtime_states_.end());
-  TI_ASSERT(active_state->second.generation == snode_tree->generation());
-  get_runtime_jit_module()->call<void *, int, std::uint64_t>(
-      "runtime_unregister_snode_tree_state", llvm_runtime_, snode_tree->id(),
-      snode_tree->generation());
-  active_snode_tree_runtime_states_.erase(active_state);
+  LlvmOfflineCache::FieldCacheData field;
+  field.tree_id = snode_tree->id();
+  field.tree_generation = snode_tree->generation();
+  std::function<void(const SNode *)> collect = [&](const SNode *node) {
+    LlvmOfflineCache::FieldCacheData::SNodeCacheData entry;
+    entry.runtime_local_id = node->runtime_local_id;
+    entry.type = node->type;
+    entry.cell_size_bytes = node->cell_size_bytes;
+    entry.chunk_size = node->chunk_size;
+    field.snode_metas.push_back(entry);
+    for (const auto &child : node->ch) collect(child.get());
+  };
+  if (arch_is_cpu(config_.arch)) collect(snode_tree->root());
+  destroy_snode_tree_runtime(field);
   get_llvm_context()->delete_snode_tree(snode_tree->id());
-  const auto tree_alloc = snode_tree_allocs_.find(snode_tree->id());
-  TI_ASSERT(tree_alloc != snode_tree_allocs_.end());
-  llvm_device()->dealloc_memory(tree_alloc->second);
-  snode_tree_allocs_.erase(tree_alloc);
-  snode_tree_buffer_manager_->destroy(snode_tree);
-  sparse_tree_pool_allocs_.erase(snode_tree->id());
-  sparse_tree_pool_sizes_.erase(snode_tree->id());
 }
 
 Device *LlvmRuntimeExecutor::get_compute_device() {

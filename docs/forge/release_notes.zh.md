@@ -31,6 +31,8 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 修复 CPU/CUDA AOT sparse/list 树退休后仍占用 ID，导致同 runtime 无法重载模块的问题。
+  JIT/AOT 共用 list/allocator/root 回收，保留其他存活 JIT 树；旧产物 ID 冲突的并行加载仍拒绝。
 - AOT 新增 OptiX program 与 prepared launch 资源，复用已有可编程 adapter 扩展和
   所有者。显式计划一次重建不含地址的参数/SBT，沿 CUDA ordered 路径重放；已验证
   实例 refit、间接 buffer/texture 和下游 DSL 梯度。普通 Graph 自动导出共享 program/

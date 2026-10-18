@@ -188,7 +188,7 @@ LlvmAotModule::~LlvmAotModule() {
       LlvmOfflineCache::FieldCacheData field;
       TI_ASSERT(cache_reader_->get_field_cache(field, logical));
       field.tree_id = physical;
-      executor_->destroy_dense_aot_snode_tree(field);
+      executor_->destroy_snode_tree_runtime(field);
     }
     executor_->release_aot_snode_tree_ids(reserved_tree_ids_);
   } catch (const std::exception &error) {
