@@ -701,18 +701,15 @@ def test_positive_multiaxis_affine_view_matches_ordinary_and_graph_addressing():
     if impl.current_cfg().arch == ti.cuda:
         stats = graph._graph_stats[0]
         assert stats["captures"] == 0
-        assert stats["ordinary_fallbacks"] == 9
         assert stats["last_path"] == "ordinary_fallback"
+        assert not stats["diagnostics_counters_complete"]
     elif impl.current_cfg().arch == ti.vulkan:
         stats = graph._graph_stats[0]
-        # The replay cache may recycle a completed record before filling all
-        # eight in-flight slots. Record/replay distribution is timing- and
-        # driver-dependent; the contract is that every submission stays on
-        # the Vulkan replay path after at least one recording.
-        assert 1 <= stats["records"] <= 8
-        assert stats["records"] + stats["replays"] == 9
-        assert stats["ordinary_fallbacks"] == 0
+        # execution_stats() is side-effect free. Production replay reports its
+        # path without enabling per-run record/replay counters.
         assert stats["last_path"] == "vulkan_replay"
+        assert not stats["diagnostics_counters_complete"]
+        assert stats["ordinary_fallbacks"] == 0
 
 
 @test_utils.test(
