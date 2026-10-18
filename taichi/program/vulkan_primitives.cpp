@@ -4196,6 +4196,7 @@ struct VulkanReduceCache {
   size_t cached_bytes{0};
   DeviceAllocation partial{kDeviceNullAllocation};
   DeviceAllocation params{kDeviceNullAllocation};
+  DeviceAllocation aligned_output{kDeviceNullAllocation};
   std::array<VulkanReducePipelineSet, 6> reduce_pipelines;
   std::unique_ptr<Pipeline> reduce_i32_sum_atomic;
   VulkanResourceSetReplayRing<2> reduce_i32_sum_atomic_bindings;
@@ -4226,8 +4227,12 @@ struct VulkanReduceCache {
     if (device && params != kDeviceNullAllocation) {
       device->dealloc_memory(params);
     }
+    if (device && aligned_output != kDeviceNullAllocation) {
+      device->dealloc_memory(aligned_output);
+    }
     partial = kDeviceNullAllocation;
     params = kDeviceNullAllocation;
+    aligned_output = kDeviceNullAllocation;
     partial_capacity = 0;
     params_capacity = 0;
     cached_bytes = 0;
@@ -4377,7 +4382,8 @@ struct VulkanReduceCache {
   }
 
   size_t allocated_bytes() const {
-    return partial_capacity + params_capacity;
+    return partial_capacity + params_capacity +
+           (aligned_output == kDeviceNullAllocation ? 0 : sizeof(uint64_t));
   }
 
   void clear_partial_alloc() {
@@ -9783,6 +9789,15 @@ VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
                 "Vulkan native reduce output dtype does not match value type.");
     output_stride = element_size;
   }
+  const auto alignment = device->get_storage_buffer_binding_limits().offset_alignment;
+  if (!member_source && offset % alignment != 0) {
+    // The existing strided shader addresses from an aligned descriptor base.
+    // Preserve the packed stride and the same reduction tree, without copying
+    // the entire input merely to satisfy descriptor alignment.
+    TI_ERROR_IF(offset / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max(),
+                "Vulkan reduce source offset exceeds its uint32 shader ABI.");
+    member_source = true;
+  }
   auto check_strided = [&](const char *role, std::size_t role_offset,
                            std::size_t role_stride) {
     TI_ERROR_IF(role_stride < element_size,
@@ -9807,6 +9822,29 @@ VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
   }
 
   cache.ensure_device(device);
+  const auto destination = output_alloc.get_ptr(output_offset);
+  const bool stage_output = output_offset % alignment != 0;
+  if (stage_output) {
+    if (cache.aligned_output == kDeviceNullAllocation)
+      cache.aligned_output = cache.alloc_storage(sizeof(uint64_t));
+    output_alloc = cache.aligned_output;
+    output_offset = 0;
+  }
+  auto finish = [&](VulkanPreparedReduce result) {
+    if (stage_output) {
+      result.key.push(destination.alloc_id);
+      result.key.push(vulkan_allocation_generation(destination));
+      result.key.push(destination.offset);
+      result.record = [record = std::move(result.record), destination,
+                       source = output_alloc.get_ptr(), element_size](
+                          Device *dev, CommandList *commands) {
+        record(dev, commands);
+        commands->buffer_copy(destination, source, element_size);
+        commands->buffer_barrier(destination, element_size);
+      };
+    }
+    return result;
+  };
   const bool use_i32_sum_atomic =
       value_type == 0 && op == 0 && !member_source && !member_destination &&
       get_environ_config("TI_VULKAN_REDUCE_I32_SUM_ATOMIC", 1) != 0;
@@ -9854,7 +9892,7 @@ VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
     command_key.push(groups);
     command_key.push_ptr(pipeline);
     command_key.push_ptr(bindings);
-    return {record_reduce_atomic, command_key, true};
+    return finish({record_reduce_atomic, command_key, true});
   }
   const int single_shared_max_n_config =
       get_environ_config("TI_VULKAN_REDUCE_SINGLE_SHARED_MAX_N", 4096);
@@ -10020,7 +10058,7 @@ VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
   command_key.push_ptr(single_bindings);
   command_key.push_ptr(private_bindings);
   command_key.push_ptr(final_bindings);
-  return {record_reduce_tree, command_key, false};
+  return finish({record_reduce_tree, command_key, false});
 }
 
 std::size_t vulkan_reduce_storage_impl(Program *program,

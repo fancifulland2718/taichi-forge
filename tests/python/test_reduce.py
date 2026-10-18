@@ -355,6 +355,31 @@ def test_experimental_reduce_vulkan_native_dense_field_workspace_replay():
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_vulkan_reduce_unaligned_scalar_output_replay():
+    prog = impl.get_runtime().prog
+    for dtype in (ti.i32, ti.f32, ti.f64):
+        if not prog.vulkan_reduce_value_type_available(
+            ti.algorithms._algorithms._REDUCE_VALUE_TYPE[dtype]
+        ):
+            continue
+        n = 4099
+        prefix, first, second = (ti.field(dtype) for _ in range(3))
+        # Adjacent scalar members have 4/8-byte offsets, smaller than typical
+        # Vulkan SSBO alignment. Alternating destinations tests the replay key.
+        ti.root.place(prefix, first, second)
+        values = ti.field(dtype, n)
+        prefix[None], first[None], second[None] = 91, -1, -2
+        workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+        for value in (1, 2):
+            values.fill(value)
+            ti.algorithms.experimental_reduce(values, first, method="vulkan_native", workspace=workspace)
+            ti.algorithms.experimental_reduce(values, second, op="max", method="vulkan_native", workspace=workspace)
+            assert prefix[None] == 91
+            assert first[None] == n * value
+            assert second[None] == value
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_reduce_vulkan_native_struct_member_view():
     n = 8192
     prog = impl.get_runtime().prog
