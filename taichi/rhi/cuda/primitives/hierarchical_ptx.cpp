@@ -590,7 +590,7 @@ void driver_inclusive_scan_with_workspace(void *data,
       stream, nullptr, PrimitiveWorkspaceFamily::scan, workspace);
 }
 
-std::size_t driver_reduce_strided(void *values,
+static std::size_t driver_reduce_strided_impl(void *values,
                                   void *output,
                                   int num_items,
                                   CudaTransformValueType value_type,
@@ -600,7 +600,8 @@ std::size_t driver_reduce_strided(void *values,
                                   std::size_t output_stride,
                                   CudaHierarchicalReduceOp op,
                                   void *stream,
-                                  PrimitiveWorkspaceArena *workspace_arena) {
+                                  PrimitiveWorkspaceArena *workspace_arena,
+                                  void *retained_workspace) {
   TI_ERROR_IF(num_items <= 0,
               "CUDA Driver reduce expects at least one input item.");
   TI_ERROR_IF(!values || !output,
@@ -617,11 +618,14 @@ std::size_t driver_reduce_strided(void *values,
   std::optional<PrimitiveWorkspaceArena::Lease<DriverWorkspace>> workspace;
   std::array<void *, 8> level_ptrs{};
   if (layout.level_count != 0) {
-    workspace.emplace(acquire_workspace(
-        workspace_arena, PrimitiveWorkspaceFamily::reduce, stream));
-    (*workspace)->ensure(layout.bytes);
+    if (!retained_workspace) {
+      workspace.emplace(acquire_workspace(
+          workspace_arena, PrimitiveWorkspaceFamily::reduce, stream));
+      (*workspace)->ensure(layout.bytes);
+      retained_workspace = (*workspace)->data();
+    }
     for (std::size_t i = 0; i < layout.level_count; ++i) {
-      level_ptrs[i] = byte_offset((*workspace)->data(), layout.offsets[i]);
+      level_ptrs[i] = byte_offset(retained_workspace, layout.offsets[i]);
     }
   }
 
@@ -663,7 +667,49 @@ std::size_t driver_reduce_strided(void *values,
                 layout.counts[final_level], output,
                 static_cast<std::uint64_t>(output_offset),
                 static_cast<std::uint64_t>(output_stride));
-  return (*workspace)->allocated_bytes();
+  return workspace ? (*workspace)->allocated_bytes() : layout.bytes;
+}
+
+std::size_t driver_reduce_strided(void *values,
+                                  void *output,
+                                  int num_items,
+                                  CudaTransformValueType value_type,
+                                  std::size_t values_offset,
+                                  std::size_t values_stride,
+                                  std::size_t output_offset,
+                                  std::size_t output_stride,
+                                  CudaHierarchicalReduceOp op,
+                                  void *stream,
+                                  PrimitiveWorkspaceArena *workspace_arena) {
+  return driver_reduce_strided_impl(values, output, num_items, value_type,
+                                    values_offset, values_stride, output_offset,
+                                    output_stride, op, stream, workspace_arena,
+                                    nullptr);
+}
+
+std::size_t driver_reduce_workspace_bytes(int num_items,
+                                          CudaTransformValueType value_type) {
+  TI_ERROR_IF(num_items <= 0, "CUDA Driver reduce expects positive num_items.");
+  return reduce_layout(static_cast<std::uint32_t>(num_items),
+                        value_type_size(value_type)).bytes;
+}
+
+void driver_prepare_reduce() {
+  (void)kernels();
+}
+
+void driver_reduce_with_workspace(void *values,
+                                   void *output,
+                                   int num_items,
+                                   CudaTransformValueType value_type,
+                                   CudaHierarchicalReduceOp op,
+                                   void *workspace,
+                                   void *stream) {
+  TI_ERROR_IF(driver_reduce_workspace_bytes(num_items, value_type) && !workspace,
+              "Fixed CUDA reduction requires its prepared workspace.");
+  const auto width = value_type_size(value_type);
+  driver_reduce_strided_impl(values, output, num_items, value_type, 0, width,
+                              0, width, op, stream, nullptr, workspace);
 }
 
 std::size_t driver_histogram_strided(void *values,

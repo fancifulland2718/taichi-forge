@@ -431,6 +431,19 @@ def test_experimental_reduce_cpu_native_ndarray_dtypes():
     assert impl.get_runtime().prog.cpu_reduce_workspace_bytes() == 0
 
 
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
+def test_cpu_parallel_reduce_preserves_partitioned_results():
+    n = 262145
+    values, output = ti.ndarray(ti.f32, n), ti.ndarray(ti.f32, 1)
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for shift in (0, 1, -1):
+        host = ((np.arange(n) % 13 - 6 + shift) / 4).astype(np.float32)
+        values.from_numpy(host)
+        ti.algorithms.experimental_reduce(values, output, workspace=workspace)
+        assert output.to_numpy()[0] == np.sum(host, dtype=np.float32)
+    assert workspace.workspace_bytes_current == 4 * 4
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_reduce_cpu_native_dense_field_i32_f32():
     n = 4096

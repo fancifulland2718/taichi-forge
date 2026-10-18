@@ -9736,7 +9736,15 @@ void check_vulkan_grouped_reduce_strided_keys_request(Ndarray *keys,
 }
 
 
-std::size_t vulkan_reduce_storage_impl(Program *program,
+struct VulkanPreparedReduce {
+  std::function<void(Device *, CommandList *)> record;
+  VulkanCommandReplayKey key;
+  bool atomic{false};
+};
+
+VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
+                                       Device *device,
+                                       VulkanReduceCache &cache,
                                        DeviceAllocation values_alloc,
                                        DeviceAllocation output_alloc,
                                        std::size_t n,
@@ -9750,15 +9758,17 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
                                        std::size_t output_stride,
                                        bool member_source,
                                        bool member_destination) {
-  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
-              "Vulkan native reduce is only available on Vulkan.");
   TI_ERROR_IF(values_alloc.device == nullptr || output_alloc.device == nullptr,
               "Vulkan native reduce received null storage.");
   TI_ERROR_IF(n == 0,
               "Vulkan native reduce expects at least one input item.");
   TI_ERROR_IF(value_type < 0 || value_type > 5,
               "Vulkan native reduce received an unsupported value type.");
-  TI_ERROR_IF(!program->vulkan_reduce_value_type_available(value_type),
+  const auto &caps = device->get_caps();
+  TI_ERROR_IF(((value_type == 3 || value_type == 4) &&
+                !caps.get(DeviceCapability::spirv_has_int64)) ||
+                  (value_type == 5 &&
+                   !caps.get(DeviceCapability::spirv_has_float64)),
               "Vulkan native reduce dtype is not supported by this device.");
   const size_t element_size = vulkan_transform_value_size(value_type);
   TI_ERROR_IF(op < 0 || op > 2,
@@ -9796,10 +9806,7 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     check_strided("destination", output_offset, output_stride);
   }
 
-  Device *device = program->get_compute_device();
-  TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
-  auto cache_lease = get_reduce_cache(program, device);
-  auto &cache = *cache_lease;
+  cache.ensure_device(device);
   const bool use_i32_sum_atomic =
       value_type == 0 && op == 0 && !member_source && !member_destination &&
       get_environ_config("TI_VULKAN_REDUCE_I32_SUM_ATOMIC", 1) != 0;
@@ -9820,7 +9827,7 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     constexpr size_t kMaxGroups = 65535;
     const uint32_t groups = static_cast<uint32_t>(
         std::min(kMaxGroups, (n + items_per_group - 1) / items_per_group));
-    const bool profiler_scopes = program->profiler != nullptr;
+    const bool profiler_scopes = program && program->profiler != nullptr;
     auto record_reduce_atomic =
         [values_alloc, output_alloc, offset, output_offset, value_bytes,
          output_bytes, pipeline, bindings, groups, profiler_scopes](
@@ -9847,12 +9854,7 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     command_key.push(groups);
     command_key.push_ptr(pipeline);
     command_key.push_ptr(bindings);
-    if (!cache.reduce_i32_sum_atomic_command_replay.submit_or_record(
-            program, device, command_key, profiler_scopes,
-            record_reduce_atomic)) {
-      program->enqueue_compute_op_lambda(record_reduce_atomic, {});
-    }
-    return cache.allocated_bytes();
+    return {record_reduce_atomic, command_key, true};
   }
   const int single_shared_max_n_config =
       get_environ_config("TI_VULKAN_REDUCE_SINGLE_SHARED_MAX_N", 4096);
@@ -9875,6 +9877,8 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     partial_bytes = num_chunks * element_size;
     if (cache.has_workspace_allocs() &&
         cache.needs_partial_realloc(partial_bytes)) {
+      TI_ERROR_IF(!program,
+                  "Fixed Vulkan reduce storage cannot grow after preparation");
       program->synchronize();
     }
     cache.ensure_partial(partial_bytes);
@@ -9930,7 +9934,7 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
                                      output_alloc, output_offset, output_bytes)
             .bindings;
   }
-  const bool profiler_scopes = program->profiler != nullptr;
+  const bool profiler_scopes = program && program->profiler != nullptr;
   std::array<uint32_t, 3> param_words{
       static_cast<uint32_t>(n),
       static_cast<uint32_t>(offset / sizeof(uint32_t)),
@@ -10016,11 +10020,39 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
   command_key.push_ptr(single_bindings);
   command_key.push_ptr(private_bindings);
   command_key.push_ptr(final_bindings);
-  if (!cache.reduce_tree_command_replay.submit_or_record(
-          program, device, command_key, profiler_scopes, record_reduce_tree)) {
-    program->enqueue_compute_op_lambda(record_reduce_tree, {});
-  }
-  return cache.cached_bytes;
+  return {record_reduce_tree, command_key, false};
+}
+
+std::size_t vulkan_reduce_storage_impl(Program *program,
+                                       DeviceAllocation values_alloc,
+                                       DeviceAllocation output_alloc,
+                                       std::size_t n,
+                                       std::size_t values_element_size,
+                                       std::size_t output_element_size,
+                                       int value_type,
+                                       int op,
+                                       std::size_t offset,
+                                       std::size_t stride,
+                                       std::size_t output_offset,
+                                       std::size_t output_stride,
+                                       bool member_source,
+                                       bool member_destination) {
+  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+              "Vulkan native reduce is only available on Vulkan.");
+  Device *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
+  auto cache_lease = get_reduce_cache(program, device);
+  auto &cache = *cache_lease;
+  auto prepared = prepare_vulkan_reduce(
+      program, device, cache, values_alloc, output_alloc, n, values_element_size,
+      output_element_size, value_type, op, offset, stride, output_offset,
+      output_stride, member_source, member_destination);
+  auto &replay = prepared.atomic ? cache.reduce_i32_sum_atomic_command_replay
+                                 : cache.reduce_tree_command_replay;
+  if (!replay.submit_or_record(program, device, prepared.key,
+                               program->profiler != nullptr, prepared.record))
+    program->enqueue_compute_op_lambda(prepared.record, {});
+  return cache.allocated_bytes();
 }
 
 std::size_t vulkan_reduce_ndarray_impl(Program *program,

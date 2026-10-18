@@ -19,6 +19,7 @@
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/rhi/cpu/inclusive_scan.h"
+#include "taichi/rhi/cpu/reduce.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -1077,15 +1078,6 @@ struct CpuHistogramTaskContext {
 };
 
 template <typename T>
-struct CpuReduceTaskContext {
-  const T *values{nullptr};
-  T *partial{nullptr};
-  std::size_t n{0};
-  int num_threads{1};
-  int op{0};
-};
-
-template <typename T>
 struct CpuStridedReduceTaskContext {
   const uint8_t *values{nullptr};
   T *partial{nullptr};
@@ -1382,7 +1374,7 @@ bool cpu_use_parallel_simple_loop(std::size_t n, int target_threads) {
 }
 
 bool cpu_use_parallel_aggregation(std::size_t n, int target_threads) {
-  return n >= 262144 && target_threads >= 4;
+  return cpu::use_parallel_aggregation(n, target_threads);
 }
 
 int cpu_indexed_copy_target_threads(std::size_t n,
@@ -1465,70 +1457,9 @@ int cpu_aggregation_target_threads(std::size_t n,
   }
   return std::min(max_threads, target_threads);
 }
-template <typename T>
-T cpu_reduce_identity(int op) {
-  if (op == 1) {
-    if constexpr (std::is_floating_point_v<T>) {
-      return std::numeric_limits<T>::infinity();
-    } else {
-      return std::numeric_limits<T>::max();
-    }
-  }
-  if (op == 2) {
-    if constexpr (std::is_floating_point_v<T>) {
-      return -std::numeric_limits<T>::infinity();
-    } else {
-      return std::numeric_limits<T>::lowest();
-    }
-  }
-  return T{0};
-}
-
-template <typename T>
-T cpu_reduce_combine(T a, T b, int op) {
-  if (op == 1) {
-    return std::min(a, b);
-  }
-  if (op == 2) {
-    return std::max(a, b);
-  }
-  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-    using U = std::make_unsigned_t<T>;
-    U ua = 0;
-    U ub = 0;
-    std::memcpy(&ua, &a, sizeof(T));
-    std::memcpy(&ub, &b, sizeof(T));
-    U sum = ua + ub;
-    T result{};
-    std::memcpy(&result, &sum, sizeof(T));
-    return result;
-  } else {
-    return a + b;
-  }
-}
-
-template <typename T>
-T cpu_reduce_sum_contiguous_range(const T *values,
-                                  std::size_t begin,
-                                  std::size_t end) {
-  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-    using U = std::make_unsigned_t<T>;
-    const auto *unsigned_values = reinterpret_cast<const U *>(values);
-    U acc = 0;
-    for (std::size_t i = begin; i < end; ++i) {
-      acc += unsigned_values[i];
-    }
-    T result{};
-    std::memcpy(&result, &acc, sizeof(T));
-    return result;
-  } else {
-    T acc{};
-    for (std::size_t i = begin; i < end; ++i) {
-      acc += values[i];
-    }
-    return acc;
-  }
-}
+using cpu::cpu_reduce_identity;
+using cpu::cpu_reduce_combine;
+using cpu::cpu_reduce_sum_contiguous_range;
 
 template <typename T>
 T cpu_reduce_sum_strided_range(const uint8_t *values,
@@ -1558,27 +1489,6 @@ T cpu_reduce_sum_strided_range(const uint8_t *values,
     }
     return acc;
   }
-}
-
-template <typename T>
-void cpu_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuReduceTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  if (ctx->op == 0) {
-    ctx->partial[tid] = cpu_reduce_sum_contiguous_range(ctx->values, begin, end);
-    return;
-  }
-  T acc = cpu_reduce_identity<T>(ctx->op);
-  for (std::size_t i = begin; i < end; ++i) {
-    acc = cpu_reduce_combine(acc, ctx->values[i], ctx->op);
-  }
-  ctx->partial[tid] = acc;
 }
 
 template <typename T>
@@ -4230,36 +4140,14 @@ std::size_t cpu_reduce_typed(const T *values_ptr,
                              int max_threads,
                              int target_threads,
                              bool use_parallel) {
-  TI_ERROR_IF(!values_ptr || !output_ptr,
-              "CPU native reduce received a null data pointer.");
-
-  T result = cpu_reduce_identity<T>(op);
   if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<T> partial(num_threads);
-    CpuReduceTaskContext<T> ctx;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.num_threads = num_threads;
-    ctx.op = op;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx, cpu_reduce_task<T>);
-    for (int tid = 0; tid < num_threads; ++tid) {
-      result = cpu_reduce_combine(result, partial[tid], op);
-    }
-    output_ptr[0] = result;
-    return partial.size() * sizeof(T);
+    std::vector<T> partial(target_threads);
+    cpu::reduce(values_ptr, output_ptr, op, n, target_threads, partial.data(),
+                get_cpu_primitive_thread_pool(max_threads));
+    return std::size_t(target_threads) * sizeof(T);
   }
-
-  if (op == 0) {
-    output_ptr[0] = cpu_reduce_sum_contiguous_range(values_ptr, 0, n);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    result = cpu_reduce_combine(result, values_ptr[i], op);
-  }
-  output_ptr[0] = result;
+  cpu::reduce(values_ptr, output_ptr, op, n, 1, static_cast<T *>(nullptr),
+              nullptr);
   return 0;
 }
 
