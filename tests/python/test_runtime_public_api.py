@@ -41,6 +41,32 @@ def test_runtime_contract_manifest_is_safe_before_init():
     assert ti.lang.impl.get_runtime().prog is None
 
 
+def test_display_and_completion_capabilities_are_explicit_before_init(monkeypatch):
+    ti.reset()
+    manifest = ti.validate_runtime_contract()
+    features = manifest["features"]
+    assert features["completion_wait_concurrent"] is True
+    assert features["completion_blocking_wait"] is True
+    assert features["display_shared_image_reuse"] == all(
+        features[name] for name in ("cuda", "vulkan", "ggui")
+    )
+    assert ti.lang.impl.get_runtime().prog is None
+    with pytest.raises(TypeError):
+        features["completion_blocking_wait"] = False
+
+    # A same-version runtime with no declaration remains unknown. Neither the
+    # version nor the provenance hash is sufficient to infer these guarantees.
+    native = runtime_contracts._native_contract_manifest()
+    for name in ("completion_wait_concurrent", "completion_blocking_wait",
+                 "display_shared_image_reuse"):
+        del native["features"][name]
+    monkeypatch.setattr(runtime_contracts, "_native_contract_manifest", lambda: native)
+    legacy = ti.validate_runtime_contract()["features"]
+    assert not legacy.get("completion_wait_concurrent", False)
+    assert not legacy.get("completion_blocking_wait", False)
+    assert not legacy.get("display_shared_image_reuse", False)
+
+
 def test_runtime_build_profile_is_native_owned_and_optional(monkeypatch):
     native = runtime_contracts._native_contract_manifest()
     native["source_id"] = "runtime-commit"

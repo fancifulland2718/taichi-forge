@@ -25,6 +25,10 @@ inline constexpr std::uint64_t kForgeFeatureOpenGl = 1ull << 5;
 inline constexpr std::uint64_t kForgeBuildProfileKnown = 1ull << 6;
 inline constexpr std::uint64_t kForgeBuildToolkitReference = 1ull << 7;
 inline constexpr std::uint64_t kForgeBuildCupti = 1ull << 8;
+// Additive implementation guarantees, independent of the package version.
+inline constexpr std::uint64_t kForgeDisplaySharedImageReuse = 1ull << 9;
+inline constexpr std::uint64_t kForgeCompletionWaitConcurrent = 1ull << 10;
+inline constexpr std::uint64_t kForgeCompletionBlockingWait = 1ull << 11;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

@@ -197,6 +197,27 @@ fence 等待；CPU 提交通常已经完成。其他后端显式选择 blocking 
 工作。两类 CUDA 事件分别复用，共用原有缓存总量限制。`done()` 仍是非阻塞查询，
 同票据的后端等待不占用状态查询锁；首次错误、reset 和资源释放合同保持不变。
 
+使用启动阶段的只读能力合同识别修复，不按 `0.6.4` 版本号或源码 hash 猜测：
+
+```python
+features = ti.validate_runtime_contract()["features"]  # ti.init() 前也可查询
+can_block = (
+    features.get("completion_wait_concurrent") is True
+    and features.get("completion_blocking_wait") is True
+)
+# can_block 为 True 时可选择 wait_mode="blocking"；否则保留应用既有轮询策略。
+```
+
+| feature | 声明范围 |
+| --- | --- |
+| `display_shared_image_reuse` | 编译含 CUDA、Vulkan、GGUI；重复显示优先复用已持有同一共享图像的 renderable，避免因此替换/销毁旧存储。保留 acquire/release semaphore 协议。 |
+| `completion_wait_concurrent` | 后端完成等待不持有完成状态锁；同票据查询与其他提交可继续。不是多 stream 或并行设备执行声明。 |
+| `completion_blocking_wait` | 配对 shim/runtime 支持上述 CPU/CUDA/Vulkan 的 `Graph.submit(wait_mode="blocking")` 合同。 |
+
+这些是 native 构建能力，不创建 Program、GPU context 或窗口，不保证机器具有可用设备，
+也不是跨平台性能验收。先通过现有 ABI/编译器兼容校验，再消费能力；必须使用配对包。
+字段缺失表示未知，即使旧包实际上已包含某项修复，也应采用保守路径。
+
 相关异步 producer 可选地共享 `SubmissionPacer`：
 
 ```python

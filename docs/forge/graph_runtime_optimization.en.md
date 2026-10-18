@@ -258,6 +258,30 @@ combined cache limit. `done()` remains a nonblocking query. Backend waiting
 does not hold the completion state lock; first-error, reset and resource-release
 contracts are unchanged.
 
+Use the read-only startup contract to identify capabilities instead of inferring
+them from the `0.6.4` version or source hash:
+
+```python
+features = ti.validate_runtime_contract()["features"]  # also safe before ti.init()
+can_block = (
+    features.get("completion_wait_concurrent") is True
+    and features.get("completion_blocking_wait") is True
+)
+# Select wait_mode="blocking" if can_block; otherwise retain application polling.
+```
+
+| Feature | Declared scope |
+| --- | --- |
+| `display_shared_image_reuse` | Built with CUDA, Vulkan and GGUI; repeated display prefers a renderable already holding the same shared image, avoiding replacement/destruction caused by that selection. Acquire/release semaphore ownership is preserved. |
+| `completion_wait_concurrent` | Backend completion waiting does not hold the completion state lock; same-ticket queries and other submissions can proceed. Does not declare multiple streams or concurrent device execution. |
+| `completion_blocking_wait` | The paired shim/runtime supports the CPU/CUDA/Vulkan `Graph.submit(wait_mode="blocking")` contract above. |
+
+These native build facts do not create a Program, GPU context or window, prove
+device availability, or qualify cross-platform performance. Existing ABI and
+compiler compatibility checks still apply; use paired packages. A missing key
+means unknown, even if an older build contains a particular fix, and calls for
+the conservative application path.
+
 For related asynchronous producers, optionally share a `SubmissionPacer`:
 
 ```python

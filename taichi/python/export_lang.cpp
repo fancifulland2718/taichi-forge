@@ -8048,6 +8048,12 @@ void export_lang(py::module &m) {
     features["vulkan"] = bool(bitmap & kForgeFeatureVulkan);
     features["ggui"] = bool(bitmap & kForgeFeatureGgui);
     features["opengl"] = bool(bitmap & kForgeFeatureOpenGl);
+    features["display_shared_image_reuse"] =
+        bool(bitmap & kForgeDisplaySharedImageReuse);
+    features["completion_wait_concurrent"] =
+        bool(bitmap & kForgeCompletionWaitConcurrent);
+    features["completion_blocking_wait"] =
+        bool(bitmap & kForgeCompletionBlockingWait);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

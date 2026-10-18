@@ -162,6 +162,9 @@
 - `Graph.submit(..., wait_mode="blocking")` 可为 CUDA 票据选择低 CPU 的事件等待，默认
   保留原等待方式。模式在提交时确定；两类事件分别复用且共用缓存上限。Vulkan 沿用
   fence 等待，CPU 通常已完成，其他后端在提交前拒绝显式 blocking。请测量唤醒延迟与整步吞吐。
+- `ti.validate_runtime_contract()["features"]` 新增 `display_shared_image_reuse`、
+  `completion_wait_concurrent`、`completion_blocking_wait` 三项独立能力声明，初始化前即可查询。
+  缺少字段表示未知；能力不替代 ABI/编译器兼容检查、设备检测或平台验收。
 - `Canvas.repeat_frame()` 优先复用持有当前共享图像的 renderable 或空 renderable，保留其他
   已完成图像供后续写入，并在重用前解除已完成 renderable 的别名引用。CUDA/Vulkan 重复显示
   不再因释放导入图像存储而等待无关 CUDA 工作；外部 semaphore 所有权和关闭同步仍然保留。

@@ -99,7 +99,12 @@ std::uint32_t get_forge_runtime_statistics_schema_version() {
 }
 
 std::uint64_t get_forge_native_feature_bitmap() {
-  std::uint64_t result = kForgeFeatureCpu | kForgeBuildProfileKnown;
+  std::uint64_t result = kForgeFeatureCpu | kForgeBuildProfileKnown |
+                         kForgeCompletionWaitConcurrent |
+                         kForgeCompletionBlockingWait;
+#if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN) && defined(TI_WITH_GGUI)
+  result |= kForgeDisplaySharedImageReuse;
+#endif
 #if defined(TI_FORGE_BUILD_TOOLKIT_REFERENCE)
   result |= kForgeBuildToolkitReference;
 #endif
