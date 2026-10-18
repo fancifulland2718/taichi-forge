@@ -1366,19 +1366,30 @@ bool driver_indexed_copy_available() {
       .nvidia_extensions_available();
 }
 
-std::size_t driver_indexed_copy(void *src,
+static std::size_t driver_indexed_copy_strided_impl(
+    void *src, void *indices, void *dst,
+    std::uint32_t num_items, std::uint32_t index_bound,
+    std::uint32_t item_words, std::size_t src_offset_words,
+    std::size_t src_stride_words, std::size_t dst_offset_words,
+    std::size_t dst_stride_words, CudaIndexedCopyOp op, void *stream);
+
+void driver_prepare_indexed_copy(CudaIndexedCopyOp op, std::uint32_t item_words) {
+  TI_ERROR_IF(!item_words, "CUDA indexed copy requires a nonempty payload.");
+  if (item_words == 1)
+    (void)cuda_indexed_copy_function(op);
+  else
+    (void)cuda_indexed_copy_strided_function(op);
+}
+
+std::size_t driver_indexed_copy_on_stream(void *src,
                                 void *indices,
                                 void *dst,
-                                int num_items,
-                                int index_bound,
-                                int item_words,
+                                std::uint32_t num_items,
+                                std::uint32_t index_bound,
+                                std::uint32_t item_words,
                                 CudaIndexedCopyOp op,
                                 void *stream) {
-  TI_ERROR_IF(num_items < 0,
-              "CUDA driver indexed copy expects non-negative num_items.");
-  TI_ERROR_IF(index_bound < 0,
-              "CUDA driver indexed copy expects non-negative index_bound.");
-  TI_ERROR_IF(item_words <= 0,
+  TI_ERROR_IF(item_words == 0,
               "CUDA driver indexed copy expects at least one word per item.");
   TI_ERROR_IF(!src || !indices || !dst,
               "CUDA driver indexed copy received a null pointer.");
@@ -1387,9 +1398,9 @@ std::size_t driver_indexed_copy(void *src,
   }
   constexpr unsigned kBlockDim = 256;
   const unsigned grid_dim =
-      static_cast<unsigned>((num_items + kBlockDim - 1) / kBlockDim);
+      num_items / kBlockDim + (num_items % kBlockDim != 0);
   if (item_words != 1) {
-    return driver_indexed_copy_strided(
+    return driver_indexed_copy_strided_impl(
         src, indices, dst, num_items, index_bound, item_words, 0, item_words,
         0, item_words, op, stream);
   }
@@ -1416,28 +1427,42 @@ std::size_t driver_indexed_copy(void *src,
                                 void *dst,
                                 int num_items,
                                 int index_bound,
+                                int item_words,
+                                CudaIndexedCopyOp op,
+                                void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA driver indexed copy expects non-negative num_items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA driver indexed copy expects non-negative index_bound.");
+  TI_ERROR_IF(item_words <= 0,
+              "CUDA driver indexed copy expects at least one word per item.");
+  return driver_indexed_copy_on_stream(src, indices, dst, num_items, index_bound,
+                                       item_words, op, stream);
+}
+
+std::size_t driver_indexed_copy(void *src,
+                                void *indices,
+                                void *dst,
+                                int num_items,
+                                int index_bound,
                                 CudaIndexedCopyOp op) {
   return driver_indexed_copy(src, indices, dst, num_items, index_bound, 1, op,
                              nullptr);
 }
 
-std::size_t driver_indexed_copy_strided(void *src,
+static std::size_t driver_indexed_copy_strided_impl(void *src,
                                         void *indices,
                                         void *dst,
-                                        int num_items,
-                                        int index_bound,
-                                        int item_words,
+                                        std::uint32_t num_items,
+                                        std::uint32_t index_bound,
+                                        std::uint32_t item_words,
                                         std::size_t src_offset_words,
                                         std::size_t src_stride_words,
                                         std::size_t dst_offset_words,
                                         std::size_t dst_stride_words,
                                         CudaIndexedCopyOp op,
                                         void *stream) {
-  TI_ERROR_IF(num_items < 0,
-              "CUDA driver strided indexed copy expects non-negative items.");
-  TI_ERROR_IF(index_bound < 0,
-              "CUDA driver strided indexed copy expects a non-negative bound.");
-  TI_ERROR_IF(item_words <= 0,
+  TI_ERROR_IF(item_words == 0,
               "CUDA driver strided indexed copy expects a positive payload.");
   TI_ERROR_IF(src_stride_words < static_cast<std::size_t>(item_words) ||
                   dst_stride_words < static_cast<std::size_t>(item_words),
@@ -1449,7 +1474,7 @@ std::size_t driver_indexed_copy_strided(void *src,
   }
   constexpr unsigned kBlockDim = 256;
   const unsigned grid_dim =
-      static_cast<unsigned>((num_items + kBlockDim - 1) / kBlockDim);
+      num_items / kBlockDim + (num_items % kBlockDim != 0);
   void *func = cuda_indexed_copy_strided_function(op);
   void *src_arg = src;
   void *indices_arg = indices;
@@ -1474,6 +1499,22 @@ std::size_t driver_indexed_copy_strided(void *src,
   CUDAContext::get_instance().launch(func, "cuda_indexed_copy_strided", args,
                                      {}, grid_dim, kBlockDim, 0, stream);
   return 0;
+}
+
+std::size_t driver_indexed_copy_strided(
+    void *src, void *indices, void *dst, int num_items, int index_bound,
+    int item_words, std::size_t src_offset_words, std::size_t src_stride_words,
+    std::size_t dst_offset_words, std::size_t dst_stride_words,
+    CudaIndexedCopyOp op, void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA driver strided indexed copy expects non-negative items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA driver strided indexed copy expects a non-negative bound.");
+  TI_ERROR_IF(item_words <= 0,
+              "CUDA driver strided indexed copy expects a positive payload.");
+  return driver_indexed_copy_strided_impl(
+      src, indices, dst, num_items, index_bound, item_words, src_offset_words,
+      src_stride_words, dst_offset_words, dst_stride_words, op, stream);
 }
 
 bool driver_scatter_add_available() {

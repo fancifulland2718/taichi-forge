@@ -93,6 +93,19 @@ std::size_t driver_transform_affine_packed_strided(
 
 bool driver_indexed_copy_available();
 
+// Resolve immutable code before capture. The fixed entry uses the shader's
+// unsigned count ABI and the owner's stream; ordinary callers keep their APIs.
+void driver_prepare_indexed_copy(CudaIndexedCopyOp op, std::uint32_t item_words);
+
+std::size_t driver_indexed_copy_on_stream(void *src,
+                                        void *indices,
+                                        void *dst,
+                                        std::uint32_t num_items,
+                                        std::uint32_t index_bound,
+                                        std::uint32_t item_words,
+                                        CudaIndexedCopyOp op,
+                                        void *stream);
+
 std::size_t driver_indexed_copy(void *src,
                                 void *indices,
                                 void *dst,
