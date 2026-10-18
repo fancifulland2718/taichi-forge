@@ -18,6 +18,11 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/rhi/cpu/inclusive_scan.h"
+#include "taichi/rhi/cpu/reduce.h"
+#include "taichi/rhi/cpu/transform.h"
+#include "taichi/rhi/cpu/indexed_copy.h"
+#include "taichi/rhi/cpu/scatter_validation.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -1077,15 +1082,6 @@ struct CpuHistogramTaskContext {
 };
 
 template <typename T>
-struct CpuReduceTaskContext {
-  const T *values{nullptr};
-  T *partial{nullptr};
-  std::size_t n{0};
-  int num_threads{1};
-  int op{0};
-};
-
-template <typename T>
 struct CpuStridedReduceTaskContext {
   const uint8_t *values{nullptr};
   T *partial{nullptr};
@@ -1121,14 +1117,7 @@ struct CpuDenseFieldCopyTaskContext {
 };
 
 template <typename T>
-struct CpuTransformTaskContext {
-  const T *src{nullptr};
-  T *dst{nullptr};
-  std::size_t n{0};
-  T scale{};
-  T bias{};
-  int num_threads{1};
-};
+using CpuTransformTaskContext = cpu::TransformTaskContext<T>;
 
 template <typename T>
 struct CpuStridedTransformTaskContext {
@@ -1168,17 +1157,6 @@ struct CpuPackedStridedToStridedTransformTaskContext {
   std::size_t dst_stride{0};
   T scale{};
   T bias{};
-  int num_threads{1};
-};
-
-struct CpuIndexedCopyTaskContext {
-  const uint8_t *src{nullptr};
-  const int32_t *indices{nullptr};
-  uint8_t *dst{nullptr};
-  std::size_t n{0};
-  std::size_t index_bound{0};
-  std::size_t item_bytes{0};
-  bool scatter{false};
   int num_threads{1};
 };
 
@@ -1378,24 +1356,17 @@ ThreadPool *get_cpu_primitive_thread_pool(int max_threads) {
 }
 
 bool cpu_use_parallel_simple_loop(std::size_t n, int target_threads) {
-  return n >= 262144 && target_threads > 1;
+  return cpu::use_parallel_simple_loop(n, target_threads);
 }
 
 bool cpu_use_parallel_aggregation(std::size_t n, int target_threads) {
-  return n >= 262144 && target_threads >= 4;
+  return cpu::use_parallel_aggregation(n, target_threads);
 }
 
 int cpu_indexed_copy_target_threads(std::size_t n,
                                     int max_threads,
                                     bool scatter) {
-  constexpr int kChunkItems = 32768;
-  int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + kChunkItems - 1) / kChunkItems,
-                            static_cast<std::size_t>(max_threads)));
-  if (scatter && n >= 262144) {
-    target_threads = std::min(target_threads, 4);
-  }
-  return std::max(1, target_threads);
+  return cpu::indexed_copy_target_threads(n, max_threads, scatter);
 }
 
 void validate_cpu_plain_scatter_indices(const int32_t *indices,
@@ -1412,43 +1383,11 @@ void validate_cpu_plain_scatter_indices(const int32_t *indices,
   }
 
   try {
-    // A byte marker is much cheaper than a hash table for the usual
-    // permutation-like case. Do not size it wildly beyond input cardinality:
-    // sparse destination index spaces instead use an O(n) hash set.
-    if (n >= std::numeric_limits<std::size_t>::max() / 8 ||
-        dst_items <= n * 8) {
-      std::vector<uint8_t> seen(dst_items, 0);
-      for (std::size_t i = 0; i < n; ++i) {
-        const int32_t raw_index = indices[i];
-        if (raw_index < 0) {
-          continue;
-        }
-        const std::size_t index = static_cast<std::size_t>(raw_index);
-        if (index >= dst_items) {
-          continue;
-        }
-        TI_ERROR_IF(seen[index] != 0,
-                    "CPU native plain scatter requires unique destination "
-                    "indices; use experimental_scatter_add() for duplicate "
-                    "targets.");
-        seen[index] = 1;
-      }
-      return;
-    }
-
-    std::unordered_set<int32_t> seen;
-    seen.reserve(n);
-    for (std::size_t i = 0; i < n; ++i) {
-      const int32_t raw_index = indices[i];
-      if (raw_index < 0 ||
-          static_cast<std::size_t>(raw_index) >= dst_items) {
-        continue;
-      }
-      TI_ERROR_IF(!seen.insert(raw_index).second,
-                  "CPU native plain scatter requires unique destination "
-                  "indices; use experimental_scatter_add() for duplicate "
-                  "targets.");
-    }
+    cpu::PlainScatterIndexValidator validator(n, dst_items);
+    TI_ERROR_IF(!validator.unique(indices),
+                "CPU native plain scatter requires unique destination "
+                "indices; use experimental_scatter_add() for duplicate "
+                "targets.");
   } catch (const std::bad_alloc &) {
     TI_ERROR("CPU native plain scatter could not allocate uniqueness "
              "validation storage; use experimental_scatter_add() for "
@@ -1465,70 +1404,9 @@ int cpu_aggregation_target_threads(std::size_t n,
   }
   return std::min(max_threads, target_threads);
 }
-template <typename T>
-T cpu_reduce_identity(int op) {
-  if (op == 1) {
-    if constexpr (std::is_floating_point_v<T>) {
-      return std::numeric_limits<T>::infinity();
-    } else {
-      return std::numeric_limits<T>::max();
-    }
-  }
-  if (op == 2) {
-    if constexpr (std::is_floating_point_v<T>) {
-      return -std::numeric_limits<T>::infinity();
-    } else {
-      return std::numeric_limits<T>::lowest();
-    }
-  }
-  return T{0};
-}
-
-template <typename T>
-T cpu_reduce_combine(T a, T b, int op) {
-  if (op == 1) {
-    return std::min(a, b);
-  }
-  if (op == 2) {
-    return std::max(a, b);
-  }
-  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-    using U = std::make_unsigned_t<T>;
-    U ua = 0;
-    U ub = 0;
-    std::memcpy(&ua, &a, sizeof(T));
-    std::memcpy(&ub, &b, sizeof(T));
-    U sum = ua + ub;
-    T result{};
-    std::memcpy(&result, &sum, sizeof(T));
-    return result;
-  } else {
-    return a + b;
-  }
-}
-
-template <typename T>
-T cpu_reduce_sum_contiguous_range(const T *values,
-                                  std::size_t begin,
-                                  std::size_t end) {
-  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-    using U = std::make_unsigned_t<T>;
-    const auto *unsigned_values = reinterpret_cast<const U *>(values);
-    U acc = 0;
-    for (std::size_t i = begin; i < end; ++i) {
-      acc += unsigned_values[i];
-    }
-    T result{};
-    std::memcpy(&result, &acc, sizeof(T));
-    return result;
-  } else {
-    T acc{};
-    for (std::size_t i = begin; i < end; ++i) {
-      acc += values[i];
-    }
-    return acc;
-  }
-}
+using cpu::cpu_reduce_identity;
+using cpu::cpu_reduce_combine;
+using cpu::cpu_reduce_sum_contiguous_range;
 
 template <typename T>
 T cpu_reduce_sum_strided_range(const uint8_t *values,
@@ -1558,27 +1436,6 @@ T cpu_reduce_sum_strided_range(const uint8_t *values,
     }
     return acc;
   }
-}
-
-template <typename T>
-void cpu_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuReduceTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  if (ctx->op == 0) {
-    ctx->partial[tid] = cpu_reduce_sum_contiguous_range(ctx->values, begin, end);
-    return;
-  }
-  T acc = cpu_reduce_identity<T>(ctx->op);
-  for (std::size_t i = begin; i < end; ++i) {
-    acc = cpu_reduce_combine(acc, ctx->values[i], ctx->op);
-  }
-  ctx->partial[tid] = acc;
 }
 
 template <typename T>
@@ -1724,21 +1581,6 @@ void cpu_compact_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
 }
 
 template <typename T>
-void cpu_transform_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuTransformTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    ctx->dst[i] = ctx->src[i] * ctx->scale + ctx->bias;
-  }
-}
-
-template <typename T>
 void cpu_strided_transform_task(void *raw_ctx,
                                 int /*thread_id*/,
                                 int task_id) {
@@ -1817,21 +1659,10 @@ void cpu_transform_run_typed(const T *src_ptr,
                              bool use_parallel,
                              int target_threads,
                              int max_threads) {
-  if (use_parallel) {
-    CpuTransformTaskContext<T> ctx;
-    ctx.src = src_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.scale = scale;
-    ctx.bias = bias;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx, cpu_transform_task<T>);
-    return;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    dst_ptr[i] = src_ptr[i] * scale + bias;
-  }
+  cpu::transform(src_ptr, dst_ptr, n, scale, bias,
+                 use_parallel ? target_threads : 1,
+                 use_parallel ? get_cpu_primitive_thread_pool(max_threads)
+                              : nullptr);
 }
 
 template <typename T>
@@ -2470,89 +2301,8 @@ void check_indexed_copy_strided_request(const char *backend,
               dst_stride);
 }
 
-inline void cpu_copy_indexed_payload(uint8_t *dst,
-                                     const uint8_t *src,
-                                     std::size_t item_bytes) {
-  auto *dst_words = reinterpret_cast<uint32_t *>(dst);
-  const auto *src_words = reinterpret_cast<const uint32_t *>(src);
-  if (item_bytes == sizeof(uint32_t)) {
-    dst_words[0] = src_words[0];
-    return;
-  }
-  if (item_bytes == sizeof(uint64_t)) {
-    dst_words[0] = src_words[0];
-    dst_words[1] = src_words[1];
-    return;
-  }
-  if (item_bytes == 4 * sizeof(uint32_t)) {
-    dst_words[0] = src_words[0];
-    dst_words[1] = src_words[1];
-    dst_words[2] = src_words[2];
-    dst_words[3] = src_words[3];
-    return;
-  }
-  const std::size_t words = item_bytes / sizeof(uint32_t);
-  for (std::size_t word = 0; word < words; ++word) {
-    dst_words[word] = src_words[word];
-  }
-}
-
-inline void cpu_zero_indexed_payload(uint8_t *dst, std::size_t item_bytes) {
-  auto *dst_words = reinterpret_cast<uint32_t *>(dst);
-  if (item_bytes == sizeof(uint32_t)) {
-    dst_words[0] = 0;
-    return;
-  }
-  if (item_bytes == sizeof(uint64_t)) {
-    dst_words[0] = 0;
-    dst_words[1] = 0;
-    return;
-  }
-  if (item_bytes == 4 * sizeof(uint32_t)) {
-    dst_words[0] = 0;
-    dst_words[1] = 0;
-    dst_words[2] = 0;
-    dst_words[3] = 0;
-    return;
-  }
-  const std::size_t words = item_bytes / sizeof(uint32_t);
-  for (std::size_t word = 0; word < words; ++word) {
-    dst_words[word] = 0;
-  }
-}
-
-void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuIndexedCopyTaskContext *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  if (ctx->scatter) {
-    for (std::size_t i = begin; i < end; ++i) {
-      const auto index = static_cast<std::size_t>(ctx->indices[i]);
-      if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(ctx->dst + index * ctx->item_bytes,
-                                 ctx->src + i * ctx->item_bytes,
-                                 ctx->item_bytes);
-      }
-    }
-  } else {
-    for (std::size_t i = begin; i < end; ++i) {
-      const auto index = static_cast<std::size_t>(ctx->indices[i]);
-      if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(ctx->dst + i * ctx->item_bytes,
-                                 ctx->src + index * ctx->item_bytes,
-                                 ctx->item_bytes);
-      } else {
-        cpu_zero_indexed_payload(ctx->dst + i * ctx->item_bytes,
-                                 ctx->item_bytes);
-      }
-    }
-  }
-}
+using cpu::copy_indexed_payload;
+using cpu::zero_indexed_payload;
 
 void cpu_strided_indexed_copy_task(void *raw_ctx,
                                    int /*thread_id*/,
@@ -2569,7 +2319,7 @@ void cpu_strided_indexed_copy_task(void *raw_ctx,
     for (std::size_t i = begin; i < end; ++i) {
       const auto index = static_cast<std::size_t>(ctx->indices[i]);
       if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(
+        copy_indexed_payload(
             ctx->dst + ctx->dst_offset + index * ctx->dst_stride,
             ctx->src + ctx->src_offset + i * ctx->src_stride,
             ctx->item_bytes);
@@ -2579,12 +2329,12 @@ void cpu_strided_indexed_copy_task(void *raw_ctx,
     for (std::size_t i = begin; i < end; ++i) {
       const auto index = static_cast<std::size_t>(ctx->indices[i]);
       if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(
+        copy_indexed_payload(
             ctx->dst + ctx->dst_offset + i * ctx->dst_stride,
             ctx->src + ctx->src_offset + index * ctx->src_stride,
             ctx->item_bytes);
       } else {
-        cpu_zero_indexed_payload(
+        zero_indexed_payload(
             ctx->dst + ctx->dst_offset + i * ctx->dst_stride,
             ctx->item_bytes);
       }
@@ -4230,36 +3980,14 @@ std::size_t cpu_reduce_typed(const T *values_ptr,
                              int max_threads,
                              int target_threads,
                              bool use_parallel) {
-  TI_ERROR_IF(!values_ptr || !output_ptr,
-              "CPU native reduce received a null data pointer.");
-
-  T result = cpu_reduce_identity<T>(op);
   if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<T> partial(num_threads);
-    CpuReduceTaskContext<T> ctx;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.num_threads = num_threads;
-    ctx.op = op;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx, cpu_reduce_task<T>);
-    for (int tid = 0; tid < num_threads; ++tid) {
-      result = cpu_reduce_combine(result, partial[tid], op);
-    }
-    output_ptr[0] = result;
-    return partial.size() * sizeof(T);
+    std::vector<T> partial(target_threads);
+    cpu::reduce(values_ptr, output_ptr, op, n, target_threads, partial.data(),
+                get_cpu_primitive_thread_pool(max_threads));
+    return std::size_t(target_threads) * sizeof(T);
   }
-
-  if (op == 0) {
-    output_ptr[0] = cpu_reduce_sum_contiguous_range(values_ptr, 0, n);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    result = cpu_reduce_combine(result, values_ptr[i], op);
-  }
-  output_ptr[0] = result;
+  cpu::reduce(values_ptr, output_ptr, op, n, 1, static_cast<T *>(nullptr),
+              nullptr);
   return 0;
 }
 
@@ -16753,37 +16481,7 @@ std::size_t Program::cpu_inclusive_scan_ndarray(Ndarray *data,
   TI_ERROR_IF(!ptr, "CPU native scan received a null data pointer.");
   const std::size_t n = data->get_nelement();
 
-  auto scan_typed = [n](auto *typed_ptr) {
-    using T = std::remove_pointer_t<decltype(typed_ptr)>;
-    T prefix{};
-    for (std::size_t i = 0; i < n; ++i) {
-      prefix += typed_ptr[i];
-      typed_ptr[i] = prefix;
-    }
-  };
-
-  switch (value_type) {
-    case 0:
-      scan_typed(reinterpret_cast<int32_t *>(ptr));
-      break;
-    case 1:
-      scan_typed(reinterpret_cast<float *>(ptr));
-      break;
-    case 2:
-      scan_typed(reinterpret_cast<uint32_t *>(ptr));
-      break;
-    case 3:
-      scan_typed(reinterpret_cast<uint64_t *>(ptr));
-      break;
-    case 4:
-      scan_typed(reinterpret_cast<int64_t *>(ptr));
-      break;
-    case 5:
-      scan_typed(reinterpret_cast<double *>(ptr));
-      break;
-    default:
-      TI_ERROR("CPU native scan received an unsupported value type.");
-  }
+  cpu::inclusive_scan(ptr, n, value_type);
   return 0;
 }
 
@@ -20891,33 +20589,10 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
               "CPU native gather received a null data pointer.");
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
-  if (n >= 65536 && target_threads > 1) {
-    CpuIndexedCopyTaskContext ctx;
-    ctx.src = src_ptr;
-    ctx.indices = indices_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.index_bound = src_items;
-    ctx.item_bytes = item_bytes;
-    ctx.scatter = false;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto index = static_cast<std::size_t>(indices_ptr[i]);
-    if (index < src_items) {
-      std::memcpy(dst_ptr + i * item_bytes, src_ptr + index * item_bytes,
-                  item_bytes);
-    } else {
-      std::memset(dst_ptr + i * item_bytes, 0, item_bytes);
-    }
-  }
+  const int partitions = cpu::indexed_copy_partitions(n, max_threads, false);
+  auto *pool = partitions > 1 ? get_cpu_primitive_thread_pool(max_threads) : nullptr;
+  cpu::indexed_copy(src_ptr, indices_ptr, dst_ptr, n, src_items, item_bytes,
+                    false, partitions, pool);
   return 0;
 }
 
@@ -21495,29 +21170,10 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
   validate_cpu_plain_scatter_indices(indices_ptr, n, dst_items);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int target_threads =
-      cpu_indexed_copy_target_threads(n, max_threads, true);
-  if (n >= 65536 && target_threads > 1) {
-    CpuIndexedCopyTaskContext ctx;
-    ctx.src = src_ptr;
-    ctx.indices = indices_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.index_bound = dst_items;
-    ctx.item_bytes = item_bytes;
-    ctx.scatter = true;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto index = static_cast<std::size_t>(indices_ptr[i]);
-    if (index < dst_items) {
-      std::memcpy(dst_ptr + index * item_bytes, src_ptr + i * item_bytes,
-                  item_bytes);
-    }
-  }
+  const int partitions = cpu::indexed_copy_partitions(n, max_threads, true);
+  auto *pool = partitions > 1 ? get_cpu_primitive_thread_pool(max_threads) : nullptr;
+  cpu::indexed_copy(src_ptr, indices_ptr, dst_ptr, n, dst_items, item_bytes,
+                    true, partitions, pool);
   return 0;
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace taichi::lang::cuda {
 
@@ -46,6 +47,18 @@ enum class CudaMetricOp : int {
 
 bool driver_transform_available();
 
+// Resolve immutable code before CUDA capture. Fixed recordings use the explicit
+// stream entry; ordinary Program submission retains the default-stream wrapper.
+void driver_prepare_transform(CudaTransformValueType value_type);
+
+std::size_t driver_transform_affine_on_stream(void *src,
+                                             void *dst,
+                                             std::uint32_t num_items,
+                                             CudaTransformValueType value_type,
+                                             double scale,
+                                             double bias,
+                                             void *stream);
+
 std::size_t driver_transform_affine(void *src,
                                     void *dst,
                                     int num_items,
@@ -79,6 +92,19 @@ std::size_t driver_transform_affine_packed_strided(
     double bias);
 
 bool driver_indexed_copy_available();
+
+// Resolve immutable code before capture. The fixed entry uses the shader's
+// unsigned count ABI and the owner's stream; ordinary callers keep their APIs.
+void driver_prepare_indexed_copy(CudaIndexedCopyOp op, std::uint32_t item_words);
+
+std::size_t driver_indexed_copy_on_stream(void *src,
+                                        void *indices,
+                                        void *dst,
+                                        std::uint32_t num_items,
+                                        std::uint32_t index_bound,
+                                        std::uint32_t item_words,
+                                        CudaIndexedCopyOp op,
+                                        void *stream);
 
 std::size_t driver_indexed_copy(void *src,
                                 void *indices,

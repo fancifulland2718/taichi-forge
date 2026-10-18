@@ -549,14 +549,18 @@ def test_transform_native_tape_gradients_dense_field():
         for i in y:
             loss[None] += y[i]
 
-    with ti.ad.Tape(loss):
-        ti.algorithms.experimental_transform(
-            x, y, scale=2.5, bias=1.0, method=_native_copy_method_for_arch()
-        )
-        sum_y()
-
-    actual = np.array([x.grad[i] for i in range(n)], dtype=np.float32)
-    np.testing.assert_allclose(actual, np.full(n, 2.5, dtype=np.float32))
+    # Grad fields can be packed at offsets that are not Vulkan descriptor
+    # boundaries. Exercise both real backward accumulation and cached replay;
+    # SyncVal must also accept these bindings, not just the numerical result.
+    for scale in (2.5, -3.0):
+        with ti.ad.Tape(loss):
+            ti.algorithms.experimental_transform(
+                x, y, scale=scale, bias=1.0, method=_native_copy_method_for_arch()
+            )
+            sum_y()
+        actual = np.array([x.grad[i] for i in range(n)], dtype=np.float32)
+        np.testing.assert_allclose(actual, np.full(n, scale, dtype=np.float32))
+        np.testing.assert_array_equal(y.to_numpy(), np.arange(n, dtype=np.float32) * scale + 1)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

@@ -48,12 +48,12 @@ def test_retained_unique_partial_empty_and_untouched_tails(tmp_path):
 def test_retained_field_export_failure_does_not_publish_views():
     keys, output = ti.field(ti.i32, shape=5), ti.field(ti.i32, shape=5)
     count = ti.field(ti.i32, shape=())
-    sequence = ti.algorithms.primitive_sequence().unique(keys, output, count).scan(output)
+    sequence = ti.algorithms.primitive_sequence().unique(keys, output, count).count_if(output)
     builder = ti.graph.GraphBuilder()
     builder.append_native(sequence)
     graph = builder.compile()
     module = ti.aot.Module()
-    with pytest.raises(ti.TaichiRuntimeError, match="'scan'"):
+    with pytest.raises(ti.TaichiRuntimeError, match="'check'"):
         module.add_execution_plan("bad", graph, snapshot_state=True)
     assert not module._fields and not module._array_fields and not module._exported_kernels
     assert not module._execution_plans and not module._content
@@ -64,6 +64,43 @@ def test_retained_field_export_failure_does_not_publish_views():
     sequence.clear()
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_fixed_compact_unaligned_multi_column_views(tmp_path):
+    module = ti.aot.Module()
+    names = ("keys", "payload", "flags", "key_output", "payload_output", "count")
+    module.add_execution_plan("step", ti.aot.ExecutionPlan(
+        [dict(kind="compact", flags="flags_view", count="count_view", columns=[
+            dict(values="keys_view", output="key_output_view"),
+            dict(values="payload_view", output="payload_output_view"),
+        ])],
+        resources=[dict(kind="ndarray_view", name=name + "_view", array=name,
+                        offset=1, shape=[1 if name == "count" else 7]) for name in names],
+    ))
+    artifact = tmp_path / "compact-offsets.tcm"
+    module.archive(str(artifact))
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(artifact) as loaded:
+        arrays = {name: runtime.ndarray(dtype, 3 if name == "count" else 9)
+                  for name, dtype in zip(names, ("u64", "f32", "i32", "u64", "f32", "i32"))}
+        keys = np.arange(9, dtype=np.uint64) + 2**40
+        payload = np.arange(9, dtype=np.float32) / 4
+        expected_keys, expected_payload = np.full(9, 91, np.uint64), np.full(9, 92, np.float32)
+        arrays["keys"].write(keys.tobytes())
+        arrays["payload"].write(payload.tobytes())
+        arrays["key_output"].write(expected_keys.tobytes())
+        arrays["payload_output"].write(expected_payload.tobytes())
+        arrays["count"].write(np.array([73, -1, 74], np.int32).tobytes())
+        with loaded.prepare_execution("step", arrays) as call:
+            for flags in ([1] * 9, [0, -1, 0, 2, 0, 0, 3, 0, 0], [0] * 9):
+                arrays["flags"].write(np.array(flags, np.int32).tobytes())
+                selected = [i for i in range(1, 8) if flags[i]]
+                expected_keys[1:1 + len(selected)] = keys[selected]
+                expected_payload[1:1 + len(selected)] = payload[selected]
+                call()
+                assert arrays["keys"].read() == keys.tobytes()
+                assert arrays["payload"].read() == payload.tobytes()
+                assert arrays["key_output"].read() == expected_keys.tobytes()
+                assert arrays["payload_output"].read() == expected_payload.tobytes()
+                assert arrays["count"].read() == np.array([73, len(selected), 74], np.int32).tobytes()
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_prepared_compact_exports_offset_record_views(tmp_path):
     values, output = (ti.Vector.field(2, ti.f32, shape=9) for _ in range(2))

@@ -11,6 +11,23 @@ from tests import test_utils
 _TRANSFORM_DTYPES = (ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, ti.f64)
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_transform_unaligned_dense_fields():
+    marker = ti.field(ti.i32, ())
+    src, dst = ti.field(ti.f32, 17), ti.field(ti.f32, 17)
+    marker[None] = 91
+    workspace = ti.algorithms.TransformWorkspace(max_items=17)
+    for shift in (0, 3):
+        values = np.arange(17, dtype=np.float32) + shift
+        src.from_numpy(values)
+        ti.algorithms.experimental_transform(
+            src, dst, scale=2.5, bias=-7, method="vulkan_native", workspace=workspace
+        )
+        np.testing.assert_array_equal(dst.to_numpy(), values * 2.5 - 7)
+        np.testing.assert_array_equal(src.to_numpy(), values)
+        assert marker[None] == 91
+
+
 def _transform_case(dtype, n):
     if dtype == ti.u32:
         data = (np.arange(n, dtype=np.uint32) % np.uint32(113)).astype(np.uint32)

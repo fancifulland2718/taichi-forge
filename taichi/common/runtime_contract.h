@@ -9,9 +9,11 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Fixed GFX recordings retain shared versions of their sparse list buffers.
+// Native preparation borrows the CPU scheduler; execution contexts also bind
+// private compiler temporaries. The two preceding development branches used
+// revision 106 for different layouts, so their pairs must not be mixed.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 106;
+inline constexpr int kForgeNativeAbiRevision = 107;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

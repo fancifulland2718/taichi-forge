@@ -49,20 +49,7 @@ ExecutionResources::Scalar scalar(const std::string &dtype,
     digits = 8;
   else if (dtype == "i64" || dtype == "u64" || dtype == "f64")
     digits = 16;
-  if (!digits || !value.is_str() || value.str.size() != digits)
-    throw std::invalid_argument(
-        "Execution scalar bits must match a supported C API dtype width");
-  std::uint64_t bits = 0;
-  for (const char digit : value.str) {
-    const int nibble = digit >= '0' && digit <= '9'   ? digit - '0'
-                       : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10
-                       : digit >= 'A' && digit <= 'F' ? digit - 'A' + 10
-                                                      : -1;
-    if (nibble < 0)
-      throw std::invalid_argument("Execution scalar bits must be hexadecimal");
-    bits = (bits << 4) | static_cast<std::uint64_t>(nibble);
-  }
-  return {bits};
+  return {operation_json::scalar_bits(value, digits)};
 }
 }  // namespace
 

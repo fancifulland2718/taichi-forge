@@ -6,6 +6,9 @@
 #include <cstring>
 #include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/native_host_blob.h"
+#ifdef TI_WITH_LLVM
+#include "taichi_llvm_impl.h"
+#endif
 #ifdef TI_WITH_VULKAN
 #include "taichi_gfx_impl.h"
 #endif
@@ -18,6 +21,10 @@ std::unique_ptr<NativePreparationContext> make_native_preparation_context(
   auto context = std::make_unique<NativePreparationContext>(
       runtime.arch, runtime.get(), runtime.native_provider_locations(),
       runtime.runtime_fault_domain(), runtime.native_library_locations());
+#ifdef TI_WITH_LLVM
+  if (auto *llvm = dynamic_cast<LlvmRuntime *>(&runtime))
+    llvm->prepare_cpu_scheduler(*context);
+#endif
 #ifdef TI_WITH_VULKAN
   if (auto *gfx = dynamic_cast<::GfxRuntime *>(&runtime))
     context->gfx_runtime = &gfx->get_gfx_runtime();

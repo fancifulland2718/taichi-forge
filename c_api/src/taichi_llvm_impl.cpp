@@ -12,6 +12,7 @@
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/rhi/cpu/cpu_device.h"
+#include "taichi/runtime/native_operation_registry.h"
 
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_device.h"
@@ -67,6 +68,15 @@ void LlvmRuntime::check_runtime_error() {
 taichi::lang::Device &LlvmRuntime::get() {
   taichi::lang::Device *device = executor_->get_compute_device();
   return *device;
+}
+
+void LlvmRuntime::prepare_cpu_scheduler(
+    taichi::lang::NativePreparationContext &context) {
+  if (!taichi::arch_is_cpu(arch))
+    return;
+  context.cpu_thread_pool = executor_->get_cpu_thread_pool();
+  context.cpu_max_threads =
+      std::max(1, executor_->get_config().cpu_max_num_threads);
 }
 
 TiMemory LlvmRuntime::allocate_memory(

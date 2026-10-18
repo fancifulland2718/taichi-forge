@@ -200,13 +200,15 @@ provider supports the full semantic and resource contract.
 
 ## Machine-readable capability contract
 
-Since Forge 0.6.0, immutable schema-v1 descriptors are exposed for every
-current primitive family:
+Every current primitive family has an immutable descriptor. Forge 0.6.4 uses
+schema v3 and adds `aot_routes`, separated by export entry point:
 
 ```python
 contract = ti.algorithms.primitive_capability("experimental_reduce")
 for operand in contract.operands:
     print(operand.name, operand.dtypes, operand.ranks, operand.layouts)
+for route in contract.aot_routes:
+    print(route.entry_point, route.forms, route.backends, route.constraints)
 
 ti.init(arch=ti.vulkan)
 active = ti.algorithms.resolve_primitive_capability("reduce")
@@ -220,6 +222,63 @@ layout, and storage constraints; backend methods; stability, determinism, and
 atomic-order behavior; primal/forward/reverse/explicit-adjoint support; Graph,
 AOT, workspace, and fallback contracts. Entry-point names such as
 `experimental_reduce` are accepted as aliases for their family.
+
+`aot_routes` distinguishes dedicated `Module.add_primitive`, `PrimitiveSequence`,
+prepared-recording and materialized-Graph export paths.
+`aot="selected_execution_plan_routes"` means the listed paths exist; it does not
+qualify every method, backend or layout in that family. For example, unique
+sequences cover CPU/CUDA/Vulkan while prepared recordings cover CUDA/Vulkan.
+`PrimitiveSequence.scan()` exports in-place inclusive sums on one-dimensional
+packed scalar storage on CPU/CUDA/Vulkan. It supports i32/u32/f32/i64/u64/f64,
+subject to device dtype capabilities. Its `builtin/scan` recording owns reusable
+scratch and uses the same algorithms as JIT; export and preparation do not run
+the scan. The explicit description also accepts a fixed prefix and preserves
+the tail. The separate CUDA `cuda_driver/retained_scan` route retains its
+i32/u32 and caller-owned scratch contract. AOT scan does not synthesize an
+adjoint; an application may export its explicit adjoint separately.
+`PrimitiveSequence.reduce()` and explicit `builtin/reduce` descriptions cover
+nonempty packed scalar sum/min/max on the same three backends and six types.
+Input and output ranges must be disjoint; only the first output element is
+written. Sequence export freezes the CPU partition strategy, and preparation
+borrows the owner's existing thread pool and retains partial storage. Fewer
+consumer workers do not change the frozen partition and merge order. CUDA and
+Vulkan reuse their JIT algorithms and prepare scratch/bindings before replay;
+floating results retain each backend's existing ordering contract, not a
+cross-backend bitwise guarantee. Explicit descriptions may select a fixed input
+prefix; their optional positive `cpu_max_threads` parameter freezes the CPU
+strategy, otherwise it uses the consumer configuration. AOT does not generate
+an adjoint. This extension requires matching
+frontend/runtime private ABI 106 components.
+`PrimitiveSequence.transform()` and explicit `builtin/transform` v1 descriptions
+cover nonempty, one-dimensional packed scalar affine transforms on CPU/CUDA/Vulkan
+for i32/u32/i64/u64/f32/f64. Accessed ranges must be exactly identical or physically
+disjoint; partial overlap is rejected during preparation. Explicit descriptions
+may select a fixed prefix and preserve the output tail. CPU borrows the owner's
+thread pool, and GPUs reuse the existing native code. No scratch or application
+kernel payload is added to the TCM. Vulkan scalar slices need not start at a
+descriptor-aligned offset: aligned enclosing views and shader offsets avoid copies.
+Coefficients are immutable after preparation. Explicit `scale_bits` and `bias_bits`
+use 16 hexadecimal digits encoding f64, as returned by
+`taichi_forge_runtime.aot.Scalar("f64", value).resource(name)["bits"]`.
+Floating negative zero and NaN/Inf are preserved; integer coefficients must be
+integral and representable in the selected type. The consumer runtime must provide
+`builtin/transform` v1. Strided/tensor/indexed-fused sequences remain outside this
+route. AOT does not synthesize this native operation's adjoint; applications can
+export an explicit adjoint.
+`PrimitiveSequence.run_length_encode()` exports consecutive i32/u32/i64/u64
+keys on CPU/CUDA/Vulkan. A fixed input prefix produces unique keys, i32 run
+lengths and an i32 count; unused output tails are preserved. Export reuses the
+existing head/start and length helpers, with one native prefix shared by both
+compaction columns. Helper specializations are deduplicated across entries and
+prefix sizes in one module. Empty prefixes only reset the first count element.
+The integer count/position ABI still applies; discrete keys have no automatic
+derivative. The ordinary JIT host path remains unchanged.
+`aot="no_native_export_route"` and an empty
+tuple indicate no listed dedicated native export path for that family. Ordinary
+compiled DSL kernels follow the generic AOT contract, which does not establish
+support for a host native method. Queries neither load vendor libraries nor
+initialize devices. Export still checks strategy, storage, version and dependencies;
+see the [AOT execution and resource contract](aot_sdk.en.md).
 
 `resolve_primitive_capability(name)` requires an active Program. It filters
 methods to the current CPU/CUDA/Vulkan backend and evaluates the same
@@ -251,8 +310,9 @@ drifting away from dispatch behavior.
   contexts before writing. Run such preprocessing or diagnostics outside
   Tape/FwdMode.
 
-These rules describe automatic AD only. Native Graph nodes remain primal-only,
-and native-node AOT serialization remains unsupported.
+These rules describe automatic AD only. AOT export does not synthesize derivatives
+for native operations. Supported execution plans can compose explicit adjoints
+and exported `kernel.grad` entries under their respective gradient contracts.
 
 ### CUDA runtime portability
 

@@ -159,12 +159,15 @@ CUDA capture。报告分别显示私有 flags 与最近观测到的共享 native
 
 ## 机器可读 capability 合同
 
-从 Forge 0.6.0 起，每个当前 primitive family 都公开不可变的 schema-v1 描述：
+每个当前 primitive family 都公开不可变的描述；Forge 0.6.4 使用 schema-v3，
+新增按入口区分的 `aot_routes`：
 
 ```python
 contract = ti.algorithms.primitive_capability("experimental_reduce")
 for operand in contract.operands:
     print(operand.name, operand.dtypes, operand.ranks, operand.layouts)
+for route in contract.aot_routes:
+    print(route.entry_point, route.forms, route.backends, route.constraints)
 
 ti.init(arch=ti.vulkan)
 active = ti.algorithms.resolve_primitive_capability("reduce")
@@ -177,6 +180,43 @@ for method in active.methods:
 并描述 backend method、稳定性、确定性、atomic 顺序依赖、primal/forward/reverse/
 explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
 `experimental_reduce` 等公开入口名作为 family alias。
+
+`aot_routes` 分别列出 `Module.add_primitive`、`PrimitiveSequence`、prepared recording
+和已物化 Graph 的专用导出路径。`aot="selected_execution_plan_routes"` 表示存在所列
+路径，不表示该家族的所有 `method=`、后端或布局都可导出。例如 unique 的 sequence
+覆盖 CPU/CUDA/Vulkan，prepared recording 覆盖 CUDA/Vulkan。
+`PrimitiveSequence.scan()` 可导出 CPU/CUDA/Vulkan 上一维连续标量存储的原位 inclusive sum，
+类型包括 i32/u32/f32/i64/u64/f64，仍需满足设备的类型能力。其 `builtin/scan` 录制对象持有
+可复用的临时空间，与 JIT 共用算法；导出和准备不会执行扫描。显式描述还可指定固定前缀，
+保持尾部不变。独立的 CUDA `cuda_driver/retained_scan` 路径仍遵从 i32/u32 和调用方提供
+scratch 的合同。AOT scan 不生成伴随，应用可另外导出自己的显式伴随。
+`PrimitiveSequence.reduce()` 和显式 `builtin/reduce` 描述覆盖相同三后端、六种类型的
+非空连续标量 sum/min/max。输入与输出访问区间必须分离，只写输出首元素。Sequence
+导出冻结 CPU 分块策略，准备时借用 owner 现有线程池并持有 partial 存储；消费端线程
+较少也保留分块与合并顺序。CUDA/Vulkan 复用 JIT 算法，提前准备临时空间和绑定；
+浮点结果保持各后端原有顺序合同，不承诺跨后端逐位一致。显式描述可选择固定输入
+前缀；可选正整数参数 `cpu_max_threads` 冻结 CPU 策略，省略则采用消费端配置。
+AOT 不生成伴随。此扩展要求配对的 frontend/runtime 私有 ABI 106 组件。
+`PrimitiveSequence.transform()` 与显式 `builtin/transform` v1 描述支持 CPU/CUDA/Vulkan
+上的非空、一维连续标量 affine 变换，覆盖 i32/u32/i64/u64/f32/f64。输入输出可为
+准确相同的访问区间，或物理不重叠的区间；部分重叠在准备时拒绝。显式描述可选择
+固定前缀，保留输出尾部。CPU 复用 owner 线程池，GPU 复用现有原生代码，均不新增
+scratch，也不向 TCM 复制应用 kernel。Vulkan 支持未对齐到 descriptor 边界的标量
+切片，通过对齐视图和 shader 偏移访问，不做整缓冲复制。
+系数在冷边界冻结：显式描述的 `scale_bits`、`bias_bits` 使用 f64 的16位十六进制
+位模式，与 `taichi_forge_runtime.aot.Scalar("f64", value).resource(name)["bits"]`
+相同；浮点负零、NaN/Inf 保留，整数系数必须为该类型可表示的整数。消费 runtime
+须提供 `builtin/transform` v1。尚不覆盖 strided/tensor/indexed-fused sequence；
+AOT 不自动生成此原生操作的伴随，应用可导出显式伴随。
+`PrimitiveSequence.run_length_encode()` 可导出 CPU/CUDA/Vulkan 上连续相等的
+i32/u32/i64/u64 键。固定输入前缀产生 unique keys、i32 run lengths 和 i32 count，
+未使用的输出尾部保持不变。导出复用既有头标记/起点和长度 helper，两列 compact
+共享一次原生前缀计算；同一模块的不同入口和前缀长度复用 helper 特化。空前缀仅重置
+count 首元素。计数/位置仍遵从 i32 ABI；离散键不支持自动求导。普通 JIT 宿主路径保持。
+`aot="no_native_export_route"` 与空列表表示当前没有列出的家族专用原生导出路径。
+普通 DSL kernel 遵从通用 AOT 合同，不能据此推导 host native method 的支持。
+查询不加载厂商库或初始化设备；具体导出仍校验策略、存储、版本和依赖，见
+[AOT 执行与资源合同](aot_sdk.zh.md)。
 
 `resolve_primitive_capability(name)` 要求已有 active Program。它将 method 过滤到
 当前 CPU/CUDA/Vulkan 后端，并执行调度层使用的同一组无副作用 provider probe。
@@ -202,8 +242,8 @@ method/adjoint 能力与真实调度逐渐漂移。
   metric 被明确标为不可微，在写入前拒绝 automatic AD context。应在
   Tape/FwdMode 外完成这类预处理或诊断。
 
-这些规则只说明 automatic AD。native Graph node 仍是 primal-only，native-node AOT
-serialization 仍不支持。
+这些规则只说明 automatic AD。AOT 导出不为原生操作自动生成导数；已支持的执行计划
+可以组合显式伴随及导出的 `kernel.grad`，须分别满足该操作与 kernel 的梯度合同。
 
 ### CUDA runtime 可移植性
 

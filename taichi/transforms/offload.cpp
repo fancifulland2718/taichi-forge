@@ -66,6 +66,19 @@ bool demotable_axis_load(Stmt *stmt) {
   }
   return true;
 }
+
+bool demotable_scalar_argument(Stmt *stmt) {
+  auto *arg = stmt->cast<ArgLoadStmt>();
+  // Only by-value scalar arguments from the launch context. In particular,
+  // this does not reread mutable device memory or an argpack buffer.
+  return arg && !arg->is_ptr && arg->create_load && arg->arg_depth == 0 &&
+         arg->ret_type->is<PrimitiveType>();
+}
+
+bool demotable_range_end(Stmt *stmt, Arch arch) {
+  return demotable_axis_load(stmt) ||
+         (arch == Arch::vulkan && demotable_scalar_argument(stmt));
+}
 class SquashPtrOffset : public IRVisitor {
  public:
   SquashPtrOffset() {
@@ -154,9 +167,9 @@ class Offloader {
         } else {
           if ((arch == Arch::opengl || arch == Arch::vulkan ||
                arch == Arch::gles || arch == Arch::metal) &&
-              demotable_axis_load(s->end)) {
-            // TODO: We need to update codegen for each backend gradually so
-            // let's limit it to opengl backend for now.
+              demotable_range_end(s->end, arch)) {
+            // Graphics backends can evaluate these immutable values
+            // directly in the range shader.
             auto end_copy = s->end->clone();
             offloaded->end_stmt = end_copy.get();
             offloaded->body->insert(std::move(end_copy));
@@ -464,11 +477,13 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     current_offloaded_ = stmt;
     if (auto begin = offloaded_ranges_->begin_stmts.find(stmt);
         begin != offloaded_ranges_->begin_stmts.end()) {
-      test_and_allocate(begin->second);
+      // A dynamic start is still loaded from global temporary storage, even
+      // when its value could otherwise be cloned into the task body.
+      test_and_allocate(begin->second, true);
     }
     if (auto end = offloaded_ranges_->end_stmts.find(stmt);
         end != offloaded_ranges_->end_stmts.end()) {
-      test_and_allocate(end->second);
+      test_and_allocate(end->second, stmt->end_stmt == nullptr);
     }
     if (stmt->body)
       stmt->body->accept(this);
@@ -479,7 +494,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     TI_ASSERT(current_offloaded_);
   }
 
-  void test_and_allocate(Stmt *stmt) {
+  void test_and_allocate(Stmt *stmt, bool range_bound = false) {
     if (stmt == nullptr)
       return;
     if (stmt_to_offloaded_[stmt] == current_offloaded_)
@@ -503,7 +518,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
       return;
     if ((config_.arch == Arch::opengl || config_.arch == Arch::vulkan ||
          config_.arch == Arch::gles || config_.arch == Arch::metal) &&
-        demotable_axis_load(stmt))
+        !range_bound && demotable_range_end(stmt, config_.arch))
       return;
     // Not yet allocated
     if (local_to_global_.find(top_level_ptr) == local_to_global_.end()) {

@@ -17,6 +17,7 @@ from taichi_forge.algorithms._primitive_capabilities import (
     PRIMITIVE_CAPABILITY_SCHEMA_VERSION,
     PRIMITIVE_DEPENDENCY_CLASSES,
     PrimitiveADCapability,
+    PrimitiveAOTRoute,
     PrimitiveCapability,
     PrimitiveMethodCapability,
     PrimitiveOperandCapability,
@@ -10374,7 +10375,7 @@ def experimental_unique_by_key(
     return workspace
 
 
-def experimental_run_length_encode(
+def _check_run_length_encode_request(
     keys,
     unique_keys,
     run_lengths,
@@ -10384,10 +10385,6 @@ def experimental_run_length_encode(
     method="auto",
     workspace=None,
 ):
-    """Encode consecutive equal-key runs without host synchronization."""
-
-    _warn_cuda_toolkit_reference_method(method)
-    reject_unsupported_automatic_ad("run_length_encode")
     capacity, n, ndarray_mode = _check_rle_key_output_count(
         "experimental_run_length_encode()",
         keys,
@@ -10419,6 +10416,26 @@ def experimental_run_length_encode(
         "experimental_run_length_encode()",
         (keys,),
         (unique_keys, run_lengths, run_count),
+    )
+    return capacity, n, ndarray_mode
+
+
+def experimental_run_length_encode(
+    keys,
+    unique_keys,
+    run_lengths,
+    run_count,
+    *,
+    size=None,
+    method="auto",
+    workspace=None,
+):
+    """Encode consecutive equal-key runs without host synchronization."""
+    _warn_cuda_toolkit_reference_method(method)
+    reject_unsupported_automatic_ad("run_length_encode")
+    capacity, n, ndarray_mode = _check_run_length_encode_request(
+        keys, unique_keys, run_lengths, run_count,
+        size=size, method=method, workspace=workspace,
     )
     if workspace is None:
         workspace = _rle_default_workspace(
@@ -17182,6 +17199,7 @@ __all__ = [
     "PRIMITIVE_CAPABILITY_SCHEMA_VERSION",
     "PrimitiveMethodCapability",
     "PrimitiveADCapability",
+    "PrimitiveAOTRoute",
     "PrimitiveOperandCapability",
     "PrimitiveCapability",
     "ResolvedPrimitiveMethod",

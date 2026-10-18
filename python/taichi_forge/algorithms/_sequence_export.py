@@ -5,6 +5,171 @@ from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
+def _scan(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms._primitive_sequence_scan
+        or type(call.workspace) is not algorithms.PrefixSumExecutor
+        or set(call.kwargs) != {"workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 1
+    ):
+        raise TaichiRuntimeError("AOT scan requires its concrete PrefixSumExecutor")
+    values = call.args[0]
+    desc = packed_description(values)
+    if len(desc.index_shape) != 1 or desc.element_shape:
+        raise TaichiRuntimeError("AOT scan requires one-dimensional packed scalar storage")
+    size = desc.index_shape[0]
+    dtype = str(desc.scalar_type)
+    if dtype not in {"i32", "u32", "f32", "i64", "u64", "f64"}:
+        raise TaichiRuntimeError("AOT scan requires supported native scalar types")
+    if call.workspace.sorting_length != size:
+        raise TaichiRuntimeError("AOT scan executor length must match its input")
+    arch = impl.current_cfg().arch
+    backend, capability = {
+        core.Arch.x64: ("cpu_native", "cpu_scan_available"),
+        core.Arch.arm64: ("cpu_native", "cpu_scan_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device_scan_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan_scan_available"),
+    }.get(arch, (None, None))
+    prog = impl.get_runtime().prog
+    if backend is None or not getattr(prog, capability)():
+        raise TaichiRuntimeError("AOT scan's selected native backend is unavailable")
+    if arch == core.Arch.vulkan and not prog.vulkan_scan_value_type_available(
+        algorithms._SCAN_VALUE_TYPE[values.dtype]
+    ):
+        raise TaichiRuntimeError("AOT scan dtype is unavailable on this Vulkan device")
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (values,), (size,))
+        or call.plan.method_name not in {
+            "cpu_inclusive_scan_ndarray", "cpu_inclusive_scan_dense_field",
+            "cuda_device_inclusive_scan_ndarray", "cuda_device_inclusive_scan_dense_field",
+            "vulkan_inclusive_scan_ndarray", "vulkan_inclusive_scan_dense_field",
+        }
+    ):
+        raise TaichiRuntimeError("AOT scan cannot reconstruct the selected cached strategy")
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="scan", version=1,
+        parameters=dict(size=size, dtype=dtype),
+        bindings=dict(values=context.retained_arrays.require(values)),
+    ))
+
+
+def _reduce(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_reduce
+        or type(call.workspace) is not algorithms.ReduceWorkspace
+        or set(call.kwargs) != {"op", "method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 2
+    ):
+        raise TaichiRuntimeError("AOT reduce requires its concrete ReduceWorkspace")
+    values, output = call.args
+    algorithms._check_reduce_request(*call.args, **call.kwargs)
+    source, destination = (packed_description(a) for a in call.args)
+    if (
+        len(source.index_shape) != 1 or source.element_shape
+        or len(destination.index_shape) > 1 or destination.element_shape
+    ):
+        raise TaichiRuntimeError("AOT reduce requires packed scalar storage")
+    arch = impl.current_cfg().arch
+    backend, capability = {
+        core.Arch.x64: ("cpu_native", "cpu_reduce_available"),
+        core.Arch.arm64: ("cpu_native", "cpu_reduce_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device_reduce_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan_reduce_available"),
+    }.get(arch, (None, None))
+    prog = impl.get_runtime().prog
+    if (backend is None or call.kwargs["method"] not in ("auto", backend)
+            or not getattr(prog, capability)()):
+        raise TaichiRuntimeError("AOT reduce requires its available native strategy")
+    if arch == core.Arch.vulkan and not prog.vulkan_reduce_value_type_available(
+        algorithms._REDUCE_VALUE_TYPE[values.dtype]
+    ):
+        raise TaichiRuntimeError("AOT reduce dtype is unavailable on this Vulkan device")
+    op = call.kwargs["op"]
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (values, output), (op,))
+        or call.plan.method_name not in {
+            "cpu_reduce_ndarray", "cpu_reduce_dense_field",
+            "cuda_device_reduce_ndarray", "cuda_device_reduce_dense_field",
+            "vulkan_reduce_ndarray", "vulkan_reduce_dense_field",
+        }
+    ):
+        raise TaichiRuntimeError("AOT reduce cannot reconstruct the selected cached strategy")
+    parameters = dict(size=source.index_shape[0], dtype=str(source.scalar_type), op=op)
+    if backend == "cpu_native":
+        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="reduce", version=1,
+        parameters=parameters,
+        bindings=dict(values=context.retained_arrays.require(values),
+                      output=context.retained_arrays.require(output)),
+    ))
+
+
+def _transform(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from taichi_forge_runtime.aot import Scalar
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_transform
+        or type(call.workspace) is not algorithms.TransformWorkspace
+        or set(call.kwargs) != {"scale", "bias", "method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 2
+    ):
+        raise TaichiRuntimeError("AOT transform requires its concrete TransformWorkspace")
+    src, dst = call.args
+    algorithms._check_transform_request(src, dst, call.kwargs["method"], call.workspace)
+    source, destination = (packed_description(a) for a in call.args)
+    if any(len(d.index_shape) != 1 or d.element_shape for d in (source, destination)):
+        raise TaichiRuntimeError("AOT transform requires one-dimensional packed scalar storage")
+    scale, bias = algorithms._normalize_transform_args(src.dtype, call.kwargs["scale"], call.kwargs["bias"])
+    arch = impl.current_cfg().arch
+    backend, capability = {
+        core.Arch.x64: ("cpu_native", "cpu_transform_available"),
+        core.Arch.arm64: ("cpu_native", "cpu_transform_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device_transform_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan_transform_available"),
+    }.get(arch, (None, None))
+    prog = impl.get_runtime().prog
+    if (backend is None or call.kwargs["method"] not in ("auto", backend)
+            or not getattr(prog, capability)()):
+        raise TaichiRuntimeError("AOT transform requires its available native strategy")
+    if arch == core.Arch.vulkan and not prog.vulkan_transform_value_type_available(
+        algorithms._transform_value_type(src.dtype)
+    ):
+        raise TaichiRuntimeError("AOT transform dtype is unavailable on this Vulkan device")
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (src, dst), (scale, bias))
+        or call.plan.method_name not in {
+            "cpu_transform_affine_ndarray", "cpu_transform_affine_dense_field",
+            "cuda_device_transform_affine_ndarray", "cuda_device_transform_affine_dense_field",
+            "vulkan_transform_affine_ndarray", "vulkan_transform_affine_dense_field",
+            "vulkan_transform_affine_ndarray_trusted", "vulkan_transform_affine_dense_field_trusted",
+        }
+    ):
+        raise TaichiRuntimeError("AOT transform cannot reconstruct the selected cached strategy")
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="transform", version=1,
+        parameters=dict(size=source.index_shape[0], dtype=str(source.scalar_type),
+                        scale_bits=Scalar("f64", float(scale)).resource("scale")["bits"],
+                        bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"]),
+        bindings=dict(src=context.retained_arrays.require(src),
+                      dst=context.retained_arrays.require(dst)),
+    ))
+
+
 def _sort(call, context):
     from . import _algorithms as algorithms
 
@@ -111,40 +276,43 @@ def _compact(call, context):
     )
 
 
-def _unique(call, context):
+def _consecutive(call, context):
     from taichi_forge.aot._primitive_exports import unique_helper
     from taichi_forge.graph._graph import Arg, ArgKind
     from taichi_forge_runtime.aot import Scalar
     from . import _algorithms as algorithms
 
     keyed = call.kind == "unique_by_key"
-    expected = algorithms.experimental_unique_by_key if keyed else algorithms.experimental_unique
+    rle = call.kind == "run_length_encode"
+    expected = (algorithms.experimental_run_length_encode if rle else
+                algorithms.experimental_unique_by_key if keyed else algorithms.experimental_unique)
     if (
         call.func is not expected
         or call.plan is not None
-        or set(call.kwargs) != {"mode", "size", "method", "workspace"}
-        or call.kwargs["mode"] != "consecutive"
+        or set(call.kwargs) != ({"size", "method", "workspace"} if rle else {"mode", "size", "method", "workspace"})
+        or (not rle and call.kwargs["mode"] != "consecutive")
+        or (rle and type(call.workspace) is not algorithms.RunLengthWorkspace)
     ):
-        raise TaichiRuntimeError("AOT unique requires its concrete consecutive operation")
+        raise TaichiRuntimeError("AOT consecutive encoding requires its concrete public operation")
     _compact_method(call.kwargs["method"])
-    if keyed:
+    if rle:
+        keys, output, lengths, count = call.args
+        capacity, size, ndarray_mode = algorithms._check_run_length_encode_request(
+            *call.args, **call.kwargs)
+    elif keyed:
         keys, values, output, unique_values, count = call.args
     else:
         keys, output, count = call.args
-    capacity, size, ndarray_mode = algorithms._check_rle_key_output_count(
-        "AOT unique",
-        keys,
-        output,
-        count,
-        call.kwargs["method"],
-        call.workspace,
-        call.kwargs["size"],
-    )
-    inputs, outputs = (keys,), (output, count)
-    if keyed:
-        algorithms._check_rle_payload("AOT unique", keys, values, unique_values, ndarray_mode=ndarray_mode)
-        inputs, outputs = (keys, values), (output, unique_values, count)
-    algorithms._check_rle_storage_aliases("AOT unique", inputs, outputs)
+    if not rle:
+        capacity, size, ndarray_mode = algorithms._check_rle_key_output_count(
+            "AOT unique", keys, output, count, call.kwargs["method"],
+            call.workspace, call.kwargs["size"],
+        )
+        inputs, outputs = (keys,), (output, count)
+        if keyed:
+            algorithms._check_rle_payload("AOT unique", keys, values, unique_values, ndarray_mode=ndarray_mode)
+            inputs, outputs = (keys, values), (output, unique_values, count)
+        algorithms._check_rle_storage_aliases("AOT unique", inputs, outputs)
     count_name = context.retained_arrays.require(count)
     if size == 0:
         context.operations.append(dict(kind="fill32", destination=count_name, value=0, size_bytes=4))
@@ -158,25 +326,54 @@ def _unique(call, context):
     # One complete head overwrite and one native prefix shared by all columns.
     # Scratch is reconstructed, not sampled from the producer workspace.
     flags = context._resource(object(), dict(kind="ndarray", dtype="i32", shape=[capacity]))
+    if rle:
+        starts, run_starts = (
+            context._resource(object(), dict(kind="ndarray", dtype="i32", shape=[capacity]))
+            for _ in range(2)
+        )
+        columns.append(dict(values=starts, output=run_starts))
     size_name = context._resource(
         object(), {k: v for k, v in Scalar("i32", size).resource("size").items() if k != "name"}
     )
     capacity_name = context._resource(
         object(), {k: v for k, v in Scalar("i32", capacity).resource("capacity").items() if k != "name"}
     )
-    helper, exemplar = unique_helper(str(keys.dtype), False)
+    helper, exemplar = unique_helper(str(keys.dtype), rle)
     kernel = helper._primal
-    specialization = kernel.ensure_compiled(exemplar["keys"], exemplar["flags"], size, capacity, _for_aot=True)
+    specialization = kernel.ensure_compiled(
+        exemplar["keys"], exemplar["flags"],
+        *([exemplar["starts"]] if rle else []), size, capacity, _for_aot=True,
+    )
     context.kernel(
         kernel.compiled_kernels[specialization],
         (
             Arg(ArgKind.NDARRAY, key_name, keys.dtype, ndim=1),
             Arg(ArgKind.NDARRAY, flags, algorithms.i32, ndim=1),
+            *([Arg(ArgKind.NDARRAY, starts, algorithms.i32, ndim=1)] if rle else []),
             Arg(ArgKind.SCALAR, size_name, algorithms.i32),
             Arg(ArgKind.SCALAR, capacity_name, algorithms.i32),
         ),
     )
     context.operations.append(dict(kind="compact", flags=flags, count=count_name, columns=columns))
+    if rle:
+        from taichi_forge._kernels import rle_finalize_lengths_ndarray
+
+        # Scalar field counts and vector counts share the same one-element
+        # helper ABI. The view retains its original owner and writes no tail.
+        count_view = context._resource(object(), dict(
+            kind="ndarray_view", array=count_name, offset=0, shape=[1]))
+        kernel = rle_finalize_lengths_ndarray._primal
+        specialization = kernel.ensure_compiled(
+            exemplar["flags"], exemplar["flags"], exemplar["flags"],
+            size, capacity, _for_aot=True,
+        )
+        context.kernel(kernel.compiled_kernels[specialization], (
+            Arg(ArgKind.NDARRAY, run_starts, algorithms.i32, ndim=1),
+            Arg(ArgKind.NDARRAY, context.retained_arrays.require(lengths), algorithms.i32, ndim=1),
+            Arg(ArgKind.NDARRAY, count_view, algorithms.i32, ndim=1),
+            Arg(ArgKind.SCALAR, size_name, algorithms.i32),
+            Arg(ArgKind.SCALAR, capacity_name, algorithms.i32),
+        ))
 
 
 def export_sequence(sequence, context):
@@ -184,7 +381,12 @@ def export_sequence(sequence, context):
 
     if type(sequence) is not PrimitiveSequence or sequence._fused_plan is not None:
         raise TaichiRuntimeError("AOT sequence requires its concrete selected native reconstruction")
-    exporters = {"sort": _sort, "sort_by_key": _sort, "compact": _compact, "unique": _unique, "unique_by_key": _unique}
+    exporters = {
+        "sort": _sort, "sort_by_key": _sort, "scan": _scan, "reduce": _reduce,
+        "transform": _transform,
+        "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,
+        "run_length_encode": _consecutive,
+    }
     for call in tuple(sequence._calls):
         exporter = exporters.get(call.kind)
         if exporter is None:

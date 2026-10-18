@@ -5392,30 +5392,29 @@ class TaskCodegen : public IRVisitor {
       task_attribs_.advisory_total_num_threads = num_elems;
     } else {
       spirv::Value end_expr_value;
-      if (stmt->end_stmt) {
-        // Range from args
-        TI_ASSERT(stmt->const_begin);
+      // The start and end are independent: a launch-argument/shape end can
+      // accompany a dynamic start that was snapshotted by a serial task.
+      if (!stmt->const_begin) {
+        spirv::Value begin_idx = ir_->make_value(
+            spv::OpShiftRightArithmetic, ir_->i32_type(),
+            ir_->int_immediate_number(ir_->i32_type(), stmt->begin_offset),
+            ir_->int_immediate_number(ir_->i32_type(), 2));
+        begin_expr_value = ir_->load_variable(
+            ir_->struct_array_access(
+                ir_->i32_type(),
+                get_buffer_value(BufferType::GlobalTmps, PrimitiveType::i32),
+                begin_idx),
+            ir_->i32_type());
+      } else {
         begin_expr_value = ir_->int_immediate_number(ir_->i32_type(),
                                                      stmt->begin_value, false);
+      }
+      if (stmt->end_stmt) {
+        // Range from args
         gen_array_range(stmt->end_stmt);
         end_expr_value = ir_->query_value(stmt->end_stmt->raw_name());
       } else {
         // Range from gtmp / constant
-        if (!stmt->const_begin) {
-          spirv::Value begin_idx = ir_->make_value(
-              spv::OpShiftRightArithmetic, ir_->i32_type(),
-              ir_->int_immediate_number(ir_->i32_type(), stmt->begin_offset),
-              ir_->int_immediate_number(ir_->i32_type(), 2));
-          begin_expr_value = ir_->load_variable(
-              ir_->struct_array_access(
-                  ir_->i32_type(),
-                  get_buffer_value(BufferType::GlobalTmps, PrimitiveType::i32),
-                  begin_idx),
-              ir_->i32_type());
-        } else {
-          begin_expr_value = ir_->int_immediate_number(
-              ir_->i32_type(), stmt->begin_value, false);  // Named Constant
-        }
         if (!stmt->const_end) {
           spirv::Value end_idx = ir_->make_value(
               spv::OpShiftRightArithmetic, ir_->i32_type(),

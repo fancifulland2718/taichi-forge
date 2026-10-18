@@ -1,5 +1,9 @@
 #include "taichi/program/program.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_scan.h"
+#include "taichi/runtime/native_reduce.h"
+#include "taichi/runtime/native_transform.h"
+#include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
 
@@ -700,8 +704,14 @@ static const uint32_t kScanF64AddStridedReverseSpv[] =
 static const uint32_t kCompactI32FlagsSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_flags.comp.spv.h"
     ;
+static const uint32_t kCompactI32FlagsOffsetSpv[] =
+#include "taichi/program/vulkan_sort_shaders/compact_i32_flags_offset.comp.spv.h"
+    ;
 static const uint32_t kCompactI32ScatterSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_scatter.comp.spv.h"
+    ;
+static const uint32_t kCompactI32ScatterOffsetSpv[] =
+#include "taichi/program/vulkan_sort_shaders/compact_i32_scatter_offset.comp.spv.h"
     ;
 static const uint32_t kCompactI32ScatterPacketSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_scatter_packet.comp.spv.h"
@@ -4194,6 +4204,7 @@ struct VulkanReduceCache {
   size_t cached_bytes{0};
   DeviceAllocation partial{kDeviceNullAllocation};
   DeviceAllocation params{kDeviceNullAllocation};
+  DeviceAllocation aligned_output{kDeviceNullAllocation};
   std::array<VulkanReducePipelineSet, 6> reduce_pipelines;
   std::unique_ptr<Pipeline> reduce_i32_sum_atomic;
   VulkanResourceSetReplayRing<2> reduce_i32_sum_atomic_bindings;
@@ -4224,8 +4235,12 @@ struct VulkanReduceCache {
     if (device && params != kDeviceNullAllocation) {
       device->dealloc_memory(params);
     }
+    if (device && aligned_output != kDeviceNullAllocation) {
+      device->dealloc_memory(aligned_output);
+    }
     partial = kDeviceNullAllocation;
     params = kDeviceNullAllocation;
+    aligned_output = kDeviceNullAllocation;
     partial_capacity = 0;
     params_capacity = 0;
     cached_bytes = 0;
@@ -4375,7 +4390,8 @@ struct VulkanReduceCache {
   }
 
   size_t allocated_bytes() const {
-    return partial_capacity + params_capacity;
+    return partial_capacity + params_capacity +
+           (aligned_output == kDeviceNullAllocation ? 0 : sizeof(uint64_t));
   }
 
   void clear_partial_alloc() {
@@ -8249,6 +8265,54 @@ size_t enqueue_vulkan_i32_scan(Program *program,
 
 namespace gfx {
 namespace {
+class FixedVulkanScan final : public NativeOperation {
+ public:
+  FixedVulkanScan(Device &device, const ScanOperation &op)
+      : device_(device), values_(op.values.pointer) {
+    validate_native_shader_storage(Arch::vulkan, values_);
+    resolve_native_storage_range(Arch::vulkan, values_, op.values.bytes);
+    if (op.size > std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument("Scan exceeds its Vulkan uint32 shader ABI");
+    const auto &caps = device.get_caps();
+    if (((op.value_type == 3 || op.value_type == 4) &&
+         !caps.get(DeviceCapability::spirv_has_int64)) ||
+        (op.value_type == 5 &&
+         !caps.get(DeviceCapability::spirv_has_float64)))
+      throw std::invalid_argument("Vulkan scan dtype is unavailable on this device");
+    scan_.ensure_device(&device);
+    for (auto *ring :
+         {&scan_.scan_small_bindings, &scan_.scan_small_strided_bindings,
+          &scan_.scan_block_bindings, &scan_.scan_block_strided_bindings_ring,
+          &scan_.scan_add_bindings, &scan_.scan_add_strided_bindings_ring})
+      ring->exact_capacity = true;
+    plan_ = prepare_vulkan_scan(nullptr, scan_, values_, op.size, op.value_type,
+                                false, 0, 0, values_.offset);
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return scan_.allocated_bytes();
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    record_vulkan_scan(device, commands, plan_, false);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{values_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr values_;
+  VulkanScanCache scan_;
+  VulkanScanDispatchPlan plan_;
+};
+
 class FixedVulkanCompact final : public NativeOperation {
  public:
   FixedVulkanCompact(Device &device, CompactOperation operation)
@@ -8274,21 +8338,50 @@ class FixedVulkanCompact final : public NativeOperation {
     TI_ERROR_IF(status != RhiResult::success,
                 "Failed to allocate fixed compact prefix");
     prefix_ = std::move(prefix);
-    flags_pipeline_ = create_pipeline(&device_, kCompactI32FlagsSpv,
-                                      "vulkan_compact_i32_flags");
-    scatter_pipeline_ = create_pipeline(&device_, kCompactI32ScatterSpv,
-                                        "vulkan_compact_i32_scatter");
+    const auto limits = device_.get_storage_buffer_binding_limits();
+    const auto alignment = limits.offset_alignment;
+    offset_views_ = operation_.columns.size() > 1 ||
+                    operation_.flags.offset % alignment ||
+                    operation_.count.offset % alignment;
+    for (const auto &column : operation_.columns)
+      offset_views_ |= column.values.offset % alignment ||
+                       column.output.offset % alignment;
+    flags_pipeline_ = offset_views_
+        ? create_pipeline(&device_, kCompactI32FlagsOffsetSpv, "vulkan_compact_flags_offset")
+        : create_pipeline(&device_, kCompactI32FlagsSpv, "vulkan_compact_i32_flags");
+    scatter_pipeline_ = offset_views_
+        ? create_pipeline(&device_, kCompactI32ScatterOffsetSpv, "vulkan_compact_scatter_offset")
+        : create_pipeline(&device_, kCompactI32ScatterSpv, "vulkan_compact_i32_scatter");
+    // Bind an aligned enclosing range and address only the requested words.
+    // No input copy, output-tail copy, or extra device allocation is needed.
+    auto bind = [&](ShaderResourceSet *set, int index, DevicePtr pointer, size_t bytes) {
+      const auto lead = pointer.offset % alignment;
+      TI_ERROR_IF(lead % sizeof(uint32_t) || lead > limits.max_range ||
+                      bytes > limits.max_range - lead ||
+                      lead / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max() ||
+                      bytes / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max() - lead / sizeof(uint32_t),
+                  "Vulkan compact view exceeds its physical descriptor or uint32 address range");
+      pointer.offset -= lead;
+      set->rw_buffer(index, pointer, lead + bytes);
+      return static_cast<uint32_t>(lead / sizeof(uint32_t));
+    };
     flags_bindings_.reset(device_.create_resource_set());
-    flags_bindings_->rw_buffer(0, operation_.flags, prefix_bytes);
+    flags_push_ = {static_cast<uint32_t>(operation_.size),
+                   bind(flags_bindings_.get(), 0, operation_.flags, prefix_bytes)};
     flags_bindings_->rw_buffer(1, prefix_->get_ptr(0), prefix_bytes);
     for (const auto &column : operation_.columns) {
       auto bindings = device_.create_resource_set_unique();
       const auto value_bytes = operation_.size * column.item_bytes;
-      bindings->rw_buffer(0, column.values, value_bytes);
-      bindings->rw_buffer(1, operation_.flags, prefix_bytes);
+      std::array<uint32_t, 7> push{
+          static_cast<uint32_t>(operation_.size),
+          static_cast<uint32_t>(column.item_bytes / sizeof(uint32_t)),
+          bind(bindings.get(), 0, column.values, value_bytes),
+          bind(bindings.get(), 1, operation_.flags, prefix_bytes),
+          bind(bindings.get(), 3, column.output, value_bytes),
+          bind(bindings.get(), 4, operation_.count, sizeof(std::int32_t)),
+          scatter_bindings_.empty() ? 1u : 0u};
       bindings->rw_buffer(2, prefix_->get_ptr(0), prefix_bytes);
-      bindings->rw_buffer(3, column.output, value_bytes);
-      bindings->rw_buffer(4, operation_.count, sizeof(std::int32_t));
+      scatter_push_.push_back(push);
       scatter_bindings_.push_back(std::move(bindings));
     }
     scan_.ensure_device(&device_);
@@ -8309,8 +8402,12 @@ class FixedVulkanCompact final : public NativeOperation {
     }
     const auto flag_groups = static_cast<std::uint32_t>(
         (operation_.size + kBlockSize - 1) / kBlockSize);
-    dispatch_pipeline(commands, flags_pipeline_.get(), flags_bindings_.get(),
-                      flag_groups, 1, 1, nullptr);
+    if (offset_views_)
+      dispatch_pipeline_with_push_constants(commands, flags_pipeline_.get(),
+          flags_bindings_.get(), flags_push_.data(), sizeof(flags_push_), flag_groups, 1, 1);
+    else
+      dispatch_pipeline(commands, flags_pipeline_.get(), flags_bindings_.get(),
+                        flag_groups, 1, 1, nullptr);
     commands->buffer_barrier(*prefix_);
     record_vulkan_i32_scan(device, commands, scan_plan_, false);
     for (std::size_t c = 0; c < operation_.columns.size(); ++c) {
@@ -8319,8 +8416,13 @@ class FixedVulkanCompact final : public NativeOperation {
           operation_.size * (column.item_bytes / sizeof(std::uint32_t));
       const auto word_groups =
           static_cast<std::uint32_t>((words + kBlockSize - 1) / kBlockSize);
-      dispatch_pipeline(commands, scatter_pipeline_.get(),
-                        scatter_bindings_[c].get(), word_groups, 1, 1, nullptr);
+      if (offset_views_)
+        dispatch_pipeline_with_push_constants(commands, scatter_pipeline_.get(),
+            scatter_bindings_[c].get(), scatter_push_[c].data(),
+            sizeof(scatter_push_[c]), word_groups, 1, 1);
+      else
+        dispatch_pipeline(commands, scatter_pipeline_.get(),
+                          scatter_bindings_[c].get(), word_groups, 1, 1, nullptr);
       commands->buffer_barrier(column.output);
     }
     commands->buffer_barrier(operation_.count);
@@ -8335,8 +8437,17 @@ class FixedVulkanCompact final : public NativeOperation {
   std::unique_ptr<Pipeline> flags_pipeline_, scatter_pipeline_;
   std::unique_ptr<ShaderResourceSet> flags_bindings_;
   std::vector<std::unique_ptr<ShaderResourceSet>> scatter_bindings_;
+  bool offset_views_{false};
+  std::array<uint32_t, 2> flags_push_{};
+  std::vector<std::array<uint32_t, 7>> scatter_push_;
 };
 }  // namespace
+
+std::shared_ptr<NativeOperation> prepare_vulkan_scan_operation(
+    Device &device,
+    const ScanOperation &operation) {
+  return std::make_shared<FixedVulkanScan>(device, operation);
+}
 
 std::shared_ptr<NativeOperation> prepare_vulkan_compact_operation(
     Device &device,
@@ -9680,7 +9791,15 @@ void check_vulkan_grouped_reduce_strided_keys_request(Ndarray *keys,
 }
 
 
-std::size_t vulkan_reduce_storage_impl(Program *program,
+struct VulkanPreparedReduce {
+  std::function<void(Device *, CommandList *)> record;
+  VulkanCommandReplayKey key;
+  bool atomic{false};
+};
+
+VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
+                                       Device *device,
+                                       VulkanReduceCache &cache,
                                        DeviceAllocation values_alloc,
                                        DeviceAllocation output_alloc,
                                        std::size_t n,
@@ -9694,15 +9813,17 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
                                        std::size_t output_stride,
                                        bool member_source,
                                        bool member_destination) {
-  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
-              "Vulkan native reduce is only available on Vulkan.");
   TI_ERROR_IF(values_alloc.device == nullptr || output_alloc.device == nullptr,
               "Vulkan native reduce received null storage.");
   TI_ERROR_IF(n == 0,
               "Vulkan native reduce expects at least one input item.");
   TI_ERROR_IF(value_type < 0 || value_type > 5,
               "Vulkan native reduce received an unsupported value type.");
-  TI_ERROR_IF(!program->vulkan_reduce_value_type_available(value_type),
+  const auto &caps = device->get_caps();
+  TI_ERROR_IF(((value_type == 3 || value_type == 4) &&
+                !caps.get(DeviceCapability::spirv_has_int64)) ||
+                  (value_type == 5 &&
+                   !caps.get(DeviceCapability::spirv_has_float64)),
               "Vulkan native reduce dtype is not supported by this device.");
   const size_t element_size = vulkan_transform_value_size(value_type);
   TI_ERROR_IF(op < 0 || op > 2,
@@ -9716,6 +9837,15 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     TI_ERROR_IF(output_element_size != element_size,
                 "Vulkan native reduce output dtype does not match value type.");
     output_stride = element_size;
+  }
+  const auto alignment = device->get_storage_buffer_binding_limits().offset_alignment;
+  if (!member_source && offset % alignment != 0) {
+    // The existing strided shader addresses from an aligned descriptor base.
+    // Preserve the packed stride and the same reduction tree, without copying
+    // the entire input merely to satisfy descriptor alignment.
+    TI_ERROR_IF(offset / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max(),
+                "Vulkan reduce source offset exceeds its uint32 shader ABI.");
+    member_source = true;
   }
   auto check_strided = [&](const char *role, std::size_t role_offset,
                            std::size_t role_stride) {
@@ -9740,10 +9870,30 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     check_strided("destination", output_offset, output_stride);
   }
 
-  Device *device = program->get_compute_device();
-  TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
-  auto cache_lease = get_reduce_cache(program, device);
-  auto &cache = *cache_lease;
+  cache.ensure_device(device);
+  const auto destination = output_alloc.get_ptr(output_offset);
+  const bool stage_output = output_offset % alignment != 0;
+  if (stage_output) {
+    if (cache.aligned_output == kDeviceNullAllocation)
+      cache.aligned_output = cache.alloc_storage(sizeof(uint64_t));
+    output_alloc = cache.aligned_output;
+    output_offset = 0;
+  }
+  auto finish = [&](VulkanPreparedReduce result) {
+    if (stage_output) {
+      result.key.push(destination.alloc_id);
+      result.key.push(vulkan_allocation_generation(destination));
+      result.key.push(destination.offset);
+      result.record = [record = std::move(result.record), destination,
+                       source = output_alloc.get_ptr(), element_size](
+                          Device *dev, CommandList *commands) {
+        record(dev, commands);
+        commands->buffer_copy(destination, source, element_size);
+        commands->buffer_barrier(destination, element_size);
+      };
+    }
+    return result;
+  };
   const bool use_i32_sum_atomic =
       value_type == 0 && op == 0 && !member_source && !member_destination &&
       get_environ_config("TI_VULKAN_REDUCE_I32_SUM_ATOMIC", 1) != 0;
@@ -9764,7 +9914,7 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     constexpr size_t kMaxGroups = 65535;
     const uint32_t groups = static_cast<uint32_t>(
         std::min(kMaxGroups, (n + items_per_group - 1) / items_per_group));
-    const bool profiler_scopes = program->profiler != nullptr;
+    const bool profiler_scopes = program && program->profiler != nullptr;
     auto record_reduce_atomic =
         [values_alloc, output_alloc, offset, output_offset, value_bytes,
          output_bytes, pipeline, bindings, groups, profiler_scopes](
@@ -9791,12 +9941,7 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     command_key.push(groups);
     command_key.push_ptr(pipeline);
     command_key.push_ptr(bindings);
-    if (!cache.reduce_i32_sum_atomic_command_replay.submit_or_record(
-            program, device, command_key, profiler_scopes,
-            record_reduce_atomic)) {
-      program->enqueue_compute_op_lambda(record_reduce_atomic, {});
-    }
-    return cache.allocated_bytes();
+    return finish({record_reduce_atomic, command_key, true});
   }
   const int single_shared_max_n_config =
       get_environ_config("TI_VULKAN_REDUCE_SINGLE_SHARED_MAX_N", 4096);
@@ -9819,6 +9964,8 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     partial_bytes = num_chunks * element_size;
     if (cache.has_workspace_allocs() &&
         cache.needs_partial_realloc(partial_bytes)) {
+      TI_ERROR_IF(!program,
+                  "Fixed Vulkan reduce storage cannot grow after preparation");
       program->synchronize();
     }
     cache.ensure_partial(partial_bytes);
@@ -9874,7 +10021,7 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
                                      output_alloc, output_offset, output_bytes)
             .bindings;
   }
-  const bool profiler_scopes = program->profiler != nullptr;
+  const bool profiler_scopes = program && program->profiler != nullptr;
   std::array<uint32_t, 3> param_words{
       static_cast<uint32_t>(n),
       static_cast<uint32_t>(offset / sizeof(uint32_t)),
@@ -9960,11 +10107,83 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
   command_key.push_ptr(single_bindings);
   command_key.push_ptr(private_bindings);
   command_key.push_ptr(final_bindings);
-  if (!cache.reduce_tree_command_replay.submit_or_record(
-          program, device, command_key, profiler_scopes, record_reduce_tree)) {
-    program->enqueue_compute_op_lambda(record_reduce_tree, {});
+  return finish({record_reduce_tree, command_key, false});
+}
+
+class FixedVulkanReduce final : public NativeOperation {
+ public:
+  FixedVulkanReduce(Device &device, const ReduceOperation &op)
+      : device_(device), values_(op.values.pointer), output_(op.output.pointer) {
+    if (op.size > std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument("Reduce exceeds its Vulkan uint32 shader ABI");
+    for (const auto *array : {&op.values, &op.output}) {
+      validate_native_shader_storage(Arch::vulkan, array->pointer);
+      resolve_native_storage_range(Arch::vulkan, array->pointer, array->bytes);
+    }
+    const std::size_t width = op.value_type < 3 ? 4 : 8;
+    validate_native_read_write_disjoint(
+        {resolve_native_storage_range(Arch::vulkan, values_, op.size * width)},
+        {resolve_native_storage_range(Arch::vulkan, output_, width)});
+    cache_.reduce_i32_sum_atomic_bindings.ring.exact_capacity = true;
+    cache_.reduce_single_bindings.ring.exact_capacity = true;
+    cache_.reduce_single_strided_bindings.ring.exact_capacity = true;
+    cache_.reduce_private_bindings.ring.exact_capacity = true;
+    cache_.reduce_private_strided_bindings.ring.exact_capacity = true;
+    cache_.reduce_final_bindings.ring.exact_capacity = true;
+    prepared_ = prepare_vulkan_reduce(
+        nullptr, &device, cache_, values_, output_, op.size, width, width,
+        op.value_type, op.op, values_.offset, width, output_.offset, width,
+        false, false);
   }
-  return cache.cached_bytes;
+  Arch arch() const override { return Arch::vulkan; }
+  Device &device() const override { return device_; }
+  std::size_t workspace_bytes() const override { return cache_.allocated_bytes(); }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{values_, output_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr values_, output_;
+  VulkanReduceCache cache_;
+  VulkanPreparedReduce prepared_;
+};
+
+std::size_t vulkan_reduce_storage_impl(Program *program,
+                                       DeviceAllocation values_alloc,
+                                       DeviceAllocation output_alloc,
+                                       std::size_t n,
+                                       std::size_t values_element_size,
+                                       std::size_t output_element_size,
+                                       int value_type,
+                                       int op,
+                                       std::size_t offset,
+                                       std::size_t stride,
+                                       std::size_t output_offset,
+                                       std::size_t output_stride,
+                                       bool member_source,
+                                       bool member_destination) {
+  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+              "Vulkan native reduce is only available on Vulkan.");
+  Device *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
+  auto cache_lease = get_reduce_cache(program, device);
+  auto &cache = *cache_lease;
+  auto prepared = prepare_vulkan_reduce(
+      program, device, cache, values_alloc, output_alloc, n, values_element_size,
+      output_element_size, value_type, op, offset, stride, output_offset,
+      output_stride, member_source, member_destination);
+  auto &replay = prepared.atomic ? cache.reduce_i32_sum_atomic_command_replay
+                                 : cache.reduce_tree_command_replay;
+  if (!replay.submit_or_record(program, device, prepared.key,
+                               program->profiler != nullptr, prepared.record))
+    program->enqueue_compute_op_lambda(prepared.record, {});
+  return cache.allocated_bytes();
 }
 
 std::size_t vulkan_reduce_ndarray_impl(Program *program,
@@ -10327,8 +10546,16 @@ std::size_t vulkan_metric_reduce_ndarray_impl(Program *program,
       values_stride, other_offset, other_stride);
 }
 
-std::size_t vulkan_transform_affine_storage_impl(
+struct VulkanPreparedTransform {
+  std::function<void(Device *, CommandList *)> record;
+  VulkanCommandReplayKey key;
+  bool dense{false};
+};
+
+VulkanPreparedTransform prepare_vulkan_transform(
     Program *program,
+    Device *device,
+    VulkanTransformCache &cache,
     DeviceAllocation src_alloc,
     DeviceAllocation dst_alloc,
     std::size_t n,
@@ -10346,8 +10573,6 @@ std::size_t vulkan_transform_affine_storage_impl(
     bool member_destination,
     bool trusted = false) {
   if (!trusted) {
-    TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
-                "Vulkan native transform is only available on Vulkan.");
     TI_ERROR_IF(src_alloc.device == nullptr || dst_alloc.device == nullptr,
                 "Vulkan native transform received null storage.");
     TI_ERROR_IF(lane_count <= 0,
@@ -10394,7 +10619,12 @@ std::size_t vulkan_transform_affine_storage_impl(
     check_strided("destination", dst_offset, dst_stride);
   }
   if (!trusted) {
-    TI_ERROR_IF(!program->vulkan_transform_value_type_available(value_type),
+    const auto &caps = device->get_caps();
+    TI_ERROR_IF(value_type < 0 || value_type > 5 ||
+                    ((value_type == 3 || value_type == 4) &&
+                     !caps.get(DeviceCapability::spirv_has_int64)) ||
+                    (value_type == 5 &&
+                     !caps.get(DeviceCapability::spirv_has_float64)),
                 "Vulkan native transform value type is not supported by this "
                 "device.");
     TI_ERROR_IF(
@@ -10409,14 +10639,20 @@ std::size_t vulkan_transform_affine_storage_impl(
                 "Vulkan native transform scalar item count exceeds UINT32_MAX.");
   }
   if (n == 0) {
-    return 0;
+    return {};
   }
-  Device *device = program->get_compute_device();
-  if (!trusted) {
-    TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
-  }
-  auto cache_lease = get_transform_cache(program, device);
-  auto &cache = *cache_lease;
+
+  // Scalars in a root allocation need not start on an SSBO descriptor
+  // boundary. Use the existing strided shader with an aligned enclosing view.
+  const auto limits = device->get_storage_buffer_binding_limits();
+  const auto alignment = limits.offset_alignment;
+  TI_ERROR_IF(!alignment, "Vulkan transform requires storage buffer alignment");
+  member_source = member_source || src_offset % alignment != 0;
+  member_destination = member_destination || dst_offset % alignment != 0;
+  const auto src_binding_offset = (src_offset / alignment) * alignment;
+  const auto dst_binding_offset = (dst_offset / alignment) * alignment;
+  const auto src_shader_offset = src_offset - src_binding_offset;
+  const auto dst_shader_offset = dst_offset - dst_binding_offset;
 
   const bool use_dense_i32_affine =
       (value_type == 0 || value_type == 2) && lane_count == 1 &&
@@ -10442,7 +10678,7 @@ std::size_t vulkan_transform_affine_storage_impl(
         static_cast<uint32_t>(push_words.size() * sizeof(uint32_t));
     const uint32_t groups =
         static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
-    const bool profiler_scopes = program->profiler != nullptr;
+    const bool profiler_scopes = program && program->profiler != nullptr;
     cache.dense_i32_affine_replay.rw_buffer(bindings, 0, src_alloc,
                                             src_offset, src_bytes);
     cache.dense_i32_affine_replay.rw_buffer(bindings, 1, dst_alloc,
@@ -10474,12 +10710,7 @@ std::size_t vulkan_transform_affine_storage_impl(
     }
     command_key.push_ptr(pipeline);
     command_key.push_ptr(bindings);
-    if (!cache.dense_i32_affine_command_replay.submit_or_record(
-            program, device, command_key, profiler_scopes,
-            record_transform_dense)) {
-      program->enqueue_compute_op_lambda(record_transform_dense, {});
-    }
-    return cache.cached_bytes;
+    return {record_transform_dense, command_key, true};
   }
 
   std::array<uint32_t, 10> param_words{0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
@@ -10516,12 +10747,12 @@ std::size_t vulkan_transform_affine_storage_impl(
   const uint32_t packed_stride_words =
       static_cast<uint32_t>(payload_size / sizeof(uint32_t));
   param_words[5] =
-      member_source ? static_cast<uint32_t>(src_offset / sizeof(uint32_t)) : 0;
+      member_source ? static_cast<uint32_t>(src_shader_offset / sizeof(uint32_t)) : 0;
   param_words[6] = member_source
                        ? static_cast<uint32_t>(src_stride / sizeof(uint32_t))
                        : packed_stride_words;
   param_words[7] = member_destination
-                       ? static_cast<uint32_t>(dst_offset / sizeof(uint32_t))
+                       ? static_cast<uint32_t>(dst_shader_offset / sizeof(uint32_t))
                        : 0;
   param_words[8] = member_destination
                        ? static_cast<uint32_t>(dst_stride / sizeof(uint32_t))
@@ -10530,23 +10761,25 @@ std::size_t vulkan_transform_affine_storage_impl(
 
   ShaderResourceSet *bindings = cache.cached_affine_resource_set();
   const bool has_float64 =
-      program->get_device_caps().get(DeviceCapability::spirv_has_float64) != 0;
+      device->get_caps().get(DeviceCapability::spirv_has_float64) != 0;
   Pipeline *pipeline = cache.pipeline_for(device, value_type, has_float64);
   const size_t src_bytes =
-      member_source ? strided_binding_bytes(n, payload_size, src_offset,
+      member_source ? strided_binding_bytes(n, payload_size, src_shader_offset,
                                             src_stride)
                     : scalar_count * value_size;
-  const size_t src_binding_offset = member_source ? 0 : src_offset;
   const size_t dst_bytes =
-      member_destination ? strided_binding_bytes(n, payload_size, dst_offset,
+      member_destination ? strided_binding_bytes(n, payload_size, dst_shader_offset,
                                                  dst_stride)
                          : scalar_count * value_size;
-  const size_t dst_binding_offset = member_destination ? 0 : dst_offset;
+  TI_ERROR_IF(src_bytes > limits.max_range || dst_bytes > limits.max_range ||
+                  src_bytes / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max() ||
+                  dst_bytes / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max(),
+              "Vulkan transform exceeds descriptor range or shader address ABI");
   const uint32_t push_bytes =
       static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
   const uint32_t groups =
       static_cast<uint32_t>((scalar_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = program->profiler != nullptr;
+  const bool profiler_scopes = program && program->profiler != nullptr;
   cache.affine_replay.rw_buffer(bindings, 0, src_alloc, src_binding_offset,
                                 src_bytes);
   cache.affine_replay.rw_buffer(bindings, 1, dst_alloc, dst_binding_offset,
@@ -10582,11 +10815,87 @@ std::size_t vulkan_transform_affine_storage_impl(
   }
   command_key.push_ptr(pipeline);
   command_key.push_ptr(bindings);
-  if (!cache.affine_command_replay.submit_or_record(
-          program, device, command_key, profiler_scopes,
-          record_transform_affine)) {
-    program->enqueue_compute_op_lambda(record_transform_affine, {});
+  return {record_transform_affine, command_key, false};
+}
+
+class FixedVulkanTransform final : public NativeOperation {
+ public:
+  FixedVulkanTransform(Device &device, const TransformOperation &op)
+      : device_(device), src_(op.src.pointer), dst_(op.dst.pointer) {
+    if (op.size > std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument("Transform exceeds its Vulkan uint32 shader ABI");
+    for (const auto *array : {&op.src, &op.dst}) {
+      validate_native_shader_storage(Arch::vulkan, array->pointer);
+      resolve_native_storage_range(Arch::vulkan, array->pointer, array->bytes);
+    }
+    const std::size_t width = op.value_type < 3 ? 4 : 8;
+    const auto bytes = op.size * width;
+    if (bytes > device.get_storage_buffer_binding_limits().max_range)
+      throw std::invalid_argument("Transform exceeds Vulkan descriptor range");
+    validate_native_disjoint_writes(
+        {resolve_native_storage_range(Arch::vulkan, src_, bytes)},
+        {{resolve_native_storage_range(Arch::vulkan, dst_, bytes), 0}});
+    cache_.ensure_pipelines(&device);
+    prepared_ = prepare_vulkan_transform(
+        nullptr, &device, cache_, src_, dst_, op.size, width, width, op.value_type,
+        1, src_.offset, width, dst_.offset, width, op.scale, op.bias, false, false);
   }
+  Arch arch() const override { return Arch::vulkan; }
+  Device &device() const override { return device_; }
+  std::size_t workspace_bytes() const override { return cache_.allocated_bytes(); }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{src_, dst_};
+    return result;
+  }
+ private:
+  Device &device_;
+  DevicePtr src_, dst_;
+  VulkanTransformCache cache_;
+  VulkanPreparedTransform prepared_;
+};
+
+std::size_t vulkan_transform_affine_storage_impl(
+    Program *program,
+    DeviceAllocation src_alloc,
+    DeviceAllocation dst_alloc,
+    std::size_t n,
+    std::size_t src_element_size,
+    std::size_t dst_element_size,
+    int value_type,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias,
+    bool member_source,
+    bool member_destination,
+    bool trusted = false) {
+  if (!trusted) {
+    TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+                "Vulkan native transform is only available on Vulkan.");
+  }
+  Device *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
+  auto cache_lease = get_transform_cache(program, device);
+  auto &cache = *cache_lease;
+  auto prepared = prepare_vulkan_transform(
+      program, device, cache, src_alloc, dst_alloc, n, src_element_size,
+      dst_element_size, value_type, lane_count, src_offset, src_stride,
+      dst_offset, dst_stride, scale, bias, member_source, member_destination,
+      trusted);
+  if (!prepared.record)
+    return 0;
+  auto &replay = prepared.dense ? cache.dense_i32_affine_command_replay
+                               : cache.affine_command_replay;
+  if (!replay.submit_or_record(program, device, prepared.key,
+                               program->profiler != nullptr, prepared.record))
+    program->enqueue_compute_op_lambda(prepared.record, {});
   return cache.cached_bytes;
 }
 
@@ -10876,6 +11185,17 @@ std::size_t vulkan_add_merge_ndarray_impl(Program *program,
 }
 
 }  // namespace
+
+namespace gfx {
+std::shared_ptr<NativeOperation> prepare_vulkan_reduce_operation(
+    Device &device, const ReduceOperation &operation) {
+  return std::make_shared<FixedVulkanReduce>(device, operation);
+}
+std::shared_ptr<NativeOperation> prepare_vulkan_transform_operation(
+    Device &device, const TransformOperation &operation) {
+  return std::make_shared<FixedVulkanTransform>(device, operation);
+}
+}  // namespace gfx
 
 namespace {
 
@@ -17151,7 +17471,13 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
   const uint32_t groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  if (src_stride == value_size && dst_stride == value_size) {
+  const auto descriptor_alignment =
+      device->get_storage_buffer_binding_limits().offset_alignment;
+  // Packed fields may begin between descriptor boundaries (notably grad
+  // fields). Their existing strided shader accepts offsets from a zero base.
+  if (src_stride == value_size && dst_stride == value_size &&
+      src_ptr.offset % descriptor_alignment == 0 &&
+      dst_ptr.offset % descriptor_alignment == 0) {
     ShaderResourceSet *bindings =
         cache.cached_scatter_add_resource_set(value_type);
     Pipeline *pipeline = cache.scatter_add_pipeline(value_type);

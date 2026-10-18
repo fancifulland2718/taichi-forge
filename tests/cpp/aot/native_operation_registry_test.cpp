@@ -803,6 +803,72 @@ TEST(NativeOperationRegistry, RetainedScanPreservesItsSelectedCountAndType) {
   EXPECT_EQ(registry.find("cuda_retained_scan", 1, Arch::vulkan), nullptr);
 }
 
+TEST(NativeOperationRegistry, ScanDecodesWithoutAnApplicationSizeCeiling) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"scan","version":1,
+      "parameters":{"size":4294967296,"dtype":"f64"},"bindings":{"values":"v"}})"));
+  // Decoding is backend-independent. CUDA/Vulkan check their count ABI when
+  // preparing actual storage; CPU must not inherit a GPU representation limit.
+  EXPECT_EQ(registry.decode(op).kind(), "scan");
+  for (const char *parameters :
+       {R"({"size":-1,"dtype":"i32"})", R"({"size":true,"dtype":"i32"})",
+        R"({"size":4,"dtype":"f16"})", R"({"size":4,"dtype":"i32","exclusive":true})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  op.parameters = liong::json::parse_complete(R"({"size":0,"dtype":"i32"})");
+  EXPECT_EQ(registry.decode(op).kind(), "scan");
+}
+
+TEST(NativeOperationRegistry, ReduceSchemaPreservesBackendSpecificScheduling) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"reduce","version":1,
+      "parameters":{"size":4294967296,"dtype":"f64","op":"sum","cpu_max_threads":65},
+      "bindings":{"values":"v","output":"o"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "reduce");
+  for (const char *parameters : {
+           R"({"size":0,"dtype":"f32","op":"sum"})",
+           R"({"size":true,"dtype":"f32","op":"sum"})",
+           R"({"size":-1,"dtype":"f32","op":"sum"})",
+           R"({"size":4.0,"dtype":"f32","op":"sum"})",
+           R"({"size":4,"dtype":"f16","op":"sum"})",
+           R"({"size":4,"dtype":"f32","op":"product"})",
+           R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":0})",
+           R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":true})",
+           R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":2147483648})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;
+  }
+}
+
+TEST(NativeOperationRegistry, TransformSchemaUsesExactScalarBits) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"transform","version":1,
+      "parameters":{"size":4294967296,"dtype":"f64",
+      "scale_bits":"8000000000000000","bias_bits":"7ff8000000000001"},
+      "bindings":{"src":"s","dst":"d"}})"));
+  // No arbitrary schema count ceiling; the selected backend validates its
+  // actual storage and shader ABI. Floating bit patterns include -0 and NaN.
+  EXPECT_EQ(registry.decode(op).kind(), "transform");
+  for (const char *parameters : {
+           R"({"size":0,"dtype":"f32","scale_bits":"3ff0000000000000","bias_bits":"0000000000000000"})",
+           R"({"size":true,"dtype":"f32","scale_bits":"3ff0000000000000","bias_bits":"0000000000000000"})",
+           R"({"size":4,"dtype":"f16","scale_bits":"3ff0000000000000","bias_bits":"0000000000000000"})",
+           R"({"size":4,"dtype":"f32","scale_bits":1,"bias_bits":"0000000000000000"})",
+           R"({"size":4,"dtype":"f32","scale_bits":"3ff000000000000g","bias_bits":"0000000000000000"})",
+           R"({"size":4,"dtype":"f32","scale_bits":"3ff000000000000","bias_bits":"0000000000000000"})",
+           R"({"size":4,"dtype":"f32","scale_bits":"3ff0000000000000","bias_bits":"0000000000000000","callback":true})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;
+  }
+}
+
 TEST(NativeOperationRegistry, VkfftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto plan = NativeOperationDescription::parse(liong::json::parse_complete(

@@ -1,0 +1,261 @@
+#include "taichi/runtime/native_reduce.h"
+
+#include <array>
+#include <limits>
+#include "taichi/common/operation_json.h"
+#include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_operation_registry.h"
+#ifdef TI_WITH_LLVM
+#include "taichi/rhi/cpu/cpu_device.h"
+#include "taichi/rhi/cpu/reduce.h"
+#endif
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
+#endif
+
+namespace taichi::lang {
+namespace {
+const std::array<DataType, 6> &reduce_types() {
+  static const std::array<DataType, 6> types{
+      PrimitiveType::i32, PrimitiveType::f32, PrimitiveType::u32,
+      PrimitiveType::u64, PrimitiveType::i64, PrimitiveType::f64};
+  return types;
+}
+
+void validate(Device &device, const ReduceOperation &op) {
+  const auto &types = reduce_types();
+  if (!op.size || op.op < 0 || op.op > 2 || op.cpu_max_threads < 0 ||
+      op.value_type < 0 || op.value_type >= types.size())
+    throw std::invalid_argument(
+        "Reduce requires nonempty supported sum/min/max");
+  const std::uint64_t width = op.value_type < 3 ? 4 : 8;
+  for (const auto *array : {&op.values, &op.output}) {
+    if (array->pointer.device != &device)
+      throw std::invalid_argument("Reduce requires same-device arrays");
+    const bool scalar = array == &op.output && array->shape.empty();
+    validate_native_array_layout(
+        *array,
+        {scalar ? std::vector<std::uint64_t>{}
+                : std::vector<std::uint64_t>{array == &op.values ? op.size : 1},
+         {},
+         width,
+         width,
+         false,
+         types[op.value_type]->to_string()});
+    const auto count = scalar ? 1 : array->shape[0];
+    if (count > std::numeric_limits<std::size_t>::max() / width ||
+        array->bytes != count * width)
+      throw std::invalid_argument(
+          "Reduce requires exact packed storage extents");
+  }
+}
+
+class ReduceBase : public NativeOperation {
+ public:
+  ReduceBase(Arch arch, Device &device, const ReduceOperation &op)
+      : arch_(arch),
+        device_(device),
+        size_(op.size),
+        type_(op.value_type),
+        op_(op.op) {
+    for (const auto *array : {&op.values, &op.output}) {
+      validate_native_shader_storage(arch, array->pointer);
+      resolve_native_storage_range(arch, array->pointer, array->bytes);
+    }
+    const auto width = type_ < 3 ? 4 : 8;
+    validate_native_read_write_disjoint(
+        {resolve_native_storage_range(arch, op.values.pointer, size_ * width)},
+        {resolve_native_storage_range(arch, op.output.pointer, width)});
+  }
+  Arch arch() const override {
+    return arch_;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return bytes_;
+  }
+
+ protected:
+  Arch arch_;
+  Device &device_;
+  std::size_t size_;
+  int type_, op_;
+  std::size_t bytes_{0};
+  void *values_{nullptr}, *output_{nullptr};
+};
+
+#ifdef TI_WITH_LLVM
+template <typename T>
+class CpuReduce final : public ReduceBase {
+ public:
+  CpuReduce(NativePreparationContext &context, const ReduceOperation &op)
+      : ReduceBase(context.arch, context.device, op),
+        pool_(context.cpu_thread_pool),
+        partitions_(cpu::reduce_partitions(op.size,
+                                           op.cpu_max_threads
+                                               ? op.cpu_max_threads
+                                               : context.cpu_max_threads)) {
+    auto *cpu = dynamic_cast<cpu::CpuDevice *>(&device_);
+    if (!cpu ||
+        cpu->map_range_for_cpu_native(op.values.pointer, op.values.bytes,
+                                      &values_) != RhiResult::success ||
+        cpu->map_range_for_cpu_native(op.output.pointer, op.output.bytes,
+                                      &output_) != RhiResult::success)
+      throw std::invalid_argument("Reduce CPU storage range is invalid");
+    if (partitions_ > 1) {
+      if (!pool_)
+        throw std::invalid_argument(
+            "Parallel reduce requires its owner's CPU scheduler");
+      partial_.resize(partitions_);
+      bytes_ = partial_.size() * sizeof(T);
+    }
+  }
+  void run_cpu() override {
+    cpu::reduce(static_cast<const T *>(values_), static_cast<T *>(output_), op_,
+                size_, partitions_, partial_.data(), pool_);
+  }
+
+ private:
+  ThreadPool *pool_;
+  int partitions_;
+  std::vector<T> partial_;
+};
+
+std::shared_ptr<NativeResource> prepare_cpu(NativePreparationContext &context,
+                                            const ReduceOperation &op) {
+  switch (op.value_type) {
+    case 0:
+      return std::make_shared<CpuReduce<std::int32_t>>(context, op);
+    case 1:
+      return std::make_shared<CpuReduce<float>>(context, op);
+    case 2:
+      return std::make_shared<CpuReduce<std::uint32_t>>(context, op);
+    case 3:
+      return std::make_shared<CpuReduce<std::uint64_t>>(context, op);
+    case 4:
+      return std::make_shared<CpuReduce<std::int64_t>>(context, op);
+    case 5:
+      return std::make_shared<CpuReduce<double>>(context, op);
+    default:
+      throw std::invalid_argument("Unsupported CPU reduce dtype");
+  }
+}
+#endif
+
+#ifdef TI_WITH_CUDA
+class CudaReduce final : public ReduceBase {
+ public:
+  CudaReduce(Device &device, const ReduceOperation &op)
+      : ReduceBase(Arch::cuda, device, op) {
+    if (size_ > std::size_t(std::numeric_limits<int>::max()))
+      throw std::invalid_argument(
+          "Reduce exceeds the CUDA primitive count ABI");
+    auto *cuda = dynamic_cast<cuda::CudaDevice *>(&device);
+    if (!cuda)
+      throw std::invalid_argument("Reduce requires a CUDA device");
+    values_ = static_cast<char *>(cuda->get_memory_addr(op.values.pointer)) +
+              op.values.pointer.offset;
+    output_ = static_cast<char *>(cuda->get_memory_addr(op.output.pointer)) +
+              op.output.pointer.offset;
+    bytes_ = cuda::driver_reduce_workspace_bytes(
+        static_cast<int>(size_),
+        static_cast<cuda::CudaTransformValueType>(type_));
+    if (bytes_) {
+      Device::AllocParams params{};
+      params.size = bytes_;
+      auto memory = device.allocate_memory_unique(params);
+      if (memory.second != RhiResult::success)
+        throw std::runtime_error("Failed to allocate fixed reduce workspace");
+      workspace_ = std::move(memory.first);
+      scratch_ = cuda->get_memory_addr(workspace_->get_ptr());
+    }
+    cuda::driver_prepare_reduce();
+  }
+  void record_cuda(void *stream) override {
+    cuda::driver_reduce_with_workspace(
+        values_, output_, static_cast<int>(size_),
+        static_cast<cuda::CudaTransformValueType>(type_),
+        static_cast<cuda::CudaHierarchicalReduceOp>(op_), scratch_, stream);
+  }
+
+ private:
+  DeviceAllocationUnique workspace_;
+  void *scratch_{nullptr};
+};
+#endif
+}  // namespace
+
+void register_reduce_operation(NativeOperationRegistry &registry) {
+  registry.define<ReduceOperation>(validate);
+  registry.register_schema<ReduceOperation>(
+      "builtin", "reduce", {"values", "output"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<ReduceOperation> {
+        operation_json::fields(parameters,
+                               {"size", "dtype", "op", "cpu_max_threads"});
+        const auto size = operation_json::integer(parameters["size"]);
+        if (!size || size > std::numeric_limits<std::size_t>::max())
+          throw std::invalid_argument(
+              "Reduce size must be nonempty and addressable");
+        const auto dtype = operation_json::name(parameters["dtype"]);
+        const auto &types = reduce_types();
+        int type = 0;
+        while (type < types.size() && types[type]->to_string() != dtype)
+          ++type;
+        if (type == types.size())
+          throw std::invalid_argument(
+              "Reduce requires a supported numeric type");
+        const auto name = operation_json::name(parameters["op"]);
+        const int op = name == "sum"   ? 0
+                       : name == "min" ? 1
+                       : name == "max" ? 2
+                                       : -1;
+        if (op < 0)
+          throw std::invalid_argument("Reduce supports sum/min/max");
+        const auto threads =
+            operation_json::optional_integer(parameters, "cpu_max_threads");
+        if (threads &&
+            (!*threads || *threads > std::numeric_limits<int>::max()))
+          throw std::invalid_argument(
+              "Reduce CPU configuration must fit its positive int ABI");
+        return
+            [size, type, op, threads](const NativeOperationBindings &bindings) {
+              return ReduceOperation{static_cast<std::size_t>(size),
+                                     type,
+                                     op,
+                                     static_cast<int>(threads.value_or(0)),
+                                     bindings.at("values").array(),
+                                     bindings.at("output").array()};
+            };
+      });
+#ifdef TI_WITH_LLVM
+  registry.register_context_factory<ReduceOperation>(
+      host_arch(), NativeOperationMode::cpu, prepare_cpu);
+#endif
+#ifdef TI_WITH_CUDA
+  registry.register_factory<ReduceOperation>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch, Device &device, const ReduceOperation &op) {
+        auto &context = CUDAContext::get_instance();
+        auto lock = context.get_submission_lock_guard();
+        auto guard = context.get_guard();
+        return std::make_shared<CudaReduce>(device, op);
+      },
+      [] {
+        return NativeOperationAvailability{
+            cuda::driver_hierarchical_available(), 0};
+      });
+#endif
+#ifdef TI_WITH_VULKAN
+  registry.register_factory<ReduceOperation>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](Arch, Device &device, const ReduceOperation &op) {
+        return gfx::prepare_vulkan_reduce_operation(device, op);
+      });
+#endif
+}
+}  // namespace taichi::lang
