@@ -103,6 +103,17 @@ _ROUTES = MappingProxyType({
              "preserved_numeric_contract", "explicit_adjoint_only"),
         ),
     ),
+    "transform": (
+        _sequence(("transform",), "nonempty", "one_dimensional_scalar", "i32_u32_f32_i64_u64_f64",
+                  "affine", "exact_inplace_or_disjoint", "immutable_coefficients",
+                  "device_dtype_capabilities", "explicit_adjoint_only"),
+        PrimitiveAOTRoute(
+            "aot.ExecutionPlan", ("builtin/transform",), _ALL,
+            ("packed_scalar", "nonempty_fixed_prefix", "affine",
+             "i32_u32_f32_i64_u64_f64", "exact_inplace_or_disjoint",
+             "f64_coefficient_bits", "device_dtype_capabilities"),
+        ),
+    ),
     "segmented_scan": (
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.segmented_scan",), ("cuda",),

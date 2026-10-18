@@ -70,6 +70,9 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert len(rle) == 1 and rle[0].entry_point == "algorithms.PrimitiveSequence"
         assert rle[0].backends == ("cpu", "cuda", "vulkan")
         assert "shared_multi_column_prefix" in rle[0].constraints
+        transform = ti.algorithms.primitive_capability("transform").aot_routes
+        assert any(r.forms == ("transform",) and r.backends == ("cpu", "cuda", "vulkan") for r in transform)
+        assert any(r.forms == ("builtin/transform",) and "f64_coefficient_bits" in r.constraints for r in transform)
         assert not ti.algorithms.primitive_capability("histogram").aot_routes
         saved = json.loads(json.dumps(asdict(unique)))
         assert saved["aot"] == "selected_execution_plan_routes"

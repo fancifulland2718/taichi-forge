@@ -2,6 +2,7 @@
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_scan.h"
 #include "taichi/runtime/native_reduce.h"
+#include "taichi/runtime/native_transform.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
@@ -10817,6 +10818,46 @@ VulkanPreparedTransform prepare_vulkan_transform(
   return {record_transform_affine, command_key, false};
 }
 
+class FixedVulkanTransform final : public NativeOperation {
+ public:
+  FixedVulkanTransform(Device &device, const TransformOperation &op)
+      : device_(device), src_(op.src.pointer), dst_(op.dst.pointer) {
+    if (op.size > std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument("Transform exceeds its Vulkan uint32 shader ABI");
+    for (const auto *array : {&op.src, &op.dst}) {
+      validate_native_shader_storage(Arch::vulkan, array->pointer);
+      resolve_native_storage_range(Arch::vulkan, array->pointer, array->bytes);
+    }
+    const std::size_t width = op.value_type < 3 ? 4 : 8;
+    const auto bytes = op.size * width;
+    if (bytes > device.get_storage_buffer_binding_limits().max_range)
+      throw std::invalid_argument("Transform exceeds Vulkan descriptor range");
+    validate_native_disjoint_writes(
+        {resolve_native_storage_range(Arch::vulkan, src_, bytes)},
+        {{resolve_native_storage_range(Arch::vulkan, dst_, bytes), 0}});
+    cache_.ensure_pipelines(&device);
+    prepared_ = prepare_vulkan_transform(
+        nullptr, &device, cache_, src_, dst_, op.size, width, width, op.value_type,
+        1, src_.offset, width, dst_.offset, width, op.scale, op.bias, false, false);
+  }
+  Arch arch() const override { return Arch::vulkan; }
+  Device &device() const override { return device_; }
+  std::size_t workspace_bytes() const override { return cache_.allocated_bytes(); }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{src_, dst_};
+    return result;
+  }
+ private:
+  Device &device_;
+  DevicePtr src_, dst_;
+  VulkanTransformCache cache_;
+  VulkanPreparedTransform prepared_;
+};
+
 std::size_t vulkan_transform_affine_storage_impl(
     Program *program,
     DeviceAllocation src_alloc,
@@ -11149,6 +11190,10 @@ namespace gfx {
 std::shared_ptr<NativeOperation> prepare_vulkan_reduce_operation(
     Device &device, const ReduceOperation &operation) {
   return std::make_shared<FixedVulkanReduce>(device, operation);
+}
+std::shared_ptr<NativeOperation> prepare_vulkan_transform_operation(
+    Device &device, const TransformOperation &operation) {
+  return std::make_shared<FixedVulkanTransform>(device, operation);
 }
 }  // namespace gfx
 

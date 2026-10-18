@@ -31,6 +31,22 @@ inline std::uint64_t integer(const JsonValue &value) {
         "Execution plan sizes and offsets must be nonnegative integers");
   return static_cast<std::uint64_t>(value.num_int);
 }
+inline std::uint64_t scalar_bits(const JsonValue &value, std::size_t digits) {
+  if (!digits || digits > 16 || !value.is_str() || value.str.size() != digits)
+    throw std::invalid_argument(
+        "Execution scalar bits must match a supported C API dtype width");
+  std::uint64_t bits = 0;
+  for (const char digit : value.str) {
+    const int nibble = digit >= '0' && digit <= '9'   ? digit - '0'
+                       : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10
+                       : digit >= 'A' && digit <= 'F' ? digit - 'A' + 10
+                                                      : -1;
+    if (nibble < 0)
+      throw std::invalid_argument("Execution scalar bits must be hexadecimal");
+    bits = (bits << 4) | static_cast<std::uint64_t>(nibble);
+  }
+  return bits;
+}
 inline std::optional<std::uint64_t> optional_integer(const JsonValue &object,
                                                      const char *key) {
   const auto found = object.obj.inner.find(key);

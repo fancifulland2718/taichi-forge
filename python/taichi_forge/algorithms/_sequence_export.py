@@ -115,6 +115,61 @@ def _reduce(call, context):
     ))
 
 
+def _transform(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from taichi_forge_runtime.aot import Scalar
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_transform
+        or type(call.workspace) is not algorithms.TransformWorkspace
+        or set(call.kwargs) != {"scale", "bias", "method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 2
+    ):
+        raise TaichiRuntimeError("AOT transform requires its concrete TransformWorkspace")
+    src, dst = call.args
+    algorithms._check_transform_request(src, dst, call.kwargs["method"], call.workspace)
+    source, destination = (packed_description(a) for a in call.args)
+    if any(len(d.index_shape) != 1 or d.element_shape for d in (source, destination)):
+        raise TaichiRuntimeError("AOT transform requires one-dimensional packed scalar storage")
+    scale, bias = algorithms._normalize_transform_args(src.dtype, call.kwargs["scale"], call.kwargs["bias"])
+    arch = impl.current_cfg().arch
+    backend, capability = {
+        core.Arch.x64: ("cpu_native", "cpu_transform_available"),
+        core.Arch.arm64: ("cpu_native", "cpu_transform_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device_transform_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan_transform_available"),
+    }.get(arch, (None, None))
+    prog = impl.get_runtime().prog
+    if (backend is None or call.kwargs["method"] not in ("auto", backend)
+            or not getattr(prog, capability)()):
+        raise TaichiRuntimeError("AOT transform requires its available native strategy")
+    if arch == core.Arch.vulkan and not prog.vulkan_transform_value_type_available(
+        algorithms._transform_value_type(src.dtype)
+    ):
+        raise TaichiRuntimeError("AOT transform dtype is unavailable on this Vulkan device")
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (src, dst), (scale, bias))
+        or call.plan.method_name not in {
+            "cpu_transform_affine_ndarray", "cpu_transform_affine_dense_field",
+            "cuda_device_transform_affine_ndarray", "cuda_device_transform_affine_dense_field",
+            "vulkan_transform_affine_ndarray", "vulkan_transform_affine_dense_field",
+            "vulkan_transform_affine_ndarray_trusted", "vulkan_transform_affine_dense_field_trusted",
+        }
+    ):
+        raise TaichiRuntimeError("AOT transform cannot reconstruct the selected cached strategy")
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="transform", version=1,
+        parameters=dict(size=source.index_shape[0], dtype=str(source.scalar_type),
+                        scale_bits=Scalar("f64", float(scale)).resource("scale")["bits"],
+                        bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"]),
+        bindings=dict(src=context.retained_arrays.require(src),
+                      dst=context.retained_arrays.require(dst)),
+    ))
+
+
 def _sort(call, context):
     from . import _algorithms as algorithms
 
@@ -328,6 +383,7 @@ def export_sequence(sequence, context):
         raise TaichiRuntimeError("AOT sequence requires its concrete selected native reconstruction")
     exporters = {
         "sort": _sort, "sort_by_key": _sort, "scan": _scan, "reduce": _reduce,
+        "transform": _transform,
         "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,
         "run_length_encode": _consecutive,
     }

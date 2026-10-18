@@ -197,6 +197,17 @@ scratch 的合同。AOT scan 不生成伴随，应用可另外导出自己的显
 浮点结果保持各后端原有顺序合同，不承诺跨后端逐位一致。显式描述可选择固定输入
 前缀；可选正整数参数 `cpu_max_threads` 冻结 CPU 策略，省略则采用消费端配置。
 AOT 不生成伴随。此扩展要求配对的 frontend/runtime 私有 ABI 106 组件。
+`PrimitiveSequence.transform()` 与显式 `builtin/transform` v1 描述支持 CPU/CUDA/Vulkan
+上的非空、一维连续标量 affine 变换，覆盖 i32/u32/i64/u64/f32/f64。输入输出可为
+准确相同的访问区间，或物理不重叠的区间；部分重叠在准备时拒绝。显式描述可选择
+固定前缀，保留输出尾部。CPU 复用 owner 线程池，GPU 复用现有原生代码，均不新增
+scratch，也不向 TCM 复制应用 kernel。Vulkan 支持未对齐到 descriptor 边界的标量
+切片，通过对齐视图和 shader 偏移访问，不做整缓冲复制。
+系数在冷边界冻结：显式描述的 `scale_bits`、`bias_bits` 使用 f64 的16位十六进制
+位模式，与 `taichi_forge_runtime.aot.Scalar("f64", value).resource(name)["bits"]`
+相同；浮点负零、NaN/Inf 保留，整数系数必须为该类型可表示的整数。消费 runtime
+须提供 `builtin/transform` v1。尚不覆盖 strided/tensor/indexed-fused sequence；
+AOT 不自动生成此原生操作的伴随，应用可导出显式伴随。
 `PrimitiveSequence.run_length_encode()` 可导出 CPU/CUDA/Vulkan 上连续相等的
 i32/u32/i64/u64 键。固定输入前缀产生 unique keys、i32 run lengths 和 i32 count，
 未使用的输出尾部保持不变。导出复用既有头标记/起点和长度 helper，两列 compact

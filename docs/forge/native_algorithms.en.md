@@ -249,6 +249,22 @@ prefix; their optional positive `cpu_max_threads` parameter freezes the CPU
 strategy, otherwise it uses the consumer configuration. AOT does not generate
 an adjoint. This extension requires matching
 frontend/runtime private ABI 106 components.
+`PrimitiveSequence.transform()` and explicit `builtin/transform` v1 descriptions
+cover nonempty, one-dimensional packed scalar affine transforms on CPU/CUDA/Vulkan
+for i32/u32/i64/u64/f32/f64. Accessed ranges must be exactly identical or physically
+disjoint; partial overlap is rejected during preparation. Explicit descriptions
+may select a fixed prefix and preserve the output tail. CPU borrows the owner's
+thread pool, and GPUs reuse the existing native code. No scratch or application
+kernel payload is added to the TCM. Vulkan scalar slices need not start at a
+descriptor-aligned offset: aligned enclosing views and shader offsets avoid copies.
+Coefficients are immutable after preparation. Explicit `scale_bits` and `bias_bits`
+use 16 hexadecimal digits encoding f64, as returned by
+`taichi_forge_runtime.aot.Scalar("f64", value).resource(name)["bits"]`.
+Floating negative zero and NaN/Inf are preserved; integer coefficients must be
+integral and representable in the selected type. The consumer runtime must provide
+`builtin/transform` v1. Strided/tensor/indexed-fused sequences remain outside this
+route. AOT does not synthesize this native operation's adjoint; applications can
+export an explicit adjoint.
 `PrimitiveSequence.run_length_encode()` exports consecutive i32/u32/i64/u64
 keys on CPU/CUDA/Vulkan. A fixed input prefix produces unique keys, i32 run
 lengths and an i32 count; unused output tails are preserved. Export reuses the
