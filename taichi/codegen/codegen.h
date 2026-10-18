@@ -59,6 +59,10 @@ class KernelCodeGen {
 #ifdef TI_WITH_LLVM
   virtual LLVMCompiledKernel compile_kernel_to_module();
 
+  // Merge roots referenced by final task lowering into the caller's dependency
+  // list. The offloaded IR alone does not contain generated mesh table loads.
+  LLVMCompiledKernel compile_kernel_to_module(std::vector<int> &used_tree_ids);
+
   virtual LLVMCompiledTask compile_task(
       int task_codegen_id,
       const CompileConfig &config,

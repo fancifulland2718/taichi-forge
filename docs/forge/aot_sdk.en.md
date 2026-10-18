@@ -4158,11 +4158,23 @@ Two instances can run with independent active sets and gradients on one runtime;
 CPU bitcode and CUDA bitcode/PTX/cubin are covered. Traversal and garbage
 collection relocate their tree/local-node keys before execution. This does not
 serialize active sparse storage as a root snapshot/view. Old embedded-ID
-artifacts and
-mesh layouts retain their embedded-ID contract: overlapping IDs
+artifacts retain their embedded-ID contract: overlapping IDs
 are rejected before initialization. Shared runtime allocation caches may remain resident.
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
+
+CPU/CUDA MeshTaichi compute loops also reuse module-local dense resources and
+`snapshot_state=True` for initialized mesh tables and attributes. Table accesses
+introduced by final task lowering join the actual dependency list; CUDA compact
+root slots are resolved after that list is complete. Consumers do not need the
+producer's Python Mesh object. A small Windows tetrahedral fixture covers CPU
+bitcode/CUDA PTX, standalone and borrowed runtimes, isolated attributes in two
+modules, fixed execution, close/reload, and actual reverse gradients of the
+downstream ndarray suffix. Snapshots operate at root-storage granularity, so
+unused tables sharing a required root are not split out. This qualification does
+not include mesh-for autodiff or dynamic topology updates. Vulkan has no
+MeshTaichi compute extension; Vulkan graphics mesh/task shaders are a separate
+capability.
 
 Since GFX metadata 6, Vulkan sparse resources use the same materializer as
 JIT. Small Windows tests cover pointer/bitmasked/dynamic trees with inline,

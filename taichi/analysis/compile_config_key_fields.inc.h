@@ -40,6 +40,7 @@
   CACHE_FIELD(quant_opt_atomic_demotion);
   if (arch_uses_llvm(config.arch)) {
     CACHE_VALUE(std::string("llvm-quant-atomic-return-v1"));
+    CACHE_VALUE(std::string("llvm-emitted-root-dependencies-v1"));
   }
   CACHE_TYPE(default_fp);
   CACHE_TYPE(default_ip);

@@ -6,6 +6,8 @@
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
+#include "taichi/codegen/llvm/cuda_root_binding.h"
+#include "llvm/IR/Verifier.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/runtime/dx12/aot_module_loader_impl.h"
 
@@ -22,6 +24,39 @@
 #undef TI_RUNTIME_HOST
 
 namespace taichi::lang {
+
+TEST(LlvmAotMetadataTest, CudaCompactRootsUseFinalLoweringDependencies) {
+  // The same early-known root changes from a direct pointer to slot 1 when
+  // final mesh lowering adds an earlier root. No placeholder call may survive.
+  for (const auto &roots : {std::vector<int>{7}, std::vector<int>{2, 7, 9}}) {
+    llvm::LLVMContext context;
+    llvm::Module module("compact-roots", context);
+    auto *pointer = llvm::PointerType::get(context, 0);
+    auto *entry = llvm::Function::Create(
+        llvm::FunctionType::get(pointer, {pointer}, false),
+        llvm::GlobalValue::ExternalLinkage, "test", module);
+    llvm::IRBuilder<> builder(
+        llvm::BasicBlock::Create(context, "entry", entry));
+    auto *result = builder.CreateRet(LLVM::emit_cuda_root_binding(
+        module, builder, entry->getArg(0), 7));
+    EXPECT_ANY_THROW(LLVM::resolve_cuda_root_bindings(module, {2}));
+    LLVM::resolve_cuda_root_bindings(module, roots);
+    EXPECT_EQ(module.getFunction("__ti_cuda_root_binding_7"), nullptr);
+    EXPECT_FALSE(llvm::verifyModule(module));
+    if (roots.size() == 1) {
+      EXPECT_EQ(result->getReturnValue(), entry->getArg(0));
+      EXPECT_EQ(entry->front().size(), 1);
+    } else {
+      auto *load = llvm::dyn_cast<llvm::LoadInst>(result->getReturnValue());
+      ASSERT_NE(load, nullptr);
+      auto *slot = llvm::cast<llvm::GetElementPtrInst>(load->getPointerOperand());
+      EXPECT_EQ(slot->getPointerOperand(), entry->getArg(0));
+      EXPECT_EQ(llvm::cast<llvm::ConstantInt>(slot->getOperand(1))->getZExtValue(),
+                1);
+      EXPECT_NE(load->getMetadata(llvm::LLVMContext::MD_invariant_load), nullptr);
+    }
+  }
+}
 
 TEST(LlvmAotMetadataTest,
      RelocationSymbolsCompactAndResolveWithoutNumericSearch) {
@@ -134,7 +169,7 @@ TEST(LlvmAotMetadataTest, DenseRelocationHasAnExplicitFormatContract) {
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
 }
 
-TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshotsOrMesh) {
+TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshots) {
   LLVM::LlvmAotMetadata metadata;
   metadata.resource_binding = "sparse_v1";
   metadata.abi_sha256 = std::string(64, 'b');
@@ -151,7 +186,7 @@ TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshotsOrMesh) {
   metadata.schema_version = LLVM::kInitialRootDataAotSchemaVersion;
   metadata.initial_root_data.push_back({0, 32, std::string(64, 'b')});
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
-  EXPECT_FALSE(LLVM::is_relocatable_aot_task(OffloadedTaskType::mesh_for, true));
+  EXPECT_TRUE(LLVM::is_relocatable_aot_task(OffloadedTaskType::mesh_for, false));
   EXPECT_TRUE(LLVM::is_relocatable_aot_snode(SNodeType::hash, true));
   EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::hash, false));
   for (auto type : {SNodeType::bit_struct, SNodeType::quant_array}) {

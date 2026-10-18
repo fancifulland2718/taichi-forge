@@ -3181,10 +3181,18 @@ dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。�
 `sparse_v2`）；同 runtime 的
 两个实例拥有独立活跃集与梯度，覆盖 CPU bitcode 和 CUDA bitcode/PTX/cubin。遍历和
 GC 的 tree/local-node key 在执行前重定位。这不把 sparse 活跃存储序列化为根快照或
-flat view。旧嵌入 ID 产物及
-mesh 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
+flat view。旧嵌入 ID 产物保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
 共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
+
+CPU/CUDA 的 MeshTaichi 计算循环也可复用模块局部 dense 资源与
+`snapshot_state=True`，导出初始化后的 mesh 表和属性。最终任务 lowering 引入的表
+访问会加入实际依赖；CUDA 紧凑根参数的位置在这份清单完整后确定，运行时不需要
+producer 的 Python Mesh 对象。Windows 小型四面体夹具覆盖 CPU bitcode/CUDA PTX、
+独立和借用 runtime、两个模块的属性隔离、固定执行、关闭与重载，以及下游 ndarray
+收尾的实际反向梯度。快照粒度是根存储，不会拆分同一根内未使用的表。此验证不包含
+mesh-for 本身的自动微分或动态拓扑更新；Vulkan 不提供 MeshTaichi 计算扩展。
+这里的 mesh 计算与 Vulkan 图形 mesh/task shader 是独立能力。
 
 Vulkan 稀疏资源从 GFX metadata 6 起与 JIT 共用物化入口。Windows 小型测试覆盖
 pointer/bitmasked/dynamic 的 inline、independent 和扁平化 chunked 池，直接/嵌套

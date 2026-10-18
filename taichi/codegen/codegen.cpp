@@ -2,8 +2,12 @@
 
 #include "codegen.h"
 
+#include <algorithm>
+
 #if defined(TI_WITH_LLVM)
 #include "taichi/codegen/cpu/codegen_cpu.h"
+#include "taichi/codegen/llvm/cuda_root_binding.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #endif
@@ -76,6 +80,12 @@ std::unique_ptr<KernelCodeGen> KernelCodeGen::create(
 #ifdef TI_WITH_LLVM
 
 LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
+  auto used_tree_ids = irpass::analysis::gather_snode_tree_dependencies(*ir);
+  return compile_kernel_to_module(used_tree_ids);
+}
+
+LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module(
+    std::vector<int> &used_tree_ids) {
   auto block = dynamic_cast<Block *>(ir);
   auto &worker = get_llvm_program(kernel->program)->compilation_workers;
   TI_ASSERT(block);
@@ -125,7 +135,18 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
     worker.flush();
   }
 
+  for (const auto &task : data) {
+    used_tree_ids.insert(used_tree_ids.end(), task->used_tree_ids.begin(),
+                         task->used_tree_ids.end());
+  }
+  std::sort(used_tree_ids.begin(), used_tree_ids.end());
+  used_tree_ids.erase(std::unique(used_tree_ids.begin(), used_tree_ids.end()),
+                      used_tree_ids.end());
   auto llvm_compiled_kernel = tlctx_.link_compiled_tasks(std::move(data));
+  if (compile_config_.arch == Arch::cuda) {
+    LLVM::resolve_cuda_root_bindings(*llvm_compiled_kernel.module,
+                                     used_tree_ids);
+  }
   optimize_module(llvm_compiled_kernel.module.get());
   return llvm_compiled_kernel;
 }

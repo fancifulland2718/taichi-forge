@@ -44,6 +44,10 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
     const Kernel &kernel_def,
     IRNode &chi_ir) const {
   LLVM::CompiledKernelData::InternalData data;
+  // Preserve runtime-only dependencies (e.g. listgen/GC), then merge the roots
+  // introduced by final task lowering without another IR traversal.
+  data.used_snode_tree_ids =
+      irpass::analysis::gather_snode_tree_dependencies(chi_ir);
   auto codegen = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.llvm.codegen_create");
     return KernelCodeGen::create(compile_config, device_caps, &kernel_def,
@@ -51,7 +55,7 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   }();
   data.compiled_data = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.llvm.emit_module");
-    return codegen->compile_kernel_to_module();
+    return codegen->compile_kernel_to_module(data.used_snode_tree_ids);
   }();
   LLVMModuleOptions::from_config(compile_config)
       .write(*data.compiled_data.module);
@@ -63,8 +67,6 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
              spec.has_value()) {
     data.compiled_data.cuda_max_registers = spec->cuda_max_registers;
   }
-  data.used_snode_tree_ids =
-      irpass::analysis::gather_snode_tree_dependencies(chi_ir);
   data.may_trigger_hash_overflow =
       irpass::analysis::may_trigger_hash_overflow(chi_ir);
   data.args.reserve(kernel_def.nested_parameters.size());

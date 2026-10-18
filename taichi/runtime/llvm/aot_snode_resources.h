@@ -29,6 +29,9 @@ inline bool is_relocatable_aot_snode(SNodeType type, bool sparse) {
 inline bool is_relocatable_aot_task(OffloadedTaskType type, bool lists) {
   return type == OffloadedTaskType::serial ||
          type == OffloadedTaskType::range_for ||
+         // Mesh lowering turns mappings/relations into ordinary SNode loads.
+         // Patch counts are constants; no live Mesh owner survives codegen.
+         type == OffloadedTaskType::mesh_for ||
          (lists && (type == OffloadedTaskType::struct_for ||
                     type == OffloadedTaskType::listgen ||
                     type == OffloadedTaskType::gc));

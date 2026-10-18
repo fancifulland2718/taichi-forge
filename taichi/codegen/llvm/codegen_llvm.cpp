@@ -15,6 +15,7 @@
 #include "taichi/program/extension.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
+#include "taichi/codegen/llvm/cuda_root_binding.h"
 #include "taichi/util/file_sequence_writer.h"
 #include "taichi/codegen/codegen_utils.h"
 
@@ -3372,26 +3373,9 @@ llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
   if (binding != cuda_root_binding_tree_ids.end() &&
       *binding == snode_tree_id) {
     TI_ASSERT(compile_config.arch == Arch::cuda && kernel->rets.empty());
-    auto *pointer_type = llvm::PointerType::get(*llvm_context, 0);
     auto *compact_binding = get_cuda_root_binding();
-    if (cuda_root_binding_tree_ids.size() == 1) {
-      root = compact_binding;
-    } else {
-      const auto binding_index =
-          static_cast<std::uint64_t>(binding -
-                                     cuda_root_binding_tree_ids.begin());
-      auto *root_slot = builder->CreateInBoundsGEP(
-          pointer_type, compact_binding,
-          llvm::ConstantInt::get(llvm::Type::getInt64Ty(*llvm_context),
-                                 binding_index));
-      auto *root_load = builder->CreateAlignedLoad(
-          pointer_type, root_slot, llvm::Align(8), "cuda_snode_root");
-      root_load->setMetadata(
-          llvm::LLVMContext::MD_invariant_load,
-          llvm::MDNode::get(*llvm_context,
-                            llvm::ArrayRef<llvm::Metadata *>{}));
-      root = root_load;
-    }
+    root = LLVM::emit_cuda_root_binding(*module, *builder, compact_binding,
+                                        snode_tree_id);
   } else {
     root = call("LLVMRuntime_get_snode_tree_root_unchecked", get_runtime(),
                 get_runtime_tree_id(snode_tree_id));
