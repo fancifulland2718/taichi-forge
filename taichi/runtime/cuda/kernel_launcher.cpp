@@ -979,6 +979,19 @@ std::uint32_t KernelLauncher::bounded_graph_grid_limit() {
   return grid > 0 ? static_cast<std::uint32_t>(grid) : 0;
 }
 
+void KernelLauncher::validate_execution_domain(Handle handle) {
+  std::shared_lock<std::shared_mutex> lock(registration_mutex());
+  const auto iter = contexts_.find(handle.get_launch_id());
+  if (iter == contexts_.end())
+    throw std::invalid_argument("CUDA execution kernel is not registered");
+  if (iter->second->runtime_context_abi < LLVM::kRuntimeContextABI)
+    throw std::invalid_argument(
+        "CUDA kernel was compiled without execution-instance temporaries");
+  if (const auto *blocker =
+          independent_runtime_state_blocker(iter->second->runtime_state))
+    throw std::invalid_argument(blocker);
+}
+
 void KernelLauncher::bind_execution_temporaries(GraphLaunchPacket &packet,
                                                 void *buffer,
                                                 std::size_t bytes) {
@@ -1763,6 +1776,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
 
     auto data = compiled.get_internal_data().compiled_data.clone();
     ctx->runtime_context_abi = LLVM::runtime_context_abi(*data.module);
+    ctx->runtime_state = LLVM::runtime_state_use(*data.module);
     auto parameters = compiled.get_internal_data().args;
     auto *jit_module = executor->create_jit_module(std::move(data.module),
                                                    data.cuda_max_registers);
@@ -1797,7 +1811,8 @@ KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
     const CUDAKernelArtifact &artifact,
     const std::map<int, int> &tree_bindings,
     KernelLaunchABI launch_abi,
-    unsigned runtime_context_abi) {
+    unsigned runtime_context_abi,
+    std::uint32_t runtime_state) {
   TI_ERROR_IF(launch_abi != KernelLaunchABI::ordinary &&
                   launch_abi != KernelLaunchABI::graph_gate_v1,
               "Unsupported CUDA kernel launch ABI");
@@ -1809,6 +1824,7 @@ KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
   auto ctx = std::make_shared<Context>();
   ctx->launch_abi = launch_abi;
   ctx->runtime_context_abi = runtime_context_abi;
+  ctx->runtime_state = runtime_state;
   ctx->snode_tree_ids = metadata.used_snode_tree_ids;
   ctx->parameters = metadata.args;
   ctx->offloaded_tasks = metadata.compiled_data.tasks;
@@ -1842,6 +1858,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   auto data = LLVM::make_cuda_graph_gated_kernel(
       compiled.get_internal_data().compiled_data);
   ctx->runtime_context_abi = LLVM::runtime_context_abi(*data.module);
+  ctx->runtime_state = LLVM::runtime_state_use(*data.module);
   auto parameters = compiled.get_internal_data().args;
   auto *jit_module = executor->create_jit_module(std::move(data.module),
                                                  data.cuda_max_registers);

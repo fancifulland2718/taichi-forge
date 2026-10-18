@@ -297,6 +297,47 @@ FixedGraph::FixedGraph(
   state_->binding_frame = binding_frame;
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed("prepare CUDA graph");
+  if (state_->independent && !parts) {
+    std::unordered_set<const void *> active;
+    std::function<void(const std::vector<Operation> &)> validate;
+    validate = [&](const auto &steps) {
+      for (const auto &step : steps) {
+        if (const auto *dispatch = std::get_if<Dispatch>(&step)) {
+          if (!dispatch->external) {
+            if (!dispatch->launcher)
+              throw std::invalid_argument("CUDA dispatch has no launcher");
+            dispatch->launcher->validate_execution_domain(dispatch->handle);
+          }
+          continue;
+        }
+        std::visit(
+            [&](const auto &region) {
+              using T = std::decay_t<decltype(region)>;
+              if constexpr (!std::is_same_v<T, Dispatch>) {
+                if (!region || !active.insert(region.get()).second)
+                  throw std::invalid_argument("Invalid CUDA control topology");
+                if constexpr (std::is_same_v<T,
+                                             std::shared_ptr<const Parallel>>) {
+                  for (const auto &branch : region->branches)
+                    validate(branch);
+                } else {
+                  validate(region->condition);
+                  if constexpr (std::is_same_v<T,
+                                               std::shared_ptr<const Branch>>) {
+                    for (const auto &body : region->bodies)
+                      validate(body);
+                  } else {
+                    validate(region->body);
+                  }
+                }
+                active.erase(region.get());
+              }
+            },
+            step);
+      }
+    };
+    validate(operations);
+  }
   try {
     if (domain_)
       domain_->prepare_instance(state_, [&] {

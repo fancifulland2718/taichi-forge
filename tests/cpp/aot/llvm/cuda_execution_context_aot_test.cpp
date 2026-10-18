@@ -9,6 +9,7 @@
 #include "taichi/program/runtime_fault.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/runtime/cuda/execution_domain.h"
+#include "taichi/runtime/cuda/fixed_graph.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
@@ -184,6 +185,72 @@ TEST(CudaExecutionContextAot,
   EXPECT_FALSE(cuda::is_graph_gate_launch_abi(cuda::kContextLaunchABI));
   EXPECT_TRUE(cuda::is_graph_gate_launch_abi(cuda::kGraphGateContextLaunchABI));
   EXPECT_EQ(cuda::launch_runtime_context_abi("ordinary"), 1);
+  EXPECT_EQ(LLVM::runtime_state_use(legacy), 0);
+  EXPECT_NE(independent_runtime_state_blocker(0), nullptr);
+  LLVM::declare_runtime_state_use(legacy, runtime_state_known);
+  EXPECT_EQ(LLVM::runtime_state_use(*llvm::CloneModule(legacy)),
+            runtime_state_known);
+  EXPECT_EQ(independent_runtime_state_blocker(runtime_state_known), nullptr);
+  EXPECT_NE(independent_runtime_state_blocker(runtime_state_known | (1u << 31)),
+            nullptr);
+}
+
+TEST(CudaRuntimeStateAot, RejectsSharedStateBeforePreparingAnInstance) {
+  const auto *folder = std::getenv("TAICHI_F3_RUNTIME_STATE_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP() << "Requires the saved runtime-state AOT fixture";
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  LlvmRuntimeExecutor executor(config, nullptr);
+  uint64 *result = nullptr;
+  executor.materialize_runtime(nullptr, &result);
+  LLVM::AotModuleParams params;
+  params.module_path = folder;
+  params.executor_ = &executor;
+  params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
+      cuda::KernelLauncher::Config{&executor});
+  auto module = LLVM::make_aot_module(std::move(params));
+  struct Operands final : RuntimeCompletionResources {
+    std::size_t retained_resource_count(std::uint32_t) const noexcept override {
+      return 0;
+    }
+  };
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 729);
+  auto domain = std::make_shared<cuda::ExecutionDomain>(
+      owner, cuda::ExecutionDomain::Options{});
+  for (const auto *name :
+       {"random_direct", "random_callee", "print_value", "sparse_value"}) {
+    SCOPED_TRACE(name);
+    auto *kernel =
+        dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel(name));
+    ASSERT_NE(kernel, nullptr);
+    auto &launcher = dynamic_cast<cuda::KernelLauncher &>(kernel->launcher());
+    EXPECT_THROW(launcher.validate_execution_domain(kernel->handle()),
+                 std::invalid_argument);
+    LaunchContextBuilder arguments(kernel);
+    bool captured_prefix = false;
+    std::vector<cuda::FixedGraph::Operation> operations{
+        cuda::FixedGraph::Dispatch{
+            nullptr, {}, nullptr, [&](void *) { captured_prefix = true; }},
+        cuda::FixedGraph::Dispatch{&launcher, kernel->handle(), &arguments}};
+    EXPECT_THROW(cuda::FixedGraph::prepare_execution_instance(
+                     operations, owner, domain, std::make_shared<Operands>()),
+                 std::invalid_argument);
+    EXPECT_FALSE(captured_prefix);
+    EXPECT_EQ(domain->latest_completion().sequence(), 0);
+    EXPECT_TRUE(domain->snapshot().accepting);
+  }
+  auto *dense =
+      dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel("dense_value"));
+  ASSERT_NE(dense, nullptr);
+  auto &launcher = dynamic_cast<cuda::KernelLauncher &>(dense->launcher());
+  const auto *list_mode = std::getenv("TAICHI_F3_DENSE_LIST_MODE");
+  if (list_mode && std::string(list_mode) == "1")
+    EXPECT_THROW(launcher.validate_execution_domain(dense->handle()),
+                 std::invalid_argument);
+  else
+    EXPECT_NO_THROW(launcher.validate_execution_domain(dense->handle()));
+  domain->close();
 }
 
 }  // namespace

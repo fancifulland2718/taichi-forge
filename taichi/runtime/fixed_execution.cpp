@@ -500,6 +500,18 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed execution requires loaded entries without returns or "
               "ArgPacks");
+#ifdef TI_WITH_CUDA
+        if (execution_binding) {
+          auto *kernel = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
+          auto *launcher =
+              kernel ? dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher())
+                     : nullptr;
+          if (!launcher)
+            throw std::invalid_argument(
+                "CUDA execution domain requires a CUDA kernel launcher");
+          launcher->validate_execution_domain(kernel->handle());
+        }
+#endif
         std::set<std::vector<int>> resource_arguments;
         for (const auto &resource : dispatch->resources) {
           if (!resource ||

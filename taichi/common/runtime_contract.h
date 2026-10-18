@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// CUDA provider resources retain execution-domain affinity and participate in
-// owner retirement. Reject older class layouts at the private C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 109;
+// LLVM AOT metadata carries the compiler's shared-runtime-state inventory.
+// Reject older class layouts at the private C++ boundary.
+inline constexpr int kForgeNativeAbiRevision = 110;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

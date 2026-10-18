@@ -76,6 +76,10 @@ struct LlvmAotMetadata {
   // with an insufficient context or a missing argument prefix.
   std::map<std::string, std::string> kernel_launch_abis;
   std::string launch_abi_sha256;
+  // Optional compiler facts; absence means unknown, never domain-safe. These
+  // do not change the serialized task layout or the device call ABI.
+  std::map<std::string, std::uint32_t> kernel_runtime_state;
+  std::string runtime_state_sha256;
 
   TI_IO_DEF(schema_version,
             required_caps,
@@ -86,10 +90,17 @@ struct LlvmAotMetadata {
             resource_binding,
             initial_root_data,
             kernel_launch_abis,
-            launch_abi_sha256);
+            launch_abi_sha256,
+            kernel_runtime_state,
+            runtime_state_sha256);
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
+  TI_ERROR_IF(metadata.kernel_runtime_state.empty()
+                  ? !metadata.runtime_state_sha256.empty()
+                  : metadata.runtime_state_sha256.size() != 64 ||
+                        metadata.abi_sha256.size() != 64,
+              "AOT runtime-state inventory requires its metadata checksum");
   auto base_schema = metadata.schema_version;
   const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion;
   TI_ERROR_IF(launch_abi != !metadata.kernel_launch_abis.empty() ||

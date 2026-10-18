@@ -100,6 +100,10 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
         "field_stage_1": "runtime_context_v2",
     }
     assert len(metadata["launch_abi_sha256"]) == 64
+    assert {item["key"]: item["value"] for item in metadata["kernel_runtime_state"]} == {
+        name: 1 for name in ("stage", "gated_stage", "field_stage_0", "field_stage_1")
+    }
+    assert len(metadata["runtime_state_sha256"]) == 64
     result = subprocess.run(
         [str(executable), "--gtest_filter=CudaExecutionContextAot.*"],
         env=dict(os.environ, TAICHI_F3_CONTEXT_AOT_FOLDER=str(directory)),

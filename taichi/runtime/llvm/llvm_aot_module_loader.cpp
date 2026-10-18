@@ -53,6 +53,10 @@ LlvmAotModule::LlvmAotModule(
                                  contents.data() + contents.size());
   liong::json::deserialize(json, metadata);
   validate_llvm_aot_metadata(metadata);
+  if (!metadata.kernel_runtime_state.empty())
+    TI_ERROR_IF(
+        metadata.runtime_state_sha256 != aot_runtime_state_sha256(metadata),
+        "AOT runtime-state inventory checksum mismatch");
   if (!metadata.kernel_launch_abis.empty()) {
     const bool has_gate =
         std::any_of(metadata.kernel_launch_abis.begin(),
@@ -69,7 +73,9 @@ LlvmAotModule::LlvmAotModule(
     TI_ERROR_IF(arch() != Arch::cuda, "CUDA device artifacts require a CUDA runtime");
   }
   if (is_cuda_aot_artifact_format(metadata.kernel_format) ||
-      !metadata.resource_binding.empty() || !metadata.kernel_launch_abis.empty()) {
+      !metadata.resource_binding.empty() ||
+      !metadata.kernel_launch_abis.empty() ||
+      !metadata.kernel_runtime_state.empty()) {
     TI_ERROR_IF(aot_artifact_sha256(read_artifact(
                     *directory_, "metadata.tcb")) != metadata.abi_sha256,
                 "LLVM AOT launch ABI checksum mismatch");
@@ -91,6 +97,10 @@ LlvmAotModule::LlvmAotModule(
     TI_ERROR_IF(!cache_reader_->has_kernel(name),
                 "AOT launch ABI references an absent kernel: {}", name);
   }
+  for (const auto &[name, state] : metadata.kernel_runtime_state)
+    TI_ERROR_IF(!cache_reader_->has_kernel(name),
+                "AOT runtime-state inventory references an absent kernel: {}",
+                name);
 
   if (executor_->get_config().arch == Arch::cuda) {
     for (const auto &[key, value] : metadata.required_caps) {
@@ -289,6 +299,11 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
                                                         : declaration->second;
   const bool gated = cuda::is_graph_gate_launch_abi(launch_abi);
   const auto context_abi = cuda::launch_runtime_context_abi(launch_abi);
+  const auto state_declaration = metadata_.kernel_runtime_state.find(name);
+  const auto runtime_state =
+      state_declaration == metadata_.kernel_runtime_state.end()
+          ? 0u
+          : state_declaration->second;
   const auto kernel_name = std::move(kernel_cache.kernel_key);
   if (is_cuda_aot_artifact_format(metadata_.kernel_format)) {
 #if defined(TI_WITH_CUDA)
@@ -363,7 +378,7 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
         data, artifact, bindings,
         gated ? cuda::KernelLaunchABI::graph_gate_v1
               : cuda::KernelLaunchABI::ordinary,
-        context_abi);
+        context_abi, runtime_state);
     return std::make_unique<llvm_aot::KernelImpl>(
         launcher, handle, arch(), kernel_name, data);
 #else
@@ -372,6 +387,12 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
   }
   LLVM::CompiledKernelData compiled{
       arch(), std::move(kernel_cache).take_llvm_ckd_data()};
+  TI_ERROR_IF(state_declaration != metadata_.kernel_runtime_state.end() &&
+                  LLVM::runtime_state_use(
+                      *compiled.get_internal_data().compiled_data.module) !=
+                      runtime_state,
+              "AOT LLVM code does not match its runtime-state inventory: {}",
+              name);
   TI_ERROR_IF(
       LLVM::runtime_context_abi(
           *compiled.get_internal_data().compiled_data.module) != context_abi,

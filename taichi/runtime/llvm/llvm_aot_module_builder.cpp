@@ -245,6 +245,17 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     }
     metadata.launch_abi_sha256 = LLVM::aot_launch_abi_sha256(metadata);
   }
+  for (const auto &[name, kernel] : cache_.kernels) {
+    const auto state = LLVM::runtime_state_use(*kernel.compiled_data.module);
+    if (state)
+      metadata.kernel_runtime_state.emplace(name, state);
+  }
+  if (!metadata.kernel_runtime_state.empty()) {
+    if (metadata.abi_sha256.empty())
+      metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
+          taichi::join_path(output_dir, "metadata.tcb")));
+    metadata.runtime_state_sha256 = LLVM::aot_runtime_state_sha256(metadata);
+  }
   const std::string json =
       liong::json::print(liong::json::serialize(metadata));
   std::fstream f(taichi::join_path(output_dir,
