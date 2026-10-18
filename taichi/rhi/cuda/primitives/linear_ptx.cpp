@@ -1160,21 +1160,24 @@ bool driver_transform_available() {
       .nvidia_extensions_available();
 }
 
-std::size_t driver_transform_affine(void *src,
+void driver_prepare_transform(CudaTransformValueType value_type) {
+  (void)cuda_transform_function(value_type);
+}
+
+std::size_t driver_transform_affine_on_stream(void *src,
                                     void *dst,
-                                    int num_items,
+                                    std::uint32_t num_items,
                                     CudaTransformValueType value_type,
                                     double scale,
-                                    double bias) {
-  TI_ERROR_IF(num_items < 0,
-              "CUDA driver transform expects non-negative num_items.");
+                                    double bias,
+                                    void *stream) {
   TI_ERROR_IF(!src || !dst, "CUDA driver transform received a null pointer.");
   if (num_items == 0) {
     return 0;
   }
   constexpr unsigned kBlockDim = 256;
   const unsigned grid_dim =
-      static_cast<unsigned>((num_items + kBlockDim - 1) / kBlockDim);
+      num_items / kBlockDim + (num_items % kBlockDim != 0);
   void *func = cuda_transform_function(value_type);
   void *src_arg = src;
   void *dst_arg = dst;
@@ -1224,8 +1227,20 @@ std::size_t driver_transform_affine(void *src,
     args.push_back(&bias_f64);
   }
   CUDAContext::get_instance().launch(func, "cuda_transform_affine", args, {},
-                                     grid_dim, kBlockDim, 0);
+                                     grid_dim, kBlockDim, 0, stream);
   return 0;
+}
+
+std::size_t driver_transform_affine(void *src,
+                                    void *dst,
+                                    int num_items,
+                                    CudaTransformValueType value_type,
+                                    double scale,
+                                    double bias) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA driver transform expects non-negative num_items.");
+  return driver_transform_affine_on_stream(src, dst, num_items, value_type,
+                                           scale, bias, nullptr);
 }
 
 void *cuda_indexed_copy_strided_function(CudaIndexedCopyOp op) {
