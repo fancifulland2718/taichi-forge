@@ -5,6 +5,7 @@ check visibility as well as numeric results. Consumers reject validation errors.
 """
 
 from contextlib import ExitStack, closing
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -90,9 +91,23 @@ def test_vulkan_indirect_rejects_same_pass_shader_write_alias(tmp_path):
         pipeline.close()
 
 
-@pytest.mark.parametrize("recipe", ["ordinary", "selected"])
+@pytest.mark.parametrize("recipe", ["ordinary", "selected", "segmented", "independent"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_aot_graphics_buffer_dependencies(tmp_path, recipe):
+    independent = recipe == "independent"
+
+    @ti.kernel
+    def publish_independent(base: ti.types.ndarray(ti.u32, 1), scratch: ti.types.ndarray(ti.f32, 1)):
+        scratch[0] = base[0]
+
+    @ti.kernel
+    def consume_independent(
+        state: ti.types.ndarray(ti.f32, 1), scratch: ti.types.ndarray(ti.f32, 1),
+        output: ti.types.ndarray(ti.f32, 1),
+    ):
+        for i in output:
+            output[i] = 2 * (state[i] + scratch[0])
+
     @ti.kernel
     def publish(
         base: ti.types.ndarray(ti.u32, 1),
@@ -141,36 +156,61 @@ def test_aot_graphics_buffer_dependencies(tmp_path, recipe):
     names = ("base", "parameters", "vertices", "indices", "state", "output", "dout", "loss")
     dtypes = (ti.u32, ti.u32, ti.f32, ti.u32, ti.f32, ti.f32, ti.f32, ti.f32)
     arguments = {name: arg(kind.NDARRAY, name, dtype, ndim=1) for name, dtype in zip(names, dtypes)}
+    scratch = arg(kind.NDARRAY, "scratch", ti.f32, ndim=1)
 
     def make_graph(adjoint):
         builder = ti.graph.GraphBuilder()
-        builder.dispatch(publish, *(arguments[name] for name in names[:4]))
+        if independent:
+            builder.dispatch(publish_independent, arguments["base"], scratch)
+        else:
+            builder.dispatch(publish, *(arguments[name] for name in names[:4]))
         builder.append_native(recording, admission="auto")
-        builder.dispatch(consume, arguments["state"], arguments["output"])
+        if independent:
+            builder.dispatch(consume_independent, arguments["state"], scratch, arguments["output"])
+        else:
+            builder.dispatch(consume, arguments["state"], arguments["output"])
         if adjoint:
             builder.dispatch(seed, arguments["dout"], arguments["loss"], builder.private_ndarray("dloss", ti.f32, 1))
             builder.dispatch(energy, arguments["output"], arguments["loss"])
             builder.dispatch(energy.grad, arguments["output"], arguments["loss"])
-        return selected_graphics(builder.freeze()) if recipe == "selected" else closing(builder.compile())
+        choice = {
+            "selected": "graphics-queue-argument-images",
+            "segmented": "immutable-argument-images",
+            "independent": "independent-graphics-argument-images",
+        }.get(recipe)
+        return selected_graphics(builder.freeze(), choice) if choice else closing(builder.compile())
 
     frame = {name: ti.ndarray(dtype, count) for name, dtype, count in zip(names, dtypes, (1, 4, 6, 3, 64, 64, 64, 1))}
+    if independent:
+        frame["scratch"] = ti.ndarray(ti.f32, 1)
+        frame["parameters"].from_numpy(np.zeros(4, dtype=np.uint32))
+        frame["vertices"].from_numpy(np.array([-1, -1, 3, -1, -1, 3], dtype=np.float32))
+        frame["indices"].from_numpy(np.array([0, 1, 2], dtype=np.uint32))
     module = ti.aot.Module()
     # JIT Graph's Python entry does not bind ndarray gradients; AOT does below.
     with make_graph(False) as graph:
         for base in (1, 3, 0):
             frame["base"].from_numpy(np.array([base], dtype=np.uint32))
-            graph.run(dict({name: frame[name] for name in names[:6]}, target=target))
+            bindings = dict({name: frame[name] for name in names[:6]}, target=target)
+            if independent:
+                bindings["scratch"] = frame["scratch"]
+            graph.run(bindings)
             ti.sync()
             expected = 2 * (np.arange(64) + base)
             np.testing.assert_array_equal(frame["output"].to_numpy(), expected)
     with make_graph(True) as graph:
-        module.add_execution_plan(
+        plan = module.add_execution_plan(
             "step",
             graph,
             source_bindings=dict(target=target),
             resource_bindings={pipeline: dict(zip(("shader_0", "shader_1"), pipeline._shader_artifacts))},
             gradients=dict(output="dout", loss="dloss"),
         )
+        if recipe in ("segmented", "independent"):
+            selected = json.loads(plan.to_json())["submission_recipe"]
+            assert selected["kind"] == ("vulkan_independent_graphics" if independent else "vulkan_segmented")
+            if not independent:
+                assert selected["ends"] == [1, 2, 6]
     artifact = tmp_path / "graphics-sync.tcm"
     module.archive(str(artifact))
     pipeline.close()
@@ -183,6 +223,7 @@ def test_aot_graphics_buffer_dependencies(tmp_path, recipe):
                 str(Path(__file__).with_name("aot_graphics_sync_probe.py")),
                 mode,
                 str(artifact),
+                recipe,
             ],
             env=os.environ.copy(),
             capture_output=True,

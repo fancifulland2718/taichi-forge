@@ -1293,9 +1293,24 @@ and uniform descriptors, aliases, public/private owners, replay, retirement and
 actual downstream kernel gradients. The explicitly selected complete graphics
 queue recipe can also export qualified pass recordings: both JIT and AOT use
 the same fixed GFX graph builder on the compute-capable graphics queue. This
-adds no format version or consumer interpreter. Segmented compute/graphics and
-independent fork/join recipes remain rejected until their distinct submission
-contracts are preserved. The cold export reuses compiled kernel entries.
+adds no format version or consumer interpreter. The cold export reuses compiled
+kernel entries.
+
+Execution-plan v20 additionally preserves explicitly selected segmented
+compute/graphics and independent graphics recipes in `submission_recipe`, separate
+from CUDA `binding_strategy`. `vulkan_segmented` v1 records strictly increasing
+`ends` covering the flat replay operations; initialization is excluded.
+`vulkan_independent_graphics` v1 reuses the native GFX fork/join builder: a
+buffer-only compute prefix, one graphics pass, and a compute consumer. Preparation
+proves physical buffer separation, including imported aliases, from the pass's
+complete operand list. Unknown footprints or storage identities are rejected.
+Both routes keep existing resource ownership, completion and retirement; replay
+does not parse recipes or resolve symbols. Nested control and unqualified executor
+subclasses are not silently flattened. These are preserved choices, not a new
+default: tiny passes can cost more with separate queue submissions. Windows
+qualification uses an 8×8 indexed raster/SSBO fixture with standalone and borrowed
+consumers, updates, rejected aliases, queued sibling retirement and actual
+downstream gradients; it does not establish an application speedup or shader AD.
 
 `vulkan_graphics/pass_direct` version 2 additionally accepts managed shader AS
 bindings. Query `native_operation_capabilities("vulkan_graphics_pass_direct",
@@ -1359,8 +1374,8 @@ in pipeline stage order, or bind a public pipeline. Windows tests cover mesh-onl
 and task+mesh, compute-to-mesh data updates, public/private owners, replacement
 bindings, close/reset and downstream numeric gradients in standalone and
 borrowed consumers. No consumer shader compiler is required. Older raster
-exports keep their lowest required versions. Mesh indirect and segmented/fork-join
-submission coverage remains unchanged.
+exports keep their lowest required versions. Mesh indirect remains unsupported;
+mesh combined with segmented/fork-join submissions has not been separately qualified.
 
 `pass_direct` v5 retains v4 and permits empty `draws` for a clear/load-only pass.
 An optional `attachment_contract={"width": w, "height": h, "colors": ["rgba8"],
@@ -1403,7 +1418,8 @@ inspection or extra submission manager is introduced. Windows tests cover
 non-indexed fixed-count and indexed GPU-count draws, mixed direct draws,
 0/1/0/1 updates, public/private finite views, replacement bindings, close/reset
 and downstream gradients in standalone/borrowed consumers. This does not add
-graphics-shader differentiation, mesh indirect, or segmented/fork-join export.
+graphics-shader differentiation or mesh indirect. Selected submission recipes
+have the separate v20 contract and qualification described above.
 
 Explicit Vulkan plans also accept `image/storage` version 1 resources with
 `shape`, `format`, optional `mip_levels` and `attachment` parameters. They use
@@ -3216,8 +3232,9 @@ explicit spectral-energy adjoints, tail partitions, two bindings, standalone and
 borrowed consumers, and retirement. This does not imply automatic FFT AD or
 arbitrary recipe coverage. Complete ordered Vulkan compute binding-frame recipes
 also export their selected nodes into one immutable AOT command sequence per
-binding. Segmented/graphics variants and executor subclasses need their own
-qualification; storage recipes remain separate. Independent AOT uses the explicit
+binding. Explicit segmented/graphics recipes use the separate v20 contract;
+unqualified executor subclasses and storage recipes still need their own
+qualification. Independent AOT uses the explicit
 `Runtime("vulkan", device_index=...)` enumeration index (default 0), which can
 differ from JIT's automatically chosen GPU. Compare performance on the same device.
 The optional SDK component is `TaichiSDKProvider_vkfft`.

@@ -192,19 +192,37 @@ class VulkanBindingFrameExecutor:
     def _validate_aot_export(spec, backend):
         from taichi_forge.lang.exception import TaichiRuntimeError
 
-        # Both executors freeze one ordered compute sequence per binding and
-        # retain it through completion. Export the already-selected nodes; do
-        # not regenerate their logical dispatches or provider alternatives.
-        # A qualified compute boundary is reconstructed through its concrete
-        # exporter on that same ordered queue. Graphics/fork-join execution
-        # still requires a separate persistent recipe.
+        # Freeze the selected nodes and their ordered boundaries. A concrete
+        # native exporter reconstructs each prepared boundary; the submission
+        # recipe below keeps it separate from neighboring compute frames.
         boundaries = prepared_boundaries(spec)
         if not eligible(spec, backend) or any(
-            node.executable._recording.queue != "compute"
-            or not callable(type(node.executable._recording).__dict__.get("_export_aot"))
+            not callable(type(node.executable._recording).__dict__.get("_export_aot"))
             for node in boundaries
         ):
-            raise TaichiRuntimeError("AOT binding frames require a qualified ordered Vulkan compute sequence")
+            raise TaichiRuntimeError("AOT binding frames require qualified ordered Vulkan recordings")
+
+    @staticmethod
+    def _export_aot_submission(spec, operation_ends):
+        from taichi_forge.lang.exception import TaichiRuntimeError
+
+        boundaries = prepared_boundaries(spec)
+        if not boundaries:
+            return None
+        ends = []
+        previous = segment_begin = 0
+        for node, end in zip(spec.nodes, operation_ends):
+            if end <= previous:
+                raise TaichiRuntimeError("AOT Vulkan submission lost a selected node's operations")
+            if node in boundaries:
+                if previous > segment_begin:
+                    ends.append(previous)
+                ends.append(end)
+                segment_begin = end
+            previous = end
+        if previous > segment_begin:
+            ends.append(previous)
+        return dict(kind="vulkan_segmented", version=1, ends=ends)
 
     def __init__(self, instance):
         from taichi_forge._lib import core
@@ -489,6 +507,20 @@ class VulkanGraphicsQueueBindingExecutor(VulkanBindingFrameExecutor):
 class VulkanIndependentGraphicsBindingExecutor(VulkanGraphicsQueueBindingExecutor):
     independent_graphics = True
     physical_execution_queue = None
+
+    @staticmethod
+    def _validate_aot_export(spec, backend):
+        from taichi_forge.lang.exception import TaichiRuntimeError
+
+        VulkanGraphicsQueueBindingExecutor._validate_aot_export(spec, backend)
+        if not independent_graphics_eligible(spec):
+            raise TaichiRuntimeError("AOT independent graphics requires a buffer-only disjoint prefix")
+
+    @staticmethod
+    def _export_aot_submission(spec, operation_ends):
+        # The shared native GFX executor re-proves physical buffer separation
+        # after binding. Symbol names alone never authorize the fork.
+        return dict(kind="vulkan_independent_graphics", version=1)
 
     def __init__(self, instance):
         super().__init__(instance)

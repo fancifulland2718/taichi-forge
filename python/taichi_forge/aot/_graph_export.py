@@ -1148,8 +1148,13 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             exporter = type(lease).__dict__.get("_export_aot_bindings")
             if exporter is not None:
                 exporter(lease, context)
+        operation_ends = []
         for node in graph._spec.nodes:
             _node(context, node)
+            operation_ends.append(len(context.operations))
+        submission_recipe = None
+        if getattr(binding_factory, "__dict__", {}).get("_export_aot_submission") is not None:
+            submission_recipe = binding_factory._export_aot_submission(spec, tuple(operation_ends))
         source_arrays.validate_used(spec.runtime_arg_names)
         source_resources.validate_used()
         resource_inputs.validate_used()
@@ -1203,6 +1208,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
                 gradients=mapped_gradients or None,
                 constraints=constraints or None,
                 binding_strategy=binding_strategy,
+                submission_recipe=submission_recipe,
             )
             # Provider workspace must not accidentally become a public input.
             expected_names = (

@@ -167,8 +167,17 @@ def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe):
             with selected_graphics(definition) as graph:
                 export(graph)
             with selected_graphics(definition, "immutable-argument-images") as graph:
-                with pytest.raises(ti.TaichiRuntimeError, match="ordered Vulkan compute"):
-                    ti.aot.Module().add_execution_plan("bad", graph)
+                segmented_inputs = dict(inputs)
+                if early_read:
+                    segmented_inputs[sources["color"]] = dict(pixels="target_pixels")
+                segmented = ti.aot.Module().add_execution_plan(
+                    "segmented", graph, source_bindings=sources,
+                    resource_bindings=segmented_inputs,
+                    gradients=dict(features="dfeatures", loss="dloss"),
+                )
+                document = json.loads(segmented.to_json())
+                assert document["submission_recipe"]["kind"] == "vulkan_segmented"
+                assert document["submission_recipe"]["ends"][-1] == len(document["operations"])
         else:
             graph = builder.compile()
             try:
@@ -313,8 +322,14 @@ def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe):
         fork.append_native(last, admission="auto")
         fork.dispatch(sample, arg(kind.TEXTURE, "color", ndim=2), output)
         with selected_graphics(fork.freeze(), "independent-graphics-argument-images") as graph:
-            with pytest.raises(ti.TaichiRuntimeError, match="selected storage/binding recipe"):
-                ti.aot.Module().add_execution_plan("bad", graph)
+            independent = ti.aot.Module().add_execution_plan(
+                "independent", graph,
+                source_bindings={name: sources[name] for name in ("color", "depth")},
+                resource_bindings={instance: inputs[instance], sources["color"]: "color", sources["depth"]: "depth"},
+            )
+            assert json.loads(independent.to_json())["submission_recipe"] == dict(
+                kind="vulkan_independent_graphics", version=1
+            )
 
     artifact = tmp_path / "graphics-export.tcm"
     module.archive(str(artifact))

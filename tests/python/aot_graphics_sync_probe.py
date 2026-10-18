@@ -5,7 +5,7 @@ from taichi_forge_runtime.aot import Runtime
 from aot_optix_probe import read, write
 
 
-def main(mode, artifact):
+def main(mode, artifact, recipe="ordinary"):
     if mode == "borrowed":
         import taichi_forge as ti
 
@@ -27,7 +27,22 @@ def main(mode, artifact):
             ("loss", "f32", 1, ("storage",)),
         ):
             frame[name] = runtime.ndarray(dtype, count, usage=usage)
+        independent = recipe == "independent"
+        if independent:
+            frame["scratch"] = runtime.ndarray("f32", 1)
+            write(frame["parameters"], [0] * 4, "I")
+            write(frame["vertices"], [-1, -1, 3, -1, -1, 3])
+            write(frame["indices"], [0, 1, 2], "I")
         with module.prepare_execution("step", frame) as call:
+            if independent:
+                for alias in ("vertices", "state"):
+                    try:
+                        invalid = module.prepare_execution("step", dict(frame, scratch=frame[alias]))
+                    except (ValueError, RuntimeError) as error:
+                        assert "alias" in str(error), str(error)
+                    else:
+                        invalid.close()
+                        raise AssertionError("Physical compute/graphics alias was accepted")
             for base in (1, 3, 0):
                 write(frame["base"], [base], "I")
                 call()
@@ -36,7 +51,13 @@ def main(mode, artifact):
                 assert read(frame["output"]) == expected
                 assert read(frame["dout"]) == expected
                 assert read(frame["loss"]) == [sum(v * v * 0.5 for v in expected)]
+            # Rebinding owns fresh commands/resources. Closing a queued sibling
+            # must preserve the original registration and its completion state.
+            with module.prepare_execution("step", frame) as sibling:
+                sibling()
             call()
+            runtime.wait()
+            assert read(frame["output"]) == expected
         module.close()
         if mode == "borrowed":
             ti.reset()

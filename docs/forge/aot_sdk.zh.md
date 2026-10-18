@@ -1004,8 +1004,18 @@ Graph 参数名，consumer 分配须有对应 buffer usage。私有重建 pipeli
 MRT clear、采样/uniform 描述符、别名、公私资源、重放、退休和真实下游 kernel 梯度。
 显式选择的整图 graphics queue recipe 也可导出合格 pass recording：JIT/AOT 都在
 支持 compute 的 graphics 队列调用同一个 GFX 固定图构建器，无需新增格式版本或
-consumer 解释层。分段 compute/graphics 和独立 fork/join recipe 在各自提交合同
-接通前仍拒绝导出。冷导出复用已编译 kernel entry。
+consumer 解释层。冷导出复用已编译 kernel entry。
+
+执行计划 v20 进一步通过 `submission_recipe` 保存显式选定的分段 compute/graphics
+和独立 graphics 配方，与 CUDA `binding_strategy` 分开。`vulkan_segmented` v1 的
+`ends` 严格递增并完整覆盖平坦 replay 操作，初始化不参与索引。
+`vulkan_independent_graphics` v1 复用原生 GFX fork/join：仅访问 buffer 的 compute
+前段、一个 graphics pass、compute 收尾。准备阶段根据 pass 的完整缓冲清单证明实际
+物理存储不相交，包含导入别名；未知清单或存储身份拒绝。两条路线保留原有资源所有权、
+完成及退休机制，重放不解析配方或查询符号。嵌套控制和未资格 executor 子类不静默展开。
+这是保留已选路线，不改变默认选择；很小的 pass 分队列提交可能更慢。Windows 验收使用
+8×8 索引绘制/SSBO 夹具，覆盖独立/借用消费、参数更新、别名拒绝、在途兄弟绑定退休和
+真实下游梯度；不是应用加速或 shader AD 声明。
 
 `vulkan_graphics/pass_direct` v2 进一步支持受管 shader AS 绑定。选择前查询
 `native_operation_capabilities("vulkan_graphics_pass_direct", version=2)`；v1 保持
@@ -1054,7 +1064,7 @@ vertex/fragment AS 合同保持。
 资产（有 task 时也包含 task），或绑定公共 pipeline。Windows 验证覆盖 mesh-only、
 task+mesh、compute→mesh 数据更新、公私 owner、替换绑定、close/reset，以及独立/
 借用消费的下游数值梯度；consumer 不需要 shader compiler。旧 raster 导出继续采用
-所需的最低版本；mesh indirect 和分段/fork-join 提交资格保持原边界。
+所需的最低版本；mesh indirect 仍未接通，mesh 与分段/fork-join 的组合尚未单独验收。
 
 `pass_direct` v5 继承 v4，并允许空 `draws` 执行仅 clear/load 的 pass。它可指定
 `attachment_contract={"width": w, "height": h, "colors": ["rgba8"], "depth": "depth32f"}`；
@@ -1088,7 +1098,7 @@ JIT/AOT 共用范围、特性、几何和整 pass alias 检查；同一 pass 可
 别名参与检查，未知身份须证明分离，不增加逐帧 host 命令检查或新提交管理器。
 Windows 验收覆盖非索引固定计数、索引 GPU count、混合直接绘制、0/1/0/1 更新、
 公开/私有有限 view、替换绑定、close/reset，以及独立/借用消费者的下游梯度。
-不新增图形 shader 求导、mesh indirect 或分段/fork-join 导出。
+不新增图形 shader 求导或 mesh indirect；已选提交配方遵守上文独立的 v20 合同及验收边界。
 
 显式 Vulkan 计划也接受 `image/storage` v1 资源，参数为 `shape`、`format`、可选
 `mip_levels` 和 `attachment`，复用同一所有者及 `image/upload`、`image/upload_mips`。
@@ -2461,8 +2471,8 @@ inline 扩展的 adapter；不提供额外 vendor `library_path`。准备可能�
 不执行用户 FFT、不改写输入；暖重放不重建计划。Windows Vulkan 已验证一维及二维混合
 kernel/FFT、归一化逆变换、显式谱能量伴随、尾分块、双绑定、独立/借用消费及退休；不是自动
 FFT AD 或任意 recipe 支持声明。完整有序 Vulkan compute binding-frame 方案也可将已选节点
-导出为每绑定一组不可变 AOT 命令；分段/graphics 变体及 executor 子类需要自己的资格，
-storage recipe 仍需单独处理。独立 AOT 使用 `Runtime("vulkan", device_index=...)` 的显式
+导出为每绑定一组不可变 AOT 命令；显式分段/graphics 配方使用独立的 v20 合同，未资格
+executor 子类及 storage recipe 仍需单独处理。独立 AOT 使用 `Runtime("vulkan", device_index=...)` 的显式
 枚举序号（默认 0），可能与 JIT 自动选择的 GPU 不同；性能比较须指定同一设备。
 独立 SDK 可选组件为 `TaichiSDKProvider_vkfft`。
 
