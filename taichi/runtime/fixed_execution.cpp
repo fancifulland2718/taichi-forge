@@ -33,6 +33,9 @@
 namespace taichi::lang {
 struct FixedExecution::State {
   std::shared_ptr<RuntimeFaultDomain> fault_domain;
+  std::vector<std::unique_ptr<FixedExecution>> storage_frames;
+  std::size_t next_storage_frame{0};
+  bool storage_ring_failed{false};
   std::uint32_t kind{0};
   std::size_t bytes{0};
   std::size_t workspace_bytes{0};
@@ -122,9 +125,50 @@ FixedExecution::FixedExecution(
     std::shared_ptr<RuntimeFaultDomain> fault_domain,
     std::shared_ptr<cuda::BindingFrameReplay> binding_replay,
     std::shared_ptr<void> binding_operands,
-    const VulkanSubmissionRecipe *submission_recipe)
+    const VulkanSubmissionRecipe *submission_recipe,
+    const OrderedStorageRing *storage_ring)
     : state_(std::make_unique<State>()) {
   state_->fault_domain = std::move(fault_domain);
+  if (storage_ring) {
+    if ((!arch_is_cpu(arch) && arch != Arch::cuda && arch != Arch::vulkan) ||
+        binding_replay || binding_operands || submission_recipe)
+      throw std::invalid_argument(
+          "Ordered storage rings require an ordinary CPU/CUDA/Vulkan queue");
+    const auto width = storage_ring->frame_size(operations.size());
+    for (const auto &operation : operations) {
+      if (const auto *dispatch = std::get_if<Dispatch>(&operation)) {
+        if (!dispatch->resources.empty() ||
+            dispatch->indirect_dispatch != kDeviceNullPtr ||
+            dispatch->bounded_extent != kDeviceNullPtr)
+          throw std::invalid_argument(
+              "Ordered storage rings require ordinary buffer dispatches");
+      } else if (!std::holds_alternative<BufferCopy>(operation) &&
+                 !std::holds_alternative<BufferFill>(operation)) {
+        throw std::invalid_argument(
+            "Ordered storage rings require kernel/copy/fill operations");
+      }
+    }
+    state_->storage_frames.reserve(storage_ring->capacity);
+    for (std::size_t offset = 0; offset < operations.size(); offset += width) {
+      std::vector<Operation> frame(operations.begin() + offset,
+                                  operations.begin() + offset + width);
+      auto prepared = std::make_unique<FixedExecution>(
+          arch, device, gfx_runtime, frame, nullptr, state_->fault_domain);
+      if (!state_->storage_frames.empty() &&
+          prepared->execution_kind() != state_->kind)
+        throw std::invalid_argument("Ordered storage ring frame kinds differ");
+      state_->kind = prepared->execution_kind();
+      const auto add = [](std::size_t &total, std::size_t bytes) {
+        if (bytes > std::numeric_limits<std::size_t>::max() - total)
+          throw std::invalid_argument("Ordered storage ring size overflow");
+        total += bytes;
+      };
+      add(state_->bytes, prepared->argument_bytes());
+      add(state_->workspace_bytes, prepared->workspace_bytes());
+      state_->storage_frames.push_back(std::move(prepared));
+    }
+    return;
+  }
   if (submission_recipe) {
     if (arch != Arch::vulkan)
       throw std::invalid_argument("Selected Vulkan submission requires Vulkan");
@@ -1052,6 +1096,20 @@ void FixedExecution::retire_completed_binding(bool backend_safe) {
 }
 
 void FixedExecution::run_impl() {
+  if (!state_->storage_frames.empty()) {
+    if (state_->storage_ring_failed)
+      throw std::runtime_error(
+          "Ordered storage ring submission failed; prepare a new instance");
+    try {
+      state_->storage_frames[state_->next_storage_frame]->run();
+      state_->next_storage_frame =
+          (state_->next_storage_frame + 1) % state_->storage_frames.size();
+    } catch (...) {
+      state_->storage_ring_failed = true;
+      throw;
+    }
+    return;
+  }
   if (!state_->host_steps.empty()) {
     if (state_->host_failed)
       throw std::runtime_error(
