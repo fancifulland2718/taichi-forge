@@ -1452,10 +1452,7 @@ void TaskCodeGenLLVM::emit_gc(OffloadedStmt *stmt) {
       return;  // skip GC — slots already cleared, allocator state is idle
     }
   }
-  const uint64 runtime_key =
-      (uint64(static_cast<uint32>(snode->get_snode_tree_id())) << 32) |
-      uint64(static_cast<uint32>(snode->runtime_local_id));
-  call("node_gc", get_runtime(), tlctx->get_constant(runtime_key));
+  call("node_gc", get_runtime(), get_runtime_snode_key(snode));
 }
 
 void TaskCodeGenLLVM::create_increment(llvm::Value *ptr, llvm::Value *value) {
@@ -2842,10 +2839,7 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
     struct_for_tls_sizes.insert(stmt->tls_size);
   }
   // Loop over nodes in the element list, in parallel
-  const uint64 runtime_key =
-      (uint64(static_cast<uint32>(leaf_block->get_snode_tree_id())) << 32) |
-      uint64(static_cast<uint32>(leaf_block->runtime_local_id));
-  call(struct_for_func, get_context(), tlctx->get_constant(runtime_key),
+  call(struct_for_func, get_context(), get_runtime_snode_key(leaf_block),
        tlctx->get_constant(list_element_size), tlctx->get_constant(num_splits),
        body, tlctx->get_constant(stmt->tls_size),
        tlctx->get_constant(stmt->num_cpu_threads));
@@ -3340,6 +3334,16 @@ llvm::Value *TaskCodeGenLLVM::get_runtime_tree_id(int snode_tree_id) {
                                   compile_config.arch == Arch::cuda);
   }
   return tlctx->get_constant(snode_tree_id);
+}
+
+llvm::Value *TaskCodeGenLLVM::get_runtime_snode_key(const SNode *snode) {
+  // Keep the local node index unchanged while relocating the owning tree.
+  // Ordinary JIT code still folds this expression to its original constant.
+  auto *tree = builder->CreateZExt(
+      get_runtime_tree_id(snode->get_snode_tree_id()), builder->getInt64Ty());
+  return builder->CreateOr(
+      builder->CreateShl(tree, 32),
+      builder->getInt64(static_cast<uint32>(snode->runtime_local_id)));
 }
 
 llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
