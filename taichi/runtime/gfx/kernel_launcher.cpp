@@ -63,8 +63,8 @@ void KernelLauncher::debug_reset_sparse_listgen_statistics() {
 
 SparseSNodeTreeListgenStatistics
 KernelLauncher::debug_sparse_listgen_statistics(
-    const std::vector<int> &snode_ids) {
-  return config_.gfx_runtime_->debug_sparse_listgen_statistics(snode_ids);
+    const std::vector<int> &snode_ids, int tree_id) {
+  return config_.gfx_runtime_->debug_sparse_listgen_statistics(snode_ids, tree_id);
 }
 
 }  // namespace gfx

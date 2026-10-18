@@ -1,5 +1,6 @@
 #pragma once
 #include "taichi/runtime/snode_tree_id_registry.h"
+#include "taichi/runtime/gfx/snode_tree_resources.h"
 #include "taichi/util/lang_util.h"
 
 #include <array>
@@ -48,7 +49,6 @@ using InputBuffersMap =
     std::unordered_map<BufferInfo, DeviceAllocation *, BufferInfoHasher>;
 
 class SNodeTreeManager;
-struct SNodeTreeResources;
 class GfxRuntime;
 class GraphReplayRegistry;
 class KernelLauncher;
@@ -160,6 +160,7 @@ class CompiledTaichiKernel {
     DeviceAllocation *global_tmps_buffer{nullptr};
     DeviceAllocation *hash_overflow_buffer{nullptr};
     DeviceAllocation *listgen_buffer{nullptr};
+    std::vector<SparseTaskResources> sparse_task_resources;
 #if defined(TI_WITH_VULKAN_POINTER)
     // B-3.b (2026-05): 路线 B 阶段开启 vulkan_pointer_independent_pool 后，
     // 每个走独立池的 pointer SNode 对应一块独立 DeviceAllocation；在这里打
@@ -207,6 +208,11 @@ class CompiledTaichiKernel {
     return task_uses_listgen_buffer_[i];
   }
 
+  const SparseTaskResources &sparse_task_resources(int i) const {
+    static const SparseTaskResources empty;
+    return sparse_task_resources_.empty() ? empty : sparse_task_resources_[i];
+  }
+
   void set_listgen_buffer(DeviceAllocation *listgen_buffer) {
     input_buffers_[BufferInfo(BufferType::ListGen)] = listgen_buffer;
   }
@@ -246,6 +252,7 @@ class CompiledTaichiKernel {
   std::vector<std::vector<BufferBindingPlan>> buffer_binding_plans_;
   size_t required_listgen_capacity_entries_{0};
   std::vector<bool> task_uses_listgen_buffer_;
+  std::vector<SparseTaskResources> sparse_task_resources_;
   std::vector<std::unique_ptr<Pipeline>> pipelines_;
   std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
@@ -310,7 +317,7 @@ class TI_DLL_EXPORT GfxRuntime {
   std::size_t debug_registered_kernel_count();
   void debug_reset_sparse_listgen_statistics();
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
-      const std::vector<int> &snode_ids);
+      const std::vector<int> &snode_ids, int tree_id = -1);
 
   void launch_kernel(KernelHandle handle, LaunchContextBuilder &host_ctx);
 
@@ -750,13 +757,16 @@ class TI_DLL_EXPORT GfxRuntime {
   void insert_pending_dispatch_barriers();
   void add_pending_dispatch_barrier(DeviceAllocation alloc);
   void clear_pending_dispatch_barriers();
-  int64 get_sparse_list_version(int snode_id) const;
+  int64 get_sparse_list_version(SNodeResourceId snode_id) const;
   struct SparseListState;
   void record_sparse_list_reuse_sample(SparseListState &state,
                                        bool would_skip) const;
-  bool sparse_list_task_is_current(const TaskAttributes &attribs);
-  void mark_sparse_list_task_launched(const TaskAttributes &attribs);
-  void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
+  bool sparse_list_task_is_current(const TaskAttributes &attribs,
+                                   const SparseTaskResources &resources);
+  void mark_sparse_list_task_launched(const TaskAttributes &attribs,
+                                      const SparseTaskResources &resources);
+  void invalidate_sparse_list_cache(SNodeResourceId mutation);
+  void retire_sparse_tree_state(int tree_id);
   void clear_sparse_list_cache_resident();
   void check_hash_overflow_counters();
   void synchronize_impl(bool check_hash_overflow);
@@ -826,20 +836,24 @@ class TI_DLL_EXPORT GfxRuntime {
     int64 global_dirty_seen{-1};
     int64 version{0};
     int64 clean_parent_version{-1};
-    int parent_snode_id{-1};
+    SNodeResourceId parent_snode_id;
     std::uint64_t adaptive_window_bits{0};
     int adaptive_window_size{0};
     int adaptive_hit_count{0};
     bool adaptive_disabled{false};
   };
   bool listgen_reuse_adaptive_{false};
-  std::unordered_map<int, SparseListState> sparse_list_states_;
+  SNodeResourceTreeMap snode_resource_trees_;
+  std::unordered_map<SNodeResourceId, SparseListState, SNodeResourceIdHash>
+      sparse_list_states_;
   bool sparse_listgen_telemetry_enabled_{false};
-  std::unordered_map<int, SparseListgenNodeStatistics>
+  std::unordered_map<SNodeResourceId, SparseListgenNodeStatistics, SNodeResourceIdHash>
       sparse_listgen_telemetry_;
-  std::unordered_map<int, std::unordered_set<int>> child_lists_by_parent_;
+  std::unordered_map<SNodeResourceId,
+                     std::unordered_set<SNodeResourceId, SNodeResourceIdHash>,
+                     SNodeResourceIdHash> child_lists_by_parent_;
   int64 sparse_list_global_dirty_epoch_{0};
-  int resident_sparse_list_snode_id_{-1};
+  SNodeResourceId resident_sparse_list_snode_id_;
   std::vector<HashOverflowWatch> hash_overflow_watches_;
   bool hash_overflow_error_reported_{false};
   std::unordered_map<uint64_t, GraphReplayState> graph_replay_states_;

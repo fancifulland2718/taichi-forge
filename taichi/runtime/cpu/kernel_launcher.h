@@ -60,7 +60,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   std::size_t debug_registered_kernel_count() override;
   void debug_reset_sparse_listgen_statistics() override;
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
-      const std::vector<int> &snode_ids) override;
+      const std::vector<int> &snode_ids, int tree_id = -1) override;
   void debug_reset_launch_attribution() override;
   std::unordered_map<std::string, std::uint64_t> debug_launch_attribution()
       const override;

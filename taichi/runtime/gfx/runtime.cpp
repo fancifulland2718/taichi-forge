@@ -969,7 +969,10 @@ size_t align_up_to(size_t value, size_t alignment) {
 
 CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
     : ti_kernel_attribs_(*ti_params.ti_kernel_attribs),
-      device_(ti_params.device) {
+      device_(ti_params.device),
+      sparse_task_resources_(ti_params.sparse_task_resources) {
+  TI_ASSERT(sparse_task_resources_.empty() || sparse_task_resources_.size() ==
+            ti_kernel_attribs_.tasks_attribs.size());
   input_buffers_[BufferType::GlobalTmps] = ti_params.global_tmps_buffer;
   input_buffers_[BufferType::HashOverflow] = ti_params.hash_overflow_buffer;
   input_buffers_[BufferType::ListGen] = ti_params.listgen_buffer;
@@ -1327,7 +1330,7 @@ GfxRuntime::~GfxRuntime() {
   listgen_buffer_.reset();
 }
 
-int64 GfxRuntime::get_sparse_list_version(int snode_id) const {
+int64 GfxRuntime::get_sparse_list_version(SNodeResourceId snode_id) const {
   auto it = sparse_list_states_.find(snode_id);
   if (it == sparse_list_states_.end()) {
     return 0;
@@ -1336,16 +1339,17 @@ int64 GfxRuntime::get_sparse_list_version(int snode_id) const {
 }
 
 bool GfxRuntime::sparse_list_task_is_current(
-    const TaskAttributes &attribs) {
+    const TaskAttributes &attribs,
+    const SparseTaskResources &resources) {
   const bool is_listgen =
       attribs.sparse_list_op == TaskAttributes::kSparseListOpListgen &&
-      attribs.sparse_list_snode_id >= 0 &&
-      attribs.sparse_list_parent_snode_id >= 0;
+      resources.list.valid() &&
+      resources.parent.valid();
   SparseListgenNodeStatistics *telemetry = nullptr;
   if (sparse_listgen_telemetry_enabled_ && is_listgen) {
-    telemetry = &sparse_listgen_telemetry_[attribs.sparse_list_snode_id];
-    telemetry->snode_id = attribs.sparse_list_snode_id;
-    telemetry->parent_snode_id = attribs.sparse_list_parent_snode_id;
+    telemetry = &sparse_listgen_telemetry_[resources.list];
+    telemetry->snode_id = resources.list.snode_id;
+    telemetry->parent_snode_id = resources.parent.snode_id;
     ++telemetry->requests;
     if (!telemetry->resident_evictions.available) {
       telemetry->resident_evictions = {0, true};
@@ -1360,10 +1364,10 @@ bool GfxRuntime::sparse_list_task_is_current(
     }
     return false;
   }
-  if (resident_sparse_list_snode_id_ != attribs.sparse_list_snode_id) {
+  if (resident_sparse_list_snode_id_ != resources.list) {
     if (telemetry != nullptr) {
       const bool cold =
-          sparse_list_states_.find(attribs.sparse_list_snode_id) ==
+          sparse_list_states_.find(resources.list) ==
           sparse_list_states_.end();
       telemetry->last_rebuild_reason =
           cold ? "cold" : "resident_list_evicted";
@@ -1374,13 +1378,13 @@ bool GfxRuntime::sparse_list_task_is_current(
     return false;
   }
 
-  auto it = sparse_list_states_.find(attribs.sparse_list_snode_id);
+  auto it = sparse_list_states_.find(resources.list);
   if (it == sparse_list_states_.end()) {
     if (telemetry != nullptr) {
       telemetry->last_rebuild_reason = "cold";
     }
     if (listgen_reuse_adaptive_) {
-      auto &state = sparse_list_states_[attribs.sparse_list_snode_id];
+      auto &state = sparse_list_states_[resources.list];
       record_sparse_list_reuse_sample(state, /*would_skip=*/false);
     }
     return false;
@@ -1391,7 +1395,7 @@ bool GfxRuntime::sparse_list_task_is_current(
                    sparse_list_global_dirty_epoch_ &&
                  state.clean_parent_version ==
                    get_sparse_list_version(
-                     attribs.sparse_list_parent_snode_id);
+                     resources.parent);
   record_sparse_list_reuse_sample(state, would_skip);
   if (telemetry != nullptr) {
     if (would_skip && !state.adaptive_disabled) {
@@ -1402,7 +1406,7 @@ bool GfxRuntime::sparse_list_task_is_current(
       telemetry->last_rebuild_reason = "global_topology_dirty";
     } else if (state.clean_parent_version !=
                get_sparse_list_version(
-                   attribs.sparse_list_parent_snode_id)) {
+                   resources.parent)) {
       telemetry->last_rebuild_reason = "parent_version_changed";
     } else if (state.adaptive_disabled) {
       telemetry->last_rebuild_reason = "adaptive_reuse_disabled";
@@ -1445,16 +1449,17 @@ void GfxRuntime::record_sparse_list_reuse_sample(SparseListState &state,
 }
 
 void GfxRuntime::mark_sparse_list_task_launched(
-    const TaskAttributes &attribs) {
+    const TaskAttributes &attribs,
+    const SparseTaskResources &resources) {
   if (attribs.task_type != OffloadedTaskType::listgen) {
     return;
   }
   if (sparse_listgen_telemetry_enabled_ &&
-      attribs.sparse_list_snode_id >= 0) {
+      resources.list.valid()) {
     auto &telemetry =
-        sparse_listgen_telemetry_[attribs.sparse_list_snode_id];
-    telemetry.snode_id = attribs.sparse_list_snode_id;
-    telemetry.parent_snode_id = attribs.sparse_list_parent_snode_id;
+        sparse_listgen_telemetry_[resources.list];
+    telemetry.snode_id = resources.list.snode_id;
+    telemetry.parent_snode_id = resources.parent.snode_id;
     ++telemetry.rebuilds;
     const std::uint64_t candidates = static_cast<std::uint64_t>(
         std::max(attribs.advisory_total_num_threads, 0));
@@ -1467,75 +1472,76 @@ void GfxRuntime::mark_sparse_list_task_launched(
     return;
   }
   if (attribs.sparse_list_op != TaskAttributes::kSparseListOpListgen ||
-      attribs.sparse_list_snode_id < 0 ||
-      attribs.sparse_list_parent_snode_id < 0) {
-    resident_sparse_list_snode_id_ = -1;
+      !resources.list.valid() ||
+      !resources.parent.valid()) {
+    resident_sparse_list_snode_id_ = {};
     return;
   }
 
-  auto &state = sparse_list_states_[attribs.sparse_list_snode_id];
-  if (state.parent_snode_id != attribs.sparse_list_parent_snode_id) {
-    if (state.parent_snode_id >= 0) {
+  auto &state = sparse_list_states_[resources.list];
+  if (state.parent_snode_id != resources.parent) {
+    if (state.parent_snode_id.valid()) {
       auto old_children = child_lists_by_parent_.find(state.parent_snode_id);
       if (old_children != child_lists_by_parent_.end()) {
-        old_children->second.erase(attribs.sparse_list_snode_id);
+        old_children->second.erase(resources.list);
         if (old_children->second.empty()) {
           child_lists_by_parent_.erase(old_children);
         }
       }
     }
-    child_lists_by_parent_[attribs.sparse_list_parent_snode_id].insert(
-        attribs.sparse_list_snode_id);
-    state.parent_snode_id = attribs.sparse_list_parent_snode_id;
+    child_lists_by_parent_[resources.parent].insert(
+        resources.list);
+    state.parent_snode_id = resources.parent;
   }
   state.clean_epoch = state.dirty_epoch;
   state.clean_parent_version =
-      get_sparse_list_version(attribs.sparse_list_parent_snode_id);
+      get_sparse_list_version(resources.parent);
   state.global_dirty_seen = sparse_list_global_dirty_epoch_;
   state.version++;
-  resident_sparse_list_snode_id_ = attribs.sparse_list_snode_id;
+  resident_sparse_list_snode_id_ = resources.list;
 }
 
-void GfxRuntime::invalidate_sparse_list_cache(int sparse_mutation_snode_id) {
+void GfxRuntime::invalidate_sparse_list_cache(
+    SNodeResourceId sparse_mutation_snode_id) {
   if (!listgen_reuse_) {
     return;
   }
-  if (sparse_mutation_snode_id < 0) {
+  if (!sparse_mutation_snode_id.valid()) {
     sparse_list_global_dirty_epoch_++;
     if (sparse_listgen_telemetry_enabled_) {
       for (const auto &[snode_id, state] : sparse_list_states_) {
         (void)state;
         auto &telemetry = sparse_listgen_telemetry_[snode_id];
-        telemetry.snode_id = snode_id;
+        telemetry.snode_id = snode_id.snode_id;
         ++telemetry.invalidations;
       }
     }
     return;
   }
 
-  std::unordered_set<int> affected;
-  std::vector<int> stack;
+  std::unordered_set<SNodeResourceId, SNodeResourceIdHash> affected;
+  std::vector<SNodeResourceId> stack;
   stack.push_back(sparse_mutation_snode_id);
   while (!stack.empty()) {
-    const int snode_id = stack.back();
+    const auto snode_id = stack.back();
     stack.pop_back();
     if (!affected.insert(snode_id).second) {
       continue;
     }
     auto children = child_lists_by_parent_.find(snode_id);
     if (children != child_lists_by_parent_.end()) {
-      for (int child_snode_id : children->second) {
+      for (auto child_snode_id : children->second) {
         stack.push_back(child_snode_id);
       }
     }
   }
-  for (int snode_id : affected) {
+  for (auto snode_id : affected) {
     auto it = sparse_list_states_.find(snode_id);
     if (it != sparse_list_states_.end()) {
       it->second.dirty_epoch++;
       if (sparse_listgen_telemetry_enabled_) {
         auto &telemetry = sparse_listgen_telemetry_[snode_id];
-        telemetry.snode_id = snode_id;
+        telemetry.snode_id = snode_id.snode_id;
         ++telemetry.invalidations;
       }
     }
@@ -1546,7 +1552,28 @@ void GfxRuntime::clear_sparse_list_cache_resident() {
   sparse_list_states_.clear();
   child_lists_by_parent_.clear();
   sparse_list_global_dirty_epoch_ = 0;
-  resident_sparse_list_snode_id_ = -1;
+  resident_sparse_list_snode_id_ = {};
+}
+
+void GfxRuntime::retire_sparse_tree_state(int tree_id) {
+  for (auto it = sparse_list_states_.begin(); it != sparse_list_states_.end();) {
+    if (it->first.tree_id == tree_id) it = sparse_list_states_.erase(it);
+    else ++it;
+  }
+  for (auto it = sparse_listgen_telemetry_.begin();
+       it != sparse_listgen_telemetry_.end();) {
+    if (it->first.tree_id == tree_id) it = sparse_listgen_telemetry_.erase(it);
+    else ++it;
+  }
+  // A list and its parent always belong to the same resource tree.
+  for (auto it = child_lists_by_parent_.begin();
+       it != child_lists_by_parent_.end();) {
+    if (it->first.tree_id == tree_id) it = child_lists_by_parent_.erase(it);
+    else ++it;
+  }
+  if (resident_sparse_list_snode_id_.tree_id == tree_id) {
+    resident_sparse_list_snode_id_ = {};
+  }
 }
 
 void GfxRuntime::check_hash_overflow_counters() {
@@ -1695,36 +1722,72 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
       params.root_buffers.push_back(get_root_buffer(root));
     }
   }
+  // Legacy registrations can omit the explicit dependency set. Recover it
+  // from their root bindings rather than visiting every live runtime tree.
+  if (reg_params.snode_tree_ids.empty()) {
+    for (const auto &task : reg_params.kernel_attribs.tasks_attribs) {
+      for (const auto &bind : task.buffer_binds) {
+        if (bind.buffer.type != BufferType::Root) continue;
+        TI_ASSERT(bind.buffer.root_id.size() == 1);
+        const int local = bind.buffer.root_id[0];
+        TI_ERROR_IF(local < 0 || local >= reg_params.num_snode_trees,
+                    "GFX task references invalid root {}", local);
+        reg_params.snode_tree_ids.push_back(
+            reg_params.root_buffer_bindings.empty()
+                ? local : reg_params.root_buffer_bindings.at(local));
+      }
+    }
+  }
+  auto &used_trees = reg_params.snode_tree_ids;
+  std::sort(used_trees.begin(), used_trees.end());
+  used_trees.erase(std::unique(used_trees.begin(), used_trees.end()),
+                   used_trees.end());
+  SNodeResourceResolver resources(snode_resource_trees_, used_trees);
+  const auto &tasks = reg_params.kernel_attribs.tasks_attribs;
+  for (std::size_t index = 0; index < tasks.size(); ++index) {
+    const auto &task = tasks[index];
+    SparseTaskResources ids{resources.resolve(task.sparse_list_snode_id),
+                            resources.resolve(task.sparse_list_parent_snode_id),
+                            resources.resolve(task.sparse_mutation_snode_id)};
+    TI_ERROR_IF(ids.list.valid() && ids.parent.valid() &&
+                    ids.list.tree_id != ids.parent.tree_id,
+                "GFX sparse list and parent belong to different trees");
+    if (ids.list.valid() || ids.parent.valid() || ids.mutation.valid()) {
+      if (params.sparse_task_resources.empty()) {
+        params.sparse_task_resources.resize(tasks.size());
+      }
+      params.sparse_task_resources[index] = ids;
+    }
+  }
   params.global_tmps_buffer = global_tmps_buffer_.get();
   params.hash_overflow_buffer = hash_overflow_buffer_.get();
   params.listgen_buffer = listgen_buffer_.get();
 #if defined(TI_WITH_VULKAN_POINTER)
-  // B-3.b (2026-05): 枚举所有独立 pool buffer。allocator->independent_pool_alloc()
-  // 返回 nullptr 表示该 SNode 仍走 root_buffer 子区间（在 vector 中跳过）。
-  // C-2.2 (2026-05): independent_pool_alloc() 已升级为 DeviceNodeAllocator 基类
-  // 虚方法，BumpOnly 与 Chunked skeleton 都能透出 chunk[0] DeviceAllocation。
-  for (const auto &[rid, sid_to_alloc] : node_allocators_) {
-    (void)rid;
-    for (const auto &[sid, allocator_ptr] : sid_to_alloc) {
-      if (allocator_ptr == nullptr) {
-        continue;
-      }
-      DeviceAllocation *indep = allocator_ptr->independent_pool_alloc();
-      if (indep != nullptr) {
-        params.node_allocator_pool_buffers.emplace_back(sid, indep);
-      }
-      // C-2.5 (2026-05): chunked allocator 在 rw_buffer_array 路径下需要
-      // 全部 chunk 的 DeviceAllocation 列表。
-      // §13.4 (2026-05-02): 任意 chunk 数（含 1）都走 chunk_arrays 路径，
-      // 与 spirv_codegen.cpp::lookup_chunked_pool_contract 同步——后者已
-      // 移除 max_chunks>1 限制；codegen 与 runtime 必须对 chunked 是否
-      // 走 descriptor array 给出相同答案，避免 binding 不匹配 (§13.4
-      // ptr_to_chunk_idx_ vs ptr_to_buffers_ 不变量)。
-      auto chunk_list = allocator_ptr->chunks();
-      if (!chunk_list.empty() && allocator_ptr->is_chunked()) {
-        params.node_allocator_chunk_arrays.emplace_back(
-            sid, std::move(chunk_list));
-      }
+  std::unordered_map<int, bool> used_pools;
+  for (const auto &task : reg_params.kernel_attribs.tasks_attribs) {
+    for (const auto &bind : task.buffer_binds) {
+      if (bind.buffer.type != BufferType::NodeAllocatorPool) continue;
+      TI_ASSERT(bind.buffer.root_id.size() == 1);
+      used_pools[bind.buffer.root_id[0]] |= bind.chunk_count > 0;
+    }
+  }
+  for (const auto &[local_id, needs_chunks] : used_pools) {
+    const auto id = resources.resolve(local_id);
+    const auto tree = node_allocators_.find(id.tree_id);
+    TI_ERROR_IF(tree == node_allocators_.end() ||
+                    tree->second.find(id.snode_id) == tree->second.end(),
+                "GFX pointer allocator is missing for tree {} SNode {}",
+                id.tree_id, id.snode_id);
+    const auto &allocator = tree->second.at(id.snode_id);
+    TI_ASSERT(allocator != nullptr);
+    if (auto *pool = allocator->independent_pool_alloc()) {
+      params.node_allocator_pool_buffers.emplace_back(local_id, pool);
+    }
+    if (needs_chunks) {
+      auto chunks = allocator->chunks();
+      TI_ERROR_IF(chunks.empty() || !allocator->is_chunked(),
+                  "GFX task requires an unavailable pointer chunk array");
+      params.node_allocator_chunk_arrays.emplace_back(local_id, std::move(chunks));
     }
   }
 #endif
@@ -1779,8 +1842,6 @@ void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
   graph_replay_retirement_tail_ = 0;
   graph_replay_retirement_count_ = 0;
   TI_ASSERT(ti_kernel_snode_tree_ids_.size() == ti_kernels_.size());
-  bool retired_any = false;
-  std::vector<int> retired_sparse_snode_ids;
   for (auto iter = ti_kernel_snode_tree_ids_.begin();
        iter != ti_kernel_snode_tree_ids_.end();) {
     const auto &tree_ids = iter->second;
@@ -1791,23 +1852,10 @@ void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
     const int launch_id = iter->first;
     const auto kernel_it = ti_kernels_.find(launch_id);
     TI_ASSERT(kernel_it != ti_kernels_.end());
-    for (const auto &attribs :
-         kernel_it->second->ti_kernel_attribs().tasks_attribs) {
-      if (attribs.sparse_list_snode_id >= 0) {
-        retired_sparse_snode_ids.push_back(
-            attribs.sparse_list_snode_id);
-      }
-    }
     TI_ASSERT(ti_kernels_.erase(launch_id) == 1);
     iter = ti_kernel_snode_tree_ids_.erase(iter);
-    retired_any = true;
   }
-  if (retired_any) {
-    clear_sparse_list_cache_resident();
-    for (int snode_id : retired_sparse_snode_ids) {
-      sparse_listgen_telemetry_.erase(snode_id);
-    }
-  }
+  retire_sparse_tree_state(tree_id);
 }
 
 std::size_t GfxRuntime::debug_registered_kernel_count() {
@@ -1823,7 +1871,7 @@ void GfxRuntime::debug_reset_sparse_listgen_statistics() {
 
 SparseSNodeTreeListgenStatistics
 GfxRuntime::debug_sparse_listgen_statistics(
-    const std::vector<int> &snode_ids) {
+    const std::vector<int> &snode_ids, int tree_id) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   SparseSNodeTreeListgenStatistics result;
   result.available = sparse_listgen_telemetry_enabled_;
@@ -1831,7 +1879,8 @@ GfxRuntime::debug_sparse_listgen_statistics(
     return result;
   }
   for (const auto &[snode_id, telemetry] : sparse_listgen_telemetry_) {
-    if (std::binary_search(snode_ids.begin(), snode_ids.end(), snode_id)) {
+    if ((tree_id < 0 || snode_id.tree_id == tree_id) &&
+        std::binary_search(snode_ids.begin(), snode_ids.end(), snode_id.snode_id)) {
       result.nodes.push_back(telemetry);
     }
   }
@@ -2109,7 +2158,8 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
   for (int i = 0; i < task_attribs.size(); ++i) {
     const auto &attribs = task_attribs[i];
-    if (sparse_list_task_is_current(attribs)) {
+    const auto &resources = ti_kernel->sparse_task_resources(i);
+    if (sparse_list_task_is_current(attribs, resources)) {
       TI_TRACE("Skipping current Vulkan sparse list kernel {}", attribs.name);
       continue;
     }
@@ -2315,9 +2365,9 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     TI_ERROR_IF(status != RhiResult::success, "Dispatch error : RhiResult({})",
                 status);
     ++current_cmdlist_dispatch_count_;
-    mark_sparse_list_task_launched(attribs);
+    mark_sparse_list_task_launched(attribs, resources);
     if (attribs.may_mutate_sparse_topology) {
-      invalidate_sparse_list_cache(attribs.sparse_mutation_snode_id);
+      invalidate_sparse_list_cache(resources.mutation);
     }
     if (dispatch_cache_) {
       mark_task_writes(attribs);
@@ -6428,6 +6478,7 @@ void GfxRuntime::materialize_snode_tree_resources(
   }
   add_root_buffer(root_id, resources.root_size);
   try {
+    TI_ASSERT(snode_resource_trees_.emplace(root_id, resources.snode_ids).second);
     for (const auto &watch : resources.hash_watches) {
       hash_overflow_watches_.push_back(
           {root_id, watch.snode_id, watch.overflow_offset,
@@ -6615,6 +6666,8 @@ void GfxRuntime::remove_root_buffer(int root_id) {
   for (const auto replay_key : dependent_recordings) {
     retire_graph_replay(replay_key);
   }
+  retire_sparse_tree_state(root_id);
+  snode_resource_trees_.erase(root_id);
   root_buffers_size_map_.erase(root_buffers_[root_id].get());
   root_buffers_[root_id].reset();
 #if defined(TI_WITH_VULKAN_POINTER)

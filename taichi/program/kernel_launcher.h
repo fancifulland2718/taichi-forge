@@ -44,8 +44,9 @@ class KernelLauncher {
   }
 
   virtual SparseSNodeTreeListgenStatistics
-  debug_sparse_listgen_statistics(const std::vector<int> &snode_ids) {
+  debug_sparse_listgen_statistics(const std::vector<int> &snode_ids, int tree_id = -1) {
     (void)snode_ids;
+    (void)tree_id;
     return {};
   }
 

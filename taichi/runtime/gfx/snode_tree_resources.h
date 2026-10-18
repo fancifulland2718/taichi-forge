@@ -4,12 +4,19 @@
 #include <vector>
 
 #include "taichi/codegen/spirv/spirv_allocator_contract.h"
+#include "taichi/runtime/snode_resource_id.h"
 
 namespace taichi::lang {
 namespace spirv {
 struct CompiledSNodeStructs;
 }
 namespace gfx {
+
+struct SparseTaskResources {
+  SNodeResourceId list;
+  SNodeResourceId parent;
+  SNodeResourceId mutation;
+};
 
 // Cold materialization facts, independent of live SNodes and device handles.
 // Offsets remain relative to the physical root/pool selected by the compiler.

@@ -199,7 +199,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const LLVM::CompiledKernelData &compiled);
   void debug_reset_sparse_listgen_statistics() override;
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
-      const std::vector<int> &snode_ids) override;
+      const std::vector<int> &snode_ids, int tree_id = -1) override;
   bool prepare_cuda_graph_launch(Handle handle,
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,

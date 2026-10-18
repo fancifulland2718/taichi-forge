@@ -6511,7 +6511,7 @@ SparseSNodeTreeStatistics Program::debug_sparse_snode_tree_statistics(
   collect_snode_ids(tree->root());
   std::sort(snode_ids.begin(), snode_ids.end());
   result.listgen = program_impl_->get_kernel_launcher()
-                       .debug_sparse_listgen_statistics(snode_ids);
+                       .debug_sparse_listgen_statistics(snode_ids, tree_id);
   return result;
 }
 

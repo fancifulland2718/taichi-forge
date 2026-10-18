@@ -474,7 +474,8 @@ void KernelLauncher::debug_reset_sparse_listgen_statistics() {
 
 SparseSNodeTreeListgenStatistics
 KernelLauncher::debug_sparse_listgen_statistics(
-    const std::vector<int> &snode_ids) {
+    const std::vector<int> &snode_ids, int tree_id) {
+  (void)tree_id;  // LLVM launchers retain their process-global node IDs.
   std::unique_lock<std::mutex> lock(execution_mutex_);
   SparseSNodeTreeListgenStatistics result;
   result.available = sparse_listgen_telemetry_enabled_;

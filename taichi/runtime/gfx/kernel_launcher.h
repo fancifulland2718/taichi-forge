@@ -22,7 +22,7 @@ class KernelLauncher : public lang::KernelLauncher {
   std::size_t debug_registered_kernel_count() override;
   void debug_reset_sparse_listgen_statistics() override;
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
-      const std::vector<int> &snode_ids) override;
+      const std::vector<int> &snode_ids, int tree_id = -1) override;
 
   Handle get_or_register_kernel(
       const lang::CompiledKernelData &compiled_kernel_data);
