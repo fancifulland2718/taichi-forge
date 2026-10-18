@@ -101,6 +101,7 @@
     // Old SPIR-V may address mixed-width SNodes with unaligned offsets/pools.
     // This is a compiler layout revision, independent of wheel/commit identity.
     CACHE_VALUE(std::string("spirv-snode-scalar-alignment-v1"));
+    CACHE_VALUE(std::string("spirv-quant-atomic-store-v1"));
     CACHE_FIELD(spirv_skip_loop_unroll);
   }
   // B-2.b (2026-05): the 4 vulkan_pointer_* runtime fields drive both

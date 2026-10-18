@@ -6656,19 +6656,19 @@ class TaskCodegen : public IRVisitor {
         ir_->make_value(spv::OpNot, phys_uint_stype, mask_shifted);
     (void)is_signed;  // truncation handles sign for both branches.
 
-    // Read-modify-write on the physical word.  This is non-atomic: races
-    // between threads writing different fields of the SAME physical word
-    // produce undefined results.  Mirrors the LLVM CPU/CUDA non-atomic
-    // store path for quant_array (atomic_add lives in G9.4).
+    // Distinct logical cells can share one physical word. Match LLVM's
+    // atomic_set_partial_bits path so parallel stores preserve their neighbors.
     DataType phys_uint_dt = ir_->get_taichi_uint_type(physical_type);
     auto buf_ptr = at_buffer(stmt->dest, phys_uint_dt);
-    spirv::Value old_word = ir_->load_variable(buf_ptr, phys_uint_stype);
-    spirv::Value cleared =
-        ir_->make_value(spv::OpBitwiseAnd, phys_uint_stype, old_word, mask_inv);
-    spirv::Value new_word =
-        ir_->make_value(spv::OpBitwiseOr, phys_uint_stype, cleared,
-                        digits_shifted);
-    ir_->store_variable(buf_ptr, new_word);
+    ir_->atomic_operation(
+        buf_ptr, digits_shifted,
+        [&](spirv::Value old_word, spirv::Value replacement) {
+          auto cleared = ir_->make_value(spv::OpBitwiseAnd, phys_uint_stype,
+                                         old_word, mask_inv);
+          return ir_->make_value(spv::OpBitwiseOr, phys_uint_stype, cleared,
+                                 replacement);
+        },
+        phys_uint_dt);
   }
 
   // -----------------------------------------------------------------

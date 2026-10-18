@@ -2077,6 +2077,12 @@ Value IRBuilder::atomic_operation(Value addr_ptr,
                                   Value data,
                                   std::function<Value(Value, Value)> op,
                                   const DataType &dt) {
+  if (data_type_bits(dt) == 64) {
+    TI_ERROR_IF(!caps_->get(cap::spirv_has_atomic_int64),
+                "64-bit atomic updates require device capability "
+                "'spirv_has_atomic_int64'");
+    declare_capability(spv::CapabilityInt64Atomics);
+  }
   SType out_type = get_primitive_type(dt);
   SType res_type = get_primitive_uint_type(dt);
   Value ret_val_int = alloca_variable(res_type);
@@ -2097,7 +2103,8 @@ Value IRBuilder::atomic_operation(Value addr_ptr,
   // while (true)
   {
     // int old = addr_ptr[0];
-    Value old_val = load_variable(addr_ptr, res_type);
+    Value old_val = make_value(spv::OpAtomicLoad, res_type, addr_ptr,
+                               const_i32_one_, const_i32_zero_);
     // int new = dataTypeBitsToInt(atomic_op(intBitsToDataType(old), data));
     Value old_data_value = make_value(spv::OpBitcast, out_type, old_val);
     Value new_data_value = op(old_data_value, data);

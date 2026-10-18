@@ -218,9 +218,12 @@ Important correctness limits:
   return value.
 - Choose bit widths and scaling for the full input and accumulated range.
   Overflow in a packed atomic addition can affect adjacent packed members.
-- Concurrent non-atomic writes to members sharing one physical word are not
-  independent. Use an appropriate supported atomic operation or ensure that
-  one thread owns writes to that word.
+- Ordinary quantized integer/fixed-point stores now preserve neighboring cells
+  through a compare-and-swap update. Small tests cover concurrent writes and
+  partial updates with 32/64-bit words; 64-bit updates require the device's
+  integer atomic capability. Concurrent writes to the same logical element
+  still require application-level ordering. Re-export old AOT shaders to obtain
+  this correction; JIT cache identities include it.
 - Quantization changes precision. Check application-level error and overflow,
   rather than assuming byte-identical results across backends.
 
