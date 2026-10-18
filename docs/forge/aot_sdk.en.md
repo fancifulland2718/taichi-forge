@@ -4193,11 +4193,14 @@ is unchanged. Old runtimes reject the unknown `list_v1` contract. Compilation
 defaults and serialized field layouts are unchanged; use paired ABI 98 components.
 
 JIT/AOT share structural sizing for independent automatic CUDA pools belonging
-to purely dense traversal trees. Full list capacity and metadata alignment
+to dense or packed traversal trees. Full list capacity and metadata alignment
 replace the repeated 32 MiB runtime baseline. Explicit floors and shared/fixed
 pool policies retain their choices. An eight-element two-level dense fixture
 uses a 48,512 B tree pool instead of 33,582,464 B; this excludes roots/shared
 runtime storage and is neither a capacity limit nor a general memory estimate.
+Eight-element bit-struct and quant-array trees have the same 48,512 B pool in
+the small fixture. Their list ownership and packed storage-view restrictions
+remain unchanged; the budget change adds no device instructions.
 
 CPU supports sparse prepared batches. CUDA `sparse_v2` exports support native
 fixed Graph preparation for pointer/bitmasked/dynamic activation, traversal,

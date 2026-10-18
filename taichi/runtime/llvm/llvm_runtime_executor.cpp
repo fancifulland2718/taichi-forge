@@ -736,14 +736,15 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
               root_runtime_local_id);
 
   bool dense_layout = true;
+  bool dense_or_packed_layout = true;
   DeviceAllocationUnique *sparse_tree_pool_alloc = nullptr;
-  for (size_t i = 0; i < snode_metas.size(); i++) {
-    if (snode_metas[i].type != SNodeType::dense &&
-        snode_metas[i].type != SNodeType::place &&
-        snode_metas[i].type != SNodeType::root) {
-      dense_layout = false;
-      break;
-    }
+  for (const auto &meta : snode_metas) {
+    const bool plain = meta.type == SNodeType::dense ||
+                       meta.type == SNodeType::place ||
+                       meta.type == SNodeType::root;
+    dense_layout &= plain;
+    dense_or_packed_layout &= plain || meta.type == SNodeType::bit_struct ||
+                              meta.type == SNodeType::quant_array;
   }
   const bool all_dense =
       element_lists ? !*element_lists
@@ -823,15 +824,16 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       std::count_if(snode_metas.begin(), snode_metas.end(), [](const auto &meta) {
         return meta.type != SNodeType::place;
       });
-  // A purely dense traversal tree allocates only its ListManagers and one
+  // A dense or packed traversal tree allocates only its ListManagers and one
   // backing descriptor here; roots, runtime state, temporaries and RNG state
   // live elsewhere. Budget worst-case manager alignment plus the descriptor
   // and its transition to aligned payloads, rather than another full runtime.
   // The metadata/payload/directory capacity is added separately below.
-  const bool compact_dense_pool = dense_layout && use_cuda_auto_pool_geometry &&
-                                  config_.cuda_sparse_per_snode_pool;
+  const bool compact_list_pool = dense_or_packed_layout &&
+                                 use_cuda_auto_pool_geometry &&
+                                 config_.cuda_sparse_per_snode_pool;
   const std::size_t pool_baseline_bytes =
-      compact_dense_pool ? (element_list_snode_count + 2) *
+      compact_list_pool ? (element_list_snode_count + 2) *
                                kLlvmListManagerAllocationAlignment
                          : 32UL << 20;
   // A non-hash Element covers at most 1024 cells in one child container, so
@@ -1146,7 +1148,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       if (do_per_snode_pool) {
         // Include only traversal-participating SNode element-list metadata.
         std::size_t global_region =
-            dense_layout ? auto_size  // Includes any explicitly requested floor.
+            dense_or_packed_layout ? auto_size  // Includes the explicit floor.
                          : pool_baseline_bytes + element_list_pool_budget_bytes +
                                element_list_snode_count * kListManagerBytes;
         std::size_t total_buffer = global_region;

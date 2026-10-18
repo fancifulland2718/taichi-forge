@@ -3206,10 +3206,12 @@ CPU bitcode/CUDA PTX 的小型测试覆盖普通/固定调用、实际 field 梯
 新 `list_v1` 会被不认识该合同的旧 runtime 拒绝。编译默认选项和持久字段布局不变，
 配套组件使用私有 ABI 98。
 
-纯 dense 遍历树的 CUDA 独立自动池按完整列表容量和元数据对齐计算，不再每树预留
+dense 或 packed 遍历树的 CUDA 独立自动池按完整列表容量和元数据对齐计算，不再每树预留
 一份 32 MiB runtime 基线；JIT/AOT 共用此路径。用户显式池下限仍生效，共享/固定池
 策略保持原选择。八元素双层 dense 夹具的树池为 48,512 B，原为 33,582,464 B；
 该数字不含根存储和共享 runtime，也不是容量限制或所有场景的内存估计。
+八元素 bit-struct 和 quant-array 夹具的树池也为 48,512 B；列表所有权及 packed
+存储视图限制保持原合同，预算调整不增加设备指令。
 
 CPU 支持稀疏 prepared batch；新 CUDA `sparse_v2` 的 `.prepare()` 使用原生固定
 Graph，覆盖 pointer/bitmasked/dynamic 的激活、遍历、GC 和实际 field 梯度。

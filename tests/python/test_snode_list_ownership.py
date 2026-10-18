@@ -1,6 +1,7 @@
 """List storage follows the materialized tree, not later compile settings."""
 
 import taichi_forge as ti
+import pytest
 from tests import test_utils
 
 
@@ -111,3 +112,38 @@ def _check_cuda_dense_list_pools(minimum, maximum):
     assert total(fields[2]) == 9
     trees[0].destroy()
     trees[2].destroy()
+
+
+@pytest.mark.parametrize("floor_mib", [0, 1])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_packed_trees_budget_only_their_list_storage(floor_mib):
+    ti.cfg.cuda_sparse_pool_size_floor_MiB = floor_mib
+    fields, trees = [], []
+    for layout in ("bitpacked", "quant_array"):
+        x = ti.field(ti.types.quant.int(7, signed=True))
+        builder = ti.FieldsBuilder()
+        if layout == "bitpacked":
+            packed = ti.BitpackedFields(max_num_bits=32)
+            packed.place(x)
+            builder.dense(ti.i, 8).place(packed)
+        else:
+            builder.dense(ti.i, 2).quant_array(ti.i, 4, max_num_bits=32).place(x)
+        tree = builder.finalize()
+        fields.append(x)
+        trees.append(tree)
+        x[0], x[7] = 11, -5
+        memory = dict(ti.lang.impl.get_runtime().prog._debug_sparse_snode_tree_stats(tree.id))["memory"]
+        # Fixture bound, not a user capacity limit. Explicit floors still apply.
+        assert floor_mib * (1 << 20) <= memory["sparse_pool_reserved_bytes"] < (floor_mib + 1) * (1 << 20)
+
+    @ti.kernel
+    def total(x: ti.template()) -> ti.i32:
+        result = 0
+        for i in x:
+            result += x[i]
+        return result
+
+    assert total(fields[0]) == total(fields[1]) == 6
+    trees[0].destroy()
+    assert total(fields[1]) == 6
+    trees[1].destroy()
