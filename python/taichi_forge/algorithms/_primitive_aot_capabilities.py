@@ -68,6 +68,11 @@ _ROUTES = MappingProxyType({
         _sequence(("unique_by_key",), *_UNIQUE),
         _prepared(("algorithms.prepare_unique_by_key",), *_UNIQUE),
     ),
+    "run_length_encode": (
+        _sequence(("run_length_encode",), *_UNIQUE, "i32_run_lengths_and_count",
+                  "fixed_prefix_extent", "shared_multi_column_prefix",
+                  "exported_helper_closure", "discrete_keys_no_automatic_ad"),
+    ),
     "scan": (
         _sequence(("scan",), "one_dimensional_scalar", "i32_u32_f32_i64_u64_f64",
                   "inplace_inclusive_sum", "device_dtype_capabilities", "explicit_adjoint_only"),

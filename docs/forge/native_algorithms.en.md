@@ -249,6 +249,14 @@ prefix; their optional positive `cpu_max_threads` parameter freezes the CPU
 strategy, otherwise it uses the consumer configuration. AOT does not generate
 an adjoint. This extension requires matching
 frontend/runtime private ABI 106 components.
+`PrimitiveSequence.run_length_encode()` exports consecutive i32/u32/i64/u64
+keys on CPU/CUDA/Vulkan. A fixed input prefix produces unique keys, i32 run
+lengths and an i32 count; unused output tails are preserved. Export reuses the
+existing head/start and length helpers, with one native prefix shared by both
+compaction columns. Helper specializations are deduplicated across entries and
+prefix sizes in one module. Empty prefixes only reset the first count element.
+The integer count/position ABI still applies; discrete keys have no automatic
+derivative. The ordinary JIT host path remains unchanged.
 `aot="no_native_export_route"` and an empty
 tuple indicate no listed dedicated native export path for that family. Ordinary
 compiled DSL kernels follow the generic AOT contract, which does not establish

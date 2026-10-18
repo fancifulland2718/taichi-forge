@@ -66,7 +66,10 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert reduce_sequence.backends == ("cpu", "cuda", "vulkan")
         assert "frozen_cpu_partition_strategy" in reduce_sequence.constraints
         assert any(r.forms == ("builtin/reduce",) for r in reduction.aot_routes)
-        assert not ti.algorithms.primitive_capability("run_length_encode").aot_routes
+        rle = ti.algorithms.primitive_capability("run_length_encode").aot_routes
+        assert len(rle) == 1 and rle[0].entry_point == "algorithms.PrimitiveSequence"
+        assert rle[0].backends == ("cpu", "cuda", "vulkan")
+        assert "shared_multi_column_prefix" in rle[0].constraints
         assert not ti.algorithms.primitive_capability("histogram").aot_routes
         saved = json.loads(json.dumps(asdict(unique)))
         assert saved["aot"] == "selected_execution_plan_routes"

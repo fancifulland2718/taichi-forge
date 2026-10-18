@@ -221,40 +221,43 @@ def _compact(call, context):
     )
 
 
-def _unique(call, context):
+def _consecutive(call, context):
     from taichi_forge.aot._primitive_exports import unique_helper
     from taichi_forge.graph._graph import Arg, ArgKind
     from taichi_forge_runtime.aot import Scalar
     from . import _algorithms as algorithms
 
     keyed = call.kind == "unique_by_key"
-    expected = algorithms.experimental_unique_by_key if keyed else algorithms.experimental_unique
+    rle = call.kind == "run_length_encode"
+    expected = (algorithms.experimental_run_length_encode if rle else
+                algorithms.experimental_unique_by_key if keyed else algorithms.experimental_unique)
     if (
         call.func is not expected
         or call.plan is not None
-        or set(call.kwargs) != {"mode", "size", "method", "workspace"}
-        or call.kwargs["mode"] != "consecutive"
+        or set(call.kwargs) != ({"size", "method", "workspace"} if rle else {"mode", "size", "method", "workspace"})
+        or (not rle and call.kwargs["mode"] != "consecutive")
+        or (rle and type(call.workspace) is not algorithms.RunLengthWorkspace)
     ):
-        raise TaichiRuntimeError("AOT unique requires its concrete consecutive operation")
+        raise TaichiRuntimeError("AOT consecutive encoding requires its concrete public operation")
     _compact_method(call.kwargs["method"])
-    if keyed:
+    if rle:
+        keys, output, lengths, count = call.args
+        capacity, size, ndarray_mode = algorithms._check_run_length_encode_request(
+            *call.args, **call.kwargs)
+    elif keyed:
         keys, values, output, unique_values, count = call.args
     else:
         keys, output, count = call.args
-    capacity, size, ndarray_mode = algorithms._check_rle_key_output_count(
-        "AOT unique",
-        keys,
-        output,
-        count,
-        call.kwargs["method"],
-        call.workspace,
-        call.kwargs["size"],
-    )
-    inputs, outputs = (keys,), (output, count)
-    if keyed:
-        algorithms._check_rle_payload("AOT unique", keys, values, unique_values, ndarray_mode=ndarray_mode)
-        inputs, outputs = (keys, values), (output, unique_values, count)
-    algorithms._check_rle_storage_aliases("AOT unique", inputs, outputs)
+    if not rle:
+        capacity, size, ndarray_mode = algorithms._check_rle_key_output_count(
+            "AOT unique", keys, output, count, call.kwargs["method"],
+            call.workspace, call.kwargs["size"],
+        )
+        inputs, outputs = (keys,), (output, count)
+        if keyed:
+            algorithms._check_rle_payload("AOT unique", keys, values, unique_values, ndarray_mode=ndarray_mode)
+            inputs, outputs = (keys, values), (output, unique_values, count)
+        algorithms._check_rle_storage_aliases("AOT unique", inputs, outputs)
     count_name = context.retained_arrays.require(count)
     if size == 0:
         context.operations.append(dict(kind="fill32", destination=count_name, value=0, size_bytes=4))
@@ -268,25 +271,54 @@ def _unique(call, context):
     # One complete head overwrite and one native prefix shared by all columns.
     # Scratch is reconstructed, not sampled from the producer workspace.
     flags = context._resource(object(), dict(kind="ndarray", dtype="i32", shape=[capacity]))
+    if rle:
+        starts, run_starts = (
+            context._resource(object(), dict(kind="ndarray", dtype="i32", shape=[capacity]))
+            for _ in range(2)
+        )
+        columns.append(dict(values=starts, output=run_starts))
     size_name = context._resource(
         object(), {k: v for k, v in Scalar("i32", size).resource("size").items() if k != "name"}
     )
     capacity_name = context._resource(
         object(), {k: v for k, v in Scalar("i32", capacity).resource("capacity").items() if k != "name"}
     )
-    helper, exemplar = unique_helper(str(keys.dtype), False)
+    helper, exemplar = unique_helper(str(keys.dtype), rle)
     kernel = helper._primal
-    specialization = kernel.ensure_compiled(exemplar["keys"], exemplar["flags"], size, capacity, _for_aot=True)
+    specialization = kernel.ensure_compiled(
+        exemplar["keys"], exemplar["flags"],
+        *([exemplar["starts"]] if rle else []), size, capacity, _for_aot=True,
+    )
     context.kernel(
         kernel.compiled_kernels[specialization],
         (
             Arg(ArgKind.NDARRAY, key_name, keys.dtype, ndim=1),
             Arg(ArgKind.NDARRAY, flags, algorithms.i32, ndim=1),
+            *([Arg(ArgKind.NDARRAY, starts, algorithms.i32, ndim=1)] if rle else []),
             Arg(ArgKind.SCALAR, size_name, algorithms.i32),
             Arg(ArgKind.SCALAR, capacity_name, algorithms.i32),
         ),
     )
     context.operations.append(dict(kind="compact", flags=flags, count=count_name, columns=columns))
+    if rle:
+        from taichi_forge._kernels import rle_finalize_lengths_ndarray
+
+        # Scalar field counts and vector counts share the same one-element
+        # helper ABI. The view retains its original owner and writes no tail.
+        count_view = context._resource(object(), dict(
+            kind="ndarray_view", array=count_name, offset=0, shape=[1]))
+        kernel = rle_finalize_lengths_ndarray._primal
+        specialization = kernel.ensure_compiled(
+            exemplar["flags"], exemplar["flags"], exemplar["flags"],
+            size, capacity, _for_aot=True,
+        )
+        context.kernel(kernel.compiled_kernels[specialization], (
+            Arg(ArgKind.NDARRAY, run_starts, algorithms.i32, ndim=1),
+            Arg(ArgKind.NDARRAY, context.retained_arrays.require(lengths), algorithms.i32, ndim=1),
+            Arg(ArgKind.NDARRAY, count_view, algorithms.i32, ndim=1),
+            Arg(ArgKind.SCALAR, size_name, algorithms.i32),
+            Arg(ArgKind.SCALAR, capacity_name, algorithms.i32),
+        ))
 
 
 def export_sequence(sequence, context):
@@ -296,7 +328,8 @@ def export_sequence(sequence, context):
         raise TaichiRuntimeError("AOT sequence requires its concrete selected native reconstruction")
     exporters = {
         "sort": _sort, "sort_by_key": _sort, "scan": _scan, "reduce": _reduce,
-        "compact": _compact, "unique": _unique, "unique_by_key": _unique,
+        "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,
+        "run_length_encode": _consecutive,
     }
     for call in tuple(sequence._calls):
         exporter = exporters.get(call.kind)

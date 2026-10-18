@@ -197,6 +197,11 @@ scratch 的合同。AOT scan 不生成伴随，应用可另外导出自己的显
 浮点结果保持各后端原有顺序合同，不承诺跨后端逐位一致。显式描述可选择固定输入
 前缀；可选正整数参数 `cpu_max_threads` 冻结 CPU 策略，省略则采用消费端配置。
 AOT 不生成伴随。此扩展要求配对的 frontend/runtime 私有 ABI 106 组件。
+`PrimitiveSequence.run_length_encode()` 可导出 CPU/CUDA/Vulkan 上连续相等的
+i32/u32/i64/u64 键。固定输入前缀产生 unique keys、i32 run lengths 和 i32 count，
+未使用的输出尾部保持不变。导出复用既有头标记/起点和长度 helper，两列 compact
+共享一次原生前缀计算；同一模块的不同入口和前缀长度复用 helper 特化。空前缀仅重置
+count 首元素。计数/位置仍遵从 i32 ABI；离散键不支持自动求导。普通 JIT 宿主路径保持。
 `aot="no_native_export_route"` 与空列表表示当前没有列出的家族专用原生导出路径。
 普通 DSL kernel 遵从通用 AOT 合同，不能据此推导 host native method 的支持。
 查询不加载厂商库或初始化设备；具体导出仍校验策略、存储、版本和依赖，见
