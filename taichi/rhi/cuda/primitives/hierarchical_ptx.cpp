@@ -712,22 +712,9 @@ void driver_reduce_with_workspace(void *values,
                               0, width, op, stream, nullptr, workspace);
 }
 
-std::size_t driver_histogram_strided(void *values,
-                                     void *bins,
-                                     int num_items,
-                                     int num_bins,
-                                     CudaTransformValueType value_type,
-                                     CudaTransformValueType bin_type,
-                                     std::size_t values_offset,
-                                     std::size_t values_stride,
-                                     std::size_t bins_offset,
-                                     std::size_t bins_stride,
-                                     void *stream) {
-  TI_ERROR_IF(num_items < 0,
-              "CUDA Driver histogram expects non-negative num_items.");
-  TI_ERROR_IF(num_bins <= 0, "CUDA Driver histogram expects at least one bin.");
-  TI_ERROR_IF((num_items > 0 && !values) || !bins,
-              "CUDA Driver histogram received a null pointer.");
+static std::pair<int, int> histogram_type_indices(
+    CudaTransformValueType value_type,
+    CudaTransformValueType bin_type) {
   const int value_index = value_type == CudaTransformValueType::i32   ? 0
                           : value_type == CudaTransformValueType::u32 ? 1
                                                                       : -1;
@@ -738,6 +725,26 @@ std::size_t driver_histogram_strided(void *values,
               "CUDA Driver histogram supports only i32/u32 bin ids.");
   TI_ERROR_IF(bin_index < 0,
               "CUDA Driver histogram supports only i32/i64 counters.");
+  return {value_index, bin_index};
+}
+
+static std::size_t driver_histogram_strided_impl(
+    void *values,
+    void *bins,
+    std::uint32_t num_items,
+    std::uint32_t num_bins,
+    CudaTransformValueType value_type,
+    CudaTransformValueType bin_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t bins_offset,
+    std::size_t bins_stride,
+    void *stream) {
+  TI_ERROR_IF(!num_bins, "CUDA Driver histogram expects at least one bin.");
+  TI_ERROR_IF((num_items > 0 && !values) || !bins,
+              "CUDA Driver histogram received a null pointer.");
+  const auto [value_index, bin_index] =
+      histogram_type_indices(value_type, bin_type);
   TI_ERROR_IF(values_stride < value_type_size(value_type) ||
                   bins_stride < value_type_size(bin_type),
               "CUDA Driver histogram received an invalid stride.");
@@ -749,7 +756,8 @@ std::size_t driver_histogram_strided(void *values,
   std::uint32_t bins_count_arg = static_cast<std::uint32_t>(num_bins);
   std::vector<void *> zero_args{&bins_arg, &bins_offset_arg, &bins_stride_arg,
                                 &bins_count_arg};
-  const unsigned bins_grid = (bins_count_arg + kBlockDim - 1u) / kBlockDim;
+  const unsigned bins_grid =
+      bins_count_arg / kBlockDim + (bins_count_arg % kBlockDim != 0);
   CUDAContext::get_instance().launch(kernel.zero_bins[bin_index],
                                      "cuda_driver_histogram_zero", zero_args,
                                      {}, bins_grid, kBlockDim, 0, stream);
@@ -764,11 +772,51 @@ std::size_t driver_histogram_strided(void *values,
   std::vector<void *> histogram_args{
       &values_arg, &values_offset_arg, &values_stride_arg, &item_count_arg,
       &bins_arg,   &bins_offset_arg,   &bins_stride_arg,   &bins_count_arg};
-  const unsigned item_grid = (item_count_arg + kBlockDim - 1u) / kBlockDim;
+  const unsigned item_grid =
+      item_count_arg / kBlockDim + (item_count_arg % kBlockDim != 0);
   CUDAContext::get_instance().launch(kernel.histogram[value_index][bin_index],
                                      "cuda_driver_histogram", histogram_args,
                                      {}, item_grid, kBlockDim, 0, stream);
   return 0;
+}
+
+void driver_prepare_histogram(CudaTransformValueType value_type,
+                              CudaTransformValueType bin_type) {
+  const auto [value, bin] = histogram_type_indices(value_type, bin_type);
+  auto &kernel = kernels();
+  (void)kernel.zero_bins[bin];
+  (void)kernel.histogram[value][bin];
+}
+
+std::size_t driver_histogram_on_stream(void *values,
+                                       void *bins,
+                                       std::uint32_t num_items,
+                                       std::uint32_t num_bins,
+                                       CudaTransformValueType value_type,
+                                       CudaTransformValueType bin_type,
+                                       void *stream) {
+  return driver_histogram_strided_impl(
+      values, bins, num_items, num_bins, value_type, bin_type, 0,
+      value_type_size(value_type), 0, value_type_size(bin_type), stream);
+}
+
+std::size_t driver_histogram_strided(void *values,
+                                     void *bins,
+                                     int num_items,
+                                     int num_bins,
+                                     CudaTransformValueType value_type,
+                                     CudaTransformValueType bin_type,
+                                     std::size_t values_offset,
+                                     std::size_t values_stride,
+                                     std::size_t bins_offset,
+                                     std::size_t bins_stride,
+                                     void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA Driver histogram expects non-negative num_items.");
+  TI_ERROR_IF(num_bins <= 0, "CUDA Driver histogram expects at least one bin.");
+  return driver_histogram_strided_impl(
+      values, bins, num_items, num_bins, value_type, bin_type, values_offset,
+      values_stride, bins_offset, bins_stride, stream);
 }
 
 std::size_t driver_add_strided(void *src,
@@ -849,21 +897,20 @@ std::size_t driver_add_scaled_strided(void *src,
   return 0;
 }
 
-std::size_t driver_scatter_add_strided(void *src,
-                                       void *indices,
-                                       void *dst,
-                                       int num_items,
-                                       int index_bound,
-                                       CudaTransformValueType value_type,
-                                       std::size_t src_offset,
-                                       std::size_t src_stride,
-                                       std::size_t indices_offset,
-                                       std::size_t indices_stride,
-                                       std::size_t dst_offset,
-                                       std::size_t dst_stride,
-                                       void *stream) {
-  TI_ERROR_IF(num_items < 0 || index_bound < 0,
-              "CUDA Driver scatter-add received a negative size.");
+static std::size_t driver_scatter_add_strided_impl(
+    void *src,
+    void *indices,
+    void *dst,
+    std::uint32_t num_items,
+    std::uint32_t index_bound,
+    CudaTransformValueType value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t indices_offset,
+    std::size_t indices_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    void *stream) {
   const std::size_t value_size = value_type_size(value_type);
   TI_ERROR_IF((num_items > 0 && (!src || !indices || !dst)) ||
                   src_stride < value_size ||
@@ -889,11 +936,50 @@ std::size_t driver_scatter_add_strided(void *src,
       &indices_arg, &indices_offset_arg, &indices_stride_arg,
       &dst_arg,     &dst_offset_arg,     &dst_stride_arg,
       &count_arg,   &bound_arg};
-  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  const unsigned grid = count_arg / kBlockDim + (count_arg % kBlockDim != 0);
   CUDAContext::get_instance().launch(
       kernels().scatter_add[value_type_index(value_type)],
       "cuda_driver_scatter_add", args, {}, grid, kBlockDim, 0, stream);
   return 0;
+}
+
+void driver_prepare_scatter_add(CudaTransformValueType value_type) {
+  const auto type = value_type_index(value_type);
+  (void)kernels().scatter_add[type];
+}
+
+std::size_t driver_scatter_add_on_stream(void *src,
+                                         void *indices,
+                                         void *dst,
+                                         std::uint32_t num_items,
+                                         std::uint32_t index_bound,
+                                         CudaTransformValueType value_type,
+                                         void *stream) {
+  const auto width = value_type_size(value_type);
+  return driver_scatter_add_strided_impl(
+      src, indices, dst, num_items, index_bound, value_type, 0, width, 0,
+      sizeof(std::int32_t), 0, width, stream);
+}
+
+std::size_t driver_scatter_add_strided(void *src,
+                                       void *indices,
+                                       void *dst,
+                                       int num_items,
+                                       int index_bound,
+                                       CudaTransformValueType value_type,
+                                       std::size_t src_offset,
+                                       std::size_t src_stride,
+                                       std::size_t indices_offset,
+                                       std::size_t indices_stride,
+                                       std::size_t dst_offset,
+                                       std::size_t dst_stride,
+                                       void *stream) {
+  TI_ERROR_IF(num_items < 0 || index_bound < 0,
+              "CUDA Driver scatter-add received a negative size.");
+  return driver_scatter_add_strided_impl(
+      src, indices, dst, num_items, index_bound, value_type, src_offset,
+      src_stride, indices_offset, indices_stride, dst_offset, dst_stride,
+      stream);
 }
 
 std::size_t driver_gather_add_strided(void *src,

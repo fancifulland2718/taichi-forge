@@ -208,6 +208,37 @@ scratch，也不向 TCM 复制应用 kernel。Vulkan 支持未对齐到 descript
 相同；浮点负零、NaN/Inf 保留，整数系数必须为该类型可表示的整数。消费 runtime
 须提供 `builtin/transform` v1。尚不覆盖 strided/tensor/indexed-fused sequence；
 AOT 不自动生成此原生操作的伴随，应用可导出显式伴随。
+
+`PrimitiveSequence.gather()` / `scatter()` 与显式 `builtin/indexed_copy` v1 描述
+支持 CPU/CUDA/Vulkan，payload 为一维 packed scalar/tensor，类型为
+i32/u32/f32/i64/u64/f64，索引为标量i32。显式参数为 `size`、`src_items`、
+`dst_items`、`dtype`、`element_shape`（标量为空）及 `op="gather"` 或 `"scatter"`，
+extent 均非空；`size` 选择索引前缀，不能超过顺序访问一侧的输入/输出范围。
+绑定名为 `src`、`indices`、`dst`；输出访问区间必须与两个读区间物理不重叠，
+原地或部分重叠在准备时拒绝。索引内容可在重放间变化；gather 允许重复索引，
+无效索引对应输出清零；scatter 忽略无效索引并保留未写目标，有效目标必须唯一。
+CPU 每次写入前校验唯一性，但复用 owner 持有的存储；GPU 保留调用方保证目标唯一的
+合同，不增加 host 读回。`workspace_bytes` 报告保留的 CPU 校验存储，gather 和 GPU
+复制不需 scratch。payload 按位复制，保留 NaN 和负零；Vulkan 对源、目标及索引
+偏移均采用对齐包围视图。纯原生计划不携带应用 kernel 代码，消费端须提供
+`builtin/indexed_copy` v1。此路线尚不覆盖 strided member sequence 或融合策略，
+不自动生成伴随；可组合导出的 kernel 构成显式伴随。
+
+`PrimitiveSequence.scatter_add()` 与显式 `builtin/scatter_add` v1 描述支持
+CPU/CUDA/Vulkan 的 packed scalar i32/u32/f32/i64/u64/f64 数组和标量 i32 索引；
+Vulkan 须启用对应类型的原子操作能力。参数为非空 `size`、`dst_items`、`dtype`
+及可选的正整数 `cpu_max_threads`，绑定名为 `src`、`indices`、`dst`。
+输入/索引前缀及目标前缀可短于实际数组。重复目标累加到目标原值，负数及越界索引
+忽略，未写尾部保留；输出访问区间须与两个读区间物理不重叠。重放间可改变索引。
+Sequence 导出冻结生产端 CPU 线程配置；显式计划省略 `cpu_max_threads` 时使用
+消费端配置。CPU prepared owner 保留独立 partial，每轮只清零一次，并复用 runtime
+线程池。可选并行工作区预算在目标较大时选择串行路线，不限制输入容量。
+`workspace_bytes` 报告保留的 partial；CUDA/Vulkan 不需 scratch。整数按类型位宽
+模加法，浮点顺序取决于后端及分区，GPU 重复目标的累加顺序不保证确定性。
+准备不会执行算子或修改目标。纯原生计划不携带应用 kernel 代码，消费端须提供
+`builtin/scatter_add` v1。此路线尚不覆盖 tensor/strided/fused/two-level sequence；
+AOT 不自动生成伴随，可组合导出的 kernel 提供显式伴随。
+
 `PrimitiveSequence.run_length_encode()` 可导出 CPU/CUDA/Vulkan 上连续相等的
 i32/u32/i64/u64 键。固定输入前缀产生 unique keys、i32 run lengths 和 i32 count，
 未使用的输出尾部保持不变。导出复用既有头标记/起点和长度 helper，两列 compact

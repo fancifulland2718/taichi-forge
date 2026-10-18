@@ -46,6 +46,7 @@ layout(push_constant) uniform Params {
   uint dst_count;
   uint dst_offset_items;
   uint lane_count;
+  uint indices_offset_items;
 } params_buf;
 
 uint value_count() {
@@ -80,6 +81,7 @@ layout(push_constant) uniform Params {
   uint dst_count;
   uint dst_offset_items;
   uint dst_stride_items;
+  uint indices_offset_items;
 } params_buf;
 
 uint value_count() {
@@ -128,7 +130,11 @@ void main() {
   if (i >= value_count()) {
     return;
   }
+#if defined(PACKED_SOURCE) || defined(STRIDED_SOURCE)
+  int index = indices_buf.data[params_buf.indices_offset_items + source_item(i)];
+#else
   int index = indices_buf.data[source_item(i)];
+#endif
   uint logical_index = uint(index);
   if (index < 0 || logical_index >= destination_count()) {
     return;

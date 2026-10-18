@@ -3,6 +3,8 @@
 #include "taichi/runtime/native_scan.h"
 #include "taichi/runtime/native_reduce.h"
 #include "taichi/runtime/native_transform.h"
+#include "taichi/runtime/native_indexed_copy.h"
+#include "taichi/runtime/native_scatter_add.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
@@ -6155,8 +6157,8 @@ struct VulkanIndexedCopyCache {
   std::array<std::unique_ptr<ShaderResourceSet>, 6> scatter_add_packed_bindings;
   VulkanRwBufferReplay<3> gather_replay;
   VulkanRwBufferReplay<3> scatter_replay;
-  VulkanRwBufferReplay<4> gather_strided_replay;
-  VulkanRwBufferReplay<4> scatter_strided_replay;
+  VulkanRwBufferReplay<3> gather_strided_replay;
+  VulkanRwBufferReplay<3> scatter_strided_replay;
   std::array<VulkanRwBufferReplay<3>, 6> scatter_add_replay;
   std::array<VulkanRwBufferReplay<3>, 6> scatter_add_strided_replay;
   std::array<VulkanRwBufferReplay<3>, 6> scatter_add_packed_replay;
@@ -6167,14 +6169,9 @@ struct VulkanIndexedCopyCache {
   std::array<VulkanCommandReplayCache, 6> scatter_add_command_replay;
   std::array<VulkanCommandReplayCache, 6> scatter_add_strided_command_replay;
   std::array<VulkanCommandReplayCache, 6> scatter_add_packed_command_replay;
-  DeviceAllocation indexed_copy_params{kDeviceNullAllocation};
 
   void clear_allocs() {
     reset_binding_replay();
-    if (device && indexed_copy_params != kDeviceNullAllocation) {
-      device->dealloc_memory(indexed_copy_params);
-    }
-    indexed_copy_params = kDeviceNullAllocation;
     cached_bytes = 0;
   }
 
@@ -6418,27 +6415,6 @@ struct VulkanIndexedCopyCache {
       bindings.reset(device->create_resource_set());
     }
     return bindings.get();
-  }
-
-  DeviceAllocation alloc_storage(size_t bytes) {
-    DeviceAllocation alloc{kDeviceNullAllocation};
-    Device::AllocParams params;
-    params.size = bytes;
-    params.usage = AllocUsage::Storage;
-    RhiResult res = device->allocate_memory(params, &alloc);
-    TI_ERROR_IF(
-        res != RhiResult::success,
-        "Failed to allocate Vulkan indexed-copy workspace: RhiResult({})",
-        res);
-    return alloc;
-  }
-
-  void ensure_indexed_copy_params() {
-    constexpr size_t kParamsBytes = 7 * sizeof(uint32_t);
-    if (indexed_copy_params == kDeviceNullAllocation) {
-      indexed_copy_params = alloc_storage(kParamsBytes);
-    }
-    cached_bytes = std::max(cached_bytes, kParamsBytes);
   }
 
   Pipeline *scatter_add_pipeline(int value_type) {
@@ -10546,6 +10522,367 @@ std::size_t vulkan_metric_reduce_ndarray_impl(Program *program,
       values_stride, other_offset, other_stride);
 }
 
+// Descriptor views share one alignment/range contract across plain indexed
+// copies and atomic accumulation. address_unit is the shader array element.
+struct VulkanIndexedBufferView {
+  DevicePtr binding;
+  size_t bytes;
+  uint32_t offset;
+};
+
+VulkanIndexedBufferView vulkan_indexed_buffer_view(Device *device,
+                                                   DevicePtr pointer,
+                                                   size_t count,
+                                                   size_t width,
+                                                   size_t stride,
+                                                   size_t address_unit) {
+  const auto limits = device->get_storage_buffer_binding_limits();
+  TI_ERROR_IF(!limits.offset_alignment || !address_unit || !width ||
+                  pointer.device != device || pointer.offset % address_unit ||
+                  width % address_unit || stride % address_unit ||
+                  stride < width,
+              "Vulkan indexed buffer has incompatible alignment or stride");
+  const auto residual = pointer.offset % limits.offset_alignment;
+  const auto address_max = std::numeric_limits<size_t>::max();
+  TI_ERROR_IF(
+      residual % address_unit || width > address_max - residual ||
+          (count && count - 1 > (address_max - residual - width) / stride),
+      "Vulkan indexed buffer overflows its typed address space");
+  const auto bytes = residual + (count ? (count - 1) * stride : 0) + width;
+  const auto maximum = std::numeric_limits<uint32_t>::max();
+  TI_ERROR_IF(
+      bytes > limits.max_range || bytes / address_unit > maximum ||
+          stride / address_unit > maximum,
+      "Vulkan indexed buffer exceeds descriptor range or shader address ABI");
+  pointer.offset -= residual;
+  return {pointer, bytes, static_cast<uint32_t>(residual / address_unit)};
+}
+
+bool vulkan_scatter_add_type_available(const DeviceCapabilityConfig &caps,
+                                       int type) {
+  if (type == 0 || type == 2)
+    return true;
+  if (type == 1)
+    return caps.get(DeviceCapability::spirv_has_atomic_float_add) != 0;
+  if (type == 3 || type == 4)
+    return caps.get(DeviceCapability::spirv_has_int64) &&
+           caps.get(DeviceCapability::spirv_has_atomic_int64);
+  if (type == 5)
+    return caps.get(DeviceCapability::spirv_has_float64) &&
+           caps.get(DeviceCapability::spirv_has_atomic_float64_add);
+  return false;
+}
+
+struct VulkanPreparedScatterAdd {
+  std::function<void(Device *, CommandList *)> record;
+  VulkanCommandReplayKey key;
+  int variant;  // dense scalar, strided scalar, packed tensor
+};
+
+VulkanPreparedScatterAdd prepare_vulkan_scatter_add(
+    Program *program,
+    Device *device,
+    VulkanIndexedCopyCache &cache,
+    DevicePtr src,
+    DevicePtr indices,
+    DevicePtr dst,
+    size_t n,
+    size_t dst_items,
+    int value_type,
+    size_t src_stride,
+    size_t dst_stride,
+    size_t lanes = 1) {
+  TI_ERROR_IF(
+      !vulkan_scatter_add_type_available(device->get_caps(), value_type),
+      "Vulkan scatter-add dtype atomics are unavailable");
+  const auto width = vulkan_scan_value_type_size(value_type);
+  const auto maximum = std::numeric_limits<uint32_t>::max();
+  TI_ERROR_IF(!n || !dst_items || !lanes || n > maximum ||
+                  lanes > maximum / n ||
+                  lanes > std::numeric_limits<size_t>::max() / width,
+              "Vulkan scatter-add exceeds its scalar-count ABI");
+  const auto payload = width * lanes;
+  TI_ERROR_IF(lanes > 1 && (src_stride != payload || dst_stride != payload),
+              "Vulkan scatter-add tensor payloads require packed strides");
+  const auto source =
+      vulkan_indexed_buffer_view(device, src, n, payload, src_stride, width);
+  const auto index = vulkan_indexed_buffer_view(device, indices, n, 4, 4, 4);
+  const auto destination = vulkan_indexed_buffer_view(
+      device, dst, dst_items, payload, dst_stride, width);
+  const bool dense = lanes == 1 && src_stride == width && dst_stride == width &&
+                     !source.offset && !index.offset && !destination.offset;
+  const int variant = dense ? 0 : lanes == 1 ? 1 : 2;
+  Pipeline *pipeline;
+  ShaderResourceSet *bindings;
+  if (dense) {
+    bindings = cache.cached_scatter_add_resource_set(value_type);
+    pipeline = cache.scatter_add_pipeline(value_type);
+  } else if (lanes == 1) {
+    cache.ensure_scatter_add_strided_pipeline(value_type);
+    bindings = cache.cached_scatter_add_strided_resource_set(value_type);
+    pipeline = cache.scatter_add_strided_pipeline(value_type);
+  } else {
+    cache.ensure_scatter_add_packed_pipeline(value_type);
+    bindings = cache.cached_scatter_add_packed_resource_set(value_type);
+    pipeline = cache.scatter_add_packed_pipeline(value_type);
+  }
+  TI_ERROR_IF(!pipeline, "Vulkan scatter-add pipeline is unavailable");
+  auto &replay = dense        ? cache.scatter_add_replay[value_type]
+                 : lanes == 1 ? cache.scatter_add_strided_replay[value_type]
+                              : cache.scatter_add_packed_replay[value_type];
+  replay.rw_buffer(bindings, 0, source.binding, source.binding.offset,
+                   source.bytes);
+  replay.rw_buffer(bindings, 1, index.binding, index.binding.offset,
+                   index.bytes);
+  replay.rw_buffer(bindings, 2, destination.binding, destination.binding.offset,
+                   destination.bytes);
+  const auto bound =
+      static_cast<uint32_t>(std::min<size_t>(dst_items, size_t{1} << 31));
+  const std::array<uint32_t, 7> params =
+      lanes == 1
+          ? std::array<uint32_t, 7>{static_cast<uint32_t>(n),
+                                    source.offset,
+                                    static_cast<uint32_t>(src_stride / width),
+                                    bound,
+                                    destination.offset,
+                                    static_cast<uint32_t>(dst_stride / width),
+                                    index.offset}
+          : std::array<uint32_t, 7>{static_cast<uint32_t>(n),
+                                    source.offset,
+                                    bound,
+                                    destination.offset,
+                                    static_cast<uint32_t>(lanes),
+                                    index.offset,
+                                    0};
+  const auto scalar_count = n * lanes;
+  const auto groups = static_cast<uint32_t>(scalar_count / kBlockSize +
+                                            (scalar_count % kBlockSize != 0));
+  const auto push_bytes =
+      static_cast<uint32_t>((lanes == 1 ? 7 : 6) * sizeof(uint32_t));
+  const bool profile = program && program->profiler;
+  auto record = [pipeline, bindings, destination, groups, params, push_bytes,
+                 dense, profile](Device *, CommandList *commands) {
+    const char *scope = profile ? "vulkan_scatter_add" : nullptr;
+    if (dense)
+      dispatch_pipeline(commands, pipeline, bindings, groups, 1, 1, scope);
+    else
+      dispatch_pipeline_with_push_constants(commands, pipeline, bindings,
+                                            params.data(), push_bytes, groups,
+                                            1, 1, scope);
+    commands->buffer_barrier(destination.binding, destination.bytes);
+  };
+  VulkanCommandReplayKey key;
+  key.push(0x10041);
+  key.push(value_type);
+  key.push(variant);
+  for (const auto &v : {source, index, destination})
+    push_vulkan_command_key_range(key, v.binding, v.binding.offset, v.bytes);
+  for (const auto word : params)
+    key.push(word);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  return {record, key, variant};
+}
+
+void submit_vulkan_scatter_add(Program *program,
+                               Device *device,
+                               VulkanIndexedCopyCache &cache,
+                               const VulkanPreparedScatterAdd &prepared,
+                               int value_type) {
+  auto &replay = prepared.variant == 0
+                     ? cache.scatter_add_command_replay[value_type]
+                 : prepared.variant == 1
+                     ? cache.scatter_add_strided_command_replay[value_type]
+                     : cache.scatter_add_packed_command_replay[value_type];
+  if (!replay.submit_or_record(program, device, prepared.key,
+                               program->profiler != nullptr, prepared.record))
+    program->enqueue_compute_op_lambda(prepared.record, {});
+}
+
+struct VulkanPreparedIndexedCopy {
+  std::function<void(Device *, CommandList *)> record;
+  VulkanCommandReplayKey key;
+  bool dense{false};
+};
+
+VulkanPreparedIndexedCopy prepare_vulkan_indexed_copy(
+    Program *program,
+    Device *device,
+    VulkanIndexedCopyCache &cache,
+    DevicePtr src,
+    DevicePtr indices,
+    DevicePtr dst,
+    size_t n,
+    size_t src_items,
+    size_t dst_items,
+    size_t item_bytes,
+    size_t src_stride,
+    size_t dst_stride,
+    bool scatter) {
+  const auto maximum = std::numeric_limits<uint32_t>::max();
+  TI_ERROR_IF(!n || !item_bytes || item_bytes % 4 || n > maximum ||
+                  item_bytes / 4 > maximum / n,
+              "Vulkan indexed copy exceeds its uint32 word-count ABI");
+  const auto source = vulkan_indexed_buffer_view(device, src, src_items,
+                                                 item_bytes, src_stride, 4);
+  const auto index = vulkan_indexed_buffer_view(device, indices, n, 4, 4, 4);
+  const auto destination = vulkan_indexed_buffer_view(
+      device, dst, dst_items, item_bytes, dst_stride, 4);
+  const bool dense = src_items && dst_items && item_bytes == 4 &&
+                     src_stride == 4 && dst_stride == 4 && !source.offset &&
+                     !index.offset && !destination.offset;
+  auto *bindings = dense ? cache.cached_resource_set(scatter)
+                         : cache.cached_strided_resource_set(scatter);
+  auto *pipeline = dense && scatter
+                       ? cache.indexed_copy_dense_u32_scatter_pipeline()
+                       : cache.indexed_copy_pipeline(scatter, !dense);
+  auto &replay = dense ? (scatter ? cache.scatter_replay : cache.gather_replay)
+                       : (scatter ? cache.scatter_strided_replay
+                                  : cache.gather_strided_replay);
+  replay.rw_buffer(bindings, 0, source.binding, source.binding.offset,
+                   source.bytes);
+  replay.rw_buffer(bindings, 1, index.binding, index.binding.offset,
+                   index.bytes);
+  replay.rw_buffer(bindings, 2, destination.binding, destination.binding.offset,
+                   destination.bytes);
+  const auto words = n * (item_bytes / 4);
+  const auto groups =
+      static_cast<uint32_t>(words / kBlockSize + (words % kBlockSize != 0));
+  // Signed i32 indices cannot name positions above INT32_MAX, even when the
+  // backing array is larger. Preserve that semantic bound without truncation.
+  const auto bound =
+      std::min<size_t>(scatter ? dst_items : src_items, size_t{1} << 31);
+  const std::array<uint32_t, 8> params{static_cast<uint32_t>(n),
+                                       static_cast<uint32_t>(bound),
+                                       static_cast<uint32_t>(item_bytes / 4),
+                                       source.offset,
+                                       static_cast<uint32_t>(src_stride / 4),
+                                       destination.offset,
+                                       static_cast<uint32_t>(dst_stride / 4),
+                                       index.offset};
+  const bool profile = program && program->profiler;
+  auto record = [pipeline, bindings, destination, groups, params, dense,
+                 scatter, profile](Device *, CommandList *commands) {
+    const char *scope =
+        profile ? (scatter ? "vulkan_scatter" : "vulkan_gather") : nullptr;
+    if (dense)
+      dispatch_pipeline(commands, pipeline, bindings, groups, 1, 1, scope);
+    else
+      dispatch_pipeline_with_push_constants(
+          commands, pipeline, bindings, params.data(),
+          static_cast<uint32_t>(params.size() * sizeof(uint32_t)), groups, 1, 1,
+          scope);
+    commands->buffer_barrier(destination.binding, destination.bytes);
+  };
+  VulkanCommandReplayKey key;
+  key.push(0x10040);
+  key.push(scatter);
+  key.push(dense);
+  for (const auto &v : {source, index, destination})
+    push_vulkan_command_key_range(key, v.binding, v.binding.offset, v.bytes);
+  for (const auto word : params)
+    key.push(word);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  return {record, key, dense};
+}
+
+void submit_vulkan_indexed_copy(Program *program,
+                                Device *device,
+                                VulkanIndexedCopyCache &cache,
+                                const VulkanPreparedIndexedCopy &prepared,
+                                bool scatter) {
+  auto &replay = prepared.dense
+                     ? (scatter ? cache.scatter_command_replay
+                                : cache.gather_command_replay)
+                     : (scatter ? cache.scatter_strided_command_replay
+                                : cache.gather_strided_command_replay);
+  if (!replay.submit_or_record(program, device, prepared.key,
+                               program->profiler != nullptr, prepared.record))
+    program->enqueue_compute_op_lambda(prepared.record, {});
+}
+
+class FixedVulkanScatterAdd final : public NativeOperation {
+ public:
+  FixedVulkanScatterAdd(Device &device, const ScatterAddOperation &op)
+      : device_(device),
+        src_(op.src.pointer),
+        indices_(op.indices.pointer),
+        dst_(op.dst.pointer) {
+    validate_scatter_add_storage(Arch::vulkan, op);
+    cache_.ensure_pipelines(&device);
+    const auto width = vulkan_scan_value_type_size(op.value_type);
+    prepared_ = prepare_vulkan_scatter_add(
+        nullptr, &device, cache_, src_, indices_, dst_, op.size, op.dst_items,
+        op.value_type, width, width);
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
+      const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{src_, indices_, dst_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr src_, indices_, dst_;
+  VulkanIndexedCopyCache cache_;
+  VulkanPreparedScatterAdd prepared_;
+};
+
+class FixedVulkanIndexedCopy final : public NativeOperation {
+ public:
+  FixedVulkanIndexedCopy(Device &device, const IndexedCopyOperation &op)
+      : device_(device),
+        src_(op.src.pointer),
+        indices_(op.indices.pointer),
+        dst_(op.dst.pointer) {
+    validate_indexed_copy_storage(Arch::vulkan, op);
+    cache_.ensure_pipelines(&device);
+    const auto bytes = indexed_copy_item_bytes(op);
+    prepared_ = prepare_vulkan_indexed_copy(
+        nullptr, &device, cache_, src_, indices_, dst_, op.size,
+        op.scatter ? op.size : op.src_items,
+        op.scatter ? op.dst_items : op.size, bytes, bytes, bytes, op.scatter);
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
+      const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{src_, indices_, dst_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr src_, indices_, dst_;
+  VulkanIndexedCopyCache cache_;
+  VulkanPreparedIndexedCopy prepared_;
+};
+
 struct VulkanPreparedTransform {
   std::function<void(Device *, CommandList *)> record;
   VulkanCommandReplayKey key;
@@ -11187,6 +11524,15 @@ std::size_t vulkan_add_merge_ndarray_impl(Program *program,
 }  // namespace
 
 namespace gfx {
+std::shared_ptr<NativeOperation> prepare_vulkan_scatter_add_operation(
+    Device &device, const ScatterAddOperation &operation) {
+  return std::make_shared<FixedVulkanScatterAdd>(device, operation);
+}
+std::shared_ptr<NativeOperation> prepare_vulkan_indexed_copy_operation(
+    Device &device,
+    const IndexedCopyOperation &operation) {
+  return std::make_shared<FixedVulkanIndexedCopy>(device, operation);
+}
 std::shared_ptr<NativeOperation> prepare_vulkan_reduce_operation(
     Device &device, const ReduceOperation &operation) {
   return std::make_shared<FixedVulkanReduce>(device, operation);
@@ -13494,28 +13840,9 @@ bool Program::vulkan_scatter_add_available() const {
 }
 
 bool Program::vulkan_scatter_add_value_type_available(int value_type) const {
-  if (compile_config().arch != Arch::vulkan) {
-    return false;
-  }
-  if (value_type == 0 || value_type == 2) {
-    return true;
-  }
-  if (value_type == 1) {
-    return const_cast<Program *>(this)
-               ->get_device_caps()
-               .get(DeviceCapability::spirv_has_atomic_float_add) != 0;
-  }
-  if (value_type == 3 || value_type == 4) {
-    const auto caps = const_cast<Program *>(this)->get_device_caps();
-    return caps.get(DeviceCapability::spirv_has_int64) != 0 &&
-           caps.get(DeviceCapability::spirv_has_atomic_int64) != 0;
-  }
-  if (value_type == 5) {
-    const auto caps = const_cast<Program *>(this)->get_device_caps();
-    return caps.get(DeviceCapability::spirv_has_float64) != 0 &&
-           caps.get(DeviceCapability::spirv_has_atomic_float64_add) != 0;
-  }
-  return false;
+  return compile_config().arch == Arch::vulkan &&
+         vulkan_scatter_add_type_available(
+             const_cast<Program *>(this)->get_device_caps(), value_type);
 }
 
 bool Program::vulkan_bucket_builder_available() const {
@@ -15946,44 +16273,13 @@ std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
   TI_ERROR_IF(!device, "Vulkan native gather requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  ShaderResourceSet *bindings = cache.cached_resource_set(false);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
-  const size_t value_bytes = n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t src_bytes = src->get_nelement() * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const DeviceAllocation src_alloc = src->ndarray_alloc_;
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  const bool profiler_scopes = profiler != nullptr;
-  cache.gather_replay.rw_buffer(bindings, 0, src_alloc, 0, src_bytes);
-  cache.gather_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                indices_bytes);
-  cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, 0, value_bytes);
-  auto record_gather =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_bytes,
-       indices_bytes, value_bytes, groups,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes ? "vulkan_gather_u32_by_i32"
-                                          : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), value_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(40);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, value_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.gather_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes, record_gather)) {
-    enqueue_compute_op_lambda(record_gather, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src->ndarray_alloc_.get_ptr(),
+      indices->ndarray_alloc_.get_ptr(), dst->ndarray_alloc_.get_ptr(), n,
+      src->get_nelement(), dst->get_nelement(), item_bytes, item_bytes,
+      item_bytes, false);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, false);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_gather_strided_ndarray(
@@ -16029,68 +16325,12 @@ std::size_t Program::vulkan_gather_strided_ndarray(
   TI_ERROR_IF(!device, "Vulkan native strided gather requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  cache.ensure_indexed_copy_params();
-  ShaderResourceSet *bindings = cache.cached_strided_resource_set(false);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(false, true);
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t src_bytes = src->get_nelement() * src->get_element_size();
-  const size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const DeviceAllocation src_alloc = src->ndarray_alloc_;
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  const DeviceAllocation params_alloc = cache.indexed_copy_params;
-  const bool profiler_scopes = profiler != nullptr;
-  std::array<uint32_t, 7> params{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(src->get_nelement()),
-      static_cast<uint32_t>(item_words),
-      static_cast<uint32_t>(src_offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(src_stride / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_stride / sizeof(uint32_t)),
-  };
-  const size_t params_bytes = params.size() * sizeof(uint32_t);
-  cache.gather_strided_replay.rw_buffer(bindings, 0, src_alloc, 0,
-                                        src_bytes);
-  cache.gather_strided_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                        indices_bytes);
-  cache.gather_strided_replay.rw_buffer(bindings, 2, dst_alloc, 0,
-                                        dst_bytes);
-  cache.gather_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
-                                        params_bytes);
-  auto record_gather_strided =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_bytes,
-       indices_bytes, dst_bytes, groups, params_alloc, params,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        for (uint32_t i = 0; i < params.size(); ++i) {
-          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
-                               sizeof(uint32_t), params[i]);
-        }
-        cmdlist->buffer_barrier(params_alloc);
-        dispatch_pipeline(
-            cmdlist, pipeline, bindings, groups, 1, 1,
-            profiler_scopes ? "vulkan_gather_strided_u32_by_i32" : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(41);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
-  command_key.push(groups);
-  for (uint32_t word : params) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.gather_strided_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes, record_gather_strided)) {
-    enqueue_compute_op_lambda(record_gather_strided, {});
-  }
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src->ndarray_alloc_.get_ptr(src_offset),
+      indices->ndarray_alloc_.get_ptr(),
+      dst->ndarray_alloc_.get_ptr(dst_offset), n, src->get_nelement(),
+      dst->get_nelement(), item_bytes, src_stride, dst_stride, false);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, false);
   return cache.cached_bytes;
 }
 
@@ -16142,115 +16382,10 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
               "Vulkan native dense field gather requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  if (src_stride == item_bytes && dst_stride == item_bytes) {
-    ShaderResourceSet *bindings = cache.cached_resource_set(false);
-    Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
-    const size_t src_bytes = src_n * item_bytes;
-    const size_t dst_bytes = n * item_bytes;
-    cache.gather_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                  src_bytes);
-    cache.gather_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                  indices_bytes);
-    cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                  dst_bytes);
-    auto record_gather_dense =
-        [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_ptr,
-         dst_ptr, src_bytes, indices_bytes, dst_bytes, groups,
-         profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-          dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                            profiler_scopes
-                                ? "vulkan_gather_dense_field_u32_by_i32"
-                                : nullptr);
-          cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                  dst_bytes);
-        };
-    VulkanCommandReplayKey command_key;
-    command_key.push(42);
-    command_key.push(static_cast<uint64_t>(value_type));
-    push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                  src_bytes);
-    push_vulkan_command_key_range(command_key, indices_alloc, 0,
-                                  indices_bytes);
-    push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                  dst_bytes);
-    command_key.push(groups);
-    command_key.push_ptr(pipeline);
-    command_key.push_ptr(bindings);
-    if (!cache.gather_command_replay.submit_or_record(
-            this, device, command_key, profiler_scopes,
-            record_gather_dense)) {
-      enqueue_compute_op_lambda(record_gather_dense, {});
-    }
-    return 0;
-  }
-  cache.ensure_indexed_copy_params();
-  ShaderResourceSet *bindings = cache.cached_strided_resource_set(false);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(false, true);
-  const size_t src_bytes =
-      src_ptr.offset + (src_n == 0 ? item_bytes
-                                   : (src_n - 1) * src_stride + item_bytes);
-  const size_t dst_bytes =
-      dst_ptr.offset + (dst_n == 0 ? item_bytes
-                                   : (dst_n - 1) * dst_stride + item_bytes);
-  std::array<uint32_t, 7> params{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(src_n),
-      static_cast<uint32_t>(item_words),
-      static_cast<uint32_t>(src_ptr.offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(src_stride / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_ptr.offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_stride / sizeof(uint32_t)),
-  };
-  const DeviceAllocation params_alloc = cache.indexed_copy_params;
-  const size_t params_bytes = params.size() * sizeof(uint32_t);
-  cache.gather_strided_replay.rw_buffer(bindings, 0, src_alloc, 0,
-                                        src_bytes);
-  cache.gather_strided_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                        indices_bytes);
-  cache.gather_strided_replay.rw_buffer(bindings, 2, dst_alloc, 0,
-                                        dst_bytes);
-  cache.gather_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
-                                        params_bytes);
-  auto record_gather_dense_strided =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_bytes,
-       indices_bytes, dst_bytes, groups, params_alloc, params,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        for (uint32_t i = 0; i < params.size(); ++i) {
-          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
-                               sizeof(uint32_t), params[i]);
-        }
-        cmdlist->buffer_barrier(params_alloc);
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? "vulkan_gather_dense_field_u32_by_i32"
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(43);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
-  command_key.push(groups);
-  for (uint32_t word : params) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.gather_strided_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_gather_dense_strided)) {
-    enqueue_compute_op_lambda(record_gather_dense_strided, {});
-  }
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices->ndarray_alloc_.get_ptr(), dst_ptr,
+      n, src_n, dst_n, item_bytes, src_stride, dst_stride, false);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, false);
   return cache.cached_bytes;
 }
 
@@ -16302,50 +16437,11 @@ std::size_t Program::vulkan_gather_dense_field_packed(SNode *src,
               "device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  ShaderResourceSet *bindings = cache.cached_resource_set(false);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t src_bytes = src_n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = n * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  cache.gather_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                src_bytes);
-  cache.gather_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                indices_bytes);
-  cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  auto record_gather_packed =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
-       src_bytes, indices_bytes, dst_bytes, groups,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? "vulkan_gather_packed_dense_field_u32_by_i32"
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(142);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.gather_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes, record_gather_packed)) {
-    enqueue_compute_op_lambda(record_gather_packed, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices->ndarray_alloc_.get_ptr(), dst_ptr,
+      n, src_n, dst_n, item_bytes, item_bytes, item_bytes, false);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, false);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_gather_dense_field_packed_indices_field(
@@ -16399,52 +16495,11 @@ std::size_t Program::vulkan_gather_dense_field_packed_indices_field(
               "device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  ShaderResourceSet *bindings = cache.cached_resource_set(false);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t src_bytes = src_n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = n * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  cache.gather_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                src_bytes);
-  cache.gather_replay.rw_buffer(bindings, 1, indices_alloc,
-                                indices_ptr.offset, indices_bytes);
-  cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  auto record_gather_packed_indices_field =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
-       dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
-                                           CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? "vulkan_gather_packed_field_indices_u32_by_i32"
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(143);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
-                                indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.gather_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_gather_packed_indices_field)) {
-    enqueue_compute_op_lambda(record_gather_packed_indices_field, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices_ptr, dst_ptr, n, src_n, dst_n,
+      item_bytes, item_bytes, item_bytes, false);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, false);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_gather_dense_field_indices_field(
@@ -16488,52 +16543,11 @@ std::size_t Program::vulkan_gather_dense_field_indices_field(
               "Vulkan native dense field gather requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t src_bytes = src_n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = n * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  ShaderResourceSet *bindings = cache.cached_resource_set(false);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
-  cache.gather_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                src_bytes);
-  cache.gather_replay.rw_buffer(bindings, 1, indices_alloc, indices_ptr.offset,
-                                indices_bytes);
-  cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  auto record_gather_dense_indices_field =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
-       dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
-                                           CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? "vulkan_gather_dense_field_u32_by_i32"
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(44);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
-                                indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.gather_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_gather_dense_indices_field)) {
-    enqueue_compute_op_lambda(record_gather_dense_indices_field, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices_ptr, dst_ptr, n, src_n, dst_n,
+      item_bytes, item_bytes, item_bytes, false);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, false);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
@@ -16575,46 +16589,13 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
   TI_ERROR_IF(!device, "Vulkan native scatter requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  ShaderResourceSet *bindings = cache.cached_resource_set(true);
-  Pipeline *pipeline = item_words == 1
-                           ? cache.indexed_copy_dense_u32_scatter_pipeline()
-                           : cache.indexed_copy_pipeline(true, false);
-  const size_t value_bytes = n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst->get_nelement() * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const DeviceAllocation src_alloc = src->ndarray_alloc_;
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  const bool profiler_scopes = profiler != nullptr;
-  cache.scatter_replay.rw_buffer(bindings, 0, src_alloc, 0, value_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                 indices_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, 0, dst_bytes);
-  auto record_scatter =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, value_bytes,
-       indices_bytes, dst_bytes, groups,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes ? "vulkan_scatter_u32_by_i32"
-                                          : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(45);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, value_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes, record_scatter)) {
-    enqueue_compute_op_lambda(record_scatter, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src->ndarray_alloc_.get_ptr(),
+      indices->ndarray_alloc_.get_ptr(), dst->ndarray_alloc_.get_ptr(), n,
+      src->get_nelement(), dst->get_nelement(), item_bytes, item_bytes,
+      item_bytes, true);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, true);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_strided_ndarray(
@@ -16662,69 +16643,12 @@ std::size_t Program::vulkan_scatter_strided_ndarray(
               "Vulkan native strided scatter requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  cache.ensure_indexed_copy_params();
-  ShaderResourceSet *bindings = cache.cached_strided_resource_set(true);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(true, true);
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t src_bytes = src->get_nelement() * src->get_element_size();
-  const size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const DeviceAllocation src_alloc = src->ndarray_alloc_;
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  const DeviceAllocation params_alloc = cache.indexed_copy_params;
-  const bool profiler_scopes = profiler != nullptr;
-  std::array<uint32_t, 7> params{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(dst->get_nelement()),
-      static_cast<uint32_t>(item_words),
-      static_cast<uint32_t>(src_offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(src_stride / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_stride / sizeof(uint32_t)),
-  };
-  const size_t params_bytes = params.size() * sizeof(uint32_t);
-  cache.scatter_strided_replay.rw_buffer(bindings, 0, src_alloc, 0,
-                                         src_bytes);
-  cache.scatter_strided_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                         indices_bytes);
-  cache.scatter_strided_replay.rw_buffer(bindings, 2, dst_alloc, 0,
-                                         dst_bytes);
-  cache.scatter_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
-                                         params_bytes);
-  auto record_scatter_strided =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_bytes,
-       indices_bytes, dst_bytes, groups, params_alloc, params,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        for (uint32_t i = 0; i < params.size(); ++i) {
-          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
-                               sizeof(uint32_t), params[i]);
-        }
-        cmdlist->buffer_barrier(params_alloc);
-        dispatch_pipeline(
-            cmdlist, pipeline, bindings, groups, 1, 1,
-            profiler_scopes ? "vulkan_scatter_strided_u32_by_i32" : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(46);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
-  command_key.push(groups);
-  for (uint32_t word : params) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_strided_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_strided)) {
-    enqueue_compute_op_lambda(record_scatter_strided, {});
-  }
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src->ndarray_alloc_.get_ptr(src_offset),
+      indices->ndarray_alloc_.get_ptr(),
+      dst->ndarray_alloc_.get_ptr(dst_offset), n, src->get_nelement(),
+      dst->get_nelement(), item_bytes, src_stride, dst_stride, true);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, true);
   return cache.cached_bytes;
 }
 
@@ -16777,117 +16701,10 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
               "Vulkan native dense field scatter requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  if (src_stride == item_bytes && dst_stride == item_bytes) {
-    ShaderResourceSet *bindings = cache.cached_resource_set(true);
-    Pipeline *pipeline = item_words == 1
-                             ? cache.indexed_copy_dense_u32_scatter_pipeline()
-                             : cache.indexed_copy_pipeline(true, false);
-    const size_t src_bytes = n * item_bytes;
-    const size_t dst_bytes = dst_n * item_bytes;
-    cache.scatter_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                   src_bytes);
-    cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                   indices_bytes);
-    cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                   dst_bytes);
-    auto record_scatter_dense =
-        [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_ptr,
-         dst_ptr, src_bytes, indices_bytes, dst_bytes, groups,
-         profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-          dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                            profiler_scopes
-                                ? "vulkan_scatter_dense_field_u32_by_i32"
-                                : nullptr);
-          cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                  dst_bytes);
-        };
-    VulkanCommandReplayKey command_key;
-    command_key.push(47);
-    command_key.push(static_cast<uint64_t>(value_type));
-    push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                  src_bytes);
-    push_vulkan_command_key_range(command_key, indices_alloc, 0,
-                                  indices_bytes);
-    push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                  dst_bytes);
-    command_key.push(groups);
-    command_key.push_ptr(pipeline);
-    command_key.push_ptr(bindings);
-    if (!cache.scatter_command_replay.submit_or_record(
-            this, device, command_key, profiler_scopes,
-            record_scatter_dense)) {
-      enqueue_compute_op_lambda(record_scatter_dense, {});
-    }
-    return 0;
-  }
-  cache.ensure_indexed_copy_params();
-  ShaderResourceSet *bindings = cache.cached_strided_resource_set(true);
-  Pipeline *pipeline = cache.indexed_copy_pipeline(true, true);
-  const size_t src_bytes =
-      src_ptr.offset + (src_n == 0 ? item_bytes
-                                   : (src_n - 1) * src_stride + item_bytes);
-  const size_t dst_bytes =
-      dst_ptr.offset + (dst_n == 0 ? item_bytes
-                                   : (dst_n - 1) * dst_stride + item_bytes);
-  std::array<uint32_t, 7> params{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(dst_n),
-      static_cast<uint32_t>(item_words),
-      static_cast<uint32_t>(src_ptr.offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(src_stride / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_ptr.offset / sizeof(uint32_t)),
-      static_cast<uint32_t>(dst_stride / sizeof(uint32_t)),
-  };
-  const DeviceAllocation params_alloc = cache.indexed_copy_params;
-  const size_t params_bytes = params.size() * sizeof(uint32_t);
-  cache.scatter_strided_replay.rw_buffer(bindings, 0, src_alloc, 0,
-                                         src_bytes);
-  cache.scatter_strided_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                         indices_bytes);
-  cache.scatter_strided_replay.rw_buffer(bindings, 2, dst_alloc, 0,
-                                         dst_bytes);
-  cache.scatter_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
-                                         params_bytes);
-  auto record_scatter_dense_strided =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_bytes,
-       indices_bytes, dst_bytes, groups, params_alloc, params,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        for (uint32_t i = 0; i < params.size(); ++i) {
-          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
-                               sizeof(uint32_t), params[i]);
-        }
-        cmdlist->buffer_barrier(params_alloc);
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? "vulkan_scatter_dense_field_u32_by_i32"
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(48);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
-  command_key.push(groups);
-  for (uint32_t word : params) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_strided_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_dense_strided)) {
-    enqueue_compute_op_lambda(record_scatter_dense_strided, {});
-  }
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices->ndarray_alloc_.get_ptr(), dst_ptr,
+      n, src_n, dst_n, item_bytes, src_stride, dst_stride, true);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, true);
   return cache.cached_bytes;
 }
 
@@ -16939,52 +16756,11 @@ std::size_t Program::vulkan_scatter_dense_field_packed(SNode *src,
               "device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  ShaderResourceSet *bindings = cache.cached_resource_set(true);
-  Pipeline *pipeline = item_words == 1
-                           ? cache.indexed_copy_dense_u32_scatter_pipeline()
-                           : cache.indexed_copy_pipeline(true, false);
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t src_bytes = n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst_n * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  cache.scatter_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                 src_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                 indices_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                 dst_bytes);
-  auto record_scatter_packed =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
-       src_bytes, indices_bytes, dst_bytes, groups,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? "vulkan_scatter_packed_dense_field_u32_by_i32"
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(147);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes, record_scatter_packed)) {
-    enqueue_compute_op_lambda(record_scatter_packed, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices->ndarray_alloc_.get_ptr(), dst_ptr,
+      n, src_n, dst_n, item_bytes, item_bytes, item_bytes, true);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, true);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_dense_field_packed_indices_field(
@@ -17038,54 +16814,11 @@ std::size_t Program::vulkan_scatter_dense_field_packed_indices_field(
               "device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  ShaderResourceSet *bindings = cache.cached_resource_set(true);
-  Pipeline *pipeline = item_words == 1
-                           ? cache.indexed_copy_dense_u32_scatter_pipeline()
-                           : cache.indexed_copy_pipeline(true, false);
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t src_bytes = n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst_n * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  cache.scatter_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                 src_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc,
-                                 indices_ptr.offset, indices_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                 dst_bytes);
-  auto record_scatter_packed_indices_field =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
-       dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
-                                           CommandList *cmdlist) {
-        dispatch_pipeline(
-            cmdlist, pipeline, bindings, groups, 1, 1,
-            profiler_scopes ? "vulkan_scatter_packed_field_indices_u32_by_i32"
-                            : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(148);
-  command_key.push(static_cast<uint64_t>(item_bytes));
-  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
-                                indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_packed_indices_field)) {
-    enqueue_compute_op_lambda(record_scatter_packed_indices_field, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices_ptr, dst_ptr, n, src_n, dst_n,
+      item_bytes, item_bytes, item_bytes, true);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, true);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_dense_field_indices_field(
@@ -17130,54 +16863,11 @@ std::size_t Program::vulkan_scatter_dense_field_indices_field(
               "Vulkan native dense field scatter requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t src_bytes = n * item_bytes;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst_n * item_bytes;
-  const uint32_t groups =
-      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  ShaderResourceSet *bindings = cache.cached_resource_set(true);
-  Pipeline *pipeline = item_words == 1
-                           ? cache.indexed_copy_dense_u32_scatter_pipeline()
-                           : cache.indexed_copy_pipeline(true, false);
-  cache.scatter_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
-                                 src_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc, indices_ptr.offset,
-                                 indices_bytes);
-  cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
-                                 dst_bytes);
-  auto record_scatter_dense_indices_field =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
-       dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
-                                           CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? "vulkan_scatter_dense_field_u32_by_i32"
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(49);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
-                                indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_dense_indices_field)) {
-    enqueue_compute_op_lambda(record_scatter_dense_indices_field, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_indexed_copy(
+      this, device, cache, src_ptr, indices_ptr, dst_ptr, n, src_n, dst_n,
+      item_bytes, item_bytes, item_bytes, true);
+  submit_vulkan_indexed_copy(this, device, cache, prepared, true);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
@@ -17219,61 +16909,12 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
   TI_ERROR_IF(!device, "Vulkan native scatter-add requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  ShaderResourceSet *bindings =
-      cache.cached_scatter_add_resource_set(value_type);
-  Pipeline *pipeline = cache.scatter_add_pipeline(value_type);
-  TI_ERROR_IF(!pipeline,
-              "Vulkan native scatter-add could not find a pipeline for the "
-              "requested value type.");
-  const size_t value_bytes = n * value_size;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst->get_nelement() * value_size;
-  const uint32_t groups =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
-  const DeviceAllocation src_alloc = src->ndarray_alloc_;
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  const bool profiler_scopes = profiler != nullptr;
-  cache.scatter_add_replay[value_type].rw_buffer(bindings, 0, src_alloc, 0,
-                                                 value_bytes);
-  cache.scatter_add_replay[value_type].rw_buffer(bindings, 1, indices_alloc, 0,
-                                                 indices_bytes);
-  cache.scatter_add_replay[value_type].rw_buffer(bindings, 2, dst_alloc, 0,
-                                                 dst_bytes);
-  auto record_scatter_add =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, value_bytes,
-       indices_bytes, dst_bytes, groups, value_type,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? (value_type == 1
-                                     ? "vulkan_scatter_add_f32_by_i32"
-                                     : value_type == 2
-                                     ? "vulkan_scatter_add_u32_by_i32"
-                                     : value_type == 3
-                                     ? "vulkan_scatter_add_u64_by_i32"
-                                     : value_type == 4
-                                     ? "vulkan_scatter_add_i64_by_i32"
-                                     : value_type == 5
-                                     ? "vulkan_scatter_add_f64_by_i32"
-                                     : "vulkan_scatter_add_i32_by_i32")
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(50);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, value_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_add_command_replay[value_type].submit_or_record(
-          this, device, command_key, profiler_scopes, record_scatter_add)) {
-    enqueue_compute_op_lambda(record_scatter_add, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_scatter_add(
+      this, device, cache, src->ndarray_alloc_.get_ptr(),
+      indices->ndarray_alloc_.get_ptr(), dst->ndarray_alloc_.get_ptr(), n,
+      dst->get_nelement(), value_type, value_size, value_size, 1);
+  submit_vulkan_scatter_add(this, device, cache, prepared, value_type);
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_add_member_ndarray(
@@ -17325,76 +16966,12 @@ std::size_t Program::vulkan_scatter_add_strided_ndarray(
               "Vulkan native strided scatter-add requires a compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  cache.ensure_scatter_add_strided_pipeline(value_type);
-  ShaderResourceSet *bindings =
-      cache.cached_scatter_add_strided_resource_set(value_type);
-  Pipeline *pipeline = cache.scatter_add_strided_pipeline(value_type);
-  TI_ERROR_IF(!pipeline,
-              "Vulkan native strided scatter-add could not find a pipeline "
-              "for the requested value type.");
-  const std::array<uint32_t, 6> param_words{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(src_offset / value_size),
-      static_cast<uint32_t>(src_stride / value_size),
-      static_cast<uint32_t>(dst->get_nelement()),
-      static_cast<uint32_t>(dst_offset / value_size),
-      static_cast<uint32_t>(dst_stride / value_size),
-  };
-  const size_t src_bytes = src->get_nelement() * src->get_element_size();
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
-  const uint32_t push_bytes =
-      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
-  const uint32_t groups =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
-  const DeviceAllocation src_alloc = src->ndarray_alloc_;
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  const bool profiler_scopes = profiler != nullptr;
-  cache.scatter_add_strided_replay[value_type].rw_buffer(
-      bindings, 0, src_alloc, 0, src_bytes);
-  cache.scatter_add_strided_replay[value_type].rw_buffer(
-      bindings, 1, indices_alloc, 0, indices_bytes);
-  cache.scatter_add_strided_replay[value_type].rw_buffer(
-      bindings, 2, dst_alloc, 0, dst_bytes);
-  auto record_scatter_add_strided =
-      [dst_alloc, pipeline, bindings, dst_bytes, param_words, push_bytes, groups,
-       value_type, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline_with_push_constants(
-            cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
-            1, 1,
-            profiler_scopes
-                ? (value_type == 1
-                       ? "vulkan_scatter_add_f32_by_i32_strided"
-                       : value_type == 2
-                       ? "vulkan_scatter_add_u32_by_i32_strided"
-                       : value_type == 3
-                       ? "vulkan_scatter_add_u64_by_i32_strided"
-                       : value_type == 4
-                       ? "vulkan_scatter_add_i64_by_i32_strided"
-                       : value_type == 5
-                       ? "vulkan_scatter_add_f64_by_i32_strided"
-                       : "vulkan_scatter_add_i32_by_i32_strided")
-                : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(51);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  command_key.push(groups);
-  for (uint32_t word : param_words) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_add_strided_command_replay[value_type].submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_add_strided)) {
-    enqueue_compute_op_lambda(record_scatter_add_strided, {});
-  }
+  auto prepared = prepare_vulkan_scatter_add(
+      this, device, cache, src->ndarray_alloc_.get_ptr(src_offset),
+      indices->ndarray_alloc_.get_ptr(),
+      dst->ndarray_alloc_.get_ptr(dst_offset), n, dst->get_nelement(),
+      value_type, src_stride, dst_stride, 1);
+  submit_vulkan_scatter_add(this, device, cache, prepared, value_type);
   return cache.cached_bytes;
 }
 
@@ -17464,142 +17041,10 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
               "device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const uint32_t groups =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  const auto descriptor_alignment =
-      device->get_storage_buffer_binding_limits().offset_alignment;
-  // Packed fields may begin between descriptor boundaries (notably grad
-  // fields). Their existing strided shader accepts offsets from a zero base.
-  if (src_stride == value_size && dst_stride == value_size &&
-      src_ptr.offset % descriptor_alignment == 0 &&
-      dst_ptr.offset % descriptor_alignment == 0) {
-    ShaderResourceSet *bindings =
-        cache.cached_scatter_add_resource_set(value_type);
-    Pipeline *pipeline = cache.scatter_add_pipeline(value_type);
-    TI_ERROR_IF(!pipeline,
-                "Vulkan native dense field scatter-add could not find a "
-                "pipeline for the requested value type.");
-    const size_t value_bytes = n * value_size;
-    const size_t dst_bytes = dst_n * value_size;
-    cache.scatter_add_replay[value_type].rw_buffer(
-        bindings, 0, src_alloc, src_ptr.offset, value_bytes);
-    cache.scatter_add_replay[value_type].rw_buffer(
-        bindings, 1, indices_alloc, 0, indices_bytes);
-    cache.scatter_add_replay[value_type].rw_buffer(
-        bindings, 2, dst_alloc, dst_ptr.offset, dst_bytes);
-    auto record_scatter_add_dense =
-        [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_ptr,
-         dst_ptr, value_bytes, indices_bytes, dst_bytes, groups, value_type,
-         profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-          dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                            profiler_scopes
-                                ? (value_type == 1
-                                       ? "vulkan_scatter_add_dense_f32_by_i32"
-                                       : value_type == 2
-                                       ? "vulkan_scatter_add_dense_u32_by_i32"
-                                       : value_type == 3
-                                       ? "vulkan_scatter_add_dense_u64_by_i32"
-                                       : value_type == 4
-                                       ? "vulkan_scatter_add_dense_i64_by_i32"
-                                       : value_type == 5
-                                       ? "vulkan_scatter_add_dense_f64_by_i32"
-                                       : "vulkan_scatter_add_dense_i32_by_i32")
-                                : nullptr);
-          cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                  dst_bytes);
-        };
-    VulkanCommandReplayKey command_key;
-    command_key.push(52);
-    command_key.push(static_cast<uint64_t>(value_type));
-    push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                  value_bytes);
-    push_vulkan_command_key_range(command_key, indices_alloc, 0,
-                                  indices_bytes);
-    push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                  dst_bytes);
-    command_key.push(groups);
-    command_key.push_ptr(pipeline);
-    command_key.push_ptr(bindings);
-    if (!cache.scatter_add_command_replay[value_type].submit_or_record(
-            this, device, command_key, profiler_scopes,
-            record_scatter_add_dense)) {
-      enqueue_compute_op_lambda(record_scatter_add_dense, {});
-    }
-    return 0;
-  }
-
-  cache.ensure_scatter_add_strided_pipeline(value_type);
-  ShaderResourceSet *bindings =
-      cache.cached_scatter_add_strided_resource_set(value_type);
-  Pipeline *pipeline = cache.scatter_add_strided_pipeline(value_type);
-  TI_ERROR_IF(!pipeline,
-              "Vulkan native dense field scatter-add could not find a strided "
-              "pipeline for the requested value type.");
-  const std::array<uint32_t, 6> param_words{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(src_ptr.offset / value_size),
-      static_cast<uint32_t>(src_stride / value_size),
-      static_cast<uint32_t>(dst_n),
-      static_cast<uint32_t>(dst_ptr.offset / value_size),
-      static_cast<uint32_t>(dst_stride / value_size),
-  };
-  const size_t src_bytes =
-      src_ptr.offset + (src_n == 0 ? value_size
-                                   : (src_n - 1) * src_stride + value_size);
-  const size_t dst_bytes =
-      dst_ptr.offset + (dst_n == 0 ? value_size
-                                   : (dst_n - 1) * dst_stride + value_size);
-  const uint32_t push_bytes =
-      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
-  cache.scatter_add_strided_replay[value_type].rw_buffer(
-      bindings, 0, src_alloc, 0, src_bytes);
-  cache.scatter_add_strided_replay[value_type].rw_buffer(
-      bindings, 1, indices_alloc, 0, indices_bytes);
-  cache.scatter_add_strided_replay[value_type].rw_buffer(
-      bindings, 2, dst_alloc, 0, dst_bytes);
-  auto record_scatter_add_dense_strided =
-      [dst_alloc, pipeline, bindings, dst_bytes, param_words, push_bytes, groups,
-       value_type, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline_with_push_constants(
-            cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
-            1, 1,
-            profiler_scopes
-                ? (value_type == 1
-                       ? "vulkan_scatter_add_dense_f32_by_i32"
-                       : value_type == 2
-                       ? "vulkan_scatter_add_dense_u32_by_i32"
-                       : value_type == 3
-                       ? "vulkan_scatter_add_dense_u64_by_i32"
-                       : value_type == 4
-                       ? "vulkan_scatter_add_dense_i64_by_i32"
-                       : value_type == 5
-                       ? "vulkan_scatter_add_dense_f64_by_i32"
-                       : "vulkan_scatter_add_dense_i32_by_i32")
-                : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(53);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  command_key.push(groups);
-  for (uint32_t word : param_words) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_add_strided_command_replay[value_type].submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_add_dense_strided)) {
-    enqueue_compute_op_lambda(record_scatter_add_dense_strided, {});
-  }
+  auto prepared = prepare_vulkan_scatter_add(
+      this, device, cache, src_ptr, indices->ndarray_alloc_.get_ptr(), dst_ptr,
+      n, dst_n, value_type, src_stride, dst_stride, 1);
+  submit_vulkan_scatter_add(this, device, cache, prepared, value_type);
   return cache.cached_bytes;
 }
 
@@ -17668,86 +17113,11 @@ std::size_t Program::vulkan_scatter_add_dense_field_packed(
               "compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  TI_ERROR_IF(
-      static_cast<size_t>(lane_count) >
-              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / n ||
-          static_cast<size_t>(lane_count) >
-              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / dst_n,
-      "Vulkan native packed dense field scatter-add scalar item count "
-      "exceeds UINT32_MAX.");
-  cache.ensure_scatter_add_packed_pipeline(value_type);
-  ShaderResourceSet *bindings =
-      cache.cached_scatter_add_packed_resource_set(value_type);
-  Pipeline *pipeline = cache.scatter_add_packed_pipeline(value_type);
-  TI_ERROR_IF(!pipeline,
-              "Vulkan native packed dense field scatter-add could not find a "
-              "packed pipeline for the requested value type.");
-
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t src_bytes = src_ptr.offset + src_n * item_bytes;
-  const size_t dst_bytes = dst_ptr.offset + dst_n * item_bytes;
-  cache.scatter_add_packed_replay[value_type].rw_buffer(
-      bindings, 0, src_alloc, 0, src_bytes);
-  cache.scatter_add_packed_replay[value_type].rw_buffer(
-      bindings, 1, indices_alloc, 0, indices_bytes);
-  cache.scatter_add_packed_replay[value_type].rw_buffer(
-      bindings, 2, dst_alloc, 0, dst_bytes);
-
-  const uint32_t scalar_items =
-      static_cast<uint32_t>(n * static_cast<size_t>(lane_count));
-  const uint32_t groups =
-      static_cast<uint32_t>((scalar_items + kBlockSize - 1) / kBlockSize);
-  const std::array<uint32_t, 5> param_words{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(src_ptr.offset / value_size),
-      static_cast<uint32_t>(dst_n),
-      static_cast<uint32_t>(dst_ptr.offset / value_size),
-      static_cast<uint32_t>(lane_count),
-  };
-  const uint32_t push_bytes =
-      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
-  const bool profiler_scopes = profiler != nullptr;
-  auto record_scatter_add_packed =
-      [dst_alloc, pipeline, bindings, dst_bytes, param_words, push_bytes, groups,
-       value_type, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline_with_push_constants(
-            cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
-            1, 1,
-            profiler_scopes
-                ? (value_type == 1
-                       ? "vulkan_scatter_add_packed_f32_by_i32"
-                       : value_type == 2
-                       ? "vulkan_scatter_add_packed_u32_by_i32"
-                       : value_type == 3
-                       ? "vulkan_scatter_add_packed_u64_by_i32"
-                       : value_type == 4
-                       ? "vulkan_scatter_add_packed_i64_by_i32"
-                       : value_type == 5
-                       ? "vulkan_scatter_add_packed_f64_by_i32"
-                       : "vulkan_scatter_add_packed_i32_by_i32")
-                : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(155);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  command_key.push(groups);
-  for (uint32_t word : param_words) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_add_packed_command_replay[value_type].submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_add_packed)) {
-    enqueue_compute_op_lambda(record_scatter_add_packed, {});
-  }
+  auto prepared = prepare_vulkan_scatter_add(
+      this, device, cache, src_ptr, indices->ndarray_alloc_.get_ptr(), dst_ptr,
+      n, dst_n, value_type, item_bytes, item_bytes,
+      static_cast<size_t>(lane_count));
+  submit_vulkan_scatter_add(this, device, cache, prepared, value_type);
   return cache.cached_bytes;
 }
 
@@ -17818,87 +17188,10 @@ std::size_t Program::vulkan_scatter_add_dense_field_packed_indices_field(
               "compute device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  TI_ERROR_IF(
-      static_cast<size_t>(lane_count) >
-              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / n ||
-          static_cast<size_t>(lane_count) >
-              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / dst_n,
-      "Vulkan native packed dense field scatter-add scalar item count "
-      "exceeds UINT32_MAX.");
-  cache.ensure_scatter_add_packed_pipeline(value_type);
-  ShaderResourceSet *bindings =
-      cache.cached_scatter_add_packed_resource_set(value_type);
-  Pipeline *pipeline = cache.scatter_add_packed_pipeline(value_type);
-  TI_ERROR_IF(!pipeline,
-              "Vulkan native packed dense field scatter-add could not find a "
-              "packed pipeline for the requested value type.");
-
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t src_bytes = src_ptr.offset + src_n * item_bytes;
-  const size_t dst_bytes = dst_ptr.offset + dst_n * item_bytes;
-  cache.scatter_add_packed_replay[value_type].rw_buffer(
-      bindings, 0, src_alloc, 0, src_bytes);
-  cache.scatter_add_packed_replay[value_type].rw_buffer(
-      bindings, 1, indices_alloc, indices_ptr.offset, indices_bytes);
-  cache.scatter_add_packed_replay[value_type].rw_buffer(
-      bindings, 2, dst_alloc, 0, dst_bytes);
-
-  const uint32_t scalar_items =
-      static_cast<uint32_t>(n * static_cast<size_t>(lane_count));
-  const uint32_t groups =
-      static_cast<uint32_t>((scalar_items + kBlockSize - 1) / kBlockSize);
-  const std::array<uint32_t, 5> param_words{
-      static_cast<uint32_t>(n),
-      static_cast<uint32_t>(src_ptr.offset / value_size),
-      static_cast<uint32_t>(dst_n),
-      static_cast<uint32_t>(dst_ptr.offset / value_size),
-      static_cast<uint32_t>(lane_count),
-  };
-  const uint32_t push_bytes =
-      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
-  const bool profiler_scopes = profiler != nullptr;
-  auto record_scatter_add_packed_indices_field =
-      [dst_alloc, pipeline, bindings, dst_bytes, param_words, push_bytes, groups,
-       value_type, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline_with_push_constants(
-            cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
-            1, 1,
-            profiler_scopes
-                ? (value_type == 1
-                       ? "vulkan_scatter_add_packed_f32_by_i32"
-                       : value_type == 2
-                       ? "vulkan_scatter_add_packed_u32_by_i32"
-                       : value_type == 3
-                       ? "vulkan_scatter_add_packed_u64_by_i32"
-                       : value_type == 4
-                       ? "vulkan_scatter_add_packed_i64_by_i32"
-                       : value_type == 5
-                       ? "vulkan_scatter_add_packed_f64_by_i32"
-                       : "vulkan_scatter_add_packed_i32_by_i32")
-                : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(156);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
-                                indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  command_key.push(groups);
-  for (uint32_t word : param_words) {
-    command_key.push(word);
-  }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_add_packed_command_replay[value_type].submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_add_packed_indices_field)) {
-    enqueue_compute_op_lambda(record_scatter_add_packed_indices_field, {});
-  }
+  auto prepared = prepare_vulkan_scatter_add(
+      this, device, cache, src_ptr, indices_ptr, dst_ptr, n, dst_n, value_type,
+      item_bytes, item_bytes, static_cast<size_t>(lane_count));
+  submit_vulkan_scatter_add(this, device, cache, prepared, value_type);
   return cache.cached_bytes;
 }
 
@@ -17946,66 +17239,11 @@ std::size_t Program::vulkan_scatter_add_dense_field_indices_field(
               "device.");
   auto cache_lease = get_indexed_copy_cache(this, device);
   auto &cache = *cache_lease;
-  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
-  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
-  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
-  const size_t value_bytes = n * value_size;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst_n * value_size;
-  const uint32_t groups =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-  ShaderResourceSet *bindings =
-      cache.cached_scatter_add_resource_set(value_type);
-  Pipeline *pipeline = cache.scatter_add_pipeline(value_type);
-  TI_ERROR_IF(!pipeline,
-              "Vulkan native dense field scatter-add could not find a "
-              "pipeline for the requested value type.");
-  cache.scatter_add_replay[value_type].rw_buffer(
-      bindings, 0, src_alloc, src_ptr.offset, value_bytes);
-  cache.scatter_add_replay[value_type].rw_buffer(
-      bindings, 1, indices_alloc, indices_ptr.offset, indices_bytes);
-  cache.scatter_add_replay[value_type].rw_buffer(
-      bindings, 2, dst_alloc, dst_ptr.offset, dst_bytes);
-  auto record_scatter_add_dense_indices_field =
-      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
-       dst_bytes, groups, value_type,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes
-                              ? (value_type == 1
-                                     ? "vulkan_scatter_add_dense_f32_by_i32"
-                                     : value_type == 2
-                                     ? "vulkan_scatter_add_dense_u32_by_i32"
-                                     : value_type == 3
-                                     ? "vulkan_scatter_add_dense_u64_by_i32"
-                                     : value_type == 4
-                                     ? "vulkan_scatter_add_dense_i64_by_i32"
-                                     : value_type == 5
-                                     ? "vulkan_scatter_add_dense_f64_by_i32"
-                                     : "vulkan_scatter_add_dense_i32_by_i32")
-                              : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
-                                dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(54);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
-                                value_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
-                                indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
-                                dst_bytes);
-  command_key.push(groups);
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
-  if (!cache.scatter_add_command_replay[value_type].submit_or_record(
-          this, device, command_key, profiler_scopes,
-          record_scatter_add_dense_indices_field)) {
-    enqueue_compute_op_lambda(record_scatter_add_dense_indices_field, {});
-  }
-  return 0;
+  auto prepared = prepare_vulkan_scatter_add(
+      this, device, cache, src_ptr, indices_ptr, dst_ptr, n, dst_n, value_type,
+      src_stride, dst_stride, 1);
+  submit_vulkan_scatter_add(this, device, cache, prepared, value_type);
+  return cache.cached_bytes;
 }
 
 bool Program::vulkan_bucket_builder_value_type_available(int value_type) const {

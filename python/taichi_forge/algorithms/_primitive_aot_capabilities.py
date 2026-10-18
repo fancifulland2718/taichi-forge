@@ -47,6 +47,20 @@ def _prepared(forms, *constraints):
 
 # Only dedicated, implemented export routes belong here. Ordinary compiled DSL
 # kernels use the generic AOT contract and do not qualify a host native method.
+def _indexed_copy_routes(mode):
+    constraints = (
+        "nonempty_fixed_prefix", "one_dimensional_packed_payload", "scalar_or_tensor",
+        "i32_u32_f32_i64_u64_f64", "mutable_i32_indices", "disjoint_output",
+        "explicit_adjoint_only",
+    ) + (("unique_targets", "cpu_replay_validation") if mode == "scatter"
+         else ("repeated_indices_supported",))
+    return (
+        _sequence((mode,), *constraints),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/indexed_copy",), _ALL,
+                          (mode,) + constraints),
+    )
+
+
 _ROUTES = MappingProxyType({
     "sort": (
         _module("sort", *_SORT),
@@ -113,6 +127,17 @@ _ROUTES = MappingProxyType({
              "i32_u32_f32_i64_u64_f64", "exact_inplace_or_disjoint",
              "f64_coefficient_bits", "device_dtype_capabilities"),
         ),
+    ),
+    "gather": _indexed_copy_routes("gather"),
+    "scatter": _indexed_copy_routes("scatter"),
+    "scatter_add": (
+        _sequence(("scatter_add",), "nonempty_fixed_prefix", "packed_scalar", "i32_u32_f32_i64_u64_f64",
+                  "mutable_i32_indices", "duplicate_target_accumulation", "disjoint_output",
+                  "frozen_cpu_partition_strategy", "device_atomic_capabilities", "explicit_adjoint_only"),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/scatter_add",), _ALL,
+                          ("nonempty_fixed_prefix", "packed_scalar", "i32_u32_f32_i64_u64_f64",
+                           "mutable_i32_indices", "duplicate_target_accumulation", "disjoint_output",
+                           "prepared_cpu_partial", "device_atomic_capabilities", "explicit_adjoint_only")),
     ),
     "segmented_scan": (
         PrimitiveAOTRoute(

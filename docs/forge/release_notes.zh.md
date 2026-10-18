@@ -31,6 +31,20 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Packed scalar scatter-add 可通过统一 AOT 原生 registry 导出到 CPU/CUDA/Vulkan，
+  支持重复目标、可变索引及目标原值累加。CPU 重放共用 runtime 调度器并保留独立
+  partial，GPU 不需 scratch；Vulkan 校验实际类型的原子能力。可组合显式伴随，
+  此路线不自动生成伴随。
+- Vulkan scatter-add 的标量、strided 和 packed 字段共用准备核心；Field 索引也使用
+  对齐视图和残余偏移，修复 descriptor 验证错误，保留重复目标原子累加与 Graph
+  参数独立性，不增加 scratch。
+- Vulkan gather/scatter 的 ndarray、字段及字段索引入口共用准备核心；源、索引和
+  目标 descriptor 均使用对齐的包围视图，修复未对齐字段偏移的验证错误，不增加
+  复制或 scratch 存储。
+- 修复 Vulkan 原生 gather/scatter 的根字段 descriptor 对齐问题，覆盖真实 Tape
+  反向；packed 字段起点不满足设备对齐时使用既有带偏移 shader。
+- Vulkan strided gather/scatter 改用 push constants 传入调度参数，去掉28字节参数
+  缓冲及每次录制的7次填充和对应 barrier；Graph 重放保留各自参数。
 - 修复 Vulkan 原生 transform 的 Tape 反向累加：packed 梯度字段若未对齐 descriptor
   起点，dense scatter-add 使用既有带偏移 shader，避免数值通过但验证层报错。
 - 修复 Vulkan 动态循环起点与 ndarray 长度终点组合时的编译断言；动态起点继续

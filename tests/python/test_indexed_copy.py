@@ -736,8 +736,8 @@ def test_experimental_gather_scatter_vulkan_native_struct_tensor_member_views():
 
     gather_ws = _run_struct_tensor_member_indexed_copy("vulkan_native", scatter=False)
     scatter_ws = _run_struct_tensor_member_indexed_copy("vulkan_native", scatter=True)
-    assert gather_ws.workspace_bytes_peak >= 28
-    assert scatter_ws.workspace_bytes_peak >= 28
+    assert gather_ws.workspace_bytes_peak == 0
+    assert scatter_ws.workspace_bytes_peak == 0
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

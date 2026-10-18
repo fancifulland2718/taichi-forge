@@ -25,6 +25,31 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, ScatterAddSchemaKeepsBackendSpecificLimitsAtPrepare) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription d;
+  d.provider = "builtin";
+  d.operation = "scatter_add";
+  d.bindings = {{"src", "s"}, {"indices", "i"}, {"dst", "d"}};
+  d.parameters = liong::json::parse_complete(
+      R"({"size":4294967296,"dst_items":17,"dtype":"f32","cpu_max_threads":4})");
+  EXPECT_EQ(registry.decode(d).kind(), "scatter_add");
+  for (
+      const auto *p :
+      {R"({"size":0,"dst_items":1,"dtype":"f32"})",
+       R"({"size":1,"dst_items":0,"dtype":"f32"})",
+       R"({"size":true,"dst_items":1,"dtype":"f32"})",
+       R"({"size":-1,"dst_items":1,"dtype":"f32"})",
+       R"({"size":1,"dst_items":1,"dtype":"i16"})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","cpu_max_threads":0})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","cpu_max_threads":true})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","cpu_max_threads":2147483648})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","unknown":0})"}) {
+    d.parameters = liong::json::parse_complete(p);
+    EXPECT_THROW(registry.decode(d), std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, MemoryPoolSchemaIsColdAndBackendQualified) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription description;
@@ -863,6 +888,31 @@ TEST(NativeOperationRegistry, TransformSchemaUsesExactScalarBits) {
            R"({"size":4,"dtype":"f32","scale_bits":"3ff000000000000g","bias_bits":"0000000000000000"})",
            R"({"size":4,"dtype":"f32","scale_bits":"3ff000000000000","bias_bits":"0000000000000000"})",
            R"({"size":4,"dtype":"f32","scale_bits":"3ff0000000000000","bias_bits":"0000000000000000","callback":true})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;
+  }
+}
+
+TEST(NativeOperationRegistry, IndexedCopySchemaPreservesLayoutAndActualBackendLimits) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"indexed_copy","version":1,
+      "parameters":{"size":4294967296,"src_items":4294967296,"dst_items":4294967296,
+      "dtype":"f64","element_shape":[3],"op":"gather"},
+      "bindings":{"src":"s","indices":"i","dst":"d"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "indexed_copy");
+  for (const char *parameters : {
+           R"({"size":0,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"gather"})",
+           R"({"size":true,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":3,"dtype":"i32","element_shape":[],"op":"gather"})",
+           R"({"size":4,"src_items":3,"dst_items":4,"dtype":"i32","element_shape":[],"op":"scatter"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i16","element_shape":[],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[0],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[true],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[4294967296,4294967296],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"scatter_add"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"gather","callback":true})"}) {
     auto bad = op;
     bad.parameters = liong::json::parse_complete(parameters);
     EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;

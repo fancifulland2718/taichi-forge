@@ -34,6 +34,25 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Packed scalar scatter-add now exports through the common AOT native registry
+  on CPU/CUDA/Vulkan, including duplicate targets, mutable indices and retained
+  destination values. CPU replay shares the runtime scheduler and retains private
+  partials; GPU paths require no scratch. Vulkan checks actual type-specific
+  atomic support. This route supports explicit adjoints, not automatic generation.
+- Vulkan scatter-add also shares preparation across scalar, strided and packed
+  field layouts. Field-backed indices use aligned views with residual offsets,
+  fixing descriptor validation errors while retaining duplicate-target atomic
+  accumulation and immutable Graph parameters without extra scratch.
+- Vulkan gather/scatter now share preparation across ndarray and field layouts,
+  including field-backed indices. Source, index and destination descriptors use
+  aligned enclosing views, fixing validation errors for nonaligned field offsets
+  without extra copies or scratch storage.
+- Fix unaligned root-field descriptors in Vulkan native gather/scatter, including
+  real Tape backward execution. Packed fields use the offset-aware shader when
+  their starts do not meet the device's descriptor alignment.
+- Vulkan strided gather/scatter now pass dispatch parameters as push constants,
+  removing a 28-byte parameter buffer, seven fills and its barrier from each
+  recording. Graph replay retains its own parameter values.
 - Fix Vulkan native transform Tape accumulation for packed gradient fields whose
   starts are not descriptor-aligned. Dense scatter-add uses its existing offset-aware
   shader, avoiding a validation error that numerical checks alone did not detect.

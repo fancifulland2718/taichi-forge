@@ -602,14 +602,24 @@ def test_gather_native_tape_gradients_dense_field():
         for i in dst:
             loss[None] += dst[i]
 
-    with ti.ad.Tape(loss):
-        ti.algorithms.experimental_gather(
-            src, indices, dst, method=_native_copy_method_for_arch()
+    # The native source/destination and their gradients can occupy unaligned
+    # slices of the same root. Validate real Tape replay as indices change.
+    for index_data in (
+        np.array([0, 1, 2, 2, 4, 1], dtype=np.int32),
+        np.array([4, 0, 0, 3, 3, 2], dtype=np.int32),
+    ):
+        indices.from_numpy(index_data)
+        with ti.ad.Tape(loss):
+            ti.algorithms.experimental_gather(
+                src, indices, dst, method=_native_copy_method_for_arch()
+            )
+            sum_dst()
+        np.testing.assert_array_equal(
+            dst.to_numpy(), np.arange(5, dtype=np.float32)[index_data]
         )
-        sum_dst()
-
-    actual = np.array([src.grad[i] for i in range(5)], dtype=np.float32)
-    np.testing.assert_allclose(actual, np.array([1, 2, 2, 0, 1], dtype=np.float32))
+        np.testing.assert_allclose(
+            src.grad.to_numpy(), np.bincount(index_data, minlength=5)
+        )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -720,14 +730,22 @@ def test_scatter_native_tape_gradients_dense_field():
         loss[None] += dst[5] * 7.0
         loss[None] += dst[6] * 11.0
 
-    with ti.ad.Tape(loss):
-        ti.algorithms.experimental_scatter(
-            src, indices, dst, method=_native_copy_method_for_arch()
-        )
-        weighted_sum()
-
-    actual = np.array([src.grad[i] for i in range(5)], dtype=np.float32)
-    np.testing.assert_allclose(actual, np.array([3, 7, 2, 11, 5], dtype=np.float32))
+    weights = np.array([0, 2, 3, 5, 0, 7, 11], dtype=np.float32)
+    for index_data in (
+        np.array([2, 5, 1, 6, 3], dtype=np.int32),
+        np.array([0, 6, 2, 4, 5], dtype=np.int32),
+    ):
+        indices.from_numpy(index_data)
+        dst.fill(0)
+        with ti.ad.Tape(loss):
+            ti.algorithms.experimental_scatter(
+                src, indices, dst, method=_native_copy_method_for_arch()
+            )
+            weighted_sum()
+        expected = np.zeros(7, dtype=np.float32)
+        expected[index_data] = np.arange(5, dtype=np.float32)
+        np.testing.assert_array_equal(dst.to_numpy(), expected)
+        np.testing.assert_allclose(src.grad.to_numpy(), weights[index_data])
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

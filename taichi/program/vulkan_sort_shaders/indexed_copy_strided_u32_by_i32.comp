@@ -14,7 +14,7 @@ layout(set = 0, binding = 2, std430) writeonly buffer Dst {
   uint data[];
 } dst_buf;
 
-layout(set = 0, binding = 3, std430) readonly buffer IndexedCopyParams {
+layout(push_constant) uniform IndexedCopyParams {
   uint num_items;
   uint index_bound;
   uint item_words;
@@ -22,6 +22,7 @@ layout(set = 0, binding = 3, std430) readonly buffer IndexedCopyParams {
   uint src_stride_words;
   uint dst_offset_words;
   uint dst_stride_words;
+  uint indices_offset_words;
 } params_buf;
 
 void main() {
@@ -32,7 +33,7 @@ void main() {
   }
   uint item = word_i / params_buf.item_words;
   uint lane = word_i - item * params_buf.item_words;
-  int index = indices_buf.data[item];
+  int index = indices_buf.data[params_buf.indices_offset_words + item];
 
 #ifdef SCATTER_OP
   if (index < 0 || uint(index) >= params_buf.index_bound) {

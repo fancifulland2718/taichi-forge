@@ -265,6 +265,50 @@ integral and representable in the selected type. The consumer runtime must provi
 `builtin/transform` v1. Strided/tensor/indexed-fused sequences remain outside this
 route. AOT does not synthesize this native operation's adjoint; applications can
 export an explicit adjoint.
+
+`PrimitiveSequence.gather()` / `scatter()` and explicit `builtin/indexed_copy`
+v1 descriptions support CPU/CUDA/Vulkan with one-dimensional packed scalar or
+tensor payloads of i32/u32/f32/i64/u64/f64 and scalar i32 indices. Explicit
+parameters are `size`, `src_items`, `dst_items`, `dtype`, `element_shape` (empty
+for scalars), and `op="gather"` or `"scatter"`; all extents are nonempty.
+`size` selects an index prefix, bounded by the sequential input/output side.
+Bindings are `src`, `indices`, `dst`. Output accesses must be physically disjoint
+from both reads; in-place and partial overlap are rejected during preparation.
+Indices may change between replays. Gather supports repeated indices and zeros
+invalid positions; scatter ignores invalid positions and preserves untouched
+targets. Valid scatter targets must be unique. CPU checks uniqueness before each
+write using owner-retained storage; GPU paths preserve the caller's unique-target
+contract without host readback. `workspace_bytes` reports retained CPU validation
+storage; gather and GPU copies need no scratch. Raw payload bits, including NaNs
+and signed zero, are copied without arithmetic. Vulkan uses aligned enclosing
+views for source, destination and index offsets. Pure native plans carry no
+application kernel code. The consumer must provide `builtin/indexed_copy` v1.
+Strided member sequences and fused strategies are not covered by this route;
+automatic adjoint generation is not added. Explicit adjoints can be composed
+with exported kernels.
+
+`PrimitiveSequence.scatter_add()` and explicit `builtin/scatter_add` v1
+descriptions support CPU/CUDA/Vulkan packed scalar i32/u32/f32/i64/u64/f64
+arrays and scalar i32 indices. Vulkan requires the selected type's enabled
+atomic capability. Parameters are nonempty `size`, `dst_items`, `dtype`, and
+optional positive `cpu_max_threads`; bindings are `src`, `indices`, `dst`.
+The input/index prefix and destination prefix may be shorter than their arrays.
+Duplicate targets accumulate into the existing destination; negative/out-of-range
+indices are ignored and untouched tails are preserved. Output accesses must be
+physically disjoint from both reads. Indices may change between replays.
+Sequence export freezes the producer CPU thread configuration; explicit plans
+without `cpu_max_threads` use the consumer's configuration. Prepared CPU operations
+retain private partial storage, cleared once per replay, and reuse the runtime
+thread pool. The optional parallel-workspace budget selects a serial path for
+larger destinations rather than limiting input capacity. `workspace_bytes`
+reports retained partials; CUDA/Vulkan require no scratch. Integer addition wraps
+at the selected bit width; floating-point order depends on backend/partitioning
+and GPU duplicate-target ordering is not deterministic. Preparation neither runs
+the operation nor mutates the destination. Pure native plans contain no
+application kernel code and require `builtin/scatter_add` v1 in the consumer.
+Tensor/strided/fused/two-level sequences are not covered by this route. AOT does
+not synthesize its adjoint; exported kernels can provide an explicit adjoint.
+
 `PrimitiveSequence.run_length_encode()` exports consecutive i32/u32/i64/u64
 keys on CPU/CUDA/Vulkan. A fixed input prefix produces unique keys, i32 run
 lengths and an i32 count; unused output tails are preserved. Export reuses the

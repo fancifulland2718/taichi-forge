@@ -71,6 +71,18 @@ std::size_t driver_reduce_strided(void *values,
                                   void *stream,
                                   PrimitiveWorkspaceArena *workspace_arena);
 
+// Prepare both clear and count code before native Graph capture. The packed
+// entry shares the existing strided kernels and their uint32 count ABI.
+void driver_prepare_histogram(CudaTransformValueType value_type,
+                              CudaTransformValueType bin_type);
+std::size_t driver_histogram_on_stream(void *values,
+                                       void *bins,
+                                       std::uint32_t num_items,
+                                       std::uint32_t num_bins,
+                                       CudaTransformValueType value_type,
+                                       CudaTransformValueType bin_type,
+                                       void *stream);
+
 std::size_t driver_histogram_strided(void *values,
                                      void *bins,
                                      int num_items,
@@ -103,6 +115,17 @@ std::size_t driver_add_scaled_strided(void *src,
                                       std::size_t dst_stride,
                                       double scale,
                                       void *stream);
+
+// Resolve the shared six-type code before capture. Fixed packed operations use
+// the kernel's uint32 count/bound ABI and explicitly supplied stream.
+void driver_prepare_scatter_add(CudaTransformValueType value_type);
+std::size_t driver_scatter_add_on_stream(void *src,
+                                        void *indices,
+                                        void *dst,
+                                        std::uint32_t num_items,
+                                        std::uint32_t index_bound,
+                                        CudaTransformValueType value_type,
+                                        void *stream);
 
 std::size_t driver_scatter_add_strided(void *src,
                                        void *indices,
