@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan scatter-add also shares preparation across scalar, strided and packed
+  field layouts. Field-backed indices use aligned views with residual offsets,
+  fixing descriptor validation errors while retaining duplicate-target atomic
+  accumulation and immutable Graph parameters without extra scratch.
 - Vulkan gather/scatter now share preparation across ndarray and field layouts,
   including field-backed indices. Source, index and destination descriptors use
   aligned enclosing views, fixing validation errors for nonaligned field offsets

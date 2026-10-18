@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan scatter-add 的标量、strided 和 packed 字段共用准备核心；Field 索引也使用
+  对齐视图和残余偏移，修复 descriptor 验证错误，保留重复目标原子累加与 Graph
+  参数独立性，不增加 scratch。
 - Vulkan gather/scatter 的 ndarray、字段及字段索引入口共用准备核心；源、索引和
   目标 descriptor 均使用对齐的包围视图，修复未对齐字段偏移的验证错误，不增加
   复制或 scratch 存储。
