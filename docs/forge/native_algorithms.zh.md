@@ -239,6 +239,27 @@ Sequence 导出冻结生产端 CPU 线程配置；显式计划省略 `cpu_max_th
 `builtin/scatter_add` v1。此路线尚不覆盖 tensor/strided/fused/two-level sequence；
 AOT 不自动生成伴随，可组合导出的 kernel 提供显式伴随。
 
+`PrimitiveSequence.histogram()` 与显式 `builtin/histogram` v1 描述支持
+CPU/CUDA/Vulkan packed scalar i32/u32 ID 和 i32/i64 counter。参数为 `size`、
+非零 `num_bins`、`value_dtype`、`counter_dtype`，以及可选 `cpu_max_threads`、
+`vulkan_policy`；绑定名为 `values`、`bins`。固定前缀可短于实际数组；每轮覆盖
+所选 bins，忽略负数和越界 ID，保留输出尾部。空输入清零 bins 前缀。读写访问
+区间须物理不重叠，空读允许别名。计数按 counter 位宽取模。Vulkan i64 counter
+要求已启用 int64 和 int64 原子能力；GPU count 使用 uint32 ABI，CPU 不继承此限制。
+
+Sequence 导出记录生产端 CPU 线程配置，以及 Vulkan 在导出时的
+`TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N`、`TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS`、
+`TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N` 偏好。AOT 重建语义算子，不序列化此前
+已物化的 JIT 命令。显式 `vulkan_policy` 字段为 `private_min_n`、
+`private_max_bins`、`single_shared_max_n`，默认 65536、512、4096；零分别移除
+对应 private 选择阈值或关闭 single-shared 策略，这些偏好不是输入容量上限。
+准备阶段固定策略，消费端环境变化及重放不会重新选型。private scratch 超出设备
+地址/描述符约束时，可选仍满足设备合同的 direct 算法。CPU owner 保留 partial 并
+复用 runtime 线程池；Vulkan owner 持有所选 partial，CUDA 不需 scratch，
+`workspace_bytes` 报告相应存储。准备不修改输入输出。纯原生包不携带应用 kernel
+代码，已安装 runtime 须提供对应算子；本路线尚不覆盖 strided/staged/fused 和
+CUB histogram sequence。离散 ID/计数不自动求导，周围可微算子保留各自求导合同。
+
 `PrimitiveSequence.run_length_encode()` 可导出 CPU/CUDA/Vulkan 上连续相等的
 i32/u32/i64/u64 键。固定输入前缀产生 unique keys、i32 run lengths 和 i32 count，
 未使用的输出尾部保持不变。导出复用既有头标记/起点和长度 helper，两列 compact

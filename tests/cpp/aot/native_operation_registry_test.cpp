@@ -25,6 +25,33 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, HistogramSchemaPreservesEmptyInputAndWidePolicy) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription d;
+  d.provider = "builtin";
+  d.operation = "histogram";
+  d.bindings = {{"values", "v"}, {"bins", "b"}};
+  for (const auto *p : {
+      R"({"size":0,"num_bins":7,"value_dtype":"i32","counter_dtype":"i64"})",
+      R"({"size":4294967296,"num_bins":7,"value_dtype":"u32","counter_dtype":"i32","vulkan_policy":{"private_min_n":8589934592,"private_max_bins":0,"single_shared_max_n":0}})"}) {
+    d.parameters = liong::json::parse_complete(p);
+    EXPECT_EQ(registry.decode(d).kind(), "histogram");
+  }
+  for (const auto *p : {
+      R"({"size":0,"num_bins":0,"value_dtype":"i32","counter_dtype":"i32"})",
+      R"({"size":true,"num_bins":7,"value_dtype":"i32","counter_dtype":"i32"})",
+      R"({"size":-1,"num_bins":7,"value_dtype":"i32","counter_dtype":"i32"})",
+      R"({"size":1,"num_bins":7,"value_dtype":"f32","counter_dtype":"i32"})",
+      R"({"size":1,"num_bins":7,"value_dtype":"i32","counter_dtype":"u32"})",
+      R"({"size":1,"num_bins":7,"value_dtype":"i32","counter_dtype":"i32","cpu_max_threads":0})",
+      R"({"size":1,"num_bins":7,"value_dtype":"i32","counter_dtype":"i32","vulkan_policy":{"private_min_n":-1}})",
+      R"({"size":1,"num_bins":7,"value_dtype":"i32","counter_dtype":"i32","vulkan_policy":{"private_min_n":true}})",
+      R"({"size":1,"num_bins":7,"value_dtype":"i32","counter_dtype":"i32","vulkan_policy":{"unknown":1}})"}) {
+    d.parameters = liong::json::parse_complete(p);
+    EXPECT_THROW(registry.decode(d), std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, ScatterAddSchemaKeepsBackendSpecificLimitsAtPrepare) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription d;

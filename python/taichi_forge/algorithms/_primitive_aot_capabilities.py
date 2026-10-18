@@ -146,6 +146,17 @@ _ROUTES = MappingProxyType({
              "selected_provider_dependencies", "disjoint_input_output"),
         ),
     ),
+    "histogram": (
+        _sequence(("histogram",), "packed_scalar", "i32_u32_ids", "i32_i64_counters",
+                  "overwrite_bins", "invalid_ids_ignored", "disjoint_output",
+                  "export_time_algorithm_preferences", "device_integer_capabilities",
+                  "discrete_no_automatic_ad"),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/histogram",), _ALL,
+                          ("packed_scalar", "fixed_prefix_extent", "empty_input_supported",
+                           "i32_u32_ids", "i32_i64_counters", "overwrite_bins", "invalid_ids_ignored",
+                           "disjoint_output", "prepared_owner_scratch", "frozen_algorithm_preferences",
+                           "device_integer_capabilities", "discrete_no_automatic_ad")),
+    ),
 })
 
 

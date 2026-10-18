@@ -5,6 +5,7 @@
 #include "taichi/runtime/native_transform.h"
 #include "taichi/runtime/native_indexed_copy.h"
 #include "taichi/runtime/native_scatter_add.h"
+#include "taichi/runtime/native_histogram.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
@@ -10503,16 +10504,13 @@ bool vulkan_scatter_add_type_available(const DeviceCapabilityConfig &caps,
   return false;
 }
 
-struct VulkanHistogramPolicy {
-  int private_min_n{65536};
-  int private_max_bins{512};
-  int single_shared_max_n{4096};
-};
-
 VulkanHistogramPolicy vulkan_histogram_policy_from_environment() {
-  return {get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N", 65536),
-          get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512),
-          get_environ_config("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096)};
+  const auto preference = [](const char *name, int fallback) {
+    return static_cast<uint64_t>(std::max(0, get_environ_config(name, fallback)));
+  };
+  return {preference("TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N", 65536),
+          preference("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512),
+          preference("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096)};
 }
 
 struct VulkanPreparedHistogram {
@@ -10546,12 +10544,11 @@ VulkanPreparedHistogram prepare_vulkan_histogram(Program *program,
       device, bins, num_bins, bin_size, bin_size, bin_size);
   const bool single = n && bin_type == 0 && num_bins <= 4096 &&
                       policy.single_shared_max_n > 0 &&
-                      n <= size_t(policy.single_shared_max_n);
+                      n <= policy.single_shared_max_n;
   bool private_bins =
       n && !single &&
-      (policy.private_min_n <= 0 || n >= size_t(policy.private_min_n)) &&
-      (policy.private_max_bins <= 0 ||
-       num_bins <= size_t(policy.private_max_bins));
+      (!policy.private_min_n || n >= policy.private_min_n) &&
+      (!policy.private_max_bins || num_bins <= policy.private_max_bins);
   size_t chunks =
       n / kHistogramPrivateChunkSize + (n % kHistogramPrivateChunkSize != 0);
   size_t partial_items = 0, partial_bytes = 0;
@@ -10934,6 +10931,35 @@ void submit_vulkan_indexed_copy(Program *program,
                                program->profiler != nullptr, prepared.record))
     program->enqueue_compute_op_lambda(prepared.record, {});
 }
+
+class FixedVulkanHistogram final : public NativeOperation {
+ public:
+  FixedVulkanHistogram(Device &device, const HistogramOperation &op)
+      : device_(device), values_(op.values.pointer), bins_(op.bins.pointer) {
+    validate_histogram_storage(Arch::vulkan, op);
+    prepared_ = prepare_vulkan_histogram(
+        nullptr, &device, cache_, values_, bins_, op.size, op.num_bins,
+        op.value_type, op.bin_type, op.vulkan_policy);
+  }
+  Arch arch() const override { return Arch::vulkan; }
+  Device &device() const override { return device_; }
+  size_t workspace_bytes() const override { return cache_.allocated_bytes(); }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{values_, bins_};
+    if (cache_.partial != kDeviceNullAllocation)
+      result.buffers->push_back(cache_.partial);
+    return result;
+  }
+ private:
+  Device &device_;
+  DevicePtr values_, bins_;
+  VulkanHistogramCache cache_;
+  VulkanPreparedHistogram prepared_;
+};
 
 class FixedVulkanScatterAdd final : public NativeOperation {
  public:
@@ -11657,6 +11683,10 @@ std::size_t vulkan_add_merge_ndarray_impl(Program *program,
 }  // namespace
 
 namespace gfx {
+std::shared_ptr<NativeOperation> prepare_vulkan_histogram_operation(
+    Device &device, const HistogramOperation &operation) {
+  return std::make_shared<FixedVulkanHistogram>(device, operation);
+}
 std::shared_ptr<NativeOperation> prepare_vulkan_scatter_add_operation(
     Device &device, const ScatterAddOperation &operation) {
   return std::make_shared<FixedVulkanScatterAdd>(device, operation);

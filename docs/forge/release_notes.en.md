@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Histogram now exports through the common native AOT registry on CPU/CUDA/Vulkan:
+  packed i32/u32 IDs, i32/i64 counters, fixed prefixes and empty-input clearing.
+  Prepared owners retain scratch and freeze algorithm preferences; replay neither
+  reallocates partials nor probes the environment. Pure-native archives reuse the
+  installed runtime's code. This discrete operation adds no automatic derivative.
 - Vulkan histogram shares preparation across ndarray and dense fields while
   retaining its direct and private/shared strategies. Aligned descriptor views
   use explicit logical counts and offsets, fixing field alignment errors without

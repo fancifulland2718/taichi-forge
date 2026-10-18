@@ -285,6 +285,70 @@ def _scatter_add(call, context):
     ))
 
 
+def _histogram(call, context):
+    import os
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_histogram
+        or type(call.workspace) is not algorithms.HistogramWorkspace
+        or set(call.kwargs) != {"method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 2
+    ):
+        raise TaichiRuntimeError("AOT histogram requires its concrete HistogramWorkspace")
+    values, bins = call.args
+    algorithms._check_histogram_request(*call.args, **call.kwargs)
+    source, destination = (packed_description(a) for a in call.args)
+    if any(len(d.index_shape) != 1 or d.element_shape for d in (source, destination)):
+        raise TaichiRuntimeError("AOT histogram requires one-dimensional packed scalar storage")
+    call.workspace.check_shape(source.index_shape[0], destination.index_shape[0])
+    arch = impl.current_cfg().arch
+    backend, capability = {
+        core.Arch.x64: ("cpu_native", "cpu_histogram_available"),
+        core.Arch.arm64: ("cpu_native", "cpu_histogram_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device_histogram_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan_histogram_available"),
+    }.get(arch, (None, None))
+    prog = impl.get_runtime().prog
+    if (backend is None
+            or call.workspace._native_histogram_backend_for_method(call.kwargs["method"]) != backend
+            or not getattr(prog, capability)()):
+        raise TaichiRuntimeError("AOT histogram requires its available native strategy")
+    semantic = (algorithms._histogram_value_type(values.dtype), algorithms._histogram_bin_type(bins.dtype))
+    if arch == core.Arch.vulkan and not prog.vulkan_histogram_value_type_available(*semantic):
+        raise TaichiRuntimeError("AOT histogram dtype is unavailable on this Vulkan device")
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (values, bins), semantic)
+        or call.plan.method_name not in {
+            "cpu_histogram_ndarray", "cpu_histogram_dense_field",
+            "cuda_device_histogram_ndarray", "cuda_device_histogram_dense_field",
+            "vulkan_histogram_ndarray", "vulkan_histogram_dense_field",
+        }
+    ):
+        raise TaichiRuntimeError("AOT histogram cannot reconstruct the selected cached strategy")
+    parameters = dict(size=source.index_shape[0], num_bins=destination.index_shape[0],
+                      value_dtype=str(values.dtype), counter_dtype=str(bins.dtype))
+    if backend == "cpu_native":
+        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
+    elif backend == "vulkan_native":
+        # Export a semantic recipe with cold export-time preferences, not the
+        # producer's materialized command buffers. Consumer environments cannot
+        # change this recipe, and replay never probes environment configuration.
+        parameters["vulkan_policy"] = {
+            key: max(0, int(os.environ.get("TI_VULKAN_HISTOGRAM_" + key.upper(), default)))
+            for key, default in (("private_min_n", 65536), ("private_max_bins", 512),
+                                 ("single_shared_max_n", 4096))
+        }
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="histogram", version=1,
+        parameters=parameters,
+        bindings=dict(values=context.retained_arrays.require(values), bins=context.retained_arrays.require(bins)),
+    ))
+
+
 def _sort(call, context):
     from . import _algorithms as algorithms
 
@@ -501,6 +565,7 @@ def export_sequence(sequence, context):
         "transform": _transform,
         "indexed_copy": _indexed_copy,
         "scatter_add": _scatter_add,
+        "histogram": _histogram,
         "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,
         "run_length_encode": _consecutive,
     }

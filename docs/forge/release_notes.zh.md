@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Histogram 可通过统一原生 AOT registry 导出到 CPU/CUDA/Vulkan，覆盖 packed
+  i32/u32 ID、i32/i64 counter、固定前缀及空输入清零。Prepared owner 保留 scratch
+  并固定算法偏好，重放不重新分配 partial 或探测环境；纯原生包复用已安装 runtime
+  的代码。该离散算子不增加自动求导能力。
 - Vulkan histogram 的 ndarray 与 dense field 共用准备核心，保留 direct 与
   private/shared 策略。对齐描述符配合显式逻辑数量和偏移，修复字段对齐错误并避免
   计入邻接存储；private 计数阶段移除多余目标描述符，Graph 重放保留各自参数及

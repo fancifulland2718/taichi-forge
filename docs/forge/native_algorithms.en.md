@@ -309,6 +309,36 @@ application kernel code and require `builtin/scatter_add` v1 in the consumer.
 Tensor/strided/fused/two-level sequences are not covered by this route. AOT does
 not synthesize its adjoint; exported kernels can provide an explicit adjoint.
 
+`PrimitiveSequence.histogram()` and explicit `builtin/histogram` v1 descriptions
+support CPU/CUDA/Vulkan packed scalar i32/u32 IDs and i32/i64 counters. Parameters
+are `size`, nonzero `num_bins`, `value_dtype`, `counter_dtype`, and optional
+`cpu_max_threads` and `vulkan_policy`; bindings are `values` and `bins`. The fixed
+prefix may be shorter than its array. Each replay overwrites the selected bins,
+ignores negative/out-of-range IDs and preserves the output tail. Empty input
+clears the bin prefix. Read/write access ranges must be physically disjoint;
+an empty read permits aliasing. Counts wrap at the counter type's bit width.
+Vulkan i64 counters require enabled int64 and int64 atomic capabilities. GPU
+counts use their uint32 ABI; CPU does not inherit that backend limit.
+
+Sequence export records the producer CPU thread configuration and, on Vulkan,
+the export-time `TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N`,
+`TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS`, and
+`TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N` preferences. AOT reconstructs the
+semantic operation; it does not serialize previously materialized JIT commands.
+Explicit `vulkan_policy` uses fields `private_min_n`, `private_max_bins`, and
+`single_shared_max_n`, defaulting to 65536, 512, and 4096. Zero removes the
+corresponding private-selection threshold or disables the single-shared strategy;
+these preferences are not input-capacity limits. Preparation fixes the strategy;
+consumer environment changes and replay do not reselect it. Oversized private
+scratch may select the direct algorithm where its device address/descriptor
+contract fits. CPU owners retain partials and share the runtime thread pool;
+Vulkan owners retain any selected partials, while CUDA requires no scratch.
+`workspace_bytes` reports this storage. Preparation leaves input/output unchanged.
+Pure-native archives contain no application kernel code and require the matching
+operation in the installed runtime. Strided/staged/fused and CUB histogram
+sequences are outside this route. Discrete histogram IDs/counts have no automatic
+derivative; surrounding differentiable operations retain their own contracts.
+
 `PrimitiveSequence.run_length_encode()` exports consecutive i32/u32/i64/u64
 keys on CPU/CUDA/Vulkan. A fixed input prefix produces unique keys, i32 run
 lengths and an i32 count; unused output tails are preserved. Export reuses the
