@@ -174,7 +174,8 @@ ExecutionDomain::~ExecutionDomain() {
 RuntimeCompletion ExecutionDomain::submit(
     const std::vector<RuntimeCompletion> &dependencies,
     std::shared_ptr<RuntimeCompletionResources> resources,
-    const std::function<void(void *)> &enqueue) {
+    const std::function<void(void *)> &enqueue,
+    const std::function<void()> &admit) {
   if (!enqueue)
     throw std::invalid_argument(
         "CUDA submission requires an enqueue operation");
@@ -194,6 +195,11 @@ RuntimeCompletion ExecutionDomain::submit(
   if (state.count == state.pending.size())
     throw ExecutionDomainBusy();
 
+  // Reservation failures enqueue nothing, including predecessor waits. They
+  // must not enter the partial-device-submission fault path below. Resource
+  // parameters outlive the lock guard, so cancellation callbacks can reenter.
+  if (admit)
+    admit();
   auto context = CUDAContext::get_instance().get_guard();
   const auto sequence = state.owner->allocate_submission_sequence();
   auto &slot = state.pending[(state.head + state.count) % state.pending.size()];

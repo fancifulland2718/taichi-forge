@@ -55,10 +55,16 @@ class ExecutionDomain {
   // Enqueue may not recursively submit/close this domain or wait on the host.
   // All predecessor validation and capacity checks precede device effects.
   // Capacity exhaustion is immediate; no other domain is polled or drained.
+  // Optional host-only admission reserves provider transactions after those
+  // checks and before any dependency is enqueued. It must not call the GPU,
+  // wait, or reenter this domain. An exception leaves the domain usable and
+  // consumes no sequence; resources must own rollback of partial reservations.
+  // Destruction of rejected resources occurs outside the admission mutex.
   RuntimeCompletion submit(
       const std::vector<RuntimeCompletion> &dependencies,
       std::shared_ptr<RuntimeCompletionResources> resources,
-      const std::function<void(void *)> &enqueue);
+      const std::function<void(void *)> &enqueue,
+      const std::function<void()> &admit = {});
 
   // Completion/resource callbacks execute without holding the admission lock.
   std::size_t collect_ready(std::size_t budget);

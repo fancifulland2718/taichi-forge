@@ -234,6 +234,62 @@ TEST_F(CudaExecutionDependency,
 }
 
 TEST_F(CudaExecutionDependency,
+       RejectedProviderAdmissionDoesNotEnqueueDependenciesOrPoisonDomain) {
+  cuda::ExecutionDomain output(fault, {1, 0});
+  cuda::ExecutionDomain physics(fault, {1, 0});
+  testing::CudaExternalGate gate;
+  auto blocked = output.submit(
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  ASSERT_FALSE(blocked.done());
+  const auto next = fault->next_submission_sequence();
+  std::atomic<int> cancelled{0};
+  int admissions = 0, enqueues = 0;
+  const auto enqueue = [&](void *stream) {
+    ++enqueues;
+    CUDADriver::get_instance().memsetd32_async(at(0), 113, 1, stream);
+  };
+  const auto reject = [&] {
+    ++admissions;
+    throw std::runtime_error("Provider capacity exhausted before enqueue");
+  };
+  EXPECT_THROW(
+      physics.submit({blocked},
+                     std::make_shared<DomainResources>(physics, cancelled),
+                     enqueue, reject),
+      std::runtime_error);
+  EXPECT_EQ(cancelled.load(), 1);
+  EXPECT_EQ(admissions, 1);
+  EXPECT_EQ(enqueues, 0);
+  EXPECT_EQ(physics.snapshot().pending, 0);
+  EXPECT_TRUE(physics.snapshot().accepting);
+  EXPECT_EQ(fault->next_submission_sequence(), next);
+  // A subsequent submit without the rejected dependency must make progress
+  // before the producer releases its real external wait.
+  auto sentinel = physics.submit({}, nullptr, enqueue, [&] { ++admissions; });
+  EXPECT_EQ(sentinel.sequence(), next);
+  EXPECT_TRUE(poll_until(sentinel));
+  EXPECT_FALSE(blocked.done());
+  EXPECT_EQ(admissions, 2);
+  EXPECT_EQ(enqueues, 1);
+  // Busy and invalid predecessor checks precede provider admission itself.
+  EXPECT_THROW(output.submit({}, nullptr, enqueue, reject),
+               cuda::ExecutionDomainBusy);
+  auto other_owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 71);
+  auto foreign = RuntimeCompletion::completed(Arch::cuda, 71, 1, other_owner);
+  EXPECT_THROW(physics.submit({foreign}, nullptr, enqueue, reject),
+               std::invalid_argument);
+  EXPECT_EQ(admissions, 2);
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  blocked.wait();
+  std::uint32_t value = 0;
+  auto context = CUDAContext::get_instance().get_guard();
+  CUDADriver::get_instance().memcpy_device_to_host(&value, at(0),
+                                                   sizeof(value));
+  EXPECT_EQ(value, 113u);
+}
+
+TEST_F(CudaExecutionDependency,
        PartialEnqueueFailureRetainsLeasesUntilCompletion) {
   cuda::ExecutionDomain output(fault, {1, 0});
   cuda::ExecutionDomain physics(fault, {1, 0});
