@@ -9,6 +9,7 @@
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
+#include "taichi/runtime/llvm/runtime_context_abi.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
@@ -53,7 +54,12 @@ LlvmAotModule::LlvmAotModule(
   liong::json::deserialize(json, metadata);
   validate_llvm_aot_metadata(metadata);
   if (!metadata.kernel_launch_abis.empty()) {
-    TI_ERROR_IF(arch() != Arch::cuda,
+    const bool has_gate =
+        std::any_of(metadata.kernel_launch_abis.begin(),
+                    metadata.kernel_launch_abis.end(), [](const auto &entry) {
+                      return cuda::is_graph_gate_launch_abi(entry.second);
+                    });
+    TI_ERROR_IF(has_gate && arch() != Arch::cuda,
                 "AOT CUDA gate entries require a CUDA runtime");
     TI_ERROR_IF(metadata.launch_abi_sha256 != aot_launch_abi_sha256(metadata),
                 "AOT kernel launch ABI declaration checksum mismatch");
@@ -277,7 +283,12 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     const std::string &name) {
   if (!cache_reader_->has_kernel(name)) return nullptr;
   auto kernel_cache = load_kernel_from_cache(name);
-  const bool gated = metadata_.kernel_launch_abis.count(name) != 0;
+  const auto declaration = metadata_.kernel_launch_abis.find(name);
+  const std::string launch_abi =
+      declaration == metadata_.kernel_launch_abis.end() ? "ordinary"
+                                                        : declaration->second;
+  const bool gated = cuda::is_graph_gate_launch_abi(launch_abi);
+  const auto context_abi = cuda::launch_runtime_context_abi(launch_abi);
   const auto kernel_name = std::move(kernel_cache.kernel_key);
   if (is_cuda_aot_artifact_format(metadata_.kernel_format)) {
 #if defined(TI_WITH_CUDA)
@@ -348,11 +359,11 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
     auto data = std::move(kernel_cache).take_llvm_ckd_data();
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(kernel_launcher_.get());
     TI_ASSERT(launcher != nullptr);
-    const auto handle =
-        launcher->register_cuda_artifact_kernel(
-            data, artifact, bindings,
-            gated ? cuda::KernelLaunchABI::graph_gate_v1
-                  : cuda::KernelLaunchABI::ordinary);
+    const auto handle = launcher->register_cuda_artifact_kernel(
+        data, artifact, bindings,
+        gated ? cuda::KernelLaunchABI::graph_gate_v1
+              : cuda::KernelLaunchABI::ordinary,
+        context_abi);
     return std::make_unique<llvm_aot::KernelImpl>(
         launcher, handle, arch(), kernel_name, data);
 #else
@@ -361,6 +372,10 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
   }
   LLVM::CompiledKernelData compiled{
       arch(), std::move(kernel_cache).take_llvm_ckd_data()};
+  TI_ERROR_IF(
+      LLVM::runtime_context_abi(
+          *compiled.get_internal_data().compiled_data.module) != context_abi,
+      "AOT LLVM code does not match its RuntimeContext layout: {}", name);
   TI_ERROR_IF(has_cuda_graph_gate(
                   *compiled.get_internal_data().compiled_data.module) != gated,
               "AOT LLVM code does not match its kernel launch ABI: {}", name);

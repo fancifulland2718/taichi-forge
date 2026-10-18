@@ -7,6 +7,7 @@
 #include "taichi/codegen/llvm/kernel_compiler.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
+#include "taichi/runtime/llvm/runtime_context_abi.h"
 
 namespace taichi::lang {
 namespace LLVM {
@@ -59,6 +60,7 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   }();
   LLVMModuleOptions::from_config(compile_config)
       .write(*data.compiled_data.module);
+  declare_runtime_context_abi(*data.compiled_data.module);
   if (kernel_def.get_offload_execution_plan().has_value()) {
     // Entry-specific maxnreg annotations own task-plan caps. Do not add a
     // module-wide CU_JIT_MAX_REGISTERS limit that would collapse them.

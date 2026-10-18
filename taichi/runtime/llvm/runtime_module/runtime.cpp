@@ -300,6 +300,7 @@ STRUCT_FIELD_ARRAY(PhysicalCoordinates, val);
 
 STRUCT_FIELD(RuntimeContext, runtime);
 STRUCT_FIELD(RuntimeContext, result_buffer)
+STRUCT_FIELD(RuntimeContext, global_tmp_buffer)
 
 #include "taichi/runtime/llvm/runtime_module/atomic.h"
 
@@ -1207,6 +1208,13 @@ void LLVMRuntime_profiler_stop(LLVMRuntime *runtime) {
 
 Ptr get_temporary_pointer(LLVMRuntime *runtime, u64 offset) {
   return runtime->temporaries + offset;
+}
+
+Ptr RuntimeContext_get_temporary_pointer(RuntimeContext *context, u64 offset) {
+  auto *base = context->global_tmp_buffer
+                   ? reinterpret_cast<Ptr>(context->global_tmp_buffer)
+                   : context->runtime->temporaries;
+  return base + offset;
 }
 
 void runtime_retrieve_and_reset_error_code(LLVMRuntime *runtime) {

@@ -380,7 +380,9 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   # or a test spin kernel occupying the GPU. Link private RHI implementation
   # objects rather than expanding the package ABI for test helpers.
   add_executable(taichi_cuda_execution_domain_tests
-    tests/cpp/rhi/common/cuda_execution_domain_test.cpp)
+    tests/cpp/rhi/common/cuda_execution_domain_test.cpp
+    tests/cpp/aot/llvm/cuda_execution_context_aot_test.cpp
+    tests/cpp/aot/llvm/cuda_gated_aot_test.cpp)
   target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE
     taichi_core gtest_main ${_ti_backend_native_targets})
   get_target_property(_ti_backend_test_includes

@@ -4390,6 +4390,21 @@ an artifact. Schema 5 additionally checks the declared `dense_v1`, `list_v1`, `s
 resource relocation contract.
 Legacy schema 2 text, schema 3 bitcode and schema 4 PTX remain readable.
 
+New LLVM exports use the existing schema 8 launch declarations to describe the
+compiled context layout: `runtime_context_v2` for ordinary entries and
+`cuda_graph_gate_context_v2` for entries with the `cuda_graph_gate_v1` prefix.
+The context appends one temporary-storage pointer, propagated through
+`real_func`; a null pointer retains the runtime's ordered temporary storage.
+BC carries the matching module flag, while PTX/cubin carry the checked launch
+declaration. Old readers reject unknown layouts before launching code. This
+requires matching private ABI106 components and does not itself expose
+independent streams or make every prepared execution concurrently reusable.
+Windows CUDA tests interleave ordinary and gated instances of a saved kernel
+in a separate native runtime, with independent argument and temporary storage,
+for BC/PTX/cubin on compute capability 120. The `real_func` fixture requires
+NVPTX stack instructions unavailable with the default PTX 7.0 export target;
+that target is not qualified by this test.
+
 PTX deployment was checked on Windows CUDA with dense-field and scalar/vector/
 matrix ndarray forward/reverse kernels and ordinary CGraphs. This does not
 establish a runtime speedup or remove the field-resource and native-recording

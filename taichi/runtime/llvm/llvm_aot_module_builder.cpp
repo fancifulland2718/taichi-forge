@@ -10,6 +10,7 @@
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
+#include "taichi/runtime/llvm/runtime_context_abi.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
@@ -293,6 +294,8 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
     compiled.compiled_data =
         LLVM::make_cuda_graph_gated_kernel(compiled.compiled_data);
   }
+  const auto context_abi =
+      LLVM::runtime_context_abi(*compiled.compiled_data.module);
   LlvmOfflineCache::KernelCacheData kcache;
   kcache.kernel_key = identifier;
   kcache.compiled_data = std::move(compiled.compiled_data);
@@ -317,7 +320,11 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   kcache.last_used_at = std::time(nullptr);
   kcache.created_at = std::time(nullptr);
   cache_.kernels[identifier] = std::move(kcache);
-  if (launch_abi == "ordinary")
+  if (context_abi == LLVM::kRuntimeContextABI) {
+    kernel_launch_abis_[identifier] = launch_abi == cuda::kGraphGateLaunchABI
+                                          ? cuda::kGraphGateContextLaunchABI
+                                          : cuda::kContextLaunchABI;
+  } else if (launch_abi == "ordinary")
     kernel_launch_abis_.erase(identifier);
   else
     kernel_launch_abis_[identifier] = launch_abi;

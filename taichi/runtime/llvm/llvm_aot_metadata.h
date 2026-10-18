@@ -71,8 +71,9 @@ struct LlvmAotMetadata {
   std::map<std::string, std::string> cuda_cubin_providers;
   std::string resource_binding;
   std::vector<aot::InitialRootData> initial_root_data;
-  // Only non-ordinary entries are listed. Schema 8 prevents old readers from
-  // treating prefix-dependent device code as an ordinary callable kernel.
+  // Non-legacy call contracts, including an appended RuntimeContext binding.
+  // Schema 8 and the exact strings prevent old readers from launching code
+  // with an insufficient context or a missing argument prefix.
   std::map<std::string, std::string> kernel_launch_abis;
   std::string launch_abi_sha256;
 
@@ -102,7 +103,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                 "AOT kernel launch ABI requires BC/PTX/cubin and checksums");
     for (const auto &[name, abi] : metadata.kernel_launch_abis) {
       TI_ERROR_IF(name.empty() || name.find('\0') != std::string::npos ||
-                      abi != cuda::kGraphGateLaunchABI,
+                      !cuda::is_declared_launch_abi(abi),
                   "Unsupported AOT kernel launch ABI declaration: {}", name);
     }
     // The launch declaration extends each existing representation/resource

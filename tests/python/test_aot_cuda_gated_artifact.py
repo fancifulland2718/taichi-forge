@@ -115,9 +115,12 @@ def test_saved_cuda_gate_code_and_launch_contract(artifact_format, tmp_path):
     assert metadata["schema_version"] == 8
     assert metadata["kernel_format"] == artifact_format
     assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == {
-        "gated_forward": "cuda_graph_gate_v1",
-        "gated_reverse": "cuda_graph_gate_v1",
-        "gated_control": "cuda_graph_gate_v1",
+        "forward": "runtime_context_v2",
+        "reverse": "runtime_context_v2",
+        "control": "runtime_context_v2",
+        "gated_forward": "cuda_graph_gate_context_v2",
+        "gated_reverse": "cuda_graph_gate_context_v2",
+        "gated_control": "cuda_graph_gate_context_v2",
     }
     assert len(metadata["launch_abi_sha256"]) == 64
     assert (directory / f"gated_forward.{artifact_format}").is_file()

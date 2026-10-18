@@ -1,0 +1,78 @@
+"""Load actual AOT kernels in an independent runtime and interleave instances."""
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
+import taichi_forge as ti
+from tests import test_utils
+
+
+@pytest.mark.parametrize("artifact_format", ("bc", "ptx", "cubin"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_saved_execution_context_isolates_temporary_storage(artifact_format, tmp_path):
+    executable = Path(
+        os.environ.get(
+            "TI_TEST_CPP_EXECUTABLE",
+            str(
+                Path(__file__).resolve().parents[2]
+                / "build"
+                / (
+                    "taichi_cuda_execution_domain_tests.exe"
+                    if os.name == "nt"
+                    else "taichi_cuda_execution_domain_tests"
+                )
+            ),
+        )
+    )
+    if not executable.is_file():
+        pytest.skip("Requires the native CUDA execution-domain test executable")
+    if artifact_format == "cubin" and not (os.environ.get("TI_CUDA_PTXAS_PATH") or shutil.which("ptxas")):
+        pytest.skip("Requires an external ptxas for cubin export")
+
+    @ti.func
+    def transform(value: ti.types.vector(2, ti.f32)) -> ti.f32:
+        return value[0] + value[1] * 2.0 + 1.0
+
+    @ti.real_func
+    def carried_value(value: ti.types.vector(2, ti.f32)) -> ti.f32:
+        return transform(value)
+
+    @ti.kernel
+    def stage(out: ti.types.ndarray(ti.f32, 1), seed: ti.f32, n: ti.i32):
+        carried = carried_value(ti.Vector([seed, seed * 2.0]))
+        total = 0.0
+        for i in range(n):
+            total += carried * (i + 1)
+        for j in range(n):
+            out[j] = total + j
+
+    # real_func requires a target with LLVM NVPTX stack support. Use the exact
+    # consumer target for all formats, as required for cubin deployment.
+    caps = [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
+    module = ti.aot.Module(artifact_format=artifact_format, caps=caps)
+    module.add_kernel(stage, name="stage")
+    module._aot_builder._add_with_launch_abi("gated_stage", module._exported_kernels["stage"], "cuda_graph_gate_v1")
+    module._content.append("kernel:gated_stage")
+    directory = tmp_path / "module"
+    module.save(directory)
+    metadata = json.loads((directory / "aot_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["schema_version"] == 8
+    assert metadata["kernel_format"] == artifact_format
+    assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == {
+        "stage": "runtime_context_v2",
+        "gated_stage": "cuda_graph_gate_context_v2",
+    }
+    assert len(metadata["launch_abi_sha256"]) == 64
+    result = subprocess.run(
+        [str(executable), "--gtest_filter=CudaExecutionContextAot.*"],
+        env=dict(os.environ, TAICHI_F3_CONTEXT_AOT_FOLDER=str(directory)),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    (tmp_path / "native-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+    assert result.returncode == 0 and "[  PASSED  ] 2 tests." in result.stdout, result.stdout + result.stderr

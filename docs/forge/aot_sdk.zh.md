@@ -3344,6 +3344,16 @@ bitcode；同一模块内失败的 kernel 查询保持失败，替换产物后�
 schema 5 还会校验声明的 `dense_v1`、`list_v1`、`sparse_v1` 或 `sparse_v2` 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
 及 schema 4 PTX 仍可读取。
 
+新 LLVM 产物复用已有 schema 8 的调用声明来描述编译后的上下文布局：普通入口使用
+`runtime_context_v2`，带 `cuda_graph_gate_v1` 前缀的入口使用
+`cuda_graph_gate_context_v2`。上下文尾部增加一个临时区指针，并通过 `real_func`
+传递；空指针保留 runtime 原有的顺序临时区。BC 保存对应模块标记，PTX/cubin 保存
+经校验的调用声明，旧读取器在执行前拒绝未知布局。该布局需要配对的私有 ABI106
+组件，本身不代表已经公开独立 stream，也不代表所有 prepared execution 均可并发复用。
+Windows CUDA 已在独立原生 runtime 中交错执行保存的普通/gated kernel 实例，分别
+绑定参数和临时区，覆盖 compute capability 120 的 BC/PTX/cubin。这段 `real_func`
+用例需要默认 PTX 7.0 导出目标不具备的 NVPTX 栈指令，因此不将该目标列入本测试覆盖。
+
 Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、
 反向和普通 CGraph 部署。这不代表已获得运行加速，也不改变上述 field 资源及
 原生 recording 边界。部署选择应同时比较生产端成本、消费端加载、体积和目标设备
