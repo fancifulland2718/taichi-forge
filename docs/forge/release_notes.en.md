@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU/CUDA SNode trees retain their creation-time element-list storage contract.
+  Memory accounting and retirement no longer depend on later changes to
+  `demote_dense_struct_fors`. Paired components use private ABI 98.
 - AOT ordinary CGraphs and execution plans share exports with the same compiled
   kernel identity and launch ABI, reducing duplicate LLVM/PTX/cubin payloads
   and Vulkan aliases. Distinct specializations and explicit public aliases are

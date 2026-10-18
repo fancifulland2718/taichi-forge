@@ -388,6 +388,12 @@ LlvmRuntimeExecutor::get_snode_tree_memory_statistics(
   };
   collect(snode_tree->root());
 
+  // A materialized tree can outlive the compilation setting that selected its
+  // list storage. Unmaterialized diagnostics retain their layout-based fallback.
+  const auto state = active_snode_tree_runtime_states_.find(snode_tree->id());
+  if (state != active_snode_tree_runtime_states_.end())
+    all_dense = !state->second.element_lists;
+
   auto *runtime_jit = get_runtime_jit_module();
   runtime_jit->call<uint64 *>("runtime_sparse_tree_statistics_reset",
                               result_buffer);
@@ -683,7 +689,8 @@ bool LlvmRuntimeExecutor::has_snode_tree_runtime_state(int tree_id) const {
 
 void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     const LlvmOfflineCache::FieldCacheData &field_cache_data,
-    uint64 *result_buffer) {
+    uint64 *result_buffer,
+    std::optional<bool> element_lists) {
   auto *const runtime_jit = get_runtime_jit_module();
   // By the time this creator is called, "this" is already destroyed.
   // Therefore it is necessary to capture members by values.
@@ -728,16 +735,21 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
               "LLVM root SNode metadata does not match tree-local id {}.",
               root_runtime_local_id);
 
-  bool all_dense = config_.demote_dense_struct_fors;
+  bool dense_layout = true;
   DeviceAllocationUnique *sparse_tree_pool_alloc = nullptr;
   for (size_t i = 0; i < snode_metas.size(); i++) {
     if (snode_metas[i].type != SNodeType::dense &&
         snode_metas[i].type != SNodeType::place &&
         snode_metas[i].type != SNodeType::root) {
-      all_dense = false;
+      dense_layout = false;
       break;
     }
   }
+  const bool all_dense =
+      element_lists ? !*element_lists
+                    : config_.demote_dense_struct_fors && dense_layout;
+  TI_ERROR_IF(all_dense && !dense_layout,
+              "LLVM sparse tree {} requires element-list storage", tree_id);
   struct NodePoolGeometry {
     std::size_t node_size;
     std::size_t chunk_elements;
@@ -1217,7 +1229,8 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       active_snode_tree_runtime_states_
           .try_emplace(tree_id,
                        ActiveSNodeTreeRuntimeState{runtime_state_buffer,
-                                                   tree_generation})
+                                                   tree_generation,
+                                                   !all_dense})
           .second;
   TI_ASSERT(state_inserted);
 
@@ -1787,13 +1800,7 @@ void LlvmRuntimeExecutor::destroy_snode_tree_runtime(
                   state->second.generation != field.tree_generation,
               "Cannot retire an unowned LLVM SNode tree {}", field.tree_id);
   if (arch_is_cpu(config_.arch)) {
-    const bool all_dense = config_.demote_dense_struct_fors &&
-        std::all_of(field.snode_metas.begin(), field.snode_metas.end(),
-                    [](const auto &node) {
-                      return node.type == SNodeType::root ||
-                             node.type == SNodeType::dense ||
-                             node.type == SNodeType::place;
-                    });
+    const bool all_dense = !state->second.element_lists;
     auto *runtime_jit = get_runtime_jit_module();
     for (size_t i = 0; i < field.snode_metas.size(); ++i) {
       const auto &node = field.snode_metas[i];

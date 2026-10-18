@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #ifdef TI_WITH_LLVM
@@ -67,7 +68,8 @@ class LlvmRuntimeExecutor {
 
   void initialize_llvm_runtime_snodes(
       const LlvmOfflineCache::FieldCacheData &field_cache_data,
-      uint64 *result_buffer);
+      uint64 *result_buffer,
+      std::optional<bool> element_lists = std::nullopt);
 
   // Retire tree-local runtime allocations after its launches have completed.
   // Shared by JIT and AOT; compiler-side struct modules remain caller-owned.
@@ -216,6 +218,8 @@ class LlvmRuntimeExecutor {
   struct ActiveSNodeTreeRuntimeState {
     void *ptr{nullptr};
     std::uint64_t generation{0};
+    // Allocation, accounting and retirement use this same immutable fact.
+    bool element_lists{false};
   };
   DeviceAllocationUnique snode_tree_runtime_directory_alloc_{nullptr};
   std::vector<void *> snode_tree_runtime_host_directory_;

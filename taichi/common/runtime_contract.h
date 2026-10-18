@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// AOT producers share exact kernel export identities across Graph paths.
+// LLVM tree allocation, statistics and retirement share list-storage ownership.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 97;
+inline constexpr int kForgeNativeAbiRevision = 98;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
