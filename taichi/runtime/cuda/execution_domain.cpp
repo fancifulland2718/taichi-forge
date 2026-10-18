@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <exception>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include "taichi/program/runtime_fault.h"
@@ -47,6 +48,7 @@ struct ExecutionDomain::State {
   int effective_priority{0};
   int least_priority{0};
   int greatest_priority{0};
+  bool accepting{true};
   bool closing{false};
   bool closed{false};
   std::exception_ptr first_error;
@@ -179,7 +181,7 @@ RuntimeCompletion ExecutionDomain::submit(
       "submit CUDA execution domain");
   if (state.first_error)
     std::rethrow_exception(state.first_error);
-  if (state.closing || state.closed)
+  if (!state.accepting || state.closing || state.closed)
     throw std::runtime_error("CUDA execution domain is closing or closed");
   for (const auto &dependency : dependencies)
     dependency.validate_cuda_dependency(state.owner_id, state.owner);
@@ -269,9 +271,26 @@ ExecutionDomain::Snapshot ExecutionDomain::snapshot() const {
           state.greatest_priority,
           state.options.capacity,
           state.count,
-          !state.closing && !state.closed && !state.first_error &&
-              state.owner->submission_allowed(),
+          state.accepting && !state.closing && !state.closed &&
+              !state.first_error && state.owner->submission_allowed(),
           state.closed};
+}
+
+RuntimeCompletion ExecutionDomain::latest_completion() const {
+  const auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.first_error)
+    std::rethrow_exception(state.first_error);
+  if (state.count)
+    return state.pending[(state.head + state.count - 1) % state.pending.size()]
+        .completion;
+  return RuntimeCompletion::completed(Arch::cuda, state.owner_id,
+                                      state.last_sequence, state.owner);
+}
+
+void ExecutionDomain::stop_accepting() {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  state_->accepting = false;
 }
 
 void ExecutionDomain::close() {
@@ -283,6 +302,7 @@ void ExecutionDomain::close() {
     state.changed.wait(lock, [&] { return !state.closing; });
     if (state.closed)
       return;
+    state.accepting = false;
     state.closing = true;
   }
   std::exception_ptr error;
@@ -322,6 +342,125 @@ void ExecutionDomain::close() {
     slot.completion.mark_completed();
   retired.clear();
   state.events->clear();
+}
+
+struct ExecutionDomainRegistry::State {
+  std::shared_ptr<RuntimeFaultDomain> owner;
+  std::vector<std::shared_ptr<ExecutionDomain>> domains;
+  mutable std::mutex mutex;
+  std::condition_variable changed;
+  bool accepting{true};
+  bool retiring{false};
+  bool retired{false};
+  std::thread::id retiring_thread;
+  std::exception_ptr first_error;
+};
+
+ExecutionDomainRegistry::ExecutionDomainRegistry(
+    std::shared_ptr<RuntimeFaultDomain> owner,
+    std::size_t capacity)
+    : state_(std::make_unique<State>()) {
+  if (!owner || owner->backend() != Arch::cuda || capacity == 0)
+    throw std::invalid_argument(
+        "CUDA domain registry requires a CUDA owner and capacity");
+  owner->throw_if_new_submission_disallowed("create CUDA domain registry");
+  state_->owner = std::move(owner);
+  state_->domains.resize(capacity);
+}
+
+ExecutionDomainRegistry::~ExecutionDomainRegistry() {
+  try {
+    retire();
+  } catch (...) {
+    // Individual domains quarantine any leases whose drain was not proven.
+  }
+}
+
+std::shared_ptr<ExecutionDomain> ExecutionDomainRegistry::create(
+    ExecutionDomain::Options options) {
+  auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.owner->throw_if_new_submission_disallowed(
+      "create CUDA execution domain");
+  if (!state.accepting)
+    throw std::runtime_error("CUDA domain registry has retired");
+  for (auto &slot : state.domains) {
+    if (!slot || slot->snapshot().closed) {
+      auto domain = std::make_shared<ExecutionDomain>(state.owner, options);
+      slot = domain;
+      return domain;
+    }
+  }
+  throw std::runtime_error("CUDA runtime execution-domain capacity exhausted");
+}
+
+bool ExecutionDomainRegistry::belongs_to(
+    const std::shared_ptr<RuntimeFaultDomain> &owner) const {
+  return state_->owner == owner;
+}
+
+bool ExecutionDomainRegistry::accepting() const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return state_->accepting && state_->owner->submission_allowed();
+}
+
+void ExecutionDomainRegistry::synchronize() {
+  std::vector<std::shared_ptr<ExecutionDomain>> domains;
+  {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    domains = state_->domains;
+  }
+  std::vector<RuntimeCompletion> prefixes;
+  prefixes.reserve(domains.size());
+  for (const auto &domain : domains)
+    if (domain)
+      prefixes.push_back(domain->latest_completion());
+  for (const auto &prefix : prefixes)
+    prefix.wait();
+}
+
+void ExecutionDomainRegistry::retire() {
+  auto &state = *state_;
+  {
+    std::unique_lock<std::mutex> lock(state.mutex);
+    if (state.retiring && state.retiring_thread == std::this_thread::get_id())
+      return;  // A resource retirement callback may inspect its owner.
+    state.changed.wait(lock, [&] { return !state.retiring; });
+    if (state.retired) {
+      if (state.first_error)
+        std::rethrow_exception(state.first_error);
+      return;
+    }
+    state.accepting = false;
+    state.retiring = true;
+    state.retiring_thread = std::this_thread::get_id();
+  }
+  // With creation closed, slots are immutable. No registry lock is held
+  // across domain admission, backend waits, or arbitrary resource callbacks.
+  for (const auto &domain : state.domains)
+    if (domain)
+      domain->stop_accepting();
+  std::exception_ptr failure;
+  for (const auto &domain : state.domains) {
+    if (!domain)
+      continue;
+    try {
+      domain->close();
+    } catch (...) {
+      if (!failure)
+        failure = std::current_exception();
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.first_error = failure;
+    state.retired = true;
+    state.retiring = false;
+    state.retiring_thread = {};
+  }
+  state.changed.notify_all();
+  if (failure)
+    std::rethrow_exception(failure);
 }
 
 }  // namespace taichi::lang::cuda

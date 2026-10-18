@@ -47,6 +47,15 @@ LlvmRuntime::LlvmRuntime(taichi::lang::LlvmRuntimeExecutor &executor,
 }
 
 LlvmRuntime::~LlvmRuntime() {
+  try {
+    retire_execution_domains();
+  } catch (...) {
+    // Failed drain cannot prove that domains stopped accessing the executor.
+    // Preserve its finite allocation and referenced configuration on failure.
+    (void)owned_executor_.release();
+    (void)cfg_.release();
+    return;
+  }
   owned_executor_.reset();
   cfg_.reset();
 }
@@ -136,6 +145,7 @@ void LlvmRuntime::flush() {
 
 void LlvmRuntime::wait() {
   try {
+    synchronize_execution_domains();
     check_runtime_error();
   } catch (const taichi::lang::BackendRuntimeError &error) {
     runtime_fault_domain()->report_backend_error(error, 0);

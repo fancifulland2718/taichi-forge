@@ -16,6 +16,9 @@
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/virtual_dir.h"
 #include "taichi/common/utils.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/execution_domain.h"
+#endif
 
 bool is_vulkan_available() {
 #ifdef TI_WITH_VULKAN
@@ -119,13 +122,67 @@ Runtime::~Runtime() {
 }
 
 void Runtime::borrow_runtime_fault_domain(
-    std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain) {
+    std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain,
+    std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains) {
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
-  if (!domain || prepared_ || native_resources_ || !modules_.empty() || !memories_.empty() ||
-      borrowed_fault_domain_)
+  if (!domain || domain->backend() != arch || prepared_ || native_resources_ ||
+      !modules_.empty() || !memories_.empty() || borrowed_fault_domain_ ||
+      cuda_execution_domains_ || execution_domains_retiring_ ||
+      (arch == taichi::Arch::cuda && !domains))
     throw std::logic_error("Runtime fault domain must be bound before use");
+#ifdef TI_WITH_CUDA
+  if (domains && !domains->belongs_to(domain))
+    throw std::invalid_argument(
+        "CUDA execution domains belong to another runtime");
+#endif
   runtime_fault_domain_ = std::move(domain);
+  cuda_execution_domains_ = std::move(domains);
   borrowed_fault_domain_ = true;
+}
+
+std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry>
+Runtime::cuda_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+  runtime_fault_domain_->throw_if_new_submission_disallowed(
+      "access CUDA execution domains");
+  if (arch != taichi::Arch::cuda || execution_domains_retiring_)
+    throw std::runtime_error("CUDA execution-domain owner is unavailable");
+  if (!cuda_execution_domains_)
+    cuda_execution_domains_ =
+        std::make_shared<taichi::lang::cuda::ExecutionDomainRegistry>(
+            runtime_fault_domain_);
+  return cuda_execution_domains_;
+#else
+  throw std::runtime_error("CUDA support is not compiled in");
+#endif
+}
+
+void Runtime::synchronize_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+    domains = cuda_execution_domains_;
+  }
+  if (domains)
+    domains->synchronize();
+#endif
+}
+
+void Runtime::retire_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+    if (borrowed_fault_domain_)
+      return;
+    execution_domains_retiring_ = true;
+    domains = cuda_execution_domains_;
+  }
+  if (domains)
+    domains->retire();
+#endif
 }
 
 VulkanRuntime *Runtime::as_vk() {
@@ -388,6 +445,7 @@ TiRuntime ti_create_runtime(TiArch arch, uint32_t device_index) {
 void ti_destroy_runtime(TiRuntime runtime) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
+  ((Runtime *)runtime)->retire_execution_domains();
   ((Runtime *)runtime)->clear_prepared();
   ((Runtime *)runtime)->clear_native_resources();
   delete (Runtime *)runtime;

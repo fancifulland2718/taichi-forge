@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "taichi/program/runtime_completion.h"
+#include "taichi/runtime/runtime_client.h"
 
 namespace taichi::lang::cuda {
 
@@ -61,11 +62,36 @@ class ExecutionDomain {
   // Completion/resource callbacks execute without holding the admission lock.
   std::size_t collect_ready(std::size_t budget);
   Snapshot snapshot() const;
+  RuntimeCompletion latest_completion() const;
+  // Cold owner retirement closes admission on every domain before draining
+  // any one domain. Existing tickets remain queryable while a drain waits.
+  void stop_accepting();
 
   // Cold, idempotent drain of this stream only. No domain admission lock or
   // global CUDA driver/submission lock is held across a host backend wait.
   // An external producer must eventually signal already submitted waits.
   void close();
+
+ private:
+  struct State;
+  std::unique_ptr<State> state_;
+};
+
+// One registry per runtime generation, shared with its borrowed AOT views.
+// Retained slots bound both live domains and historical closed-domain storage.
+// Registration and retirement are cold; submit never acquires this mutex.
+class ExecutionDomainRegistry final : public RuntimeClient {
+ public:
+  explicit ExecutionDomainRegistry(std::shared_ptr<RuntimeFaultDomain> owner,
+                                   std::size_t capacity = 64);
+  ~ExecutionDomainRegistry() override;
+  std::shared_ptr<ExecutionDomain> create(ExecutionDomain::Options options);
+  bool belongs_to(const std::shared_ptr<RuntimeFaultDomain> &owner) const;
+  bool accepting() const;
+  // Cold explicit runtime synchronization. Snapshot every queue before any
+  // wait, so subsequent work cannot extend the requested prefixes.
+  void synchronize();
+  void retire() override;
 
  private:
   struct State;

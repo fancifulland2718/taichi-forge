@@ -40,6 +40,9 @@
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+namespace cuda {
+class ExecutionDomainRegistry;
+}
 }
 
 #define TI_CAPI_NOT_SUPPORTED(x) ti_set_last_error(TI_ERROR_NOT_SUPPORTED, #x);
@@ -181,6 +184,9 @@ class Runtime {
   taichi::lang::NativeProviderLocations native_provider_locations_;
   taichi::lang::NativeLibraryLocations native_library_locations_;
   std::shared_ptr<taichi::lang::RuntimeFaultDomain> runtime_fault_domain_;
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry>
+      cuda_execution_domains_;
+  bool execution_domains_retiring_{false};
   bool borrowed_fault_domain_{false};
 
  protected:
@@ -270,7 +276,15 @@ class Runtime {
   // Cold borrower construction only; ownership of the domain stays with the
   // Program. Closing this C API view must not finalize its owner's domain.
   void borrow_runtime_fault_domain(
-      std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain);
+      std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain,
+      std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains =
+          {});
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry>
+  cuda_execution_domains();
+  // A borrowed view never retires its Program's shared domains. Its resource
+  // retirement already waits for outstanding execution before freeing views.
+  void retire_execution_domains();
+  void synchronize_execution_domains();
 
   virtual TiImage allocate_image(const taichi::lang::ImageParams &params) {
     TI_NOT_IMPLEMENTED

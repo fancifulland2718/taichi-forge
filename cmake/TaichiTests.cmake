@@ -386,6 +386,12 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
     tests/cpp/aot/llvm/cuda_gated_aot_test.cpp)
   target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE
     taichi_core gtest_main ${_ti_backend_native_targets})
+  if(TARGET taichi_runtime_c_api)
+    target_sources(taichi_cuda_execution_domain_tests PRIVATE
+      tests/cpp/aot/llvm/cuda_execution_owner_test.cpp)
+    target_compile_definitions(taichi_cuda_execution_domain_tests PRIVATE TI_TEST_RUNTIME_C_API)
+    target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE taichi_runtime_c_api)
+  endif()
   get_target_property(_ti_backend_test_includes
     ${TAICHI_BACKEND_SAFETY_TESTS_NAME} INCLUDE_DIRECTORIES)
   target_include_directories(taichi_cuda_execution_domain_tests PRIVATE

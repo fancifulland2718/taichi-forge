@@ -38,6 +38,7 @@
 
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_primitives.h"
 #include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
@@ -8880,6 +8881,16 @@ Program::debug_texture_resource_identity(const Texture *view) const {
 void Program::synchronize() {
   ensure_runtime_submission_allowed("Program synchronize");
   RuntimeProgramSyncStatisticsScope statistics_scope(this);
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<cuda::ExecutionDomainRegistry> domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(
+        runtime_resource_submission_mutex_);
+    domains = cuda_execution_domains_;
+  }
+  if (domains)
+    domains->synchronize();
+#endif
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const bool tracking_was_enabled =
@@ -9017,6 +9028,27 @@ uint64 Program::fetch_result_uint64(int i) {
   return program_impl_->fetch_result_uint64(i, result_buffer);
 }
 
+std::shared_ptr<cuda::ExecutionDomainRegistry>
+Program::cuda_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::lock_guard<std::recursive_mutex> guard(
+      runtime_resource_submission_mutex_);
+  runtime_fault_domain_->throw_if_new_submission_disallowed(
+      "access CUDA execution domains");
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "Execution domains require a CUDA runtime");
+  if (!cuda_execution_domains_) {
+    auto domains =
+        std::make_shared<cuda::ExecutionDomainRegistry>(runtime_fault_domain_);
+    retain_runtime_client(domains);
+    cuda_execution_domains_ = std::move(domains);
+  }
+  return cuda_execution_domains_;
+#else
+  throw std::runtime_error("CUDA support is not compiled in");
+#endif
+}
+
 void Program::attach_runtime_client(
     const std::shared_ptr<RuntimeClient> &client) {
   auto guard = acquire_runtime_resource_submission_guard();
@@ -9099,6 +9131,18 @@ void Program::finalize() {
     return false;
   };
 
+#ifdef TI_WITH_CUDA
+  best_effort("retire CUDA execution domains", [&] {
+    std::shared_ptr<cuda::ExecutionDomainRegistry> domains;
+    {
+      std::lock_guard<std::recursive_mutex> lock(
+          runtime_resource_submission_mutex_);
+      domains = cuda_execution_domains_;
+    }
+    if (domains)
+      domains->retire();
+  });
+#endif
   best_effort("close runtime resources", [&] {
     std::lock_guard<std::recursive_mutex> submission_lock(
         runtime_resource_submission_mutex_);

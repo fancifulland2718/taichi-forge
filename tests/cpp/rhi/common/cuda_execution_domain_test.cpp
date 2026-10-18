@@ -354,6 +354,71 @@ TEST_F(CudaExecutionDependency, WarmAdmissionProgressesBeforeExternalRelease) {
       duration_us[499], duration_us[949], busy, priority.effective_priority);
 }
 
+TEST_F(CudaExecutionDependency,
+       RegistryRetiresAllDomainsWithoutHoldingItsLock) {
+  cuda::ExecutionDomainRegistry registry(fault, 2);
+  EXPECT_TRUE(registry.belongs_to(fault));
+  EXPECT_FALSE(registry.belongs_to(
+      std::make_shared<RuntimeFaultDomain>(Arch::cuda, 71)));
+  auto output = registry.create({1, 0});
+  auto physics = registry.create({1, 0});
+  EXPECT_ANY_THROW(registry.create({1, 0}));
+  testing::CudaExternalGate gate;
+  std::atomic<int> released{0};
+  auto blocked =
+      output->submit({}, std::make_shared<DomainResources>(*output, released),
+                     [&](void *stream) { gate.enqueue_wait(stream); });
+  auto sentinel = physics->submit({}, nullptr, [&](void *stream) {
+    CUDADriver::get_instance().memsetd32_async(at(0), 97, 1, stream);
+  });
+  ASSERT_TRUE(poll_until(sentinel));
+  auto retirement = std::async(std::launch::async, [&] { registry.retire(); });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (physics->snapshot().accepting &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_FALSE(registry.accepting());
+  EXPECT_FALSE(physics->snapshot().accepting);
+  EXPECT_ANY_THROW(registry.create({1, 0}));
+  EXPECT_ANY_THROW(physics->submit({}, nullptr, [](void *) {}));
+  EXPECT_FALSE(blocked.done());
+  EXPECT_EQ(released.load(), 0);
+  EXPECT_EQ(retirement.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  auto second_retirement =
+      std::async(std::launch::async, [&] { registry.retire(); });
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  retirement.get();
+  second_retirement.get();
+  EXPECT_TRUE(output->snapshot().closed);
+  EXPECT_TRUE(physics->snapshot().closed);
+  EXPECT_TRUE(blocked.done());
+  EXPECT_EQ(released.load(), 1);
+}
+
+TEST_F(CudaExecutionDependency, RegistryReusesOnlyClosedDomainSlots) {
+  cuda::ExecutionDomainRegistry registry(fault, 1);
+  auto previous = registry.create({1, 0});
+  const auto original_identity = previous->snapshot().identity;
+  for (int i = 0; i < 32; ++i) {
+    EXPECT_ANY_THROW(registry.create({1, 0}));
+    previous->close();
+    std::weak_ptr<cuda::ExecutionDomain> retired = previous;
+    previous = registry.create({1, 0});
+    EXPECT_TRUE(retired.expired());
+    EXPECT_NE(previous->snapshot().identity, original_identity);
+  }
+  // The runtime retains an open domain even when its application wrapper is
+  // discarded, so owner teardown can still retire its storage before code.
+  std::weak_ptr<cuda::ExecutionDomain> retained = previous;
+  previous.reset();
+  EXPECT_FALSE(retained.expired());
+  registry.retire();
+  EXPECT_TRUE(retained.lock()->snapshot().closed);
+}
+
 }  // namespace
 }  // namespace taichi::lang
 #endif

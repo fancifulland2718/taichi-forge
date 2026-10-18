@@ -52,6 +52,10 @@
 
 namespace taichi::lang {
 
+namespace cuda {
+class ExecutionDomainRegistry;
+}
+
 namespace cuda::detail {
 enum class CudaAsyncTileAdmissionReason : std::uint8_t;
 }
@@ -621,6 +625,9 @@ class TI_DLL_EXPORT Program {
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain() const {
     return runtime_fault_domain_;
   }
+  // Cold native adapter shared by JIT and borrowed AOT execution. The owner
+  // retires all domains before releasing code/storage and the backend.
+  std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains();
   RuntimeStatisticsSnapshot runtime_statistics_snapshot();
   PrimitiveWorkspaceSnapshot primitive_workspace_snapshot() const noexcept {
     return primitive_workspace_arena_.snapshot();
@@ -4531,6 +4538,7 @@ class TI_DLL_EXPORT Program {
   std::unique_ptr<RuntimeClientRegistry> runtime_clients_;
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
+  std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains_;
   RuntimeTraceRecorder runtime_trace_;
   std::shared_ptr<RuntimeCompletionCudaEventPool>
       runtime_completion_cuda_event_pool_;
