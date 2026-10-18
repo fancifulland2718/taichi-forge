@@ -21,10 +21,12 @@ llvm::Value *TaskCodeGenLLVM::atomic_add_quant_int(llvm::Value *ptr,
                                                    llvm::Value *value,
                                                    bool value_is_signed) {
   auto [byte_ptr, bit_offset] = load_bit_ptr(ptr);
-  return call(fmt::format("atomic_add_partial_bits_b{}",
-                          physical_type->getIntegerBitWidth()),
-              byte_ptr, bit_offset, tlctx->get_constant(qit->get_num_bits()),
-              builder->CreateIntCast(value, physical_type, value_is_signed));
+  auto old_word = call(
+      fmt::format("atomic_add_partial_bits_b{}",
+                  physical_type->getIntegerBitWidth()),
+      byte_ptr, bit_offset, tlctx->get_constant(qit->get_num_bits()),
+      builder->CreateIntCast(value, physical_type, value_is_signed));
+  return extract_quant_int(old_word, bit_offset, qit);
 }
 
 llvm::Value *TaskCodeGenLLVM::atomic_add_quant_fixed(llvm::Value *ptr,
@@ -35,10 +37,12 @@ llvm::Value *TaskCodeGenLLVM::atomic_add_quant_fixed(llvm::Value *ptr,
   auto qit = qfxt->get_digits_type()->as<QuantIntType>();
   auto val_store = to_quant_fixed(value, qfxt);
   val_store = builder->CreateSExt(val_store, physical_type);
-  return call(fmt::format("atomic_add_partial_bits_b{}",
-                          physical_type->getIntegerBitWidth()),
-              byte_ptr, bit_offset, tlctx->get_constant(qit->get_num_bits()),
-              val_store);
+  auto old_word = call(
+      fmt::format("atomic_add_partial_bits_b{}",
+                  physical_type->getIntegerBitWidth()),
+      byte_ptr, bit_offset, tlctx->get_constant(qit->get_num_bits()), val_store);
+  return reconstruct_quant_fixed(extract_quant_int(old_word, bit_offset, qit),
+                                 qfxt);
 }
 
 llvm::Value *TaskCodeGenLLVM::to_quant_fixed(llvm::Value *real,

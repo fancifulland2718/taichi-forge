@@ -6,9 +6,18 @@ from tests import test_utils
 @pytest.mark.parametrize("word_bits", [32, 64])
 @pytest.mark.parametrize("kind", ["signed", "unsigned", "fixed"])
 @pytest.mark.parametrize("layout", ["bitpacked", "quant_array"])
-@test_utils.test(arch=ti.vulkan, vulkan_quant_experimental=True, quant_opt_atomic_demotion=False, offline_cache=False)
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    vulkan_quant_experimental=True,
+    quant_opt_atomic_demotion=False,
+    offline_cache=False,
+)
 def test_quantized_atomic_add_returns_each_previous_value(word_bits, kind, layout):
-    if word_bits == 64 and not ti.lang.impl.get_runtime().prog.get_device_caps().get("spirv_has_atomic_int64"):
+    if (
+        ti.lang.impl.current_cfg().arch == ti.vulkan
+        and word_bits == 64
+        and not ti.lang.impl.get_runtime().prog.get_device_caps().get("spirv_has_atomic_int64")
+    ):
         pytest.skip("64-bit packed atomics require device integer atomics")
     dtype = ti.types.quant.fixed(7, scale=0.25) if kind == "fixed" else ti.types.quant.int(7, signed=kind == "signed")
     x = ti.field(dtype)
@@ -35,13 +44,13 @@ def test_quantized_atomic_add_returns_each_previous_value(word_bits, kind, layou
             x[2] = 13 * factor
 
     @ti.kernel
-    def add():
+    def add(step: ti.i32):
         for i in range(8):
-            old[i] = ti.atomic_add(x[target], factor)
+            old[i] = ti.atomic_add(x[target], step * factor)
 
     for first in ((3, 124) if kind == "unsigned" else (-4, 60)):
         seed(first)
-        add()
+        add(1)
 
         def expected(value):
             value %= 128
@@ -49,6 +58,9 @@ def test_quantized_atomic_add_returns_each_previous_value(word_bits, kind, layou
 
         assert sorted(old.to_numpy().tolist()) == sorted(expected(first + i) for i in range(8))
         assert x[target] == expected(first + 8)
+        add(-1)
+        assert sorted(old.to_numpy().tolist()) == sorted(expected(first + i) for i in range(1, 9))
+        assert x[target] == expected(first)
         if layout == "bitpacked":
             assert neighbor[None] == 113
         else:
@@ -56,9 +68,12 @@ def test_quantized_atomic_add_returns_each_previous_value(word_bits, kind, layou
             assert x[2] == 13 * factor
 
 
-@test_utils.test(arch=ti.vulkan, vulkan_quant_experimental=True, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], vulkan_quant_experimental=True, offline_cache=False)
 def test_quantized_signed_load_and_atomic_return_sign_extend():
-    if not ti.lang.impl.get_runtime().prog.get_device_caps().get("spirv_has_int64"):
+    if (
+        ti.lang.impl.current_cfg().arch == ti.vulkan
+        and not ti.lang.impl.get_runtime().prog.get_device_caps().get("spirv_has_int64")
+    ):
         pytest.skip("64-bit compute type requires device integer support")
     x = ti.field(ti.types.quant.int(7, signed=True, compute=ti.i64))
     ti.root.quant_array(ti.i, 4, max_num_bits=32).place(x)
