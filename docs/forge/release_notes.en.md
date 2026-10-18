@@ -36,6 +36,11 @@ lifetimes. The entries below describe the changes.
 
 - Fix Vulkan compilation of dynamic range starts with ndarray-shape ends. Dynamic
   starts retain temporary-storage snapshots, preserving device-memory bound semantics.
+- Vulkan reads by-value scalar range ends directly from launch arguments, removing
+  serial tasks used only to stage those arguments and their temporary-buffer round trips.
+  JIT, Graph and newly exported AOT share this path. Complex scalar expressions,
+  argpacks and device-memory bounds retain their existing paths; CPU/CUDA do not
+  enable this rematerialization.
 - CPU/CUDA SNode trees retain their creation-time element-list storage contract.
   Memory accounting and retirement no longer depend on later changes to
   `demote_dense_struct_fors`. Paired components use private ABI 98.
