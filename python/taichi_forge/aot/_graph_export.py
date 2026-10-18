@@ -471,7 +471,18 @@ class _ExportContext:
         self._initialization_resources[resource] = description
         self.initialization.append(description)
 
-    def kernel(self, kernel, args, label="", launch=None, *, launch_abi="ordinary"):
+    def _kernel_entry(self, kernel, launch_abi, jit_source):
+        identity = (id(kernel), launch_abi)
+        name = self._kernel_names.get(identity)
+        if name is None:
+            name = self._name("kernel" if launch_abi == "ordinary" else "gated_kernel")
+            self._kernel_names[identity] = name
+            self.kernels[name] = kernel
+            if launch_abi != "ordinary":
+                self.kernel_launch_abis[name] = launch_abi
+        return name
+
+    def kernel(self, kernel, args, label="", launch=None, *, launch_abi="ordinary", jit_source=None):
         if launch_abi != "ordinary" and (
             launch_abi != "cuda_graph_gate_v1" or self.arch != core.Arch.cuda or launch is not None
         ):
@@ -481,14 +492,7 @@ class _ExportContext:
             self.source_arrays.validate_kernel(args, bindings)
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY, core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION, core.ArgKind.ACCELERATION_STRUCTURE) for arg in args):
             raise TaichiRuntimeError("AOT execution Graph requires scalar, ndarray or qualified image/AS bindings")
-        identity = (id(kernel), launch_abi)
-        name = self._kernel_names.get(identity)
-        if name is None:
-            name = self._name("kernel" if launch_abi == "ordinary" else "gated_kernel")
-            self._kernel_names[identity] = name
-            self.kernels[name] = kernel
-            if launch_abi != "ordinary":
-                self.kernel_launch_abis[name] = launch_abi
+        name = self._kernel_entry(kernel, launch_abi, jit_source)
         self._used_kernel_entries.add(name)
         operation = dict(kind="kernel", entry=name, arguments=bindings)
         if label:
@@ -895,7 +899,7 @@ def _parallel(context, node):
 
     def emit(context, indices):
         for index in indices:
-            context.kernel(*sources[index][1:])
+            context.kernel(*sources[index][1:], jit_source=(node.compiled_graph, index))
 
     emit(context, range(indices[0]))
     context.operations.append(dict(kind="cuda_parallel", branches=[context.region(emit, group) for group in groups]))
@@ -1034,6 +1038,7 @@ def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
                 dispatch_offsets.append(len(context.operations))
             context.kernel(
                 *dispatch[1:],
+                jit_source=(node.compiled_graph, index),
                 launch_abi=(
                     "cuda_graph_gate_v1" if gated_body_begin is not None and index >= gated_body_begin else "ordinary"
                 ),
@@ -1067,11 +1072,11 @@ def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
         raise TaichiRuntimeError("AOT mixed Graph lacks complete physical recording metadata")
     recreated = context.declared_bindings(node.fixed_runtime_args)
     native_count = 0
-    for source in sources:
+    for index, source in enumerate(sources):
         if dispatch_offsets is not None:
             dispatch_offsets.append(len(context.operations))
         if source[0] == "dispatch":
-            context.kernel(*source[1:])
+            context.kernel(*source[1:], jit_source=(node.compiled_graph, index))
         elif source[0] == "native" and source[1] == native_count and native_count < len(natives):
             for name, owner in _native(context, natives[native_count]).items():
                 if name in recreated and recreated[name] is not owner:
@@ -1090,6 +1095,49 @@ def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
         recreated[name] is not value for name, value in node.fixed_runtime_args.items()
     ):
         raise TaichiRuntimeError("AOT execution Graph has unreconstructed fixed bindings")
+
+
+def _lower_graph(context, graph):
+    """Lower one complete selected recipe for either an artifact or a live loan.
+
+    Both owners require the same control boundaries and reconstructed binding
+    contracts. Only code publication and live storage ownership differ.
+    """
+    spec = graph._spec
+    context.declare_storage_plans(graph)
+    context.declare_private_bindings(spec.fixed_runtime_args)
+    context.source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
+    context.control_names = set(spec.control_binding_plan.names)
+    for lease in spec.lifetime_leases:
+        exporter = type(lease).__dict__.get("_export_aot_bindings")
+        if exporter is not None:
+            exporter(lease, context)
+    operation_ends = []
+    for node in spec.nodes:
+        _node(context, node)
+        operation_ends.append(len(context.operations))
+    context.source_arrays.validate_used(spec.runtime_arg_names)
+    context.source_resources.validate_used()
+    context.resource_inputs.validate_used()
+    context.resolve_resource_aliases()
+    context.binding_constraints.extend(context.source_arrays.constraints)
+    if context.control_names != context._control_bindings:
+        raise TaichiRuntimeError("Graph requires complete selected control binding metadata")
+    for _, bindings in spec.control_binding_plan.distinct_groups:
+        names = [context.binding(name) for _, _, name in bindings]
+        for i, left in enumerate(names):
+            for right in names[i + 1 :]:
+                context.binding_constraints.append(dict(kind="disjoint", left=left, right=right))
+    if any(
+        (callable(getattr(lease, "bind_graph_arguments", None)) and id(lease) not in context.reconstructed_argument_binders)
+        or (
+            callable(getattr(lease, "validate_graph_bindings", None))
+            and id(lease) not in context.reconstructed_binding_validators
+        )
+        for lease in spec.lifetime_leases
+    ):
+        raise TaichiRuntimeError("Graph requires the selected binding validation recipe")
+    return tuple(operation_ends)
 
 
 def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_bindings=None, resource_bindings=None):
@@ -1137,48 +1185,10 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             source_resources=source_resources,
             resource_inputs=resource_inputs,
         )
-        context.declare_storage_plans(graph)
-        context.declare_private_bindings(spec.fixed_runtime_args)
-        source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
-        context.control_names = set(spec.control_binding_plan.names)
-        # Dispatch actions may already be flattened into ordinary physical
-        # kernels. Reconstruct their concrete binding contracts before lowering
-        # those kernels, without regenerating the selected dispatch recipe.
-        for lease in spec.lifetime_leases:
-            exporter = type(lease).__dict__.get("_export_aot_bindings")
-            if exporter is not None:
-                exporter(lease, context)
-        operation_ends = []
-        for node in graph._spec.nodes:
-            _node(context, node)
-            operation_ends.append(len(context.operations))
+        operation_ends = _lower_graph(context, graph)
         submission_recipe = None
         if getattr(binding_factory, "__dict__", {}).get("_export_aot_submission") is not None:
-            submission_recipe = binding_factory._export_aot_submission(spec, tuple(operation_ends))
-        source_arrays.validate_used(spec.runtime_arg_names)
-        source_resources.validate_used()
-        resource_inputs.validate_used()
-        context.resolve_resource_aliases()
-        context.binding_constraints.extend(source_arrays.constraints)
-        if context.control_names != context._control_bindings:
-            raise TaichiRuntimeError("AOT Graph requires complete selected control binding metadata")
-        for _, bindings in spec.control_binding_plan.distinct_groups:
-            names = [context.binding(name) for _, _, name in bindings]
-            for i, left in enumerate(names):
-                for right in names[i + 1 :]:
-                    context.binding_constraints.append(dict(kind="disjoint", left=left, right=right))
-        if any(
-            (
-                callable(getattr(lease, "bind_graph_arguments", None))
-                and id(lease) not in context.reconstructed_argument_binders
-            )
-            or (
-                callable(getattr(lease, "validate_graph_bindings", None))
-                and id(lease) not in context.reconstructed_binding_validators
-            )
-            for lease in spec.lifetime_leases
-        ):
-            raise TaichiRuntimeError("AOT execution Graph requires the selected binding validation recipe")
+            submission_recipe = binding_factory._export_aot_submission(spec, operation_ends)
         mapped_gradients = {}
         for primal, gradient in (gradients or {}).items():
             if primal in context._scalar_values or gradient in context._scalar_values:

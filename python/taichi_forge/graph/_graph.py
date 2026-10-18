@@ -18908,6 +18908,19 @@ class Graph:
             self.close()
             raise
 
+    def prepare(self, arguments, *, execution_domain):
+        """Prepare one immutable instance of this complete selected CUDA Graph.
+
+        Call ``initialize()`` once during setup, then ``submit(wait_for=...)``
+        to enqueue exact device dependencies and receive a completion ticket.
+        A full instance/domain returns ``None`` without submitting work. Each
+        preparation owns independent arguments and private workspace. Shared
+        application arrays and Fields require explicit dependencies.
+        """
+        from ._execution_domain import prepare_graph
+
+        return prepare_graph(self, arguments, execution_domain=execution_domain)
+
     def bind(self, arguments):
         """Create a versioned runtime binding source for repeat invocation.
 

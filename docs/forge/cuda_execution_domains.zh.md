@@ -6,8 +6,38 @@
 nonblocking stream，每个准备好的实例拥有自己的 executable、不可变参数和编译临时区。
 该接口保留已经选择的完整计划。stream、优先级和完成票据只属于运行时，不写入 AOT 产物。
 
-这是 F3 的一部分，尚不代表独立 JIT Graph、Canvas 显示链、跨平台真实窗口或应用 FPS
-已完成资格验证。优先级是设备调度提示，不能保证 kernel 并行或抢占。
+JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和当前 Program 的 dense Field。
+这是 F3 的一部分；Canvas 显示链、跨平台真实窗口和应用 FPS 仍未完成资格验证。
+优先级是设备调度提示，不能保证 kernel 并行或抢占。
+
+## 当前 JIT Graph
+
+```python
+domain = ti.graph.execution_domain(capacity=2, instance_capacity=64, priority=0)
+step = graph.prepare(arguments, execution_domain=domain)
+step.initialize()
+ticket = step.submit(wait_for=previous_tickets)
+if ticket is not None:
+    # 消费结果或退休资源时再等待，不在每次仿真与绘图交接时等待。
+    ticket.wait()
+step.close()    # 仅释放主机实例句柄
+domain.close()  # 冷阶段，排空并退休资源
+```
+
+`arguments` 接受字典或该 Graph 的 `GraphBindingSet`，在准备时冻结；后续更新绑定集
+不会修改已有实例。准备消费完整的物理 dispatch、条件/循环和并行分支描述，保留每个
+调用点的启动策略，不导出文件、重新编译前端或复制 Field 根。不同准备拥有独立的参数、
+控制缓冲区和声明的私有工作区；共享应用 ndarray 和 Field 仍需精确依赖。
+
+当前覆盖 scalar/tensor JIT ndarray、隐式 dense Field 访问、普通与 masked 控制及
+选定的 CUDA 并行区域。ndarray 的已有 `.grad` 同时借用，支持显式反向内核；不参与
+自动 Tape/FwdMode，初始化/提交会排斥该上下文及其并发进入过程。源 Graph 的 `close()`
+不会关闭已准备实例，Field 树销毁或 Program reset 则先退休相关实例再释放代码/存储。
+
+绑定帧、多 workspace lane、动态选择 recipe、尚未具备借用描述的 retained Field view
+和 provider data，以及未资格的 native route 会在冷准备时拒绝，不回退到默认 stream。
+默认 `Graph.run()`/`submit()` 合同不变。`ti.graph.execution_domain()` 的借用 runtime
+由 Program 的 Python owner 持有，避免丢弃最后一个域包装时意外触发破坏性关闭。
 
 ## 准备、初始化与提交
 

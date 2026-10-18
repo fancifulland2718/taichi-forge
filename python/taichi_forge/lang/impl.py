@@ -549,6 +549,10 @@ class PyTaichi:
         # Cold specialization creation is serialized so the global safety
         # budget remains exact even when separate Python threads compile.
         self._kernel_compilation_lock = threading.RLock()
+        # Persistent ownership prevents dropping the last domain handle from
+        # accidentally finalizing a borrower and waiting on the hot path.
+        self._graph_execution_runtime_lock = threading.RLock()
+        self._graph_execution_runtime = None
         self.kernel_specialization_limit = 1024
         # Program owns every native Kernel until ti.reset(), even after the
         # defining Python Kernel is garbage-collected or its cache is cleared
@@ -1017,6 +1021,10 @@ class PyTaichi:
             self._signal_handler_registry = _ti_core.HackedSignalRegister()
 
     def clear(self):
+        with self._graph_execution_runtime_lock:
+            self._clear()
+
+    def _clear(self):
         # Graph invalidation may release a native workspace. If an opt-in
         # submission still owns one, complete it before invalidating weakly
         # registered Graph wrappers. Program.finalize() would otherwise sync
@@ -1031,6 +1039,7 @@ class PyTaichi:
         if has_submission_owners:
             self.clear_runtime_submission_owners()
         self.invalidate_runtime_objects()
+        self._graph_execution_runtime = None
         self._pending_aot_snode_trees.clear()
         # Structured Graph definitions and locally defined kernels can form
         # Python reference cycles. Collect unreachable cycles while the

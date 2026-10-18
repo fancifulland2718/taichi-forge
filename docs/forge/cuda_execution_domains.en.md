@@ -8,10 +8,49 @@ instance owns its executable, immutable arguments and compiler temporaries.
 This API preserves the complete selected plan. Stream handles, priorities and
 completion tickets are runtime choices; they are never serialized into AOT.
 
-This is part of the F3 implementation. It does not yet establish independent
-JIT Graph or Canvas presentation support, cross-platform window qualification,
-or an application FPS improvement. Queue priority is a device scheduling hint;
-it does not guarantee concurrent kernels or priority preemption.
+JIT Graphs can also be prepared as independent instances borrowing selected
+compiled code and the current Program's dense Fields. This is part of F3;
+Canvas presentation, cross-platform windows and application FPS remain
+unqualified. Queue priority is a device scheduling hint; it does not guarantee
+concurrent kernels or priority preemption.
+
+## Current JIT Graphs
+
+```python
+domain = ti.graph.execution_domain(capacity=2, instance_capacity=64, priority=0)
+step = graph.prepare(arguments, execution_domain=domain)
+step.initialize()
+ticket = step.submit(wait_for=previous_tickets)
+if ticket is not None:
+    # Wait when consuming results or retiring resources, rather than at every
+    # simulation/render handoff.
+    ticket.wait()
+step.close()    # release the host instance handle
+domain.close()  # cold: drain and retire resources
+```
+
+`arguments` accepts a dictionary or this Graph's `GraphBindingSet`. Preparation
+freezes its current values; later binding-set updates do not change an existing
+instance. It consumes the complete physical dispatch, control and parallel
+description, preserving each invocation's launch policy. It does not export an
+artifact, recompile the frontend or copy Field roots. Separate preparations own
+independent arguments, control buffers and declared private workspace. Shared
+application ndarrays and Fields still require exact dependencies.
+
+The current scope includes scalar/tensor JIT ndarrays, implicit dense Field
+access, ordinary and masked control, and selected CUDA parallel regions.
+Existing ndarray `.grad` storage is borrowed for explicit adjoint kernels.
+Automatic Tape/FwdMode is not supported; initialization/submission rejects that
+context and concurrent AD entry. Closing the source Graph leaves prepared
+instances usable. Field-tree destruction or Program reset retires dependent
+instances before releasing code or storage.
+
+Binding frames, multiple workspace lanes, dynamic recipe selection, retained
+Field views/provider data without a live-loan description, and unqualified
+native routes reject during cold preparation without a default-stream fallback.
+Existing `Graph.run()`/`submit()` contracts stay unchanged. The Python Program
+owner retains the borrower used by `ti.graph.execution_domain()` so dropping
+the last domain wrapper cannot accidentally trigger destructive runtime close.
 
 ## Prepare, initialize and submit
 
