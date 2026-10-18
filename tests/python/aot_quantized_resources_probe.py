@@ -18,6 +18,7 @@ def main(arch, mode, artifact, layout):
         runtime = Runtime(arch)
     with runtime:
         out = runtime.ndarray("i32", 2)
+        old = runtime.ndarray("i32", 8)
         weight, dweight, loss, dloss = (runtime.ndarray("f32", 1) for _ in range(4))
 
         def check(module, offset, call=None):
@@ -49,6 +50,11 @@ def main(arch, mode, artifact, layout):
             check(module, 2, call)
             module.kernel("seed")(Scalar("i32", -3))
             check(module, -3, call)
+            with module.kernel("bump").prepare(old) as bump:
+                bump()
+                previous = sorted(read(old, dtype="i"))
+                assert previous == list(range(-3, 5)), (arch, layout, previous)
+                check(module, -2, call)
             call()
             module.close()
             raises(call)

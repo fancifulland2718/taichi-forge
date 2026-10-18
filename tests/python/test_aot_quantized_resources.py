@@ -41,6 +41,11 @@ def test_aot_quantized_module_isolation(tmp_path, layout):
                 out[1] += y[i]
 
     @ti.kernel
+    def bump(old: ti.types.ndarray(ti.i32, 1)):
+        for i in range(8):
+            old[i] = ti.atomic_add(x[0], 1)
+
+    @ti.kernel
     def energy(
         weight: ti.types.ndarray(ti.f32, 1, needs_grad=True),
         loss: ti.types.ndarray(ti.f32, 1, needs_grad=True),
@@ -50,7 +55,7 @@ def test_aot_quantized_module_isolation(tmp_path, layout):
 
     arch = {ti.cpu: "cpu", ti.cuda: "cuda", ti.vulkan: "vulkan"}[ti.lang.impl.current_cfg().arch]
     module = ti.aot.Module(**({"artifact_format": "ptx"} if arch == "cuda" else {}))
-    for kernel in (seed, gather, energy):
+    for kernel in (seed, gather, bump, energy):
         module.add_kernel(kernel)
     module.add_kernel(energy.grad, name="backward")
     artifact = tmp_path / "packed.tcm"

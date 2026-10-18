@@ -4176,6 +4176,11 @@ the stored values; it does not make quantized integers differentiable.
 Vulkan export retains the explicit `vulkan_quant_experimental=True` gate.
 This qualification does not include shared-exponent quantized floats or mesh
 resources. Old LLVM packed artifacts retain embedded IDs until re-export.
+The packed AOT checks also consume the previous values from concurrent
+`atomic_add` calls through prepared CPU/CUDA/Vulkan kernels. New exports decode
+the target field rather than returning the input delta or the whole storage
+word. Re-export existing artifacts to obtain this generated-code correction;
+the module format and private ABI are unchanged.
 
 New CPU/CUDA exports requiring element lists with
 `demote_dense_struct_fors=False` declare `list_v1`. The loader derives per-tree

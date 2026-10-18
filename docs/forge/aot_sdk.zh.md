@@ -3194,6 +3194,9 @@ LLVM bit-struct 与 quant-array 存储也复用公共资源重定位路径，不
 这些存储值的浮点 ndarray 输入，不代表量化整数本身可微。Vulkan 导出仍需显式启用
 `vulkan_quant_experimental=True`。本次验证不包含共享指数的量化浮点或 mesh 资源。
 旧 LLVM packed 产物仍使用嵌入 ID，需重新导出才能重定位。
+打包 AOT 回归也通过 CPU/CUDA/Vulkan 固定 kernel 调用消费并发 `atomic_add` 的旧值。
+新产物会提取目标字段，不再返回输入增量或整个物理字。这是生成代码的修正，现有产物
+需要重新导出；模块格式和私有 ABI 保持不变。
 
 `demote_dense_struct_fors=False` 下需要元素列表的新 CPU/CUDA 产物声明 `list_v1`。
 加载器仅解析已有的任务和 SNode 元数据，按树分配列表；同一 kernel 读取的其他
