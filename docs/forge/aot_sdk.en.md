@@ -4183,6 +4183,11 @@ ceiling; dense consumers that do not use lists need no such preallocation.
 Runtimes borrowed from an existing Program retain the owner's configuration.
 Old and new buffer versions can coexist during growth and in-flight retirement;
 this is runtime storage, not payload added to the compiled package.
+New SPIR-V compilation omits standalone list-clear and GC tasks: GFX clears
+the list count at each listgen dispatch, and deactivation recycles storage
+inline. This applies to JIT and AOT, reducing shaders, pipeline creation and
+dispatches without changing the artifact format. Older artifacts with empty
+tasks remain executable. CPU/CUDA keep their required clear and GC tasks.
 Each sparse module owns a 24-byte diagnostic record and a cold producer-to-runtime
 tree mapping. Synchronization reads all live records in one existing readback
 batch; dispatch does not resolve module identities.

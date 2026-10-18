@@ -286,16 +286,19 @@ class Offloader {
           TI_ASSERT(i == path.size() - 1);
           continue;
         }
-        auto offloaded_clear_list = Stmt::make_typed<OffloadedStmt>(
-            OffloadedStmt::TaskType::serial, arch, kernel);
-        offloaded_clear_list->body->insert(
-            Stmt::make<ClearListStmt>(snode_child));
-        offloaded_clear_list->grid_dim = 1;
-        offloaded_clear_list->block_dim = 1;
-        // Intentionally do not set offloaded_clear_list->snode, so that there
-        // is nothing special about this task, which could otherwise cause
-        // problems when fused with other serial tasks.
-        root_block->insert(std::move(offloaded_clear_list));
+        // GFX clears the shared list count immediately before each listgen
+        // dispatch, including fixed replay. A separate ClearList task has
+        // no device work on SPIR-V. LLVM needs the per-SNode runtime clear.
+        if (!arch_uses_spirv(arch)) {
+          auto offloaded_clear_list = Stmt::make_typed<OffloadedStmt>(
+              OffloadedStmt::TaskType::serial, arch, kernel);
+          offloaded_clear_list->body->insert(
+              Stmt::make<ClearListStmt>(snode_child));
+          offloaded_clear_list->grid_dim = 1;
+          offloaded_clear_list->block_dim = 1;
+          // Leave snode unset so this task can fuse with other serial tasks.
+          root_block->insert(std::move(offloaded_clear_list));
+        }
         auto offloaded_listgen = Stmt::make_typed<OffloadedStmt>(
             OffloadedStmt::TaskType::listgen, arch, kernel);
         offloaded_listgen->snode = snode_child;
@@ -774,6 +777,12 @@ class FixCrossOffloadReferences : public BasicStmtVisitor {
 };
 
 void insert_gc(IRNode *root, const CompileConfig &config) {
+  // SPIR-V updates its allocator/freelist inline during deactivate. Its
+  // standalone GC offload is empty: avoid even discovering these tasks.
+  // CPU/CUDA still need their runtime list compaction and recycling work.
+  if (arch_uses_spirv(config.arch)) {
+    return;
+  }
   auto *b = dynamic_cast<Block *>(root);
   TI_ASSERT(b);
   Kernel *kernel = dynamic_cast<Kernel *>(b->parent_callable());

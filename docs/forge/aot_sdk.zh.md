@@ -3198,6 +3198,10 @@ hash、实际 field 与下游 ndarray 反向梯度、双模块，以及独立/�
 预分配 32 MiB，也不把该值作为容量上限；未使用列表的 dense 消费无需这项预分配。
 借用现有 Program 的 runtime 继续遵守 owner 的配置。缓冲版本在扩容和在途退休期间
 可能同时驻留，这部分存储仍属于 runtime，而非编译包中的载荷。
+新编译的 SPIR-V 不再生成独立列表清零和 GC 任务：GFX 在每次 listgen dispatch 前
+清零列表计数，deactivate 内直接回收存储。JIT/AOT 共用此行为，减少 shader、管线创建
+和 dispatch，无需改变产物格式；含空任务的旧产物仍可执行。CPU/CUDA 保留所需的清零
+及 GC 任务。
 每个稀疏模块持有 24 字节诊断记录，冷路径建立 producer→runtime 树映射；同步时将
 所有存活记录放进同一批既有读回，dispatch 不查询模块身份。
 
