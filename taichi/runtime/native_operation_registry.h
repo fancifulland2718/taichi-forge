@@ -331,6 +331,7 @@ void register_blas_operations(NativeOperationRegistry &registry);
 void register_cusparse_operations(NativeOperationRegistry &registry);
 void register_cusparse_bsr_operations(NativeOperationRegistry &registry);
 void register_retained_scan_operation(NativeOperationRegistry &registry);
+void register_scan_operation(NativeOperationRegistry &registry);
 void register_matrix_operations(NativeOperationRegistry &registry);
 void register_cub_source_operations(NativeOperationRegistry &registry);
 void register_cutlass_source_operations(NativeOperationRegistry &registry);

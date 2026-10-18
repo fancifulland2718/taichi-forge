@@ -1,5 +1,7 @@
 #include "taichi/program/program.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_scan.h"
+#include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
 
@@ -8249,6 +8251,54 @@ size_t enqueue_vulkan_i32_scan(Program *program,
 
 namespace gfx {
 namespace {
+class FixedVulkanScan final : public NativeOperation {
+ public:
+  FixedVulkanScan(Device &device, const ScanOperation &op)
+      : device_(device), values_(op.values.pointer) {
+    validate_native_shader_storage(Arch::vulkan, values_);
+    resolve_native_storage_range(Arch::vulkan, values_, op.values.bytes);
+    if (op.size > std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument("Scan exceeds its Vulkan uint32 shader ABI");
+    const auto &caps = device.get_caps();
+    if (((op.value_type == 3 || op.value_type == 4) &&
+         !caps.get(DeviceCapability::spirv_has_int64)) ||
+        (op.value_type == 5 &&
+         !caps.get(DeviceCapability::spirv_has_float64)))
+      throw std::invalid_argument("Vulkan scan dtype is unavailable on this device");
+    scan_.ensure_device(&device);
+    for (auto *ring :
+         {&scan_.scan_small_bindings, &scan_.scan_small_strided_bindings,
+          &scan_.scan_block_bindings, &scan_.scan_block_strided_bindings_ring,
+          &scan_.scan_add_bindings, &scan_.scan_add_strided_bindings_ring})
+      ring->exact_capacity = true;
+    plan_ = prepare_vulkan_scan(nullptr, scan_, values_, op.size, op.value_type,
+                                false, 0, 0, values_.offset);
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return scan_.allocated_bytes();
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    record_vulkan_scan(device, commands, plan_, false);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{values_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr values_;
+  VulkanScanCache scan_;
+  VulkanScanDispatchPlan plan_;
+};
+
 class FixedVulkanCompact final : public NativeOperation {
  public:
   FixedVulkanCompact(Device &device, CompactOperation operation)
@@ -8337,6 +8387,12 @@ class FixedVulkanCompact final : public NativeOperation {
   std::vector<std::unique_ptr<ShaderResourceSet>> scatter_bindings_;
 };
 }  // namespace
+
+std::shared_ptr<NativeOperation> prepare_vulkan_scan_operation(
+    Device &device,
+    const ScanOperation &operation) {
+  return std::make_shared<FixedVulkanScan>(device, operation);
+}
 
 std::shared_ptr<NativeOperation> prepare_vulkan_compact_operation(
     Device &device,

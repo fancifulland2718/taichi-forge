@@ -55,9 +55,11 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert prepared.forms == ("algorithms.prepare_unique",)
         scan = ti.algorithms.primitive_capability("scan")
         assert scan.aot_routes
-        assert all(r.entry_point != "algorithms.PrimitiveSequence" for r in scan.aot_routes)
-        assert scan.aot_routes[0].forms == ("cuda_driver/retained_scan",)
-        assert scan.aot_routes[0].backends == ("cuda",)
+        scan_sequence = next(r for r in scan.aot_routes if r.entry_point == "algorithms.PrimitiveSequence")
+        assert scan_sequence.forms == ("scan",)
+        assert scan_sequence.backends == ("cpu", "cuda", "vulkan")
+        retained = next(r for r in scan.aot_routes if r.forms == ("cuda_driver/retained_scan",))
+        assert retained.backends == ("cuda",)
         assert not ti.algorithms.primitive_capability("run_length_encode").aot_routes
         assert not ti.algorithms.primitive_capability("histogram").aot_routes
         saved = json.loads(json.dumps(asdict(unique)))

@@ -803,6 +803,25 @@ TEST(NativeOperationRegistry, RetainedScanPreservesItsSelectedCountAndType) {
   EXPECT_EQ(registry.find("cuda_retained_scan", 1, Arch::vulkan), nullptr);
 }
 
+TEST(NativeOperationRegistry, ScanDecodesWithoutAnApplicationSizeCeiling) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"scan","version":1,
+      "parameters":{"size":4294967296,"dtype":"f64"},"bindings":{"values":"v"}})"));
+  // Decoding is backend-independent. CUDA/Vulkan check their count ABI when
+  // preparing actual storage; CPU must not inherit a GPU representation limit.
+  EXPECT_EQ(registry.decode(op).kind(), "scan");
+  for (const char *parameters :
+       {R"({"size":-1,"dtype":"i32"})", R"({"size":true,"dtype":"i32"})",
+        R"({"size":4,"dtype":"f16"})", R"({"size":4,"dtype":"i32","exclusive":true})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  op.parameters = liong::json::parse_complete(R"({"size":0,"dtype":"i32"})");
+  EXPECT_EQ(registry.decode(op).kind(), "scan");
+}
+
 TEST(NativeOperationRegistry, VkfftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto plan = NativeOperationDescription::parse(liong::json::parse_complete(

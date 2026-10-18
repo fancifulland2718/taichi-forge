@@ -228,8 +228,15 @@ prepared-recording and materialized-Graph export paths.
 `aot="selected_execution_plan_routes"` means the listed paths exist; it does not
 qualify every method, backend or layout in that family. For example, unique
 sequences cover CPU/CUDA/Vulkan while prepared recordings cover CUDA/Vulkan.
-The explicit `cuda_driver/retained_scan` description does not qualify
-`PrimitiveSequence.scan()` export. `aot="no_native_export_route"` and an empty
+`PrimitiveSequence.scan()` exports in-place inclusive sums on one-dimensional
+packed scalar storage on CPU/CUDA/Vulkan. It supports i32/u32/f32/i64/u64/f64,
+subject to device dtype capabilities. Its `builtin/scan` recording owns reusable
+scratch and uses the same algorithms as JIT; export and preparation do not run
+the scan. The explicit description also accepts a fixed prefix and preserves
+the tail. The separate CUDA `cuda_driver/retained_scan` route retains its
+i32/u32 and caller-owned scratch contract. AOT scan does not synthesize an
+adjoint; an application may export its explicit adjoint separately.
+`aot="no_native_export_route"` and an empty
 tuple indicate no listed dedicated native export path for that family. Ordinary
 compiled DSL kernels follow the generic AOT contract, which does not establish
 support for a host native method. Queries neither load vendor libraries nor

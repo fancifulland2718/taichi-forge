@@ -18,6 +18,7 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/rhi/cpu/inclusive_scan.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -16713,37 +16714,7 @@ std::size_t Program::cpu_inclusive_scan_ndarray(Ndarray *data,
   TI_ERROR_IF(!ptr, "CPU native scan received a null data pointer.");
   const std::size_t n = data->get_nelement();
 
-  auto scan_typed = [n](auto *typed_ptr) {
-    using T = std::remove_pointer_t<decltype(typed_ptr)>;
-    T prefix{};
-    for (std::size_t i = 0; i < n; ++i) {
-      prefix += typed_ptr[i];
-      typed_ptr[i] = prefix;
-    }
-  };
-
-  switch (value_type) {
-    case 0:
-      scan_typed(reinterpret_cast<int32_t *>(ptr));
-      break;
-    case 1:
-      scan_typed(reinterpret_cast<float *>(ptr));
-      break;
-    case 2:
-      scan_typed(reinterpret_cast<uint32_t *>(ptr));
-      break;
-    case 3:
-      scan_typed(reinterpret_cast<uint64_t *>(ptr));
-      break;
-    case 4:
-      scan_typed(reinterpret_cast<int64_t *>(ptr));
-      break;
-    case 5:
-      scan_typed(reinterpret_cast<double *>(ptr));
-      break;
-    default:
-      TI_ERROR("CPU native scan received an unsupported value type.");
-  }
+  cpu::inclusive_scan(ptr, n, value_type);
   return 0;
 }
 

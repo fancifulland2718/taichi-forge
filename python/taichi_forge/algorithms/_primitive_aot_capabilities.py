@@ -69,6 +69,13 @@ _ROUTES = MappingProxyType({
         _prepared(("algorithms.prepare_unique_by_key",), *_UNIQUE),
     ),
     "scan": (
+        _sequence(("scan",), "one_dimensional_scalar", "i32_u32_f32_i64_u64_f64",
+                  "inplace_inclusive_sum", "device_dtype_capabilities", "explicit_adjoint_only"),
+        PrimitiveAOTRoute(
+            "aot.ExecutionPlan", ("builtin/scan",), _ALL,
+            ("packed_scalar", "i32_u32_f32_i64_u64_f64", "inplace_inclusive_sum",
+             "fixed_prefix_extent", "prepared_owner_scratch", "device_dtype_capabilities"),
+        ),
         PrimitiveAOTRoute(
             "aot.ExecutionPlan", ("cuda_driver/retained_scan",), ("cuda",),
             ("i32_u32", "inplace_inclusive_sum", "explicit_exact_scratch", "fixed_prefix_extent"),

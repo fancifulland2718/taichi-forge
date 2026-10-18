@@ -48,12 +48,12 @@ def test_retained_unique_partial_empty_and_untouched_tails(tmp_path):
 def test_retained_field_export_failure_does_not_publish_views():
     keys, output = ti.field(ti.i32, shape=5), ti.field(ti.i32, shape=5)
     count = ti.field(ti.i32, shape=())
-    sequence = ti.algorithms.primitive_sequence().unique(keys, output, count).scan(output)
+    sequence = ti.algorithms.primitive_sequence().unique(keys, output, count).count_if(output)
     builder = ti.graph.GraphBuilder()
     builder.append_native(sequence)
     graph = builder.compile()
     module = ti.aot.Module()
-    with pytest.raises(ti.TaichiRuntimeError, match="'scan'"):
+    with pytest.raises(ti.TaichiRuntimeError, match="'check'"):
         module.add_execution_plan("bad", graph, snapshot_state=True)
     assert not module._fields and not module._array_fields and not module._exported_kernels
     assert not module._execution_plans and not module._content

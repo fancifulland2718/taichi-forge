@@ -127,8 +127,8 @@ def test_primitive_sequence_export_preflight_and_binding_identity():
     with pytest.raises(ti.TaichiRuntimeError, match="strategy"):
         module.add_execution_plan("bad", graph, source_bindings=dict(keys=keys, order=order))
     sequence._calls[0].kwargs["descending"] = False
-    sequence.scan(order)
-    with pytest.raises(ti.TaichiRuntimeError, match="'scan'"):
+    sequence.count_if(order)
+    with pytest.raises(ti.TaichiRuntimeError, match="'check'"):
         module.add_execution_plan("bad", graph, source_bindings=dict(keys=keys, order=order))
     assert not module._content and not module._exported_kernels
     sequence._calls.pop()

@@ -5,6 +5,59 @@ from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
+def _scan(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms._primitive_sequence_scan
+        or type(call.workspace) is not algorithms.PrefixSumExecutor
+        or set(call.kwargs) != {"workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 1
+    ):
+        raise TaichiRuntimeError("AOT scan requires its concrete PrefixSumExecutor")
+    values = call.args[0]
+    desc = packed_description(values)
+    if len(desc.index_shape) != 1 or desc.element_shape:
+        raise TaichiRuntimeError("AOT scan requires one-dimensional packed scalar storage")
+    size = desc.index_shape[0]
+    dtype = str(desc.scalar_type)
+    if dtype not in {"i32", "u32", "f32", "i64", "u64", "f64"}:
+        raise TaichiRuntimeError("AOT scan requires supported native scalar types")
+    if call.workspace.sorting_length != size:
+        raise TaichiRuntimeError("AOT scan executor length must match its input")
+    arch = impl.current_cfg().arch
+    backend, capability = {
+        core.Arch.x64: ("cpu_native", "cpu_scan_available"),
+        core.Arch.arm64: ("cpu_native", "cpu_scan_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device_scan_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan_scan_available"),
+    }.get(arch, (None, None))
+    prog = impl.get_runtime().prog
+    if backend is None or not getattr(prog, capability)():
+        raise TaichiRuntimeError("AOT scan's selected native backend is unavailable")
+    if arch == core.Arch.vulkan and not prog.vulkan_scan_value_type_available(
+        algorithms._SCAN_VALUE_TYPE[values.dtype]
+    ):
+        raise TaichiRuntimeError("AOT scan dtype is unavailable on this Vulkan device")
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (values,), (size,))
+        or call.plan.method_name not in {
+            "cpu_inclusive_scan_ndarray", "cpu_inclusive_scan_dense_field",
+            "cuda_device_inclusive_scan_ndarray", "cuda_device_inclusive_scan_dense_field",
+            "vulkan_inclusive_scan_ndarray", "vulkan_inclusive_scan_dense_field",
+        }
+    ):
+        raise TaichiRuntimeError("AOT scan cannot reconstruct the selected cached strategy")
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="scan", version=1,
+        parameters=dict(size=size, dtype=dtype),
+        bindings=dict(values=context.retained_arrays.require(values)),
+    ))
+
+
 def _sort(call, context):
     from . import _algorithms as algorithms
 
@@ -184,7 +237,10 @@ def export_sequence(sequence, context):
 
     if type(sequence) is not PrimitiveSequence or sequence._fused_plan is not None:
         raise TaichiRuntimeError("AOT sequence requires its concrete selected native reconstruction")
-    exporters = {"sort": _sort, "sort_by_key": _sort, "compact": _compact, "unique": _unique, "unique_by_key": _unique}
+    exporters = {
+        "sort": _sort, "sort_by_key": _sort, "scan": _scan,
+        "compact": _compact, "unique": _unique, "unique_by_key": _unique,
+    }
     for call in tuple(sequence._calls):
         exporter = exporters.get(call.kind)
         if exporter is None:

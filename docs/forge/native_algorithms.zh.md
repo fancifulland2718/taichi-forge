@@ -184,8 +184,12 @@ explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
 `aot_routes` 分别列出 `Module.add_primitive`、`PrimitiveSequence`、prepared recording
 和已物化 Graph 的专用导出路径。`aot="selected_execution_plan_routes"` 表示存在所列
 路径，不表示该家族的所有 `method=`、后端或布局都可导出。例如 unique 的 sequence
-覆盖 CPU/CUDA/Vulkan，prepared recording 覆盖 CUDA/Vulkan；scan 的显式
-`cuda_driver/retained_scan` 描述不代表 `PrimitiveSequence.scan()` 已可导出。
+覆盖 CPU/CUDA/Vulkan，prepared recording 覆盖 CUDA/Vulkan。
+`PrimitiveSequence.scan()` 可导出 CPU/CUDA/Vulkan 上一维连续标量存储的原位 inclusive sum，
+类型包括 i32/u32/f32/i64/u64/f64，仍需满足设备的类型能力。其 `builtin/scan` 录制对象持有
+可复用的临时空间，与 JIT 共用算法；导出和准备不会执行扫描。显式描述还可指定固定前缀，
+保持尾部不变。独立的 CUDA `cuda_driver/retained_scan` 路径仍遵从 i32/u32 和调用方提供
+scratch 的合同。AOT scan 不生成伴随，应用可另外导出自己的显式伴随。
 `aot="no_native_export_route"` 与空列表表示当前没有列出的家族专用原生导出路径。
 普通 DSL kernel 遵从通用 AOT 合同，不能据此推导 host native method 的支持。
 查询不加载厂商库或初始化设备；具体导出仍校验策略、存储、版本和依赖，见
