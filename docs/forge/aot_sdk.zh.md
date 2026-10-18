@@ -3548,6 +3548,13 @@ Vulkan分别创建两个球体和三个箱体的MJCF新场景，拒绝访问内�
 该安装包也通过小规模CUDA SAP导出和独立AOT消费；这不等于整个GeoPhys
 公开API、所有依赖配置、solver分支或非线性求解器反向已取得资格，后者仍是应用/部署工作。
 
+安装资格还覆盖独立升级Forge runtime及配套前端，同时保留GeoPhys wheel和其中唯一的
+CUDA TCM。应用产物哈希、44个外部依赖的版本/RECORD记录保持不变；runtime/前端不含
+TCM，核心DLL只由runtime持有，各包安装文件无重叠。升级后旧CPU/CUDA/Vulkan AOT
+前向/伴随、两种加载顺序、选定Vulkan图形配方和上述小型公开场景均通过。固定SAP消费
+无需导入前端、NumPy或编译后的GeoPhys宿主。这是该配套版本的安装资格，不承诺任意
+runtime ABI兼容；前端须与runtime合同匹配。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index

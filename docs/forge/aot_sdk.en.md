@@ -4650,6 +4650,17 @@ consumption. This does not qualify the complete GeoPhys public API,
 all dependency profiles, solver branches or nonlinear solver gradients; those remain
 separate application/deployment work.
 
+The installed qualification also upgrades Forge runtime and its matching frontend
+independently while retaining the GeoPhys wheel and its single CUDA TCM. The
+application artifact hash and all 44 external dependency version/RECORD entries
+remain unchanged; runtime/frontend contain no TCM, only runtime owns the core
+DLL, and these packages have no overlapping installed files. Old CPU/CUDA/Vulkan
+AOT forward/adjoint entries, both loading orders, selected Vulkan graphics
+recipes and the bounded public scenes pass after the upgrade. Fixed SAP
+consumption needs no frontend, NumPy or compiled GeoPhys host import. This is
+qualification of this package pair, not compatibility with arbitrary runtime ABI
+versions; install a frontend matched to the runtime contract.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed
