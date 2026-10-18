@@ -8,9 +8,10 @@ resolution remains in _algorithms.py beside the existing capability cache.
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Optional, Tuple
+from ._primitive_aot_capabilities import PrimitiveAOTRoute, primitive_aot_routes
 
 
-PRIMITIVE_CAPABILITY_SCHEMA_VERSION = 2
+PRIMITIVE_CAPABILITY_SCHEMA_VERSION = 3
 
 PRIMITIVE_DEPENDENCY_CLASSES = (
     "none",
@@ -81,6 +82,7 @@ class PrimitiveCapability:
     ad: PrimitiveADCapability
     graph_replay: str
     aot: str
+    aot_routes: Tuple[PrimitiveAOTRoute, ...]
     workspace: str
     fallback: str
 
@@ -268,11 +270,11 @@ def _capability(
     atomic_order_dependent,
     ad,
     graph_replay="dsl_native_node",
-    aot="unsupported_for_native_nodes",
     workspace="optional_reusable",
     fallback,
     layouts=_NUMERIC_LAYOUTS,
 ):
+    aot_routes = primitive_aot_routes(name)
     return PrimitiveCapability(
         schema_version=PRIMITIVE_CAPABILITY_SCHEMA_VERSION,
         name=name,
@@ -288,7 +290,8 @@ def _capability(
         atomic_order_dependent=atomic_order_dependent,
         ad=ad,
         graph_replay=graph_replay,
-        aot=aot,
+        aot="selected_execution_plan_routes" if aot_routes else "no_native_export_route",
+        aot_routes=aot_routes,
         workspace=workspace,
         fallback=fallback,
     )
@@ -1431,6 +1434,7 @@ __all__ = [
     "PRIMITIVE_CAPABILITY_SCHEMA_VERSION",
     "PrimitiveMethodCapability",
     "PrimitiveADCapability",
+    "PrimitiveAOTRoute",
     "PrimitiveOperandCapability",
     "PrimitiveCapability",
     "ResolvedPrimitiveMethod",

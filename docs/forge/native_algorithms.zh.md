@@ -159,12 +159,15 @@ CUDA capture。报告分别显示私有 flags 与最近观测到的共享 native
 
 ## 机器可读 capability 合同
 
-从 Forge 0.6.0 起，每个当前 primitive family 都公开不可变的 schema-v1 描述：
+每个当前 primitive family 都公开不可变的描述；Forge 0.6.4 使用 schema-v3，
+新增按入口区分的 `aot_routes`：
 
 ```python
 contract = ti.algorithms.primitive_capability("experimental_reduce")
 for operand in contract.operands:
     print(operand.name, operand.dtypes, operand.ranks, operand.layouts)
+for route in contract.aot_routes:
+    print(route.entry_point, route.forms, route.backends, route.constraints)
 
 ti.init(arch=ti.vulkan)
 active = ti.algorithms.resolve_primitive_capability("reduce")
@@ -177,6 +180,16 @@ for method in active.methods:
 并描述 backend method、稳定性、确定性、atomic 顺序依赖、primal/forward/reverse/
 explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
 `experimental_reduce` 等公开入口名作为 family alias。
+
+`aot_routes` 分别列出 `Module.add_primitive`、`PrimitiveSequence`、prepared recording
+和已物化 Graph 的专用导出路径。`aot="selected_execution_plan_routes"` 表示存在所列
+路径，不表示该家族的所有 `method=`、后端或布局都可导出。例如 unique 的 sequence
+覆盖 CPU/CUDA/Vulkan，prepared recording 覆盖 CUDA/Vulkan；scan 的显式
+`cuda_driver/retained_scan` 描述不代表 `PrimitiveSequence.scan()` 已可导出。
+`aot="no_native_export_route"` 与空列表表示当前没有列出的家族专用原生导出路径。
+普通 DSL kernel 遵从通用 AOT 合同，不能据此推导 host native method 的支持。
+查询不加载厂商库或初始化设备；具体导出仍校验策略、存储、版本和依赖，见
+[AOT 执行与资源合同](aot_sdk.zh.md)。
 
 `resolve_primitive_capability(name)` 要求已有 active Program。它将 method 过滤到
 当前 CPU/CUDA/Vulkan 后端，并执行调度层使用的同一组无副作用 provider probe。
@@ -202,8 +215,8 @@ method/adjoint 能力与真实调度逐渐漂移。
   metric 被明确标为不可微，在写入前拒绝 automatic AD context。应在
   Tape/FwdMode 外完成这类预处理或诊断。
 
-这些规则只说明 automatic AD。native Graph node 仍是 primal-only，native-node AOT
-serialization 仍不支持。
+这些规则只说明 automatic AD。AOT 导出不为原生操作自动生成导数；已支持的执行计划
+可以组合显式伴随及导出的 `kernel.grad`，须分别满足该操作与 kernel 的梯度合同。
 
 ### CUDA runtime 可移植性
 

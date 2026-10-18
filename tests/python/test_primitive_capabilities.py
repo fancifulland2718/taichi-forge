@@ -36,6 +36,38 @@ def _method_names(capability):
     return frozenset(method.name for method in capability.methods)
 
 
+def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monkeypatch):
+    ti.reset()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Static AOT discovery must not consult a Program or provider")
+
+    with monkeypatch.context() as cold:
+        cold.setattr(ti.lang.impl, "get_runtime", forbidden)
+        cold.setattr(alg_impl._ti_core, "native_operation_capabilities", forbidden)
+        unique = ti.algorithms.primitive_capability("experimental_unique")
+        sequence = next(r for r in unique.aot_routes if r.entry_point == "algorithms.PrimitiveSequence")
+        assert sequence.forms == ("unique",)
+        assert sequence.backends == ("cpu", "cuda", "vulkan")
+        assert "consecutive_integer_keys" in sequence.constraints
+        prepared = next(r for r in unique.aot_routes if r.entry_point == "aot.Module.add_execution_plan")
+        assert prepared.backends == ("cuda", "vulkan")  # CPU uses the sequence route.
+        assert prepared.forms == ("algorithms.prepare_unique",)
+        scan = ti.algorithms.primitive_capability("scan")
+        assert scan.aot_routes
+        assert all(r.entry_point != "algorithms.PrimitiveSequence" for r in scan.aot_routes)
+        assert scan.aot_routes[0].forms == ("cuda_driver/retained_scan",)
+        assert scan.aot_routes[0].backends == ("cuda",)
+        assert not ti.algorithms.primitive_capability("run_length_encode").aot_routes
+        assert not ti.algorithms.primitive_capability("histogram").aot_routes
+        saved = json.loads(json.dumps(asdict(unique)))
+        assert saved["aot"] == "selected_execution_plan_routes"
+        assert saved["aot_routes"][1]["backends"] == ["cpu", "cuda", "vulkan"]
+        with pytest.raises(FrozenInstanceError):
+            prepared.backends = ("cpu",)
+    assert ti.lang.impl.get_runtime().prog is None
+
+
 @pytest.mark.parametrize("method", ["cuda_cub", "cuda_cub_native"])
 def test_cuda_toolkit_reference_methods_are_deprecated(method):
     with pytest.warns(
@@ -50,7 +82,7 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
 
     assert tuple(capability.name for capability in capabilities) == _FAMILIES
     assert all(
-        capability.schema_version == ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 2
+        capability.schema_version == ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 3
         for capability in capabilities
     )
     assert all(capability.dtypes for capability in capabilities)
@@ -83,7 +115,10 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     assert methods_by_family["reduce"]["cpu_native"].dependency_class == "none"
     assert methods_by_family["reduce"]["auto"].dependency_class == ("selected_provider")
     assert all(capability.ad.primal == "supported" for capability in capabilities)
-    assert all(capability.aot == "unsupported_for_native_nodes" for capability in capabilities)
+    assert all(
+        capability.aot == ("selected_execution_plan_routes" if capability.aot_routes else "no_native_export_route")
+        for capability in capabilities
+    )
 
     reduce_capability = ti.algorithms.primitive_capability("ti.algorithms.experimental_reduce()")
     assert reduce_capability.name == "reduce"
@@ -125,7 +160,7 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     assert sort_methods["vulkan_radix_u32"].provider_probes == ()
     assert sort_methods["vulkan_radix_u32"].implementation == "composite"
     serialized = json.loads(json.dumps(asdict(reduce_capability)))
-    assert serialized["schema_version"] == 2
+    assert serialized["schema_version"] == 3
     assert serialized["operands"][0]["name"] == "values"
     with pytest.raises(FrozenInstanceError):
         reduce_capability.name = "changed"

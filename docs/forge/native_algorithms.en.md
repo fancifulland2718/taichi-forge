@@ -200,13 +200,15 @@ provider supports the full semantic and resource contract.
 
 ## Machine-readable capability contract
 
-Since Forge 0.6.0, immutable schema-v1 descriptors are exposed for every
-current primitive family:
+Every current primitive family has an immutable descriptor. Forge 0.6.4 uses
+schema v3 and adds `aot_routes`, separated by export entry point:
 
 ```python
 contract = ti.algorithms.primitive_capability("experimental_reduce")
 for operand in contract.operands:
     print(operand.name, operand.dtypes, operand.ranks, operand.layouts)
+for route in contract.aot_routes:
+    print(route.entry_point, route.forms, route.backends, route.constraints)
 
 ti.init(arch=ti.vulkan)
 active = ti.algorithms.resolve_primitive_capability("reduce")
@@ -220,6 +222,19 @@ layout, and storage constraints; backend methods; stability, determinism, and
 atomic-order behavior; primal/forward/reverse/explicit-adjoint support; Graph,
 AOT, workspace, and fallback contracts. Entry-point names such as
 `experimental_reduce` are accepted as aliases for their family.
+
+`aot_routes` distinguishes dedicated `Module.add_primitive`, `PrimitiveSequence`,
+prepared-recording and materialized-Graph export paths.
+`aot="selected_execution_plan_routes"` means the listed paths exist; it does not
+qualify every method, backend or layout in that family. For example, unique
+sequences cover CPU/CUDA/Vulkan while prepared recordings cover CUDA/Vulkan.
+The explicit `cuda_driver/retained_scan` description does not qualify
+`PrimitiveSequence.scan()` export. `aot="no_native_export_route"` and an empty
+tuple indicate no listed dedicated native export path for that family. Ordinary
+compiled DSL kernels follow the generic AOT contract, which does not establish
+support for a host native method. Queries neither load vendor libraries nor
+initialize devices. Export still checks strategy, storage, version and dependencies;
+see the [AOT execution and resource contract](aot_sdk.en.md).
 
 `resolve_primitive_capability(name)` requires an active Program. It filters
 methods to the current CPU/CUDA/Vulkan backend and evaluates the same
@@ -251,8 +266,9 @@ drifting away from dispatch behavior.
   contexts before writing. Run such preprocessing or diagnostics outside
   Tape/FwdMode.
 
-These rules describe automatic AD only. Native Graph nodes remain primal-only,
-and native-node AOT serialization remains unsupported.
+These rules describe automatic AD only. AOT export does not synthesize derivatives
+for native operations. Supported execution plans can compose explicit adjoints
+and exported `kernel.grad` entries under their respective gradient contracts.
 
 ### CUDA runtime portability
 
