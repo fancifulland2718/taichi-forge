@@ -822,6 +822,29 @@ TEST(NativeOperationRegistry, ScanDecodesWithoutAnApplicationSizeCeiling) {
   EXPECT_EQ(registry.decode(op).kind(), "scan");
 }
 
+TEST(NativeOperationRegistry, ReduceSchemaPreservesBackendSpecificScheduling) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"reduce","version":1,
+      "parameters":{"size":4294967296,"dtype":"f64","op":"sum","cpu_max_threads":65},
+      "bindings":{"values":"v","output":"o"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "reduce");
+  for (const char *parameters : {
+           R"({"size":0,"dtype":"f32","op":"sum"})",
+           R"({"size":true,"dtype":"f32","op":"sum"})",
+           R"({"size":-1,"dtype":"f32","op":"sum"})",
+           R"({"size":4.0,"dtype":"f32","op":"sum"})",
+           R"({"size":4,"dtype":"f16","op":"sum"})",
+           R"({"size":4,"dtype":"f32","op":"product"})",
+           R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":0})",
+           R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":true})",
+           R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":2147483648})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;
+  }
+}
+
 TEST(NativeOperationRegistry, VkfftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto plan = NativeOperationDescription::parse(liong::json::parse_complete(

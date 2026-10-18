@@ -58,6 +58,63 @@ def _scan(call, context):
     ))
 
 
+def _reduce(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_reduce
+        or type(call.workspace) is not algorithms.ReduceWorkspace
+        or set(call.kwargs) != {"op", "method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 2
+    ):
+        raise TaichiRuntimeError("AOT reduce requires its concrete ReduceWorkspace")
+    values, output = call.args
+    algorithms._check_reduce_request(*call.args, **call.kwargs)
+    source, destination = (packed_description(a) for a in call.args)
+    if (
+        len(source.index_shape) != 1 or source.element_shape
+        or len(destination.index_shape) > 1 or destination.element_shape
+    ):
+        raise TaichiRuntimeError("AOT reduce requires packed scalar storage")
+    arch = impl.current_cfg().arch
+    backend, capability = {
+        core.Arch.x64: ("cpu_native", "cpu_reduce_available"),
+        core.Arch.arm64: ("cpu_native", "cpu_reduce_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device_reduce_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan_reduce_available"),
+    }.get(arch, (None, None))
+    prog = impl.get_runtime().prog
+    if (backend is None or call.kwargs["method"] not in ("auto", backend)
+            or not getattr(prog, capability)()):
+        raise TaichiRuntimeError("AOT reduce requires its available native strategy")
+    if arch == core.Arch.vulkan and not prog.vulkan_reduce_value_type_available(
+        algorithms._REDUCE_VALUE_TYPE[values.dtype]
+    ):
+        raise TaichiRuntimeError("AOT reduce dtype is unavailable on this Vulkan device")
+    op = call.kwargs["op"]
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (values, output), (op,))
+        or call.plan.method_name not in {
+            "cpu_reduce_ndarray", "cpu_reduce_dense_field",
+            "cuda_device_reduce_ndarray", "cuda_device_reduce_dense_field",
+            "vulkan_reduce_ndarray", "vulkan_reduce_dense_field",
+        }
+    ):
+        raise TaichiRuntimeError("AOT reduce cannot reconstruct the selected cached strategy")
+    parameters = dict(size=source.index_shape[0], dtype=str(source.scalar_type), op=op)
+    if backend == "cpu_native":
+        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="reduce", version=1,
+        parameters=parameters,
+        bindings=dict(values=context.retained_arrays.require(values),
+                      output=context.retained_arrays.require(output)),
+    ))
+
+
 def _sort(call, context):
     from . import _algorithms as algorithms
 
@@ -238,7 +295,7 @@ def export_sequence(sequence, context):
     if type(sequence) is not PrimitiveSequence or sequence._fused_plan is not None:
         raise TaichiRuntimeError("AOT sequence requires its concrete selected native reconstruction")
     exporters = {
-        "sort": _sort, "sort_by_key": _sort, "scan": _scan,
+        "sort": _sort, "sort_by_key": _sort, "scan": _scan, "reduce": _reduce,
         "compact": _compact, "unique": _unique, "unique_by_key": _unique,
     }
     for call in tuple(sequence._calls):

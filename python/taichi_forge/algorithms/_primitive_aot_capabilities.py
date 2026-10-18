@@ -82,6 +82,16 @@ _ROUTES = MappingProxyType({
         ),
     ),
     "reduce": (
+        _sequence(("reduce",), "sum_min_max", "i32_u32_f32_i64_u64_f64",
+                  "disjoint_input_output", "frozen_cpu_partition_strategy",
+                  "device_dtype_capabilities", "explicit_adjoint_only"),
+        PrimitiveAOTRoute(
+            "aot.ExecutionPlan", ("builtin/reduce",), _ALL,
+            ("packed_scalar", "nonempty_fixed_prefix", "sum_min_max",
+             "i32_u32_f32_i64_u64_f64", "disjoint_input_output",
+             "first_output_element", "prepared_owner_scratch",
+             "device_dtype_capabilities"),
+        ),
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.reduce",), ("cuda",),
             ("selected_materialized_graph", "i32_f32_sum", "exported_helper_closure",

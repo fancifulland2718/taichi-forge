@@ -60,6 +60,12 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert scan_sequence.backends == ("cpu", "cuda", "vulkan")
         retained = next(r for r in scan.aot_routes if r.forms == ("cuda_driver/retained_scan",))
         assert retained.backends == ("cuda",)
+        reduction = ti.algorithms.primitive_capability("reduce")
+        reduce_sequence = next(r for r in reduction.aot_routes if r.entry_point == "algorithms.PrimitiveSequence")
+        assert reduce_sequence.forms == ("reduce",)
+        assert reduce_sequence.backends == ("cpu", "cuda", "vulkan")
+        assert "frozen_cpu_partition_strategy" in reduce_sequence.constraints
+        assert any(r.forms == ("builtin/reduce",) for r in reduction.aot_routes)
         assert not ti.algorithms.primitive_capability("run_length_encode").aot_routes
         assert not ti.algorithms.primitive_capability("histogram").aot_routes
         saved = json.loads(json.dumps(asdict(unique)))

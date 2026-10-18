@@ -190,6 +190,13 @@ explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
 可复用的临时空间，与 JIT 共用算法；导出和准备不会执行扫描。显式描述还可指定固定前缀，
 保持尾部不变。独立的 CUDA `cuda_driver/retained_scan` 路径仍遵从 i32/u32 和调用方提供
 scratch 的合同。AOT scan 不生成伴随，应用可另外导出自己的显式伴随。
+`PrimitiveSequence.reduce()` 和显式 `builtin/reduce` 描述覆盖相同三后端、六种类型的
+非空连续标量 sum/min/max。输入与输出访问区间必须分离，只写输出首元素。Sequence
+导出冻结 CPU 分块策略，准备时借用 owner 现有线程池并持有 partial 存储；消费端线程
+较少也保留分块与合并顺序。CUDA/Vulkan 复用 JIT 算法，提前准备临时空间和绑定；
+浮点结果保持各后端原有顺序合同，不承诺跨后端逐位一致。显式描述可选择固定输入
+前缀；可选正整数参数 `cpu_max_threads` 冻结 CPU 策略，省略则采用消费端配置。
+AOT 不生成伴随。此扩展要求配对的 frontend/runtime 私有 ABI 106 组件。
 `aot="no_native_export_route"` 与空列表表示当前没有列出的家族专用原生导出路径。
 普通 DSL kernel 遵从通用 AOT 合同，不能据此推导 host native method 的支持。
 查询不加载厂商库或初始化设备；具体导出仍校验策略、存储、版本和依赖，见

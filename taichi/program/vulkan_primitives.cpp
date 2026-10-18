@@ -1,6 +1,7 @@
 #include "taichi/program/program.h"
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_scan.h"
+#include "taichi/runtime/native_reduce.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
@@ -10061,6 +10062,50 @@ VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
   return finish({record_reduce_tree, command_key, false});
 }
 
+class FixedVulkanReduce final : public NativeOperation {
+ public:
+  FixedVulkanReduce(Device &device, const ReduceOperation &op)
+      : device_(device), values_(op.values.pointer), output_(op.output.pointer) {
+    if (op.size > std::numeric_limits<std::uint32_t>::max())
+      throw std::invalid_argument("Reduce exceeds its Vulkan uint32 shader ABI");
+    for (const auto *array : {&op.values, &op.output}) {
+      validate_native_shader_storage(Arch::vulkan, array->pointer);
+      resolve_native_storage_range(Arch::vulkan, array->pointer, array->bytes);
+    }
+    const std::size_t width = op.value_type < 3 ? 4 : 8;
+    validate_native_read_write_disjoint(
+        {resolve_native_storage_range(Arch::vulkan, values_, op.size * width)},
+        {resolve_native_storage_range(Arch::vulkan, output_, width)});
+    cache_.reduce_i32_sum_atomic_bindings.ring.exact_capacity = true;
+    cache_.reduce_single_bindings.ring.exact_capacity = true;
+    cache_.reduce_single_strided_bindings.ring.exact_capacity = true;
+    cache_.reduce_private_bindings.ring.exact_capacity = true;
+    cache_.reduce_private_strided_bindings.ring.exact_capacity = true;
+    cache_.reduce_final_bindings.ring.exact_capacity = true;
+    prepared_ = prepare_vulkan_reduce(
+        nullptr, &device, cache_, values_, output_, op.size, width, width,
+        op.value_type, op.op, values_.offset, width, output_.offset, width,
+        false, false);
+  }
+  Arch arch() const override { return Arch::vulkan; }
+  Device &device() const override { return device_; }
+  std::size_t workspace_bytes() const override { return cache_.allocated_bytes(); }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{values_, output_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr values_, output_;
+  VulkanReduceCache cache_;
+  VulkanPreparedReduce prepared_;
+};
+
 std::size_t vulkan_reduce_storage_impl(Program *program,
                                        DeviceAllocation values_alloc,
                                        DeviceAllocation output_alloc,
@@ -11002,6 +11047,13 @@ std::size_t vulkan_add_merge_ndarray_impl(Program *program,
 }
 
 }  // namespace
+
+namespace gfx {
+std::shared_ptr<NativeOperation> prepare_vulkan_reduce_operation(
+    Device &device, const ReduceOperation &operation) {
+  return std::make_shared<FixedVulkanReduce>(device, operation);
+}
+}  // namespace gfx
 
 namespace {
 

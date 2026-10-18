@@ -236,6 +236,19 @@ the scan. The explicit description also accepts a fixed prefix and preserves
 the tail. The separate CUDA `cuda_driver/retained_scan` route retains its
 i32/u32 and caller-owned scratch contract. AOT scan does not synthesize an
 adjoint; an application may export its explicit adjoint separately.
+`PrimitiveSequence.reduce()` and explicit `builtin/reduce` descriptions cover
+nonempty packed scalar sum/min/max on the same three backends and six types.
+Input and output ranges must be disjoint; only the first output element is
+written. Sequence export freezes the CPU partition strategy, and preparation
+borrows the owner's existing thread pool and retains partial storage. Fewer
+consumer workers do not change the frozen partition and merge order. CUDA and
+Vulkan reuse their JIT algorithms and prepare scratch/bindings before replay;
+floating results retain each backend's existing ordering contract, not a
+cross-backend bitwise guarantee. Explicit descriptions may select a fixed input
+prefix; their optional positive `cpu_max_threads` parameter freezes the CPU
+strategy, otherwise it uses the consumer configuration. AOT does not generate
+an adjoint. This extension requires matching
+frontend/runtime private ABI 106 components.
 `aot="no_native_export_route"` and an empty
 tuple indicate no listed dedicated native export path for that family. Ordinary
 compiled DSL kernels follow the generic AOT contract, which does not establish

@@ -10,6 +10,7 @@
 namespace taichi::lang {
 class LlvmRuntimeExecutor;
 struct CompileConfig;
+struct NativePreparationContext;
 }  // namespace taichi::lang
 
 namespace capi {
@@ -23,6 +24,7 @@ class LlvmRuntime : public Runtime {
 
   void check_runtime_error();
   taichi::lang::Device &get() override;
+  void prepare_cpu_scheduler(taichi::lang::NativePreparationContext &context);
 
  private:
   /* Internally used interfaces */

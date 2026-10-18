@@ -10,6 +10,10 @@
 #include "taichi/runtime/native_operation_description.h"
 #include "taichi/runtime/native_provider.h"
 
+namespace taichi {
+class ThreadPool;
+}
+
 namespace taichi::lang {
 class RuntimeFaultDomain;
 namespace gfx {
@@ -48,6 +52,11 @@ struct NativePreparationContext {
   // Borrowed from the same owner. Resources retire before this runtime; image
   // factories use its existing queue, layout tracking and sampler registry.
   gfx::GfxRuntime *gfx_runtime{nullptr};
+  // Borrowed from this same CPU owner, never a per-operation worker pool.
+  // Prepared resources retire before the executor. Only cold preparation
+  // consults these fields; frozen partitions need not equal worker count.
+  ThreadPool *cpu_thread_pool{nullptr};
+  int cpu_max_threads{1};
 };
 
 // Build privately, then publish as const. No static registration side effects,
@@ -332,6 +341,7 @@ void register_cusparse_operations(NativeOperationRegistry &registry);
 void register_cusparse_bsr_operations(NativeOperationRegistry &registry);
 void register_retained_scan_operation(NativeOperationRegistry &registry);
 void register_scan_operation(NativeOperationRegistry &registry);
+void register_reduce_operation(NativeOperationRegistry &registry);
 void register_matrix_operations(NativeOperationRegistry &registry);
 void register_cub_source_operations(NativeOperationRegistry &registry);
 void register_cutlass_source_operations(NativeOperationRegistry &registry);
