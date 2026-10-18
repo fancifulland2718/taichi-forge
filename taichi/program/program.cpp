@@ -22,6 +22,7 @@
 #include "taichi/rhi/cpu/reduce.h"
 #include "taichi/rhi/cpu/transform.h"
 #include "taichi/rhi/cpu/indexed_copy.h"
+#include "taichi/rhi/cpu/scatter_validation.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -1381,43 +1382,11 @@ void validate_cpu_plain_scatter_indices(const int32_t *indices,
   }
 
   try {
-    // A byte marker is much cheaper than a hash table for the usual
-    // permutation-like case. Do not size it wildly beyond input cardinality:
-    // sparse destination index spaces instead use an O(n) hash set.
-    if (n >= std::numeric_limits<std::size_t>::max() / 8 ||
-        dst_items <= n * 8) {
-      std::vector<uint8_t> seen(dst_items, 0);
-      for (std::size_t i = 0; i < n; ++i) {
-        const int32_t raw_index = indices[i];
-        if (raw_index < 0) {
-          continue;
-        }
-        const std::size_t index = static_cast<std::size_t>(raw_index);
-        if (index >= dst_items) {
-          continue;
-        }
-        TI_ERROR_IF(seen[index] != 0,
-                    "CPU native plain scatter requires unique destination "
-                    "indices; use experimental_scatter_add() for duplicate "
-                    "targets.");
-        seen[index] = 1;
-      }
-      return;
-    }
-
-    std::unordered_set<int32_t> seen;
-    seen.reserve(n);
-    for (std::size_t i = 0; i < n; ++i) {
-      const int32_t raw_index = indices[i];
-      if (raw_index < 0 ||
-          static_cast<std::size_t>(raw_index) >= dst_items) {
-        continue;
-      }
-      TI_ERROR_IF(!seen.insert(raw_index).second,
-                  "CPU native plain scatter requires unique destination "
-                  "indices; use experimental_scatter_add() for duplicate "
-                  "targets.");
-    }
+    cpu::PlainScatterIndexValidator validator(n, dst_items);
+    TI_ERROR_IF(!validator.unique(indices),
+                "CPU native plain scatter requires unique destination "
+                "indices; use experimental_scatter_add() for duplicate "
+                "targets.");
   } catch (const std::bad_alloc &) {
     TI_ERROR("CPU native plain scatter could not allocate uniqueness "
              "validation storage; use experimental_scatter_add() for "

@@ -4,8 +4,44 @@
 #include <limits>
 #include <vector>
 #include "taichi/rhi/cpu/indexed_copy.h"
+#include "taichi/rhi/cpu/scatter_validation.h"
 
 namespace taichi::lang {
+
+TEST(IndexedCopyCore,
+     ScatterValidationReusesStorageAfterChangedAndInvalidIndices) {
+  for (const std::size_t bound : {std::size_t{7}, std::size_t{1} << 31}) {
+    cpu::PlainScatterIndexValidator validator(5, bound);
+    const auto bytes = validator.workspace_bytes();
+    EXPECT_GT(bytes, 0);
+    std::array<int32_t, 5> indices{0, 2, 5, -1, 6};
+    EXPECT_TRUE(validator.unique(indices.data()));
+    indices[4] = 2;
+    EXPECT_FALSE(validator.unique(indices.data()));
+    indices = {6, 4, 1, -1, std::numeric_limits<int32_t>::max()};
+    EXPECT_TRUE(validator.unique(indices.data()));
+    indices[0] = std::numeric_limits<int32_t>::max();
+    EXPECT_EQ(validator.unique(indices.data()), bound == 7);
+    EXPECT_EQ(validator.workspace_bytes(), bytes);
+  }
+  cpu::PlainScatterIndexValidator empty(17, 0);
+  EXPECT_EQ(empty.workspace_bytes(), 0);
+  EXPECT_TRUE(empty.unique(nullptr));
+}
+
+TEST(IndexedCopyCore, SparseScatterValidationHandlesStridedKeysAndCollisions) {
+  std::array<int32_t, 33> indices;
+  cpu::PlainScatterIndexValidator validator(indices.size(),
+                                            std::size_t{1} << 30);
+  for (int pass = 0; pass < 17; ++pass) {
+    for (int i = 0; i < indices.size(); ++i)
+      indices[i] = (i * 65536 + pass * 7) % (1 << 30);
+    EXPECT_TRUE(validator.unique(indices.data()));
+    indices.back() = indices[pass];
+    EXPECT_FALSE(validator.unique(indices.data()));
+  }
+  EXPECT_LE(validator.workspace_bytes(), 16 * indices.size());
+}
 
 TEST(IndexedCopyCore, RawPayloadsAndInvalidIndicesWithFewerWorkers) {
   ThreadPool pool(2);
