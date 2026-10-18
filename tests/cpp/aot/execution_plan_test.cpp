@@ -749,6 +749,35 @@ TEST(ExecutionPlan, CompactColumnsShareOnePredicateAndCount) {
        R"({"version":1,"operations":[{"kind":"compact","flags":"f","count":"n","columns":[{"values":"x","output":"y"}],"values":"z","output":"w"}]})"})
     EXPECT_THROW(ExecutionPlan::parse(description), std::invalid_argument);
 }
+TEST(ExecutionPlan, AllocatorsFollowStorageDemandNotShapeDependencies) {
+  const auto plan = ExecutionPlan::parse(R"({"version":19,
+    "resources":[
+      {"kind":"ndarray","name":"state","dtype":"i32","shape":[{"array":"shape","axis":0}],"allocator":"pool"},
+      {"kind":"ndarray","name":"shape","dtype":"i32","shape":[17],"allocator":"unused_external"},
+      {"kind":"native","name":"pool","provider":"memory","operation":"pool","version":1,"parameters":{},"bindings":{}},
+      {"kind":"ndarray","name":"unused","dtype":"i32","shape":[4],"allocator":"unbound"}],
+    "operations":[{"kind":"copy","source":"state","destination":"out"}]})");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out"}));
+  EXPECT_EQ(plan.resources.order, (std::vector<std::size_t>{1, 2, 0}));
+  EXPECT_EQ(plan.resources.materialize,
+            (std::vector<bool>{true, false, true, false}));
+  EXPECT_EQ(plan.replay_bindings,
+            (std::set<std::string>{"out", "state", "pool"}));
+  const auto external = ExecutionPlan::parse(R"({"version":19,
+    "resources":[{"kind":"ndarray","name":"state","dtype":"i32","shape":[0],"allocator":"pool"}],
+    "operations":[{"kind":"copy","source":"state","destination":"out"}]})");
+  EXPECT_EQ(external.arguments, (std::vector<std::string>{"out", "pool"}));
+}
+
+TEST(ExecutionPlan, AllocatorsRequireVersionedNativeFactoryReferences) {
+  for (const auto *json : {
+           R"({"version":18,"resources":[{"kind":"ndarray","name":"a","dtype":"i32","shape":[1],"allocator":"pool"}],"operations":[]})",
+           R"({"version":19,"resources":[{"kind":"ndarray","name":"a","dtype":"i32","shape":[1],"allocator":null}],"operations":[]})",
+           R"({"version":19,"resources":[{"kind":"ndarray","name":"a","dtype":"i32","shape":[1],"allocator":"a"}],"operations":[]})",
+           R"({"version":19,"resources":[{"kind":"ndarray","name":"a","dtype":"i32","shape":[1],"allocator":"pool"},{"kind":"native","name":"pool","provider":"memory","operation":"pool","version":1,"parameters":{},"bindings":{"x":"a"}}],"operations":[]})"})
+    EXPECT_THROW(ExecutionPlan::parse(json), std::invalid_argument);
+}
+
 TEST(ExecutionPlan, ReconstructsOnlyLiveResourceStorageAndShapeClosure) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,
     "resources":[

@@ -2767,6 +2767,33 @@ shape-only external arrays are not retained after preparation. Invalid cycles,
 duplicate names and conflicting external bindings are errors. `plan.argument_names`
 reports the external slots, including shape sources and declared gradients.
 
+An ndarray resource can name an optional `"allocator"` resource (plan v19,
+matching private ABI 103 components). For example:
+
+```python
+pool = dict(kind="native", name="pool", provider="memory", operation="pool",
+            version=1, parameters={"retained_bytes": 0}, bindings={})
+scratch = dict(kind="ndarray", name="scratch", dtype="f32", shape=[17],
+               allocator="pool")
+plan = aot.ExecutionPlan(operations, resources=[pool, scratch])
+```
+
+`memory/pool` v1 currently supports CUDA devices with memory-pool support;
+CPU/Vulkan reject required pool resources at preparation. Omitted allocators
+preserve normal allocation behavior. `retained_bytes` is the driver's release
+threshold, not a capacity limit or an eager reservation. A declared allocator
+must be an input-free native resource; an external allocator can instead be
+created by `runtime.native_resource("memory", "pool")` and bound by name.
+Unknown/non-allocator objects are rejected. Shape-only and unused arrays do not
+create or require their allocators. Views inherit their parent's allocation.
+
+Independent prepares rebuild separate pools; selected CUDA binding families
+share their own pool and arrays. Allocation records retain pool backing through
+in-flight retirement, and closing an externally bound allocator retires its
+dependent calls. Pools add no replay lookup or additional TCM. Array bytes remain
+in `resource_bytes`; driver-reserved pages are not counted a second time as
+`workspace_bytes` or `native_resource_bytes` and are not estimates of residency.
+
 Immutable kernel parameters can use `aot.Scalar("i32", 17).resource("n")` or
 `aot.Scalar("f32", -1.75).resource("gain")` in the same `resources` list. These
 parameters are absent from `plan.argument_names` and require no private device

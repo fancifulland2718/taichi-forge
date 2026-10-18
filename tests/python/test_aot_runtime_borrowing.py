@@ -52,7 +52,12 @@ def test_borrowed_aot_owner_and_retirement(tmp_path):
                 {"kind": "kernel", "entry": "forward", "arguments": ["x", "y"]},
                 {"kind": "kernel", "entry": "backward", "arguments": ["x", "y"]},
             ],
-            resources=[{"kind": "ndarray", "name": "dy", "dtype": "f32", "shape": [{"array": "x", "axis": 0}]}],
+            resources=[
+                {"kind": "ndarray", "name": "dy", "dtype": "f32", "shape": [{"array": "x", "axis": 0}],
+                 **({"allocator": "pool"} if arch == "cuda" else {})},
+                {"kind": "native", "name": "pool", "provider": "memory", "operation": "pool", "version": 1,
+                 "parameters": {}, "bindings": {}},
+            ],
             gradients={"x": "dx", "y": "dy"},
         ),
     )

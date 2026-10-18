@@ -10,6 +10,8 @@ def retained_arguments(resources, gradients, arguments):
         refs = list(resource.get("bindings", {}).values()) if resource.get("kind") == "native" else []
         if resource.get("kind") == "ndarray_view":
             refs.append(resource["array"])
+        if resource.get("kind") == "ndarray" and "allocator" in resource:
+            refs.append(resource["allocator"])
         if name in gradients:
             refs.append(gradients[name])
         for ref in refs:
@@ -27,7 +29,7 @@ def external_arguments(resources, gradients, arguments):
         raise ValueError("Execution resources must be a list and gradients a name mapping")
     if not resources and not gradients:
         return tuple(sorted(arguments))
-    by_name, references = {}, {}
+    by_name, references, allocators = {}, {}, {}
 
     def word(value, *, positive=False):
         if type(value) is not int or not int(positive) <= value <= 0xFFFFFFFF:
@@ -48,6 +50,7 @@ def external_arguments(resources, gradients, arguments):
                 "zero_initialize",
                 "initial_data",
                 "usage",
+                "allocator",
             }
         elif kind == "extent":
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
@@ -89,6 +92,9 @@ def external_arguments(resources, gradients, arguments):
         elif kind == "module_array":
             _name(resource["view"])
         elif kind in ("ndarray", "ndarray_view"):
+            if "allocator" in resource:
+                _name(resource["allocator"])
+                allocators[name] = resource["allocator"]
             if "usage" in resource:
                 _array_usage(resource["usage"])
             if kind == "ndarray_view":
@@ -144,6 +150,14 @@ def external_arguments(resources, gradients, arguments):
             if parent in by_name:
                 if by_name[name]["kind"] != "native" and by_name[parent]["kind"] not in ("ndarray", "ndarray_view", "module_array"):
                     raise ValueError(f"Execution shape reference requires an ndarray: {parent}")
+        all_refs = list(refs)
+        if name in allocators:
+            parent = allocators[name]
+            if parent in by_name and (by_name[parent]["kind"] != "native" or by_name[parent]["bindings"]):
+                raise ValueError(f"Array allocator requires an input-free native resource: {parent}")
+            all_refs.append(parent)
+        for parent in all_refs:
+            if parent in by_name:
                 indegree[name] += 1
                 dependents[parent].append(name)
     ready = [name for name, degree in indegree.items() if degree == 0]
@@ -162,6 +176,18 @@ def external_arguments(resources, gradients, arguments):
             if name in by_name and by_name[name]["kind"] not in ("ndarray", "ndarray_view", "module_array"):
                 raise ValueError(f"Execution gradient reference requires an ndarray: {name}")
         arguments.update((primal, gradient))
+    # Allocator dependencies belong to storage demand, not shape metadata.
+    materialize = set(arguments)
+    for name in reversed(ready):
+        if name not in materialize:
+            continue
+        resource = by_name[name]
+        if resource["kind"] == "native":
+            materialize.update(resource["bindings"].values())
+        elif resource["kind"] == "ndarray_view":
+            materialize.add(resource["array"])
+        elif name in allocators:
+            materialize.add(allocators[name])
     pending, seen, external = list(arguments), set(), set()
     for name in pending:
         if name not in by_name:
@@ -169,4 +195,6 @@ def external_arguments(resources, gradients, arguments):
         elif name not in seen:
             seen.add(name)
             pending.extend(references[name])
+            if name in materialize and name in allocators:
+                pending.append(allocators[name])
     return tuple(sorted(external))

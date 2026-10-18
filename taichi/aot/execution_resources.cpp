@@ -65,12 +65,15 @@ ExecutionResources::Scalar scalar(const std::string &dtype,
   return {bits};
 }
 std::vector<std::string> dependencies(
-    const ExecutionResources::Resource &resource) {
+    const ExecutionResources::Resource &resource,
+    bool include_allocator = true) {
   std::vector<std::string> result;
   const std::vector<ExecutionResources::Dimension> *dimensions = nullptr;
   if (const auto *array =
           std::get_if<ExecutionResources::Array>(&resource.value)) {
     dimensions = &array->shape;
+    if (include_allocator && !array->allocator.empty())
+      result.push_back(array->allocator);
   } else if (const auto *view =
                  std::get_if<ExecutionResources::View>(&resource.value)) {
     result.push_back(view->array);
@@ -134,8 +137,16 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
       resource.dtype = name(value["dtype"]);
       if (kind == "ndarray") {
         fields(value, {"kind", "name", "dtype", "shape", "element_shape",
-                       "zero_initialize", "initial_data", "usage"});
+                       "zero_initialize", "initial_data", "usage",
+                       "allocator"});
         auto &array = std::get<Array>(resource.value);
+        if (const auto allocator = value.obj.inner.find("allocator");
+            allocator != value.obj.inner.end()) {
+          if (integer(root["version"]) < 19)
+            throw std::invalid_argument(
+                "Array allocators require execution plan version 19");
+          array.allocator = name(allocator->second);
+        }
         if (const auto usage = value.obj.inner.find("usage");
             usage != value.obj.inner.end()) {
           if (integer(root["version"]) < 18)
@@ -228,14 +239,29 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
   std::vector<std::vector<std::size_t>> dependents(count);
   std::vector<std::size_t> indegree(count), ready;
   for (std::size_t i = 0; i < count; ++i) {
-    references[i] = dependencies(declarations[i]);
-    for (const auto &ref : references[i]) {
-      if (const auto parent = indices.find(ref); parent != indices.end()) {
+    references[i] = dependencies(declarations[i], false);
+    for (const auto &ref : references[i])
+      if (const auto parent = indices.find(ref); parent != indices.end())
         if (!std::holds_alternative<NativeOperationDescription>(
                 declarations[i].value) &&
             !is_array(declarations[parent->second]))
           throw std::invalid_argument(
               "Execution shape reference requires an ndarray: " + ref);
+    if (const auto *array = std::get_if<Array>(&declarations[i].value);
+        array && !array->allocator.empty()) {
+      if (const auto parent = indices.find(array->allocator);
+          parent != indices.end()) {
+        const auto *native = std::get_if<NativeOperationDescription>(
+            &declarations[parent->second].value);
+        if (!native || !native->bindings.empty())
+          throw std::invalid_argument(
+              "Array allocator requires an input-free native resource: " +
+              array->allocator);
+      }
+      references[i].push_back(array->allocator);
+    }
+    for (const auto &ref : references[i]) {
+      if (const auto parent = indices.find(ref); parent != indices.end()) {
         ++indegree[i];
         dependents[parent->second].push_back(i);
       }
@@ -265,6 +291,11 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
   // Propagate storage demand separately from shape-only reachability. Walk in
   // reverse topological order so nested views keep every storage ancestor.
   for (auto it = ready.rbegin(); it != ready.rend(); ++it) {
+    if (const auto *array = std::get_if<Array>(&declarations[*it].value))
+      if (materialize[*it] && !array->allocator.empty())
+        if (const auto parent = indices.find(array->allocator);
+            parent != indices.end())
+          materialize[parent->second] = true;
     if (const auto *native =
             std::get_if<NativeOperationDescription>(&declarations[*it].value)) {
       if (materialize[*it])
@@ -287,7 +318,8 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
       arguments.insert(pending[head]);
     } else if (!needed[found->second]) {
       needed[found->second] = true;
-      const auto &refs = references[found->second];
+      const auto refs = dependencies(declarations[found->second],
+                                     materialize[found->second]);
       pending.insert(pending.end(), refs.begin(), refs.end());
     }
   }
@@ -311,6 +343,9 @@ std::set<std::string> ExecutionResources::runtime_bindings(
     if (const auto gradient = gradients.find(name); gradient != gradients.end())
       add(gradient->second);
     if (const auto resource = by_name.find(name); resource != by_name.end()) {
+      if (const auto *array = std::get_if<Array>(&resource->second->value))
+        if (!array->allocator.empty())
+          add(array->allocator);
       if (const auto *native =
               std::get_if<NativeOperationDescription>(&resource->second->value))
         for (const auto &[port, slot] : native->bindings)

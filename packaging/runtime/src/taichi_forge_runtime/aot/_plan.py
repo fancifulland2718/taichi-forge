@@ -7,10 +7,12 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 18
+_MAX_EXECUTION_PLAN_VERSION = 19
 
 
 def _resource_version(resources):
+    if any(isinstance(r, dict) and r.get("kind") == "ndarray" and "allocator" in r for r in resources):
+        return 19
     return 18 if any(isinstance(r, dict) and r.get("kind") == "ndarray" and "usage" in r for r in resources) else 1
 
 

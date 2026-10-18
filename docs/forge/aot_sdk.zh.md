@@ -2125,6 +2125,29 @@ shape 各维可为 uint32 常量或 `{array, axis}` 引用，tensor 记录另用
 存储；只提供形状的外部数组在准备后不再被持有。依赖环、重复名称、与外部绑定冲突
 会报错。`plan.argument_names` 列出实际外部参数，包括形状来源和声明的梯度。
 
+ndarray 资源可通过可选 `"allocator"` 字段指定分配器资源（计划 v19，Python/native
+组件须配套 private ABI 103）。例如：
+
+```python
+pool = dict(kind="native", name="pool", provider="memory", operation="pool",
+            version=1, parameters={"retained_bytes": 0}, bindings={})
+scratch = dict(kind="ndarray", name="scratch", dtype="f32", shape=[17],
+               allocator="pool")
+plan = aot.ExecutionPlan(operations, resources=[pool, scratch])
+```
+
+`memory/pool` v1 当前支持具备内存池能力的 CUDA 设备；CPU/Vulkan 在准备期拒绝
+实际需要的池资源。省略分配器保持普通分配行为。`retained_bytes` 是驱动的释放阈值，
+不是容量上限，也不预留对应大小的存储。声明的分配器必须是不带输入绑定的 native
+资源；也可用 `runtime.native_resource("memory", "pool")` 创建外部分配器后按名称
+绑定。未知或非分配器对象会被拒绝。只用于形状和未使用的数组不创建、也不要求绑定
+其分配器；view 继承父数组的分配。
+
+独立 prepare 重建各自的池，已选 CUDA 参数绑定族共享其池和数组。分配记录持有池的
+底层存储直至在途工作退休；关闭外部绑定池会退休依赖的调用。重放不增加查询，也不
+增加第二个 TCM。数组字节仍计入 `resource_bytes`；驱动保留页不重复计入
+`workspace_bytes` 或 `native_resource_bytes`，这些计数不等于实际驻留内存。
+
 不可变 kernel 参数可在同一 `resources` 列表中使用
 `aot.Scalar("i32", 17).resource("n")` 或
 `aot.Scalar("f32", -1.75).resource("gain")`。这些参数不进入

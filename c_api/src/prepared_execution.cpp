@@ -806,9 +806,54 @@ static TiPreparedExecution prepare_execution_plan_impl(
             name);
     }
   }
+  std::map<std::string, std::shared_ptr<NativeResource>> native_objects;
+  for (const auto &[name, arg] : arguments) {
+    if (arg->type != TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+      continue;
+    auto object = rt.native_resource_registry().get(arg->value.native_resource);
+    native_objects.emplace(name, std::move(object));
+    prepared->external_resources.push_back(arg->value.native_resource);
+    if (family && !rebinding && plan.replay_bindings.count(name))
+      family->persistent_public_arguments.insert(name);
+  }
+  std::map<std::string, const NativeOperationDescription *> allocator_descriptions;
+  for (const auto index : resource_description.order) {
+    const auto &resource = resource_description.declarations[index];
+    if (const auto *native =
+            std::get_if<NativeOperationDescription>(&resource.value))
+      allocator_descriptions.emplace(resource.name, native);
+  }
+  auto resolve_allocator = [&](const std::string &name) {
+    auto found = native_objects.find(name);
+    if (found == native_objects.end()) {
+      std::shared_ptr<NativeResource> object;
+      if (rebinding) {
+        object = family->objects.at(name);
+      } else {
+        const auto description = allocator_descriptions.find(name);
+        if (description == allocator_descriptions.end() ||
+            !description->second->bindings.empty())
+          throw MemoryBindingError(
+              "Array allocator requires an input-free native resource: " + name);
+        try {
+          object = native_operation_registry().prepare_resource(
+              preparation, decoded.at(description->second), {});
+        } catch (const std::invalid_argument &error) {
+          throw MemoryBindingError(error.what());
+        }
+      }
+      prepared->native_resources.push_back(object);
+      found = native_objects.emplace(name, std::move(object)).first;
+    }
+    auto allocator =
+        std::dynamic_pointer_cast<NativeMemoryAllocator>(found->second);
+    if (!allocator)
+      throw MemoryBindingError("Native resource is not an array allocator: " + name);
+    return allocator;
+  };
   auto resource_bindings = capi::bind_execution_resources(
       rt, mod.get(), resource_description, arguments, layouts,
-      family ? family->arrays.get() : nullptr, frozen_metadata);
+      family ? family->arrays.get() : nullptr, frozen_metadata, resolve_allocator);
   prepared->resources = std::move(resource_bindings.storage);
   struct Storage {
     DevicePtr pointer;
@@ -836,16 +881,6 @@ static TiPreparedExecution prepare_execution_plan_impl(
         bytes - offset, element_bytes};
   };
   std::map<std::string, NativeArrayBinding> native_arrays;
-  std::map<std::string, std::shared_ptr<NativeResource>> native_objects;
-  for (const auto &[name, arg] : arguments) {
-    if (arg->type != TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
-      continue;
-    auto object = rt.native_resource_registry().get(arg->value.native_resource);
-    native_objects.emplace(name, std::move(object));
-    prepared->external_resources.push_back(arg->value.native_resource);
-    if (family && !rebinding && plan.replay_bindings.count(name))
-      family->persistent_public_arguments.insert(name);
-  }
   auto array_binding =
       [&](const std::string &slot) -> const NativeArrayBinding & {
     auto found = native_arrays.find(slot);
@@ -979,6 +1014,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
       host_blobs;
   for (const auto index : resource_description.order) {
     const auto &resource = resource_description.declarations[index];
+    // Allocator factories were resolved after metadata validation, before
+    // arrays. Reuse their owner instead of creating a second private pool.
+    if (native_objects.count(resource.name))
+      continue;
     if (rebinding &&
         (std::holds_alternative<NativeOperationDescription>(resource.value) ||
          std::holds_alternative<aot::ExecutionResources::HostBlob>(

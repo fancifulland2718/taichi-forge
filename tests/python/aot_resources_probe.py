@@ -87,6 +87,50 @@ def check(arch, path):
             assert read(output) == [11] * 17
 
         bindings, prepared = frames[1]
+        # Allocator factories are cold resources. Sharing an argument family
+        # shares its private pool/arrays; an independent prepare does not.
+        pool = dict(kind="native", name="pool", provider="memory", operation="pool", version=1, parameters={}, bindings={})
+        pool_array = dict(kind="ndarray", name="state", dtype="i32", shape=[17], allocator="pool")
+        pool_operations = [dict(kind="copy", source="state", destination="out"),
+                           dict(kind="fill32", destination="state", value=13)]
+        pool_init = [dict(kind="fill32", destination="state", value=7)]
+        a, b = runtime.ndarray("i32", 17), runtime.ndarray("i32", 17)
+        try:
+            if arch == "cuda":
+                family_plan = aot.ExecutionPlan(pool_operations, initialization=pool_init,
+                                               resources=[pool_array, pool],
+                                               binding_strategy="cuda_immutable_argument_frames")
+                first = family_plan.prepare(module, {"out": a})
+                sibling = first.prepare_binding({"out": b})
+                independent = family_plan.prepare(module, {"out": a})
+                first()
+                assert read(a) == [7] * 17
+                first.close()
+                sibling()
+                assert read(b) == [13] * 17
+                independent()
+                assert read(a) == [7] * 17
+                independent.close()
+                sibling()
+                sibling.close()
+
+                external = runtime.native_resource("memory", "pool")
+                external_plan = aot.ExecutionPlan(pool_operations, initialization=pool_init, resources=[pool_array])
+                retained = external_plan.prepare(module, {"pool": external, "out": a})
+                retained()
+                assert read(a) == [7] * 17
+                retained()
+                external.close()  # Retires in-flight dependents before storage.
+                raises(aot.AotError, retained)
+                retained.close()
+                raises(aot.AotError, lambda: external_plan.prepare(module, {"pool": b, "out": a}))
+            else:
+                unsupported = aot.ExecutionPlan(pool_operations, initialization=pool_init, resources=[pool_array, pool])
+                raises(aot.AotError, lambda: unsupported.prepare(module, {"out": a}))
+        finally:
+            a.close()
+            b.close()
+
         duplicate = runtime.ndarray("f32", 17)
         raises(aot.AotError, lambda: plan.prepare(module, bindings, gradients={"y": duplicate}))
         duplicate.close()

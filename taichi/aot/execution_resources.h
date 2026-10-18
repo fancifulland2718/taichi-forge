@@ -31,6 +31,9 @@ struct ExecutionResources {
     std::string initial_data;
     // Physical buffer uses are fixed at allocation; views inherit them.
     AllocUsage usage{AllocUsage::Storage};
+    // Optional cold native allocator. Empty keeps the runtime's ordinary
+    // allocation policy. No process-local pool/handle is serialized.
+    std::string allocator;
   };
   struct Scalar {
     // Exact C API scalar payload, independent of JSON numeric precision.

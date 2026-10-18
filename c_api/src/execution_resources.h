@@ -1,9 +1,11 @@
 #pragma once
 
+#include <functional>
 #include <unordered_set>
 
 #include "argument_binding.h"
 #include "taichi/aot/execution_resources.h"
+#include "taichi/runtime/native_memory_allocator.h"
 
 namespace capi {
 // Private allocations retire after the owning execution's backend recordings.
@@ -15,7 +17,9 @@ class ExecutionResourceStorage {
   ExecutionResourceStorage(const ExecutionResourceStorage &) = delete;
   ExecutionResourceStorage &operator=(const ExecutionResourceStorage &) =
       delete;
-  TiMemory allocate(uint64_t bytes, taichi::lang::AllocUsage usage);
+  TiMemory allocate(uint64_t bytes,
+                    taichi::lang::AllocUsage usage,
+                    taichi::lang::NativeMemoryAllocator *allocator = nullptr);
   // Non-owning aliases; the execution resource closure retains their parents.
   TiMemory view(TiMemory parent, uint64_t offset, uint64_t bytes);
   // The enclosing prepared execution belongs to this same module and retires
@@ -64,5 +68,7 @@ ExecutionResourceBindings bind_execution_resources(
     std::unordered_map<std::string, const TiArgument *> &arguments,
     std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts,
     SharedExecutionResources *shared = nullptr,
-    const std::unordered_set<std::string> &frozen_metadata = {});
+    const std::unordered_set<std::string> &frozen_metadata = {},
+    const std::function<std::shared_ptr<taichi::lang::NativeMemoryAllocator>(
+        const std::string &)> &allocator = {});
 }  // namespace capi

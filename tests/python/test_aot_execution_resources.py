@@ -29,6 +29,7 @@ def test_source_free_execution_resources_and_gradients(tmp_path):
         for i in range(n):
             y[i] = x[i] * x[i]
 
+    allocator = {"allocator": "pool"} if arch == "cuda" else {}
     plan = ti.aot.ExecutionPlan(
         [
             {"kind": "fill32", "destination": "scratch_grad", "value": 0},
@@ -44,11 +45,15 @@ def test_source_free_execution_resources_and_gradients(tmp_path):
                 "dtype": "f32",
                 "shape": [{"array": "shape_only", "axis": 0}],
                 "usage": ["storage", "vertex", "uniform", "index"],
+                **allocator,
             },
-            {"kind": "ndarray", "name": "shape_only", "dtype": "f32", "shape": [{"array": "x", "axis": 0}, 3]},
+            {"kind": "ndarray", "name": "shape_only", "dtype": "f32", "shape": [{"array": "x", "axis": 0}, 3],
+             "allocator": "unbound_shape_allocator"},
             {"kind": "extent", "name": "n", "dtype": "i32", "array": "scratch", "axis": 0},
-            {"kind": "ndarray", "name": "scratch_grad", "dtype": "f32", "shape": [{"array": "scratch", "axis": 0}]},
+            {"kind": "ndarray", "name": "scratch_grad", "dtype": "f32", "shape": [{"array": "scratch", "axis": 0}], **allocator},
             {"kind": "ndarray", "name": "unused", "dtype": "f64", "shape": [2147483647, 2147483647]},
+            {"kind": "native", "name": "pool", "provider": "memory", "operation": "pool",
+             "version": 1, "parameters": {}, "bindings": {}},
         ],
         gradients={"scratch": "scratch_grad", "y": "dy"},
     )

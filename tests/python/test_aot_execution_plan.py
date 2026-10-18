@@ -6,6 +6,27 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
+def test_private_allocators_follow_storage_demand_and_require_v19():
+    pool = dict(kind="native", name="pool", provider="memory", operation="pool", version=1, parameters={}, bindings={})
+    state = dict(kind="ndarray", name="state", dtype="i32", shape=[dict(array="shape", axis=0)], allocator="pool")
+    shape = dict(kind="ndarray", name="shape", dtype="i32", shape=[17], allocator="unbound")
+    operations = [dict(kind="copy", source="state", destination="out")]
+    plan = ExecutionPlan(operations, resources=[state, shape, pool])
+    assert plan.argument_names == ("out",)
+    assert plan._replay_argument_names == frozenset({"out", "state", "pool"})
+    snapshot = json.loads(plan.to_json())
+    assert snapshot["version"] == 19
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 19"):
+        ExecutionPlan.from_json(json.dumps(dict(snapshot, version=18)))
+    assert ExecutionPlan(operations, resources=[state, shape]).argument_names == ("out", "pool")
+    for change in (dict(allocator=None), dict(allocator=""), dict(allocator="shape")):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=[dict(state, **change), shape, pool])
+    with pytest.raises(ValueError, match="input-free"):
+        ExecutionPlan(operations, resources=[state, shape, dict(pool, bindings=dict(input="state"))])
+
+
 def test_private_array_usages_require_v18_and_preserve_views():
     operations = [dict(kind="copy", source="view", destination="out")]
     array = dict(kind="ndarray", name="vertices", dtype="f32", shape=[9], usage=["storage", "vertex", "indirect"])

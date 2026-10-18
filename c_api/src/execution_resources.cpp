@@ -16,7 +16,8 @@ ExecutionResourceStorage::~ExecutionResourceStorage() {
 }
 
 TiMemory ExecutionResourceStorage::allocate(uint64_t bytes,
-                                            taichi::lang::AllocUsage usage) {
+                                            taichi::lang::AllocUsage usage,
+                                            taichi::lang::NativeMemoryAllocator *allocator) {
   // Empty logical arrays still need a live, aligned binding identity.
   const auto physical = std::max<uint64_t>(1, bytes);
   if (physical > std::numeric_limits<std::size_t>::max() ||
@@ -25,7 +26,15 @@ TiMemory ExecutionResourceStorage::allocate(uint64_t bytes,
   taichi::lang::Device::AllocParams params{};
   params.size = physical;
   params.usage = usage;
-  auto memory = runtime_.allocate_memory(params);
+  if (allocator && &allocator->device() != &runtime_.get())
+    throw MemoryBindingError("Array allocator belongs to another device");
+  // This is an ordinary owning allocation. Supplying storage_owner would
+  // convert it into a non-owning imported view; the device record itself keeps
+  // the backing pool alive through recording retirement/asynchronous frees.
+  auto memory = allocator
+                    ? runtime_.register_memory(
+                          allocator->allocate_memory(physical, usage), physical)
+                    : runtime_.allocate_memory(params);
   try {
     sizes_.emplace(memory, physical);
     memories_.push_back(memory);
@@ -127,7 +136,9 @@ ExecutionResourceBindings bind_execution_resources(
     std::unordered_map<std::string, const TiArgument *> &arguments,
     std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts,
     SharedExecutionResources *shared,
-    const std::unordered_set<std::string> &frozen_metadata) {
+    const std::unordered_set<std::string> &frozen_metadata,
+    const std::function<std::shared_ptr<taichi::lang::NativeMemoryAllocator>(
+        const std::string &)> &allocator) {
   using Recipes = taichi::lang::aot::ExecutionResources;
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
@@ -391,20 +402,27 @@ ExecutionResourceBindings bind_execution_resources(
             resources.declarations[resources.order[pos]].value) &&
         resources.materialize[resources.order[pos]] &&
         argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
-      const auto usage = std::get<Recipes::Array>(
-                             resources.declarations[resources.order[pos]].value)
-                             .usage;
+      const auto &description = std::get<Recipes::Array>(
+          resources.declarations[resources.order[pos]].value);
+      // Full metadata/payload validation above precedes factory creation.
+      // A shared frame reuses both the existing array and its allocator.
+      if (shared && shared_array(name, argument.value.ndarray))
+        continue;
+      std::shared_ptr<taichi::lang::NativeMemoryAllocator> owner;
+      if (!description.allocator.empty()) {
+        if (!allocator || !(owner = allocator(description.allocator)))
+          throw MemoryBindingError("Array allocator is unavailable: " +
+                                   description.allocator);
+      }
       if (shared) {
-        if (shared_array(name, argument.value.ndarray))
-          continue;
         argument.value.ndarray.memory =
-            shared->storage->allocate(sizes[pos], usage);
+            shared->storage->allocate(sizes[pos], description.usage, owner.get());
         shared->arrays.emplace(name, argument.value.ndarray);
       } else {
         if (!result.storage)
           result.storage = std::make_unique<ExecutionResourceStorage>(runtime);
         argument.value.ndarray.memory =
-            result.storage->allocate(sizes[pos], usage);
+            result.storage->allocate(sizes[pos], description.usage, owner.get());
       }
       if (std::get<Recipes::Array>(
               resources.declarations[resources.order[pos]].value)
