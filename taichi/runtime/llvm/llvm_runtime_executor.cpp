@@ -823,6 +823,17 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       std::count_if(snode_metas.begin(), snode_metas.end(), [](const auto &meta) {
         return meta.type != SNodeType::place;
       });
+  // A purely dense traversal tree allocates only its ListManagers and one
+  // backing descriptor here; roots, runtime state, temporaries and RNG state
+  // live elsewhere. Budget worst-case manager alignment plus the descriptor
+  // and its transition to aligned payloads, rather than another full runtime.
+  // The metadata/payload/directory capacity is added separately below.
+  const bool compact_dense_pool = dense_layout && use_cuda_auto_pool_geometry &&
+                                  config_.cuda_sparse_per_snode_pool;
+  const std::size_t pool_baseline_bytes =
+      compact_dense_pool ? (element_list_snode_count + 2) *
+                               kLlvmListManagerAllocationAlignment
+                         : 32UL << 20;
   // A non-hash Element covers at most 1024 cells in one child container, so
   // its list-entry upper bound is:
   //   expected active parent cells * ceil(cells_per_container / 1024).
@@ -1051,9 +1062,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       constexpr int kListManagersPerNodeManager = 3;
       // Baseline for misc allocations (LLVMRuntime fields, NodeManager
       // structs themselves, ambient_elements, rand_states, etc).
-      constexpr std::size_t kBaselineBytes = 32UL << 20;
-
-      std::size_t auto_size = kBaselineBytes;
+      std::size_t auto_size = pool_baseline_bytes;
       // Only structural SNodes participate in listgen/struct-for traversal.
       // A place SNode is field storage, never a list parent or child, so do not
       // reserve its ~1 MiB ListManager metadata.
@@ -1136,10 +1145,10 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       // one-time global pool reused by the next tree.
       if (do_per_snode_pool) {
         // Include only traversal-participating SNode element-list metadata.
-        std::size_t global_region = kBaselineBytes +
-                                    element_list_pool_budget_bytes +
-                                    element_list_snode_count *
-                                        kListManagerBytes;
+        std::size_t global_region =
+            dense_layout ? auto_size  // Includes any explicitly requested floor.
+                         : pool_baseline_bytes + element_list_pool_budget_bytes +
+                               element_list_snode_count * kListManagerBytes;
         std::size_t total_buffer = global_region;
         for (const auto &e : snode_entries) {
           global_region += e.metadata_bytes;
@@ -1296,14 +1305,13 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       config_.device_memory_fraction == 0 &&
       config_.cuda_sparse_pool_size_GB == 0 &&
       sparse_tree_pool_alloc != nullptr && *sparse_tree_pool_alloc != nullptr) {
-    constexpr std::size_t kBaseline = 32UL << 20;
     constexpr std::size_t kMgrBytes =
         kLlvmListManagerFixedAllocationBudgetBytes;
     constexpr int kMgrsPerNode = 3;
 
     // Account only for structural SNodes which own an element list.
     std::size_t global_region =
-        kBaseline + element_list_pool_budget_bytes +
+        pool_baseline_bytes + element_list_pool_budget_bytes +
         element_list_snode_count * kMgrBytes;
     std::vector<std::pair<int, std::size_t>> snode_pools;  // (id, data_bytes)
     for (size_t i = 0; i < snode_metas.size(); i++) {

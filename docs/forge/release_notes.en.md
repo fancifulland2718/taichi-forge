@@ -40,6 +40,10 @@ lifetimes. The entries below describe the changes.
 - Fix CUDA pool ownership for multiple non-demoted dense list trees. The
   default automatic pool path assigns independent pools even without a
   NodeManager, preventing a second tree from reusing a sealed global pool.
+- Independent automatic CUDA pools for purely dense traversal now budget list
+  capacity, metadata and alignment without a repeated 32 MiB runtime baseline.
+  An eight-element fixture reduces pool reservation from 33,582,464 B to 48,512 B.
+  Explicit floors/shared-pool choices remain; capacity and warm-path work are unchanged.
 - CPU/CUDA non-demoted dense AOT declares exact task/tree list requirements
   through `list_v1`, with per-tree allocation, relocation and dense initial
   state. This fixes missing storage when consumer settings differ. CPU bitcode

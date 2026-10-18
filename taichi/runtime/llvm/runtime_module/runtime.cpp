@@ -630,6 +630,12 @@ struct PreallocatedMemoryChunk {
   std::size_t preallocated_size = 0;
 };
 
+// Host sizing uses these conservative bounds for dense traversal pools.
+// Keep structural growth from silently invalidating that allocation contract.
+static_assert(sizeof(ListManager) <= kLlvmListManagerFixedAllocationBudgetBytes);
+static_assert(sizeof(PreallocatedMemoryChunk) <=
+              kLlvmListManagerAllocationAlignment);
+
 struct LLVMRuntime {
   PreallocatedMemoryChunk runtime_objects_chunk;
   PreallocatedMemoryChunk runtime_memory_chunk;

@@ -62,16 +62,40 @@ def test_dense_list_storage_keeps_its_creation_contract():
 
 @test_utils.test(arch=ti.cuda, offline_cache=False, demote_dense_struct_fors=False)
 def test_dense_list_trees_have_independent_cuda_backing_pools():
+    _check_cuda_dense_list_pools(0, 1 << 20)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False, demote_dense_struct_fors=False, cuda_sparse_pool_size_floor_MiB=1)
+def test_dense_list_pool_respects_explicit_floor():
+    _check_cuda_dense_list_pools(1 << 20, 2 << 20)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False, demote_dense_struct_fors=False, cuda_sparse_per_snode_pool=False)
+def test_dense_list_trees_keep_explicit_shared_pool_policy():
+    _check_cuda_dense_list_pools(0, 0)
+
+
+def _check_cuda_dense_list_pools(minimum, maximum):
     trees = []
     fields = []
-    for index in range(3):
+    for index, shape in enumerate(((4, 2), (8, 8), (2, 4, 8))):
         values = ti.field(ti.i32)
         builder = ti.FieldsBuilder()
-        builder.dense(ti.i, 4).dense(ti.i, 2).place(values)
+        node = builder
+        for size in shape:
+            node = node.dense(ti.i, size)
+        node.place(values)
         tree = builder.finalize()
         trees.append(tree)
         fields.append(values)
         values[0] = 7 + index
+        memory = dict(ti.lang.impl.get_runtime().prog._debug_sparse_snode_tree_stats(tree.id))["memory"]
+        # These small traversal trees must not reserve a full runtime-sized
+        # pool. This is a regression bound for this fixture, not a user limit.
+        if maximum:
+            assert minimum <= memory["sparse_pool_reserved_bytes"] < maximum
+        else:
+            assert memory["sparse_pool_reserved_bytes"] == 0  # Shared pool is not tree-owned.
 
     @ti.kernel
     def total(values: ti.template()) -> ti.i32:
