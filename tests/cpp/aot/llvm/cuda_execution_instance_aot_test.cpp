@@ -12,6 +12,9 @@
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/fixed_graph.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/fixed_execution.h"
+#include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_scan.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/system/profiler_annotation.h"
@@ -40,6 +43,10 @@ struct InstanceOperands final : RuntimeCompletionResources {
     params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
         cuda::KernelLauncher::Config{executor.get()});
     module = LLVM::make_aot_module(std::move(params));
+    auto &loaded = static_cast<LLVM::LlvmAotModule &>(*module);
+    for (int tree : loaded.get_snode_tree_ids())
+      LLVM::allocate_aot_snode_tree_type(
+          module.get(), module->get_snode_tree(std::to_string(tree)), result);
     auto guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
     for (int i = 0; i < (with_copy_targets ? 4 : 2); ++i) {
@@ -72,20 +79,22 @@ struct InstanceOperands final : RuntimeCompletionResources {
   void *address(int index) {
     return device().get_memory_addr(*storage[index]);
   }
-  llvm_aot::KernelImpl &kernel() {
+  llvm_aot::KernelImpl &kernel(const char *name = "stage") {
     auto *result =
-        dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel("stage"));
+        dynamic_cast<llvm_aot::KernelImpl *>(module->get_kernel(name));
     if (!result)
       throw std::runtime_error("Missing saved stage kernel");
     return *result;
   }
-  cuda::FixedGraph::Dispatch dispatch(LaunchContextBuilder &args, int index) {
+  cuda::FixedGraph::Dispatch dispatch(LaunchContextBuilder &args,
+                                      int index,
+                                      const char *name = "stage") {
     args.set_arg_external_array_with_shape(
         {0}, reinterpret_cast<std::uintptr_t>(address(index)),
         count * sizeof(float), {count});
     args.set_arg_float({1}, index == 0 ? 2.0 : 7.0);
     args.set_arg_int({2}, count);
-    auto &entry = kernel();
+    auto &entry = kernel(name);
     return {&dynamic_cast<cuda::KernelLauncher &>(entry.launcher()),
             entry.handle(), &args};
   }
@@ -232,6 +241,172 @@ TEST(CudaExecutionContextAot, FixedParallelBranchesHaveIndependentTemporaries) {
   registry.retire();
   EXPECT_TRUE(graph->instance_snapshot().retired);
   EXPECT_ANY_THROW(graph->submit());
+}
+
+TEST(CudaExecutionContextAot,
+     FixedExecutionKeepsKernelCopyAndNativeRecipeOnItsDomain) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  auto operands = std::make_shared<InstanceOperands>(folder, true);
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 833);
+  cuda::ExecutionDomainRegistry registry(owner, 2);
+  auto output = registry.create({2, 0}), physics = registry.create({2, -1});
+  LaunchContextBuilder ca(&operands->kernel()), cb(&operands->kernel());
+  std::array<std::shared_ptr<NativeOperation>, 2> scans;
+  for (int i = 0; i < 2; ++i)
+    scans[i] = native_operation_registry().prepare(
+        Arch::cuda, operands->device(),
+        ScanOperation{count,
+                      1,
+                      {operands->storage[i + 2]->get_ptr(),
+                       count * sizeof(float),
+                       PrimitiveType::f32,
+                       {count},
+                       {}}});
+  const auto prepare =
+      [&](int index, LaunchContextBuilder &context,
+          const std::shared_ptr<cuda::ExecutionDomain> &domain) {
+        operands->dispatch(context, index);
+        FixedExecution::CudaExecutionBinding binding{domain, operands};
+        std::vector<FixedExecution::Operation> operations{
+            FixedExecution::BufferFill{operands->storage[index + 2]->get_ptr(),
+                                       count * sizeof(float), 0},
+            FixedExecution::Dispatch{&operands->kernel(), &context},
+            FixedExecution::BufferCopy{operands->storage[index + 2]->get_ptr(),
+                                       operands->storage[index]->get_ptr(),
+                                       count * sizeof(float)},
+            scans[index]};
+        return std::make_unique<FixedExecution>(
+            Arch::cuda, operands->device(), nullptr, operations, nullptr, owner,
+            nullptr, nullptr, nullptr, nullptr, &binding);
+      };
+  auto first = prepare(0, ca, output), second = prepare(1, cb, physics);
+  EXPECT_EQ(first->execution_kind(), 1);
+  EXPECT_GE(first->workspace_bytes(), taichi_global_tmp_buffer_size);
+  first->submit().wait();
+  second->submit().wait();
+  operands->poison_results();
+  const auto read = [&](int index, cuda::ExecutionDomain &domain) {
+    domain
+        .submit({}, nullptr,
+                [&](void *stream) {
+                  CUDADriver::get_instance().memcpy_device_to_host_async(
+                      operands->readback[index], operands->address(index + 2),
+                      count * sizeof(float), stream);
+                })
+        .wait();
+    const float total = (index == 0 ? 11.f : 36.f) * (count * (count + 1) / 2);
+    for (int j = 0; j < count; ++j)
+      EXPECT_FLOAT_EQ(operands->readback[index][j],
+                      total * (j + 1) + (j * (j + 1) / 2));
+  };
+  testing::CudaExternalGate gate;
+  auto blocked =
+      output->submit({}, nullptr, [&](void *s) { gate.enqueue_wait(s); });
+  auto pending = first->submit();
+  RuntimeCompletion sentinel;
+  {
+    ScopedExternalProfilerAnnotation range("F3/fixed_execution_native_submit");
+    sentinel = second->submit();
+  }
+  ASSERT_TRUE(poll(sentinel));
+  EXPECT_FALSE(pending.done());
+  read(1, *physics);
+  ca.set_arg_float({1}, -100);
+  cb.set_arg_float({1}, -200);
+  auto dependent = second->submit({pending});
+  EXPECT_FALSE(dependent.done());
+  std::weak_ptr<NativeOperation> first_scan = scans[0], second_scan = scans[1];
+  scans = {};
+  first.reset();
+  second.reset();
+  EXPECT_FALSE(first_scan.expired());
+  EXPECT_FALSE(second_scan.expired());
+  EXPECT_FALSE(blocked.done());
+  EXPECT_FALSE(gate.timed_out());
+  {
+    ScopedExternalProfilerAnnotation range("F3/fixed_execution_release");
+    gate.release();
+  }
+  pending.wait();
+  dependent.wait();
+  read(0, *output);
+  read(1, *physics);
+  std::weak_ptr<InstanceOperands> retained = operands;
+  operands.reset();
+  registry.retire();
+  EXPECT_TRUE(retained.expired());
+  EXPECT_TRUE(first_scan.expired());
+  EXPECT_TRUE(second_scan.expired());
+}
+
+TEST(CudaExecutionContextAot, DenseFieldInstancesPreserveIndependentProgress) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  auto operands = std::make_shared<InstanceOperands>(folder);
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 834);
+  cuda::ExecutionDomainRegistry registry(owner, 2);
+  auto output = registry.create({2, 0}), physics = registry.create({2, -1});
+  LaunchContextBuilder ca(&operands->kernel("field_stage_0")),
+      cb(&operands->kernel("field_stage_1"));
+  const auto prepare =
+      [&](int index, LaunchContextBuilder &context,
+          const std::shared_ptr<cuda::ExecutionDomain> &domain) {
+        const auto name = "field_stage_" + std::to_string(index);
+        operands->dispatch(context, index, name.c_str());
+        FixedExecution::CudaExecutionBinding binding{domain, operands};
+        return std::make_unique<FixedExecution>(
+            Arch::cuda, operands->device(), nullptr,
+            std::vector<FixedExecution::Operation>{FixedExecution::Dispatch{
+                &operands->kernel(name.c_str()), &context}},
+            nullptr, owner, nullptr, nullptr, nullptr, nullptr, &binding);
+      };
+  auto first = prepare(0, ca, output), second = prepare(1, cb, physics);
+  first->submit().wait();
+  second->submit().wait();
+  operands->poison_results();  // Roots retain one increment, ndarray outputs do
+                               // not.
+  const auto check = [&](int index, int executions,
+                         cuda::ExecutionDomain &domain) {
+    domain.submit({}, nullptr, operands->read(index).external).wait();
+    const float total = (index == 0 ? 11.f : 36.f) * (count * (count + 1) / 2);
+    for (int j = 0; j < count; ++j)
+      EXPECT_FLOAT_EQ(operands->readback[index][j], executions * (total + j));
+  };
+  testing::CudaExternalGate gate;
+  auto blocked =
+      output->submit({}, nullptr, [&](void *s) { gate.enqueue_wait(s); });
+  auto pending = first->submit();
+  RuntimeCompletion sentinel;
+  {
+    ScopedExternalProfilerAnnotation range("F3/dense_field_submit");
+    sentinel = second->submit();
+  }
+  ASSERT_TRUE(poll(sentinel));
+  EXPECT_FALSE(pending.done());
+  check(1, 2, *physics);
+  ca.set_arg_float({1}, -100);
+  cb.set_arg_float({1}, -200);
+  auto dependent = second->submit({pending});
+  EXPECT_FALSE(dependent.done());
+  first.reset();
+  second.reset();
+  EXPECT_FALSE(blocked.done());
+  EXPECT_FALSE(gate.timed_out());
+  {
+    ScopedExternalProfilerAnnotation range("F3/dense_field_release");
+    gate.release();
+  }
+  pending.wait();
+  dependent.wait();
+  check(0, 2, *output);
+  check(1, 3, *physics);
+  std::weak_ptr<InstanceOperands> retained = operands;
+  operands.reset();
+  registry.retire();
+  EXPECT_TRUE(retained.expired());
 }
 
 // A policy measurement, not an independence guarantee for DMA engines. Some

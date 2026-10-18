@@ -53,6 +53,19 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
         for j in range(n):
             out[j] = total + j
 
+    fields = [ti.field(ti.f32, shape=64) for _ in range(2)]
+
+    @ti.kernel(opt_level=tier)
+    def field_stage(out: ti.types.ndarray(ti.f32, 1), seed: ti.f32, n: ti.i32, target: ti.template()):
+        carried = carried_value(ti.Vector([seed, seed * 2.0]))
+        total = 0.0
+        for i in range(n):
+            total += carried * (i + 1)
+        for j in target:
+            target[j] += total + j
+        for j in target:
+            out[j] = target[j]
+
     caps = (
         [ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
         if explicit_target
@@ -62,6 +75,12 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
     module.add_kernel(stage, name="stage")
     module._aot_builder._add_with_launch_abi("gated_stage", module._exported_kernels["stage"], "cuda_graph_gate_v1")
     module._content.append("kernel:gated_stage")
+    output_layout = ti.ndarray(ti.f32, 64)
+    for i, field in enumerate(fields):
+        module.add_field(f"field_{i}", field)
+        module.add_kernel(
+            field_stage, name=f"field_stage_{i}", template_args={"out": output_layout, "target": field}
+        )
     directory = tmp_path / "module"
     module.save(directory)
     metadata = json.loads((directory / "aot_metadata.json").read_text(encoding="utf-8"))
@@ -77,6 +96,8 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
     assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == {
         "stage": "runtime_context_v2",
         "gated_stage": "cuda_graph_gate_context_v2",
+        "field_stage_0": "runtime_context_v2",
+        "field_stage_1": "runtime_context_v2",
     }
     assert len(metadata["launch_abi_sha256"]) == 64
     result = subprocess.run(
@@ -87,4 +108,4 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
         timeout=90,
     )
     (tmp_path / "native-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
-    assert result.returncode == 0 and "[  PASSED  ] 4 tests." in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0 and "[  PASSED  ] 6 tests." in result.stdout, result.stdout + result.stderr
