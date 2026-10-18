@@ -3,6 +3,7 @@
 #include "taichi/runtime/native_scan.h"
 #include "taichi/runtime/native_reduce.h"
 #include "taichi/runtime/native_transform.h"
+#include "taichi/runtime/native_indexed_copy.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
@@ -10647,6 +10648,47 @@ void submit_vulkan_indexed_copy(Program *program,
     program->enqueue_compute_op_lambda(prepared.record, {});
 }
 
+class FixedVulkanIndexedCopy final : public NativeOperation {
+ public:
+  FixedVulkanIndexedCopy(Device &device, const IndexedCopyOperation &op)
+      : device_(device),
+        src_(op.src.pointer),
+        indices_(op.indices.pointer),
+        dst_(op.dst.pointer) {
+    validate_indexed_copy_storage(Arch::vulkan, op);
+    cache_.ensure_pipelines(&device);
+    const auto bytes = indexed_copy_item_bytes(op);
+    prepared_ = prepare_vulkan_indexed_copy(
+        nullptr, &device, cache_, src_, indices_, dst_, op.size,
+        op.scatter ? op.size : op.src_items,
+        op.scatter ? op.dst_items : op.size, bytes, bytes, bytes, op.scatter);
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
+      const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{src_, indices_, dst_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr src_, indices_, dst_;
+  VulkanIndexedCopyCache cache_;
+  VulkanPreparedIndexedCopy prepared_;
+};
+
 struct VulkanPreparedTransform {
   std::function<void(Device *, CommandList *)> record;
   VulkanCommandReplayKey key;
@@ -11288,6 +11330,11 @@ std::size_t vulkan_add_merge_ndarray_impl(Program *program,
 }  // namespace
 
 namespace gfx {
+std::shared_ptr<NativeOperation> prepare_vulkan_indexed_copy_operation(
+    Device &device,
+    const IndexedCopyOperation &operation) {
+  return std::make_shared<FixedVulkanIndexedCopy>(device, operation);
+}
 std::shared_ptr<NativeOperation> prepare_vulkan_reduce_operation(
     Device &device, const ReduceOperation &operation) {
   return std::make_shared<FixedVulkanReduce>(device, operation);

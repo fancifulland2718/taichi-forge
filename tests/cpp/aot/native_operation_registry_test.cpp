@@ -869,6 +869,31 @@ TEST(NativeOperationRegistry, TransformSchemaUsesExactScalarBits) {
   }
 }
 
+TEST(NativeOperationRegistry, IndexedCopySchemaPreservesLayoutAndActualBackendLimits) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"indexed_copy","version":1,
+      "parameters":{"size":4294967296,"src_items":4294967296,"dst_items":4294967296,
+      "dtype":"f64","element_shape":[3],"op":"gather"},
+      "bindings":{"src":"s","indices":"i","dst":"d"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "indexed_copy");
+  for (const char *parameters : {
+           R"({"size":0,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"gather"})",
+           R"({"size":true,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":3,"dtype":"i32","element_shape":[],"op":"gather"})",
+           R"({"size":4,"src_items":3,"dst_items":4,"dtype":"i32","element_shape":[],"op":"scatter"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i16","element_shape":[],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[0],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[true],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[4294967296,4294967296],"op":"gather"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"scatter_add"})",
+           R"({"size":4,"src_items":4,"dst_items":4,"dtype":"i32","element_shape":[],"op":"gather","callback":true})"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;
+  }
+}
+
 TEST(NativeOperationRegistry, VkfftPlansDecodeWithoutLoadingProvider) {
   const auto &registry = native_operation_registry();
   auto plan = NativeOperationDescription::parse(liong::json::parse_complete(

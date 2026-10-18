@@ -47,6 +47,20 @@ def _prepared(forms, *constraints):
 
 # Only dedicated, implemented export routes belong here. Ordinary compiled DSL
 # kernels use the generic AOT contract and do not qualify a host native method.
+def _indexed_copy_routes(mode):
+    constraints = (
+        "nonempty_fixed_prefix", "one_dimensional_packed_payload", "scalar_or_tensor",
+        "i32_u32_f32_i64_u64_f64", "mutable_i32_indices", "disjoint_output",
+        "explicit_adjoint_only",
+    ) + (("unique_targets", "cpu_replay_validation") if mode == "scatter"
+         else ("repeated_indices_supported",))
+    return (
+        _sequence((mode,), *constraints),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/indexed_copy",), _ALL,
+                          (mode,) + constraints),
+    )
+
+
 _ROUTES = MappingProxyType({
     "sort": (
         _module("sort", *_SORT),
@@ -114,6 +128,8 @@ _ROUTES = MappingProxyType({
              "f64_coefficient_bits", "device_dtype_capabilities"),
         ),
     ),
+    "gather": _indexed_copy_routes("gather"),
+    "scatter": _indexed_copy_routes("scatter"),
     "segmented_scan": (
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.segmented_scan",), ("cuda",),

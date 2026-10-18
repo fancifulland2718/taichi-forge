@@ -170,6 +170,68 @@ def _transform(call, context):
     ))
 
 
+def _indexed_copy(call, context):
+    from math import prod
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func not in (algorithms.experimental_gather, algorithms.experimental_scatter)
+        or type(call.workspace) is not algorithms.IndexedCopyWorkspace
+        or set(call.kwargs) != {"method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 3
+    ):
+        raise TaichiRuntimeError("AOT indexed copy requires its concrete IndexedCopyWorkspace")
+    src, indices, dst = call.args
+    scatter = call.func is algorithms.experimental_scatter
+    mode = "scatter" if scatter else "gather"
+    algorithms._check_indexed_copy_request(
+        src, indices, dst, call.kwargs["method"], call.workspace, f"experimental_{mode}()"
+    )
+    size = algorithms._indexed_copy_item_count(src, indices, dst, scatter)
+    call.workspace.check_shape(size)
+    source, index, destination = (packed_description(a) for a in call.args)
+    if (any(len(d.index_shape) != 1 for d in (source, index, destination))
+            or index.element_shape or str(index.scalar_type) != "i32"
+            or source.scalar_type != destination.scalar_type
+            or tuple(source.element_shape) != tuple(destination.element_shape)):
+        raise TaichiRuntimeError("AOT indexed copy requires packed payloads and scalar i32 indices")
+    arch = impl.current_cfg().arch
+    backend, prefix, capability = {
+        core.Arch.x64: ("cpu_native", "cpu", "cpu_indexed_copy_available"),
+        core.Arch.arm64: ("cpu_native", "cpu", "cpu_indexed_copy_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device", "cuda_device_indexed_copy_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan", "vulkan_indexed_copy_available"),
+    }.get(arch, (None, None, None))
+    prog = impl.get_runtime().prog
+    if (backend is None or call.kwargs["method"] not in ("auto", backend)
+            or not getattr(prog, capability)()):
+        raise TaichiRuntimeError("AOT indexed copy requires its available native strategy")
+    item_bytes = core.data_type_size(source.scalar_type) * prod(source.element_shape)
+    if arch == core.Arch.cuda and not prog.cuda_device_indexed_copy_payload_available(item_bytes):
+        raise TaichiRuntimeError("AOT indexed-copy payload is unavailable on CUDA")
+    methods = {
+        f"{prefix}_{mode}_{suffix}" for suffix in (
+            "ndarray", "strided_ndarray", "dense_field", "dense_field_indices_field",
+            "dense_field_packed", "dense_field_packed_indices_field",
+        )
+    }
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (src, indices, dst), (scatter,))
+        or call.plan.method_name not in methods
+    ):
+        raise TaichiRuntimeError("AOT indexed copy cannot reconstruct the selected cached strategy")
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="indexed_copy", version=1,
+        parameters=dict(size=size, src_items=source.index_shape[0], dst_items=destination.index_shape[0],
+                        dtype=str(source.scalar_type), element_shape=list(source.element_shape), op=mode),
+        bindings=dict(src=context.retained_arrays.require(src), indices=context.retained_arrays.require(indices),
+                      dst=context.retained_arrays.require(dst)),
+    ))
+
+
 def _sort(call, context):
     from . import _algorithms as algorithms
 
@@ -384,6 +446,7 @@ def export_sequence(sequence, context):
     exporters = {
         "sort": _sort, "sort_by_key": _sort, "scan": _scan, "reduce": _reduce,
         "transform": _transform,
+        "indexed_copy": _indexed_copy,
         "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,
         "run_length_encode": _consecutive,
     }
