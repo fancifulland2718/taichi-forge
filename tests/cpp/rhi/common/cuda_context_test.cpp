@@ -5,6 +5,7 @@
 #include <taichi/rhi/cuda/cuda_context.h>
 #include <taichi/rhi/cuda/cuda_device.h>
 #include <taichi/rhi/cuda/cusparse_plan.h>
+#include <taichi/runtime/cuda/graph_memory_pool.h>
 
 #include <algorithm>
 #include <atomic>
@@ -656,6 +657,63 @@ TEST(CUDAContext, ToolkitCompatibilityUsesCudaMajorVersion) {
   EXPECT_TRUE(supports_cuda_toolkit_major(13, 12));
   EXPECT_FALSE(supports_cuda_toolkit_major(11, 12));
   EXPECT_FALSE(supports_cuda_toolkit_major(12, 13));
+}
+
+TEST(CUDAGraphMemoryPool, DeviceOwnedPoolsPreserveAllocationLeases) {
+  if (!CUDADriver::get_instance_without_context().detected() ||
+      !cuda::GraphMemoryPool::available()) {
+    GTEST_SKIP();
+  }
+  // No Program, LLVM runtime, ndarray wrapper or Python owner is needed.
+  cuda::CudaDevice device;
+  cuda::GraphMemoryPool first(device, 0), second(device, 4096);
+  const auto a = first.allocate_memory(17 * sizeof(std::uint32_t));
+  const auto b = second.allocate_memory(29 * sizeof(std::uint32_t));
+  auto &driver = CUDADriver::get_instance();
+  driver.stream_synchronize(nullptr);
+  EXPECT_EQ(first.snapshot().at("used_current_bytes"), 17 * sizeof(std::uint32_t));
+  EXPECT_EQ(second.snapshot().at("used_current_bytes"), 29 * sizeof(std::uint32_t));
+  EXPECT_EQ(second.snapshot().at("release_threshold_bytes"), 4096);
+
+  auto lease = device.acquire_allocation_lease(a);
+  ASSERT_NE(lease, nullptr);
+  auto *address = device.get_memory_addr(a);
+  first.close();
+  first.close();
+  EXPECT_EQ(first.snapshot().at("closed"), 1);
+  EXPECT_ANY_THROW(first.allocate_memory(4));
+  device.dealloc_memory(a);
+  EXPECT_EQ(device.get_memory_addr(a), nullptr);
+  // A prepared command may still own the allocation after the public handle
+  // and factory retire. Its captured address must remain usable.
+  driver.memsetd32(address, 37, 17);
+  std::array<std::uint32_t, 17> values{};
+  driver.memcpy_device_to_host(values.data(), address, sizeof(values));
+  EXPECT_TRUE(std::all_of(values.begin(), values.end(),
+                          [](auto value) { return value == 37; }));
+  EXPECT_EQ(second.snapshot().at("used_current_bytes"), 29 * sizeof(std::uint32_t));
+  lease.reset();
+  device.dealloc_memory(b);
+  driver.stream_synchronize(nullptr);
+  device.collect_graph_memory_pools();
+  EXPECT_EQ(second.snapshot().at("used_current_bytes"), 0);
+  second.close();
+}
+
+TEST(CUDAGraphMemoryPool, DeviceTeardownRetiresStandaloneFactory) {
+  if (!CUDADriver::get_instance_without_context().detected() ||
+      !cuda::GraphMemoryPool::available()) {
+    GTEST_SKIP();
+  }
+  auto device = std::make_unique<cuda::CudaDevice>();
+  cuda::GraphMemoryPool pool(*device, 0);
+  const auto allocation = pool.allocate_memory(68);
+  ASSERT_NE(device->get_memory_addr(allocation), nullptr);
+  device.reset();
+  EXPECT_EQ(pool.snapshot().size(), 1);
+  EXPECT_EQ(pool.snapshot().at("closed"), 1);
+  EXPECT_ANY_THROW(pool.allocate_memory(4));
+  pool.close();
 }
 
 TEST(CUDADevice, RejectsDeallocationWhileMapped) {

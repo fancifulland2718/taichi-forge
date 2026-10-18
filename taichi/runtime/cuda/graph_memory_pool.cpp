@@ -39,6 +39,11 @@ struct GraphMemoryPool::State : CudaDevice::RetainedGraphResource {
   std::mutex mutex;
   std::atomic<bool> closed{false};
 
+  DeviceAllocation allocate_locked(std::size_t bytes) {
+    TI_ERROR_IF(closed.load(), "Graph memory pool is closed");
+    return device->allocate_memory_from_pool(bytes, pool->handle, pool);
+  }
+
   ~State() override {
     retire_graph_resource();
   }
@@ -81,13 +86,25 @@ bool GraphMemoryPool::available() {
 GraphMemoryPool::GraphMemoryPool(Program &program,
                                  std::uint64_t retained_bytes) {
   auto resource = program.acquire_runtime_resource_submission_guard();
-  TI_ERROR_IF(program.compile_config().arch != Arch::cuda || !available(),
+  TI_ERROR_IF(program.compile_config().arch != Arch::cuda,
               "Graph-owned CUDA memory pools are unavailable");
+  auto *device = dynamic_cast<CudaDevice *>(program.get_compute_device());
+  TI_ERROR_IF(!device, "Graph memory pool requires a CUDA device");
+  initialize(*device, retained_bytes);
+  state_->program = &program;
+}
+
+GraphMemoryPool::GraphMemoryPool(CudaDevice &device,
+                                 std::uint64_t retained_bytes) {
+  initialize(device, retained_bytes);
+}
+
+void GraphMemoryPool::initialize(CudaDevice &device,
+                                  std::uint64_t retained_bytes) {
+  TI_ERROR_IF(!available(), "Graph-owned CUDA memory pools are unavailable");
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
   auto state = std::make_shared<State>();
-  state->program = &program;
-  state->device = dynamic_cast<CudaDevice *>(program.get_compute_device());
-  TI_ERROR_IF(!state->device, "Graph memory pool requires a CUDA device");
+  state->device = &device;
   state->retained_bytes = retained_bytes;
   state->pool = std::make_shared<PoolHandle>();
   state->pool->fault_reporter = state->device->backend_fault_reporter();
@@ -112,10 +129,20 @@ GraphMemoryPool::~GraphMemoryPool() {
   state_->retire_graph_resource();
 }
 
+DeviceAllocation GraphMemoryPool::allocate_memory(std::size_t bytes) {
+  auto &state = *state_;
+  TI_ERROR_IF(state.closed.load(), "Graph memory pool is closed");
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.allocate_locked(bytes);
+}
+
 Ndarray *GraphMemoryPool::create_ndarray(DataType type,
                                          const std::vector<int> &shape) {
   auto &state = *state_;
   TI_ERROR_IF(state.closed.load(), "Graph memory pool is closed");
+  TI_ERROR_IF(!state.program,
+              "Program ndarray creation requires a Program-owned memory pool");
   // Validate once, before allocating. No raw pointer import and no repeated
   // storage validation is introduced in ordinary kernel or Graph execution.
   TI_ERROR_IF(!type->is<PrimitiveType>(),
@@ -135,8 +162,7 @@ Ndarray *GraphMemoryPool::create_ndarray(DataType type,
   TI_ERROR_IF(state.closed.load(), "Graph memory pool is closed");
   return state.program->create_ndarray_with_allocator(
       type, shape, [&](std::size_t allocation_bytes) {
-        auto allocation = state.device->allocate_memory_from_pool(
-            allocation_bytes, state.pool->handle, state.pool);
+        auto allocation = state.allocate_locked(allocation_bytes);
         state.program->mark_runtime_submission_pending();
         return allocation;
       });
