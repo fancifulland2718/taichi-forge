@@ -7,6 +7,7 @@
 
 #include "taichi/ir/offloaded_task_type.h"
 #include "taichi/ir/snode_types.h"
+#include "taichi/ir/snode_hash_utils.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
 
 namespace taichi::lang::LLVM {
@@ -19,7 +20,8 @@ inline bool is_dense_aot_snode(SNodeType type) {
 inline bool is_relocatable_aot_snode(SNodeType type, bool sparse) {
   return is_dense_aot_snode(type) || (sparse && (type == SNodeType::pointer ||
                                                  type == SNodeType::bitmasked ||
-                                                 type == SNodeType::dynamic));
+                                                 type == SNodeType::dynamic ||
+                                                 type == SNodeType::hash));
 }
 
 inline bool is_relocatable_aot_task(OffloadedTaskType type, bool lists) {
@@ -95,6 +97,11 @@ inline void validate_relocatable_aot_field(
                     seen[node.runtime_local_id] ||
                     !local_ids.emplace(node.id, node.runtime_local_id).second,
                 "Invalid relocatable LLVM AOT node in tree {}", field.tree_id);
+    if (node.type == SNodeType::hash) {
+      validate_hash_snode_capacity(node.vk_max_active_hint > 0
+                                      ? node.vk_max_active_hint
+                                      : node.num_cells_per_container);
+    }
     seen[node.runtime_local_id] = true;
     can_parent[node.runtime_local_id] = node.type != SNodeType::place;
     if (node.type == SNodeType::root) {

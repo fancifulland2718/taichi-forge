@@ -3177,9 +3177,16 @@ dense tree，以及 sparse/list 树的根存储、runtime state 和预留 ID。�
 两个实例拥有独立活跃集与梯度，覆盖 CPU bitcode 和 CUDA bitcode/PTX/cubin。遍历和
 GC 的 tree/local-node key 在执行前重定位。这不把 sparse 活跃存储序列化为根快照或
 flat view。旧嵌入 ID 产物及
-hash/mesh/quantized 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
+mesh/quantized 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
 共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
+
+Hash 树现在复用同一套模块局部稀疏资源绑定。Windows CPU bitcode/CUDA PTX 的小型
+测试覆盖直接 hash 和嵌套 `hash -> hash -> dense`、碰撞、删除/重插入、实际 field
+反向梯度、双模块、普通/固定调用，以及独立/借用 runtime 的关闭/重载。容量、活跃
+列表和紧凑子池布局由编译产物携带，消费者无需复制生产者的全局 hash 选项。
+该验证不包含 hash 根快照、一般 mesh/quantized 布局或拓扑变化本身的微分。
+旧 embedded-ID hash 产物需要重新导出才能获得资源隔离。
 
 `demote_dense_struct_fors=False` 下需要元素列表的新 CPU/CUDA 产物声明 `list_v1`。
 加载器仅解析已有的任务和 SNode 元数据，按树分配列表；同一 kernel 读取的其他

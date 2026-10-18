@@ -152,7 +152,8 @@ TEST(LlvmAotMetadataTest, SparseRelocationDoesNotImplyRootSnapshotsOrMesh) {
   metadata.initial_root_data.push_back({0, 32, std::string(64, 'b')});
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(metadata));
   EXPECT_FALSE(LLVM::is_relocatable_aot_task(OffloadedTaskType::mesh_for, true));
-  EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::hash, true));
+  EXPECT_TRUE(LLVM::is_relocatable_aot_snode(SNodeType::hash, true));
+  EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::hash, false));
   EXPECT_FALSE(LLVM::is_relocatable_aot_snode(SNodeType::quant_array, true));
 }
 
@@ -214,6 +215,31 @@ TEST(LlvmAotMetadataTest, ListOwnersFollowTasksInsteadOfAllKernelDependencies) {
   cache.fields[1].snode_metas[0].type = SNodeType::pointer;
   EXPECT_EQ(LLVM::aot_element_list_tree_ids(cache, true),
             (std::unordered_set<int>{1}));
+}
+
+TEST(LlvmAotMetadataTest, HashCapacityRetainsTheCompilerIndexContract) {
+  LlvmOfflineCache::FieldCacheData field;
+  field.snode_metas.resize(3);
+  for (int i = 0; i < 3; ++i) {
+    auto &node = field.snode_metas[i];
+    node.id = node.runtime_local_id = i;
+    node.parent_id = i - 1;
+    node.type = i == 0 ? SNodeType::root
+                      : i == 1 ? SNodeType::hash : SNodeType::place;
+  }
+  auto &hash = field.snode_metas[1];
+  hash.vk_max_active_hint = 8;
+  EXPECT_NO_THROW(LLVM::validate_relocatable_aot_field(field, true));
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(field, false));
+  hash.vk_max_active_hint = 3;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(field, true));
+  hash.vk_max_active_hint = int64{1} << 31;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(field, true));
+  hash.vk_max_active_hint = -1;
+  hash.num_cells_per_container = 8;
+  EXPECT_NO_THROW(LLVM::validate_relocatable_aot_field(field, true));
+  hash.num_cells_per_container = 0;
+  EXPECT_ANY_THROW(LLVM::validate_relocatable_aot_field(field, true));
 }
 
 TEST(LlvmAotMetadataTest, ListOwnersValidateClosureAndBoundLegacyFallback) {

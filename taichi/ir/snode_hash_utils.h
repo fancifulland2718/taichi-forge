@@ -45,10 +45,7 @@ struct HashSNodeFlatLayout {
   std::size_t compact_child_pool_stride{0};
 };
 
-inline int64 get_hash_snode_capacity(const SNode &snode) {
-  int64 capacity =
-      snode.vk_max_active_hint > 0 ? snode.vk_max_active_hint
-                                   : snode.max_num_elements();
+inline void validate_hash_snode_capacity(int64 capacity) {
   TI_ERROR_IF(capacity <= 0, "Hash SNode capacity must be positive.");
   TI_ERROR_IF((capacity & (capacity - 1)) != 0,
               "Hash SNode capacity must be a power of two, got {}.",
@@ -56,6 +53,13 @@ inline int64 get_hash_snode_capacity(const SNode &snode) {
   TI_ERROR_IF(capacity > std::numeric_limits<int32>::max(),
               "Hash SNode capacity {} exceeds the 32-bit index limit.",
               capacity);
+}
+
+inline int64 get_hash_snode_capacity(const SNode &snode) {
+  const int64 capacity = snode.vk_max_active_hint > 0
+                             ? snode.vk_max_active_hint
+                             : snode.max_num_elements();
+  validate_hash_snode_capacity(capacity);
   return capacity;
 }
 

@@ -4152,10 +4152,20 @@ CPU bitcode and CUDA bitcode/PTX/cubin are covered. Traversal and garbage
 collection relocate their tree/local-node keys before execution. This does not
 serialize active sparse storage as a root snapshot/view. Old embedded-ID
 artifacts and
-hash/mesh/quantized layouts retain their embedded-ID contract: overlapping IDs
+mesh/quantized layouts retain their embedded-ID contract: overlapping IDs
 are rejected before initialization. Shared runtime allocation caches may remain resident.
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
+
+Hash trees now use the same module-local sparse binding. Small Windows CPU
+bitcode/CUDA PTX checks cover direct hash and nested `hash -> hash -> dense`,
+collisions, deletion/reinsertion, actual field reverse gradients, two modules,
+ordinary/prepared calls and close/reload in standalone/borrowed runtimes.
+Compiled hash capacity, active-list and compact-child layout remain properties
+of the artifact; consumers do not copy the producer's global hash options.
+This qualification does not include hash root snapshots, general mesh/quantized
+layouts or differentiation through topology changes. Re-export old embedded-ID
+hash artifacts to obtain resource isolation.
 
 New CPU/CUDA exports requiring element lists with
 `demote_dense_struct_fors=False` declare `list_v1`. The loader derives per-tree
