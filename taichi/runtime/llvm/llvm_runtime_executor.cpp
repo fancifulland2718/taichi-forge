@@ -1131,7 +1131,10 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       // contains the baseline, runtime/list metadata and the explicit
       // traversal-list capacity budget; each SNode's data region is a
       // sub-range of the same allocation.
-      if (do_per_snode_pool && !snode_entries.empty()) {
+      // Dense struct-for trees also own traversal lists, even without a
+      // NodeManager data region. Their finalized backing pool cannot be the
+      // one-time global pool reused by the next tree.
+      if (do_per_snode_pool) {
         // Include only traversal-participating SNode element-list metadata.
         std::size_t global_region = kBaselineBytes +
                                     element_list_pool_budget_bytes +
@@ -1189,7 +1192,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
             config_.device_memory_GB);
       }
     }
-    if (!do_per_snode_pool || snode_entries.empty()) {
+    if (!do_per_snode_pool) {
       preallocate_runtime_memory(override_size);
     }
   }

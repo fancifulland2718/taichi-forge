@@ -37,6 +37,9 @@ lifetimes. The entries below describe the changes.
 - CPU/CUDA SNode trees retain their creation-time element-list storage contract.
   Memory accounting and retirement no longer depend on later changes to
   `demote_dense_struct_fors`. Paired components use private ABI 98.
+- Fix CUDA pool ownership for multiple non-demoted dense list trees. The
+  default automatic pool path assigns independent pools even without a
+  NodeManager, preventing a second tree from reusing a sealed global pool.
 - AOT ordinary CGraphs and execution plans share exports with the same compiled
   kernel identity and launch ABI, reducing duplicate LLVM/PTX/cubin payloads
   and Vulkan aliases. Distinct specializations and explicit public aliases are

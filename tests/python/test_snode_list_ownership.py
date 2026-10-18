@@ -58,3 +58,32 @@ def test_dense_list_storage_keeps_its_creation_contract():
             cfg.demote_dense_struct_fors = demote
             tree.destroy()
         cfg.demote_dense_struct_fors = False
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False, demote_dense_struct_fors=False)
+def test_dense_list_trees_have_independent_cuda_backing_pools():
+    trees = []
+    fields = []
+    for index in range(3):
+        values = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, 4).dense(ti.i, 2).place(values)
+        tree = builder.finalize()
+        trees.append(tree)
+        fields.append(values)
+        values[0] = 7 + index
+
+    @ti.kernel
+    def total(values: ti.template()) -> ti.i32:
+        result = 0
+        for i in values:
+            result += values[i]
+        return result
+
+    for index, values in enumerate(fields):
+        assert total(values) == 7 + index
+    trees[1].destroy()
+    assert total(fields[0]) == 7
+    assert total(fields[2]) == 9
+    trees[0].destroy()
+    trees[2].destroy()

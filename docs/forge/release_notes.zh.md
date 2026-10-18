@@ -33,6 +33,8 @@
 
 - CPU/CUDA SNode 树保存创建时的元素列表资源合同，内存统计和资源退休不再依赖
   后续变化的 `demote_dense_struct_fors` 配置；配套组件使用私有 ABI 98。
+- 修复 CUDA 多棵未降级 dense 列表树的池所有权：默认自动池路径也为没有
+  NodeManager 的列表树分配独立池，避免第二棵树沿用已封存全局池而触发设备断言。
 - AOT 普通 CGraph 与执行计划按相同编译对象和 launch ABI 共享导出入口，减少重复
   LLVM/PTX/cubin 载荷及 Vulkan 别名。保留不同特化和显式公共别名，拒绝冲突覆盖；
   不修改原 Graph 或消费端格式，配套组件使用私有 ABI 97。
