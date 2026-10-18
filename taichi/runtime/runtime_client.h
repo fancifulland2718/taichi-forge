@@ -26,23 +26,32 @@ class RuntimeClientRegistry {
   // Borrowers whose wrapper can disappear during owner teardown stay alive
   // until explicit close/detach or the owner's retirement callback completes.
   void retain(const std::shared_ptr<RuntimeClient> &client);
+  // Cold, immutable dependency registration. These clients also retire before
+  // any referenced SNode root or its executable bindings are destroyed.
+  void retain(const std::shared_ptr<RuntimeClient> &client,
+              std::vector<int> snode_tree_ids);
   void detach(RuntimeClient *client);
+  void retire_snode_tree(int tree_id);
   void retire();
   bool closed() const;
 
  private:
   mutable std::mutex mutex_;
-  enum class State { open, retiring, closed };
+  enum class State { open, retiring_tree, retiring, closed };
   State state_{State::open};
+  int retiring_tree_id_{-1};
   std::thread::id retiring_thread_;
   std::condition_variable retired_;
   struct Entry {
     RuntimeClient *identity;
     std::weak_ptr<RuntimeClient> weak;
     std::shared_ptr<RuntimeClient> retained;
+    std::vector<int> snode_tree_ids;
   };
   std::vector<Entry> clients_;
-  void attach_impl(const std::shared_ptr<RuntimeClient> &client, bool retain);
+  void attach_impl(const std::shared_ptr<RuntimeClient> &client,
+                   bool retain,
+                   std::vector<int> snode_tree_ids = {});
 };
 
 }  // namespace taichi::lang

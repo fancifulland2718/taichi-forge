@@ -1180,6 +1180,11 @@ class TI_DLL_EXPORT Program {
   // Explicit borrower ownership, released by detach or finalization. The
   // caller must retire its backend payload before detaching.
   void retain_runtime_client(const std::shared_ptr<RuntimeClient> &client);
+  // Live JIT borrowers register their frozen tree closure during preparation.
+  // Tree destruction drains only clients which reference that tree.
+  void retain_runtime_client(
+      const std::shared_ptr<RuntimeClient> &client,
+      const std::vector<SNodeTreeDependency> &snode_tree_dependencies);
   void detach_runtime_client(RuntimeClient *client);
   gfx::GfxRuntime *get_gfx_runtime_for_borrowing();
   // Delayed resource owners use the typed token and helpers below to

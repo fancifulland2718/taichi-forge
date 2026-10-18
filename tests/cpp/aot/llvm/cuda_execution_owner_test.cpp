@@ -14,6 +14,7 @@
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/program/program.h"
 #include "taichi/runtime/aot_runtime_client.h"
+#include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/system/profiler_annotation.h"
 
@@ -358,6 +359,83 @@ TEST(CudaExecutionOwner, ProgramPrefixesAndBorrowedAotShareOneOwner) {
   EXPECT_TRUE(physics->snapshot().closed);
   EXPECT_FALSE(registry->accepting());
   EXPECT_ANY_THROW(registry->create({1, 0}));
+}
+
+TEST(CudaExecutionOwner, SNodeRetirementDrainsDependentDomainBeforeRootFree) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto root = std::make_unique<SNode>(0, SNodeType::root);
+  root->dense(Axis(0), 1).insert_children(SNodeType::place).dt =
+      PrimitiveType::i32;
+  auto *tree = program.add_snode_tree(std::move(root), false);
+  auto *executor = static_cast<LlvmProgramImpl *>(program.get_program_impl())
+                       ->get_runtime_executor();
+  auto *root_address = executor->get_snode_tree_root_ptr(tree->id());
+  auto &device = static_cast<cuda::CudaDevice &>(*program.get_compute_device());
+  auto allocation = device.allocate_memory_unique({2 * sizeof(std::uint32_t)});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto *address =
+      static_cast<std::uint32_t *>(device.get_memory_addr(*allocation.first));
+  auto registry = program.cuda_execution_domains();
+  auto dependent = registry->create({1, 0});
+  auto peer = registry->create({1, 0});
+  std::promise<void> entered;
+  class TreeClient final : public RuntimeClient {
+   public:
+    TreeClient(std::shared_ptr<cuda::ExecutionDomain> domain,
+               std::promise<void> &entered)
+        : domain_(std::move(domain)), entered_(entered) {
+    }
+    void retire() override {
+      entered_.set_value();
+      domain_->close();
+    }
+
+   private:
+    std::shared_ptr<cuda::ExecutionDomain> domain_;
+    std::promise<void> &entered_;
+  };
+  program.retain_runtime_client(
+      std::make_shared<TreeClient>(dependent, entered),
+      program.snapshot_snode_tree_dependencies({tree->id()}));
+  program.synchronize();
+  testing::CudaExternalGate gate;
+  auto blocked = dependent->submit({}, nullptr, [&](void *stream) {
+    gate.enqueue_wait(stream);
+    auto &driver = CUDADriver::get_instance();
+    driver.memsetd32_async(root_address, 0x3210ABCD, 1, stream);
+    driver.memcpy_device_to_device_async(address, root_address,
+                                         sizeof(std::uint32_t), stream);
+  });
+  auto destroy =
+      std::async(std::launch::async, [&] { program.destroy_snode_tree(tree); });
+  entered.get_future().wait();
+  EXPECT_EQ(destroy.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  auto sentinel = peer->submit({}, nullptr, [&](void *stream) {
+    CUDADriver::get_instance().memsetd32_async(address + 1, 0x1234FEDC, 1,
+                                               stream);
+  });
+  sentinel.wait();
+  auto context = CUDAContext::get_instance().get_guard();
+  std::uint32_t observed = 0;
+  CUDADriver::get_instance().memcpy_device_to_host(&observed, address + 1,
+                                                   sizeof(observed));
+  EXPECT_EQ(observed, 0x1234FEDCu);
+  EXPECT_FALSE(blocked.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  destroy.get();
+  EXPECT_TRUE(blocked.done());
+  EXPECT_TRUE(dependent->snapshot().closed);
+  EXPECT_TRUE(peer->snapshot().accepting);
+  CUDADriver::get_instance().memcpy_device_to_host(&observed, address,
+                                                   sizeof(observed));
+  EXPECT_EQ(observed, 0x3210ABCDu);
+  allocation.first.reset();
+  program.finalize();
 }
 
 TEST(CudaExecutionOwner, StandaloneAotWaitAndDestroyRetireIndependentWork) {

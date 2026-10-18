@@ -5804,6 +5804,10 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // sections and waits for current host submissions to finish. Explicit tree
   // destruction is a cold path, so complete outstanding device work before
   // releasing the root allocation.
+  if (runtime_clients_) {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.runtime_clients");
+    runtime_clients_->retire_snode_tree(tree_id);
+  }
   {
     TI_COMPILE_PROFILER("cpp.snode.destroy.backend_sync");
     program_impl_->synchronize();
@@ -8672,6 +8676,26 @@ void Program::retain_runtime_client(
     runtime_clients_ = std::make_unique<RuntimeClientRegistry>();
   }
   runtime_clients_->retain(client);
+}
+
+void Program::retain_runtime_client(
+    const std::shared_ptr<RuntimeClient> &client,
+    const std::vector<SNodeTreeDependency> &snode_tree_dependencies) {
+  // Match graph/tree-destruction lock order: tree lifecycle before resources.
+  auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  auto guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("retain SNode runtime client");
+  // IDs can be reused, so qualify the frozen closure by generation before
+  // registering it. Successful destruction removes every matching client
+  // before an ID can become available to a new tree.
+  validate_snode_tree_dependencies(snode_tree_dependencies, "Runtime client");
+  std::vector<int> snode_tree_ids;
+  snode_tree_ids.reserve(snode_tree_dependencies.size());
+  for (const auto &dependency : snode_tree_dependencies)
+    snode_tree_ids.push_back(dependency.tree_id);
+  if (!runtime_clients_)
+    runtime_clients_ = std::make_unique<RuntimeClientRegistry>();
+  runtime_clients_->retain(client, std::move(snode_tree_ids));
 }
 
 void Program::detach_runtime_client(RuntimeClient *client) {
