@@ -362,6 +362,16 @@ class PreparedPass final : public NativeOperation {
       : device_(owner_device(c)),
         fault_(c.fault_domain),
         payload_(std::make_unique<Payload>()) {
+    std::unordered_set<DeviceAllocationId> seen_buffers;
+    const auto array = [&](uint32_t index) -> const NativeArrayBinding & {
+      const auto &binding = indexed(d.arrays, index);
+      if (binding.pointer.device != &device_)
+        throw std::invalid_argument(
+            "Graphics buffer belongs to another runtime device");
+      if (seen_buffers.insert(binding.pointer.alloc_id).second)
+        buffers_.push_back(binding.pointer);
+      return binding;
+    };
     std::map<VkImage, ImageLayout> image_layouts;
     std::unordered_map<const NativeSampledImage *, ImageLayout>
         resource_layouts;
@@ -428,13 +438,13 @@ class PreparedPass final : public NativeOperation {
       std::vector<VulkanGraphicsVertexRange> ranges;
       std::vector<std::pair<uint32_t, DevicePtr>> vertices;
       for (const auto &v : input.vertices) {
-        const auto &a = indexed(d.arrays, v.array);
+        const auto &a = array(v.array);
         ranges.push_back({v.binding, {a.pointer, size_t(a.bytes)}});
         vertices.emplace_back(v.binding, a.pointer);
       }
       std::optional<VulkanGraphicsBufferRange> indices;
       if (input.indices) {
-        const auto &a = indexed(d.arrays, *input.indices);
+        const auto &a = array(*input.indices);
         if (a.scalar_type != PrimitiveType::u32 &&
             a.scalar_type != PrimitiveType::i32)
           throw std::invalid_argument("Graphics index array must use i32 or u32");
@@ -445,7 +455,7 @@ class PreparedPass final : public NativeOperation {
       std::optional<VulkanGraphicsIndirectPacket> indirect;
       if (input.indirect) {
         const auto command_view = [&](uint32_t index) {
-          const auto &a = indexed(d.arrays, index);
+          const auto &a = array(index);
           if (a.scalar_type != PrimitiveType::u32)
             throw std::invalid_argument(
                 "Graphics indirect command/count arrays must use u32");
@@ -472,7 +482,7 @@ class PreparedPass final : public NativeOperation {
         buffer.binding = v.binding;
         buffer.storage = v.storage;
         if (v.arrays.empty()) {
-          const auto &a = indexed(d.arrays, v.array);
+          const auto &a = array(v.array);
           buffer.allocation = a.pointer;
           buffer.offset = size_t(a.pointer.offset);
           buffer.bytes = size_t(a.bytes);
@@ -487,7 +497,7 @@ class PreparedPass final : public NativeOperation {
                 "capability");
           buffer.array_elements.reserve(v.arrays.size());
           for (const auto index : v.arrays) {
-            const auto &a = indexed(d.arrays, index);
+            const auto &a = array(index);
             buffer.array_elements.push_back({a.pointer, size_t(a.bytes)});
           }
         }
@@ -572,7 +582,7 @@ class PreparedPass final : public NativeOperation {
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements()
       const override {
-    return {images_, true};
+    return {images_, true, buffers_};
   }
   void record_vulkan(Device *, CommandList *commands) override {
     for (const auto &[scene, stages] : payload_->scene_reads)
@@ -595,6 +605,7 @@ class PreparedPass final : public NativeOperation {
   std::shared_ptr<RuntimeFaultDomain> fault_;
   std::unique_ptr<Payload> payload_;
   std::vector<std::pair<DeviceAllocation, ImageLayout>> images_;
+  std::vector<DeviceAllocation> buffers_;
 };
 #endif
 

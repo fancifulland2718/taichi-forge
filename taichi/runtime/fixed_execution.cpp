@@ -952,6 +952,7 @@ FixedExecution::FixedExecution(
         auto requirements = (*external)->vulkan_recording_requirements();
         op.images = std::move(requirements.images);
         op.graphics_queue = requirements.graphics_queue;
+        op.buffers = std::move(requirements.buffers);
         op.external = [external = *external](Device *device,
                                              CommandList *commands) {
           commands->memory_barrier();

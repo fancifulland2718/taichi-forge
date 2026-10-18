@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <unordered_set>
 #include <unordered_map>
@@ -60,6 +61,10 @@ struct NativeRecordingState {
 struct NativeVulkanRecordingRequirements {
   std::vector<std::pair<DeviceAllocation, ImageLayout>> images;
   bool graphics_queue{false};
+  // Complete external buffer operands, resolved once during preparation.
+  // nullopt means unknown; an empty list certifies no external buffer access.
+  // Private provider storage remains owned by the prepared resource itself.
+  std::optional<std::vector<DeviceAllocation>> buffers;
 };
 
 // Prepared backend commands own their scratch and recording state. The
