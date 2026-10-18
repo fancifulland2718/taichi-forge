@@ -4174,7 +4174,15 @@ small stable-topology workloads are not guaranteed to run faster. Default fixed
 replay caps listgen grids using the compiler's existing parent-list capacity
 bound and grid-stride traversal. It adds no active-count readback or generated
 artifact; explicit task plans retain their selected launch policy. Ordinary JIT
-Graph admission is unchanged. Matching components require private ABI 96.
+Graph admission is unchanged. Matching components require private ABI 97.
+
+Windows CUDA bitcode/PTX/cubin checks also cover sparse
+`cuda_immutable_argument_frames` families. Multiple scalar/array binding frames
+share one executable while preserving actual field gradients and ordinary-call
+list coherence. Closing the active frame preserves its siblings; failed binding
+preparation and in-flight module closure follow the existing retirement contract.
+This qualifies the existing root-graph update path, not embedding arbitrary
+prepared Graphs in a separate parent graph.
 
 CUDA exporters can select `ti.aot.Module(artifact_format="ptx")`, or pass
 `--artifact-format ptx` to the example exporter. The default remains LLVM

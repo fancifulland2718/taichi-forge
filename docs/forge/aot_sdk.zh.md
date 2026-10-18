@@ -3192,7 +3192,12 @@ host 回读。不同模块不共享该缓存。关闭依赖会等待在途工作
 固定重放会减少 host 提交，却仍执行设备列表检查，不能据此保证稳定拓扑的小任务更快。
 默认固定重放使用编译器已有的父列表容量上界缩小 listgen 网格，沿用 grid-stride
 遍历；不读回活跃数量、不新增编译产物，显式 task plan 保持其选择的启动策略。
-该扩展不改变普通 JIT Graph 的稀疏准入。配套组件使用私有 ABI 96。
+该扩展不改变普通 JIT Graph 的稀疏准入。配套组件使用私有 ABI 97。
+
+Windows CUDA bitcode/PTX/cubin 还验证了稀疏 `cuda_immutable_argument_frames`
+参数族：多个参数帧共用一个可执行图，切换标量/数组后保留实际 field 梯度和普通调用
+的列表一致性。关闭当前帧不影响其余帧；失败的参数准备及模块在途关闭遵守原退休合同。
+这是既有根图更新路径的验证，不代表可将任意 prepared Graph 嵌入另一个独立父图。
 
 CUDA 导出可选择 `ti.aot.Module(artifact_format="ptx")`，示例导出命令也支持
 `--artifact-format ptx`；默认仍为 LLVM bitcode。PTX 在生产端完成用户 kernel

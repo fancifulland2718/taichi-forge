@@ -9,6 +9,78 @@ from taichi_forge_runtime.aot import ExecutionPlan, Runtime, Scalar
 from tests.python.aot_optix_probe import raises, read, write
 
 
+def check_binding_family(runtime, module, other):
+    """A shared executable retains sparse source frames across graph updates."""
+    plan = ExecutionPlan(
+        [
+            dict(kind="kernel", entry="deactivate", arguments=[]),
+            dict(kind="kernel", entry="activate", arguments=["scale"]),
+            *[dict(kind="fill32", destination=name, value=0) for name in ("out", "loss", "gradient")],
+            dict(kind="fill32", destination="dloss", value=0x3F800000),
+            dict(kind="kernel", entry="gather", arguments=["out"]),
+            dict(kind="kernel", entry="sparse_energy", arguments=["loss"]),
+            dict(kind="kernel", entry="sparse_backward", arguments=["loss"]),
+            dict(kind="kernel", entry="gather_grad", arguments=["gradient"]),
+        ],
+        resources=[dict(kind="ndarray", name="dloss", dtype="f32", shape=[1])],
+        gradients={"loss": "dloss"},
+        binding_strategy="cuda_immutable_argument_frames",
+    )
+    frames = [
+        {name: runtime.ndarray("f32", size) for name, size in (("out", 3), ("loss", 1), ("gradient", 3))}
+        for _ in range(3)
+    ]
+    ordinary_out = runtime.ndarray("f32", 3)
+
+    def check(call, frame, scale):
+        call()
+        assert read(frame["out"]) == [3 * scale, 4 * scale, 2]
+        assert read(frame["loss"]) == [2.5 * scale * scale]
+        assert read(frame["gradient"]) == [3 * scale, 0, 0]
+        write(ordinary_out, [0, 0, 0])
+        module.kernel("gather")(ordinary_out)
+        assert read(ordinary_out) == [3 * scale, 4 * scale, 2]
+
+    first = module.prepare_execution(plan, dict(frames[0], scale=Scalar("f32", 2)))
+    second = first.prepare_binding(dict(frames[1], scale=Scalar("f32", -1)))
+    assert first.binding_family_info["identity"] == second.binding_family_info["identity"]
+    assert second.binding_family_info["executables"] == 1
+    bad = runtime.ndarray("i32", 3)
+    raises(lambda: second.prepare_binding(dict(frames[1], out=bad, scale=Scalar("f32", 1))))
+    bad.close()
+    for _ in range(2):
+        check(first, frames[0], 2)
+        check(second, frames[1], -1)
+    first()  # Close the active child with work pending; its sibling survives.
+    first.close()
+    for value in frames[0].values():
+        value.close()
+    check(second, frames[1], -1)
+    third = second.prepare_binding(dict(frames[2], scale=Scalar("f32", 4)))
+    second.close()
+    assert third.binding_family_info["bindings"] == third.binding_family_info["executables"] == 1
+    module.kernel("deactivate")()
+    write(ordinary_out, [0, 0, 0])
+    module.kernel("gather")(ordinary_out)
+    assert read(ordinary_out) == [0, 0, 0]
+    check(third, frames[2], 4)
+    third.close()
+    module.kernel("deactivate")()
+    write(ordinary_out, [0, 0, 0])
+    module.kernel("gather")(ordinary_out)
+    assert read(ordinary_out) == [0, 0, 0]
+    write(ordinary_out, [0, 0, 0])
+    other.kernel("gather")(ordinary_out)
+    assert read(ordinary_out) == [21, 28, 2]
+    for value in frames[1].values():
+        value.close()
+    ordinary_out.close()
+    # A separate family must also retire when its module closes in flight.
+    pending = module.prepare_execution(plan, dict(frames[2], scale=Scalar("f32", 5)))
+    pending()
+    return pending
+
+
 def main(arch, mode, artifact, legacy=""):
     if mode == "borrowed":
         import taichi_forge as ti
@@ -108,11 +180,17 @@ def main(arch, mode, artifact, legacy=""):
             # Last graph release invalidates stale host cache state once.
             module.kernel("deactivate")()
             check(ordinary, [0, 0, 0])
+            family_pending = None
+            if arch == "cuda" and iteration == 0:
+                family_pending = check_binding_family(runtime, module, other)
             pending = module.kernel("activate").prepare(Scalar("f32", 5))
             pending()
             module.close()
             raises(pending)
             pending.close()
+            if family_pending is not None:
+                raises(family_pending)
+                family_pending.close()
             check(other.kernel("gather").bind(alternate), [21, 28, 2], alternate)
             other.close()
             if mode == "borrowed":
