@@ -34,6 +34,77 @@ TI_DLL_EXPORT void TI_API_CALL ti_set_cuda_stream(void *stream);
 // Writes nullptr (the legacy default stream). `stream` must not be null.
 TI_DLL_EXPORT void TI_API_CALL ti_get_cuda_stream(void **stream);
 
+// Runtime-owned nonblocking streams. Domain identity and completion handles
+// are runtime objects and must never be serialized into AOT artifacts.
+typedef struct TiCudaExecutionDomain_t *TiCudaExecutionDomain;
+typedef struct TiCompletion_t *TiCompletion;
+
+typedef struct TiCudaExecutionDomainCreateInfo {
+  uint32_t capacity;
+  uint32_t instance_capacity;
+  int32_t priority;
+} TiCudaExecutionDomainCreateInfo;
+
+typedef struct TiCudaExecutionDomainInfo {
+  uint64_t identity;
+  uint64_t owner;
+  uint64_t context;
+  uint64_t stream;
+  int32_t requested_priority;
+  int32_t effective_priority;
+  int32_t least_priority;
+  int32_t greatest_priority;
+  uint64_t capacity;
+  uint64_t pending;
+  TiBool accepting;
+  TiBool closed;
+} TiCudaExecutionDomainInfo;
+
+typedef struct TiCompletionInfo {
+  uint64_t owner;
+  uint64_t sequence;
+  TiBool has_backend_work;
+} TiCompletionInfo;
+
+// Cold construction, with explicit positive queue and instance capacities.
+// Priority is a scheduling hint; query the effective value on this device.
+TI_DLL_EXPORT TiCudaExecutionDomain TI_API_CALL
+ti_create_cuda_execution_domain_ext(
+    TiRuntime runtime,
+    const TiCudaExecutionDomainCreateInfo *create_info);
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_cuda_execution_domain_info_ext(TiCudaExecutionDomain domain,
+                                      TiCudaExecutionDomainInfo *info);
+// Closes admission permanently without waiting for device work.
+TI_DLL_EXPORT void TI_API_CALL
+ti_stop_cuda_execution_domain_ext(TiCudaExecutionDomain domain);
+// Cold destructive close. Driver/provider teardown may synchronize the context.
+// An external producer must signal any previously submitted device waits.
+TI_DLL_EXPORT void TI_API_CALL
+ti_close_cuda_execution_domain_ext(TiCudaExecutionDomain domain);
+// Host-only handle release. The runtime retains the bounded domain until close
+// or runtime retirement; release never cancels submitted work.
+TI_DLL_EXPORT void TI_API_CALL
+ti_release_cuda_execution_domain_ext(TiCudaExecutionDomain domain);
+TI_DLL_EXPORT uint32_t TI_API_CALL
+ti_collect_cuda_execution_domain_ext(TiCudaExecutionDomain domain,
+                                     uint32_t budget);
+// Snapshot the already accepted prefix, including the empty prefix. Subsequent
+// submissions cannot extend this ticket. The caller owns the returned handle.
+TI_DLL_EXPORT TiCompletion TI_API_CALL
+ti_get_cuda_execution_domain_completion_ext(TiCudaExecutionDomain domain);
+
+// These calls do not access or lock the originating Runtime. Query, wait and
+// independent submission may proceed concurrently. Reset/fault remains visible
+// through the ticket's owner state; the caller must release each handle.
+TI_DLL_EXPORT TiBool TI_API_CALL
+ti_query_completion_ext(TiCompletion completion);
+TI_DLL_EXPORT void TI_API_CALL ti_wait_completion_ext(TiCompletion completion);
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_completion_info_ext(TiCompletion completion, TiCompletionInfo *info);
+TI_DLL_EXPORT void TI_API_CALL
+ti_release_completion_ext(TiCompletion completion);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

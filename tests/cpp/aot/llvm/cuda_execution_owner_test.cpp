@@ -5,12 +5,124 @@
 #include <future>
 #include "tests/cpp/rhi/common/cuda_external_gate.h"
 #include "c_api/src/taichi_llvm_impl.h"
+#include "c_api/src/execution_domain.h"
+#include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/program/program.h"
 #include "taichi/runtime/aot_runtime_client.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 
 namespace taichi::lang {
 namespace {
+
+TEST(CudaExecutionOwner, PublicTicketWaitDoesNotLockQueryOrPeerSubmission) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  auto runtime = std::make_unique<capi::LlvmRuntime>(Arch::cuda);
+  const auto handle = reinterpret_cast<TiRuntime>(runtime.get());
+  auto context = CUDAContext::get_instance().get_guard();
+  const TiCudaExecutionDomainCreateInfo options{2, 4, -1};
+  auto output = ti_create_cuda_execution_domain_ext(handle, &options);
+  auto physics = ti_create_cuda_execution_domain_ext(handle, &options);
+  ASSERT_NE(output, nullptr);
+  ASSERT_NE(physics, nullptr);
+  TiCudaExecutionDomainInfo left{}, right{};
+  ti_get_cuda_execution_domain_info_ext(output, &left);
+  ti_get_cuda_execution_domain_info_ext(physics, &right);
+  EXPECT_NE(left.identity, right.identity);
+  EXPECT_EQ(left.owner, right.owner);
+  EXPECT_EQ(left.context, right.context);
+  EXPECT_NE(left.stream, 0);
+  EXPECT_NE(left.stream, right.stream);
+  EXPECT_EQ(left.capacity, 2);
+  auto empty = ti_get_cuda_execution_domain_completion_ext(output);
+  ASSERT_NE(empty, nullptr);
+  TiCompletionInfo empty_info{};
+  ti_get_completion_info_ext(empty, &empty_info);
+  EXPECT_EQ(empty_info.sequence, 0);
+
+  auto &device = static_cast<cuda::CudaDevice &>(runtime->get());
+  auto allocation = device.allocate_memory_unique({sizeof(std::uint32_t)});
+  ASSERT_EQ(allocation.second, RhiResult::success);
+  auto *address = device.get_memory_addr(*allocation.first);
+  testing::CudaExternalGate gate;
+  auto native_output = capi::get_execution_domain(output);
+  auto native_physics = capi::get_execution_domain(physics);
+  native_output->submit({}, nullptr,
+                        [&](void *stream) { gate.enqueue_wait(stream); });
+  auto blocked = ti_get_cuda_execution_domain_completion_ext(output);
+  ASSERT_NE(blocked, nullptr);
+  EXPECT_FALSE(ti_query_completion_ext(blocked));
+  EXPECT_TRUE(ti_query_completion_ext(empty));
+  auto waiter = std::async(std::launch::async, [&] {
+    ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+    ti_wait_completion_ext(blocked);
+    return ti_get_last_error(nullptr, nullptr);
+  });
+  EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  auto query = std::async(std::launch::async, [&] {
+    ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+    return std::make_pair(ti_query_completion_ext(blocked),
+                          ti_get_last_error(nullptr, nullptr));
+  });
+  const auto query_status = query.wait_for(std::chrono::milliseconds(200));
+  if (query_status != std::future_status::ready)
+    gate.release();
+  EXPECT_EQ(query_status, std::future_status::ready);
+  const auto queried = query.get();
+  EXPECT_FALSE(queried.first);
+  EXPECT_EQ(queried.second, TI_ERROR_SUCCESS);
+  auto sentinel = native_physics->submit({}, nullptr, [&](void *stream) {
+    CUDADriver::get_instance().memsetd32_async(address, 0x3f123456, 1, stream);
+  });
+  sentinel.wait();
+  std::uint32_t observed = 0;
+  CUDADriver::get_instance().memcpy_device_to_host(&observed, address,
+                                                   sizeof(observed));
+  EXPECT_EQ(observed, 0x3f123456u);
+  EXPECT_FALSE(ti_query_completion_ext(blocked));
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  EXPECT_EQ(waiter.get(), TI_ERROR_SUCCESS);
+  EXPECT_TRUE(ti_query_completion_ext(blocked));
+  ti_release_completion_ext(blocked);
+  ti_release_completion_ext(empty);
+  ti_release_cuda_execution_domain_ext(output);
+  // Releasing the public handle must not close its runtime-owned domain.
+  EXPECT_TRUE(native_output->snapshot().accepting);
+  ti_close_cuda_execution_domain_ext(physics);
+  ti_release_cuda_execution_domain_ext(physics);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  EXPECT_FALSE(ti_query_completion_ext(blocked));
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_INVALID_ARGUMENT);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+}
+
+TEST(CudaExecutionOwner,
+     PublicDomainHandlesRetireWithRuntimeAndRejectBadCapacity) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  auto runtime = std::make_unique<capi::LlvmRuntime>(Arch::cuda);
+  auto handle = reinterpret_cast<TiRuntime>(runtime.get());
+  const TiCudaExecutionDomainCreateInfo invalid{0, 4, 0}, valid{1, 4, 0};
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  EXPECT_EQ(ti_create_cuda_execution_domain_ext(handle, &invalid), nullptr);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_INVALID_ARGUMENT);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  auto domain = ti_create_cuda_execution_domain_ext(handle, &valid);
+  ASSERT_NE(domain, nullptr);
+  auto completion = ti_get_cuda_execution_domain_completion_ext(domain);
+  ti_destroy_runtime(reinterpret_cast<TiRuntime>(runtime.release()));
+  TiCudaExecutionDomainInfo info{};
+  ti_get_cuda_execution_domain_info_ext(domain, &info);
+  EXPECT_TRUE(info.closed);
+  EXPECT_FALSE(info.accepting);
+  EXPECT_TRUE(ti_query_completion_ext(completion));
+  ti_wait_completion_ext(completion);
+  ti_release_completion_ext(completion);
+  ti_release_cuda_execution_domain_ext(domain);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+}
 
 TEST(CudaExecutionOwner, ProgramPrefixesAndBorrowedAotShareOneOwner) {
   if (!cuda::ExecutionDomain::available())

@@ -196,6 +196,12 @@ class Runtime:
                 for entry in entries[: count.value]
             }
 
+    def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0):
+        """Create a bounded independent CUDA queue with explicit priority."""
+        from ._domain import create_domain
+
+        return create_domain(self, capacity, instance_capacity, priority)
+
     def native_operation_capabilities(self, kind, *, version=1):
         """Registered composition modes for this backend and operation version.
 
