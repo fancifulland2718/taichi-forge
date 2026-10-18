@@ -145,6 +145,13 @@ def main(arch, mode, artifact, legacy=""):
             check(ordinary, [6, 8, 2])
             check(prepared, [6, 8, 2])
             check(prepared, [6, 8, 2])
+            growth_path = Path(artifact).with_name("list-growth.tcm")
+            if not iteration and growth_path.exists():
+                with runtime.load_module(str(growth_path)) as growth:
+                    growth.kernel("touch")(out)
+                    assert read(out)[0] == 91
+                    check(prepared, [6, 8, 2])
+                check(prepared, [6, 8, 2])
             # Device replay mutates topology after host list caches are warm.
             deactivate()
             check(ordinary, [0, 0, 0])

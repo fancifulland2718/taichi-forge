@@ -133,6 +133,33 @@ TEST_F(CapiTest, TestCPUImport) {
 
 #if TI_WITH_VULKAN
 
+TEST_F(CapiTest, ImportedVulkanRuntimeRetirementPreservesOwner) {
+  if (!ti::is_arch_available(TI_ARCH_VULKAN)) GTEST_SKIP();
+  ti::Runtime owner(TI_ARCH_VULKAN);
+  auto survivor = owner.allocate_ndarray<int>({2}, {}, true);
+  survivor.write(std::vector<int>{11, 29});
+  TiVulkanRuntimeInteropInfo info{};
+  ti_export_vulkan_runtime(owner, &info);
+  ASSERT_TAICHI_SUCCESS();
+  {
+    const auto handle = ti_import_vulkan_runtime(&info);
+    ASSERT_NE(handle, nullptr);
+    ASSERT_TAICHI_SUCCESS();
+    ti::Runtime imported(TI_ARCH_VULKAN, handle, true);
+    auto values = imported.allocate_ndarray<int>({2}, {}, true);
+    values.write(std::vector<int>{3, 7});
+    std::vector<int> output(2);
+    values.read(output);
+    EXPECT_EQ(output, (std::vector<int>{3, 7}));
+    imported.wait();
+    ASSERT_TAICHI_SUCCESS();
+  }
+  std::vector<int> output(2);
+  survivor.read(output);
+  EXPECT_EQ(output, (std::vector<int>{11, 29}));
+  ASSERT_TAICHI_SUCCESS();
+}
+
 TEST_F(CapiTest, VulkanIndirectAllocationUsagePreservesStorageDefaults) {
   if (!ti::is_arch_available(TI_ARCH_VULKAN)) GTEST_SKIP();
   ti::Runtime runtime(TI_ARCH_VULKAN);

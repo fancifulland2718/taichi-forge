@@ -4177,6 +4177,12 @@ user. Fixed list generation resets its count, and submission invalidates only an
 affected ordinary resident list. Fixed WHILE/nested control with sparse tasks
 remains unsupported. Sparse roots cannot be exposed as plain flat views or initial
 root snapshots.
+Owned and imported-device Vulkan AOT runtimes grow shared list capacity from
+resource metadata. They no longer preallocate 32 MiB or treat it as a capacity
+ceiling; dense consumers that do not use lists need no such preallocation.
+Runtimes borrowed from an existing Program retain the owner's configuration.
+Old and new buffer versions can coexist during growth and in-flight retirement;
+this is runtime storage, not payload added to the compiled package.
 Each sparse module owns a 24-byte diagnostic record and a cold producer-to-runtime
 tree mapping. Synchronization reads all live records in one existing readback
 batch; dispatch does not resolve module identities.
