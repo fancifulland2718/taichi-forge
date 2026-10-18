@@ -703,8 +703,14 @@ static const uint32_t kScanF64AddStridedReverseSpv[] =
 static const uint32_t kCompactI32FlagsSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_flags.comp.spv.h"
     ;
+static const uint32_t kCompactI32FlagsOffsetSpv[] =
+#include "taichi/program/vulkan_sort_shaders/compact_i32_flags_offset.comp.spv.h"
+    ;
 static const uint32_t kCompactI32ScatterSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_scatter.comp.spv.h"
+    ;
+static const uint32_t kCompactI32ScatterOffsetSpv[] =
+#include "taichi/program/vulkan_sort_shaders/compact_i32_scatter_offset.comp.spv.h"
     ;
 static const uint32_t kCompactI32ScatterPacketSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_scatter_packet.comp.spv.h"
@@ -8331,21 +8337,50 @@ class FixedVulkanCompact final : public NativeOperation {
     TI_ERROR_IF(status != RhiResult::success,
                 "Failed to allocate fixed compact prefix");
     prefix_ = std::move(prefix);
-    flags_pipeline_ = create_pipeline(&device_, kCompactI32FlagsSpv,
-                                      "vulkan_compact_i32_flags");
-    scatter_pipeline_ = create_pipeline(&device_, kCompactI32ScatterSpv,
-                                        "vulkan_compact_i32_scatter");
+    const auto limits = device_.get_storage_buffer_binding_limits();
+    const auto alignment = limits.offset_alignment;
+    offset_views_ = operation_.columns.size() > 1 ||
+                    operation_.flags.offset % alignment ||
+                    operation_.count.offset % alignment;
+    for (const auto &column : operation_.columns)
+      offset_views_ |= column.values.offset % alignment ||
+                       column.output.offset % alignment;
+    flags_pipeline_ = offset_views_
+        ? create_pipeline(&device_, kCompactI32FlagsOffsetSpv, "vulkan_compact_flags_offset")
+        : create_pipeline(&device_, kCompactI32FlagsSpv, "vulkan_compact_i32_flags");
+    scatter_pipeline_ = offset_views_
+        ? create_pipeline(&device_, kCompactI32ScatterOffsetSpv, "vulkan_compact_scatter_offset")
+        : create_pipeline(&device_, kCompactI32ScatterSpv, "vulkan_compact_i32_scatter");
+    // Bind an aligned enclosing range and address only the requested words.
+    // No input copy, output-tail copy, or extra device allocation is needed.
+    auto bind = [&](ShaderResourceSet *set, int index, DevicePtr pointer, size_t bytes) {
+      const auto lead = pointer.offset % alignment;
+      TI_ERROR_IF(lead % sizeof(uint32_t) || lead > limits.max_range ||
+                      bytes > limits.max_range - lead ||
+                      lead / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max() ||
+                      bytes / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max() - lead / sizeof(uint32_t),
+                  "Vulkan compact view exceeds its physical descriptor or uint32 address range");
+      pointer.offset -= lead;
+      set->rw_buffer(index, pointer, lead + bytes);
+      return static_cast<uint32_t>(lead / sizeof(uint32_t));
+    };
     flags_bindings_.reset(device_.create_resource_set());
-    flags_bindings_->rw_buffer(0, operation_.flags, prefix_bytes);
+    flags_push_ = {static_cast<uint32_t>(operation_.size),
+                   bind(flags_bindings_.get(), 0, operation_.flags, prefix_bytes)};
     flags_bindings_->rw_buffer(1, prefix_->get_ptr(0), prefix_bytes);
     for (const auto &column : operation_.columns) {
       auto bindings = device_.create_resource_set_unique();
       const auto value_bytes = operation_.size * column.item_bytes;
-      bindings->rw_buffer(0, column.values, value_bytes);
-      bindings->rw_buffer(1, operation_.flags, prefix_bytes);
+      std::array<uint32_t, 7> push{
+          static_cast<uint32_t>(operation_.size),
+          static_cast<uint32_t>(column.item_bytes / sizeof(uint32_t)),
+          bind(bindings.get(), 0, column.values, value_bytes),
+          bind(bindings.get(), 1, operation_.flags, prefix_bytes),
+          bind(bindings.get(), 3, column.output, value_bytes),
+          bind(bindings.get(), 4, operation_.count, sizeof(std::int32_t)),
+          scatter_bindings_.empty() ? 1u : 0u};
       bindings->rw_buffer(2, prefix_->get_ptr(0), prefix_bytes);
-      bindings->rw_buffer(3, column.output, value_bytes);
-      bindings->rw_buffer(4, operation_.count, sizeof(std::int32_t));
+      scatter_push_.push_back(push);
       scatter_bindings_.push_back(std::move(bindings));
     }
     scan_.ensure_device(&device_);
@@ -8366,8 +8401,12 @@ class FixedVulkanCompact final : public NativeOperation {
     }
     const auto flag_groups = static_cast<std::uint32_t>(
         (operation_.size + kBlockSize - 1) / kBlockSize);
-    dispatch_pipeline(commands, flags_pipeline_.get(), flags_bindings_.get(),
-                      flag_groups, 1, 1, nullptr);
+    if (offset_views_)
+      dispatch_pipeline_with_push_constants(commands, flags_pipeline_.get(),
+          flags_bindings_.get(), flags_push_.data(), sizeof(flags_push_), flag_groups, 1, 1);
+    else
+      dispatch_pipeline(commands, flags_pipeline_.get(), flags_bindings_.get(),
+                        flag_groups, 1, 1, nullptr);
     commands->buffer_barrier(*prefix_);
     record_vulkan_i32_scan(device, commands, scan_plan_, false);
     for (std::size_t c = 0; c < operation_.columns.size(); ++c) {
@@ -8376,8 +8415,13 @@ class FixedVulkanCompact final : public NativeOperation {
           operation_.size * (column.item_bytes / sizeof(std::uint32_t));
       const auto word_groups =
           static_cast<std::uint32_t>((words + kBlockSize - 1) / kBlockSize);
-      dispatch_pipeline(commands, scatter_pipeline_.get(),
-                        scatter_bindings_[c].get(), word_groups, 1, 1, nullptr);
+      if (offset_views_)
+        dispatch_pipeline_with_push_constants(commands, scatter_pipeline_.get(),
+            scatter_bindings_[c].get(), scatter_push_[c].data(),
+            sizeof(scatter_push_[c]), word_groups, 1, 1);
+      else
+        dispatch_pipeline(commands, scatter_pipeline_.get(),
+                          scatter_bindings_[c].get(), word_groups, 1, 1, nullptr);
       commands->buffer_barrier(column.output);
     }
     commands->buffer_barrier(operation_.count);
@@ -8392,6 +8436,9 @@ class FixedVulkanCompact final : public NativeOperation {
   std::unique_ptr<Pipeline> flags_pipeline_, scatter_pipeline_;
   std::unique_ptr<ShaderResourceSet> flags_bindings_;
   std::vector<std::unique_ptr<ShaderResourceSet>> scatter_bindings_;
+  bool offset_views_{false};
+  std::array<uint32_t, 2> flags_push_{};
+  std::vector<std::array<uint32_t, 7>> scatter_push_;
 };
 }  // namespace
 

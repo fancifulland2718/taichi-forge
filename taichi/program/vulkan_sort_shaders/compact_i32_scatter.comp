@@ -22,6 +22,18 @@ layout(set = 0, binding = 4, std430) buffer Count {
   int data[];
 } count_buf;
 
+#ifdef OFFSET_VIEWS
+layout(push_constant) uniform Offsets {
+  uint n;
+  uint item_words;
+  uint values;
+  uint flags;
+  uint destination;
+  uint count;
+  uint write_count;
+} offsets;
+#endif
+
 #ifdef DISPATCH_PACKET
 layout(set = 0, binding = 5, std430) buffer DispatchPacket {
   uint data[];
@@ -30,11 +42,26 @@ layout(set = 0, binding = 5, std430) buffer DispatchPacket {
 
 void main() {
   uint word_idx = gl_GlobalInvocationID.x;
+#ifdef OFFSET_VIEWS
+  uint n = offsets.n;
+  uint value_words = n * offsets.item_words;
+  uint values_offset = offsets.values;
+  uint flags_offset = offsets.flags;
+  uint output_offset = offsets.destination;
+  uint count_offset = offsets.count;
+  bool write_count = offsets.write_count != 0u;
+#else
   uint n = flags_buf.data.length();
   uint value_words = values_buf.data.length();
-  if (word_idx == 0u) {
+  uint values_offset = 0u;
+  uint flags_offset = 0u;
+  uint output_offset = 0u;
+  uint count_offset = 0u;
+  bool write_count = true;
+#endif
+  if (word_idx == 0u && write_count) {
     uint count = uint(n > 0u ? prefix_buf.data[n - 1u] : 0);
-    count_buf.data[0] = int(count);
+    count_buf.data[count_offset] = int(count);
 #ifdef DISPATCH_PACKET
     uint block_dim = max(dispatch_packet_buf.data[3], 1u);
     dispatch_packet_buf.data[0] = (count + block_dim - 1u) / block_dim;
@@ -48,8 +75,8 @@ void main() {
   uint item_words = value_words / n;
   uint item = word_idx / item_words;
   uint lane = word_idx - item * item_words;
-  if (flags_buf.data[item] != 0) {
+  if (flags_buf.data[flags_offset + item] != 0) {
     uint out_idx = uint(prefix_buf.data[item] - 1);
-    output_buf.data[out_idx * item_words + lane] = values_buf.data[word_idx];
+    output_buf.data[output_offset + out_idx * item_words + lane] = values_buf.data[values_offset + word_idx];
   }
 }

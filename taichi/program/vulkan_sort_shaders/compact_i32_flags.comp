@@ -10,11 +10,24 @@ layout(set = 0, binding = 1, std430) buffer Prefix {
   int data[];
 } prefix_buf;
 
+#ifdef OFFSET_VIEWS
+layout(push_constant) uniform Offsets {
+  uint n;
+  uint flags;
+} offsets;
+#endif
+
 void main() {
   uint idx = gl_GlobalInvocationID.x;
+#ifdef OFFSET_VIEWS
+  uint n = offsets.n;
+  uint flags_offset = offsets.flags;
+#else
   uint n = flags_buf.data.length();
+  uint flags_offset = 0u;
+#endif
   if (idx >= n) {
     return;
   }
-  prefix_buf.data[idx] = flags_buf.data[idx] != 0 ? 1 : 0;
+  prefix_buf.data[idx] = flags_buf.data[flags_offset + idx] != 0 ? 1 : 0;
 }
