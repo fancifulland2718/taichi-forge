@@ -17426,7 +17426,13 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
   const uint32_t groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  if (src_stride == value_size && dst_stride == value_size) {
+  const auto descriptor_alignment =
+      device->get_storage_buffer_binding_limits().offset_alignment;
+  // Packed fields may begin between descriptor boundaries (notably grad
+  // fields). Their existing strided shader accepts offsets from a zero base.
+  if (src_stride == value_size && dst_stride == value_size &&
+      src_ptr.offset % descriptor_alignment == 0 &&
+      dst_ptr.offset % descriptor_alignment == 0) {
     ShaderResourceSet *bindings =
         cache.cached_scatter_add_resource_set(value_type);
     Pipeline *pipeline = cache.scatter_add_pipeline(value_type);

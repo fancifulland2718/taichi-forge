@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fix Vulkan native transform Tape accumulation for packed gradient fields whose
+  starts are not descriptor-aligned. Dense scatter-add uses its existing offset-aware
+  shader, avoiding a validation error that numerical checks alone did not detect.
 - Fix Vulkan compilation of dynamic range starts with ndarray-shape ends. Dynamic
   starts retain temporary-storage snapshots, preserving device-memory bound semantics.
 - Vulkan reads by-value scalar range ends directly from launch arguments, removing
