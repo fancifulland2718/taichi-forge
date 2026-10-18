@@ -1,5 +1,6 @@
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
+#include "taichi/runtime/gfx/descriptor_binding.h"
 #include "external/PicoSHA2/picosha2.h"
 #include <random>
 #ifdef _WIN32
@@ -617,6 +618,21 @@ std::unique_ptr<Pipeline> create_structured_pipeline(
   return std::move(pipeline);
 }
 
+void bind_descriptor_array(ShaderResourceSet *bindings,
+                           int slot,
+                           const storage::ResolvedDenseBinding &binding,
+                           bool supports_byte_bias) {
+  const auto slice = describe_descriptor_buffer_slice(
+      binding.allocation.device->get_storage_buffer_binding_limits(),
+      binding.byte_offset, binding.byte_size, supports_byte_bias);
+  if (!slice.size) {
+    bindings->rw_buffer(slot, binding.allocation);
+  } else {
+    bindings->rw_buffer(slot, binding.allocation.get_ptr(slice.offset),
+                        slice.size);
+  }
+}
+
 class HostDeviceContextBlitter {
  public:
   HostDeviceContextBlitter(const KernelContextAttributes *ctx_attribs,
@@ -647,10 +663,6 @@ class HostDeviceContextBlitter {
     if (!ctx_attribs_->has_args()) {
       return;
     }
-
-    void *device_base{nullptr};
-    TI_ASSERT(device_->map(*device_args_buffer_, &device_base) ==
-              RhiResult::success);
 
     for (const auto &array_arg : *runtime_array_args_) {
       const auto &indices = array_arg.indices;
@@ -696,10 +708,8 @@ class HostDeviceContextBlitter {
 
         if ((alloc_type == LaunchContextBuilder::DevAllocType::kNone ||
              alloc_type == LaunchContextBuilder::DevAllocType::kNdarray ||
-             alloc_type ==
-                 LaunchContextBuilder::DevAllocType::kDenseStorage) &&
-            device_->get_caps().get(
-                DeviceCapability::spirv_has_physical_storage_buffer)) {
+             alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) &&
+            ctx_attribs_->args_type()->get_layout() == "1b") {
           uint64_t addr =
               device_->get_memory_physical_pointer(ext_arrays.at(indices));
           if (alloc_type ==
@@ -727,9 +737,41 @@ class HostDeviceContextBlitter {
                 ext_arrays.at(array_arg.grad_ptr_indices));
           }
           host_ctx_.set_ndarray_ptrs(indices, addr, grad_addr);
+        } else if (ctx_attribs_->descriptor_array_offsets &&
+                   (alloc_type == LaunchContextBuilder::DevAllocType::kNone ||
+                    alloc_type ==
+                        LaunchContextBuilder::DevAllocType::kNdarray ||
+                    alloc_type ==
+                        LaunchContextBuilder::DevAllocType::kDenseStorage)) {
+          const auto limits = device_->get_storage_buffer_binding_limits();
+          auto bias = [&](const storage::ResolvedDenseBinding *binding) {
+            return binding ? describe_descriptor_buffer_slice(
+                                 limits, binding->byte_offset,
+                                 binding->byte_size, true)
+                                 .byte_bias
+                           : uint32_t(0);
+          };
+          host_ctx_.set_struct_arg_impl<uint32_t>(
+              array_arg.data_ptr_indices,
+              bias(host_ctx_.find_resolved_dense_storage_buffer(
+                  array_arg.data_ptr_indices)));
+          const auto *array_type = ctx_attribs_->args_type()
+                                       ->get_element_type(indices)
+                                       ->as<lang::StructType>();
+          if (array_type->elements().size() >
+              TypeFactory::GRAD_PTR_POS_IN_NDARRAY)
+            host_ctx_.set_struct_arg_impl<uint32_t>(
+                array_arg.grad_ptr_indices,
+                bias(host_ctx_.find_resolved_dense_storage_buffer(
+                    array_arg.grad_ptr_indices)));
         }
     }
 
+    // Validate/resolve all arguments before mapping the pooled upload buffer.
+    // A rejected descriptor range must not leave that buffer mapped.
+    void *device_base{nullptr};
+    TI_ASSERT(device_->map(*device_args_buffer_, &device_base) ==
+              RhiResult::success);
     std::memcpy(device_base, host_ctx_.get_context().arg_buffer,
                 ctx_attribs_->args_bytes());
 
@@ -2246,12 +2288,9 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       if (bind.kind == CompiledTaichiKernel::BufferBindingKind::ExtArrRw) {
         if (const auto *binding = host_ctx.find_resolved_dense_storage_buffer(
                 bind.buffer.root_id)) {
-          if (binding->byte_size == 0) {
-            bindings->rw_buffer(bind.binding, binding->allocation);
-          } else {
-            bindings->rw_buffer(bind.binding, binding->device_ptr(),
-                                binding->byte_size);
-          }
+          bind_descriptor_array(bindings, bind.binding, *binding,
+                                ti_kernel->ti_kernel_attribs()
+                                    .ctx_attribs.descriptor_array_offsets);
         } else {
           bindings->rw_buffer(bind.binding,
                               any_arrays.at(bind.buffer.root_id));
@@ -2831,12 +2870,9 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
         if (const auto *binding =
                 pd.host_ctx->find_resolved_dense_storage_buffer(
                     bind.buffer.root_id)) {
-          if (binding->byte_size == 0) {
-            bindings->rw_buffer(bind.binding, binding->allocation);
-          } else {
-            bindings->rw_buffer(bind.binding, binding->device_ptr(),
-                                binding->byte_size);
-          }
+          bind_descriptor_array(bindings, bind.binding, *binding,
+                                pd.kernel->ti_kernel_attribs()
+                                    .ctx_attribs.descriptor_array_offsets);
         } else {
           bindings->rw_buffer(bind.binding,
                               pd.any_arrays->at(bind.buffer.root_id));

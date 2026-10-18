@@ -23,6 +23,31 @@ TEST(LaunchContextBuilderTest, HasNoCudaTaskExecutionPlanByDefault) {
       builder.cuda_task_range_work_per_thread_targets().empty());
 }
 
+TEST(LaunchContextBuilderTest, DescriptorPointerWritesPreserveAdjacentScalar) {
+  auto &types = TypeFactory::get_instance();
+  const auto pointer = types.get_pointer_type(PrimitiveType::f32);
+  for (const auto *layout : {"1-", "1b", "none"}) {
+    const bool narrow = std::string(layout) == "1-";
+    CallableBase callable;
+    callable.args_type =
+        types
+            .get_struct_type(
+                {{pointer, "pointer", 0},
+                 {PrimitiveType::u32, "sentinel", narrow ? 4u : 8u}},
+                layout)
+            ->as<StructType>();
+    callable.args_size = 16;
+    LaunchContextBuilder builder(&callable);
+    builder.set_struct_arg_impl<uint32_t>({1}, 0xabcdef01);
+    builder.set_struct_arg<uint64_t>({0}, 0x1234567800000004ull);
+    EXPECT_EQ(builder.get_struct_arg<uint32_t>({1}), 0xabcdef01);
+    if (narrow)
+      EXPECT_EQ(builder.get_struct_arg<uint32_t>({0}), 4);
+    else
+      EXPECT_EQ(builder.get_struct_arg<uint64_t>({0}), 0x1234567800000004ull);
+  }
+}
+
 void set_test_execution_plan(Kernel &kernel,
                              const std::string &execution_identity,
                              int work_per_thread) {

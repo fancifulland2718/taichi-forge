@@ -123,7 +123,7 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=
     with zipfile.ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("metadata.json" if arch == "vulkan" else "aot_metadata.json"))
     if arch == "vulkan":
-        assert metadata["metadata_version"] == 6
+        assert metadata["metadata_version"] == 7
         assert len(metadata["snode_tree_resources"]) == len(metadata["root_buffer_sizes"])
         assert any(tree["storage_kind"] == 2 for tree in metadata["snode_tree_resources"])
     else:

@@ -7,6 +7,7 @@
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
 #include "taichi/runtime/gfx/aot_snode_resources.h"
+#include "taichi/runtime/gfx/descriptor_binding.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
 #include "taichi/program/launch_context_builder.h"
@@ -15,6 +16,35 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 
 namespace taichi::lang {
+
+TEST(GfxDescriptorBinding, AlignsBaseWithoutChangingLogicalAddress) {
+  const Device::StorageBufferBindingLimits limits{16, 64};
+  const auto slice =
+      gfx::describe_descriptor_buffer_slice(limits, 212, 17, true);
+  EXPECT_EQ(slice.offset, 208);
+  EXPECT_EQ(slice.size, 21);
+  EXPECT_EQ(slice.byte_bias, 4);
+  EXPECT_EQ(slice.offset + slice.byte_bias, 212);
+  EXPECT_EQ(slice.offset + slice.size, 229);
+  EXPECT_EQ(
+      gfx::describe_descriptor_buffer_slice(limits, 32, 64, false).byte_bias,
+      0);
+  EXPECT_EQ(
+      gfx::describe_descriptor_buffer_slice(limits, UINT64_MAX, 0, false).size,
+      0);
+  EXPECT_THROW(gfx::describe_descriptor_buffer_slice(limits, 212, 17, false),
+               std::invalid_argument);
+  EXPECT_THROW(gfx::describe_descriptor_buffer_slice(limits, 212, 61, true),
+               std::invalid_argument);
+  EXPECT_THROW(
+      gfx::describe_descriptor_buffer_slice(limits, UINT64_MAX, 1, true),
+      std::invalid_argument);
+  EXPECT_THROW(gfx::describe_descriptor_buffer_slice({0, 64}, 0, 1, true),
+               std::invalid_argument);
+  EXPECT_THROW(gfx::describe_descriptor_buffer_slice(
+                   {uint64_t(1) << 33, UINT64_MAX}, uint64_t(1) << 32, 1, true),
+               std::invalid_argument);
+}
 
 TEST(GfxSNodeResources, ReconstructedModulesOwnDiagnosticIdentity) {
   if (!vulkan::is_vulkan_api_available())

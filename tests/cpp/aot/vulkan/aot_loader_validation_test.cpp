@@ -85,6 +85,40 @@ TEST(GfxAotValidation, ExposesRequiredCapabilities) {
             1);
 }
 
+TEST(GfxAotValidation, DescriptorOffsetsRequireVersionAndMatchingLayout) {
+  MemoryAotDir dir;
+  dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
+  gfx::TaichiAotData data;
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]),
+                           data);
+  auto json = liong::json::serialize(data.kernels[0].ctx_attribs);
+  spirv::KernelContextAttributes::ArgAttributes argument;
+  argument.ptype = ParameterType::kNdarray;
+  argument.is_array = true;
+  json["arg_attribs_vec_"] = liong::json::serialize(
+      std::vector<std::pair<std::vector<int>,
+                            spirv::KernelContextAttributes::ArgAttributes>>{
+          {{0}, argument}});
+  auto update = [&](const char *layout) {
+    json["args_type_"] = liong::json::serialize(
+        TypeFactory::get_instance().get_struct_type({}, layout));
+    liong::json::deserialize(json, data.kernels[0].ctx_attribs);
+    data.kernels[0].ctx_attribs.descriptor_array_offsets = true;
+    dir.files["metadata.json"] =
+        liong::json::print(liong::json::serialize(data));
+    return dir.load()->is_corrupted();
+  };
+  EXPECT_FALSE(update("1-"));
+  EXPECT_TRUE(update("1b"));
+  data.metadata_version = 6;
+  EXPECT_TRUE(update("1-"));
+  data.metadata_version = 7;
+  data.root_buffer_size = 32;
+  data.root_buffer_sizes = {32};
+  data.kernel_metadata[0] = {1, {0}};
+  EXPECT_FALSE(update("1-"));  // Dense resources need no sparse envelope.
+}
+
 TEST(GfxAotValidation, RejectsMissingShortAndInvalidShaderReads) {
   const std::vector<uint32_t> header{0x07230203, 0x10300, 0, 1, 0};
   MemoryAotDir dir;

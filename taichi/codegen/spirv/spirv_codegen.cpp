@@ -3644,6 +3644,19 @@ class TaskCodegen : public IRVisitor {
     ir_->register_value(name, var);
   }
 
+  spirv::Value descriptor_array_byte_bias(const std::vector<int> &arg_id,
+                                          int pointer_slot) {
+    if (!ctx_attribs_->descriptor_array_offsets)
+      return ir_->int_immediate_number(ir_->i32_type(), 0);
+    auto indices = arg_id;
+    indices.push_back(pointer_slot);
+    const auto address = ir_->make_access_chain(
+        ir_->get_pointer_type(ir_->u32_type(), spv::StorageClassUniform),
+        get_buffer_value(BufferType::Args, PrimitiveType::i32), indices);
+    return ir_->make_value(spv::OpBitcast, ir_->i32_type(),
+                           ir_->load_variable(address, ir_->u32_type()));
+  }
+
   void visit(ExternalTensorBasePtrStmt *stmt) override {
     const bool uses_physical_storage =
         caps_->get(DeviceCapability::spirv_has_physical_storage_buffer);
@@ -3659,8 +3672,9 @@ class TaskCodegen : public IRVisitor {
       ir_->register_value(stmt->raw_name(),
                           ir_->load_variable(address_ptr, ir_->u64_type()));
     } else {
-      ir_->register_value(stmt->raw_name(),
-                          ir_->int_immediate_number(ir_->i32_type(), 0));
+      ir_->register_value(
+          stmt->raw_name(),
+          descriptor_array_byte_bias(stmt->arg_id, ndarray_ptr_slot));
     }
 
     std::vector<int> ext_arr_id = stmt->arg_id;
@@ -3806,7 +3820,12 @@ class TaskCodegen : public IRVisitor {
                                             linear_offset));
       ir_->register_value(stmt->raw_name(), addr);
     } else {
-      ir_->register_value(stmt->raw_name(), linear_offset);
+      ir_->register_value(
+          stmt->raw_name(),
+          ctx_attribs_->descriptor_array_offsets
+              ? ir_->add(linear_offset,
+                         descriptor_array_byte_bias(arg_id, ndarray_ptr_slot))
+              : linear_offset);
     }
 
     if (ctx_attribs_->arg_at(arg_id).is_array) {
@@ -7590,6 +7609,13 @@ KernelCodegen::KernelCodegen(const Params &params)
     : params_(params), ctx_attribs_(*params.kernel, &params.caps) {
   TI_ASSERT(params.kernel);
   TI_ASSERT(params.ir_root);
+  ctx_attribs_.descriptor_array_offsets =
+      params.arch == Arch::vulkan &&
+      !params.caps.get(DeviceCapability::spirv_has_physical_storage_buffer) &&
+      std::any_of(ctx_attribs_.args().begin(), ctx_attribs_.args().end(),
+                  [](const auto &arg) {
+                    return arg.second.ptype == ParameterType::kNdarray;
+                  });
 
   uint32_t spirv_version = params.caps.get(DeviceCapability::spirv_version);
 

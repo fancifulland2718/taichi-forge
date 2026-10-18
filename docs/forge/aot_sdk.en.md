@@ -4164,7 +4164,7 @@ are rejected before initialization. Shared runtime allocation caches may remain 
 Vulkan dense AOT resources also use module-local mappings. Always destroy
 modules before their runtime.
 
-Vulkan sparse exports use GFX metadata 6 and the same resource materializer as
+Since GFX metadata 6, Vulkan sparse resources use the same materializer as
 JIT. Small Windows tests cover pointer/bitmasked/dynamic trees with inline,
 independent and flattened chunked pools, direct/nested hash trees, actual field
 and downstream ndarray reverse gradients, two modules, and close/reload in
@@ -4174,9 +4174,20 @@ their buffer retention and cache contracts are qualified. Sparse roots cannot
 be exposed as plain flat views or initial root snapshots.
 Each sparse module owns a 24-byte diagnostic record and a cold producer-to-runtime
 tree mapping. Synchronization reads all live records in one existing readback
-batch; dispatch does not resolve module identities. Dense/image exports keep
-their earlier metadata versions (2–5). Use the matching private ABI 100 runtime
-and shim for metadata 6.
+batch; dispatch does not resolve module identities.
+
+Vulkan ndarray kernels using descriptor addressing now export GFX metadata 7.
+Ordinary and fixed execution align the descriptor base down and pass separate
+data/gradient byte offsets. Element-aligned subviews require no extra payload
+copy or submission. Small Windows checks cover module root storage, nested
+views, actual reverse gradients, adjacent scalar arguments, binding updates and
+three-backend lifetime regressions. Legal aligned bindings of old artifacts
+remain usable; unaligned views that old shaders cannot express require re-export
+before execution. Use the matching private ABI 101 runtime and shim for the new
+semantics; other artifacts retain their required minimum metadata version.
+Dense modules using only the new array-offset semantics do not allocate sparse
+diagnostic resources. Device descriptor-range and integer-overflow limits still
+apply.
 
 Hash trees now use the same module-local sparse binding. Small Windows CPU
 bitcode/CUDA PTX checks cover direct hash and nested `hash -> hash -> dense`,

@@ -149,6 +149,9 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       field.snode_tree_id = module_ids.at(field.snode_tree_id);
     }
     for (auto &kernel : artifact.kernels) {
+      if (kernel.ctx_attribs.descriptor_array_offsets)
+        artifact.metadata_version =
+            std::max(artifact.metadata_version, uint32_t(7));
       for (const auto &[indices, argument] : kernel.ctx_attribs.args()) {
         if (argument.ptype == ParameterType::kRWTexture) {
           TI_ERROR_IF(argument.format == BufferFormat::unknown,

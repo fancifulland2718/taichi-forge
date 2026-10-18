@@ -415,6 +415,10 @@ class KernelContextAttributes {
   std::vector<std::pair<std::vector<int>, irpass::ExternalPtrAccess>>
       grad_arr_access;
 
+  // Descriptor kernels store data/gradient byte biases in the existing u32
+  // pointer placeholders. Missing metadata preserves the legacy zero bias.
+  bool descriptor_array_offsets{false};
+
   TI_IO_DEF(arg_attribs_vec_,
             ret_attribs_vec_,
             args_bytes_,
@@ -423,7 +427,8 @@ class KernelContextAttributes {
             grad_arr_access,
             args_type_,
             rets_type_,
-            argpack_types_);
+            argpack_types_,
+            descriptor_array_offsets);
 
  private:
   std::vector<std::pair<std::vector<int>, ArgAttributes>> arg_attribs_vec_;

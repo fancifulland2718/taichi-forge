@@ -1022,6 +1022,17 @@ class RHI_DLL_EXPORT Device {
     return 0;
   }
 
+  struct StorageBufferBindingLimits {
+    uint64_t offset_alignment{1};
+    uint64_t max_range{UINT64_MAX};
+  };
+
+  // Descriptor limits are binding constraints, not monotonic feature levels.
+  virtual StorageBufferBindingLimits get_storage_buffer_binding_limits()
+      const noexcept {
+    return {};
+  }
+
   // C-2.4.c: maximum number of storage buffer descriptors that may share a
   // single binding slot (descriptorCount in a VkDescriptorSetLayoutBinding).
   // Used by ChunkedDeviceNodeAllocator (vulkan_pointer_allocator_kind=chunked

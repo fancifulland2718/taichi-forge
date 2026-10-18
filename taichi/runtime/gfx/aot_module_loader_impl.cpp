@@ -113,7 +113,7 @@ class AotModuleImpl : public aot::Module {
         if (!resources.empty())
           throw std::invalid_argument(
               "Sparse resource metadata requires GFX v6");
-      } else {
+      } else if (ti_aot_data_.metadata_version == 6 || !resources.empty()) {
         if (resources.size() != ti_aot_data_.root_buffer_sizes.size())
           throw std::invalid_argument(
               "GFX resource count does not match root layouts");
@@ -155,6 +155,19 @@ class AotModuleImpl : public aot::Module {
       }
     }
     for (std::size_t i = 0; i < ti_aot_data_.kernel_metadata.size(); ++i) {
+      const auto &context = ti_aot_data_.kernels[i].ctx_attribs;
+      if (context.descriptor_array_offsets &&
+          (ti_aot_data_.metadata_version < 7 || !context.args_type() ||
+           context.args_type()->get_layout() != "1-" ||
+           std::none_of(
+               context.args().begin(), context.args().end(),
+               [](const auto &arg) {
+                 return arg.second.ptype == ParameterType::kNdarray;
+               }))) {
+        mark_corrupted();
+        TI_WARN("Invalid GFX AOT descriptor array-offset contract");
+        return;
+      }
       for (const auto &[indices, argument] :
            ti_aot_data_.kernels[i].ctx_attribs.args()) {
         const bool storage = argument.ptype == ParameterType::kRWTexture;
@@ -204,7 +217,7 @@ class AotModuleImpl : public aot::Module {
         SNodeResourceResolver resolver(resource_trees,
                                        metadata.used_snode_tree_ids);
         for (const auto &task : ti_aot_data_.kernels[i].tasks_attribs) {
-          if (ti_aot_data_.metadata_version >= 6) {
+          if (!ti_aot_data_.snode_tree_resources.empty()) {
             const auto list = resolver.resolve(task.sparse_list_snode_id);
             const auto parent =
                 resolver.resolve(task.sparse_list_parent_snode_id);
@@ -234,6 +247,17 @@ class AotModuleImpl : public aot::Module {
                 throw std::invalid_argument(
                     "AOT task references an undeclared independent pool");
             }
+          } else if (ti_aot_data_.metadata_version >= 7 &&
+                     (task.may_mutate_sparse_topology ||
+                      std::any_of(task.buffer_binds.begin(),
+                                  task.buffer_binds.end(),
+                                  [](const auto &bind) {
+                                    return bind.buffer.type ==
+                                           spirv::TaskAttributes::BufferType::
+                                               NodeAllocatorPool;
+                                  }))) {
+            throw std::invalid_argument(
+                "Sparse AOT task lacks resource declarations");
           }
         }
       } catch (const std::exception &error) {

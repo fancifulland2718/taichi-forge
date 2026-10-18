@@ -3186,14 +3186,21 @@ mesh 布局保留 embedded-ID 合同，重叠 ID 在初始化前拒绝。
 共享 runtime 分配缓存可继续常驻。Vulkan dense AOT 也使用模块局部映射。
 模块必须先于所属 runtime 关闭。
 
-Vulkan 稀疏导出采用 GFX metadata 6，与 JIT 共用资源物化入口。Windows 小型测试覆盖
+Vulkan 稀疏资源从 GFX metadata 6 起与 JIT 共用物化入口。Windows 小型测试覆盖
 pointer/bitmasked/dynamic 的 inline、independent 和扁平化 chunked 池，直接/嵌套
 hash、实际 field 与下游 ndarray 反向梯度、双模块，以及独立/借用 runtime 的关闭和
 重载。当前验证范围是普通执行；固定稀疏 Graph 仍拒绝拓扑修改/listgen 任务，待补齐
 缓冲持有和缓存合同后单独验证。稀疏根不能作为普通 flat view 或初始根快照导出。
 每个稀疏模块持有 24 字节诊断记录，冷路径建立 producer→runtime 树映射；同步时将
-所有存活记录放进同一批既有读回，dispatch 不查询模块身份。dense/image 导出继续使用
-原有 metadata 2–5；metadata 6 需要配套的私有 ABI 100 runtime 与 shim。
+所有存活记录放进同一批既有读回，dispatch 不查询模块身份。
+
+使用 descriptor 寻址的 Vulkan ndarray kernel 现在导出 GFX metadata 7。普通调用和
+固定执行会将 descriptor 基址向下对齐，再分别传入数据/梯度的字节偏移；满足元素对齐的
+子视图无需额外数据复制或提交。Windows 小型验证覆盖模块根存储、嵌套视图、实际反向
+梯度、相邻标量参数、绑定更新与三后端生命周期回归。旧产物的合法对齐绑定继续可用；
+旧 shader 无法表达的非对齐视图在执行前要求重新导出。新语义需配套的私有 ABI 101
+runtime 与 shim；其他产物保留所需的最低 metadata 版本。仅使用新数组偏移语义的 dense
+模块不因此分配稀疏诊断资源。设备的 descriptor 范围和整数溢出约束仍然适用。
 
 Hash 树现在复用同一套模块局部稀疏资源绑定。Windows CPU bitcode/CUDA PTX 的小型
 测试覆盖直接 hash 和嵌套 `hash -> hash -> dense`、碰撞、删除/重插入、实际 field

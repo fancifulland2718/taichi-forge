@@ -1076,6 +1076,13 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   uint64_t get_memory_physical_pointer(DeviceAllocation handle) override;
 
+  StorageBufferBindingLimits get_storage_buffer_binding_limits()
+      const noexcept override {
+    const auto &limits = get_vk_physical_device_props().limits;
+    return {limits.minStorageBufferOffsetAlignment,
+            limits.maxStorageBufferRange};
+  }
+
   ShaderResourceSet *create_resource_set() final;
 
   RasterResources *create_raster_resources() final;

@@ -131,7 +131,11 @@ void LaunchContextBuilder::set_struct_arg(std::vector<int> arg_indices, T d) {
 
   TI_ASSERT(dt->is<PrimitiveType>() || dt->is<PointerType>());
   if (dt->is<PointerType>()) {
-    set_struct_arg_impl(arg_indices, (uint64)d);
+    const auto &layout = args_type->get_layout();
+    if (layout == "1-" || layout == "4-")
+      set_struct_arg_impl(arg_indices, (uint32)d);
+    else
+      set_struct_arg_impl(arg_indices, (uint64)d);
     return;
   }
   PrimitiveTypeID typeId = dt->as<PrimitiveType>()->type;
