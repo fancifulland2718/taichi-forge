@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "taichi/runtime/snode_tree_id_registry.h"
+#include "taichi/runtime/sparse_replay_tracker.h"
 #include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
@@ -62,6 +63,51 @@ TEST(SNodeTreeIdRegistry, ConcurrentJitAndModuleReservationsDoNotAlias) {
   registry.release(module_ids);
   registry.release(jit_ids);
   EXPECT_EQ(registry.reserve(1), std::vector<int>{0});
+}
+
+TEST(SparseReplayTracker, ParentOwnershipAndOverlappingGraphsRetainInterference) {
+  SparseReplayTracker tracker;
+  SparseReplayTracker other_launcher;
+  const auto cold = tracker.epoch();
+  auto first = tracker.acquire({5, 3, 5});
+  auto parent = first;
+  auto second = tracker.acquire({5, 7});
+  EXPECT_NE(tracker.epoch(), cold);
+  EXPECT_TRUE(tracker.snapshot({2, 3}).intersects);
+  EXPECT_FALSE(tracker.snapshot({2, 4}).intersects);
+  EXPECT_FALSE(other_launcher.snapshot({3, 5, 7}).intersects);
+  const auto retained = tracker.epoch();
+  first.reset();
+  EXPECT_EQ(tracker.epoch(), retained);
+  parent.reset();
+  EXPECT_NE(tracker.epoch(), retained);
+  EXPECT_FALSE(tracker.snapshot({3}).intersects);
+  EXPECT_TRUE(tracker.snapshot({5}).intersects);
+  second.reset();
+  const auto retired = tracker.snapshot({3, 5, 7});
+  EXPECT_FALSE(retired.intersects);
+  EXPECT_EQ(retired.epoch, tracker.epoch());
+  EXPECT_NE(retired.epoch, retained);
+}
+
+TEST(SparseReplayTracker, FailedPreparationAndLateRetirementAreSafe) {
+  std::shared_ptr<void> surviving_parent;
+  {
+    SparseReplayTracker tracker;
+    EXPECT_FALSE(tracker.acquire({}));
+    EXPECT_THROW(tracker.acquire({3, -1}), std::invalid_argument);
+    EXPECT_EQ(tracker.epoch(), 0);
+    EXPECT_FALSE(tracker.snapshot({3}).intersects);
+    {
+      auto construction = tracker.acquire({3});
+      EXPECT_TRUE(tracker.snapshot({3}).intersects);
+      // Unwinding a failed graph preparation releases its unpublished lease.
+    }
+    EXPECT_FALSE(tracker.snapshot({3}).intersects);
+    surviving_parent = tracker.acquire({3});
+  }
+  // No callback or pointer into the already-destroyed launcher is retained.
+  surviving_parent.reset();
 }
 
 }  // namespace taichi::lang
