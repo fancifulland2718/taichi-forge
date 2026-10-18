@@ -11,7 +11,6 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
-#include <vector>
 
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
@@ -145,13 +144,21 @@ class CudaExternalGate {
   CudaExternalGate &operator=(const CudaExternalGate &) = delete;
 
   void enqueue_wait(void *stream) {
-    if (!streams_.empty())
+    if (wait_completion_)
       throw std::logic_error("Binary gate can be consumed only once");
-    streams_.push_back(stream);  // Allocate before the device side effect.
     auto context = CUDAContext::get_instance().get_guard();
-    CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS params{};
-    CUDADriver::get_instance().wait_external_semaphore_async(
-        &cuda_semaphore_, &params, 1, static_cast<CUstream>(stream));
+    auto &driver = CUDADriver::get_instance();
+    driver.event_create(&wait_completion_, CU_EVENT_DISABLE_TIMING);
+    try {
+      CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS params{};
+      driver.wait_external_semaphore_async(&cuda_semaphore_, &params, 1,
+                                           static_cast<CUstream>(stream));
+      driver.event_record(wait_completion_, stream);
+    } catch (...) {
+      release();
+      driver.stream_synchronize.call_concurrent(stream);
+      throw;
+    }
   }
 
   void release() noexcept {
@@ -183,8 +190,10 @@ class CudaExternalGate {
     if (cuda_semaphore_) {
       auto context = CUDAContext::get_instance().get_guard();
       auto &driver = CUDADriver::get_instance();
-      for (auto stream : streams_)
-        driver.stream_synchronize.call_concurrent(stream);
+      if (wait_completion_) {
+        driver.event_synchronize.call_concurrent(wait_completion_);
+        driver.event_destroy.call(wait_completion_);
+      }
       driver.external_semaphore_destroy.call(cuda_semaphore_);
     }
     if (pool_)
@@ -205,7 +214,7 @@ class CudaExternalGate {
   VkCommandPool pool_{};
   CUexternalSemaphore cuda_semaphore_{};
   bool submitted_{false};
-  std::vector<void *> streams_;
+  void *wait_completion_{nullptr};
   std::mutex mutex_;
   std::condition_variable changed_;
   bool released_{false};

@@ -155,6 +155,8 @@ TEST(RuntimeCompletion, CompletedCudaDependencyRequiresExactLiveOwner) {
                std::invalid_argument);
   const auto cpu = RuntimeCompletion::completed(Arch::x64, 23, 8, owner);
   EXPECT_THROW(cpu.validate_cuda_dependency(23, owner), std::invalid_argument);
+  owner->begin_finalizing();
+  EXPECT_THROW(completion.validate_cuda_dependency(23, owner), std::exception);
   owner->mark_finalized();
   // Historical observations remain valid, but a reset owner cannot supply a
   // new device dependency, including when its original work had completed.

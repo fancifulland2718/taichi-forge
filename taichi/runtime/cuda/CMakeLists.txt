@@ -8,6 +8,7 @@ target_sources(cuda_runtime
     cudss_plan.cpp
     cuda_artifact_provider.cpp
     cuda_compileiq_protocol.cpp
+    execution_domain.cpp
     graph_binding_frame.cpp
     fixed_graph.cpp
     graph_memory_pool.cpp

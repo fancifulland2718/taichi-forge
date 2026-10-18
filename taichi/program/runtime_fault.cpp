@@ -184,6 +184,14 @@ RuntimeFaultSnapshot RuntimeFaultDomain::snapshot() const {
   return result;
 }
 
+void RuntimeFaultDomain::throw_if_new_submission_disallowed(
+    const char *operation) const {
+  if (!submission_allowed()) {
+    statistics_.record_rejected_submission();
+    throw TaichiRuntimeError(rejection_message(operation));
+  }
+}
+
 std::string RuntimeFaultDomain::rejection_message(const char *operation) const {
   const RuntimeFaultSnapshot current = snapshot();
   std::string message = fmt::format(

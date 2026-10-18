@@ -22,6 +22,9 @@ PER_CUDA_FUNCTION(context_set_limit, cuCtxSetLimit, int, std::size_t);
 
 // Stream management
 PER_CUDA_FUNCTION(stream_create, cuStreamCreate, void **, uint32);
+PER_CUDA_FUNCTION(stream_create_with_priority, cuStreamCreateWithPriority, void **, uint32, int);
+PER_CUDA_FUNCTION(stream_get_priority, cuStreamGetPriority, void *, int *);
+PER_CUDA_FUNCTION(context_get_stream_priority_range, cuCtxGetStreamPriorityRange, int *, int *);
 PER_CUDA_FUNCTION(stream_destroy, cuStreamDestroy_v2, void *);
 
 // Memory management

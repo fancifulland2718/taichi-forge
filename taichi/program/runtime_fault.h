@@ -64,6 +64,10 @@ class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
  public:
   RuntimeFaultDomain(Arch backend, std::uint64_t program_domain) noexcept;
 
+  Arch backend() const noexcept {
+    return backend_;
+  }
+
   RuntimeLifecycleState state() const noexcept {
     return state_.load(std::memory_order_acquire);
   }
@@ -97,6 +101,10 @@ class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
   // TaichiRuntimeError instead of logging repeatedly after the first fault.
   void throw_if_submission_disallowed(
       const char *operation) const override;
+
+  // New domain work/dependencies cannot use the finalizer's privileged drain
+  // path. That privilege exists only for retiring previously accepted work.
+  void throw_if_new_submission_disallowed(const char *operation) const;
 
   RuntimeFaultSnapshot snapshot() const;
 

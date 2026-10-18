@@ -108,13 +108,18 @@ void RuntimeCompletionCudaEventPool::release(void *event,
   }
 #ifdef TI_WITH_CUDA
   if (reusable && impl_->backend_calls_safe()) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->retention == Retention::until_clear ||
-        impl_->cached_events[0].size() + impl_->cached_events[1].size() <
-            impl_->max_cached_events) {
-      impl_->cached_events[blocking_sync].push_back(event);
-      impl_->returned.fetch_add(1, std::memory_order_relaxed);
-      return;
+    try {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      if (impl_->retention == Retention::until_clear ||
+          impl_->cached_events[0].size() + impl_->cached_events[1].size() <
+              impl_->max_cached_events) {
+        impl_->cached_events[blocking_sync].push_back(event);
+        impl_->returned.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    } catch (...) {
+      // Caching is optional. An allocation failure must not terminate a
+      // noexcept retirement callback; destroy the already completed event.
     }
   }
   if (!impl_->backend_calls_safe()) {
@@ -665,7 +670,7 @@ struct RuntimeCompletion::State {
       rethrow_first_error_locked();
     }
     if (fault_domain) {
-      fault_domain->throw_if_submission_disallowed("enqueue CUDA dependency");
+      fault_domain->throw_if_new_submission_disallowed("enqueue CUDA dependency");
     }
     try {
       primitive->enqueue_cuda_wait(stream);
@@ -1118,7 +1123,7 @@ void RuntimeCompletion::validate_cuda_dependency(
     throw std::invalid_argument(
         "CUDA dependency must belong to the same live runtime and context");
   }
-  fault_domain->throw_if_submission_disallowed("validate CUDA dependency");
+  fault_domain->throw_if_new_submission_disallowed("validate CUDA dependency");
   state_->validate_dependency();
 }
 
