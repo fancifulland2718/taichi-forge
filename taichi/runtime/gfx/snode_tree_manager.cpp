@@ -1,9 +1,7 @@
 #include "taichi/runtime/gfx/snode_tree_manager.h"
 
 #include "taichi/runtime/gfx/runtime.h"
-#if defined(TI_WITH_VULKAN_POINTER)
-#include "taichi/runtime/gfx/snode_allocator.h"
-#endif
+#include "taichi/runtime/gfx/snode_tree_resources.h"
 
 namespace taichi::lang {
 namespace gfx {
@@ -16,64 +14,13 @@ void SNodeTreeManager::materialize_snode_tree(
     const taichi::lang::spirv::PointerLayoutPolicy &policy) {
   auto *const root = tree->root();
   CompiledSNodeStructs compiled_structs = compile_snode_structs(*root, policy);
-  runtime_->update_listgen_buffer_for_snode_tree(compiled_structs);
   const int root_id = tree->id();
-  runtime_->add_root_buffer(root_id, compiled_structs.root_size);
-  runtime_->register_hash_overflow_checks(root_id, compiled_structs);
-#if defined(TI_WITH_VULKAN_POINTER)
-  // 路线 B B-1（2026-04-30）：用 contracts 在该 root_buffer 上构造 BumpOnly
-  // allocator，与 codegen 端 contract 字节等价。当前 root_buffer 已由
-  // add_root_buffer() memset(0)，allocator::clear_all() 暂未被调用。
-  std::unordered_map<int, std::unique_ptr<DeviceNodeAllocator>>
-      allocators_for_tree;
-  if (!compiled_structs.pointer_contracts.empty()) {
-    DeviceAllocation root_alloc = *runtime_->root_buffers_[root_id];
-    for (const auto &[sid, contract] : compiled_structs.pointer_contracts) {
-      BumpOnlyDeviceNodeAllocator::Params p;
-      p.device = runtime_->device_;
-      p.snode_id = sid;
-      p.pool_capacity = contract.pool_capacity;
-      p.cell_payload_bytes = contract.cell_stride_bytes;
-      p.watermark_offset = contract.watermark_offset;
-      p.pool_data_offset = contract.pool_data_offset;
-      p.has_freelist = contract.has_freelist;
-      p.freelist_head_offset = contract.freelist_head_offset;
-      p.freelist_links_offset = contract.freelist_links_offset;
-      p.has_ambient_zone = contract.has_ambient_zone;
-      p.ambient_offset = contract.ambient_offset;
-      p.alloc_protocol = contract.alloc_protocol;
-      p.pool_fraction = contract.pool_fraction;
-      // C-2.1 (2026-05): allocator_kind / chunk_* 透传到 Params。Bump 路径
-      // 这些字段保持默认 0/-1，BumpOnly 不读取，byte-equivalent。
-      p.allocator_kind = contract.allocator_kind;
-      p.chunk_log2_capacity = contract.chunk_log2_capacity;
-      p.max_chunks = contract.max_chunks;
-      p.chunk_descriptor_array_first_binding =
-          contract.chunk_descriptor_array_first_binding;
-      p.root_buffer_alloc = root_alloc;
-      // B-3.b (2026-05): contract.pool_buffer_binding_id >= 0 表示 layout 端
-      // 已选定该 pointer SNode 走独立 NodeAllocatorPool；此处申请独立
-      // DeviceAllocation 并交由 allocator 管理生命周期。size 来自 layout pass
-      // 计算的 footprint（覆盖 watermark + freelist + pool_data + ambient）。
-      if (contract.pool_buffer_binding_id >= 0) {
-        const auto sz_it = compiled_structs.pool_buffer_sizes.find(sid);
-        TI_ASSERT_INFO(
-            sz_it != compiled_structs.pool_buffer_sizes.end() &&
-                sz_it->second > 0,
-            "B-3.b: pool_buffer_size missing or zero for pointer SNode {}",
-            sid);
-        p.use_independent_pool = true;
-        p.independent_pool_size = sz_it->second;
-      }
-      allocators_for_tree.emplace(sid, create_device_node_allocator(p));
-    }
-  }
-  runtime_->node_allocators_[root_id] = std::move(allocators_for_tree);
-#endif
   TI_ASSERT(root_id >= 0);
   if (static_cast<std::size_t>(root_id) >= compiled_snode_structs_.size())
     compiled_snode_structs_.resize(static_cast<std::size_t>(root_id) + 1);
   TI_ASSERT(compiled_snode_structs_[root_id].root == nullptr);
+  runtime_->materialize_snode_tree_resources(
+      root_id, describe_snode_tree_resources(compiled_structs));
   compiled_snode_structs_[root_id] = std::move(compiled_structs);
 }
 
@@ -85,9 +32,6 @@ void SNodeTreeManager::destroy_snode_tree(SNodeTree *snode_tree) {
           compiled_snode_structs_[root_id].root != snode_tree->root(),
       "the tree to be destroyed cannot be found");
   runtime_->remove_root_buffer(root_id);
-#if defined(TI_WITH_VULKAN_POINTER)
-  runtime_->node_allocators_.erase(root_id);
-#endif
   compiled_snode_structs_[root_id] = {};
 }
 

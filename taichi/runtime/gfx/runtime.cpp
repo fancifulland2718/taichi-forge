@@ -1,4 +1,5 @@
 #include "taichi/runtime/gfx/runtime.h"
+#include "taichi/runtime/gfx/snode_tree_resources.h"
 #include "external/PicoSHA2/picosha2.h"
 #include <random>
 #ifdef _WIN32
@@ -963,41 +964,6 @@ size_t align_up_to(size_t value, size_t alignment) {
   return ((value + alignment - 1) / alignment) * alignment;
 }
 
-bool snode_can_use_spirv_listgen(const SNode *snode) {
-  if (snode == nullptr || snode->type == SNodeType::root ||
-      snode->is_place() || snode->is_path_all_dense) {
-    return false;
-  }
-  return snode->type == SNodeType::dense ||
-         snode->type == SNodeType::bitmasked ||
-         snode->type == SNodeType::pointer ||
-         snode->type == SNodeType::hash ||
-         snode->type == SNodeType::dynamic;
-}
-
-size_t estimate_listgen_entries(const CompiledSNodeStructs &compiled_structs) {
-  size_t result = 0;
-  for (const auto &[sid, desc] : compiled_structs.snode_descriptors) {
-    (void)sid;
-    if (snode_can_use_spirv_listgen(desc.snode)) {
-      size_t entries = desc.total_num_cells_from_root;
-      size_t suffix = 1;
-      for (auto *sn = desc.snode; sn != nullptr && sn->type != SNodeType::root;
-           sn = sn->parent) {
-        const auto it = compiled_structs.snode_descriptors.find(sn->id);
-        if (it != compiled_structs.snode_descriptors.end() &&
-            sn->type == SNodeType::hash && it->second.hash_table_capacity > 0) {
-          entries = it->second.hash_table_capacity * suffix;
-          break;
-        }
-        suffix *= static_cast<size_t>(sn->num_cells_per_container);
-      }
-      result = std::max(result, entries);
-    }
-  }
-  return result;
-}
-
 // Info for launching a compiled Taichi kernel, which consists of a series of
 // Unified Device API pipelines.
 
@@ -1581,35 +1547,6 @@ void GfxRuntime::clear_sparse_list_cache_resident() {
   child_lists_by_parent_.clear();
   sparse_list_global_dirty_epoch_ = 0;
   resident_sparse_list_snode_id_ = -1;
-}
-
-void GfxRuntime::register_hash_overflow_checks(
-    int root_id,
-    const CompiledSNodeStructs &compiled_structs) {
-  for (const auto &[sid, desc] : compiled_structs.snode_descriptors) {
-    if (desc.snode == nullptr || desc.snode->type != SNodeType::hash ||
-        desc.hash_table_capacity == 0 ||
-        desc.snode->parent == nullptr ||
-        desc.snode->parent->type != SNodeType::root) {
-      continue;
-    }
-    size_t base_offset = 0;
-    for (const SNode *sn = desc.snode;
-         sn != nullptr && sn->type != SNodeType::root; sn = sn->parent) {
-      const auto it = compiled_structs.snode_descriptors.find(sn->id);
-      TI_ASSERT_INFO(it != compiled_structs.snode_descriptors.end(),
-                     "Hash SNode {} is missing from compiled descriptors",
-                     sn->id);
-      base_offset += it->second.mem_offset_in_parent_cell;
-    }
-    const size_t no_offset = static_cast<size_t>(-1);
-    hash_overflow_watches_.push_back(
-        {root_id, sid, base_offset + desc.hash_overflow_count_offset,
-         base_offset + desc.hash_active_count_offset,
-         desc.hash_tombstone_count_offset == no_offset
-             ? no_offset
-             : base_offset + desc.hash_tombstone_count_offset});
-  }
 }
 
 void GfxRuntime::check_hash_overflow_counters() {
@@ -6481,10 +6418,65 @@ void GfxRuntime::ensure_listgen_capacity_for_kernel(
   }
 }
 
+void GfxRuntime::materialize_snode_tree_resources(
+    int root_id,
+    const SNodeTreeResources &resources) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  if (resources.listgen_capacity_entries > 0) {
+    ensure_listgen_capacity_entries(resources.listgen_capacity_entries,
+                                    "SNodeTree materialization");
+  }
+  add_root_buffer(root_id, resources.root_size);
+  try {
+    for (const auto &watch : resources.hash_watches) {
+      hash_overflow_watches_.push_back(
+          {root_id, watch.snode_id, watch.overflow_offset,
+           watch.active_count_offset, watch.tombstone_offset});
+    }
+#if defined(TI_WITH_VULKAN_POINTER)
+    std::unordered_map<int, std::unique_ptr<DeviceNodeAllocator>> allocators;
+    for (const auto &pool : resources.pointer_pools) {
+      const auto &contract = pool.contract;
+      BumpOnlyDeviceNodeAllocator::Params p;
+      p.device = device_;
+      p.snode_id = contract.snode_id;
+      p.pool_capacity = contract.pool_capacity;
+      p.cell_payload_bytes = contract.cell_stride_bytes;
+      p.watermark_offset = contract.watermark_offset;
+      p.pool_data_offset = contract.pool_data_offset;
+      p.has_freelist = contract.has_freelist;
+      p.freelist_head_offset = contract.freelist_head_offset;
+      p.freelist_links_offset = contract.freelist_links_offset;
+      p.has_ambient_zone = contract.has_ambient_zone;
+      p.ambient_offset = contract.ambient_offset;
+      p.alloc_protocol = contract.alloc_protocol;
+      p.pool_fraction = contract.pool_fraction;
+      p.allocator_kind = contract.allocator_kind;
+      p.chunk_log2_capacity = contract.chunk_log2_capacity;
+      p.max_chunks = contract.max_chunks;
+      p.chunk_descriptor_array_first_binding =
+          contract.chunk_descriptor_array_first_binding;
+      p.root_buffer_alloc = *get_root_buffer(root_id);
+      p.use_independent_pool = contract.pool_buffer_binding_id >= 0;
+      p.independent_pool_size = pool.independent_size;
+      allocators.emplace(contract.snode_id, create_device_node_allocator(p));
+    }
+    TI_ASSERT(node_allocators_.find(root_id) == node_allocators_.end());
+    node_allocators_.emplace(root_id, std::move(allocators));
+#endif
+  } catch (...) {
+    // No caller can observe a partially installed tree. Allocator guards
+    // unwind first; the root and its diagnostic watches retire together.
+    remove_root_buffer(root_id);
+    throw;
+  }
+}
+
 void GfxRuntime::update_listgen_buffer_for_snode_tree(
     const CompiledSNodeStructs &compiled_structs) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  const size_t requested_entries = estimate_listgen_entries(compiled_structs);
+  const size_t requested_entries =
+      describe_snode_tree_resources(compiled_structs).listgen_capacity_entries;
   if (requested_entries > 0) {
     ensure_listgen_capacity_entries(requested_entries,
                                     "SNodeTree materialization");
@@ -6625,6 +6617,9 @@ void GfxRuntime::remove_root_buffer(int root_id) {
   }
   root_buffers_size_map_.erase(root_buffers_[root_id].get());
   root_buffers_[root_id].reset();
+#if defined(TI_WITH_VULKAN_POINTER)
+  node_allocators_.erase(root_id);
+#endif
   hash_overflow_watches_.erase(
       std::remove_if(hash_overflow_watches_.begin(),
                      hash_overflow_watches_.end(),

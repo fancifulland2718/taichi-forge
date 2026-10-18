@@ -11,6 +11,7 @@ target_sources(gfx_runtime
   PRIVATE
     runtime.cpp
     snode_tree_manager.cpp
+    snode_tree_resources.cpp
     aot_module_builder_impl.cpp
     aot_module_loader_impl.cpp
     kernel_launcher.cpp

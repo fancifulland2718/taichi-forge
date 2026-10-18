@@ -48,6 +48,7 @@ using InputBuffersMap =
     std::unordered_map<BufferInfo, DeviceAllocation *, BufferInfoHasher>;
 
 class SNodeTreeManager;
+struct SNodeTreeResources;
 class GfxRuntime;
 class GraphReplayRegistry;
 class KernelLauncher;
@@ -629,6 +630,9 @@ class TI_DLL_EXPORT GfxRuntime {
 
   void remove_root_buffer(int root_id);
 
+  void materialize_snode_tree_resources(int root_id,
+                                        const SNodeTreeResources &resources);
+
   void update_listgen_buffer_for_snode_tree(
       const CompiledSNodeStructs &compiled_structs);
 
@@ -754,9 +758,6 @@ class TI_DLL_EXPORT GfxRuntime {
   void mark_sparse_list_task_launched(const TaskAttributes &attribs);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
   void clear_sparse_list_cache_resident();
-  void register_hash_overflow_checks(
-      int root_id,
-      const CompiledSNodeStructs &compiled_structs);
   void check_hash_overflow_counters();
   void synchronize_impl(bool check_hash_overflow);
   void retire_graph_replay(uint64_t replay_token);
