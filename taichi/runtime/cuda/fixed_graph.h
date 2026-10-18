@@ -6,6 +6,7 @@
 #include <variant>
 #include <vector>
 #include "taichi/program/kernel_launcher.h"
+#include "taichi/program/runtime_completion.h"
 #include "taichi/runtime/cuda/capture_resources.h"
 #include "taichi/runtime/branch_selection.h"
 #include "taichi/runtime/cuda_control_recipe.h"
@@ -15,6 +16,7 @@ class RuntimeFaultDomain;
 }
 namespace taichi::lang::cuda {
 class KernelLauncher;
+class ExecutionDomain;
 
 // Backend-owned fixed execution, independent of the Python/JIT Program. Source
 // contexts are consumed only during construction. Registered code and bound
@@ -68,6 +70,25 @@ class FixedGraph {
   FixedGraph(const FixedGraph &) = delete;
   FixedGraph &operator=(const FixedGraph &) = delete;
   static bool available();
+  // Cold preparation of an independent fixed execution. Registered code and
+  // every bound allocation/provider are retained by operands. The caller
+  // supplies the selected recipe and its shared-storage hazard contract;
+  // this object isolates arguments, compiler temporaries and executable
+  // control storage without changing that recipe or recompiling its code.
+  static std::unique_ptr<FixedGraph> prepare_execution_instance(
+      const std::vector<Operation> &operations,
+      std::shared_ptr<RuntimeFaultDomain> owner,
+      std::shared_ptr<ExecutionDomain> domain,
+      std::shared_ptr<RuntimeCompletionResources> operands);
+  RuntimeCompletion submit(
+      const std::vector<RuntimeCompletion> &dependencies = {});
+  struct InstanceSnapshot {
+    std::uint64_t identity;
+    std::uintptr_t temporary_storage;
+    std::size_t temporary_bytes;
+    bool retired;
+  };
+  InstanceSnapshot instance_snapshot() const;
   // Capture a flat immutable source without instantiating an executable.
   // The replay family retains this object and its operands through completion.
   static std::shared_ptr<FixedGraph> capture_binding_frame(
@@ -82,12 +103,16 @@ class FixedGraph {
   std::size_t capture_bytes() const;
 
  private:
-  FixedGraph(const std::vector<Operation> &operations,
-             std::shared_ptr<RuntimeFaultDomain> fault_domain,
-             std::shared_ptr<void> operands,
-             bool binding_frame);
+  FixedGraph(
+      const std::vector<Operation> &operations,
+      std::shared_ptr<RuntimeFaultDomain> fault_domain,
+      std::shared_ptr<void> operands,
+      bool binding_frame,
+      std::shared_ptr<ExecutionDomain> domain = {},
+      std::shared_ptr<RuntimeCompletionResources> instance_operands = {});
   void initialize(const std::vector<Operation> &operations);
   struct State;
-  std::unique_ptr<State> state_;
+  std::shared_ptr<State> state_;
+  std::shared_ptr<ExecutionDomain> domain_;
 };
 }  // namespace taichi::lang::cuda

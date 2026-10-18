@@ -383,6 +383,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   add_executable(taichi_cuda_execution_domain_tests
     tests/cpp/rhi/common/cuda_execution_domain_test.cpp
     tests/cpp/aot/llvm/cuda_execution_context_aot_test.cpp
+    tests/cpp/aot/llvm/cuda_execution_instance_aot_test.cpp
     tests/cpp/aot/llvm/cuda_gated_aot_test.cpp)
   target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE
     taichi_core gtest_main ${_ti_backend_native_targets})

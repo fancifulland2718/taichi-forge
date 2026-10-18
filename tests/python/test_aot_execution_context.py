@@ -87,4 +87,4 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
         timeout=90,
     )
     (tmp_path / "native-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
-    assert result.returncode == 0 and "[  PASSED  ] 2 tests." in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0 and "[  PASSED  ] 4 tests." in result.stdout, result.stdout + result.stderr
