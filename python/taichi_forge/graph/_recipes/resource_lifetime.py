@@ -1,7 +1,7 @@
 """Generation-owned CUDA storage over complete semantic usage regions."""
 
 from dataclasses import dataclass, replace
-from functools import lru_cache, partial
+from functools import lru_cache
 from math import prod
 
 from taichi_forge.graph._recipes.definition import _digest
@@ -162,6 +162,26 @@ def _resource_groups(definition, nodes):
     return tuple(groups)
 
 
+@dataclass(frozen=True)
+class _CudaGraphStorageFactory:
+    group: _ResourceGroup
+
+    def __call__(self):
+        return _CudaGraphStorageOwner(self.group)
+
+    def _export_aot_allocator(self, context, plan):
+        from taichi_forge._lib import core
+        from taichi_forge.lang.exception import TaichiRuntimeError
+
+        group = self.group
+        if context.arch != core.Arch.cuda or plan.plan_id != group.key or plan.binding_names != group.bindings:
+            raise TaichiRuntimeError("AOT selected storage factory does not match its private bindings")
+        if (group.arena_capacity or group.ordered_temporary_reuse or plan.temporary_arena
+                or plan.temporary_capacity is not None or plan.ordered_temporary_reuse):
+            raise TaichiRuntimeError("AOT execution Graph requires the selected temporary storage recipe")
+        return context.resource(plan, "memory", "pool", parameters={"retained_bytes": 0})
+
+
 class _CudaGraphStorageOwner:
     def __init__(self, group):
         from taichi_forge._lib import core
@@ -313,7 +333,7 @@ class GraphResourceLifetimeRecipeProvider(GraphRuntimeFragmentProvider):
                 group.key,
                 group.bindings,
                 bool(group.arena_capacity),
-                partial(_CudaGraphStorageOwner, group),
+                _CudaGraphStorageFactory(group),
                 temporary_capacity=group.arena_capacity or None,
                 ordered_temporary_reuse=group.ordered_temporary_reuse,
             )

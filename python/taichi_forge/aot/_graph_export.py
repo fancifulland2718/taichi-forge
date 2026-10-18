@@ -56,6 +56,7 @@ class _ExportContext:
         self.bounded_extents = {}
         self.private_bindings = {}
         self._private_names = {}
+        self._private_allocators = {}
         self._scalar_values = {}
         self._scalar_symbols = {}
         self._scalar_resources = {}
@@ -174,6 +175,26 @@ class _ExportContext:
         self.resources.append(dict(description, name=name))
         return name
 
+    def declare_storage_plans(self, spec):
+        from taichi_forge.graph._recipes.runtime_storage import validate_storage_plans
+
+        plans = getattr(spec, "_storage_plans", ())
+        if not plans:
+            return
+        validate_storage_plans(spec, plans)
+        for plan in plans:
+            # A concrete factory must preserve its chosen allocation policy.
+            # Arbitrary callbacks and inherited hooks cannot qualify a recipe.
+            exporter = type(plan.factory).__dict__.get("_export_aot_allocator")
+            if exporter is None:
+                raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
+            allocator = exporter(plan.factory, self, plan)
+            for name in plan.binding_names:
+                identity = id(spec.fixed_runtime_args[name])
+                previous = self._private_allocators.setdefault(identity, allocator)
+                if previous != allocator:
+                    raise TaichiRuntimeError("AOT private aliases have conflicting storage owners")
+
     def declare_private_bindings(self, bindings):
         from taichi_forge.graph._ir import InternalNdarrayRequirement
         from taichi_forge.lang._storage_view import DenseNdarrayView
@@ -215,6 +236,7 @@ class _ExportContext:
                     shape=owner.shape,
                     element_shape=dtype.shape(),
                     zero_initialize=True,
+                    **({"allocator": self._private_allocators[id(owner)]} if id(owner) in self._private_allocators else {}),
                 ),
             )
             self.private_bindings[name] = owner
@@ -1072,8 +1094,6 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         if graph._workspace_lane_capacity != 1 or graph._qualified_fusion_selector is not None:
             raise TaichiRuntimeError("AOT execution Graph needs a fixed single-frame execution recipe")
         spec = graph._spec
-        if getattr(spec, "_storage_plans", ()):
-            raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
         binding_factory = getattr(spec, "_binding_executor_factory", None)
         binding_strategy = None
         if binding_factory is not None:
@@ -1110,6 +1130,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             source_resources=source_resources,
             resource_inputs=resource_inputs,
         )
+        context.declare_storage_plans(spec)
         context.declare_private_bindings(spec.fixed_runtime_args)
         source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
         context.control_names = set(spec.control_binding_plan.names)

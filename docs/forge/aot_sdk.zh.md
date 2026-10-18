@@ -2143,6 +2143,10 @@ plan = aot.ExecutionPlan(operations, resources=[pool, scratch])
 绑定。未知或非分配器对象会被拒绝。只用于形状和未使用的数组不创建、也不要求绑定
 其分配器；view 继承父数组的分配。
 
+Graph 执行计划自动导出可保留已选的私有 ndarray 代次池，包括同一 Graph 的多个
+独立池，复用上述分配器资源描述。未知 storage factory 和临时 arena/ring 策略仍在
+预检期报错，不会静默替换为普通分配。
+
 独立 prepare 重建各自的池，已选 CUDA 参数绑定族共享其池和数组。分配记录持有池的
 底层存储直至在途工作退休；关闭外部绑定池会退休依赖的调用。重放不增加查询，也不
 增加第二个 TCM。数组字节仍计入 `resource_bytes`；驱动保留页不重复计入

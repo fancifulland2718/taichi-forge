@@ -2787,6 +2787,12 @@ created by `runtime.native_resource("memory", "pool")` and bound by name.
 Unknown/non-allocator objects are rejected. Shape-only and unused arrays do not
 create or require their allocators. Views inherit their parent's allocation.
 
+Graph execution-plan export preserves selected generation-owned pools for private
+ndarrays, including distinct pools in one Graph. It uses the same allocator
+resources and retains the selected pool topology. Unknown storage factories and
+temporary arena/ring storage recipes still fail preflight; they are not silently
+replaced with ordinary allocations.
+
 Independent prepares rebuild separate pools; selected CUDA binding families
 share their own pool and arrays. Allocation records retain pool backing through
 in-flight retirement, and closing an externally bound allocator retires its

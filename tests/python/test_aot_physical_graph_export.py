@@ -101,17 +101,64 @@ def test_aot_selected_maps_forward_adjoint_and_alias(tmp_path):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_aot_selected_storage_is_not_silently_replaced(tmp_path):
+def test_aot_selected_private_storage_preserves_pool_topology(tmp_path):
+    import array
+    from dataclasses import replace
+    from taichi_forge_runtime.aot import Runtime, Scalar
     from tests.python.test_graph_resource_lifetime_recipe import _definition, _providers
 
-    definition = _definition(groups=1, size=17)
+    definition = _definition(groups=2, size=17)
     catalog = definition.recipe_catalog(providers=_providers())
-    recipe = catalog.composer.compose((catalog.fragments[0],))
+    separate = tuple(fragment for fragment in catalog.fragments if len(fragment.coverage_region_ids) == 2)
+    recipe = catalog.composer.compose(separate)
     module = ti.aot.Module()
     with definition.materialization_context(provider_set=catalog.provider_set) as context:
         with context.materialize(recipe) as materialized:
-            assert materialized.executor.execution_stats().storage_pools
-            with pytest.raises(ti.TaichiRuntimeError, match="storage/binding recipe"):
-                module.add_execution_plan("invalid", materialized.executor)
-            assert not module._content and not module._exported_kernels and not module._execution_plans
-            assert not module._graph_export_failed
+            graph = materialized.executor
+            assert len(graph.execution_stats().storage_pools) == 2
+            plan = module.add_execution_plan("step", graph)
+            document = json.loads(plan.to_json())
+            pools = [r for r in document["resources"] if r["kind"] == "native" and r["provider"] == "memory"]
+            arrays = [r for r in document["resources"] if r["kind"] == "ndarray"]
+            assert len(pools) == len(arrays) == 2
+            assert {a["allocator"] for a in arrays} == {p["name"] for p in pools}
+            assert document["version"] == 19
+            assert plan.argument_names == ("output_0", "output_1", "value_0", "value_1")
+            artifact = tmp_path / "private_pools.tcm"
+            module.archive(str(artifact))
+
+            # Unknown allocation policies still fail before publishing any code.
+            original = graph._spec._storage_plans
+            graph._spec._storage_plans = tuple(replace(p, factory=lambda: None) for p in original)
+            rejected = ti.aot.Module()
+            try:
+                with pytest.raises(ti.TaichiRuntimeError, match="storage/binding recipe"):
+                    rejected.add_execution_plan("invalid", graph)
+                assert not rejected._content and not rejected._exported_kernels and not rejected._execution_plans
+                assert not rejected._graph_export_failed
+            finally:
+                graph._spec._storage_plans = original
+
+    # Producer generations/pools are now closed. Both consumer ownership modes
+    # reconstruct their own pools from the same package.
+    for make_runtime in (lambda: Runtime("cuda"), ti.aot.borrow_runtime):
+        with make_runtime() as runtime:
+            loaded = runtime.load_module(artifact)
+            outputs = [runtime.ndarray("i32", 17) for _ in range(4)]
+            frames = [loaded.prepare_execution("step", {
+                "output_0": outputs[2 * index], "output_1": outputs[2 * index + 1],
+                "value_0": Scalar("i32", index + 1), "value_1": Scalar("i32", index + 9),
+            }) for index in range(2)]
+            assert all(frame.info["resource_bytes"] == 136 for frame in frames)
+            for index, frame in enumerate(frames):
+                frame()
+                for group in range(2):
+                    actual = array.array("i")
+                    actual.frombytes(outputs[2 * index + group].read())
+                    value = index + (1 if group == 0 else 9)
+                    assert actual.tolist() == [(value + i * 3) * 2 + 7 for i in range(17)]
+            frames[0]()
+            frames[0].close()
+            frames[1]()
+            loaded.close()
+            frames[1].close()

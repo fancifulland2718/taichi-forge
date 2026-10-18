@@ -546,6 +546,10 @@ def test_resource_recipe_records_real_temporary_work_and_freezes_ring_capacity(m
             before = graph.execution_stats()
             assert before.memory.temporary_arena_slots == 3
             assert before.storage_pools[0].requested_bytes == 3 * 257 * 4
+            module = ti.aot.Module()
+            with pytest.raises(ti.TaichiRuntimeError, match="selected temporary storage recipe"):
+                module.add_execution_plan("unsupported_ring", graph)
+            assert not module._content and not module._execution_plans
             for _ in range(13):
                 graph.run(dict(output=output))
             np.testing.assert_array_equal(output.to_numpy(), (np.arange(257, dtype=np.int32) * 3 + 11) * 2 + 5)
