@@ -2789,9 +2789,13 @@ create or require their allocators. Views inherit their parent's allocation.
 
 Graph execution-plan export preserves selected generation-owned pools for private
 ndarrays, including distinct pools in one Graph. It uses the same allocator
-resources and retains the selected pool topology. Unknown storage factories and
-temporary arena/ring storage recipes still fail preflight; they are not silently
-replaced with ordinary allocations.
+resources and retains the selected pool topology. A selected single-slot,
+queue-ordered CUDA temporary arena also exports its whole i32/f32 buffers when
+the existing final-executor proof qualifies one fully lowered CGraph. Export
+reuses its already-resolved temporary bindings without reading scratch contents;
+replay does not invoke Python allocation/binding callbacks. Unknown factories,
+completion-ring arenas and unqualified temporary schedules still fail preflight;
+they are not silently replaced with ordinary allocations.
 
 Independent prepares rebuild separate pools; selected CUDA binding families
 share their own pool and arrays. Allocation records retain pool backing through

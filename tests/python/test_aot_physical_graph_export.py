@@ -162,3 +162,57 @@ def test_aot_selected_private_storage_preserves_pool_topology(tmp_path):
             frames[1]()
             loaded.close()
             frames[1].close()
+
+
+@pytest.mark.parametrize("dtype", [ti.i32, ti.f32])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_selected_ordered_temporary_storage_replays_without_callbacks(tmp_path, monkeypatch, dtype):
+    import array
+    from taichi_forge_runtime.aot import Runtime, Scalar
+    from tests.python.test_graph_resource_lifetime_recipe import _TaggedTemporaryWork, _TemporaryAction, _providers
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(_TaggedTemporaryWork(257, dtype))
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog(providers=_providers())
+    fragment = next(f for f in catalog.fragments if f.fragment_key.endswith(":queue-ordered-storage"))
+    recipe = catalog.composer.compose((fragment,))
+    module = ti.aot.Module()
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(recipe) as materialized:
+            def forbidden(*args, **kwargs):
+                raise AssertionError("AOT export reran a resolved temporary callback")
+
+            with monkeypatch.context() as cold:
+                cold.setattr(_TemporaryAction, "bind_graph_temporaries", forbidden)
+                plan = module.add_execution_plan("step", materialized.executor)
+            document = json.loads(plan.to_json())
+            arrays = [r for r in document["resources"] if r["kind"] == "ndarray"]
+            assert len(arrays) == 1 and arrays[0]["shape"] == [257]
+            assert arrays[0]["dtype"] == str(dtype)
+            assert not arrays[0].get("zero_initialize")
+            assert len(document["operations"]) == 2 and len(module._exported_kernels) == 2
+            assert plan.argument_names == ("output", "tag")
+            artifact = tmp_path / "ordered_temporary.tcm"
+            module.archive(str(artifact))
+
+    for make_runtime in (lambda: Runtime("cuda"), ti.aot.borrow_runtime):
+        with make_runtime() as runtime:
+            loaded = runtime.load_module(artifact)
+            outputs = [runtime.ndarray(str(dtype), 257) for _ in range(3)]
+            frames = [loaded.prepare_execution("step", dict(output=output, tag=Scalar("i32", tag)))
+                      for output, tag in zip(outputs, (-3, 19, 41))]
+            assert all(frame.info["resource_bytes"] == 1028 for frame in frames)
+            for _ in range(5):
+                for frame in reversed(frames):
+                    frame()
+            for output, tag in zip(outputs, (-3, 19, 41)):
+                actual = array.array("f" if dtype == ti.f32 else "i")
+                actual.frombytes(output.read())
+                assert actual.tolist() == [(i * 3 + tag) * 2 + 5 for i in range(257)]
+            frames[0]()
+            frames[0].close()
+            frames[1]()
+            loaded.close()
+            for frame in frames[1:]:
+                frame.close()

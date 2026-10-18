@@ -356,24 +356,24 @@ class _TemporaryWork(NativeGraphNode, NativeGraphExecutable):
 
 
 class _TaggedTemporaryWork(_TemporaryWork):
-    def __init__(self, size):
+    def __init__(self, size, dtype=ti.i32):
         @ti.kernel
-        def stage(scratch: ti.types.ndarray(dtype=ti.i32, ndim=1), tag: ti.i32):
+        def stage(scratch: ti.types.ndarray(dtype=dtype, ndim=1), tag: ti.i32):
             for i in scratch:
                 scratch[i] = i * 3 + tag
 
         @ti.kernel
         def finish(
-            scratch: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            scratch: ti.types.ndarray(dtype=dtype, ndim=1),
+            output: ti.types.ndarray(dtype=dtype, ndim=1),
         ):
             for i in output:
                 output[i] = scratch[i] * 2 + 5
 
         scratch = ti.graph.Arg(
-            ti.graph.ArgKind.NDARRAY, "__arena_scratch", ti.i32, ndim=1
+            ti.graph.ArgKind.NDARRAY, "__arena_scratch", dtype, ndim=1
         )
-        output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+        output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", dtype, ndim=1)
         tag = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "tag", ti.i32)
         self.action = _TemporaryAction(
             (
@@ -383,6 +383,12 @@ class _TaggedTemporaryWork(_TemporaryWork):
             scratch.name,
         )
         self.size = size
+        self.dtype = dtype
+
+    @property
+    def temporary_requirements(self):
+        return (TemporaryRequirement("scratch", self.size * 4, 16,
+                                     storage_kind="f32" if self.dtype == ti.f32 else "raw_i32"),)
 
     @property
     def runtime_arg_schema(self):

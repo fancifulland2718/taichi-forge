@@ -2144,8 +2144,11 @@ plan = aot.ExecutionPlan(operations, resources=[pool, scratch])
 其分配器；view 继承父数组的分配。
 
 Graph 执行计划自动导出可保留已选的私有 ndarray 代次池，包括同一 Graph 的多个
-独立池，复用上述分配器资源描述。未知 storage factory 和临时 arena/ring 策略仍在
-预检期报错，不会静默替换为普通分配。
+独立池，复用上述分配器资源描述。已选的单槽、同流顺序复用 CUDA temporary arena
+也可导出完整 i32/f32 缓冲，但须通过既有的最终执行器证明，限定为一个完全 lowering
+的 CGraph。导出复用已解析的临时绑定，不读回 scratch 内容；重放不调用 Python
+分配/绑定回调。未知 storage factory、依赖完成信号轮转的 ring，以及未经证明的临时
+调度仍在预检期报错，不会静默替换为普通分配。
 
 独立 prepare 重建各自的池，已选 CUDA 参数绑定族共享其池和数组。分配记录持有池的
 底层存储直至在途工作退休；关闭外部绑定池会退休依赖的调用。重放不增加查询，也不

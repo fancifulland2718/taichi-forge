@@ -50,6 +50,7 @@ class _ExportContext:
         self.reconstructed_binding_validators = set()
         self.reconstructed_argument_binders = set()
         self.reconstructed_derived_bindings = set()
+        self.reconstructed_temporary_actions = set()
         self.binding_constraints = []
         self._provider_data = {}
         self._native_export_facts = {}
@@ -175,9 +176,10 @@ class _ExportContext:
         self.resources.append(dict(description, name=name))
         return name
 
-    def declare_storage_plans(self, spec):
+    def declare_storage_plans(self, graph):
         from taichi_forge.graph._recipes.runtime_storage import validate_storage_plans
 
+        spec = graph._spec
         plans = getattr(spec, "_storage_plans", ())
         if not plans:
             return
@@ -189,6 +191,10 @@ class _ExportContext:
             if exporter is None:
                 raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
             allocator = exporter(plan.factory, self, plan)
+            if plan.temporary_arena:
+                from ._graph_temporaries import declare_ordered_temporaries
+
+                declare_ordered_temporaries(self, graph, allocator)
             for name in plan.binding_names:
                 identity = id(spec.fixed_runtime_args[name])
                 previous = self._private_allocators.setdefault(identity, allocator)
@@ -992,7 +998,8 @@ def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
     if not isinstance(node, _CompiledCGraphNode):
         raise TaichiRuntimeError(f"AOT execution Graph cannot reconstruct {type(node).__name__} yet")
     context.field_state(node.snode_tree_dependency_info)
-    if node.temporary_actions or set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings:
+    if (any(id(action) not in context.reconstructed_temporary_actions for action in node.temporary_actions)
+            or set(node.derived_runtime_arg_names) - context.reconstructed_derived_bindings):
         raise TaichiRuntimeError("AOT execution Graph requires the selected composition/resource recipe")
     ir_nodes = node.ir_node.children if isinstance(node.ir_node, SequentialRegion) else (node.ir_node,)
     from ._bounded_export import validate_domains
@@ -1130,7 +1137,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             source_resources=source_resources,
             resource_inputs=resource_inputs,
         )
-        context.declare_storage_plans(spec)
+        context.declare_storage_plans(graph)
         context.declare_private_bindings(spec.fixed_runtime_args)
         source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
         context.control_names = set(spec.control_binding_plan.names)

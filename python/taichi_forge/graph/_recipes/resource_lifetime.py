@@ -176,8 +176,11 @@ class _CudaGraphStorageFactory:
         group = self.group
         if context.arch != core.Arch.cuda or plan.plan_id != group.key or plan.binding_names != group.bindings:
             raise TaichiRuntimeError("AOT selected storage factory does not match its private bindings")
-        if (group.arena_capacity or group.ordered_temporary_reuse or plan.temporary_arena
-                or plan.temporary_capacity is not None or plan.ordered_temporary_reuse):
+        if (plan.temporary_arena != bool(group.arena_capacity)
+                or plan.temporary_capacity != (group.arena_capacity or None)
+                or plan.ordered_temporary_reuse != group.ordered_temporary_reuse):
+            raise TaichiRuntimeError("AOT selected storage factory does not match its temporary plan")
+        if plan.temporary_arena and not plan.ordered_temporary_reuse:
             raise TaichiRuntimeError("AOT execution Graph requires the selected temporary storage recipe")
         return context.resource(plan, "memory", "pool", parameters={"retained_bytes": 0})
 
