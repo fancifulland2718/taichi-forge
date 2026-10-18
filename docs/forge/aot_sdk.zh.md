@@ -2092,6 +2092,11 @@ CPU/CUDA/Vulkan 的每份 prepared 实例独立拥有工作区；`prepared.info`
 的 gather/backward。`prepared.info["dispatch_count"]` 统计已导出 kernel 入口数，
 不代表 native 算法内部 shader 的实际 dispatch 数。
 
+Vulkan radix sort 接受满足标量对齐、但不满足设备 storage descriptor 对齐要求的
+Field/数组视图偏移。仅这些输入使用保留的对齐工作区，在同一录制内拷入、排序和拷回；
+已对齐输入沿用直接绑定。工作区计入统计并在重放中复用。该处理适用于 radix sort，
+不扩展任意外部 shader 或独立 Parallel Sort provider 的对齐合同。
+
 执行计划可声明私有 `resources`。例如，按外部 `output` 数组的第 0 维重建临时数组，
 SDK 调用者无需分配该临时数组：
 

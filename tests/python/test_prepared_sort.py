@@ -7,6 +7,38 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_prepared_sort_misaligned_wide_keys_and_views():
+    # Scalar-aligned slices need not satisfy storage descriptor alignment.
+    # Cover the index-sort/gather path and preserve both surrounding sentinels.
+    count = 19
+    keys = ti.ndarray(ti.u64, count)
+    values = ti.ndarray(ti.i32, count)
+    key_view = ti.experimental.ndarray_view(keys, slices=(slice(1, 18),))
+    value_view = ti.experimental.ndarray_view(values, slices=(slice(1, 18),))
+    plan = ti.algorithms.prepare_sort(key_view, value_view)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(plan.record())
+    graph = builder.compile()
+    workspace_bytes = plan.report()["workspace_bytes_last_observed"]
+    for step, execute in enumerate((plan.run, lambda: graph.run({}), plan.run)):
+        source = (np.arange(count, dtype=np.uint64) * 7 + step) % 11 + np.uint64(1 << 40)
+        payload = np.arange(count, dtype=np.int32)
+        keys.from_numpy(source)
+        values.from_numpy(payload)
+        execute()
+        if workspace_bytes is None:
+            workspace_bytes = plan.report()["workspace_bytes_last_observed"]
+        order = np.argsort(source[1:18], kind="stable")
+        expected, expected_payload = source.copy(), payload.copy()
+        expected[1:18], expected_payload[1:18] = source[1:18][order], payload[1:18][order]
+        np.testing.assert_array_equal(keys.to_numpy(), expected)
+        np.testing.assert_array_equal(values.to_numpy(), expected_payload)
+    assert plan.report()["workspace_bytes_last_observed"] == workspace_bytes
+    graph.close()
+    plan.close()
+
+
 @pytest.mark.parametrize("storage", ("ndarray", "field", "view"))
 @test_utils.test(arch=[ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
 def test_prepared_sort_cold_binding_stability_and_graph(storage, monkeypatch):

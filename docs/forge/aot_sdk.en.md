@@ -2725,6 +2725,13 @@ derivative: an explicit integer permutation can feed an exported gather/backward
 pair. `prepared.info["dispatch_count"]` counts exported kernel entries, not the
 internal shader dispatches of native algorithms.
 
+Vulkan radix sort accepts scalar-aligned Field and array-view offsets even when
+they do not meet the device's storage-descriptor alignment. Only those inputs
+use retained aligned scratch and an input/output copy within the same recording;
+aligned inputs retain their direct bindings. Scratch is included in workspace
+accounting and reused on replay. This applies to radix sort, not to arbitrary
+external shaders or the separate Parallel Sort provider.
+
 Execution plans may declare private `resources`. For example, a temporary with
 the first dimension of an external `output` array can be reconstructed without
 exposing its allocation to the SDK caller:

@@ -313,16 +313,16 @@ def test_sort_vulkan_native_dense_field_nonzero_root_offset():
     ti.root.place(pad)
     ti.root.dense(ti.i, keys_np.shape[0]).place(keys)
     ti.root.dense(ti.i, keys_np.shape[0]).place(values)
-    values.from_numpy(values_np)
-    keys.from_numpy(keys_np)
     workspace = ti.algorithms.SortWorkspace(max_items=keys_np.shape[0])
-
-    ti.algorithms.sort(
-        keys, values, method="vulkan_native_radix_u32", workspace=workspace
-    )
-
-    assert keys.to_numpy().tolist() == keys_np[order].tolist()
-    assert values.to_numpy().tolist() == values_np[order].tolist()
+    pad[None] = 123456
+    for source in (keys_np, keys_np[::-1].copy(), keys_np):
+        values.from_numpy(values_np)
+        keys.from_numpy(source)
+        ti.algorithms.sort(keys, values, method="vulkan_native_radix_u32", workspace=workspace)
+        order = np.argsort(source, kind="stable")
+        assert keys.to_numpy().tolist() == source[order].tolist()
+        assert values.to_numpy().tolist() == values_np[order].tolist()
+        assert pad[None] == 123456
     assert workspace._vulkan_native_active
 
 

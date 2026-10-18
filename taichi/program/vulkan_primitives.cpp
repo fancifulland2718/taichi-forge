@@ -1752,6 +1752,10 @@ struct VulkanRadixSortCache {
   DeviceAllocation value_in{kDeviceNullAllocation};
   DeviceAllocation value_out{kDeviceNullAllocation};
   DeviceAllocation key_high{kDeviceNullAllocation};
+  // Only subviews that cannot be bound at the device's descriptor alignment
+  // need these retained buffers. Ordinary aligned arrays keep the direct path.
+  DeviceAllocation aligned_keys{kDeviceNullAllocation};
+  DeviceAllocation aligned_values{kDeviceNullAllocation};
   bool has_value_buffers{false};
   bool has_high_key_buffer{false};
   size_t key_bytes_per_item{sizeof(uint32_t)};
@@ -1817,7 +1821,7 @@ struct VulkanRadixSortCache {
     for (DeviceAllocation *alloc :
          {&key_in, &key_out, &rank, &hist, &offsets, &chunk_sums,
           &chunk_offsets, &radix8_global_hist, &radix8_partition_hist,
-          &value_in, &value_out, &key_high}) {
+          &value_in, &value_out, &key_high, &aligned_keys, &aligned_values}) {
       if (*alloc != kDeviceNullAllocation) {
         device->dealloc_memory(*alloc);
         *alloc = kDeviceNullAllocation;
@@ -18425,8 +18429,8 @@ VulkanSortRecording prepare_vulkan_sort_recording(
       use_values ? operation.value_bytes : sizeof(std::uint32_t);
   const auto expected_value_size =
       use_values ? operation.value_scalar_bytes : sizeof(std::uint32_t);
-  const auto key_offset = operation.keys.offset;
-  const auto value_offset = operation.values.offset;
+  auto key_offset = operation.keys.offset;
+  auto value_offset = operation.values.offset;
   double start = 0;
   const bool use_radix8 = cache.radix8_enabled;
   const bool raw_value_payload =
@@ -18484,6 +18488,32 @@ VulkanSortRecording prepare_vulkan_sort_recording(
   const size_t user_key_bytes = n * key_size;
   const size_t index_bytes = n * sizeof(uint32_t);
   const size_t value_bytes = n * value_size;
+  const auto descriptor_alignment = static_cast<vulkan::VulkanDevice *>(device)
+                                        ->get_vk_physical_device_props()
+                                        .limits.minStorageBufferOffsetAlignment;
+  const bool stage_keys = key_offset % descriptor_alignment != 0;
+  const bool stage_values =
+      use_values && value_offset % descriptor_alignment != 0;
+  // Scratch grows with the existing cache capacity, whose replacement already
+  // synchronizes and invalidates recordings. No per-replay allocation occurs.
+  if (stage_keys) {
+    if (cache.aligned_keys == kDeviceNullAllocation) {
+      const auto bytes = cache.capacity * cache.key_bytes_per_item;
+      cache.aligned_keys = cache.alloc_storage(bytes);
+      cache.cached_bytes += bytes;
+    }
+    key_alloc = cache.aligned_keys;
+    key_offset = 0;
+  }
+  if (stage_values) {
+    if (cache.aligned_values == kDeviceNullAllocation) {
+      const auto bytes = cache.capacity * cache.value_bytes_per_item;
+      cache.aligned_values = cache.alloc_storage(bytes);
+      cache.cached_bytes += bytes;
+    }
+    value_alloc = cache.aligned_values;
+    value_offset = 0;
+  }
   const bool raw64_values = use_values && value_size == sizeof(uint64_t);
   const size_t table_bytes =
       static_cast<size_t>(groups) * kRadixBins * sizeof(uint32_t);
@@ -19202,6 +19232,37 @@ VulkanSortRecording prepare_vulkan_sort_recording(
                                 cache.capacity * cache.value_bytes_per_item);
   push_vulkan_command_key_range(command_key, cache.key_high, 0,
                                 cache.capacity * sizeof(uint32_t));
+  if (stage_keys || stage_values) {
+    // The staging allocation is shared by bindings. Keep the actual source
+    // identity/generation/range in the command key as well.
+    push_vulkan_command_key_range(command_key, operation.keys,
+                                  operation.keys.offset, user_key_bytes);
+    push_vulkan_command_key_range(command_key, operation.values,
+                                  operation.values.offset,
+                                  use_values ? value_bytes : 0);
+    return {[inner = std::move(record_sort), stage_keys, stage_values,
+             source_keys = operation.keys, source_values = operation.values,
+             key_alloc, value_alloc, user_key_bytes,
+             value_bytes](Device *op_device, CommandList *commands) {
+              commands->memory_barrier();
+              if (stage_keys)
+                commands->buffer_copy(key_alloc.get_ptr(), source_keys,
+                                      user_key_bytes);
+              if (stage_values)
+                commands->buffer_copy(value_alloc.get_ptr(), source_values,
+                                      value_bytes);
+              commands->memory_barrier();
+              inner(op_device, commands);
+              if (stage_keys)
+                commands->buffer_copy(source_keys, key_alloc.get_ptr(),
+                                      user_key_bytes);
+              if (stage_values)
+                commands->buffer_copy(source_values, value_alloc.get_ptr(),
+                                      value_bytes);
+              commands->memory_barrier();
+            },
+            std::move(command_key)};
+  }
   return {std::move(record_sort), std::move(command_key)};
 }
 }  // namespace
