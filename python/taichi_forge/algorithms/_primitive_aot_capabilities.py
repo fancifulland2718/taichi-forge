@@ -130,6 +130,15 @@ _ROUTES = MappingProxyType({
     ),
     "gather": _indexed_copy_routes("gather"),
     "scatter": _indexed_copy_routes("scatter"),
+    "scatter_add": (
+        _sequence(("scatter_add",), "nonempty_fixed_prefix", "packed_scalar", "i32_u32_f32_i64_u64_f64",
+                  "mutable_i32_indices", "duplicate_target_accumulation", "disjoint_output",
+                  "frozen_cpu_partition_strategy", "device_atomic_capabilities", "explicit_adjoint_only"),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/scatter_add",), _ALL,
+                          ("nonempty_fixed_prefix", "packed_scalar", "i32_u32_f32_i64_u64_f64",
+                           "mutable_i32_indices", "duplicate_target_accumulation", "disjoint_output",
+                           "prepared_cpu_partial", "device_atomic_capabilities", "explicit_adjoint_only")),
+    ),
     "segmented_scan": (
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.segmented_scan",), ("cuda",),

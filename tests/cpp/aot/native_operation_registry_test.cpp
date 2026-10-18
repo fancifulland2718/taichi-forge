@@ -25,6 +25,31 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, ScatterAddSchemaKeepsBackendSpecificLimitsAtPrepare) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription d;
+  d.provider = "builtin";
+  d.operation = "scatter_add";
+  d.bindings = {{"src", "s"}, {"indices", "i"}, {"dst", "d"}};
+  d.parameters = liong::json::parse_complete(
+      R"({"size":4294967296,"dst_items":17,"dtype":"f32","cpu_max_threads":4})");
+  EXPECT_EQ(registry.decode(d).kind(), "scatter_add");
+  for (
+      const auto *p :
+      {R"({"size":0,"dst_items":1,"dtype":"f32"})",
+       R"({"size":1,"dst_items":0,"dtype":"f32"})",
+       R"({"size":true,"dst_items":1,"dtype":"f32"})",
+       R"({"size":-1,"dst_items":1,"dtype":"f32"})",
+       R"({"size":1,"dst_items":1,"dtype":"i16"})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","cpu_max_threads":0})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","cpu_max_threads":true})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","cpu_max_threads":2147483648})",
+       R"({"size":1,"dst_items":1,"dtype":"f32","unknown":0})"}) {
+    d.parameters = liong::json::parse_complete(p);
+    EXPECT_THROW(registry.decode(d), std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, MemoryPoolSchemaIsColdAndBackendQualified) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription description;

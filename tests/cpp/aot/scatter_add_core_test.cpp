@@ -2,6 +2,7 @@
 
 #include <array>
 #include <vector>
+#include "taichi/rhi/cpu/aggregation.h"
 #include "taichi/rhi/cpu/scatter_add.h"
 
 namespace taichi::lang {
@@ -92,5 +93,16 @@ TEST(ScatterAddCore, InvalidSchedulerAndRealOverflowFailBeforeWrites) {
   EXPECT_EQ(cpu::scatter_add_workspace_bytes<double>(maximum, 1), 0);
   EXPECT_NO_THROW(cpu::scatter_add<float>(nullptr, nullptr, nullptr, 0, 17, 1,
                                           nullptr, nullptr));
+}
+
+TEST(ScatterAddCore, OptionalWorkspaceBudgetDoesNotLimitInputCapacity) {
+  EXPECT_EQ(cpu::scatter_add_partitions<float>(262147, 1024, 4), 4);
+  EXPECT_EQ(cpu::scatter_add_partitions<float>(4099, 257, 4), 1);
+  const auto maximum = std::numeric_limits<std::size_t>::max();
+  EXPECT_EQ(cpu::aggregation_target_threads(maximum, 2048, 4), 4);
+  const auto partitions =
+      cpu::scatter_add_partitions<double>(maximum, maximum, 4);
+  EXPECT_EQ(partitions, 1);
+  EXPECT_EQ(cpu::scatter_add_workspace_bytes<double>(maximum, partitions), 0);
 }
 }  // namespace taichi::lang

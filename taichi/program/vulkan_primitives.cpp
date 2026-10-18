@@ -4,6 +4,7 @@
 #include "taichi/runtime/native_reduce.h"
 #include "taichi/runtime/native_transform.h"
 #include "taichi/runtime/native_indexed_copy.h"
+#include "taichi/runtime/native_scatter_add.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
@@ -10801,6 +10802,46 @@ void submit_vulkan_indexed_copy(Program *program,
     program->enqueue_compute_op_lambda(prepared.record, {});
 }
 
+class FixedVulkanScatterAdd final : public NativeOperation {
+ public:
+  FixedVulkanScatterAdd(Device &device, const ScatterAddOperation &op)
+      : device_(device),
+        src_(op.src.pointer),
+        indices_(op.indices.pointer),
+        dst_(op.dst.pointer) {
+    validate_scatter_add_storage(Arch::vulkan, op);
+    cache_.ensure_pipelines(&device);
+    const auto width = vulkan_scan_value_type_size(op.value_type);
+    prepared_ = prepare_vulkan_scatter_add(
+        nullptr, &device, cache_, src_, indices_, dst_, op.size, op.dst_items,
+        op.value_type, width, width);
+  }
+  Arch arch() const override {
+    return Arch::vulkan;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements()
+      const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = std::vector<DeviceAllocation>{src_, indices_, dst_};
+    return result;
+  }
+
+ private:
+  Device &device_;
+  DevicePtr src_, indices_, dst_;
+  VulkanIndexedCopyCache cache_;
+  VulkanPreparedScatterAdd prepared_;
+};
+
 class FixedVulkanIndexedCopy final : public NativeOperation {
  public:
   FixedVulkanIndexedCopy(Device &device, const IndexedCopyOperation &op)
@@ -11483,6 +11524,10 @@ std::size_t vulkan_add_merge_ndarray_impl(Program *program,
 }  // namespace
 
 namespace gfx {
+std::shared_ptr<NativeOperation> prepare_vulkan_scatter_add_operation(
+    Device &device, const ScatterAddOperation &operation) {
+  return std::make_shared<FixedVulkanScatterAdd>(device, operation);
+}
 std::shared_ptr<NativeOperation> prepare_vulkan_indexed_copy_operation(
     Device &device,
     const IndexedCopyOperation &operation) {

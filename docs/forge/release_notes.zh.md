@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Packed scalar scatter-add 可通过统一 AOT 原生 registry 导出到 CPU/CUDA/Vulkan，
+  支持重复目标、可变索引及目标原值累加。CPU 重放共用 runtime 调度器并保留独立
+  partial，GPU 不需 scratch；Vulkan 校验实际类型的原子能力。可组合显式伴随，
+  此路线不自动生成伴随。
 - Vulkan scatter-add 的标量、strided 和 packed 字段共用准备核心；Field 索引也使用
   对齐视图和残余偏移，修复 descriptor 验证错误，保留重复目标原子累加与 Graph
   参数独立性，不增加 scratch。

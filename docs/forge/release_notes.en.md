@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Packed scalar scatter-add now exports through the common AOT native registry
+  on CPU/CUDA/Vulkan, including duplicate targets, mutable indices and retained
+  destination values. CPU replay shares the runtime scheduler and retains private
+  partials; GPU paths require no scratch. Vulkan checks actual type-specific
+  atomic support. This route supports explicit adjoints, not automatic generation.
 - Vulkan scatter-add also shares preparation across scalar, strided and packed
   field layouts. Field-backed indices use aligned views with residual offsets,
   fixing descriptor validation errors while retaining duplicate-target atomic

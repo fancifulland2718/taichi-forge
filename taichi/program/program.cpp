@@ -24,6 +24,7 @@
 #include "taichi/rhi/cpu/indexed_copy.h"
 #include "taichi/rhi/cpu/scatter_validation.h"
 #include "taichi/rhi/cpu/scatter_add.h"
+#include "taichi/rhi/cpu/aggregation.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -709,7 +710,8 @@ void Program::validate_snode_tree_dependencies(
 std::atomic<int> Program::num_instances_;
 
 namespace {
-constexpr std::size_t kCpuPrimitiveMaxLocalWorkspaceBytes = 64ull << 20;
+constexpr std::size_t kCpuPrimitiveMaxLocalWorkspaceBytes =
+    cpu::max_local_aggregation_workspace_bytes;
 constexpr std::size_t kCpuPrimitiveRetainedScratchBytes = 8ull << 20;
 constexpr std::uint64_t kCpuPrimitiveExecutionDomainSlots = 16;
 
@@ -1387,11 +1389,7 @@ void validate_cpu_plain_scatter_indices(const int32_t *indices,
 int cpu_aggregation_target_threads(std::size_t n,
                                    std::size_t groups,
                                    int max_threads) {
-  int target_threads = std::max(1, static_cast<int>(n / 65536));
-  if (groups <= 1024 && n >= 262144) {
-    target_threads = std::min(16, std::max(1, static_cast<int>(n / 32768)));
-  }
-  return std::min(max_threads, target_threads);
+  return cpu::aggregation_target_threads(n, groups, max_threads);
 }
 using cpu::cpu_reduce_identity;
 using cpu::cpu_reduce_combine;
@@ -2489,12 +2487,14 @@ void cpu_packed_scatter_add_io_merge_task(void *raw_ctx,
 
 template <typename T>
 std::size_t cpu_scatter_add_typed(const T *src_ptr,
-                                const int32_t *indices_ptr,
-                                T *dst_ptr,
-                                std::size_t n,
-                                std::size_t dst_items,
-                                int max_threads,
-                                int target_threads) {
+                                  const int32_t *indices_ptr,
+                                  T *dst_ptr,
+                                  std::size_t n,
+                                  std::size_t dst_items,
+                                  int max_threads,
+                                  int target_threads) {
+  target_threads =
+      cpu::scatter_add_workspace_partitions<T>(dst_items, target_threads);
   const auto workspace_bytes =
       cpu::scatter_add_workspace_bytes<T>(dst_items, target_threads);
   if (target_threads > 1 &&
@@ -2502,8 +2502,8 @@ std::size_t cpu_scatter_add_typed(const T *src_ptr,
     CpuPrimitiveScratchBuffer<T> partial(PrimitiveWorkspaceFamily::scatter_add,
                                          workspace_bytes / sizeof(T));
     auto pool = get_cpu_primitive_thread_pool(max_threads);
-    cpu::scatter_add(src_ptr, indices_ptr, dst_ptr, n, dst_items, target_threads,
-                     partial.data(), pool);
+    cpu::scatter_add(src_ptr, indices_ptr, dst_ptr, n, dst_items,
+                     target_threads, partial.data(), pool);
     return workspace_bytes;
   }
   cpu::scatter_add(src_ptr, indices_ptr, dst_ptr, n, dst_items, 1,

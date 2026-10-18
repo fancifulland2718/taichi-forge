@@ -232,6 +232,59 @@ def _indexed_copy(call, context):
     ))
 
 
+def _scatter_add(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_scatter_add
+        or type(call.workspace) is not algorithms.ScatterAddWorkspace
+        or set(call.kwargs) != {"method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 3
+    ):
+        raise TaichiRuntimeError("AOT scatter-add requires its concrete ScatterAddWorkspace")
+    src, indices, dst = call.args
+    algorithms._check_scatter_add_request(*call.args, **call.kwargs)
+    source, index, destination = (packed_description(a) for a in call.args)
+    if any(len(d.index_shape) != 1 or d.element_shape for d in (source, index, destination)):
+        raise TaichiRuntimeError("AOT scatter-add requires packed scalar storage")
+    n, bound = source.index_shape[0], destination.index_shape[0]
+    call.workspace.check_shape(n, bound)
+    arch = impl.current_cfg().arch
+    backend, prefix, capability = {
+        core.Arch.x64: ("cpu_native", "cpu", "cpu_scatter_add_available"),
+        core.Arch.arm64: ("cpu_native", "cpu", "cpu_scatter_add_available"),
+        core.Arch.cuda: ("cuda_device", "cuda_device", "cuda_device_scatter_add_available"),
+        core.Arch.vulkan: ("vulkan_native", "vulkan", "vulkan_scatter_add_available"),
+    }.get(arch, (None, None, None))
+    prog = impl.get_runtime().prog
+    if (backend is None or call.kwargs["method"] not in ("auto", backend)
+            or not getattr(prog, capability)()):
+        raise TaichiRuntimeError("AOT scatter-add requires its available direct native strategy")
+    value_type = algorithms._scatter_add_value_type(source.scalar_type)
+    if arch == core.Arch.vulkan and not prog.vulkan_scatter_add_value_type_available(value_type):
+        raise TaichiRuntimeError("AOT scatter-add dtype atomics are unavailable on Vulkan")
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, (src, indices, dst), (value_type,))
+        or call.plan.method_name not in {
+            f"{prefix}_scatter_add_{suffix}"
+            for suffix in ("ndarray", "dense_field", "dense_field_indices_field")
+        }
+    ):
+        raise TaichiRuntimeError("AOT scatter-add cannot reconstruct the selected cached strategy")
+    parameters = dict(size=n, dst_items=bound, dtype=str(source.scalar_type))
+    if backend == "cpu_native":
+        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="scatter_add", version=1,
+        parameters=parameters,
+        bindings=dict(src=context.retained_arrays.require(src), indices=context.retained_arrays.require(indices),
+                      dst=context.retained_arrays.require(dst)),
+    ))
+
+
 def _sort(call, context):
     from . import _algorithms as algorithms
 
@@ -447,6 +500,7 @@ def export_sequence(sequence, context):
         "sort": _sort, "sort_by_key": _sort, "scan": _scan, "reduce": _reduce,
         "transform": _transform,
         "indexed_copy": _indexed_copy,
+        "scatter_add": _scatter_add,
         "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,
         "run_length_encode": _consecutive,
     }

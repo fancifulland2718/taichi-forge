@@ -77,6 +77,10 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
             routes = ti.algorithms.primitive_capability(mode).aot_routes
             assert any(r.forms == (mode,) and r.backends == ("cpu", "cuda", "vulkan") for r in routes)
             assert any(r.forms == ("builtin/indexed_copy",) and "mutable_i32_indices" in r.constraints for r in routes)
+        accumulation = ti.algorithms.primitive_capability("scatter_add").aot_routes
+        assert any(r.forms == ("scatter_add",) and r.backends == ("cpu", "cuda", "vulkan") for r in accumulation)
+        assert any(r.forms == ("builtin/scatter_add",) and "device_atomic_capabilities" in r.constraints for r in accumulation)
+        assert all("explicit_adjoint_only" in r.constraints for r in accumulation)
         assert not ti.algorithms.primitive_capability("histogram").aot_routes
         saved = json.loads(json.dumps(asdict(unique)))
         assert saved["aot"] == "selected_execution_plan_routes"
