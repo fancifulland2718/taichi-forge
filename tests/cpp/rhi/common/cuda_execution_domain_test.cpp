@@ -485,6 +485,33 @@ struct DomainInstance final : RuntimeClient {
   }
 };
 
+TEST_F(CudaExecutionDependency, RegistryDrainsPeersBeforeProviderDestruction) {
+  cuda::ExecutionDomainRegistry registry(fault, 2);
+  auto ready_domain = registry.create({1, 0});
+  auto blocked_domain = registry.create({1, 0});
+  testing::CudaExternalGate gate;
+  auto pending = blocked_domain->submit(
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  auto instance = std::make_shared<DomainInstance>();
+  instance->on_retire = [&] { EXPECT_TRUE(pending.done()); };
+  ready_domain->prepare_instance(instance, [] {});
+  auto retirement = std::async(std::launch::async, [&] { registry.retire(); });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (blocked_domain->snapshot().accepting &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_FALSE(blocked_domain->snapshot().accepting);
+  EXPECT_FALSE(pending.done());
+  EXPECT_EQ(instance->retire_calls.load(), 0);
+  EXPECT_EQ(retirement.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  retirement.get();
+  EXPECT_EQ(instance->retire_calls.load(), 1);
+}
+
 TEST_F(CudaExecutionDependency, InstanceCapacityPrecedesPreparationEffects) {
   cuda::ExecutionDomain domain(fault, {1, 0, 1});
   auto failed = std::make_shared<DomainInstance>();

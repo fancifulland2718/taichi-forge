@@ -84,12 +84,16 @@ class ExecutionDomain {
   void prepare_instance(const std::shared_ptr<RuntimeClient> &instance,
                         const std::function<void()> &prepare);
 
-  // Cold, idempotent drain of this stream only. No domain admission lock or
-  // global CUDA driver/submission lock is held across a host backend wait.
+  // Cold, idempotent destructive teardown. The explicit drain waits only for
+  // this stream without admission/global CUDA locks, but driver or vendor
+  // destruction may synchronize the context. To pause while peers are active,
+  // stop_accepting() and wait latest_completion(), retaining bounded state.
   // An external producer must eventually signal already submitted waits.
   void close();
 
  private:
+  friend class ExecutionDomainRegistry;
+  RuntimeCompletion retirement_completion() const;
   struct State;
   std::unique_ptr<State> state_;
 };

@@ -305,6 +305,20 @@ bool ExecutionDomain::belongs_to(
   return state_->owner == owner;
 }
 
+RuntimeCompletion ExecutionDomain::retirement_completion() const {
+  const auto &state = *state_;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  // A provider error can still have a successfully sealed device prefix.
+  // Drain that prefix without changing the public sticky-error contract. If
+  // event recording itself failed, close() must prove retirement via its
+  // stream drain; an invalid token never authorizes storage release.
+  return state.count ? state
+                           .pending[(state.head + state.count - 1) %
+                                    state.pending.size()]
+                           .completion
+                     : RuntimeCompletion{};
+}
+
 void ExecutionDomain::prepare_instance(
     const std::shared_ptr<RuntimeClient> &instance,
     const std::function<void()> &prepare) {
@@ -537,6 +551,21 @@ void ExecutionDomainRegistry::retire() {
     if (domain)
       domain->stop_accepting();
   std::exception_ptr failure;
+  // Finish all accepted work before destructive cleanup of any domain. CUDA
+  // event destruction and vendor handle cleanup can synchronize the context;
+  // they must not accidentally become the wait for a different domain's work.
+  for (const auto &domain : state.domains) {
+    if (!domain)
+      continue;
+    try {
+      auto prefix = domain->retirement_completion();
+      if (prefix.valid())
+        prefix.wait();
+    } catch (...) {
+      if (!failure)
+        failure = std::current_exception();
+    }
+  }
   for (const auto &domain : state.domains) {
     if (!domain)
       continue;
