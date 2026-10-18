@@ -1,6 +1,14 @@
 #version 450
 
 layout(local_size_x = 256) in;
+layout(push_constant) uniform HistogramParams {
+  uint n;
+  uint num_bins;
+  uint values_offset;
+  uint bins_offset;
+  uint num_chunks;
+} params;
+
 
 #ifndef VALUE_KIND
 #define VALUE_KIND 0
@@ -34,20 +42,20 @@ layout(set = 0, binding = 1, std430) buffer Bins {
 
 void main() {
   uint idx = gl_GlobalInvocationID.x;
-  uint n = values_buf.data.length();
-  uint num_bins = bins_buf.data.length();
+  uint n = params.n;
+  uint num_bins = params.num_bins;
   if (idx >= n) {
     return;
   }
 #if VALUE_KIND == 2
-  uint bin = values_buf.data[idx];
+  uint bin = values_buf.data[params.values_offset + idx];
   if (bin < num_bins) {
-    atomicAdd(bins_buf.data[bin], BIN_T(1));
+    atomicAdd(bins_buf.data[params.bins_offset + bin], BIN_T(1));
   }
 #else
-  VALUE_T bin = values_buf.data[idx];
+  VALUE_T bin = values_buf.data[params.values_offset + idx];
   if (bin >= 0 && uint(bin) < num_bins) {
-    atomicAdd(bins_buf.data[uint(bin)], BIN_T(1));
+    atomicAdd(bins_buf.data[params.bins_offset + uint(bin)], BIN_T(1));
   }
 #endif
 }

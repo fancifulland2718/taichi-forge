@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan histogram shares preparation across ndarray and dense fields while
+  retaining its direct and private/shared strategies. Aligned descriptor views
+  use explicit logical counts and offsets, fixing field alignment errors without
+  counting adjacent storage. Private counting also removes an unused output
+  descriptor; replay keeps each Graph's parameters and exact partial range.
 - Packed scalar scatter-add now exports through the common AOT native registry
   on CPU/CUDA/Vulkan, including duplicate targets, mutable indices and retained
   destination values. CPU replay shares the runtime scheduler and retains private

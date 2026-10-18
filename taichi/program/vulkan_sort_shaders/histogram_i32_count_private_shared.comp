@@ -1,6 +1,14 @@
 #version 450
 
 layout(local_size_x = 256) in;
+layout(push_constant) uniform HistogramParams {
+  uint n;
+  uint num_bins;
+  uint values_offset;
+  uint bins_offset;
+  uint num_chunks;
+} params;
+
 
 #ifndef VALUE_KIND
 #define VALUE_KIND 0
@@ -27,11 +35,7 @@ layout(set = 0, binding = 0, std430) buffer Values {
   VALUE_T data[];
 } values_buf;
 
-layout(set = 0, binding = 1, std430) buffer Bins {
-  BIN_T data[];
-} bins_buf;
-
-layout(set = 0, binding = 2, std430) buffer Partial {
+layout(set = 0, binding = 1, std430) buffer Partial {
   BIN_T data[];
 } partial_buf;
 
@@ -41,8 +45,8 @@ void main() {
   const uint chunk_size = 2048u;
   uint lid = gl_LocalInvocationID.x;
   uint chunk = gl_WorkGroupID.x;
-  uint n = values_buf.data.length();
-  uint num_bins = bins_buf.data.length();
+  uint n = params.n;
+  uint num_bins = params.num_bins;
 
   for (uint bin = lid; bin < num_bins; bin += 256u) {
     local_hist[bin] = 0;
@@ -54,12 +58,12 @@ void main() {
     uint idx = base + offset;
     if (idx < n) {
 #if VALUE_KIND == 2
-      uint bin = values_buf.data[idx];
+      uint bin = values_buf.data[params.values_offset + idx];
       if (bin < num_bins) {
         atomicAdd(local_hist[bin], 1);
       }
 #else
-      VALUE_T bin = values_buf.data[idx];
+      VALUE_T bin = values_buf.data[params.values_offset + idx];
       if (bin >= 0 && uint(bin) < num_bins) {
         atomicAdd(local_hist[uint(bin)], 1);
       }

@@ -1,6 +1,14 @@
 #version 450
 
 layout(local_size_x = 256) in;
+layout(push_constant) uniform HistogramParams {
+  uint n;
+  uint num_bins;
+  uint values_offset;
+  uint bins_offset;
+  uint num_chunks;
+} params;
+
 
 #ifndef VALUE_KIND
 #define VALUE_KIND 0
@@ -24,8 +32,8 @@ shared int local_hist[4096];
 
 void main() {
   uint lid = gl_LocalInvocationID.x;
-  uint n = values_buf.data.length();
-  uint num_bins = bins_buf.data.length();
+  uint n = params.n;
+  uint num_bins = params.num_bins;
 
   for (uint bin = lid; bin < num_bins; bin += 256u) {
     local_hist[bin] = 0;
@@ -34,12 +42,12 @@ void main() {
 
   for (uint idx = lid; idx < n; idx += 256u) {
 #if VALUE_KIND == 2
-    uint bin = values_buf.data[idx];
+    uint bin = values_buf.data[params.values_offset + idx];
     if (bin < num_bins) {
       atomicAdd(local_hist[bin], 1);
     }
 #else
-    VALUE_T bin = values_buf.data[idx];
+    VALUE_T bin = values_buf.data[params.values_offset + idx];
     if (bin >= 0 && uint(bin) < num_bins) {
       atomicAdd(local_hist[uint(bin)], 1);
     }
@@ -48,6 +56,6 @@ void main() {
   barrier();
 
   for (uint bin = lid; bin < num_bins; bin += 256u) {
-    bins_buf.data[bin] = local_hist[bin];
+    bins_buf.data[params.bins_offset + bin] = local_hist[bin];
   }
 }

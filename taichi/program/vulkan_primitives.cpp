@@ -3726,8 +3726,8 @@ struct VulkanHistogramCache {
   std::unique_ptr<Pipeline> histogram_u32_i64_count_private_shared;
   VulkanResourceSetReplayRing<1> clear_bindings;
   VulkanResourceSetReplayRing<2> count_direct_bindings;
-  VulkanResourceSetReplayRing<3> count_private_bindings;
-  VulkanResourceSetReplayRing<3> count_private_shared_bindings;
+  VulkanResourceSetReplayRing<2> count_private_bindings;
+  VulkanResourceSetReplayRing<2> count_private_shared_bindings;
   VulkanResourceSetReplayRing<2> reduce_private_bindings;
   VulkanResourceSetReplayRing<2> single_shared_bindings;
   VulkanCommandReplayCache ndarray_command_replay;
@@ -4072,15 +4072,12 @@ struct VulkanHistogramCache {
             rw_buffer_request(bins_alloc, bins_offset, bin_bytes)});
   }
 
-  VulkanReplayResourceSet<3> bind_count_private_resource_set(
+  VulkanReplayResourceSet<2> bind_count_private_resource_set(
       Program *program,
       bool shared,
       DeviceAllocation values_alloc,
       uint64_t values_offset,
       size_t value_bytes,
-      DeviceAllocation bins_alloc,
-      uint64_t bins_offset,
-      size_t bin_bytes,
       DeviceAllocation partial_alloc,
       uint64_t partial_offset,
       size_t partial_bytes) {
@@ -4088,9 +4085,8 @@ struct VulkanHistogramCache {
         shared ? count_private_shared_bindings : count_private_bindings;
     return bindings.bind(
         program, device,
-        std::array<VulkanRwBufferBindingRequest, 3>{
+        std::array<VulkanRwBufferBindingRequest, 2>{
             rw_buffer_request(values_alloc, values_offset, value_bytes),
-            rw_buffer_request(bins_alloc, bins_offset, bin_bytes),
             rw_buffer_request(partial_alloc, partial_offset, partial_bytes)});
   }
 
@@ -7489,72 +7485,6 @@ void dispatch_pipeline_with_push_constants(CommandList *cmdlist,
               "Vulkan sort dispatch failed: RhiResult({})", dispatch_status);
 }
 
-VulkanCommandReplayKey make_vulkan_histogram_command_key(
-    bool dense_field,
-    int value_type,
-    int bin_type,
-    bool use_single_shared,
-    bool use_private,
-    bool use_private_shared,
-    DeviceAllocation values_alloc,
-    uint64_t values_offset,
-    size_t value_bytes,
-    DeviceAllocation bins_alloc,
-    uint64_t bins_offset,
-    size_t bin_bytes,
-    DeviceAllocation partial_alloc,
-    size_t partial_bytes,
-    uint32_t value_groups,
-    uint32_t bin_groups,
-    uint32_t partial_groups,
-    size_t num_chunks,
-    Pipeline *clear_pipeline,
-    Pipeline *count_direct_pipeline,
-    Pipeline *count_private_pipeline,
-    Pipeline *count_private_shared_pipeline,
-    Pipeline *reduce_private_pipeline,
-    Pipeline *single_shared_pipeline,
-    ShaderResourceSet *single_shared_bindings,
-    ShaderResourceSet *clear_bindings,
-    ShaderResourceSet *count_direct_bindings,
-    ShaderResourceSet *count_private_bindings,
-    ShaderResourceSet *reduce_private_bindings) {
-  VulkanCommandReplayKey key;
-  key.push(dense_field ? 1 : 0);
-  key.push(static_cast<uint64_t>(value_type));
-  key.push(static_cast<uint64_t>(bin_type));
-  key.push(use_single_shared ? 1 : 0);
-  key.push(use_private ? 1 : 0);
-  key.push(use_private_shared ? 1 : 0);
-  key.push(values_alloc.alloc_id);
-  key.push(vulkan_allocation_generation(values_alloc));
-  key.push(values_offset);
-  key.push(static_cast<uint64_t>(value_bytes));
-  key.push(bins_alloc.alloc_id);
-  key.push(vulkan_allocation_generation(bins_alloc));
-  key.push(bins_offset);
-  key.push(static_cast<uint64_t>(bin_bytes));
-  key.push(partial_alloc.alloc_id);
-  key.push(vulkan_allocation_generation(partial_alloc));
-  key.push(static_cast<uint64_t>(partial_bytes));
-  key.push(value_groups);
-  key.push(bin_groups);
-  key.push(partial_groups);
-  key.push(static_cast<uint64_t>(num_chunks));
-  key.push_ptr(clear_pipeline);
-  key.push_ptr(count_direct_pipeline);
-  key.push_ptr(count_private_pipeline);
-  key.push_ptr(count_private_shared_pipeline);
-  key.push_ptr(reduce_private_pipeline);
-  key.push_ptr(single_shared_pipeline);
-  key.push_ptr(single_shared_bindings);
-  key.push_ptr(clear_bindings);
-  key.push_ptr(count_direct_bindings);
-  key.push_ptr(count_private_bindings);
-  key.push_ptr(reduce_private_bindings);
-  return key;
-}
-
 template <typename Ptr>
 void profiled_rw_buffer(ShaderResourceSet *bindings,
                         uint32_t binding,
@@ -10571,6 +10501,209 @@ bool vulkan_scatter_add_type_available(const DeviceCapabilityConfig &caps,
     return caps.get(DeviceCapability::spirv_has_float64) &&
            caps.get(DeviceCapability::spirv_has_atomic_float64_add);
   return false;
+}
+
+struct VulkanHistogramPolicy {
+  int private_min_n{65536};
+  int private_max_bins{512};
+  int single_shared_max_n{4096};
+};
+
+VulkanHistogramPolicy vulkan_histogram_policy_from_environment() {
+  return {get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N", 65536),
+          get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512),
+          get_environ_config("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096)};
+}
+
+struct VulkanPreparedHistogram {
+  std::function<void(Device *, CommandList *)> record;
+  VulkanCommandReplayKey key;
+};
+
+VulkanPreparedHistogram prepare_vulkan_histogram(Program *program,
+                                                 Device *device,
+                                                 VulkanHistogramCache &cache,
+                                                 DevicePtr values,
+                                                 DevicePtr bins,
+                                                 size_t n,
+                                                 size_t num_bins,
+                                                 int value_type,
+                                                 int bin_type,
+                                                 VulkanHistogramPolicy policy) {
+  cache.ensure_pipelines(device);
+  TI_ERROR_IF(
+      !(value_type == 0 || value_type == 2) ||
+          !(bin_type == 0 || (bin_type == 4 && cache.supports_i64_bins())),
+      "Vulkan histogram value/counter capabilities are unavailable");
+  const auto maximum = std::numeric_limits<uint32_t>::max();
+  TI_ERROR_IF(!num_bins || n > maximum || num_bins > maximum,
+              "Vulkan histogram exceeds its uint32 count ABI");
+  const size_t bin_size = bin_type == 4 ? 8 : 4;
+  VulkanIndexedBufferView source{kDeviceNullPtr, 0, 0};
+  if (n)
+    source = vulkan_indexed_buffer_view(device, values, n, 4, 4, 4);
+  const auto destination = vulkan_indexed_buffer_view(
+      device, bins, num_bins, bin_size, bin_size, bin_size);
+  const bool single = n && bin_type == 0 && num_bins <= 4096 &&
+                      policy.single_shared_max_n > 0 &&
+                      n <= size_t(policy.single_shared_max_n);
+  bool private_bins =
+      n && !single &&
+      (policy.private_min_n <= 0 || n >= size_t(policy.private_min_n)) &&
+      (policy.private_max_bins <= 0 ||
+       num_bins <= size_t(policy.private_max_bins));
+  size_t chunks =
+      n / kHistogramPrivateChunkSize + (n % kHistogramPrivateChunkSize != 0);
+  size_t partial_items = 0, partial_bytes = 0;
+  if (private_bins) {
+    const auto limit = device->get_storage_buffer_binding_limits().max_range;
+    // A private layout may exceed the descriptor/address ABI even though the
+    // direct histogram fits. Select the direct algorithm in that case.
+    private_bins =
+        num_bins <= maximum / chunks &&
+        num_bins <= std::numeric_limits<size_t>::max() / bin_size / chunks &&
+        num_bins <= limit / bin_size / chunks;
+    if (private_bins) {
+      partial_items = chunks * num_bins;
+      partial_bytes = partial_items * bin_size;
+      if (cache.has_workspace_allocs() &&
+          cache.needs_partial_realloc(partial_bytes) && program)
+        program->synchronize();
+      cache.ensure_partial(partial_bytes);
+    }
+  }
+  if (!private_bins)
+    chunks = 0;
+  const std::array<uint32_t, 5> params{
+      static_cast<uint32_t>(n), static_cast<uint32_t>(num_bins), source.offset,
+      destination.offset, static_cast<uint32_t>(chunks)};
+  const auto groups = [](size_t count) {
+    return static_cast<uint32_t>(count / kBlockSize +
+                                 (count % kBlockSize != 0));
+  };
+  struct Stage {
+    Pipeline *pipeline{nullptr};
+    ShaderResourceSet *bindings{nullptr};
+    std::array<uint32_t, 5> params{};
+    uint32_t groups{0};
+    DevicePtr output{kDeviceNullPtr};
+    size_t bytes{0};
+    const char *scope{nullptr};
+  };
+  std::array<Stage, 3> stages{};
+  size_t count = 0;
+  const auto add = [&](Pipeline *pipeline, ShaderResourceSet *bindings,
+                       uint32_t groups, DevicePtr output, size_t bytes,
+                       const char *scope) -> Stage & {
+    auto &stage = stages[count++];
+    stage = {pipeline, bindings, params, groups, output, bytes, scope};
+    return stage;
+  };
+  if (single) {
+    auto *bindings = cache
+                         .bind_single_shared_resource_set(
+                             program, source.binding, source.binding.offset,
+                             source.bytes, destination.binding,
+                             destination.binding.offset, destination.bytes)
+                         .bindings;
+    add(cache.single_shared_pipeline(value_type), bindings, 1,
+        destination.binding, destination.bytes,
+        cache.single_shared_scope(value_type));
+  } else if (private_bins) {
+    const bool shared = num_bins <= 4096;
+    Pipeline *pipeline =
+        shared ? cache.count_private_shared_pipeline(value_type, bin_type)
+               : nullptr;
+    const auto partial = cache.partial.get_ptr();
+    if (!pipeline) {
+      auto *bindings =
+          cache.bind_clear_resource_set(program, partial, 0, partial_bytes)
+              .bindings;
+      auto &stage =
+          add(cache.clear_pipeline(bin_type), bindings, groups(partial_items),
+              partial, partial_bytes, cache.clear_scope(bin_type));
+      stage.params[0] = static_cast<uint32_t>(partial_items);
+      stage.params[3] = 0;
+    }
+    const bool private_shared = pipeline != nullptr;
+    auto *bindings =
+        cache
+            .bind_count_private_resource_set(
+                program, private_shared, source.binding, source.binding.offset,
+                source.bytes, partial, 0, partial_bytes)
+            .bindings;
+    add(private_shared ? pipeline
+                       : cache.count_private_pipeline(value_type, bin_type),
+        bindings, private_shared ? static_cast<uint32_t>(chunks) : groups(n),
+        partial, partial_bytes,
+        cache.count_private_scope(value_type, bin_type, private_shared));
+    bindings = cache
+                   .bind_reduce_private_resource_set(
+                       program, partial, 0, partial_bytes, destination.binding,
+                       destination.binding.offset, destination.bytes)
+                   .bindings;
+    add(cache.reduce_private_pipeline(bin_type), bindings, groups(num_bins),
+        destination.binding, destination.bytes,
+        cache.reduce_private_scope(bin_type));
+  } else {
+    auto *bindings = cache
+                         .bind_clear_resource_set(program, destination.binding,
+                                                  destination.binding.offset,
+                                                  destination.bytes)
+                         .bindings;
+    auto &clear = add(cache.clear_pipeline(bin_type), bindings,
+                      groups(num_bins), destination.binding, destination.bytes,
+                      cache.clear_scope(bin_type));
+    clear.params[0] = static_cast<uint32_t>(num_bins);
+    if (n) {
+      bindings = cache
+                     .bind_count_direct_resource_set(
+                         program, source.binding, source.binding.offset,
+                         source.bytes, destination.binding,
+                         destination.binding.offset, destination.bytes)
+                     .bindings;
+      add(cache.count_direct_pipeline(value_type, bin_type), bindings,
+          groups(n), destination.binding, destination.bytes,
+          cache.count_direct_scope(value_type, bin_type));
+    }
+  }
+  const bool profile = program && program->profiler;
+  auto record = [stages, count, profile](Device *, CommandList *commands) {
+    for (size_t i = 0; i < count; ++i) {
+      const auto &s = stages[i];
+      dispatch_pipeline_with_push_constants(
+          commands, s.pipeline, s.bindings, s.params.data(), sizeof(s.params),
+          s.groups, 1, 1, profile ? s.scope : nullptr);
+      commands->buffer_barrier(s.output, s.bytes);
+    }
+  };
+  VulkanCommandReplayKey key;
+  key.push(0x10051);
+  key.push(value_type);
+  key.push(bin_type);
+  key.push(count);
+  for (const auto &view : {source, destination})
+    push_vulkan_command_key_range(key, view.binding, view.binding.offset,
+                                  view.bytes);
+  for (size_t i = 0; i < count; ++i) {
+    const auto &s = stages[i];
+    key.push_ptr(s.pipeline);
+    key.push_ptr(s.bindings);
+    key.push(s.groups);
+    for (auto word : s.params)
+      key.push(word);
+    push_vulkan_command_key_range(key, s.output, s.output.offset, s.bytes);
+  }
+  return {record, key};
+}
+
+void submit_vulkan_histogram(Program *program,
+                             Device *device,
+                             VulkanCommandReplayCache &replay,
+                             const VulkanPreparedHistogram &prepared) {
+  if (!replay.submit_or_record(program, device, prepared.key,
+                               program->profiler != nullptr, prepared.record))
+    program->enqueue_compute_op_lambda(prepared.record, {});
 }
 
 struct VulkanPreparedScatterAdd {
@@ -15179,10 +15312,11 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
               "Vulkan native histogram received null ndarray.");
   TI_ERROR_IF(values->shape.size() != 1 || bins->shape.size() != 1,
               "Vulkan native histogram expects 1D ndarrays.");
-  TI_ERROR_IF(!vulkan_histogram_value_type_available(value_type, bin_type),
-              "Vulkan native histogram received an unsupported value/bin type.");
-  const size_t value_size = value_type == 2 ? sizeof(uint32_t)
-                                            : sizeof(int32_t);
+  TI_ERROR_IF(
+      !vulkan_histogram_value_type_available(value_type, bin_type),
+      "Vulkan native histogram received an unsupported value/bin type.");
+  const size_t value_size =
+      value_type == 2 ? sizeof(uint32_t) : sizeof(int32_t);
   const size_t bin_size = bin_type == 4 ? sizeof(int64_t) : sizeof(int32_t);
   TI_ERROR_IF(values->get_element_size() != value_size ||
                   bins->get_element_size() != bin_size,
@@ -15191,211 +15325,15 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
               "Vulkan native histogram expects at least one bin.");
 
   Device *device = program_impl_->get_compute_device();
-  TI_ERROR_IF(!device, "Vulkan native histogram requires a compute device.");
-  auto cache_lease = get_histogram_cache(this, device);
-  auto &cache = *cache_lease;
-
-  const size_t n = values->get_nelement();
-  const size_t num_bins = bins->get_nelement();
-  const size_t value_bytes = n * value_size;
-  const size_t bin_bytes = num_bins * bin_size;
-  const int private_min_n_config =
-      get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N", 65536);
-  const int private_max_bins_config =
-      get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512);
-  const int single_shared_max_n_config =
-      get_environ_config("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096);
-  const bool shared_bins_supported = bin_type == 0 && num_bins <= 4096;
-  const bool private_shared_supported = num_bins <= 4096;
-  const bool use_single_shared =
-      n > 0 && shared_bins_supported && single_shared_max_n_config > 0 &&
-      n <= static_cast<size_t>(single_shared_max_n_config);
-  const bool use_private =
-      n > 0 && !use_single_shared &&
-      (private_min_n_config <= 0 ||
-       n >= static_cast<size_t>(private_min_n_config)) &&
-      (private_max_bins_config <= 0 ||
-       num_bins <= static_cast<size_t>(private_max_bins_config));
-
-  size_t num_chunks = 0;
-  size_t partial_bytes = 0;
-  if (use_private) {
-    num_chunks = (n + kHistogramPrivateChunkSize - 1) /
-                 kHistogramPrivateChunkSize;
-    partial_bytes = num_chunks * num_bins * bin_size;
-    if (cache.has_workspace_allocs() &&
-        cache.needs_partial_realloc(partial_bytes)) {
-      synchronize();
-    }
-    cache.ensure_partial(partial_bytes);
-  }
-
-  DeviceAllocation values_alloc = values->ndarray_alloc_;
-  DeviceAllocation bins_alloc = bins->ndarray_alloc_;
-  DeviceAllocation partial_alloc = cache.partial;
-  Pipeline *clear_pipeline = nullptr;
-  Pipeline *count_direct_pipeline = nullptr;
-  Pipeline *count_private_pipeline = nullptr;
-  Pipeline *count_private_shared_pipeline = nullptr;
-  Pipeline *reduce_private_pipeline = nullptr;
-  Pipeline *single_shared_pipeline = nullptr;
-  const char *single_shared_scope = nullptr;
-  const char *clear_scope = nullptr;
-  const char *reduce_private_scope = nullptr;
-  const char *count_direct_scope = nullptr;
-  const char *count_private_scope = nullptr;
-  const char *count_private_shared_scope = nullptr;
-  if (use_single_shared) {
-    single_shared_pipeline = cache.single_shared_pipeline(value_type);
-    single_shared_scope = cache.single_shared_scope(value_type);
-  } else if (use_private) {
-    count_private_shared_pipeline =
-        private_shared_supported
-            ? cache.count_private_shared_pipeline(value_type, bin_type)
-            : nullptr;
-    if (!count_private_shared_pipeline) {
-      clear_pipeline = cache.clear_pipeline(bin_type);
-      clear_scope = cache.clear_scope(bin_type);
-      count_private_pipeline = cache.count_private_pipeline(value_type, bin_type);
-      count_private_scope = cache.count_private_scope(value_type, bin_type, false);
-    }
-    reduce_private_pipeline = cache.reduce_private_pipeline(bin_type);
-    reduce_private_scope = cache.reduce_private_scope(bin_type);
-    count_private_shared_scope =
-        cache.count_private_scope(value_type, bin_type, true);
-  } else {
-    clear_pipeline = cache.clear_pipeline(bin_type);
-    count_direct_pipeline = cache.count_direct_pipeline(value_type, bin_type);
-    clear_scope = cache.clear_scope(bin_type);
-    count_direct_scope = cache.count_direct_scope(value_type, bin_type);
-  }
-  const bool profiler_scopes = profiler != nullptr;
-  const uint32_t bin_groups = static_cast<uint32_t>(
-      (num_bins + kBlockSize - 1) / kBlockSize);
-  const uint32_t partial_groups = static_cast<uint32_t>(
-      ((use_private ? num_chunks * num_bins : 0) + kBlockSize - 1) /
-      kBlockSize);
-  const uint32_t value_groups = static_cast<uint32_t>(
-      (n + kBlockSize - 1) / kBlockSize);
-  ShaderResourceSet *single_shared_bindings = nullptr;
-  ShaderResourceSet *clear_bindings = nullptr;
-  ShaderResourceSet *count_direct_bindings = nullptr;
-  ShaderResourceSet *count_private_bindings = nullptr;
-  ShaderResourceSet *reduce_private_bindings = nullptr;
-  if (use_single_shared) {
-    single_shared_bindings =
-        cache
-            .bind_single_shared_resource_set(this, values_alloc, 0,
-                                             value_bytes, bins_alloc, 0,
-                                             bin_bytes)
-            .bindings;
-  } else if (use_private) {
-    if (!count_private_shared_pipeline) {
-      clear_bindings =
-          cache.bind_clear_resource_set(this, partial_alloc, 0, partial_bytes)
-              .bindings;
-    }
-    count_private_bindings =
-        cache
-            .bind_count_private_resource_set(
-                this, count_private_shared_pipeline != nullptr, values_alloc,
-                0, value_bytes, bins_alloc, 0, bin_bytes, partial_alloc, 0,
-                partial_bytes)
-            .bindings;
-    reduce_private_bindings =
-        cache
-            .bind_reduce_private_resource_set(this, partial_alloc, 0,
-                                              partial_bytes, bins_alloc, 0,
-                                              bin_bytes)
-            .bindings;
-  } else {
-    clear_bindings =
-        cache.bind_clear_resource_set(this, bins_alloc, 0, bin_bytes).bindings;
-    if (value_groups > 0) {
-      count_direct_bindings =
-          cache
-              .bind_count_direct_resource_set(this, values_alloc, 0,
-                                              value_bytes, bins_alloc, 0,
-                                              bin_bytes)
-              .bindings;
-    }
-  }
-
-  auto record_histogram =
-      [values_alloc, bins_alloc, partial_alloc, value_bytes, bin_bytes,
-       partial_bytes, clear_pipeline, count_direct_pipeline,
-       count_private_pipeline, count_private_shared_pipeline,
-       reduce_private_pipeline, single_shared_pipeline, single_shared_scope,
-       clear_scope, reduce_private_scope, count_direct_scope,
-       count_private_scope, count_private_shared_scope, value_groups,
-       bin_groups, partial_groups, num_chunks, use_private, use_single_shared,
-       profiler_scopes, single_shared_bindings, clear_bindings,
-       count_direct_bindings, count_private_bindings,
-       reduce_private_bindings](Device * /*op_device*/, CommandList *cmdlist) {
-        auto scope_name = [profiler_scopes](const char *name) {
-          return profiler_scopes ? name : nullptr;
-        };
-        if (use_single_shared) {
-          dispatch_pipeline(cmdlist, single_shared_pipeline,
-                            single_shared_bindings, 1, 1, 1,
-                            scope_name(single_shared_scope));
-          cmdlist->buffer_barrier(bins_alloc);
-          return;
-        }
-        if (use_private) {
-          if (!count_private_shared_pipeline) {
-            dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
-                              partial_groups, 1, 1, scope_name(clear_scope));
-            cmdlist->buffer_barrier(partial_alloc);
-          }
-          {
-            Pipeline *count_pipeline = count_private_shared_pipeline
-                                           ? count_private_shared_pipeline
-                                           : count_private_pipeline;
-            const char *count_scope =
-                count_private_shared_pipeline ? count_private_shared_scope
-                                              : count_private_scope;
-            uint32_t count_groups =
-                count_private_shared_pipeline
-                    ? static_cast<uint32_t>(num_chunks)
-                    : value_groups;
-            dispatch_pipeline(cmdlist, count_pipeline, count_private_bindings,
-                              count_groups, 1, 1, scope_name(count_scope));
-            cmdlist->buffer_barrier(partial_alloc);
-          }
-          {
-            dispatch_pipeline(cmdlist, reduce_private_pipeline,
-                              reduce_private_bindings, bin_groups, 1, 1,
-                              scope_name(reduce_private_scope));
-            cmdlist->buffer_barrier(bins_alloc);
-          }
-          return;
-        }
-        {
-          dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings, bin_groups,
-                            1, 1, scope_name(clear_scope));
-          cmdlist->buffer_barrier(bins_alloc);
-        }
-        if (value_groups > 0) {
-          dispatch_pipeline(cmdlist, count_direct_pipeline,
-                            count_direct_bindings, value_groups, 1, 1,
-                            scope_name(count_direct_scope));
-          cmdlist->buffer_barrier(bins_alloc);
-        }
-      };
-  VulkanCommandReplayKey command_key = make_vulkan_histogram_command_key(
-      false, value_type, bin_type, use_single_shared, use_private,
-      count_private_shared_pipeline != nullptr, values_alloc, 0, value_bytes,
-      bins_alloc, 0, bin_bytes, partial_alloc, partial_bytes, value_groups,
-      bin_groups, partial_groups, num_chunks, clear_pipeline,
-      count_direct_pipeline, count_private_pipeline,
-      count_private_shared_pipeline, reduce_private_pipeline,
-      single_shared_pipeline, single_shared_bindings, clear_bindings,
-      count_direct_bindings, count_private_bindings, reduce_private_bindings);
-  if (!cache.ndarray_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes, record_histogram)) {
-    enqueue_compute_op_lambda(record_histogram, {});
-  }
+  TI_ERROR_IF(!device, "Vulkan histogram requires a compute device");
+  auto lease = get_histogram_cache(this, device);
+  auto &cache = *lease;
+  auto prepared = prepare_vulkan_histogram(
+      this, device, cache, values->ndarray_alloc_.get_ptr(),
+      bins->ndarray_alloc_.get_ptr(), values->get_nelement(),
+      bins->get_nelement(), value_type, bin_type,
+      vulkan_histogram_policy_from_environment());
+  submit_vulkan_histogram(this, device, cache.ndarray_command_replay, prepared);
   return cache.cached_bytes;
 }
 
@@ -15413,8 +15351,8 @@ std::size_t Program::vulkan_histogram_dense_field(SNode *values,
   TI_ERROR_IF(!vulkan_histogram_value_type_available(value_type, bin_type),
               "Vulkan native dense field histogram received an unsupported "
               "value/bin type.");
-  const size_t value_size = value_type == 2 ? sizeof(uint32_t)
-                                            : sizeof(int32_t);
+  const size_t value_size =
+      value_type == 2 ? sizeof(uint32_t) : sizeof(int32_t);
   const size_t bin_size = bin_type == 4 ? sizeof(int64_t) : sizeof(int32_t);
   TI_ERROR_IF(num_bins == 0,
               "Vulkan native dense field histogram expects at least one bin.");
@@ -15427,215 +15365,14 @@ std::size_t Program::vulkan_histogram_dense_field(SNode *values,
               "field values and bins.");
 
   Device *device = program_impl_->get_compute_device();
-  TI_ERROR_IF(!device,
-              "Vulkan native dense field histogram requires a compute device.");
-  auto cache_lease = get_histogram_cache(this, device);
-  auto &cache = *cache_lease;
-
-  const size_t value_bytes = n * value_size;
-  const size_t bin_bytes = num_bins * bin_size;
-  const int private_min_n_config =
-      get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N", 65536);
-  const int private_max_bins_config =
-      get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512);
-  const int single_shared_max_n_config =
-      get_environ_config("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096);
-  const bool shared_bins_supported = bin_type == 0 && num_bins <= 4096;
-  const bool private_shared_supported = num_bins <= 4096;
-  const bool use_single_shared =
-      n > 0 && shared_bins_supported && single_shared_max_n_config > 0 &&
-      n <= static_cast<size_t>(single_shared_max_n_config);
-  const bool use_private =
-      n > 0 && !use_single_shared &&
-      (private_min_n_config <= 0 ||
-       n >= static_cast<size_t>(private_min_n_config)) &&
-      (private_max_bins_config <= 0 ||
-       num_bins <= static_cast<size_t>(private_max_bins_config));
-
-  size_t num_chunks = 0;
-  size_t partial_bytes = 0;
-  if (use_private) {
-    num_chunks = (n + kHistogramPrivateChunkSize - 1) /
-                 kHistogramPrivateChunkSize;
-    partial_bytes = num_chunks * num_bins * bin_size;
-    if (cache.has_workspace_allocs() &&
-        cache.needs_partial_realloc(partial_bytes)) {
-      synchronize();
-    }
-    cache.ensure_partial(partial_bytes);
-  }
-
-  DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
-  DeviceAllocation bins_alloc{bins_ptr.device, bins_ptr.alloc_id};
-  DeviceAllocation partial_alloc = cache.partial;
-  Pipeline *clear_pipeline = nullptr;
-  Pipeline *count_direct_pipeline = nullptr;
-  Pipeline *count_private_pipeline = nullptr;
-  Pipeline *count_private_shared_pipeline = nullptr;
-  Pipeline *reduce_private_pipeline = nullptr;
-  Pipeline *single_shared_pipeline = nullptr;
-  const char *single_shared_scope = nullptr;
-  const char *clear_scope = nullptr;
-  const char *reduce_private_scope = nullptr;
-  const char *count_direct_scope = nullptr;
-  const char *count_private_scope = nullptr;
-  const char *count_private_shared_scope = nullptr;
-  if (use_single_shared) {
-    single_shared_pipeline = cache.single_shared_pipeline(value_type);
-    single_shared_scope = cache.single_shared_scope(value_type);
-  } else if (use_private) {
-    count_private_shared_pipeline =
-        private_shared_supported
-            ? cache.count_private_shared_pipeline(value_type, bin_type)
-            : nullptr;
-    if (!count_private_shared_pipeline) {
-      clear_pipeline = cache.clear_pipeline(bin_type);
-      clear_scope = cache.clear_scope(bin_type);
-      count_private_pipeline = cache.count_private_pipeline(value_type, bin_type);
-      count_private_scope = cache.count_private_scope(value_type, bin_type, false);
-    }
-    reduce_private_pipeline = cache.reduce_private_pipeline(bin_type);
-    reduce_private_scope = cache.reduce_private_scope(bin_type);
-    count_private_shared_scope =
-        cache.count_private_scope(value_type, bin_type, true);
-  } else {
-    clear_pipeline = cache.clear_pipeline(bin_type);
-    count_direct_pipeline = cache.count_direct_pipeline(value_type, bin_type);
-    clear_scope = cache.clear_scope(bin_type);
-    count_direct_scope = cache.count_direct_scope(value_type, bin_type);
-  }
-  const bool profiler_scopes = profiler != nullptr;
-  const uint32_t bin_groups = static_cast<uint32_t>(
-      (num_bins + kBlockSize - 1) / kBlockSize);
-  const uint32_t partial_groups = static_cast<uint32_t>(
-      ((use_private ? num_chunks * num_bins : 0) + kBlockSize - 1) /
-      kBlockSize);
-  const uint32_t value_groups = static_cast<uint32_t>(
-      (n + kBlockSize - 1) / kBlockSize);
-  ShaderResourceSet *single_shared_bindings = nullptr;
-  ShaderResourceSet *clear_bindings = nullptr;
-  ShaderResourceSet *count_direct_bindings = nullptr;
-  ShaderResourceSet *count_private_bindings = nullptr;
-  ShaderResourceSet *reduce_private_bindings = nullptr;
-  if (use_single_shared) {
-    single_shared_bindings =
-        cache
-            .bind_single_shared_resource_set(this, values_alloc,
-                                             values_ptr.offset, value_bytes,
-                                             bins_alloc, bins_ptr.offset,
-                                             bin_bytes)
-            .bindings;
-  } else if (use_private) {
-    if (!count_private_shared_pipeline) {
-      clear_bindings =
-          cache.bind_clear_resource_set(this, partial_alloc, 0, partial_bytes)
-              .bindings;
-    }
-    count_private_bindings =
-        cache
-            .bind_count_private_resource_set(
-                this, count_private_shared_pipeline != nullptr, values_alloc,
-                values_ptr.offset, value_bytes, bins_alloc, bins_ptr.offset,
-                bin_bytes, partial_alloc, 0, partial_bytes)
-            .bindings;
-    reduce_private_bindings =
-        cache
-            .bind_reduce_private_resource_set(this, partial_alloc, 0,
-                                              partial_bytes, bins_alloc,
-                                              bins_ptr.offset, bin_bytes)
-            .bindings;
-  } else {
-    clear_bindings =
-        cache
-            .bind_clear_resource_set(this, bins_alloc, bins_ptr.offset,
-                                     bin_bytes)
-            .bindings;
-    if (value_groups > 0) {
-      count_direct_bindings =
-          cache
-              .bind_count_direct_resource_set(
-                  this, values_alloc, values_ptr.offset, value_bytes,
-                  bins_alloc, bins_ptr.offset, bin_bytes)
-              .bindings;
-    }
-  }
-
-  auto record_histogram =
-      [values_alloc, bins_alloc, partial_alloc, values_ptr, bins_ptr,
-       value_bytes, bin_bytes, partial_bytes, clear_pipeline,
-       count_direct_pipeline, count_private_pipeline,
-       count_private_shared_pipeline, reduce_private_pipeline,
-       single_shared_pipeline, single_shared_scope, clear_scope,
-       reduce_private_scope, count_direct_scope, count_private_scope,
-       count_private_shared_scope, value_groups, bin_groups, partial_groups,
-       num_chunks, use_private, use_single_shared, profiler_scopes,
-       single_shared_bindings, clear_bindings, count_direct_bindings,
-       count_private_bindings, reduce_private_bindings](
-          Device * /*op_device*/, CommandList *cmdlist) {
-        auto scope_name = [profiler_scopes](const char *name) {
-          return profiler_scopes ? name : nullptr;
-        };
-        if (use_single_shared) {
-          dispatch_pipeline(cmdlist, single_shared_pipeline,
-                            single_shared_bindings, 1, 1, 1,
-                            scope_name(single_shared_scope));
-          cmdlist->buffer_barrier(bins_alloc);
-          return;
-        }
-        if (use_private) {
-          if (!count_private_shared_pipeline) {
-            dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
-                              partial_groups, 1, 1, scope_name(clear_scope));
-            cmdlist->buffer_barrier(partial_alloc);
-          }
-          {
-            Pipeline *count_pipeline = count_private_shared_pipeline
-                                           ? count_private_shared_pipeline
-                                           : count_private_pipeline;
-            const char *count_scope =
-                count_private_shared_pipeline ? count_private_shared_scope
-                                              : count_private_scope;
-            uint32_t count_groups =
-                count_private_shared_pipeline
-                    ? static_cast<uint32_t>(num_chunks)
-                    : value_groups;
-            dispatch_pipeline(cmdlist, count_pipeline, count_private_bindings,
-                              count_groups, 1, 1, scope_name(count_scope));
-            cmdlist->buffer_barrier(partial_alloc);
-          }
-          {
-            dispatch_pipeline(cmdlist, reduce_private_pipeline,
-                              reduce_private_bindings, bin_groups, 1, 1,
-                              scope_name(reduce_private_scope));
-            cmdlist->buffer_barrier(bins_alloc);
-          }
-          return;
-        }
-        {
-          dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings, bin_groups,
-                            1, 1, scope_name(clear_scope));
-          cmdlist->buffer_barrier(bins_alloc);
-        }
-        if (value_groups > 0) {
-          dispatch_pipeline(cmdlist, count_direct_pipeline,
-                            count_direct_bindings, value_groups, 1, 1,
-                            scope_name(count_direct_scope));
-          cmdlist->buffer_barrier(bins_alloc);
-        }
-      };
-  VulkanCommandReplayKey command_key = make_vulkan_histogram_command_key(
-      true, value_type, bin_type, use_single_shared, use_private,
-      count_private_shared_pipeline != nullptr, values_alloc, values_ptr.offset,
-      value_bytes, bins_alloc, bins_ptr.offset, bin_bytes, partial_alloc,
-      partial_bytes, value_groups, bin_groups, partial_groups, num_chunks,
-      clear_pipeline, count_direct_pipeline, count_private_pipeline,
-      count_private_shared_pipeline, reduce_private_pipeline,
-      single_shared_pipeline, single_shared_bindings, clear_bindings,
-      count_direct_bindings, count_private_bindings, reduce_private_bindings);
-  if (!cache.dense_field_command_replay.submit_or_record(
-          this, device, command_key, profiler_scopes, record_histogram)) {
-    enqueue_compute_op_lambda(record_histogram, {});
-  }
+  TI_ERROR_IF(!device, "Vulkan histogram requires a compute device");
+  auto lease = get_histogram_cache(this, device);
+  auto &cache = *lease;
+  auto prepared = prepare_vulkan_histogram(
+      this, device, cache, values_ptr, bins_ptr, n, num_bins, value_type,
+      bin_type, vulkan_histogram_policy_from_environment());
+  submit_vulkan_histogram(this, device, cache.dense_field_command_replay,
+                          prepared);
   return cache.cached_bytes;
 }
 

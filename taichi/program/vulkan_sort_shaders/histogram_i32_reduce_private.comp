@@ -1,6 +1,14 @@
 #version 450
 
 layout(local_size_x = 256) in;
+layout(push_constant) uniform HistogramParams {
+  uint n;
+  uint num_bins;
+  uint values_offset;
+  uint bins_offset;
+  uint num_chunks;
+} params;
+
 
 #ifndef BIN_KIND
 #define BIN_KIND 0
@@ -23,14 +31,14 @@ layout(set = 0, binding = 1, std430) buffer Bins {
 
 void main() {
   uint bin = gl_GlobalInvocationID.x;
-  uint num_bins = bins_buf.data.length();
+  uint num_bins = params.num_bins;
   if (bin >= num_bins) {
     return;
   }
-  uint num_chunks = partial_buf.data.length() / num_bins;
+  uint num_chunks = params.num_chunks;
   BIN_T total = BIN_T(0);
   for (uint chunk = 0u; chunk < num_chunks; ++chunk) {
     total += partial_buf.data[chunk * num_bins + bin];
   }
-  bins_buf.data[bin] = total;
+  bins_buf.data[params.bins_offset + bin] = total;
 }

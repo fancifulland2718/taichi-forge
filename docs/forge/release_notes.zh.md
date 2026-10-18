@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan histogram 的 ndarray 与 dense field 共用准备核心，保留 direct 与
+  private/shared 策略。对齐描述符配合显式逻辑数量和偏移，修复字段对齐错误并避免
+  计入邻接存储；private 计数阶段移除多余目标描述符，Graph 重放保留各自参数及
+  实际 partial 范围。
 - Packed scalar scatter-add 可通过统一 AOT 原生 registry 导出到 CPU/CUDA/Vulkan，
   支持重复目标、可变索引及目标原值累加。CPU 重放共用 runtime 调度器并保留独立
   partial，GPU 不需 scratch；Vulkan 校验实际类型的原子能力。可组合显式伴随，
