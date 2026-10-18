@@ -4168,10 +4168,15 @@ Since GFX metadata 6, Vulkan sparse resources use the same materializer as
 JIT. Small Windows tests cover pointer/bitmasked/dynamic trees with inline,
 independent and flattened chunked pools, direct/nested hash trees, actual field
 and downstream ndarray reverse gradients, two modules, and close/reload in
-standalone and borrowed runtimes. These checks qualify ordinary execution;
-fixed sparse Graphs still reject topology-changing/list-generation tasks until
-their buffer retention and cache contracts are qualified. Sparse roots cannot
-be exposed as plain flat views or initial root snapshots.
+standalone and borrowed runtimes. Flat fixed calls and Graphs also cover independent
+pools, currently flattened chunked pools and direct/nested hash, including
+ordinary/fixed interleaving, parent Graphs, rebinding and actual reverse gradients.
+Recordings share and retain the list-buffer version they bind. Growth does not
+require old Graphs to be recorded again; old allocations retire with their last
+user. Fixed list generation resets its count, and submission invalidates only an
+affected ordinary resident list. Fixed WHILE/nested control with sparse tasks
+remains unsupported. Sparse roots cannot be exposed as plain flat views or initial
+root snapshots.
 Each sparse module owns a 24-byte diagnostic record and a cold producer-to-runtime
 tree mapping. Synchronization reads all live records in one existing readback
 batch; dispatch does not resolve module identities.
@@ -4183,8 +4188,8 @@ copy or submission. Small Windows checks cover module root storage, nested
 views, actual reverse gradients, adjacent scalar arguments, binding updates and
 three-backend lifetime regressions. Legal aligned bindings of old artifacts
 remain usable; unaligned views that old shaders cannot express require re-export
-before execution. Use the matching private ABI 101 runtime and shim for the new
-semantics; other artifacts retain their required minimum metadata version.
+before execution. Use this version's matching private ABI 102 runtime and shim;
+other artifacts retain their required minimum metadata version.
 Dense modules using only the new array-offset semantics do not allocate sparse
 diagnostic resources. Device descriptor-range and integer-overflow limits still
 apply.

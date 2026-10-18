@@ -85,7 +85,7 @@ def main(arch, mode, artifact, legacy=""):
     if mode == "borrowed":
         import taichi_forge as ti
 
-        ti.init(arch=ti.cuda if arch == "cuda" else ti.cpu, offline_cache=False)
+        ti.init(arch=getattr(ti, arch), offline_cache=False)
         survivor = ti.field(ti.i32, shape=4)
         survivor[0] = 91
         runtime = ti.aot.borrow_runtime()
@@ -114,7 +114,10 @@ def main(arch, mode, artifact, legacy=""):
             start = time.perf_counter()
             prepared = module.kernel("gather").prepare(out)
             prepare_ms = (time.perf_counter() - start) * 1000
-            assert prepared.info["execution_kind"] == ("cuda_graph" if arch == "cuda" else "cpu_batch")
+            assert (
+                prepared.info["execution_kind"]
+                == {"cpu": "cpu_batch", "cuda": "cuda_graph", "vulkan": "vulkan_commands"}[arch]
+            )
             assert prepared.info["launches"] == 0
             if arch == "cuda" and iteration == 0:
                 parallel = ExecutionPlan(

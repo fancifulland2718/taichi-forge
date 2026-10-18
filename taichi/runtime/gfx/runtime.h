@@ -832,7 +832,9 @@ class TI_DLL_EXPORT GfxRuntime {
   // Keyed by the first reserved module root. Ordinary execution only uses
   // the cold-bound buffer; synchronization reads all records in one batch.
   std::unordered_map<int, SparseDiagnosticDomain> sparse_diagnostic_domains_;
-  std::unique_ptr<DeviceAllocationGuard> listgen_buffer_;
+  // Fixed recordings retain the version they bind. Growth publishes a new
+  // version without invalidating commands that still own the old allocation.
+  std::shared_ptr<DeviceAllocationGuard> listgen_buffer_;
   bool listgen_dynamic_size_{false};
   bool listgen_explicit_size_{false};
   size_t listgen_initial_buffer_size_{0};

@@ -251,6 +251,138 @@ TEST(GfxSNodeResources, RepeatedLocalIdsHaveIndependentListsAndRetirement) {
   }
 }
 
+TEST(GfxSNodeResources,
+     FixedListsRetainVersionsAndInvalidateOnlyAffectedResident) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator::Params device_params;
+  vulkan::VulkanDeviceCreator creator(device_params);
+  auto *device = creator.device();
+  gfx::GfxRuntime::Params runtime_params;
+  runtime_params.device = device;
+  runtime_params.listgen_reuse = true;
+  runtime_params.listgen_dynamic_size = true;
+  gfx::GfxRuntime runtime(runtime_params);
+  gfx::SNodeTreeResources resources;
+  resources.root_size = 8;
+  resources.snode_ids = {10, 11};
+  resources.listgen_capacity_entries = 1;
+  runtime.materialize_snode_tree_resources(0, resources);
+  runtime.materialize_snode_tree_resources(1, resources);
+  auto make_kernel = [&](int root, bool mutation) {
+    DeviceCapabilityConfig caps;
+    caps.set(DeviceCapability::spirv_version, 0x10300);
+    spirv::IRBuilder builder(Arch::vulkan, &caps);
+    builder.init_header();
+    const auto counter =
+        builder.buffer_argument(builder.u32_type(), 0, 0, "counter");
+    const auto list =
+        mutation ? spirv::Value{}
+                 : builder.buffer_argument(builder.u32_type(), 0, 1, "list");
+    const auto function = builder.new_function();
+    builder.start_function(function);
+    const auto ptr = builder.struct_array_access(builder.u32_type(), counter,
+                                                 builder.const_i32_zero_);
+    builder.store_variable(
+        ptr, builder.make_value(
+                 spv::OpIAdd, builder.u32_type(),
+                 builder.load_variable(ptr, builder.u32_type()),
+                 builder.uint_immediate_number(builder.u32_type(), 1)));
+    if (!mutation) {
+      const auto count = builder.struct_array_access(builder.u32_type(), list,
+                                                     builder.const_i32_zero_);
+      builder.store_variable(
+          builder.struct_array_access(builder.u32_type(), counter,
+                                      builder.const_i32_one_),
+          builder.load_variable(count, builder.u32_type()));
+      builder.store_variable(
+          count, builder.uint_immediate_number(builder.u32_type(), 17));
+    }
+    builder.make_inst(spv::OpReturn);
+    builder.make_inst(spv::OpFunctionEnd);
+    builder.commit_kernel_function(function, "main", {}, {1, 1, 1});
+    gfx::GfxRuntime::RegisterParams params;
+    params.num_snode_trees = 1;
+    params.root_buffer_bindings = {root};
+    params.snode_tree_ids = {root};
+    spirv::TaskAttributes task;
+    task.name = "fixed_list_version_counter";
+    task.task_type =
+        mutation ? OffloadedTaskType::serial : OffloadedTaskType::listgen;
+    task.advisory_total_num_threads = task.advisory_num_threads_per_group = 1;
+    using BufferType = spirv::TaskAttributes::BufferType;
+    task.buffer_binds.push_back({{BufferType::Root, 0}, 0});
+    if (mutation) {
+      task.may_mutate_sparse_topology = true;
+      task.sparse_mutation_snode_id = 10;
+    } else {
+      task.buffer_binds.push_back({{BufferType::ListGen}, 1});
+      task.sparse_list_op = spirv::TaskAttributes::kSparseListOpListgen;
+      task.sparse_list_snode_id = 11;
+      task.sparse_list_parent_snode_id = 10;
+    }
+    params.kernel_attribs.tasks_attribs.push_back(task);
+    params.task_spirv_source_codes = {builder.finalize()};
+    return runtime.register_taichi_kernel(std::move(params));
+  };
+  CallableBase callable;
+  LaunchContextBuilder context(&callable);
+  const auto list = make_kernel(0, false);
+  const auto mutation = make_kernel(0, true);
+  const auto other_mutation = make_kernel(1, true);
+  const auto prepare = [&](auto handle, int root) {
+    return runtime.prepare_fixed_graph({{{handle, &context}, {}}}, {}, {root});
+  };
+  auto fixed = prepare(list, 0);
+  auto changed = prepare(mutation, 0);
+  auto unrelated = prepare(other_mutation, 1);
+  const auto check = [&](int root, uint32_t expected) {
+    runtime.synchronize();
+    auto ptr = runtime.get_root_buffer(root)->get_ptr();
+    uint32_t values[2] = {};
+    void *host = values;
+    std::size_t bytes = sizeof(values);
+    ASSERT_EQ(device->readback_data(&ptr, &host, &bytes, 1),
+              RhiResult::success);
+    EXPECT_EQ(values[0], expected);
+    EXPECT_EQ(values[1],
+              0);  // Every generated list starts from a cleared count.
+  };
+  runtime.launch_kernel(list, context);
+  runtime.launch_kernel(list, context);  // Reuse the ordinary list.
+  unrelated->launch_prepared();
+  runtime.launch_kernel(list,
+                        context);  // An unrelated mutation cannot evict it.
+  check(0, 1);
+  check(1, 1);
+  changed->launch_prepared();
+  runtime.launch_kernel(list, context);
+  check(0, 3);
+  fixed->launch_prepared();
+  runtime.launch_kernel(list, context);  // Fixed list writing must evict it.
+  check(0, 5);
+
+  // Only a few KiB are allocated; the one-invocation kernels stay unchanged.
+  resources.listgen_capacity_entries = 4096;
+  runtime.materialize_snode_tree_resources(2, resources);
+  runtime.launch_kernel(list, context);
+  fixed->launch_prepared();  // The old recording still owns its buffer version.
+  runtime.launch_kernel(list,
+                        context);  // Its write cannot evict the new buffer.
+  check(0, 7);
+  auto current = prepare(list, 0);
+  current->launch_prepared();
+  runtime.launch_kernel(list, context);
+  check(0, 9);
+  fixed.reset();
+  changed->launch_prepared();
+  runtime.release_aot_resources({list, mutation}, {0});
+  EXPECT_ANY_THROW(current->launch_prepared());
+  unrelated->launch_prepared();
+  check(1, 2);
+  runtime.release_aot_resources({other_mutation}, {1, 2});
+}
+
 TEST(GfxSNodeResources, DenseLayoutHasNoSparseResources) {
   SNode root{0, SNodeType::root};
   auto &dense = root.dense({Axis{0}}, 8);

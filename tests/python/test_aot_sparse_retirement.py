@@ -41,6 +41,15 @@ def test_aot_vulkan_sparse_resource_reconstruction(tmp_path, pool):
     _sparse_module(tmp_path, None, consumer="aot_sparse_retirement_probe.py")
 
 
+@pytest.mark.parametrize("pool", ["independent", "chunked"])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_aot_vulkan_sparse_fixed_execution(tmp_path, pool):
+    ti.cfg.vulkan_pointer_independent_pool = True
+    ti.cfg.vulkan_pointer_allocator_kind = "chunked" if pool == "chunked" else "bump"
+    ti.cfg.vulkan_pointer_max_chunks = 2 if pool == "chunked" else 1
+    _sparse_module(tmp_path, None, consumer="aot_sparse_fixed_probe.py")
+
+
 def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=None, consumer=None):
     # Ensure the producer tree ID differs from the compact artifact ID.
     unrelated = ti.field(ti.i32, shape=1)

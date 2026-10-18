@@ -1235,6 +1235,11 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
 }
 
 RhiResult VulkanResourceSet::prepare_for_replay(bool patch_existing) {
+  // Some compiler tasks have no resources (for example inline-recycled sparse
+  // GC). Match bind_shader_resources: they need no descriptor set allocation.
+  if (bindings_.empty()) {
+    return RhiResult::success;
+  }
   if (patch_existing &&
       !device_->vk_caps().descriptor_update_after_bind) {
     return RhiResult::not_supported;
