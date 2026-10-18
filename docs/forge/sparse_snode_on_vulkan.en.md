@@ -213,11 +213,11 @@ quantized fields are not supported on this path.
 
 Important correctness limits:
 
-- The current experimental quantized `atomic_add` returns the input delta,
-  **not the previous stored value**. Do not consume it as an ordinary atomic
-  return value.
-- Choose bit widths and scaling for the full input and accumulated range.
-  Overflow in a packed atomic addition can affect adjacent packed members.
+- Quantized `atomic_add` returns the previous logical field value, including
+  signed extraction and fixed-point scaling. Concurrent additions to one field
+  return the values preceding their respective successful updates.
+- Packed integer addition wraps within the target field's bit width and
+  preserves adjacent members. Choose widths and scaling for the required range.
 - Ordinary quantized integer/fixed-point stores now preserve neighboring cells
   through a compare-and-swap update. Small tests cover concurrent writes and
   partial updates with 32/64-bit words; 64-bit updates require the device's
