@@ -1082,6 +1082,91 @@ class TaskCodegen : public IRVisitor {
                         bucket_u32);
   }
 
+  spirv::Value hash_compact_child_used_ptr(spirv::Value buffer,
+                                           spirv::Value base_byte_offset,
+                                           const SNodeDescriptor &desc,
+                                           spirv::Value slot) {
+    auto word = ir_->make_value(spv::OpShiftRightLogical, ir_->u32_type(), slot,
+                                ir_->uint_immediate_number(ir_->u32_type(), 5));
+    return hash_u32_ptr(buffer, base_byte_offset,
+                        desc.hash_compact_child_pool_overflow_offset + 4, word);
+  }
+
+  spirv::Value hash_compact_child_used_bit(spirv::Value slot) {
+    auto u32_t = ir_->u32_type();
+    auto bit_index = ir_->make_value(spv::OpBitwiseAnd, u32_t, slot,
+                                     ir_->uint_immediate_number(u32_t, 31));
+    return ir_->make_value(spv::OpShiftLeftLogical, u32_t,
+                           ir_->uint_immediate_number(u32_t, 1), bit_index);
+  }
+
+  spirv::Value hash_allocate_child_slot(spirv::Value buffer,
+                                        spirv::Value base_byte_offset,
+                                        const SNodeDescriptor &desc) {
+    auto u32_t = ir_->u32_type();
+    auto zero = ir_->uint_immediate_number(u32_t, 0);
+    auto one = ir_->uint_immediate_number(u32_t, 1);
+    auto missing = ir_->uint_immediate_number(u32_t, 0xffffffffu);
+    auto capacity = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_compact_child_pool_capacity));
+    auto next_ptr = hash_counter_ptr(buffer, base_byte_offset,
+                                     desc.hash_compact_child_pool_next_offset);
+    auto cursor =
+        ir_->make_value(spv::OpAtomicIAdd, u32_t, next_ptr, ir_->const_i32_one_,
+                        ir_->const_i32_zero_, one);
+    auto slot_var = ir_->alloca_variable(u32_t);
+    auto attempts_var = ir_->alloca_variable(u32_t);
+    auto result_var = ir_->alloca_variable(u32_t);
+    ir_->store_variable(slot_var,
+                        ir_->make_value(spv::OpUMod, u32_t, cursor, capacity));
+    ir_->store_variable(attempts_var, zero);
+    ir_->store_variable(result_var, missing);
+
+    auto head = ir_->new_label();
+    auto body = ir_->new_label();
+    auto cont = ir_->new_label();
+    auto merge = ir_->new_label();
+    ir_->make_inst(spv::OpBranch, head);
+    ir_->start_label(head);
+    auto in_range =
+        ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                        ir_->load_variable(attempts_var, u32_t), capacity);
+    auto unassigned =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(),
+                        ir_->load_variable(result_var, u32_t), missing);
+    auto searching = ir_->make_value(spv::OpLogicalAnd, ir_->bool_type(),
+                                     in_range, unassigned);
+    ir_->make_inst(spv::OpLoopMerge, merge, cont, spv::LoopControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, searching, body, merge);
+
+    ir_->start_label(body);
+    auto slot = ir_->load_variable(slot_var, u32_t);
+    auto bit = hash_compact_child_used_bit(slot);
+    auto word_ptr =
+        hash_compact_child_used_ptr(buffer, base_byte_offset, desc, slot);
+    auto old =
+        ir_->make_value(spv::OpAtomicOr, u32_t, word_ptr, ir_->const_i32_one_,
+                        uniform_memory_acq_rel_semantics(), bit);
+    auto was_used = ir_->make_value(spv::OpBitwiseAnd, u32_t, old, bit);
+    auto won = ir_->make_value(spv::OpIEqual, ir_->bool_type(), was_used, zero);
+    ir_->store_variable(
+        result_var, ir_->make_value(spv::OpSelect, u32_t, won, slot, missing));
+    ir_->make_inst(spv::OpBranch, cont);
+
+    ir_->start_label(cont);
+    auto next = ir_->add(slot, one);
+    auto wraps =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), next, capacity);
+    ir_->store_variable(
+        slot_var, ir_->make_value(spv::OpSelect, u32_t, wraps, zero, next));
+    ir_->store_variable(attempts_var,
+                        ir_->add(ir_->load_variable(attempts_var, u32_t), one));
+    ir_->make_inst(spv::OpBranch, head);
+
+    ir_->start_label(merge);
+    return ir_->load_variable(result_var, u32_t);
+  }
+
   spirv::Value hash_compact_child_pool_byte_offset(
       spirv::Value base_byte_offset,
       const SNodeDescriptor &desc,
@@ -1131,10 +1216,35 @@ class TaskCodegen : public IRVisitor {
                                  const SNodeDescriptor &desc,
                                  spirv::Value bucket_u32) {
     if (hash_has_compact_child_pool(desc)) {
-      auto zero = ir_->uint_immediate_number(ir_->u32_type(), 0);
-      auto slot_ptr =
-          hash_compact_child_slot_ptr(buffer, base_byte_offset, desc, bucket_u32);
+      auto u32_t = ir_->u32_type();
+      auto zero = ir_->uint_immediate_number(u32_t, 0);
+      auto slot_ptr = hash_compact_child_slot_ptr(buffer, base_byte_offset,
+                                                  desc, bucket_u32);
+      auto slot_plus_one = ir_->load_variable(slot_ptr, u32_t);
       ir_->store_variable(slot_ptr, zero);
+      auto nonzero = ir_->make_value(spv::OpUGreaterThan, ir_->bool_type(),
+                                     slot_plus_one, zero);
+      auto not_busy =
+          ir_->make_value(spv::OpINotEqual, ir_->bool_type(), slot_plus_one,
+                          ir_->uint_immediate_number(u32_t, 0xffffffffu));
+      auto has_slot = ir_->make_value(spv::OpLogicalAnd, ir_->bool_type(),
+                                      nonzero, not_busy);
+      auto release = ir_->new_label();
+      auto merge = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, merge,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, has_slot, release, merge);
+      ir_->start_label(release);
+      auto slot = ir_->sub(slot_plus_one, ir_->uint_immediate_number(u32_t, 1));
+      auto bit = hash_compact_child_used_bit(slot);
+      auto mask = ir_->make_value(spv::OpNot, u32_t, bit);
+      auto word_ptr =
+          hash_compact_child_used_ptr(buffer, base_byte_offset, desc, slot);
+      (void)ir_->make_value(spv::OpAtomicAnd, u32_t, word_ptr,
+                            ir_->const_i32_one_,
+                            uniform_memory_acq_rel_semantics(), mask);
+      ir_->make_inst(spv::OpBranch, merge);
+      ir_->start_label(merge);
       return;
     }
     auto payload = hash_payload_byte_offset(base_byte_offset, desc, bucket_u32);
@@ -1218,12 +1328,7 @@ class TaskCodegen : public IRVisitor {
       ir_->make_inst(spv::OpBranchConditional, won, won_lbl, after_won_lbl);
 
       ir_->start_label(won_lbl);
-      auto next_ptr = hash_counter_ptr(
-          buffer, base_byte_offset, desc.hash_compact_child_pool_next_offset);
-      auto slot = ir_->make_value(spv::OpAtomicIAdd, u32_t, next_ptr,
-                                  /*scope=*/ir_->const_i32_one_,
-                                  /*semantics=*/ir_->const_i32_zero_,
-                                  ir_->uint_immediate_number(u32_t, 1));
+      auto slot = hash_allocate_child_slot(buffer, base_byte_offset, desc);
       auto in_range = ir_->make_value(
           spv::OpULessThan, ir_->bool_type(), slot,
           ir_->uint_immediate_number(

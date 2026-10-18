@@ -6,7 +6,12 @@ from tests import test_utils
 
 
 @pytest.mark.parametrize("active_list", [False, True])
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, hash_snode_compact_child_pool=True)
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+    hash_snode_compact_child_pool=True,
+    vulkan_sparse_experimental=True,
+)
 def test_compact_hash_recycles_retired_parent_slots(active_list):
     ti.lang.impl.current_cfg().hash_snode_active_list = active_list
     values = ti.field(ti.i32)
@@ -33,7 +38,12 @@ def test_compact_hash_recycles_retired_parent_slots(active_list):
         previous = current
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, hash_snode_compact_child_pool=True)
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+    hash_snode_compact_child_pool=True,
+    vulkan_sparse_experimental=True,
+)
 def test_compact_hash_recycles_parallel_slots_and_clears_children():
     # Cross a bitmap word boundary, including a partial final word. All slots
     # are live together; the next generation must reuse every retired slot.

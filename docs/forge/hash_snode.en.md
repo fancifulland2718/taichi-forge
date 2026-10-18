@@ -162,6 +162,15 @@ Recommended defaults:
 
 Hash SNode does not grow at run time. If more distinct keys are activated than the table can hold, the backend reports a hash overflow. On GPU backends the error is typically observed at `ti.sync()` or the next synchronization boundary.
 
+With `hash_snode_compact_child_pool=True`, the parent active hint sizes the
+child-container pool. Deactivating a parent returns its slot for reuse on
+CPU/CUDA/Vulkan; a new owner receives a zeroed child container. The pool tracks
+live slots rather than cumulative activations, using one occupancy bit per slot
+(rounded to 32-bit words). A full pool still reports overflow. This does not make
+concurrent deletion and access of the same parent safe. Old compiled compact
+artifacts need re-export to acquire the recycling logic; JIT cache identities
+include the layout revision. The option remains disabled by default.
+
 ```python
 ti.init(arch=ti.cuda)
 

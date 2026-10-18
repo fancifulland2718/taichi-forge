@@ -162,6 +162,12 @@ h.place(x)
 
 Hash SNode 不会在运行时增长。如果激活的 distinct key 超过 table 可承载范围，后端会报告 hash overflow。GPU 后端通常在 `ti.sync()` 或下一个同步边界观察到错误。
 
+启用 `hash_snode_compact_child_pool=True` 时，父节点的活跃数量提示决定子容器池大小。
+CPU/CUDA/Vulkan 在停用父键后归还槽位，新键复用时会清零子容器。容量按仍占用的槽位
+计算，不再累计历史激活次数；每槽增加一位占用记录，向 32 位字取整。池满仍报溢出。
+这不保证对同一父键并发删除和访问安全。旧紧凑编译产物需重新导出才能获得回收逻辑，
+JIT 缓存身份已包含布局修订。该选项仍默认关闭。
+
 ```python
 ti.init(arch=ti.cuda)
 

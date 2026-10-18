@@ -134,6 +134,9 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
     layout.compact_child_pool_overflow_offset =
         align_up(cursor, static_cast<std::size_t>(4));
     cursor = layout.compact_child_pool_overflow_offset + 4;
+    // Occupancy words immediately follow the overflow counter. Codegen derives
+    // their address from that offset; no additional descriptor field is needed.
+    cursor += ((layout.compact_child_pool_capacity + 31) / 32) * 4;
     layout.compact_child_pool_offset =
         align_up(cursor, payload_alignment);
     layout.compact_child_pool_stride = payload_stride;
