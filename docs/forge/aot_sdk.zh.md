@@ -3464,7 +3464,8 @@ python python/taichi_forge/tools/_host_wheel.py --spec release.json --output whe
   "files": {
     "simulation/solver.pyi": "public/solver.pyi",
     "simulation/py.typed": "public/py.typed",
-    "simulation/settings.json": "public/settings.json"
+    "simulation/settings.json": "public/settings.json",
+    "simulation/aot/cuda/application.tcm": "artifacts/application.tcm"
   }
 }
 ```
@@ -3479,6 +3480,20 @@ setuptools生成正确的原生wheel标签、`METADATA`、`WHEEL`和`RECORD`，�
 保留在`.dist-info/forge-host.json`。构建脚本和编译缓存不进入消费包。工具校验全部产物
 哈希，拒绝未声明文件、源码、目标冲突和不匹配的ABI/平台；公开文件清单不能夹带Forge
 或其他原生runtime库。
+
+应用 TCM 由应用分发包持有，`taichi-forge-runtime` 正常独立安装。按目标配置将应用
+的 kernel、Graph 和资源重建声明聚合进一个 TCM；外部 provider 保持库引用，不另建
+一组应用归档。一个 TCM 对应一个后端。NumPy、SciPy 及厂商库保持独立依赖；通用 SDK
+需要的前端和依赖闭包可通过 `[project.optional-dependencies]` 中的 `sdk` 等 extra
+声明，实际闭包允许时，固定任务配置仅依赖 runtime。wheelhouse 是可选离线安装介质，
+不内嵌到应用包。
+
+固定消费可以通过已安装分发包的 `importlib.metadata` 文件记录定位声明的 TCM，
+无需导入编译后的应用宿主，再使用 `taichi_forge_runtime.aot.Runtime.load_module()`
+加载并准备入口。Windows 资格包已验证单一 CUDA SAP TCM、独立 SDK extras，以及
+不导入前端/NumPy/GeoPhys 宿主的消费路线。该宿主显式适配 SAP schema 9 并保留动态
+容量语义；四接触固定任务不代表全部 GeoPhys。卸载应用及 shim 后，runtime 和外部
+依赖文件仍保持完整。
 
 已有wheel不可变；相同输入可复现。公开文件改变时换版本或输出目录，宿主扩展无需重编译。
 遵守`SOURCE_DATE_EPOCH`，默认使用ZIP格式最早时间戳。小型已安装wheel已验证公开资源、

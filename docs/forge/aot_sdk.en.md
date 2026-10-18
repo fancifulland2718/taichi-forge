@@ -4536,7 +4536,8 @@ python python/taichi_forge/tools/_host_wheel.py --spec release.json --output whe
   "files": {
     "simulation/solver.pyi": "public/solver.pyi",
     "simulation/py.typed": "public/py.typed",
-    "simulation/settings.json": "public/settings.json"
+    "simulation/settings.json": "public/settings.json",
+    "simulation/aot/cuda/application.tcm": "artifacts/application.tcm"
   }
 }
 ```
@@ -4556,6 +4557,25 @@ build scripts and compiler caches stay outside the wheel. The tool checks every
 payload hash and rejects undeclared files, source, destination collisions and
 incompatible host ABIs/platforms. The public-file list cannot vendor Forge or
 other native runtime libraries.
+
+Keep the application TCM in the application distribution and install
+`taichi-forge-runtime` normally. Aggregate the selected application's kernels,
+Graphs and reconstruction declarations into one TCM per target profile; external
+providers remain library references, not separate application archives. A TCM
+targets one backend. NumPy, SciPy and vendor libraries remain independently
+installed dependencies. The generic SDK's frontend/dependency closure can be
+declared in a `[project.optional-dependencies]` extra such as `sdk`, while a
+fixed-task profile depends only on the runtime when its actual closure permits.
+An offline wheelhouse is an optional installation medium, not embedded payload.
+
+For fixed consumption, locate the declared TCM through the installed
+distribution's `importlib.metadata` file records, without importing the compiled
+application host. Then use `taichi_forge_runtime.aot.Runtime.load_module()` and
+prepare the declared entry. A Windows qualification wheel verifies this route
+with one CUDA SAP TCM, no frontend/NumPy/GeoPhys host imports, and independent
+SDK extras. Its explicit SAP schema-9 port preserves dynamic capacity declarations;
+the selected four-contact task is not all of GeoPhys. Removing the application
+and shim also leaves the runtime and external dependency files intact.
 
 Output wheels are immutable. Identical inputs reproduce the same wheel; changed
 public files require another version or output directory without rebuilding host
