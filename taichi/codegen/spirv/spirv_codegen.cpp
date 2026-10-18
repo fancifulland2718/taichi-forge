@@ -2460,6 +2460,7 @@ class TaskCodegen : public IRVisitor {
         spirv::Label fl_continue_lbl = ir_->new_label();
         spirv::Label fl_merge_lbl = ir_->new_label();
         spirv::Label bump_lbl = ir_->new_label();
+        spirv::Label pop_lbl = ir_->new_label();
         spirv::Label publish_lbl = ir_->new_label();
 
         ir_->make_inst(spv::OpBranch, fl_head_lbl);
@@ -2472,9 +2473,11 @@ class TaskCodegen : public IRVisitor {
                             /*semantics=*/ir_->const_i32_zero_);
         auto fhead_empty = ir_->make_value(spv::OpIEqual, ir_->bool_type(),
                                            fhead_cur, zero_v);
+        // Both empty and successful-pop cases must leave through the loop's
+        // declared merge before selecting the bump/publication path.
         ir_->make_inst(spv::OpLoopMerge, fl_merge_lbl, fl_continue_lbl,
                        spv::LoopControlMaskNone);
-        ir_->make_inst(spv::OpBranchConditional, fhead_empty, bump_lbl,
+        ir_->make_inst(spv::OpBranchConditional, fhead_empty, fl_merge_lbl,
                        fl_body_lbl);
 
         // fl_body: try to CAS free_head from head to next.
@@ -2502,6 +2505,11 @@ class TaskCodegen : public IRVisitor {
         ir_->start_label(fl_continue_lbl);
         ir_->make_inst(spv::OpBranch, fl_head_lbl);
 
+        ir_->start_label(fl_merge_lbl);
+        ir_->make_inst(spv::OpSelectionMerge, publish_lbl,
+                       spv::SelectionControlMaskNone);
+        ir_->make_inst(spv::OpBranchConditional, fhead_empty, bump_lbl, pop_lbl);
+
         // bump_path: freelist empty, fall back to watermark bump.
         ir_->start_label(bump_lbl);
         auto old_wm = ir_->make_value(spv::OpAtomicIAdd, u32_t, wm_ptr,
@@ -2516,16 +2524,13 @@ class TaskCodegen : public IRVisitor {
             spv::OpSelect, u32_t, in_cap, candidate, zero_v);
         ir_->make_inst(spv::OpBranch, publish_lbl);
 
-        // fl_merge: freelist pop succeeded; new_slot = fhead_cur (the
-        // popped head value, still in slot-value encoding).
-        ir_->start_label(fl_merge_lbl);
+        ir_->start_label(pop_lbl);
         ir_->make_inst(spv::OpBranch, publish_lbl);
 
-        // publish: phi(new_slot_bump from bump_lbl, fhead_cur from
-        // fl_merge).
+        // Publish either the bounded bump result or the recycled slot.
         ir_->start_label(publish_lbl);
         new_slot = ir_->make_value(spv::OpPhi, u32_t, new_slot_bump,
-                                   bump_lbl, fhead_cur, fl_merge_lbl);
+                                   bump_lbl, fhead_cur, pop_lbl);
         winner_terminator_label = publish_pointer_slot(new_slot);
         ir_->make_inst(spv::OpBranch, alloc_done_label);
       } else {
