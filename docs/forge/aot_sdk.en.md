@@ -4160,7 +4160,10 @@ borrowed runtimes. Sparse tasks in parallel branches are rejected at preparation
 conditional control requires separate qualification. Old CUDA `sparse_v1`
 artifacts retain ordinary execution and require re-export for fixed Graphs.
 Fixed replay reduces host submissions but still executes device list checks;
-small stable-topology workloads are not guaranteed to run faster. Ordinary JIT
+small stable-topology workloads are not guaranteed to run faster. Default fixed
+replay caps listgen grids using the compiler's existing parent-list capacity
+bound and grid-stride traversal. It adds no active-count readback or generated
+artifact; explicit task plans retain their selected launch policy. Ordinary JIT
 Graph admission is unchanged. Matching components require private ABI 96.
 
 CUDA exporters can select `ti.aot.Module(artifact_format="ptx")`, or pass

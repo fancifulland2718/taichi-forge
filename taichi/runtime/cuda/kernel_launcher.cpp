@@ -888,6 +888,17 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                               : nullptr;
   if (resolved_tasks != nullptr) {
     *resolved_tasks = offloaded_tasks;
+    if (uses_sparse && allow_sparse_replay && plan == nullptr) {
+      // Reuse the existing grid-stride parent bound on the default fixed
+      // replay route. Explicit task plans retain their own launch policy.
+      for (auto &task : *resolved_tasks) {
+        if (task.task_type == OffloadedTaskType::listgen &&
+            task.sparse_list_parent_grid_bound > 0) {
+          task.grid_dim =
+              std::min(task.grid_dim, task.sparse_list_parent_grid_bound);
+        }
+      }
+    }
   }
   if (resolved_task_count != nullptr) {
     *resolved_task_count = offloaded_tasks.size();

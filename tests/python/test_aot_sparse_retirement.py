@@ -27,13 +27,20 @@ def test_aot_sparse_device_artifact_isolation(tmp_path, artifact_format):
     _sparse_module(tmp_path, artifact_format)
 
 
-def _sparse_module(tmp_path, artifact_format):
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_aot_sparse_multilevel_fixed(tmp_path):
+    _sparse_module(tmp_path, "ptx", multilevel=True)
+
+
+def _sparse_module(tmp_path, artifact_format, multilevel=False):
     # Ensure the producer tree ID differs from the compact artifact ID.
     unrelated = ti.field(ti.i32, shape=1)
     unrelated[0] = 7
     values = ti.field(ti.f32, needs_grad=True)
     blocks = ti.root.pointer(ti.i, 4)
-    blocks.bitmasked(ti.i, 2).place(values, values.grad)
+    leaves = blocks.dense(ti.i, 2) if multilevel else blocks
+    leaves.bitmasked(ti.i, 2).place(values, values.grad)
+    second = 13 if multilevel else 5
     entries = ti.field(ti.f32)
     dynamic = ti.root.dynamic(ti.i, 8, chunk_size=4)
     dynamic.place(entries)
@@ -41,9 +48,9 @@ def _sparse_module(tmp_path, artifact_format):
     @ti.kernel
     def activate(scale: ti.f32):
         values[2] = scale
-        values[5] = 2 * scale
+        values[second] = 2 * scale
         values.grad[2] = 0
-        values.grad[5] = 0
+        values.grad[second] = 0
         ti.append(dynamic, [], scale)
         ti.append(dynamic, [], 3 * scale)
 
