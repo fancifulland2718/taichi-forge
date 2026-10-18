@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fix unaligned root-field descriptors in Vulkan native gather/scatter, including
+  real Tape backward execution. Packed fields use the offset-aware shader when
+  their starts do not meet the device's descriptor alignment.
 - Vulkan strided gather/scatter now pass dispatch parameters as push constants,
   removing a 28-byte parameter buffer, seven fills and its barrier from each
   recording. Graph replay retains its own parameter values.

@@ -16113,7 +16113,11 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
   const uint32_t groups =
       static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  if (src_stride == item_bytes && dst_stride == item_bytes) {
+  const auto alignment = device->get_storage_buffer_binding_limits().offset_alignment;
+  // Packed root fields may still have unaligned starts. The strided shader
+  // uses word offsets from an aligned zero-based descriptor in that case.
+  if (src_stride == item_bytes && dst_stride == item_bytes &&
+      src_ptr.offset % alignment == 0 && dst_ptr.offset % alignment == 0) {
     ShaderResourceSet *bindings = cache.cached_resource_set(false);
     Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
     const size_t src_bytes = src_n * item_bytes;
@@ -16728,7 +16732,11 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
   const uint32_t groups =
       static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  if (src_stride == item_bytes && dst_stride == item_bytes) {
+  const auto alignment = device->get_storage_buffer_binding_limits().offset_alignment;
+  // Packed root fields may still have unaligned starts. The strided shader
+  // uses word offsets from an aligned zero-based descriptor in that case.
+  if (src_stride == item_bytes && dst_stride == item_bytes &&
+      src_ptr.offset % alignment == 0 && dst_ptr.offset % alignment == 0) {
     ShaderResourceSet *bindings = cache.cached_resource_set(true);
     Pipeline *pipeline = item_words == 1
                              ? cache.indexed_copy_dense_u32_scatter_pipeline()
