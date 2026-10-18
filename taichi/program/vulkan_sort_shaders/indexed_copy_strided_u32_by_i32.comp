@@ -14,7 +14,7 @@ layout(set = 0, binding = 2, std430) writeonly buffer Dst {
   uint data[];
 } dst_buf;
 
-layout(set = 0, binding = 3, std430) readonly buffer IndexedCopyParams {
+layout(push_constant) uniform IndexedCopyParams {
   uint num_items;
   uint index_bound;
   uint item_words;
