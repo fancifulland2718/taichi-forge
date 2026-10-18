@@ -120,6 +120,7 @@ Program *&runtime_completion_detail::active_runtime_submission_program()
 namespace {
 
 thread_local Program *active_snode_tree_lifecycle_program = nullptr;
+thread_local Program *active_snode_tree_destruction_program = nullptr;
 thread_local Program *active_runtime_resource_graph_program = nullptr;
 thread_local Program::RuntimeResourceGraphScope *active_runtime_resource_graph_scope = nullptr;
 
@@ -5775,6 +5776,23 @@ static void remove_snode_frontend_caches(
 
 void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   TI_COMPILE_PROFILER("cpp.snode.destroy.total");
+  // Both destructive operations can retire borrowed clients. Serialize them
+  // before taking tree/resource locks, so finalization cannot hold a client
+  // retirement transaction while tree destruction waits for that transaction
+  // with a borrower blocked behind its resource lock.
+  std::lock_guard<std::recursive_mutex> finalization_lock(
+      runtime_finalization_mutex_);
+  if (finalized_ || runtime_finalization_in_progress_)
+    throw std::runtime_error(
+        "Cannot destroy an SNode tree after runtime retirement");
+  if (active_snode_tree_destruction_program)
+    throw std::logic_error("Reentrant SNode tree destruction");
+  active_snode_tree_destruction_program = this;
+  struct DestructionScope {
+    ~DestructionScope() {
+      active_snode_tree_destruction_program = nullptr;
+    }
+  } destruction_scope;
   TI_ASSERT(arch_uses_llvm(compile_config().arch) ||
             compile_config().arch == Arch::vulkan ||
             compile_config().arch == Arch::dx11 ||
@@ -8718,6 +8736,9 @@ gfx::GfxRuntime *Program::get_gfx_runtime_for_borrowing() {
 void Program::finalize() {
   std::lock_guard<std::recursive_mutex> finalization_lock(
       runtime_finalization_mutex_);
+  if (active_snode_tree_destruction_program == this)
+    throw std::logic_error(
+        "Cannot finalize a Program from an SNode retirement callback");
   if (finalized_ || runtime_finalization_in_progress_) {
     return;
   }

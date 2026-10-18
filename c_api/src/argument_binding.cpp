@@ -1,4 +1,7 @@
 #include "argument_binding.h"
+#ifdef TI_WITH_RUNTIME_C_API
+#include "jit_module.h"
+#endif
 #include "native_resource_registry.h"
 
 #include <algorithm>
@@ -406,8 +409,12 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
   auto result = std::make_unique<BoundKernelArguments>();
   result->owner = kernel_binding.owner;
   result->kernel = ti_kernel;
+#ifdef TI_WITH_RUNTIME_C_API
+  result->context = make_borrowed_launch_context(ti_kernel, cpu_bounded_range);
+#else
   result->context =
       std::make_unique<taichi::lang::LaunchContextBuilder>(ti_kernel, cpu_bounded_range);
+#endif
   auto &builder = *result->context;
   auto &devallocs = result->allocations;
 

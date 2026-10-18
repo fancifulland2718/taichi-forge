@@ -242,6 +242,7 @@ class Runtime {
   const GraphBinding &get_graph(TiComputeGraph graph) const;
   const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
   void retire_module(class AotModule *owner);
+  void invalidate_module_entries(class AotModule *owner);
   void register_module(class AotModule *owner);
   // Explicit borrower retirement: recordings before code and buffers. The
   // Program finalizer has already synchronized and passes false.
@@ -321,6 +322,7 @@ class Runtime {
 
 class AotModule {
   Runtime *runtime_;
+  bool code_live_{true};
   std::unique_ptr<taichi::lang::aot::Module> aot_module_;
   std::unordered_map<std::string,
                      std::unique_ptr<taichi::lang::aot::CompiledGraph>>
@@ -330,6 +332,7 @@ class AotModule {
   std::unordered_map<const taichi::lang::Type *, TiNdArrayLayout> layout_handles_;
 
   TiNdArrayLayout layout_handle(taichi::lang::DataType type);
+  void check_code_live() const;
 
  public:
   AotModule(Runtime &runtime,
@@ -343,6 +346,9 @@ class AotModule {
   taichi::lang::aot::CompiledGraph *get_cgraph(const std::string &name);
   taichi::lang::aot::Module &get();
   Runtime &runtime();
+  // Cold live-JIT loan retirement. Keep the host shell owned by Runtime but
+  // drain its independent users before invalidating entry handles/code access.
+  void retire_borrowed_code();
 };
 
 namespace {

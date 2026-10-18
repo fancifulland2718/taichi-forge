@@ -277,10 +277,12 @@ AotModule::AotModule(Runtime &runtime,
 }
 
 taichi::lang::aot::Kernel *AotModule::get_kernel(const std::string &name) {
+  check_code_live();
   return aot_module_->get_kernel(name);
 }
 taichi::lang::aot::CompiledGraph *AotModule::get_cgraph(
     const std::string &name) {
+  check_code_live();
   auto it = loaded_cgraphs_.find(name);
   if (it == loaded_cgraphs_.end()) {
     return loaded_cgraphs_
@@ -291,10 +293,25 @@ taichi::lang::aot::CompiledGraph *AotModule::get_cgraph(
   }
 }
 taichi::lang::aot::Module &AotModule::get() {
+  check_code_live();
   return *aot_module_;
 }
 Runtime &AotModule::runtime() {
   return *runtime_;
+}
+
+void AotModule::check_code_live() const {
+  if (!code_live_)
+    throw MemoryBindingError(
+        "Borrowed JIT code has retired with its SNode tree");
+}
+
+void AotModule::retire_borrowed_code() {
+  if (!code_live_)
+    return;
+  runtime_->retire_prepared_module(this);
+  runtime_->invalidate_module_entries(this);
+  code_live_ = false;
 }
 
 // -----------------------------------------------------------------------------

@@ -7,6 +7,7 @@
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/texture_storage.h"
 #include "native_resource_registry.h"
+#include "jit_module.h"
 #include "taichi_core_impl.h"
 #ifdef TI_WITH_LLVM
 #include "taichi_llvm_impl.h"
@@ -226,6 +227,26 @@ std::uintptr_t AotRuntimeClient::device_identity() const {
 }
 Arch AotRuntimeClient::arch() const {
   return state_->arch;
+}
+
+std::uintptr_t AotRuntimeClient::import_jit_kernels(
+    const std::vector<JitKernelImport> &kernels) {
+  auto &state = *state_;
+  // Hold the borrower alive, then follow the Program's tree-before-resource
+  // order. The registered tree callback never reacquires this state mutex.
+  std::lock_guard<std::recursive_mutex> lock(state.mutex);
+  if (state.closed || !state.program || !state.runtime)
+    throw std::runtime_error("AOT runtime is closed");
+  if (!state.scopes.empty())
+    throw std::logic_error(
+        "Borrowing JIT code must run outside a borrowed submission scope");
+  auto tree_guard = state.program->acquire_snode_tree_lifecycle_read_guard();
+  auto resource_guard =
+      state.program->acquire_runtime_resource_submission_guard();
+  state.program->ensure_runtime_submission_allowed("borrow selected JIT code");
+  std::lock_guard<std::recursive_mutex> runtime_lock(
+      state.runtime->submission_mutex());
+  return capi::import_jit_module(*state.program, *state.runtime, kernels);
 }
 
 std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {

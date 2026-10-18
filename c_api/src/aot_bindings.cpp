@@ -85,6 +85,10 @@ const taichi::lang::aot::StructLayout &Runtime::get_layout(
 }
 void Runtime::retire_module(AotModule *owner) {
   modules_.erase(owner);
+  invalidate_module_entries(owner);
+}
+
+void Runtime::invalidate_module_entries(AotModule *owner) {
   auto retire = [owner](auto &items) {
     for (auto it = items.begin(); it != items.end();) {
       if (it->second.owner == owner)
@@ -152,6 +156,7 @@ TiNdArrayLayout AotModule::layout_handle(taichi::lang::DataType type) {
 }
 
 TiKernel AotModule::get_kernel_handle(const std::string &name) {
+  check_code_live();
   auto found = kernel_handles_.find(name);
   if (found != kernel_handles_.end())
     return found->second;
@@ -177,6 +182,7 @@ TiKernel AotModule::get_kernel_handle(const std::string &name) {
 }
 
 TiComputeGraph AotModule::get_graph_handle(const std::string &name) {
+  check_code_live();
   auto found = graph_handles_.find(name);
   if (found != graph_handles_.end())
     return found->second;

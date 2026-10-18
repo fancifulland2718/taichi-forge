@@ -307,6 +307,7 @@ TEST(RuntimeClientRegistry, ProgramSNodeFailurePreservesTreeAndOtherClients) {
       program.snapshot_snode_tree_dependencies({first_id});
   int attempts = 0, peer = 0;
   auto selected = std::make_shared<TestClient>([&] {
+    EXPECT_THROW(program.finalize(), std::logic_error);
     if (++attempts == 1)
       throw std::runtime_error("pending JIT code/root use");
   });
@@ -362,6 +363,42 @@ TEST(RuntimeClientRegistry, ConcurrentProgramFinalizationWaitsForClient) {
   first.get();
   second.get();
   EXPECT_EQ(retired, 1);
+}
+
+TEST(RuntimeClientRegistry, ProgramFinalizationCannotOvertakeSNodeRetirement) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  auto *tree = program.add_snode_tree(
+      std::make_unique<SNode>(0, SNodeType::root), false);
+  std::promise<void> entered, release, finalizer_started;
+  auto release_future = release.get_future();
+  std::atomic<bool> tree_drained{false};
+  auto selected = std::make_shared<TestClient>([&] {
+    entered.set_value();
+    release_future.wait();
+    tree_drained = true;
+  });
+  auto owner =
+      std::make_shared<TestClient>([&] { EXPECT_TRUE(tree_drained.load()); });
+  program.retain_runtime_client(
+      selected, program.snapshot_snode_tree_dependencies({tree->id()}));
+  program.retain_runtime_client(owner);
+  auto destroy =
+      std::async(std::launch::async, [&] { program.destroy_snode_tree(tree); });
+  entered.get_future().wait();
+  auto finalize = std::async(std::launch::async, [&] {
+    finalizer_started.set_value();
+    program.finalize();
+  });
+  finalizer_started.get_future().wait();
+  EXPECT_EQ(finalize.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_EQ(program.runtime_fault_domain()->state(),
+            RuntimeLifecycleState::kHealthy);
+  release.set_value();
+  destroy.get();
+  finalize.get();
+  EXPECT_THROW(program.destroy_snode_tree(nullptr), std::runtime_error);
 }
 #endif
 #ifdef TI_WITH_CUDA

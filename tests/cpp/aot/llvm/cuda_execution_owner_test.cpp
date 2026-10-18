@@ -13,6 +13,8 @@
 #include "c_api/src/execution_domain.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/program/program.h"
+#include "taichi/program/graph_builder.h"
+#include "taichi/ir/ir_builder.h"
 #include "taichi/runtime/aot_runtime_client.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/cuda/execution_domain.h"
@@ -435,6 +437,111 @@ TEST(CudaExecutionOwner, SNodeRetirementDrainsDependentDomainBeforeRootFree) {
                                                    sizeof(observed));
   EXPECT_EQ(observed, 0x3210ABCDu);
   allocation.first.reset();
+  program.finalize();
+}
+
+TEST(CudaExecutionOwner, LiveJitCodeLoanDrainsBeforeFieldAndCodeRetirement) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto root = std::make_unique<SNode>(0, SNodeType::root);
+  auto *place = &root->dense(Axis(0), 1).insert_children(SNodeType::place);
+  place->dt = PrimitiveType::i32;
+  auto *tree = program.add_snode_tree(std::move(root), false);
+  IRBuilder ir;
+  auto *array = ir.create_ndarray_arg_load({0}, PrimitiveType::i32, 1, 0);
+  auto *zero = ir.get_int32(0);
+  auto *value = ir.get_int32(314159);
+  auto *field = ir.create_global_ptr(place, {zero});
+  ir.create_global_store(field, value);
+  ir.create_global_store(ir.create_external_ptr(array, {zero}),
+                         ir.create_global_load(field));
+  auto kernel = std::make_unique<Kernel>(program, ir.extract_ir(), "jit_loan");
+  kernel->insert_ndarray_param(PrimitiveType::i32, 1);
+  kernel->finalize_params();
+  kernel->finalize_rets();
+  Dispatch dispatch(kernel.get(), {aot::Arg(aot::ArgKind::kNdarray, "out",
+                                            PrimitiveType::i32, 1)});
+  aot::CompiledGraph graph({dispatch.compile_dispatch()});
+  auto borrower = AotRuntimeClient::create(program);
+  auto *runtime = reinterpret_cast<::Runtime *>(borrower->handle());
+  auto rt = reinterpret_cast<TiRuntime>(runtime);
+  auto module = reinterpret_cast<TiAotModule>(
+      borrower->import_jit_kernels({{"stage", &graph, 0, false}}));
+  ASSERT_NE(module, nullptr);
+  const TiCudaExecutionDomainCreateInfo options{2, 4, 0};
+  auto output = ti_create_cuda_execution_domain_ext(rt, &options);
+  auto peer = ti_create_cuda_execution_domain_ext(rt, &options);
+  ASSERT_NE(output, nullptr);
+  ASSERT_NE(peer, nullptr);
+  TiMemoryAllocateInfo allocation_info{};
+  allocation_info.size = 2 * sizeof(std::uint32_t);
+  allocation_info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+  auto memory = ti_allocate_memory(rt, &allocation_info);
+  TiNamedArgument argument{};
+  argument.name = "out";
+  argument.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+  argument.argument.value.ndarray = {
+      memory, {1, {2}}, {0, {}}, TI_DATA_TYPE_I32};
+  const std::string plan =
+      R"({"version":1,"operations":[{"kind":"kernel","entry":"stage","arguments":["out"]}]})";
+  auto prepared = ti_prepare_execution_plan_on_domain_ext(
+      rt, module, output, plan.size(), plan.c_str(), 1, &argument, 0, nullptr);
+  ASSERT_NE(prepared, nullptr);
+  ti_initialize_prepared_ext(rt, prepared);
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  auto &device = static_cast<cuda::CudaDevice &>(runtime->get());
+  auto *address = static_cast<std::uint32_t *>(
+      device.get_memory_addr(runtime->get_memory(memory).allocation));
+  auto native_output = capi::get_execution_domain(output);
+  auto native_peer = capi::get_execution_domain(peer);
+  testing::CudaExternalGate gate;
+  auto blocked = native_output->submit(
+      {}, nullptr, [&](void *stream) { gate.enqueue_wait(stream); });
+  TiCompletion ticket = nullptr;
+  ASSERT_TRUE(ti_try_submit_prepared_ext(rt, prepared, 0, nullptr, &ticket));
+  auto destroy =
+      std::async(std::launch::async, [&] { program.destroy_snode_tree(tree); });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (native_output->snapshot().accepting &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_FALSE(native_output->snapshot().accepting);
+  EXPECT_EQ(destroy.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  native_peer
+      ->submit({}, nullptr,
+               [&](void *stream) {
+                 CUDADriver::get_instance().memsetd32_async(address + 1, 271828,
+                                                            1, stream);
+               })
+      .wait();
+  auto context = CUDAContext::get_instance().get_guard();
+  std::uint32_t observed = 0;
+  CUDADriver::get_instance().memcpy_device_to_host(&observed, address + 1,
+                                                   sizeof(observed));
+  EXPECT_EQ(observed, 271828u);
+  EXPECT_FALSE(blocked.done());
+  EXPECT_FALSE(ti_query_completion_ext(ticket));
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  destroy.get();
+  EXPECT_TRUE(ti_query_completion_ext(ticket));
+  EXPECT_TRUE(native_peer->snapshot().accepting);
+  CUDADriver::get_instance().memcpy_device_to_host(&observed, address,
+                                                   sizeof(observed));
+  EXPECT_EQ(observed, 314159u);
+  ti_release_completion_ext(ticket);
+  ti_destroy_prepared_ext(rt, prepared);
+  ti_destroy_aot_module(module);
+  ti_free_memory(rt, memory);
+  ti_close_cuda_execution_domain_ext(output);
+  ti_close_cuda_execution_domain_ext(peer);
+  ti_release_cuda_execution_domain_ext(output);
+  ti_release_cuda_execution_domain_ext(peer);
+  borrower->close();
   program.finalize();
 }
 

@@ -12,6 +12,9 @@ namespace taichi::lang {
 class Program;
 class Ndarray;
 class Texture;
+namespace aot {
+struct CompiledGraph;
+}
 
 // Private split-runtime bridge. Consumers use the existing C API only while
 // holding this client's scope. The Program owns the backend, never this client.
@@ -37,6 +40,13 @@ class AotRuntimeClient final : public RuntimeClient {
   NdarrayImport import_ndarray(const Ndarray *array);
   // Opaque native-resource token; retains the Program's texture storage lease.
   std::uintptr_t import_texture(const Texture *texture);
+  // Name, selected physical Graph, dispatch index, graph-gated launch ABI.
+  // This borrows existing compiled code and Field roots, never an artifact
+  // reload or a new frontend compilation request.
+  using JitKernelImport =
+      std::tuple<std::string, const aot::CompiledGraph *, std::uint32_t, bool>;
+  std::uintptr_t import_jit_kernels(
+      const std::vector<JitKernelImport> &kernels);
 
  private:
   struct State;

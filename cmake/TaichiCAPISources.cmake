@@ -7,7 +7,7 @@ function(ti_get_c_api_sources OUT_SOURCES OUT_HEADERS)
         c_api/src/execution_resources.cpp c_api/src/execution_binding_family.cpp
         c_api/src/native_resource_registry.cpp)
     if(TI_WITH_RUNTIME_C_API)
-        list(APPEND _sources c_api/src/aot_runtime_client.cpp)
+        list(APPEND _sources c_api/src/aot_runtime_client.cpp c_api/src/jit_module.cpp)
     endif()
     set(_headers
         c_api/include/taichi/taichi_platform.h
@@ -43,6 +43,7 @@ endfunction()
 
 function(ti_configure_c_api_target TARGET)
     if(TI_WITH_RUNTIME_C_API)
+        target_compile_definitions(${TARGET} PRIVATE TI_WITH_RUNTIME_C_API)
         target_include_directories(${TARGET} PRIVATE
             ${PROJECT_SOURCE_DIR}/external/eigen)
     endif()

@@ -355,6 +355,7 @@ struct CompiledDispatch {
   std::shared_ptr<CompiledGraphKernelInvocation> jit_invocation;
   void bind_jit_kernel(std::shared_ptr<KernelExecutionHandle> handle);
   const std::shared_ptr<KernelExecutionHandle> &jit_execution_handle() const;
+  bool jit_belongs_to_program(const Program &program) const;
   CallableBase *jit_callable() const;
   LaunchContextBuilder make_launch_context(bool cpu_bounded_range = false) const;
   // JIT-only metadata. AOT serialization intentionally remains unchanged:
