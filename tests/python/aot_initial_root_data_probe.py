@@ -95,7 +95,17 @@ def main(mode, arch, artifact):
                 with ZipFile(path, "w") as archive:
                     for name, payload in files.items():
                         archive.writestr(name, payload)
-                expect_failure(lambda: runtime.load_module(path))
+                if failure == "absent" and arch == "vulkan" and document[version_key] > 3:
+                    # Newer GFX versions also describe artifacts without a
+                    # snapshot. Removing its declaration selects zero state;
+                    # missing/corrupt declared payloads must still fail above.
+                    with runtime.load_module(path) as zero:
+                        with zero.prepare_execution("step", frames[0]) as call:
+                            call()
+                            assert read(frames[0]["y"]) == [0] * 4
+                            assert read(frames[0]["dx"]) == [0] * 4
+                else:
+                    expect_failure(lambda: runtime.load_module(path))
                 with runtime.load_module(artifact) as replacement:
                     with replacement.prepare_execution("step", frames[0]) as call:
                         execute(call, frames[0], 0)
