@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan gather/scatter now share preparation across ndarray and field layouts,
+  including field-backed indices. Source, index and destination descriptors use
+  aligned enclosing views, fixing validation errors for nonaligned field offsets
+  without extra copies or scratch storage.
 - Fix unaligned root-field descriptors in Vulkan native gather/scatter, including
   real Tape backward execution. Packed fields use the offset-aware shader when
   their starts do not meet the device's descriptor alignment.

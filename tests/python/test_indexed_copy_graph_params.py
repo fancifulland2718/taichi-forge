@@ -1,7 +1,53 @@
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from tests import test_utils
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_indexed_copy_field_indices_keep_unaligned_neighbors(packed):
+    marker = ti.field(ti.i32, ())
+    make = (
+        (lambda n: ti.Vector.field(3, ti.f32, n))
+        if packed
+        else (lambda n: ti.field(ti.f32, n))
+    )
+    source, gathered, scattered = make(17), make(9), make(23)
+    indices = ti.field(ti.i32, 9)
+    marker[None] = 91
+    shape = (17, 3) if packed else (17,)
+    data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) - 7
+    source.from_numpy(data)
+    sentinel = np.full((23, 3) if packed else (23,), 37, np.float32)
+    gather = ti.algorithms.IndexedCopyWorkspace(max_items=9)
+    scatter = ti.algorithms.IndexedCopyWorkspace(max_items=9)
+    for index_data in (
+        np.array([16, 2, -1, 8, 20, 3, 6, 0, 99], np.int32),
+        np.array([0, 1, 4, 9, 10, 12, 13, 15, 22], np.int32),
+    ):
+        indices.from_numpy(index_data)
+        scattered.from_numpy(sentinel)
+        ti.algorithms.experimental_gather(
+            source, indices, gathered, method="vulkan_native", workspace=gather
+        )
+        ti.algorithms.experimental_scatter(
+            gathered, indices, scattered, method="vulkan_native", workspace=scatter
+        )
+        expected_gather = np.zeros((9, 3) if packed else (9,), np.float32)
+        expected_scatter = sentinel.copy()
+        for i, index in enumerate(index_data):
+            if 0 <= index < 17:
+                expected_gather[i] = data[index]
+            if 0 <= index < 23:
+                expected_scatter[index] = expected_gather[i]
+        np.testing.assert_array_equal(gathered.to_numpy(), expected_gather)
+        np.testing.assert_array_equal(scattered.to_numpy(), expected_scatter)
+        np.testing.assert_array_equal(source.to_numpy(), data)
+        np.testing.assert_array_equal(indices.to_numpy(), index_data)
+        assert marker[None] == 91
+    assert gather.workspace_bytes_peak == scatter.workspace_bytes_peak == 0
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

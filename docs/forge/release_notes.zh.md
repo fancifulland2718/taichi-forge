@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan gather/scatter 的 ndarray、字段及字段索引入口共用准备核心；源、索引和
+  目标 descriptor 均使用对齐的包围视图，修复未对齐字段偏移的验证错误，不增加
+  复制或 scratch 存储。
 - 修复 Vulkan 原生 gather/scatter 的根字段 descriptor 对齐问题，覆盖真实 Tape
   反向；packed 字段起点不满足设备对齐时使用既有带偏移 shader。
 - Vulkan strided gather/scatter 改用 push constants 传入调度参数，去掉28字节参数
