@@ -23,6 +23,7 @@
 #include "taichi/rhi/cpu/transform.h"
 #include "taichi/rhi/cpu/indexed_copy.h"
 #include "taichi/rhi/cpu/scatter_validation.h"
+#include "taichi/rhi/cpu/scatter_add.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -1189,17 +1190,6 @@ struct CpuStridedGatherAddTaskContext {
 };
 
 template <typename T>
-struct CpuScatterAddTaskContext {
-  const T *src{nullptr};
-  const int32_t *indices{nullptr};
-  T *partial{nullptr};
-  T *dst{nullptr};
-  std::size_t n{0};
-  std::size_t dst_items{0};
-  int num_threads{1};
-};
-
-template <typename T>
 struct CpuStridedScatterAddTaskContext {
   const uint8_t *src{nullptr};
   const int32_t *indices{nullptr};
@@ -2342,50 +2332,6 @@ void cpu_strided_indexed_copy_task(void *raw_ctx,
 }
 
 template <typename T>
-void cpu_scatter_add_count_task(void *raw_ctx,
-                                int /*thread_id*/,
-                                int task_id) {
-  auto *ctx = static_cast<CpuScatterAddTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  T *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    const auto index = static_cast<std::size_t>(ctx->indices[i]);
-    if (index < ctx->dst_items) {
-      local[index] = cpu_reduce_combine(local[index], ctx->src[i], 0);
-    }
-  }
-}
-
-template <typename T>
-void cpu_scatter_add_merge_task(void *raw_ctx,
-                                int /*thread_id*/,
-                                int task_id) {
-  auto *ctx = static_cast<CpuScatterAddTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->dst_items * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->dst_items * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    T value{};
-    for (int t = 0; t < ctx->num_threads; ++t) {
-      value = cpu_reduce_combine(
-          value,
-          ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i], 0);
-    }
-    ctx->dst[i] = cpu_reduce_combine(ctx->dst[i], value, 0);
-  }
-}
-
-template <typename T>
 void cpu_strided_scatter_add_count_task(void *raw_ctx,
                                         int /*thread_id*/,
                                         int task_id) {
@@ -2543,42 +2489,25 @@ void cpu_packed_scatter_add_io_merge_task(void *raw_ctx,
 
 template <typename T>
 std::size_t cpu_scatter_add_typed(const T *src_ptr,
-                                  const int32_t *indices_ptr,
-                                  T *dst_ptr,
-                                  std::size_t n,
-                                  std::size_t dst_items,
-                                  int max_threads,
-                                  int target_threads) {
-  TI_ERROR_IF(!src_ptr || !dst_ptr,
-              "CPU native scatter-add received a null data pointer.");
-  const std::size_t workspace_bytes =
-      static_cast<std::size_t>(target_threads) * dst_items * sizeof(T);
+                                const int32_t *indices_ptr,
+                                T *dst_ptr,
+                                std::size_t n,
+                                std::size_t dst_items,
+                                int max_threads,
+                                int target_threads) {
+  const auto workspace_bytes =
+      cpu::scatter_add_workspace_bytes<T>(dst_items, target_threads);
   if (target_threads > 1 &&
       workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
-    CpuPrimitiveScratchBuffer<T> partial(
-        PrimitiveWorkspaceFamily::scatter_add,
-        static_cast<std::size_t>(target_threads) * dst_items);
-    CpuScatterAddTaskContext<T> ctx;
-    ctx.src = src_ptr;
-    ctx.indices = indices_ptr;
-    ctx.partial = partial.data();
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.dst_items = dst_items;
-    ctx.num_threads = target_threads;
+    CpuPrimitiveScratchBuffer<T> partial(PrimitiveWorkspaceFamily::scatter_add,
+                                         workspace_bytes / sizeof(T));
     auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_scatter_add_count_task<T>);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_scatter_add_merge_task<T>);
+    cpu::scatter_add(src_ptr, indices_ptr, dst_ptr, n, dst_items, target_threads,
+                     partial.data(), pool);
     return workspace_bytes;
   }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto index = static_cast<std::size_t>(indices_ptr[i]);
-    if (index < dst_items) {
-      dst_ptr[index] = cpu_reduce_combine(dst_ptr[index], src_ptr[i], 0);
-    }
-  }
+  cpu::scatter_add(src_ptr, indices_ptr, dst_ptr, n, dst_items, 1,
+                   static_cast<T *>(nullptr), nullptr);
   return 0;
 }
 
