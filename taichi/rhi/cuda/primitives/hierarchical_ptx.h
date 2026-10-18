@@ -71,6 +71,18 @@ std::size_t driver_reduce_strided(void *values,
                                   void *stream,
                                   PrimitiveWorkspaceArena *workspace_arena);
 
+// Prepare both clear and count code before native Graph capture. The packed
+// entry shares the existing strided kernels and their uint32 count ABI.
+void driver_prepare_histogram(CudaTransformValueType value_type,
+                              CudaTransformValueType bin_type);
+std::size_t driver_histogram_on_stream(void *values,
+                                       void *bins,
+                                       std::uint32_t num_items,
+                                       std::uint32_t num_bins,
+                                       CudaTransformValueType value_type,
+                                       CudaTransformValueType bin_type,
+                                       void *stream);
+
 std::size_t driver_histogram_strided(void *values,
                                      void *bins,
                                      int num_items,
