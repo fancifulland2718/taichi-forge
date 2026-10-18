@@ -6,6 +6,7 @@
 
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
+#include "taichi/runtime/gfx/aot_snode_resources.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
 #include "taichi/program/launch_context_builder.h"
@@ -347,6 +348,113 @@ TEST(GfxSNodeResources, GeometryOverflowIsRejectedWithoutCapacityThreshold) {
   table.hash_active_count_offset = 4;
   EXPECT_THROW(gfx::describe_snode_tree_resources(compiled),
                std::overflow_error);
+}
+
+TEST(GfxSNodeResources, PersistedLayoutsRoundTripWithoutLiveSNodes) {
+  for (bool independent : {false, true}) {
+    for (const auto *kind : {"bump", "chunked"}) {
+      gfx::AotSNodeTreeResources artifact;
+      artifact.producer_tree_id = 17;
+      artifact.storage_kind = gfx::AotSNodeTreeResources::StorageKind::Sparse;
+      {
+        SNode root{0, SNodeType::root};
+        root.pointer({Axis{0}}, 8)
+            .dense({Axis{0}}, 4)
+            .insert_children(SNodeType::place)
+            .dt = PrimitiveType::i32;
+        spirv::PointerLayoutPolicy policy;
+        policy.independent_pool = independent;
+        policy.allocator_kind = kind;
+        policy.max_chunks = 2;
+        policy.pool_fraction = 0.5;
+        artifact.resources = gfx::describe_snode_tree_resources(
+            spirv::compile_snode_structs(root, policy));
+      }
+      const auto json = liong::json::print(liong::json::serialize(artifact));
+      gfx::AotSNodeTreeResources decoded;
+      liong::json::deserialize(liong::json::parse(json), decoded);
+      EXPECT_EQ(liong::json::print(liong::json::serialize(decoded)), json);
+      EXPECT_EQ(decoded.producer_tree_id, 17);
+      EXPECT_EQ(decoded.resources.root_size, artifact.resources.root_size);
+      ASSERT_EQ(decoded.resources.pointer_pools.size(), 1);
+      const auto &pool = decoded.resources.pointer_pools.front();
+      EXPECT_EQ(pool.contract.has_freelist, true);
+      EXPECT_EQ(pool.contract.has_ambient_zone, true);
+      EXPECT_EQ(pool.contract.pool_fraction, 0.5);
+      EXPECT_EQ(pool.contract.pool_buffer_binding_id >= 0, independent);
+      EXPECT_EQ(pool.independent_size,
+                artifact.resources.pointer_pools.front().independent_size);
+    }
+  }
+  gfx::AotSNodeTreeResources artifact;
+  artifact.producer_tree_id = 0;
+  artifact.resources.snode_ids = {0, 1};
+  artifact.resources.root_size = 16;
+  for (auto kind : {gfx::AotSNodeTreeResources::StorageKind::PlainDense,
+                    gfx::AotSNodeTreeResources::StorageKind::PackedDense,
+                    gfx::AotSNodeTreeResources::StorageKind::Sparse}) {
+    artifact.storage_kind = kind;
+    if (kind == gfx::AotSNodeTreeResources::StorageKind::Sparse)
+      artifact.resources.hash_watches.push_back({1, 4, 8});
+    gfx::AotSNodeTreeResources decoded;
+    liong::json::deserialize(liong::json::serialize(artifact), decoded);
+    EXPECT_EQ(decoded.storage_kind, kind);
+    if (!decoded.resources.hash_watches.empty())
+      EXPECT_EQ(decoded.resources.hash_watches.front().tombstone_offset,
+                static_cast<std::size_t>(-1));
+  }
+}
+
+TEST(GfxSNodeResources, PersistedResourcesRejectMissingAndTruncatedValues) {
+  gfx::AotSNodeTreeResources artifact;
+  artifact.producer_tree_id = 7;
+  artifact.storage_kind = gfx::AotSNodeTreeResources::StorageKind::Sparse;
+  artifact.resources.root_size = 24;
+  artifact.resources.snode_ids = {0, 1, 2};
+  spirv::SpirvAllocatorContract c;
+  c.snode_id = 1;
+  c.pool_capacity = 2;
+  c.cell_stride_bytes = 4;
+  c.pool_data_offset = 4;
+  artifact.resources.pointer_pools.push_back({c, 0});
+  artifact.resources.hash_watches.push_back({2, 12, 16});
+  const auto original = liong::json::serialize(artifact);
+  auto rejects = [&](auto mutate) {
+    auto json = original;
+    mutate(json);
+    auto decoded = artifact;
+    EXPECT_ANY_THROW(liong::json::deserialize(json, decoded, false));
+    EXPECT_EQ(liong::json::print(liong::json::serialize(decoded)),
+              liong::json::print(original));
+  };
+  using liong::json::JsonValue;
+  rejects([](auto &j) { j.obj.inner.erase("storage_kind"); });
+  rejects([](auto &j) { j.obj.inner.erase("pointer_pools"); });
+  rejects([](auto &j) {
+    j["pointer_pools"][size_t(0)]["contract"].obj.inner.erase("has_freelist");
+  });
+  rejects([](auto &j) {
+    j["pointer_pools"][size_t(0)]["contract"]["pool_capacity"] =
+        JsonValue((uint64_t(1) << 32) + 2);
+  });
+  rejects([](auto &j) {
+    j["pointer_pools"][size_t(0)]["contract"]["alloc_protocol"] =
+        JsonValue(257);
+  });
+  rejects([](auto &j) {
+    j["pointer_pools"][size_t(0)]["contract"]["pool_capacity"] = JsonValue(2.5);
+  });
+  rejects([](auto &j) {
+    j["pointer_pools"][size_t(0)]["contract"]["has_freelist"] = JsonValue(0);
+  });
+  rejects([](auto &j) { j["root_size"] = JsonValue(-1); });
+  rejects(
+      [](auto &j) { j["producer_tree_id"] = JsonValue(uint64_t(1) << 32); });
+  rejects([](auto &j) { j["storage_kind"] = JsonValue(0); });
+  rejects([](auto &j) { j["snode_ids"][size_t(1)] = JsonValue(-1); });
+  rejects([](auto &j) {
+    j["hash_watches"][size_t(0)]["tombstone_offset"] = JsonValue(-2);
+  });
 }
 
 }  // namespace taichi::lang
