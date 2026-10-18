@@ -47,6 +47,8 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   std::uintptr_t temporary_storage_identity{0};
   std::size_t temporary_bytes{0};
   bool binding_frame{false};
+  bool native_only{false};
+  std::atomic<bool> retained_claimed{false};
   CUgraph graph{nullptr};
   CUgraphExec executable{nullptr};
   void *stream{nullptr};
@@ -64,7 +66,7 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   std::vector<std::shared_ptr<void>> sparse_replay_leases;
   std::vector<std::uint8_t> host_arguments;
   bool capturing{false};
-  bool submitted{false};
+  std::atomic<bool> submitted{false};
   void release_selected(bool backend_safe) {
     for (const auto &region : selected_controls)
       region->release(backend_safe);
@@ -350,6 +352,48 @@ void FixedGraph::enqueue_execution_part(void *stream) {
   CUDAContext::get_instance().launch_graph(state_->executable, stream);
 }
 
+void FixedGraph::validate_retained_provider() const {
+  if (!state_->native_only || state_->binding_frame || domain_ ||
+      state_->submitted.load() || state_->retired.load() ||
+      state_->retained_claimed.load())
+    throw std::invalid_argument(
+        "CUDA retained provider requires a fresh native-only recording");
+}
+
+void FixedGraph::adopt_retained_provider(
+    const std::shared_ptr<RuntimeFaultDomain> &owner,
+    std::vector<std::shared_ptr<RuntimeClient>> &parts) {
+  std::lock_guard<std::mutex> lock(state_->retirement_mutex);
+  validate_retained_provider();
+  if (!owner || (state_->fault_domain && state_->fault_domain != owner))
+    throw std::invalid_argument("CUDA provider belongs to another runtime");
+  parts.push_back(state_);
+  state_->retained_claimed = true;
+  state_->fault_domain = owner;
+  state_->independent = true;
+  state_->preparation_started = true;
+  state_->instance_identity =
+      next_instance_identity.fetch_add(1, std::memory_order_relaxed);
+  // Upload once during preparation. A failed upload leaves the entire state
+  // registered for retirement; replay never allocates or uploads this graph.
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  driver.stream_create(&state_->stream, 1);
+  driver.graph_upload(state_->executable, state_->stream);
+  const auto result = driver.stream_synchronize.call_concurrent(state_->stream);
+  if (result != CUDA_SUCCESS)
+    throw BackendRuntimeError(Arch::cuda, result, "upload provider recording",
+                              "CUDA provider preparation failed");
+  driver.stream_destroy(state_->stream);
+  state_->stream = nullptr;
+}
+
+void FixedGraph::enqueue_retained_provider(void *stream) {
+  if (!state_->native_only)
+    throw std::logic_error("CUDA provider recording contains kernel packets");
+  enqueue_execution_part(stream);
+}
+
 std::shared_ptr<FixedGraph> FixedGraph::capture_binding_frame(
     const std::vector<Operation> &operations,
     std::shared_ptr<void> operands,
@@ -375,6 +419,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   auto lock = cuda.get_submission_lock_guard();
   auto &driver = CUDADriver::get_instance();
   auto &state = *state_;
+  state.native_only = std::all_of(
+      operations.begin(), operations.end(), [](const auto &operation) {
+        const auto *dispatch = std::get_if<Dispatch>(&operation);
+        return dispatch && dispatch->external && !dispatch->bounded_extent &&
+               !dispatch->adaptive_block_dim;
+      });
   if (state.binding_frame) {
     if (!driver.graph_node_get_type.available() ||
         !driver.graph_exec_update_v1.available())

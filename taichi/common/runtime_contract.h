@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// NativeOperation now distinguishes unsubmitted reservation cancellation and
-// cold execution-domain validation. Reject older vtables at the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 108;
+// CUDA provider resources retain execution-domain affinity and participate in
+// owner retirement. Reject older class layouts at the private C++ boundary.
+inline constexpr int kForgeNativeAbiRevision = 109;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

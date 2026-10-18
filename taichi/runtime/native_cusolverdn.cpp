@@ -316,14 +316,18 @@ class CudaSolverOperation final : public NativeOperation {
     return plan_;
   }
   void validate_cuda_execution_domain() const override {
-    throw std::invalid_argument(
-        "cuSOLVERDn retained recording requires domain-bound replay");
+    graph_->validate_retained_provider();
+  }
+  void prepare_cuda_execution_domain(
+      const std::shared_ptr<RuntimeFaultDomain> &owner,
+      std::vector<std::shared_ptr<RuntimeClient>> &parts) override {
+    graph_->adopt_retained_provider(owner, parts);
   }
   void run_cuda_ordered(void *stream) override {
     if (stream)
-      throw std::invalid_argument(
-          "cuSOLVERDn retained recording uses the runtime stream");
-    graph_->run();
+      graph_->enqueue_retained_provider(stream);
+    else
+      graph_->run();
   }
 
  private:

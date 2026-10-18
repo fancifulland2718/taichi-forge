@@ -9,6 +9,21 @@
 #include "taichi/runtime/native_operation.h"
 
 namespace taichi::lang {
+std::shared_ptr<void> CudaProviderCompletionResource::bind_execution_domain(
+    std::uint64_t identity) {
+  std::lock_guard<std::mutex> lock(completion_mutex_);
+  auto binding = execution_domain_binding_.lock();
+  if (binding) {
+    if (*binding != identity)
+      throw std::invalid_argument(
+          "Mutable CUDA provider resource belongs to another execution domain");
+    return binding;
+  }
+  auto result = std::make_shared<std::uint64_t>(identity);
+  execution_domain_binding_ = result;
+  return result;
+}
+
 void CudaProviderCompletionResource::track_ordered_completion(
     const std::shared_ptr<RuntimeCompletion> &completion) {
   std::lock_guard<std::mutex> lock(completion_mutex_);

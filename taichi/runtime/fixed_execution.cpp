@@ -76,6 +76,10 @@ struct FixedExecution::State {
 #endif
 #ifdef TI_WITH_CUDA
   std::shared_ptr<cuda::ExecutionDomain> cuda_domain;
+  // Declared before recordings so legacy destruction drains before releasing
+  // the resource's domain claim. Independent instances retain another copy.
+  std::vector<std::shared_ptr<void>> cuda_provider_bindings;
+  std::vector<std::shared_ptr<CudaProviderCompletionResource>> cuda_providers;
   std::unique_ptr<cuda::FixedGraph> cuda_graph;
   std::shared_ptr<cuda::FixedGraph> cuda_frame;
   std::shared_ptr<cuda::BindingFrameReplay> cuda_binding_replay;
@@ -561,6 +565,21 @@ FixedExecution::FixedExecution(
   };
   validate(operations, recording_state, false);
 #ifdef TI_WITH_CUDA
+  if (arch == Arch::cuda) {
+    std::unordered_set<CudaProviderCompletionResource *> providers;
+    const auto identity =
+        state_->cuda_domain ? state_->cuda_domain->snapshot().identity : 0;
+    for (const auto &operation : state_->native_operations) {
+      auto provider = operation->cuda_ordered_resource();
+      if (provider && providers.insert(provider.get()).second) {
+        state_->cuda_provider_bindings.push_back(
+            provider->bind_execution_domain(identity));
+        state_->cuda_providers.push_back(std::move(provider));
+      }
+    }
+  }
+#endif
+#ifdef TI_WITH_CUDA
   if (binding_replay) {
     std::vector<std::vector<std::uint64_t>> invariants;
     invariants.reserve(state_->native_operations.size());
@@ -821,6 +840,7 @@ FixedExecution::FixedExecution(
         std::shared_ptr<RuntimeCompletionResources> bindings;
         std::vector<std::shared_ptr<NativeOperation>> operations;
         std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
+        std::vector<std::shared_ptr<void>> provider_bindings;
         std::size_t retained_resource_count(
             std::uint32_t kind) const noexcept override {
           return bindings->retained_resource_count(kind);
@@ -830,8 +850,11 @@ FixedExecution::FixedExecution(
       retained->bindings = execution_binding->operands;
       retained->operations = state_->native_operations;
       retained->resources = state_->kernel_resources;
+      retained->provider_bindings = state_->cuda_provider_bindings;
       state_->cuda_instance = std::make_shared<State::CudaInstance>();
       state_->cuda_instance->operands = std::move(retained);
+      for (const auto &provider : state_->cuda_providers)
+        state_->cuda_instance->parts.push_back(provider);
     }
     auto &steps =
         execution_binding ? state_->cuda_instance->steps : state_->cuda_steps;
@@ -969,6 +992,9 @@ FixedExecution::FixedExecution(
     };
     if (execution_binding) {
       state_->cuda_domain->prepare_instance(state_->cuda_instance, [&] {
+        for (const auto &operation : state_->native_operations)
+          operation->prepare_cuda_execution_domain(
+              state_->fault_domain, state_->cuda_instance->parts);
         auto native = prepare(operations);
         flush(native);
       });

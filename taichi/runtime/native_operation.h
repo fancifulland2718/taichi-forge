@@ -16,6 +16,7 @@
 #include "taichi/runtime/cuda/provider_completion_resource.h"
 
 namespace taichi::lang {
+class RuntimeFaultDomain;
 
 // The composition contract of an operation, independent of its provider.
 enum class NativeOperationMode : std::uint32_t {
@@ -131,6 +132,12 @@ class NativeOperation : public NativeResource {
         mode != NativeOperationMode::cuda_ordered)
       throw std::invalid_argument(
           "Native operation has no independent CUDA execution contract");
+  }
+  // Cold registration of retained provider recordings. The enclosing domain
+  // retains every part before backend work and retires them after its stream.
+  virtual void prepare_cuda_execution_domain(
+      const std::shared_ptr<RuntimeFaultDomain> &owner,
+      std::vector<std::shared_ptr<RuntimeClient>> &parts) {
   }
   virtual void run_cuda_ordered(void *stream) {
     throw std::invalid_argument("Native operation has no ordered CUDA implementation");

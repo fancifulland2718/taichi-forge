@@ -98,6 +98,14 @@ class FixedGraph {
       std::shared_ptr<void> operands,
       std::shared_ptr<RuntimeFaultDomain> fault_domain = {});
   void *binding_source() const;
+  // Transfer a fresh native-only retained recording to an enclosing domain.
+  // No Taichi argument/temporary packet may enter through this adapter. A
+  // recording already replayed on the legacy stream must be prepared anew.
+  void validate_retained_provider() const;
+  void adopt_retained_provider(
+      const std::shared_ptr<RuntimeFaultDomain> &owner,
+      std::vector<std::shared_ptr<RuntimeClient>> &parts);
+  void enqueue_retained_provider(void *stream);
   void run();
   std::size_t argument_bytes() const;
   std::size_t node_count() const;
