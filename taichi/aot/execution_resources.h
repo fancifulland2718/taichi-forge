@@ -76,6 +76,10 @@ struct ExecutionResources {
   std::vector<bool> materialize;
 
   static ExecutionResources parse(const liong::json::JsonValue &root);
+  // Cold declaration references, including shape-only dependencies.
+  static std::vector<std::string> dependencies(
+      const Resource &resource,
+      bool include_allocator = true);
   // Replace operation slots by the exact external binding set.
   void analyze(std::set<std::string> &arguments);
   std::set<std::string> runtime_bindings(std::set<std::string> roots) const;

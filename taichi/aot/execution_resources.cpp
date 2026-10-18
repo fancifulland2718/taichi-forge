@@ -64,9 +64,11 @@ ExecutionResources::Scalar scalar(const std::string &dtype,
   }
   return {bits};
 }
-std::vector<std::string> dependencies(
+}  // namespace
+
+std::vector<std::string> ExecutionResources::dependencies(
     const ExecutionResources::Resource &resource,
-    bool include_allocator = true) {
+    bool include_allocator) {
   std::vector<std::string> result;
   const std::vector<ExecutionResources::Dimension> *dimensions = nullptr;
   if (const auto *array =
@@ -92,8 +94,6 @@ std::vector<std::string> dependencies(
         result.push_back(ref->array);
   return result;
 }
-}  // namespace
-
 ExecutionResources ExecutionResources::parse(const JsonValue &root) {
   ExecutionResources result;
   if (const auto found = root.obj.inner.find("resources");

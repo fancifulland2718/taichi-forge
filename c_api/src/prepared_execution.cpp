@@ -627,6 +627,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
     }
   }
   const auto &plan = family ? family->plan : parsed;
+  // The compact format is validated independently before replay is enabled.
+  // Never interpret its expanded frames as one ordinary execution sequence.
+  if (plan.storage_ring)
+    throw MemoryBindingError("Ordered storage ring replay is not available in this runtime");
   if (plan.vulkan_submission && rt.arch != taichi::Arch::vulkan)
     throw MemoryBindingError("Selected Vulkan submission requires Vulkan");
   const auto &resource_description =

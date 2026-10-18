@@ -6,6 +6,56 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
+def test_storage_recipe_is_compact_and_keeps_shared_allocator_and_gradients():
+    pool = dict(kind="native", name="pool", provider="memory", operation="pool", version=1, parameters={}, bindings={})
+    state = dict(kind="ndarray", name="scratch", dtype="f32", shape=[3], allocator="pool", zero_initialize=True)
+    operations = [dict(kind="fill32", destination="scratch", value=0),
+                  dict(kind="kernel", entry="step", arguments=["x", "scratch", "out"])]
+    for capacity in (1, 3, 65):
+        recipe = dict(kind="ordered_temporary_ring", version=1, capacity=capacity, arrays=["scratch"])
+        plan = ExecutionPlan(operations, resources=[state, pool], gradients={"x": "dx"}, storage_recipe=recipe)
+        assert plan.argument_names == ("dx", "out", "x")
+        assert plan.kernel_entries == ("step",)
+        snapshot = json.loads(plan.to_json())
+        assert snapshot["version"] == 21
+        assert snapshot["operations"] == operations
+        assert snapshot["resources"] == [state, pool]
+        assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+        recipe["arrays"].append("out")
+        assert json.loads(plan.to_json())["storage_recipe"]["arrays"] == ["scratch"]
+        with pytest.raises(ValueError, match="version 21"):
+            ExecutionPlan.from_json(json.dumps(dict(snapshot, version=20)))
+
+
+def test_storage_recipe_rejects_unproven_aliases_and_mixed_execution_recipes():
+    state = dict(kind="ndarray", name="scratch", dtype="f32", shape=[3])
+    operations = [dict(kind="kernel", entry="step", arguments=["x", "scratch", "out"])]
+    recipe = dict(kind="ordered_temporary_ring", version=1, capacity=3, arrays=["scratch"])
+    for change in (
+        dict(capacity=0), dict(capacity=True), dict(capacity=3.0), dict(capacity=1 << 63),
+        dict(version=True), dict(version=2), dict(extra=1), dict(kind="unknown"),
+        dict(arrays=[]), dict(arrays=["scratch", "scratch"]), dict(arrays=["x"]), dict(arrays="scratch"),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=[state], storage_recipe=dict(recipe, **change))
+    for kwargs in (
+        dict(initialization=[]), dict(gradients={"x": "scratch"}),
+        dict(binding_strategy="cuda_immutable_argument_frames"),
+        dict(submission_recipe=dict(kind="vulkan_segmented", version=1, ends=[1])),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=[state], storage_recipe=recipe, **kwargs)
+    for shared in (
+        dict(kind="ndarray_view", name="view", array="scratch", shape=[1], offset=0),
+        dict(kind="extent", name="size", dtype="i32", array="scratch", axis=0),
+        dict(kind="ndarray", name="sibling", dtype="f32", shape=[dict(array="scratch", axis=0)]),
+    ):
+        with pytest.raises(ValueError, match="Shared resources"):
+            ExecutionPlan(operations, resources=[state, shared], storage_recipe=recipe)
+    with pytest.raises(ValueError, match="nonempty"):
+        ExecutionPlan([], resources=[state], storage_recipe=recipe)
+
+
 def test_private_allocators_follow_storage_demand_and_require_v19():
     pool = dict(kind="native", name="pool", provider="memory", operation="pool", version=1, parameters={}, bindings={})
     state = dict(kind="ndarray", name="state", dtype="i32", shape=[dict(array="shape", axis=0)], allocator="pool")

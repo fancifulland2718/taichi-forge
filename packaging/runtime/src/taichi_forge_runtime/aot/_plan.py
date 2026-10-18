@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 20
+_MAX_EXECUTION_PLAN_VERSION = 21
 
 
 def _resource_version(resources):
@@ -84,6 +84,7 @@ class ExecutionPlan:
         constraints=None,
         binding_strategy=None,
         submission_recipe=None,
+        storage_recipe=None,
     ):
         document = {"version": 1 if initialization is None else 2, "operations": list(operations)}
         if initialization is not None:
@@ -102,6 +103,9 @@ class ExecutionPlan:
         if submission_recipe is not None:
             document["submission_recipe"] = submission_recipe
             document["version"] = 20
+        if storage_recipe is not None:
+            document["storage_recipe"] = storage_recipe
+            document["version"] = 21
         document["version"] = max(
             document["version"], _control_version(document["operations"] + document.get("initialization", [])),
             _constraint_version(document.get("constraints", [])),
@@ -128,6 +132,7 @@ class ExecutionPlan:
                 "constraints",
                 "binding_strategy",
                 "submission_recipe",
+                "storage_recipe",
             }
         ):
             raise ValueError("Execution plan requires version and operations")
@@ -156,6 +161,10 @@ class ExecutionPlan:
             if value["submission_recipe"] is None:
                 raise ValueError("Submission recipe must be an object")
             required = max(required, 20)
+        if "storage_recipe" in value:
+            if value["storage_recipe"] is None:
+                raise ValueError("Storage recipe must be an object")
+            required = max(required, 21)
         if value["version"] < required:
             raise ValueError(f"Execution features require execution plan version {required}")
         return cls(
@@ -166,6 +175,7 @@ class ExecutionPlan:
             constraints=value.get("constraints"),
             binding_strategy=value.get("binding_strategy"),
             submission_recipe=value.get("submission_recipe"),
+            storage_recipe=value.get("storage_recipe"),
         )
 
     @classmethod
@@ -524,6 +534,9 @@ class ExecutionPlan:
         self.argument_names = external_arguments(
             document.get("resources", []), document.get("gradients", {}), arguments
         )
+        from ._storage_recipe import validate_storage_recipe
+
+        validate_storage_recipe(document, replay)
 
         resources, gradients = document.get("resources", []), document.get("gradients", {})
         self._retained_argument_names = retained_arguments(resources, gradients, arguments)

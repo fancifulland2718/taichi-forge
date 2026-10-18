@@ -6,6 +6,7 @@
 #include <set>
 #include <stdexcept>
 #include "taichi/aot/execution_plan_json.h"
+#include "taichi/aot/ordered_storage_ring.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/system/profiler_annotation.h"
 
@@ -78,7 +79,7 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
     const auto root = liong::json::parse_complete(json);
     fields(root, {"version", "operations", "resources", "gradients",
                   "initialization", "constraints", "binding_strategy",
-                  "submission_recipe"});
+                  "submission_recipe", "storage_recipe"});
     const auto version = integer(root["version"]);
     if (version < 1 || version > kMaxVersion)
       throw std::invalid_argument("Unsupported execution plan version");
@@ -617,6 +618,13 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
               "Vulkan submission recipes require a flat replay sequence");
       }
       plan.vulkan_submission = std::move(submission);
+    }
+    if (const auto selected = root.obj.inner.find("storage_recipe");
+        selected != root.obj.inner.end()) {
+      if (version < 21 || has_initialization)
+        throw std::invalid_argument(
+            "Storage rings require plan version 21 without explicit initialization");
+      expand_ordered_storage_ring(plan, selected->second, arguments);
     }
     plan.resources.analyze(arguments);
     plan.arguments.assign(arguments.begin(), arguments.end());

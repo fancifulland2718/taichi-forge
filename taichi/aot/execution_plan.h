@@ -12,6 +12,7 @@
 #include "taichi/runtime/cuda_control_recipe.h"
 #include "taichi/runtime/native_array_contract.h"
 #include "taichi/runtime/native_operation_description.h"
+#include "taichi/runtime/ordered_storage_ring.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
 #include "taichi/runtime/vulkan_submission_recipe.h"
 
@@ -20,7 +21,7 @@ namespace taichi::lang::aot {
 // handles, backend commands and storage ownership. Binding consumes this only
 // in the cold phase; replay retains no JSON or symbolic argument lookups.
 struct ExecutionPlan {
-  static constexpr std::uint32_t kMaxVersion = 20;
+  static constexpr std::uint32_t kMaxVersion = 21;
   struct Kernel {
     struct BoundedRange {
       bool cuda{false};
@@ -144,6 +145,7 @@ struct ExecutionPlan {
   ExecutionResources resources;
   bool cuda_binding_frames{false};
   std::optional<VulkanSubmissionRecipe> vulkan_submission;
+  std::optional<OrderedStorageRing> storage_ring;
 
   static ExecutionPlan parse(const std::string &json);
 };
