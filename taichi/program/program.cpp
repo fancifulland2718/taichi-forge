@@ -21,6 +21,7 @@
 #include "taichi/rhi/cpu/inclusive_scan.h"
 #include "taichi/rhi/cpu/reduce.h"
 #include "taichi/rhi/cpu/transform.h"
+#include "taichi/rhi/cpu/indexed_copy.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -1157,17 +1158,6 @@ struct CpuPackedStridedToStridedTransformTaskContext {
   int num_threads{1};
 };
 
-struct CpuIndexedCopyTaskContext {
-  const uint8_t *src{nullptr};
-  const int32_t *indices{nullptr};
-  uint8_t *dst{nullptr};
-  std::size_t n{0};
-  std::size_t index_bound{0};
-  std::size_t item_bytes{0};
-  bool scatter{false};
-  int num_threads{1};
-};
-
 struct CpuStridedIndexedCopyTaskContext {
   const uint8_t *src{nullptr};
   const int32_t *indices{nullptr};
@@ -1374,14 +1364,7 @@ bool cpu_use_parallel_aggregation(std::size_t n, int target_threads) {
 int cpu_indexed_copy_target_threads(std::size_t n,
                                     int max_threads,
                                     bool scatter) {
-  constexpr int kChunkItems = 32768;
-  int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + kChunkItems - 1) / kChunkItems,
-                            static_cast<std::size_t>(max_threads)));
-  if (scatter && n >= 262144) {
-    target_threads = std::min(target_threads, 4);
-  }
-  return std::max(1, target_threads);
+  return cpu::indexed_copy_target_threads(n, max_threads, scatter);
 }
 
 void validate_cpu_plain_scatter_indices(const int32_t *indices,
@@ -2348,89 +2331,8 @@ void check_indexed_copy_strided_request(const char *backend,
               dst_stride);
 }
 
-inline void cpu_copy_indexed_payload(uint8_t *dst,
-                                     const uint8_t *src,
-                                     std::size_t item_bytes) {
-  auto *dst_words = reinterpret_cast<uint32_t *>(dst);
-  const auto *src_words = reinterpret_cast<const uint32_t *>(src);
-  if (item_bytes == sizeof(uint32_t)) {
-    dst_words[0] = src_words[0];
-    return;
-  }
-  if (item_bytes == sizeof(uint64_t)) {
-    dst_words[0] = src_words[0];
-    dst_words[1] = src_words[1];
-    return;
-  }
-  if (item_bytes == 4 * sizeof(uint32_t)) {
-    dst_words[0] = src_words[0];
-    dst_words[1] = src_words[1];
-    dst_words[2] = src_words[2];
-    dst_words[3] = src_words[3];
-    return;
-  }
-  const std::size_t words = item_bytes / sizeof(uint32_t);
-  for (std::size_t word = 0; word < words; ++word) {
-    dst_words[word] = src_words[word];
-  }
-}
-
-inline void cpu_zero_indexed_payload(uint8_t *dst, std::size_t item_bytes) {
-  auto *dst_words = reinterpret_cast<uint32_t *>(dst);
-  if (item_bytes == sizeof(uint32_t)) {
-    dst_words[0] = 0;
-    return;
-  }
-  if (item_bytes == sizeof(uint64_t)) {
-    dst_words[0] = 0;
-    dst_words[1] = 0;
-    return;
-  }
-  if (item_bytes == 4 * sizeof(uint32_t)) {
-    dst_words[0] = 0;
-    dst_words[1] = 0;
-    dst_words[2] = 0;
-    dst_words[3] = 0;
-    return;
-  }
-  const std::size_t words = item_bytes / sizeof(uint32_t);
-  for (std::size_t word = 0; word < words; ++word) {
-    dst_words[word] = 0;
-  }
-}
-
-void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuIndexedCopyTaskContext *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  if (ctx->scatter) {
-    for (std::size_t i = begin; i < end; ++i) {
-      const auto index = static_cast<std::size_t>(ctx->indices[i]);
-      if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(ctx->dst + index * ctx->item_bytes,
-                                 ctx->src + i * ctx->item_bytes,
-                                 ctx->item_bytes);
-      }
-    }
-  } else {
-    for (std::size_t i = begin; i < end; ++i) {
-      const auto index = static_cast<std::size_t>(ctx->indices[i]);
-      if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(ctx->dst + i * ctx->item_bytes,
-                                 ctx->src + index * ctx->item_bytes,
-                                 ctx->item_bytes);
-      } else {
-        cpu_zero_indexed_payload(ctx->dst + i * ctx->item_bytes,
-                                 ctx->item_bytes);
-      }
-    }
-  }
-}
+using cpu::copy_indexed_payload;
+using cpu::zero_indexed_payload;
 
 void cpu_strided_indexed_copy_task(void *raw_ctx,
                                    int /*thread_id*/,
@@ -2447,7 +2349,7 @@ void cpu_strided_indexed_copy_task(void *raw_ctx,
     for (std::size_t i = begin; i < end; ++i) {
       const auto index = static_cast<std::size_t>(ctx->indices[i]);
       if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(
+        copy_indexed_payload(
             ctx->dst + ctx->dst_offset + index * ctx->dst_stride,
             ctx->src + ctx->src_offset + i * ctx->src_stride,
             ctx->item_bytes);
@@ -2457,12 +2359,12 @@ void cpu_strided_indexed_copy_task(void *raw_ctx,
     for (std::size_t i = begin; i < end; ++i) {
       const auto index = static_cast<std::size_t>(ctx->indices[i]);
       if (index < ctx->index_bound) {
-        cpu_copy_indexed_payload(
+        copy_indexed_payload(
             ctx->dst + ctx->dst_offset + i * ctx->dst_stride,
             ctx->src + ctx->src_offset + index * ctx->src_stride,
             ctx->item_bytes);
       } else {
-        cpu_zero_indexed_payload(
+        zero_indexed_payload(
             ctx->dst + ctx->dst_offset + i * ctx->dst_stride,
             ctx->item_bytes);
       }
@@ -20678,33 +20580,10 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
               "CPU native gather received a null data pointer.");
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
-  if (n >= 65536 && target_threads > 1) {
-    CpuIndexedCopyTaskContext ctx;
-    ctx.src = src_ptr;
-    ctx.indices = indices_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.index_bound = src_items;
-    ctx.item_bytes = item_bytes;
-    ctx.scatter = false;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto index = static_cast<std::size_t>(indices_ptr[i]);
-    if (index < src_items) {
-      std::memcpy(dst_ptr + i * item_bytes, src_ptr + index * item_bytes,
-                  item_bytes);
-    } else {
-      std::memset(dst_ptr + i * item_bytes, 0, item_bytes);
-    }
-  }
+  const int partitions = cpu::indexed_copy_partitions(n, max_threads, false);
+  auto *pool = partitions > 1 ? get_cpu_primitive_thread_pool(max_threads) : nullptr;
+  cpu::indexed_copy(src_ptr, indices_ptr, dst_ptr, n, src_items, item_bytes,
+                    false, partitions, pool);
   return 0;
 }
 
@@ -21282,29 +21161,10 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
   validate_cpu_plain_scatter_indices(indices_ptr, n, dst_items);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int target_threads =
-      cpu_indexed_copy_target_threads(n, max_threads, true);
-  if (n >= 65536 && target_threads > 1) {
-    CpuIndexedCopyTaskContext ctx;
-    ctx.src = src_ptr;
-    ctx.indices = indices_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.index_bound = dst_items;
-    ctx.item_bytes = item_bytes;
-    ctx.scatter = true;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto index = static_cast<std::size_t>(indices_ptr[i]);
-    if (index < dst_items) {
-      std::memcpy(dst_ptr + index * item_bytes, src_ptr + i * item_bytes,
-                  item_bytes);
-    }
-  }
+  const int partitions = cpu::indexed_copy_partitions(n, max_threads, true);
+  auto *pool = partitions > 1 ? get_cpu_primitive_thread_pool(max_threads) : nullptr;
+  cpu::indexed_copy(src_ptr, indices_ptr, dst_ptr, n, dst_items, item_bytes,
+                    true, partitions, pool);
   return 0;
 }
 
