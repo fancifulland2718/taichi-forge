@@ -4650,6 +4650,15 @@ consumption. This does not qualify the complete GeoPhys public API,
 all dependency profiles, solver branches or nonlinear solver gradients; those remain
 separate application/deployment work.
 
+An expanded 534-module application profile also passes source-hidden offscreen
+compute raster rendering on Windows CPU/CUDA/Vulkan: consumer-created two-box
+and three-sphere mesh scenes, two resolutions, image/depth comparison with the
+source reference, and rigid-state updates. The 53 added application modules
+increase the compressed wheel by 4.75 MB; all 481 prior binaries, dependency
+declarations and the sole 0.926 MB CUDA SAP TCM remain unchanged. The independent
+Forge frontend specializes these new rendering cases; this does not put rendering
+in that fixed TCM or qualify hardware raster, OptiX, textures or all scene types.
+
 The installed qualification also upgrades Forge runtime and its matching frontend
 independently while retaining the GeoPhys wheel and its single CUDA TCM. The
 application artifact hash and all 44 external dependency version/RECORD entries

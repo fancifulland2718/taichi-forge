@@ -3548,6 +3548,12 @@ Vulkan分别创建两个球体和三个箱体的MJCF新场景，拒绝访问内�
 该安装包也通过小规模CUDA SAP导出和独立AOT消费；这不等于整个GeoPhys
 公开API、所有依赖配置、solver分支或非线性求解器反向已取得资格，后者仍是应用/部署工作。
 
+扩展到534个模块的应用配置还通过了Windows CPU/CUDA/Vulkan隐藏源码离屏compute光栅化：
+消费端创建两个箱体、三个球体的网格场景，覆盖两种分辨率、与源码参照的图像/深度比较及
+刚体状态更新。新增53个应用模块使压缩wheel增加4.75 MB；原481个二进制模块、依赖声明和
+唯一的0.926 MB CUDA SAP TCM保持不变。新渲染场景由独立安装的Forge前端特化；这不代表
+渲染已包含在该固定TCM中，也不代表硬件光栅化、OptiX、贴图或所有场景类型取得资格。
+
 安装资格还覆盖独立升级Forge runtime及配套前端，同时保留GeoPhys wheel和其中唯一的
 CUDA TCM。应用产物哈希、44个外部依赖的版本/RECORD记录保持不变；runtime/前端不含
 TCM，核心DLL只由runtime持有，各包安装文件无重叠。升级后旧CPU/CUDA/Vulkan AOT
