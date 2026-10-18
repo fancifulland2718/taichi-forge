@@ -13,6 +13,8 @@
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+class RuntimeClient;
+class FixedExecution;
 }
 namespace taichi::lang::cuda {
 class KernelLauncher;
@@ -103,13 +105,23 @@ class FixedGraph {
   std::size_t capture_bytes() const;
 
  private:
-  FixedGraph(
+  friend class taichi::lang::FixedExecution;
+  // Parts are registered by one enclosing recipe before any backend work.
+  // They have no domain owner of their own, preventing ownership cycles and
+  // recursive admission. Only the enclosing domain may enqueue these parts.
+  static std::unique_ptr<FixedGraph> prepare_execution_part(
       const std::vector<Operation> &operations,
-      std::shared_ptr<RuntimeFaultDomain> fault_domain,
-      std::shared_ptr<void> operands,
-      bool binding_frame,
-      std::shared_ptr<ExecutionDomain> domain = {},
-      std::shared_ptr<RuntimeCompletionResources> instance_operands = {});
+      std::shared_ptr<RuntimeFaultDomain> owner,
+      std::shared_ptr<RuntimeCompletionResources> operands,
+      std::vector<std::shared_ptr<RuntimeClient>> &parts);
+  void enqueue_execution_part(void *stream);
+  FixedGraph(const std::vector<Operation> &operations,
+             std::shared_ptr<RuntimeFaultDomain> fault_domain,
+             std::shared_ptr<void> operands,
+             bool binding_frame,
+             std::shared_ptr<ExecutionDomain> domain = {},
+             std::shared_ptr<RuntimeCompletionResources> instance_operands = {},
+             std::vector<std::shared_ptr<RuntimeClient>> *parts = nullptr);
   void initialize(const std::vector<Operation> &operations);
   struct State;
   std::shared_ptr<State> state_;

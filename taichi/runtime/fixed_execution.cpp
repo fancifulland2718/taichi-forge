@@ -3,6 +3,8 @@
 #include "taichi/program/runtime_completion.h"
 
 #include <algorithm>
+#include <exception>
+#include <mutex>
 #include <cstring>
 #include <functional>
 #include <stdexcept>
@@ -79,6 +81,47 @@ struct FixedExecution::State {
   std::shared_ptr<cuda::BindingFrameReplay> cuda_binding_replay;
   using CudaStep = std::variant<std::unique_ptr<cuda::FixedGraph>,
                                 std::shared_ptr<NativeOperation>>;
+  struct CudaInstance final : RuntimeClient, RuntimeCompletionResources {
+    std::shared_ptr<RuntimeCompletionResources> operands;
+    std::vector<CudaStep> steps;
+    std::vector<std::shared_ptr<NativeOperation>> ordered;
+    // Contains no ExecutionDomain reference. One domain registration owns the
+    // entire recipe, including partial construction and provider-only recipes.
+    std::vector<std::shared_ptr<RuntimeClient>> parts;
+    std::mutex retirement_mutex;
+    std::exception_ptr retirement_error;
+    bool retired{false};
+    void retire() override {
+      std::lock_guard<std::mutex> lock(retirement_mutex);
+      if (retirement_error)
+        std::rethrow_exception(retirement_error);
+      if (retired)
+        return;
+      for (const auto &part : parts) {
+        try {
+          part->retire();
+        } catch (...) {
+          if (!retirement_error)
+            retirement_error = std::current_exception();
+        }
+      }
+      if (retirement_error)
+        std::rethrow_exception(retirement_error);
+      steps.clear();
+      parts.clear();
+      ordered.clear();
+      std::atomic_store(&operands,
+                        std::shared_ptr<RuntimeCompletionResources>{});
+      retired = true;
+    }
+    std::size_t retained_resource_count(
+        std::uint32_t kind) const noexcept override {
+      const auto retained = std::atomic_load(&operands);
+      return retained ? retained->retained_resource_count(kind) : 0;
+    }
+  };
+  std::shared_ptr<CudaInstance> cuda_instance;
+  std::size_t cuda_ordered_count{0};
   std::vector<CudaStep> cuda_steps;
   // Retire submitted native work before releasing graph/provider owners.
   std::unique_ptr<cuda::OrderedSubmissions> cuda_ordered;
@@ -489,10 +532,8 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed native operation belongs to another execution device");
         const auto mode = native->execution_mode();
-        if (execution_binding && mode != NativeOperationMode::cuda_capture)
-          throw std::invalid_argument(
-              "Selected host-invoked provider needs an independent-domain "
-              "submission contract");
+        if (execution_binding)
+          native->validate_cuda_execution_domain();
         if (!((arch_is_cpu(arch) && mode == NativeOperationMode::cpu) ||
               (arch == Arch::cuda &&
                (mode == NativeOperationMode::cuda_capture ||
@@ -775,6 +816,25 @@ FixedExecution::FixedExecution(
                     }))
       state_->fault_domain = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 0);
     using CudaOperation = cuda::FixedGraph::Operation;
+    if (execution_binding) {
+      struct InstanceOperands final : RuntimeCompletionResources {
+        std::shared_ptr<RuntimeCompletionResources> bindings;
+        std::vector<std::shared_ptr<NativeOperation>> operations;
+        std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
+        std::size_t retained_resource_count(
+            std::uint32_t kind) const noexcept override {
+          return bindings->retained_resource_count(kind);
+        }
+      };
+      auto retained = std::make_shared<InstanceOperands>();
+      retained->bindings = execution_binding->operands;
+      retained->operations = state_->native_operations;
+      retained->resources = state_->kernel_resources;
+      state_->cuda_instance = std::make_shared<State::CudaInstance>();
+      state_->cuda_instance->operands = std::move(retained);
+    }
+    auto &steps =
+        execution_binding ? state_->cuda_instance->steps : state_->cuda_steps;
     std::size_t ordered_operations = 0;
     bool synchronous_operations = false;
     auto account = [&](const cuda::FixedGraph &graph) {
@@ -793,10 +853,14 @@ FixedExecution::FixedExecution(
     auto flush = [&](std::vector<CudaOperation> &native) {
       if (native.empty())
         return;
-      auto graph =
-          std::make_unique<cuda::FixedGraph>(native, state_->fault_domain);
+      auto graph = execution_binding ? cuda::FixedGraph::prepare_execution_part(
+                                           native, state_->fault_domain,
+                                           state_->cuda_instance->operands,
+                                           state_->cuda_instance->parts)
+                                     : std::make_unique<cuda::FixedGraph>(
+                                           native, state_->fault_domain);
       account(*graph);
-      state_->cuda_steps.emplace_back(std::move(graph));
+      steps.emplace_back(std::move(graph));
       native.clear();
     };
     std::function<std::vector<CudaOperation>(const std::vector<Operation> &)>
@@ -862,7 +926,9 @@ FixedExecution::FixedExecution(
             ordered_operations += mode == NativeOperationMode::cuda_ordered;
             synchronous_operations |= mode == NativeOperationMode::cuda_synchronous;
             flush(native);
-            state_->cuda_steps.emplace_back(*external);
+            steps.emplace_back(*external);
+            if (execution_binding)
+              state_->cuda_instance->ordered.push_back(*external);
             continue;
           }
           native.emplace_back(cuda::FixedGraph::Dispatch{
@@ -901,6 +967,17 @@ FixedExecution::FixedExecution(
       }
       return native;
     };
+    if (execution_binding) {
+      state_->cuda_domain->prepare_instance(state_->cuda_instance, [&] {
+        auto native = prepare(operations);
+        flush(native);
+      });
+      state_->kind = ordered_operations ? 4 : 1;
+      state_->cuda_ordered_count = ordered_operations;
+      if (sequence_state)
+        *sequence_state = std::move(recording_state);
+      return;
+    }
     auto native = prepare(operations);
     if (binding_replay) {
       struct FrameOperands {
@@ -923,27 +1000,8 @@ FixedExecution::FixedExecution(
       state_->cuda_binding_replay = std::move(binding_replay);
       state_->kind = 1;
     } else if (state_->cuda_steps.empty()) {
-      if (execution_binding) {
-        struct InstanceOperands final : RuntimeCompletionResources {
-          std::shared_ptr<RuntimeCompletionResources> bindings;
-          std::vector<std::shared_ptr<NativeOperation>> operations;
-          std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
-          std::size_t retained_resource_count(
-              std::uint32_t kind) const noexcept override {
-            return bindings->retained_resource_count(kind);
-          }
-        };
-        auto retained = std::make_shared<InstanceOperands>();
-        retained->bindings = execution_binding->operands;
-        retained->operations = state_->native_operations;
-        retained->resources = state_->kernel_resources;
-        state_->cuda_graph = cuda::FixedGraph::prepare_execution_instance(
-            native, state_->fault_domain, state_->cuda_domain,
-            std::move(retained));
-      } else {
-        state_->cuda_graph =
-            std::make_unique<cuda::FixedGraph>(native, state_->fault_domain);
-      }
+      state_->cuda_graph =
+          std::make_unique<cuda::FixedGraph>(native, state_->fault_domain);
       state_->kind = 1;
       account(*state_->cuda_graph);
     } else {
@@ -1120,8 +1178,31 @@ FixedExecution::~FixedExecution() = default;
 RuntimeCompletion FixedExecution::submit(
     const std::vector<RuntimeCompletion> &dependencies) {
 #ifdef TI_WITH_CUDA
-  if (state_->cuda_domain && state_->cuda_graph)
-    return state_->cuda_graph->submit(dependencies);
+  if (state_->cuda_domain && state_->cuda_instance) {
+    const auto instance = state_->cuda_instance;
+    std::shared_ptr<cuda::OrderedSubmissionResources> ordered;
+    if (state_->cuda_ordered_count)
+      ordered = std::make_shared<cuda::OrderedSubmissionResources>(
+          state_->cuda_ordered_count, std::atomic_load(&instance->operands));
+    return state_->cuda_domain->submit(
+        dependencies,
+        ordered
+            ? ordered
+            : std::static_pointer_cast<RuntimeCompletionResources>(instance),
+        [&](void *stream) {
+          std::size_t index = 0;
+          for (const auto &step : instance->steps) {
+            if (const auto *graph =
+                    std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step))
+              (*graph)->enqueue_execution_part(stream);
+            else
+              ordered->run(index++, stream);
+          }
+        },
+        ordered ? std::function<void()>(
+                      [&] { ordered->reserve(instance->ordered); })
+                : std::function<void()>{});
+  }
 #endif
   throw std::invalid_argument(
       "Fixed execution was not prepared for an independent domain");
@@ -1150,6 +1231,12 @@ void FixedExecution::retire_completed_binding(bool backend_safe) {
 }
 
 void FixedExecution::run_impl() {
+#ifdef TI_WITH_CUDA
+  if (state_->cuda_instance) {
+    (void)submit();
+    return;
+  }
+#endif
   if (!state_->storage_frames.empty()) {
     if (state_->storage_ring_failed)
       throw std::runtime_error(

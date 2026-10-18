@@ -4,6 +4,8 @@
 #include <array>
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
+#include <mutex>
 #include <cstdlib>
 #include <limits>
 #include "tests/cpp/rhi/common/cuda_external_gate.h"
@@ -23,6 +25,91 @@ namespace taichi::lang {
 namespace {
 constexpr int count = 64;
 constexpr std::uint32_t operand_kind = 193;
+
+struct OrderedTransaction final : CudaProviderCompletionResource {
+  mutable std::mutex mutex;
+  std::uint64_t generation{0}, active{0};
+  bool started{false};
+  std::atomic<int> cancelled{0}, retired{0};
+  void reserve() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (active)
+      throw std::runtime_error("provider transaction is already reserved");
+    active = ++generation;
+    started = false;
+  }
+  void start() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!active || started)
+      throw std::logic_error("provider transaction is not reserved");
+    started = true;
+  }
+  void cancel() noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (active && !started) {
+      active = 0;
+      ++cancelled;
+    }
+  }
+  std::uint64_t submission_retirement_token() const override {
+    std::lock_guard<std::mutex> lock(mutex);
+    return active;
+  }
+  void on_submission_retired(std::uint64_t token) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (token && token == active) {
+      active = 0;
+      ++retired;
+    }
+  }
+};
+
+class OrderedCopy final : public NativeOperation {
+ public:
+  OrderedCopy(Device &device, void *source, void *target, bool fail = false)
+      : device_(device), source_(source), target_(target), fail_(fail) {
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  NativeOperationMode execution_mode() const override {
+    return NativeOperationMode::cuda_ordered;
+  }
+  std::shared_ptr<CudaProviderCompletionResource> cuda_ordered_resource()
+      const override {
+    return transaction;
+  }
+  void reserve_cuda_ordered() override {
+    transaction->reserve();
+  }
+  void cancel_cuda_ordered() noexcept override {
+    transaction->cancel();
+  }
+  void run_cuda_ordered(void *stream) override {
+    if (!stream)
+      throw std::logic_error("Test provider requires an independent stream");
+    transaction->start();
+    ++calls;
+    CUDADriver::get_instance().memcpy_device_to_device_async(
+        target_, source_, count * sizeof(float), stream);
+    if (fail_)
+      throw std::runtime_error("Provider failed after copy enqueue");
+  }
+  std::shared_ptr<OrderedTransaction> transaction =
+      std::make_shared<OrderedTransaction>();
+  int calls{0};
+
+ private:
+  Device &device_;
+  void *source_, *target_;
+  bool fail_;
+};
 
 struct InstanceOperands final : RuntimeCompletionResources {
   CompileConfig config;
@@ -243,8 +330,7 @@ TEST(CudaExecutionContextAot, FixedParallelBranchesHaveIndependentTemporaries) {
   EXPECT_ANY_THROW(graph->submit());
 }
 
-TEST(CudaExecutionContextAot,
-     FixedExecutionKeepsKernelCopyAndNativeRecipeOnItsDomain) {
+void check_fixed_execution_recipe(bool ordered) {
   const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
   if (!folder || !cuda::ExecutionDomain::available())
     GTEST_SKIP();
@@ -254,6 +340,11 @@ TEST(CudaExecutionContextAot,
   auto output = registry.create({2, 0}), physics = registry.create({2, -1});
   LaunchContextBuilder ca(&operands->kernel()), cb(&operands->kernel());
   std::array<std::shared_ptr<NativeOperation>, 2> scans;
+  std::array<std::shared_ptr<OrderedCopy>, 2> copies;
+  if (ordered)
+    for (int i = 0; i < 2; ++i)
+      copies[i] = std::make_shared<OrderedCopy>(
+          operands->device(), operands->address(i), operands->address(i + 2));
   for (int i = 0; i < 2; ++i)
     scans[i] = native_operation_registry().prepare(
         Arch::cuda, operands->device(),
@@ -273,16 +364,20 @@ TEST(CudaExecutionContextAot,
             FixedExecution::BufferFill{operands->storage[index + 2]->get_ptr(),
                                        count * sizeof(float), 0},
             FixedExecution::Dispatch{&operands->kernel(), &context},
-            FixedExecution::BufferCopy{operands->storage[index + 2]->get_ptr(),
-                                       operands->storage[index]->get_ptr(),
-                                       count * sizeof(float)},
+            ordered
+                ? FixedExecution::Operation(
+                      std::static_pointer_cast<NativeOperation>(copies[index]))
+                : FixedExecution::Operation(FixedExecution::BufferCopy{
+                      operands->storage[index + 2]->get_ptr(),
+                      operands->storage[index]->get_ptr(),
+                      count * sizeof(float)}),
             scans[index]};
         return std::make_unique<FixedExecution>(
             Arch::cuda, operands->device(), nullptr, operations, nullptr, owner,
             nullptr, nullptr, nullptr, nullptr, &binding);
       };
   auto first = prepare(0, ca, output), second = prepare(1, cb, physics);
-  EXPECT_EQ(first->execution_kind(), 1);
+  EXPECT_EQ(first->execution_kind(), ordered ? 4 : 1);
   EXPECT_GE(first->workspace_bytes(), taichi_global_tmp_buffer_size);
   first->submit().wait();
   second->submit().wait();
@@ -307,7 +402,9 @@ TEST(CudaExecutionContextAot,
   auto pending = first->submit();
   RuntimeCompletion sentinel;
   {
-    ScopedExternalProfilerAnnotation range("F3/fixed_execution_native_submit");
+    ScopedExternalProfilerAnnotation range(
+        ordered ? "F3/fixed_ordered_submit"
+                : "F3/fixed_execution_native_submit");
     sentinel = second->submit();
   }
   ASSERT_TRUE(poll(sentinel));
@@ -326,7 +423,8 @@ TEST(CudaExecutionContextAot,
   EXPECT_FALSE(blocked.done());
   EXPECT_FALSE(gate.timed_out());
   {
-    ScopedExternalProfilerAnnotation range("F3/fixed_execution_release");
+    ScopedExternalProfilerAnnotation range(
+        ordered ? "F3/fixed_ordered_release" : "F3/fixed_execution_release");
     gate.release();
   }
   pending.wait();
@@ -339,6 +437,163 @@ TEST(CudaExecutionContextAot,
   EXPECT_TRUE(retained.expired());
   EXPECT_TRUE(first_scan.expired());
   EXPECT_TRUE(second_scan.expired());
+  if (ordered) {
+    EXPECT_EQ(copies[0]->transaction->retired.load(), 2);
+    EXPECT_EQ(copies[1]->transaction->retired.load(), 3);
+    EXPECT_EQ(copies[0]->transaction->cancelled.load(), 0);
+    EXPECT_EQ(copies[1]->transaction->cancelled.load(), 0);
+  }
+}
+
+TEST(CudaExecutionContextAot,
+     FixedExecutionKeepsKernelCopyAndNativeRecipeOnItsDomain) {
+  check_fixed_execution_recipe(false);
+}
+
+TEST(CudaExecutionContextAot, OrderedRecipePreservesRootsAndExactRetirement) {
+  check_fixed_execution_recipe(true);
+}
+
+TEST(CudaExecutionContextAot, OrderedReservationFailureCancelsOnlyItsOwnBatch) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  auto operands = std::make_shared<InstanceOperands>(folder, true);
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 835);
+  cuda::ExecutionDomainRegistry registry(owner, 3);
+  auto blocked_domain = registry.create({1, 0});
+  auto domain = registry.create(
+      {1, 0, 1});  // One instance slot owns all roots/providers.
+  auto provider_domain = registry.create({1, 0, 1});
+  auto first = std::make_shared<OrderedCopy>(
+      operands->device(), operands->address(0), operands->address(1));
+  auto second = std::make_shared<OrderedCopy>(
+      operands->device(), operands->address(1), operands->address(2));
+  FixedExecution::CudaExecutionBinding binding{domain, operands};
+  FixedExecution recipe(
+      Arch::cuda, operands->device(), nullptr,
+      {FixedExecution::BufferFill{operands->storage[0]->get_ptr(),
+                                  count * sizeof(float), 0x3f800000u},
+       std::static_pointer_cast<NativeOperation>(first),
+       std::static_pointer_cast<NativeOperation>(second),
+       FixedExecution::BufferFill{operands->storage[3]->get_ptr(),
+                                  count * sizeof(float), 0x40000000u}},
+      nullptr, owner, nullptr, nullptr, nullptr, nullptr, &binding);
+  auto provider = std::make_shared<OrderedCopy>(
+      operands->device(), operands->address(0), operands->address(2));
+  std::weak_ptr<OrderedCopy> retained_provider = provider;
+  FixedExecution::CudaExecutionBinding provider_binding{provider_domain,
+                                                        operands};
+  auto provider_only = std::make_unique<FixedExecution>(
+      Arch::cuda, operands->device(), nullptr,
+      std::vector<FixedExecution::Operation>{
+          std::static_pointer_cast<NativeOperation>(provider)},
+      nullptr, owner, nullptr, nullptr, nullptr, nullptr, &provider_binding);
+  EXPECT_EQ(provider_only->execution_kind(), 4);
+  EXPECT_EQ(provider_only->workspace_bytes(), 0);
+  provider.reset();
+  operands->poison_results();
+  testing::CudaExternalGate gate;
+  auto blocked = blocked_domain->submit({}, nullptr,
+                                        [&](void *s) { gate.enqueue_wait(s); });
+  second->transaction->reserve();
+  const auto foreign_reservation =
+      second->transaction->submission_retirement_token();
+  const auto next = owner->next_submission_sequence();
+  EXPECT_THROW(recipe.submit({blocked}), std::runtime_error);
+  EXPECT_EQ(owner->next_submission_sequence(), next);
+  EXPECT_TRUE(domain->snapshot().accepting);
+  EXPECT_EQ(first->transaction->cancelled.load(), 1);
+  EXPECT_EQ(first->transaction->retired.load(), 0);
+  EXPECT_EQ(first->calls, 0);
+  EXPECT_EQ(second->calls, 0);
+  EXPECT_EQ(second->transaction->submission_retirement_token(),
+            foreign_reservation);
+  EXPECT_EQ(second->transaction->cancelled.load(), 0);
+  second->transaction->cancel();
+  auto sentinel = recipe.submit();
+  ASSERT_TRUE(poll(sentinel));
+  EXPECT_FALSE(blocked.done());
+  EXPECT_EQ(first->transaction->retired.load(), 1);
+  EXPECT_EQ(second->transaction->retired.load(), 1);
+  ASSERT_TRUE(poll(provider_only->submit({sentinel})));
+  provider_only.reset();
+  EXPECT_FALSE(retained_provider.expired());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  registry.retire();
+  EXPECT_TRUE(retained_provider.expired());
+  auto context = CUDAContext::get_instance().get_guard();
+  for (int i = 0; i < 4; ++i) {
+    CUDADriver::get_instance().memcpy_device_to_host(
+        operands->readback[0], operands->address(i), count * sizeof(float));
+    for (int j = 0; j < count; ++j)
+      EXPECT_FLOAT_EQ(operands->readback[0][j], i == 3 ? 2.f : 1.f);
+  }
+  EXPECT_THROW(recipe.submit(), std::runtime_error);
+}
+
+TEST(CudaExecutionContextAot,
+     OrderedPartialFailureRetiresSubmittedAndCancelsSuffix) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  auto operands = std::make_shared<InstanceOperands>(folder, true);
+  auto owner = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 836);
+  cuda::ExecutionDomainRegistry registry(owner, 2);
+  auto domain = registry.create({2, 0, 1});
+  auto independent = registry.create({1, 0});
+  auto first = std::make_shared<OrderedCopy>(
+      operands->device(), operands->address(0), operands->address(1), true);
+  auto second = std::make_shared<OrderedCopy>(
+      operands->device(), operands->address(1), operands->address(2));
+  FixedExecution::CudaExecutionBinding binding{domain, operands};
+  auto recipe = std::make_unique<FixedExecution>(
+      Arch::cuda, operands->device(), nullptr,
+      std::vector<FixedExecution::Operation>{
+          FixedExecution::BufferFill{operands->storage[0]->get_ptr(),
+                                     count * sizeof(float), 0x3f800000u},
+          std::static_pointer_cast<NativeOperation>(first),
+          std::static_pointer_cast<NativeOperation>(second),
+          FixedExecution::BufferFill{operands->storage[3]->get_ptr(),
+                                     count * sizeof(float), 0x40000000u}},
+      nullptr, owner, nullptr, nullptr, nullptr, nullptr, &binding);
+  operands->poison_results();
+  testing::CudaExternalGate gate;
+  auto blocked =
+      domain->submit({}, nullptr, [&](void *s) { gate.enqueue_wait(s); });
+  EXPECT_THROW(recipe->submit(), std::runtime_error);
+  EXPECT_FALSE(domain->snapshot().accepting);
+  recipe.reset();
+  EXPECT_EQ(first->transaction->retired.load(), 0);
+  EXPECT_EQ(first->transaction->cancelled.load(), 0);
+  EXPECT_EQ(second->transaction->cancelled.load(), 0);
+  EXPECT_EQ(first->calls, 1);
+  EXPECT_EQ(second->calls, 0);
+  auto sentinel = independent->submit({}, nullptr, [&](void *s) {
+    CUDADriver::get_instance().memsetd32_async(operands->address(3),
+                                               0x40400000u, count, s);
+  });
+  ASSERT_TRUE(poll(sentinel));
+  EXPECT_FALSE(blocked.done());
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  registry.retire();
+  EXPECT_EQ(first->transaction->retired.load(), 1);
+  EXPECT_EQ(first->transaction->cancelled.load(), 0);
+  EXPECT_EQ(second->transaction->cancelled.load(), 1);
+  EXPECT_EQ(second->transaction->retired.load(), 0);
+  auto context = CUDAContext::get_instance().get_guard();
+  for (int i = 0; i < 4; ++i) {
+    CUDADriver::get_instance().memcpy_device_to_host(
+        operands->readback[0], operands->address(i), count * sizeof(float));
+    for (int j = 0; j < count; ++j) {
+      if (i == 2)
+        EXPECT_TRUE(std::isnan(operands->readback[0][j]));
+      else
+        EXPECT_FLOAT_EQ(operands->readback[0][j], i == 3 ? 3.f : 1.f);
+    }
+  }
 }
 
 TEST(CudaExecutionContextAot, DenseFieldInstancesPreserveIndependentProgress) {

@@ -276,11 +276,12 @@ FixedGraph::FixedGraph(
     std::shared_ptr<void> operands,
     bool binding_frame,
     std::shared_ptr<ExecutionDomain> domain,
-    std::shared_ptr<RuntimeCompletionResources> instance_operands)
+    std::shared_ptr<RuntimeCompletionResources> instance_operands,
+    std::vector<std::shared_ptr<RuntimeClient>> *parts)
     : state_(std::make_shared<State>()), domain_(std::move(domain)) {
-  if (domain_) {
-    if (!fault_domain || !domain_->belongs_to(fault_domain) ||
-        !instance_operands)
+  if (domain_ || parts) {
+    if (!fault_domain || (domain_ && !domain_->belongs_to(fault_domain)) ||
+        (domain_ && parts) || !instance_operands)
       throw std::invalid_argument(
           "CUDA execution instance requires matching domain and operand "
           "owners");
@@ -300,7 +301,11 @@ FixedGraph::FixedGraph(
         state_->preparation_started = true;
         initialize(operations);
       });
-    else
+    else if (parts) {
+      parts->push_back(state_);
+      state_->preparation_started = true;
+      initialize(operations);
+    } else
       initialize(operations);
   } catch (const BackendRuntimeError &error) {
     if (state_->fault_domain)
@@ -326,6 +331,23 @@ std::unique_ptr<FixedGraph> FixedGraph::prepare_execution_instance(
   return std::unique_ptr<FixedGraph>(
       new FixedGraph(operations, std::move(owner), {}, false, std::move(domain),
                      std::move(operands)));
+}
+
+std::unique_ptr<FixedGraph> FixedGraph::prepare_execution_part(
+    const std::vector<Operation> &operations,
+    std::shared_ptr<RuntimeFaultDomain> owner,
+    std::shared_ptr<RuntimeCompletionResources> operands,
+    std::vector<std::shared_ptr<RuntimeClient>> &parts) {
+  return std::unique_ptr<FixedGraph>(
+      new FixedGraph(operations, std::move(owner), {}, false, {},
+                     std::move(operands), &parts));
+}
+
+void FixedGraph::enqueue_execution_part(void *stream) {
+  if (!state_->independent || domain_ || !stream || state_->retired.load())
+    throw std::logic_error(
+        "CUDA execution part requires its live enclosing domain");
+  CUDAContext::get_instance().launch_graph(state_->executable, stream);
 }
 
 std::shared_ptr<FixedGraph> FixedGraph::capture_binding_frame(
@@ -1076,6 +1098,9 @@ void FixedGraph::run() {
     (void)submit();
     return;
   }
+  if (state_->independent)
+    throw std::invalid_argument(
+        "CUDA execution parts require enclosing submission");
   if (state_->binding_frame)
     throw std::invalid_argument(
         "Captured CUDA binding frames require a replay family");

@@ -42,6 +42,70 @@ void CudaProviderCompletionResource::retire_completed_ordered_submissions() {
 }
 
 namespace cuda {
+struct OrderedSubmissionResources::State {
+  struct Entry {
+    std::shared_ptr<NativeOperation> operation;
+    std::shared_ptr<CudaProviderCompletionResource> owner;
+    std::uint64_t token{0};
+    bool reserved{false};
+    bool submitted{false};
+  };
+  std::vector<Entry> entries;
+  std::shared_ptr<RuntimeCompletionResources> operands;
+  bool attempted{false};
+};
+
+OrderedSubmissionResources::OrderedSubmissionResources(
+    std::size_t operation_count,
+    std::shared_ptr<RuntimeCompletionResources> operands)
+    : state_(std::make_unique<State>()) {
+  state_->operands = std::move(operands);
+  state_->entries.resize(operation_count);
+}
+
+OrderedSubmissionResources::~OrderedSubmissionResources() {
+  for (auto it = state_->entries.rbegin(); it != state_->entries.rend(); ++it) {
+    if (!it->reserved)
+      continue;
+    if (!it->submitted)
+      it->operation->cancel_cuda_ordered();
+    else if (it->owner)
+      it->owner->on_submission_retired(it->token);
+  }
+}
+
+void OrderedSubmissionResources::reserve(
+    const std::vector<std::shared_ptr<NativeOperation>> &operations) {
+  if (state_->attempted || operations.size() != state_->entries.size())
+    throw std::logic_error("Ordered domain admission was already attempted");
+  state_->attempted = true;
+  for (std::size_t i = 0; i < operations.size(); ++i) {
+    auto &entry = state_->entries[i];
+    entry.operation = operations[i];
+    entry.owner = entry.operation->cuda_ordered_resource();
+    entry.operation->reserve_cuda_ordered();
+    entry.reserved = true;
+    if (entry.owner)
+      entry.token = entry.owner->submission_retirement_token();
+  }
+}
+
+void OrderedSubmissionResources::run(std::size_t index, void *stream) {
+  auto &entry = state_->entries.at(index);
+  if (!stream || !entry.reserved || entry.submitted)
+    throw std::logic_error(
+        "Ordered domain operation has no unused reservation");
+  // A failing provider may already have enqueued work. Transfer from cancel
+  // to completion retirement before entering it, including its error path.
+  entry.submitted = true;
+  entry.operation->run_cuda_ordered(stream);
+}
+
+std::size_t OrderedSubmissionResources::retained_resource_count(
+    std::uint32_t kind) const noexcept {
+  return state_->operands ? state_->operands->retained_resource_count(kind) : 0;
+}
+
 struct OrderedSubmissions::State {
   struct Resources final : RuntimeCompletionResources {
     std::vector<std::pair<std::shared_ptr<CudaProviderCompletionResource>,

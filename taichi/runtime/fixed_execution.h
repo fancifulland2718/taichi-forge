@@ -35,8 +35,8 @@ class ExecutionDomain;
 // Contexts and operation descriptors are borrowed only during preparation.
 class FixedExecution {
  public:
-  // Runtime-only ownership for independent CUDA capture recipes. Code and
-  // array owners outlive every pending launch; provider objects supplied in
+  // Runtime-only ownership for independent CUDA capture/ordered recipes. Code
+  // and array owners outlive every pending launch; provider objects supplied in
   // operations must have independent mutable state. Never serialized in AOT.
   struct CudaExecutionBinding {
     std::shared_ptr<cuda::ExecutionDomain> domain;

@@ -117,6 +117,21 @@ class NativeOperation : public NativeResource {
   }
   virtual void reserve_cuda_ordered() {
   }
+  // A successful reservation which has not entered run_cuda_ordered must be
+  // cancellable without touching the device. Operations which reserve mutable
+  // state override this; cancellation is distinct from submitted retirement.
+  virtual void cancel_cuda_ordered() noexcept {
+  }
+  // Cold validation before any part of an independent recipe is prepared.
+  // The default ordered contract accepts its supplied stream. Implementations
+  // with retained default-stream state must reject until they can bind it.
+  virtual void validate_cuda_execution_domain() const {
+    const auto mode = execution_mode();
+    if (mode != NativeOperationMode::cuda_capture &&
+        mode != NativeOperationMode::cuda_ordered)
+      throw std::invalid_argument(
+          "Native operation has no independent CUDA execution contract");
+  }
   virtual void run_cuda_ordered(void *stream) {
     throw std::invalid_argument("Native operation has no ordered CUDA implementation");
   }

@@ -315,6 +315,10 @@ class CudaSolverOperation final : public NativeOperation {
       const override {
     return plan_;
   }
+  void validate_cuda_execution_domain() const override {
+    throw std::invalid_argument(
+        "cuSOLVERDn retained recording requires domain-bound replay");
+  }
   void run_cuda_ordered(void *stream) override {
     if (stream)
       throw std::invalid_argument(
