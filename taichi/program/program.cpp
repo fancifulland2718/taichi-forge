@@ -11725,15 +11725,14 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
       "keys/offsets/cursor are not i32, or payload is not 4-byte aligned.");
   TI_ERROR_IF(
       keys->get_nelement() >
-              static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
-          num_bins >
-              static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
-      "CUDA bucket builder input is too large for u32 launch parameters.");
+              static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          num_bins > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          item_bytes / sizeof(uint32_t) >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "CUDA bucket builder exceeds its i32 count or payload-width ABI.");
   const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
-  TI_ERROR_IF(
-      keys->get_nelement() > static_cast<std::size_t>(
-                                 std::numeric_limits<int>::max() / item_words),
-      "CUDA bucket builder word count exceeds INT_MAX.");
+  // The scatter kernel indexes items, not flattened payload words. Its byte
+  // addressing is 64-bit, so n * item_words need not fit in an int.
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
   return cuda::driver_bucket_builder_strided(
@@ -11795,9 +11794,6 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
       "CUDA dense field bucket builder input is too large for int "
       "launch parameters.");
   const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
-  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
-                                           item_words),
-              "CUDA dense field bucket builder word count exceeds INT_MAX.");
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
     TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);

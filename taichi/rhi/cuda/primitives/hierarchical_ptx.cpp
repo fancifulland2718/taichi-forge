@@ -452,6 +452,46 @@ void *byte_offset(void *base, std::size_t offset) {
   return reinterpret_cast<std::uint8_t *>(base) + offset;
 }
 
+struct BucketWorkspaceLayout {
+  std::size_t scan_offset{0};
+  std::size_t scan_bytes{0};
+  std::size_t bytes{0};
+};
+
+BucketWorkspaceLayout bucket_workspace_layout(int num_items, int num_bins) {
+  TI_ERROR_IF(num_items < 0 || num_bins <= 0,
+              "CUDA bucket builder received an invalid size.");
+  BucketWorkspaceLayout layout;
+  if (!num_items)
+    return layout;
+  const auto bins = static_cast<std::size_t>(num_bins);
+  const auto maximum = std::numeric_limits<std::size_t>::max();
+  TI_ERROR_IF(bins > maximum / sizeof(std::int32_t),
+              "CUDA bucket cursor exceeds address space.");
+  const auto cursor_bytes = bins * sizeof(std::int32_t);
+  layout.scan_bytes = scan_layout(num_bins, sizeof(std::int32_t)).bytes;
+  layout.scan_offset = cursor_bytes;
+  if (layout.scan_bytes) {
+    TI_ERROR_IF(cursor_bytes > maximum - 255,
+                "CUDA bucket scan alignment exceeds address space.");
+    layout.scan_offset = (cursor_bytes + 255) & ~std::size_t{255};
+  }
+  TI_ERROR_IF(layout.scan_offset > maximum - layout.scan_bytes,
+              "CUDA bucket workspace exceeds address space.");
+  layout.bytes = layout.scan_offset + layout.scan_bytes;
+  return layout;
+}
+
+void validate_bucket_view(std::size_t count,
+                          std::size_t offset,
+                          std::size_t stride,
+                          std::size_t width) {
+  const auto maximum = std::numeric_limits<std::size_t>::max();
+  TI_ERROR_IF(stride < width || offset > maximum - width ||
+                  (count && count - 1 > (maximum - offset - width) / stride),
+              "CUDA bucket view has an invalid stride or exceeds address space.");
+}
+
 }  // namespace
 
 bool driver_hierarchical_available() {
@@ -739,7 +779,8 @@ static std::size_t driver_histogram_strided_impl(
     std::size_t values_stride,
     std::size_t bins_offset,
     std::size_t bins_stride,
-    void *stream) {
+    void *stream,
+    bool clear_leading_element = false) {
   TI_ERROR_IF(!num_bins, "CUDA Driver histogram expects at least one bin.");
   TI_ERROR_IF((num_items > 0 && !values) || !bins,
               "CUDA Driver histogram received a null pointer.");
@@ -748,16 +789,24 @@ static std::size_t driver_histogram_strided_impl(
   TI_ERROR_IF(values_stride < value_type_size(value_type) ||
                   bins_stride < value_type_size(bin_type),
               "CUDA Driver histogram received an invalid stride.");
+  TI_ERROR_IF(clear_leading_element &&
+                  (bins_offset < bins_stride || num_bins == UINT32_MAX),
+              "CUDA histogram leading clear exceeds its view or count ABI.");
 
   auto &kernel = kernels();
   void *bins_arg = bins;
   std::uint64_t bins_offset_arg = bins_offset;
   std::uint64_t bins_stride_arg = bins_stride;
   std::uint32_t bins_count_arg = static_cast<std::uint32_t>(num_bins);
-  std::vector<void *> zero_args{&bins_arg, &bins_offset_arg, &bins_stride_arg,
-                                &bins_count_arg};
+  // Bucket offsets include a leading zero. Clear it in this same launch while
+  // histogram counting still targets the following num_bins elements.
+  std::uint64_t zero_offset =
+      bins_offset - (clear_leading_element ? bins_stride : 0);
+  std::uint32_t zero_count = num_bins + (clear_leading_element ? 1u : 0u);
+  std::vector<void *> zero_args{&bins_arg, &zero_offset, &bins_stride_arg,
+                                &zero_count};
   const unsigned bins_grid =
-      bins_count_arg / kBlockDim + (bins_count_arg % kBlockDim != 0);
+      zero_count / kBlockDim + (zero_count % kBlockDim != 0);
   CUDAContext::get_instance().launch(kernel.zero_bins[bin_index],
                                      "cuda_driver_histogram_zero", zero_args,
                                      {}, bins_grid, kBlockDim, 0, stream);
@@ -1246,7 +1295,7 @@ void driver_compact_with_workspace(void *values,
                        stream, nullptr, reuse_prefix, workspace);
 }
 
-std::size_t driver_bucket_builder_strided(
+static std::size_t driver_bucket_builder_strided_impl(
     void *keys,
     void *values,
     void *offsets,
@@ -1264,26 +1313,38 @@ std::size_t driver_bucket_builder_strided(
     std::size_t output_offset,
     std::size_t output_stride,
     void *stream,
-    PrimitiveWorkspaceArena *workspace_arena) {
+    PrimitiveWorkspaceArena *workspace_arena,
+    void *scan_workspace) {
   TI_ERROR_IF(num_items < 0 || num_bins <= 0 || item_words <= 0,
               "CUDA Driver bucket builder received an invalid size.");
   const std::size_t item_bytes =
       static_cast<std::size_t>(item_words) * sizeof(std::uint32_t);
   TI_ERROR_IF(
-      !keys || !values || !offsets || !output || !cursor ||
+      !offsets || (num_items && (!keys || !values || !output || !cursor)) ||
           keys_stride < sizeof(std::int32_t) || values_stride < item_bytes ||
           offsets_stride < sizeof(std::int32_t) || output_stride < item_bytes,
       "CUDA Driver bucket builder received an invalid pointer or "
       "stride.");
-  driver_zero_strided(offsets, 1, CudaTransformValueType::i32, offsets_offset,
-                      offsets_stride, stream);
-  driver_histogram_strided(
+  validate_bucket_view(num_items, keys_offset, keys_stride, sizeof(int32_t));
+  validate_bucket_view(num_items, values_offset, values_stride, item_bytes);
+  validate_bucket_view(static_cast<std::size_t>(num_bins) + 1, offsets_offset,
+                       offsets_stride, sizeof(int32_t));
+  validate_bucket_view(num_items, output_offset, output_stride, item_bytes);
+  TI_ERROR_IF(num_items && static_cast<uint32_t>(num_bins) > kScanTileItems &&
+                  !scan_workspace && !workspace_arena,
+              "CUDA bucket builder requires prepared scan workspace or an arena.");
+  driver_histogram_strided_impl(
       keys, offsets, num_items, num_bins, CudaTransformValueType::i32,
       CudaTransformValueType::i32, keys_offset, keys_stride,
-      offsets_offset + offsets_stride, offsets_stride, stream);
-  const std::size_t scan_bytes = driver_inclusive_scan_strided(
-      offsets, num_bins + 1, CudaTransformValueType::i32, offsets_offset,
-      offsets_stride, false, stream, workspace_arena);
+      offsets_offset + offsets_stride, offsets_stride, stream, true);
+  if (!num_items)
+    return 0;
+  // offsets[0] is already zero. Scanning only the counts avoids a redundant
+  // element (and sometimes a whole scan level), without num_bins + 1 in int.
+  const std::size_t scan_bytes = driver_inclusive_scan_strided_for_family(
+      offsets, num_bins, CudaTransformValueType::i32,
+      offsets_offset + offsets_stride, offsets_stride, false, stream,
+      workspace_arena, PrimitiveWorkspaceFamily::scan, scan_workspace);
 
   void *offsets_arg = offsets;
   std::uint64_t offsets_offset_arg = offsets_offset;
@@ -1325,6 +1386,64 @@ std::size_t driver_bucket_builder_strided(
         {}, grid, kBlockDim, 0, stream);
   }
   return scan_bytes;
+}
+
+std::size_t driver_bucket_builder_workspace_bytes(int num_items, int num_bins) {
+  return bucket_workspace_layout(num_items, num_bins).bytes;
+}
+
+void driver_prepare_bucket_builder() {
+  // The existing module contains zero, histogram, scan, cursor copy and scatter.
+  // Resolve it before capture; preparation performs no user computation.
+  (void)kernels();
+}
+
+void driver_bucket_builder_with_workspace(void *keys,
+                                          void *values,
+                                          void *offsets,
+                                          void *output,
+                                          int num_items,
+                                          int num_bins,
+                                          int item_words,
+                                          void *workspace,
+                                          void *stream) {
+  const auto layout = bucket_workspace_layout(num_items, num_bins);
+  TI_ERROR_IF(layout.bytes && !workspace,
+              "CUDA bucket builder requires prepared workspace.");
+  TI_ERROR_IF(item_words <= 0,
+              "CUDA bucket builder received an invalid payload width.");
+  const auto item_bytes = static_cast<std::size_t>(item_words) * sizeof(uint32_t);
+  driver_bucket_builder_strided_impl(
+      keys, values, offsets, output, workspace, num_items, num_bins, item_words,
+      0, sizeof(int32_t), 0, item_bytes, 0, sizeof(int32_t), 0, item_bytes,
+      stream, nullptr,
+      layout.scan_bytes ? byte_offset(workspace, layout.scan_offset) : nullptr);
+}
+
+std::size_t driver_bucket_builder_strided(
+    void *keys,
+    void *values,
+    void *offsets,
+    void *output,
+    void *cursor,
+    int num_items,
+    int num_bins,
+    int item_words,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t offsets_offset,
+    std::size_t offsets_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena) {
+  return driver_bucket_builder_strided_impl(
+      keys, values, offsets, output, cursor, num_items, num_bins, item_words,
+      keys_offset, keys_stride, values_offset, values_stride, offsets_offset,
+      offsets_stride, output_offset, output_stride, stream, workspace_arena,
+      nullptr);
 }
 
 static std::size_t driver_grouped_reduce_strided_impl(void *keys,

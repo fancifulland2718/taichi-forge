@@ -358,6 +358,20 @@ std::size_t driver_compact_strided(void *values,
                                    PrimitiveWorkspaceArena *workspace_arena,
                                    bool reuse_prefix = false);
 
+// Cold preparation and one caller-owned allocation containing cursor + scan
+// scratch. Empty batches need no scratch and only clear the offsets prefix.
+std::size_t driver_bucket_builder_workspace_bytes(int num_items, int num_bins);
+void driver_prepare_bucket_builder();
+void driver_bucket_builder_with_workspace(void *keys,
+                                         void *values,
+                                         void *offsets,
+                                         void *output,
+                                         int num_items,
+                                         int num_bins,
+                                         int item_words,
+                                         void *workspace,
+                                         void *stream);
+
 std::size_t driver_bucket_builder_strided(
     void *keys,
     void *values,

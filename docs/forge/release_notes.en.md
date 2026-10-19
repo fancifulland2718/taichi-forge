@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA bucket builders combine the leading-offset and histogram clears and
+  scan only bucket counts, reducing redundant launches and boundary scratch.
+  Payload addressing no longer has the obsolete flattened-word count limit;
+  actual count and address-range checks remain.
 - CPU bucket builders reuse one count/cursor table, halving parallel scratch
   storage while preserving bucket order and payload bits. Workspace clear and
   statistics include the retained CPU table.
