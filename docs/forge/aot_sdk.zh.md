@@ -1769,6 +1769,11 @@ CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part
 显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、strided
 存储、融合序列和未列出的操作仍需自己的导出合同。
 
+标量 sequence 排序要求输入全部为 ndarray，或全部为符合条件的 dense Field。
+Field 与 ndarray 混用时，生产端选择 host 排序，自动 AOT 导出会拒绝该组合，
+包括 `method="auto"`。调用者可通过显式 AOT sort 描述主动选择原生路线，
+导出不会静默替换生产端策略。
+
 单键排序还允许 scalar ndarray key 携带等长的 packed vector/matrix ndarray 载荷。
 载荷 lane 支持上述六种标量类型，通过既有 raw-record 后端保留每一位，包括 NaN
 payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出或运行后导出，

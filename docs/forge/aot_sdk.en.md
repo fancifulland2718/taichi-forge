@@ -2290,6 +2290,11 @@ Vulkan compact/unique method is `vulkan_native`. Other strategies,
 descending/bitwise ordering, strided storage, fused sequences
 and unlisted operations still require their own export contracts.
 
+Scalar sequence sorting requires all ndarrays or all qualified dense Fields.
+Mixing a Field and an ndarray selects host sorting in the producer and is rejected
+by automatic AOT export, including with `method="auto"`. An explicit AOT sort
+description can select the native route; export does not silently make that choice.
+
 For single-key sorting, a scalar ndarray key can also carry an equally sized
 packed vector/matrix ndarray payload. The sequence accepts the six scalar lane
 types above and preserves every payload bit, including NaN payloads and signed

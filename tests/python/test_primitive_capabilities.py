@@ -46,6 +46,8 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         cold.setattr(ti.lang.impl, "get_runtime", forbidden)
         cold.setattr(alg_impl._ti_core, "native_operation_capabilities", forbidden)
         sort = ti.algorithms.primitive_capability("sort_by_key")
+        scalar = next(r for r in sort.aot_routes if r.entry_point == "algorithms.PrimitiveSequence")
+        assert "all_ndarrays_or_all_dense_scalar_fields" in scalar.constraints
         tensor = next(r for r in sort.aot_routes if "packed_vector_or_matrix_ndarray_payload" in r.constraints)
         assert tensor.entry_point == "algorithms.PrimitiveSequence"
         assert tensor.forms == ("sort", "sort_by_key") and tensor.backends == ("cpu", "cuda", "vulkan")

@@ -468,6 +468,19 @@ def _sort(call, context):
         # closures. Only packed ndarray records use this direct raw-copy sort.
         if type(keys) is not ScalarNdarray or type(values) not in (VectorNdarray, MatrixNdarray):
             raise TaichiRuntimeError("AOT tensor sort requires scalar ndarray keys and vector/matrix ndarray payload")
+    if not all(isinstance(a, algorithms.Ndarray) for a in arrays):
+        # The producer has distinct all-ndarray and all-dense-Field routes.
+        # A packed descriptor alone does not make mixed storage native: auto
+        # falls back to host_stable, while explicit native methods reject it.
+        views = tuple(algorithms._primitive_view(a) for a in arrays)
+        if not all(
+            view is not None and view.is_dense_field and view.stride == core.data_type_size(desc.scalar_type)
+            for view, desc in zip(views, descriptions)
+        ):
+            raise TaichiRuntimeError(
+                "AOT sequence sort requires the producer's native storage strategy; "
+                "use an explicit AOT sort description to select a different backend route"
+            )
     algorithms._check_sort_request(keys, values, True, False, method, "exact", call.workspace, "last")
     if any(str(a.dtype) not in {"i32", "u32", "f32", "i64", "u64", "f64"} for a in arrays):
         raise TaichiRuntimeError("AOT sequence sort requires supported native scalar types")
