@@ -20,7 +20,9 @@ def exercise(runtime, module, case, arch):
         lanes *= axis
     width = int(dtype[1:]) // 8
     item_bytes = lanes * width
-    capacity = n + 3
+    prefix = case.get("prefix", 1)
+    capacity = case.get("capacity", n + 3)
+    offset_capacity = case.get("offset_capacity", bins + 4)
     rows = []
     for i in range(capacity):
         row = struct.pack("<" + CODES[dtype], i + 100)
@@ -33,7 +35,7 @@ def exercise(runtime, module, case, arch):
     source = b"".join(rows)
     row_ids = {value: i for i, value in enumerate(rows)}
     sentinel = bytes([0xA5]) * len(source)
-    offset_initial = array.array("i", [-77] * (bins + 4)).tobytes()
+    offset_initial = array.array("i", [-77] * offset_capacity).tobytes()
     with ExitStack() as stack:
         keys = stack.enter_context(closing(runtime.ndarray("i32", capacity)))
         values = stack.enter_context(
@@ -42,7 +44,7 @@ def exercise(runtime, module, case, arch):
         output = stack.enter_context(
             closing(runtime.ndarray(dtype, capacity, element_shape=shape))
         )
-        offsets = stack.enter_context(closing(runtime.ndarray("i32", bins + 4)))
+        offsets = stack.enter_context(closing(runtime.ndarray("i32", offset_capacity)))
         frame = dict(keys=keys, values=values, offsets=offsets, output=output)
         values.write(source)
         output.write(sentinel)
@@ -62,12 +64,12 @@ def exercise(runtime, module, case, arch):
             assert scratch == (((n + 2047) // 2048) if private else 1) * bins * 4
         for replay in range(3):
             key_data = (
-                [-77]
+                [-77] * prefix
                 + [
                     -1 if replay == 1 or i % 7 == 0 else (i + replay) % (bins + 2)
                     for i in range(n)
                 ]
-                + [-77, -77]
+                + [-77] * (capacity - prefix - n)
             )
             keys_bytes = array.array("i", key_data).tobytes()
             keys.write(keys_bytes)
@@ -78,25 +80,32 @@ def exercise(runtime, module, case, arch):
             actual = output.read()
             observed_offsets = array.array("i")
             observed_offsets.frombytes(offsets.read())
-            expected_offsets = [-77, 0]
+            expected_offsets = [-77] * prefix + [0]
             groups = [[] for _ in range(bins)]
-            for i, key in enumerate(key_data[1 : n + 1], 1):
+            for i, key in enumerate(key_data[prefix : n + prefix], prefix):
                 if 0 <= key < bins:
                     groups[key].append(i)
             for group in groups:
                 expected_offsets.append(expected_offsets[-1] + len(group))
-            expected_offsets += [-77, -77]
+            expected_offsets += [-77] * (offset_capacity - prefix - bins - 1)
             assert observed_offsets.tolist() == expected_offsets
-            accepted = expected_offsets[-3]
-            assert actual[:item_bytes] == sentinel[:item_bytes]
+            accepted = expected_offsets[prefix + bins]
+            assert actual[: prefix * item_bytes] == sentinel[: prefix * item_bytes]
             assert (
-                actual[(accepted + 1) * item_bytes :]
-                == sentinel[(accepted + 1) * item_bytes :]
+                actual[(accepted + prefix) * item_bytes :]
+                == sentinel[(accepted + prefix) * item_bytes :]
             )
             for b, group in enumerate(groups):
-                begin, end = expected_offsets[b + 1], expected_offsets[b + 2]
+                begin, end = (
+                    expected_offsets[b + prefix],
+                    expected_offsets[b + prefix + 1],
+                )
                 ids = [
-                    row_ids[actual[(i + 1) * item_bytes : (i + 2) * item_bytes]]
+                    row_ids[
+                        actual[
+                            (i + prefix) * item_bytes : (i + prefix + 1) * item_bytes
+                        ]
+                    ]
                     for i in range(begin, end)
                 ]
                 assert ids == group if arch == "cpu" else sorted(ids) == group
@@ -127,7 +136,12 @@ def exercise(runtime, module, case, arch):
             ) as aliased:
                 assert aliased.info["workspace_bytes"] == 0
                 aliased()
-                expected = array.array("i", [-77] + [0] * (bins + 1) + [-77, -77])
+                expected = array.array(
+                    "i",
+                    [-77] * prefix
+                    + [0] * (bins + 1)
+                    + [-77] * (offset_capacity - prefix - bins - 1),
+                )
                 assert offsets.read() == expected.tobytes()
         with closing(runtime.ndarray("i16", capacity, element_shape=shape)) as wrong:
             reject(
@@ -163,9 +177,10 @@ def main(mode, arch, artifact):
         module = runtime.load_module(artifact)
         case = cases[0]
         n, bins = case["size"], case["num_bins"]
-        keys, values, output = (runtime.ndarray("i32", n + 3) for _ in range(3))
-        offsets = runtime.ndarray("i32", bins + 4)
-        keys.write(array.array("i", [0] * (n + 3)))
+        capacity = case.get("capacity", n + 3)
+        keys, values, output = (runtime.ndarray("i32", capacity) for _ in range(3))
+        offsets = runtime.ndarray("i32", case.get("offset_capacity", bins + 4))
+        keys.write(array.array("i", [0] * capacity))
         call = module.prepare_execution(
             case["name"], dict(keys=keys, values=values, output=output, offsets=offsets)
         )

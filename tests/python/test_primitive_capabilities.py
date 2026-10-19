@@ -98,9 +98,13 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert any(r.forms == ("builtin/histogram",) and "empty_input_supported" in r.constraints for r in histogram)
         assert all("discrete_no_automatic_ad" in r.constraints for r in histogram)
         bucket = ti.algorithms.primitive_capability("bucket_builder").aot_routes
-        assert len(bucket) == 1 and bucket[0].forms == ("builtin/bucket_builder",)
-        assert bucket[0].backends == ("cpu", "cuda", "vulkan")
-        assert {"scalar_or_tensor", "prepared_owner_scratch", "no_automatic_ad"} <= set(bucket[0].constraints)
+        assert len(bucket) == 2
+        assert all(r.backends == ("cpu", "cuda", "vulkan") and "no_automatic_ad" in r.constraints for r in bucket)
+        explicit = next(r for r in bucket if r.forms == ("builtin/bucket_builder",))
+        assert {"scalar_or_tensor", "prepared_owner_scratch"} <= set(explicit.constraints)
+        sequence = next(r for r in bucket if r.entry_point == "algorithms.PrimitiveSequence")
+        assert {"scalar_or_tensor_ndarray", "scalar_dense_field", "preserved_native_strategy",
+                "export_time_algorithm_preferences"} <= set(sequence.constraints)
         for family, operation in (("check", "check_count"), ("metric", "metric_reduce")):
             routes = ti.algorithms.primitive_capability(family).aot_routes
             assert len(routes) == 3

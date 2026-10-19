@@ -380,9 +380,17 @@ do not change the description. Exceeding private scratch preferences or device/
 shared-array capacity can select direct counting. These are algorithm choices,
 not input limits; i32 item counts, backend parameter widths and address ranges
 still apply. Pure-native archives contain no application shaders and require the
-v1 operation in the runtime. This entry does not yet automatically export bucket
-sequences, strided/Struct member compositions, or adjoints; other differentiable
-operations retain their contracts.
+v1 operation in the runtime.
+
+`PrimitiveSequence.bucket_builder()` exports the same operation through
+`Module.add_execution_plan()` for packed scalar/tensor ndarrays and packed scalar
+dense Fields, using named source bindings or a module snapshot. Cold export does
+not execute the sequence or allocate its JIT cursor. Already-run sequences must
+retain a matching native strategy; `auto` and native/two-level aliases select the
+current backend. CPU thread count and Vulkan preferences are frozen at export.
+Strided/Struct member compositions, tensor Fields, fused sequences and automatic
+bucket adjoints remain outside this route. Downstream differentiable kernels and
+their exported adjoints can consume bucket output normally.
 
 `PrimitiveSequence.histogram()` and explicit `builtin/histogram` v1 descriptions
 support CPU/CUDA/Vulkan packed scalar i32/u32 IDs and i32/i64 counters. Parameters

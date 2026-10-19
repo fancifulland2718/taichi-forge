@@ -33,7 +33,9 @@
 
 - 显式 AOT `builtin/bucket_builder` v1 支持 CPU/CUDA/Vulkan packed 标量与 tensor
   载荷、偏移 view 和空输入，复用各后端核心并由 prepared owner 持有临时存储。
-  支持独立 runtime 消费与执行器借用；sequence 自动导出和伴随尚未纳入该路线。
+  支持独立 runtime 消费与执行器借用；`PrimitiveSequence.bucket_builder()` 可免预热
+  导出 packed 标量/tensor ndarray 和标量 Field 快照。可接后续 kernel 伴随，
+  bucket 本身不自动生成伴随。
 - Vulkan bucket-builder 共用准备与录制路径，修复 dense Field 的 descriptor 对齐，
   显式保留逻辑范围和步长；连续 offsets 使用 buffer fill，私有计数策略不再写无用
   cursor，prefix 将策略分支移到循环外。固定原生操作拥有自己的临时存储。

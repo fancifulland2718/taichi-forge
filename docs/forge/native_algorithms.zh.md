@@ -292,8 +292,15 @@ Vulkan 偏好字段 `private_enabled`、`private_min_items`、`private_max_bins`
 `private_max_bytes` 默认 true、65536、1024、4194304，在准备时固定；消费端环境
 变量不改变该描述。私有策略超出预算或设备/shared-array 容量时可退回直接算法，
 这些是选型偏好而非输入上限。i32 item count、后端参数宽度及地址范围仍须满足。
-纯原生包不携带应用 shader，runtime 须提供该 v1 操作。目前此入口不自动导出
-bucket sequence、strided/Struct 成员组合或伴随；其他可微操作的合同保持。
+纯原生包不携带应用 shader，runtime 须提供该 v1 操作。
+
+`PrimitiveSequence.bucket_builder()` 可经 `Module.add_execution_plan()` 导出为
+同一原生操作，支持 packed 标量/tensor ndarray 和 packed 标量 dense Field，
+使用命名 source binding 或模块快照。冷导出不执行 sequence，也不分配其 JIT
+cursor；已运行 sequence 须保持匹配的原生策略。`auto` 及原生/two-level 别名
+沿用当前后端，CPU 线程数和 Vulkan 偏好在导出时固定。strided/Struct 成员组合、
+tensor Field、fused sequence 和 bucket 自动伴随仍不在此路线内；后续可微 kernel
+及其导出的伴随可正常使用 bucket 输出。
 
 `PrimitiveSequence.histogram()` 与显式 `builtin/histogram` v1 描述支持
 CPU/CUDA/Vulkan packed scalar i32/u32 ID 和 i32/i64 counter。参数为 `size`、

@@ -37,8 +37,9 @@ lifetimes. The entries below describe the changes.
 - Explicit AOT `builtin/bucket_builder` v1 supports CPU/CUDA/Vulkan packed scalar
   and tensor payloads, offset views and empty inputs, reusing backend cores with
   scratch owned by each prepared execution. Standalone runtime consumption and
-  executor borrowing are supported; automatic sequence export and adjoints are
-  not part of this route yet.
+  executor borrowing are supported. `PrimitiveSequence.bucket_builder()` also
+  exports packed scalar/tensor ndarrays and scalar Field snapshots without
+  prewarming; downstream kernel adjoints work, but bucket adjoints are not automatic.
 - Vulkan bucket builders share preparation and recording, fix dense Field
   descriptor alignment, and retain explicit logical extents and strides.
   Packed offsets use buffer fills; private counting skips unused cursor writes,
