@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 修复 CPU/CUDA/Vulkan 原生多键排序的 packed 向量／矩阵 ndarray 载荷路径，
+  覆盖 Graph 重放。整条记录的 gather 保留 NaN 载荷和正负零，复用临时存储，
+  避免按分量发起调用；CPU 原生路线需显式选择 `cpu_native`。
+
 - 单键原生排序序列可在 CPU/CUDA/Vulkan 导出 packed vector/matrix ndarray 载荷，
   不预热、不新增 helper 代码，保留包括 NaN 和正负零在内的载荷位模式。已覆盖独立/
   借用消费者及下游 kernel 梯度；prepared sort 与多键 tensor 载荷仍需各自的合同。

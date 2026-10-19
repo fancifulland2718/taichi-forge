@@ -131,7 +131,7 @@ from taichi_forge.lang.field import _dense_native_field_layout_supported
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang._storage_view import describe_storage
 from taichi_forge.lang.kernel_impl import data_oriented
-from taichi_forge.lang.matrix import Matrix, MatrixField
+from taichi_forge.lang.matrix import Matrix, MatrixField, MatrixNdarray, VectorNdarray
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
 from taichi_forge.lang.runtime_ops import sync
 from taichi_forge.lang.simt import subgroup
@@ -4144,6 +4144,8 @@ class _OrderApplyWorkspaceMixin:
         self._order_apply_pairs = {}
         self._order_apply_pair = None
         self._order_apply_scalar_temp_buffers = {}
+        self._order_apply_tensor_temp_buffers = {}
+        self._order_apply_identity_buffers = {}
         self._order_apply_indexed_copy_workspace = None
         self._order_apply_transform_workspace = None
         self._order_apply_inplace_plan_group = None
@@ -4158,6 +4160,8 @@ class _OrderApplyWorkspaceMixin:
         self._order_apply_pairs.clear()
         self._order_apply_pair = None
         self._order_apply_scalar_temp_buffers.clear()
+        self._order_apply_tensor_temp_buffers.clear()
+        self._order_apply_identity_buffers.clear()
         self._order_apply_indexed_copy_workspace = None
         self._order_apply_transform_workspace = None
         self._order_apply_inplace_plan_group = None
@@ -4217,6 +4221,31 @@ class _OrderApplyWorkspaceMixin:
                 max_items=self.max_items
             )
         return self._order_apply_indexed_copy_workspace
+
+    def _get_order_apply_tensor_temp_buffer(self, values):
+        n, shape = values.shape[0], tuple(values.element_shape)
+        self._check_order_apply_items(n)
+        key = (str(values.dtype), int(n), shape)
+        temp = self._order_apply_tensor_temp_buffers.get(key)
+        if temp is None:
+            temp = (
+                VectorNdarray(shape[0], values.dtype, (n,))
+                if len(shape) == 1
+                else MatrixNdarray(*shape, values.dtype, (n,))
+            )
+            self._order_apply_tensor_temp_buffers[key] = temp
+            self._reserve_order_apply_bytes(n * temp._get_element_size())
+        return temp
+
+    def _get_order_apply_identity_buffer(self, n):
+        self._check_order_apply_items(n)
+        identity = self._order_apply_identity_buffers.get(n)
+        if identity is None:
+            identity = ti_ndarray(i32, shape=n)
+            fill_i32_arange_ndarray(identity, n)
+            self._order_apply_identity_buffers[n] = identity
+            self._reserve_order_apply_bytes(n * 4)
+        return identity
 
     def _get_order_apply_transform_workspace(self, n):
         self._check_order_apply_items(n)
@@ -8911,6 +8940,17 @@ def _apply_order_to_values(
             workspace=workspace,
             use_temp=use_temp,
         )
+        return
+    if use_temp and type(values) in (VectorNdarray, MatrixNdarray):
+        # Move complete records, including NaN payloads and signed zero. The
+        # identity gather copies back through the same capture-safe native
+        # path, without a host synchronization or one launch per component.
+        temp = workspace._get_order_apply_tensor_temp_buffer(values)
+        identity = workspace._get_order_apply_identity_buffer(values.shape[0])
+        copy_workspace = workspace._get_order_apply_indexed_copy_workspace(values.shape[0])
+        experimental_gather(values, order, temp, method=copy_method, workspace=copy_workspace)
+        experimental_gather(temp, identity, output, method=copy_method, workspace=copy_workspace)
+        workspace._record_order_apply_child_workspace(copy_workspace)
         return
     if use_temp:
         if _is_opaque_raw_payload(values) or _is_opaque_raw_payload(output):

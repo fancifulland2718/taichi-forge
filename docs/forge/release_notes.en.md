@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Native multi-key sorting now handles packed vector/matrix ndarray payloads
+  on CPU/CUDA/Vulkan, including Graph replay. Whole-record gathers preserve
+  NaN payloads and signed zero, reuse temporary storage and avoid component-wise
+  launches. CPU requires explicit `cpu_native` for this native route.
+
 - Single-key native sort sequences export packed vector/matrix ndarray payloads
   on CPU/CUDA/Vulkan without prewarming or extra helper code. Payload bits,
   including NaNs and signed zero, remain intact. Standalone/borrowed consumers
