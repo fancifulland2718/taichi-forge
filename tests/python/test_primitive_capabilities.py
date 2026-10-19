@@ -86,10 +86,13 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert any(r.forms == ("builtin/grouped_reduce",) and "empty_input_supported" in r.constraints for r in grouped)
         assert all("gpu_direct_atomic_strategy" in r.constraints and "explicit_adjoint_only" in r.constraints for r in grouped)
         segmented = ti.algorithms.primitive_capability("segmented_reduce").aot_routes
-        assert len(segmented) == 1
-        assert segmented[0].forms == ("graph.GraphBuilder.segmented_reduce",)
-        assert segmented[0].backends == ("cuda",)
-        assert {"selected_strategy_scratch", "no_automatic_ad"} <= set(segmented[0].constraints)
+        assert len(segmented) == 2
+        sequence = next(r for r in segmented if r.entry_point == "algorithms.PrimitiveSequence")
+        assert sequence.backends == ("cpu", "cuda", "vulkan")
+        assert {"preserved_grouped_or_serial_strategy", "serial_field_snapshot", "explicit_adjoint_only"} <= set(sequence.constraints)
+        selected = next(r for r in segmented if r.forms == ("graph.GraphBuilder.segmented_reduce",))
+        assert selected.backends == ("cuda",)
+        assert {"selected_strategy_scratch", "no_automatic_ad"} <= set(selected.constraints)
         histogram = ti.algorithms.primitive_capability("histogram").aot_routes
         assert any(r.forms == ("histogram",) and r.backends == ("cpu", "cuda", "vulkan") for r in histogram)
         assert any(r.forms == ("builtin/histogram",) and "empty_input_supported" in r.constraints for r in histogram)

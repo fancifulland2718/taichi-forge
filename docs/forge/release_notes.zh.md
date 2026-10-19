@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Segmented reduction sequence 可按原有 grouped/serial 策略导出到
+  CPU/CUDA/Vulkan，保留冻结拓扑、CPU 分区顺序、容量尾部、serial Field 快照和
+  显式伴随组合；每种策略仅携带实际使用的拓扑数组。
 - CUDA Graph 选中的 segmented reduction 可导出实际 helper kernel 与所需拓扑/
   scratch，保留 serial、warp、block、partial 策略的 i32/u32 模加和空 segment
   写零语义，支持独立 AOT 消费；不携带未使用的逐元素 ID，不新增自动微分路线。

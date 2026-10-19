@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Segmented reduction sequences now export their original grouped/serial
+  strategy on CPU/CUDA/Vulkan. Frozen topology, CPU partition order, padded
+  inputs, serial Field snapshots and explicit adjoint composition are retained;
+  unused topology arrays are omitted from each strategy's closure.
 - Selected CUDA Graph segmented reductions now export their actual helper
   kernels and live topology/scratch arrays. Serial, warp, block and partial
   strategies preserve i32/u32 sums and empty-segment writes in standalone AOT

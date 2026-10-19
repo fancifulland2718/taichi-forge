@@ -325,8 +325,22 @@ the partial route retains tile/final offsets and private partials, without unuse
 original offsets or per-item segment IDs. Repeated identical topology data is
 shared within a plan. Empty segments write zero, integer sums wrap, and export
 does not execute the reduction or read device topology. Consumers need no Python
-DSL source. This route does not cover `PrimitiveSequence.segmented_reduce()`,
-floating-point recipes, or automatic differentiation.
+DSL source. This selected Graph route does not cover floating-point recipes or
+automatic differentiation.
+
+`PrimitiveSequence.segmented_reduce()` exports CPU/CUDA/Vulkan scalar
+i32/u32/f32/i64/u64/f64 operations with host-published immutable layouts.
+Plain ndarray `auto`/`grouped` preserves native grouped execution and its full
+capacity, including ignored padding, to retain CPU partition order. Its immutable
+ID table is reconstructed once and shared where identical; it adds no helper
+kernel code. Explicit `serial` and dense Field `auto` export their actual serial
+helper and only the offsets table, preserving Field index offsets and empty
+segments. Field export requires `snapshot_state=True`. Vulkan serial helpers
+using 64-bit types require the corresponding `Module(caps=[...])` declarations
+(`spirv_has_int64` or `spirv_has_float64`); grouped atomics require the consumer's
+type capability. Preparation does not execute the operation. Device-published
+layouts are not reconstructed by this route. Exported kernels can provide
+explicit adjoints; AOT does not generate automatic adjoints or add forward AD.
 
 `PrimitiveSequence.grouped_reduce()` and explicit `builtin/grouped_reduce` v1
 descriptions support packed scalar sums on CPU/CUDA/Vulkan: i32 keys and

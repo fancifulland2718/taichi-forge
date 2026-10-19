@@ -251,8 +251,19 @@ layout 为 host 发布的不可变拓扑。导出保留选中的 serial、warp�
 partial/finalize helper kernel。前三者仅保留 offsets；partial 路线仅保留分块/
 收尾边界与私有 partial，不携带未使用的原始 offsets 或逐元素 segment IDs。
 一个 plan 内重复拓扑数据共享；空 segment 写零，整数模加，导出不执行归约或读回
-设备拓扑，消费者无需 Python DSL 源码。该路线不覆盖
-`PrimitiveSequence.segmented_reduce()`、浮点 recipe 或自动微分。
+设备拓扑，消费者无需 Python DSL 源码。该选中 Graph 路线不覆盖浮点 recipe
+或自动微分。
+
+`PrimitiveSequence.segmented_reduce()` 支持 CPU/CUDA/Vulkan 的 scalar
+i32/u32/f32/i64/u64/f64 与 host 发布的不可变布局。普通 ndarray 的 `auto`/`grouped`
+保留原生 grouped 路线及完整 capacity（包括忽略的尾部），保持 CPU 分区顺序；
+不可变 ID 表只在冷阶段重建，相同数据共享，不增加 helper kernel 代码。显式
+`serial` 和 dense Field 的 `auto` 导出各自真实 serial helper 与 offsets 表，
+保留 Field 索引偏移和空段写零；Field 导出要求 `snapshot_state=True`。
+Vulkan serial 的 64 位类型需在 `Module(caps=[...])` 中声明对应
+`spirv_has_int64` 或 `spirv_has_float64`，grouped 原子路线需消费者具备相应类型能力。
+准备不执行运算；该路线暂不重建 device 发布的布局。可组合导出 kernel 提供
+显式伴随，不自动生成 AOT 伴随或增加前向 AD。
 
 `PrimitiveSequence.grouped_reduce()` 与显式 `builtin/grouped_reduce` v1 描述支持
 CPU/CUDA/Vulkan 的 packed scalar sum：key 为 i32，value/output 为
