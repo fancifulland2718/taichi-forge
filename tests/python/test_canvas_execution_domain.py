@@ -11,6 +11,121 @@ from tests import test_utils
 
 @pytest.mark.skipif(not core.GGUI_AVAILABLE, reason="GGUI not available")
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_pending_canvas_writer_does_not_block_physics(tmp_path):
+    from taichi_forge_runtime.aot import ExecutionPlan, Runtime
+    from tests.python.aot_external_memory_probe import Producer, ReadyGate
+
+    @ti.kernel
+    def paint(x: ti.types.ndarray(ti.u32, 2)):
+        for i, j in x:
+            x[i, j] = ti.u32(0xFF332211)
+
+    @ti.kernel
+    def step(x: ti.types.ndarray(ti.i32, 1)):
+        for i in x:
+            x[i] = 314159 + i
+
+    exported = ti.aot.Module()
+    exported.add_kernel(paint)
+    artifact = tmp_path / "pending-display.tcm"
+    exported.archive(str(artifact))
+    window = ti.ui.Window("pending writer", (12, 20), show_window=False)
+    canvas = window.get_canvas()
+    output = ti.graph.execution_domain(capacity=2, instance_capacity=8)
+    physics = ti.graph.execution_domain(capacity=2, instance_capacity=4)
+    canvas.set_execution_domain(output)
+    views = canvas.prepare_frame_pool(12, 20, capacity=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(paint, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.u32, ndim=2))
+    graph = builder.compile()
+    calls = {
+        id(view.descriptor): graph.prepare(dict(x=view), execution_domain=output)
+        for view in views
+    }
+    for call in calls.values():
+        call.initialize()
+    state = ti.ndarray(ti.i32, 64)
+    state.fill(0)
+    state.to_numpy()  # Warm host readback before either controlled gate.
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(step, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.i32, ndim=1))
+    physical_call = builder.compile().prepare(dict(x=state), execution_domain=physics)
+    physical_call.initialize()
+    runtime = output._runtime
+    module = runtime.load_module(artifact)
+    with Runtime(
+        "vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", "0"))
+    ) as vk:
+        producer = Producer(vk)
+        try:
+            external = runtime.import_cuda_external_memory(
+                memory_handle=producer.handles[0],
+                ready_for_cuda=producer.handles[1],
+                ready_for_external=producer.handles[2],
+                allocation_size=producer.allocation_size,
+                device_uuid=producer.uuid,
+                dtype="f32",
+                shape=64,
+                byte_offset=4,
+            )
+            gate_call = module.prepare_execution(
+                ExecutionPlan([dict(kind="fill32", destination="external", value=0)]),
+                dict(external=external),
+                execution_domain=output,
+            )
+            gate_call.initialize()
+            frame = canvas.acquire_frame(12, 20)
+            assert frame is not None
+            gate = ReadyGate(producer)
+            try:
+                blocked = gate_call.submit()
+                assert blocked is not None and not blocked.done()
+                writer = calls[id(frame.pixels.descriptor)].submit()
+                assert writer is not None and not writer.done()
+                assert canvas.submit_frame(
+                    frame, source_completion=writer, track_source=True
+                )
+                assert not frame.source_completion.done()
+                sentinel = physical_call.submit()
+                assert sentinel is not None
+                deadline = time.monotonic() + 2
+                while not sentinel.done() and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                assert sentinel.done()
+                assert not frame.source_completion.done()
+                assert not blocked.done() and not gate.timed_out
+            finally:
+                gate.close()
+            producer.submit(wait=True)
+            writer.wait()
+            assert frame.source_completion.done()
+            # Ordinary ndarray host readback is an explicit synchronization
+            # boundary. The exact physics ticket above proves progress while
+            # the Canvas writer remains pending; validate its unchanged values
+            # after releasing the controlled external wait.
+            np.testing.assert_array_equal(state.to_numpy(), np.arange(64) + 314159)
+            image = window.get_image_buffer_as_numpy()
+            np.testing.assert_allclose(
+                image,
+                np.broadcast_to(np.array([17, 34, 51, 255]) / 255, image.shape),
+                atol=1 / 255,
+            )
+            producer.runtime.wait()
+            window.destroy()
+            external.close()
+            gate_call.close()
+        finally:
+            window.destroy()
+            for call in calls.values():
+                call.close()
+            physical_call.close()
+            output.close()
+            physics.close()
+            producer.close()
+
+
+@pytest.mark.skipif(not core.GGUI_AVAILABLE, reason="GGUI not available")
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_selected_display_copy_cancel_and_empty_source():
     window = ti.ui.Window("selected copy", (12, 20), show_window=False)
     canvas = window.get_canvas()

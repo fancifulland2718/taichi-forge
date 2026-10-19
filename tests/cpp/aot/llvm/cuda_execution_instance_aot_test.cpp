@@ -646,8 +646,6 @@ TEST(CudaExecutionContextAot, DenseFieldInstancesPreserveIndependentProgress) {
   cb.set_arg_float({1}, -200);
   auto dependent = second->submit({pending});
   EXPECT_FALSE(dependent.done());
-  first.reset();
-  second.reset();
   EXPECT_FALSE(blocked.done());
   EXPECT_FALSE(gate.timed_out());
   {
@@ -658,6 +656,24 @@ TEST(CudaExecutionContextAot, DenseFieldInstancesPreserveIndependentProgress) {
   dependent.wait();
   check(0, 2, *output);
   check(1, 3, *physics);
+  // Reverse the blocked lane using the same complete instances and disjoint
+  // storage. Input/output labels must not privilege either direction.
+  testing::CudaExternalGate reverse_gate;
+  auto reverse_blocked = physics->submit(
+      {}, nullptr, [&](void *stream) { reverse_gate.enqueue_wait(stream); });
+  auto reverse_pending = second->submit();
+  auto reverse_sentinel = first->submit();
+  ASSERT_TRUE(poll(reverse_sentinel));
+  check(0, 3, *output);
+  EXPECT_FALSE(reverse_pending.done());
+  EXPECT_FALSE(reverse_blocked.done());
+  EXPECT_FALSE(reverse_gate.timed_out());
+  first.reset();
+  second.reset();
+  EXPECT_FALSE(reverse_pending.done());
+  reverse_gate.release();
+  reverse_pending.wait();
+  check(1, 4, *physics);
   std::weak_ptr<InstanceOperands> retained = operands;
   operands.reset();
   registry.retire();
