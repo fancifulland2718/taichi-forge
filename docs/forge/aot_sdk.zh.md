@@ -3793,7 +3793,8 @@ f64 共享 CAS 需要 `spirv_has_float64`、`spirv_has_int64` 和
 在边界做位转换。若一个数组混用加法与 min/max，其中任一操作需要 CAS，整个数组采用
 一致的存储表示；其他只用受支持原生指令的数组保留快路径。此修复不增加数组容量、
 scratch 或提交次数，并修正 f64 CAS min/max 的结果类型。旧版已生成的共享浮点 CAS
-SPIR-V 需要重新导出；更新 runtime 不会改写包内 shader。
+SPIR-V 需要重新导出；更新 runtime 不会改写包内 shader。本次同步刷新磁盘编译缓存版本，
+防止重新导出时仍读入旧 shader；已有编译缓存失效后，首次编译成本会重新发生。
 
 原生 graphics 路径的安装资格进一步发现并补齐了宿主依赖与资源缺口：显式选择该路径时，
 旧应用包缺少 `native_visibility`，四个 SPIR-V stage 文件也未交付。新增20个宿主模块

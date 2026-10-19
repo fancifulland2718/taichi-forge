@@ -189,7 +189,8 @@ class Kernel;
 //  63 - Promote private LLVM scalar slots after O0 runtime helper inlining.
 //  64 - Emit AD stack access directly and initialize only the new adjoint.
 //  65 - Preserve integer reverse-power exponents and finite zero/one bases.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 65;
+//  66 - Regenerate SPIR-V with valid shared float CAS storage and scalar types.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 66;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

@@ -5005,6 +5005,8 @@ uses one consistent storage type. Other allocations retain supported native
 operations. This correction adds no array capacity, scratch or submissions and
 also corrects the result type of f64 CAS min/max. Re-export previously generated
 shared float CAS SPIR-V: updating the runtime does not rewrite packaged shaders.
+The disk compilation cache epoch also changes so re-export cannot reload the old
+shader. Existing compilation caches become cold after this update.
 
 Installed native-graphics qualification exposed and closed another host/resource
 gap: explicitly selecting this path failed because `native_visibility` was
