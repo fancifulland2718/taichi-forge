@@ -10,9 +10,17 @@ layout(set = 0, binding = 1, std430) readonly buffer Indices {
   int data[];
 } indices_buf;
 
-layout(set = 0, binding = 2, std430) writeonly buffer Dst {
+layout(set = 0, binding = 2, std430) buffer Dst {
   uint data[];
 } dst_buf;
+
+layout(set = 0, binding = 3, std430) writeonly buffer Transformed {
+  uint data[];
+} transformed_buf;
+
+layout(set = 0, binding = 4, std430) writeonly buffer Gathered {
+  uint data[];
+} gathered_buf;
 
 layout(push_constant) uniform Params {
   uint scale;
@@ -20,29 +28,40 @@ layout(push_constant) uniform Params {
   uint n;
   uint src_n;
   uint dst_n;
+  uint src_offset;
+  uint indices_offset;
+  uint dst_offset;
+  uint transformed_offset;
+  uint gathered_offset;
 } params;
+
+uint affine(uint index) {
+#if VALUE_KIND == 1
+  float value = uintBitsToFloat(src_buf.data[params.src_offset + index]);
+  float scale = uintBitsToFloat(params.scale);
+  float bias = uintBitsToFloat(params.bias);
+  return floatBitsToUint(value * scale + bias);
+#else
+  return src_buf.data[params.src_offset + index] * params.scale + params.bias;
+#endif
+}
 
 void main() {
   uint item = gl_GlobalInvocationID.x;
-  if (item >= params.n) {
-    return;
+  if (item < params.src_n) {
+    transformed_buf.data[params.transformed_offset + item] = affine(item);
   }
-
-  int index = indices_buf.data[item];
-  if (index < 0) {
-    return;
+  if (item < params.n) {
+    int index = indices_buf.data[params.indices_offset + item];
+    uint value = 0u;
+    if (index >= 0 && uint(index) < params.src_n) {
+      value = affine(uint(index));
+    }
+    gathered_buf.data[params.gathered_offset + item] = value;
+    if (index >= 0 && uint(index) < params.dst_n) {
+      // Duplicate indices produce identical gathered values; atomic exchange
+      // preserves that result without concurrent non-atomic stores.
+      atomicExchange(dst_buf.data[params.dst_offset + uint(index)], value);
+    }
   }
-  uint dst_i = uint(index);
-  if (dst_i >= params.src_n || dst_i >= params.dst_n) {
-    return;
-  }
-
-#if VALUE_KIND == 1
-  float value = uintBitsToFloat(src_buf.data[dst_i]);
-  float scale = uintBitsToFloat(params.scale);
-  float bias = uintBitsToFloat(params.bias);
-  dst_buf.data[dst_i] = floatBitsToUint(value * scale + bias);
-#else
-  dst_buf.data[dst_i] = src_buf.data[dst_i] * params.scale + params.bias;
-#endif
 }

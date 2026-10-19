@@ -5890,7 +5890,7 @@ struct VulkanTransformCache {
   std::unique_ptr<ShaderResourceSet> indexed_affine_bindings;
   VulkanRwBufferReplay<2> dense_i32_affine_replay;
   VulkanRwBufferReplay<2> affine_replay;
-  VulkanRwBufferReplay<3> indexed_affine_replay;
+  VulkanRwBufferReplay<5> indexed_affine_replay;
   VulkanCommandReplayCache dense_i32_affine_command_replay;
   VulkanCommandReplayCache affine_command_replay;
   VulkanCommandReplayCache indexed_affine_command_replay;
@@ -11907,127 +11907,147 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
       member_source, member_destination, trusted);
 }
 
-std::size_t vulkan_transform_indexed_affine_ndarray_impl(Program *program,
-                                                          Ndarray *src,
-                                                          Ndarray *indices,
-                                                          Ndarray *dst,
-                                                          int value_type,
-                                                          double scale,
-                                                          double bias) {
-  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
-              "Vulkan native indexed transform is only available on Vulkan.");
-  TI_ERROR_IF(!src || !indices || !dst,
-              "Vulkan native indexed transform received a null ndarray.");
-  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
-                  dst->shape.size() != 1,
-              "Vulkan native indexed transform currently expects 1D ndarrays.");
-  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
-              "Vulkan native indexed transform source and destination dtypes "
-              "differ.");
-  const std::size_t value_size = vulkan_transform_value_size(value_type);
-  TI_ERROR_IF(value_size != sizeof(uint32_t),
-              "Vulkan native indexed transform currently supports 32-bit "
-              "i32/u32/f32 values.");
-  TI_ERROR_IF(src->get_element_size() != value_size ||
-                  dst->get_element_size() != value_size ||
-                  indices->get_element_size() != sizeof(int32_t),
-              "Vulkan native indexed transform expects 32-bit values and i32 "
-              "indices.");
-  TI_ERROR_IF(value_type != 0 && value_type != 1 && value_type != 2,
-              "Vulkan native indexed transform only supports i32/f32/u32.");
-  TI_ERROR_IF(!program->vulkan_transform_value_type_available(value_type),
-              "Vulkan native indexed transform value type is not supported by "
-              "this device.");
-  const std::size_t n = indices->get_nelement();
-  if (n == 0) {
-    return 0;
+VulkanPreparedTransform prepare_vulkan_indexed_transform(
+    Program *program,
+    Device *device,
+    VulkanTransformCache &cache,
+    const IndexedTransformOperation &op) {
+  validate_indexed_transform_operation(*device, op);
+  const auto maximum = std::numeric_limits<std::uint32_t>::max();
+  TI_ERROR_IF(op.src_size > maximum || op.index_size > maximum ||
+                  op.dst_size > maximum,
+              "Indexed transform exceeds its Vulkan uint32 shader ABI");
+  const auto limits = device->get_storage_buffer_binding_limits();
+  TI_ERROR_IF(!limits.offset_alignment,
+              "Indexed transform requires storage-buffer alignment");
+  const std::array<const NativeArrayBinding *, 5> arrays{
+      &op.src, &op.indices, &op.dst, &op.transformed, &op.gathered};
+  std::array<std::uint32_t, 10> push{0, 0,
+      static_cast<std::uint32_t>(op.index_size),
+      static_cast<std::uint32_t>(op.src_size),
+      static_cast<std::uint32_t>(op.dst_size)};
+  std::array<std::size_t, 5> offsets{}, bytes{};
+  std::array<NativeStorageRange, 5> ranges;
+  for (std::size_t i = 0; i < arrays.size(); ++i) {
+    const auto &array = *arrays[i];
+    validate_native_shader_storage(Arch::vulkan, array.pointer);
+    ranges[i] = resolve_native_storage_range(Arch::vulkan, array.pointer,
+                                             array.bytes);
+    TI_ERROR_IF(array.pointer.offset % 4,
+                "Indexed transform requires uint32-word alignment");
+    offsets[i] = (array.pointer.offset / limits.offset_alignment) *
+                 limits.offset_alignment;
+    const auto head = array.pointer.offset - offsets[i];
+    TI_ERROR_IF(head % 4 || head > limits.max_range ||
+                    array.bytes > limits.max_range - head ||
+                    head / 4 + array.bytes / 4 > maximum,
+                "Indexed transform exceeds Vulkan descriptor/shader range");
+    bytes[i] = head + array.bytes;
+    push[5 + i] = static_cast<std::uint32_t>(head / 4);
   }
-  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
-                  src->get_nelement() >
-                      static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
-                  dst->get_nelement() >
-                      static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
-              "Vulkan native indexed transform currently supports at most "
-              "UINT32_MAX items.");
-
-  const DeviceAllocation src_alloc = src->ndarray_alloc_;
-  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
-  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  TI_ERROR_IF(src_alloc.device == nullptr || indices_alloc.device == nullptr ||
-                  dst_alloc.device == nullptr,
-              "Vulkan native indexed transform received null storage.");
-  const auto same_allocation = [](const DeviceAllocation &a,
-                                  const DeviceAllocation &b) {
-    return a.device == b.device && a.alloc_id == b.alloc_id;
-  };
-  TI_ERROR_IF(same_allocation(src_alloc, dst_alloc) ||
-                  same_allocation(indices_alloc, dst_alloc),
-              "Vulkan native indexed transform requires a non-aliased "
-              "destination.");
-
-  Device *device = program->get_compute_device();
-  TI_ERROR_IF(!device,
-              "Vulkan native indexed transform requires a compute device.");
-  auto cache_lease = get_transform_cache(program, device);
-  auto &cache = *cache_lease;
-  ShaderResourceSet *bindings = cache.cached_indexed_affine_resource_set();
-  Pipeline *pipeline = cache.indexed_pipeline_for(device, value_type);
-
-  std::array<uint32_t, 5> push_words{0, 0, static_cast<uint32_t>(n),
-                                     static_cast<uint32_t>(src->get_nelement()),
-                                     static_cast<uint32_t>(dst->get_nelement())};
-  if (value_type == 1) {
-    float scale_f32 = static_cast<float>(scale);
-    float bias_f32 = static_cast<float>(bias);
-    std::memcpy(&push_words[0], &scale_f32, sizeof(push_words[0]));
-    std::memcpy(&push_words[1], &bias_f32, sizeof(push_words[1]));
-  } else if (value_type == 0) {
-    push_words[0] = static_cast<uint32_t>(static_cast<int32_t>(scale));
-    push_words[1] = static_cast<uint32_t>(static_cast<int32_t>(bias));
+  validate_native_disjoint_writes(
+      {ranges[0], ranges[1]},
+      {{ranges[2], std::nullopt}, {ranges[3], std::nullopt},
+       {ranges[4], std::nullopt}});
+  if (op.value_type == 1) {
+    const float scale = op.scale, bias = op.bias;
+    std::memcpy(&push[0], &scale, sizeof(scale));
+    std::memcpy(&push[1], &bias, sizeof(bias));
+  } else if (op.value_type == 0) {
+    push[0] = static_cast<std::uint32_t>(static_cast<std::int32_t>(op.scale));
+    push[1] = static_cast<std::uint32_t>(static_cast<std::int32_t>(op.bias));
   } else {
-    push_words[0] = static_cast<uint32_t>(scale);
-    push_words[1] = static_cast<uint32_t>(bias);
+    push[0] = static_cast<std::uint32_t>(op.scale);
+    push[1] = static_cast<std::uint32_t>(op.bias);
   }
-
-  const size_t src_bytes = src->get_nelement() * value_size;
-  const size_t indices_bytes = n * sizeof(int32_t);
-  const size_t dst_bytes = dst->get_nelement() * value_size;
-  const uint32_t groups =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
-  const uint32_t push_bytes =
-      static_cast<uint32_t>(push_words.size() * sizeof(uint32_t));
-  const bool profiler_scopes = program->profiler != nullptr;
-
-  cache.indexed_affine_replay.rw_buffer(bindings, 0, src_alloc, 0, src_bytes);
-  cache.indexed_affine_replay.rw_buffer(bindings, 1, indices_alloc, 0,
-                                        indices_bytes);
-  cache.indexed_affine_replay.rw_buffer(bindings, 2, dst_alloc, 0, dst_bytes);
-  auto record_transform_indexed =
-      [dst_alloc, bindings, pipeline, dst_bytes, push_words, push_bytes, groups,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        dispatch_pipeline_with_push_constants(
-            cmdlist, pipeline, bindings, push_words.data(), push_bytes, groups,
-            1, 1,
-            profiler_scopes ? "vulkan_transform_indexed_affine" : nullptr);
-        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      };
-  VulkanCommandReplayKey command_key;
-  command_key.push(33);
-  command_key.push(static_cast<uint64_t>(value_type));
-  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
-  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
-  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
-  command_key.push(groups);
-  for (uint32_t word : push_words) {
-    command_key.push(word);
+  auto *pipeline = cache.indexed_pipeline_for(device, op.value_type);
+  auto *bindings = cache.cached_indexed_affine_resource_set();
+  VulkanCommandReplayKey key;
+  key.push(33);
+  key.push(static_cast<std::uint64_t>(op.value_type));
+  for (std::size_t i = 0; i < arrays.size(); ++i) {
+    cache.indexed_affine_replay.rw_buffer(bindings, i, arrays[i]->pointer,
+                                          offsets[i], bytes[i]);
+    push_vulkan_command_key_range(key, arrays[i]->pointer, offsets[i], bytes[i]);
   }
-  command_key.push_ptr(pipeline);
-  command_key.push_ptr(bindings);
+  const auto groups = static_cast<std::uint32_t>(
+      (std::max(op.src_size, op.index_size) + kBlockSize - 1) / kBlockSize);
+  key.push(groups);
+  for (auto word : push) key.push(word);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  const bool profiler = program && program->profiler;
+  const std::array<std::pair<DevicePtr, std::size_t>, 3> outputs{{
+      {op.dst.pointer, op.dst.bytes}, {op.transformed.pointer, op.transformed.bytes},
+      {op.gathered.pointer, op.gathered.bytes}}};
+  auto record = [pipeline, bindings, push, groups, profiler, outputs](
+                    Device *, CommandList *commands) {
+    dispatch_pipeline_with_push_constants(
+        commands, pipeline, bindings, push.data(), sizeof(push), groups, 1, 1,
+        profiler ? "vulkan_transform_indexed_affine" : nullptr);
+    for (const auto &output : outputs)
+      commands->buffer_barrier(output.first, output.second);
+  };
+  return {record, key, false};
+}
+
+class FixedVulkanIndexedTransform final : public NativeOperation {
+ public:
+  FixedVulkanIndexedTransform(Device &device, const IndexedTransformOperation &op)
+      : device_(device) {
+    prepared_ = prepare_vulkan_indexed_transform(nullptr, &device, cache_, op);
+    for (const auto *array : {&op.src, &op.indices, &op.dst,
+                              &op.transformed, &op.gathered})
+      buffers_.push_back(array->pointer);
+  }
+  Arch arch() const override { return Arch::vulkan; }
+  Device &device() const override { return device_; }
+  std::size_t workspace_bytes() const override { return cache_.allocated_bytes(); }
+  void record_vulkan(Device *device, CommandList *commands) override {
+    prepared_.record(device, commands);
+  }
+  NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
+    NativeVulkanRecordingRequirements result;
+    result.buffers = buffers_;
+    return result;
+  }
+ private:
+  Device &device_;
+  std::vector<DeviceAllocation> buffers_;
+  VulkanTransformCache cache_;
+  VulkanPreparedTransform prepared_;
+};
+
+std::size_t vulkan_transform_indexed_affine_ndarray_impl(
+    Program *program, Ndarray *src, Ndarray *transformed, Ndarray *indices,
+    Ndarray *gathered, Ndarray *dst, int value_type, double scale, double bias) {
+  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+              "Indexed transform requires Vulkan");
+  auto binding = [](Ndarray *array) {
+    TI_ERROR_IF(!array || array->shape.size() != 1 ||
+                    !array->get_element_shape().empty(),
+                "Indexed transform requires packed scalar 1D ndarrays");
+    return NativeArrayBinding{
+        array->ndarray_alloc_.get_ptr(0),
+        array->get_nelement() * array->get_element_size(),
+        array->get_element_data_type(),
+        {array->get_nelement()}, {}, 0};
+  };
+  const auto source = binding(src), intermediate = binding(transformed);
+  const auto index = binding(indices), selected = binding(gathered);
+  const auto destination = binding(dst);
+  IndexedTransformOperation op{source.shape[0], index.shape[0],
+      destination.shape[0], value_type, scale, bias, source, intermediate,
+      index, selected, destination};
+  auto *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Indexed transform requires a compute device");
+  auto lease = get_transform_cache(program, device);
+  auto &cache = *lease;
+  auto prepared = prepare_vulkan_indexed_transform(program, device, cache, op);
   if (!cache.indexed_affine_command_replay.submit_or_record(
-          program, device, command_key, profiler_scopes,
-          record_transform_indexed)) {
-    program->enqueue_compute_op_lambda(record_transform_indexed, {});
-  }
+          program, device, prepared.key, program->profiler != nullptr,
+          prepared.record))
+    program->enqueue_compute_op_lambda(prepared.record, {});
   return cache.cached_bytes;
 }
 
@@ -12279,6 +12299,10 @@ std::shared_ptr<NativeOperation> prepare_vulkan_indexed_copy_operation(
 std::shared_ptr<NativeOperation> prepare_vulkan_reduce_operation(
     Device &device, const ReduceOperation &operation) {
   return std::make_shared<FixedVulkanReduce>(device, operation);
+}
+std::shared_ptr<NativeOperation> prepare_vulkan_indexed_transform_operation(
+    Device &device, const IndexedTransformOperation &operation) {
+  return std::make_shared<FixedVulkanIndexedTransform>(device, operation);
 }
 std::shared_ptr<NativeOperation> prepare_vulkan_transform_operation(
     Device &device, const TransformOperation &operation) {
@@ -16029,7 +16053,9 @@ std::size_t Program::vulkan_transform_affine_ndarray_trusted(Ndarray *src,
 }
 
 std::size_t Program::vulkan_transform_indexed_affine_ndarray(Ndarray *src,
+                                                              Ndarray *transformed,
                                                               Ndarray *indices,
+                                                              Ndarray *gathered,
                                                               Ndarray *dst,
                                                               int value_type,
                                                               double scale,
@@ -16037,7 +16063,7 @@ std::size_t Program::vulkan_transform_indexed_affine_ndarray(Ndarray *src,
   auto native_ndarray_submission_guard =
       acquire_runtime_resource_submission_guard();
   return vulkan_transform_indexed_affine_ndarray_impl(
-      this, src, indices, dst, value_type, scale, bias);
+      this, src, transformed, indices, gathered, dst, value_type, scale, bias);
 }
 
 std::size_t Program::vulkan_transform_affine_member_ndarray(
@@ -19644,7 +19670,9 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
 }
 
 std::size_t Program::vulkan_transform_indexed_affine_ndarray(Ndarray *src,
+                                                              Ndarray *transformed,
                                                               Ndarray *indices,
+                                                              Ndarray *gathered,
                                                               Ndarray *dst,
                                                               int value_type,
                                                               double scale,

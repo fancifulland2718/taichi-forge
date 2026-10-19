@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan `PrimitiveSequence` transform/gather/scatter fusion preserves all
+  intermediate outputs and zero values from out-of-range gathers. Appending an
+  operation invalidates the old plan. Read/write aliases retain ordered execution
+  to avoid applying in-place transforms twice; eligible fusion uses one dispatch.
+
 - Vulkan native/AOT sorting accepts tensor payloads at scalar-aligned Field
   offsets. It no longer requires the offset to be a multiple of the complete
   record size; existing descriptor-alignment staging and range checks remain.

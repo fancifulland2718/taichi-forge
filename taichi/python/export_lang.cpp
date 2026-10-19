@@ -5340,7 +5340,8 @@ void export_lang(py::module &m) {
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_transform_indexed_affine_ndarray",
            tracked_native_program_method(&Program::vulkan_transform_indexed_affine_ndarray), py::arg("src"),
-           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("transformed"), py::arg("indices"), py::arg("gathered"),
+           py::arg("dst"), py::arg("value_type"),
            py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_transform_affine_member_ndarray",

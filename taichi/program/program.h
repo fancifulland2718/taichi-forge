@@ -3702,7 +3702,9 @@ class TI_DLL_EXPORT Program {
                                                       double scale,
                                                       double bias);
   std::size_t vulkan_transform_indexed_affine_ndarray(Ndarray *src,
+                                                       Ndarray *transformed,
                                                        Ndarray *indices,
+                                                       Ndarray *gathered,
                                                        Ndarray *dst,
                                                        int value_type,
                                                        double scale,

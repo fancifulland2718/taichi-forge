@@ -2229,11 +2229,18 @@ def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke):
         and isinstance(dst, Ndarray)
     ):
         return None
-    if _same_ndarray_storage(src, dst) or _same_ndarray_storage(indices, dst):
+    # All three outputs remain observable. Aliasing requires the original
+    # ordered operations, since a single dispatch has no global read barrier.
+    writes = (tmp, gathered, dst)
+    if any(_same_ndarray_storage(read, write) for read in (src, indices) for write in writes):
+        return None
+    if any(_same_ndarray_storage(write, other) for i, write in enumerate(writes) for other in writes[i + 1:]):
         return None
     if src.dtype != tmp.dtype or src.dtype != gathered.dtype or src.dtype != dst.dtype:
         return None
     if src.dtype not in (i32, f32, u32) or indices.dtype != i32:
+        return None
+    if any(getattr(array, "element_shape", ()) for array in (src, tmp, indices, gathered, dst)):
         return None
     src_shape = _shape_tuple(src)
     tmp_shape = _shape_tuple(tmp)
@@ -2251,6 +2258,7 @@ def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke):
         or len(indices_shape) != 1
         or len(gathered_shape) != 1
         or len(dst_shape) != 1
+        or min(src_shape[0], indices_shape[0], dst_shape[0]) <= 0
         or src_shape != tmp_shape
         or indices_shape != gathered_shape
     ):
@@ -2271,7 +2279,7 @@ def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke):
         transform_call.kwargs.get("scale", 1),
         transform_call.kwargs.get("bias", 0),
     )
-    call_args = (src.arr, indices.arr, dst.arr, value_type, scale, bias)
+    call_args = (src.arr, tmp.arr, indices.arr, gathered.arr, dst.arr, value_type, scale, bias)
     semantic_key = (
         "transform_indexed_affine",
         value_type,
@@ -2284,7 +2292,7 @@ def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke):
     plan = _NativePrimitivePlan(
         "vulkan_native",
         method_name,
-        (src, indices, dst),
+        (src, tmp, indices, gathered, dst),
         semantic_key,
         call_args,
         prog,
@@ -2352,6 +2360,7 @@ class PrimitiveSequence:
         return tuple(workspaces)
 
     def _add_call(self, kind, func, args, kwargs, workspace):
+        self._fused_plan = None
         self._calls.append(_PrimitiveSequenceCall(kind, func, args, kwargs, workspace))
         return self
 

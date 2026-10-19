@@ -195,6 +195,29 @@ double coefficient(const operation_json::JsonValue &value) {
 }
 }  // namespace
 
+void validate_indexed_transform_operation(
+    Device &device, const IndexedTransformOperation &op) {
+  if (op.value_type < 0 || op.value_type > 2 || !op.index_size || !op.dst_size)
+    throw std::invalid_argument(
+        "Indexed transform requires nonempty i32/u32/f32 arrays");
+  validate(device, TransformOperation{op.src_size, op.value_type, op.scale,
+                                      op.bias, op.src, op.transformed});
+  for (const auto *array : {&op.indices, &op.gathered, &op.dst}) {
+    const auto size = array == &op.dst ? op.dst_size : op.index_size;
+    const auto type = array == &op.indices ? PrimitiveType::i32
+                                         : transform_types()[op.value_type];
+    if (array->pointer.device != &device ||
+        size > std::numeric_limits<std::size_t>::max() / 4 ||
+        array->bytes != size * 4)
+      throw std::invalid_argument("Indexed transform requires exact same-device storage");
+    validate_native_array_layout(*array, {{size}, {}, 4, 4, true,
+                                          type->to_string()});
+  }
+  if (op.src.shape[0] != op.src_size ||
+      op.transformed.shape[0] != op.src_size)
+    throw std::invalid_argument("Indexed transform requires exact source shapes");
+}
+
 void register_transform_operation(NativeOperationRegistry &registry) {
   registry.define<TransformOperation>(validate);
   registry.register_schema<TransformOperation>(
