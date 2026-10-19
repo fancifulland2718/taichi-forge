@@ -2896,7 +2896,11 @@ create or require their allocators. Views inherit their parent's allocation.
 
 Graph execution-plan export preserves selected generation-owned pools for private
 ndarrays, including distinct pools in one Graph. It uses the same allocator
-resources and retains the selected pool topology. Selected CUDA temporary arenas
+resources and retains the selected pool topology. Retained sequential subgraphs
+also preserve these private pools: different materialized instances own separate
+pools, while repeated references to one instance share its pool and array aliases.
+Kernel code remains shared. Unknown factories or mismatched materialized owners
+are rejected before publication. Selected CUDA temporary arenas
 export whole i32/f32 buffers when the existing final-executor proof qualifies one
 fully lowered, single-queue CGraph. A single-slot ordered arena retains its
 existing path; an eagerly materialized completion arena exports the ordered ring

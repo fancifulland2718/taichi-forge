@@ -2,6 +2,7 @@
 
 import json
 import struct
+from contextlib import ExitStack
 
 import pytest
 import taichi_forge as ti
@@ -27,7 +28,9 @@ class _RetainedGraph(NativeGraphNode, NativeGraphExecutable):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_retained_graph_instances_keep_private_state_and_aliases(tmp_path):
+def test_retained_graph_instances_keep_private_state_and_aliases(
+    tmp_path, pooled=False
+):
     @ti.kernel
     def advance(
         state: ti.types.ndarray(ti.i32, ndim=1),
@@ -55,8 +58,36 @@ def test_retained_graph_instances_keep_private_state_and_aliases(tmp_path):
     output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
     builder.dispatch(advance, private, alias, output)
     definition = builder.freeze()
-    one, two = definition.compile(), definition.compile()
-    assert one._spec is two._spec
+    contexts = ExitStack()
+    if pooled:
+        from tests.python.test_graph_resource_lifetime_recipe import _providers
+
+        catalog = definition.recipe_catalog(providers=_providers())
+        fragment = next(
+            f
+            for f in catalog.fragments
+            if f.fragment_key.endswith(":generation-owned-storage")
+        )
+        recipe = catalog.composer.compose((fragment,))
+        first = contexts.enter_context(
+            definition.materialization_context(provider_set=catalog.provider_set)
+        )
+        second = contexts.enter_context(
+            definition.materialization_context(provider_set=catalog.provider_set)
+        )
+        a = contexts.enter_context(first.materialize(recipe))
+        b = contexts.enter_context(second.materialize(recipe))
+        cached = contexts.enter_context(first.materialize(recipe))
+        one, two = a.executor, b.executor
+        assert cached.executor._instance is one._instance
+        assert one._instance._storage_owners[0] is not two._instance._storage_owners[0]
+    else:
+        one, two = definition.compile(), definition.compile()
+    if not pooled:
+        assert one._spec is two._spec
+    assert (
+        one._spec.fixed_runtime_args["state"] is two._spec.fixed_runtime_args["state"]
+    )
     source = {name: ti.ndarray(ti.f32, 5) for name in ("first", "second", "again")}
     retained = [
         _RetainedGraph(one, source["first"]),
@@ -78,6 +109,14 @@ def test_retained_graph_instances_keep_private_state_and_aliases(tmp_path):
     document = json.loads(plan.to_json())
     arrays = [r for r in document["resources"] if r["kind"] == "ndarray"]
     assert len(arrays) == 2
+    pools = [
+        r
+        for r in document["resources"]
+        if r["kind"] == "native" and r["provider"] == "memory"
+    ]
+    assert len(pools) == (2 if pooled else 0)
+    if pooled:
+        assert {r["allocator"] for r in arrays} == {r["name"] for r in pools}
     assert len(module._exported_kernels) == 1
     operations = document["operations"]
     assert len({op["entry"] for op in operations}) == 1
@@ -125,6 +164,7 @@ def test_retained_graph_instances_keep_private_state_and_aliases(tmp_path):
     graph.close()
     one.close()
     two.close()
+    contexts.close()
     rejected = ti.aot.Module()
     with pytest.raises(ti.TaichiRuntimeError):
         rejected.add_execution_plan("closed", graph, source_bindings=source)
@@ -173,3 +213,79 @@ def test_retained_graph_instances_keep_private_state_and_aliases(tmp_path):
                 call.close()
                 for value in outputs.values():
                     value.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_retained_graph_instances_keep_selected_pools(tmp_path):
+    test_retained_graph_instances_keep_private_state_and_aliases(tmp_path, pooled=True)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_retained_pool_export_rejects_unmatched_owners_and_nested_arenas(monkeypatch):
+    from dataclasses import replace
+    from tests.python.test_graph_resource_lifetime_recipe import (
+        _definition,
+        _providers,
+        _TemporaryWork,
+    )
+
+    definition = _definition(groups=1, size=5)
+    catalog = definition.recipe_catalog(providers=_providers())
+    fragment = next(
+        f
+        for f in catalog.fragments
+        if f.fragment_key.endswith(":generation-owned-storage")
+    )
+    with definition.materialization_context(
+        provider_set=catalog.provider_set
+    ) as context:
+        with context.materialize(catalog.composer.compose((fragment,))) as selected:
+            graph = selected.executor
+            rejected = ti.aot.Module()
+            with monkeypatch.context() as altered:
+                altered.setattr(graph._instance, "_storage_owners", (object(),))
+                with pytest.raises(ti.TaichiRuntimeError, match="owner differs"):
+                    rejected.add_execution_plan("wrong_owner", graph)
+            with monkeypatch.context() as altered:
+                altered.setattr(
+                    graph._spec,
+                    "_storage_plans",
+                    tuple(
+                        replace(plan, factory=lambda: None)
+                        for plan in graph._spec._storage_plans
+                    ),
+                )
+                with pytest.raises(
+                    ti.TaichiRuntimeError, match="selected storage/binding"
+                ):
+                    rejected.add_execution_plan("unknown_factory", graph)
+            assert not rejected._exported_kernels and not rejected._graph_export_failed
+            rejected.add_execution_plan("valid", graph)
+    monkeypatch.setenv("TI_GRAPH_TEMPORARY_ARENA_SLOTS", "3")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(_TemporaryWork(5))
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog(providers=_providers())
+    with definition.materialization_context(
+        provider_set=catalog.provider_set
+    ) as context:
+        for flavor in (":generation-owned-storage", ":queue-ordered-storage"):
+            fragment = next(
+                f for f in catalog.fragments if f.fragment_key.endswith(flavor)
+            )
+            with context.materialize(catalog.composer.compose((fragment,))) as selected:
+                output = ti.ndarray(ti.i32, 5)
+                parent = ti.graph.GraphBuilder()
+                parent.append_native(_RetainedGraph(selected.executor, output))
+                graph = parent.compile()
+                rejected = ti.aot.Module()
+                with pytest.raises(
+                    ti.TaichiRuntimeError, match="fixed sequential binding recipe"
+                ):
+                    rejected.add_execution_plan(
+                        "nested_arena", graph, source_bindings=dict(output=output)
+                    )
+                assert (
+                    not rejected._exported_kernels and not rejected._graph_export_failed
+                )
+                graph.close()

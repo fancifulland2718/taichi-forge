@@ -185,19 +185,19 @@ class _ExportContext:
         if not plans:
             return
         validate_storage_plans(spec, plans)
-        for plan in plans:
+        for plan, owner in zip(plans, graph._instance._storage_owners, strict=True):
             # A concrete factory must preserve its chosen allocation policy.
             # Arbitrary callbacks and inherited hooks cannot qualify a recipe.
             exporter = type(plan.factory).__dict__.get("_export_aot_allocator")
             if exporter is None:
                 raise TaichiRuntimeError("AOT execution Graph requires the selected storage/binding recipe")
-            allocator = exporter(plan.factory, self, plan)
+            allocator = exporter(plan.factory, self, plan, owner)
             if plan.temporary_arena:
                 from ._graph_temporaries import declare_ordered_temporaries
 
                 declare_ordered_temporaries(self, graph, allocator)
             for name in plan.binding_names:
-                identity = id(spec.fixed_runtime_args[name])
+                identity = id(graph._instance._fixed_runtime_args[name])
                 previous = self._private_allocators.setdefault(identity, allocator)
                 if previous != allocator:
                     raise TaichiRuntimeError("AOT private aliases have conflicting storage owners")
@@ -246,7 +246,10 @@ class _ExportContext:
                     shape=owner.shape,
                     element_shape=dtype.shape(),
                     zero_initialize=True,
-                    **({"allocator": self._private_allocators[id(owner)]} if id(owner) in self._private_allocators else {}),
+                    **(
+                        {"allocator": self._private_allocators[id(instance._fixed_runtime_args[name])]}
+                        if id(instance._fixed_runtime_args[name]) in self._private_allocators else {}
+                    ),
                 ),
             )
             self.private_bindings[name] = owner
@@ -526,7 +529,7 @@ class _ExportContext:
             if (
                 graph._workspace_lane_capacity != 1
                 or graph._qualified_fusion_selector is not None
-                or getattr(spec, "_storage_plans", ())
+                or any(plan.temporary_arena for plan in getattr(spec, "_storage_plans", ()))
                 or getattr(spec, "_binding_executor_factory", None) is not None
                 or spec.control_binding_plan.names
             ):
@@ -546,6 +549,7 @@ class _ExportContext:
                         self.private_bindings[name] = self._scalar_values[name] = owner
                     else:
                         self.retained_arrays.bind_private(name, owner)
+                self.declare_storage_plans(graph)
                 self.declare_private_bindings(spec.fixed_runtime_args, graph._instance)
                 for lease in spec.lifetime_leases:
                     exporter = type(lease).__dict__.get("_export_aot_bindings")

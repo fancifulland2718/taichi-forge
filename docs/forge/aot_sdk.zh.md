@@ -2220,7 +2220,9 @@ plan = aot.ExecutionPlan(operations, resources=[pool, scratch])
 其分配器；view 继承父数组的分配。
 
 Graph 执行计划自动导出可保留已选的私有 ndarray 代次池，包括同一 Graph 的多个
-独立池，复用上述分配器资源描述。已选 CUDA temporary arena 可导出完整 i32/f32
+独立池，复用上述分配器资源描述。父图保留的顺序子图也可导出这些私有池：不同物化
+实例分别拥有池，同一实例重复出现则共享池及数组别名，kernel 代码仍共享。未知
+factory 或与已物化 owner 不匹配的配置在发布前拒绝。已选 CUDA temporary arena 可导出完整 i32/f32
 缓冲，但须通过既有的最终执行器证明，限定为一个完全 lowering 的单队列 CGraph。
 单槽 ordered arena 保留原路线；已完整物化的 completion arena 导出为下述有序 ring，
 保留选定容量和分配器。导出逐槽检查已解析的完整缓冲映射，不读回 scratch 内容。

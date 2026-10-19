@@ -169,7 +169,7 @@ class _CudaGraphStorageFactory:
     def __call__(self):
         return _CudaGraphStorageOwner(self.group)
 
-    def _export_aot_allocator(self, context, plan):
+    def _export_aot_allocator(self, context, plan, owner):
         from taichi_forge._lib import core
         from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -180,7 +180,9 @@ class _CudaGraphStorageFactory:
                 or plan.temporary_capacity != (group.arena_capacity or None)
                 or plan.ordered_temporary_reuse != group.ordered_temporary_reuse):
             raise TaichiRuntimeError("AOT selected storage factory does not match its temporary plan")
-        return context.resource(plan, "memory", "pool", parameters={"retained_bytes": 0})
+        if type(owner) is not _CudaGraphStorageOwner or owner._group is not group:
+            raise TaichiRuntimeError("AOT selected storage owner differs from its materialized factory")
+        return context.resource(owner, "memory", "pool", parameters={"retained_bytes": 0})
 
 
 class _CudaGraphStorageOwner:
