@@ -3659,6 +3659,11 @@ TCM，核心DLL只由runtime持有，各包安装文件无重叠。升级后旧C
 无需导入前端、NumPy或编译后的GeoPhys宿主。这是该配套版本的安装资格，不承诺任意
 runtime ABI兼容；前端须与runtime合同匹配。
 
+后续仅刷新前端的批次也通过了CPU/CUDA/Vulkan多键向量／矩阵载荷排序和下游梯度验证，
+复用同一匹配runtime。runtime DLL、GeoPhys唯一TCM和44个外部依赖记录保持不变，压缩
+前端wheel增加1,116字节。正常安装环境同时验证了无用排序调用历史的移除、固定应用
+入口和消费者创建的新SDK场景，没有增加厂商依赖。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index

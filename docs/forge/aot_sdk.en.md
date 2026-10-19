@@ -4810,6 +4810,13 @@ consumption needs no frontend, NumPy or compiled GeoPhys host import. This is
 qualification of this package pair, not compatibility with arbitrary runtime ABI
 versions; install a frontend matched to the runtime contract.
 
+A subsequent frontend-only refresh also qualifies multi-key vector/matrix payload
+sorting and downstream gradients on CPU/CUDA/Vulkan with that matching runtime.
+The runtime DLL, sole GeoPhys TCM and 44 external dependency records stay unchanged;
+the compressed frontend wheel grows by 1,116 bytes. Installed checks also cover
+the removal of unused sort-reservation history, the fixed application entries and
+consumer-created SDK scenes. No additional vendor dependency is introduced.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed
