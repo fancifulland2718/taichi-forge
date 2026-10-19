@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Packed scalar grouped sum exports through native sequences or
+  `builtin/grouped_reduce` v1 on CPU/CUDA/Vulkan, including empty input, mutable
+  keys, snapshots and explicit adjoint composition. CPU shares owner/partial
+  management with scatter-add; GPU preserves direct atomic execution without
+  substituting for Vulkan bucket strategies.
 - Vulkan grouped sum resets contiguous outputs with an exact-range buffer fill,
   eliminating one zeroing pipeline and compute dispatch, plus six unused embedded
   shader variants and their build targets. Strided outputs retain element-wise

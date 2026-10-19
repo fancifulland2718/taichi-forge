@@ -139,6 +139,17 @@ _ROUTES = MappingProxyType({
                            "mutable_i32_indices", "duplicate_target_accumulation", "disjoint_output",
                            "prepared_cpu_partial", "device_atomic_capabilities", "explicit_adjoint_only")),
     ),
+    "grouped_reduce": (
+        _sequence(("grouped_reduce",), "packed_scalar", "sum", "i32_u32_f32_i64_u64_f64",
+                  "mutable_i32_keys", "overwrite_groups", "invalid_ids_ignored", "disjoint_output",
+                  "frozen_cpu_partition_strategy", "gpu_direct_atomic_strategy",
+                  "device_atomic_capabilities", "explicit_adjoint_only"),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/grouped_reduce",), _ALL,
+                          ("packed_scalar", "fixed_prefix_extent", "empty_input_supported", "sum",
+                           "i32_u32_f32_i64_u64_f64", "mutable_i32_keys", "overwrite_groups",
+                           "invalid_ids_ignored", "disjoint_output", "prepared_cpu_partial",
+                           "gpu_direct_atomic_strategy", "device_atomic_capabilities", "explicit_adjoint_only")),
+    ),
     "segmented_scan": (
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.segmented_scan",), ("cuda",),

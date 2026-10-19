@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Packed scalar grouped sum 可通过原生 sequence 或 `builtin/grouped_reduce` v1
+  导出到 CPU/CUDA/Vulkan，覆盖空输入、可变 key、快照和显式伴随组合。CPU 与
+  scatter-add 共用 owner/partial 管理；GPU 保留直接原子策略，不替换 Vulkan bucket。
 - Vulkan grouped sum 对连续输出使用精确范围的 buffer fill，省去一个清零
   pipeline 和 compute dispatch，并移除六份不再使用的嵌入 shader 及生成目标。
   带步长输出仍逐元素清零；空输入会覆盖输出，保持 Graph 与原有梯度语义。

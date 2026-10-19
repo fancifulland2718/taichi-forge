@@ -285,6 +285,69 @@ def _scatter_add(call, context):
     ))
 
 
+def _grouped_reduce(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_grouped_reduce
+        or type(call.workspace) is not algorithms.GroupedReduceWorkspace
+        or set(call.kwargs) != {"op", "method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 3
+    ):
+        raise TaichiRuntimeError("AOT grouped reduce requires its concrete GroupedReduceWorkspace")
+    keys, values, output = call.args
+    algorithms._check_grouped_reduce_request(*call.args, **call.kwargs)
+    descriptions = tuple(packed_description(a) for a in call.args)
+    if any(len(d.index_shape) != 1 or d.element_shape for d in descriptions):
+        raise TaichiRuntimeError("AOT grouped reduce requires one-dimensional packed scalar storage")
+    n, groups = descriptions[0].index_shape[0], descriptions[2].index_shape[0]
+    call.workspace.check_shape(n, groups)
+    arch = impl.current_cfg().arch
+    backend = call.workspace._native_grouped_reduce_backend_for_method(call.kwargs["method"])
+    prefix, capability, accepted = {
+        core.Arch.x64: ("cpu", "cpu_grouped_reduce_available", ("cpu_native_two_level",)),
+        core.Arch.arm64: ("cpu", "cpu_grouped_reduce_available", ("cpu_native_two_level",)),
+        core.Arch.cuda: ("cuda_device", "cuda_device_grouped_reduce_available",
+                         ("cuda_device_atomic", "cuda_device_two_level")),
+        core.Arch.vulkan: ("vulkan", "vulkan_grouped_reduce_available", ("vulkan_native_atomic",)),
+    }.get(arch, (None, None, ()))
+    prog = impl.get_runtime().prog
+    if backend not in accepted or not getattr(prog, capability)():
+        raise TaichiRuntimeError("AOT grouped reduce cannot reconstruct the requested native strategy")
+    # CUDA aliases use the same atomic ndarray implementation. Their dense-field
+    # request still falls back in JIT, so cold export must not silently change it.
+    if backend == "cuda_device_two_level" and any(
+        algorithms._primitive_view(a).is_dense_field for a in call.args
+    ):
+        raise TaichiRuntimeError("AOT grouped reduce cannot replace a CUDA segmented field fallback")
+    value_type = algorithms._grouped_reduce_value_type(values.dtype)
+    if arch == core.Arch.vulkan and not prog.vulkan_grouped_reduce_atomic_value_type_available(value_type):
+        raise TaichiRuntimeError("AOT grouped reduce dtype atomics are unavailable on Vulkan")
+    stem = f"{prefix}_grouped_reduce" + ("" if backend == "cpu_native_two_level" else "_atomic")
+    methods = {
+        f"{stem}_{suffix}"
+        for suffix in ("ndarray", "dense_field", "member_ndarray", "strided_ndarray", "strided_keys_ndarray")
+    }
+    semantic = (value_type, algorithms._SUPPORTED_GROUPED_REDUCE_OPS[call.kwargs["op"]], n, groups)
+    if call.plan is not None and (
+        type(call.plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(call.plan, backend, call.args, semantic)
+        or call.plan.method_name not in methods
+    ):
+        raise TaichiRuntimeError("AOT grouped reduce cannot reconstruct the selected cached strategy")
+    parameters = dict(size=n, num_groups=groups, dtype=str(values.dtype))
+    if backend == "cpu_native_two_level":
+        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="grouped_reduce", version=1,
+        parameters=parameters,
+        bindings=dict(keys=context.retained_arrays.require(keys), values=context.retained_arrays.require(values),
+                      output=context.retained_arrays.require(output)),
+    ))
+
+
 def _histogram(call, context):
     import os
     from taichi_forge.aot._graph_storage_bindings import packed_description
@@ -566,6 +629,7 @@ def export_sequence(sequence, context):
         "transform": _transform,
         "indexed_copy": _indexed_copy,
         "scatter_add": _scatter_add,
+        "grouped_reduce": _grouped_reduce,
         "histogram": _histogram,
         "check": export_check_call, "metric": export_metric_call,
         "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,

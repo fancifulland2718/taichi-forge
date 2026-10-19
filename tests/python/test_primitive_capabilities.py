@@ -81,6 +81,10 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert any(r.forms == ("scatter_add",) and r.backends == ("cpu", "cuda", "vulkan") for r in accumulation)
         assert any(r.forms == ("builtin/scatter_add",) and "device_atomic_capabilities" in r.constraints for r in accumulation)
         assert all("explicit_adjoint_only" in r.constraints for r in accumulation)
+        grouped = ti.algorithms.primitive_capability("grouped_reduce").aot_routes
+        assert any(r.forms == ("grouped_reduce",) and r.backends == ("cpu", "cuda", "vulkan") for r in grouped)
+        assert any(r.forms == ("builtin/grouped_reduce",) and "empty_input_supported" in r.constraints for r in grouped)
+        assert all("gpu_direct_atomic_strategy" in r.constraints and "explicit_adjoint_only" in r.constraints for r in grouped)
         histogram = ti.algorithms.primitive_capability("histogram").aot_routes
         assert any(r.forms == ("histogram",) and r.backends == ("cpu", "cuda", "vulkan") for r in histogram)
         assert any(r.forms == ("builtin/histogram",) and "empty_input_supported" in r.constraints for r in histogram)

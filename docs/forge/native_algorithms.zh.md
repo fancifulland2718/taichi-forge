@@ -245,6 +245,19 @@ Sequence 导出冻结生产端 CPU 线程配置；显式计划省略 `cpu_max_th
 `builtin/scatter_add` v1。此路线尚不覆盖 tensor/strided/fused/two-level sequence；
 AOT 不自动生成伴随，可组合导出的 kernel 提供显式伴随。
 
+`PrimitiveSequence.grouped_reduce()` 与显式 `builtin/grouped_reduce` v1 描述支持
+CPU/CUDA/Vulkan 的 packed scalar sum：key 为 i32，value/output 为
+i32/u32/f32/i64/u64/f64。参数为 `size`、非零 `num_groups`、`dtype` 和可选的
+正整数 `cpu_max_threads`，绑定名为 `keys`、`values`、`output`。每次覆盖目标组，
+空输入也写零；负数及越界 key 忽略，前缀以外的尾部保留。两个读区间须与输出区间
+物理不重叠，key 可在重放之间更新。准备不会执行求和。
+CPU 保留生产端分区配置，复用执行器线程池并持有 partial；GPU 使用既有原子 sum，
+Vulkan 需启用对应类型原子能力。整数按位宽模加，GPU 浮点累加顺序不保证确定性。
+CUDA ndarray 的 segmented/two-level 别名沿用其真实原子实现；Vulkan bucket 策略、
+CUDA segmented dense-field fallback、tensor/strided/fused sequence 尚不属于这条导出路线，
+不会在导出时静默替换策略。纯原生包无需应用 shader 代码，消费端需提供
+`builtin/grouped_reduce` v1。可组合 kernel 提供显式伴随；不自动生成 AOT 伴随。
+
 `PrimitiveSequence.histogram()` 与显式 `builtin/histogram` v1 描述支持
 CPU/CUDA/Vulkan packed scalar i32/u32 ID 和 i32/i64 counter。参数为 `size`、
 非零 `num_bins`、`value_dtype`、`counter_dtype`，以及可选 `cpu_max_threads`、

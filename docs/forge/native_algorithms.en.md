@@ -317,6 +317,25 @@ application kernel code and require `builtin/scatter_add` v1 in the consumer.
 Tensor/strided/fused/two-level sequences are not covered by this route. AOT does
 not synthesize its adjoint; exported kernels can provide an explicit adjoint.
 
+`PrimitiveSequence.grouped_reduce()` and explicit `builtin/grouped_reduce` v1
+descriptions support packed scalar sums on CPU/CUDA/Vulkan: i32 keys and
+i32/u32/f32/i64/u64/f64 values/outputs. Parameters are `size`, nonzero
+`num_groups`, `dtype`, and optional positive `cpu_max_threads`; bindings are
+`keys`, `values`, and `output`. Each replay overwrites the output groups, including
+zeroing them for empty input. Negative/out-of-range keys are ignored, tails outside
+the declared prefixes are preserved, and keys may change between replays. Both
+read ranges must be physically disjoint from the output. Preparation does not run
+the sum. CPU preserves producer partition settings, borrows the executor pool and
+retains partial storage. GPU uses the existing atomic sum; Vulkan requires the
+selected type's atomic capability. Integer addition wraps at the type width;
+GPU floating-point ordering is not deterministic. CUDA ndarray segmented/two-level
+aliases retain their actual atomic implementation. Vulkan bucket strategies, CUDA
+segmented dense-field fallbacks, and tensor/strided/fused sequences are outside
+this export route; export does not silently substitute another strategy. Pure
+native packages need no application shader code and require `builtin/grouped_reduce`
+v1 in the consumer. Exported kernels can provide an explicit adjoint; AOT does not
+synthesize it automatically.
+
 `PrimitiveSequence.histogram()` and explicit `builtin/histogram` v1 descriptions
 support CPU/CUDA/Vulkan packed scalar i32/u32 IDs and i32/i64 counters. Parameters
 are `size`, nonzero `num_bins`, `value_dtype`, `counter_dtype`, and optional
