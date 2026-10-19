@@ -4745,7 +4745,7 @@ Fixed export of that production compute-render Graph also passes independent
 runtime-only consumption on CPU/CUDA/Vulkan, including position updates, image
 and depth comparisons, and module isolation. The qualified CUDA sm120 delivery
 profile puts real SAP `solve`, fixed `render` and generic candidate processing
-`candidates` entries in one 250,929 B GeoPhys TCM. The 58,736,796 B application
+`candidates` entries in one 251,133 B GeoPhys TCM. The 58,737,750 B application
 wheel retains the same 534 host binaries and dependency declarations, with no
 Forge/vendor DLL or private Python source. The candidate entry uses a fixed
 33-raw-slot/7-published-slot profile, covering duplicates, masking, overflow,
@@ -4759,8 +4759,18 @@ establish a physically coupled step or arbitrary-scene AOT coverage.
 After every export, generate each entry's argument names, types and dimensions
 from the current artifact and check them before packaging. Internal Graph names
 may contain producer instance identities, so a previous export's binding manifest
-cannot simply be reused. Keep stable application-facing domain interfaces in the
-SDK host layer.
+cannot simply be reused. Use explicit `argument_resources` at export to expose
+stable AOT ports, or maintain a domain interface in the SDK host layer.
+
+The installed fixed SAP profile now exposes only `velocity_output` f32[28],
+`diagnostics` f32[6] and the complete `control` packet f32[272]. Eight fixed scalar
+parameters and six private scalar control arrays no longer require external
+bindings. This reuses the same compiled code and execution recipe; the 24-byte
+control allocation moves to the prepared owner. Independent preparations isolate
+those control arrays; independent simulations still use separate loaded modules
+to isolate module Field state. Changing the fixed scene/configuration requires a
+different export or generic SDK specialization. The candidate entry's `control`
+input is a separate, entry-scoped binding with its existing contract.
 
 The installed qualification also upgrades Forge runtime and its matching frontend
 independently while retaining the GeoPhys wheel and its single CUDA TCM. The
