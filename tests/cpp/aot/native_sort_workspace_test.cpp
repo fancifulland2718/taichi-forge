@@ -2,6 +2,7 @@
 #include "taichi/runtime/native_sort.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
+#include "taichi/rhi/cpu/stable_sort.h"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -9,6 +10,52 @@
 
 namespace taichi::lang {
 #ifdef TI_WITH_LLVM
+namespace {
+template <typename Key, typename Bits>
+void check_float_order_cache(const std::array<Bits, 8> &bits) {
+  const std::array<std::array<int, 8>, 4> expected{{
+      {{4, 1, 2, 5, 6, 3, 0, 7}},  // NaNs last, ascending.
+      {{3, 5, 6, 1, 2, 4, 0, 7}},  // NaNs last, descending.
+      {{0, 4, 2, 1, 5, 6, 3, 7}},  // Bitwise, ascending.
+      {{7, 3, 5, 6, 1, 2, 4, 0}},  // Bitwise, descending.
+  }};
+  cpu::StableSortWorkspace<Key, Bits> workspace;
+  for (int policy = 0; policy < 2; ++policy) {
+    for (int descending = 0; descending < 2; ++descending) {
+      std::array<Key, 8> keys;
+      std::memcpy(keys.data(), bits.data(), sizeof(keys));
+      // Payloads include NaN and zero bit patterns, preserved without FP math.
+      std::array<Bits, 8> payload;
+      for (std::size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = bits[(i + 3) % bits.size()];
+      }
+      const auto bytes = cpu::cpu_stable_sort_impl(
+          keys.data(), payload.data(), keys.size(), bool(descending), policy,
+          &workspace);
+      EXPECT_EQ(bytes, workspace.bytes());
+      std::array<Bits, 8> result;
+      std::memcpy(result.data(), keys.data(), sizeof(keys));
+      for (std::size_t i = 0; i < keys.size(); ++i) {
+        const auto index = expected[2 * policy + descending][i];
+        EXPECT_EQ(result[i], bits[index]);
+        EXPECT_EQ(payload[i], bits[(index + 3) % bits.size()]);
+      }
+    }
+  }
+}
+}  // namespace
+
+TEST(NativeSortWorkspace, CachedFloatOrderPreservesPoliciesAndPayloadBits) {
+  check_float_order_cache<float, std::uint32_t>(
+      {0xffc00001u, 0u, 0x80000000u, 0x7f800000u, 0xff800000u,
+       0x3f800000u, 0x3f800000u, 0x7fc00002u});
+  check_float_order_cache<double, std::uint64_t>(
+      {0xfff8000000000001ull, 0ull, 0x8000000000000000ull,
+       0x7ff0000000000000ull, 0xfff0000000000000ull,
+       0x3ff0000000000000ull, 0x3ff0000000000000ull,
+       0x7ff8000000000002ull});
+}
+
 TEST(NativeSortWorkspace, CpuSharedStorageRetainsStableOrderAndLifetime) {
   cpu::CpuDevice device;
   constexpr std::size_t n = 7;
