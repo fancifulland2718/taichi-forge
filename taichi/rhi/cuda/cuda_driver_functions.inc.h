@@ -86,7 +86,9 @@ PER_CUDA_FUNCTION(graph_exec_destroy, cuGraphExecDestroy, CUgraphExec);
 
 // Event management
 PER_CUDA_FUNCTION(event_create, cuEventCreate, void **, uint32)
-PER_CUDA_FUNCTION(event_destroy, cuEventDestroy, void *)
+// Match cuda.h's modern entry point. The legacy symbol can block on unrelated
+// work even when this event has completed.
+PER_CUDA_FUNCTION(event_destroy, cuEventDestroy_v2, void *)
 PER_CUDA_FUNCTION(event_record, cuEventRecord, void *, void *)
 PER_CUDA_FUNCTION(stream_wait_event, cuStreamWaitEvent, void *, void *,
                   unsigned int)

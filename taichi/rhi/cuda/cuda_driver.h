@@ -96,6 +96,10 @@ inline std::string driver_symbol_name(CUDADriverProvider provider,
                                       const std::string &cuda_symbol) {
   if (provider == CUDADriverProvider::musa &&
       cuda_symbol.rfind("cu", 0) == 0) {
+    // Keep the established MUSA entry point; CUDA's event ABI revision does
+    // not imply a corresponding MUSA symbol revision.
+    if (cuda_symbol == "cuEventDestroy_v2")
+      return "muEventDestroy";
     return "mu" + cuda_symbol.substr(2);
   }
   return cuda_symbol;

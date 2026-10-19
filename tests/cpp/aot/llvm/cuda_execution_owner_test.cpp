@@ -151,7 +151,12 @@ TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
   ti_destroy_prepared_ext(rt, external_initializer);
   program.synchronize();
   testing::CudaExternalGate default_gate;
+  auto &driver = CUDADriver::get_instance();
+  void *default_pending = nullptr;
+  driver.event_create(&default_pending, CU_EVENT_DISABLE_TIMING);
   default_gate.enqueue_wait(nullptr);
+  driver.event_record(default_pending, nullptr);
+  ASSERT_EQ(driver.event_query.call(default_pending), CUDA_ERROR_NOT_READY);
   const auto binding_stats = program.debug_dense_storage_binding_stats();
   const auto *requested_replays = std::getenv("TAICHI_F3_EXTERNAL_REPLAYS");
   const int replay_count = requested_replays ? std::atoi(requested_replays) : 5;
@@ -176,6 +181,7 @@ TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
     ti_wait_completion_ext(ticket);
     ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
     ti_release_completion_ext(ticket);
+    EXPECT_EQ(driver.event_query.call(default_pending), CUDA_ERROR_NOT_READY);
     EXPECT_FALSE(default_gate.timed_out());
   }
   std::sort(submit_times.begin(), submit_times.end());
@@ -195,17 +201,24 @@ TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
   for (int i = 0; i < 64; ++i)
     EXPECT_EQ(values[i + 1], 36.0f * 64 * 65 / 2 + i);
   EXPECT_FALSE(default_gate.timed_out());
-  // Retirement itself must wait only the participating prefix, not default.
-  program.retire_external_dense_storage(owner);
-  EXPECT_TRUE(domain->snapshot().closed);
-  EXPECT_TRUE(adapter->closed());
-  EXPECT_THROW(runtime->get_memory(memory, true), MemoryBindingError);
+  // Draining the participating work must not inherit the default tail.
+  // Destructive close is a cold boundary: the driver's actual memory frees
+  // may synchronize more broadly. Never use it as a frame/cancel operation.
+  domain->stop_accepting();
+  domain->latest_completion().wait();
+  EXPECT_EQ(driver.event_query.call(default_pending), CUDA_ERROR_NOT_READY);
   EXPECT_FALSE(default_gate.timed_out());
   {
     ScopedExternalProfilerAnnotation release(
         "F3/public_external/default_release");
     default_gate.release();
   }
+  driver.event_synchronize(default_pending);
+  driver.event_destroy(default_pending);
+  program.retire_external_dense_storage(owner);
+  EXPECT_TRUE(domain->snapshot().closed);
+  EXPECT_TRUE(adapter->closed());
+  EXPECT_THROW(runtime->get_memory(memory, true), MemoryBindingError);
   ti_destroy_prepared_ext(rt, prepared);
   ti_free_memory(rt, memory);
   ti_destroy_aot_module(module);

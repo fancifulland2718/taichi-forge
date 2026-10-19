@@ -125,6 +125,37 @@ TEST_F(CudaExecutionDependency, EventReuseCannotMoveAnAlreadyQueuedDependency) {
   EXPECT_EQ(value, 67u);
 }
 
+TEST_F(CudaExecutionDependency,
+       EventDestructionLeavesUnrelatedDefaultWorkPending) {
+  auto context = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  std::array<void *, 128> events{};
+  for (auto &event : events) {
+    driver.event_create(&event, CU_EVENT_DISABLE_TIMING);
+    driver.event_record(event, streams[1]);
+  }
+  driver.stream_synchronize(streams[1]);
+  testing::CudaExternalGate gate;
+  gate.enqueue_wait(nullptr);
+  void *pending = nullptr;
+  driver.event_create(&pending, CU_EVENT_DISABLE_TIMING);
+  driver.event_record(pending, nullptr);
+  ASSERT_EQ(driver.event_query.call(pending), CUDA_ERROR_NOT_READY);
+  const auto start = std::chrono::steady_clock::now();
+  for (auto event : events)
+    driver.event_destroy(event);
+  std::cout << "event destruction_us="
+            << std::chrono::duration<double, std::micro>(
+                   std::chrono::steady_clock::now() - start)
+                   .count()
+            << std::endl;
+  EXPECT_EQ(driver.event_query.call(pending), CUDA_ERROR_NOT_READY);
+  EXPECT_FALSE(gate.timed_out());
+  gate.release();
+  driver.event_synchronize(pending);
+  driver.event_destroy(pending);
+}
+
 class DomainResources final : public RuntimeCompletionResources {
  public:
   DomainResources(cuda::ExecutionDomain &domain, std::atomic<int> &released)

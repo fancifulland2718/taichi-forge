@@ -426,6 +426,11 @@ TEST(CUDADriverCompatibility, MapsAndGatesMUSADriverSurface) {
             "muInit");
   EXPECT_EQ(driver_symbol_name(CUDADriverProvider::musa, "cuMemAlloc_v2"),
             "muMemAlloc_v2");
+  EXPECT_EQ(
+      driver_symbol_name(CUDADriverProvider::nvidia_cuda, "cuEventDestroy_v2"),
+      "cuEventDestroy_v2");
+  EXPECT_EQ(driver_symbol_name(CUDADriverProvider::musa, "cuEventDestroy_v2"),
+            "muEventDestroy");
 
   EXPECT_TRUE(
       driver_symbol_enabled(CUDADriverProvider::musa, "cuLaunchKernel"));

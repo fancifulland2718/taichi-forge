@@ -95,6 +95,10 @@ Ordinary AOT launch, memory copy/map/export and default prepared execution rejec
 these managed imports. Native resource factories that inspect external operands
 during cold preparation are not qualified. Closing the external owner drains
 dependent domains before revoking every loan and alias; this is a cold operation.
+Actual CUDA/vendor memory destruction may synchronize unrelated work even after
+the participating prefix has completed. For a pause while peers run, stop
+admission and wait for the domain's latest completion while retaining its bounded
+instances and image pool. Destroy them only at the cold teardown boundary.
 Canvas stream selection and source completion are a separate interface boundary.
 
 ## Selected Canvas display domain
