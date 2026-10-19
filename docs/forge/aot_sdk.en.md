@@ -2899,6 +2899,39 @@ replay does not invoke Python allocation/binding callbacks. Unknown factories,
 completion-ring arenas and unqualified temporary schedules still fail preflight;
 they are not silently replaced with ordinary allocations.
 
+Explicit execution plans can use an ordered private storage ring on CPU, CUDA
+and Vulkan (plan v21). The existing native executor prepares each frame once,
+then runs one frame per call on the same ordered backend queue:
+
+```python
+plan = aot.ExecutionPlan(
+    operations,
+    resources=[dict(kind="ndarray", name="scratch", dtype="f32", shape=[17],
+                    zero_initialize=True)],
+    storage_recipe=dict(kind="ordered_temporary_ring", version=1,
+                        capacity=3, arrays=["scratch"]),
+)
+```
+
+`operations` must use the selected private arrays through fixed kernel/copy/fill
+operations. Capacity is a positive representable integer, subject to checked
+expansion sizes and successful allocation; three is only an example. Each slot
+retains independent array contents. The artifact stores one operation template
+and one copy of each kernel/data payload. Preparation expands bindings and
+storage, retaining a shared allocator when selected. `dispatch_count` describes
+one replay; argument/resource/workspace byte counts cover the entire prepared
+owner. Closing a dependency or borrowed Program retires all its frames before
+their storage is released. Replaying does not poll completion from Python.
+
+This explicit recipe does not provide concurrent Graph lanes or automatically
+export a JIT completion-ring arena. It currently rejects control/native/image
+operations, dynamic launches, other execution recipes, explicit initialization
+sequences, shared resources that alias selected arrays, and gradient bindings on
+the selected arrays. Array `initial_data`/`zero_initialize` and gradients on
+external arrays are supported. Select additional slots only when independent
+scratch contents are needed; a larger ring increases preparation and storage
+costs and does not inherently accelerate execution.
+
 Independent prepares rebuild separate pools; selected CUDA binding families
 share their own pool and arrays. Allocation records retain pool backing through
 in-flight retirement, and closing an externally bound allocator retires its

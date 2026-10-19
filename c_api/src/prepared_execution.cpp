@@ -128,7 +128,8 @@ struct PreparedExecution {
       Runtime &runtime,
       const std::vector<FixedExecution::Operation> &operations,
       const std::vector<FixedExecution::Operation> &initializers = {},
-      const VulkanSubmissionRecipe *submission_recipe = nullptr) {
+      const VulkanSubmissionRecipe *submission_recipe = nullptr,
+      const OrderedStorageRing *storage_ring = nullptr) {
     gfx::GfxRuntime *gfx_runtime = nullptr;
 #ifdef TI_WITH_VULKAN
     if (auto *gfx = dynamic_cast<::GfxRuntime *>(&runtime))
@@ -171,7 +172,7 @@ struct PreparedExecution {
       native = std::make_unique<FixedExecution>(
           runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
           runtime.runtime_fault_domain(), family ? family->replay : nullptr,
-          family ? operands : nullptr, submission_recipe);
+          family ? operands : nullptr, submission_recipe, storage_ring);
       if (family) {
         family->prepared = true;
         family->arrays->sealed = true;
@@ -206,6 +207,13 @@ struct PreparedExecution {
       }
     };
     count_dispatches(operations);
+    if (storage_ring) {
+      // The compact template expands to equal frames during cold parsing.
+      // One replay selects one frame; memory statistics cover every frame.
+      if (dispatch_count % storage_ring->capacity)
+        throw MemoryBindingError("Storage ring dispatch counts differ between frames");
+      dispatch_count /= storage_ring->capacity;
+    }
     if (dispatch_count > std::numeric_limits<std::uint32_t>::max())
       throw MemoryBindingError(
           "Static dispatch count exceeds its C API representation");
@@ -628,10 +636,6 @@ static TiPreparedExecution prepare_execution_plan_impl(
     }
   }
   const auto &plan = family ? family->plan : parsed;
-  // The compact format is validated independently before replay is enabled.
-  // Never interpret its expanded frames as one ordinary execution sequence.
-  if (plan.storage_ring)
-    throw MemoryBindingError("Ordered storage ring replay is not available in this runtime");
   if (plan.vulkan_submission && rt.arch != taichi::Arch::vulkan)
     throw MemoryBindingError("Selected Vulkan submission requires Vulkan");
   const auto &resource_description =
@@ -1552,8 +1556,11 @@ static TiPreparedExecution prepare_execution_plan_impl(
   operations.erase(operations.begin(), split);
   if (plan.vulkan_submission && operations.size() != plan.operations.size())
     throw MemoryBindingError("Selected Vulkan submission changed replay boundaries");
+  if (plan.storage_ring && operations.size() != plan.operations.size())
+    throw MemoryBindingError("Ordered storage ring changed replay boundaries");
   prepared->prepare_operations(rt, operations, initializers,
-                              plan.vulkan_submission ? &*plan.vulkan_submission : nullptr);
+                              plan.vulkan_submission ? &*plan.vulkan_submission : nullptr,
+                              plan.storage_ring ? &*plan.storage_ring : nullptr);
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;

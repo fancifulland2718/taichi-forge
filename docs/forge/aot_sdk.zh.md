@@ -2222,6 +2222,31 @@ Graph 执行计划自动导出可保留已选的私有 ndarray 代次池，包�
 分配/绑定回调。未知 storage factory、依赖完成信号轮转的 ring，以及未经证明的临时
 调度仍在预检期报错，不会静默替换为普通分配。
 
+显式执行计划现支持CPU/CUDA/Vulkan上的有序私有存储轮转（plan v21）。原生执行器在
+准备期建立各槽绑定，每次调用只执行一个槽，仍使用同一有序后端队列：
+
+```python
+plan = aot.ExecutionPlan(
+    operations,
+    resources=[dict(kind="ndarray", name="scratch", dtype="f32", shape=[17],
+                    zero_initialize=True)],
+    storage_recipe=dict(kind="ordered_temporary_ring", version=1,
+                        capacity=3, arrays=["scratch"]),
+)
+```
+
+`operations`须通过固定kernel/copy/fill使用选中的私有数组。容量为可表示的正整数，
+保留展开大小的溢出检查和实际分配失败检查；三槽仅是示例，不是硬性限制。各槽数组
+内容独立保留，产物只存一份操作模板及kernel/初始数据。准备期展开绑定与存储，已选
+allocator仍共享。`dispatch_count`表示单次重放，参数/资源/工作区字节统计整个owner。
+依赖关闭或借用Program退出时，所有槽先退休再释放存储；重放不增加Python完成轮询。
+
+这一显式配方不提供Graph并行lanes，也不自动导出JIT的completion-ring arena。
+当前拒绝控制/native/image操作、动态launch、其他执行配方、显式初始化序列、依赖所选
+数组的共享别名，以及所选数组自身的梯度绑定；数组`initial_data`/`zero_initialize`
+和外部数组梯度可用。需要独立scratch内容时才增加槽数；槽越多，准备和存储成本越高，
+不会天然加快执行。
+
 独立 prepare 重建各自的池，已选 CUDA 参数绑定族共享其池和数组。分配记录持有池的
 底层存储直至在途工作退休；关闭外部绑定池会退休依赖的调用。重放不增加查询，也不
 增加第二个 TCM。数组字节仍计入 `resource_bytes`；驱动保留页不重复计入
