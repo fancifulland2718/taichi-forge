@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan bucket builders share preparation and recording, fix dense Field
+  descriptor alignment, and retain explicit logical extents and strides.
+  Packed offsets use buffer fills; private counting skips unused cursor writes,
+  and prefix scans move strategy branches outside the loop. Fixed native
+  operations own their scratch storage.
 - CUDA bucket builders combine the leading-offset and histogram clears and
   scan only bucket counts, reducing redundant launches and boundary scratch.
   Payload addressing no longer has the obsolete flattened-word count limit;

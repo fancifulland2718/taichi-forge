@@ -1,6 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 256) in;
+#include "bucket_params.glsl"
 
 #ifndef VALUE_KIND
 #define VALUE_KIND 0
@@ -35,30 +37,28 @@ layout(set = 0, binding = 3, std430) buffer Output {
 } output_buf;
 
 void main() {
-  uint idx = gl_GlobalInvocationID.x;
-  if (idx >= keys_buf.data.length()) {
+  uint idx = bucket_item_index();
+  if (idx >= params.n) {
     return;
   }
-  int key = keys_buf.data[idx];
-  if (key < 0 || uint(key) >= cursor_buf.data.length()) {
+  int key = keys_buf.data[params.keys_offset + idx * params.keys_stride];
+  if (key < 0 || uint(key) >= params.bins) {
     return;
   }
-  uint out_idx = uint(atomicAdd(cursor_buf.data[uint(key)], 1));
+  uint out_idx = uint(atomicAdd(cursor_buf.data[params.cursor_offset + uint(key)], 1));
 #if VALUE_KIND == 7
-  uint n = keys_buf.data.length();
-  uint item_words = n == 0u ? 0u : values_buf.data.length() / n;
-  uint dst_base = out_idx * item_words;
-  uint src_base = idx * item_words;
-  if (item_words > 0u &&
-      dst_base + item_words <= output_buf.data.length() &&
-      src_base + item_words <= values_buf.data.length()) {
+  uint item_words = params.item_words;
+  uint dst_base = params.output_offset + out_idx * params.output_stride;
+  uint src_base = params.values_offset + idx * params.values_stride;
+  if (out_idx < params.n) {
     for (uint lane = 0u; lane < item_words; ++lane) {
       output_buf.data[dst_base + lane] = values_buf.data[src_base + lane];
     }
   }
 #else
-  if (out_idx < output_buf.data.length()) {
-    output_buf.data[out_idx] = values_buf.data[idx];
+  if (out_idx < params.n) {
+    output_buf.data[params.output_offset + out_idx * params.output_stride] =
+        values_buf.data[params.values_offset + idx * params.values_stride];
   }
 #endif
 }

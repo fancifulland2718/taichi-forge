@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan bucket-builder 共用准备与录制路径，修复 dense Field 的 descriptor 对齐，
+  显式保留逻辑范围和步长；连续 offsets 使用 buffer fill，私有计数策略不再写无用
+  cursor，prefix 将策略分支移到循环外。固定原生操作拥有自己的临时存储。
 - CUDA bucket-builder 合并首项 offset 与 histogram 清零，仅扫描桶计数，减少
   冗余提交及分块边界工作区；移除过时的载荷总字数限制，保留实际计数及地址范围检查。
 - CPU bucket-builder 复用一张计数/游标表，并行临时存储减半，保留桶内次序和

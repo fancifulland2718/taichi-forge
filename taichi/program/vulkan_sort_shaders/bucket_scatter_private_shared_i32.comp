@@ -1,6 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 256) in;
+#include "bucket_params.glsl"
 
 #ifndef VALUE_KIND
 #define VALUE_KIND 0
@@ -43,11 +45,13 @@ shared int local_cursor[4096];
 void main() {
   const uint chunk_size = 2048u;
   uint lid = gl_LocalInvocationID.x;
-  uint chunk = gl_WorkGroupID.x;
-  uint chunks = gl_NumWorkGroups.x;
-  uint n = keys_buf.data.length();
-  uint item_words = n == 0u ? 0u : values_buf.data.length() / n;
-  uint num_bins = offsets_buf.data.length() - 1u;
+  uint chunk = bucket_group_index();
+  if (chunk >= params.chunks) {
+    return;
+  }
+  uint n = params.n;
+  uint item_words = params.item_words;
+  uint num_bins = params.bins;
 
   for (uint bin = lid; bin < num_bins; bin += 256u) {
     local_cursor[bin] = 0;
@@ -58,28 +62,28 @@ void main() {
   for (uint offset = lid; offset < chunk_size; offset += 256u) {
     uint idx = base + offset;
     if (idx < n) {
-      int key = keys_buf.data[idx];
+      int key = keys_buf.data[params.keys_offset + idx * params.keys_stride];
       if (key >= 0 && uint(key) < num_bins) {
         uint bin = uint(key);
         uint local_rank = uint(atomicAdd(local_cursor[bin], 1));
         uint chunk_base =
             uint(partial_buf.data[chunk * num_bins + bin]);
-        uint bucket_base = uint(offsets_buf.data[bin]);
+        uint bucket_base = uint(offsets_buf.data[
+            params.offsets_offset + bin * params.offsets_stride]);
         uint out_idx = bucket_base + chunk_base + local_rank;
 #if VALUE_KIND == 7
-        uint dst_base = out_idx * item_words;
-        uint src_base = idx * item_words;
-        if (item_words > 0u &&
-            dst_base + item_words <= output_buf.data.length() &&
-            src_base + item_words <= values_buf.data.length()) {
+        uint dst_base = params.output_offset + out_idx * params.output_stride;
+        uint src_base = params.values_offset + idx * params.values_stride;
+        if (out_idx < params.n) {
           for (uint lane = 0u; lane < item_words; ++lane) {
             output_buf.data[dst_base + lane] =
                 values_buf.data[src_base + lane];
           }
         }
 #else
-        if (out_idx < output_buf.data.length()) {
-          output_buf.data[out_idx] = values_buf.data[idx];
+        if (out_idx < params.n) {
+          output_buf.data[params.output_offset + out_idx * params.output_stride] =
+              values_buf.data[params.values_offset + idx * params.values_stride];
         }
 #endif
       }

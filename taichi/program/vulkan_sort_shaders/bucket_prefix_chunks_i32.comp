@@ -1,6 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 256) in;
+#include "bucket_params.glsl"
 
 layout(set = 0, binding = 0, std430) buffer Partial {
   int data[];
@@ -11,12 +13,12 @@ layout(set = 0, binding = 1, std430) buffer Offsets {
 } offsets_buf;
 
 void main() {
-  uint bin = gl_GlobalInvocationID.x;
-  uint num_bins = offsets_buf.data.length() - 1u;
+  uint bin = bucket_item_index();
+  uint num_bins = params.bins;
   if (bin >= num_bins) {
     return;
   }
-  uint chunks = partial_buf.data.length() / num_bins;
+  uint chunks = params.chunks;
   int running = 0;
   for (uint chunk = 0u; chunk < chunks; ++chunk) {
     uint idx = chunk * num_bins + bin;
@@ -25,7 +27,7 @@ void main() {
     running += count;
   }
   if (bin == 0u) {
-    offsets_buf.data[0] = 0;
+    offsets_buf.data[params.offsets_offset] = 0;
   }
-  offsets_buf.data[bin + 1u] = running;
+  offsets_buf.data[params.offsets_offset + (bin + 1u) * params.offsets_stride] = running;
 }

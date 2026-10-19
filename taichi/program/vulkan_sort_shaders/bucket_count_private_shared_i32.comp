@@ -1,6 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 256) in;
+#include "bucket_params.glsl"
 
 layout(set = 0, binding = 0, std430) readonly buffer Keys {
   int data[];
@@ -15,10 +17,12 @@ shared int local_hist[4096];
 void main() {
   const uint chunk_size = 2048u;
   uint lid = gl_LocalInvocationID.x;
-  uint chunk = gl_WorkGroupID.x;
-  uint chunks = gl_NumWorkGroups.x;
-  uint n = keys_buf.data.length();
-  uint num_bins = partial_buf.data.length() / chunks;
+  uint chunk = bucket_group_index();
+  if (chunk >= params.chunks) {
+    return;
+  }
+  uint n = params.n;
+  uint num_bins = params.bins;
 
   for (uint bin = lid; bin < num_bins; bin += 256u) {
     local_hist[bin] = 0;
@@ -29,7 +33,7 @@ void main() {
   for (uint offset = lid; offset < chunk_size; offset += 256u) {
     uint idx = base + offset;
     if (idx < n) {
-      int key = keys_buf.data[idx];
+      int key = keys_buf.data[params.keys_offset + idx * params.keys_stride];
       if (key >= 0 && uint(key) < num_bins) {
         atomicAdd(local_hist[uint(key)], 1);
       }

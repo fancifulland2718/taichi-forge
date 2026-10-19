@@ -278,6 +278,10 @@ if (TI_WITH_VULKAN)
 
     macro(ti_vulkan_builtin_shader source output target_env)
         set(output_path "${TI_VULKAN_SORT_GENERATED_SHADER_DIR}/${output}")
+        set(shader_dependencies "${TI_VULKAN_SORT_SHADER_SOURCE_DIR}/${source}")
+        if ("${source}" MATCHES "^bucket_")
+            list(APPEND shader_dependencies "${TI_VULKAN_SORT_SHADER_SOURCE_DIR}/bucket_params.glsl")
+        endif()
         if (TI_GLSLC_EXECUTABLE)
             add_custom_command(
                 OUTPUT "${output_path}"
@@ -289,7 +293,7 @@ if (TI_WITH_VULKAN)
                         -mfmt=c
                         "${TI_VULKAN_SORT_SHADER_SOURCE_DIR}/${source}"
                         -o "${output_path}"
-                DEPENDS "${TI_VULKAN_SORT_SHADER_SOURCE_DIR}/${source}"
+                DEPENDS ${shader_dependencies}
                 VERBATIM
             )
             list(APPEND TI_VULKAN_SORT_GENERATED_SPV_HEADERS "${output_path}")

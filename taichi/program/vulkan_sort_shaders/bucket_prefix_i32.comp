@@ -1,6 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 1) in;
+#include "bucket_params.glsl"
 
 layout(set = 0, binding = 0, std430) buffer Offsets {
   int data[];
@@ -12,13 +14,22 @@ layout(set = 0, binding = 1, std430) buffer Cursor {
 
 void main() {
   int running = 0;
-  uint num_offsets = offsets_buf.data.length();
-  uint num_bins = cursor_buf.data.length();
-  for (uint i = 0u; i < num_offsets; ++i) {
-    running += offsets_buf.data[i];
-    offsets_buf.data[i] = running;
-    if (i < num_bins) {
-      cursor_buf.data[i] = running;
+  uint offset = params.offsets_offset;
+  // Counts start at offsets[1]. Keep strategy and final-element handling
+  // outside the serial scan instead of branching for each bucket.
+  if (params.write_cursor != 0u) {
+    for (uint i = 0u; i < params.bins; ++i) {
+      offsets_buf.data[offset] = running;
+      cursor_buf.data[params.cursor_offset + i] = running;
+      offset += params.offsets_stride;
+      running += offsets_buf.data[offset];
+    }
+  } else {
+    for (uint i = 0u; i < params.bins; ++i) {
+      offsets_buf.data[offset] = running;
+      offset += params.offsets_stride;
+      running += offsets_buf.data[offset];
     }
   }
+  offsets_buf.data[offset] = running;
 }
