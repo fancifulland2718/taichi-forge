@@ -1020,12 +1020,9 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
   input_buffers_[BufferType::HashOverflow] = ti_params.hash_overflow_buffer;
   input_buffers_[BufferType::ListGen] = ti_params.listgen_buffer;
 
-  // Compiled_structs can be empty if loading a kernel from an AOT module as
-  // the SNode are not re-compiled/structured. In this case, we assume a
-  // single root buffer size configured from the AOT module.
-  for (int root = 0; root < ti_params.num_snode_trees; ++root) {
+  for (const auto &[root, allocation] : ti_params.root_buffers) {
     BufferInfo buffer = {BufferType::Root, root};
-    input_buffers_[buffer] = ti_params.root_buffers[root];
+    input_buffers_[buffer] = allocation;
   }
 #if defined(TI_WITH_VULKAN_POINTER)
   // B-3.b (2026-05): 注册独立 NodeAllocatorPool buffer。key 中 root_id[0] = sid。
@@ -1769,36 +1766,29 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   CompiledTaichiKernel::Params params;
   params.ti_kernel_attribs = &(reg_params.kernel_attribs);
-  params.num_snode_trees = reg_params.num_snode_trees;
   params.device = device_;
-  params.root_buffers = {};
-  if (reg_params.root_buffer_bindings.empty()) {
-    TI_ERROR_IF(reg_params.num_snode_trees > root_buffers_.size(),
-                "GFX kernel references missing root buffers.");
-    for (int root = 0; root < reg_params.num_snode_trees; ++root) {
-      params.root_buffers.push_back(root_buffers_[root].get());
-    }
-  } else {
+  if (!reg_params.root_buffer_bindings.empty()) {
     TI_ERROR_IF(reg_params.root_buffer_bindings.size() != reg_params.num_snode_trees,
                 "GFX AOT root binding count does not match its layouts.");
-    for (int root : reg_params.root_buffer_bindings) {
-      params.root_buffers.push_back(get_root_buffer(root));
-    }
   }
-  // Legacy registrations can omit the explicit dependency set. Recover it
-  // from their root bindings rather than visiting every live runtime tree.
-  if (reg_params.snode_tree_ids.empty()) {
-    for (const auto &task : reg_params.kernel_attribs.tasks_attribs) {
-      for (const auto &bind : task.buffer_binds) {
-        if (bind.buffer.type != BufferType::Root) continue;
-        TI_ASSERT(bind.buffer.root_id.size() == 1);
-        const int local = bind.buffer.root_id[0];
-        TI_ERROR_IF(local < 0 || local >= reg_params.num_snode_trees,
-                    "GFX task references invalid root {}", local);
-        reg_params.snode_tree_ids.push_back(
-            reg_params.root_buffer_bindings.empty()
-                ? local : reg_params.root_buffer_bindings.at(local));
-      }
+  // num_snode_trees describes the producer's layout namespace, not this
+  // kernel's dependencies. Cached ndarray kernels can have a nonzero count
+  // while referencing no roots, and may be reused in a root-free Program.
+  // Resolve only emitted bindings, retaining validation of every actual root.
+  const bool recover_dependencies = reg_params.snode_tree_ids.empty();
+  std::unordered_set<int> bound_roots;
+  for (const auto &task : reg_params.kernel_attribs.tasks_attribs) {
+    for (const auto &bind : task.buffer_binds) {
+      if (bind.buffer.type != BufferType::Root) continue;
+      TI_ASSERT(bind.buffer.root_id.size() == 1);
+      const int local = bind.buffer.root_id[0];
+      TI_ERROR_IF(local < 0 || static_cast<std::size_t>(local) >= reg_params.num_snode_trees,
+                  "GFX task references invalid root {}", local);
+      if (!bound_roots.insert(local).second) continue;
+      const int physical = reg_params.root_buffer_bindings.empty()
+                               ? local : reg_params.root_buffer_bindings[local];
+      params.root_buffers.emplace_back(local, get_root_buffer(physical));
+      if (recover_dependencies) reg_params.snode_tree_ids.push_back(physical);
     }
   }
   auto &used_trees = reg_params.snode_tree_ids;

@@ -153,10 +153,10 @@ class CompiledTaichiKernel {
     const TaichiKernelAttributes *ti_kernel_attribs{nullptr};
     // Borrowed only during synchronous pipeline construction.
     const std::vector<std::vector<uint32_t>> *spirv_bins{nullptr};
-    std::size_t num_snode_trees{0};
-
     Device *device{nullptr};
-    std::vector<DeviceAllocation *> root_buffers;
+    // Only referenced roots, keyed by the task's local root index. Unrelated
+    // producer layouts need not exist when an offline kernel is loaded.
+    std::vector<std::pair<int, DeviceAllocation *>> root_buffers;
     DeviceAllocation *global_tmps_buffer{nullptr};
     DeviceAllocation *hash_overflow_buffer{nullptr};
     DeviceAllocation *listgen_buffer{nullptr};

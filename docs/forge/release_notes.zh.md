@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan 离线缓存 kernel 只绑定 shader 实际引用的根缓冲，不再要求恢复 producer
+  中无关的 Field。修复纯 ndarray helper 和减少无关 Field 后的缓存加载失败，
+  同时保留实际缺失资源检查、AOT 局部根映射及原有退休合同。
+
 - 显式 AOT `builtin/bucket_builder` v1 支持 CPU/CUDA/Vulkan packed 标量与 tensor
   载荷、偏移 view 和空输入，复用各后端核心并由 prepared owner 持有临时存储。
   支持独立 runtime 消费与执行器借用；`PrimitiveSequence.bucket_builder()` 可免预热

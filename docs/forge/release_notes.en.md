@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan cached kernels bind only roots actually referenced by their shaders,
+  without requiring unrelated producer Fields. This fixes cached ndarray helpers
+  and kernels loaded with fewer unrelated Fields, while preserving missing-resource
+  checks, AOT local root mappings and existing retirement contracts.
+
 - Explicit AOT `builtin/bucket_builder` v1 supports CPU/CUDA/Vulkan packed scalar
   and tensor payloads, offset views and empty inputs, reusing backend cores with
   scratch owned by each prepared execution. Standalone runtime consumption and

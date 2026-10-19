@@ -46,6 +46,37 @@ TEST(GfxDescriptorBinding, AlignsBaseWithoutChangingLogicalAddress) {
                std::invalid_argument);
 }
 
+TEST(GfxSNodeResources, KernelBindingsRejectMissingRoots) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator::Params device_params;
+  vulkan::VulkanDeviceCreator creator(device_params);
+  gfx::GfxRuntime::Params runtime_params;
+  runtime_params.device = creator.device();
+  gfx::GfxRuntime runtime(runtime_params);
+  gfx::SNodeTreeResources resources;
+  resources.root_size = 16;
+  runtime.materialize_snode_tree_resources(0, resources);
+
+  gfx::GfxRuntime::RegisterParams params;
+  params.num_snode_trees = 3;
+  spirv::TaskAttributes task;
+  task.buffer_binds.push_back({{spirv::TaskAttributes::BufferType::Root, 2}, 0});
+  params.kernel_attribs.tasks_attribs.push_back(task);
+  // These fail before pipeline construction: only root zero is live.
+  EXPECT_ANY_THROW(runtime.register_taichi_kernel(params));
+  params.root_buffer_bindings = {0, 0, 17};
+  EXPECT_ANY_THROW(runtime.register_taichi_kernel(params));
+  params.root_buffer_bindings = {0, 0};
+  EXPECT_ANY_THROW(runtime.register_taichi_kernel(params));
+  params.root_buffer_bindings = {0, 0, 0};
+  params.kernel_attribs.tasks_attribs[0].buffer_binds[0].buffer.root_id = {3};
+  EXPECT_ANY_THROW(runtime.register_taichi_kernel(params));
+  runtime.remove_root_buffer(0);
+  params.kernel_attribs.tasks_attribs[0].buffer_binds[0].buffer.root_id = {0};
+  EXPECT_ANY_THROW(runtime.register_taichi_kernel(params));
+}
+
 TEST(GfxSNodeResources, ReconstructedModulesOwnDiagnosticIdentity) {
   if (!vulkan::is_vulkan_api_available())
     GTEST_SKIP();
