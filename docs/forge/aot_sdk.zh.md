@@ -3739,13 +3739,30 @@ Neo-Hookean 材料。预测、两轮颜色迭代及收尾沿用已有 Graph/kern
 在途退休与 Vulkan 同步验证通过。真实 stable Neo-Hookean 能量及其矩阵梯度也与独立
 应力参考一致，包含倒置和奇异形变输入；这不代表整个 VBD 求解或接触已有自动伴随。
 
-正常安装的 CUDA sm120 应用包在原 solve/render/candidates 之外增加 `fem_step` 和
+FEM 资格批次的 CUDA sm120 应用包在原 solve/render/candidates 之外增加 `fem_step` 和
 `fem_material`，仍只有一个340,517字节TCM。应用wheel为58,828,410字节（+89,040），
 534个宿主二进制及依赖声明不变。新增两入口和原三入口安装消费通过；Forge组件与44个
 外部依赖记录不变。固定FEM入口的几何、材料保持冻结，已编译宿主SDK仍通过原公开API
 创建新场景；独立仿真使用不同loaded module。CPU/Vulkan资格来自分别导出的产物，
 不把CUDA二进制视为跨后端包。本机cubin FEM首次prepare约4.7ms，runtime初始化与
 整个module加载仍须单独计入启动成本。
+
+随后，公开 MPM 场景构建暴露的按需宿主依赖缺口已补齐：新增三个已编译粒子化模块，
+原 534 个宿主二进制逐字节保留。16 粒子、两种弹性材料、dense 网格的完整
+P2G／网格更新／G2P 在 Windows CPU/CUDA/Vulkan 上通过独立及借用消费、六步状态与
+网格清零检查；独立 f64 APIC 参考、真实 log Neo-Hookean 能量的矩阵梯度及 Vulkan
+同步验证通过。此资格不包含接触、塑性、流体、实验性 sparse solver 或完整步自动伴随。
+
+当前 CUDA sm120 应用包共七个入口，新增 `mpm_step`／`mpm_material`，仍只有一个
+381,034 字节 TCM；应用 wheel 为 59,071,418 字节，比 FEM 批次增加 243,008 字节。
+新旧入口均通过正常安装消费，Forge 组件及 44 个外部依赖记录不变。MPM cubin 整步
+首次 prepare 约 4.9ms，独立 runtime 初始化约 307ms，联合 module 加载约 8–16ms。
+固定入口的粒子、材料和步长冻结；新场景由已编译宿主公开接口创建。
+
+运行成本仍需按后端和提交节奏判断。相同借用执行器、预热与显式等待下，连续 16 步后
+等待一次的本机小样本，CUDA JIT/AOT 约 21.6/19.6μs 每步；Vulkan 约 64.6/152.6μs。
+Vulkan AOT 的 host 提交更低，但整体执行仍较慢，该差距尚未定位，不能宣称普遍加速。
+这些短测试用于发现回退，不是中大规模吞吐或跨设备性能资格。
 
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是

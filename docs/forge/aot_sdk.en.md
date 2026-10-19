@@ -4927,7 +4927,7 @@ The actual stable Neo-Hookean energy and its matrix gradient also match an
 independent stress reference, including inverted and singular deformation inputs.
 This does not qualify an automatic adjoint of the entire VBD solve or contact.
 
-The installed CUDA sm120 package now includes `fem_step` and `fem_material` beside
+The FEM qualification CUDA sm120 package includes `fem_step` and `fem_material` beside
 `solve`, `render` and `candidates` in its sole 340,517-byte TCM. The application
 wheel is 58,828,410 bytes (+89,040), with all 534 host binaries and dependency
 declarations unchanged. Both new entries and the previous three pass installed
@@ -4937,6 +4937,33 @@ scenes through its existing public APIs. Independent simulations use separate
 loaded modules. The CPU/Vulkan checks use separately exported artifacts, not the
 CUDA binary. On this Windows system, cubin FEM preparation takes about 4.7 ms;
 runtime initialization and whole-module loading remain separate startup costs.
+
+The subsequent public MPM scene build exposed a missing lazy host dependency.
+Three compiled particleization modules complete that path while preserving all
+534 previous host binaries byte for byte. A complete 16-particle, two-elastic-
+material dense-grid P2G/grid-update/G2P step passes standalone and borrowed
+consumption on Windows CPU/CUDA/Vulkan, including six consecutive states and
+grid clearing. An independent f64 APIC reference, the actual log Neo-Hookean
+energy gradient, and Vulkan synchronization validation pass. Contact, plasticity,
+fluid, the experimental sparse solver and whole-step autodiff remain outside
+this qualification.
+
+The current CUDA sm120 application has seven entries, adding `mpm_step` and
+`mpm_material` in its sole 381,034-byte TCM. Its wheel is 59,071,418 bytes, an
+increase of 243,008 bytes over the FEM batch. Installed consumption of new and
+existing entries passes; Forge and all 44 external dependency records are
+unchanged. Initial MPM cubin preparation takes about 4.9 ms, standalone runtime
+initialization about 307 ms, and combined-module loading about 8–16 ms on this
+system. Fixed-entry particles, materials and timestep remain frozen; the compiled
+host public API creates new scenes.
+
+Runtime costs still depend on backend and submission cadence. With the same
+borrowed executor, warm-up and explicit wait, a small paired sample submitting
+16 steps before waiting measures CUDA JIT/AOT at about 21.6/19.6 microseconds per
+step and Vulkan at 64.6/152.6. Vulkan AOT reduces host submission cost but still
+completes more slowly; the cause remains unresolved. These short checks identify
+regressions, not general speedups, large-workload throughput or device-wide
+performance qualification.
 
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
