@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Host producer scripts retain LF checkout bytes across Git newline settings,
+  preventing unchanged source-hidden modules from recompiling solely because
+  the checkout uses `core.autocrlf`. Exact toolchain and artifact checks remain.
+
 - Graph submission telemetry accepts single-element scalar i32 control arrays
   at any index rank, matching ordinary structured execution. Enabling telemetry
   no longer rejects valid `(1,)` or `(1, 1)` predicate/counter arrays.

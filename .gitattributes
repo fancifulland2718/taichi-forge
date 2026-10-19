@@ -1,0 +1,5 @@
+# Host cache identity hashes these producer files byte for byte. Keep checkout
+# bytes stable across core.autocrlf settings without weakening cache validation.
+python/taichi_forge/tools/_host_build.py text eol=lf
+python/taichi_forge/tools/_compiled_host.py text eol=lf
+python/taichi_forge/tools/_native_host.py text eol=lf
