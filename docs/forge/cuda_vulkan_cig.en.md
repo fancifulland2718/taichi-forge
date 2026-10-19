@@ -58,9 +58,11 @@ device. Failed native retirement quarantines its exact owner and rejects retry.
 
 On the tested Windows / RTX 5090 / driver 610.88 / Driver API 13030 system,
 ordinary device and managed allocations execute kernels and graphs. Async
-allocation returns success, but kernel access fails with
-`CUDA_ERROR_ILLEGAL_ADDRESS`. Allocation return codes alone are insufficient.
-This observation does not qualify other GPUs or future drivers.
+allocation returns success, but direct kernel access has repeatedly faulted with
+`CUDA_ERROR_ILLEGAL_ADDRESS`; successful direct and graph accesses were also
+observed. These mixed results do not qualify the async/pool route and do not mean
+every access fails. Allocation return codes or a single successful access are
+insufficient. This observation does not qualify other GPUs or future drivers.
 
 CiG therefore uses retained ordinary device blocks for runtime arrays, parameter
 packets, fixed binding frames, and Graph-owned storage. Cold initialization or

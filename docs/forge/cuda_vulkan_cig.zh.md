@@ -54,9 +54,11 @@ runtime；**不能销毁并换绑 Vulkan device，也不能把窗口关闭当成
 ## 分配与稳态成本
 
 本机 Windows / RTX 5090 / 610.88 / Driver API 13030 的原生检查发现：普通设备内存和
-managed 内存可执行 kernel 和 Graph；async allocation 返回成功后，实际 kernel
-访问会触发 `CUDA_ERROR_ILLEGAL_ADDRESS`。因此 CiG 不走原生 async/pool 分配。
-这个结果不能外推到所有 GPU 和未来驱动，也不能仅用分配返回码认定可用。
+managed 内存可执行 kernel 和 Graph；async allocation 返回成功后，直接 kernel
+访问多次触发 `CUDA_ERROR_ILLEGAL_ADDRESS`，但也观察到直接访问和 Graph 访问成功。
+这组结果不足以证明 async/pool 路线可靠，也不能称其必定失败；CiG 因此使用已验证的
+普通 device allocation 保留池。不能仅用分配返回码或单次成功认定可用，也不能将
+本机结果外推到所有 GPU 和未来驱动。
 
 CiG 的等价后端使用普通 device allocation，覆盖 runtime array、参数包、固定 binding
 frame 和 Graph 自有存储。冷初始化或容量增长时分配，释放时记录该 stream 前缀的事件，
