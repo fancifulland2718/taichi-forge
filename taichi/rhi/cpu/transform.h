@@ -7,6 +7,19 @@
 
 namespace taichi::lang::cpu {
 
+inline int transform_partitions(std::size_t scalar_count,
+                                int max_threads,
+                                bool packed_tensor) {
+  if (!packed_tensor)
+    return simple_loop_partitions(scalar_count, max_threads);
+  // Preserve the existing packed-transform policy, which has a lower parallel
+  // crossover than the scalar loop. This is a scheduling choice, not a limit.
+  const auto chunks = scalar_count / 32768 + (scalar_count % 32768 != 0);
+  const int target = static_cast<int>(std::min<std::size_t>(
+      chunks, static_cast<std::size_t>(std::max(1, max_threads))));
+  return scalar_count >= 65536 && target > 1 ? target : 1;
+}
+
 template <typename T>
 struct TransformTaskContext {
   const T *src{nullptr};

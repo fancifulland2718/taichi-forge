@@ -93,6 +93,9 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         transform = ti.algorithms.primitive_capability("transform").aot_routes
         assert any(r.forms == ("transform",) and r.backends == ("cpu", "cuda", "vulkan") for r in transform)
         assert any(r.forms == ("builtin/transform",) and "f64_coefficient_bits" in r.constraints for r in transform)
+        tensor_transform = next(r for r in transform if "one_dimensional_packed_tensor_ndarrays" in r.constraints)
+        assert tensor_transform.backends == ("cpu", "cuda", "vulkan")
+        assert "preserved_cpu_partition_policy_cuda_lane_launches_vulkan_packed_dispatch" in tensor_transform.constraints
         fused = next(r for r in transform if r.forms == ("transform_gather_scatter",))
         assert fused.backends == ("vulkan",)
         assert {"selected_fused_strategy", "all_intermediate_outputs", "single_dispatch"} <= set(fused.constraints)

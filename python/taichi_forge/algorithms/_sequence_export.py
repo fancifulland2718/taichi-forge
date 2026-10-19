@@ -131,8 +131,14 @@ def _transform(call, context):
     src, dst = call.args
     algorithms._check_transform_request(src, dst, call.kwargs["method"], call.workspace)
     source, destination = (packed_description(a) for a in call.args)
-    if any(len(d.index_shape) != 1 or d.element_shape for d in (source, destination)):
-        raise TaichiRuntimeError("AOT transform requires one-dimensional packed scalar storage")
+    if any(len(d.index_shape) != 1 for d in (source, destination)):
+        raise TaichiRuntimeError("AOT transform requires one-dimensional packed storage")
+    element_shape = tuple(source.element_shape)
+    tensor = bool(element_shape)
+    if element_shape != tuple(destination.element_shape) or (tensor and any(
+        type(a) not in (algorithms.VectorNdarray, algorithms.MatrixNdarray) for a in call.args
+    )):
+        raise TaichiRuntimeError("AOT tensor transform requires matching packed vector/matrix ndarrays")
     scale, bias = algorithms._normalize_transform_args(src.dtype, call.kwargs["scale"], call.kwargs["bias"])
     arch = impl.current_cfg().arch
     backend, capability = {
@@ -149,22 +155,28 @@ def _transform(call, context):
         algorithms._transform_value_type(src.dtype)
     ):
         raise TaichiRuntimeError("AOT transform dtype is unavailable on this Vulkan device")
+    methods = {
+        "cpu_transform_affine_packed_strided_ndarray",
+        "cuda_device_transform_affine_packed_strided_ndarray",
+        "vulkan_transform_affine_packed_strided_ndarray",
+    } if tensor else {
+        "cpu_transform_affine_ndarray", "cpu_transform_affine_dense_field",
+        "cuda_device_transform_affine_ndarray", "cuda_device_transform_affine_dense_field",
+        "vulkan_transform_affine_ndarray", "vulkan_transform_affine_dense_field",
+        "vulkan_transform_affine_ndarray_trusted", "vulkan_transform_affine_dense_field_trusted",
+    }
     if call.plan is not None and (
         type(call.plan) is not algorithms._NativePrimitivePlan
         or not algorithms._native_plan_request_matches(call.plan, backend, (src, dst), (scale, bias))
-        or call.plan.method_name not in {
-            "cpu_transform_affine_ndarray", "cpu_transform_affine_dense_field",
-            "cuda_device_transform_affine_ndarray", "cuda_device_transform_affine_dense_field",
-            "vulkan_transform_affine_ndarray", "vulkan_transform_affine_dense_field",
-            "vulkan_transform_affine_ndarray_trusted", "vulkan_transform_affine_dense_field_trusted",
-        }
+        or call.plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT transform cannot reconstruct the selected cached strategy")
     context.operations.append(dict(
         kind="native", provider="builtin", operation="transform", version=1,
         parameters=dict(size=source.index_shape[0], dtype=str(source.scalar_type),
                         scale_bits=Scalar("f64", float(scale)).resource("scale")["bits"],
-                        bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"]),
+                        bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"],
+                        **(dict(element_shape=list(element_shape)) if tensor else {})),
         bindings=dict(src=context.retained_arrays.require(src),
                       dst=context.retained_arrays.require(dst)),
     ))

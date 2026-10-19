@@ -50,6 +50,13 @@ bool driver_transform_available();
 // Resolve immutable code before CUDA capture. Fixed recordings use the explicit
 // stream entry; ordinary Program submission retains the default-stream wrapper.
 void driver_prepare_transform(CudaTransformValueType value_type);
+void driver_prepare_transform_strided(CudaTransformValueType value_type);
+
+std::size_t driver_transform_affine_strided_on_stream(
+    void *src, void *dst, std::uint32_t num_items,
+    CudaTransformValueType value_type, std::size_t src_offset,
+    std::size_t src_stride, std::size_t dst_offset, std::size_t dst_stride,
+    double scale, double bias, void *stream);
 
 std::size_t driver_transform_affine_on_stream(void *src,
                                              void *dst,

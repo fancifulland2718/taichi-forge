@@ -18581,11 +18581,8 @@ std::size_t Program::cpu_transform_affine_packed_strided_ndarray(
       n * static_cast<std::size_t>(std::max(1, lane_count));
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((total + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = total >= 65536 && target_threads > 1;
+  const int target_threads = cpu::transform_partitions(total, max_threads, true);
+  const bool use_parallel = target_threads > 1;
 
   const auto src_addr = get_ndarray_data_ptr_as_int(src);
   const auto dst_addr = get_ndarray_data_ptr_as_int(dst);

@@ -11560,7 +11560,7 @@ VulkanPreparedTransform prepare_vulkan_transform(
     std::size_t src_element_size,
     std::size_t dst_element_size,
     int value_type,
-    int lane_count,
+    std::size_t lane_count,
     std::size_t src_offset,
     std::size_t src_stride,
     std::size_t dst_offset,
@@ -11630,7 +11630,9 @@ VulkanPreparedTransform prepare_vulkan_transform(
         "Vulkan native transform currently supports at most UINT32_MAX items.");
   }
 
-  const size_t scalar_count = n * static_cast<size_t>(lane_count);
+  TI_ERROR_IF(lane_count && n > std::numeric_limits<size_t>::max() / lane_count,
+              "Vulkan transform scalar count overflows address space");
+  const size_t scalar_count = n * lane_count;
   if (!trusted) {
     TI_ERROR_IF(scalar_count >
                     static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
@@ -11827,7 +11829,8 @@ class FixedVulkanTransform final : public NativeOperation {
       resolve_native_storage_range(Arch::vulkan, array->pointer, array->bytes);
     }
     const std::size_t width = op.value_type < 3 ? 4 : 8;
-    const auto bytes = op.size * width;
+    const auto record = transform_item_bytes(op);
+    const auto bytes = op.size * record;
     if (bytes > device.get_storage_buffer_binding_limits().max_range)
       throw std::invalid_argument("Transform exceeds Vulkan descriptor range");
     validate_native_disjoint_writes(
@@ -11835,8 +11838,9 @@ class FixedVulkanTransform final : public NativeOperation {
         {{resolve_native_storage_range(Arch::vulkan, dst_, bytes), 0}});
     cache_.ensure_pipelines(&device);
     prepared_ = prepare_vulkan_transform(
-        nullptr, &device, cache_, src_, dst_, op.size, width, width, op.value_type,
-        1, src_.offset, width, dst_.offset, width, op.scale, op.bias, false, false);
+        nullptr, &device, cache_, src_, dst_, op.size, record, record, op.value_type,
+        record / width, src_.offset, record, dst_.offset, record, op.scale,
+        op.bias, !op.element_shape.empty(), !op.element_shape.empty());
   }
   Arch arch() const override { return Arch::vulkan; }
   Device &device() const override { return device_; }

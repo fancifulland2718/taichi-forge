@@ -4,7 +4,7 @@
 
 namespace taichi::lang {
 
-// Packed scalar affine transform. Exact in-place or physically disjoint ranges;
+// Packed scalar/tensor affine transform. Exact in-place or disjoint ranges;
 // only the selected prefix is written. Coefficients retain the native double
 // argument contract and convert to the selected arithmetic type at preparation.
 struct TransformOperation {
@@ -16,7 +16,10 @@ struct TransformOperation {
   double bias{0};
   NativeArrayBinding src;
   NativeArrayBinding dst;
+  std::vector<std::uint64_t> element_shape;
 };
+
+std::size_t transform_item_bytes(const TransformOperation &operation);
 
 // One transform/gather/scatter dispatch, including both visible intermediate
 // outputs. Writable ranges must be disjoint from each other and both inputs.

@@ -952,6 +952,22 @@ TEST(NativeOperationRegistry, TransformSchemaUsesExactScalarBits) {
   }
 }
 
+TEST(NativeOperationRegistry, TransformTensorLayoutIsCheckedBeforeBinding) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"transform","version":1,
+      "parameters":{"size":7,"dtype":"u64","element_shape":[2,3],
+      "scale_bits":"4008000000000000","bias_bits":"401c000000000000"},
+      "bindings":{"src":"s","dst":"d"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "transform");
+  for (const char *shape : {"true", "[0]", "[-1]", "[1.5]", "[true]",
+                            "[9223372036854775807]", "[4294967296,4294967296]"}) {
+    auto bad = op;
+    bad.parameters.obj.inner["element_shape"] = liong::json::parse_complete(shape);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << shape;
+  }
+}
+
 TEST(NativeOperationRegistry, IndexedTransformRequiresEveryObservableOutput) {
   const auto &registry = native_operation_registry();
   auto op = NativeOperationDescription::parse(liong::json::parse_complete(

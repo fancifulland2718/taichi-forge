@@ -32,6 +32,7 @@ void validate(Device &device, const TransformOperation &op) {
     throw std::invalid_argument(
         "Transform requires nonempty supported storage");
   const std::uint64_t width = op.value_type < 3 ? 4 : 8;
+  const auto record = transform_item_bytes(op);
   if (op.value_type != 1 && op.value_type != 5) {
     const bool is_signed = op.value_type == 0 || op.value_type == 4;
     const double bound = std::ldexp(1., width * 8 - int(is_signed));
@@ -46,13 +47,13 @@ void validate(Device &device, const TransformOperation &op) {
     if (array->pointer.device != &device)
       throw std::invalid_argument("Transform requires same-device arrays");
     validate_native_array_layout(*array, {{op.size},
-                                          {},
-                                          width,
+                                          op.element_shape,
+                                          record,
                                           width,
                                           false,
                                           types[op.value_type]->to_string()});
-    if (array->shape[0] > std::numeric_limits<std::size_t>::max() / width ||
-        array->bytes != array->shape[0] * width)
+    if (array->shape[0] > std::numeric_limits<std::size_t>::max() / record ||
+        array->bytes != array->shape[0] * record)
       throw std::invalid_argument(
           "Transform requires exact packed storage extents");
   }
@@ -61,12 +62,15 @@ void validate(Device &device, const TransformOperation &op) {
 class TransformBase : public NativeOperation {
  public:
   TransformBase(Arch arch, Device &device, const TransformOperation &op)
-      : arch_(arch), device_(device), size_(op.size), type_(op.value_type) {
+      : arch_(arch), device_(device), size_(op.size),
+        record_bytes_(transform_item_bytes(op)),
+        scalar_count_(op.size * (record_bytes_ / (op.value_type < 3 ? 4 : 8))),
+        type_(op.value_type) {
     for (const auto *array : {&op.src, &op.dst}) {
       validate_native_shader_storage(arch, array->pointer);
       resolve_native_storage_range(arch, array->pointer, array->bytes);
     }
-    const auto bytes = size_ * (type_ < 3 ? 4 : 8);
+    const auto bytes = size_ * record_bytes_;
     validate_native_disjoint_writes(
         {resolve_native_storage_range(arch, op.src.pointer, bytes)},
         {{resolve_native_storage_range(arch, op.dst.pointer, bytes), 0}});
@@ -85,6 +89,7 @@ class TransformBase : public NativeOperation {
   Arch arch_;
   Device &device_;
   std::size_t size_;
+  std::size_t record_bytes_, scalar_count_;
   int type_;
   void *src_{nullptr}, *dst_{nullptr};
 };
@@ -102,7 +107,8 @@ class CpuTransform final : public TransformBase {
         bias_(bias),
         pool_(context.cpu_thread_pool),
         partitions_(
-            cpu::simple_loop_partitions(size_, context.cpu_max_threads)) {
+            cpu::transform_partitions(scalar_count_, context.cpu_max_threads,
+                                       !op.element_shape.empty())) {
     auto *cpu = dynamic_cast<cpu::CpuDevice *>(&device_);
     if (!cpu ||
         cpu->map_range_for_cpu_native(op.src.pointer, op.src.bytes, &src_) !=
@@ -114,7 +120,7 @@ class CpuTransform final : public TransformBase {
           "Transform CPU storage or scheduler is invalid");
   }
   void run_cpu() override {
-    cpu::transform(static_cast<const T *>(src_), static_cast<T *>(dst_), size_,
+    cpu::transform(static_cast<const T *>(src_), static_cast<T *>(dst_), scalar_count_,
                    scale_, bias_, partitions_, pool_);
   }
 
@@ -161,7 +167,7 @@ class CudaTransform final : public TransformBase {
   CudaTransform(Device &device, const TransformOperation &op)
       : TransformBase(Arch::cuda, device, op),
         scale_(op.scale),
-        bias_(op.bias) {
+        bias_(op.bias), packed_(!op.element_shape.empty()) {
     if (size_ > std::numeric_limits<std::uint32_t>::max())
       throw std::invalid_argument(
           "Transform exceeds the CUDA uint32 shader count ABI");
@@ -172,10 +178,23 @@ class CudaTransform final : public TransformBase {
            op.src.pointer.offset;
     dst_ = static_cast<char *>(cuda->get_memory_addr(op.dst.pointer)) +
            op.dst.pointer.offset;
-    cuda::driver_prepare_transform(
-        static_cast<cuda::CudaTransformValueType>(type_));
+    if (packed_)
+      cuda::driver_prepare_transform_strided(
+          static_cast<cuda::CudaTransformValueType>(type_));
+    else
+      cuda::driver_prepare_transform(
+          static_cast<cuda::CudaTransformValueType>(type_));
   }
   void record_cuda(void *stream) override {
+    if (packed_) {
+      const auto width = type_ < 3 ? 4u : 8u;
+      for (std::size_t offset = 0; offset < record_bytes_; offset += width)
+        cuda::driver_transform_affine_strided_on_stream(
+            src_, dst_, static_cast<std::uint32_t>(size_),
+            static_cast<cuda::CudaTransformValueType>(type_), offset,
+            record_bytes_, offset, record_bytes_, scale_, bias_, stream);
+      return;
+    }
     cuda::driver_transform_affine_on_stream(
         src_, dst_, static_cast<std::uint32_t>(size_),
         static_cast<cuda::CudaTransformValueType>(type_), scale_, bias_,
@@ -184,6 +203,7 @@ class CudaTransform final : public TransformBase {
 
  private:
   double scale_, bias_;
+  bool packed_;
 };
 #endif
 
@@ -194,6 +214,20 @@ double coefficient(const operation_json::JsonValue &value) {
   return result;
 }
 }  // namespace
+
+std::size_t transform_item_bytes(const TransformOperation &op) {
+  if (op.value_type < 0 || op.value_type >= transform_types().size())
+    throw std::invalid_argument("Transform requires a supported dtype");
+  std::size_t bytes = op.value_type < 3 ? 4 : 8;
+  for (const auto axis : op.element_shape) {
+    if (!axis || axis > std::numeric_limits<std::size_t>::max() / bytes)
+      throw std::invalid_argument("Transform payload exceeds address space");
+    bytes *= axis;
+  }
+  if (op.size > std::numeric_limits<std::size_t>::max() / bytes)
+    throw std::invalid_argument("Transform prefix exceeds address space");
+  return bytes;
+}
 
 void validate_indexed_transform_operation(
     Device &device, const IndexedTransformOperation &op) {
@@ -259,7 +293,7 @@ void register_transform_operation(NativeOperationRegistry &registry) {
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<TransformOperation> {
         operation_json::fields(parameters,
-                               {"size", "dtype", "scale_bits", "bias_bits"});
+                               {"size", "dtype", "scale_bits", "bias_bits", "element_shape"});
         const auto size = operation_json::integer(parameters["size"]);
         if (!size || size > std::numeric_limits<std::size_t>::max())
           throw std::invalid_argument(
@@ -274,14 +308,28 @@ void register_transform_operation(NativeOperationRegistry &registry) {
               "Transform requires a supported numeric type");
         const auto scale = coefficient(parameters["scale_bits"]);
         const auto bias = coefficient(parameters["bias_bits"]);
+        std::vector<std::uint64_t> element_shape;
+        const auto shape = parameters.obj.inner.find("element_shape");
+        if (shape != parameters.obj.inner.end()) {
+          if (!shape->second.is_arr())
+            throw std::invalid_argument("Transform element_shape must be an array");
+          for (const auto &axis : shape->second.arr.inner)
+            element_shape.push_back(operation_json::integer(axis));
+        }
+        // Decode layout arithmetic before binding or allocating consumer state.
+        TransformOperation descriptor;
+        descriptor.size = size;
+        descriptor.value_type = type;
+        descriptor.element_shape = element_shape;
+        transform_item_bytes(descriptor);
         return
-            [size, type, scale, bias](const NativeOperationBindings &bindings) {
+            [size, type, scale, bias, element_shape](const NativeOperationBindings &bindings) {
               return TransformOperation{static_cast<std::size_t>(size),
                                         type,
                                         scale,
                                         bias,
                                         bindings.at("src").array(),
-                                        bindings.at("dst").array()};
+                                        bindings.at("dst").array(), element_shape};
             };
       });
 #ifdef TI_WITH_LLVM

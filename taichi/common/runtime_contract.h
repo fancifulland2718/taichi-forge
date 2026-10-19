@@ -11,7 +11,7 @@ namespace taichi {
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Indexed-transform fusion retains both visible intermediate output bindings.
 // Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 107;
+inline constexpr int kForgeNativeAbiRevision = 108;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

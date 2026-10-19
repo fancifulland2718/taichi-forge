@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CPU/CUDA/Vulkan AOT transform 序列通过共享 `builtin/transform` 描述支持 packed
+  向量／矩阵 ndarray，准备时验证 tensor shape、前缀范围及精确原地别名。CPU 保留
+  tensor 分区策略，CUDA 在 owner stream 上保留逐 lane strided launch，Vulkan
+  保留一次 packed dispatch；无新增应用 shader 或 scratch，下游向量 kernel 梯度
+  仍可用。此扩展需配套的私有 ABI108 runtime／前端组件。
+
 - CPU/CUDA/Vulkan 的 `PrimitiveSequence.segmented_scan` 可保留 serial 或整数
   global-scan 策略、inclusive/exclusive、精确原地绑定及各策略的 padding 行为导出。
   独立消费者恢复不可变 host/device 拓扑、私有 bases 和 dense Field 快照；共享

@@ -34,6 +34,14 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU/CUDA/Vulkan AOT transform sequences support packed vector/matrix ndarrays
+  through the shared `builtin/transform` descriptor. Tensor shape, prefix ranges
+  and exact in-place aliases are checked during preparation. CPU retains its
+  tensor partition policy, CUDA retains per-lane strided launches on the owner's
+  stream, and Vulkan retains its packed dispatch. No application shader or scratch
+  is added; downstream vector-kernel gradients remain usable. This requires the
+  matched private ABI 108 runtime/frontend components.
+
 - CPU/CUDA/Vulkan `PrimitiveSequence.segmented_scan` exports its serial or integer
   global-scan strategy, inclusive/exclusive mode, exact in-place bindings and
   strategy-specific padding behavior. Consumers retain immutable host/device
