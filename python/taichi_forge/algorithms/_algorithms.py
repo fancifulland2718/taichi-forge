@@ -15759,40 +15759,9 @@ def _try_cuda_device_grouped_reduce(
     if (keys_is_member or values_is_member or output_is_member) and _prog_has(
         prog, "cuda_device_grouped_reduce_atomic_strided_keys_ndarray"
     ):
-        if segmented:
-            method = _prog_method(
-                prog, "cuda_device_grouped_reduce_segmented_strided_keys_ndarray"
-            )
-            if method is None:
-                return False
-            offsets, scratch, cursor = workspace._get_native_buffers_typed(
-                keys.shape[0], num_groups, values.dtype
-            )
-            keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
-            values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
-            output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-            call_args = (
-                keys_arr,
-                values_arr,
-                output_arr,
-                offsets.arr,
-                scratch.arr,
-                cursor.arr,
-                value_type,
-                keys_offset,
-                keys_stride,
-                values_offset,
-                values_stride,
-                output_offset,
-                output_stride,
-                op_id,
-            )
-            temp_bytes = method(*call_args)
-            return finish(
-                "cuda_device_grouped_reduce_segmented_strided_keys_ndarray",
-                call_args,
-                temp_bytes,
-            )
+        # CUDA's segmented/two-level entry already executes zero + atomic
+        # scatter. Bind that actual implementation without allocating the
+        # unused offsets, reordered values and cursor of a bucket plan.
         keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
         output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
@@ -15819,7 +15788,7 @@ def _try_cuda_device_grouped_reduce(
         )
     if keys_is_member or values_is_member or output_is_member:
         return False
-    if not segmented and _prog_has(prog, "cuda_device_grouped_reduce_atomic_ndarray"):
+    if _prog_has(prog, "cuda_device_grouped_reduce_atomic_ndarray"):
         call_args = (keys.arr, values.arr, output.arr, value_type, op_id)
         temp_bytes = _prog_method(
             prog, "cuda_device_grouped_reduce_atomic_ndarray"
@@ -15827,52 +15796,7 @@ def _try_cuda_device_grouped_reduce(
         return finish(
             "cuda_device_grouped_reduce_atomic_ndarray", call_args, temp_bytes
         )
-    if not segmented and value_type == 0 and _prog_has(
-        prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"
-    ):
-        call_args = (keys.arr, values.arr, output.arr, op_id)
-        temp_bytes = _prog_method(
-            prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"
-        )(*call_args)
-        return finish(
-            "cuda_device_grouped_reduce_i32_atomic_ndarray", call_args, temp_bytes
-        )
-    if segmented and _prog_has(prog, "cuda_device_grouped_reduce_ndarray"):
-        offsets, scratch, cursor = workspace._get_native_buffers_typed(
-            n, num_groups, values.dtype
-        )
-        call_args = (
-            keys.arr,
-            values.arr,
-            output.arr,
-            offsets.arr,
-            scratch.arr,
-            cursor.arr,
-            value_type,
-            op_id,
-        )
-        temp_bytes = _prog_method(prog, "cuda_device_grouped_reduce_ndarray")(
-            *call_args
-        )
-        return finish("cuda_device_grouped_reduce_ndarray", call_args, temp_bytes)
-    if segmented and value_type != 0:
-        return False
-    if not _prog_has(prog, "cuda_device_grouped_reduce_i32_ndarray"):
-        return False
-    offsets, scratch, cursor = workspace._get_native_buffers(n, num_groups)
-    call_args = (
-        keys.arr,
-        values.arr,
-        output.arr,
-        offsets.arr,
-        scratch.arr,
-        cursor.arr,
-        op_id,
-    )
-    temp_bytes = _prog_method(prog, "cuda_device_grouped_reduce_i32_ndarray")(
-        *call_args
-    )
-    return finish("cuda_device_grouped_reduce_i32_ndarray", call_args, temp_bytes)
+    return False
 
 
 def _try_vulkan_grouped_reduce(

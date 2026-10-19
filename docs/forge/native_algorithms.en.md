@@ -57,6 +57,14 @@ capability.
 The `experimental_` prefix means the entry point is Forge public API but may
 evolve more conservatively than long-standing vanilla APIs.
 
+For CUDA ndarray/member grouped sum, `cuda_segmented`, `cuda_two_level`,
+`segmented` and `two_level` currently select the same zero-plus-atomic
+implementation as `cuda_device`. They do not provide deterministic bucket-order
+summation. Forge binds that implementation directly without allocating unused
+bucket offsets, reordered values or cursors. Vulkan's segmented strategy remains
+a separate bucket-based implementation; strategy names do not imply identical
+algorithms across backends.
+
 ## Prepared sort (0.6.3)
 
 ```python

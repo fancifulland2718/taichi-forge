@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA grouped-sum aliases for segmented/two-level execution no longer allocate
+  three unused bucket buffers. They retain their existing zero-plus-atomic
+  computation, cached Graph replay and supported gradients.
 - Vulkan native grouped reduction now binds aligned descriptor views for dense
   fields and passes explicit scalar offsets and lengths to existing shaders.
   This fixes validation errors while preserving neighboring fields, Graph

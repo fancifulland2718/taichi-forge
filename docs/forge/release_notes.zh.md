@@ -31,6 +31,8 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CUDA grouped sum 的 segmented/two-level 别名不再申请三个未使用的 bucket
+  缓冲，保持既有清零＋原子累加计算、缓存 Graph 重放及原有梯度支持。
 - Vulkan 原生分组归约的 dense field 改用对齐 descriptor，并给现有 shader 传入
   明确的 scalar 偏移和长度，修复验证层对齐报错；保持相邻字段、Graph 重放及原有
   支持范围内的反向梯度。

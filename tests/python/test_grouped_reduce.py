@@ -225,8 +225,12 @@ def test_experimental_grouped_reduce_cuda_device_ndarray_wide_dtypes():
     for dtype, np_dtype in _GROUPED_DTYPES:
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cuda_device")
         _run_struct_member_grouped_reduce(dtype, np_dtype, "cuda_device")
-        _run_ndarray_grouped_reduce(dtype, np_dtype, "cuda_segmented")
-        _run_struct_member_grouped_reduce(dtype, np_dtype, "cuda_segmented")
+        for run in (_run_ndarray_grouped_reduce, _run_struct_member_grouped_reduce):
+            workspace = run(dtype, np_dtype, "cuda_segmented")
+            assert workspace.workspace_bytes_peak == 0
+            assert workspace._offsets_ndarray is None
+            assert workspace._scratch_ndarray is None
+            assert workspace._cursor_ndarray is None
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "two_level")
     _run_struct_member_grouped_reduce(ti.i32, np.int32, "cuda_two_level")
@@ -235,6 +239,42 @@ def test_experimental_grouped_reduce_cuda_device_ndarray_wide_dtypes():
     _run_struct_tensor_member_grouped_reduce("cuda_device")
     _run_struct_tensor_member_grouped_reduce("cuda_segmented")
     _run_struct_tensor_member_grouped_reduce("cuda_two_level")
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_grouped_alias_graph_reuses_atomic_plan_without_bucket_storage():
+    keys = ti.ndarray(ti.i32, 7)
+    values = ti.ndarray(ti.f32, 7)
+    output = ti.ndarray(ti.f32, 3)
+    source = np.arange(1, 8, dtype=np.float32)
+    original = np.array([0, 2, -1, 2, 3, 0, 1], dtype=np.int32)
+    values.from_numpy(source)
+    for method in ("cuda_segmented", "cuda_two_level", "segmented", "two_level"):
+        keys.from_numpy(original)
+        workspace = ti.algorithms.GroupedReduceWorkspace()
+        sequence = ti.algorithms.primitive_sequence()
+        sequence.grouped_reduce(keys, values, output, method=method, workspace=workspace)
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(sequence)
+        graph = builder.compile()
+        try:
+            for current in (original, np.full(7, -1, np.int32), original):
+                keys.from_numpy(current)
+                graph.run({})
+                expected = np.zeros(3, np.float32)
+                for key, value in zip(current, source):
+                    if 0 <= key < 3:
+                        expected[key] += value
+                np.testing.assert_array_equal(output.to_numpy(), expected)
+                np.testing.assert_array_equal(values.to_numpy(), source)
+                np.testing.assert_array_equal(keys.to_numpy(), current)
+            assert workspace.workspace_bytes_peak == 0
+            assert workspace._offsets_ndarray is None
+            assert workspace._scratch_ndarray is None
+            assert workspace._cursor_ndarray is None
+        finally:
+            graph.close()
+            workspace.clear()
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

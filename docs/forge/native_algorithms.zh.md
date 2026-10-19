@@ -51,6 +51,12 @@
 
 名称里的 `experimental_` 表示这是 Forge 公开入口，但演进节奏会比长期 vanilla API 更保守。
 
+CUDA ndarray/member 的 grouped sum 中，`cuda_segmented`、`cuda_two_level`、
+`segmented` 和 `two_level` 当前与 `cuda_device` 使用相同的清零＋原子累加实现，
+不保证按桶顺序确定性求和。Forge 直接绑定实际实现，不再申请未使用的 bucket
+offsets、重排 values 和 cursor。Vulkan 的 segmented 仍是独立的 bucket 实现；
+同名策略不代表各后端使用相同算法。
+
 ## Prepared sort（0.6.3）
 
 ```python
