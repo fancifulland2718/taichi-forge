@@ -1778,9 +1778,16 @@ Field 与 ndarray 混用时，生产端选择 host 排序，自动 AOT 导出会
 载荷 lane 支持上述六种标量类型，通过既有 raw-record 后端保留每一位，包括 NaN
 payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出或运行后导出，
 不新增 helper 代码。显式 `Module.add_primitive(..., "sort", values=...)` 在绑定时
-也接受 tensor 记录。这不扩展 `prepare_sort()` 原有的 scalar 合同，不代表 tensor
-Field、Struct 成员或 strided 布局已经接通。排序无自动伴随，
+也接受 tensor 记录。该 sequence 路线不代表 tensor Field、Struct 成员或 strided
+布局已经接通。排序无自动伴随，
 后续已编译 kernel 的梯度仍可读取重排后的记录。
+
+CUDA/Vulkan 的 `prepare_sort(keys, values)` recording 也支持标量／向量／矩阵载荷，
+包括紧凑 dense Field 和带偏移的紧凑 ndarray view。既有 retained-storage 导出器
+用同一 sort 操作重建标量 key 与完整载荷记录，不预热、不增加 helper 代码。
+已检查冷暖导出、独立／借用消费、载荷位模式、生命周期退休及后续 kernel 梯度。
+同一模块的 Field 快照须共享相同初始根状态。该扩展不改变独立的 `count=` 前缀
+排序路线，也不增加 CPU prepared sort。见 [Sort API](sort_api.zh.md)。
 
 多键 `PrimitiveSequence.sort_by_key()` 也可导出稳定字典序排序：键须为一维 packed
 标量 ndarray，可选载荷允许标量或 packed 向量／矩阵 ndarray，要求长度相同且互不别名。

@@ -2301,10 +2301,19 @@ types above and preserves every payload bit, including NaN payloads and signed
 zero, using the existing raw-record backend. Both `sort()` and single-part
 `sort_by_key()` export cold or after execution without additional helper code.
 Explicit `Module.add_primitive(..., "sort", values=...)` also accepts tensor
-records at binding time. This does not extend `prepare_sort()`'s scalar-only
-contract or qualify tensor Fields, Struct members or strided layouts.
+records at binding time. This sequence route does not qualify tensor Fields,
+Struct members or strided layouts.
 Sorting has no automatic adjoint; downstream compiled kernel
 gradients can consume the reordered records.
+
+CUDA/Vulkan `prepare_sort(keys, values)` recordings also accept scalar/vector/matrix
+payloads, including packed dense Fields and offset packed ndarray views. The
+existing retained-storage exporter reconstructs the scalar key and complete payload
+record with the same sort operation, without prewarming or adding helper code.
+Cold and warm export, standalone/borrowed consumption, raw payload bits, lifetime
+retirement and downstream kernel gradients are checked. Field snapshots in one
+module must share one initial root state. This does not extend the separate
+`count=` prefix-sort route or add CPU prepared sorting. See [Sort API](sort_api.en.md).
 
 Multi-key `PrimitiveSequence.sort_by_key()` also exports stable lexicographic
 sorting of equally sized, disjoint, packed 1D scalar ndarrays, with optional

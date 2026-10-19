@@ -23,7 +23,9 @@ def main(mode, arch, artifact):
     with runtime, runtime.load_module(artifact) as module, ExitStack() as stack:
         for case in cases:
             frames = []
-            for name in (f"cold{case['index']}", f"warm{case['index']}", "explicit"):
+            for name in case.get(
+                "entries", (f"cold{case['index']}", f"warm{case['index']}", "explicit")
+            ):
                 frame = dict(
                     keys=stack.enter_context(
                         closing(runtime.ndarray(case["key_dtype"], case["n"]))

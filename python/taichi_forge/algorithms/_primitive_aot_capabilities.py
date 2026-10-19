@@ -84,7 +84,9 @@ _ROUTES = MappingProxyType({
                      "unfused_sequence", "selected_native_method", "cpu_explicit_cpu_native",
                      "preserved_scalar_sort_gather_affine_strategy", "tensor_gather_copy_back", "no_automatic_ad"),
         ),
-        _prepared(("algorithms.prepare_sort",), *_SORT),
+        _prepared(("algorithms.prepare_sort",), "stable_ascending", "nan_last", "scalar_keys",
+                  "scalar_or_tensor_payload", "raw_payload_bits", "packed_dense_fields_and_ndarray_views",
+                  "fixed_extent", "no_automatic_ad"),
     ),
     "compact": (
         _module("compact", "stable_selection", "valid_count_prefix"),

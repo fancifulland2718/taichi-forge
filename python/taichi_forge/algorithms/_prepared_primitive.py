@@ -65,9 +65,9 @@ class _PreparedNativePlan:
 class PreparedSortPlan(_PreparedNativePlan):
     """A stable ascending in-place sort over fixed CUDA/Vulkan dense storage.
 
-    Keys and optional payload are equally sized, compact 1D scalar ranges with
-    i32/u32/f32/i64/u64/f64 elements. Ndarrays and qualified dense field/views
-    share this path; no field-to-ndarray copy is performed. Equal keys preserve
+    Keys are compact 1D scalar ranges; optional payloads are equally sized
+    scalar/vector/matrix ranges with i32/u32/f32/i64/u64/f64 lanes. Ndarrays and
+    qualified dense fields/views share this path. Equal keys preserve
     payload order. Vulkan supports ``nan_policy="last"`` only; CUDA also
     supports ``"bitwise"`` (the existing sortable-bit order). Other algorithms, descending order and raw provider
     selection are deliberately not options of this plan.
@@ -114,6 +114,7 @@ class PreparedSortPlan(_PreparedNativePlan):
             "count": int(descriptions[0].descriptor.index_shape[0]),
             "key_dtype": str(descriptions[0].descriptor.scalar_type),
             "value_dtype": None if values is None else str(descriptions[1].descriptor.scalar_type),
+            "value_element_shape": [] if values is None else list(descriptions[1].descriptor.element_shape),
             "nan_policy": nan_policy,
             "ascending": True,
             "stable": True,

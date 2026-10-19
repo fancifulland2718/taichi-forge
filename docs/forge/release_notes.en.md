@@ -38,6 +38,12 @@ lifetimes. The entries below describe the changes.
   offsets. It no longer requires the offset to be a multiple of the complete
   record size; existing descriptor-alignment staging and range checks remain.
 
+- CUDA/Vulkan `prepare_sort()` accepts packed vector/matrix payloads, including
+  dense Fields and offset ndarray views. Direct execution, Graph recording and
+  cold/warm AOT export share the existing raw-record sort and storage ownership;
+  payload bits survive unchanged, without extra AOT helper kernels. The separate
+  `count=` prefix-sort route and CPU prepared-sort coverage are unchanged.
+
 - Repeated `SortWorkspace.reserve()` calls no longer retain unused request
   dictionaries. Native multi-key sorting can reuse its workspace without growing
   a host-side reservation history; lazy allocation and caller capacity checks stay

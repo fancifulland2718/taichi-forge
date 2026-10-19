@@ -34,6 +34,11 @@
 - 修复 Vulkan 原生／AOT 排序误拒绝合法 tensor Field 偏移的问题：载荷起点遵守标量
   lane 对齐，不再要求为整条记录大小的倍数；保留 descriptor 对齐暂存及范围检查。
 
+- CUDA/Vulkan `prepare_sort()` 接纳紧凑向量／矩阵载荷，包括 dense Field 和带偏移
+  的 ndarray view。直接执行、Graph recording 及冷暖 AOT 导出共用既有整记录排序
+  与存储所有权，保留载荷位模式，不增加 AOT helper kernel。独立的 `count=` 前缀
+  排序路线及 CPU prepared-sort 覆盖范围保持不变。
+
 - `SortWorkspace.reserve()` 不再保留无用途的调用参数字典，避免原生多键排序在
   重复使用工作区时持续累积主机内存；实际缓冲的按需分配与调用者容量检查保持不变。
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 
+#include "taichi/ir/type_factory.h"
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
 #ifdef TI_WITH_CUDA
@@ -80,11 +81,21 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
   plan->nan_policy_ = nan_policy;
   std::vector<const storage::DenseStorageDescriptor *> descriptors{&keys};
   if (values) {
-    TI_ERROR_IF(values->index_rank() != 1 || values->element_rank() != 0 ||
+    TI_ERROR_IF(values->index_rank() != 1 || values->element_rank() > 2 ||
                     values->index_extent(0) != n,
-                "Prepared sort requires a matching scalar payload range");
+                "Prepared sort requires a matching scalar/vector/matrix payload range");
     plan->value_type_ = sort_value_type(values->scalar_type());
     plan->value_bytes_ = data_type_size(values->scalar_type());
+    for (auto extent : values->element_shape()) {
+      TI_ERROR_IF(extent <= 0 || extent > std::numeric_limits<int>::max() ||
+                      plan->value_bytes_ >
+                          std::numeric_limits<std::size_t>::max() / extent,
+                  "Prepared sort payload dimensions exceed the native representation");
+      plan->value_bytes_ *= extent;
+    }
+    TI_ERROR_IF(plan->value_bytes_ / sizeof(std::uint32_t) >
+                    std::numeric_limits<int>::max(),
+                "Prepared sort payload word count exceeds INT_MAX");
     descriptors.push_back(values);
   }
   if (arch == Arch::cuda) {
@@ -113,9 +124,14 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
       const auto &binding = plan->storage_->binding(i);
       DeviceAllocation allocation{binding.pointer.device,
                                   binding.pointer.alloc_id};
+      DataType dtype = descriptors[i]->scalar_type();
+      const auto element_shape = descriptors[i]->element_shape();
+      if (!element_shape.empty()) {
+        dtype = TypeFactory::create_tensor_type(
+            std::vector<int>(element_shape.begin(), element_shape.end()), dtype);
+      }
       plan->views_[i] = std::make_unique<Ndarray>(
-          allocation, descriptors[i]->scalar_type(),
-          std::vector<int>{plan->count_});
+          allocation, dtype, std::vector<int>{plan->count_});
     }
   }
   // No mathematical operation, command submission, scratch allocation or

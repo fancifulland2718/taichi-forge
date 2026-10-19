@@ -68,6 +68,22 @@ Vulkan native fast path：
 
 未覆盖的组合会通过 host stable fallback 保持正确性；如果用户显式指定某个后端专用 method，则不满足条件时会报错。
 
+## 预绑定排序
+
+`ti.algorithms.prepare_sort(keys, values=None)` 固定存储绑定，可在 CUDA/Vulkan 上
+重复直接执行，或通过 `plan.record()` 放入 Graph。key 为一维标量；等长载荷支持
+标量、向量和矩阵，lane 类型为 i32/u32/f32/i64/u64/f64。紧凑 ndarray、dense Field
+和紧凑 ndarray view 共用存储生命周期合同。整记录搬运保留 NaN payload、正负零等
+全部位模式。准备阶段不排序、不提交设备工作；首次执行由既有后端 arena 提供 scratch。
+`plan.report()` 的物理计划标识包含 `value_element_shape`。使用完毕关闭计划；Field
+退休后相应绑定失效。
+
+这些 recording 可在执行前或执行后导出 AOT，要求 `nan_policy="last"`。ndarray 使用
+具名 source bindings，Field 使用 `snapshot_state=True`。既有 AOT sort 操作重建
+相同记录，无需新增辅助 kernel。CPU 继续使用普通／sequence 或显式 AOT 排序。
+此次扩展不改变独立的 `count=` 前缀排序合同，也不接纳 Struct／strided 载荷。
+排序自身无自动伴随；后续编译的梯度可以使用排序结果。见 [AOT SDK](aot_sdk.zh.md)。
+
 ## 语义说明
 
 - 默认语义是 stable ascending sort。`descending=True` 在 CPU native/host 路径可用；

@@ -54,6 +54,11 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert {"scalar_ndarray_keys", "raw_payload_bits", "no_automatic_ad"} <= set(tensor.constraints)
         direct = next(r for r in sort.aot_routes if r.entry_point == "aot.Module.add_primitive")
         assert "scalar_or_tensor_payload" in direct.constraints
+        prepared_sort = next(r for r in sort.aot_routes if r.forms == ("algorithms.prepare_sort",))
+        assert prepared_sort.backends == ("cuda", "vulkan")
+        assert {"scalar_keys", "scalar_or_tensor_payload", "raw_payload_bits",
+                "packed_dense_fields_and_ndarray_views", "fixed_extent", "no_automatic_ad"} <= set(
+                    prepared_sort.constraints)
         multikey = next(r for r in sort.aot_routes if "multiple_lexicographic_key_parts" in r.constraints)
         assert multikey.entry_point == "algorithms.PrimitiveSequence"
         assert multikey.forms == ("sort_by_key",) and multikey.backends == ("cpu", "cuda", "vulkan")
