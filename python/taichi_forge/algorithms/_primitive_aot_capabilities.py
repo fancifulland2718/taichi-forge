@@ -65,6 +65,14 @@ _ROUTES = MappingProxyType({
     "sort": (
         _module("sort", *_SORT),
         _sequence(("sort", "sort_by_key"), *_SORT, "single_lexicographic_key_part"),
+        PrimitiveAOTRoute(
+            "algorithms.PrimitiveSequence", ("sort_by_key",), _ALL,
+            _SORT + ("multiple_lexicographic_key_parts", "packed_scalar_ndarrays",
+                     "named_source_bindings", "matching_one_dimensional_extent",
+                     "i32_u32_f32_i64_u64_f64", "disjoint_keys_and_payload",
+                     "unfused_sequence", "selected_native_method", "cpu_explicit_cpu_native",
+                     "preserved_sort_gather_affine_strategy", "no_automatic_ad"),
+        ),
         _prepared(("algorithms.prepare_sort",), *_SORT),
     ),
     "compact": (

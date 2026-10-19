@@ -2287,8 +2287,22 @@ last; `sort_by_key` requires lexicographic order. `auto` must resolve to the
 existing native backend; explicit `cpu_native`, `cuda_device` or
 `vulkan_native_radix_u32` sorting requires its matching backend. The explicit
 Vulkan compact/unique method is `vulkan_native`. Other strategies,
-descending/bitwise ordering, multiple key parts, strided storage, fused sequences
+descending/bitwise ordering, strided storage, fused sequences
 and unlisted operations still require their own export contracts.
+
+Multi-key `PrimitiveSequence.sort_by_key()` also exports stable lexicographic
+sorting of equally sized, disjoint, packed 1D scalar ndarrays, with optional
+scalar payload. Keys and payload support i32/u32/f32/i64/u64/f64, subject to device
+dtype capabilities. Bind these arrays through `source_bindings`; this route does
+not snapshot Fields or support tensor/Struct/strided payloads. CPU requires explicit
+`method="cpu_native"`: CPU `auto` selects a host strategy that export must not
+silently replace. CUDA/Vulkan accept `auto` or their matching native method above.
+Export preserves the existing reversed-key sort/gather/affine sequence, including
+floating-point identity-transform semantics, without prewarming producer scratch.
+One order array and one reorder array per dtype are private to each prepared owner;
+native sorting scratch remains separate per pass. There is no added key-count cap.
+Singleton inputs retain binding checks and perform no device work. Sorting itself
+has no automatic adjoint; exported downstream kernel gradients remain supported.
 
 Retained scalar/vector/matrix ndarrays use `source_bindings`. Qualified packed dense Fields
 use `add_execution_plan(..., snapshot_state=True)` to export module array views

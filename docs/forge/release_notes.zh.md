@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 原生多键 `PrimitiveSequence.sort_by_key()` 可将 packed 标量 ndarray 键及可选载荷
+  导出到 CPU/CUDA/Vulkan AOT，保留稳定字典序 sort/gather/affine 策略。CPU 需显式
+  选择 `cpu_native`；冷导出不预热 producer 工作区，并按 dtype 共用置换临时数组。
+  已覆盖独立 runtime、执行器借用及下游 kernel 梯度；排序本身不自动生成伴随。
+
 - CPU AOT 标量排序与 JIT 共用稳定键值排序核心，保留重复键、NaN 和正负零的
   原有顺序语义；prepared owner 复用主数组，减少索引间接访问与复制。标准库
   stable sort 仍可能申请瞬时 merge 缓冲，不声称整个调用零分配。

@@ -191,6 +191,10 @@ explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
 和已物化 Graph 的专用导出路径。`aot="selected_execution_plan_routes"` 表示存在所列
 路径，不表示该家族的所有 `method=`、后端或布局都可导出。例如 unique 的 sequence
 覆盖 CPU/CUDA/Vulkan，prepared recording 覆盖 CUDA/Vulkan。
+多键 `PrimitiveSequence.sort_by_key()` 单独列出三后端导出路线，接受互不别名、
+长度相同的 packed 标量 ndarray 键及可选标量载荷。CPU 需显式 `cpu_native`，GPU
+`auto` 保留原生 sort/gather/affine 策略；Field、tensor/Struct 载荷和 strided 布局
+不属于此路线，详见 [AOT 存储与导出合同](aot_sdk.zh.md)。
 `PrimitiveSequence.scan()` 可导出 CPU/CUDA/Vulkan 上一维连续标量存储的原位 inclusive sum，
 类型包括 i32/u32/f32/i64/u64/f64，仍需满足设备的类型能力。其 `builtin/scan` 录制对象持有
 可复用的临时空间，与 JIT 共用算法；导出和准备不会执行扫描。显式描述还可指定固定前缀，

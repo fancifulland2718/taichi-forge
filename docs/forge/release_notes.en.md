@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Native multi-key `PrimitiveSequence.sort_by_key()` exports packed scalar ndarray
+  keys and optional payload to CPU/CUDA/Vulkan AOT, retaining its stable
+  lexicographic sort/gather/affine strategy. CPU requires explicit `cpu_native`;
+  cold export avoids producer prewarming and shares reorder arrays by dtype.
+  Independent runtime consumption, executor borrowing and downstream kernel
+  gradients are covered; sorting itself has no automatic adjoint.
+
 - CPU AOT scalar sorting shares JIT's stable key/value sorting core, preserving
   duplicate-key, NaN and signed-zero ordering. Prepared owners reuse the primary
   array and avoid indirect index sorting and extra copies. The standard library

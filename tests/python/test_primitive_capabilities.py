@@ -45,6 +45,12 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
     with monkeypatch.context() as cold:
         cold.setattr(ti.lang.impl, "get_runtime", forbidden)
         cold.setattr(alg_impl._ti_core, "native_operation_capabilities", forbidden)
+        sort = ti.algorithms.primitive_capability("sort_by_key")
+        multikey = next(r for r in sort.aot_routes if "multiple_lexicographic_key_parts" in r.constraints)
+        assert multikey.entry_point == "algorithms.PrimitiveSequence"
+        assert multikey.forms == ("sort_by_key",) and multikey.backends == ("cpu", "cuda", "vulkan")
+        assert {"packed_scalar_ndarrays", "cpu_explicit_cpu_native", "disjoint_keys_and_payload",
+                "preserved_sort_gather_affine_strategy", "no_automatic_ad"} <= set(multikey.constraints)
         unique = ti.algorithms.primitive_capability("experimental_unique")
         sequence = next(r for r in unique.aot_routes if r.entry_point == "algorithms.PrimitiveSequence")
         assert sequence.forms == ("unique",)

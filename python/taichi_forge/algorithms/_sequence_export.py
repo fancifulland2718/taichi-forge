@@ -421,7 +421,9 @@ def _sort(call, context):
     if keyed:
         if isinstance(keys, (list, tuple)):
             if len(keys) != 1:
-                raise TaichiRuntimeError("AOT sequence sort_by_key requires one native key part")
+                from ._sort_export import export_key_parts
+
+                return export_key_parts(call, context)
             keys = keys[0]
         if set(options) != {"stable", "order", "method", "workspace"} or options["order"] != "lexicographic":
             raise TaichiRuntimeError("AOT sequence sort_by_key requires exact lexicographic ordering")

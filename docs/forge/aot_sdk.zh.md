@@ -1766,8 +1766,18 @@ CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part
 及可选 scalar payload，保持稳定升序、NaN 在末尾；`sort_by_key` 要求 lexicographic。
 `auto` 必须对应既有原生后端；显式 `cpu_native`、`cuda_device`、
 `vulkan_native_radix_u32` 排序分别要求匹配后端。compact/unique 对应的 Vulkan
-显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、多 key part、strided
+显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、strided
 存储、融合序列和未列出的操作仍需自己的导出合同。
+
+多键 `PrimitiveSequence.sort_by_key()` 也可导出稳定字典序排序：键和可选标量载荷
+须为长度相同、互不别名的一维 packed 标量 ndarray，支持 i32/u32/f32/i64/u64/f64，
+并满足设备类型能力。数组通过 `source_bindings` 绑定；此路线不快照 Field，也不覆盖
+tensor/Struct/strided 载荷。CPU 需显式 `method="cpu_native"`，因为 CPU `auto` 选择的
+host 策略不能在导出时被静默替换；CUDA/Vulkan 可选 `auto` 或上述匹配的原生方法。
+导出保留既有逆序逐键 sort/gather/affine 序列，包括浮点恒等变换的语义，不预热
+producer 工作区。每个 prepared owner 私有一份 order 数组及每种 dtype 一份置换数组；
+原生排序 scratch 仍按 pass 独立持有。不新增 key 数量硬上限。单元素输入保留绑定
+检查、不执行设备工作。排序本身无自动伴随，仍可导出后续 kernel 的梯度。
 
 持有的 scalar/vector/matrix ndarray 通过 `source_bindings` 命名；合格的连续 dense Field 使用
 `add_execution_plan(..., snapshot_state=True)` 自动导出模块数组视图，与普通 Field
