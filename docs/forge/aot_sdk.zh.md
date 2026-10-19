@@ -3617,6 +3617,12 @@ setuptools生成正确的原生wheel标签、`METADATA`、`WHEEL`和`RECORD`，�
 哈希，拒绝未声明文件、源码、目标冲突和不匹配的ABI/平台；公开文件清单不能夹带Forge
 或其他原生runtime库。
 
+宿主闭包也包括按需导入的模块与包资源。对使用
+`importlib.resources.files(__package__)` 的原生渲染器，显式把已编译的 `.spv` 文件
+加入上述 `files`，保持原包内相对路径；只收集已观察到的 Python 导入不能覆盖它们。
+例如 `"visualization/rasterizer/shaders/visibility.vert.spv":
+"resources/visibility.vert.spv"`。资源归应用包，Forge runtime 和厂商库仍独立安装。
+
 应用 TCM 由应用分发包持有，`taichi-forge-runtime` 正常独立安装。按目标配置将应用
 的 kernel、Graph 和资源重建声明聚合进一个 TCM；外部 provider 保持库引用，不另建
 一组应用归档。一个 TCM 对应一个后端。NumPy、SciPy 及厂商库保持独立依赖；通用 SDK
@@ -3753,7 +3759,7 @@ P2G／网格更新／G2P 在 Windows CPU/CUDA/Vulkan 上通过独立及借用消
 网格清零检查；独立 f64 APIC 参考、真实 log Neo-Hookean 能量的矩阵梯度及 Vulkan
 同步验证通过。此资格不包含接触、塑性、流体、实验性 sparse solver 或完整步自动伴随。
 
-当前 CUDA sm120 应用包共七个入口，新增 `mpm_step`／`mpm_material`，仍只有一个
+MPM资格批次的 CUDA sm120 应用包共七个入口，新增 `mpm_step`／`mpm_material`，仍只有一个
 381,034 字节 TCM；应用 wheel 为 59,071,418 字节，比 FEM 批次增加 243,008 字节。
 新旧入口均通过正常安装消费，Forge 组件及 44 个外部依赖记录不变。MPM cubin 整步
 首次 prepare 约 4.9ms，独立 runtime 初始化约 307ms，联合 module 加载约 8–16ms。
@@ -3775,6 +3781,25 @@ module = ti.aot.Module(caps=[ti.DeviceCapability.spirv_has_atomic_float_add])
 独立／借用消费、材料梯度及同步验证通过；TCM减少106字节，未改默认能力或同步合同。
 这些短测试用于定位回退，不是中大规模吞吐或跨设备性能资格，也不意味着所有浮点归约
 在不同目标上逐位一致。CPU/CUDA的既有目标选择不受此Vulkan配置影响。
+
+原生 graphics 路径的安装资格进一步发现并补齐了宿主依赖与资源缺口：显式选择该路径时，
+旧应用包缺少 `native_visibility`，四个 SPIR-V stage 文件也未交付。新增20个宿主模块
+（含按需导入的依赖），四个资源共2,548字节；旧537个宿主二进制逐字节保持。新应用wheel为
+61,379,645字节（+2,308,227），唯一七入口CUDA TCM仍为381,034字节；Forge组件和44个
+外部依赖记录不变，新安装包的原七入口及适用材料梯度消费通过。
+
+Windows Vulkan上的两盒48×32不透明网格场景，已从公开场景API构建原生visibility
+渲染器，再沿原引擎的计算→graphics→着色序列导出。独立与借用AOT消费均通过颜色/深度、
+位姿更新/恢复、双module隔离、在途退休和同步验证。导出显式绑定图像及pipeline的shader
+资源，目标声明64位整数能力；计算写入后供绘制读取的数组同时声明`storage`与`vertex`
+用途。独立消费者无需GeoPhys宿主、NumPy或Forge前端。
+
+该Vulkan资格产物为192,253字节，未并入CUDA交付TCM；图像资源18,432字节，另有已有
+Field与数组存储。本机Graph构建约2.1ms、导出138ms、归档36ms。预热后逐次提交并等待的
+五样本中位数约为JIT462μs、独立AOT196μs、借用AOT175μs；这只是相同小场景的主机到
+完成成本，不是GPU专用时间或大场景加速资格。首次驱动准备仍单独计费，未受控缓存的
+初次观测约259ms、后续进程约12–18ms。新增ray/shadow模块仅补齐构造依赖，不能据此
+宣称所有光追、阴影、材质或跨平台组合均通过应用资格。
 
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是

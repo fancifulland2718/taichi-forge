@@ -4742,6 +4742,14 @@ payload hash and rejects undeclared files, source, destination collisions and
 incompatible host ABIs/platforms. The public-file list cannot vendor Forge or
 other native runtime libraries.
 
+The host closure includes lazy imports and package resources. For native
+renderers using `importlib.resources.files(__package__)`, add compiled `.spv`
+files explicitly to `files`, preserving their package-relative paths. Observed
+Python imports alone do not cover these resources. For example, map
+`"visualization/rasterizer/shaders/visibility.vert.spv"` to
+`"resources/visibility.vert.spv"`. The application owns these assets; Forge and
+vendor runtimes remain independently installed dependencies.
+
 Keep the application TCM in the application distribution and install
 `taichi-forge-runtime` normally. Aggregate the selected application's kernels,
 Graphs and reconstruction declarations into one TCM per target profile; external
@@ -4948,7 +4956,7 @@ energy gradient, and Vulkan synchronization validation pass. Contact, plasticity
 fluid, the experimental sparse solver and whole-step autodiff remain outside
 this qualification.
 
-The current CUDA sm120 application has seven entries, adding `mpm_step` and
+The MPM qualification CUDA sm120 application has seven entries, adding `mpm_step` and
 `mpm_material` in its sole 381,034-byte TCM. Its wheel is 59,071,418 bytes, an
 increase of 243,008 bytes over the FEM batch. Installed consumption of new and
 existing entries passes; Forge and all 44 external dependency records are
@@ -4981,6 +4989,37 @@ Default capabilities and synchronization contracts are unchanged. These short
 tests diagnose a regression; they do not qualify larger workloads, other devices
 or bitwise equality of floating-point reductions across targets. Existing
 CPU/CUDA target selection is unaffected by this Vulkan configuration.
+
+Installed native-graphics qualification exposed and closed another host/resource
+gap: explicitly selecting this path failed because `native_visibility` was
+absent, and four SPIR-V stages were also missing. Twenty host modules, including
+their lazy-import dependencies, plus 2,548 bytes of shader assets complete these
+construction inputs. All 537 previous host binaries remain byte-identical.
+The new application wheel is 61,379,645 bytes (+2,308,227); its sole seven-entry
+CUDA TCM stays at 381,034 bytes. Forge and all 44 external dependency records
+are unchanged; the seven installed entries and applicable material gradients pass.
+
+A two-box, 48x32 opaque mesh scene on Windows Vulkan builds the native visibility
+renderer through the public scene API, then exports the engine's existing
+compute/graphics/shading sequence. Standalone and borrowed AOT consumption pass
+color/depth comparisons, pose changes and restoration, independent modules,
+in-flight retirement and synchronization validation. Export explicitly binds
+images and pipeline shader assets and declares 64-bit integer capabilities.
+Arrays written by compute and read as vertices declare both `storage` and
+`vertex` usage. Standalone consumption imports no GeoPhys host, NumPy or Forge
+frontend.
+
+The separate Vulkan qualification TCM is 192,253 bytes and is not added to the
+CUDA delivery. Its images occupy 18,432 bytes, in addition to existing Fields
+and arrays. Graph construction, export and archiving take about 2.1, 138 and
+36 ms on this system. Five warm samples with a wait after each submission have
+median completion costs of about 462 microseconds for JIT, 196 for standalone
+AOT and 175 for borrowed AOT. These are host-to-completion costs for the same
+small scene, not GPU-only timings or larger-scene performance qualification.
+Driver preparation is separate: an initial observation took about 259 ms and
+subsequent processes 12–18 ms with uncontrolled driver-cache state. Including
+ray/shadow host modules establishes construction inputs, not qualification of
+every ray, shadow, material or platform combination.
 
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
