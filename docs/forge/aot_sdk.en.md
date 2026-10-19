@@ -5120,6 +5120,29 @@ Matching installed runtime/frontend wheels are 26,624,656/4,106,949 bytes; the n
 DLL grows by 4,096 bytes. ABI108/plan21 remain unchanged, with a refreshed compilation
 cache epoch.
 
+Installed-host qualification also covers the actual Rigid `gpu_sap` sorting
+region on CPU/CUDA/Vulkan, explicit Vulkan ParallelSort, and EFC's default
+device merge plus reference native radix on CUDA/Vulkan. Rigid retains its
+prepare/sort/publish sequence and shared ndarray bindings; EFC preserves complete
+signed keys, stable ties, active-prefix counts and packet payload publication.
+Eight configurations pass standalone and borrowed runtime consumption, empty and
+repeated inputs, downstream floating-point gradients, independent modules and
+in-flight retirement. All four Vulkan configurations also pass synchronization
+validation in both ownership modes. The Rigid fixture has four scene bodies and
+32 storage entries; EFC uses 65 packet entries. These qualify the actual sorting
+regions, not complete collision detection, an EFC solve, or differentiability of
+the permutation itself.
+
+This qualification requires no new runtime implementation or default selection.
+EFC's merge artifacts are larger than the reference radix artifacts: CUDA
+49,735 versus 29,093 bytes, Vulkan 182,574 versus 108,882 bytes, including the
+downstream-gradient entry. In these small samples, merge completes in
+112–118/193–254 microseconds on CUDA/Vulkan, versus radix at 227–230/568–647
+microseconds. The measurements are correctness-fixture costs, not application
+throughput or controlled cross-process speedups. Extra qualification archives
+remain outside the application wheel; its sole 381,034-byte TCM, installed Forge
+packages and external dependencies are unchanged.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed

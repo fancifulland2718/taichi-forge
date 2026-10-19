@@ -3868,6 +3868,20 @@ Vulkan显式选择缓冲与共享内存的原生float add后，该例72处CAS变
 不据此修改默认目标或承诺普遍加速。配套安装runtime/frontend wheel为26,624,656/
 4,106,949B；原生DLL增加4,096B，ABI108/plan21保持，编译缓存版本已刷新。
 
+已安装宿主还完成了 Rigid `gpu_sap` 在CPU/CUDA/Vulkan上的实际排序区域、显式Vulkan
+ParallelSort，以及EFC在CUDA/Vulkan上的默认设备归并与参考native radix资格。
+Rigid保留原prepare/sort/publish次序和ndarray共享绑定；EFC保留完整有符号键、稳定同键
+顺序、活动前缀计数及接触载荷发布。八种配置通过独立与借用消费、空输入及重复执行、
+下游浮点梯度、双module隔离和在途退休；四种Vulkan配置在两种所有权模式下均通过同步验证。
+Rigid夹具有四个场景物体、32个存储项，EFC为65个packet项；此资格覆盖实际排序区域，
+不表示完整碰撞检测、EFC求解或排序置换自身已经可微。
+
+本批无需新增运行时实现或修改默认选择。EFC归并的产物比参考radix大：CUDA为49,735对
+29,093B，Vulkan为182,574对108,882B，均含下游梯度入口。小样本中归并在CUDA/Vulkan
+完成约112–118／193–254μs，radix约227–230／568–647μs。这些是正确性夹具成本，
+不是应用吞吐或受控跨进程加速比。额外资格归档不加入应用wheel；唯一381,034B应用TCM、
+已安装Forge包和外部依赖保持不变。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index
