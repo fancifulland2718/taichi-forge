@@ -37,15 +37,17 @@
 
 - 单键原生排序序列可在 CPU/CUDA/Vulkan 导出 packed vector/matrix ndarray 载荷，
   不预热、不新增 helper 代码，保留包括 NaN 和正负零在内的载荷位模式。已覆盖独立/
-  借用消费者及下游 kernel 梯度；prepared sort 与多键 tensor 载荷仍需各自的合同。
+  借用消费者及下游 kernel 梯度；prepared sort 仍保留单独的合同。
 
 - AOT 原生排序在同一顺序重放区域中，按相同尺寸、key 类型和载荷布局共用 scratch。
   CPU/CUDA/Vulkan 的递归区域、初始化与独立绑定帧分别持有存储，保持资源计量及退休
   合同；不改变产物格式，不新增输入规模上限。
 
-- 原生多键 `PrimitiveSequence.sort_by_key()` 可将 packed 标量 ndarray 键及可选载荷
-  导出到 CPU/CUDA/Vulkan AOT，保留稳定字典序 sort/gather/affine 策略。CPU 需显式
-  选择 `cpu_native`；冷导出不预热 producer 工作区，并按 dtype 共用置换临时数组。
+- 原生多键 `PrimitiveSequence.sort_by_key()` 可将 packed 标量 ndarray 键及可选
+  标量／向量／矩阵载荷导出到 CPU/CUDA/Vulkan AOT，保留稳定字典序及标量 affine 语义。
+  tensor 载荷采用整记录 gather，身份索引仅在准备时初始化一次，保留原始位模式，
+  不增加 helper 代码。CPU 需显式选择 `cpu_native`；冷导出不预热 producer 工作区，
+  按 dtype 和 element shape 共用置换临时数组。
   已覆盖独立 runtime、执行器借用及下游 kernel 梯度；排序本身不自动生成伴随。
 
 - CPU AOT 标量排序与 JIT 共用稳定键值排序核心，保留重复键、NaN 和正负零的

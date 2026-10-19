@@ -8,6 +8,7 @@ from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.lang.matrix import MatrixNdarray, VectorNdarray
 
 
 def export_key_parts(call, context):
@@ -47,9 +48,12 @@ def export_key_parts(call, context):
             "AOT multi-key sort requires the selected native sort/order/apply strategy"
         )
     targets = tuple(parts) + (() if values is None else (values,))
-    if any(type(a) is not ScalarNdarray for a in targets):
+    if any(type(a) is not ScalarNdarray for a in parts) or (
+        values is not None
+        and type(values) not in (ScalarNdarray, VectorNdarray, MatrixNdarray)
+    ):
         raise TaichiRuntimeError(
-            "AOT multi-key sort requires packed scalar ndarray keys and payload"
+            "AOT multi-key sort requires packed scalar ndarray keys and scalar or tensor payload"
         )
     if len({id(a.arr) for a in targets}) != len(targets):
         raise TaichiRuntimeError(
@@ -57,15 +61,19 @@ def export_key_parts(call, context):
         )
     descriptors = tuple(map(packed_description, targets))
     n = descriptors[0].index_shape[0]
-    for part, desc in zip(targets, descriptors):
-        if (
-            tuple(desc.index_shape) != (n,)
-            or desc.element_shape
-            or str(desc.scalar_type) not in {"i32", "u32", "f32", "i64", "u64", "f64"}
-        ):
+    for desc in descriptors:
+        if tuple(desc.index_shape) != (n,) or str(desc.scalar_type) not in {
+            "i32",
+            "u32",
+            "f32",
+            "i64",
+            "u64",
+            "f64",
+        }:
             raise TaichiRuntimeError(
-                "AOT multi-key sort requires matching one-dimensional scalar storage"
+                "AOT multi-key sort requires matching one-dimensional packed storage"
             )
+    for part in parts:
         algorithms._check_sort_request(
             part, None, True, False, method, "exact", call.workspace, "last"
         )
@@ -91,6 +99,7 @@ def export_key_parts(call, context):
             algorithms._transform_value_type(a.dtype)
         )
         for a in targets
+        if not a.element_shape
     ):
         raise TaichiRuntimeError("AOT multi-key sort dtype is unavailable on Vulkan")
 
@@ -120,19 +129,31 @@ def export_key_parts(call, context):
         np.empty(0, dtype=np.int32), n, _for_aot=True
     )
     compiled = kernel.compiled_kernels[specialization]
+
+    def emit_arange(ctx, destination):
+        ctx.kernel(
+            compiled,
+            (
+                Arg(ArgKind.NDARRAY, destination, algorithms.i32, ndim=1),
+                Arg(ArgKind.SCALAR, count, algorithms.i32),
+            ),
+        )
+
+    identity_order = None
+    if values is not None and values.element_shape:
+        identity_order = context._resource(
+            object(), dict(kind="ndarray", dtype="i32", shape=[n])
+        )
+        # The immutable copy-back indices belong to this prepared frame and
+        # are initialized once, using the same helper code as each sort pass.
+        context.initialization.extend(context.region(emit_arange, identity_order))
     temporaries = {}
     identity = dict(
         scale_bits=Scalar("f64", 1).resource("scale")["bits"],
         bias_bits=Scalar("f64", 0).resource("bias")["bits"],
     )
     for key_index in reversed(range(len(parts))):
-        context.kernel(
-            compiled,
-            (
-                Arg(ArgKind.NDARRAY, order, algorithms.i32, ndim=1),
-                Arg(ArgKind.SCALAR, count, algorithms.i32),
-            ),
-        )
+        emit_arange(context, order)
         context.operations.append(
             dict(kind="sort", keys=names[key_index], values=order)
         )
@@ -140,28 +161,49 @@ def export_key_parts(call, context):
             if index == key_index:
                 continue
             dtype = str(descriptor.scalar_type)
-            if dtype not in temporaries:
-                temporaries[dtype] = context._resource(
-                    object(), dict(kind="ndarray", dtype=dtype, shape=[n])
+            shape = tuple(descriptor.element_shape)
+            key = (dtype, shape)
+            if key not in temporaries:
+                temporaries[key] = context._resource(
+                    object(),
+                    dict(
+                        kind="ndarray",
+                        dtype=dtype,
+                        shape=[n],
+                        element_shape=list(shape),
+                    ),
                 )
-            temp = temporaries[dtype]
+            temp = temporaries[key]
+            gather = dict(
+                size=n,
+                src_items=n,
+                dst_items=n,
+                dtype=dtype,
+                element_shape=list(shape),
+                op="gather",
+            )
             context.operations.append(
                 dict(
                     kind="native",
                     provider="builtin",
                     operation="indexed_copy",
                     version=1,
-                    parameters=dict(
-                        size=n,
-                        src_items=n,
-                        dst_items=n,
-                        dtype=dtype,
-                        element_shape=[],
-                        op="gather",
-                    ),
+                    parameters=gather,
                     bindings=dict(src=name, indices=order, dst=temp),
                 )
             )
+            if shape:
+                context.operations.append(
+                    dict(
+                        kind="native",
+                        provider="builtin",
+                        operation="indexed_copy",
+                        version=1,
+                        parameters=dict(gather),
+                        bindings=dict(src=temp, indices=identity_order, dst=name),
+                    )
+                )
+                continue
             # Preserve the JIT's affine identity operation, including its
             # floating-point semantics; a byte copy is not an equivalent swap.
             context.operations.append(

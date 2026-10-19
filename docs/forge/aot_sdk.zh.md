@@ -1779,16 +1779,20 @@ Field 与 ndarray 混用时，生产端选择 host 排序，自动 AOT 导出会
 payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出或运行后导出，
 不新增 helper 代码。显式 `Module.add_primitive(..., "sort", values=...)` 在绑定时
 也接受 tensor 记录。这不扩展 `prepare_sort()` 原有的 scalar 合同，不代表 tensor
-Field、Struct 成员、strided 布局或多键 tensor 载荷已经接通。排序无自动伴随，
+Field、Struct 成员或 strided 布局已经接通。排序无自动伴随，
 后续已编译 kernel 的梯度仍可读取重排后的记录。
 
-多键 `PrimitiveSequence.sort_by_key()` 也可导出稳定字典序排序：键和可选标量载荷
-须为长度相同、互不别名的一维 packed 标量 ndarray，支持 i32/u32/f32/i64/u64/f64，
+多键 `PrimitiveSequence.sort_by_key()` 也可导出稳定字典序排序：键须为一维 packed
+标量 ndarray，可选载荷允许标量或 packed 向量／矩阵 ndarray，要求长度相同且互不别名。
+键与载荷 lane 支持 i32/u32/f32/i64/u64/f64，
 并满足设备类型能力。数组通过 `source_bindings` 绑定；此路线不快照 Field，也不覆盖
-tensor/Struct/strided 载荷。CPU 需显式 `method="cpu_native"`，因为 CPU `auto` 选择的
+Struct/strided 载荷。CPU 需显式 `method="cpu_native"`，因为 CPU `auto` 选择的
 host 策略不能在导出时被静默替换；CUDA/Vulkan 可选 `auto` 或上述匹配的原生方法。
 导出保留既有逆序逐键 sort/gather/affine 序列，包括浮点恒等变换的语义，不预热
-producer 工作区。每个 prepared owner 私有一份 order 数组及每种 dtype 一份置换数组。
+producer 工作区。标量保持 affine 写回语义；tensor 载荷每轮通过两次整记录 gather
+保留全部位模式。身份索引复用现有 order helper，在每个 prepared frame 中仅初始化一次，
+不增加 helper 代码或序列化索引数据。每个 owner 私有一份 order 数组，按 dtype 和
+element shape 共用置换数组；tensor 另需一份 i32 身份索引，每项 4 字节，随 owner 正常退休。
 同一顺序重放区域中，尺寸、key 类型和载荷布局相同的原生排序共用 scratch，由 owner
 计量一次；递归控制区域、独立 prepared frame、初始化及 CUDA 绑定帧分别持有存储。
 不同排序描述仍可执行并独立分配。不新增 key 数量硬上限。单元素输入保留绑定

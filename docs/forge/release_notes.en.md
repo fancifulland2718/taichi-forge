@@ -42,8 +42,8 @@ lifetimes. The entries below describe the changes.
 - Single-key native sort sequences export packed vector/matrix ndarray payloads
   on CPU/CUDA/Vulkan without prewarming or extra helper code. Payload bits,
   including NaNs and signed zero, remain intact. Standalone/borrowed consumers
-  and downstream kernel gradients are covered; prepared sort and multi-key
-  tensor payloads retain their separate contracts.
+  and downstream kernel gradients are covered; prepared sort retains its separate
+  contract.
 
 - AOT native sorts share scratch for matching extents, key types and payload
   layouts within each ordered replay region. CPU/CUDA/Vulkan retain separate
@@ -52,9 +52,12 @@ lifetimes. The entries below describe the changes.
   or new input-size limit is required.
 
 - Native multi-key `PrimitiveSequence.sort_by_key()` exports packed scalar ndarray
-  keys and optional payload to CPU/CUDA/Vulkan AOT, retaining its stable
-  lexicographic sort/gather/affine strategy. CPU requires explicit `cpu_native`;
-  cold export avoids producer prewarming and shares reorder arrays by dtype.
+  keys and optional scalar/vector/matrix payload to CPU/CUDA/Vulkan AOT, retaining
+  stable lexicographic order and scalar affine semantics. Tensor payloads use
+  whole-record gathers and one identity index array initialized at preparation,
+  preserving raw bits without additional helper code. CPU requires explicit
+  `cpu_native`; cold export avoids producer prewarming and shares reorder arrays
+  by dtype and element shape.
   Independent runtime consumption, executor borrowing and downstream kernel
   gradients are covered; sorting itself has no automatic adjoint.
 

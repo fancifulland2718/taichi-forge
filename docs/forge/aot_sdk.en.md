@@ -2302,20 +2302,26 @@ zero, using the existing raw-record backend. Both `sort()` and single-part
 `sort_by_key()` export cold or after execution without additional helper code.
 Explicit `Module.add_primitive(..., "sort", values=...)` also accepts tensor
 records at binding time. This does not extend `prepare_sort()`'s scalar-only
-contract or qualify tensor Fields, Struct members, strided layouts or multi-key
-tensor payloads. Sorting has no automatic adjoint; downstream compiled kernel
+contract or qualify tensor Fields, Struct members or strided layouts.
+Sorting has no automatic adjoint; downstream compiled kernel
 gradients can consume the reordered records.
 
 Multi-key `PrimitiveSequence.sort_by_key()` also exports stable lexicographic
 sorting of equally sized, disjoint, packed 1D scalar ndarrays, with optional
-scalar payload. Keys and payload support i32/u32/f32/i64/u64/f64, subject to device
+scalar or packed vector/matrix ndarray payload. Keys and payload lanes support
+i32/u32/f32/i64/u64/f64, subject to device
 dtype capabilities. Bind these arrays through `source_bindings`; this route does
-not snapshot Fields or support tensor/Struct/strided payloads. CPU requires explicit
+not snapshot Fields or support Struct/strided payloads. CPU requires explicit
 `method="cpu_native"`: CPU `auto` selects a host strategy that export must not
 silently replace. CUDA/Vulkan accept `auto` or their matching native method above.
 Export preserves the existing reversed-key sort/gather/affine sequence, including
 floating-point identity-transform semantics, without prewarming producer scratch.
-One order array and one reorder array per dtype are private to each prepared owner.
+Scalar targets retain their affine copy-back semantics. Tensor payloads use two
+whole-record gathers per pass to preserve all payload bits; an identity index array
+is initialized once per prepared frame using the existing order helper. No extra
+helper code or serialized index data is required. Each owner holds one order array,
+one reorder array per dtype and element shape, and, for tensor payloads, one i32
+identity array (4 bytes per item). Clearing/closing retires this storage normally.
 Native sorts with equal extents, key types and payload layouts share scratch within
 an ordered replay region. Recursive control regions, independent prepared frames
 and initialization retain separate storage; CUDA binding frames also retain their

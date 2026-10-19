@@ -57,8 +57,9 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         multikey = next(r for r in sort.aot_routes if "multiple_lexicographic_key_parts" in r.constraints)
         assert multikey.entry_point == "algorithms.PrimitiveSequence"
         assert multikey.forms == ("sort_by_key",) and multikey.backends == ("cpu", "cuda", "vulkan")
-        assert {"packed_scalar_ndarrays", "cpu_explicit_cpu_native", "disjoint_keys_and_payload",
-                "preserved_sort_gather_affine_strategy", "no_automatic_ad"} <= set(multikey.constraints)
+        assert {"packed_ndarrays", "scalar_ndarray_keys", "scalar_or_tensor_payload", "raw_tensor_payload_bits",
+                "cpu_explicit_cpu_native", "disjoint_keys_and_payload", "tensor_gather_copy_back",
+                "preserved_scalar_sort_gather_affine_strategy", "no_automatic_ad"} <= set(multikey.constraints)
         unique = ti.algorithms.primitive_capability("experimental_unique")
         sequence = next(r for r in unique.aot_routes if r.entry_point == "algorithms.PrimitiveSequence")
         assert sequence.forms == ("unique",)

@@ -26,7 +26,13 @@ def main(mode, arch, artifact):
             for plan in (f"cold{case['index']}", f"warm{case['index']}"):
                 arrays = {
                     name: stack.enter_context(
-                        closing(runtime.ndarray(dtype, case["n"]))
+                        closing(
+                            runtime.ndarray(
+                                dtype,
+                                case["n"],
+                                element_shape=case.get("shapes", {}).get(name, ()),
+                            )
+                        )
                     )
                     for name, dtype in case["dtypes"].items()
                 }
@@ -42,11 +48,14 @@ def main(mode, arch, artifact):
                         arrays[name].write(bytes.fromhex(data))
                     call()
                     for name, expected in sample["expected"].items():
-                        check(
-                            arrays[name].read(),
-                            bytes.fromhex(expected),
-                            case["dtypes"][name],
-                        )
+                        if case.get("shapes", {}).get(name):
+                            assert arrays[name].read() == bytes.fromhex(expected)
+                        else:
+                            check(
+                                arrays[name].read(),
+                                bytes.fromhex(expected),
+                                case["dtypes"][name],
+                            )
             first, second = frames
             sample = case["samples"][0]
             for name, data in sample["inputs"].items():
@@ -58,11 +67,14 @@ def main(mode, arch, artifact):
                 second[0][name].write(bytes.fromhex(data))
             second[1]()
             for name, expected in sample["expected"].items():
-                check(
-                    second[0][name].read(),
-                    bytes.fromhex(expected),
-                    case["dtypes"][name],
-                )
+                if case.get("shapes", {}).get(name):
+                    assert second[0][name].read() == bytes.fromhex(expected)
+                else:
+                    check(
+                        second[0][name].read(),
+                        bytes.fromhex(expected),
+                        case["dtypes"][name],
+                    )
             wrong = dict(second[0], key1=second[0]["key0"])
             reject(lambda: module.prepare_execution(f"cold{case['index']}", wrong))
             if "order" in case["dtypes"]:
@@ -75,7 +87,9 @@ def main(mode, arch, artifact):
                             )
                         )
                     )
-                with closing(module.prepare_execution("gradient", arrays)) as call:
+                with closing(
+                    module.prepare_execution(case.get("gradient", "gradient"), arrays)
+                ) as call:
                     for shift, sample in enumerate(case["samples"]):
                         for name, data in sample["inputs"].items():
                             arrays[name].write(bytes.fromhex(data))
@@ -84,6 +98,8 @@ def main(mode, arch, artifact):
                         call()
                         order = array.array("i")
                         order.frombytes(bytes.fromhex(sample["expected"]["order"]))
+                        if case.get("shapes", {}).get("order"):
+                            order = order[:: case["shapes"]["order"][0]]
                         gradient = [0.0] * case["n"]
                         for i, j in enumerate(order):
                             gradient[j] = 2 * (i + 1) * values[j]
