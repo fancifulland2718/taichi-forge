@@ -1531,6 +1531,11 @@ with loaded.prepare_workspace_pool(
 的物理状态必须保持其预期共享身份，pool 不合并或迁移私有状态。外部 provider 仍遵守
 原有事务和独占规则，全部提交使用现有 runtime 的同一有序队列。
 
+模块 Field 根及其 `module_array` 别名属于加载的模块，仍由该模块的所有工作区槽
+共享，并非每份计划的私有数组。这允许顺序提交推进同一仿真状态，同时分别保留结果。
+需要隔离独立的 Field 场景时，应分别加载模块，不能把 Field 别名替换为新 ndarray。
+完成信号保护存储寿命，结果租约保护其拥有的输出，不会为共享模块状态建立快照。
+
 每份租约只提交一次。`done()`/`wait()` 保留结果所有权；`release()` 等待后归还，
 `discard()` 放弃结果但仍需完成后才可回收。归还后不得继续使用此前取得的裸数组引用。
 无就绪槽时 `acquire()` 报 `WorkspaceBusyError`；`acquire(wait=True)` 可等待已放弃的
@@ -1542,6 +1547,9 @@ Windows CPU/CUDA/Vulkan 已验证独立私有状态、ndarray 梯度、prepared 
 预算耗尽的 terminal、独立与借用退休及 owner reset；CUDA 另验证 65 个单元素槽和注入
 的 owner 故障。这是显式 pool API 的资格，不代表自动改造下游 solver 的独占工作区或
 跨 stream 并行已经接通。
+另已验证共享 Field 根、每槽私有计数、保留输出、真实下游梯度、独立模块和退休。
+已取得资格的 pinned SAP 小夹具也在三后端通过双输出租约，保持原模块 Field 别名
+与有序执行；它表示同一 SAP 状态的分别保留结果，不表示两个独立 solver 场景。
 
 描述保存到模块的 `executions/`，目录和 `.tcm` 均保留它；也可用
 `ExecutionPlan.save/load` 单独保存。C/C++ 可将同一 JSON 文档传给
@@ -2336,7 +2344,7 @@ Windows 已验证 CPU/CUDA/Vulkan 的 1/3/65 槽计划、正常安装的独立/�
 
 正常安装的 Windows 包另通过 CUDA arena 自动导出及父图私有池验证，覆盖别名、
 独立 owner、真实下游梯度和在途退休；仅 runtime 的消费者无需导入前端即可加载。
-单独的定向检查覆盖 CPU/Vulkan 多组执行，以及容量为 3+5、3+65 的 CUDA 父图 arena，
+正常安装检查也覆盖 CPU/Vulkan 多组执行，以及容量为 3+5、3+65 的 CUDA 父图 arena，
 包括重复子图实例、重绑定、下游梯度和退休；父图夹具保持四个代码入口。这不代表
 SAP 或其他应用的并发工作区已通过验证；显式 workspace pool API 有自己的所有权合同。
 

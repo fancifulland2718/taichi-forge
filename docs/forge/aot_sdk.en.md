@@ -1959,6 +1959,14 @@ must advance across submissions must keep its intended shared identity; the pool
 does not merge or migrate private state. External providers retain their existing
 transaction and exclusivity rules. Submissions use the same ordered runtime queue.
 
+Module Field roots, including `module_array` aliases, belong to the loaded module
+and remain shared across its workspace slots. They are not per-plan private
+arrays. This lets sequential submissions advance one simulation state while
+keeping separately leased outputs. To isolate independent Field-based worlds,
+load a separate module for each world; do not replace its Field aliases with new
+ndarrays. Completion protects storage lifetime, while a result lease protects
+only its owned outputs, not snapshots of the module's shared state.
+
 Each lease submits once. `done()`/`wait()` preserve result ownership;
 `release()` waits and returns the slot, while `discard()` gives up results and
 allows reclamation after completion. Raw array references must not be used after
@@ -1975,6 +1983,11 @@ prepared sorting, terminal results for zero/early/budget-limited loops, standalo
 and borrowed retirement, and owner reset. CUDA also covers 65 one-element slots
 and injected owner failure. This qualifies the explicit pool API, not automatic
 conversion of a downstream solver's exclusive workspace or multi-stream execution.
+Additional checks cover shared Field roots, per-slot private counters, retained
+outputs, real downstream gradients, independent modules and retirement. The
+qualified pinned SAP fixture also passes with two retained output leases on all
+three backends, using its original module Field aliases and ordered execution.
+This is one shared SAP state with separate results, not independent solver worlds.
 
 Descriptions live under `executions/` in directory and `.tcm` modules, or can be
 saved separately with `ExecutionPlan.save/load`. C/C++ passes the same JSON
@@ -3047,7 +3060,7 @@ and lifecycle checks, not a large-application speedup or Linux qualification.
 Installed Windows qualification also covers automatic CUDA arena export and
 retained private-pool subgraphs, including aliases, independent owners, real
 downstream gradients and in-flight retirement. Runtime-only consumers load these
-artifacts without importing the frontend. Separate targeted checks cover grouped
+artifacts without importing the frontend. Installed checks also cover grouped
 CPU/Vulkan execution and CUDA parent arenas with capacities 3+5 and 3+65, including
 repeated child instances, rebinding, downstream gradients and retirement. The
 parent fixture retains four code entries. This does not qualify SAP or other
