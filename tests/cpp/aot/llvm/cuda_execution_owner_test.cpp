@@ -26,6 +26,54 @@
 namespace taichi::lang {
 namespace {
 
+struct RecoverableInitializationProbe {
+  CUDADriver &driver{CUDADriver::get_instance()};
+  decltype(driver.stream_synchronize) saved_wait{driver.stream_synchronize};
+  decltype(driver.module_unload) saved_unload{driver.module_unload};
+  int waits{0};
+  int unloads{0};
+  static inline RecoverableInitializationProbe *active{nullptr};
+
+  RecoverableInitializationProbe() {
+    active = this;
+    driver.stream_synchronize.set(reinterpret_cast<void *>(&wait));
+    driver.module_unload.set(reinterpret_cast<void *>(&unload));
+  }
+  ~RecoverableInitializationProbe() {
+    driver.stream_synchronize = std::move(saved_wait);
+    driver.module_unload = std::move(saved_unload);
+    active = nullptr;
+  }
+  static uint32 wait(void *stream) {
+    // The second runtime result fetch happens after persistent runtime storage
+    // was allocated. A transient operation error must release that owner.
+    if (++active->waits == 2)
+      return 2;  // CUDA_ERROR_OUT_OF_MEMORY, operation-local classification.
+    return active->saved_wait.call_concurrent(stream);
+  }
+  static uint32 unload(void *module) {
+    ++active->unloads;
+    return active->saved_unload.call_concurrent(module);
+  }
+};
+
+TEST(CudaExecutionOwner, RecoverableInitializationRetiresModulesAndAllowsRetry) {
+  auto context = CUDAContext::get_instance().get_guard();
+  for (int retry = 0; retry < 2; ++retry) {
+    RecoverableInitializationProbe probe;
+    try {
+      capi::LlvmRuntime runtime(Arch::cuda);
+      FAIL() << "The initialization fault was not injected";
+    } catch (const BackendRuntimeError &error) {
+      EXPECT_EQ(error.backend_code(), 2);
+    }
+    EXPECT_GE(probe.waits, 3);  // Explicit healthy retirement performed a drain.
+    EXPECT_GT(probe.unloads, 0);  // Failed executor was destroyed, not leaked.
+  }
+  capi::LlvmRuntime recovered(Arch::cuda);
+  EXPECT_NO_THROW(static_cast<::Runtime &>(recovered).wait());
+}
+
 TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
   const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
   if (!folder || !cuda::ExecutionDomain::available())

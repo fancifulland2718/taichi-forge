@@ -55,6 +55,10 @@ class LlvmRuntimeExecutor {
    */
   void materialize_runtime(KernelProfilerBase *profiler,
                            uint64 **result_buffer_ptr);
+  // Explicit cold retirement lets an unpublished owner's caller preserve its
+  // first initialization error if cleanup also fails. Destruction after a
+  // successful finalize does not repeat backend retirement.
+  void finalize();
 
   // SNodeTree Allocation
   bool has_snode_tree_runtime_state(int tree_id) const;
@@ -186,7 +190,6 @@ class LlvmRuntimeExecutor {
   /* -------------------------- */
   /* ------ Member Access ----- */
   /* -------------------------- */
-  void finalize();
 
   uint64 fetch_result_uint64(int i, uint64 *result_buffer);
   void destroy_snode_tree(SNodeTree *snode_tree);

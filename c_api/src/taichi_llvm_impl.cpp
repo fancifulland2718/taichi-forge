@@ -40,18 +40,30 @@ LlvmRuntime::LlvmRuntime(taichi::Arch arch) : Runtime(arch) {
   try {
     executor_->materialize_runtime(nullptr /*kNoProfiler*/, &result_buffer);
   } catch (const taichi::lang::BackendRuntimeError &error) {
+    bool quarantine = true;
 #ifdef TI_WITH_CUDA
-    if (error.backend() == taichi::Arch::cuda &&
-        taichi::lang::classify_cuda_driver_error(error.backend_code()) ==
-            taichi::lang::BackendErrorClassification::kFatal)
-      taichi::lang::CUDAContext::record_runtime_failure(error);
+    if (error.backend() == taichi::Arch::cuda) {
+      quarantine = taichi::lang::classify_cuda_driver_error(error.backend_code()) ==
+                   taichi::lang::BackendErrorClassification::kFatal;
+      if (quarantine)
+        taichi::lang::CUDAContext::record_runtime_failure(error);
+    }
 #endif
     // Initialization can fail before a runtime is published. A second CUDA
     // error from the executor's draining destructor would call terminate and
-    // hide the original error. Retain this finite failed ownership closure;
-    // the C boundary must return the first backend error to the caller.
-    (void)owned_executor_.release();
-    (void)cfg_.release();
+    // hide the original error. Recoverable failures can retire normally; only
+    // failed contexts or unproven retirement retain their ownership closure.
+    if (!quarantine) {
+      try {
+        executor_->finalize();
+      } catch (...) {
+        quarantine = true;
+      }
+    }
+    if (quarantine) {
+      (void)owned_executor_.release();
+      (void)cfg_.release();
+    }
     throw;
   }
 }
