@@ -378,6 +378,18 @@ std::size_t driver_bucket_builder_strided(
     void *stream,
     PrimitiveWorkspaceArena *workspace_arena);
 
+// Resolve both kernels before capture. Fixed replay uses the existing zero and
+// atomic scatter code, owns no workspace, and accepts the kernel's u32 counts.
+void driver_prepare_grouped_reduce(CudaTransformValueType value_type);
+std::size_t driver_grouped_reduce_on_stream(
+    void *keys,
+    void *values,
+    void *output,
+    std::uint32_t num_items,
+    std::uint32_t num_groups,
+    CudaTransformValueType value_type,
+    void *stream);
+
 std::size_t driver_grouped_reduce_strided(void *keys,
                                           void *values,
                                           void *output,

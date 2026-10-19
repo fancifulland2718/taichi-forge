@@ -1034,14 +1034,12 @@ std::size_t driver_gather_add_strided(void *src,
   return 0;
 }
 
-std::size_t driver_zero_strided(void *dst,
-                                int num_items,
+static std::size_t driver_zero_strided_impl(void *dst,
+                                std::uint32_t num_items,
                                 CudaTransformValueType value_type,
                                 std::size_t dst_offset,
                                 std::size_t dst_stride,
                                 void *stream) {
-  TI_ERROR_IF(num_items < 0,
-              "CUDA Driver zero expects non-negative num_items.");
   const std::size_t value_size = value_type_size(value_type);
   TI_ERROR_IF((num_items > 0 && !dst) || dst_stride < value_size,
               "CUDA Driver zero received an invalid pointer or stride.");
@@ -1054,11 +1052,23 @@ std::size_t driver_zero_strided(void *dst,
   std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
   std::vector<void *> args{&dst_arg, &dst_offset_arg, &dst_stride_arg,
                            &count_arg};
-  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  const unsigned grid = count_arg / kBlockDim + (count_arg % kBlockDim != 0);
   CUDAContext::get_instance().launch(
       kernels().zero[value_type_index(value_type)], "cuda_driver_zero", args,
       {}, grid, kBlockDim, 0, stream);
   return 0;
+}
+
+std::size_t driver_zero_strided(void *dst,
+                                int num_items,
+                                CudaTransformValueType value_type,
+                                std::size_t dst_offset,
+                                std::size_t dst_stride,
+                                void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA Driver zero expects non-negative num_items.");
+  return driver_zero_strided_impl(dst, num_items, value_type, dst_offset,
+                                  dst_stride, stream);
 }
 
 namespace {
@@ -1317,6 +1327,56 @@ std::size_t driver_bucket_builder_strided(
   return scan_bytes;
 }
 
+static std::size_t driver_grouped_reduce_strided_impl(void *keys,
+                                          void *values,
+                                          void *output,
+                                          std::uint32_t num_items,
+                                          std::uint32_t num_groups,
+                                          CudaTransformValueType value_type,
+                                          std::size_t keys_offset,
+                                          std::size_t keys_stride,
+                                          std::size_t values_offset,
+                                          std::size_t values_stride,
+                                          std::size_t output_offset,
+                                          std::size_t output_stride,
+                                          void *stream) {
+  const auto width = value_type_size(value_type);
+  // Validate the whole sequence before its first write. In particular a bad
+  // source/stride must not clear a previously valid destination first.
+  TI_ERROR_IF(!num_groups || !output || (num_items && (!keys || !values)) ||
+                  keys_stride < sizeof(std::int32_t) ||
+                  values_stride < width || output_stride < width,
+              "CUDA Driver grouped reduce received an invalid size, pointer "
+              "or stride.");
+  driver_zero_strided_impl(output, num_groups, value_type, output_offset,
+                           output_stride, stream);
+  return driver_scatter_add_strided_impl(
+      values, keys, output, num_items, num_groups, value_type, values_offset,
+      values_stride, keys_offset, keys_stride, output_offset, output_stride,
+      stream);
+}
+
+void driver_prepare_grouped_reduce(CudaTransformValueType value_type) {
+  const auto type = value_type_index(value_type);
+  const auto &loaded = kernels();
+  (void)loaded.zero[type];
+  (void)loaded.scatter_add[type];
+}
+
+std::size_t driver_grouped_reduce_on_stream(
+    void *keys,
+    void *values,
+    void *output,
+    std::uint32_t num_items,
+    std::uint32_t num_groups,
+    CudaTransformValueType value_type,
+    void *stream) {
+  const auto width = value_type_size(value_type);
+  return driver_grouped_reduce_strided_impl(
+      keys, values, output, num_items, num_groups, value_type, 0,
+      sizeof(std::int32_t), 0, width, 0, width, stream);
+}
+
 std::size_t driver_grouped_reduce_strided(void *keys,
                                           void *values,
                                           void *output,
@@ -1332,12 +1392,10 @@ std::size_t driver_grouped_reduce_strided(void *keys,
                                           void *stream) {
   TI_ERROR_IF(num_items < 0 || num_groups <= 0,
               "CUDA Driver grouped reduce received an invalid size.");
-  driver_zero_strided(output, num_groups, value_type, output_offset,
-                      output_stride, stream);
-  return driver_scatter_add_strided(values, keys, output, num_items, num_groups,
-                                    value_type, values_offset, values_stride,
-                                    keys_offset, keys_stride, output_offset,
-                                    output_stride, stream);
+  return driver_grouped_reduce_strided_impl(
+      keys, values, output, num_items, num_groups, value_type, keys_offset,
+      keys_stride, values_offset, values_stride, output_offset, output_stride,
+      stream);
 }
 
 void driver_sparse_diagonal_apply_f32(void *inverse_diagonal,
