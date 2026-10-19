@@ -4826,6 +4826,16 @@ the compressed frontend wheel grows by 1,116 bytes. Installed checks also cover
 the removal of unused sort-reservation history, the fixed application entries and
 consumer-created SDK scenes. No additional vendor dependency is introduced.
 
+The matched runtime/frontend refresh for prepared tensor sorting also passes
+normal-install qualification. CUDA/Vulkan recordings preserve vector/matrix
+payloads in packed ndarrays, offset views and dense Fields; CPU retains its
+existing sequence/explicit AOT routes. Standalone and borrowed consumers pass
+bitwise permutation, independent preparations and actual downstream gradients.
+The core DLL grows by 1 KiB; compressed runtime/frontend wheels remain about
+26.61/4.10 MB. The GeoPhys package, sole TCM and 44 external dependency records
+remain unchanged. Six backend/loading-order combinations, the fixed application
+entries and consumer-created SDK scenes pass with the new package pair.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed

@@ -3671,6 +3671,13 @@ runtime ABI兼容；前端须与runtime合同匹配。
 前端wheel增加1,116字节。正常安装环境同时验证了无用排序调用历史的移除、固定应用
 入口和消费者创建的新SDK场景，没有增加厂商依赖。
 
+prepared tensor 排序对应的配套runtime／前端刷新也通过正常安装资格。CUDA/Vulkan
+recording在紧凑ndarray、偏移view与dense Field中保留向量／矩阵载荷；CPU保持既有
+sequence／显式AOT路线。独立／借用消费者通过逐位重排、独立prepare与实际下游梯度
+检查。核心DLL增加1 KiB，压缩runtime／前端wheel仍约26.61／4.10 MB。GeoPhys包、
+唯一TCM和44个外部依赖记录保持不变；新配套包通过六种后端／加载顺序组合、固定
+应用入口及消费者创建的新SDK场景验证。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index
