@@ -1282,10 +1282,11 @@ Value IRBuilder::ray_query_closest(Value acceleration_structure,
   const Label loop_merge = new_label();
   make_inst(spv::OpBranch, loop_header);
   start_label(loop_header);
-  make_inst(spv::OpLoopMerge, loop_merge, loop_continue,
-            spv::LoopControlMaskNone);
   const Value proceed =
       make_value(spv::OpRayQueryProceedKHR, bool_type(), query);
+  // Structured loop merges must immediately precede the terminating branch.
+  make_inst(spv::OpLoopMerge, loop_merge, loop_continue,
+            spv::LoopControlMaskNone);
   make_inst(spv::OpBranchConditional, proceed, loop_continue, loop_merge);
   start_label(loop_continue);
   make_inst(spv::OpBranch, loop_header);
