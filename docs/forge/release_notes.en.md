@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU checks and metrics share packed/strided reduction cores and the existing
+  scheduler. Predicate selection occurs outside counting loops. Wide internal
+  counts avoid signed overflow; an unrepresentable i32 result raises on exact
+  host reads while retaining zero/nonzero truth, without an input-size cap.
 - Native device checks correctly classify unsigned indices against negative
   upper bounds on CPU/CUDA/Vulkan. CUDA zero/nonzero checks also treat `-0.0`
   as zero for both f32 and f64 while retaining NaN/Inf classification.

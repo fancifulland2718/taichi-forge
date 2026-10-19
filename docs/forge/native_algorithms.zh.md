@@ -644,6 +644,13 @@ Python scope 调用，不能在 `@ti.kernel` 或 `@ti.func` 内部调用。调�
 native primitive，并把结果写入 device-side scalar；只有调用 `to_int()`、`to_bool()`、
 `ok()` 或 `to_float()` 时才把标量读回 Python。
 
+Check 结果使用 i32 device scalar；负值表示实际计数超出该结果类型的表示范围。
+此时 `to_int()` 抛出 `OverflowError`，`to_bool()` 和 `ok()` 仍保留零/非零判断。
+CPU 计数和 partial 合并使用宽计数，溢出写回不会回绕成零。这是结果位宽边界，
+不是总输入容量限制：大输入中可表示的计数仍然有效。需要使用精确 count 的设备端
+消费者须处理负值标记，不能直接将其当作计数。CPU packed/strided check 和 metric
+共用由调用方提供 partial、复用既有调度器的核心，每次执行都完整覆盖各任务的 partial。
+
 `check_count` 类 API 支持 `i32/u32/i64/u64/f32/f64` 的 scalar 1D `ti.ndarray`、
 `StructNdarray` scalar member view，以及 root-dense-place dense field。`metric_reduce`
 类 API 支持 `f32/f64` 的同类输入；Vulkan 当前只开放 `f32` metric fast path。

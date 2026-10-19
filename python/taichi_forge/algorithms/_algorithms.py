@@ -5556,22 +5556,28 @@ class DeviceCheckResult:
     def kind(self):
         return self._kind
 
-    def to_int(self):
+    def _read_count(self):
         if isinstance(self._scalar, Ndarray):
             return int(self._scalar.to_numpy()[0])
         return int(self._scalar[None])
 
+    def to_int(self):
+        value = self._read_count()
+        if value < 0:
+            raise OverflowError("Device check count exceeds its i32 result representation")
+        return value
+
     def to_bool(self):
-        value = self.to_int()
+        value = self._read_count()
         if self._truth_when == "zero":
             return value == 0
         return value != 0
 
     def ok(self):
         if self._ok_when == "zero":
-            return self.to_int() == 0
+            return self._read_count() == 0
         if self._ok_when == "nonzero":
-            return self.to_int() != 0
+            return self._read_count() != 0
         return self.to_bool()
 
     def _as_graph_native_node(self):

@@ -2115,6 +2115,9 @@ Limits:
 - These calls are Python-scope native methods, not kernel-scope DSL functions.
 - `to_int()`, `to_bool()`, `ok()`, and `to_float()` read one scalar back to the
   host and therefore synchronize that scalar.
+- Check counts use i32 device scalars. Negative values mark an unrepresentable
+  count: `to_int()` raises `OverflowError`; zero/nonzero tests through `to_bool()`
+  and `ok()` remain valid. This does not impose a limit on total input size.
 - Native routes cover dense ndarray, dense field, and supported StructNdarray
   member views. Non-dense and sparse SNode trees are not native check targets.
 - Vulkan metric fast paths currently prioritize `f32`; unsupported `f64`

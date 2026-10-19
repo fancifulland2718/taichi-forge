@@ -26,6 +26,7 @@
 #include "taichi/rhi/cpu/scatter_add.h"
 #include "taichi/rhi/cpu/aggregation.h"
 #include "taichi/rhi/cpu/histogram.h"
+#include "taichi/rhi/cpu/diagnostic_reduce.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
 #include "taichi/rhi/interop/external_access_epoch.h"
@@ -3915,419 +3916,86 @@ std::size_t cpu_reduce_strided_typed(const uint8_t *values_ptr,
   return 0;
 }
 
-template <typename T>
-bool cpu_check_predicate(T value, int check_op, int lower, int upper) {
-  switch (check_op) {
-    case 0:
-      return value != T{};
-    case 1:
-      return value == T{};
-    case 2:
-      if constexpr (std::is_floating_point_v<T>) {
-        return std::isnan(value);
-      }
-      return false;
-    case 3:
-      if constexpr (std::is_floating_point_v<T>) {
-        return std::isinf(value);
-      }
-      return false;
-    case 4:
-      if constexpr (std::is_floating_point_v<T>) {
-        return !std::isfinite(value);
-      }
-      return false;
-    case 5:
-      if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-        return value < static_cast<T>(lower) || value >= static_cast<T>(upper);
-      } else if constexpr (std::is_integral_v<T>) {
-        if (upper <= 0) {
-          return true;
-        }
-        if (lower < 0) {
-          return value >= static_cast<T>(upper);
-        }
-        return value < static_cast<T>(lower) || value >= static_cast<T>(upper);
-      }
-      return false;
-  }
-  return false;
+template <typename Read>
+std::size_t cpu_check_count_read(Read values, int32_t *output, int op,
+                                 int lower, int upper, std::size_t n,
+                                 int max_threads, int partitions) {
+  TI_ERROR_IF(!output, "CPU native check received a null output.");
+  std::vector<uint64_t> partial(partitions > 1 ? partitions : 0);
+  auto *pool = partitions > 1 ? get_cpu_primitive_thread_pool(max_threads) : nullptr;
+  const auto count = cpu::check_count(values, n, op, lower, upper, partitions,
+                                       partial.data(), pool);
+  output[0] = cpu::encode_check_count_i32(count);
+  return partial.size() * sizeof(uint64_t);
 }
 
 template <typename T>
-struct CpuCheckCountTaskContext {
-  const T *values{nullptr};
-  int32_t *partial{nullptr};
-  std::size_t n{0};
-  int check_op{0};
-  int lower{0};
-  int upper{0};
-  int num_threads{1};
-};
-
-template <typename T>
-void cpu_check_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuCheckCountTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  int32_t local = 0;
-  for (std::size_t i = begin; i < end; ++i) {
-    local += cpu_check_predicate(ctx->values[i], ctx->check_op, ctx->lower,
-                                 ctx->upper)
-                 ? 1
-                 : 0;
-  }
-  ctx->partial[tid] = local;
-}
-
-template <typename T>
-std::size_t cpu_check_count_typed(const T *values_ptr,
-                                  int32_t *output_ptr,
-                                  int check_op,
-                                  int lower,
-                                  int upper,
-                                  std::size_t n,
-                                  int max_threads,
-                                  int target_threads,
+std::size_t cpu_check_count_typed(const T *values, int32_t *output, int op,
+                                  int lower, int upper, std::size_t n,
+                                  int max_threads, int target_threads,
                                   bool use_parallel) {
-  TI_ERROR_IF(!values_ptr || !output_ptr,
-              "CPU native check_count received a null data pointer.");
-  if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<int32_t> partial(num_threads, 0);
-    CpuCheckCountTaskContext<T> ctx;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.check_op = check_op;
-    ctx.lower = lower;
-    ctx.upper = upper;
-    ctx.num_threads = num_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx, cpu_check_count_task<T>);
-    int32_t total = 0;
-    for (int32_t value : partial) {
-      total += value;
-    }
-    output_ptr[0] = total;
-    return partial.size() * sizeof(int32_t);
-  }
-  int32_t total = 0;
-  for (std::size_t i = 0; i < n; ++i) {
-    total += cpu_check_predicate(values_ptr[i], check_op, lower, upper) ? 1 : 0;
-  }
-  output_ptr[0] = total;
-  return 0;
+  return cpu_check_count_read(cpu::DiagnosticPackedRead<T>{values}, output,
+                               op, lower, upper, n, max_threads,
+                               use_parallel ? target_threads : 1);
 }
 
 template <typename T>
-struct CpuStridedCheckCountTaskContext {
-  const uint8_t *values{nullptr};
-  std::size_t offset{0};
-  std::size_t stride{sizeof(T)};
-  int32_t *partial{nullptr};
-  std::size_t n{0};
-  int check_op{0};
-  int lower{0};
-  int upper{0};
-  int num_threads{1};
-};
-
-template <typename T>
-void cpu_strided_check_count_task(void *raw_ctx,
-                                  int /*thread_id*/,
-                                  int task_id) {
-  auto *ctx = static_cast<CpuStridedCheckCountTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  int32_t local = 0;
-  for (std::size_t i = begin; i < end; ++i) {
-    const auto value = *reinterpret_cast<const T *>(
-        ctx->values + ctx->offset + i * ctx->stride);
-    local += cpu_check_predicate(value, ctx->check_op, ctx->lower, ctx->upper)
-                 ? 1
-                 : 0;
-  }
-  ctx->partial[tid] = local;
-}
-
-template <typename T>
-std::size_t cpu_check_count_strided_typed(const uint8_t *values_ptr,
-                                          std::size_t offset,
-                                          std::size_t stride,
-                                          int32_t *output_ptr,
-                                          int check_op,
-                                          int lower,
-                                          int upper,
-                                          std::size_t n,
-                                          int max_threads,
-                                          int target_threads,
+std::size_t cpu_check_count_strided_typed(const uint8_t *values,
+                                          std::size_t offset, std::size_t stride,
+                                          int32_t *output, int op, int lower,
+                                          int upper, std::size_t n,
+                                          int max_threads, int target_threads,
                                           bool use_parallel) {
-  TI_ERROR_IF(!values_ptr || !output_ptr,
-              "CPU native strided check_count received a null data pointer.");
-  if (stride == sizeof(T) && offset == 0) {
-    return cpu_check_count_typed(reinterpret_cast<const T *>(values_ptr),
-                                 output_ptr, check_op, lower, upper, n,
-                                 max_threads, target_threads, use_parallel);
-  }
-  if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<int32_t> partial(num_threads, 0);
-    CpuStridedCheckCountTaskContext<T> ctx;
-    ctx.values = values_ptr;
-    ctx.offset = offset;
-    ctx.stride = stride;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.check_op = check_op;
-    ctx.lower = lower;
-    ctx.upper = upper;
-    ctx.num_threads = num_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx, cpu_strided_check_count_task<T>);
-    int32_t total = 0;
-    for (int32_t value : partial) {
-      total += value;
-    }
-    output_ptr[0] = total;
-    return partial.size() * sizeof(int32_t);
-  }
-  int32_t total = 0;
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto value =
-        *reinterpret_cast<const T *>(values_ptr + offset + i * stride);
-    total += cpu_check_predicate(value, check_op, lower, upper) ? 1 : 0;
-  }
-  output_ptr[0] = total;
-  return 0;
+  if (!offset && stride == sizeof(T))
+    return cpu_check_count_typed(reinterpret_cast<const T *>(values), output,
+                                  op, lower, upper, n, max_threads,
+                                  target_threads, use_parallel);
+  return cpu_check_count_read(cpu::DiagnosticStridedRead<T>{values, offset, stride},
+                               output, op, lower, upper, n, max_threads,
+                               use_parallel ? target_threads : 1);
+}
+
+template <typename Read>
+std::size_t cpu_metric_reduce_read(Read values, Read other,
+                                    typename Read::value_type *output, int op,
+                                    std::size_t n, int max_threads, int partitions) {
+  TI_ERROR_IF(!output, "CPU native metric received a null output.");
+  using T = typename Read::value_type;
+  std::vector<T> partial(partitions > 1 ? partitions : 0);
+  auto *pool = partitions > 1 ? get_cpu_primitive_thread_pool(max_threads) : nullptr;
+  output[0] = cpu::metric_reduce(values, other, n, op, partitions,
+                                  partial.data(), pool);
+  return partial.size() * sizeof(T);
 }
 
 template <typename T>
-T cpu_metric_abs(T value) {
-  if constexpr (std::is_floating_point_v<T>) {
-    if (std::isnan(value)) {
-      return std::numeric_limits<T>::infinity();
-    }
-    return value < T{} ? -value : value;
-  } else if constexpr (std::is_signed_v<T>) {
-    return value < T{} ? -value : value;
-  } else {
-    return value;
-  }
+std::size_t cpu_metric_reduce_typed(const T *values, const T *other, T *output,
+                                    int op, std::size_t n, int max_threads,
+                                    int target_threads, bool use_parallel) {
+  return cpu_metric_reduce_read(cpu::DiagnosticPackedRead<T>{values},
+                                 cpu::DiagnosticPackedRead<T>{other}, output,
+                                 op, n, max_threads, use_parallel ? target_threads : 1);
 }
 
 template <typename T>
-T cpu_metric_value(const T *values, const T *other, std::size_t i, int op) {
-  switch (op) {
-    case 0:
-      return cpu_metric_abs(values[i]);
-    case 1:
-      return cpu_metric_abs(values[i] - other[i]);
-  }
-  return T{};
-}
-
-template <typename T>
-struct CpuMetricReduceTaskContext {
-  const T *values{nullptr};
-  const T *other{nullptr};
-  T *partial{nullptr};
-  std::size_t n{0};
-  int metric_op{0};
-  int num_threads{1};
-};
-
-template <typename T>
-void cpu_metric_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuMetricReduceTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  T local{};
-  for (std::size_t i = begin; i < end; ++i) {
-    local = std::max(local,
-                     cpu_metric_value(ctx->values, ctx->other, i,
-                                      ctx->metric_op));
-  }
-  ctx->partial[tid] = local;
-}
-
-template <typename T>
-std::size_t cpu_metric_reduce_typed(const T *values_ptr,
-                                    const T *other_ptr,
-                                    T *output_ptr,
-                                    int metric_op,
-                                    std::size_t n,
-                                    int max_threads,
-                                    int target_threads,
-                                    bool use_parallel) {
-  TI_ERROR_IF(!values_ptr || !output_ptr,
-              "CPU native metric_reduce received a null data pointer.");
-  TI_ERROR_IF(metric_op == 1 && !other_ptr,
-              "CPU native max_abs_delta received a null rhs pointer.");
-  if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<T> partial(num_threads, T{});
-    CpuMetricReduceTaskContext<T> ctx;
-    ctx.values = values_ptr;
-    ctx.other = other_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.metric_op = metric_op;
-    ctx.num_threads = num_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx, cpu_metric_reduce_task<T>);
-    T result{};
-    for (T value : partial) {
-      result = std::max(result, value);
-    }
-    output_ptr[0] = result;
-    return partial.size() * sizeof(T);
-  }
-  T result{};
-  for (std::size_t i = 0; i < n; ++i) {
-    result = std::max(result,
-                      cpu_metric_value(values_ptr, other_ptr, i, metric_op));
-  }
-  output_ptr[0] = result;
-  return 0;
-}
-
-template <typename T>
-T cpu_metric_strided_value(const uint8_t *values,
-                           const uint8_t *other,
-                           std::size_t values_offset,
-                           std::size_t values_stride,
-                           std::size_t other_offset,
-                           std::size_t other_stride,
-                           std::size_t i,
-                           int op) {
-  const T value =
-      *reinterpret_cast<const T *>(values + values_offset + i * values_stride);
-  switch (op) {
-    case 0:
-      return cpu_metric_abs(value);
-    case 1:
-      return cpu_metric_abs(
-          value - *reinterpret_cast<const T *>(other + other_offset +
-                                               i * other_stride));
-  }
-  return T{};
-}
-
-template <typename T>
-struct CpuStridedMetricReduceTaskContext {
-  const uint8_t *values{nullptr};
-  const uint8_t *other{nullptr};
-  T *partial{nullptr};
-  std::size_t n{0};
-  std::size_t values_offset{0};
-  std::size_t values_stride{sizeof(T)};
-  std::size_t other_offset{0};
-  std::size_t other_stride{sizeof(T)};
-  int metric_op{0};
-  int num_threads{1};
-};
-
-template <typename T>
-void cpu_strided_metric_reduce_task(void *raw_ctx,
-                                    int /*thread_id*/,
-                                    int task_id) {
-  auto *ctx = static_cast<CpuStridedMetricReduceTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  T local{};
-  for (std::size_t i = begin; i < end; ++i) {
-    local = std::max(local,
-                     cpu_metric_strided_value<T>(
-                         ctx->values, ctx->other, ctx->values_offset,
-                         ctx->values_stride, ctx->other_offset,
-                         ctx->other_stride, i, ctx->metric_op));
-  }
-  ctx->partial[tid] = local;
-}
-
-template <typename T>
-std::size_t cpu_metric_reduce_strided_typed(const uint8_t *values_ptr,
-                                            const uint8_t *other_ptr,
-                                            T *output_ptr,
-                                            int metric_op,
-                                            std::size_t n,
+std::size_t cpu_metric_reduce_strided_typed(const uint8_t *values,
+                                            const uint8_t *other, T *output,
+                                            int op, std::size_t n,
                                             std::size_t values_offset,
                                             std::size_t values_stride,
                                             std::size_t other_offset,
                                             std::size_t other_stride,
-                                            int max_threads,
-                                            int target_threads,
+                                            int max_threads, int target_threads,
                                             bool use_parallel) {
-  TI_ERROR_IF(!values_ptr || !output_ptr,
-              "CPU native strided metric_reduce received a null data pointer.");
-  TI_ERROR_IF(metric_op == 1 && !other_ptr,
-              "CPU native strided max_abs_delta received a null rhs pointer.");
-  if (!other_ptr) {
-    other_ptr = values_ptr;
-    other_offset = values_offset;
-    other_stride = values_stride;
-  }
-  if (values_offset == 0 && values_stride == sizeof(T) && other_offset == 0 &&
-      other_stride == sizeof(T)) {
-    return cpu_metric_reduce_typed(reinterpret_cast<const T *>(values_ptr),
-                                   reinterpret_cast<const T *>(other_ptr),
-                                   output_ptr, metric_op, n, max_threads,
-                                   target_threads, use_parallel);
-  }
-  if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<T> partial(num_threads, T{});
-    CpuStridedMetricReduceTaskContext<T> ctx;
-    ctx.values = values_ptr;
-    ctx.other = other_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.values_offset = values_offset;
-    ctx.values_stride = values_stride;
-    ctx.other_offset = other_offset;
-    ctx.other_stride = other_stride;
-    ctx.metric_op = metric_op;
-    ctx.num_threads = num_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx,
-             cpu_strided_metric_reduce_task<T>);
-    T result{};
-    for (T value : partial) {
-      result = std::max(result, value);
-    }
-    output_ptr[0] = result;
-    return partial.size() * sizeof(T);
-  }
-  T result{};
-  for (std::size_t i = 0; i < n; ++i) {
-    result = std::max(result,
-                      cpu_metric_strided_value<T>(
-                          values_ptr, other_ptr, values_offset, values_stride,
-                          other_offset, other_stride, i, metric_op));
-  }
-  output_ptr[0] = result;
-  return 0;
+  if (!values_offset && values_stride == sizeof(T) &&
+      (!other || (!other_offset && other_stride == sizeof(T))))
+    return cpu_metric_reduce_typed(reinterpret_cast<const T *>(values),
+                                    reinterpret_cast<const T *>(other), output,
+                                    op, n, max_threads, target_threads, use_parallel);
+  return cpu_metric_reduce_read(
+      cpu::DiagnosticStridedRead<T>{values, values_offset, values_stride},
+      cpu::DiagnosticStridedRead<T>{other, other_offset, other_stride},
+      output, op, n, max_threads, use_parallel ? target_threads : 1);
 }
 
 template <typename T>
@@ -18603,7 +18271,7 @@ std::size_t Program::cpu_check_count_ndarray(Ndarray *values,
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
   const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
@@ -18679,7 +18347,7 @@ std::size_t Program::cpu_check_count_strided_ndarray(Ndarray *values,
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
   const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
@@ -18748,7 +18416,7 @@ std::size_t Program::cpu_check_count_dense_field(SNode *values,
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
   const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   switch (value_type) {
@@ -18836,7 +18504,7 @@ std::size_t Program::cpu_metric_reduce_ndarray(Ndarray *values,
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
   const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
@@ -18926,7 +18594,7 @@ std::size_t Program::cpu_metric_reduce_strided_ndarray(
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
   const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
@@ -18997,7 +18665,7 @@ std::size_t Program::cpu_metric_reduce_dense_field(SNode *values,
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
   const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   switch (value_type) {
@@ -19074,7 +18742,7 @@ std::size_t Program::cpu_metric_reduce_dense_field_strided_ndarray(
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
   const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   const auto *values_ptr = field_is_values ? field_ptr : array_ptr;

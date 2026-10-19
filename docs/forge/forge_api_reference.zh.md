@@ -1735,6 +1735,8 @@ Result 对象：
 - 这些调用是 Python scope native method，不是 kernel scope DSL 函数。
 - `to_int()`、`to_bool()`、`ok()` 和 `to_float()` 会把一个 scalar 读回 host，
   因而会同步这个 scalar。
+- Check 使用 i32 device scalar，负值标记不可表示的计数：`to_int()` 抛出
+  `OverflowError`，`to_bool()` 与 `ok()` 仍能做零/非零判断；不限制总输入规模。
 - native route 覆盖 dense ndarray、dense field 和已支持的 StructNdarray member
   view。非 dense / sparse SNode tree 不是 native check 目标。
 - Vulkan metric fast path 当前优先覆盖 `f32`；不支持的 `f64` metric 路线会根据

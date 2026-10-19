@@ -837,6 +837,16 @@ or `@ti.func`. The API call submits a native backend primitive and writes one
 device-side scalar. The scalar is copied back to Python only when callers use
 `to_int()`, `to_bool()`, `ok()`, or `to_float()`.
 
+Check results use an i32 device scalar. A negative value signals that the exact
+count exceeds this representation: `to_int()` raises `OverflowError`, while
+`to_bool()` and `ok()` retain their zero/nonzero interpretation. CPU counting
+and partial merges use a wide count and encode overflow without wrapping to
+zero. This is a result-width boundary, not a limit on total input size; large
+inputs with representable counts remain valid. Device consumers that need the
+count itself must handle the negative marker rather than use it as a count.
+CPU packed and strided checks/metrics share a core with caller-owned partials
+and the existing scheduler; each task overwrites its partial on every execution.
+
 `check_count`-style APIs support scalar 1D `ti.ndarray`, `StructNdarray` scalar
 member views, and root-dense-place dense fields with
 `i32/u32/i64/u64/f32/f64`. `metric_reduce`-style APIs support the same input

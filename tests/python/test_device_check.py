@@ -481,3 +481,23 @@ def test_native_graph_aot_rejects_native_nodes():
     module = ti.aot.Module()
     with pytest.raises(Exception, match="Module.add_execution_plan"):
         module.add_graph("native_check", graph)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_device_check_overflow_payload_preserves_boolean_truth():
+    # Exercise the i32 result protocol without allocating billions of inputs.
+    scalar = ti.ndarray(ti.i32, 1)
+    count = ti.algorithms.DeviceCheckResult(scalar, ok_when="zero")
+    all_result = ti.algorithms.DeviceCheckResult(scalar, truth_when="zero", ok_when="zero")
+    any_result = ti.algorithms.DeviceCheckResult(scalar, truth_when="nonzero", ok_when="nonzero")
+    for value in (-(2**31), -1):
+        scalar.from_numpy(np.array([value], np.int32))
+        with pytest.raises(OverflowError, match="i32 result"):
+            count.to_int()
+        assert count.to_bool() and not count.ok()
+        assert not all_result.to_bool() and not all_result.ok()
+        assert any_result.to_bool() and any_result.ok()
+    for value in (0, 2**31 - 1):
+        scalar.from_numpy(np.array([value], np.int32))
+        assert count.to_int() == value
+        assert any_result.to_bool() == (value != 0)
