@@ -1400,13 +1400,16 @@ for GPU completion.
 | `capacity_bytes`, `used_bytes`, `available_bytes` | Allocator-owned capacity, bump-cursor consumption including alignment, and still-allocatable tails. |
 | `alignment_waste_bytes`, `unreclaimed_released_bytes`, `wasted_bytes` | Alignment loss, released slab bytes that the current policy cannot reuse, and their sum. |
 | `*_chunk_count` | Current total, adaptive slab, request-larger-than-the-next-slab, and exclusive mapping counts. |
-| `peak_reserved_bytes`, `peak_used_bytes`, `peak_wasted_bytes`, `peak_chunk_count` | Host-pool lifetime peaks; they intentionally survive Program reset. |
+| `peak_reserved_bytes`, `peak_used_bytes`, `peak_wasted_bytes`, `peak_chunk_count` | Owning host-pool lifetime peaks; a new LLVM executor starts new counters after retirement. |
 
 The older flat `host_requested_live_bytes`, `host_raw_bytes`, and
 `host_capacity_bytes` fields remain compatibility aliases. New measurement
 code should prefer `host_allocator`. `ti.tools.memory_pool_stats()` exposes
 the same host values in its legacy dictionary and remains a diagnostic
 snapshot, not a reset or allocator-control API.
+LLVM host statistics cover the current executor and exclude independent AOT
+runtimes. Non-LLVM paths retain the legacy host-pool scope. Compare snapshots
+within the same owner and pool lifetime when measuring across resets.
 
 The default host policy starts with a 16 MiB slab and grows geometrically up
 to the existing 1 GiB ceiling. A request larger than the next slab receives a

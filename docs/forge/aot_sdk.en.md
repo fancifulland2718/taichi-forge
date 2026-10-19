@@ -77,6 +77,12 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
+CPU host allocations, runtime callbacks and result buffers belong to their
+LLVM executor. An independent CPU `Runtime` survives `ti.reset()` of another
+CPU/CUDA/Vulkan JIT owner. A `borrow_runtime()` consumer instead shares its JIT
+executor and retires with that owner. Runtime host-memory statistics describe
+the current executor, excluding independent AOT owners.
+
 Optional cuDSS, cuSOLVERDn, cuBLASLt, cuTENSOR, cuSPARSELt, AmgX and VkFFT adapters have separate SDK components.
 Enable their build targets, then build and install only the selected adapter:
 

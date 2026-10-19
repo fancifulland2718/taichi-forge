@@ -14,6 +14,53 @@ namespace taichi::lang {
 namespace cpu {
 namespace {
 
+TEST(CpuDeviceTest, BorrowedPoolLivesUntilMappedAllocationRetires) {
+  auto pool = std::make_shared<HostMemoryPool>();
+  std::weak_ptr<HostMemoryPool> lifetime = pool;
+  CpuDevice device{lifetime};
+  Device::AllocParams params{};
+  params.size = 32;
+  DeviceAllocation allocation;
+  ASSERT_EQ(device.allocate_memory(params, &allocation), RhiResult::success);
+  void *mapped = nullptr;
+  ASSERT_EQ(device.map(allocation, &mapped), RhiResult::success);
+  std::memset(mapped, 37, params.size);
+
+  // A device clear cannot retire a mapped record. Dropping the executor's
+  // ownership must therefore leave the allocation's backing pool alive.
+  device.clear();
+  pool.reset();
+  ASSERT_FALSE(lifetime.expired());
+  EXPECT_EQ(static_cast<uint8_t *>(mapped)[31], 37);
+  device.unmap(allocation);
+  device.clear();
+  EXPECT_TRUE(lifetime.expired());
+  EXPECT_EQ(device.allocate_memory(params, &allocation),
+            RhiResult::invalid_usage);
+}
+
+TEST(CpuDeviceTest, ImportedAllocationRetainsButDoesNotReleaseOwnerStorage) {
+  auto pool = std::make_shared<HostMemoryPool>();
+  std::weak_ptr<HostMemoryPool> lifetime = pool;
+  CpuDevice device{lifetime};
+  auto *storage = static_cast<uint8_t *>(pool->allocate(32, 8));
+  storage[0] = 41;
+  auto allocation = device.import_memory(storage, 32);
+  device.dealloc_memory(allocation);
+  EXPECT_EQ(pool->get_stats().release_count, 0u);
+  EXPECT_EQ(storage[0], 41);
+
+  allocation = device.import_memory(storage, 32);
+  pool.reset();
+  ASSERT_FALSE(lifetime.expired());
+  void *mapped = nullptr;
+  ASSERT_EQ(device.map(allocation, &mapped), RhiResult::success);
+  EXPECT_EQ(static_cast<uint8_t *>(mapped)[0], 41);
+  device.unmap(allocation);
+  device.dealloc_memory(allocation);
+  EXPECT_TRUE(lifetime.expired());
+}
+
 TEST(CpuDeviceTest, RejectsStaleWrongDeviceAndOutOfRangeAllocations) {
   CpuDevice device;
   CpuDevice other_device;

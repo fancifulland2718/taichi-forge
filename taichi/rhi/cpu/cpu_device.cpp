@@ -10,7 +10,7 @@ namespace cpu {
 
 CpuDevice::AllocationRecord::~AllocationRecord() {
   if (ptr != nullptr && !use_cached && !is_imported) {
-    HostMemoryPool::get_instance().release(size, ptr);
+    host_memory_pool->release(size, ptr);
   }
 }
 
@@ -19,7 +19,8 @@ CpuDevice::AllocationRecord::AllocationRecord(
     : ptr(other.ptr),
       size(other.size),
       use_cached(other.use_cached),
-      is_imported(other.is_imported) {
+      is_imported(other.is_imported),
+      host_memory_pool(std::move(other.host_memory_pool)) {
   other.ptr = nullptr;
 }
 
@@ -27,12 +28,13 @@ CpuDevice::AllocationRecord &CpuDevice::AllocationRecord::operator=(
     AllocationRecord &&other) noexcept {
   if (this != &other) {
     if (ptr != nullptr && !use_cached && !is_imported) {
-      HostMemoryPool::get_instance().release(size, ptr);
+      host_memory_pool->release(size, ptr);
     }
     ptr = other.ptr;
     size = other.size;
     use_cached = other.use_cached;
     is_imported = other.is_imported;
+    host_memory_pool = std::move(other.host_memory_pool);
     other.ptr = nullptr;
   }
   return *this;
@@ -49,7 +51,13 @@ CpuDevice::AllocInfo CpuDevice::get_alloc_info(const DeviceAllocation handle) {
   return lease->info();
 }
 
-CpuDevice::CpuDevice() {
+CpuDevice::CpuDevice()
+    : owned_host_memory_pool_(std::make_shared<HostMemoryPool>()),
+      host_memory_pool_(owned_host_memory_pool_) {
+}
+
+CpuDevice::CpuDevice(std::weak_ptr<HostMemoryPool> host_memory_pool)
+    : host_memory_pool_(std::move(host_memory_pool)) {
 }
 
 CpuDevice::~CpuDevice() {
@@ -61,17 +69,22 @@ RhiResult CpuDevice::allocate_memory(const AllocParams &params,
   if (out_devalloc == nullptr) {
     return RhiResult::invalid_usage;
   }
+  auto host_memory_pool = host_memory_pool_.lock();
+  if (!host_memory_pool) {
+    return RhiResult::invalid_usage;
+  }
 
   void *ptr = nullptr;
   if (params.size != 0) {
-    ptr = HostMemoryPool::get_instance().allocate(
+    ptr = host_memory_pool->allocate(
         params.size, HostMemoryPool::page_size, true /*exclusive*/);
     if (ptr == nullptr) {
       return RhiResult::out_of_memory;
     }
   }
 
-  AllocationRecord record(ptr, params.size, false, false);
+  AllocationRecord record(ptr, params.size, false, false,
+                          std::move(host_memory_pool));
   auto [result, alloc_id] = allocations_.emplace(std::move(record));
   if (result != RhiResult::success) {
     return result;
@@ -276,7 +289,9 @@ void CpuDevice::memcpy_internal(DevicePtr dst, DevicePtr src, uint64_t size) {
 }
 
 DeviceAllocation CpuDevice::import_memory(void *ptr, size_t size) {
-  AllocationRecord record(ptr, size, false, true);
+  auto host_memory_pool = host_memory_pool_.lock();
+  TI_ERROR_IF(!host_memory_pool, "Cannot import memory into a retired CPU device");
+  AllocationRecord record(ptr, size, false, true, std::move(host_memory_pool));
   auto [result, alloc_id] = allocations_.emplace(std::move(record));
   TI_ERROR_IF(result != RhiResult::success,
               "Failed to import CPU DeviceAllocation: {}", result);

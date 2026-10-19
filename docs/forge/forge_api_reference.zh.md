@@ -1145,12 +1145,14 @@ wait 数据转换成“实测为零”。读取 snapshot 不会有意等待 GPU 
 | `capacity_bytes`、`used_bytes`、`available_bytes` | allocator 拥有的容量、包含 alignment 的 bump-cursor 消耗，以及仍可分配的尾部。 |
 | `alignment_waste_bytes`、`unreclaimed_released_bytes`、`wasted_bytes` | 对齐损耗、当前策略无法复用的已释放 slab 字节及两者之和。 |
 | `*_chunk_count` | 当前总数、adaptive slab、请求大于下一 slab 的 large mapping 和 exclusive mapping 数。 |
-| `peak_reserved_bytes`、`peak_used_bytes`、`peak_wasted_bytes`、`peak_chunk_count` | host pool lifetime peak；有意跨 Program reset 保留。 |
+| `peak_reserved_bytes`、`peak_used_bytes`、`peak_wasted_bytes`、`peak_chunk_count` | 所属 host pool 的 lifetime peak；LLVM 执行器退休后，下一执行器重新计数。 |
 
 旧的 flat `host_requested_live_bytes`、`host_raw_bytes` 与
 `host_capacity_bytes` 保留为兼容 alias；新测量代码应优先使用
 `host_allocator`。`ti.tools.memory_pool_stats()` 在旧 dictionary 中公开相同
 host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
+LLVM host 统计仅覆盖当前执行器，不包含独立 AOT runtime；非 LLVM 路径继续使用
+legacy host pool 的统计范围。跨 reset 比较时，应区分 owner 与 pool 的生命周期。
 
 默认 host policy 从 16 MiB slab 开始，按几何级数增长到既有 1 GiB 上限；大于
 下一 slab 的单次请求使用按请求大小并包含必要对齐空间的 large mapping，且不推进后续

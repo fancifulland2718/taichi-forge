@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU AOT runtime memory is isolated from unrelated JIT resets, fixing an access
+  violation when an independent consumer continued after `ti.reset()`.
+  Borrowed consumers retain their existing owner retirement contract.
+
 - Prepared sorting, prefix sorting and compaction now reject automatic reverse
   and forward AD before writing outputs, closing a path that silently omitted
   gradients. Primal execution and explicitly differentiated downstream kernels remain supported.
@@ -46,8 +50,7 @@ lifetimes. The entries below describe the changes.
 - CPU stable payload sorting computes floating-point ordering keys once per input,
   reducing repeated NaN and signed-zero checks while preserving ordering and payload
   bits. The additional keys are included in workspace accounting. CPU finalization
-  also retires allocation records before the host pool resets, preventing a delayed
-  executor destructor from releasing storage reused by a new runtime.
+  also retires allocation records before releasing the owning runtime's host pool.
 
 - Fix invalid pointer types in Vulkan `SharedArray` floating-point CAS fallback.
   Each allocation uses consistent storage for atomics and ordinary loads/stores,

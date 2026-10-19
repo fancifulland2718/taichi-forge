@@ -12,6 +12,7 @@
 #include "taichi/math/math.h"
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/program/py_print_buffer.h"
+#include "taichi/program/program.h"
 #include "taichi/python/exception.h"
 #include "taichi/python/export.h"
 #include "taichi/python/memory_usage_monitor.h"
@@ -639,8 +640,9 @@ void export_misc(py::module &m) {
   // R1.c: read-only memory pool diagnostic snapshots. Adds one extra mutex
   // acquire per call; not on any hot path. See compile_doc/运行时优化规划.md
   // §3.1 for the exposed-fields contract.
-  m.def("get_host_memory_pool_stats", []() {
-    auto s = taichi::lang::HostMemoryPool::get_instance().get_stats();
+  m.def("get_host_memory_pool_stats", [](taichi::lang::Program *program) {
+    auto s = program ? program->get_host_memory_pool_stats()
+                     : taichi::lang::HostMemoryPool::get_instance().get_stats();
     py::dict d;
     d["allocate_count"] = s.allocate_count;
     d["release_count"] = s.release_count;
@@ -668,7 +670,7 @@ void export_misc(py::module &m) {
     d["peak_wasted_bytes"] = s.peak_wasted_bytes;
     d["peak_chunks"] = s.peak_chunks;
     return d;
-  });
+  }, py::arg("program") = nullptr);
   m.def("get_device_memory_pool_stats", []() {
     auto s = taichi::lang::DeviceMemoryPool::get_instance().get_stats();
     py::dict d;

@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CPU AOT runtime 的内存不再受其他 JIT reset 影响，修复独立 consumer 在
+  `ti.reset()` 后继续执行时的访问冲突；借用 consumer 仍随所属 owner 一起退休。
+
 - prepared 排序、前缀排序与 compaction 现在会在写输出前拒绝自动反向／前向微分，
   修复原入口可能静默漏掉梯度的问题；普通执行与后续 kernel 的显式梯度保持可用。
 
@@ -39,8 +42,8 @@
   导出 AOT。排序仍是离散操作，支持后续已编译 kernel 的梯度。
 
 - CPU 稳定 payload 排序按输入预计算浮点排序键，减少重复的 NaN 和有符号零判断，
-  保留原顺序与 payload 位语义；新增排序键计入工作区大小。CPU finalize 同时在 host
-  内存池重置前退休分配记录，避免延迟析构的旧 executor 误释放新 runtime 复用的地址。
+  保留原顺序与 payload 位语义；新增排序键计入工作区大小。CPU finalize 同时在释放
+  所属 runtime 的 host 内存池前退休分配记录。
 
 - 修复 Vulkan `SharedArray` 浮点 CAS 回退使用错误指针类型的问题，按数组统一原子操作
   与普通读写的存储表示，保留其他数组的原生快路径；同时修正 f64 CAS min/max 类型。

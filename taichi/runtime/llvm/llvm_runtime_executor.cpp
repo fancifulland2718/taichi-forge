@@ -66,7 +66,7 @@ std::size_t direct_ambient_size(SNodeType type,
 
 LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
                                          KernelProfilerBase *profiler)
-    : config_(config) {
+    : config_(config), host_memory_pool_(std::make_shared<HostMemoryPool>()) {
   if (config.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
     CUDAContext::check_runtime_health();
@@ -122,7 +122,7 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
 
   if (arch_is_cpu(config.arch)) {
     config.max_block_dim = 1024;
-    device_ = std::make_shared<cpu::CpuDevice>();
+    device_ = std::make_shared<cpu::CpuDevice>(host_memory_pool_);
 
   }
 #if defined(TI_WITH_CUDA)
@@ -199,7 +199,7 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
     // FIXME: add dx12 device.
     // FIXME: set value based on DX12.
     config.max_block_dim = 1024;
-    device_ = std::make_shared<cpu::CpuDevice>();
+    device_ = std::make_shared<cpu::CpuDevice>(host_memory_pool_);
   }
 #endif
   else {
@@ -1487,6 +1487,13 @@ uint64_t *LlvmRuntimeExecutor::get_device_alloc_info_ptr(
       .ptr;
 }
 
+HostMemoryPoolStats LlvmRuntimeExecutor::get_host_memory_pool_stats() const {
+  // Diagnostics may race owner retirement. Keep this snapshot's pool alive
+  // without extending the executor lifetime or touching a submission path.
+  auto pool = std::atomic_load(&host_memory_pool_);
+  return pool ? pool->get_stats() : HostMemoryPoolStats{};
+}
+
 void LlvmRuntimeExecutor::finalize() {
   profiler_ = nullptr;
   active_snode_tree_runtime_states_.clear();
@@ -1496,9 +1503,9 @@ void LlvmRuntimeExecutor::finalize() {
   snode_tree_runtime_directory_capacity_ = 0;
   snode_tree_runtime_directory_growth_events_ = 0;
   if (arch_is_cpu(config_.arch)) {
-    // Program resets the host pool after this boundary. Retained Python plans
-    // can delay executor destruction past the next Program's allocations;
-    // retire the old records now so they cannot release reused host addresses.
+    // Retire device records before releasing this executor's runtime pool.
+    // An outstanding mapped allocation retains its pool until it is unmapped
+    // and retired; an unrelated runtime never shares this ownership boundary.
     llvm_device()->clear();
   }
   if (config_.arch == Arch::cuda || config_.arch == Arch::amdgpu) {
@@ -1541,6 +1548,8 @@ void LlvmRuntimeExecutor::finalize() {
       synchronize();
     }
   }
+  llvm_runtime_ = nullptr;
+  std::atomic_store(&host_memory_pool_, std::shared_ptr<HostMemoryPool>{});
   finalized_ = true;
 }
 
@@ -1750,13 +1759,13 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
     TI_NOT_IMPLEMENTED
 #endif
   } else {
-    *result_buffer_ptr = (uint64 *)HostMemoryPool::get_instance().allocate(
+    *result_buffer_ptr = (uint64 *)host_memory_pool_->allocate(
         sizeof(uint64) * taichi_result_buffer_entries, 8);
   }
 
   TI_TRACE("Launching runtime_initialize");
 
-  auto *host_memory_pool = &HostMemoryPool::get_instance();
+  auto *host_memory_pool = host_memory_pool_.get();
   runtime_jit
       ->call<void *, void *, std::size_t, void *, int, void *, void *, void *>(
           "runtime_initialize", *result_buffer_ptr, host_memory_pool,

@@ -61,6 +61,11 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 通过 `TI_PREBUILT_PYTHON_RUNTIME_DIR` 单独构建 shim 时，对包含兼容 C API 的
 runtime 同样启用 `TI_WITH_RUNTIME_C_API=ON`。这会编译 `borrow_runtime()` 绑定，
 核心及 SDK 文件仍由 runtime 分发包持有；发行 shim 配置已启用此选项。
+CPU host 分配、runtime 回调和结果缓冲由各自的 LLVM 执行器持有。独立 CPU
+`Runtime` 可在另一个 CPU/CUDA/Vulkan JIT owner 执行 `ti.reset()` 后继续使用；
+`borrow_runtime()` 则共享所属 JIT 执行器，并随该 owner 一起退休。
+runtime 的 host 内存统计反映当前执行器，不计入独立 AOT owner 的分配。
+
 共用二进制库不会自动共用可变 runtime 实例，
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。

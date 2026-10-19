@@ -25,6 +25,8 @@
 namespace taichi::lang {
 
 struct CUDAKernelArtifact;
+class HostMemoryPool;
+struct HostMemoryPoolStats;
 
 namespace cuda {
 class CudaDevice;
@@ -118,6 +120,8 @@ class LlvmRuntimeExecutor {
 
   Device *get_compute_device();
 
+  HostMemoryPoolStats get_host_memory_pool_stats() const;
+
   // Lazily creates the host scheduler for CPU execution. CUDA/AMDGPU callers
   // receive nullptr and therefore never create unrelated CPU worker threads.
   ThreadPool *get_cpu_thread_pool();
@@ -207,6 +211,10 @@ class LlvmRuntimeExecutor {
 
  private:
   CompileConfig &config_;
+
+  // All host runtime callbacks and CPU device allocations share this owner.
+  // Its lifetime is independent of any other JIT or standalone AOT executor.
+  std::shared_ptr<HostMemoryPool> host_memory_pool_;
 
   std::unique_ptr<TaichiLLVMContext> llvm_context_{nullptr};
   std::unique_ptr<JITSession> jit_session_{nullptr};
