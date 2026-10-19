@@ -180,8 +180,6 @@ class _CudaGraphStorageFactory:
                 or plan.temporary_capacity != (group.arena_capacity or None)
                 or plan.ordered_temporary_reuse != group.ordered_temporary_reuse):
             raise TaichiRuntimeError("AOT selected storage factory does not match its temporary plan")
-        if plan.temporary_arena and not plan.ordered_temporary_reuse:
-            raise TaichiRuntimeError("AOT execution Graph requires the selected temporary storage recipe")
         return context.resource(plan, "memory", "pool", parameters={"retained_bytes": 0})
 
 

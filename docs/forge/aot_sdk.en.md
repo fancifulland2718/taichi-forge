@@ -2896,13 +2896,16 @@ create or require their allocators. Views inherit their parent's allocation.
 
 Graph execution-plan export preserves selected generation-owned pools for private
 ndarrays, including distinct pools in one Graph. It uses the same allocator
-resources and retains the selected pool topology. A selected single-slot,
-queue-ordered CUDA temporary arena also exports its whole i32/f32 buffers when
-the existing final-executor proof qualifies one fully lowered CGraph. Export
-reuses its already-resolved temporary bindings without reading scratch contents;
-replay does not invoke Python allocation/binding callbacks. Unknown factories,
-completion-ring arenas and unqualified temporary schedules still fail preflight;
-they are not silently replaced with ordinary allocations.
+resources and retains the selected pool topology. Selected CUDA temporary arenas
+export whole i32/f32 buffers when the existing final-executor proof qualifies one
+fully lowered, single-queue CGraph. A single-slot ordered arena retains its
+existing path; an eagerly materialized completion arena exports the ordered ring
+below with its selected capacity and allocator. Export checks the resolved
+whole-buffer mapping of every slot without reading scratch contents. Transient
+scratch has no cross-invocation persistence contract; same-queue ordering protects
+native cyclic reuse. Replay does not invoke Python allocation/binding callbacks.
+Unknown factories, partial arenas, unqualified schedules and nested temporary
+arenas still fail preflight, before publishing code.
 
 Explicit execution plans can use an ordered private storage ring on CPU, CUDA
 and Vulkan (plan v21). The existing native executor prepares each frame once,
@@ -2928,8 +2931,8 @@ one replay; argument/resource/workspace byte counts cover the entire prepared
 owner. Closing a dependency or borrowed Program retires all its frames before
 their storage is released. Replaying does not poll completion from Python.
 
-This explicit recipe does not provide concurrent Graph lanes or automatically
-export a JIT completion-ring arena. It currently rejects control/native/image
+This recipe does not provide concurrent Graph lanes. Automatic arena export is
+limited to the qualified CUDA route above. The recipe rejects control/native/image
 operations, dynamic launches, other execution recipes, explicit initialization
 sequences, shared resources that alias selected arrays, and gradient bindings on
 the selected arrays. Array `initial_data`/`zero_initialize` and gradients on

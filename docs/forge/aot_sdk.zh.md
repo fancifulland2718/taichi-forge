@@ -2220,11 +2220,13 @@ plan = aot.ExecutionPlan(operations, resources=[pool, scratch])
 其分配器；view 继承父数组的分配。
 
 Graph 执行计划自动导出可保留已选的私有 ndarray 代次池，包括同一 Graph 的多个
-独立池，复用上述分配器资源描述。已选的单槽、同流顺序复用 CUDA temporary arena
-也可导出完整 i32/f32 缓冲，但须通过既有的最终执行器证明，限定为一个完全 lowering
-的 CGraph。导出复用已解析的临时绑定，不读回 scratch 内容；重放不调用 Python
-分配/绑定回调。未知 storage factory、依赖完成信号轮转的 ring，以及未经证明的临时
-调度仍在预检期报错，不会静默替换为普通分配。
+独立池，复用上述分配器资源描述。已选 CUDA temporary arena 可导出完整 i32/f32
+缓冲，但须通过既有的最终执行器证明，限定为一个完全 lowering 的单队列 CGraph。
+单槽 ordered arena 保留原路线；已完整物化的 completion arena 导出为下述有序 ring，
+保留选定容量和分配器。导出逐槽检查已解析的完整缓冲映射，不读回 scratch 内容。
+临时 scratch 不承诺跨调用保留内容，由同队列顺序保护原生轮转复用；重放不调用
+Python 分配/绑定回调。未知 factory、未完整物化的 arena、未经证明的调度和父图
+嵌套 temporary arena 仍在发布代码前报错。
 
 显式执行计划现支持CPU/CUDA/Vulkan上的有序私有存储轮转（plan v21）。原生执行器在
 准备期建立各槽绑定，每次调用只执行一个槽，仍使用同一有序后端队列：
@@ -2245,7 +2247,7 @@ plan = aot.ExecutionPlan(
 allocator仍共享。`dispatch_count`表示单次重放，参数/资源/工作区字节统计整个owner。
 依赖关闭或借用Program退出时，所有槽先退休再释放存储；重放不增加Python完成轮询。
 
-这一显式配方不提供Graph并行lanes，也不自动导出JIT的completion-ring arena。
+这一配方不提供Graph并行lanes；arena自动导出仅覆盖上述已证明的CUDA路线。
 当前拒绝控制/native/image操作、动态launch、其他执行配方、显式初始化序列、依赖所选
 数组的共享别名，以及所选数组自身的梯度绑定；数组`initial_data`/`zero_initialize`
 和外部数组梯度可用。需要独立scratch内容时才增加槽数；槽越多，准备和存储成本越高，

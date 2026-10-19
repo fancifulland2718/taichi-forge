@@ -26,6 +26,7 @@ class _ExportContext:
         self.resource_inputs = resource_inputs
         self.operations = []
         self.initialization = []
+        self.storage_recipe = None
         self._initialization_resources = {}
         self.data_payloads = {}
         self._data_keys = {}
@@ -1204,6 +1205,19 @@ def export_graph(
         from ._graph_constraints import export_constraints
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
+        if context.storage_recipe is not None:
+            # Validate aliases, AD and the entire selected schedule before any
+            # code is published; the arena proof alone cannot cover these.
+            ExecutionPlan(
+                context.operations,
+                initialization=context.initialization or None,
+                resources=context.resources,
+                gradients=mapped_gradients or None,
+                constraints=constraints or None,
+                binding_strategy=binding_strategy,
+                submission_recipe=submission_recipe,
+                storage_recipe=context.storage_recipe,
+            )
         if argument_resources is not None:
             argument_resources = _snapshot(list(argument_resources))
             # Validate the full binding policy before publishing kernels, roots
@@ -1217,6 +1231,7 @@ def export_graph(
                 constraints=constraints or None,
                 binding_strategy=binding_strategy,
                 submission_recipe=submission_recipe,
+                storage_recipe=context.storage_recipe,
             ).with_argument_resources(argument_resources)
             missing_data = set(policy_plan.data_entries) - context.data_payloads.keys() - module._data_payloads.keys()
             if missing_data:
@@ -1240,6 +1255,7 @@ def export_graph(
                 constraints=constraints or None,
                 binding_strategy=binding_strategy,
                 submission_recipe=submission_recipe,
+                storage_recipe=context.storage_recipe,
             )
             # Provider workspace must not accidentally become a public input.
             expected_names = (
