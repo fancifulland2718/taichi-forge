@@ -6,6 +6,7 @@
 #include "taichi/ir/type_factory.h"
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/runtime/native_operation.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
 #endif
@@ -64,11 +65,11 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
     const storage::DenseStorageDescriptor *values,
     int nan_policy) {
   const auto arch = compile_config().arch;
-  TI_ERROR_IF(arch != Arch::cuda && arch != Arch::vulkan,
-              "Prepared sort requires CUDA or Vulkan");
+  TI_ERROR_IF(!arch_is_cpu(arch) && arch != Arch::cuda && arch != Arch::vulkan,
+              "Prepared sort requires CPU, CUDA or Vulkan");
   TI_ERROR_IF(nan_policy < 0 || nan_policy > 1 ||
-                  (arch == Arch::vulkan && nan_policy != 0),
-              "Prepared Vulkan sort supports only nan_policy='last'");
+                  (arch != Arch::cuda && nan_policy != 0),
+              "Prepared CPU/Vulkan sort supports only nan_policy='last'");
   TI_ERROR_IF(keys.index_rank() != 1 || keys.element_rank() != 0,
               "Prepared sort requires one-dimensional scalar keys");
   const auto n = keys.index_extent(0);
@@ -107,8 +108,9 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
     std::copy(packet.pointers.begin(), packet.pointers.end(),
               plan->cuda_pointers_.begin());
   } else {
-    TI_ERROR_IF(!vulkan_radix_sort_available(),
-                "Vulkan native stable sort is unavailable");
+    TI_ERROR_IF(arch_is_cpu(arch) ? !cpu_stable_sort_available()
+                                : !vulkan_radix_sort_available(),
+                "Native stable sort is unavailable");
     plan->storage_ = prepare_native_storage(
         descriptors, std::vector<bool>(descriptors.size(), true));
     if (values) {
@@ -120,7 +122,7 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
                       b.pointer.offset < a.pointer.offset + a.bytes,
                   "Prepared sort key and payload ranges must not overlap");
     }
-    for (std::size_t i = 0; i < descriptors.size(); ++i) {
+    for (std::size_t i = 0; arch == Arch::vulkan && i < descriptors.size(); ++i) {
       const auto &binding = plan->storage_->binding(i);
       DeviceAllocation allocation{binding.pointer.device,
                                   binding.pointer.alloc_id};
@@ -135,7 +137,7 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
     }
   }
   // No mathematical operation, command submission, scratch allocation or
-  // synchronization. First execution may populate the existing backend arena.
+  // synchronization. First execution may populate the backend workspace.
   return plan;
 }
 
@@ -145,7 +147,23 @@ std::size_t Program::execute_primitive_sort(const PreparedPrimitiveSort &plan) {
     if (plan.count_ <= 1) {
       return;
     }
-    if (compile_config().arch == Arch::cuda) {
+    const auto arch = compile_config().arch;
+    if (arch_is_cpu(arch)) {
+      if (!plan.cpu_operation_) {
+        const auto keys = plan.storage_->binding(0).pointer;
+        const auto values = plan.value_bytes_
+                                ? plan.storage_->binding(1).pointer
+                                : DevicePtr{};
+        SortOperation operation{
+            keys, values, static_cast<std::size_t>(plan.count_),
+            static_cast<NativeSortKeyType>(plan.key_type_), plan.value_bytes_,
+            plan.value_bytes_ ? (plan.value_type_ >= 3 ? 8u : 4u) : 0u};
+        plan.cpu_operation_ =
+            prepare_sort_operation(arch, *keys.device, operation);
+      }
+      plan.cpu_operation_->run_cpu();
+      workspace_bytes = plan.cpu_operation_->workspace_bytes();
+    } else if (arch == Arch::cuda) {
 #ifdef TI_WITH_CUDA
       workspace_bytes = cuda::driver_stable_radix_sort_strided(
           reinterpret_cast<void *>(plan.cuda_pointers_[0]),

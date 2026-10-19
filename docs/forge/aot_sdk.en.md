@@ -2402,13 +2402,12 @@ close and downstream kernel gradients are covered; fusion itself does not
 generate an adjoint. CPU/CUDA keep their ordinary operation sequence.
 
 Scalar sequence sorting accepts all ndarrays or all qualified dense Fields.
-CUDA/Vulkan also accept a compact scalar Field paired with a scalar ndarray,
+CPU/CUDA/Vulkan also accept a compact scalar Field paired with a scalar ndarray,
 in either key/payload direction. Ordinary `sort` and single-part `sort_by_key`
 use the same native route for `auto` and the matching explicit native method;
 export works before or after execution without host sorting or helper kernels.
 `SortWorkspace` reuses the current storage bindings and releases them on clear
-or replacement. CPU mixed storage still selects host sorting and automatic AOT
-export rejects it. Descending, explicit host strategies and strided Fields are
+or replacement. Descending, explicit host strategies and strided Fields are
 outside this mixed native route; export does not silently change their strategy.
 
 For single-key sorting, a scalar ndarray key can also carry an equally sized
@@ -2422,14 +2421,15 @@ Struct members or strided layouts.
 Sorting has no automatic adjoint; downstream compiled kernel
 gradients can consume the reordered records.
 
-CUDA/Vulkan `prepare_sort(keys, values)` recordings also accept scalar/vector/matrix
+CPU/CUDA/Vulkan `prepare_sort(keys, values)` recordings also accept scalar/vector/matrix
 payloads, including packed dense Fields and offset packed ndarray views. The
 existing retained-storage exporter reconstructs the scalar key and complete payload
 record with the same sort operation, without prewarming or adding helper code.
 Cold and warm export, standalone/borrowed consumption, raw payload bits, lifetime
 retirement and downstream kernel gradients are checked. Field snapshots in one
 module must share one initial root state. This does not extend the separate
-`count=` prefix-sort route or add CPU prepared sorting. See [Sort API](sort_api.en.md).
+`count=` prefix-sort route. CPU plans retain their lazy stable-sort workspace;
+GPU plans continue to use the Program arena. See [Sort API](sort_api.en.md).
 
 Multi-key `PrimitiveSequence.sort_by_key()` also exports stable lexicographic
 sorting of equally sized, disjoint, packed 1D scalar ndarrays, with optional
@@ -2462,7 +2462,8 @@ graphs also snapshot their required Fields. Views are published after structural
 preflight and reused across exports in the same module. CUDA/Vulkan recordings
 from `prepare_sort`, `prepare_compact`, and `prepare_unique`/`prepare_unique_by_key`
 also export; prepared compact checks include offset packed Field vector-record
-views. CPU retains the sequence route.
+views. CPU supports the sequence and full-range prepared-sort routes; prepared
+compact/unique remain CUDA/Vulkan.
 
 Unique keeps the first item of each consecutive integer-key run without sorting.
 Fixed `size` preserves producer semantics; only the count prefix is valid and

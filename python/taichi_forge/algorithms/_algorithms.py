@@ -9064,6 +9064,8 @@ def _mixed_storage_sort_method(method, descending, nan_policy):
     arch = current_cfg().arch
     if descending:
         return None
+    if arch in (x64, arm64) and method in ("auto", "cpu_native") and nan_policy == "last":
+        return "cpu_stable_sort_available"
     if arch == cuda and method in ("auto", "cuda_device"):
         return "cuda_device_radix_sort_available"
     if arch == vulkan and method in ("auto", "vulkan_native_radix_u32") and nan_policy == "last":
@@ -9125,7 +9127,7 @@ def _try_native_mixed_storage_sort(keys, values, *, method, workspace, descendin
     if workspace is not None:
         if current_cfg().arch == cuda:
             workspace._cuda_device_active = True
-        else:
+        elif current_cfg().arch == vulkan:
             workspace._vulkan_native_active = True
         workspace.workspace_bytes_current = max(workspace.workspace_bytes_current, plan._workspace_bytes)
         workspace.workspace_bytes_peak = max(workspace.workspace_bytes_peak, workspace.workspace_bytes_current)
@@ -9447,7 +9449,7 @@ def sort(
 
     This is a Taichi Forge extension. `auto` selects the native CPU stable sort,
     CUDA Driver stable radix fallback on CUDA when available, the native
-    Vulkan radix8 path for supported dense key dtypes on Vulkan. CUDA/Vulkan
+    Vulkan radix8 path for supported dense key dtypes on Vulkan. CPU/CUDA/Vulkan
     also accept compact scalar Field/ndarray pairs in either direction. Other
     supported storage and order combinations fall back to a host stable sort.
     Use ``method="legacy"`` for the original

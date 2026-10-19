@@ -68,7 +68,7 @@ _ROUTES = MappingProxyType({
         _sequence(("sort", "sort_by_key"), *_SORT, "single_lexicographic_key_part",
                   "all_ndarrays_or_all_dense_scalar_fields"),
         PrimitiveAOTRoute(
-            "algorithms.PrimitiveSequence", ("sort", "sort_by_key"), _GPU,
+            "algorithms.PrimitiveSequence", ("sort", "sort_by_key"), _ALL,
             _STORAGE + _SORT + ("mixed_scalar_field_and_ndarray", "single_lexicographic_key_part",
                                "unfused_sequence", "selected_native_method", "no_automatic_ad"),
         ),
@@ -89,9 +89,12 @@ _ROUTES = MappingProxyType({
                      "unfused_sequence", "selected_native_method", "cpu_explicit_cpu_native",
                      "preserved_scalar_sort_gather_affine_strategy", "tensor_gather_copy_back", "no_automatic_ad"),
         ),
-        _prepared(("algorithms.prepare_sort",), "stable_ascending", "nan_last", "scalar_keys",
-                  "scalar_or_tensor_payload", "raw_payload_bits", "packed_dense_fields_and_ndarray_views",
-                  "fixed_extent", "no_automatic_ad"),
+        PrimitiveAOTRoute(
+            "aot.Module.add_execution_plan", ("algorithms.prepare_sort",), _ALL,
+            _STORAGE + ("concrete_prepared_recording", "stable_ascending", "nan_last", "scalar_keys",
+                        "scalar_or_tensor_payload", "raw_payload_bits", "packed_dense_fields_and_ndarray_views",
+                        "fixed_extent", "no_automatic_ad"),
+        ),
     ),
     "compact": (
         _module("compact", "stable_selection", "valid_count_prefix"),

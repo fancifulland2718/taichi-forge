@@ -1853,12 +1853,10 @@ f64 位串。三个写范围彼此及与两个读范围不得重叠。越界 gat
 消费者、在途关闭和下游 kernel 梯度；融合本身不自动生成伴随。CPU/CUDA 保持普通操作序列。
 
 标量 sequence 排序支持输入全部为 ndarray，或全部为符合条件的 dense Field。
-CUDA/Vulkan 也支持紧凑标量 Field 与标量 ndarray 混用，二者均可作为 key 或 payload。
+CPU/CUDA/Vulkan 也支持紧凑标量 Field 与标量 ndarray 混用，二者均可作为 key 或 payload。
 普通 `sort` 和单 key 的 `sort_by_key` 在 `auto` 或对应的显式原生方法下使用同一条
 原生路线；冷态、暖态均可导出，不经过 host 排序，也不增加辅助 kernel。
-`SortWorkspace` 复用当前存储绑定，在清理或替换时释放旧绑定。CPU 混合存储仍选择
-host 排序，自动 AOT 导出会拒绝该组合，
-包括 `method="auto"`。调用者可通过显式 AOT sort 描述主动选择原生路线，
+`SortWorkspace` 复用当前存储绑定，在清理或替换时释放旧绑定。
 导出不会静默替换生产端策略。降序、显式 host 策略和带 stride 的 Field 不在这条
 混合原生路线的支持范围内。
 
@@ -1870,12 +1868,13 @@ payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出�
 布局已经接通。排序无自动伴随，
 后续已编译 kernel 的梯度仍可读取重排后的记录。
 
-CUDA/Vulkan 的 `prepare_sort(keys, values)` recording 也支持标量／向量／矩阵载荷，
+CPU/CUDA/Vulkan 的 `prepare_sort(keys, values)` recording 也支持标量／向量／矩阵载荷，
 包括紧凑 dense Field 和带偏移的紧凑 ndarray view。既有 retained-storage 导出器
 用同一 sort 操作重建标量 key 与完整载荷记录，不预热、不增加 helper 代码。
 已检查冷暖导出、独立／借用消费、载荷位模式、生命周期退休及后续 kernel 梯度。
 同一模块的 Field 快照须共享相同初始根状态。该扩展不改变独立的 `count=` 前缀
-排序路线，也不增加 CPU prepared sort。见 [Sort API](sort_api.zh.md)。
+排序路线。CPU plan 按需持有稳定排序工作区；GPU 继续使用 Program arena。
+见 [Sort API](sort_api.zh.md)。
 
 多键 `PrimitiveSequence.sort_by_key()` 也可导出稳定字典序排序：键须为一维 packed
 标量 ndarray，可选载荷允许标量或 packed 向量／矩阵 ndarray，要求长度相同且互不别名。
@@ -1898,7 +1897,8 @@ element shape 共用置换数组；tensor 另需一份 i32 身份索引，每项
 kernel 共用同一 root。没有 kernel 的纯原生图也会保存所需 Field 初值。结构预检通过后
 才发布视图，同一模块多次导出复用已有视图。CUDA/Vulkan 的 `prepare_sort`、
 `prepare_compact`、`prepare_unique`/`prepare_unique_by_key` recording 也可导出；
-prepared compact 已验证带偏移的连续 Field 向量记录视图。CPU 保持 sequence 路线。
+prepared compact 已验证带偏移的连续 Field 向量记录视图。CPU 支持 sequence 和全范围
+prepared sort；prepared compact/unique 仍为 CUDA/Vulkan 路线。
 
 unique 保留每个连续整数键段的第一项，不隐式排序。固定 `size` 保持生产端语义；
 只有 count 指示的输出前缀有效，尾部保持不变。非空输入使用一个 head kernel 和一次

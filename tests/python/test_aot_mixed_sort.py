@@ -14,7 +14,7 @@ from tests import test_utils
 
 
 @pytest.mark.parametrize("field_keys", [False, True])
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_mixed_sort_export_cold_warm_and_downstream_ad(tmp_path, field_keys, monkeypatch):
     n = 17
     fixed, mixed = ti.field(ti.i32, n), ti.ndarray(ti.i32, n)
@@ -119,7 +119,7 @@ def test_mixed_sort_export_cold_warm_and_downstream_ad(tmp_path, field_keys, mon
     graph.close()
     sequence.clear()
     assert plan.report()["closed"]
-    arch = ti.lang.impl.current_cfg().arch.name
+    arch = "cpu" if ti.lang.impl.current_cfg().arch == ti.cpu else ti.lang.impl.current_cfg().arch.name
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
             [

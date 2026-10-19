@@ -6,7 +6,7 @@ import taichi_forge as ti
 from tests import test_utils
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_prepared_tensor_sort_offsets_recording_and_retirement():
     n = 19
     keys = ti.ndarray(ti.u64, n)
@@ -74,7 +74,7 @@ def test_prepared_tensor_sort_offsets_recording_and_retirement():
     assert len(set(identities)) == len(identities)
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_prepared_tensor_sort_dense_field_offset_and_retirement():
     builder = ti.FieldsBuilder()
     sentinel = ti.field(ti.i32)

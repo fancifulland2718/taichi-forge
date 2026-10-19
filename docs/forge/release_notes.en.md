@@ -34,6 +34,17 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Full-range `prepare_sort()` now supports CPU through the shared AOT stable-sort
+  core, retaining lazy workspace across calls. CPU/CUDA/Vulkan ordinary mixed
+  scalar Field/ndarray sorting uses the same native route and exports cold or
+  warm to AOT. Sorting remains discrete; downstream compiled gradients are supported.
+
+- CPU stable payload sorting computes floating-point ordering keys once per input,
+  reducing repeated NaN and signed-zero checks while preserving ordering and payload
+  bits. The additional keys are included in workspace accounting. CPU finalization
+  also retires allocation records before the host pool resets, preventing a delayed
+  executor destructor from releasing storage reused by a new runtime.
+
 - Fix invalid pointer types in Vulkan `SharedArray` floating-point CAS fallback.
   Each allocation uses consistent storage for atomics and ordinary loads/stores,
   while other allocations retain native operations; f64 CAS min/max also use the

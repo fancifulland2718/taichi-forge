@@ -49,7 +49,7 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         scalar = next(r for r in sort.aot_routes if r.entry_point == "algorithms.PrimitiveSequence")
         assert "all_ndarrays_or_all_dense_scalar_fields" in scalar.constraints
         mixed = next(r for r in sort.aot_routes if "mixed_scalar_field_and_ndarray" in r.constraints)
-        assert mixed.backends == ("cuda", "vulkan")
+        assert mixed.backends == ("cpu", "cuda", "vulkan")
         assert mixed.forms == ("sort", "sort_by_key")
         tensor = next(r for r in sort.aot_routes if "packed_vector_or_matrix_ndarray_payload" in r.constraints)
         assert tensor.entry_point == "algorithms.PrimitiveSequence"
@@ -58,7 +58,7 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         direct = next(r for r in sort.aot_routes if r.entry_point == "aot.Module.add_primitive")
         assert "scalar_or_tensor_payload" in direct.constraints
         prepared_sort = next(r for r in sort.aot_routes if r.forms == ("algorithms.prepare_sort",))
-        assert prepared_sort.backends == ("cuda", "vulkan")
+        assert prepared_sort.backends == ("cpu", "cuda", "vulkan")
         assert {"scalar_keys", "scalar_or_tensor_payload", "raw_payload_bits",
                 "packed_dense_fields_and_ndarray_views", "fixed_extent", "no_automatic_ad"} <= set(
                     prepared_sort.constraints)

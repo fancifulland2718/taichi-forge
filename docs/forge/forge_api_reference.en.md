@@ -1645,8 +1645,8 @@ Limits:
 
 Returns `PreparedSortPlan` with `run()`, `record()`, `report()` and idempotent
 `close()` (also a context manager). Fixed compact, naturally aligned 1D scalar
-CUDA/Vulkan storage is validated without executing the sort; contents may then
-change in place. Backend workspace remains lazy and Program-owned. Recording is
+CPU/CUDA/Vulkan storage is validated without executing the sort; contents may then
+change in place. Workspace remains lazy, owned by the CPU plan or GPU Program arena. Recording is
 a runtime-ordered Graph action, not a capture-safe CUDA sort. See
 [prepared sort](native_algorithms.en.md#prepared-sort-063) for dtype, alignment,
 NaN policy and lifetime boundaries.

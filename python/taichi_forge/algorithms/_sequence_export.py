@@ -481,8 +481,8 @@ def _sort(call, context):
         if type(keys) is not ScalarNdarray or type(values) not in (VectorNdarray, MatrixNdarray):
             raise TaichiRuntimeError("AOT tensor sort requires scalar ndarray keys and vector/matrix ndarray payload")
     if not all(isinstance(a, algorithms.Ndarray) for a in arrays):
-        # Keep storage qualification shared with ordinary sort. CPU mixed
-        # storage still selects host_stable; CUDA/Vulkan use prepared bindings.
+        # Keep storage qualification shared with ordinary sort, including
+        # mixed scalar Field/ndarray pairs on CPU/CUDA/Vulkan.
         views = tuple(algorithms._primitive_view(a) for a in arrays)
         if not all(
             view is not None and view.is_dense_field and view.stride == core.data_type_size(desc.scalar_type)

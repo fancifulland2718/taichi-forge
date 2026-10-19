@@ -11,7 +11,7 @@ import taichi_forge as ti
 from tests import test_utils
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_prepared_tensor_sort_aot_views_fields_and_downstream_grad(
     tmp_path, monkeypatch
 ):
@@ -186,7 +186,7 @@ def test_prepared_tensor_sort_aot_views_fields_and_downstream_grad(
     for tree in trees:
         tree.destroy()
     artifact.with_suffix(".json").write_text(json.dumps(cases), encoding="utf-8")
-    arch = "cuda" if ti.cfg.arch == ti.cuda else "vulkan"
+    arch = "cpu" if ti.cfg.arch == ti.cpu else "cuda" if ti.cfg.arch == ti.cuda else "vulkan"
     for mode in ("standalone", "borrowed"):
         result = subprocess.run(
             [
@@ -203,3 +203,6 @@ def test_prepared_tensor_sort_aot_views_fields_and_downstream_grad(
             timeout=90,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(
+            marker in result.stdout + result.stderr for marker in ("VUID-", "Validation Error", "SYNC-HAZARD")
+        ), (result.stdout + result.stderr)

@@ -8,7 +8,7 @@ from tests import test_utils
 
 
 @pytest.mark.parametrize("field_keys", [False, True])
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_mixed_sort_cache_stability_and_rebinding(field_keys, monkeypatch):
     n = 259
     fixed = ti.field(ti.f32 if field_keys else ti.i32, n)
@@ -23,7 +23,9 @@ def test_mixed_sort_cache_stability_and_rebinding(field_keys, monkeypatch):
         raise AssertionError("Mixed native sorting downloaded its inputs")
 
     monkeypatch.setattr(algorithms, "_host_stable_sort", no_host)
-    method = "cuda_device" if ti.lang.impl.current_cfg().arch == ti.cuda else "vulkan_native_radix_u32"
+    method = {ti.cpu: "cpu_native", ti.cuda: "cuda_device", ti.vulkan: "vulkan_native_radix_u32"}[
+        ti.lang.impl.current_cfg().arch
+    ]
     for selected in ("auto", method, "auto"):
         keys.from_numpy(data)
         values.from_numpy(np.arange(n, dtype=np.int32))
@@ -51,7 +53,7 @@ def test_mixed_sort_cache_stability_and_rebinding(field_keys, monkeypatch):
     np.testing.assert_array_equal(values.to_numpy(), expected)
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_mixed_sort_preserves_explicit_host_and_strided_fallback(monkeypatch):
     keys, sibling = ti.field(ti.i32), ti.field(ti.i32)
     ti.root.dense(ti.i, 7).place(keys, sibling)
@@ -98,7 +100,7 @@ def test_mixed_sort_cache_preserves_nan_policy():
     workspace.clear()
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_mixed_sort_workspace_rebinds_after_runtime_reset():
     arch = ti.lang.impl.current_cfg().arch
     workspace = ti.algorithms.SortWorkspace()
