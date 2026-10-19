@@ -189,6 +189,37 @@ def test_native_device_check_index_bounds():
     assert invalid.ok()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_native_device_check_unsigned_indices_signed_bounds():
+    _skip_if_native_check_unavailable()
+    for dtype, value_type, np_type in ((ti.u32, 2, np.uint32), (ti.u64, 3, np.uint64)):
+        if not _check_count_value_available(value_type):
+            continue
+        data = np.array([0, 1, 2, 3, 2**32 - 1, np.iinfo(np_type).max], dtype=np_type)
+        values = ti.ndarray(dtype, len(data))
+        values.from_numpy(data)
+        workspace = ti.algorithms.CheckWorkspace(max_items=len(data))
+        for lower, upper in ((-3, -1), (-1, 0), (-1, 2), (2, 4)):
+            expected = sum(not lower <= int(value) < upper for value in data)
+            result = ti.algorithms.index_bounds_check(values, lower=lower, upper=upper, workspace=workspace)
+            assert result.to_int() == expected
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_native_device_check_float_zero_is_numeric():
+    _skip_if_native_check_unavailable()
+    for dtype, value_type, np_type in ((ti.f32, 1, np.float32), (ti.f64, 5, np.float64)):
+        if not _check_count_value_available(value_type):
+            continue
+        values = ti.ndarray(dtype, 6)
+        values.from_numpy(np.array([-0.0, 0.0, 1.0, -2.0, np.nan, np.inf], dtype=np_type))
+        workspace = ti.algorithms.CheckWorkspace(max_items=6)
+        assert ti.algorithms.count_if(values, workspace=workspace).to_int() == 4
+        all_result = ti.algorithms.all_if(values, workspace=workspace)
+        assert all_result.to_int() == 2
+        assert not all_result.to_bool()
+
+
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")]
 )

@@ -3472,6 +3472,9 @@ struct CheckCountLoadOp {
                      ? 1
                      : 0;
         } else if constexpr (std::is_integral_v<T>) {
+          if (upper <= 0) {
+            return 1;
+          }
           if (lower < 0) {
             return value >= static_cast<T>(upper) ? 1 : 0;
           }

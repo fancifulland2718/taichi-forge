@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Native device checks correctly classify unsigned indices against negative
+  upper bounds on CPU/CUDA/Vulkan. CUDA zero/nonzero checks also treat `-0.0`
+  as zero for both f32 and f64 while retaining NaN/Inf classification.
 - Histogram now exports through the common native AOT registry on CPU/CUDA/Vulkan:
   packed i32/u32 IDs, i32/i64 counters, fixed prefixes and empty-input clearing.
   Prepared owners retain scratch and freeze algorithm preferences; replay neither

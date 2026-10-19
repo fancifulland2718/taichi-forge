@@ -75,6 +75,9 @@ int predicate(VALUE_T value) {
 #if VALUE_KIND == 0 || VALUE_KIND == 4
     return (value < VALUE_T(params.lower) || value >= VALUE_T(params.upper)) ? 1 : 0;
 #elif VALUE_KIND == 2 || VALUE_KIND == 3
+    if (params.upper <= 0) {
+      return 1;
+    }
     if (params.lower < 0) {
       return value >= VALUE_T(params.upper) ? 1 : 0;
     }

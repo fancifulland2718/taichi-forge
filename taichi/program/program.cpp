@@ -3941,6 +3941,9 @@ bool cpu_check_predicate(T value, int check_op, int lower, int upper) {
       if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
         return value < static_cast<T>(lower) || value >= static_cast<T>(upper);
       } else if constexpr (std::is_integral_v<T>) {
+        if (upper <= 0) {
+          return true;
+        }
         if (lower < 0) {
           return value >= static_cast<T>(upper);
         }

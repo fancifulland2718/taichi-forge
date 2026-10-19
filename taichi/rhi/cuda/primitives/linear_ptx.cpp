@@ -790,6 +790,12 @@ CHECK_LOAD_64:
     ld.global.u64 %rd8, [%rd7];
 
 CHECK_DISPATCH:
+    // Floating zero predicates compare magnitude bits so -0 equals +0.
+    // NaN/Inf predicates are also sign independent; integer bits stay intact.
+    setp.eq.u32 %p4, %r2, 1;
+    @%p4 and.b32 %r11, %r11, 2147483647;
+    setp.eq.u32 %p4, %r2, 5;
+    @%p4 and.b64 %rd8, %rd8, 9223372036854775807;
     setp.eq.u32 %p3, %r3, 0;
     @%p3 bra CHECK_NONZERO;
     setp.eq.u32 %p3, %r3, 1;
@@ -890,6 +896,9 @@ CHECK_BOUNDS_I32:
     selp.u32 %r10, 1, 0, %p7;
     bra CHECK_ACCUMULATE;
 CHECK_BOUNDS_U32:
+    setp.le.s32 %p7, %r5, 0;
+    @%p7 mov.u32 %r10, 1;
+    @%p7 bra CHECK_ACCUMULATE;
     setp.lt.s32 %p5, %r4, 0;
     @%p5 bra CHECK_BOUNDS_U32_UPPER;
     setp.lt.u32 %p6, %r11, %r4;
@@ -899,6 +908,9 @@ CHECK_BOUNDS_U32_UPPER:
     @%p7 mov.u32 %r10, 1;
     bra CHECK_ACCUMULATE;
 CHECK_BOUNDS_U64:
+    setp.le.s32 %p7, %r5, 0;
+    @%p7 mov.u32 %r10, 1;
+    @%p7 bra CHECK_ACCUMULATE;
     cvt.u64.u32 %rd11, %r5;
     setp.lt.s32 %p5, %r4, 0;
     @%p5 bra CHECK_BOUNDS_U64_UPPER;

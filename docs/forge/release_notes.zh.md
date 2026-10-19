@@ -31,6 +31,8 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 原生设备检查修复 CPU/CUDA/Vulkan 无符号索引配合负上界时漏报越界的问题；
+  CUDA 的 f32/f64 零值检查也正确将 `-0.0` 视为零，保留 NaN/Inf 分类语义。
 - Histogram 可通过统一原生 AOT registry 导出到 CPU/CUDA/Vulkan，覆盖 packed
   i32/u32 ID、i32/i64 counter、固定前缀及空输入清零。Prepared owner 保留 scratch
   并固定算法偏好，重放不重新分配 partial 或探测环境；纯原生包复用已安装 runtime
