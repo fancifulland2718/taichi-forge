@@ -1,6 +1,12 @@
 // CUDA APIs newer than Taichi's minimum supported driver must stay optional.
 // Capability checks gate every call site before invoking these wrappers.
 
+PER_CUDA_OPTIONAL_FUNCTION(context_create_v4, cuCtxCreate_v4,
+                           void **, const TaichiCudaContextCreateParams *,
+                           unsigned int, int);
+PER_CUDA_OPTIONAL_FUNCTION(context_destroy, cuCtxDestroy_v2, void *);
+PER_CUDA_OPTIONAL_FUNCTION(context_pop_current, cuCtxPopCurrent_v2, void **);
+
 PER_CUDA_OPTIONAL_FUNCTION(stream_query, cuStreamQuery, void *);
 // Needed only by relocatable PTX AOT, not by ordinary kernel launches.
 PER_CUDA_OPTIONAL_FUNCTION(module_get_global,

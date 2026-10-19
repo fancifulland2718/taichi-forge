@@ -969,7 +969,7 @@ CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run) {
     return result;
   }
 
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto &driver = CUDADriver::get_instance();
   if (!ensure_bounded_module(&result.driver_error)) {
     result.reason = "cuda_device_update_ptx_link_failed";

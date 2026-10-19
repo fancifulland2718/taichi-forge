@@ -128,6 +128,7 @@ void *DeviceMemoryPool::allocate_raw_memory(std::size_t size, bool managed) {
 
 #if TI_WITH_CUDA
   if (arch_ == Arch::cuda) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     if (!managed) {
       CUDADriver::get_instance().malloc(&ptr, size);
     } else {
@@ -174,8 +175,10 @@ void DeviceMemoryPool::deallocate_raw_memory(void *ptr) {
   }
 
 #if TI_WITH_CUDA
-  if (arch_ == Arch::cuda)
+  if (arch_ == Arch::cuda) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().mem_free(ptr);
+  }
 #endif
 #if TI_WITH_AMDGPU
   if (arch_ == Arch::amdgpu)

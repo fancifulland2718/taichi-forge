@@ -143,7 +143,7 @@ struct DeviceBiCGSTABCudaReplayState {
   std::string unavailable_reason{"not_built"};
 
   ~DeviceBiCGSTABCudaReplayState() {
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().stream_synchronize(nullptr);
     for (auto &entry : entries) {
       entry.reset();
@@ -155,7 +155,7 @@ struct DeviceBiCGSTABCudaReplayState {
 
   CUstream ensure_capture_stream() {
     if (!capture_stream) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().stream_create(
           reinterpret_cast<void **>(&capture_stream), CU_STREAM_NON_BLOCKING);
     }

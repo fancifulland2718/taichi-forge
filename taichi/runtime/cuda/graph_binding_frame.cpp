@@ -208,8 +208,8 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
   state->launcher = dynamic_cast<KernelLauncher *>(
       &state->program->get_program_impl()->get_kernel_launcher());
   TI_ERROR_IF(!state->device || !state->launcher ||
-                  !CUDAContext::get_instance().supports_mem_pool(),
-              "CUDA binding frames require the CUDA launcher and async memory");
+                  !CUDAContext::get_instance().supports_retained_allocation(),
+              "CUDA binding frames require the CUDA launcher and retained memory");
   for (const auto &dispatch : graph.dispatches) {
     if (dispatch.cuda_capture_command) {
       state->handles.emplace_back();
@@ -243,7 +243,7 @@ bool GraphBindingExecutor::available() {
          driver.graph_instantiate_with_flags.available() &&
          driver.stream_begin_capture.available() &&
          driver.stream_end_capture.available() &&
-         CUDAContext::get_instance().supports_mem_pool();
+         CUDAContext::get_instance().supports_retained_allocation();
 }
 
 const aot::CompiledGraph &GraphBindingExecutor::graph() const {

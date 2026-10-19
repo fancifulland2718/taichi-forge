@@ -1,5 +1,17 @@
 #pragma once
 
+// CUDA Driver 13.3 cuCtxCreate_v4 ABI (cuda.h CUctxCigParam/CUctxCreateParams).
+// Keep prefixed types so driver-only builds do not require a toolkit SDK.
+struct TaichiCudaCigParams {
+  unsigned int shared_data_type;
+  void *shared_data;
+};
+struct TaichiCudaContextCreateParams {
+  void *execution_affinity;
+  int execution_affinity_count;
+  TaichiCudaCigParams *cig;
+};
+
 #include <cstddef>
 #include <cstdint>
 

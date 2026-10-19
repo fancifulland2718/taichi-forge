@@ -991,7 +991,7 @@ class CudaGraphCaptureStream {
 
   ~CudaGraphCaptureStream() {
     if (stream_ != nullptr) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().stream_destroy(stream_);
     }
   }
@@ -1028,7 +1028,7 @@ class CudaGraphHandle {
 
   void reset() {
     if (graph_ != nullptr) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().graph_destroy(graph_);
       graph_ = nullptr;
     }
@@ -1063,7 +1063,7 @@ class CudaGraphExecHandle {
   void reset() {
     if (graph_exec_ != nullptr) {
       auto &context = CUDAContext::get_instance();
-      context.make_current();
+      auto context_guard = context.get_guard();
       // Replay stays on the default stream to preserve the ordering contract
       // visible to ordinary CUDA launches.
       auto &driver = CUDADriver::get_instance();
@@ -1145,11 +1145,11 @@ class CudaGraphCapturePacket {
       return false;
     }
     auto &context = CUDAContext::get_instance();
-    context.make_current();
+    auto context_guard = context.get_guard();
     auto &driver = CUDADriver::get_instance();
     bool stream_ordered_free = false;
-    if (context.supports_mem_pool()) {
-      driver.mem_free_async_impl(packet.device_arg_buffer, stream_);
+    if (context.supports_retained_allocation()) {
+      driver.mem_free_async(packet.device_arg_buffer, stream_);
       stream_ordered_free = true;
     } else {
       driver.mem_free(packet.device_arg_buffer);
@@ -1421,7 +1421,7 @@ struct CompiledGraphCudaState {
 
   void retire() {
     auto &context = CUDAContext::get_instance();
-    context.make_current();
+    auto context_guard = context.get_guard();
     graph_exec.reset();
     nested_conditional.reset();
     if (conditional_control != nullptr) {
@@ -2428,7 +2428,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       }
     }
     if (exact_match) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       state->collect_ready_deferred_resources();
       CUDAContext::get_instance().launch_graph(state->graph_exec.get(),
                                               select_replay_stream());
@@ -2468,7 +2468,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     state = allocate_cuda_replay_slot_for_miss(cache, state,
                                                signature->entries);
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   if (state->retry.structurally_disabled()) {
     mark_cuda_graph_fallback(
         *state, CompiledGraphFallbackReason::structural_unsupported, true);
@@ -2877,7 +2877,7 @@ bool try_run_cuda_masked_control_graph(
     state = allocate_cuda_replay_slot_for_miss(cache, state,
                                                signature->entries);
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   state->collect_ready_deferred_resources();
 
   const bool topology_matches =
@@ -3152,7 +3152,7 @@ bool try_run_cuda_conditional_nested_control_graph(
                                          inner.dispatch_end};
     }
     if (same) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       state->collect_ready_deferred_resources();
       CUDAContext::get_instance().launch_graph(state->graph_exec.get(), nullptr);
       state->stats.last_path =
@@ -3241,7 +3241,7 @@ bool try_run_cuda_conditional_nested_control_graph(
     if (state->graph_exec && state->signature != signature->entries) {
       state = allocate_cuda_replay_slot_for_miss(cache, state, signature->entries);
     }
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     state->collect_ready_deferred_resources();
     if (state->diagnostics_enabled) {
       state->stats.backend = CompiledGraphBackend::cuda;
@@ -3598,7 +3598,7 @@ bool try_run_cuda_device_update_nested_control_graph(
     state = allocate_cuda_replay_slot_for_miss(cache, state,
                                                signature->entries);
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   state->collect_ready_deferred_resources();
   const bool topology_matches =
       state->device_update_nested_mode &&
@@ -4032,7 +4032,7 @@ bool try_run_cuda_masked_nested_control_graph(
     state = allocate_cuda_replay_slot_for_miss(cache, state,
                                                signature->entries);
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   state->collect_ready_deferred_resources();
   const bool topology_matches =
       state->masked_mode && state->masked_nested_mode &&
@@ -4352,7 +4352,7 @@ bool try_run_cuda_bounded_graph(
     state = allocate_cuda_replay_slot_for_miss(cache, state,
                                                signature->entries);
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   state->collect_ready_deferred_resources();
 
   auto update_control = [&]() {
@@ -4724,7 +4724,7 @@ bool try_run_cuda_conditional_graph(
     state = allocate_cuda_replay_slot_for_miss(cache, state,
                                                signature->entries);
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   state->collect_ready_deferred_resources();
 
   const bool topology_matches =

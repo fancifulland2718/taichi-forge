@@ -22,7 +22,7 @@ void JITModuleCUDA::bind_aot_tree_ids(const std::map<int, int> &bindings) {
   auto &driver = CUDADriver::get_instance();
   TI_ERROR_IF(!driver.module_get_global.available(),
               "CUDA driver does not support PTX AOT resource binding");
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   for (const auto &[logical, physical] : bindings) {
     const auto symbol = LLVM::aot_tree_id_symbol(logical);
     void *address = nullptr;
@@ -135,7 +135,7 @@ JITModule *JITSessionCUDA::add_artifact(const CUDAKernelArtifact &artifact) {
 
 JITSessionCUDA::~JITSessionCUDA() {
   try {
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     auto context_lock = CUDAContext::get_instance().get_lock_guard();
     for (auto &owned : modules) {
       auto *cuda_module = dynamic_cast<JITModuleCUDA *>(owned.get());
@@ -204,9 +204,7 @@ CUDAKernelArtifact JITSessionCUDA::select_artifact(
 }
 
 void *JITSessionCUDA::load_artifact(const CUDAKernelArtifact &artifact) {
-  // TODO: figure out why using the guard leads to wrong tests results
-  // auto context_guard = CUDAContext::get_instance().get_guard();
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   // Create module for object
   void *cuda_module = nullptr;
   TI_TRACE("CUDA {} artifact size: {:.2f}KB",
@@ -339,7 +337,7 @@ bool JITSessionCUDA::remove_module(JITModule *module) {
   }
   auto *cuda_module = dynamic_cast<JITModuleCUDA *>(module_it->get());
   TI_ASSERT(cuda_module != nullptr);
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto context_lock = CUDAContext::get_instance().get_lock_guard();
   CUDADriver::get_instance().module_unload(cuda_module->module_);
   cuda::record_cuda_artifact_unload(

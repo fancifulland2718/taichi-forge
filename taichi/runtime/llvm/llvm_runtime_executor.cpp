@@ -69,6 +69,7 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
     : config_(config) {
   if (config.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
+    CUDAContext::check_runtime_health();
     if (!is_cuda_api_available()) {
       TI_WARN("No CUDA driver API detected.");
       config.arch = host_arch();
@@ -77,7 +78,7 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
       config.arch = host_arch();
     } else {
       // CUDA runtime created successfully
-      use_device_memory_pool_ = CUDAContext::get_instance().supports_mem_pool();
+      use_device_memory_pool_ = CUDAContext::get_instance().supports_retained_allocation();
       if (!use_device_memory_pool_ &&
           config.cuda_pointer_deterministic_slot) {
         TI_WARN(

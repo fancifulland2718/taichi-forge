@@ -6,6 +6,7 @@
 
 #include "taichi/program/kernel_profiler.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/rhi/cuda/cuda_context_config.h"
 
 namespace taichi::lang {
 
@@ -18,8 +19,8 @@ class CUDADriver;
 
 class CUDAContext {
  private:
-  void *device_;
-  void *context_;
+  void *device_{nullptr};
+  void *context_{nullptr};
   int dev_count_;
   // Keep the hardware capability separate from the target accepted by the
   // bundled LLVM NVPTX backend. User code and runtime feature checks need the
@@ -44,6 +45,7 @@ class CUDAContext {
   int max_shared_memory_bytes_;
   bool debug_{false};
   bool supports_mem_pool_{false};
+  bool vulkan_cig_{false};
 
  public:
   CUDAContext();
@@ -55,6 +57,11 @@ class CUDAContext {
   bool detected() const {
     return dev_count_ != 0;
   }
+
+  // A context-fatal CiG error poisons the process-held context. Cold runtime
+  // reconstruction and allocation must not retry it or recycle its storage.
+  static void record_runtime_failure(const BackendRuntimeError &error) noexcept;
+  static void check_runtime_health();
 
   void launch(void *func,
               const std::string &task_name,
@@ -113,6 +120,14 @@ class CUDAContext {
     return supports_mem_pool_;
   }
 
+  bool is_vulkan_cig() const {
+    return vulkan_cig_;
+  }
+
+  bool supports_retained_allocation() const {
+    return supports_mem_pool_ || vulkan_cig_;
+  }
+
   ~CUDAContext();
 
   class ContextGuard {
@@ -123,14 +138,14 @@ class CUDAContext {
    public:
     explicit ContextGuard(CUDAContext *new_ctx)
         : old_ctx_(nullptr), new_ctx_(new_ctx->context_) {
-      CUDADriver::get_instance().context_get_current(&old_ctx_);
+      CUDADriver::get_instance_without_context().context_get_current(&old_ctx_);
       if (old_ctx_ != new_ctx_)
         new_ctx->make_current();
     }
 
     ~ContextGuard() {
       if (old_ctx_ != new_ctx_) {
-        CUDADriver::get_instance().context_set_current(old_ctx_);
+        CUDADriver::get_instance_without_context().context_set_current.call(old_ctx_);
       }
     }
   };
@@ -161,6 +176,11 @@ class CUDAContext {
   }
 
   static CUDAContext &get_instance();
+
+  // Must precede the first context use. One selection per native runtime
+  // library/process; no pointer migration or hot switching is performed.
+  static void configure(CudaContextConfig config);
+  static CudaContextInfo configuration();
 
 };
 

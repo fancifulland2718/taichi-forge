@@ -200,7 +200,7 @@ void KernelLauncher::RetainedDeviceBuffer::release() const {
   if (ptr == nullptr) {
     return;
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   CUDADriver::get_instance().mem_free_async(ptr, nullptr);
   record_retained_launch_release(capacity);
   ptr = nullptr;
@@ -212,7 +212,7 @@ namespace {
 std::shared_ptr<void> own_cuda_allocation(void *ptr) {
   return std::shared_ptr<void>(ptr, [](void *allocation) {
     if (allocation != nullptr) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().mem_free(allocation);
     }
   });
@@ -260,7 +260,7 @@ void KernelLauncher::ensure_root_binding(const Context &context) {
       return;
     }
 
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     const std::size_t binding_bytes = roots.size() * sizeof(void *);
     void *device_binding = nullptr;
     CUDADriver::get_instance().malloc(&device_binding, binding_bytes);
@@ -462,7 +462,7 @@ KernelLauncher::resolve_task_execution_plan(
   });
   if (uses_waves) {
     telemetry.resolution_calls.fetch_add(1, std::memory_order_relaxed);
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
   }
   if (uses_work) {
     telemetry.coarsening_resolution_calls.fetch_add(
@@ -1286,7 +1286,7 @@ bool KernelLauncher::capture_cuda_graph_bounded_launch(
   if (function == nullptr) {
     return false;
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
 
   TaichiCudaLaunchAttribute attribute{};
   attribute.id = TAICHI_CU_LAUNCH_ATTRIBUTE_DEVICE_UPDATABLE_KERNEL_NODE;
@@ -1347,7 +1347,7 @@ bool KernelLauncher::capture_cuda_graph_updatable_launch(
   if (cuda_jit_module == nullptr || packet.offloaded_tasks.empty()) {
     return false;
   }
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   for (const auto &task : packet.offloaded_tasks) {
     if (task.grid_dim <= 0 || task.block_dim <= 0 ||
         task.dynamic_shared_array_bytes < 0 ||
@@ -1432,7 +1432,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   TI_ASSERT(cuda_jit_module != nullptr);
   const auto &parameters = launcher_ctx->parameters;
 
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   const Context::ResolvedTaskExecutionPlan *task_execution_plan = nullptr;
   const std::vector<OffloadedTask> *offloaded_tasks_ptr =
       &launcher_ctx->offloaded_tasks;
@@ -1960,7 +1960,7 @@ KernelLauncher::qualify_llvm_kernel_artifacts(
   TI_ERROR_IF(cuda_module == nullptr,
               "CUDA artifact qualification requires a CUDA JIT module");
 
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   int multiprocessor_count = 0;
   CUDADriver::get_instance().device_get_attribute(
       &multiprocessor_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,

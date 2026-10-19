@@ -8,12 +8,14 @@
 #include "taichi/program/program.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/cuda/cuda_retained_memory.h"
 
 namespace taichi::lang::cuda {
 
 namespace {
 struct PoolHandle {
   void *handle{nullptr};
+  std::shared_ptr<RetainedMemoryPool> retained;
   std::shared_ptr<BackendFaultReporter> fault_reporter;
 
   ~PoolHandle() {
@@ -41,6 +43,9 @@ struct GraphMemoryPool::State : CudaDevice::RetainedGraphResource {
 
   DeviceAllocation allocate_locked(std::size_t bytes) {
     TI_ERROR_IF(closed.load(), "Graph memory pool is closed");
+    if (pool->retained)
+      return device->allocate_memory_from_retained_pool(bytes, pool->retained,
+                                                        pool);
     return device->allocate_memory_from_pool(bytes, pool->handle, pool);
   }
 
@@ -73,6 +78,8 @@ struct GraphMemoryPool::State : CudaDevice::RetainedGraphResource {
 };
 
 bool GraphMemoryPool::available() {
+  if (CUDAContext::get_instance().is_vulkan_cig())
+    return true;
   auto &driver = CUDADriver::get_instance();
   return !driver.is_musa() && driver.mem_pool_create.available() &&
          driver.stream_query.available() &&
@@ -100,7 +107,7 @@ GraphMemoryPool::GraphMemoryPool(CudaDevice &device,
 }
 
 void GraphMemoryPool::initialize(CudaDevice &device,
-                                  std::uint64_t retained_bytes) {
+                                 std::uint64_t retained_bytes) {
   TI_ERROR_IF(!available(), "Graph-owned CUDA memory pools are unavailable");
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
   auto state = std::make_shared<State>();
@@ -109,17 +116,21 @@ void GraphMemoryPool::initialize(CudaDevice &device,
   state->pool = std::make_shared<PoolHandle>();
   state->pool->fault_reporter = state->device->backend_fault_reporter();
   auto context = CUDAContext::get_instance().get_guard();
-  TaichiCudaMemPoolProps properties{};
-  properties.allocation_type = 1;  // CU_MEM_ALLOCATION_TYPE_PINNED
-  properties.location_type = 1;    // CU_MEM_LOCATION_TYPE_DEVICE
-  properties.location_id =
-      static_cast<std::int32_t>(reinterpret_cast<std::intptr_t>(
-          CUDAContext::get_instance().get_device()));
-  auto &driver = CUDADriver::get_instance();
-  driver.mem_pool_create(&state->pool->handle, &properties);
-  driver.mem_pool_set_attribute(state->pool->handle,
-                                CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
-                                &state->retained_bytes);
+  if (CUDAContext::get_instance().is_vulkan_cig()) {
+    state->pool->retained = std::make_shared<RetainedMemoryPool>();
+  } else {
+    TaichiCudaMemPoolProps properties{};
+    properties.allocation_type = 1;  // CU_MEM_ALLOCATION_TYPE_PINNED
+    properties.location_type = 1;    // CU_MEM_LOCATION_TYPE_DEVICE
+    properties.location_id =
+        static_cast<std::int32_t>(reinterpret_cast<std::intptr_t>(
+            CUDAContext::get_instance().get_device()));
+    auto &driver = CUDADriver::get_instance();
+    driver.mem_pool_create(&state->pool->handle, &properties);
+    driver.mem_pool_set_attribute(state->pool->handle,
+                                  CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                                  &state->retained_bytes);
+  }
   state->device->register_graph_memory_pool(state->pool);
   state->device->register_graph_resource(state);
   state_ = std::move(state);
@@ -174,7 +185,10 @@ void GraphMemoryPool::trim() {
   std::lock_guard<std::mutex> lock(state.mutex);
   TI_ERROR_IF(state.closed.load(), "Graph memory pool is closed");
   auto context = CUDAContext::get_instance().get_guard();
-  CUDADriver::get_instance().mem_pool_trim_to(state.pool->handle, 0);
+  if (state.pool->retained)
+    state.pool->retained->trim();
+  else
+    CUDADriver::get_instance().mem_pool_trim_to(state.pool->handle, 0);
 }
 
 void GraphMemoryPool::close() {
@@ -188,9 +202,18 @@ std::unordered_map<std::string, std::uint64_t> GraphMemoryPool::snapshot() {
   if (state.closed.load()) {
     return {{"closed", 1}};
   }
+  if (state.pool->retained) {
+    auto result = state.pool->retained->snapshot();
+    result.emplace("closed", 0);
+    // Retention has explicit cold trim, not a driver release threshold.
+    return result;
+  }
   auto context = CUDAContext::get_instance().get_guard();
   std::unordered_map<std::string, std::uint64_t> result{
-      {"closed", 0}, {"release_threshold_bytes", state.retained_bytes}};
+      {"closed", 0},
+      {"native_async_pool", 1},
+      {"retained_device_pool", 0},
+      {"release_threshold_bytes", state.retained_bytes}};
   auto &driver = CUDADriver::get_instance();
   // CUmemPool_attribute 5..8; these are this pool's own driver observations,
   // not process VRAM, total Graph storage, or an inferred zero when missing.

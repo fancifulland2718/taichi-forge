@@ -34,7 +34,8 @@ class TI_DLL_EXPORT GraphMemoryPool {
   // Caller owns the ordinary device allocation. Its allocation record retains
   // the pool even after this factory closes, including queued asynchronous frees.
   DeviceAllocation allocate_memory(std::size_t bytes);
-  // Best-effort release of currently unused backing pages, without waiting.
+  // Explicit cold reclamation. Native pools trim without waiting; CiG retained
+  // device blocks use cuMemFree, which may synchronize unrelated device work.
   void trim();
   void close();
   // Explicit cold observation; closed pools omit unavailable numeric fields.

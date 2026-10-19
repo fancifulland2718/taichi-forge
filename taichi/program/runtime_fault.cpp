@@ -6,6 +6,9 @@
 
 #include "taichi/common/exceptions.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
 
 namespace taichi::lang {
 namespace {
@@ -136,6 +139,10 @@ void RuntimeFaultDomain::report_backend_error(
   if (classification != BackendErrorClassification::kFatal) {
     return;
   }
+#ifdef TI_WITH_CUDA
+  if (error.backend() == Arch::cuda)
+    CUDAContext::record_runtime_failure(error);
+#endif
   try {
     report_fatal({error.backend(), error.backend_code(), submission_sequence,
                   error.operation(), error.what()});

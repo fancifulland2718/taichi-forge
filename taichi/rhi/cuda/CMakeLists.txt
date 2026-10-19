@@ -7,6 +7,7 @@ target_sources(${CUDA_RHI}
     cuda_device.cpp
     cuda_context.cpp
     cuda_driver.cpp
+    cuda_retained_memory.cpp
     cusparse_plan.cpp
     graph_region_builder.cpp
     cuda_profiler.cpp

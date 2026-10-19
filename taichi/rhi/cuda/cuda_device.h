@@ -14,6 +14,8 @@
 namespace taichi::lang {
 namespace cuda {
 
+class RetainedMemoryPool;
+
 class CudaPipeline : public Pipeline {
  public:
   ~CudaPipeline() override {
@@ -138,6 +140,9 @@ class CudaDevice : public LlvmDevice {
   DeviceAllocation allocate_memory_from_pool(std::size_t bytes,
                                              void *pool,
                                              std::shared_ptr<void> pool_owner);
+  DeviceAllocation allocate_memory_from_retained_pool(
+      std::size_t bytes, std::shared_ptr<RetainedMemoryPool> pool,
+      std::shared_ptr<void> pool_owner);
   void dealloc_memory(DeviceAllocation handle) override;
 
   uint64_t *allocate_llvm_runtime_memory_jit(
@@ -259,6 +264,7 @@ class CudaDevice : public LlvmDevice {
     // Cold allocation lifetime only: destroy an owned pool after its final
     // allocation has submitted free, not when the factory closes.
     std::shared_ptr<void> pool_owner;
+    std::shared_ptr<RetainedMemoryPool> retained_pool;
   };
 
   AllocationRegistry<AllocationRecord> allocations_;

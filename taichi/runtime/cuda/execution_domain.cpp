@@ -179,6 +179,7 @@ RuntimeCompletion ExecutionDomain::submit(
   if (!enqueue)
     throw std::invalid_argument(
         "CUDA submission requires an enqueue operation");
+  CUDAContext::check_runtime_health();
   auto &state = *state_;
   // At most one FIFO prefix entry is polled per hot admission. Since every
   // entry here is on the same stream, a pending head cannot hide a ready tail.

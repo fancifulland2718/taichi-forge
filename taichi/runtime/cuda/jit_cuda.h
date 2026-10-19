@@ -113,9 +113,7 @@ class JITModuleCUDA : public JITModule {
   }
 
   void *lookup_function(const std::string &name) override {
-    // TODO: figure out why using the guard leads to wrong tests results
-    // auto context_guard = CUDAContext::get_instance().get_guard();
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     void *func = nullptr;
     auto t = Time::get_time();
     uint32 err;
@@ -179,7 +177,7 @@ class JITModuleCUDA : public JITModule {
     // lookup_function() used to activate the CUDA context before entering
     // CUDAContext::launch(). Preserve that ordering because profiler setup in
     // launch() may query driver state before its internal launch guard.
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDAContext::get_instance().launch(
         function, profiler_name != nullptr ? *profiler_name : name,
         arg_pointers, arg_sizes, grid_dim, block_dim,

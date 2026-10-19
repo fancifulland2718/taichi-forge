@@ -8,6 +8,67 @@
 extern "C" {
 #endif  // __cplusplus
 
+// Initialization-only CUDA/Vulkan context association. This is NOT an AOT
+// artifact field. Configure before any CUDA Program, runtime, probe or stream.
+typedef enum TiCudaContextMode {
+  TI_CUDA_CONTEXT_DISABLED = 0,
+  TI_CUDA_CONTEXT_REQUIRED = 1,
+  TI_CUDA_CONTEXT_AUTO = 2,
+} TiCudaContextMode;
+
+// Native, noexcept callbacks. retain returns TI_ERROR_SUCCESS on success;
+// release drops exactly that reference. They must not depend on a Python
+// interpreter. The owner retains the Vulkan external queue AND its device.
+typedef TiError(TI_API_CALL *TiCudaContextOwnerRetain)(void *owner);
+typedef void(TI_API_CALL *TiCudaContextOwnerRelease)(void *owner);
+
+typedef struct TiCudaContextConfig {
+  uint32_t struct_size;
+  uint32_t schema_version;  // 1
+  TiCudaContextMode mode;
+  uint32_t graphics_api;  // 1 = Vulkan, including disabled/auto-without-binding
+  uint8_t device_uuid[16];
+  const void *queue_data;
+  uint64_t queue_data_size;
+  void *owner;
+  TiCudaContextOwnerRetain retain_owner;
+  TiCudaContextOwnerRelease release_owner;
+} TiCudaContextConfig;
+
+typedef struct TiCudaContextInfo {
+  uint32_t struct_size;
+  uint32_t schema_version;  // 1
+  TiBool initialized;
+  TiBool vulkan_cig;
+  TiBool driver_entry;
+  TiBool device_capability;
+  uint64_t generation;
+  uint8_t device_uuid[16];
+  // Cold checks: 1=device, 2=managed, 4=async, 8=owned pool, 16=capture.
+  uint32_t allocation_checks;
+  // First version: context and native owner are process-lived. Closing a
+  // Program/runtime retires its resources, but does NOT release this lease.
+  TiBool process_lifetime;
+  // 0=ordinary CUDA, 1=CiG retained ordinary device blocks. Counts below are
+  // the context's parameter/scratch pool, not Graph-owned pool statistics.
+  uint32_t allocation_route;
+  uint64_t native_allocation_calls;
+  uint64_t native_free_calls;
+  uint64_t reuse_calls;
+  uint64_t retirement_calls;
+  uint64_t reserved_current_bytes;
+  uint64_t reserved_high_bytes;
+  uint64_t used_current_bytes;
+  uint64_t used_high_bytes;
+  char fallback_reason[256];
+} TiCudaContextInfo;
+
+TI_DLL_EXPORT void TI_API_CALL
+ti_configure_cuda_context_ext(const TiCudaContextConfig *config);
+// Does not create a context or probe a device.
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_cuda_context_info_ext(TiCudaContextInfo *info);
+
 // Structure `TiCudaMemoryInteropInfo`
 typedef struct TiCudaMemoryInteropInfo {
   void *ptr;

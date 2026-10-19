@@ -1,5 +1,6 @@
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/llvm/device_memory_pool.h"
+#include "taichi/rhi/cuda/cuda_retained_memory.h"
 
 #include <algorithm>
 #include <memory>
@@ -23,7 +24,8 @@ CudaDevice::AllocationRecord::AllocationRecord(
       use_memory_pool(other.use_memory_pool),
       stream(other.stream),
       mapping(std::move(other.mapping)),
-      pool_owner(std::move(other.pool_owner)) {
+      pool_owner(std::move(other.pool_owner)),
+      retained_pool(std::move(other.retained_pool)) {
   other.owner = nullptr;
   other.ptr = nullptr;
 }
@@ -42,6 +44,7 @@ CudaDevice::AllocationRecord &CudaDevice::AllocationRecord::operator=(
     stream = other.stream;
     mapping = std::move(other.mapping);
     pool_owner = std::move(other.pool_owner);
+    retained_pool = std::move(other.retained_pool);
     other.owner = nullptr;
     other.ptr = nullptr;
   }
@@ -55,7 +58,10 @@ void CudaDevice::AllocationRecord::release() {
   }
 
   try {
-    if (use_memory_pool) {
+    if (retained_pool) {
+      if (owner == nullptr || owner->backend_calls_safe())
+        retained_pool->release(ptr, stream);
+    } else if (use_memory_pool) {
       // cuMemAllocAsync/cuMemFreeAsync require the same stream-ordered
       // lifetime contract. Cross-stream access must have an explicit CUDA
       // dependency before the allocation is retired.
@@ -80,6 +86,7 @@ void CudaDevice::AllocationRecord::release() {
   }
   owner = nullptr;
   ptr = nullptr;
+  retained_pool.reset();
   pool_owner.reset();
 }
 
@@ -235,6 +242,21 @@ DeviceAllocation CudaDevice::allocate_memory_from_pool(
   auto [result, handle] = allocations_.emplace(std::move(record));
   TI_ERROR_IF(result != RhiResult::success,
               "Unable to register Graph pool allocation");
+  return DeviceAllocation{this, handle};
+}
+
+DeviceAllocation CudaDevice::allocate_memory_from_retained_pool(
+    std::size_t bytes, std::shared_ptr<RetainedMemoryPool> pool,
+    std::shared_ptr<void> pool_owner) {
+  auto mapping = std::make_unique<MappingState>();
+  void *ptr = pool->allocate(bytes);
+  AllocationRecord record(this, ptr, bytes, false, true, false, true, nullptr,
+                          std::move(mapping));
+  record.retained_pool = std::move(pool);
+  record.pool_owner = std::move(pool_owner);
+  auto [result, handle] = allocations_.emplace(std::move(record));
+  TI_ERROR_IF(result != RhiResult::success,
+              "Unable to register retained Graph pool allocation");
   return DeviceAllocation{this, handle};
 }
 

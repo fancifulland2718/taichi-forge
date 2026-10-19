@@ -6,6 +6,7 @@
 
 #include "taichi/common/dynamic_loader.h"
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_retained_memory.h"
 #include "taichi/util/environ_config.h"
 
 namespace taichi::lang {
@@ -404,6 +405,10 @@ void CUDADriver::clear_fault_reporter(
 }
 
 void CUDADriver::malloc_async(void **dev_ptr, size_t size, CUstream stream) {
+  if (CUDAContext::get_instance().is_vulkan_cig()) {
+    *dev_ptr = cuda::RetainedMemoryPool::process_pool().allocate(size);
+    return;
+  }
   if (cuda::detail::memory_allocation_route(
           CUDAContext::get_instance().supports_mem_pool()) ==
       cuda::detail::MemoryAllocationRoute::kAsyncMemoryPool) {
@@ -424,6 +429,10 @@ void CUDADriver::malloc_async_from_pool(void **dev_ptr,
 }
 
 void CUDADriver::mem_free_async(void *dev_ptr, CUstream stream) {
+  if (CUDAContext::get_instance().is_vulkan_cig()) {
+    cuda::RetainedMemoryPool::process_pool().release(dev_ptr, stream);
+    return;
+  }
   if (cuda::detail::memory_allocation_route(
           CUDAContext::get_instance().supports_mem_pool()) ==
       cuda::detail::MemoryAllocationRoute::kAsyncMemoryPool) {

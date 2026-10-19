@@ -318,7 +318,7 @@ Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
 #if defined(TI_WITH_CUDA)
       TI_ERROR_IF(program_->compile_config().arch != Arch::cuda,
                   "Concurrent Graph submission batches require CUDA");
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       auto &driver = CUDADriver::get_instance();
       cuda_concurrent_fork_event_ =
           program_->runtime_completion_cuda_event_pool_->acquire();
@@ -408,6 +408,7 @@ void *Program::RuntimeSubmissionTransaction::register_cuda_concurrent_stream(
       cuda_concurrent_streams_.end()) {
     return stream;
   }
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto &driver = CUDADriver::get_instance();
   const auto error = driver.stream_wait_event.call(
       stream, cuda_concurrent_fork_event_, 0);
@@ -425,7 +426,7 @@ void Program::RuntimeSubmissionTransaction::join_cuda_concurrent_streams() {
     return;
   }
 #if defined(TI_WITH_CUDA)
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto &driver = CUDADriver::get_instance();
   std::uint32_t first_error = CUDA_SUCCESS;
   std::vector<void *> tail_events;
@@ -8969,6 +8970,7 @@ void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
     auto *raw_ptr =
         program_impl_->get_device_alloc_info_ptr(ndarray->ndarray_alloc_);
     TI_ERROR_IF(!raw_ptr, "CUDA ndarray fill received a null data pointer.");
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().memset(reinterpret_cast<void *>(raw_ptr), 0,
                                       bytes);
     return;
@@ -10262,6 +10264,7 @@ std::size_t Program::cuda_device_zero_dense_field(SNode *dst,
   void *dst_raw =
       static_cast<void *>(reinterpret_cast<uint8_t *>(base) + dst_device_ptr.offset);
   if (dst_stride == value_size) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().memset(dst_raw, 0, n * value_size);
     return 0;
   }
@@ -16275,6 +16278,7 @@ void Program::fill_dense_field(SNode *dst,
                   "pointer.");
       auto *dst_raw =
           reinterpret_cast<uint8_t *>(base) + dst_device_ptr.offset;
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().memsetd32(
           dst_raw, static_cast<uint32_t>(value_bits), n);
       return;
@@ -16390,6 +16394,7 @@ void Program::fill_dense_field_packed(SNode *dst,
                 "data pointer.");
     auto *dst_raw =
         reinterpret_cast<uint8_t *>(base) + dst_device_ptr.offset;
+    auto context_guard = CUDAContext::get_instance().get_guard();
     if (value_bits == 0) {
       CUDADriver::get_instance().memset(dst_raw, 0, bytes);
       return;

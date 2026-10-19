@@ -225,7 +225,12 @@ class CUDADriverFunction {
 
   // Note: CUDA driver API passes everything as value
   void operator()(Args... args) {
-    auto err = call(args...);
+    check_result(call(args...));
+  }
+
+  // Report a result already obtained by a nonblocking query. Never repeat a
+  // failed driver operation merely to route it through the fault reporter.
+  void check_result(uint32 err) {
     if (!err) {
       return;
     }

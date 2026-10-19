@@ -37,7 +37,23 @@ LlvmRuntime::LlvmRuntime(taichi::Arch arch) : Runtime(arch) {
   // since it returns a temporary copy of the internal data pointer,
   // thus we won't be able to modify the address where the std::array's data
   // pointer is pointing to.
-  executor_->materialize_runtime(nullptr /*kNoProfiler*/, &result_buffer);
+  try {
+    executor_->materialize_runtime(nullptr /*kNoProfiler*/, &result_buffer);
+  } catch (const taichi::lang::BackendRuntimeError &error) {
+#ifdef TI_WITH_CUDA
+    if (error.backend() == taichi::Arch::cuda &&
+        taichi::lang::classify_cuda_driver_error(error.backend_code()) ==
+            taichi::lang::BackendErrorClassification::kFatal)
+      taichi::lang::CUDAContext::record_runtime_failure(error);
+#endif
+    // Initialization can fail before a runtime is published. A second CUDA
+    // error from the executor's draining destructor would call terminate and
+    // hide the original error. Retain this finite failed ownership closure;
+    // the C boundary must return the first backend error to the caller.
+    (void)owned_executor_.release();
+    (void)cfg_.release();
+    throw;
+  }
 }
 
 LlvmRuntime::LlvmRuntime(taichi::lang::LlvmRuntimeExecutor &executor,
@@ -155,6 +171,10 @@ void LlvmRuntime::flush() {
 
 void LlvmRuntime::wait() {
   try {
+#ifdef TI_WITH_CUDA
+    if (arch == taichi::Arch::cuda)
+      taichi::lang::CUDAContext::check_runtime_health();
+#endif
     synchronize_execution_domains();
     check_runtime_error();
   } catch (const taichi::lang::BackendRuntimeError &error) {

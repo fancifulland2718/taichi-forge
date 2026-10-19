@@ -95,7 +95,7 @@ struct CudaSolverChunkReplayState {
   }
 
   ~CudaSolverChunkReplayState() {
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().stream_synchronize(nullptr);
     for (auto &entry : entries) {
       entry.reset();
@@ -108,7 +108,7 @@ struct CudaSolverChunkReplayState {
 
   CUstream ensure_capture_stream() {
     if (capture_stream == nullptr) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().stream_create(
           reinterpret_cast<void **>(&capture_stream), CU_STREAM_NON_BLOCKING);
     }
@@ -116,7 +116,7 @@ struct CudaSolverChunkReplayState {
   }
 
   void reset_entries() {
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().stream_synchronize(nullptr);
     for (auto &entry : entries) {
       entry.reset();
@@ -136,7 +136,7 @@ struct CudaSolverConditionalReplayState {
   }
 
   ~CudaSolverConditionalReplayState() {
-    CUDAContext::get_instance().make_current();
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().stream_synchronize(nullptr);
     entry.reset();
     if (capture_stream != nullptr) {
@@ -147,7 +147,7 @@ struct CudaSolverConditionalReplayState {
 
   CUstream ensure_capture_stream() {
     if (capture_stream == nullptr) {
-      CUDAContext::get_instance().make_current();
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().stream_create(
           reinterpret_cast<void **>(&capture_stream), CU_STREAM_NON_BLOCKING);
     }
@@ -1141,7 +1141,7 @@ bool CUCG::try_submit_conditional_solver(
     return false;
   }
 
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   void *current_context = nullptr;
   if (driver.context_get_current.call(&current_context) != CUDA_SUCCESS ||
       current_context == nullptr) {
@@ -1685,7 +1685,7 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   // CUDA contexts are current per host thread. SolvePlan may be called from a
   // worker thread after construction/warmup on another thread, so establish
   // the primary context before any driver, cuBLAS, or cuSPARSE operation.
-  CUDAContext::get_instance().make_current();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   TI_ERROR_IF(
       (compiled_kernel_operator_ || compiled_graph_operator_) &&
           (prog != program_ || x.owning_program() != program_ ||
