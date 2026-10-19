@@ -11,7 +11,7 @@ namespace taichi::lang {
 std::size_t UnifiedAllocator::default_allocator_size =
     1 << 30;  // 1 GiB maximum slab
 std::size_t UnifiedAllocator::initial_allocator_size =
-    16 << 20;  // 16 MiB initial adaptive slab
+    16 << 20;  // Maximum first adaptive slab; actual demand seeds growth.
 
 template <typename T>
 static void swap_erase_vector(std::vector<T> &vec, size_t idx) {
@@ -36,10 +36,9 @@ UnifiedAllocator::UnifiedAllocator(HostMemoryPool *owner,
               "Host allocator maximum slab size must be non-zero");
   TI_ERROR_IF(initial_allocator_size == 0,
               "Host allocator initial slab size must be non-zero");
-  next_slab_size_ =
-      adaptive_chunk_policy_
-          ? std::min(initial_allocator_size, default_allocator_size)
-          : default_allocator_size;
+  // Adaptive pools select their first slab from the actual request. Zero is
+  // an unseeded growth sequence, not a limit on the allocation size.
+  next_slab_size_ = adaptive_chunk_policy_ ? 0 : default_allocator_size;
 }
 
 bool UnifiedAllocator::checked_add_size(std::size_t lhs,
@@ -159,13 +158,27 @@ void *UnifiedAllocator::allocate(std::size_t size,
   std::size_t allocation_size = minimum_allocation_size;
   bool is_large = false;
   if (!exclusive) {
-    if (minimum_allocation_size > next_slab_size_) {
+    auto slab_size = next_slab_size_;
+    if (slab_size == 0) {
+      const auto initial_ceiling =
+          std::min(initial_allocator_size, default_allocator_size);
+      slab_size = initial_ceiling;
+      if (minimum_allocation_size <= initial_ceiling) {
+        slab_size = std::min(HostMemoryPool::page_size, initial_ceiling);
+        while (slab_size < minimum_allocation_size) {
+          slab_size = slab_size > initial_ceiling / 2
+                          ? initial_ceiling
+                          : slab_size * 2;
+        }
+      }
+    }
+    if (minimum_allocation_size > slab_size) {
       // A request larger than the next slab gets a request-sized,
       // alignment-safe mapping and does not inflate the geometric slab
       // sequence used by later small requests.
       is_large = true;
     } else {
-      allocation_size = next_slab_size_;
+      allocation_size = slab_size;
     }
   }
   TI_ERROR_IF(allocation_size == 0,
@@ -210,6 +223,7 @@ void *UnifiedAllocator::allocate(std::size_t size,
   TI_ASSERT(index_inserted);
   if (!exclusive && !is_large) {
     // Advance the policy only after the mapping and chunk insertion succeed.
+    next_slab_size_ = allocation_size;
     grow_next_slab_size();
   }
   const auto consumed = head - data;

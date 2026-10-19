@@ -1411,8 +1411,10 @@ LLVM host statistics cover the current executor and exclude independent AOT
 runtimes. Non-LLVM paths retain the legacy host-pool scope. Compare snapshots
 within the same owner and pool lifetime when measuring across resets.
 
-The default host policy starts with a 16 MiB slab and grows geometrically up
-to the existing 1 GiB ceiling. A request larger than the next slab receives a
+The default host policy sizes its first reusable slab from the request and
+alignment, starting at a page and doubling as needed up to the existing
+16 MiB initial-slab bound. Later slabs grow geometrically up to the existing
+1 GiB slab ceiling. A request larger than the next slab receives a
 request-sized, alignment-safe large mapping without advancing that sequence.
 
 

@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Host pools size their first reusable slab from the allocation request and
+  alignment, reducing idle reservation for small independent runtimes while
+  retaining geometric growth and request-sized large allocations.
+
 - CPU AOT runtime memory is isolated from unrelated JIT resets, fixing an access
   violation when an independent consumer continued after `ti.reset()`.
   Borrowed consumers retain their existing owner retirement contract.

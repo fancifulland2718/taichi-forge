@@ -1154,7 +1154,8 @@ host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
 LLVM host 统计仅覆盖当前执行器，不包含独立 AOT runtime；非 LLVM 路径继续使用
 legacy host pool 的统计范围。跨 reset 比较时，应区分 owner 与 pool 的生命周期。
 
-默认 host policy 从 16 MiB slab 开始，按几何级数增长到既有 1 GiB 上限；大于
+默认 host policy 按实际请求和对齐选择首个可复用 slab，从一页起按需翻倍，保留原
+16 MiB 初始 slab 边界；后续 slab 按几何级数增长到既有 1 GiB 单 slab 边界。大于
 下一 slab 的单次请求使用按请求大小并包含必要对齐空间的 large mapping，且不推进后续
 小请求的增长序列。
 
