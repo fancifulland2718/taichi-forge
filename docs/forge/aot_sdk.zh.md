@@ -2261,6 +2261,11 @@ Windows 已验证 CPU/CUDA/Vulkan 的 1/3/65 槽计划、正常安装的独立/�
 单计划参照增加 871–988 字节。这些是存储与生命周期验证，不代表大应用加速或 Linux
 验证结果。
 
+正常安装的 Windows 包另通过 CUDA arena 自动导出及父图私有池验证，覆盖别名、
+独立 owner、真实下游梯度和在途退休；仅 runtime 的消费者无需导入前端即可加载。
+前端 wheel 为 4,107,741 字节（增加 570），既有 ABI108 runtime、GeoPhys 唯一 TCM
+及 44 个独立安装的依赖保持不变。这不代表完整 workspace lanes 已通过验证。
+
 独立 prepare 重建各自的池，已选 CUDA 参数绑定族共享其池和数组。分配记录持有池的
 底层存储直至在途工作退休；关闭外部绑定池会退休依赖的调用。重放不增加查询，也不
 增加第二个 TCM。数组字节仍计入 `resource_bytes`；驱动保留页不重复计入
@@ -2272,8 +2277,8 @@ Windows 已验证 CPU/CUDA/Vulkan 的 1/3/65 槽计划、正常安装的独立/�
 `plan.argument_names`，不分配私有设备存储或增加初始化命令，复用现有 typed kernel
 绑定路径；修改值需创建另一份描述/准备。序列化的 `"scalar"` 资源包含 `name`、
 `dtype` 和十六进制 `bits`，保留 64 位整数与负零，不经过 JSON 数值舍入。
-位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须
-配套（当前 private ABI 46）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
+位宽按 C API：F16 标量载荷为 float32，与 F16 数组元素不同。Python/native 组件须使用
+配套的 private ABI 版本。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
 SDK 可在导出 Graph 或 `ExecutionPlan` 时，明确将公共参数绑定为普通资源描述：
@@ -2399,7 +2404,7 @@ root 边界，重放使用已绑定存储。关闭 preparation 只释放其别�
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
-当前组件须配套 private ABI 64。
+当前 Python/native 组件须使用配套的 private ABI 版本。
 
 计划可以将一次性初始化与重放分开：
 

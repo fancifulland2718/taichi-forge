@@ -2952,6 +2952,13 @@ entries at every capacity; an archive containing the three compact ring plans
 adds 871–988 bytes over its ordinary single-plan reference. These are storage
 and lifecycle checks, not a large-application speedup or Linux qualification.
 
+Installed Windows qualification also covers automatic CUDA arena export and
+retained private-pool subgraphs, including aliases, independent owners, real
+downstream gradients and in-flight retirement. Runtime-only consumers load these
+artifacts without importing the frontend. The frontend wheel is 4,107,741 bytes
+(+570); the existing ABI108 runtime, sole GeoPhys TCM and 44 separately installed
+dependencies remain unchanged. This does not qualify complete workspace lanes.
+
 Independent prepares rebuild separate pools; selected CUDA binding families
 share their own pool and arrays. Allocation records retain pool backing through
 in-flight retirement, and closing an externally bound allocator retires its
@@ -2967,7 +2974,7 @@ path; preparing a different value requires a different description/preparation.
 The serialized `"scalar"` resource has `name`, `dtype` and hexadecimal `bits`,
 preserving 64-bit integers and negative zero without JSON numeric rounding.
 Bit widths follow the C API: F16 scalar payloads are float32, unlike F16 array
-elements. Use matching Python/native components (current private ABI 46). Small
+elements. Use Python/native components with matching private ABI revisions. Small
 CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/reverse
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.
@@ -3146,7 +3153,7 @@ before releasing roots. Independent module instances have independent state.
 CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, tensor
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
-Current components require matching private ABI 64.
+Current Python/native components must have matching private ABI revisions.
 
 Plans can separate one-time initialization from replay:
 
