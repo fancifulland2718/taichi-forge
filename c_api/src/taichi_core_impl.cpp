@@ -390,6 +390,7 @@ void ti_destroy_runtime(TiRuntime runtime) {
   TI_CAPI_ARGUMENT_NULL(runtime);
   ((Runtime *)runtime)->clear_prepared();
   ((Runtime *)runtime)->clear_native_resources();
+  ((Runtime *)runtime)->clear_submission_completions();
   delete (Runtime *)runtime;
   TI_CAPI_TRY_CATCH_END();
 }
@@ -1001,6 +1002,9 @@ void ti_wait(TiRuntime runtime) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
 
-  ((Runtime *)runtime)->wait();
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  rt.wait();
+  rt.complete_submission_completions();
   TI_CAPI_TRY_CATCH_END();
 }

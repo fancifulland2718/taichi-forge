@@ -1813,6 +1813,19 @@ void ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {
   rt.prepared_registry().run(execution);
   TI_CAPI_TRY_CATCH_END();
 }
+TiSubmissionTicket ti_submit_prepared_ext(TiRuntime runtime,
+                                         TiPreparedExecution execution) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(execution);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  rt.prepare_submission_completion();
+  rt.prepared_registry().run(execution);
+  return rt.finish_submission_completion();
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
 void ti_get_prepared_execution_info_ext(TiRuntime runtime,
                                         TiPreparedExecution execution,
                                         TiPreparedExecutionInfo *info) {

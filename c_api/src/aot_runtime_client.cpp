@@ -109,6 +109,13 @@ struct AotRuntimeClient::State {
     if (&this->runtime->get() != program.get_compute_device())
       throw std::logic_error("AOT borrower did not share its Program device");
     this->runtime->borrow_runtime_fault_domain(program.runtime_fault_domain());
+    this->runtime->borrow_completion_recorder([owner = &program] {
+      // The client's existing resource-submission guard protects this pointer.
+      // Record through Program so its success/failure verdict retires these
+      // tokens before the shared backend, including a failed final synchronize.
+      owner->mark_runtime_submission_pending();
+      return owner->record_runtime_completion();
+    });
   }
   std::recursive_mutex mutex;
   Program *program;

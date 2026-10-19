@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <exception>
+#include <functional>
 #include <stdexcept>
 #include <mutex>
 #include <unordered_map>
@@ -40,6 +41,7 @@
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+class RuntimeCompletion;
 }
 
 #define TI_CAPI_NOT_SUPPORTED(x) ti_set_last_error(TI_ERROR_NOT_SUPPORTED, #x);
@@ -133,6 +135,7 @@ namespace capi {
 class MetalRuntime;
 class PreparedExecutionRegistry;
 class NativeResourceRegistry;
+struct SubmissionCompletionState;
 }  // namespace capi
 
 class Runtime {
@@ -182,6 +185,8 @@ class Runtime {
   taichi::lang::NativeLibraryLocations native_library_locations_;
   std::shared_ptr<taichi::lang::RuntimeFaultDomain> runtime_fault_domain_;
   bool borrowed_fault_domain_{false};
+  std::shared_ptr<capi::SubmissionCompletionState> submission_completions_;
+  std::function<taichi::lang::RuntimeCompletion()> borrowed_completion_recorder_;
 
  protected:
   // 32 is a magic number in `taichi/inc/constants.h`.
@@ -271,6 +276,12 @@ class Runtime {
   // Program. Closing this C API view must not finalize its owner's domain.
   void borrow_runtime_fault_domain(
       std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain);
+  void borrow_completion_recorder(
+      std::function<taichi::lang::RuntimeCompletion()> recorder);
+  void prepare_submission_completion();
+  TiSubmissionTicket finish_submission_completion();
+  void complete_submission_completions();
+  void clear_submission_completions();
 
   virtual TiImage allocate_image(const taichi::lang::ImageParams &params) {
     TI_NOT_IMPLEMENTED

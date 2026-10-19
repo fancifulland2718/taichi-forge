@@ -316,6 +316,7 @@ typedef struct TiComputeGraph_t *TiComputeGraph;
 // Forge 0.6.4: immutable native execution with fixed bindings. Runtime-local;
 // closing any bound memory or its module invalidates future launches.
 typedef struct TiPreparedExecution_t *TiPreparedExecution;
+typedef struct TiSubmissionTicket_t *TiSubmissionTicket;
 
 // Runtime-owned native resource. Distinct from raw TiImage/RHI handles.
 typedef struct TiNativeResource_t *TiNativeResource;
@@ -1353,6 +1354,21 @@ ti_get_prepared_binding_family_info_ext(TiRuntime runtime,
                                         TiPreparedBindingFamilyInfo *info);
 TI_DLL_EXPORT void TI_API_CALL
 ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
+// Submit the same prepared execution and record a CPU/CUDA/Vulkan completion
+// atomically with respect to this runtime's submissions. No result snapshot or
+// workspace lease is implied. Destroy tickets explicitly, including completed
+// ones. Destroying a pending ticket does not wait or retire its execution.
+TI_DLL_EXPORT TiSubmissionTicket TI_API_CALL
+ti_submit_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
+// Ticket query/wait needs no live runtime handle. Owner retirement completes or
+// invalidates pending records before backend destruction. Waits do not hold the
+// runtime submission lock; errors remain sticky on each completion.
+TI_DLL_EXPORT TiBool TI_API_CALL
+ti_query_submission_ext(TiSubmissionTicket ticket);
+TI_DLL_EXPORT void TI_API_CALL
+ti_wait_submission_ext(TiSubmissionTicket ticket);
+TI_DLL_EXPORT void TI_API_CALL
+ti_destroy_submission_ext(TiSubmissionTicket ticket);
 // Execute optional one-time initialization and wait for its completion.
 // Idempotent after success. The first launch also initializes if needed.
 TI_DLL_EXPORT void TI_API_CALL
