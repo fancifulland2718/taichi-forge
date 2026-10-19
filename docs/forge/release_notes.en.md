@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan grouped sum resets contiguous outputs with an exact-range buffer fill,
+  eliminating one zeroing pipeline and compute dispatch, plus six unused embedded
+  shader variants and their build targets. Strided outputs retain element-wise
+  zeroing; empty inputs overwrite outputs, preserving Graph and supported gradients.
 - CUDA grouped-sum aliases for segmented/two-level execution no longer allocate
   three unused bucket buffers. They retain their existing zero-plus-atomic
   computation, cached Graph replay and supported gradients.

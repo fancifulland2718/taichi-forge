@@ -35,10 +35,11 @@ void expect_grouped_words(Device &device,
 template <typename T>
 void exercise_grouped(Device &device, gfx::GfxRuntime &runtime, int type) {
   constexpr size_t count = 513, groups = 7;
-  for (bool strided : {false, true}) {
+  // Aligned packed, descriptor-misaligned packed, and strided members.
+  for (int layout : {0, 1, 2}) {
     SCOPED_TRACE(type);
-    SCOPED_TRACE(strided);
-    const size_t offset = strided ? 1 : 0, step = strided ? 2 : 1;
+    SCOPED_TRACE(layout);
+    const size_t offset = layout ? 1 : 0, step = layout == 2 ? 2 : 1;
     const size_t output_offset = 1100 + offset;
     std::array<int32_t, 1050> keys;
     std::array<T, 1140> data;

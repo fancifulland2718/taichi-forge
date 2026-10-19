@@ -1324,24 +1324,6 @@ static const uint32_t kBucketScatterPrivateSharedRaw64Spv[] =
 static const uint32_t kBucketScatterPrivateSharedRawWordsSpv[] =
 #include "taichi/program/vulkan_sort_shaders/bucket_scatter_private_shared_raw_words.comp.spv.h"
     ;
-static const uint32_t kGroupedReduceZeroI32Spv[] =
-#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_i32.comp.spv.h"
-    ;
-static const uint32_t kGroupedReduceZeroF32Spv[] =
-#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_f32.comp.spv.h"
-    ;
-static const uint32_t kGroupedReduceZeroU32Spv[] =
-#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_u32.comp.spv.h"
-    ;
-static const uint32_t kGroupedReduceZeroU64Spv[] =
-#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_u64.comp.spv.h"
-    ;
-static const uint32_t kGroupedReduceZeroI64Spv[] =
-#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_i64.comp.spv.h"
-    ;
-static const uint32_t kGroupedReduceZeroF64Spv[] =
-#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_f64.comp.spv.h"
-    ;
 static const uint32_t kGroupedReduceZeroI32StridedSpv[] =
 #include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_i32_strided.comp.spv.h"
     ;
@@ -6491,12 +6473,6 @@ struct VulkanIndexedCopyCache {
 // its existing bucket cache family; standalone owners retain only this core.
 struct VulkanGroupedAtomicCache {
   Device *device{nullptr};
-  std::unique_ptr<Pipeline> grouped_reduce_zero_i32;
-  std::unique_ptr<Pipeline> grouped_reduce_zero_f32;
-  std::unique_ptr<Pipeline> grouped_reduce_zero_u32;
-  std::unique_ptr<Pipeline> grouped_reduce_zero_u64;
-  std::unique_ptr<Pipeline> grouped_reduce_zero_i64;
-  std::unique_ptr<Pipeline> grouped_reduce_zero_f64;
   std::array<std::unique_ptr<Pipeline>, 6> grouped_reduce_zero_strided;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_i32;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_f32;
@@ -6505,8 +6481,6 @@ struct VulkanGroupedAtomicCache {
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_i64;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_f64;
   std::array<std::unique_ptr<Pipeline>, 6> grouped_reduce_atomic_sum_strided;
-  std::array<VulkanResourceSetReplayRing<1>, 6>
-      grouped_reduce_zero_ring_bindings;
   std::array<VulkanResourceSetReplayRing<3>, 6>
       grouped_reduce_atomic_ring_bindings;
   std::array<VulkanResourceSetReplayRing<1>, 6>
@@ -6517,9 +6491,6 @@ struct VulkanGroupedAtomicCache {
   VulkanCommandReplayCache grouped_reduce_atomic_strided_command_replay;
 
   void reset_atomic_binding_replay() {
-    for (auto &ring : grouped_reduce_zero_ring_bindings) {
-      ring.reset();
-    }
     for (auto &ring : grouped_reduce_atomic_ring_bindings) {
       ring.reset();
     }
@@ -6537,12 +6508,6 @@ struct VulkanGroupedAtomicCache {
     if (device == dev)
       return;
     reset_atomic_binding_replay();
-    grouped_reduce_zero_i32.reset();
-    grouped_reduce_zero_f32.reset();
-    grouped_reduce_zero_u32.reset();
-    grouped_reduce_zero_u64.reset();
-    grouped_reduce_zero_i64.reset();
-    grouped_reduce_zero_f64.reset();
     for (auto &pipeline : grouped_reduce_zero_strided) {
       pipeline.reset();
     }
@@ -6556,49 +6521,6 @@ struct VulkanGroupedAtomicCache {
       pipeline.reset();
     }
     device = dev;
-  }
-
-  Pipeline *grouped_reduce_zero_pipeline(int value_type) {
-    if (value_type == 1) {
-      if (!grouped_reduce_zero_f32) {
-        grouped_reduce_zero_f32 = create_pipeline(
-            device, kGroupedReduceZeroF32Spv, "vulkan_grouped_reduce_zero_f32");
-      }
-      return grouped_reduce_zero_f32.get();
-    }
-    if (value_type == 3) {
-      if (!grouped_reduce_zero_u64) {
-        grouped_reduce_zero_u64 = create_pipeline(
-            device, kGroupedReduceZeroU64Spv, "vulkan_grouped_reduce_zero_u64");
-      }
-      return grouped_reduce_zero_u64.get();
-    }
-    if (value_type == 4) {
-      if (!grouped_reduce_zero_i64) {
-        grouped_reduce_zero_i64 = create_pipeline(
-            device, kGroupedReduceZeroI64Spv, "vulkan_grouped_reduce_zero_i64");
-      }
-      return grouped_reduce_zero_i64.get();
-    }
-    if (value_type == 5) {
-      if (!grouped_reduce_zero_f64) {
-        grouped_reduce_zero_f64 = create_pipeline(
-            device, kGroupedReduceZeroF64Spv, "vulkan_grouped_reduce_zero_f64");
-      }
-      return grouped_reduce_zero_f64.get();
-    }
-    if (value_type == 2) {
-      if (!grouped_reduce_zero_u32) {
-        grouped_reduce_zero_u32 = create_pipeline(
-            device, kGroupedReduceZeroU32Spv, "vulkan_grouped_reduce_zero_u32");
-      }
-      return grouped_reduce_zero_u32.get();
-    }
-    if (!grouped_reduce_zero_i32) {
-      grouped_reduce_zero_i32 = create_pipeline(
-          device, kGroupedReduceZeroI32Spv, "vulkan_grouped_reduce_zero_i32");
-    }
-    return grouped_reduce_zero_i32.get();
   }
 
   void ensure_grouped_reduce_zero_strided_pipeline(int value_type) {
@@ -6732,18 +6654,6 @@ struct VulkanGroupedAtomicCache {
 
   Pipeline *grouped_reduce_atomic_strided_pipeline(int value_type) const {
     return grouped_reduce_atomic_sum_strided[value_type].get();
-  }
-
-  VulkanReplayResourceSet<1> bind_grouped_reduce_zero_resource_set(
-      Program *program,
-      int value_type,
-      DeviceAllocation output_alloc,
-      uint64_t output_offset,
-      size_t output_bytes) {
-    return grouped_reduce_zero_ring_bindings[value_type].bind(
-        program, device,
-        std::array<VulkanRwBufferBindingRequest, 1>{
-            rw_buffer_request(output_alloc, output_offset, output_bytes)});
   }
 
   VulkanReplayResourceSet<3> bind_grouped_reduce_atomic_resource_set(
@@ -10660,17 +10570,13 @@ VulkanPreparedCommand prepare_vulkan_grouped_reduce(
   }
   // Complete view qualification before creating any pipeline or descriptor.
   cache.ensure_pipelines(device);
-  const bool zero_dense = !destination.offset && output.stride == width;
-  const bool reduce_dense = zero_dense && !index.offset && !source.offset &&
+  const bool fill_output = output.stride == width;
+  const bool reduce_dense = fill_output && !destination.offset &&
+                            !index.offset && !source.offset &&
                             keys.stride == 4 && values.stride == width;
   Pipeline *zero_pipeline = nullptr;
   ShaderResourceSet *zero_bindings = nullptr;
-  if (zero_dense) {
-    zero_pipeline = cache.grouped_reduce_zero_pipeline(value_type);
-    zero_bindings = cache.bind_grouped_reduce_zero_resource_set(
-        program, value_type, destination.binding, destination.binding.offset,
-        destination.bytes).bindings;
-  } else {
+  if (!fill_output) {
     cache.ensure_grouped_reduce_zero_strided_pipeline(value_type);
     zero_pipeline = cache.grouped_reduce_zero_strided_pipeline(value_type);
     zero_bindings = cache.bind_grouped_reduce_zero_strided_resource_set(
@@ -10711,14 +10617,16 @@ VulkanPreparedCommand prepare_vulkan_grouped_reduce(
   const auto reduce_groups = static_cast<uint32_t>(
       n / kBlockSize + (n % kBlockSize != 0));
   const bool profile = program && program->profiler;
-  auto record = [destination, zero_pipeline, zero_bindings, atomic_pipeline,
-                 atomic_bindings, zero_dense, reduce_dense, zero_params,
+  auto record = [destination, output, num_groups, width,
+                 zero_pipeline, zero_bindings, atomic_pipeline,
+                 atomic_bindings, fill_output, reduce_dense, zero_params,
                  reduce_params, zero_groups, reduce_groups, profile](
                     Device *, CommandList *commands) {
     const char *zero_scope = profile ? "vulkan_grouped_reduce_zero" : nullptr;
-    if (zero_dense)
-      dispatch_pipeline(commands, zero_pipeline, zero_bindings, zero_groups,
-                        1, 1, zero_scope);
+    if (fill_output)
+      // The logical pointer excludes any descriptor-alignment prefix. Fill
+      // only this output, preserving adjacent fields in the same allocation.
+      commands->buffer_fill(output.pointer, num_groups * width, 0);
     else
       dispatch_pipeline_with_push_constants(
           commands, zero_pipeline, zero_bindings, zero_params.data(),
@@ -10739,7 +10647,7 @@ VulkanPreparedCommand prepare_vulkan_grouped_reduce(
   VulkanCommandReplayKey key;
   key.push(0x10051);
   key.push(value_type);
-  key.push(zero_dense);
+  key.push(fill_output);
   key.push(reduce_dense);
   for (const auto &view : {index, source, destination}) {
     if (view.bytes)
