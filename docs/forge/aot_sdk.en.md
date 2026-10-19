@@ -2932,6 +2932,14 @@ external arrays are supported. Select additional slots only when independent
 scratch contents are needed; a larger ring increases preparation and storage
 costs and does not inherently accelerate execution.
 
+Windows qualification covers 1/3/65-slot plans on CPU/CUDA/Vulkan, independent
+and borrowed installed runtimes, wraparound without intermediate host polling,
+real external-array gradients, failed preparation, and in-flight retirement.
+Vulkan also passed synchronization validation. The fixture retains three code
+entries at every capacity; an archive containing the three compact ring plans
+adds 871–988 bytes over its ordinary single-plan reference. These are storage
+and lifecycle checks, not a large-application speedup or Linux qualification.
+
 Independent prepares rebuild separate pools; selected CUDA binding families
 share their own pool and arrays. Allocation records retain pool backing through
 in-flight retirement, and closing an externally bound allocator retires its
