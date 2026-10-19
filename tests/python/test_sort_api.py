@@ -896,6 +896,30 @@ def test_sort_workspace_metadata_only():
         workspace.reserve(n=17)
 
 
+def test_sort_workspace_repeated_reserve_does_not_retain_call_history():
+    import tracemalloc
+
+    workspace = ti.algorithms.SortWorkspace()
+    owns_tracing = not tracemalloc.is_tracing()
+    if owns_tracing:
+        tracemalloc.start()
+    try:
+        # Exercise changing metadata as well as duplicate requests. Storage
+        # allocation is lazy; reserve must not keep an unused history of calls.
+        for i in range(100):
+            workspace.reserve(dtype=ti.i32, value_dtype=ti.f32, n=i)
+        before = tracemalloc.get_traced_memory()[0]
+        for i in range(4096):
+            workspace.reserve(dtype=ti.i32, value_dtype=ti.f32, n=i)
+        retained = tracemalloc.get_traced_memory()[0] - before
+        assert retained < 16 * 1024
+    finally:
+        if owns_tracing:
+            tracemalloc.stop()
+    assert workspace.workspace_bytes_current == 0
+    workspace.clear()
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_sort_workspace_max_items_rejects_execution_over_capacity():
     keys = ti.ndarray(ti.i32, shape=17)

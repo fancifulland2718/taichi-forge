@@ -4325,7 +4325,6 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
         self.device = device
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
-        self._reserved_specs = []
         self._radix_u32_buffers = {}
         self._vulkan_graph_u32_buffers = {}
         self._vulkan_graph_u32_execs = {}
@@ -4341,9 +4340,9 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
             raise ValueError(
                 f"Requested {n} sort items, exceeding max_items={self.max_items}."
             )
-        self._reserved_specs.append(
-            {"dtype": dtype, "value_dtype": value_dtype, "n": n}
-        )
+        # Backend buffers are allocated lazily by their concrete descriptors.
+        # Keeping a reservation history here retains unused metadata on every
+        # replay without reserving any additional storage.
         return self
 
     def clear(self):
@@ -4355,7 +4354,6 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
             self._clear_vulkan_native_backend_workspace()
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
-        self._reserved_specs.clear()
         self._radix_u32_buffers.clear()
         self._vulkan_graph_u32_buffers.clear()
         self._vulkan_graph_u32_execs.clear()

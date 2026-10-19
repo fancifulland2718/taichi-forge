@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Repeated `SortWorkspace.reserve()` calls no longer retain unused request
+  dictionaries. Native multi-key sorting can reuse its workspace without growing
+  a host-side reservation history; lazy allocation and caller capacity checks stay
+  unchanged.
+
 - Native multi-key sorting now handles packed vector/matrix ndarray payloads
   on CPU/CUDA/Vulkan, including Graph replay. Whole-record gathers preserve
   NaN payloads and signed zero, reuse temporary storage and avoid component-wise
