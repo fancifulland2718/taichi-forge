@@ -7509,12 +7509,14 @@ std::vector<size_t> scan_level_lengths(size_t n) {
 }
 
 size_t scan_workspace_bytes(const std::vector<size_t> &levels,
-                            size_t item_size) {
-  size_t items = 0;
+                            size_t item_size,
+                            size_t alignment) {
+  size_t bytes = 0;
   for (size_t i = 1; i < levels.size(); ++i) {
-    items += levels[i];
+    bytes += (alignment - bytes % alignment) % alignment;
+    bytes += levels[i] * item_size;
   }
-  return items * item_size;
+  return bytes;
 }
 
 size_t vulkan_scan_value_type_size(int value_type) {
@@ -7716,18 +7718,47 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
                                            size_t stride = 0,
                                            size_t data_offset = 0,
                                            bool reverse = false) {
+  const auto item_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(item_size == 0,
+              "Vulkan native scan received an unsupported value type.");
+  const auto limits = cache.device->get_storage_buffer_binding_limits();
+  const size_t alignment = std::max<size_t>(limits.offset_alignment, item_size);
+  const size_t lead = data_offset % alignment;
+  if (lead) {
+    // Keep the descriptor aligned and address the actual view in the existing
+    // strided shader. No copy or padded application allocation is necessary.
+    TI_ERROR_IF(offset > std::numeric_limits<size_t>::max() - lead,
+                "Vulkan scan view offset overflows");
+    offset = (member_source ? offset : 0) + lead;
+    stride = member_source ? stride : item_size;
+    member_source = true;
+    data_offset -= lead;
+  }
+  if (n > 1) {
+    const size_t shader_offset = member_source ? offset : 0;
+    const size_t shader_stride = member_source ? stride : item_size;
+    // The strided shaders address uint32 words; descriptor ranges also have a
+    // physical device limit. Check before multiplication or narrowing.
+    const size_t max_bytes = std::min<uint64_t>(
+        limits.max_range,
+        (uint64_t(std::numeric_limits<uint32_t>::max()) + 1) * sizeof(uint32_t));
+    TI_ERROR_IF(n > std::numeric_limits<uint32_t>::max() ||
+                    !shader_stride || shader_offset % item_size ||
+                    shader_stride % item_size || max_bytes < item_size ||
+                    shader_offset > max_bytes - item_size ||
+                    n - 1 > (max_bytes - item_size - shader_offset) / shader_stride,
+                "Vulkan scan exceeds its descriptor or uint32 shader address range");
+  }
   VulkanScanDispatchPlan plan;
   plan.data_alloc = data_alloc;
   plan.data_offset = data_offset;
   plan.n = n;
   plan.value_type = value_type;
-  plan.item_size = vulkan_scan_value_type_size(value_type);
+  plan.item_size = item_size;
   plan.member_source = member_source;
   plan.reverse = reverse;
   plan.offset = offset;
   plan.stride = stride;
-  TI_ERROR_IF(plan.item_size == 0,
-              "Vulkan native scan received an unsupported value type.");
   if (n <= 1) {
     return plan;
   }
@@ -7780,7 +7811,7 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
   }
 
   plan.levels = scan_level_lengths(n);
-  plan.workspace_bytes = scan_workspace_bytes(plan.levels, plan.item_size);
+  plan.workspace_bytes = scan_workspace_bytes(plan.levels, plan.item_size, alignment);
   if (cache.has_workspace_allocs() &&
       cache.needs_workspace_realloc(plan.workspace_bytes)) {
     TI_ERROR_IF(!program,
@@ -7793,8 +7824,9 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
                                                         : 0);
   size_t workspace_offset = 0;
   for (size_t i = 1; i < plan.levels.size(); ++i) {
-    plan.workspace_offsets.push_back(workspace_offset);
-    workspace_offset += plan.levels[i];
+    workspace_offset += (alignment - workspace_offset % alignment) % alignment;
+    plan.workspace_offsets.push_back(workspace_offset / plan.item_size);
+    workspace_offset += plan.levels[i] * plan.item_size;
   }
 
   plan.workspace_alloc = cache.workspace;
@@ -8549,7 +8581,9 @@ VulkanSparseAssemblyDispatchInfo Program::vulkan_sparse_assemble_csr(
   const std::size_t max_scan_count = std::max(capacity, rows + 1);
   const auto scan_levels = scan_level_lengths(max_scan_count);
   const std::size_t scan_workspace_request =
-      scan_workspace_bytes(scan_levels, sizeof(int32_t));
+      scan_workspace_bytes(scan_levels, sizeof(int32_t),
+                           std::max<size_t>(device->get_storage_buffer_binding_limits().offset_alignment,
+                                            sizeof(int32_t)));
   {
     auto sort_cache_lease = get_cache(this, device);
     auto &sort_cache = *sort_cache_lease;
