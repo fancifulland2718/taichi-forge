@@ -8080,6 +8080,16 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeCompletionWaitConcurrent);
     features["completion_blocking_wait"] =
         bool(bitmap & kForgeCompletionBlockingWait);
+    features["cuda_execution_domains"] =
+        bool(bitmap & kForgeCudaExecutionDomains);
+    features["cuda_aot_execution_domains"] =
+        bool(bitmap & kForgeCudaAotExecutionDomains);
+    features["cuda_jit_graph_execution_domains"] =
+        bool(bitmap & kForgeCudaJitGraphExecutionDomains);
+    features["cuda_external_storage_execution_domains"] =
+        bool(bitmap & kForgeCudaExternalStorageExecutionDomains);
+    features["cuda_canvas_execution_domains"] =
+        bool(bitmap & kForgeCudaCanvasExecutionDomains);
     result["features"] = std::move(features);
     result["legacy_runtime"] = false;
     return result;

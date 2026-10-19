@@ -14,6 +14,9 @@ endif()
 if (TI_WITH_CUDA AND TI_WITH_CUPTI)
   target_compile_definitions(taichi_common PRIVATE TI_FORGE_BUILD_CUPTI)
 endif()
+if (TI_WITH_RUNTIME_C_API)
+  target_compile_definitions(taichi_common PRIVATE TI_FORGE_BUILD_RUNTIME_C_API)
+endif()
 target_sources(taichi_common
   PRIVATE
     cleanup.cpp

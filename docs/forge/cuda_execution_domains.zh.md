@@ -11,6 +11,25 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 和应用 FPS 仍未完成资格验证。
 优先级是设备调度提示，不能保证 kernel 并行或抢占。
 
+## 能力查询
+
+在 `ti.init()` 前可读取 `ti.runtime_contract_manifest()["features"]`。独立 consumer
+可用 `taichi_forge_runtime.runtime_contract_manifest()["features"]`，不导入 DSL 或
+创建设备。以下是原生实现声明：
+
+| 能力 | 声明的路线 |
+| --- | --- |
+| `cuda_execution_domains` | 有界持久队列、显式优先级、精确票据依赖 |
+| `cuda_aot_execution_domains` | 已保存完整执行计划的准备和重放 |
+| `cuda_jit_graph_execution_domains` | 完整 live JIT Graph 准备 |
+| `cuda_external_storage_execution_domains` | 托管外部导入及选域 acquire/release epoch |
+| `cuda_canvas_execution_domains` | Canvas copy/writer/empty/repeat 选域及固定预备池 |
+
+对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
+驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
+Linux 窗口或所有 provider 已通过验收。沿用现有 bootstrap 与 ABI 110；不匹配的 shim/
+native 在进入 C++ 绑定前拒绝。
+
 ## 当前 JIT Graph
 
 ```python
@@ -189,6 +208,12 @@ ring 和 host selection 不会被悄悄改写为其他物理路线；native oper
 `simulation(n) → snapshot(n) → render(n)`；还必须在 live state 覆写前建立
 `snapshot(n) → simulation(n+1)`，并在 render ticket 完成后才复用 snapshot 槽。
 主机队列保持有界。显示忙时保留最近完成的画面并丢弃冗余呈现请求，避免阻塞仿真准入。
+
+先使用同优先级，分别限制绘图与物理的在途数。显示 acquire 忙时跳过此次呈现，继续满足
+依赖的物理工作；只保留最近可用的 snapshot，同时遵守租约及精确 render completion 的
+复用条件。分别测量物理和输出进度后再调整优先级。本机 RTX 5090 的合成 ABBA 矩阵中，
+提高物理优先级改善了长计算的物理进度，但降低输出进度并增加两项工作全部结束的耗时；
+短 kernel 主要受主机提交限制。优先级是显式调度取舍，不能自动等同于吞吐优化。
 
 CPU `wait()` 和字节缓冲区主机传输是显式同步边界，适用于初始化、最终读回与关闭。
 若放在每次仿真与渲染提交之间，就会把流水重新串行化。CUDA 完成与 Vulkan 呈现、屏幕

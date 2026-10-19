@@ -15,6 +15,28 @@ windows and application FPS remain unqualified. Queue priority is a device
 scheduling hint; it does not guarantee
 concurrent kernels or priority preemption.
 
+## Capability discovery
+
+Before `ti.init()`, inspect `ti.runtime_contract_manifest()["features"]`. A
+runtime-only consumer can use
+`taichi_forge_runtime.runtime_contract_manifest()["features"]` without importing
+the DSL or creating a device. These are native implementation declarations:
+
+| Feature | Declared route |
+| --- | --- |
+| `cuda_execution_domains` | Bounded persistent queues, explicit priorities and exact ticket dependencies |
+| `cuda_aot_execution_domains` | Complete saved execution-plan preparation and replay |
+| `cuda_jit_graph_execution_domains` | Complete live JIT Graph preparation |
+| `cuda_external_storage_execution_domains` | Managed external imports and selected acquire/release epochs |
+| `cuda_canvas_execution_domains` | Selected Canvas copy/writer/empty/repeat and bounded prepared image pools |
+
+Use `features.get(name, False)` for older packages. Missing declarations do not
+become support because a version or commit looks newer. Device/driver support,
+same-GPU sharing and each recipe's compiler/provider facts are checked at cold
+creation/preparation. A true build declaration does not qualify Linux windows
+or every provider. Existing bootstrap and private ABI 110 are unchanged; an
+incompatible shim/native pair is rejected before C++ bindings are entered.
+
 ## Current JIT Graphs
 
 ```python
@@ -248,6 +270,16 @@ Express `simulation(n) → snapshot(n) → render(n)` with device tickets, also 
 snapshot slot only after its render ticket completes. Keep the host queues
 bounded. When presentation is busy, retain the latest completed frame and drop
 redundant presentation requests instead of blocking simulation admission.
+
+Start with equal priorities and bound rendering separately from physics. If
+display acquisition is busy, skip that presentation request and continue
+eligible physics work. Keep only the newest eligible snapshot, respecting its
+lease; reusing a slot still requires its exact render completion. Measure
+physics and output progress independently before increasing physics priority.
+On the qualified RTX 5090 synthetic ABBA matrix, high physics priority improved
+its long-compute progress while reducing output progress and increasing the
+time to finish both workloads. Short kernels were largely host limited.
+Priority is an explicit policy choice, not an automatic throughput optimization.
 
 CPU `wait()` and byte-buffer host transfers are explicit synchronization
 boundaries. They are useful for cold initialization, final reads and shutdown;

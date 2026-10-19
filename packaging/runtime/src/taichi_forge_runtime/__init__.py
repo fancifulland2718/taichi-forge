@@ -2,4 +2,6 @@
 
 from __future__ import annotations
 
-__all__ = []
+from ._contracts import runtime_contract_manifest
+
+__all__ = ["runtime_contract_manifest"]
