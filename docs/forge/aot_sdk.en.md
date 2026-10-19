@@ -4885,6 +4885,15 @@ dependency records. Existing application entries, six backend/loading-order
 combinations and six consumer-created SDK scenes pass. This qualification uses
 the paired private ABI 107 components; it introduces no extra application TCM.
 
+The subsequent segmented-sequence refresh is also qualified with normally
+installed Windows CPU/CUDA/Vulkan packages. Device-published topology, serial and
+integer global scans pass standalone/borrowed consumption; Vulkan offset and
+multilevel scan buffers pass synchronization validation. Runtime/frontend wheels
+are 26,618,730/4,106,612 bytes (+2,244/+1,510); the native DLL grows by 1,024 bytes.
+Six loading orders and six public SDK scenes pass, while the application, its sole
+TCM and 44 external dependency records stay unchanged. Private ABI 107 and plan 21
+remain paired; these checks do not qualify every solver or mutable topology.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed

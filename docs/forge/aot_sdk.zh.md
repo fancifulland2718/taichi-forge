@@ -3710,6 +3710,12 @@ kernel梯度和同步验证均通过。runtime／前端wheel分别增加10,043�
 不变；现有应用入口、六种后端／加载顺序及六个消费者自建SDK场景通过。本资格使用
 配套的私有ABI107组件，没有额外增加应用TCM。
 
+后续分段序列刷新同样通过Windows CPU/CUDA/Vulkan正常安装资格：设备发布拓扑、
+serial及整数global scan通过独立／借用消费，Vulkan偏移与多级scan缓冲通过同步验证。
+runtime／前端wheel为26,618,730／4,106,612字节（+2,244／+1,510），native DLL增加
+1,024字节。六种加载顺序及六个公开SDK场景通过；应用包、唯一TCM和44个外部依赖
+记录不变，仍配套使用私有ABI107与plan21。这不代表所有solver或可变拓扑均获资格。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index
