@@ -7215,11 +7215,12 @@ struct VulkanBucketBuilderCache {
       Program *program,
       int value_type,
       DeviceAllocation output_alloc,
-      size_t output_bytes) {
+      size_t output_bytes,
+      uint64_t output_offset = 0) {
     return grouped_reduce_zero_strided_ring_bindings[value_type].bind(
         program, device,
         std::array<VulkanRwBufferBindingRequest, 1>{
-            rw_buffer_request(output_alloc, 0, output_bytes)});
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
   }
 
   VulkanReplayResourceSet<3> bind_grouped_reduce_atomic_strided_resource_set(
@@ -7230,13 +7231,16 @@ struct VulkanBucketBuilderCache {
       DeviceAllocation values_alloc,
       size_t values_bytes,
       DeviceAllocation output_alloc,
-      size_t output_bytes) {
+      size_t output_bytes,
+      uint64_t keys_offset = 0,
+      uint64_t values_offset = 0,
+      uint64_t output_offset = 0) {
     return grouped_reduce_atomic_strided_ring_bindings[value_type].bind(
         program, device,
         std::array<VulkanRwBufferBindingRequest, 3>{
-            rw_buffer_request(keys_alloc, 0, keys_bytes),
-            rw_buffer_request(values_alloc, 0, values_bytes),
-            rw_buffer_request(output_alloc, 0, output_bytes)});
+            rw_buffer_request(keys_alloc, keys_offset, keys_bytes),
+            rw_buffer_request(values_alloc, values_offset, values_bytes),
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
   }
 
   VulkanReplayResourceSet<3> bind_grouped_reduce_sum_resource_set(
@@ -14402,25 +14406,44 @@ std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
   const DeviceAllocation keys_alloc{keys_ptr.device, keys_ptr.alloc_id};
   const DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
   const DeviceAllocation output_alloc{output_ptr.device, output_ptr.alloc_id};
-  const size_t input_bytes = n * sizeof(int32_t);
-  const size_t values_bytes = n * value_size;
-  const size_t output_bytes = num_groups * value_size;
-  Pipeline *zero_pipeline = cache.grouped_reduce_zero_pipeline(value_type);
-  Pipeline *atomic_pipeline = cache.grouped_reduce_atomic_pipeline(value_type);
+  // Dense field offsets satisfy scalar alignment, not necessarily Vulkan's
+  // descriptor alignment. Use enclosing views plus the existing strided
+  // shader's explicit scalar offsets/counts so sibling fields stay untouched.
+  const auto key_view = vulkan_indexed_buffer_view(
+      device, keys_ptr, n, sizeof(int32_t), keys_stride, sizeof(int32_t));
+  const auto value_view = vulkan_indexed_buffer_view(
+      device, values_ptr, n, value_size, values_stride, value_size);
+  const auto output_view = vulkan_indexed_buffer_view(
+      device, output_ptr, num_groups, value_size, output_stride, value_size);
+  const size_t input_bytes = key_view.bytes;
+  const size_t values_bytes = value_view.bytes;
+  const size_t output_bytes = output_view.bytes;
+  const std::array<uint32_t, 3> zero_params{
+      static_cast<uint32_t>(num_groups), output_view.offset, 1};
+  const std::array<uint32_t, 8> reduce_params{
+      static_cast<uint32_t>(n), key_view.offset, 1, value_view.offset, 1,
+      static_cast<uint32_t>(num_groups), output_view.offset, 1};
+  cache.ensure_grouped_reduce_zero_strided_pipeline(value_type);
+  cache.ensure_grouped_reduce_atomic_strided_pipeline(value_type);
+  Pipeline *zero_pipeline = cache.grouped_reduce_zero_strided_pipeline(value_type);
+  Pipeline *atomic_pipeline =
+      cache.grouped_reduce_atomic_strided_pipeline(value_type);
   TI_ERROR_IF(!zero_pipeline || !atomic_pipeline,
               "Vulkan native dense field grouped reduce could not find a "
               "pipeline for the requested value type.");
   ShaderResourceSet *zero_bindings =
       cache
-          .bind_grouped_reduce_zero_resource_set(
-              this, value_type, output_alloc, output_ptr.offset, output_bytes)
+          .bind_grouped_reduce_zero_strided_resource_set(
+              this, value_type, output_alloc, output_bytes,
+              output_view.binding.offset)
           .bindings;
   ShaderResourceSet *atomic_bindings =
       cache
-          .bind_grouped_reduce_atomic_resource_set(
-              this, value_type, keys_alloc, keys_ptr.offset, input_bytes,
-              values_alloc, values_ptr.offset, values_bytes, output_alloc,
-              output_ptr.offset, output_bytes)
+          .bind_grouped_reduce_atomic_strided_resource_set(
+              this, value_type, keys_alloc, input_bytes, values_alloc,
+              values_bytes, output_alloc, output_bytes,
+              key_view.binding.offset, value_view.binding.offset,
+              output_view.binding.offset)
           .bindings;
   const uint32_t zero_groups =
       static_cast<uint32_t>((num_groups + kBlockSize - 1) / kBlockSize);
@@ -14431,10 +14454,11 @@ std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
       [keys_alloc, values_alloc, output_alloc, keys_ptr, values_ptr, output_ptr,
        input_bytes, output_bytes, zero_pipeline, atomic_pipeline,
        zero_bindings, atomic_bindings, zero_groups, reduce_groups, value_type,
-       values_bytes, profiler_scopes](Device * /*op_device*/,
+       values_bytes, zero_params, reduce_params, profiler_scopes](Device * /*op_device*/,
                                       CommandList *cmdlist) {
-        dispatch_pipeline(cmdlist, zero_pipeline, zero_bindings, zero_groups, 1,
-                          1,
+        dispatch_pipeline_with_push_constants(
+                          cmdlist, zero_pipeline, zero_bindings,
+                          zero_params.data(), sizeof(zero_params), zero_groups, 1, 1,
                           profiler_scopes
                               ? (value_type == 1
                                      ? "vulkan_grouped_reduce_zero_f32"
@@ -14452,8 +14476,9 @@ std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
         if (reduce_groups == 0) {
           return;
         }
-        dispatch_pipeline(cmdlist, atomic_pipeline, atomic_bindings,
-                          reduce_groups, 1, 1,
+        dispatch_pipeline_with_push_constants(
+                          cmdlist, atomic_pipeline, atomic_bindings,
+                          reduce_params.data(), sizeof(reduce_params), reduce_groups, 1, 1,
                           profiler_scopes
                               ? (value_type == 1
                                      ? "vulkan_grouped_reduce_atomic_sum_f32"
@@ -14471,6 +14496,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
       };
   VulkanCommandReplayKey command_key;
   command_key.push(21);
+  for (auto word : reduce_params)
+    command_key.push(word);
   command_key.push(static_cast<uint64_t>(value_type));
   command_key.push(keys_alloc.alloc_id);
   command_key.push(vulkan_allocation_generation(keys_alloc));

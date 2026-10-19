@@ -438,6 +438,54 @@ def test_experimental_grouped_reduce_dense_field_native_i32():
     assert np.array_equal(output.to_numpy(), expected)
 
 
+@test_utils.test(arch=ti.vulkan, exclude=[(ti.vulkan, "Darwin")])
+def test_grouped_reduce_dense_field_offset_neighbors_and_graph_replay():
+    # Scalar-aligned field addresses need not meet storage descriptor alignment.
+    # Guards, keys and values share the root allocation with the output fields.
+    guard = ti.field(ti.i32, shape=5)
+    keys = ti.field(ti.i32, shape=7)
+    original_keys = np.array([0, 2, -1, 2, 3, 0, 1], dtype=np.int32)
+    prog = impl.get_runtime().prog
+    pairs = []
+    for dtype, numpy_dtype, value_type in (
+        (ti.i32, np.int32, 0),
+        (ti.f32, np.float32, 1),
+        (ti.u64, np.uint64, 3),
+    ):
+        if not prog.vulkan_grouped_reduce_atomic_value_type_available(value_type):
+            continue
+        values = ti.field(dtype, shape=7)
+        output = ti.field(dtype, shape=3)
+        source = np.arange(1, 8, dtype=numpy_dtype)
+        pairs.append((values, output, source))
+    keys.from_numpy(original_keys)
+    guard.from_numpy(np.arange(5, dtype=np.int32) + 91)
+    for values, output, source in pairs:
+        values.from_numpy(source)
+        output.fill(37)
+    sequence = ti.algorithms.primitive_sequence()
+    for values, output, _ in pairs:
+        sequence.grouped_reduce(keys, values, output, method="vulkan_native")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(sequence)
+    graph = builder.compile()
+    try:
+        for current_keys in (original_keys, np.full(7, -1, np.int32), original_keys):
+            keys.from_numpy(current_keys)
+            graph.run({})
+            for values, output, source in pairs:
+                expected = np.zeros(3, dtype=source.dtype)
+                for key, value in zip(current_keys, source):
+                    if 0 <= key < 3:
+                        expected[key] += value
+                np.testing.assert_array_equal(output.to_numpy(), expected)
+                np.testing.assert_array_equal(values.to_numpy(), source)
+            np.testing.assert_array_equal(keys.to_numpy(), current_keys)
+            np.testing.assert_array_equal(guard.to_numpy(), np.arange(5) + 91)
+    finally:
+        graph.close()
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_grouped_reduce_dense_field_native_f32_no_helper():
     n = 1024

@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan 原生分组归约的 dense field 改用对齐 descriptor，并给现有 shader 传入
+  明确的 scalar 偏移和长度，修复验证层对齐报错；保持相邻字段、Graph 重放及原有
+  支持范围内的反向梯度。
 - Check/metric 的原生 sequence 和选定 result node 可通过统一 registry 导出到
   CPU/CUDA/Vulkan。准备不执行诊断，私有 scalar 可重建并由后续 kernel 直接消费；
   保留原 count/NaN 语义、偏移与空前缀合同。当前导出覆盖 packed scalar，Vulkan
