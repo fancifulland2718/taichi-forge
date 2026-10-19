@@ -1769,6 +1769,16 @@ CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part
 显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、strided
 存储、其他融合序列和未列出的操作仍需自己的导出合同。
 
+CPU/CUDA/Vulkan 的原生 sequence `transform()` 还可导出具有一维索引的紧凑向量／矩阵
+ndarray。`builtin/transform` v1 描述保存确切的 `element_shape`、基础 dtype 和 scale/bias；
+省略 shape 保持标量行为。lane 支持 i32/u32/i64/u64/f32/f64，受设备类型能力约束。
+冷导出和已选策略导出保留 CPU 分区策略、CUDA 逐 lane strided launch 及 Vulkan packed
+dispatch，不增加应用 kernel 或私有 scratch。绑定允许完全原位或不相交的范围，拒绝部分
+重叠和不匹配的 element shape。显式消费者计划还支持标量对齐的 tensor 偏移视图及指定
+前缀，保留范围外记录。本路线不覆盖 tensor Field、Struct 成员或任意 stride。
+已验证编译后的下游 kernel 梯度；原生 transform 本身不自动生成伴随。
+需使用配套的私有 ABI108 runtime／前端组件。
+
 Vulkan 标量 `transform → gather → scatter` 序列具有专门的
 `builtin/indexed_transform` v1 合同。冷导出按 JIT 的条件选择融合；已选中融合后，
 即使偏好设置改变，导出仍保留该选择。产物保存 `src`、`transformed`、`indices`、
@@ -3715,6 +3725,12 @@ serial及整数global scan通过独立／借用消费，Vulkan偏移与多级sca
 runtime／前端wheel为26,618,730／4,106,612字节（+2,244／+1,510），native DLL增加
 1,024字节。六种加载顺序及六个公开SDK场景通过；应用包、唯一TCM和44个外部依赖
 记录不变，仍配套使用私有ABI107与plan21。这不代表所有solver或可变拓扑均获资格。
+
+tensor transform 配套包刷新通过 Windows 正常安装，使用私有 ABI108 和 plan21。
+六个独立／借用消费者、六种加载顺序、六个公开 SDK 场景及 Vulkan 同步验证通过，
+包括下游梯度和 tensor 偏移视图。runtime／前端 wheel 为 26,620,183／4,106,982 字节
+（+1,453／+370），native DLL 增加 3,584 字节。GeoPhys 应用包、唯一 TCM 和 44 个
+外部依赖记录保持不变；runtime-only tensor 消费者不需要 DSL 或 NumPy。
 
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是

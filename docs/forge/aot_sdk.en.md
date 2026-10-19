@@ -2290,6 +2290,20 @@ Vulkan compact/unique method is `vulkan_native`. Other strategies,
 descending/bitwise ordering, strided storage, other fused sequences
 and unlisted operations still require their own export contracts.
 
+Native sequence `transform()` also exports packed vector/matrix ndarrays with
+one index dimension on CPU/CUDA/Vulkan. The `builtin/transform` v1 descriptor
+stores the exact `element_shape`, scalar dtype and scale/bias; omitting the shape
+retains scalar behavior. Supported lanes are i32/u32/i64/u64/f32/f64, subject to
+device support. Cold and previously selected exports retain the CPU partition
+policy, CUDA per-lane strided launches and Vulkan packed dispatch. They add no
+application kernel or private scratch. Bindings allow exact in-place or disjoint
+ranges; partial overlap and incompatible element shapes are rejected. Explicit
+consumer plans also support scalar-aligned offset tensor views and selected
+prefixes without changing surrounding records. This route does not cover tensor
+Fields, Struct members or arbitrary strides. Compiled downstream kernel gradients
+are qualified; the native transform does not acquire an automatic adjoint.
+Use matching private ABI 108 runtime/frontend components.
+
 The Vulkan scalar `transform → gather → scatter` sequence has a dedicated
 `builtin/indexed_transform` v1 contract. Cold export selects the same eligible
 fusion as JIT; export of an already selected fusion preserves that choice even
@@ -4893,6 +4907,14 @@ are 26,618,730/4,106,612 bytes (+2,244/+1,510); the native DLL grows by 1,024 by
 Six loading orders and six public SDK scenes pass, while the application, its sole
 TCM and 44 external dependency records stay unchanged. Private ABI 107 and plan 21
 remain paired; these checks do not qualify every solver or mutable topology.
+
+The tensor-transform package refresh passes normal Windows installation with
+private ABI 108 and plan 21. Six standalone/borrowed consumers, six loading orders,
+six public SDK scenes and Vulkan synchronization validation pass, including
+downstream gradients and offset tensor views. Runtime/frontend wheels are
+26,620,183/4,106,982 bytes (+1,453/+370); the native DLL grows by 3,584 bytes.
+The GeoPhys application, its sole TCM and 44 external dependency records remain
+unchanged. Runtime-only tensor consumers need neither the DSL nor NumPy.
 
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
