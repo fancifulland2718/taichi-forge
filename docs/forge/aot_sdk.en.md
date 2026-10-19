@@ -4875,6 +4875,16 @@ it does not make integer grouping differentiable or qualify complete collision
 dynamics. Additional qualification artifacts are not added to the sole delivered
 application TCM, and no new runtime dependency is introduced.
 
+The paired package refresh for indexed-transform fusion also passes normal
+Windows installation. CPU/CUDA/Vulkan tensor transforms and Vulkan cold/warm
+fusion export pass; independent and borrowed consumers preserve offset views,
+retirement and downstream kernel gradients, including synchronization validation.
+Runtime/frontend wheels grow by 10,043/846 bytes to 26,616,486/4,105,102 bytes.
+The unchanged GeoPhys package keeps its sole 251,133-byte TCM and all 44 external
+dependency records. Existing application entries, six backend/loading-order
+combinations and six consumer-created SDK scenes pass. This qualification uses
+the paired private ABI 107 components; it introduces no extra application TCM.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed

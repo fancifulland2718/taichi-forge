@@ -3703,6 +3703,13 @@ Vulkan 原生 i64/u64 原子指令遗漏必需的 SPIR-V capability。修复后�
 所选下游计算的资格，不代表整数分组可微或完整碰撞动力学已获资格；额外验证产物
 没有加入正常交付的唯一应用TCM，也没有引入新的运行依赖。
 
+融合indexed-transform对应的配套包刷新也通过Windows正常安装资格。CPU/CUDA/Vulkan
+tensor transform、Vulkan冷暖融合导出，以及独立／借用消费者的偏移view、退休、下游
+kernel梯度和同步验证均通过。runtime／前端wheel分别增加10,043／846字节，至
+26,616,486／4,105,102字节。GeoPhys包、唯一251,133字节TCM和44个外部依赖记录保持
+不变；现有应用入口、六种后端／加载顺序及六个消费者自建SDK场景通过。本资格使用
+配套的私有ABI107组件，没有额外增加应用TCM。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index
