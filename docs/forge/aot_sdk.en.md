@@ -2708,6 +2708,13 @@ by default. CPU/CUDA loading still uses the unchanged `metadata.tcb` and
 Use `archive(path, include_debug_metadata=True)` to retain the diagnostic files.
 Directory exports with `Module.save()` continue to include them for inspection.
 
+Archives use fast deflate compression (level 1) for metadata, code and immutable
+data. Entries retain their original contents, names and fixed timestamps;
+native readers decompress requested payloads during loading/preparation, not
+warm replay. This reduces package size, especially for repetitive topology or
+state, without reducing device buffer sizes or changing numerical execution.
+Directory exports remain uncompressed.
+
 `copy` defaults to the source's remaining logical bytes; optional
 `source_offset`, `destination_offset` and `size_bytes` select nonoverlapping
 ranges. `fill32.value` is a uint32 bit pattern; optional `offset/size_bytes`

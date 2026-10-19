@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- TCM archives use fast deflate to reduce code and frozen data size. Existing
+  native readers decompress entries on demand; payload contents, device storage
+  and warm execution remain unchanged. Directory exports retain raw files.
 - Segmented reduction sequences now export their original grouped/serial
   strategy on CPU/CUDA/Vulkan. Frozen topology, CPU partition order, padded
   inputs, serial Field snapshots and explicit adjoint composition are retained;

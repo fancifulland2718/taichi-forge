@@ -2079,6 +2079,11 @@ CPU/CUDA 仍使用原有的 `metadata.tcb` 与 `aot_metadata.json`；Vulkan 加�
 `metadata.json` 始终保留。需要调试文件时使用
 `archive(path, include_debug_metadata=True)`；`Module.save()` 的目录导出仍保留这些文件。
 
+归档对元数据、代码与不可变数据采用快速 deflate 压缩（level 1），保留各文件原始
+内容、名称和固定时间戳。原生读取器在加载/准备时按需解压载荷，暖态重放不解压。
+这可减小包体，尤其是重复拓扑或状态数据；不会缩小设备缓冲或改变数值执行。
+目录导出仍不压缩。
+
 `copy` 默认复制 source 的逻辑剩余字节，可指定 `source_offset`、`destination_offset`
 及 `size_bytes`；区域不能重叠。`fill32` 的 `value` 是 uint32 位模式，默认覆盖目标
 逻辑剩余区域，可指定 `offset/size_bytes`；起点和大小必须为 4 字节倍数。Vulkan

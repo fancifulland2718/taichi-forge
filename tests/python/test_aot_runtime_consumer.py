@@ -107,9 +107,13 @@ def test_lightweight_aot_consumer_and_jit_coexistence(tmp_path):
         TAICHI_RUNTIME_DIR=runtime_utils._runtime_bitcode_dir(),
         TI_ENABLE_VERSION_CHECK="0",
     )
-    for order in ("pure", "aot-first", "jit-first"):
+    for order, source in (
+        ("pure", tmp_path / "packed.tcm"),
+        ("aot-first", tmp_path),
+        ("jit-first", tmp_path),
+    ):
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).with_name("aot_consumer_probe.py")), arch, str(tmp_path), order],
+            [sys.executable, str(Path(__file__).with_name("aot_consumer_probe.py")), arch, str(source), order],
             env=environment,
             capture_output=True,
             text=True,

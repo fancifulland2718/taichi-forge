@@ -6,7 +6,7 @@ from pathlib import Path
 from shutil import rmtree
 from tempfile import mkdtemp
 from urllib.parse import quote
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 
@@ -678,6 +678,9 @@ class Module:
             cache lock file. By default these are omitted from deployment
             archives; runtime metadata and the output of ``save()`` are
             unchanged. GFX JSON metadata is always retained.
+
+        Entries use fast deflate compression. Native readers decompress on
+        demand; this does not change execution data or device storage sizes.
         """
         assert filepath.endswith(".tcm"), "AOT module artifact archive must ends with .tcm"
         if self._graph_export_failed:
@@ -699,8 +702,9 @@ class Module:
             # backends instead require metadata.json for loading.
             omitted = {Path("metadata.json"), Path("metadata.lock")}
 
-        # Package deployment artifacts into a zip archive.
-        with ZipFile(tcm_path, "w") as z:
+        # Fast deflate reduces frozen topology/state and code without replay
+        # work. Native VirtualDir readers already decompress requested entries.
+        with ZipFile(tcm_path, "w", compression=ZIP_DEFLATED, compresslevel=1) as z:
             for path in sorted(Path(temp_dir).rglob("*")):
                 if not path.is_file():
                     continue
