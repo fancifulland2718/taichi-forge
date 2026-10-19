@@ -3687,6 +3687,13 @@ Vulkan 原生 i64/u64 原子指令遗漏必需的 SPIR-V capability。修复后�
 原有单TCM与44个外部依赖保持。Forge核心DLL增加512字节；配套包已正常安装，固定
 应用入口、六个新SDK场景及六种后端／加载顺序组合回归通过。
 
+后续接触岛跨帧资格覆盖CPU/CUDA/Vulkan的full CSR／mapping、跨表面／同表面、VF／EE
+混合和跨扫描块执行。独立连通性及incidence参考检查合并、拆分、无效帧保留历史、空帧
+清空历史与恢复；实际下游浮点kernel及其反向通过解析参考。独立／借用消费者的两份
+模块错开帧序执行、输出刷新和在途关闭通过，Vulkan同步验证通过。这是接触分组及
+所选下游计算的资格，不代表整数分组可微或完整碰撞动力学已获资格；额外验证产物
+没有加入正常交付的唯一应用TCM，也没有引入新的运行依赖。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index

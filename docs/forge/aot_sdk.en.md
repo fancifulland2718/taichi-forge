@@ -4850,6 +4850,18 @@ and 44 external dependency records. The Forge core DLL grows by 512 bytes. The
 matched packages are normally installed; fixed application entries, six new SDK
 scenes and six backend/loading-order combinations pass regression checks.
 
+Further temporal contact-island checks cover CPU/CUDA/Vulkan full CSR/mapping,
+cross-surface/self-surface VF/EE mixtures and scan-block crossings. Independent
+connectivity and incidence references check merging, splitting, invalid frames
+retaining history, valid empty frames clearing history, and recovery. Actual
+downstream floating-point kernels and their reverse gradients match analytic
+references. Standalone/borrowed consumers pass staggered temporal execution in
+two modules, output refresh and in-flight close, including Vulkan synchronization
+validation. This qualifies grouping and the selected downstream computation;
+it does not make integer grouping differentiable or qualify complete collision
+dynamics. Additional qualification artifacts are not added to the sole delivered
+application TCM, and no new runtime dependency is introduced.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed
