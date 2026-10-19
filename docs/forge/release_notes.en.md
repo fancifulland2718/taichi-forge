@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Native check/metric sequences and selected result nodes now export through the
+  shared registry on CPU/CUDA/Vulkan. Preparation does not execute diagnostics;
+  private scalars can be reconstructed and consumed directly by later kernels.
+  Count/NaN semantics, offsets and empty-prefix behavior are retained. This route
+  covers packed scalars, with f32 metrics on Vulkan and unchanged automatic AD.
 - CPU checks and metrics share packed/strided reduction cores and the existing
   scheduler. Predicate selection occurs outside counting loops. Wide internal
   counts avoid signed overflow; an unrepresentable i32 result raises on exact

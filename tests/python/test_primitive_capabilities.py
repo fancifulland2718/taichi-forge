@@ -85,6 +85,11 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert any(r.forms == ("histogram",) and r.backends == ("cpu", "cuda", "vulkan") for r in histogram)
         assert any(r.forms == ("builtin/histogram",) and "empty_input_supported" in r.constraints for r in histogram)
         assert all("discrete_no_automatic_ad" in r.constraints for r in histogram)
+        for family, operation in (("check", "check_count"), ("metric", "metric_reduce")):
+            routes = ti.algorithms.primitive_capability(family).aot_routes
+            assert len(routes) == 3
+            assert any(r.forms == ("builtin/" + operation,) and "empty_input_supported" in r.constraints for r in routes)
+            assert all(r.backends == ("cpu", "cuda", "vulkan") and "no_automatic_ad" in r.constraints for r in routes)
         saved = json.loads(json.dumps(asdict(unique)))
         assert saved["aot"] == "selected_execution_plan_routes"
         assert saved["aot_routes"][1]["backends"] == ["cpu", "cuda", "vulkan"]

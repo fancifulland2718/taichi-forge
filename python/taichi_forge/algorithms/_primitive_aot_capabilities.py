@@ -157,6 +157,31 @@ _ROUTES = MappingProxyType({
                            "disjoint_output", "prepared_owner_scratch", "frozen_algorithm_preferences",
                            "device_integer_capabilities", "discrete_no_automatic_ad")),
     ),
+    "check": (
+        _sequence(("count_if", "any_if", "all_if", "nan_count", "inf_count", "all_finite", "index_bounds_check"),
+                  "packed_scalar", "i32_u32_f32_i64_u64_f64", "device_count_not_boolean",
+                  "i32_count_overflow_marker", "signed_i32_bounds", "disjoint_output",
+                  "device_dtype_capabilities", "no_automatic_ad"),
+        PrimitiveAOTRoute("aot.Module.add_execution_plan", ("algorithms.DeviceCheckResult",), _ALL,
+                          _STORAGE + ("selected_native_result_node", "device_count_not_boolean",
+                                      "i32_count_overflow_marker", "signed_i32_bounds", "no_automatic_ad")),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/check_count",), _ALL,
+                          ("packed_scalar", "fixed_prefix_extent", "empty_input_supported",
+                           "i32_u32_f32_i64_u64_f64", "i32_count_overflow_marker",
+                           "signed_i32_bounds", "disjoint_output", "first_output_element",
+                           "prepared_owner_scratch", "device_dtype_capabilities", "no_automatic_ad")),
+    ),
+    "metric": (
+        _sequence(("max_abs", "max_abs_delta"), "packed_scalar", "cpu_cuda_f32_f64_vulkan_f32",
+                  "nan_maps_to_infinity", "disjoint_output", "no_automatic_ad"),
+        PrimitiveAOTRoute("aot.Module.add_execution_plan", ("algorithms.DeviceMetricResult",), _ALL,
+                          _STORAGE + ("selected_native_result_node", "cpu_cuda_f32_f64_vulkan_f32",
+                                      "nan_maps_to_infinity", "no_automatic_ad")),
+        PrimitiveAOTRoute("aot.ExecutionPlan", ("builtin/metric_reduce",), _ALL,
+                          ("packed_scalar", "fixed_prefix_extent", "empty_input_supported",
+                           "cpu_cuda_f32_f64_vulkan_f32", "nan_maps_to_infinity", "disjoint_output",
+                           "first_output_element", "prepared_owner_scratch", "no_automatic_ad")),
+    ),
 })
 
 

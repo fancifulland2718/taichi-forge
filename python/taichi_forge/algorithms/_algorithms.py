@@ -1075,6 +1075,11 @@ class _NativePrimitivePlanGraphExecutable(NativeGraphExecutable):
         self.run()
         return self
 
+    def _export_aot(self, context):
+        from taichi_forge.algorithms._diagnostic_export import export_result_plan
+
+        export_result_plan(self, context)
+
     def run(self):
         prog = _current_program()
         if not self.plan.matches_program(prog) or self.plan.invoke(prog) is None:

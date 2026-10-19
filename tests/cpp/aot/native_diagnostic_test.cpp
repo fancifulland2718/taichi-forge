@@ -50,10 +50,10 @@ TEST(NativeDiagnostic, SchemaPreservesSignedBoundsAndBackendSpecificCounts) {
 #ifdef TI_WITH_LLVM
 TEST(NativeDiagnostic, CpuOwnerReusesPartialAndPreservesOutputNeighbors) {
   cpu::CpuDevice device;
-  ThreadPool pool(4);
+  ThreadPool pool(2);
   NativePreparationContext context(host_arch(), device);
   context.cpu_thread_pool = &pool;
-  context.cpu_max_threads = 4;
+  context.cpu_max_threads = 2;
   const size_t n = 262147;
   auto [values, values_result] = device.allocate_memory_unique({n * 4});
   auto [other, other_result] = device.allocate_memory_unique({n * 4});
@@ -82,6 +82,7 @@ TEST(NativeDiagnostic, CpuOwnerReusesPartialAndPreservesOutputNeighbors) {
   metric.size = n;
   metric.value_type = 1;
   metric.op = 1;
+  metric.cpu_max_threads = 4;  // Frozen producer partitions on a smaller owner pool.
   metric.values = check.values;
   metric.other =
       NativeArrayBinding{other->get_ptr(), n * 4, PrimitiveType::f32, {n}, {}};

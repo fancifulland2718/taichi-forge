@@ -2125,6 +2125,13 @@ Limits:
 
 The same check functions are also available under `ti.algorithms.check`.
 
+`PrimitiveSequence` and result-object Graph nodes export to AOT through the
+shared `builtin/check_count` / `builtin/metric_reduce` v1 routes. Export currently
+requires packed scalars and preserves device counts without Boolean conversion.
+Metrics support f32/f64 on CPU/CUDA and f32 on Vulkan. Outputs may be privately
+reconstructed or explicitly named; preparation does not execute diagnostics.
+See the [native algorithm AOT contract](native_algorithms.en.md).
+
 ### Workspaces
 
 Reusable workspace classes:

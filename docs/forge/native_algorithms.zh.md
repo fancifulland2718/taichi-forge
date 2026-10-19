@@ -260,6 +260,23 @@ Sequence 导出记录生产端 CPU 线程配置，以及 Vulkan 在导出时的
 代码，已安装 runtime 须提供对应算子；本路线尚不覆盖 strided/staged/fused 和
 CUB histogram sequence。离散 ID/计数不自动求导，周围可微算子保留各自求导合同。
 
+设备 check/metric 可通过 `PrimitiveSequence`、选定的 `DeviceCheckResult` /
+`DeviceMetricResult` Graph 节点，以及 `builtin/check_count` /
+`builtin/metric_reduce` v1 描述导出。三后端支持 packed scalar ndarray 与可证明
+packed 的 dense field；check 覆盖 i32/u32/i64/u64/f32/f64，metric 在 CPU/CUDA
+支持 f32/f64，在 Vulkan 支持 f32。`max_abs_delta` 需要同类型 rhs；NaN（包括
+Inf-Inf）使 metric 返回 +Inf。显式描述支持固定前缀及空输入，结果只写首个 scalar，
+输出与读取范围必须分离。前端 sequence 保留原非空输入要求，strided/fused/CUB
+路线尚不在此导出范围内。
+
+check 输出仍是 i32 **计数**：`all_if` 统计零值，`all_finite` 统计非有限值；导出
+不会改写成 Boolean，也不调用 host 读取方法。负结果表示计数超出 i32，精确 host
+读取报错，零/非零判断仍有效；bounds 保留 signed i32 合同。中间 workspace scalar
+可作为私有资源重建，也可通过 `source_bindings` 显式命名。后续 native 或 kernel
+可直接消费设备结果。CPU prepared owner 保留 partial 并复用 runtime 线程池，GPU
+不需 scratch；Vulkan 分组偏好在导出时固定。准备不执行诊断，纯原生包复用 runtime
+代码。安装的 runtime 需包含相应 v1 算子；此路线不增加 check/metric 自动微分能力。
+
 `PrimitiveSequence.run_length_encode()` 可导出 CPU/CUDA/Vulkan 上连续相等的
 i32/u32/i64/u64 键。固定输入前缀产生 unique keys、i32 run lengths 和 i32 count，
 未使用的输出尾部保持不变。导出复用既有头标记/起点和长度 helper，两列 compact

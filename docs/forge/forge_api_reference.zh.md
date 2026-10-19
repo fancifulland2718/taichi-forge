@@ -1744,6 +1744,12 @@ Result 对象：
 
 同一组检查函数也可从 `ti.algorithms.check` 访问。
 
+`PrimitiveSequence` 与结果对象的 Graph 节点可导出到 AOT，使用统一的
+`builtin/check_count` / `builtin/metric_reduce` v1 路线。当前导出限定 packed
+scalar，保留设备计数而不转成 Boolean；CPU/CUDA metric 支持 f32/f64，Vulkan
+支持 f32。输出可私有重建或显式命名，准备不执行诊断；详见
+[原生算法的 AOT 合同](native_algorithms.zh.md)。
+
 ### Workspaces
 
 可复用 workspace 类：

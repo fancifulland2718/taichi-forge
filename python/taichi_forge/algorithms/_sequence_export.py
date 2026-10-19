@@ -557,6 +557,7 @@ def _consecutive(call, context):
 
 def export_sequence(sequence, context):
     from ._algorithms import PrimitiveSequence
+    from ._diagnostic_export import export_check_call, export_metric_call
 
     if type(sequence) is not PrimitiveSequence or sequence._fused_plan is not None:
         raise TaichiRuntimeError("AOT sequence requires its concrete selected native reconstruction")
@@ -566,6 +567,7 @@ def export_sequence(sequence, context):
         "indexed_copy": _indexed_copy,
         "scatter_add": _scatter_add,
         "histogram": _histogram,
+        "check": export_check_call, "metric": export_metric_call,
         "compact": _compact, "unique": _consecutive, "unique_by_key": _consecutive,
         "run_length_encode": _consecutive,
     }

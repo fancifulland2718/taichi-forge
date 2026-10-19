@@ -339,6 +339,27 @@ operation in the installed runtime. Strided/staged/fused and CUB histogram
 sequences are outside this route. Discrete histogram IDs/counts have no automatic
 derivative; surrounding differentiable operations retain their own contracts.
 
+Device checks and metrics export through `PrimitiveSequence`, selected
+`DeviceCheckResult` / `DeviceMetricResult` Graph nodes, or explicit
+`builtin/check_count` / `builtin/metric_reduce` v1 descriptions. The three backends
+accept packed scalar ndarrays and proven packed dense fields. Checks support
+i32/u32/i64/u64/f32/f64; metrics support f32/f64 on CPU/CUDA and f32 on Vulkan.
+`max_abs_delta` requires a matching rhs; NaN, including Inf-Inf, produces +Inf.
+Explicit descriptions support fixed prefixes and empty input, write only the
+first output scalar, and require disjoint read/output spans. Frontend sequences
+retain their nonempty-input requirement. Strided/fused/CUB routes are not covered.
+
+Check output remains an i32 **count**: `all_if` counts zeros and `all_finite`
+counts nonfinite values. Export neither converts it to Boolean nor reads it on
+the host. Negative results signal count overflow; exact host reads raise while
+zero/nonzero truth remains valid. Bounds retain their signed i32 ABI. Workspace
+scalars can be reconstructed privately or named through `source_bindings`;
+subsequent native operations and kernels consume them directly on device. CPU
+owners retain partials and share the runtime thread pool; GPU paths need no
+scratch. Vulkan grouping preferences freeze at export. Preparation does not
+execute diagnostics, and pure-native archives reuse runtime code. The installed
+runtime must supply the matching v1 operations. Automatic AD support is unchanged.
+
 `PrimitiveSequence.run_length_encode()` exports consecutive i32/u32/i64/u64
 keys on CPU/CUDA/Vulkan. A fixed input prefix produces unique keys, i32 run
 lengths and an i32 count; unused output tails are preserved. Export reuses the
