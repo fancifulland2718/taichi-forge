@@ -7448,8 +7448,9 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
     """Workspace for experimental fixed-bin bucket range construction.
 
     Native CUDA/Vulkan paths use one cached i32 cursor buffer of length
-    ``num_bins``. Field/SNode fallback uses a field cursor plus the existing
-    prefix-sum executor over ``offsets``.
+    ``num_bins``. CPU paths reuse a Program-owned count/cursor table; clear()
+    retires the CPU bucket-family cache. Field/SNode fallback uses a field
+    cursor plus the existing prefix-sum executor over ``offsets``.
     """
 
     def __init__(self, max_items=None, max_bins=None):
@@ -7463,6 +7464,7 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         self._init_order_apply_workspace("bucket")
         self._native_bucket_builder_plan = None
         self._native_bucket_builder_plans = {}
+        self._cpu_native_active = False
         self._vulkan_native_active = False
 
     def check_shape(self, n, num_bins):
@@ -7476,6 +7478,11 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
             )
 
     def clear(self):
+        if self._cpu_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            _call_optional_prog_method(prog, "cpu_bucket_builder_clear_workspace")
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -7488,6 +7495,7 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         self._scanner_cache.clear()
         self._clear_order_apply_workspace()
         self._clear_native_bucket_builder_plans()
+        self._cpu_native_active = False
         self._vulkan_native_active = False
 
     def _reserve_bytes(self, bytes_used):
@@ -7511,6 +7519,8 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         return None
 
     def _mark_native_bucket_builder_backend_active(self, backend, temp_bytes):
+        if backend and backend.startswith("cpu_"):
+            self._cpu_native_active = True
         if backend and backend.startswith("vulkan_"):
             self._vulkan_native_active = True
         self.workspace_bytes_peak = max(

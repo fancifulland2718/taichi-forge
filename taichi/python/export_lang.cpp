@@ -5074,6 +5074,13 @@ void export_lang(py::module &m) {
             &Program::cpu_bucket_builder_available)
        .def("cpu_bucket_builder_workspace_bytes",
             &Program::cpu_bucket_builder_workspace_bytes)
+       .def("cpu_bucket_builder_clear_workspace",
+            [](Program &program) {
+              program.primitive_workspace_arena().clear(
+                  PrimitiveWorkspaceBackend::cpu,
+                  PrimitiveWorkspaceFamily::bucket);
+            },
+            py::call_guard<py::gil_scoped_release>())
        .def("cpu_bucket_builder_i32_ndarray",
             tracked_native_program_method(&Program::cpu_bucket_builder_i32_ndarray), py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),

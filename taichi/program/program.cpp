@@ -26,6 +26,7 @@
 #include "taichi/rhi/cpu/scatter_add.h"
 #include "taichi/rhi/cpu/aggregation.h"
 #include "taichi/rhi/cpu/histogram.h"
+#include "taichi/rhi/cpu/bucket_builder.h"
 #include "taichi/rhi/cpu/diagnostic_reduce.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/interop/external_sync.h"
@@ -1225,36 +1226,6 @@ struct CpuPackedScatterAddIoTaskContext {
   std::size_t src_stride{0};
   std::size_t dst_offset{0};
   std::size_t dst_stride{0};
-  int num_threads{1};
-};
-
-struct CpuBucketCountTaskContext {
-  const int32_t *keys{nullptr};
-  int32_t *partial{nullptr};
-  std::size_t n{0};
-  std::size_t num_bins{0};
-  int num_threads{1};
-};
-
-template <typename T>
-struct CpuBucketScatterTaskContext {
-  const int32_t *keys{nullptr};
-  const T *values{nullptr};
-  int32_t *thread_offsets{nullptr};
-  T *output{nullptr};
-  std::size_t n{0};
-  std::size_t num_bins{0};
-  int num_threads{1};
-};
-
-struct CpuBucketScatterRawTaskContext {
-  const int32_t *keys{nullptr};
-  const uint8_t *values{nullptr};
-  int32_t *thread_offsets{nullptr};
-  uint8_t *output{nullptr};
-  std::size_t n{0};
-  std::size_t num_bins{0};
-  std::size_t item_bytes{0};
   int num_threads{1};
 };
 
@@ -2667,71 +2638,24 @@ std::size_t cpu_scatter_add_packed_strided_io_typed(
   return 0;
 }
 
-void cpu_bucket_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuBucketCountTaskContext *>(raw_ctx);
-  const int tid = task_id;
-  int32_t *local = ctx->partial + ctx->num_bins * static_cast<std::size_t>(tid);
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    int32_t key = ctx->keys[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_bins) {
-      local[key] += 1;
-    }
+template <typename Invoke>
+std::size_t cpu_bucket_builder_with_scratch(std::size_t n,
+                                           std::size_t num_bins,
+                                           int max_threads,
+                                           std::size_t chunk_items,
+                                           Invoke invoke) {
+  if (!n) {
+    invoke(1, nullptr, nullptr);
+    return 0;
   }
-}
-
-template <typename T>
-void cpu_bucket_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuBucketScatterTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  int32_t *local =
-      ctx->thread_offsets + ctx->num_bins * static_cast<std::size_t>(tid);
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    int32_t key = ctx->keys[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_bins) {
-      int32_t pos = local[key]++;
-      if (pos >= 0 && static_cast<std::size_t>(pos) < ctx->n) {
-        ctx->output[pos] = ctx->values[i];
-      }
-    }
-  }
-}
-
-void cpu_bucket_scatter_raw_task(void *raw_ctx,
-                                 int /*thread_id*/,
-                                 int task_id) {
-  auto *ctx = static_cast<CpuBucketScatterRawTaskContext *>(raw_ctx);
-  const int tid = task_id;
-  int32_t *local =
-      ctx->thread_offsets + ctx->num_bins * static_cast<std::size_t>(tid);
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    int32_t key = ctx->keys[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_bins) {
-      int32_t pos = local[key]++;
-      if (pos >= 0 && static_cast<std::size_t>(pos) < ctx->n) {
-        std::memcpy(ctx->output + static_cast<std::size_t>(pos) *
-                                      ctx->item_bytes,
-                    ctx->values + i * ctx->item_bytes, ctx->item_bytes);
-      }
-    }
-  }
+  const int partitions = cpu::bucket_builder_partitions(
+      n, num_bins, max_threads, chunk_items);
+  const auto bytes = cpu::bucket_builder_workspace_bytes(num_bins, partitions);
+  CpuPrimitiveScratchBuffer<int32_t> scratch(PrimitiveWorkspaceFamily::bucket,
+                                            bytes / sizeof(int32_t));
+  invoke(partitions, scratch.data(),
+         partitions > 1 ? get_cpu_primitive_thread_pool(max_threads) : nullptr);
+  return bytes;
 }
 
 template <typename T>
@@ -2744,87 +2668,12 @@ std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
                                      int max_threads) {
   TI_ERROR_IF(!keys_ptr || !values_ptr || !offsets_ptr || !output_ptr,
               "CPU native bucket builder received a null data pointer.");
-  std::fill(offsets_ptr, offsets_ptr + num_bins + 1, 0);
-  if (n == 0) {
-    return 0;
-  }
-
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
-  const std::size_t parallel_workspace =
-      static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
-      2;
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads) &&
-                            parallel_workspace <=
-                                kCpuPrimitiveMaxLocalWorkspaceBytes;
-
-  if (use_parallel) {
-    std::vector<int32_t> partial(
-        static_cast<std::size_t>(target_threads) * num_bins, 0);
-    CpuBucketCountTaskContext count_ctx;
-    count_ctx.keys = keys_ptr;
-    count_ctx.partial = partial.data();
-    count_ctx.n = n;
-    count_ctx.num_bins = num_bins;
-    count_ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
-
-    std::vector<int32_t> thread_offsets(
-        static_cast<std::size_t>(target_threads) * num_bins, 0);
-    int64_t running = 0;
-    offsets_ptr[0] = 0;
-    for (std::size_t bin = 0; bin < num_bins; ++bin) {
-      int64_t pos = running;
-      for (int tid = 0; tid < target_threads; ++tid) {
-        const std::size_t idx =
-            static_cast<std::size_t>(tid) * num_bins + bin;
-        thread_offsets[idx] = static_cast<int32_t>(pos);
-        pos += partial[idx];
-      }
-      running = pos;
-      TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
-                  "CPU native bucket builder valid item count exceeds i32 range.");
-      offsets_ptr[bin + 1] = static_cast<int32_t>(running);
-    }
-
-    CpuBucketScatterTaskContext<T> scatter_ctx;
-    scatter_ctx.keys = keys_ptr;
-    scatter_ctx.values = values_ptr;
-    scatter_ctx.thread_offsets = thread_offsets.data();
-    scatter_ctx.output = output_ptr;
-    scatter_ctx.n = n;
-    scatter_ctx.num_bins = num_bins;
-    scatter_ctx.num_threads = target_threads;
-    pool->run(target_threads, target_threads, &scatter_ctx,
-             cpu_bucket_scatter_task<T>);
-    return parallel_workspace;
-  }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
-      offsets_ptr[static_cast<std::size_t>(key) + 1] += 1;
-    }
-  }
-  int64_t running = 0;
-  for (std::size_t bin = 0; bin <= num_bins; ++bin) {
-    running += offsets_ptr[bin];
-    TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
-                "CPU native bucket builder valid item count exceeds i32 range.");
-    offsets_ptr[bin] = static_cast<int32_t>(running);
-  }
-  std::vector<int32_t> cursor(offsets_ptr, offsets_ptr + num_bins);
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
-      int32_t pos = cursor[key]++;
-      output_ptr[pos] = values_ptr[i];
-    }
-  }
-  return cursor.size() * sizeof(int32_t);
+  return cpu_bucket_builder_with_scratch(
+      n, num_bins, max_threads, 32768,
+      [&](int partitions, int32_t *scratch, ThreadPool *pool) {
+        cpu::bucket_builder(keys_ptr, values_ptr, offsets_ptr, output_ptr, n,
+                            num_bins, partitions, scratch, pool);
+      });
 }
 
 std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
@@ -2839,89 +2688,13 @@ std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
               "CPU native bucket builder received a null data pointer.");
   TI_ERROR_IF(item_bytes == 0,
               "CPU native bucket builder received empty payload items.");
-  std::fill(offsets_ptr, offsets_ptr + num_bins + 1, 0);
-  if (n == 0) {
-    return 0;
-  }
-
-  const int chunk_items = 65536;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
-  const std::size_t parallel_workspace =
-      static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
-      2;
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads) &&
-                            parallel_workspace <=
-                                kCpuPrimitiveMaxLocalWorkspaceBytes;
-
-  if (use_parallel) {
-    std::vector<int32_t> partial(
-        static_cast<std::size_t>(target_threads) * num_bins, 0);
-    CpuBucketCountTaskContext count_ctx;
-    count_ctx.keys = keys_ptr;
-    count_ctx.partial = partial.data();
-    count_ctx.n = n;
-    count_ctx.num_bins = num_bins;
-    count_ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
-
-    std::vector<int32_t> thread_offsets(
-        static_cast<std::size_t>(target_threads) * num_bins, 0);
-    int64_t running = 0;
-    offsets_ptr[0] = 0;
-    for (std::size_t bin = 0; bin < num_bins; ++bin) {
-      int64_t pos = running;
-      for (int tid = 0; tid < target_threads; ++tid) {
-        const std::size_t idx =
-            static_cast<std::size_t>(tid) * num_bins + bin;
-        thread_offsets[idx] = static_cast<int32_t>(pos);
-        pos += partial[idx];
-      }
-      running = pos;
-      TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
-                  "CPU native bucket builder valid item count exceeds i32 range.");
-      offsets_ptr[bin + 1] = static_cast<int32_t>(running);
-    }
-
-    CpuBucketScatterRawTaskContext scatter_ctx;
-    scatter_ctx.keys = keys_ptr;
-    scatter_ctx.values = values_ptr;
-    scatter_ctx.thread_offsets = thread_offsets.data();
-    scatter_ctx.output = output_ptr;
-    scatter_ctx.n = n;
-    scatter_ctx.num_bins = num_bins;
-    scatter_ctx.item_bytes = item_bytes;
-    scatter_ctx.num_threads = target_threads;
-    pool->run(target_threads, target_threads, &scatter_ctx,
-             cpu_bucket_scatter_raw_task);
-    return parallel_workspace;
-  }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
-      offsets_ptr[static_cast<std::size_t>(key) + 1] += 1;
-    }
-  }
-  int64_t running = 0;
-  for (std::size_t bin = 0; bin <= num_bins; ++bin) {
-    running += offsets_ptr[bin];
-    TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
-                "CPU native bucket builder valid item count exceeds i32 range.");
-    offsets_ptr[bin] = static_cast<int32_t>(running);
-  }
-  std::vector<int32_t> cursor(offsets_ptr, offsets_ptr + num_bins);
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
-      int32_t pos = cursor[key]++;
-      std::memcpy(output_ptr + static_cast<std::size_t>(pos) * item_bytes,
-                  values_ptr + i * item_bytes, item_bytes);
-    }
-  }
-  return cursor.size() * sizeof(int32_t);
+  return cpu_bucket_builder_with_scratch(
+      n, num_bins, max_threads, 65536,
+      [&](int partitions, int32_t *scratch, ThreadPool *pool) {
+        cpu::bucket_builder_bytes(keys_ptr, values_ptr, offsets_ptr, output_ptr,
+                                  n, num_bins, item_bytes, partitions, scratch,
+                                  pool);
+      });
 }
 
 template <typename T>
@@ -21486,7 +21259,7 @@ std::size_t Program::cpu_bucket_builder_dense_field(SNode *keys,
 }
 
 std::size_t Program::cpu_bucket_builder_workspace_bytes() const {
-  return 0;
+  return cpu_primitive_workspace_bytes(this, PrimitiveWorkspaceFamily::bucket);
 }
 
 bool Program::cpu_grouped_reduce_available() const {

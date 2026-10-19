@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU bucket builders reuse one count/cursor table, halving parallel scratch
+  storage while preserving bucket order and payload bits. Workspace clear and
+  statistics include the retained CPU table.
 - TCM archives use fast deflate to reduce code and frozen data size. Existing
   native readers decompress entries on demand; payload contents, device storage
   and warm execution remain unchanged. Directory exports retain raw files.

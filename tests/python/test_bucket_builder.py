@@ -319,6 +319,56 @@ def test_experimental_bucket_builder_cpu_native_ndarray_vector_payload():
     _run_vector_ndarray_bucket_builder("cpu_two_level")
 
 
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
+def test_experimental_bucket_builder_cpu_scratch_reuse_and_retirement():
+    n, bins = 262151, 257
+    keys_np, values_np, expected_offsets = _bucket_input(n, bins)
+    keys = ti.ndarray(ti.i32, n)
+    values = ti.ndarray(ti.i32, n)
+    offsets = ti.ndarray(ti.i32, bins + 1)
+    output = ti.ndarray(ti.i32, n)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    output.fill(-777)
+    workspace = ti.algorithms.BucketBuilderWorkspace()
+    peer = ti.algorithms.BucketBuilderWorkspace()
+    prog = impl.get_runtime().prog
+
+    def replay(owner):
+        ti.algorithms.experimental_bucket_builder(
+            keys, values, offsets, output, method="cpu_native", workspace=owner
+        )
+
+    replay(workspace)
+    reserved = prog.cpu_bucket_builder_workspace_bytes()
+    assert reserved >= 4 * bins * 4
+    assert workspace.workspace_bytes_peak == 4 * bins * 4
+    assert workspace._cpu_native_active
+    valid = np.flatnonzero((keys_np >= 0) & (keys_np < bins))
+    order = valid[np.argsort(keys_np[valid], kind="stable")]
+    expected = np.full(n, -777, dtype=np.int32)
+    expected[:len(order)] = values_np[order]
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+    replay(peer)
+    assert prog.cpu_bucket_builder_workspace_bytes() == reserved
+    np.testing.assert_array_equal(offsets.to_numpy(), expected_offsets)
+    # Clear the shared cache; the peer's cached callable must remain replayable.
+    workspace.clear()
+    assert prog.cpu_bucket_builder_workspace_bytes() == 0
+    assert not workspace._cpu_native_active
+    keys.fill(-1)
+    replay(peer)
+    np.testing.assert_array_equal(offsets.to_numpy(), np.zeros(bins + 1))
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+    assert prog.cpu_bucket_builder_workspace_bytes() == reserved
+    keys.from_numpy(keys_np)
+    replay(peer)
+    np.testing.assert_array_equal(offsets.to_numpy(), expected_offsets)
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+    peer.clear()
+    assert prog.cpu_bucket_builder_workspace_bytes() == 0
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_bucket_builder_field_kernel():
     n = 2048
