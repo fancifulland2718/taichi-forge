@@ -1577,6 +1577,57 @@ bool driver_check_count_available() {
       .nvidia_extensions_available();
 }
 
+void driver_prepare_check_count(CudaTransformValueType value_type,
+                                CudaCheckOp op) {
+  TI_ERROR_IF(static_cast<int>(value_type) < 0 ||
+                  static_cast<int>(value_type) > 5 ||
+                  static_cast<int>(op) < 0 || static_cast<int>(op) > 5,
+              "CUDA driver check received an unsupported type or predicate.");
+  TI_ERROR_IF(op == CudaCheckOp::index_oob &&
+                  (value_type == CudaTransformValueType::f32 ||
+                   value_type == CudaTransformValueType::f64),
+              "CUDA driver bounds checks require integer inputs.");
+  ensure_diagnostic_module();
+}
+
+std::size_t driver_check_count_on_stream(void *values,
+                                         void *output,
+                                         uint32_t num_items,
+                                         CudaTransformValueType value_type,
+                                         std::size_t offset,
+                                         std::size_t stride,
+                                         CudaCheckOp op,
+                                         int lower,
+                                         int upper,
+                                         void *stream) {
+  TI_ERROR_IF((num_items && !values) || !output,
+              "CUDA driver check received a null pointer.");
+  driver_prepare_check_count(value_type, op);
+  void *output_arg = output;
+  CUDAContext::get_instance().launch(zero_u32_func, "cuda_check_zero",
+                                     {&output_arg}, {}, 1, 1, 0, stream);
+  if (num_items == 0) {
+    return 0;
+  }
+  constexpr unsigned kBlockDim = 256;
+  const unsigned grid_dim =
+      num_items / kBlockDim + (num_items % kBlockDim != 0);
+  void *values_arg = values;
+  uint32_t n_arg = static_cast<uint32_t>(num_items);
+  uint32_t type_arg = static_cast<uint32_t>(value_type);
+  uint64_t offset_arg = static_cast<uint64_t>(offset);
+  uint64_t stride_arg = static_cast<uint64_t>(stride);
+  uint32_t op_arg = static_cast<uint32_t>(op);
+  int32_t lower_arg = static_cast<int32_t>(lower);
+  int32_t upper_arg = static_cast<int32_t>(upper);
+  std::vector<void *> args{&values_arg, &output_arg, &n_arg,
+                           &type_arg,   &offset_arg, &stride_arg,
+                           &op_arg,     &lower_arg,  &upper_arg};
+  CUDAContext::get_instance().launch(check_count_func, "cuda_check_count", args,
+                                     {}, grid_dim, kBlockDim, 0, stream);
+  return 0;
+}
+
 std::size_t driver_check_count(void *values,
                                void *output,
                                int num_items,
@@ -1589,37 +1640,70 @@ std::size_t driver_check_count(void *values,
                                void *stream) {
   TI_ERROR_IF(num_items < 0,
               "CUDA driver check expects non-negative num_items.");
-  TI_ERROR_IF(!values || !output,
-              "CUDA driver check received a null pointer.");
+  TI_ERROR_IF(!values || !output, "CUDA driver check received a null pointer.");
+  return driver_check_count_on_stream(values, output, num_items, value_type,
+                                      offset, stride, op, lower, upper, stream);
+}
+
+bool driver_metric_reduce_available() {
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
+}
+
+void driver_prepare_metric_reduce(CudaTransformValueType value_type,
+                                  CudaMetricOp op) {
+  TI_ERROR_IF(value_type != CudaTransformValueType::f32 &&
+                  value_type != CudaTransformValueType::f64,
+              "CUDA driver metric supports only f32 and f64.");
+  TI_ERROR_IF(op != CudaMetricOp::max_abs && op != CudaMetricOp::max_abs_delta,
+              "CUDA driver metric received an unsupported operation.");
   ensure_diagnostic_module();
+}
+
+std::size_t driver_metric_reduce_on_stream(void *values,
+                                           void *other,
+                                           void *output,
+                                           uint32_t num_items,
+                                           CudaTransformValueType value_type,
+                                           std::size_t values_offset,
+                                           std::size_t values_stride,
+                                           std::size_t other_offset,
+                                           std::size_t other_stride,
+                                           CudaMetricOp op,
+                                           void *stream) {
+  TI_ERROR_IF((num_items && !values) || !output,
+              "CUDA driver metric received a null pointer.");
+  TI_ERROR_IF(num_items && op == CudaMetricOp::max_abs_delta && !other,
+              "CUDA driver max_abs_delta received a null rhs pointer.");
+  driver_prepare_metric_reduce(value_type, op);
   void *output_arg = output;
-  CUDAContext::get_instance().launch(zero_u32_func, "cuda_check_zero",
+  void *zero_func =
+      value_type == CudaTransformValueType::f32 ? zero_u32_func : zero_u64_func;
+  CUDAContext::get_instance().launch(zero_func, "cuda_metric_zero",
                                      {&output_arg}, {}, 1, 1, 0, stream);
   if (num_items == 0) {
     return 0;
   }
   constexpr unsigned kBlockDim = 256;
   const unsigned grid_dim =
-      static_cast<unsigned>((num_items + kBlockDim - 1) / kBlockDim);
+      num_items / kBlockDim + (num_items % kBlockDim != 0);
   void *values_arg = values;
+  void *other_arg = other;
   uint32_t n_arg = static_cast<uint32_t>(num_items);
   uint32_t type_arg = static_cast<uint32_t>(value_type);
-  uint64_t offset_arg = static_cast<uint64_t>(offset);
-  uint64_t stride_arg = static_cast<uint64_t>(stride);
+  uint64_t values_offset_arg = static_cast<uint64_t>(values_offset);
+  uint64_t values_stride_arg = static_cast<uint64_t>(values_stride);
+  uint64_t other_offset_arg = static_cast<uint64_t>(other_offset);
+  uint64_t other_stride_arg = static_cast<uint64_t>(other_stride);
   uint32_t op_arg = static_cast<uint32_t>(op);
-  int32_t lower_arg = static_cast<int32_t>(lower);
-  int32_t upper_arg = static_cast<int32_t>(upper);
-  std::vector<void *> args{&values_arg, &output_arg, &n_arg,
-                           &type_arg,   &offset_arg, &stride_arg,
-                           &op_arg,     &lower_arg,  &upper_arg};
-  CUDAContext::get_instance().launch(check_count_func, "cuda_check_count",
+  std::vector<void *> args{&values_arg,        &other_arg,
+                           &output_arg,        &n_arg,
+                           &type_arg,          &values_offset_arg,
+                           &values_stride_arg, &other_offset_arg,
+                           &other_stride_arg,  &op_arg};
+  CUDAContext::get_instance().launch(metric_reduce_func, "cuda_metric_reduce",
                                      args, {}, grid_dim, kBlockDim, 0, stream);
   return 0;
-}
-
-bool driver_metric_reduce_available() {
-  return CUDADriver::get_instance_without_context()
-      .nvidia_extensions_available();
 }
 
 std::size_t driver_metric_reduce(void *values,
@@ -1639,38 +1723,9 @@ std::size_t driver_metric_reduce(void *values,
               "CUDA driver metric received a null pointer.");
   TI_ERROR_IF(op == CudaMetricOp::max_abs_delta && !other,
               "CUDA driver max_abs_delta received a null rhs pointer.");
-  TI_ERROR_IF(value_type != CudaTransformValueType::f32 &&
-                  value_type != CudaTransformValueType::f64,
-              "CUDA driver metric supports only f32 and f64.");
-  ensure_diagnostic_module();
-  void *output_arg = output;
-  void *zero_func =
-      value_type == CudaTransformValueType::f32 ? zero_u32_func : zero_u64_func;
-  CUDAContext::get_instance().launch(zero_func, "cuda_metric_zero",
-                                     {&output_arg}, {}, 1, 1, 0, stream);
-  if (num_items == 0) {
-    return 0;
-  }
-  constexpr unsigned kBlockDim = 256;
-  const unsigned grid_dim =
-      static_cast<unsigned>((num_items + kBlockDim - 1) / kBlockDim);
-  void *values_arg = values;
-  void *other_arg = other;
-  uint32_t n_arg = static_cast<uint32_t>(num_items);
-  uint32_t type_arg = static_cast<uint32_t>(value_type);
-  uint64_t values_offset_arg = static_cast<uint64_t>(values_offset);
-  uint64_t values_stride_arg = static_cast<uint64_t>(values_stride);
-  uint64_t other_offset_arg = static_cast<uint64_t>(other_offset);
-  uint64_t other_stride_arg = static_cast<uint64_t>(other_stride);
-  uint32_t op_arg = static_cast<uint32_t>(op);
-  std::vector<void *> args{
-      &values_arg,        &other_arg,        &output_arg, &n_arg,
-      &type_arg,          &values_offset_arg, &values_stride_arg,
-      &other_offset_arg,  &other_stride_arg, &op_arg};
-  CUDAContext::get_instance().launch(metric_reduce_func,
-                                     "cuda_metric_reduce", args, {}, grid_dim,
-                                     kBlockDim, 0, stream);
-  return 0;
+  return driver_metric_reduce_on_stream(
+      values, other, output, num_items, value_type, values_offset,
+      values_stride, other_offset, other_stride, op, stream);
 }
 
 }  // namespace taichi::lang::cuda

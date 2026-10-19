@@ -146,6 +146,23 @@ std::size_t driver_scatter_add(void *src,
 
 bool driver_check_count_available();
 
+// Prepare the existing diagnostic module before capture. Fixed recordings use
+// the kernel's uint32 count ABI and the owner's explicit stream; ordinary
+// signed-count callers retain their entry points below.
+void driver_prepare_check_count(CudaTransformValueType value_type,
+                                CudaCheckOp op);
+
+std::size_t driver_check_count_on_stream(void *values,
+                                         void *output,
+                                         std::uint32_t num_items,
+                                         CudaTransformValueType value_type,
+                                         std::size_t offset,
+                                         std::size_t stride,
+                                         CudaCheckOp op,
+                                         int lower,
+                                         int upper,
+                                         void *stream);
+
 std::size_t driver_check_count(void *values,
                                void *output,
                                int num_items,
@@ -158,6 +175,21 @@ std::size_t driver_check_count(void *values,
                                void *stream = nullptr);
 
 bool driver_metric_reduce_available();
+
+void driver_prepare_metric_reduce(CudaTransformValueType value_type,
+                                  CudaMetricOp op);
+
+std::size_t driver_metric_reduce_on_stream(void *values,
+                                           void *other,
+                                           void *output,
+                                           std::uint32_t num_items,
+                                           CudaTransformValueType value_type,
+                                           std::size_t values_offset,
+                                           std::size_t values_stride,
+                                           std::size_t other_offset,
+                                           std::size_t other_stride,
+                                           CudaMetricOp op,
+                                           void *stream);
 
 std::size_t driver_metric_reduce(void *values,
                                  void *other,
