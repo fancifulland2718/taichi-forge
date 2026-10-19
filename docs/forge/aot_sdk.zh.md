@@ -1504,7 +1504,41 @@ with prepared.submit() as ticket:
 `ti_submit_prepared_ext`、`ti_query_submission_ext`、`ti_wait_submission_ext` 和
 `ti_destroy_submission_ext`，查询、等待和销毁票据不需要 runtime 指针。Windows
 CPU/CUDA/Vulkan 已验证前向、ndarray 梯度及退休，两个 GPU 后端另验证注入的 owner
-故障；这不代表异步结果/完整工作区租约已经接通。
+故障；结果/工作区租约使用下述独立 pool API。
+
+固定 prepared 计划可通过 `Module.prepare_workspace_pool()` 使用完整工作区和结果租约。
+同一加载模块共享代码，各槽独立准备私有资源图，并分配自己的参数数组：
+
+```python
+with loaded.prepare_workspace_pool(
+    "step", 3,
+    arrays={name: {"dtype": "f32", "shape": 257} for name in ("x", "scratch", "y")},
+) as pool:
+    pool.initialize()  # 可选：获取租约前先完成冷初始化。
+    with pool.acquire() as lease:
+        lease.arrays["x"].write(input_bytes)
+        lease.submit()
+        lease.wait()
+        result_bytes = lease.arrays["y"].read()
+    # 离开租约时按需等待，然后归还槽。
+```
+
+`arrays` 使用 `Runtime.ndarray` 的关键字参数；`arguments` 提供显式共享的外部绑定，
+`gradients` 将前向绑定名映射到梯度绑定名。私有持久状态保留在各自槽中；需要跨提交推进
+的物理状态必须保持其预期共享身份，pool 不合并或迁移私有状态。外部 provider 仍遵守
+原有事务和独占规则，全部提交使用现有 runtime 的同一有序队列。
+
+每份租约只提交一次。`done()`/`wait()` 保留结果所有权；`release()` 等待后归还，
+`discard()` 放弃结果但仍需完成后才可回收。归还后不得继续使用此前取得的裸数组引用。
+无就绪槽时 `acquire()` 报 `WorkspaceBusyError`；`acquire(wait=True)` 可等待已放弃的
+在途工作，但全部结果仍由活租约持有时仍报饱和。容量为正整数，仅受实际分配约束。
+空闲槽和已放弃的完成记录使用队列，获取时不遍历全部槽。提交或完成失败停止新接纳，
+关闭 pool 后再准备替代对象；关闭使租约失效，并沿用原 owner 退休全部槽。
+
+Windows CPU/CUDA/Vulkan 已验证独立私有状态、ndarray 梯度、prepared 排序、零轮/早停/
+预算耗尽的 terminal、独立与借用退休及 owner reset；CUDA 另验证 65 个单元素槽和注入
+的 owner 故障。这是显式 pool API 的资格，不代表自动改造下游 solver 的独占工作区或
+跨 stream 并行已经接通。
 
 描述保存到模块的 `executions/`，目录和 `.tcm` 均保留它；也可用
 `ExecutionPlan.save/load` 单独保存。C/C++ 可将同一 JSON 文档传给

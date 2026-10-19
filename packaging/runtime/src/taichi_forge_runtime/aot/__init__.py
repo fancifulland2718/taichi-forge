@@ -7,5 +7,6 @@ Use an explicit Runtime context manager to retire modules and arrays safely.
 from ._runtime import AotError, BoundCall, Graph, Kernel, Module, NativeResource, NdArray, PreparedCall, Runtime, Scalar
 from ._plan import ExecutionPlan
 from ._completion import SubmissionTicket
+from ._workspace import WorkspaceBusyError, WorkspaceLease, WorkspacePool
 
-__all__ = ["AotError", "Runtime", "Module", "NativeResource", "NdArray", "Kernel", "Graph", "BoundCall", "PreparedCall", "Scalar", "ExecutionPlan", "SubmissionTicket"]
+__all__ = ["AotError", "Runtime", "Module", "NativeResource", "NdArray", "Kernel", "Graph", "BoundCall", "PreparedCall", "Scalar", "ExecutionPlan", "SubmissionTicket", "WorkspaceBusyError", "WorkspaceLease", "WorkspacePool"]

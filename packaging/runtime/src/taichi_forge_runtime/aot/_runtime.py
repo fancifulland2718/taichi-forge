@@ -702,6 +702,19 @@ class Module(_Resource):
             raise TypeError("Expected an ExecutionPlan or an exported plan name")
         return plan.prepare(self, arguments, gradients=gradients)
 
+    def prepare_workspace_pool(self, plan, capacity, *, arguments=None, arrays=None, gradients=None):
+        """Share code while preparing independent resources and result leases.
+
+        ``arguments`` are shared external bindings. ``arrays`` maps each private
+        binding name to Runtime.ndarray keyword arguments; ``gradients`` maps
+        primal binding names to gradient binding names. Private resources in the
+        plan are also rebuilt for each slot. No additional device streams are
+        created and shared external providers retain their existing contracts.
+        """
+        from ._workspace import WorkspacePool
+
+        return WorkspacePool(self, plan, capacity, arguments=arguments, arrays=arrays, gradients=gradients)
+
     def kernel(self, name):
         with self._runtime._lock:
             self._check()

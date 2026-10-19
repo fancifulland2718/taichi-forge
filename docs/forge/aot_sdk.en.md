@@ -1927,7 +1927,49 @@ ticket fail. The C API equivalents are `ti_submit_prepared_ext`,
 `ti_destroy_submission_ext`; querying, waiting and destroying a ticket require
 no runtime pointer. This interface was validated on Windows CPU/CUDA/Vulkan with
 forward results, ndarray gradients, retirement and injected owner faults on the
-two GPU backends; it does not qualify asynchronous result/workspace leasing.
+two GPU backends. Result/workspace leasing uses the separate pool API below.
+
+For a fixed prepared plan, `Module.prepare_workspace_pool()` provides complete
+workspace and result leases. One loaded module shares its code; each slot gets
+its own prepared private resource graph and owned argument arrays:
+
+```python
+with loaded.prepare_workspace_pool(
+    "step", 3,
+    arrays={name: {"dtype": "f32", "shape": 257} for name in ("x", "scratch", "y")},
+) as pool:
+    pool.initialize()  # Optional cold initialization before acquiring leases.
+    with pool.acquire() as lease:
+        lease.arrays["x"].write(input_bytes)
+        lease.submit()
+        lease.wait()
+        result_bytes = lease.arrays["y"].read()
+    # Leaving the lease waits if needed, then returns its slot.
+```
+
+`arrays` uses `Runtime.ndarray` keyword arguments. `arguments` supplies explicitly
+shared external bindings; `gradients` maps primal binding names to gradient
+binding names. Private persistent state stays with its slot. Physical state that
+must advance across submissions must keep its intended shared identity; the pool
+does not merge or migrate private state. External providers retain their existing
+transaction and exclusivity rules. Submissions use the same ordered runtime queue.
+
+Each lease submits once. `done()`/`wait()` preserve result ownership;
+`release()` waits and returns the slot, while `discard()` gives up results and
+allows reclamation after completion. Raw array references must not be used after
+returning the lease. `acquire()` raises `WorkspaceBusyError` when no slot is ready;
+`acquire(wait=True)` can wait for discarded work, but still raises when every
+result is held by a live lease. Capacity is a positive integer subject to actual
+allocation limits. Free slots and discarded completions use queues; acquisition
+does not scan every slot. A submission/completion failure stops new admission;
+close the pool before preparing a replacement. Closing invalidates its leases
+and retires all slots through existing resource owners.
+
+Windows CPU/CUDA/Vulkan checks cover independent private state, ndarray gradients,
+prepared sorting, terminal results for zero/early/budget-limited loops, standalone
+and borrowed retirement, and owner reset. CUDA also covers 65 one-element slots
+and injected owner failure. This qualifies the explicit pool API, not automatic
+conversion of a downstream solver's exclusive workspace or multi-stream execution.
 
 Descriptions live under `executions/` in directory and `.tcm` modules, or can be
 saved separately with `ExecutionPlan.save/load`. C/C++ passes the same JSON
