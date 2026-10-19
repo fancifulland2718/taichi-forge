@@ -4756,6 +4756,16 @@ themselves gain no automatic derivative. All three installed entries execute
 without importing the application host, NumPy or Forge frontend. This does not
 establish a physically coupled step or arbitrary-scene AOT coverage.
 
+Separate exports of the actual closed candidate pipeline also qualify dense
+ordinal publication on CPU/CUDA/Vulkan and segmented ordering on CPU/CUDA.
+The 263-ordinal/segment fixtures cross a 256-item scan block and exercise CUDA
+warp cooperation, first-owner/tie ordering, invalid ordinals, packet/segment
+overflow, stale inputs, empty-result recovery and explicit downstream gradients.
+Both standalone and borrowed consumers pass. GeoPhys itself rejects its segmented
+mode on Vulkan; these checks do not extend that application route. These are
+additional export qualifications, not additional entries in the fixed three-entry
+delivery above or automatic derivatives for candidate processing.
+
 After every export, generate each entry's argument names, types and dimensions
 from the current artifact and check them before packaging. Internal Graph names
 may contain producer instance identities, so a previous export's binding manifest
