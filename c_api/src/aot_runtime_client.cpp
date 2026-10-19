@@ -10,6 +10,10 @@
 #include "native_resource_registry.h"
 #include "jit_module.h"
 #include "taichi_core_impl.h"
+#include "execution_domain.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/execution_domain.h"
+#endif
 #ifdef TI_WITH_LLVM
 #include "taichi_llvm_impl.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
@@ -260,6 +264,33 @@ std::uintptr_t AotRuntimeClient::device_identity() const {
 }
 Arch AotRuntimeClient::arch() const {
   return state_->arch;
+}
+
+std::shared_ptr<cuda::ExecutionDomain> AotRuntimeClient::execution_domain(
+    std::uintptr_t handle) {
+#ifdef TI_WITH_CUDA
+  auto &state = *state_;
+  std::lock_guard<std::recursive_mutex> lock(state.mutex);
+  if (state.closed || !state.runtime || state.arch != Arch::cuda)
+    throw std::runtime_error("Canvas domain requires a live CUDA borrower");
+  auto domain = capi::get_execution_domain(
+      reinterpret_cast<TiCudaExecutionDomain>(handle));
+  if (!domain->belongs_to(state.runtime->runtime_fault_domain()) ||
+      !domain->snapshot().accepting)
+    throw std::invalid_argument(
+        "Canvas domain belongs to another or closed runtime");
+  return domain;
+#else
+  throw std::runtime_error("CUDA execution domains are unavailable");
+#endif
+}
+
+RuntimeCompletion borrow_aot_completion(std::uintptr_t handle) {
+#ifdef TI_WITH_CUDA
+  return capi::get_completion(reinterpret_cast<TiCompletion>(handle));
+#else
+  throw std::runtime_error("CUDA completion bridge is unavailable");
+#endif
 }
 
 std::uintptr_t AotRuntimeClient::import_jit_kernels(

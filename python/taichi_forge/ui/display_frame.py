@@ -27,8 +27,10 @@ class WritableDisplayFrame:
     """Canvas-owned packed RGBA8 write lease from Canvas.acquire_frame().
 
     pixels is a (width, height) u32 dense view, x-major, y=0 at the bottom.
-    Use it only before submit/cancel, on Forge's ordered CUDA execution path.
-    Do not retain the view for later writes. Cancelling does not publish pixels.
+    Use it only before submit/cancel, on the canvas's selected CUDA domain or
+    the legacy ordered path. Prepared bindings may retain the physical view,
+    but may only write while that image has a current writable Canvas lease.
+    Cancelling does not publish pixels.
     """
 
     def __init__(self, canvas, pixels, completion):
@@ -83,6 +85,7 @@ class DisplayFrame:
         "_packed_u32",
         "_texture",
         "_field_info",
+        "source_completion",
     )
 
     HOST_RGBA8 = "host_rgba8"
@@ -110,6 +113,7 @@ class DisplayFrame:
         self._packed_u32 = packed_u32
         self._texture = texture
         self._field_info = field_info
+        self.source_completion = None
 
     @classmethod
     def from_numpy_rgba8(cls, image, *, copy=False, transpose=True):

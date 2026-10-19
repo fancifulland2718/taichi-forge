@@ -46,6 +46,9 @@
 #include "taichi/runtime/native_operation_registry.h"
 #ifdef TI_WITH_RUNTIME_C_API
 #include "taichi/runtime/aot_runtime_client.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/execution_domain.h"
+#endif
 #endif
 #include "taichi/program/matrix.h"
 #include "taichi/program/runtime_statistics.h"
@@ -597,6 +600,11 @@ py::dict primitive_workspace_snapshot_to_dict(
 void export_lang(py::module &m) {
 #ifdef TI_WITH_RUNTIME_C_API
   using lang::AotRuntimeClient;
+#ifdef TI_WITH_CUDA
+  py::class_<lang::cuda::ExecutionDomain,
+             std::shared_ptr<lang::cuda::ExecutionDomain>>(
+      m, "_CudaExecutionDomain");
+#endif
   py::class_<AotRuntimeClient, std::shared_ptr<AotRuntimeClient>>(
       m, "_AotRuntimeClient")
       .def("__enter__", &AotRuntimeClient::enter,
@@ -616,12 +624,18 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("import_jit_kernels", &AotRuntimeClient::import_jit_kernels,
            py::call_guard<py::gil_scoped_release>())
+#ifdef TI_WITH_CUDA
+      .def("execution_domain", &AotRuntimeClient::execution_domain,
+           py::call_guard<py::gil_scoped_release>())
+#endif
       .def_property_readonly("closed", &AotRuntimeClient::closed)
       .def_property_readonly("handle", &AotRuntimeClient::handle)
       .def_property_readonly("device_identity",
                              &AotRuntimeClient::device_identity)
       .def_property_readonly("arch", &AotRuntimeClient::arch);
   m.def("_borrow_aot_runtime", &AotRuntimeClient::create,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("_borrow_aot_completion", &lang::borrow_aot_completion,
         py::call_guard<py::gil_scoped_release>());
 #endif
   m.def("_compile_graph_segmented_reduce_values",

@@ -11,9 +11,10 @@ from tests import test_utils
 
 
 @pytest.mark.parametrize("jit", [True, False])
+@pytest.mark.parametrize("selected", [False, True])
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI not available")
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_complete_external_epoch_through_public_recipe(tmp_path, jit):
+def test_complete_external_epoch_through_public_recipe(tmp_path, jit, selected):
     @ti.kernel
     def paint(target: ti.types.ndarray(ti.u32, 2)):
         for i, j in target:
@@ -49,6 +50,9 @@ def test_complete_external_epoch_through_public_recipe(tmp_path, jit):
             runtime = scope.enter_context(ti.aot.borrow_runtime())
             domain = runtime.execution_domain(instance_capacity=16)
             module = runtime.load_module(artifact)
+        if selected:
+            canvas.set_execution_domain(domain)
+            assert len(canvas.prepare_frame_pool(12, 20, capacity=3)) == 3
         try:
             for _ in range(8):
                 frame = canvas.acquire_frame(12, 20)
@@ -77,7 +81,16 @@ def test_complete_external_epoch_through_public_recipe(tmp_path, jit):
                     calls[key] = call
                 ticket = calls[key].submit()
                 assert ticket is not None
-                assert canvas.submit_frame(frame)
+                if selected:
+                    # Tracking needs this exact producer, not the current tail.
+                    with pytest.raises(RuntimeError, match="exact producer"):
+                        canvas.submit_frame(frame, track_source=True)
+                    assert canvas.submit_frame(
+                        frame, track_source=True, source_completion=ticket
+                    )
+                    assert frame.source_completion.sequence == ticket.info["sequence"]
+                else:
+                    assert canvas.submit_frame(frame)
                 # Readback proves actual Vulkan consumption of both dispatches.
                 image = window.get_image_buffer_as_numpy()
                 np.testing.assert_allclose(
@@ -86,7 +99,14 @@ def test_complete_external_epoch_through_public_recipe(tmp_path, jit):
                     atol=1 / 255,
                 )
                 ticket.wait()
+                if selected:
+                    frame.source_completion.wait()
+                    assert canvas.repeat_frame() is not None
+                    repeated = window.get_image_buffer_as_numpy()
+                    np.testing.assert_allclose(repeated, image, atol=1 / 255)
             assert 1 <= len(calls) <= 3
+            if selected:
+                assert len(calls) == 3
             window.destroy()
             assert domain.info["closed"]
             with pytest.raises(RuntimeError, match="retired|closed|live"):

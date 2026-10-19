@@ -755,6 +755,13 @@ class VulkanCudaExternalAllocation::Impl {
     state_ = AccessState::kAwaitingVulkanAcquire;
   }
 
+  ExternalStreamDomain cuda_producer_stream() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_ == AccessState::kAwaitingVulkanAcquire
+               ? active_cuda_stream_
+               : ExternalStreamDomain{};
+  }
+
   StreamSemaphore acquire_vulkan_from_cuda(VulkanStream &stream,
                                            CommandList *cmdlist) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -922,6 +929,11 @@ VulkanCudaExternalAllocation::access_state() const noexcept {
   return impl_->access_state();
 }
 
+ExternalStreamDomain VulkanCudaExternalAllocation::cuda_producer_stream()
+    const noexcept {
+  return impl_->cuda_producer_stream();
+}
+
 VulkanCudaExternalAllocation::PrepareCudaAccessResult
 VulkanCudaExternalAllocation::prepare_cuda_access(
     VulkanStream &stream,
@@ -1051,6 +1063,10 @@ std::size_t VulkanCudaExternalAllocation::allocation_size() const noexcept {
 VulkanCudaExternalAllocation::AccessState
 VulkanCudaExternalAllocation::access_state() const noexcept {
   return AccessState::kClosed;
+}
+ExternalStreamDomain VulkanCudaExternalAllocation::cuda_producer_stream()
+    const noexcept {
+  return {};
 }
 VulkanCudaExternalAllocation::PrepareCudaAccessResult
 VulkanCudaExternalAllocation::prepare_cuda_access(vulkan::VulkanStream &,

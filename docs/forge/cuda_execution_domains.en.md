@@ -9,9 +9,10 @@ This API preserves the complete selected plan. Stream handles, priorities and
 completion tickets are runtime choices; they are never serialized into AOT.
 
 JIT Graphs can also be prepared as independent instances borrowing selected
-compiled code and the current Program's dense Fields. This is part of F3;
-Canvas presentation, cross-platform windows and application FPS remain
-unqualified. Queue priority is a device scheduling hint; it does not guarantee
+compiled code and the current Program's dense Fields. This is part of F3.
+Selected Canvas display has Windows CUDA/Vulkan qualification; cross-platform
+windows and application FPS remain unqualified. Queue priority is a device
+scheduling hint; it does not guarantee
 concurrent kernels or priority preemption.
 
 ## Current JIT Graphs
@@ -73,6 +74,67 @@ these managed imports. Native resource factories that inspect external operands
 during cold preparation are not qualified. Closing the external owner drains
 dependent domains before revoking every loan and alias; this is a cold operation.
 Canvas stream selection and source completion are a separate interface boundary.
+
+## Selected Canvas display domain
+
+Bind the current Program's domain with `canvas.set_execution_domain(output)`.
+Before starting simulation, call
+`views = canvas.prepare_frame_pool(width, height, capacity=3)` and prepare the
+complete writer Graph/AOT bindings for those physical views. Capacity is bounded
+by the renderer's in-flight limit plus its last displayed image. Views returned
+by preparation are binding identities; only the view returned by a current
+`acquire_frame()` lease may be written. Do not prepare new recordings per frame.
+The prepared pool never expands during admission: when every eligible image has
+an in-flight reader, acquisition returns `None`. Idle repeat aliases are reused;
+the last displayed image is retained. Resize requires closing the old output
+domain, binding a new one and calling `prepare_frame_pool()` again before
+preparing new writers. This cold reconfiguration retires old Vulkan readers.
+
+```python
+canvas.set_execution_domain(output)
+views = canvas.prepare_frame_pool(width, height, capacity=3)
+writers = {
+    id(view.descriptor): graph.prepare({"pixels": view}, execution_domain=output)
+    for view in views
+}
+for writer in writers.values():
+    writer.initialize()
+
+frame = canvas.acquire_frame(width, height)
+if frame is not None:
+    ticket = writers[id(frame.pixels.descriptor)].submit(wait_for=dependencies)
+    if ticket is None:
+        frame.cancel()
+    else:
+        canvas.submit_frame(frame, source_completion=ticket, track_source=True)
+        window.show()
+```
+
+The supplied ticket must cover this frame's complete writer. Native validation
+checks the live runtime, CUDA stream and released image owner. Source tracking
+copies this exact ticket; it neither records the default queue's tail nor
+includes later work on the selected queue. `frame.source_completion` covers
+source reads, while `frame.completion` covers Vulkan consumption, not scanout.
+Passing no writer to an empty frame submits only the external semaphore epoch
+on the selected queue. Repeat uses the same queue and adds no pixel kernel.
+Full admission returns busy without consuming a semaphore or sealing a writable
+lease. Cancel itself submits no CUDA work; reuse performs any needed Vulkan
+rearm.
+
+Selected-domain `DisplayFrame.from_packed_u32_ndarray()` copies also accept
+`source_completion` as an exact device predecessor. Their source ticket covers
+the copy. Warm the finite source set before steady use; up to 64 source ndarray
+leases per physical output image remain retained through cold retirement, so
+discard/minimize and completion polling cannot free an in-flight source. Busy
+does not add a source lease. Generic `set_image()` packing and texture/host
+inputs are not selected-domain routes; use a prepared writer or packed buffer.
+
+Resizing shared storage is a cold boundary: close the old output domain, create
+and bind its replacement, and reprepare the new physical view bindings. An
+attempt to replace live bound storage rejects before retiring it. Reset
+invalidates old leases. Window destruction drains dependent CUDA/external use
+before releasing the Vulkan device. Failed retirement retains the bounded
+graphics closure instead of freeing storage that may still be in use.
 
 Binding frames, multiple workspace lanes, dynamic recipe selection, provider
 data without a live-loan description, strided/read-only or unsynchronized external views and unqualified
@@ -191,8 +253,14 @@ CPU `wait()` and byte-buffer host transfers are explicit synchronization
 boundaries. They are useful for cold initialization, final reads and shutdown;
 placing them between every simulation and render submission serializes the
 pipeline. Independent CUDA completion is distinct from Vulkan presentation and
-screen scanout. The external-display/Canvas dependency chain needs its own
-qualified integration before these queues can replace the headed path.
+screen scanout. The selected Canvas path is qualified with real Windows
+CUDA/Vulkan frames and explicit pending-consumer gates. A 1000-frame three-slot
+headed run has no hot CUDA synchronization, CUDA allocation/free, Vulkan explicit
+host wait or shared-image growth; repeat launches no pixel kernel. Vulkan still
+creates per-submit fence/semaphore/framebuffer metadata and driver submit/present
+calls retain their own host cost. This is not a zero-cost presentation or
+application throughput claim. The separate headless run checks every version;
+the headed run checks actual presentation submission and the final pixel version.
 
 The C equivalents are declared in `taichi_cuda.h`:
 `ti_prepare_execution_plan_on_domain_ext`, `ti_initialize_prepared_ext`,

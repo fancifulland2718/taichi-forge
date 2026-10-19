@@ -7,7 +7,8 @@ nonblocking stream，每个准备好的实例拥有自己的 executable、不可
 该接口保留已经选择的完整计划。stream、优先级和完成票据只属于运行时，不写入 AOT 产物。
 
 JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和当前 Program 的 dense Field。
-这是 F3 的一部分；Canvas 显示链、跨平台真实窗口和应用 FPS 仍未完成资格验证。
+这是 F3 的一部分；Canvas 显式选域已有 Windows CUDA/Vulkan 资格，跨平台真实窗口
+和应用 FPS 仍未完成资格验证。
 优先级是设备调度提示，不能保证 kernel 并行或抢占。
 
 ## 当前 JIT Graph
@@ -59,6 +60,53 @@ VkDeviceMemory 绑定位置，因此拒绝非零 buffer-relative 偏移。两者
 非紧凑/只读或无同步域的外部存储视图，以及未资格的 native route 会在冷准备时拒绝，不回退到默认 stream。
 默认 `Graph.run()`/`submit()` 合同不变。`ti.graph.execution_domain()` 的借用 runtime
 由 Program 的 Python owner 持有，避免丢弃最后一个域包装时意外触发破坏性关闭。
+
+## Canvas 显式显示域
+
+用 `canvas.set_execution_domain(output)` 绑定当前 Program 的域。仿真开始前调用
+`views = canvas.prepare_frame_pool(width, height, capacity=3)`，为各物理 view 准备完整
+Graph/AOT 写入实例并初始化；容量上限为 renderer 的在途数加最后显示图像。返回 view
+只用于提前绑定，只有 `acquire_frame()` 当前借出的同一图像才可写，不应逐帧 prepare。
+预备池不在准入时扩容；可用图像均有在途读取者时返回 `None`。重复显示复用空闲别名，
+保留最后显示图像。resize 时先关闭旧输出域、绑定新域，再调用 `prepare_frame_pool()`
+并准备新写入实例；这个冷重配过程会退休旧 Vulkan 读取者。
+
+```python
+canvas.set_execution_domain(output)
+views = canvas.prepare_frame_pool(width, height, capacity=3)
+writers = {
+    id(view.descriptor): graph.prepare({"pixels": view}, execution_domain=output)
+    for view in views
+}
+for writer in writers.values():
+    writer.initialize()
+
+frame = canvas.acquire_frame(width, height)
+if frame is not None:
+    ticket = writers[id(frame.pixels.descriptor)].submit(wait_for=dependencies)
+    if ticket is None:
+        frame.cancel()
+    else:
+        canvas.submit_frame(frame, source_completion=ticket, track_source=True)
+        window.show()
+```
+
+传入票据须覆盖这一帧的完整写入。原生层检查活 runtime、CUDA stream 及图像释放者；
+source tracking 保留该精确票据，不记录默认队列尾部，也不纳入所选域后来提交的工作。
+`frame.source_completion` 覆盖源读取，`frame.completion` 覆盖 Vulkan 消费，不代表扫描呈现。
+空帧只在所选队列完成 semaphore epoch；repeat 使用同一队列，不增加像素 kernel。
+满容量直接返回 busy，不消费 semaphore 或封存 writable lease；取消本身不提交 CUDA
+工作，再用图像时按需执行 Vulkan rearm。
+
+所选域的 `DisplayFrame.from_packed_u32_ndarray()` 复制同样接受 `source_completion`
+作为设备前驱，返回的源票据覆盖这次复制。稳态前预热有限输入集；每张物理输出图像最多
+保留 64 个源 ndarray 租约至冷退休，避免丢帧/最小化或完成查询提前释放在途复制源。
+busy 不增加源租约。通用 `set_image()` 打包、texture/host 输入不是选域路线，应使用
+prepared writer 或 packed buffer。
+
+共享存储 resize 属于冷边界：关闭旧输出域，建立并绑定新域，再准备新 view 的写入实例。
+直接替换仍绑定活域的存储会在退休前拒绝。reset 使旧租约失效；窗口关闭先排空依赖的
+CUDA/外部访问，再释放 Vulkan 设备。无法完成退休证明时保留有界图形资源闭包，不提前释放。
 
 ## 准备、初始化与提交
 
@@ -144,7 +192,11 @@ ring 和 host selection 不会被悄悄改写为其他物理路线；native oper
 
 CPU `wait()` 和字节缓冲区主机传输是显式同步边界，适用于初始化、最终读回与关闭。
 若放在每次仿真与渲染提交之间，就会把流水重新串行化。CUDA 完成与 Vulkan 呈现、屏幕
-扫描是不同边界；external-display/Canvas 链仍需单独接入并验证，才能替换有头路径。
+扫描是不同边界。Canvas 选域已通过 Windows CUDA/Vulkan 真实窗口和显式挂起消费者验证。
+三槽 1000 帧有头捕获中，热 API 没有 CUDA 同步/分配释放、Vulkan 显式主机等待或共享
+图像增长；repeat 不启动像素内核。Vulkan 仍逐提交建立 fence/semaphore/framebuffer
+元数据，驱动提交和呈现也有主机耗时，不能宣称呈现零成本或应用吞吐已通过。
+独立无头长跑检查每个版本，有头长跑检查实际呈现提交及最终像素版本。
 
 对应 C 接口在 `taichi_cuda.h`：`ti_prepare_execution_plan_on_domain_ext`、
 `ti_initialize_prepared_ext`、`ti_try_submit_prepared_ext` 和域/票据句柄接口。

@@ -1,6 +1,9 @@
 #include "renderer.h"
 
 #include "taichi/ui/utils/utils.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/execution_domain.h"
+#endif
 
 using taichi::lang::Program;
 
@@ -79,13 +82,109 @@ void Renderer::set_image(const DisplayFrameInfo &info) {
 
 std::shared_ptr<SharedCudaVulkanImage>
 Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
+  TI_ERROR_IF(prepared_display_width_ && (width != prepared_display_width_ ||
+                                          height != prepared_display_height_),
+              "Reprepare the display pool at a cold resize boundary");
   SetImage *set_image = pending_set_image_;
   if (!set_image) {
     set_image = get_set_image_renderable();
+    if (!set_image)
+      return nullptr;
     render_queue_.push_back(set_image);
     pending_set_image_ = set_image;
   }
-  return set_image->acquire_shared_cuda_vulkan_image(width, height);
+  auto previous = set_image->shared_image();
+  TI_ERROR_IF(previous && previous->has_live_execution_domain() &&
+                  (previous->width() != width || previous->height() != height),
+              "Close the previous display domain before resizing its storage");
+  previous.reset();
+  auto image = set_image->acquire_shared_cuda_vulkan_image(width, height);
+  if (image && display_execution_domain_)
+    image->set_execution_domain(display_execution_domain_);
+  return image;
+}
+
+void Renderer::set_display_execution_domain(
+    std::shared_ptr<cuda::ExecutionDomain> domain) {
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(pending_set_image_,
+              "Submit or cancel the display frame before binding a domain");
+  TI_ERROR_IF(
+      !domain || !app_context_.prog() ||
+          !domain->belongs_to(app_context_.prog()->runtime_fault_domain()) ||
+          !domain->snapshot().accepting,
+      "Canvas domain requires the current live CUDA runtime");
+  TI_ERROR_IF(display_execution_domain_ &&
+                  display_execution_domain_ != domain &&
+                  !display_execution_domain_->snapshot().closed,
+              "Close the previous display domain before replacing it");
+  display_execution_domain_ = std::move(domain);
+#else
+  TI_ERROR("CUDA display domains are unavailable");
+#endif
+}
+
+std::vector<SharedCudaVulkanImage *>
+Renderer::prepare_display_pool(int width, int height, int capacity) {
+  TI_ERROR_IF(!display_execution_domain_ || width <= 0 || height <= 0 ||
+                  capacity < 2 || capacity > max_frames_in_flight() + 1,
+              "Display pool requires a selected domain and bounded positive "
+              "dimensions/capacity");
+  TI_ERROR_IF(pending_set_image_ || !renderables_.empty(),
+              "Submit or cancel pending work before preparing display storage");
+  const auto require_retired = [](const auto &items) {
+    for (const auto &item : items) {
+      auto *image = dynamic_cast<SetImage *>(item.get());
+      TI_ERROR_IF(image && image->shared_image() &&
+                      image->shared_image()->has_live_execution_domain(),
+                  "Close the previous display domain before preparing its "
+                  "replacement pool");
+    }
+  };
+  require_retired(reusable_set_images_);
+  for (const auto &frame : in_flight_frames_)
+    require_retired(frame.renderables);
+  TI_ERROR_IF(last_shared_display_image_ &&
+                  last_shared_display_image_->has_live_execution_domain(),
+              "Close the previous display domain before replacing its pool");
+  std::vector<std::unique_ptr<SetImage>> prepared;
+  std::vector<SharedCudaVulkanImage *> views;
+  const auto repeat_capacity = max_frames_in_flight() + 1;
+  prepared.reserve(capacity + repeat_capacity);
+  views.reserve(capacity);
+  for (int i = 0; i < capacity; ++i) {
+    auto image = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
+    auto storage = image->acquire_shared_cuda_vulkan_image(width, height);
+    TI_ERROR_IF(!storage, "Unable to prepare CUDA/Vulkan display pool");
+    storage->set_execution_domain(display_execution_domain_);
+    views.push_back(storage.get());
+    prepared.push_back(std::move(image));
+  }
+  // Repeating an image whose earlier Vulkan read is still in flight needs a
+  // distinct renderable, but no new pixel storage. Prepare its tiny UBO and
+  // pipeline state here so that overlap cannot allocate them in repeat().
+  for (size_t i = 0; i < repeat_capacity; ++i) {
+    auto repeat = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
+    repeat->use_shared_image(prepared.front()->shared_image());
+    repeat->use_shared_image(nullptr);
+    prepared.push_back(std::move(repeat));
+  }
+  // Reconfiguration is explicitly cold: retire Vulkan readers and the old
+  // external owners before freeing their storage. No simulation-tail wait is
+  // introduced into acquire/submit/repeat.
+  wait_for_in_flight_frames();
+  for (const auto &image : reusable_set_images_) {
+    if (image->shared_image())
+      image->shared_image()->close();
+    erase_direct_set_image_state(image.get());
+  }
+  if (last_shared_display_image_)
+    last_shared_display_image_->close();
+  last_shared_display_image_.reset();
+  reusable_set_images_ = std::move(prepared);
+  prepared_display_width_ = width;
+  prepared_display_height_ = height;
+  return views;
 }
 
 std::shared_ptr<DisplayCompletion> Renderer::track_display_frame(
@@ -97,6 +196,12 @@ std::shared_ptr<DisplayCompletion> Renderer::track_display_frame(
 }
 
 bool Renderer::set_image_shared_cuda(const SetImageInfo &info) {
+  return set_image_shared_cuda_on_domain(info, {});
+}
+
+bool Renderer::set_image_shared_cuda_on_domain(
+    const SetImageInfo &info,
+    const RuntimeCompletion &producer) {
   TI_ERROR_IF(
       info.img.shape.size() != 2 || info.img.dtype != PrimitiveType::u32,
       "Shared packed display input must be a 2D u32 image");
@@ -104,9 +209,24 @@ bool Renderer::set_image_shared_cuda(const SetImageInfo &info) {
   auto image =
       acquire_shared_cuda_vulkan_image(info.img.shape[0], info.img.shape[1]);
   if (!image) {
+    cancel_display_frame();
     return false;
   }
-  image->copy_cuda_image(info.img.dev_alloc.get_ptr());
+  SharedNdarrayResourceLease source_lease;
+  if (display_execution_domain_) {
+    const auto found = shared_ndarray_frame_leases_.find(
+        info.img.runtime_resource_handle.index);
+    if (found != shared_ndarray_frame_leases_.end())
+      source_lease = found->second.lock();
+    TI_ERROR_IF(!source_lease ||
+                    source_lease->handle() != info.img.runtime_resource_handle,
+                "Selected display copy requires a retained source ndarray");
+  }
+  if (!image->try_copy_cuda_image(info.img.dev_alloc.get_ptr(), producer,
+                                  source_lease)) {
+    cancel_display_frame();
+    return false;
+  }
   return true;
 }
 
@@ -117,7 +237,27 @@ void Renderer::finish_display_write() {
   pending_set_image_->seal_display_write();
 }
 
+bool Renderer::try_finish_display_write(const RuntimeCompletion &producer,
+                                        bool track_source) {
+  TI_ERROR_IF(!display_execution_domain_ || !pending_set_image_ ||
+                  !pending_set_image_->shared_image(),
+              "No borrowed image on a selected display domain");
+  auto image = pending_set_image_->shared_image();
+  // Missing observation must reject before sealing an already written frame.
+  if (track_source && !producer.valid() && image->ready_for_vulkan_submit())
+    (void)image->source_completion();
+  if (!image->try_finish_cuda_write(producer))
+    return false;
+  pending_set_image_->seal_display_write();
+  return true;
+}
+
 RuntimeCompletion Renderer::record_display_source_completion() {
+  if (display_execution_domain_) {
+    TI_ERROR_IF(!pending_set_image_ || !pending_set_image_->shared_image(),
+                "No pending shared display image");
+    return pending_set_image_->shared_image()->source_completion();
+  }
   // Explicit observation of the producer stream, including work already
   // covered by an earlier Graph ticket. Do not use the no-pending fast token.
   auto *program = app_context_.prog();
@@ -129,8 +269,9 @@ RuntimeCompletion Renderer::record_display_source_completion() {
 void Renderer::cancel_display_frame() {
   if (!pending_set_image_)
     return;
-  if (pending_set_image_->shared_image())
-    finish_display_write();
+  // Cancellation does not consume a ready signal. A completed CUDA producer
+  // is rearmed by prepare_cuda_write on reuse; an unwritten image remains
+  // ready.
   pending_set_image_->cancel_display();
   render_queue_.erase(std::remove(render_queue_.begin(), render_queue_.end(),
                                   pending_set_image_),
@@ -152,7 +293,10 @@ bool Renderer::repeat_display_frame() {
               "Submit or cancel the pending display frame first");
   if (!last_shared_display_image_)
     return false;
-  last_shared_display_image_->finish_cuda_write();
+  if (display_execution_domain_)
+    last_shared_display_image_->set_execution_domain(display_execution_domain_);
+  if (!last_shared_display_image_->try_finish_cuda_write())
+    return false;
   auto *image = get_set_image_renderable(/*reuse_last_image=*/true);
   image->use_shared_image(last_shared_display_image_);
   render_queue_.push_back(image);
@@ -363,6 +507,26 @@ Renderer::~Renderer() {
   }
 }
 
+void Renderer::retire_shared_display_resources() {
+#ifdef TI_WITH_CUDA
+  if (display_execution_domain_)
+    display_execution_domain_->close();
+#endif
+  const auto close = [](const auto &renderables) {
+    for (const auto &item : renderables) {
+      auto *image = dynamic_cast<SetImage *>(item.get());
+      if (image && image->shared_image())
+        image->shared_image()->close();
+    }
+  };
+  close(renderables_);
+  close(reusable_set_images_);
+  for (const auto &frame : in_flight_frames_)
+    close(frame.renderables);
+  if (last_shared_display_image_)
+    last_shared_display_image_->close();
+}
+
 void Renderer::prepare_for_next_frame() {
   retire_completed_frames();
 }
@@ -415,7 +579,28 @@ SetImage *Renderer::get_set_image_renderable(bool reuse_last_image) {
   retire_completed_frames();
   std::unique_ptr<SetImage> r;
   auto reusable = reusable_set_images_.end();
-  if (last_shared_display_image_) {
+  if (prepared_display_width_ && !reuse_last_image) {
+    reusable = std::find_if(
+        reusable_set_images_.begin(), reusable_set_images_.end(),
+        [this](const auto &item) {
+          const auto image = item->shared_image();
+          if (!image || image == last_shared_display_image_)
+            return false;
+          // Idle repeat renderables may alias this storage. Every other
+          // reference (in particular an in-flight Vulkan read) prevents a
+          // write. Count only the bounded pool, then detach idle aliases below.
+          const auto idle_owners = std::count_if(
+              reusable_set_images_.begin(), reusable_set_images_.end(),
+              [&image](const auto &other) {
+                return other->shared_image() == image;
+              });
+          return image.use_count() == idle_owners + 1;
+        });
+    // A prepared pool is a hard storage bound. Busy must neither allocate a
+    // replacement image nor destroy any prepared Graph/AOT binding.
+    if (reusable == reusable_set_images_.end())
+      return nullptr;
+  } else if (last_shared_display_image_) {
     reusable = std::find_if(
         reusable_set_images_.begin(), reusable_set_images_.end(),
         [this, reuse_last_image](const auto &item) {

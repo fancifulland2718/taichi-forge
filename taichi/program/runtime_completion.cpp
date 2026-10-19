@@ -509,6 +509,8 @@ std::string exception_message(const std::exception_ptr &error) {
 }  // namespace
 
 struct RuntimeCompletion::State {
+  void *cuda_origin_stream{nullptr};
+  bool has_cuda_origin{false};
   State() : status(CompletionStatus::completed) {
   }
 
@@ -1008,6 +1010,8 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream_with_wait_mode(
     auto state = std::make_shared<State>(std::move(primitive), fault_domain,
                                          sequence, std::move(gpu_timing),
                                          std::move(gpu_region_timings));
+    state->cuda_origin_stream = stream;
+    state->has_cuda_origin = true;
     return RuntimeCompletion(
         Arch::cuda, program_domain, sequence, std::move(state),
         std::move(fault_domain));
@@ -1113,6 +1117,11 @@ void RuntimeCompletion::wait() const {
 
 bool RuntimeCompletion::has_backend_work() const noexcept {
   return state_ && state_->has_backend_work();
+}
+
+bool RuntimeCompletion::recorded_on_cuda_stream(void *stream) const noexcept {
+  return backend_ == Arch::cuda && state_ && state_->has_cuda_origin &&
+         state_->cuda_origin_stream == stream;
 }
 
 void RuntimeCompletion::validate_cuda_dependency(

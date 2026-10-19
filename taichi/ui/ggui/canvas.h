@@ -50,15 +50,25 @@ class TI_DLL_EXPORT Canvas final : public CanvasBase {
 
   void set_image_transpose(bool transpose);
   bool set_image_shared_cuda(const SetImageInfo &info);
+  void set_display_execution_domain(
+      std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain);
+  bool set_image_shared_cuda_on_domain(
+      const SetImageInfo &info,
+      const taichi::lang::RuntimeCompletion &producer);
 
   std::shared_ptr<DisplayCompletion> track_display_frame(bool writable);
   void finish_display_write();
+  bool try_finish_display_write(const taichi::lang::RuntimeCompletion &producer,
+                                bool track_source);
   taichi::lang::RuntimeCompletion record_display_source_completion();
   void cancel_display_frame();
   bool repeat_display_frame();
 
   std::shared_ptr<SharedCudaVulkanImage>
   acquire_shared_cuda_vulkan_image(int width, int height);
+  std::vector<SharedCudaVulkanImage *> prepare_display_pool(int width,
+                                                            int height,
+                                                            int capacity);
 
   void triangles(const TrianglesInfo &info) override;
 

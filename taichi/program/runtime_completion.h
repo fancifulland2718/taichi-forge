@@ -158,6 +158,8 @@ class TI_DLL_EXPORT RuntimeCompletion {
     return sequence_;
   }
   bool has_backend_work() const noexcept;
+  // Immutable origin survives completion and event recycling.
+  bool recorded_on_cuda_stream(void *stream) const noexcept;
   std::size_t retained_resource_count(std::uint32_t kind) const noexcept;
   std::string first_error_message() const;
   StreamGpuTimingSnapshot gpu_timing_snapshot() const;

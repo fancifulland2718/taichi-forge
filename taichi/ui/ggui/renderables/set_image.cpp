@@ -5,6 +5,8 @@
 #include "taichi/program/texture.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/runtime/cuda/execution_domain.h"
 #endif
 #include "taichi/rhi/interop/vulkan_cuda_interop.h"
 #include "taichi/ui/utils/utils.h"
@@ -134,6 +136,54 @@ void DisplayCompletion::cancel() {
 
 class SharedCudaVulkanImage::Impl {
  public:
+#ifdef TI_WITH_CUDA
+  class DomainRetirement final : public RuntimeClient,
+                                 public RuntimeCompletionResources {
+   public:
+    explicit DomainRetirement(std::shared_ptr<cuda::ExecutionDomain> domain)
+        : domain(std::move(domain)) {
+    }
+    void retire() override {
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        retiring = true;
+      }
+      domain->close();
+      std::lock_guard<std::mutex> lock(mutex);
+      sources.clear();
+    }
+    void retain_source(std::shared_ptr<Program::NdarrayResourceLease> source) {
+      TI_ERROR_IF(!source,
+                  "Selected display copy requires a live ndarray lease");
+      const auto handle = source->handle();
+      const auto key = (std::uint64_t(handle.generation) << 32) | handle.index;
+      std::lock_guard<std::mutex> lock(mutex);
+      TI_ERROR_IF(retiring, "Display copy storage is retiring");
+      auto found = sources.find(key);
+      if (found != sources.end()) {
+        TI_ERROR_IF(found->second->handle() != handle,
+                    "Display copy owner mismatch");
+        return;
+      }
+      TI_ERROR_IF(
+          sources.size() == 64,
+          "Display copy source capacity exhausted; retire at a cold boundary");
+      // Retain a bounded, warmed source set through cold retirement. Dropping
+      // a pending/minimized frame must not free an in-flight copy source, nor
+      // should completion polling trigger cuMemFree on its last lease.
+      sources.emplace(key, std::move(source));
+    }
+    std::size_t retained_resource_count(std::uint32_t) const noexcept override {
+      return 1;
+    }
+    std::shared_ptr<cuda::ExecutionDomain> domain;
+    std::mutex mutex;
+    bool retiring{false};
+    std::unordered_map<std::uint64_t,
+                       std::shared_ptr<Program::NdarrayResourceLease>>
+        sources;
+  };
+#endif
   struct Lifetime {
     Lifetime(DeviceAllocationUnique allocation,
              std::shared_ptr<VulkanCudaExternalAllocation> interop)
@@ -255,6 +305,7 @@ class SharedCudaVulkanImage::Impl {
   void prepare_cuda_write() {
     TI_ERROR_IF(!lifetime_ || !lifetime_->interop,
                 "Shared display storage is closed");
+    source_completion_ = {};
     if (lifetime_->interop->access_state() ==
         VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire) {
       return;
@@ -287,8 +338,96 @@ class SharedCudaVulkanImage::Impl {
   }
 
   void finish_cuda_write() {
+    TI_ERROR_IF(!try_finish_cuda_write({}), "CUDA display domain is full");
+  }
+
+  void set_execution_domain(std::shared_ptr<cuda::ExecutionDomain> domain) {
+#ifdef TI_WITH_CUDA
+    if (domain == domain_)
+      return;
+    TI_ERROR_IF(!domain ||
+                    !domain->belongs_to(program_->runtime_fault_domain()) ||
+                    !domain->snapshot().accepting,
+                "Display domain belongs to another or closed runtime");
+    TI_ERROR_IF(domain_ && !domain_->snapshot().closed,
+                "Display storage is already bound to another live domain");
+    auto retirement = std::make_shared<DomainRetirement>(domain);
+    program_->retain_external_storage_client(retirement, owner_);
+    if (domain_retirement_)
+      program_->detach_runtime_client(domain_retirement_.get());
+    const auto snapshot = domain->snapshot();
+    selected_stream_ =
+        ExternalStreamDomain::cuda(snapshot.owner, snapshot.identity,
+                                   reinterpret_cast<void *>(snapshot.stream));
+    domain_ = std::move(domain);
+    domain_retirement_ = std::move(retirement);
+#else
+    TI_ERROR("CUDA display domain is unavailable");
+#endif
+  }
+
+  RuntimeCompletion source_completion() const {
+    TI_ERROR_IF(!source_completion_.valid(),
+                "Provide the exact producer completion for this display write");
+    return source_completion_;
+  }
+
+  bool has_live_execution_domain() const {
+#ifdef TI_WITH_CUDA
+    return domain_ && !domain_->snapshot().closed;
+#else
+    return false;
+#endif
+  }
+
+  void close() {
+    const bool retired = Program::close_external_dense_storage_if_alive(
+        program_, program_lifetime_, owner_);
+    if (!retired && lifetime_)
+      lifetime_->close();
+    owner_ = {};
+    lifetime_.reset();
+  }
+
+  bool try_finish_cuda_write(const RuntimeCompletion &producer) {
     TI_ERROR_IF(!lifetime_ || !lifetime_->interop,
                 "Shared display storage is closed");
+#ifdef TI_WITH_CUDA
+    if (domain_) {
+      if (producer.valid()) {
+        producer.validate_cuda_dependency(selected_stream_.owner_domain,
+                                          program_->runtime_fault_domain());
+        TI_ERROR_IF(
+            !producer.recorded_on_cuda_stream(selected_stream_.native_stream),
+            "Display producer completion belongs to another CUDA stream");
+      }
+      if (lifetime_->interop->access_state() ==
+          VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire) {
+        TI_ERROR_IF(producer.valid(),
+                    "Display producer did not release this image");
+        try {
+          source_completion_ =
+              domain_->submit({}, domain_retirement_, [this](void *) {
+                lifetime_->interop->acquire_for_consumer(selected_stream_);
+                lifetime_->interop->release_from_consumer(selected_stream_);
+              });
+        } catch (const cuda::ExecutionDomainBusy &) {
+          return false;
+        }
+      } else {
+        TI_ERROR_IF(
+            !ready_for_vulkan_submit() ||
+                !lifetime_->interop->cuda_producer_stream().same_stream(
+                    selected_stream_),
+            "Display image was not released by its selected CUDA domain");
+        if (producer.valid())
+          source_completion_ = producer;
+      }
+      return true;
+    }
+#endif
+    TI_ERROR_IF(producer.valid(),
+                "Explicit producer requires a selected display domain");
     // Empty/cancelled writes and cached redisplay still consume the binary
     // semaphore pair, but need no pixel-touch kernel or host wait.
     if (lifetime_->interop->access_state() ==
@@ -302,12 +441,62 @@ class SharedCudaVulkanImage::Impl {
     }
     TI_ERROR_IF(!ready_for_vulkan_submit(),
                 "Display write is still active on another stream");
+    return true;
   }
 
   void copy_cuda_image(DevicePtr source) {
+    TI_ERROR_IF(!try_copy_cuda_image(source, {}, nullptr),
+                "CUDA display domain is full");
+  }
+
+  bool try_copy_cuda_image(
+      DevicePtr source,
+      const RuntimeCompletion &producer,
+      std::shared_ptr<Program::NdarrayResourceLease> source_lease) {
     const auto destination = lifetime_->interop->cuda_allocation().get_ptr();
     TI_ERROR_IF(source.device != destination.device,
                 "Shared display copy requires the same CUDA device");
+#ifdef TI_WITH_CUDA
+    if (domain_) {
+      auto *device = static_cast<cuda::CudaDevice *>(source.device);
+      const auto src =
+          reinterpret_cast<std::uint64_t>(device->get_alloc_info(source).ptr) +
+          source.offset;
+      const auto dst = reinterpret_cast<std::uint64_t>(
+                           device->get_alloc_info(destination).ptr) +
+                       destination.offset;
+      try {
+        source_completion_ = domain_->submit(
+            producer.valid() ? std::vector<RuntimeCompletion>{producer}
+                             : std::vector<RuntimeCompletion>{},
+            domain_retirement_,
+            [this, src, dst](void *stream) {
+              lifetime_->interop->acquire_for_consumer(selected_stream_);
+              try {
+                CUDADriver::get_instance().memcpy_device_to_device_async(
+                    reinterpret_cast<void *>(dst),
+                    reinterpret_cast<void *>(src), requested_bytes_, stream);
+              } catch (...) {
+                auto error = std::current_exception();
+                try {
+                  lifetime_->interop->release_from_consumer(selected_stream_);
+                } catch (...) {
+                }
+                std::rethrow_exception(error);
+              }
+              lifetime_->interop->release_from_consumer(selected_stream_);
+            },
+            [this, &source_lease] {
+              domain_retirement_->retain_source(source_lease);
+            });
+      } catch (const cuda::ExecutionDomainBusy &) {
+        return false;
+      }
+      return true;
+    }
+#endif
+    TI_ERROR_IF(producer.valid(),
+                "Explicit producer requires a selected display domain");
     auto guard = program_->acquire_runtime_resource_submission_guard();
     const auto stream =
         ExternalStreamDomain::cuda(program_->runtime_program_generation(), 1);
@@ -322,16 +511,13 @@ class SharedCudaVulkanImage::Impl {
     }
     lifetime_->interop->release_from_consumer(stream);
     program_->mark_runtime_submission_pending();
+    return true;
   }
 
  private:
   void close_noexcept() noexcept {
     try {
-      const bool retired = Program::close_external_dense_storage_if_alive(
-          program_, program_lifetime_, owner_);
-      if (!retired && lifetime_) {
-        lifetime_->close();
-      }
+      close();
     } catch (...) {
       // A failed borrower drain leaves its registry lease and Lifetime alive.
       // Do not turn that failure into permission to close external memory.
@@ -349,6 +535,12 @@ class SharedCudaVulkanImage::Impl {
   storage::StorageOwnerRef owner_;
   storage::DenseStorageBuildResult description_;
   std::shared_ptr<Lifetime> lifetime_;
+  RuntimeCompletion source_completion_;
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<cuda::ExecutionDomain> domain_;
+  std::shared_ptr<DomainRetirement> domain_retirement_;
+  ExternalStreamDomain selected_stream_;
+#endif
 };
 
 std::shared_ptr<SharedCudaVulkanImage> SharedCudaVulkanImage::create(
@@ -401,6 +593,30 @@ void SharedCudaVulkanImage::finish_cuda_write() {
 
 void SharedCudaVulkanImage::copy_cuda_image(DevicePtr source) {
   impl_->copy_cuda_image(source);
+}
+
+void SharedCudaVulkanImage::set_execution_domain(
+    std::shared_ptr<cuda::ExecutionDomain> domain) {
+  impl_->set_execution_domain(std::move(domain));
+}
+bool SharedCudaVulkanImage::try_finish_cuda_write(
+    const RuntimeCompletion &producer) {
+  return impl_->try_finish_cuda_write(producer);
+}
+bool SharedCudaVulkanImage::try_copy_cuda_image(
+    DevicePtr source,
+    const RuntimeCompletion &producer,
+    std::shared_ptr<Program::NdarrayResourceLease> source_lease) {
+  return impl_->try_copy_cuda_image(source, producer, std::move(source_lease));
+}
+RuntimeCompletion SharedCudaVulkanImage::source_completion() const {
+  return impl_->source_completion();
+}
+bool SharedCudaVulkanImage::has_live_execution_domain() const {
+  return impl_->has_live_execution_domain();
+}
+void SharedCudaVulkanImage::close() {
+  impl_->close();
 }
 
 StreamSemaphore SharedCudaVulkanImage::submit_vulkan_frame(

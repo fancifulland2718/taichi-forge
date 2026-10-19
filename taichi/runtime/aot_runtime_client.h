@@ -5,6 +5,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "taichi/common/core.h"
 #include "taichi/runtime/runtime_client.h"
 #include "taichi/rhi/arch.h"
 
@@ -12,6 +13,10 @@ namespace taichi::lang {
 class Program;
 class Ndarray;
 class Texture;
+class RuntimeCompletion;
+namespace cuda {
+class ExecutionDomain;
+}
 namespace storage {
 class DenseStorageDescriptor;
 }
@@ -52,10 +57,15 @@ class AotRuntimeClient final : public RuntimeClient {
       std::tuple<std::string, const aot::CompiledGraph *, std::uint32_t, bool>;
   std::uintptr_t import_jit_kernels(
       const std::vector<JitKernelImport> &kernels);
+  // Cold GGUI bridge. Hot drawing never resolves an opaque domain handle.
+  std::shared_ptr<cuda::ExecutionDomain> execution_domain(
+      std::uintptr_t handle);
 
  private:
   struct State;
   explicit AotRuntimeClient(std::unique_ptr<State> state);
   std::unique_ptr<State> state_;
 };
+// Pin an exact public ticket without entering the borrower's submission scope.
+TI_DLL_EXPORT RuntimeCompletion borrow_aot_completion(std::uintptr_t handle);
 }  // namespace taichi::lang

@@ -24,6 +24,9 @@ namespace py = pybind11;
 #include "taichi/program/storage_view.h"
 #include "taichi/ui/common/gui_base.h"
 #include "taichi/program/ndarray.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/execution_domain.h"
+#endif
 #include <memory>
 
 #ifndef TI_WITH_LLVM
@@ -561,6 +564,16 @@ struct PyCanvas {
   bool set_image_shared_cuda(FieldInfo info) {
     return display_canvas().set_image_shared_cuda(SetImageInfo{info});
   }
+  void set_display_execution_domain(
+      std::shared_ptr<cuda::ExecutionDomain> domain) {
+    display_canvas().set_display_execution_domain(std::move(domain));
+  }
+  bool set_image_shared_cuda_on_domain(
+      FieldInfo info,
+      const std::optional<RuntimeCompletion> &producer) {
+    return display_canvas().set_image_shared_cuda_on_domain(
+        SetImageInfo{info}, producer.value_or(RuntimeCompletion{}));
+  }
 
   std::shared_ptr<vulkan::DisplayCompletion> track_display_frame(
       bool writable) {
@@ -568,6 +581,12 @@ struct PyCanvas {
   }
   void finish_display_write() {
     display_canvas().finish_display_write();
+  }
+  bool try_finish_display_write(
+      const std::optional<RuntimeCompletion> &producer,
+      bool track_source) {
+    return display_canvas().try_finish_display_write(
+        producer.value_or(RuntimeCompletion{}), track_source);
   }
   RuntimeCompletion record_display_source_completion() {
     return display_canvas().record_display_source_completion();
@@ -587,6 +606,10 @@ struct PyCanvas {
       return nullptr;
     }
     return ggui_canvas->acquire_shared_cuda_vulkan_image(width, height).get();
+  }
+  std::vector<vulkan::SharedCudaVulkanImage *>
+  prepare_display_pool(int width, int height, int capacity) {
+    return display_canvas().prepare_display_pool(width, height, capacity);
   }
 
   void scene(PyScene &scene) {
@@ -1036,9 +1059,9 @@ void export_ggui(py::module &m) {
   py::class_<vulkan::SharedCudaVulkanImage,
              std::shared_ptr<vulkan::SharedCudaVulkanImage>>(
       m, "_SharedCudaVulkanImage")
-      .def_property_readonly(
-          "description", &vulkan::SharedCudaVulkanImage::description,
-          py::return_value_policy::reference_internal)
+      .def_property_readonly("description",
+                             &vulkan::SharedCudaVulkanImage::description,
+                             py::return_value_policy::copy)
       .def_property_readonly("identity",
                              &vulkan::SharedCudaVulkanImage::identity)
       .def_property_readonly("width", &vulkan::SharedCudaVulkanImage::width)
@@ -1062,9 +1085,19 @@ void export_ggui(py::module &m) {
       .def("_set_image_transpose", &PyCanvas::set_image_transpose)
       .def("_set_image_shared_cuda", &PyCanvas::set_image_shared_cuda,
            py::call_guard<py::gil_scoped_release>())
+#ifdef TI_WITH_CUDA
+      .def("_set_display_execution_domain",
+           &PyCanvas::set_display_execution_domain,
+           py::call_guard<py::gil_scoped_release>())
+#endif
+      .def("_set_image_shared_cuda_on_domain",
+           &PyCanvas::set_image_shared_cuda_on_domain,
+           py::call_guard<py::gil_scoped_release>())
       .def("_track_display_frame", &PyCanvas::track_display_frame,
            py::arg("writable") = false)
       .def("_finish_display_write", &PyCanvas::finish_display_write)
+      .def("_try_finish_display_write", &PyCanvas::try_finish_display_write,
+           py::call_guard<py::gil_scoped_release>())
       .def("_record_display_source_completion",
            &PyCanvas::record_display_source_completion)
       .def("_cancel_display_frame", &PyCanvas::cancel_display_frame)
@@ -1072,6 +1105,9 @@ void export_ggui(py::module &m) {
       .def("_acquire_shared_cuda_vulkan_image",
            &PyCanvas::acquire_shared_cuda_vulkan_image,
            py::return_value_policy::reference)
+      .def("_prepare_display_pool", &PyCanvas::prepare_display_pool,
+           py::return_value_policy::reference,
+           py::call_guard<py::gil_scoped_release>())
       .def("triangles", &PyCanvas::triangles)
       .def("lines", &PyCanvas::lines)
       .def("circles", &PyCanvas::circles)

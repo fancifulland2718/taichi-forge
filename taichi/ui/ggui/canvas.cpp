@@ -34,6 +34,15 @@ void Canvas::set_image_transpose(bool transpose) {
 bool Canvas::set_image_shared_cuda(const SetImageInfo &info) {
   return renderer_->set_image_shared_cuda(info);
 }
+void Canvas::set_display_execution_domain(
+    std::shared_ptr<cuda::ExecutionDomain> domain) {
+  renderer_->set_display_execution_domain(std::move(domain));
+}
+bool Canvas::set_image_shared_cuda_on_domain(
+    const SetImageInfo &info,
+    const RuntimeCompletion &producer) {
+  return renderer_->set_image_shared_cuda_on_domain(info, producer);
+}
 
 std::shared_ptr<DisplayCompletion> Canvas::track_display_frame(bool writable) {
   return renderer_->track_display_frame(writable);
@@ -41,6 +50,10 @@ std::shared_ptr<DisplayCompletion> Canvas::track_display_frame(bool writable) {
 
 void Canvas::finish_display_write() {
   renderer_->finish_display_write();
+}
+bool Canvas::try_finish_display_write(const RuntimeCompletion &producer,
+                                      bool track_source) {
+  return renderer_->try_finish_display_write(producer, track_source);
 }
 RuntimeCompletion Canvas::record_display_source_completion() {
   return renderer_->record_display_source_completion();
@@ -55,6 +68,10 @@ bool Canvas::repeat_display_frame() {
 std::shared_ptr<SharedCudaVulkanImage>
 Canvas::acquire_shared_cuda_vulkan_image(int width, int height) {
   return renderer_->acquire_shared_cuda_vulkan_image(width, height);
+}
+std::vector<SharedCudaVulkanImage *>
+Canvas::prepare_display_pool(int width, int height, int capacity) {
+  return renderer_->prepare_display_pool(width, height, capacity);
 }
 
 void Canvas::triangles(const TrianglesInfo &info) {

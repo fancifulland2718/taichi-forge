@@ -246,6 +246,18 @@ void Window::present_frame() {
 
 Window::~Window() {
   if (renderer_) {
+    try {
+      renderer_->retire_shared_display_resources();
+    } catch (...) {
+      // A failed CUDA/external drain cannot authorize destruction of the
+      // borrowed Vulkan device. Retain this bounded window closure as a unit;
+      // its registry clients may still hold allocations and pending waits.
+      TI_WARN(
+          "GGUI display retirement failed; retaining its graphics resources");
+      (void)gui_.release();
+      (void)renderer_.release();
+      return;
+    }
     renderer_->discard_pending_frame();
     auto &device = renderer_->app_context().device();
     if (device.backend_calls_safe()) {
