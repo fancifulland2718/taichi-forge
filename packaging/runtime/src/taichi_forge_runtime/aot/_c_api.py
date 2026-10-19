@@ -65,6 +65,20 @@ class CapabilityLevelInfo(C.Structure):
     _fields_ = [("capability", UInt), ("level", UInt)]
 
 
+class CudaExternalMemoryImportInfo(C.Structure):
+    _fields_ = [
+        ("handle_type", UInt),
+        ("dedicated", UInt),
+        ("memory_handle", C.c_uint64),
+        ("ready_for_cuda", C.c_uint64),
+        ("ready_for_external", C.c_uint64),
+        ("allocation_size", C.c_uint64),
+        ("byte_offset", C.c_uint64),
+        ("byte_size", C.c_uint64),
+        ("device_uuid", C.c_uint8 * 16),
+    ]
+
+
 class Shape(C.Structure):
     _fields_ = [("dim_count", UInt), ("dims", UInt * 16)]
 
@@ -203,6 +217,25 @@ class MemorySlice(C.Structure):
     _fields_ = [("memory", Handle), ("offset", C.c_uint64), ("size", C.c_uint64)]
 
 
+class CudaExecutionDomainCreateInfo(C.Structure):
+    _fields_ = [("capacity", UInt), ("instance_capacity", UInt), ("priority", C.c_int32)]
+
+
+class CudaExecutionDomainInfo(C.Structure):
+    _fields_ = [
+        ("identity", C.c_uint64), ("owner", C.c_uint64),
+        ("context", C.c_uint64), ("stream", C.c_uint64),
+        ("requested_priority", C.c_int32), ("effective_priority", C.c_int32),
+        ("least_priority", C.c_int32), ("greatest_priority", C.c_int32),
+        ("capacity", C.c_uint64), ("pending", C.c_uint64),
+        ("accepting", UInt), ("closed", UInt),
+    ]
+
+
+class CompletionInfo(C.Structure):
+    _fields_ = [("owner", C.c_uint64), ("sequence", C.c_uint64), ("has_backend_work", UInt)]
+
+
 class AotError(RuntimeError):
     """An error reported by the native AOT C API."""
 
@@ -296,6 +329,46 @@ class Api:
                 ) from error
             function.argtypes, function.restype = arguments, result
             setattr(self, name, function)
+
+    def load_cuda_external_memory(self):
+        if getattr(self, "ti_import_cuda_external_memory_ext", None) is not None:
+            return
+        try:
+            function = self.library.ti_import_cuda_external_memory_ext
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime has no synchronized CUDA external-memory API") from error
+        function.argtypes, function.restype = [Handle, C.POINTER(CudaExternalMemoryImportInfo)], Handle
+        self.ti_import_cuda_external_memory_ext = function
+
+    def load_cuda_domains(self):
+        if getattr(self, "_cuda_domains_loaded", False):
+            return
+        declarations = {
+            "ti_create_cuda_execution_domain_ext": ([Handle, C.POINTER(CudaExecutionDomainCreateInfo)], Handle),
+            "ti_get_cuda_execution_domain_info_ext": ([Handle, C.POINTER(CudaExecutionDomainInfo)], None),
+            "ti_stop_cuda_execution_domain_ext": ([Handle], None),
+            "ti_close_cuda_execution_domain_ext": ([Handle], None),
+            "ti_release_cuda_execution_domain_ext": ([Handle], None),
+            "ti_collect_cuda_execution_domain_ext": ([Handle, UInt], UInt),
+            "ti_get_cuda_execution_domain_completion_ext": ([Handle], Handle),
+            "ti_prepare_execution_plan_on_domain_ext": (
+                [Handle, Handle, Handle, C.c_uint64, C.c_char_p, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],
+                Handle,
+            ),
+            "ti_try_submit_prepared_ext": ([Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle)], UInt),
+            "ti_query_completion_ext": ([Handle], UInt),
+            "ti_wait_completion_ext": ([Handle], None),
+            "ti_get_completion_info_ext": ([Handle, C.POINTER(CompletionInfo)], None),
+            "ti_release_completion_ext": ([Handle], None),
+        }
+        try:
+            functions = {name: getattr(self.library, name) for name in declarations}
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime has no CUDA execution-domain API") from error
+        for name, function in functions.items():
+            function.argtypes, function.restype = declarations[name]
+            setattr(self, name, function)
+        self._cuda_domains_loaded = True
 
     def call(self, function, *arguments):
         self.ti_set_last_error(0, None)

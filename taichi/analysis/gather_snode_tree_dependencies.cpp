@@ -93,7 +93,26 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
 
   void visit(OffloadedStmt *stmt) override {
     record(stmt->snode);
+    if (stmt->task_type == OffloadedTaskType::mesh_for)
+      runtime_state_ |= runtime_state_mesh;
     BasicStmtVisitor::visit(stmt);
+  }
+
+  void visit(RandStmt *) override {
+    runtime_state_ |= runtime_state_random;
+  }
+  void visit(AssertStmt *) override {
+    runtime_state_ |= runtime_state_error;
+  }
+  void visit(PrintStmt *) override {
+    runtime_state_ |= runtime_state_print;
+  }
+  void visit(ExternalFuncCallStmt *) override {
+    runtime_state_ |= runtime_state_external;
+  }
+  void visit(InternalFuncStmt *stmt) override {
+    if (stmt->with_runtime_context)
+      runtime_state_ |= runtime_state_external;
   }
 
   void visit(ClearListStmt *stmt) override {
@@ -112,6 +131,14 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
 
   bool may_trigger_hash_overflow() const {
     return may_trigger_hash_overflow_;
+  }
+
+  std::uint32_t runtime_state() const {
+    return runtime_state_ |
+           (relocation_structures_ != SNodeRelocationStructure::none
+                ? runtime_state_sparse
+                : 0u) |
+           (may_trigger_hash_overflow_ ? runtime_state_error : 0u);
   }
 
  private:
@@ -169,6 +196,7 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   SNodeRelocationStructure relocation_structures_{
       SNodeRelocationStructure::none};
   bool may_trigger_hash_overflow_{false};
+  std::uint32_t runtime_state_{runtime_state_known};
 };
 
 bool tree_contains_non_dense_snode(const SNode &node) {
@@ -186,6 +214,13 @@ bool tree_contains_non_dense_snode(const SNode &node) {
 std::vector<int> gather_snode_tree_dependencies(const Kernel &kernel) {
   TI_ASSERT(kernel.ir != nullptr);
   return gather_snode_tree_dependencies(*kernel.ir);
+}
+
+KernelRuntimeDependencies gather_kernel_runtime_dependencies(IRNode &ir) {
+  SNodeTreeDependencyCollector collector;
+  ir.accept(&collector);
+  return {collector.result(), collector.relocation_structures(),
+          collector.may_trigger_hash_overflow(), collector.runtime_state()};
 }
 
 std::vector<int> gather_snode_tree_dependencies(IRNode &ir) {

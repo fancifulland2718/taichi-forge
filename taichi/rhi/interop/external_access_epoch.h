@@ -10,6 +10,91 @@
 
 namespace taichi::lang {
 
+// Immutable cold binding for a repeatedly submitted complete recipe. Domain
+// identity validation/deduplication is done once; each accepted submission
+// keeps only a stack count and performs no allocation or ownership scan.
+class RHI_DLL_EXPORT PreparedExternalAccess final {
+ public:
+  explicit PreparedExternalAccess(
+      std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains) {
+    domains_.reserve(domains.size());
+    for (auto &domain : domains) {
+      if (!domain || domain->identity() == 0)
+        throw std::invalid_argument("Invalid external synchronization domain");
+      bool duplicate = false;
+      for (const auto &existing : domains_) {
+        if (existing->identity() != domain->identity())
+          continue;
+        if (existing != domain)
+          throw std::invalid_argument(
+              "External synchronization identity is not unique");
+        duplicate = true;
+        break;
+      }
+      if (!duplicate)
+        domains_.push_back(std::move(domain));
+    }
+  }
+
+  class Epoch final {
+   public:
+    Epoch(const PreparedExternalAccess &plan, ExternalStreamDomain stream)
+        : plan_(plan), stream_(stream) {
+      if (!stream_.valid())
+        throw std::invalid_argument(
+            "External access requires a live stream domain");
+      try {
+        for (const auto &domain : plan_.domains_) {
+          domain->acquire_for_consumer(stream_);
+          ++acquired_;
+        }
+      } catch (...) {
+        release_noexcept();
+        throw;
+      }
+    }
+    Epoch(const Epoch &) = delete;
+    Epoch &operator=(const Epoch &) = delete;
+    ~Epoch() {
+      release_noexcept();
+    }
+    void release() {
+      std::exception_ptr error;
+      while (acquired_) {
+        try {
+          plan_.domains_[--acquired_]->release_from_consumer(stream_);
+        } catch (...) {
+          if (!error)
+            error = std::current_exception();
+        }
+      }
+      if (error)
+        std::rethrow_exception(error);
+    }
+
+   private:
+    void release_noexcept() noexcept {
+      try {
+        release();
+      } catch (...) {
+      }
+    }
+    const PreparedExternalAccess &plan_;
+    ExternalStreamDomain stream_;
+    std::size_t acquired_{0};
+  };
+
+  Epoch acquire(ExternalStreamDomain stream) const {
+    return Epoch(*this, stream);
+  }
+  std::size_t size() const noexcept {
+    return domains_.size();
+  }
+
+ private:
+  std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains_;
+};
+
 // One coarse ownership interval shared by all views from the same external
 // synchronization domain. Construction acquires every unique domain before
 // consumer work is submitted. release() signals them in reverse order and

@@ -755,6 +755,13 @@ class VulkanCudaExternalAllocation::Impl {
     state_ = AccessState::kAwaitingVulkanAcquire;
   }
 
+  ExternalStreamDomain cuda_producer_stream() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_ == AccessState::kAwaitingVulkanAcquire
+               ? active_cuda_stream_
+               : ExternalStreamDomain{};
+  }
+
   StreamSemaphore acquire_vulkan_from_cuda(VulkanStream &stream,
                                            CommandList *cmdlist) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -801,34 +808,20 @@ class VulkanCudaExternalAllocation::Impl {
       return;
     }
 
-    std::exception_ptr failure;
-    const auto attempt = [&failure](auto &&action) {
-      try {
-        action();
-      } catch (...) {
-        if (!failure) {
-          failure = std::current_exception();
-        }
-      }
-    };
+    retiring_ = true;
     if ((state_ == AccessState::kAwaitingCudaAcquire ||
          state_ == AccessState::kVulkanOwned) &&
         last_vulkan_completion_) {
-      attempt([this] {
-        TI_ERROR_IF(!last_vulkan_completion_->wait(),
-                    "Failed to wait for the last Vulkan interop submission");
-      });
+      TI_ERROR_IF(!last_vulkan_completion_->wait(),
+                  "Failed to wait for the last Vulkan interop submission");
     }
-    attempt([this] { destroy_resources(); });
+    destroy_resources();
     state_ = AccessState::kClosed;
-    if (failure) {
-      std::rethrow_exception(failure);
-    }
   }
 
  private:
   void require_open() const {
-    TI_ERROR_IF(state_ == AccessState::kClosed,
+    TI_ERROR_IF(state_ == AccessState::kClosed || retiring_,
                 "Vulkan-CUDA interop allocation is closed");
   }
 
@@ -847,6 +840,9 @@ class VulkanCudaExternalAllocation::Impl {
   }
 
   void destroy_resources() {
+    // A failed CUDA prefix drain must retain both APIs' semaphore handles.
+    if (cuda_import_ != nullptr)
+      cuda_import_->close();
     std::exception_ptr failure;
     const auto attempt = [&failure](auto &&action) {
       try {
@@ -857,11 +853,6 @@ class VulkanCudaExternalAllocation::Impl {
         }
       }
     };
-    attempt([this] {
-      if (cuda_import_ != nullptr) {
-        cuda_import_->close();
-      }
-    });
     cuda_import_.reset();
     attempt([this] { vulkan_to_cuda_.stream.reset(); });
     attempt([this] { cuda_to_vulkan_.stream.reset(); });
@@ -894,6 +885,7 @@ class VulkanCudaExternalAllocation::Impl {
   ExternalStreamDomain active_cuda_stream_;
   StreamSemaphore last_vulkan_completion_;
   AccessState state_{AccessState::kVulkanOwned};
+  bool retiring_{false};
 };
 
 std::shared_ptr<VulkanCudaExternalAllocation>
@@ -910,7 +902,14 @@ VulkanCudaExternalAllocation::VulkanCudaExternalAllocation(
     : impl_(std::move(impl)) {
 }
 
-VulkanCudaExternalAllocation::~VulkanCudaExternalAllocation() = default;
+VulkanCudaExternalAllocation::~VulkanCudaExternalAllocation() {
+  try {
+    impl_->close();
+  } catch (...) {
+    TI_WARN("Retaining Vulkan-CUDA allocation after failed retirement");
+    (void)impl_.release();
+  }
+}
 
 std::uint64_t VulkanCudaExternalAllocation::identity() const noexcept {
   return impl_->identity();
@@ -928,6 +927,11 @@ std::size_t VulkanCudaExternalAllocation::allocation_size() const noexcept {
 VulkanCudaExternalAllocation::AccessState
 VulkanCudaExternalAllocation::access_state() const noexcept {
   return impl_->access_state();
+}
+
+ExternalStreamDomain VulkanCudaExternalAllocation::cuda_producer_stream()
+    const noexcept {
+  return impl_->cuda_producer_stream();
 }
 
 VulkanCudaExternalAllocation::PrepareCudaAccessResult
@@ -1059,6 +1063,10 @@ std::size_t VulkanCudaExternalAllocation::allocation_size() const noexcept {
 VulkanCudaExternalAllocation::AccessState
 VulkanCudaExternalAllocation::access_state() const noexcept {
   return AccessState::kClosed;
+}
+ExternalStreamDomain VulkanCudaExternalAllocation::cuda_producer_stream()
+    const noexcept {
+  return {};
 }
 VulkanCudaExternalAllocation::PrepareCudaAccessResult
 VulkanCudaExternalAllocation::prepare_cuda_access(vulkan::VulkanStream &,

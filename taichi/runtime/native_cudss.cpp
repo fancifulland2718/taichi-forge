@@ -412,6 +412,13 @@ class CudaCudssTransaction final : public NativeOperation {
   void reserve_cuda_ordered() override {
     resource_->plan->reserve_refactor_solve();
   }
+  void cancel_cuda_ordered() noexcept override {
+    resource_->plan->cancel_unsubmitted_refactor_solve();
+  }
+  void validate_cuda_execution_domain() const override {
+    throw std::invalid_argument(
+        "Ordinary cuDSS transactions require a domain-bound provider plan");
+  }
   void run_cuda_ordered(void *stream) override {
     if (stream)
       throw std::invalid_argument(

@@ -195,7 +195,7 @@ class PythonExternalDenseStorage final {
     if (closed_) {
       return;
     }
-    lang::Program::retire_external_dense_storage_if_alive(
+    lang::Program::close_external_dense_storage_if_alive(
         program_, program_lifetime_, owner_);
     closed_ = true;
   }
@@ -488,7 +488,7 @@ class PythonVulkanCudaExternalAllocation final {
     if (closed_) {
       return;
     }
-    lang::Program::retire_external_dense_storage_if_alive(
+    lang::Program::close_external_dense_storage_if_alive(
         program_, program_lifetime_, base_owner_);
     closed_ = true;
   }

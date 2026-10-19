@@ -1,7 +1,11 @@
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
+#include "taichi/program/runtime_completion.h"
+#include "taichi/rhi/interop/external_access_epoch.h"
 
 #include <algorithm>
+#include <exception>
+#include <mutex>
 #include <cstring>
 #include <functional>
 #include <stdexcept>
@@ -20,6 +24,7 @@
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/binding_frame_replay.h"
 #include "taichi/runtime/cuda/fixed_graph.h"
+#include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/ordered_submission.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
@@ -71,11 +76,60 @@ struct FixedExecution::State {
   }
 #endif
 #ifdef TI_WITH_CUDA
+  std::shared_ptr<cuda::ExecutionDomain> cuda_domain;
+  // Declared before recordings so legacy destruction drains before releasing
+  // the resource's domain claim. Independent instances retain another copy.
+  std::vector<std::shared_ptr<void>> cuda_provider_bindings;
+  std::vector<std::shared_ptr<CudaProviderCompletionResource>> cuda_providers;
   std::unique_ptr<cuda::FixedGraph> cuda_graph;
   std::shared_ptr<cuda::FixedGraph> cuda_frame;
   std::shared_ptr<cuda::BindingFrameReplay> cuda_binding_replay;
   using CudaStep = std::variant<std::unique_ptr<cuda::FixedGraph>,
                                 std::shared_ptr<NativeOperation>>;
+  struct CudaInstance final : RuntimeClient, RuntimeCompletionResources {
+    std::shared_ptr<RuntimeCompletionResources> operands;
+    std::unique_ptr<PreparedExternalAccess> external_access;
+    ExternalStreamDomain external_stream;
+    std::vector<CudaStep> steps;
+    std::vector<std::shared_ptr<NativeOperation>> ordered;
+    // Contains no ExecutionDomain reference. One domain registration owns the
+    // entire recipe, including partial construction and provider-only recipes.
+    std::vector<std::shared_ptr<RuntimeClient>> parts;
+    std::mutex retirement_mutex;
+    std::exception_ptr retirement_error;
+    bool retired{false};
+    void retire() override {
+      std::lock_guard<std::mutex> lock(retirement_mutex);
+      if (retirement_error)
+        std::rethrow_exception(retirement_error);
+      if (retired)
+        return;
+      for (const auto &part : parts) {
+        try {
+          part->retire();
+        } catch (...) {
+          if (!retirement_error)
+            retirement_error = std::current_exception();
+        }
+      }
+      if (retirement_error)
+        std::rethrow_exception(retirement_error);
+      steps.clear();
+      parts.clear();
+      ordered.clear();
+      external_access.reset();
+      std::atomic_store(&operands,
+                        std::shared_ptr<RuntimeCompletionResources>{});
+      retired = true;
+    }
+    std::size_t retained_resource_count(
+        std::uint32_t kind) const noexcept override {
+      const auto retained = std::atomic_load(&operands);
+      return retained ? retained->retained_resource_count(kind) : 0;
+    }
+  };
+  std::shared_ptr<CudaInstance> cuda_instance;
+  std::size_t cuda_ordered_count{0};
   std::vector<CudaStep> cuda_steps;
   // Retire submitted native work before releasing graph/provider owners.
   std::unique_ptr<cuda::OrderedSubmissions> cuda_ordered;
@@ -126,9 +180,25 @@ FixedExecution::FixedExecution(
     std::shared_ptr<cuda::BindingFrameReplay> binding_replay,
     std::shared_ptr<void> binding_operands,
     const VulkanSubmissionRecipe *submission_recipe,
-    const OrderedStorageRing *storage_ring)
+    const OrderedStorageRing *storage_ring,
+    const CudaExecutionBinding *execution_binding)
     : state_(std::make_unique<State>()) {
   state_->fault_domain = std::move(fault_domain);
+  if (execution_binding) {
+    if (arch != Arch::cuda || !state_->fault_domain ||
+        !execution_binding->domain || !execution_binding->operands ||
+        storage_ring || binding_replay || binding_operands || submission_recipe)
+      throw std::invalid_argument(
+          "Independent fixed execution requires an owned CUDA capture recipe");
+#ifdef TI_WITH_CUDA
+    if (!execution_binding->domain->belongs_to(state_->fault_domain))
+      throw std::invalid_argument(
+          "Fixed execution domain belongs to another runtime owner");
+    state_->cuda_domain = execution_binding->domain;
+#else
+    throw std::invalid_argument("CUDA execution domains are unavailable");
+#endif
+  }
   if (storage_ring) {
     if ((!arch_is_cpu(arch) && arch != Arch::cuda && arch != Arch::vulkan) ||
         binding_replay || binding_operands || submission_recipe)
@@ -242,6 +312,9 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed branch requires a supported lowering and aligned selector storage");
         const bool host = branch->mode == BranchExecutionMode::host;
+        if (host && execution_binding)
+          throw std::invalid_argument(
+              "Host selection has no independent CUDA execution contract");
         const bool masked = branch->mode == BranchExecutionMode::cuda_masked;
         if (!host && !masked && branch->mode != BranchExecutionMode::native)
           throw std::invalid_argument("Unsupported fixed branch execution mode");
@@ -431,6 +504,18 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed execution requires loaded entries without returns or "
               "ArgPacks");
+#ifdef TI_WITH_CUDA
+        if (execution_binding) {
+          auto *kernel = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
+          auto *launcher =
+              kernel ? dynamic_cast<cuda::KernelLauncher *>(&kernel->launcher())
+                     : nullptr;
+          if (!launcher)
+            throw std::invalid_argument(
+                "CUDA execution domain requires a CUDA kernel launcher");
+          launcher->validate_execution_domain(kernel->handle());
+        }
+#endif
         std::set<std::vector<int>> resource_arguments;
         for (const auto &resource : dispatch->resources) {
           if (!resource ||
@@ -467,6 +552,8 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Fixed native operation belongs to another execution device");
         const auto mode = native->execution_mode();
+        if (execution_binding)
+          native->validate_cuda_execution_domain();
         if (!((arch_is_cpu(arch) && mode == NativeOperationMode::cpu) ||
               (arch == Arch::cuda &&
                (mode == NativeOperationMode::cuda_capture ||
@@ -493,6 +580,21 @@ FixedExecution::FixedExecution(
     }
   };
   validate(operations, recording_state, false);
+#ifdef TI_WITH_CUDA
+  if (arch == Arch::cuda) {
+    std::unordered_set<CudaProviderCompletionResource *> providers;
+    const auto identity =
+        state_->cuda_domain ? state_->cuda_domain->snapshot().identity : 0;
+    for (const auto &operation : state_->native_operations) {
+      auto provider = operation->cuda_ordered_resource();
+      if (provider && providers.insert(provider.get()).second) {
+        state_->cuda_provider_bindings.push_back(
+            provider->bind_execution_domain(identity));
+        state_->cuda_providers.push_back(std::move(provider));
+      }
+    }
+  }
+#endif
 #ifdef TI_WITH_CUDA
   if (binding_replay) {
     std::vector<std::vector<std::uint64_t>> invariants;
@@ -749,6 +851,29 @@ FixedExecution::FixedExecution(
                     }))
       state_->fault_domain = std::make_shared<RuntimeFaultDomain>(Arch::cuda, 0);
     using CudaOperation = cuda::FixedGraph::Operation;
+    if (execution_binding) {
+      struct InstanceOperands final : RuntimeCompletionResources {
+        std::shared_ptr<RuntimeCompletionResources> bindings;
+        std::vector<std::shared_ptr<NativeOperation>> operations;
+        std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
+        std::vector<std::shared_ptr<void>> provider_bindings;
+        std::size_t retained_resource_count(
+            std::uint32_t kind) const noexcept override {
+          return bindings->retained_resource_count(kind);
+        }
+      };
+      auto retained = std::make_shared<InstanceOperands>();
+      retained->bindings = execution_binding->operands;
+      retained->operations = state_->native_operations;
+      retained->resources = state_->kernel_resources;
+      retained->provider_bindings = state_->cuda_provider_bindings;
+      state_->cuda_instance = std::make_shared<State::CudaInstance>();
+      state_->cuda_instance->operands = std::move(retained);
+      for (const auto &provider : state_->cuda_providers)
+        state_->cuda_instance->parts.push_back(provider);
+    }
+    auto &steps =
+        execution_binding ? state_->cuda_instance->steps : state_->cuda_steps;
     std::size_t ordered_operations = 0;
     bool synchronous_operations = false;
     auto account = [&](const cuda::FixedGraph &graph) {
@@ -767,10 +892,14 @@ FixedExecution::FixedExecution(
     auto flush = [&](std::vector<CudaOperation> &native) {
       if (native.empty())
         return;
-      auto graph =
-          std::make_unique<cuda::FixedGraph>(native, state_->fault_domain);
+      auto graph = execution_binding ? cuda::FixedGraph::prepare_execution_part(
+                                           native, state_->fault_domain,
+                                           state_->cuda_instance->operands,
+                                           state_->cuda_instance->parts)
+                                     : std::make_unique<cuda::FixedGraph>(
+                                           native, state_->fault_domain);
       account(*graph);
-      state_->cuda_steps.emplace_back(std::move(graph));
+      steps.emplace_back(std::move(graph));
       native.clear();
     };
     std::function<std::vector<CudaOperation>(const std::vector<Operation> &)>
@@ -836,7 +965,9 @@ FixedExecution::FixedExecution(
             ordered_operations += mode == NativeOperationMode::cuda_ordered;
             synchronous_operations |= mode == NativeOperationMode::cuda_synchronous;
             flush(native);
-            state_->cuda_steps.emplace_back(*external);
+            steps.emplace_back(*external);
+            if (execution_binding)
+              state_->cuda_instance->ordered.push_back(*external);
             continue;
           }
           native.emplace_back(cuda::FixedGraph::Dispatch{
@@ -875,6 +1006,20 @@ FixedExecution::FixedExecution(
       }
       return native;
     };
+    if (execution_binding) {
+      state_->cuda_domain->prepare_instance(state_->cuda_instance, [&] {
+        for (const auto &operation : state_->native_operations)
+          operation->prepare_cuda_execution_domain(
+              state_->fault_domain, state_->cuda_instance->parts);
+        auto native = prepare(operations);
+        flush(native);
+      });
+      state_->kind = ordered_operations ? 4 : 1;
+      state_->cuda_ordered_count = ordered_operations;
+      if (sequence_state)
+        *sequence_state = std::move(recording_state);
+      return;
+    }
     auto native = prepare(operations);
     if (binding_replay) {
       struct FrameOperands {
@@ -1072,6 +1217,73 @@ FixedExecution::FixedExecution(
 }
 
 FixedExecution::~FixedExecution() = default;
+void FixedExecution::bind_external_access(
+    std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains) {
+#ifdef TI_WITH_CUDA
+  if (state_->cuda_domain && state_->cuda_instance) {
+    auto &instance = *state_->cuda_instance;
+    std::lock_guard<std::mutex> lock(instance.retirement_mutex);
+    if (instance.retired || instance.retirement_error ||
+        instance.external_access)
+      throw std::invalid_argument(
+          "External access requires an unbound live instance");
+    auto plan = std::make_unique<PreparedExternalAccess>(std::move(domains));
+    const auto selected = state_->cuda_domain->snapshot();
+    if (!selected.accepting)
+      throw std::invalid_argument(
+          "External access requires a live CUDA domain");
+    instance.external_stream =
+        ExternalStreamDomain::cuda(selected.owner, selected.identity,
+                                   reinterpret_cast<void *>(selected.stream));
+    instance.external_access = std::move(plan);
+    return;
+  }
+#endif
+  throw std::invalid_argument(
+      "Prepared external access requires an independent CUDA instance");
+}
+RuntimeCompletion FixedExecution::submit(
+    const std::vector<RuntimeCompletion> &dependencies) {
+#ifdef TI_WITH_CUDA
+  if (state_->cuda_domain && state_->cuda_instance) {
+    const auto instance = state_->cuda_instance;
+    std::shared_ptr<cuda::OrderedSubmissionResources> ordered;
+    if (state_->cuda_ordered_count)
+      ordered = std::make_shared<cuda::OrderedSubmissionResources>(
+          state_->cuda_ordered_count, std::atomic_load(&instance->operands));
+    return state_->cuda_domain->submit(
+        dependencies,
+        ordered
+            ? ordered
+            : std::static_pointer_cast<RuntimeCompletionResources>(instance),
+        [&](void *stream) {
+          std::optional<PreparedExternalAccess::Epoch> external;
+          if (instance->external_access) {
+            // Admission and exact dependency validation already succeeded.
+            // Busy/rejected calls never consume an external binary semaphore.
+            auto selected = instance->external_stream;
+            selected.native_stream = stream;
+            external.emplace(*instance->external_access, selected);
+          }
+          std::size_t index = 0;
+          for (const auto &step : instance->steps) {
+            if (const auto *graph =
+                    std::get_if<std::unique_ptr<cuda::FixedGraph>>(&step))
+              (*graph)->enqueue_execution_part(stream);
+            else
+              ordered->run(index++, stream);
+          }
+          if (external)
+            external->release();
+        },
+        ordered ? std::function<void()>(
+                      [&] { ordered->reserve(instance->ordered); })
+                : std::function<void()>{});
+  }
+#endif
+  throw std::invalid_argument(
+      "Fixed execution was not prepared for an independent domain");
+}
 void FixedExecution::run() {
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed("run fixed execution");
@@ -1096,6 +1308,12 @@ void FixedExecution::retire_completed_binding(bool backend_safe) {
 }
 
 void FixedExecution::run_impl() {
+#ifdef TI_WITH_CUDA
+  if (state_->cuda_instance) {
+    (void)submit();
+    return;
+  }
+#endif
   if (!state_->storage_frames.empty()) {
     if (state_->storage_ring_failed)
       throw std::runtime_error(

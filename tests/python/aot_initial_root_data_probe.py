@@ -95,9 +95,12 @@ def main(mode, arch, artifact):
                 with ZipFile(path, "w") as archive:
                     for name, payload in files.items():
                         archive.writestr(name, payload)
-                if failure == "absent" and arch == "vulkan" and document[version_key] > 3:
-                    # Newer GFX versions also describe artifacts without a
-                    # snapshot. Removing its declaration selects zero state;
+                optional_snapshot = (
+                    arch == "vulkan" and document[version_key] > 3
+                ) or (arch != "vulkan" and document[version_key] == 8)
+                if failure == "absent" and optional_snapshot:
+                    # GFX and LLVM launch-layout versions also describe
+                    # artifacts without a snapshot. Its absence selects zero state;
                     # missing/corrupt declared payloads must still fail above.
                     with runtime.load_module(path) as zero:
                         with zero.prepare_execution("step", frames[0]) as call:

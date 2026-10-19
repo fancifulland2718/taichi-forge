@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "taichi/codegen/snode_relocation.h"
+#include "taichi/codegen/runtime_state.h"
 #include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
@@ -12,6 +13,16 @@ class IRNode;
 class Program;
 
 namespace irpass::analysis {
+
+// The compiler needs all these facts at the same lowering boundary. Collect
+// them in one traversal, including transitive real-function bodies.
+struct KernelRuntimeDependencies {
+  std::vector<int> tree_ids;
+  SNodeRelocationStructure structures{SNodeRelocationStructure::none};
+  bool may_trigger_hash_overflow{false};
+  std::uint32_t runtime_state{runtime_state_known};
+};
+KernelRuntimeDependencies gather_kernel_runtime_dependencies(IRNode &ir);
 
 // Returns sorted, unique SNodeTree ids referenced by the specialized kernel
 // IR. Both frontend and lowered statement forms are covered so graph

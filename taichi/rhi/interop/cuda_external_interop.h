@@ -58,6 +58,13 @@ class RHI_DLL_EXPORT CudaExternalAllocation final
       CudaExternalMemoryImport memory,
       std::optional<CudaExternalSemaphorePairImport> semaphores = std::nullopt);
 
+  // Duplicate OS handles internally. The caller keeps all original handles
+  // on success and every failure path; the returned mapping owns the copies.
+  static std::shared_ptr<CudaExternalAllocation> create_borrowed(
+      cuda::CudaDevice *cuda_device,
+      CudaExternalMemoryImport memory,
+      CudaExternalSemaphorePairImport semaphores);
+
   ~CudaExternalAllocation() override;
   CudaExternalAllocation(const CudaExternalAllocation &) = delete;
   CudaExternalAllocation &operator=(const CudaExternalAllocation &) = delete;
@@ -76,8 +83,9 @@ class RHI_DLL_EXPORT CudaExternalAllocation final
   bool synchronized() const noexcept;
   bool closed() const noexcept;
 
-  // Idempotent. It waits only for this allocation's last participating CUDA
-  // stream before releasing the imported mapping and CUDA-side semaphores.
+  // Idempotent. It waits for this allocation's last access prefix before
+  // releasing the mapping and CUDA-side semaphores. The prefix remains valid
+  // after stream destruction; driver object cleanup is a cold operation.
   void close();
 
  private:

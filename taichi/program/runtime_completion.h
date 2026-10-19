@@ -135,6 +135,19 @@ class TI_DLL_EXPORT RuntimeCompletion {
   bool done() const;
   void wait() const;
 
+  // Device dependency on this exact submission. The caller owns the target
+  // stream's submission/lifecycle guard and has retained its own input leases.
+  // Validate every predecessor before enqueueing any of them. Completed
+  // tokens need no backend call; pending tokens pin their event until the
+  // stream wait has captured it. No host wait or replacement event is used.
+  void validate_cuda_dependency(
+      std::uint64_t owner,
+      const std::shared_ptr<RuntimeFaultDomain> &fault_domain) const;
+  bool enqueue_cuda_wait(
+      void *stream,
+      std::uint64_t owner,
+      const std::shared_ptr<RuntimeFaultDomain> &fault_domain) const;
+
   Arch backend() const noexcept {
     return backend_;
   }
@@ -145,6 +158,8 @@ class TI_DLL_EXPORT RuntimeCompletion {
     return sequence_;
   }
   bool has_backend_work() const noexcept;
+  // Immutable origin survives completion and event recycling.
+  bool recorded_on_cuda_stream(void *stream) const noexcept;
   std::size_t retained_resource_count(std::uint32_t kind) const noexcept;
   std::string first_error_message() const;
   StreamGpuTimingSnapshot gpu_timing_snapshot() const;

@@ -62,6 +62,8 @@ class TI_DLL_EXPORT Renderer {
   bool has_render_work() const;
   bool last_frame_used_shared_cuda_vulkan() const noexcept;
   void discard_pending_frame();
+  // Cold: prove CUDA/Vulkan retirement before destroying the graphics device.
+  void retire_shared_display_resources();
 
   void set_background_color(const glm::vec3 &color);
 
@@ -73,12 +75,22 @@ class TI_DLL_EXPORT Renderer {
 
   void set_image_transpose(bool transpose);
   bool set_image_shared_cuda(const SetImageInfo &info);
+  void set_display_execution_domain(
+      std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain);
+  bool set_image_shared_cuda_on_domain(
+      const SetImageInfo &info,
+      const taichi::lang::RuntimeCompletion &producer);
 
   std::shared_ptr<SharedCudaVulkanImage>
   acquire_shared_cuda_vulkan_image(int width, int height);
+  std::vector<SharedCudaVulkanImage *> prepare_display_pool(int width,
+                                                            int height,
+                                                            int capacity);
 
   std::shared_ptr<DisplayCompletion> track_display_frame(bool writable);
   void finish_display_write();
+  bool try_finish_display_write(const taichi::lang::RuntimeCompletion &producer,
+                                bool track_source);
   taichi::lang::RuntimeCompletion record_display_source_completion();
   void cancel_display_frame();
   bool repeat_display_frame();
@@ -166,6 +178,10 @@ class TI_DLL_EXPORT Renderer {
   std::vector<std::unique_ptr<SetImage>> reusable_set_images_;
   SetImage *pending_set_image_{nullptr};
   std::shared_ptr<SharedCudaVulkanImage> last_shared_display_image_;
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomain>
+      display_execution_domain_;
+  int prepared_display_width_{0};
+  int prepared_display_height_{0};
   bool last_frame_used_shared_cuda_vulkan_{false};
   std::vector<taichi::lang::RuntimeResourceHandle>
       pending_runtime_resource_handles_;

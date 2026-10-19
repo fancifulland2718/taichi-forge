@@ -25,6 +25,9 @@
 #include "taichi/rhi/device.h"
 
 namespace taichi::lang {
+namespace cuda {
+class ExecutionDomain;
+}
 namespace storage {
 struct DenseStorageBuildResult;
 }  // namespace storage
@@ -75,6 +78,18 @@ class SharedCudaVulkanImage final {
   void prepare_cuda_write();
   void finish_cuda_write();
   void copy_cuda_image(taichi::lang::DevicePtr source);
+  void set_execution_domain(
+      std::shared_ptr<taichi::lang::cuda::ExecutionDomain> domain);
+  bool try_finish_cuda_write(
+      const taichi::lang::RuntimeCompletion &producer = {});
+  bool try_copy_cuda_image(
+      taichi::lang::DevicePtr source,
+      const taichi::lang::RuntimeCompletion &producer = {},
+      std::shared_ptr<taichi::lang::Program::NdarrayResourceLease>
+          source_lease = nullptr);
+  taichi::lang::RuntimeCompletion source_completion() const;
+  bool has_live_execution_domain() const;
+  void close();
   taichi::lang::StreamSemaphore submit_vulkan_frame(
       taichi::lang::vulkan::VulkanStream &stream,
       taichi::lang::CommandList *command_list,

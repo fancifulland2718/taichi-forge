@@ -7,6 +7,7 @@
 #include "taichi/codegen/llvm/kernel_compiler.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
+#include "taichi/runtime/llvm/runtime_context_abi.h"
 
 namespace taichi::lang {
 namespace LLVM {
@@ -46,8 +47,9 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   LLVM::CompiledKernelData::InternalData data;
   // Preserve runtime-only dependencies (e.g. listgen/GC), then merge the roots
   // introduced by final task lowering without another IR traversal.
-  data.used_snode_tree_ids =
-      irpass::analysis::gather_snode_tree_dependencies(chi_ir);
+  auto dependencies =
+      irpass::analysis::gather_kernel_runtime_dependencies(chi_ir);
+  data.used_snode_tree_ids = std::move(dependencies.tree_ids);
   auto codegen = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.llvm.codegen_create");
     return KernelCodeGen::create(compile_config, device_caps, &kernel_def,
@@ -59,6 +61,20 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   }();
   LLVMModuleOptions::from_config(compile_config)
       .write(*data.compiled_data.module);
+  declare_runtime_context_abi(*data.compiled_data.module);
+  // Dense struct-for may become an ordinary range during final task lowering.
+  // Consult emitted task records, not its pre-lowering statement kind. This
+  // also covers explicit dense-list mode without another instruction walk.
+  for (const auto &task : data.compiled_data.tasks)
+    if (task.task_type == OffloadedTaskType::struct_for ||
+        task.task_type == OffloadedTaskType::listgen ||
+        task.task_type == OffloadedTaskType::gc || task.sparse_list_op ||
+        task.may_mutate_sparse_topology)
+      dependencies.runtime_state |= runtime_state_sparse;
+  declare_runtime_state_use(
+      *data.compiled_data.module,
+      dependencies.runtime_state |
+          (compile_config.debug ? runtime_state_error : 0u));
   if (kernel_def.get_offload_execution_plan().has_value()) {
     // Entry-specific maxnreg annotations own task-plan caps. Do not add a
     // module-wide CU_JIT_MAX_REGISTERS limit that would collapse them.
@@ -67,8 +83,7 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
              spec.has_value()) {
     data.compiled_data.cuda_max_registers = spec->cuda_max_registers;
   }
-  data.may_trigger_hash_overflow =
-      irpass::analysis::may_trigger_hash_overflow(chi_ir);
+  data.may_trigger_hash_overflow = dependencies.may_trigger_hash_overflow;
   data.args.reserve(kernel_def.nested_parameters.size());
   for (const auto &p : kernel_def.nested_parameters)
     data.args.push_back(p);
@@ -80,7 +95,7 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   auto result =
       std::make_unique<LLVM::CompiledKernelData>(compile_config.arch, data);
   result->initialize_generation_bound_snode_relocation_descriptor(
-      true, irpass::analysis::gather_snode_relocation_structures(chi_ir));
+      true, dependencies.structures);
   return result;
 }
 

@@ -16,6 +16,9 @@
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/virtual_dir.h"
 #include "taichi/common/utils.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/runtime/cuda/execution_domain.h"
+#endif
 
 bool is_vulkan_available() {
 #ifdef TI_WITH_VULKAN
@@ -119,13 +122,67 @@ Runtime::~Runtime() {
 }
 
 void Runtime::borrow_runtime_fault_domain(
-    std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain) {
+    std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain,
+    std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains) {
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
-  if (!domain || prepared_ || native_resources_ || !modules_.empty() || !memories_.empty() ||
-      borrowed_fault_domain_)
+  if (!domain || domain->backend() != arch || prepared_ || native_resources_ ||
+      !modules_.empty() || !memories_.empty() || borrowed_fault_domain_ ||
+      cuda_execution_domains_ || execution_domains_retiring_ ||
+      (arch == taichi::Arch::cuda && !domains))
     throw std::logic_error("Runtime fault domain must be bound before use");
+#ifdef TI_WITH_CUDA
+  if (domains && !domains->belongs_to(domain))
+    throw std::invalid_argument(
+        "CUDA execution domains belong to another runtime");
+#endif
   runtime_fault_domain_ = std::move(domain);
+  cuda_execution_domains_ = std::move(domains);
   borrowed_fault_domain_ = true;
+}
+
+std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry>
+Runtime::cuda_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+  runtime_fault_domain_->throw_if_new_submission_disallowed(
+      "access CUDA execution domains");
+  if (arch != taichi::Arch::cuda || execution_domains_retiring_)
+    throw std::runtime_error("CUDA execution-domain owner is unavailable");
+  if (!cuda_execution_domains_)
+    cuda_execution_domains_ =
+        std::make_shared<taichi::lang::cuda::ExecutionDomainRegistry>(
+            runtime_fault_domain_);
+  return cuda_execution_domains_;
+#else
+  throw std::runtime_error("CUDA support is not compiled in");
+#endif
+}
+
+void Runtime::synchronize_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+    domains = cuda_execution_domains_;
+  }
+  if (domains)
+    domains->synchronize();
+#endif
+}
+
+void Runtime::retire_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(submission_mutex());
+    if (borrowed_fault_domain_)
+      return;
+    execution_domains_retiring_ = true;
+    domains = cuda_execution_domains_;
+  }
+  if (domains)
+    domains->retire();
+#endif
 }
 
 VulkanRuntime *Runtime::as_vk() {
@@ -167,14 +224,28 @@ void Runtime::free_memory(TiMemory devmem) {
   std::lock_guard<std::recursive_mutex> submission_lock(submission_mutex());
   retire_native_memory(devmem);
   retire_prepared_memory(devmem);
-  std::lock_guard<std::mutex> lock(memory_mutex_);
-  const auto found = memories_.find(devmem);
-  if (found == memories_.end()) {
-    throw MemoryBindingError("Memory is not a live allocation of this runtime");
+  std::shared_ptr<void> released;
+  std::shared_ptr<taichi::lang::ExternalSynchronizationDomain> released_access;
+  {
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    const auto found = memories_.find(devmem);
+    if (found == memories_.end()) {
+      throw MemoryBindingError(
+          "Memory is not a live allocation of this runtime");
+    }
+    if (found->second.owns_allocation)
+      this->get().dealloc_memory(found->second.allocation);
+    const auto borrowed = found->second.borrowed;
+    memories_.erase(found);
+    if (borrowed && std::none_of(memories_.begin(), memories_.end(),
+                                 [&](const auto &entry) {
+                                   return entry.second.borrowed == borrowed;
+                                 })) {
+      borrowed->live = false;
+      released_access = std::move(borrowed->external_access);
+      released = std::move(borrowed->owner);
+    }
   }
-  if (found->second.owns_allocation)
-    this->get().dealloc_memory(found->second.allocation);
-  memories_.erase(found);
 }
 
 TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
@@ -183,34 +254,76 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
                                   uint64_t base_offset,
                                   std::shared_ptr<void> storage_owner,
                                   uint64_t byte_offset,
-                                  bool owns_allocation) {
+                                  bool owns_allocation,
+                                  std::shared_ptr<BorrowedMemory> borrowed) {
   TI_ASSERT(allocation.device == &get());
   try {
+    if (byte_offset > std::numeric_limits<size_t>::max() ||
+        size > std::numeric_limits<size_t>::max() - byte_offset)
+      throw MemoryBindingError("Memory range overflows device address space");
     // Never reuse a token, including across runtime destruction. Refuse the
     // machine's exhausted handle space instead of wrapping into a live token.
     const auto handle = reinterpret_cast<TiMemory>(new_handle_token());
     std::lock_guard<std::mutex> lock(memory_mutex_);
     memories_.emplace(
-        handle,
-        MemoryAllocation{allocation, size, base_offset, storage_owner,
-                         byte_offset, owns_allocation && !storage_owner});
+        handle, MemoryAllocation{
+                    allocation, size, base_offset, storage_owner, byte_offset,
+                    owns_allocation && !storage_owner && !borrowed, borrowed});
     return handle;
   } catch (...) {
     // RHI import paths allocate their own wrapper too. Retire that wrapper;
     // the backend retains ownership rules for the external storage itself.
-    if (release_on_failure && owns_allocation && !storage_owner)
+    if (release_on_failure && owns_allocation && !storage_owner && !borrowed)
       get().dealloc_memory(allocation);
     throw;
   }
 }
 
-Runtime::MemoryAllocation Runtime::get_memory(TiMemory memory) const {
+Runtime::MemoryAllocation Runtime::get_memory(
+    TiMemory memory,
+    bool prepared_external_access) const {
   std::lock_guard<std::mutex> lock(memory_mutex_);
   const auto found = memories_.find(memory);
   if (found == memories_.end()) {
     throw MemoryBindingError("Memory is not a live allocation of this runtime");
   }
+  if (found->second.borrowed && !found->second.borrowed->live)
+    throw MemoryBindingError("Borrowed storage has retired with its owner");
+  if (!prepared_external_access && found->second.borrowed &&
+      found->second.borrowed->external_access)
+    throw MemoryBindingError(
+        "Synchronized external storage requires a prepared execution domain");
   return found->second;
+}
+
+void Runtime::retire_borrowed_memory(
+    const std::shared_ptr<BorrowedMemory> &borrowed) {
+  std::lock_guard<std::recursive_mutex> submission_lock(submission_mutex());
+  if (!borrowed->live)
+    return;
+  std::vector<TiMemory> handles;
+  {
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    for (const auto &[handle, memory] : memories_)
+      if (memory.borrowed == borrowed)
+        handles.push_back(handle);
+  }
+  // Do not revoke the generation or release backing ownership on a failed
+  // drain. Retrying the original Program retirement remains safe.
+  for (auto handle : handles) {
+    retire_native_memory(handle);
+    retire_prepared_memory(handle);
+  }
+  std::shared_ptr<void> released;
+  std::shared_ptr<taichi::lang::ExternalSynchronizationDomain> released_access;
+  {
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    borrowed->live = false;
+    released_access = std::move(borrowed->external_access);
+    released = std::move(borrowed->owner);
+  }
+  // Host handle shells survive invalidation, so late close is idempotent.
+  // The owner's destructor may detach its Program callback outside this lock.
 }
 
 AotModule::AotModule(Runtime &runtime,
@@ -220,10 +333,12 @@ AotModule::AotModule(Runtime &runtime,
 }
 
 taichi::lang::aot::Kernel *AotModule::get_kernel(const std::string &name) {
+  check_code_live();
   return aot_module_->get_kernel(name);
 }
 taichi::lang::aot::CompiledGraph *AotModule::get_cgraph(
     const std::string &name) {
+  check_code_live();
   auto it = loaded_cgraphs_.find(name);
   if (it == loaded_cgraphs_.end()) {
     return loaded_cgraphs_
@@ -234,10 +349,25 @@ taichi::lang::aot::CompiledGraph *AotModule::get_cgraph(
   }
 }
 taichi::lang::aot::Module &AotModule::get() {
+  check_code_live();
   return *aot_module_;
 }
 Runtime &AotModule::runtime() {
   return *runtime_;
+}
+
+void AotModule::check_code_live() const {
+  if (!code_live_)
+    throw MemoryBindingError(
+        "Borrowed JIT code has retired with its SNode tree");
+}
+
+void AotModule::retire_borrowed_code() {
+  if (!code_live_)
+    return;
+  runtime_->retire_prepared_module(this);
+  runtime_->invalidate_module_entries(this);
+  code_live_ = false;
 }
 
 // -----------------------------------------------------------------------------
@@ -329,16 +459,10 @@ TiRuntime ti_create_runtime(TiArch arch, uint32_t device_index) {
   switch (arch) {
 #ifdef TI_WITH_VULKAN
     case TI_ARCH_VULKAN: {
-      taichi::lang::vulkan::set_vulkan_visible_device(
-          std::to_string(device_index));
-      VulkanRuntimeOwned *vulkan_runtime;
-      if (is_ci()) {
-        auto param = make_vulkan_runtime_creator_params();
-        param.enable_validation_layer = true;
-        vulkan_runtime = new VulkanRuntimeOwned(std::move(param));
-      } else {
-        vulkan_runtime = new VulkanRuntimeOwned;
-      }
+      auto param = make_vulkan_runtime_creator_params();
+      param.device_index = device_index;
+      param.enable_validation_layer = is_ci();
+      auto *vulkan_runtime = new VulkanRuntimeOwned(std::move(param));
       out = (TiRuntime)(static_cast<Runtime *>(vulkan_runtime));
       break;
     }
@@ -388,6 +512,7 @@ TiRuntime ti_create_runtime(TiArch arch, uint32_t device_index) {
 void ti_destroy_runtime(TiRuntime runtime) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
+  ((Runtime *)runtime)->retire_execution_domains();
   ((Runtime *)runtime)->clear_prepared();
   ((Runtime *)runtime)->clear_native_resources();
   ((Runtime *)runtime)->clear_submission_completions();
@@ -524,10 +649,13 @@ void *ti_map_memory(TiRuntime runtime, TiMemory devmem) {
   TI_CAPI_ARGUMENT_NULL_RV(devmem);
 
   Runtime *runtime2 = (Runtime *)runtime;
-  TI_ASSERT(runtime2->get().map(devmem2devalloc(*runtime2, devmem), &out) ==
+  const auto memory = runtime2->get_memory(devmem);
+  TI_ASSERT(runtime2->get().map(memory.allocation, &out) ==
                 taichi::lang::RhiResult::success &&
             "RHI map memory failed: "
             "Mapping Memory without VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT set");
+  if (out)
+    out = static_cast<char *>(out) + memory.byte_offset;
   TI_CAPI_TRY_CATCH_END();
   return out;
 }
@@ -631,7 +759,7 @@ taichi::lang::DevicePtr resolve_memory_slice(Runtime &runtime,
       slice.size > std::numeric_limits<size_t>::max()) {
     throw MemoryBindingError("Memory slice exceeds its allocation capacity");
   }
-  return allocation.allocation.get_ptr(slice.offset);
+  return allocation.allocation.get_ptr(allocation.byte_offset + slice.offset);
 }
 
 void check_transfer_result(taichi::lang::RhiResult result) {

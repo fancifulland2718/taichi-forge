@@ -2970,8 +2970,7 @@ void TaskCodeGenLLVM::visit(BlockCornerIndexStmt *stmt) {
 }
 
 void TaskCodeGenLLVM::visit(GlobalTemporaryStmt *stmt) {
-  auto runtime = get_runtime();
-  auto buffer = call("get_temporary_pointer", runtime,
+  auto buffer = call("RuntimeContext_get_temporary_pointer", get_context(),
                      tlctx->get_constant((int64)stmt->offset));
 
   auto ptr_type = llvm::PointerType::get(
@@ -3546,6 +3545,8 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
   llvm::Function *llvm_func = func_map[stmt->func];
   auto *new_ctx = create_entry_block_alloca(get_runtime_type("RuntimeContext"));
   call("RuntimeContext_set_runtime", new_ctx, get_runtime());
+  call("RuntimeContext_set_global_tmp_buffer", new_ctx,
+       call("RuntimeContext_get_global_tmp_buffer", get_context()));
   if (arch_is_cpu(compile_config.arch)) {
     // The third RuntimeContext member identifies the current CPU worker.
     // Real functions share that worker, including its random-number state.

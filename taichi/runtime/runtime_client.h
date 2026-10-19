@@ -5,6 +5,8 @@
 #include <condition_variable>
 #include <thread>
 #include <vector>
+#include <functional>
+#include "taichi/program/runtime_resource_registry.h"
 
 namespace taichi::lang {
 
@@ -26,23 +28,44 @@ class RuntimeClientRegistry {
   // Borrowers whose wrapper can disappear during owner teardown stay alive
   // until explicit close/detach or the owner's retirement callback completes.
   void retain(const std::shared_ptr<RuntimeClient> &client);
+  // Cold, immutable dependency registration. These clients also retire before
+  // any referenced SNode root or its executable bindings are destroyed.
+  void retain(const std::shared_ptr<RuntimeClient> &client,
+              std::vector<int> snode_tree_ids);
+  // Exact external-storage generations, qualified by their owning Program at
+  // registration. A retired/reused slot cannot revoke an unrelated borrower.
+  void retain_storage(const std::shared_ptr<RuntimeClient> &client,
+                      std::vector<RuntimeResourceHandle> storage,
+                      std::shared_ptr<void> storage_owner = {});
   void detach(RuntimeClient *client);
+  void retire_snode_tree(int tree_id);
+  void retire_storage(RuntimeResourceHandle storage);
   void retire();
   bool closed() const;
 
  private:
   mutable std::mutex mutex_;
-  enum class State { open, retiring, closed };
+  enum class State { open, retiring_subset, retiring, closed };
   State state_{State::open};
   std::thread::id retiring_thread_;
   std::condition_variable retired_;
   struct Entry {
     RuntimeClient *identity;
+    // Release storage after the retained client and its native destructor.
+    std::shared_ptr<void> storage_owner;
     std::weak_ptr<RuntimeClient> weak;
     std::shared_ptr<RuntimeClient> retained;
+    std::vector<int> snode_tree_ids;
+    std::vector<RuntimeResourceHandle> storage;
+    bool selected{false};
   };
   std::vector<Entry> clients_;
-  void attach_impl(const std::shared_ptr<RuntimeClient> &client, bool retain);
+  void attach_impl(const std::shared_ptr<RuntimeClient> &client,
+                   bool retain,
+                   std::vector<int> snode_tree_ids = {},
+                   std::vector<RuntimeResourceHandle> storage = {},
+                   std::shared_ptr<void> storage_owner = {});
+  void retire_selected(const std::function<bool(const Entry &)> &select);
 };
 
 }  // namespace taichi::lang

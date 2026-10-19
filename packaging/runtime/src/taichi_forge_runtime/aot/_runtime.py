@@ -3,7 +3,8 @@
 This consumer covers ordinary kernels/CGraphs and primitive or tensor ndarrays.
 Fixed recordings support loaded kernels, declared native operations and private arrays.
 Explicit JIT borrowers can import scalar/tensor ndarrays with storage leases;
-structure arrays and arbitrary external-memory imports are not exposed here.
+Synchronized CUDA external linear buffers can be imported for selected-domain
+recipes without the DSL; structure arrays are not exposed here.
 Host transfers are explicit; kernel calls use device
 allocations directly. Close resources explicitly or use Runtime as a context
 manager. ``bind()`` reuses Python argument descriptors across submissions.
@@ -129,6 +130,7 @@ class Runtime:
         self._lock = threading.RLock()
         self._borrower = None
         self._ndarray_importer = None
+        self._dense_view_importer = None
         self._texture_importer = None
         self._handle = None
         # Keep native registrations independently of Python wrapper lifetimes.
@@ -136,6 +138,7 @@ class Runtime:
         # either order; every native child must still retire before the device.
         self._resources = set()
         self._pending = set()
+        self._domain_owners = {}
         if arch == "cpu":
             arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
         try:
@@ -154,13 +157,16 @@ class Runtime:
             raise RuntimeError("Native AOT runtime creation returned no handle")
 
     @classmethod
-    def _from_borrowed(cls, client, library_path, *, ndarray_importer=None, texture_importer=None):
+    def _from_borrowed(cls, client, library_path, *, ndarray_importer=None, texture_importer=None,
+                       dense_view_importer=None):
         result = cls.__new__(cls)
         result._lock = result._borrower = client
         result._ndarray_importer = ndarray_importer
+        result._dense_view_importer = dense_view_importer
         result._texture_importer = texture_importer
         result._handle = None
         result._resources, result._pending = set(), set()
+        result._domain_owners = {}
         try:
             result._api = abi.Api(library_path)
             result.arch = str(client.arch).split(".")[-1]
@@ -196,6 +202,12 @@ class Runtime:
                 abi.CAPABILITY_NAMES.get(entry.capability, entry.capability): entry.level
                 for entry in entries[: count.value]
             }
+
+    def execution_domain(self, *, capacity=2, instance_capacity=64, priority=0):
+        """Create a bounded independent CUDA queue with explicit priority."""
+        from ._domain import create_domain
+
+        return create_domain(self, capacity, instance_capacity, priority)
 
     def native_operation_capabilities(self, kind, *, version=1):
         """Registered composition modes for this backend and operation version.
@@ -432,6 +444,110 @@ class Runtime:
                     memory.close()
                 raise
 
+    def import_dense_view(self, view):
+        """Borrow a compact managed dense view without copying.
+
+        Tree destruction drains dependent prepared users and revokes all
+        aliases before freeing the root. The imported handle remains closeable.
+        This cold call must run outside a borrowed runtime submission scope.
+        Synchronized CUDA external storage requires a prepared execution domain;
+        its semaphore pair is consumed once per complete initialization/replay.
+        """
+        self._check()
+        if self._dense_view_importer is None:
+            raise RuntimeError("Dense view import requires ti.aot.borrow_runtime()")
+        # Native import acquires tree lifetime before the Program resource gate.
+        # Entering self._lock here would invert that order against tree destroy.
+        handle, size, dtype, shape, element_shape = self._dense_view_importer(self._borrower, view)
+        with self._lock:
+            self._check()
+            memory = None
+            try:
+                code, _, width = _dtype(dtype)
+                shape, element_shape = _shape(shape), _shape(element_shape)
+                if size != math.prod(shape) * math.prod(element_shape) * width:
+                    raise ValueError("Imported dense view layout disagrees with its extent")
+                memory = _Memory._from_import(self, handle, size)
+                return NdArray(memory, dtype, code, shape, element_shape)
+            except BaseException:
+                if memory is None:
+                    self._api.call(self._api.ti_free_memory, self._handle, handle)
+                else:
+                    memory.close()
+                raise
+
+    def import_cuda_external_memory(
+        self, *, memory_handle, ready_for_cuda, ready_for_external,
+        allocation_size, device_uuid, dtype, shape, element_shape=(),
+        byte_offset=0, dedicated=True, handle_type=None,
+    ):
+        """Import a synchronized external linear buffer for prepared recipes.
+
+        All original OS handles remain caller-owned on success and failure.
+        Keep the external allocation/device/semaphore objects alive until close.
+        Each complete initialization/replay consumes one ready signal and emits
+        one consumed signal. Ordinary launch/map/host-transfer paths reject it.
+        Enqueue the producer signal before submitting CUDA work; it may remain
+        pending on device. Enqueue the consumer wait after CUDA submit returns.
+        Import each physical pair once and use plan views for aliases. The
+        external producer remains responsible for draining its own queued work.
+        """
+        def integer(value, name):
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer")
+            result = operator.index(value)
+            if not 0 <= result <= 0xFFFFFFFFFFFFFFFF:
+                raise ValueError(f"{name} must fit uint64")
+            return result
+
+        code, _, width = _dtype(dtype)
+        shape, element_shape = _shape(shape), _shape(element_shape)
+        if any(x == 0 for x in element_shape):
+            raise ValueError("Tensor element extents must be positive")
+        if any(x > 0x7FFFFFFF for x in shape + element_shape):
+            raise ValueError("External view extents exceed native indexing")
+        size = math.prod(shape) * math.prod(element_shape) * width
+        allocation_size = integer(allocation_size, "allocation_size")
+        byte_offset = integer(byte_offset, "byte_offset")
+        if not 0 < size <= allocation_size or byte_offset > allocation_size - size:
+            raise ValueError("External view must be a positive range within its allocation")
+        if byte_offset % width:
+            raise ValueError("External view offset must be scalar aligned")
+        if not isinstance(device_uuid, (bytes, bytearray)) or len(device_uuid) != 16:
+            raise ValueError("device_uuid must contain exactly 16 bytes")
+        if type(dedicated) is not bool:
+            raise TypeError("dedicated must be bool")
+        if handle_type is None:
+            handle_type = "opaque_win32" if os.name == "nt" else "opaque_fd"
+        if handle_type not in ("opaque_win32", "opaque_fd"):
+            raise ValueError("handle_type must be opaque_win32 or opaque_fd")
+        handles = tuple(integer(value, name) for value, name in (
+            (memory_handle, "memory_handle"), (ready_for_cuda, "ready_for_cuda"),
+            (ready_for_external, "ready_for_external"),
+        ))
+        if len(set(handles)) != 3 or (handle_type == "opaque_win32" and not all(handles)):
+            raise ValueError("External memory and semaphore handles must be valid and distinct")
+        info = abi.CudaExternalMemoryImportInfo(
+            1 if handle_type == "opaque_win32" else 2, dedicated, *handles,
+            allocation_size, byte_offset, size, (C.c_uint8 * 16)(*device_uuid),
+        )
+        with self._lock:
+            self._check()
+            if self.arch != "cuda":
+                raise ValueError("Synchronized external import requires a CUDA runtime")
+            self._api.load_cuda_external_memory()
+            handle = self._api.call(self._api.ti_import_cuda_external_memory_ext, self._handle, C.byref(info))
+            memory = None
+            try:
+                memory = _Memory._from_import(self, handle, size)
+                return NdArray(memory, dtype, code, shape, element_shape)
+            except BaseException:
+                if memory is None:
+                    self._api.call(self._api.ti_free_memory, self._handle, handle)
+                else:
+                    memory.close()
+                raise
+
     def import_texture(self, texture):
         """Borrow existing JIT texture storage and sampler without copying pixels.
 
@@ -461,6 +577,7 @@ class Runtime:
                     self._handle = None
                     self._resources.clear()
                     self._pending.clear()
+                    self._domain_owners.clear()
                 return
             self.wait()
             # Retire code and module-local storage before external arguments.
@@ -469,6 +586,7 @@ class Runtime:
                 self._destroy_resource(kind, handle)
             self._api.call(self._api.ti_destroy_runtime, self._handle)
             self._handle = None
+            self._domain_owners.clear()
 
     def _invalidate_runtime(self):
         self.close()
@@ -692,7 +810,7 @@ class Module(_Resource):
             with ZipFile(self._source_path) as archive:
                 return ExecutionPlan.from_json(archive.read(relative))
 
-    def prepare_execution(self, plan, arguments, *, gradients=None):
+    def prepare_execution(self, plan, arguments, *, gradients=None, execution_domain=None):
         """Prepare a named or explicit ExecutionPlan for repeated native replay."""
         from ._plan import ExecutionPlan
 
@@ -700,7 +818,7 @@ class Module(_Resource):
             plan = self.execution_plan(plan)
         if not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or an exported plan name")
-        return plan.prepare(self, arguments, gradients=gradients)
+        return plan.prepare(self, arguments, gradients=gradients, execution_domain=execution_domain)
 
     def prepare_workspace_pool(self, plan, capacity, *, arguments=None, arrays=None, gradients=None):
         """Share code while preparing independent resources and result leases.
@@ -841,11 +959,15 @@ class PreparedCall(_Resource):
 
     _kind = "prepared"
 
-    def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None):
+    def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None, execution_domain=None):
         self._owners = owners
         self._replay_owners = replay_owners
         self._family = family
+        self._execution_domain = execution_domain
         super().__init__(runtime, handle)
+        if execution_domain is not None:
+            execution_domain._clients.add(runtime)
+            runtime._domain_owners.setdefault(execution_domain._native_handle(), {})[handle] = owners
 
     def prepare_binding(self, arguments, *, gradients=None):
         """Prepare a sibling sharing the selected CUDA plan's state and executable.
@@ -865,8 +987,11 @@ class PreparedCall(_Resource):
         runtime = self._runtime
         with runtime._lock:
             self._check()
-            runtime._pending.add(self)
+            if self._execution_domain is None:
+                runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_initialize_prepared_ext, runtime._handle, self._handle)
+            if self._execution_domain is not None:
+                return
             if self._family is not None:
                 self._family.initialized = True
                 self._family.initial_owners = ()
@@ -874,12 +999,27 @@ class PreparedCall(_Resource):
                 self._owners, self._replay_owners = self._replay_owners, None
 
     def close(self):
-        super().close()
+        if self._execution_domain is None:
+            super().close()
+        else:
+            runtime = self._runtime
+            with runtime._lock:
+                if runtime._borrower is not None and runtime._borrower.closed:
+                    runtime.close()
+                if self._handle is not None and (self._kind, self._handle) in runtime._resources:
+                    runtime._destroy_resource(self._kind, self._handle)
+                self._handle = None
         self._owners = ()
         self._replay_owners = None
         self._family = None
 
     def run(self):
+        if self._execution_domain is not None:
+            completion = self.submit()
+            if completion is None:
+                raise RuntimeError("CUDA execution domain is full")
+            completion.close()
+            return
         runtime = self._runtime
         with runtime._lock:
             self._check()
@@ -888,9 +1028,44 @@ class PreparedCall(_Resource):
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
 
+    def submit(self, *, wait_for=()):
+        """Try one complete replay, returning an exact ticket or None if full.
+
+        Initialize explicitly in the cold phase. Dependencies enqueue device
+        waits on their exact prefixes; this method never waits on the host.
+        """
+        from ._domain import Completion
+
+        predecessors = tuple(wait_for)
+        if self._execution_domain is None:
+            if predecessors:
+                raise ValueError("wait_for requires an execution-domain binding")
+            return self._submit_ordinary()
+        runtime = self._runtime
+        if any(not isinstance(ticket, Completion) for ticket in predecessors):
+            raise TypeError("wait_for must contain Completion tickets")
+        if any(ticket._api.library._handle != runtime._api.library._handle for ticket in predecessors):
+            raise ValueError("Completion belongs to another native runtime library")
+        dependencies = (abi.Handle * len(predecessors))(*[ticket._native_handle() for ticket in predecessors])
+        with runtime._lock:
+            self._check()
+            handle = abi.Handle()
+            accepted = runtime._api.call(
+                runtime._api.ti_try_submit_prepared_ext,
+                runtime._handle, self._handle, len(dependencies), dependencies, C.byref(handle),
+            )
+        if not accepted:
+            return None
+        try:
+            return Completion(runtime._api, handle.value)
+        except BaseException:
+            if handle.value:
+                runtime._api.call(runtime._api.ti_release_completion_ext, handle.value)
+            raise
+
     __call__ = run
 
-    def submit(self):
+    def _submit_ordinary(self):
         """Run and return a completion ticket; output storage remains caller-owned."""
         runtime = self._runtime
         with runtime._lock:

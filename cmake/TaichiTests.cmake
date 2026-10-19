@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.17)
 set(TESTS_NAME taichi_cpp_tests)
 if(TARGET taichi_runtime AND TI_WITH_SPLIT_PYTHON_RUNTIME)
   add_executable(taichi_completion_tests
-    tests/cpp/program/runtime_completion_test.cpp)
+    tests/cpp/program/runtime_completion_test.cpp
+    tests/cpp/program/runtime_fault_test.cpp)
   target_link_libraries(taichi_completion_tests PRIVATE taichi_runtime gtest_main)
   target_compile_definitions(taichi_completion_tests PRIVATE
     TI_WITH_SPLIT_PYTHON_RUNTIME)
@@ -391,4 +392,35 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   endif()
   add_test(NAME ${TAICHI_BACKEND_SAFETY_TESTS_NAME}
            COMMAND ${TAICHI_BACKEND_SAFETY_TESTS_NAME})
+
+  # Real CUDA/Vulkan gates qualify independent device progress without Python
+  # or a test spin kernel occupying the GPU. Link private RHI implementation
+  # objects rather than expanding the package ABI for test helpers.
+  add_executable(taichi_cuda_execution_domain_tests
+    tests/cpp/rhi/common/cuda_execution_domain_test.cpp
+    tests/cpp/aot/runtime_client_test.cpp
+    tests/cpp/program/external_dense_storage_test.cpp
+    tests/cpp/aot/prepared_external_access_test.cpp
+    tests/cpp/aot/cuda_ordered_submission_test.cpp
+    tests/cpp/aot/cuda_execution_provider_test.cpp
+    tests/cpp/aot/llvm/cuda_execution_context_aot_test.cpp
+    tests/cpp/aot/llvm/cuda_execution_instance_aot_test.cpp
+    tests/cpp/aot/llvm/cuda_gated_aot_test.cpp)
+  target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE
+    taichi_core gtest_main ${_ti_backend_native_targets})
+  if(TARGET taichi_runtime_c_api)
+    target_sources(taichi_cuda_execution_domain_tests PRIVATE
+      tests/cpp/aot/llvm/cuda_execution_owner_test.cpp)
+    target_compile_definitions(taichi_cuda_execution_domain_tests PRIVATE TI_TEST_RUNTIME_C_API)
+    target_link_libraries(taichi_cuda_execution_domain_tests PRIVATE taichi_runtime_c_api)
+  endif()
+  get_target_property(_ti_backend_test_includes
+    ${TAICHI_BACKEND_SAFETY_TESTS_NAME} INCLUDE_DIRECTORIES)
+  target_include_directories(taichi_cuda_execution_domain_tests PRIVATE
+    ${_ti_backend_test_includes})
+  set_target_properties(taichi_cuda_execution_domain_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+  add_test(NAME taichi_cuda_execution_domain_tests
+    COMMAND taichi_cuda_execution_domain_tests)
+  set_tests_properties(taichi_cuda_execution_domain_tests PROPERTIES TIMEOUT 30)
 endif()

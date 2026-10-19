@@ -259,7 +259,10 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path, *, inner_
     if route == "masked":
         with zipfile.ZipFile(artifact) as archive:
             metadata = json.loads(archive.read("aot_metadata.json"))
-            assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == module._kernel_launch_abis
+            assert {item["key"]: item["value"] for item in metadata["kernel_launch_abis"]} == {
+                name: "cuda_graph_gate_context_v2" if name in module._kernel_launch_abis else "runtime_context_v2"
+                for name in module._exported_kernels
+            }
             assert {Path(name).stem for name in archive.namelist() if name.endswith(".bc")} == set(
                 module._exported_kernels
             )

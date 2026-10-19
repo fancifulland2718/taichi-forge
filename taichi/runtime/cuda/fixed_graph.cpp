@@ -2,20 +2,26 @@
 #include "taichi/program/runtime_fault.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include "taichi/rhi/cuda/graph_region_builder.h"
 #include "taichi/rhi/cuda/primitives/graph_ptx.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/runtime/cuda/bounded_graph.h"
 #include "taichi/runtime/cuda/parallel_graph.h"
 #include "taichi/runtime/cuda/predicate_graph.h"
 
 namespace taichi::lang::cuda {
-struct FixedGraph::State {
+namespace {
+std::atomic<std::uint64_t> next_instance_identity{1};
+}
+struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
   struct SelectedControl {
     NestedPredicateGraphControls controls;
     bool masked{false};
@@ -30,7 +36,19 @@ struct FixedGraph::State {
   };
   std::shared_ptr<RuntimeFaultDomain> fault_domain;
   std::shared_ptr<void> operands;
+  std::shared_ptr<RuntimeCompletionResources> instance_operands;
+  std::uint64_t instance_identity{0};
+  std::atomic<bool> retired{false};
+  bool independent{false};
+  bool preparation_started{false};
+  std::mutex retirement_mutex;
+  std::exception_ptr retirement_error;
+  void *temporaries{nullptr};
+  std::uintptr_t temporary_storage_identity{0};
+  std::size_t temporary_bytes{0};
   bool binding_frame{false};
+  bool native_only{false};
+  std::atomic<bool> retained_claimed{false};
   CUgraph graph{nullptr};
   CUgraphExec executable{nullptr};
   void *stream{nullptr};
@@ -48,12 +66,31 @@ struct FixedGraph::State {
   std::vector<std::shared_ptr<void>> sparse_replay_leases;
   std::vector<std::uint8_t> host_arguments;
   bool capturing{false};
-  bool submitted{false};
+  std::atomic<bool> submitted{false};
   void release_selected(bool backend_safe) {
     for (const auto &region : selected_controls)
       region->release(backend_safe);
   }
-  ~State() {
+  std::size_t retained_resource_count(
+      std::uint32_t kind) const noexcept override {
+    const auto retained = std::atomic_load(&instance_operands);
+    return retained ? retained->retained_resource_count(kind) : 0;
+  }
+  ~State() override {
+    try {
+      retire();
+    } catch (...) {
+      // An independent state with failed retirement is retained/quarantined
+      // by its domain. Unregistered states have created no backend resources.
+    }
+  }
+  void retire() override {
+    if (independent) {
+      retire_independent();
+      return;
+    }
+    if (retired.exchange(true))
+      return;
     bool backend_safe = false;
     if (fault_domain &&
         (!fault_domain->backend_calls_safe() ||
@@ -134,6 +171,86 @@ struct FixedGraph::State {
         region->release(false);
     }
   }
+  void retire_independent() {
+    std::lock_guard<std::mutex> lock(retirement_mutex);
+    if (retirement_error)
+      std::rethrow_exception(retirement_error);
+    if (retired.exchange(true))
+      return;
+    if (!preparation_started) {
+      std::atomic_store(&instance_operands,
+                        std::shared_ptr<RuntimeCompletionResources>{});
+      return;
+    }
+    try {
+      if (!fault_domain->backend_calls_safe() ||
+          fault_domain->state() == RuntimeLifecycleState::kFinalized)
+        throw std::runtime_error(
+            "Cannot retire CUDA execution instance after backend failure");
+      auto guard = CUDAContext::get_instance().get_guard();
+      auto &driver = CUDADriver::get_instance();
+      const auto check = [](std::uint32_t result, const char *operation) {
+        if (result != CUDA_SUCCESS)
+          throw BackendRuntimeError(
+              Arch::cuda, result, operation,
+              "CUDA execution instance retirement failed");
+      };
+      // Domain close has drained replay. Construction failure may still have
+      // work on the private preparation stream; never wait under a global
+      // submission lock or release operands before this prefix is proven.
+      if (capturing) {
+        check(driver.stream_end_capture.call(stream, &graph), "end capture");
+        capturing = false;
+      }
+      if (stream)
+        check(driver.stream_synchronize.call_concurrent(stream),
+              "wait instance preparation");
+      if (executable) {
+        check(driver.graph_exec_destroy.call(executable),
+              "destroy instance executable");
+        executable = nullptr;
+      }
+      if (graph) {
+        check(driver.graph_destroy.call(graph), "destroy instance graph");
+        graph = nullptr;
+      }
+      for (const auto &resource : capture_resources)
+        resource->release(true);
+      capture_resources.clear();
+      bounded.release(true);
+      release_selected(true);
+      for (const auto &region : parallel)
+        region->release(true);
+      const auto free = [&](void *pointer) {
+        if (pointer)
+          check(driver.mem_free.call(pointer), "free instance storage");
+      };
+      free(controls);
+      controls = nullptr;
+      free(arguments);
+      arguments = nullptr;
+      free(temporaries);
+      temporaries = nullptr;
+      if (stream) {
+        check(driver.stream_destroy.call(stream), "destroy preparation stream");
+        stream = nullptr;
+      }
+      sparse_replay_leases.clear();
+      std::atomic_store(&instance_operands,
+                        std::shared_ptr<RuntimeCompletionResources>{});
+    } catch (...) {
+      retirement_error = std::current_exception();
+      // Keep all remaining code/storage owners. The domain retains this state
+      // and propagates the first error; repeat close cannot report success.
+      try {
+        std::rethrow_exception(retirement_error);
+      } catch (const BackendRuntimeError &error) {
+        fault_domain->report_backend_error(error, 0);
+      } catch (...) {
+      }
+      std::rethrow_exception(retirement_error);
+    }
+  }
 };
 
 bool FixedGraph::available() {
@@ -155,18 +272,84 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations,
     : FixedGraph(operations, std::move(fault_domain), {}, false) {
 }
 
-FixedGraph::FixedGraph(const std::vector<Operation> &operations,
-                       std::shared_ptr<RuntimeFaultDomain> fault_domain,
-                       std::shared_ptr<void> operands,
-                       bool binding_frame)
-    : state_(std::make_unique<State>()) {
+FixedGraph::FixedGraph(
+    const std::vector<Operation> &operations,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    std::shared_ptr<void> operands,
+    bool binding_frame,
+    std::shared_ptr<ExecutionDomain> domain,
+    std::shared_ptr<RuntimeCompletionResources> instance_operands,
+    std::vector<std::shared_ptr<RuntimeClient>> *parts)
+    : state_(std::make_shared<State>()), domain_(std::move(domain)) {
+  if (domain_ || parts) {
+    if (!fault_domain || (domain_ && !domain_->belongs_to(fault_domain)) ||
+        (domain_ && parts) || !instance_operands)
+      throw std::invalid_argument(
+          "CUDA execution instance requires matching domain and operand "
+          "owners");
+    state_->independent = true;
+    state_->instance_identity =
+        next_instance_identity.fetch_add(1, std::memory_order_relaxed);
+    state_->instance_operands = std::move(instance_operands);
+  }
   state_->fault_domain = std::move(fault_domain);
   state_->operands = std::move(operands);
   state_->binding_frame = binding_frame;
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed("prepare CUDA graph");
+  if (state_->independent && !parts) {
+    std::unordered_set<const void *> active;
+    std::function<void(const std::vector<Operation> &)> validate;
+    validate = [&](const auto &steps) {
+      for (const auto &step : steps) {
+        if (const auto *dispatch = std::get_if<Dispatch>(&step)) {
+          if (!dispatch->external) {
+            if (!dispatch->launcher)
+              throw std::invalid_argument("CUDA dispatch has no launcher");
+            dispatch->launcher->validate_execution_domain(dispatch->handle);
+          }
+          continue;
+        }
+        std::visit(
+            [&](const auto &region) {
+              using T = std::decay_t<decltype(region)>;
+              if constexpr (!std::is_same_v<T, Dispatch>) {
+                if (!region || !active.insert(region.get()).second)
+                  throw std::invalid_argument("Invalid CUDA control topology");
+                if constexpr (std::is_same_v<T,
+                                             std::shared_ptr<const Parallel>>) {
+                  for (const auto &branch : region->branches)
+                    validate(branch);
+                } else {
+                  validate(region->condition);
+                  if constexpr (std::is_same_v<T,
+                                               std::shared_ptr<const Branch>>) {
+                    for (const auto &body : region->bodies)
+                      validate(body);
+                  } else {
+                    validate(region->body);
+                  }
+                }
+                active.erase(region.get());
+              }
+            },
+            step);
+      }
+    };
+    validate(operations);
+  }
   try {
-    initialize(operations);
+    if (domain_)
+      domain_->prepare_instance(state_, [&] {
+        state_->preparation_started = true;
+        initialize(operations);
+      });
+    else if (parts) {
+      parts->push_back(state_);
+      state_->preparation_started = true;
+      initialize(operations);
+    } else
+      initialize(operations);
   } catch (const BackendRuntimeError &error) {
     if (state_->fault_domain)
       state_->fault_domain->report_backend_error(error, 0);
@@ -179,6 +362,77 @@ FixedGraph::FixedGraph(const std::vector<Operation> &operations,
           0);
     throw;
   }
+}
+
+std::unique_ptr<FixedGraph> FixedGraph::prepare_execution_instance(
+    const std::vector<Operation> &operations,
+    std::shared_ptr<RuntimeFaultDomain> owner,
+    std::shared_ptr<ExecutionDomain> domain,
+    std::shared_ptr<RuntimeCompletionResources> operands) {
+  if (!domain)
+    throw std::invalid_argument("CUDA execution instance requires a domain");
+  return std::unique_ptr<FixedGraph>(
+      new FixedGraph(operations, std::move(owner), {}, false, std::move(domain),
+                     std::move(operands)));
+}
+
+std::unique_ptr<FixedGraph> FixedGraph::prepare_execution_part(
+    const std::vector<Operation> &operations,
+    std::shared_ptr<RuntimeFaultDomain> owner,
+    std::shared_ptr<RuntimeCompletionResources> operands,
+    std::vector<std::shared_ptr<RuntimeClient>> &parts) {
+  return std::unique_ptr<FixedGraph>(
+      new FixedGraph(operations, std::move(owner), {}, false, {},
+                     std::move(operands), &parts));
+}
+
+void FixedGraph::enqueue_execution_part(void *stream) {
+  if (!state_->independent || domain_ || !stream || state_->retired.load())
+    throw std::logic_error(
+        "CUDA execution part requires its live enclosing domain");
+  CUDAContext::get_instance().launch_graph(state_->executable, stream);
+}
+
+void FixedGraph::validate_retained_provider() const {
+  if (!state_->native_only || state_->binding_frame || domain_ ||
+      state_->submitted.load() || state_->retired.load() ||
+      state_->retained_claimed.load())
+    throw std::invalid_argument(
+        "CUDA retained provider requires a fresh native-only recording");
+}
+
+void FixedGraph::adopt_retained_provider(
+    const std::shared_ptr<RuntimeFaultDomain> &owner,
+    std::vector<std::shared_ptr<RuntimeClient>> &parts) {
+  std::lock_guard<std::mutex> lock(state_->retirement_mutex);
+  validate_retained_provider();
+  if (!owner || (state_->fault_domain && state_->fault_domain != owner))
+    throw std::invalid_argument("CUDA provider belongs to another runtime");
+  parts.push_back(state_);
+  state_->retained_claimed = true;
+  state_->fault_domain = owner;
+  state_->independent = true;
+  state_->preparation_started = true;
+  state_->instance_identity =
+      next_instance_identity.fetch_add(1, std::memory_order_relaxed);
+  // Upload once during preparation. A failed upload leaves the entire state
+  // registered for retirement; replay never allocates or uploads this graph.
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  driver.stream_create(&state_->stream, 1);
+  driver.graph_upload(state_->executable, state_->stream);
+  const auto result = driver.stream_synchronize.call_concurrent(state_->stream);
+  if (result != CUDA_SUCCESS)
+    throw BackendRuntimeError(Arch::cuda, result, "upload provider recording",
+                              "CUDA provider preparation failed");
+  driver.stream_destroy(state_->stream);
+  state_->stream = nullptr;
+}
+
+void FixedGraph::enqueue_retained_provider(void *stream) {
+  if (!state_->native_only)
+    throw std::logic_error("CUDA provider recording contains kernel packets");
+  enqueue_execution_part(stream);
 }
 
 std::shared_ptr<FixedGraph> FixedGraph::capture_binding_frame(
@@ -206,6 +460,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   auto lock = cuda.get_submission_lock_guard();
   auto &driver = CUDADriver::get_instance();
   auto &state = *state_;
+  state.native_only = std::all_of(
+      operations.begin(), operations.end(), [](const auto &operation) {
+        const auto *dispatch = std::get_if<Dispatch>(&operation);
+        return dispatch && dispatch->external && !dispatch->bounded_extent &&
+               !dispatch->adaptive_block_dim;
+      });
   if (state.binding_frame) {
     if (!driver.graph_node_get_type.available() ||
         !driver.graph_exec_update_v1.available())
@@ -223,7 +483,8 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   std::unordered_map<const Branch *, std::size_t> branch_index;
   std::unordered_map<const Parallel *, std::size_t> parallel_index;
   std::vector<const Parallel *> parallel_regions;
-  std::unordered_set<const Dispatch *> parallel_dispatches;
+  std::unordered_map<const Dispatch *, std::size_t> parallel_dispatches;
+  std::size_t temporary_regions = 1;
   // Each occurrence owns its control storage, even for a reused descriptor.
   // Masked packets contain gate addresses and cannot share across occurrences.
   std::unordered_map<const Operation *, std::size_t> selected_index;
@@ -308,7 +569,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                  .second)
           continue;
         parallel_regions.push_back(parallel.get());
+        std::size_t branch_index = 0;
         for (const auto &branch : parallel->branches) {
+          // Branch joins end every parallel temporary lifetime. Region zero
+          // can therefore serve sequential work and the first branch; later
+          // serial parallel regions reuse the same bounded arena.
+          temporary_regions = std::max(temporary_regions, branch_index + 1);
           if (branch.empty())
             throw std::invalid_argument(
                 "Fixed CUDA parallel requires nonempty branches");
@@ -318,9 +584,10 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                 dispatch->adaptive_block_dim)
               throw std::invalid_argument(
                   "Fixed CUDA parallel requires ordinary dispatch branches");
-            parallel_dispatches.insert(dispatch);
+            parallel_dispatches.emplace(dispatch, branch_index);
           }
           collect(branch);
+          ++branch_index;
         }
       } else {
         const auto &loop = std::get<std::shared_ptr<const While>>(operation);
@@ -487,6 +754,18 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   std::vector<std::size_t> offsets;
   auto &image = state.host_arguments;
   constexpr std::size_t alignment = 16;  // RuntimeContext argument ABI.
+  if (state.independent &&
+      std::any_of(dispatches.begin(), dispatches.end(),
+                  [](const auto *dispatch) { return !dispatch->external; })) {
+    if (temporary_regions >
+        std::numeric_limits<std::size_t>::max() / taichi_global_tmp_buffer_size)
+      throw std::invalid_argument(
+          "CUDA execution temporary storage size overflow");
+    state.temporary_bytes = temporary_regions * taichi_global_tmp_buffer_size;
+    driver.malloc(&state.temporaries, state.temporary_bytes);
+    state.temporary_storage_identity =
+        reinterpret_cast<std::uintptr_t>(state.temporaries);
+  }
   for (std::size_t i = 0; i < dispatches.size(); ++i) {
     const auto &dispatch = *dispatches[i];
     if (dispatch.external) {
@@ -509,6 +788,16 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
                         dispatch.handle, *dispatch.context, packets[i], true)),
         "Unsupported fixed CUDA Graph dispatch");
     auto &packet = packets[i];
+    if (state.independent) {
+      const auto region = parallel_dispatches.find(&dispatch);
+      const auto index =
+          region == parallel_dispatches.end() ? 0 : region->second;
+      dispatch.launcher->bind_execution_temporaries(
+          packet,
+          static_cast<char *>(state.temporaries) +
+              index * taichi_global_tmp_buffer_size,
+          taichi_global_tmp_buffer_size);
+    }
     if (packet.sparse_replay_lease) {
       TI_ERROR_IF(parallel_dispatches.count(&dispatch),
                   "Sparse fixed CUDA dispatch cannot enter a parallel branch");
@@ -836,7 +1125,7 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
   }
   if (!state.binding_frame)
     driver.graph_instantiate_with_flags(&state.executable, state.graph, 0);
-  if (grid_limit || has_device_update) {
+  if (grid_limit || has_device_update || state.independent) {
     driver.graph_upload(state.executable, state.stream);
     driver.stream_synchronize(state.stream);
     if (grid_limit) {
@@ -880,7 +1169,29 @@ void FixedGraph::initialize(const std::vector<Operation> &operations) {
 }
 
 FixedGraph::~FixedGraph() = default;
+RuntimeCompletion FixedGraph::submit(
+    const std::vector<RuntimeCompletion> &dependencies) {
+  if (!domain_)
+    throw std::invalid_argument(
+        "Fixed CUDA graph was not prepared for an execution domain");
+  return domain_->submit(dependencies, state_, [state = state_](void *stream) {
+    CUDAContext::get_instance().launch_graph(state->executable, stream);
+  });
+}
+
+FixedGraph::InstanceSnapshot FixedGraph::instance_snapshot() const {
+  return {state_->instance_identity, state_->temporary_storage_identity,
+          state_->temporary_bytes, state_->retired.load()};
+}
+
 void FixedGraph::run() {
+  if (domain_) {
+    (void)submit();
+    return;
+  }
+  if (state_->independent)
+    throw std::invalid_argument(
+        "CUDA execution parts require enclosing submission");
   if (state_->binding_frame)
     throw std::invalid_argument(
         "Captured CUDA binding frames require a replay family");
@@ -902,7 +1213,8 @@ std::size_t FixedGraph::argument_bytes() const {
   return state_->bytes;
 }
 std::size_t FixedGraph::control_bytes() const {
-  return state_->control_bytes + state_->bounded.device_bytes();
+  return state_->control_bytes + state_->bounded.device_bytes() +
+         state_->temporary_bytes;
 }
 std::size_t FixedGraph::capture_bytes() const {
   return state_->capture_bytes;

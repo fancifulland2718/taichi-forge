@@ -71,10 +71,15 @@ struct LlvmAotMetadata {
   std::map<std::string, std::string> cuda_cubin_providers;
   std::string resource_binding;
   std::vector<aot::InitialRootData> initial_root_data;
-  // Only non-ordinary entries are listed. Schema 8 prevents old readers from
-  // treating prefix-dependent device code as an ordinary callable kernel.
+  // Non-legacy call contracts, including an appended RuntimeContext binding.
+  // Schema 8 and the exact strings prevent old readers from launching code
+  // with an insufficient context or a missing argument prefix.
   std::map<std::string, std::string> kernel_launch_abis;
   std::string launch_abi_sha256;
+  // Optional compiler facts; absence means unknown, never domain-safe. These
+  // do not change the serialized task layout or the device call ABI.
+  std::map<std::string, std::uint32_t> kernel_runtime_state;
+  std::string runtime_state_sha256;
 
   TI_IO_DEF(schema_version,
             required_caps,
@@ -85,10 +90,17 @@ struct LlvmAotMetadata {
             resource_binding,
             initial_root_data,
             kernel_launch_abis,
-            launch_abi_sha256);
+            launch_abi_sha256,
+            kernel_runtime_state,
+            runtime_state_sha256);
 };
 
 inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
+  TI_ERROR_IF(metadata.kernel_runtime_state.empty()
+                  ? !metadata.runtime_state_sha256.empty()
+                  : metadata.runtime_state_sha256.size() != 64 ||
+                        metadata.abi_sha256.size() != 64,
+              "AOT runtime-state inventory requires its metadata checksum");
   auto base_schema = metadata.schema_version;
   const bool launch_abi = base_schema == kKernelLaunchAbiAotSchemaVersion;
   TI_ERROR_IF(launch_abi != !metadata.kernel_launch_abis.empty() ||
@@ -102,7 +114,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                 "AOT kernel launch ABI requires BC/PTX/cubin and checksums");
     for (const auto &[name, abi] : metadata.kernel_launch_abis) {
       TI_ERROR_IF(name.empty() || name.find('\0') != std::string::npos ||
-                      abi != cuda::kGraphGateLaunchABI,
+                      !cuda::is_declared_launch_abi(abi),
                   "Unsupported AOT kernel launch ABI declaration: {}", name);
     }
     // The launch declaration extends each existing representation/resource

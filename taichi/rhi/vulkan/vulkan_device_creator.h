@@ -85,6 +85,9 @@ class TI_DLL_EXPORT VulkanDeviceCreator {
     // custom surface creator
     std::function<VkSurfaceKHR(VkInstance)> surface_creator;
     bool enable_validation_layer{false};
+    // Per-owner selection must not overwrite the process default used by GGUI
+    // and other runtimes. An explicit index never falls back to another GPU.
+    std::optional<uint32_t> device_index;
   };
 
   explicit VulkanDeviceCreator(const Params &params);
@@ -101,7 +104,8 @@ class TI_DLL_EXPORT VulkanDeviceCreator {
  private:
   void create_instance(uint32_t vk_api_version, bool manual_create);
   void setup_debug_messenger();
-  void pick_physical_device(VkSurfaceKHR test_surface);
+  void pick_physical_device(VkSurfaceKHR test_surface,
+                            std::optional<uint32_t> device_index);
   void create_logical_device(bool manual_create);
   void query_physical_device_features2(
       VkPhysicalDeviceFeatures2 *features) const;

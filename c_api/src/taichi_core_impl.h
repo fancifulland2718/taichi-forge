@@ -42,6 +42,10 @@
 namespace taichi::lang {
 class RuntimeFaultDomain;
 class RuntimeCompletion;
+class ExternalSynchronizationDomain;
+namespace cuda {
+class ExecutionDomainRegistry;
+}
 }
 
 #define TI_CAPI_NOT_SUPPORTED(x) ti_set_last_error(TI_ERROR_NOT_SUPPORTED, #x);
@@ -154,6 +158,14 @@ class Runtime {
     class AotModule *owner;
     taichi::lang::aot::StructLayout layout;
   };
+  struct BorrowedMemory {
+    // Shared by all finite views of this loan. Mutation is cold and serialized
+    // by submission_mutex; get_memory observes live under memory_mutex.
+    std::shared_ptr<void> owner;
+    std::shared_ptr<taichi::lang::ExternalSynchronizationDomain>
+        external_access;
+    bool live{true};
+  };
   struct MemoryAllocation {
     taichi::lang::DeviceAllocation allocation;
     uint64_t size;
@@ -169,6 +181,7 @@ class Runtime {
     // Internal aliases can instead be owned by their enclosing module. That
     // lifetime is ordered by prepared retirement, not by a placeholder lease.
     bool owns_allocation{true};
+    std::shared_ptr<BorrowedMemory> borrowed;
   };
 
  private:
@@ -184,6 +197,9 @@ class Runtime {
   taichi::lang::NativeProviderLocations native_provider_locations_;
   taichi::lang::NativeLibraryLocations native_library_locations_;
   std::shared_ptr<taichi::lang::RuntimeFaultDomain> runtime_fault_domain_;
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry>
+      cuda_execution_domains_;
+  bool execution_domains_retiring_{false};
   bool borrowed_fault_domain_{false};
   std::shared_ptr<capi::SubmissionCompletionState> submission_completions_;
   std::function<taichi::lang::RuntimeCompletion()> borrowed_completion_recorder_;
@@ -230,8 +246,13 @@ class Runtime {
                            uint64_t base_offset = 0,
                            std::shared_ptr<void> storage_owner = {},
                            uint64_t byte_offset = 0,
-                           bool owns_allocation = true);
-  MemoryAllocation get_memory(TiMemory memory) const;
+                           bool owns_allocation = true,
+                           std::shared_ptr<BorrowedMemory> borrowed = {});
+  // Only whole-recipe cold binding may opt into external synchronization.
+  // Ordinary launch/copy/map/export paths cannot bypass the access epoch.
+  MemoryAllocation get_memory(TiMemory memory,
+                              bool prepared_external_access = false) const;
+  void retire_borrowed_memory(const std::shared_ptr<BorrowedMemory> &borrowed);
   static std::uintptr_t new_handle_token();
   TiKernel register_kernel(KernelBinding binding);
   TiComputeGraph register_graph(GraphBinding binding);
@@ -241,6 +262,7 @@ class Runtime {
   const GraphBinding &get_graph(TiComputeGraph graph) const;
   const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
   void retire_module(class AotModule *owner);
+  void invalidate_module_entries(class AotModule *owner);
   void register_module(class AotModule *owner);
   // Explicit borrower retirement: recordings before code and buffers. The
   // Program finalizer has already synchronized and passes false.
@@ -275,7 +297,15 @@ class Runtime {
   // Cold borrower construction only; ownership of the domain stays with the
   // Program. Closing this C API view must not finalize its owner's domain.
   void borrow_runtime_fault_domain(
-      std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain);
+      std::shared_ptr<taichi::lang::RuntimeFaultDomain> domain,
+      std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry> domains =
+          {});
+  std::shared_ptr<taichi::lang::cuda::ExecutionDomainRegistry>
+  cuda_execution_domains();
+  // A borrowed view never retires its Program's shared domains. Its resource
+  // retirement already waits for outstanding execution before freeing views.
+  void retire_execution_domains();
+  void synchronize_execution_domains();
   void borrow_completion_recorder(
       std::function<taichi::lang::RuntimeCompletion()> recorder);
   void prepare_submission_completion();
@@ -318,6 +348,7 @@ class Runtime {
 
 class AotModule {
   Runtime *runtime_;
+  bool code_live_{true};
   std::unique_ptr<taichi::lang::aot::Module> aot_module_;
   std::unordered_map<std::string,
                      std::unique_ptr<taichi::lang::aot::CompiledGraph>>
@@ -327,6 +358,7 @@ class AotModule {
   std::unordered_map<const taichi::lang::Type *, TiNdArrayLayout> layout_handles_;
 
   TiNdArrayLayout layout_handle(taichi::lang::DataType type);
+  void check_code_live() const;
 
  public:
   AotModule(Runtime &runtime,
@@ -340,6 +372,9 @@ class AotModule {
   taichi::lang::aot::CompiledGraph *get_cgraph(const std::string &name);
   taichi::lang::aot::Module &get();
   Runtime &runtime();
+  // Cold live-JIT loan retirement. Keep the host shell owned by Runtime but
+  // drain its independent users before invalidating entry handles/code access.
+  void retire_borrowed_code();
 };
 
 namespace {

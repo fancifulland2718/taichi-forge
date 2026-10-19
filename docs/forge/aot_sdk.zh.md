@@ -3,6 +3,9 @@
 [English](aot_sdk.en.md)
 
 应用产物选择、生产/消费成本和包归属见 [AOT 部署配置](aot_deployment_profiles.zh.md)。
+有界独立 CUDA 队列、精确设备依赖和显式初始化见
+[CUDA 执行域](cuda_execution_domains.zh.md)。开发接口在运行时绑定已保存计划，
+不序列化 stream 身份，也不改变已选择的执行路线。
 
 0.6.4 开发版可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
 消费端链接 `TaichiForge::c_api`，无需导入 Python。CPU/CUDA 仍使用随 SDK
@@ -3549,6 +3552,17 @@ capability 80、PTX 7.0，面向 Ampere 及更新设备；已知部署设备时�
 bitcode；同一模块内失败的 kernel 查询保持失败，替换产物后需重新加载模块。
 schema 5 还会校验声明的 `dense_v1`、`list_v1`、`sparse_v1` 或 `sparse_v2` 资源重定位合同。旧 schema 2 文本、schema 3 bitcode
 及 schema 4 PTX 仍可读取。
+
+新 LLVM 产物复用已有 schema 8 的调用声明来描述编译后的上下文布局：普通入口使用
+`runtime_context_v2`，带 `cuda_graph_gate_v1` 前缀的入口使用
+`cuda_graph_gate_context_v2`。上下文尾部增加一个临时区指针，并通过 `real_func`
+传递；空指针保留 runtime 原有的顺序临时区。BC 保存对应模块标记，PTX/cubin 保存
+经校验的调用声明，旧读取器在执行前拒绝未知布局。该布局需要配对的私有 ABI106
+组件，本身不代表已经公开独立 stream，也不代表所有 prepared execution 均可并发复用。
+Windows CUDA 已在独立原生 runtime 中交错执行保存的普通/gated kernel 实例，分别
+绑定参数和临时区，在 compute capability 120 上覆盖 fast/balanced/full 的 BC/PTX/cubin。
+导出目标包含默认 SM80/PTX7.0 与显式 SM120/PTX8.7。CUDA range/mesh 循环在生成的调用方
+分配对齐的定长线程临时区，避免运行时 helper 的变长数组引入多余动态栈指令；默认部署目标保持不变。
 
 Windows CUDA 已验证 PTX 的 dense field、scalar/vector/matrix ndarray 前向、
 反向和普通 CGraph 部署。这不代表已获得运行加速，也不改变上述 field 资源及

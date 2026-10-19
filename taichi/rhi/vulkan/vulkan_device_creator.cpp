@@ -401,7 +401,7 @@ VulkanDeviceCreator::VulkanDeviceCreator(
     RHI_ASSERT((test_surface != VK_NULL_HANDLE) &&
                "failed to create window surface!");
   }
-  pick_physical_device(test_surface);
+  pick_physical_device(test_surface, params.device_index);
   create_logical_device(manual_create);
 
   {
@@ -592,7 +592,8 @@ void VulkanDeviceCreator::setup_debug_messenger() {
       "failed to set up debug messenger");
 }
 
-void VulkanDeviceCreator::pick_physical_device(VkSurfaceKHR test_surface) {
+void VulkanDeviceCreator::pick_physical_device(
+    VkSurfaceKHR test_surface, std::optional<uint32_t> device_index) {
   uint32_t device_count = 0;
   vkEnumeratePhysicalDevices(instance_, &device_count, nullptr);
   RHI_ASSERT(device_count > 0 && "failed to find GPUs with Vulkan support");
@@ -612,6 +613,12 @@ void VulkanDeviceCreator::pick_physical_device(VkSurfaceKHR test_surface) {
   }
 
   auto device_id = VulkanLoader::instance().visible_device_id;
+  if (device_index) {
+    if (*device_index >= devices.size() ||
+        !get_device_score(devices[*device_index], test_surface))
+      throw std::invalid_argument("Requested Vulkan device is unavailable");
+    device_id = std::to_string(*device_index);
+  }
   bool has_visible_device{false};
   if (!device_id.empty()) {
     int id = std::stoi(device_id);

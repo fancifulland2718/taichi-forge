@@ -49,6 +49,7 @@
 
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/runtime/cuda/execution_domain.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_primitives.h"
 #include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
@@ -122,6 +123,7 @@ Program *&runtime_completion_detail::active_runtime_submission_program()
 namespace {
 
 thread_local Program *active_snode_tree_lifecycle_program = nullptr;
+thread_local Program *active_runtime_storage_retirement_program = nullptr;
 thread_local Program *active_runtime_resource_graph_program = nullptr;
 thread_local Program::RuntimeResourceGraphScope *active_runtime_resource_graph_scope = nullptr;
 
@@ -5010,6 +5012,23 @@ static void remove_snode_frontend_caches(
 
 void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   TI_COMPILE_PROFILER("cpp.snode.destroy.total");
+  if (active_runtime_storage_retirement_program)
+    throw std::logic_error("Reentrant runtime storage destruction");
+  // Both destructive operations can retire borrowed clients. Serialize them
+  // before taking tree/resource locks, so finalization cannot hold a client
+  // retirement transaction while tree destruction waits for that transaction
+  // with a borrower blocked behind its resource lock.
+  std::lock_guard<std::recursive_mutex> finalization_lock(
+      runtime_finalization_mutex_);
+  if (finalized_ || runtime_finalization_in_progress_)
+    throw std::runtime_error(
+        "Cannot destroy an SNode tree after runtime retirement");
+  active_runtime_storage_retirement_program = this;
+  struct DestructionScope {
+    ~DestructionScope() {
+      active_runtime_storage_retirement_program = nullptr;
+    }
+  } destruction_scope;
   TI_ASSERT(arch_uses_llvm(compile_config().arch) ||
             compile_config().arch == Arch::vulkan ||
             compile_config().arch == Arch::dx11 ||
@@ -5039,6 +5058,10 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // sections and waits for current host submissions to finish. Explicit tree
   // destruction is a cold path, so complete outstanding device work before
   // releasing the root allocation.
+  if (runtime_clients_) {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.runtime_clients");
+    runtime_clients_->retire_snode_tree(tree_id);
+  }
   {
     TI_COMPILE_PROFILER("cpp.snode.destroy.backend_sync");
     program_impl_->synchronize();
@@ -6354,6 +6377,55 @@ void Program::resolve_dense_storage_launch_context(
   }
 }
 
+Program::DenseStorageBorrow Program::borrow_dense_storage(
+    const storage::DenseStorageDescriptor &descriptor,
+    const std::shared_ptr<RuntimeClient> &client) {
+  std::optional<SNodeTreeLifecycleReadGuard> tree_guard;
+  if (active_snode_tree_lifecycle_program != this)
+    tree_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
+  auto resource_guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("borrow dense storage");
+  const auto &owner = descriptor.owner();
+  TI_ERROR_IF(
+      !client || (owner.kind != storage::StorageOwnerKind::kProgramNdarray &&
+                  owner.kind != storage::StorageOwnerKind::kSNodePayload &&
+                  owner.kind != storage::StorageOwnerKind::kExternalManaged),
+      "Dense storage borrowing requires a live managed range");
+  const auto &properties = descriptor.properties();
+  TI_ERROR_IF(
+      !properties.ndarray_abi_compatible || !properties.compact_contiguous ||
+          !properties.element_contiguous || !properties.canonical_aos ||
+          descriptor.access() != storage::StorageAccess::kReadWrite,
+      "Dense storage borrowing requires a compact read-write AOS range");
+  NdarrayLaunchLeases arrays;
+  ExternalDenseStorageLaunchLeases external;
+  const auto binding =
+      resolve_dense_storage_descriptor(descriptor, arrays, external);
+  DenseStorageBorrow result{
+      binding.allocation, binding.byte_offset, binding.byte_size, {}};
+  if (owner.kind == storage::StorageOwnerKind::kProgramNdarray) {
+    // Launch resolution may reuse an inflight lease. A cold borrower instead
+    // owns its own reference, independently of default-stream completion.
+    auto lease = acquire_ndarray_external_lease(owner.ndarray_handle);
+    TI_ERROR_IF(!lease, "Cannot retain borrowed ndarray storage");
+    result.lease = std::make_shared<NdarrayResourceLease>(std::move(lease));
+  } else if (owner.kind == storage::StorageOwnerKind::kExternalManaged) {
+    auto [status, lease] = external_dense_storage_resources_.acquire(
+        external_dense_storage_handle(owner));
+    TI_ERROR_IF(status != ExternalDenseStorageRegistry::Result::kSuccess ||
+                    !lease || compile_config().arch != Arch::cuda ||
+                    !lease->synchronization_domain,
+                "External borrowing requires live synchronized CUDA storage");
+    result.external_access = lease->synchronization_domain;
+    result.lease =
+        std::make_shared<ExternalDenseStorageLease>(std::move(lease));
+    retain_external_storage_client(client, owner);
+  } else {
+    retain_runtime_client(client, {owner.tree});
+  }
+  return result;
+}
+
 std::shared_ptr<PreparedNativeStorage> Program::prepare_native_storage(
     const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
     const std::vector<bool> &writable) {
@@ -7069,7 +7141,7 @@ void Program::debug_inject_runtime_fault(
     const std::string &operation,
     const std::string &message) {
   const std::uint64_t sequence =
-      next_runtime_completion_sequence_.load(std::memory_order_acquire);
+      runtime_fault_domain_->next_submission_sequence();
   runtime_fault_domain_->report_fatal(
       {compile_config().arch, backend_code, sequence, operation, message});
 }
@@ -7124,11 +7196,11 @@ RuntimeCompletion Program::record_runtime_completion_with_wait_mode(
 
     if (!runtime_submission_pending_.exchange(false,
                                               std::memory_order_acq_rel)) {
-      const std::uint64_t next =
-          next_runtime_completion_sequence_.load(std::memory_order_relaxed);
-      return RuntimeCompletion::completed(
-          compile_config().arch, runtime_completion_domain_,
-          next > 1 ? next - 1 : 0, runtime_fault_domain_);
+      if (last_default_runtime_completion_.valid())
+        return last_default_runtime_completion_;
+      return RuntimeCompletion::completed(compile_config().arch,
+                                          runtime_completion_domain_, 0,
+                                          runtime_fault_domain_);
     }
 
     const std::uint64_t previous_submission_epoch =
@@ -7138,10 +7210,7 @@ RuntimeCompletion Program::record_runtime_completion_with_wait_mode(
     const std::uint64_t submission_epoch = previous_submission_epoch + 1;
 
     const std::uint64_t sequence =
-        next_runtime_completion_sequence_.fetch_add(
-            1, std::memory_order_relaxed);
-    TI_ASSERT(sequence != 0 &&
-              sequence != (std::numeric_limits<std::uint64_t>::max)());
+        runtime_fault_domain_->allocate_submission_sequence();
 
     try {
       if (arch_is_cpu(compile_config().arch)) {
@@ -7186,6 +7255,7 @@ RuntimeCompletion Program::record_runtime_completion_with_wait_mode(
         release_completed_external_dense_storage_leases();
         release_completed_vulkan_native_resources();
       }
+      last_default_runtime_completion_ = result;
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
     } catch (...) {
@@ -7297,8 +7367,7 @@ Program::debug_runtime_completion_stats() const {
       {"completed_submission_epoch",
        last_runtime_completion_submission_epoch_.load(
            std::memory_order_acquire)},
-      {"next_sequence",
-       next_runtime_completion_sequence_.load(std::memory_order_acquire)},
+      {"next_sequence", runtime_fault_domain_->next_submission_sequence()},
       {"active", active},
       {"pending", pending},
       {"failed", failed},
@@ -7572,10 +7641,32 @@ storage::StorageOwnerRef Program::register_external_dense_storage(
 
 void Program::retire_external_dense_storage(
     const storage::StorageOwnerRef &owner) {
+  if (active_runtime_storage_retirement_program)
+    throw std::logic_error("Reentrant runtime storage destruction");
+  active_runtime_storage_retirement_program = this;
+  struct RetirementScope {
+    ~RetirementScope() {
+      active_runtime_storage_retirement_program = nullptr;
+    }
+  } retirement_scope;
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const auto handle = external_dense_storage_handle(owner);
   TI_ERROR_IF(!handle, "External dense storage belongs to another Program");
+  auto [result, lease] = external_dense_storage_resources_.acquire(handle);
+  TI_ERROR_IF(
+      result != ExternalDenseStorageRegistry::Result::kSuccess || !lease,
+      "External dense storage is stale or already retired");
+  const auto lifecycle = runtime_fault_domain_->state();
+  if (runtime_clients_ && lifecycle != RuntimeLifecycleState::kFinalizing &&
+      lifecycle != RuntimeLifecycleState::kFinalized) {
+    // Callbacks enter only their native Runtime gate, not the borrower scope.
+    // During whole-owner finalization, admission is already closed and the
+    // global client drain owns these leases. Do not wait on that transaction
+    // with a resource guard held: another borrower may need the same guard to
+    // exit before its owner callback can finish.
+    runtime_clients_->retire_storage(handle);
+  }
   TI_ERROR_IF(external_dense_storage_resources_.retire(handle) !=
                   ExternalDenseStorageRegistry::Result::kSuccess,
               "External dense storage is stale or already retired");
@@ -7724,6 +7815,16 @@ Program::debug_texture_resource_identity(const Texture *view) const {
 void Program::synchronize() {
   ensure_runtime_submission_allowed("Program synchronize");
   RuntimeProgramSyncStatisticsScope statistics_scope(this);
+#ifdef TI_WITH_CUDA
+  std::shared_ptr<cuda::ExecutionDomainRegistry> domains;
+  {
+    std::lock_guard<std::recursive_mutex> lock(
+        runtime_resource_submission_mutex_);
+    domains = cuda_execution_domains_;
+  }
+  if (domains)
+    domains->synchronize();
+#endif
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const bool tracking_was_enabled =
@@ -7735,8 +7836,7 @@ void Program::synchronize() {
       program_impl_->synchronize();
     } catch (const BackendRuntimeError &error) {
       runtime_fault_domain_->report_backend_error(
-          error, next_runtime_completion_sequence_.load(
-                     std::memory_order_acquire));
+          error, runtime_fault_domain_->next_submission_sequence());
       if (runtime_fault_domain_->has_fatal_fault()) {
         runtime_submission_pending_.store(false, std::memory_order_release);
         const auto fault = runtime_fault_domain_->snapshot();
@@ -7862,6 +7962,27 @@ uint64 Program::fetch_result_uint64(int i) {
   return program_impl_->fetch_result_uint64(i, result_buffer);
 }
 
+std::shared_ptr<cuda::ExecutionDomainRegistry>
+Program::cuda_execution_domains() {
+#ifdef TI_WITH_CUDA
+  std::lock_guard<std::recursive_mutex> guard(
+      runtime_resource_submission_mutex_);
+  runtime_fault_domain_->throw_if_new_submission_disallowed(
+      "access CUDA execution domains");
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "Execution domains require a CUDA runtime");
+  if (!cuda_execution_domains_) {
+    auto domains =
+        std::make_shared<cuda::ExecutionDomainRegistry>(runtime_fault_domain_);
+    retain_runtime_client(domains);
+    cuda_execution_domains_ = std::move(domains);
+  }
+  return cuda_execution_domains_;
+#else
+  throw std::runtime_error("CUDA support is not compiled in");
+#endif
+}
+
 void Program::attach_runtime_client(
     const std::shared_ptr<RuntimeClient> &client) {
   auto guard = acquire_runtime_resource_submission_guard();
@@ -7882,12 +8003,53 @@ void Program::retain_runtime_client(
   runtime_clients_->retain(client);
 }
 
+void Program::retain_runtime_client(
+    const std::shared_ptr<RuntimeClient> &client,
+    const std::vector<SNodeTreeDependency> &snode_tree_dependencies) {
+  // Match graph/tree-destruction lock order: tree lifecycle before resources.
+  auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  auto guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("retain SNode runtime client");
+  // IDs can be reused, so qualify the frozen closure by generation before
+  // registering it. Successful destruction removes every matching client
+  // before an ID can become available to a new tree.
+  validate_snode_tree_dependencies(snode_tree_dependencies, "Runtime client");
+  std::vector<int> snode_tree_ids;
+  snode_tree_ids.reserve(snode_tree_dependencies.size());
+  for (const auto &dependency : snode_tree_dependencies)
+    snode_tree_ids.push_back(dependency.tree_id);
+  if (!runtime_clients_)
+    runtime_clients_ = std::make_unique<RuntimeClientRegistry>();
+  runtime_clients_->retain(client, std::move(snode_tree_ids));
+}
+
 void Program::detach_runtime_client(RuntimeClient *client) {
   // The borrower holds its own lifecycle lock and the existing submission
   // guard. Finalization invokes callbacks without either registry lock held.
   if (runtime_clients_) {
     runtime_clients_->detach(client);
   }
+}
+
+void Program::retain_external_storage_client(
+    const std::shared_ptr<RuntimeClient> &client,
+    const storage::StorageOwnerRef &owner) {
+  auto guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("retain external storage client");
+  const auto handle = external_dense_storage_handle(owner);
+  TI_ERROR_IF(!handle, "External dense storage belongs to another Program");
+  auto [result, lease] = external_dense_storage_resources_.acquire(handle);
+  TI_ERROR_IF(
+      result != ExternalDenseStorageRegistry::Result::kSuccess || !lease,
+      "External storage client references a retired generation");
+  if (!runtime_clients_)
+    runtime_clients_ = std::make_unique<RuntimeClientRegistry>();
+  // Whole-owner finalization closes registries before invoking client drains.
+  // Keep the allocation alive through that ordering and through failed subset
+  // retirement, even if the producer drops its own last view concurrently.
+  runtime_clients_->retain_storage(
+      client, {handle},
+      std::make_shared<ExternalDenseStorageLease>(std::move(lease)));
 }
 
 gfx::GfxRuntime *Program::get_gfx_runtime_for_borrowing() {
@@ -7900,6 +8062,9 @@ gfx::GfxRuntime *Program::get_gfx_runtime_for_borrowing() {
 }
 
 void Program::finalize() {
+  if (active_runtime_storage_retirement_program == this)
+    throw std::logic_error(
+        "Cannot finalize a Program from a storage retirement callback");
   std::lock_guard<std::recursive_mutex> finalization_lock(
       runtime_finalization_mutex_);
   if (finalized_ || runtime_finalization_in_progress_) {
@@ -7944,6 +8109,18 @@ void Program::finalize() {
     return false;
   };
 
+#ifdef TI_WITH_CUDA
+  best_effort("retire CUDA execution domains", [&] {
+    std::shared_ptr<cuda::ExecutionDomainRegistry> domains;
+    {
+      std::lock_guard<std::recursive_mutex> lock(
+          runtime_resource_submission_mutex_);
+      domains = cuda_execution_domains_;
+    }
+    if (domains)
+      domains->retire();
+  });
+#endif
   best_effort("close runtime resources", [&] {
     std::lock_guard<std::recursive_mutex> submission_lock(
         runtime_resource_submission_mutex_);
@@ -8490,6 +8667,21 @@ bool Program::retire_external_dense_storage_if_alive(
     Program *program,
     const std::weak_ptr<ProgramLifetimeToken> &lifetime,
     const storage::StorageOwnerRef &owner) noexcept {
+  try {
+    return close_external_dense_storage_if_alive(program, lifetime, owner);
+  } catch (...) {
+    return false;
+  }
+}
+
+bool Program::close_external_dense_storage_if_alive(
+    Program *program,
+    const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+    const storage::StorageOwnerRef &owner) {
+  // A client callback can already hold this lifetime token through the outer
+  // close helper. Reject destructive reentry before its nonrecursive mutex.
+  if (active_runtime_storage_retirement_program)
+    throw std::logic_error("Reentrant runtime storage destruction");
   if (!program || !owner.valid()) {
     return false;
   }
@@ -8497,17 +8689,13 @@ bool Program::retire_external_dense_storage_if_alive(
   if (!token) {
     return false;
   }
-  try {
-    std::lock_guard<std::mutex> lock(token->mutex_);
-    if (token->program_ != program ||
-        !program->validate_external_dense_storage_owner(owner)) {
-      return false;
-    }
-    program->retire_external_dense_storage(owner);
-    return true;
-  } catch (...) {
+  std::lock_guard<std::mutex> lock(token->mutex_);
+  if (token->program_ != program ||
+      !program->validate_external_dense_storage_owner(owner)) {
     return false;
   }
+  program->retire_external_dense_storage(owner);
+  return true;
 }
 
 void Program::delete_argpack(ArgPack *argpack) {

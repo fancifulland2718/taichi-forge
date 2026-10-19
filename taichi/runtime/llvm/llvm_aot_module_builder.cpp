@@ -10,6 +10,7 @@
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
+#include "taichi/runtime/llvm/runtime_context_abi.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
@@ -244,6 +245,17 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     }
     metadata.launch_abi_sha256 = LLVM::aot_launch_abi_sha256(metadata);
   }
+  for (const auto &[name, kernel] : cache_.kernels) {
+    const auto state = LLVM::runtime_state_use(*kernel.compiled_data.module);
+    if (state)
+      metadata.kernel_runtime_state.emplace(name, state);
+  }
+  if (!metadata.kernel_runtime_state.empty()) {
+    if (metadata.abi_sha256.empty())
+      metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
+          taichi::join_path(output_dir, "metadata.tcb")));
+    metadata.runtime_state_sha256 = LLVM::aot_runtime_state_sha256(metadata);
+  }
   const std::string json =
       liong::json::print(liong::json::serialize(metadata));
   std::fstream f(taichi::join_path(output_dir,
@@ -293,6 +305,8 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
     compiled.compiled_data =
         LLVM::make_cuda_graph_gated_kernel(compiled.compiled_data);
   }
+  const auto context_abi =
+      LLVM::runtime_context_abi(*compiled.compiled_data.module);
   LlvmOfflineCache::KernelCacheData kcache;
   kcache.kernel_key = identifier;
   kcache.compiled_data = std::move(compiled.compiled_data);
@@ -317,7 +331,11 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   kcache.last_used_at = std::time(nullptr);
   kcache.created_at = std::time(nullptr);
   cache_.kernels[identifier] = std::move(kcache);
-  if (launch_abi == "ordinary")
+  if (context_abi == LLVM::kRuntimeContextABI) {
+    kernel_launch_abis_[identifier] = launch_abi == cuda::kGraphGateLaunchABI
+                                          ? cuda::kGraphGateContextLaunchABI
+                                          : cuda::kContextLaunchABI;
+  } else if (launch_abi == "ordinary")
     kernel_launch_abis_.erase(identifier);
   else
     kernel_launch_abis_[identifier] = launch_abi;

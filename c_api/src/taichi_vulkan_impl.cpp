@@ -258,14 +258,20 @@ void ti_export_vulkan_memory(TiRuntime runtime,
   TI_CAPI_INVALID_INTEROP_ARCH(((Runtime *)runtime)->arch, vulkan);
 
   VulkanRuntime *runtime2 = ((Runtime *)runtime)->as_vk();
-  taichi::lang::DeviceAllocation devalloc = devmem2devalloc(*runtime2, memory);
+  const auto range = runtime2->get_memory(memory);
+  // This interop descriptor's offset is the VkDeviceMemory binding offset,
+  // not a byte offset within VkBuffer. Do not export a different logical view.
+  if (range.byte_offset)
+    throw MemoryBindingError(
+        "Vulkan memory export cannot represent a buffer-relative view offset");
+  const auto devalloc = range.allocation;
   vkapi::IVkBuffer buffer = runtime2->get_vk().get_vkbuffer(devalloc);
 
   auto [vk_mem, offset, size] =
       runtime2->get_vk().get_vkmemory_offset_size(devalloc);
 
   interop_info->buffer = buffer.get()->buffer;
-  interop_info->size = size;
+  interop_info->size = range.size;
   interop_info->usage = buffer.get()->usage;
   interop_info->memory = vk_mem;
   interop_info->offset = (uint64_t)offset;

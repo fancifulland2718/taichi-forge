@@ -34,6 +34,8 @@ class Canvas:
         self._set_image_info_cache = {}
         self._shared_cuda_vulkan_views = {}
         self._display_write = None
+        self._execution_domain = None
+        self._prepared_frame_pool = False
         self._display_runtime = impl.pytaichi
         self._window_owner = None if owner is None else weakref.ref(owner)
 
@@ -43,6 +45,56 @@ class Canvas:
         owner = None if self._window_owner is None else self._window_owner()
         if owner is None or owner.window is None:
             raise RuntimeError("Display window is closed")
+
+    def set_execution_domain(self, domain):
+        """Cold-bind CUDA display handoffs to an independent execution domain.
+
+        Use acquire_frame() with prepared producers, or a packed DisplayFrame.
+        Prepare all physical image bindings before starting the steady pipeline.
+        Resize/owner destruction retires dependent domains; rebind after that
+        cold boundary. A live display domain cannot be replaced.
+        """
+        from taichi_forge_runtime.aot._domain import CudaExecutionDomain
+
+        self._check_display_owner()
+        if not isinstance(domain, CudaExecutionDomain):
+            raise TypeError("Expected a CUDA execution domain")
+        if self._display_write is not None:
+            raise RuntimeError("Submit or cancel the current display write first")
+        borrower = domain._runtime._borrower
+        if borrower is None:
+            raise ValueError("Canvas requires a domain borrowed from its JIT Program")
+        native = borrower.execution_domain(domain._native_handle())
+        self.canvas._set_display_execution_domain(native)
+        self._execution_domain = domain
+
+    def _native_source_completion(self, completion):
+        if completion is None:
+            return None
+        from taichi_forge_runtime.aot._domain import Completion
+
+        if self._execution_domain is None or not isinstance(completion, Completion):
+            raise TypeError("An explicit producer requires a selected domain and its Completion")
+        return _ti_core._borrow_aot_completion(completion._native_handle())
+
+    def prepare_frame_pool(self, width, height, *, capacity=3):
+        """Allocate bounded display storage at a cold boundary, returning views.
+
+        Use the views to prepare immutable Graph/AOT bindings. They become
+        writable only when acquire_frame() returns the corresponding view.
+        No free slot means acquire_frame() returns None without expanding the
+        pool. To resize, close the old domain, bind its replacement and prepare
+        new storage. Reconfiguration retires the previous Vulkan consumers.
+        """
+        self._check_display_owner()
+        if self._execution_domain is None:
+            raise ValueError("Select an execution domain before preparing display storage")
+        if any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in (width, height, capacity)):
+            raise ValueError("Display dimensions and capacity must be positive integers")
+        natives = self.canvas._prepare_display_pool(width, height, capacity)
+        self._shared_cuda_vulkan_views.clear()
+        self._prepared_frame_pool = True
+        return tuple(self._shared_view(native) for native in natives)
 
     def acquire_frame(self, width, height):
         """Borrow a packed RGBA8 CUDA write target, or return None when busy.
@@ -62,6 +114,8 @@ class Canvas:
         try:
             pixels = self._acquire_shared_cuda_vulkan_view(width, height)
             if pixels is None:
+                if self._prepared_frame_pool:
+                    return None
                 raise RuntimeError("CUDA-Vulkan shared display is unavailable")
             frame = WritableDisplayFrame(self, pixels, self.canvas._track_display_frame(True))
         except Exception:
@@ -132,6 +186,9 @@ class Canvas:
         native = acquire(int(width), int(height))
         if native is None:
             return None
+        return self._shared_view(native)
+
+    def _shared_view(self, native):
         key = (int(native.identity), int(native.width), int(native.height))
         view = self._shared_cuda_vulkan_views.get(key)
         if view is None:
@@ -175,6 +232,8 @@ class Canvas:
         """
         if isinstance(img, (DisplayFrame, WritableDisplayFrame)):
             return self.submit_frame(img)
+        if self._execution_domain is not None:
+            raise ValueError("Selected display domains require a packed DisplayFrame or acquire_frame() producer")
         if self._display_write is not None:
             raise RuntimeError("Submit or cancel the current display write first")
         if self.window is not None and not self.window.can_render_frame():
@@ -242,7 +301,7 @@ class Canvas:
             )
             return True
 
-    def submit_frame(self, frame, *, track_source=False, track_completion=False):
+    def submit_frame(self, frame, *, track_source=False, track_completion=False, source_completion=None):
         """Submit a display-ready frame to the canvas.
 
         By default return whether the frame was accepted. With
@@ -251,7 +310,14 @@ class Canvas:
         Completion covers GPU consumption, not on-screen presentation; a
         replaced or dropped pending frame is cancelled. Tracking is opt-in
         and uses the existing display submission, without a producer wait.
+
+        With a selected domain, supply the exact ``source_completion`` from
+        the prepared writer when tracking a writable frame. Later work on that
+        domain cannot extend the returned source ticket. For packed copies,
+        this parameter is a device dependency and ``frame.source_completion``
+        covers the accepted copy. Busy leaves a writable frame unsealed.
         """
+        producer = self._native_source_completion(source_completion)
         if track_completion:
             self._check_display_owner()
             if not hasattr(self.canvas, "_track_display_frame"):
@@ -260,19 +326,27 @@ class Canvas:
             self._check_display_owner()
             if self._display_write is not frame:
                 raise RuntimeError("Display write belongs to another canvas or is already sealed")
-            self.canvas._finish_display_write()
+            if self._execution_domain is None:
+                self.canvas._finish_display_write()
+            elif not self.canvas._try_finish_display_write(producer, bool(track_source)):
+                return None if track_completion else False
             if track_source:
                 frame.source_completion = self.canvas._record_display_source_completion()
             self._display_write = None
             frame._seal("submitted")
             self._record_display_frame_accepted(frame.width, frame.height)
             return frame.completion if track_completion else True
-        if track_source:
-            raise ValueError("track_source requires a writable display frame")
+        if track_source and not (
+            self._execution_domain is not None and isinstance(frame, DisplayFrame)
+            and frame.kind == DisplayFrame.PACKED_U32
+        ):
+            raise ValueError("track_source requires a writable or selected-domain packed frame")
         if self._display_write is not None:
             raise RuntimeError("Submit or cancel the current display write first")
         if not isinstance(frame, DisplayFrame):
             raise TypeError("submit_frame expects a DisplayFrame")
+        if self._execution_domain is not None and frame.kind != DisplayFrame.PACKED_U32:
+            raise ValueError("Selected display domains require packed CUDA image storage")
         default_transpose = frame.kind != DisplayFrame.TEXTURE
         set_transpose = None
         if frame.kind != DisplayFrame.HOST_RGBA8 and frame.transpose != default_transpose:
@@ -291,6 +365,16 @@ class Canvas:
                 frame.transpose,
             )
         elif frame.kind == DisplayFrame.PACKED_U32:
+            if self._execution_domain is not None:
+                if not self.canvas._set_image_shared_cuda_on_domain(frame.field_info, producer):
+                    self.window.record_display_frame_dropped()
+                    return None if track_completion else False
+                if track_source:
+                    frame.source_completion = self.canvas._record_display_source_completion()
+                if set_transpose is not None:
+                    set_transpose(frame.transpose)
+                self._record_display_frame_accepted(frame.width, frame.height)
+                return DisplayCompletion(self.canvas._track_display_frame()) if track_completion else True
             shared_submit = getattr(self.canvas, "_set_image_shared_cuda", None)
             shared = (
                 impl.pytaichi.prog.config().arch == _ti_core.Arch.cuda

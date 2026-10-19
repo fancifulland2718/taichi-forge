@@ -105,6 +105,16 @@ std::uint64_t get_forge_native_feature_bitmap() {
 #if defined(TI_WITH_CUDA) && defined(TI_WITH_VULKAN) && defined(TI_WITH_GGUI)
   result |= kForgeDisplaySharedImageReuse;
 #endif
+#if defined(TI_WITH_CUDA) && defined(TI_FORGE_BUILD_RUNTIME_C_API)
+  result |= kForgeCudaExecutionDomains | kForgeCudaAotExecutionDomains |
+            kForgeCudaExternalStorageExecutionDomains;
+#if defined(TI_WITH_LLVM)
+  result |= kForgeCudaJitGraphExecutionDomains;
+#endif
+#if defined(TI_WITH_VULKAN) && defined(TI_WITH_GGUI)
+  result |= kForgeCudaCanvasExecutionDomains;
+#endif
+#endif
 #if defined(TI_FORGE_BUILD_TOOLKIT_REFERENCE)
   result |= kForgeBuildToolkitReference;
 #endif

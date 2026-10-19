@@ -125,6 +125,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
     bool uses_root_binding{false};
     bool uses_bounded_range{false};
     KernelLaunchABI launch_abi{KernelLaunchABI::ordinary};
+    unsigned runtime_context_abi{1};
+    std::uint32_t runtime_state{0};
     // Accessed under sparse_list_mutex_, only after a cold lease epoch change.
     mutable std::uint64_t sparse_replay_epoch{0};
     mutable bool sparse_replay_intersects{false};
@@ -174,6 +176,13 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // sparse code and ordinary JIT launchers retain their existing admission.
   void enable_sparse_graph_replay();
 
+  // Cold instance preparation, shared by JIT and AOT capture. Storage remains
+  // owned by the execution instance until its exact completion retires.
+  void bind_execution_temporaries(GraphLaunchPacket &packet,
+                                  void *buffer,
+                                  std::size_t bytes);
+  void validate_execution_domain(Handle handle);
+
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
@@ -185,7 +194,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const LLVM::CompiledKernelData::InternalData &metadata,
       const CUDAKernelArtifact &artifact,
       const std::map<int, int> &tree_bindings = {},
-      KernelLaunchABI launch_abi = KernelLaunchABI::ordinary);
+      KernelLaunchABI launch_abi = KernelLaunchABI::ordinary,
+      unsigned runtime_context_abi = 1,
+      std::uint32_t runtime_state = 0);
   // Register a private variant whose offloaded task entries uniformly test a
   // device gate before executing. The source kernel and ordinary registration
   // remain untouched, so only internal masked CUDA Graph replay pays the

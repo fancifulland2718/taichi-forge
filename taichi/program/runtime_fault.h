@@ -64,6 +64,18 @@ class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
  public:
   RuntimeFaultDomain(Arch backend, std::uint64_t program_domain) noexcept;
 
+  Arch backend() const noexcept {
+    return backend_;
+  }
+
+  // One identity space for the default queue, independent execution domains
+  // and borrowed AOT clients. Allocation does not imply device completion or
+  // order across queues. The caller holds its own admission/lifecycle guard.
+  std::uint64_t allocate_submission_sequence();
+  std::uint64_t next_submission_sequence() const noexcept {
+    return next_submission_sequence_.load(std::memory_order_relaxed);
+  }
+
   RuntimeLifecycleState state() const noexcept {
     return state_.load(std::memory_order_acquire);
   }
@@ -98,6 +110,10 @@ class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
   void throw_if_submission_disallowed(
       const char *operation) const override;
 
+  // New domain work/dependencies cannot use the finalizer's privileged drain
+  // path. That privilege exists only for retiring previously accepted work.
+  void throw_if_new_submission_disallowed(const char *operation) const;
+
   RuntimeFaultSnapshot snapshot() const;
 
   RuntimeStatistics &statistics() noexcept {
@@ -112,6 +128,7 @@ class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
 
   const Arch backend_;
   const std::uint64_t program_domain_;
+  std::atomic<std::uint64_t> next_submission_sequence_{1};
   mutable RuntimeStatistics statistics_;
   std::atomic<RuntimeLifecycleState> state_{RuntimeLifecycleState::kHealthy};
   std::atomic<bool> fatal_observed_{false};

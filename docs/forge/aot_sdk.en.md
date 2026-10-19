@@ -10,6 +10,11 @@ Forge Python to export modules; the consumer links `TaichiForge::c_api` and does
 not import Python. CPU/CUDA still use the supplied LLVM runtime and compiler.
 This is a full SDK, not a compiler-free runtime.
 
+For bounded independent CUDA queues, exact device dependencies and explicit
+initialization, see [CUDA execution domains](cuda_execution_domains.en.md).
+The development interface binds saved plans at runtime without serializing
+stream identities or changing their selected execution recipes.
+
 A Vulkan-only SDK can also be built without LLVM, CUDA or Python. Configure a
 separate build directory with the following options, then build `taichi_c_api`
 and install the `TaichiSDK` component as below:
@@ -4663,6 +4668,23 @@ lookup remains failed within that module; reload the module after replacing
 an artifact. Schema 5 additionally checks the declared `dense_v1`, `list_v1`, `sparse_v1` or `sparse_v2`
 resource relocation contract.
 Legacy schema 2 text, schema 3 bitcode and schema 4 PTX remain readable.
+
+New LLVM exports use the existing schema 8 launch declarations to describe the
+compiled context layout: `runtime_context_v2` for ordinary entries and
+`cuda_graph_gate_context_v2` for entries with the `cuda_graph_gate_v1` prefix.
+The context appends one temporary-storage pointer, propagated through
+`real_func`; a null pointer retains the runtime's ordered temporary storage.
+BC carries the matching module flag, while PTX/cubin carry the checked launch
+declaration. Old readers reject unknown layouts before launching code. This
+requires matching private ABI106 components and does not itself expose
+independent streams or make every prepared execution concurrently reusable.
+Windows CUDA tests interleave ordinary and gated instances of a saved kernel
+in a separate native runtime, with independent argument and temporary storage,
+for BC/PTX/cubin at fast/balanced/full compilation tiers on compute capability
+120. Exports cover both the default SM80/PTX7.0 target and explicit SM120/PTX8.7.
+CUDA range and mesh loops allocate aligned thread-local storage with a static
+size in the generated caller, avoiding unnecessary dynamic-stack instructions
+from runtime helper arrays. The default deployment target is unchanged.
 
 PTX deployment was checked on Windows CUDA with dense-field and scalar/vector/
 matrix ndarray forward/reverse kernels and ordinary CGraphs. This does not

@@ -46,6 +46,7 @@ namespace aot {
 
 struct CompiledGraphKernelInvocation {
   CallableBase callable;
+  std::weak_ptr<void> owner_lifetime;
   std::shared_ptr<KernelExecutionHandle> execution_handle;
   struct TaskLaunchPlan {
     std::string identity;
@@ -58,8 +59,9 @@ struct CompiledGraphKernelInvocation {
   std::optional<TaskLaunchPlan> task_launch_plan;
 
   CompiledGraphKernelInvocation(taichi::lang::Kernel &kernel,
-                               std::shared_ptr<KernelExecutionHandle> handle)
+                                std::shared_ptr<KernelExecutionHandle> handle)
       : callable(static_cast<const CallableBase &>(kernel)),
+        owner_lifetime(kernel.program->weak_lifetime_token()),
         execution_handle(std::move(handle)) {
     // Use the ordinary context constructor to freeze launch policy before
     // copying its immutable values. No frontend IR or SNode pointers survive
@@ -103,6 +105,14 @@ CompiledDispatch::jit_execution_handle() const {
 
 CallableBase *CompiledDispatch::jit_callable() const {
   return jit_invocation ? &jit_invocation->callable : ti_kernel;
+}
+
+bool CompiledDispatch::jit_belongs_to_program(const Program &program) const {
+  if (!jit_invocation || jit_invocation->owner_lifetime.expired())
+    return false;
+  const auto &owner = jit_invocation->owner_lifetime;
+  const auto current = program.weak_lifetime_token();
+  return !owner.owner_before(current) && !current.owner_before(owner);
 }
 
 LaunchContextBuilder CompiledDispatch::make_launch_context(

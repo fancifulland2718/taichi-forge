@@ -85,6 +85,10 @@ const taichi::lang::aot::StructLayout &Runtime::get_layout(
 }
 void Runtime::retire_module(AotModule *owner) {
   modules_.erase(owner);
+  invalidate_module_entries(owner);
+}
+
+void Runtime::invalidate_module_entries(AotModule *owner) {
   auto retire = [owner](auto &items) {
     for (auto it = items.begin(); it != items.end();) {
       if (it->second.owner == owner)
@@ -113,9 +117,11 @@ void Runtime::retire_resources(bool synchronize) {
         failure = std::current_exception();
     }
   };
+  // Neither failed synchronization nor failed domain retirement proves that
+  // code/storage may be freed. Keep the entire owner closure on that failure.
   if (synchronize)
-    cleanup([&] { wait(); });
-  cleanup([&] { clear_prepared(false); });
+    wait();
+  clear_prepared(false);
   cleanup([&] { clear_native_resources(false); });
   while (!modules_.empty()) {
     auto *module = *modules_.begin();
@@ -126,10 +132,20 @@ void Runtime::retire_resources(bool synchronize) {
   {
     std::lock_guard<std::mutex> memory_lock(memory_mutex_);
     memories.swap(memories_);
+    for (const auto &[handle, memory] : memories)
+      if (memory.borrowed)
+        memory.borrowed->live = false;
   }
-  for (const auto &[handle, memory] : memories)
+  for (const auto &[handle, memory] : memories) {
+    // Disarm Program revocation callbacks even if a cold metadata snapshot
+    // still holds BorrowedMemory after this Runtime has been destroyed.
+    if (memory.borrowed) {
+      memory.borrowed->external_access.reset();
+      memory.borrowed->owner.reset();
+    }
     if (memory.owns_allocation)
       cleanup([&] { get().dealloc_memory(memory.allocation); });
+  }
   if (failure)
     std::rethrow_exception(failure);
 }
@@ -150,6 +166,7 @@ TiNdArrayLayout AotModule::layout_handle(taichi::lang::DataType type) {
 }
 
 TiKernel AotModule::get_kernel_handle(const std::string &name) {
+  check_code_live();
   auto found = kernel_handles_.find(name);
   if (found != kernel_handles_.end())
     return found->second;
@@ -175,6 +192,7 @@ TiKernel AotModule::get_kernel_handle(const std::string &name) {
 }
 
 TiComputeGraph AotModule::get_graph_handle(const std::string &name) {
+  check_code_live();
   auto found = graph_handles_.find(name);
   if (found != graph_handles_.end())
     return found->second;

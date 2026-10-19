@@ -1,4 +1,13 @@
 from ._graph import *
+
+
+def execution_domain(*, capacity=2, instance_capacity=64, priority=0):
+    """Create a runtime-owned independent CUDA queue for prepared Graphs."""
+    from ._execution_domain import execution_domain as create
+
+    return create(capacity=capacity, instance_capacity=instance_capacity, priority=priority)
+
+
 from ._recipes.families import default_graph_recipe_providers as default_recipe_providers
 
 from ._compileiq_opaque import (

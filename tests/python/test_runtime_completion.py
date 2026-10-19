@@ -57,9 +57,15 @@ def test_cuda_wait_query_and_paced_submit_share_a_pending_ticket(wait_mode):
     time.sleep(0.001)
     try:
         assert not first.done()
+        # No new work still represents the same pending default-queue prefix.
+        # It must not manufacture an already-completed device dependency.
+        repeated = impl.get_runtime().prog._record_runtime_completion()
+        assert repeated.sequence == first.sequence
+        assert not repeated.done()
         second = graph.submit(bound, pacer=pacer, lane="second", wait_mode=wait_mode)
         assert not first.done(), "submission waited for the first ticket"
         second.wait()
+        assert repeated.done()
     finally:
         waiter.join(3)
         graph.close()

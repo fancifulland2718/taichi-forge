@@ -6,6 +6,7 @@
 #include <variant>
 #include <vector>
 #include "taichi/rhi/device.h"
+#include "taichi/program/runtime_completion.h"
 #include "taichi/runtime/branch_selection.h"
 #include "taichi/runtime/cuda_control_recipe.h"
 #include "taichi/runtime/vulkan_control_recipe.h"
@@ -17,6 +18,7 @@ class LaunchContextBuilder;
 class NativeOperation;
 class NativeKernelResourceBinding;
 class RuntimeFaultDomain;
+class ExternalSynchronizationDomain;
 struct NativeRecordingState;
 namespace aot {
 class Kernel;
@@ -26,6 +28,7 @@ class GfxRuntime;
 }
 namespace cuda {
 class BindingFrameReplay;
+class ExecutionDomain;
 }
 
 // Cold bindings shared by loaded AOT entries and native runtime adapters. The
@@ -33,6 +36,13 @@ class BindingFrameReplay;
 // Contexts and operation descriptors are borrowed only during preparation.
 class FixedExecution {
  public:
+  // Runtime-only ownership for independent CUDA capture/ordered recipes. Code
+  // and array owners outlive every pending launch; provider objects supplied in
+  // operations must have independent mutable state. Never serialized in AOT.
+  struct CudaExecutionBinding {
+    std::shared_ptr<cuda::ExecutionDomain> domain;
+    std::shared_ptr<RuntimeCompletionResources> operands;
+  };
   struct Dispatch {
     aot::Kernel *kernel;
     LaunchContextBuilder *context;
@@ -106,11 +116,19 @@ class FixedExecution {
                  std::shared_ptr<cuda::BindingFrameReplay> binding_replay = {},
                  std::shared_ptr<void> binding_operands = {},
                  const VulkanSubmissionRecipe *submission_recipe = nullptr,
-                 const OrderedStorageRing *storage_ring = nullptr);
+                 const OrderedStorageRing *storage_ring = nullptr,
+                 const CudaExecutionBinding *execution_binding = nullptr);
   ~FixedExecution();
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;
   void run();
+  RuntimeCompletion submit(
+      const std::vector<RuntimeCompletion> &dependencies = {});
+  // Cold, once-only binding before publishing this instance to submitters.
+  // The whole replay owns one external epoch on its selected CUDA stream.
+  // Initialization has its own separately qualified access closure.
+  void bind_external_access(
+      std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains);
   // Called by an owner which has completed submitted work before retiring a
   // frame's external allocations. It does not retire sibling bindings.
   void retire_completed_binding(bool backend_safe = true);

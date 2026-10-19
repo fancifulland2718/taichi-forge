@@ -57,6 +57,8 @@ class RHI_DLL_EXPORT VulkanCudaExternalAllocation final
   DeviceAllocation cuda_allocation() const noexcept;
   std::size_t allocation_size() const noexcept;
   AccessState access_state() const noexcept;
+  // The released producer domain, until Vulkan consumes its signal.
+  ExternalStreamDomain cuda_producer_stream() const noexcept;
   bool closed() const noexcept;
 
   // Make the allocation available to the next CUDA access epoch. A CUDA

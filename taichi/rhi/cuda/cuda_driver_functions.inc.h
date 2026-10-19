@@ -22,6 +22,9 @@ PER_CUDA_FUNCTION(context_set_limit, cuCtxSetLimit, int, std::size_t);
 
 // Stream management
 PER_CUDA_FUNCTION(stream_create, cuStreamCreate, void **, uint32);
+PER_CUDA_FUNCTION(stream_create_with_priority, cuStreamCreateWithPriority, void **, uint32, int);
+PER_CUDA_FUNCTION(stream_get_priority, cuStreamGetPriority, void *, int *);
+PER_CUDA_FUNCTION(context_get_stream_priority_range, cuCtxGetStreamPriorityRange, int *, int *);
 PER_CUDA_FUNCTION(stream_destroy, cuStreamDestroy_v2, void *);
 
 // Memory management
@@ -83,7 +86,9 @@ PER_CUDA_FUNCTION(graph_exec_destroy, cuGraphExecDestroy, CUgraphExec);
 
 // Event management
 PER_CUDA_FUNCTION(event_create, cuEventCreate, void **, uint32)
-PER_CUDA_FUNCTION(event_destroy, cuEventDestroy, void *)
+// Match cuda.h's modern entry point. The legacy symbol can block on unrelated
+// work even when this event has completed.
+PER_CUDA_FUNCTION(event_destroy, cuEventDestroy_v2, void *)
 PER_CUDA_FUNCTION(event_record, cuEventRecord, void *, void *)
 PER_CUDA_FUNCTION(stream_wait_event, cuStreamWaitEvent, void *, void *,
                   unsigned int)

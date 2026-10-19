@@ -69,6 +69,11 @@ struct RuntimeContext {
   // LLVMRuntime is shared among functions. So we moved the pointer to
   // RuntimeContext which each function have one.
   uint64_t *result_buffer;
+
+  // Optional execution-instance storage. A null binding keeps the ordered
+  // runtime's historical temporary buffer. Do not put stream handles or
+  // ownership here: this plain context is also consumed by compiled kernels.
+  char *global_tmp_buffer{nullptr};
 };
 
 #if defined(TI_RUNTIME_HOST)

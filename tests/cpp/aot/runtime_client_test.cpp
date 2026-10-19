@@ -150,6 +150,159 @@ TEST(RuntimeClientRegistry, ConcurrentRetirementWaitsForClientCompletion) {
   first.get();
   second.get();
 }
+
+TEST(RuntimeClientRegistry, SNodeRetirementIsSelectiveAndRetainsUntilDrain) {
+  RuntimeClientRegistry registry;
+  int selected = 0, peer = 0, global = 0;
+  auto first = std::make_shared<TestClient>([&] {
+    EXPECT_TRUE(registry.closed());
+    ++selected;
+  });
+  auto second = std::make_shared<TestClient>([&] { ++peer; });
+  auto third = std::make_shared<TestClient>([&] { ++global; });
+  registry.retain(first, {7, 3, 7});
+  registry.retain(second, {9});
+  registry.retain(third);
+  std::weak_ptr<TestClient> weak = first;
+  first.reset();
+  EXPECT_FALSE(weak.expired());
+  registry.retire_snode_tree(3);
+  EXPECT_TRUE(weak.expired());
+  EXPECT_EQ(selected, 1);
+  EXPECT_EQ(peer, 0);
+  EXPECT_EQ(global, 0);
+  EXPECT_FALSE(registry.closed());
+  registry.retire_snode_tree(7);
+  EXPECT_EQ(selected, 1);
+  EXPECT_THROW(registry.retain(second, {-1}), std::invalid_argument);
+  registry.retire();
+  EXPECT_EQ(peer, 1);
+  EXPECT_EQ(global, 1);
+}
+
+TEST(RuntimeClientRegistry, StorageRetirementUsesExactOwnerKindAndGeneration) {
+  RuntimeClientRegistry registry;
+  const RuntimeResourceHandle first{7, 5, 3, 1};
+  const RuntimeResourceHandle reused{7, 5, 3, 2};
+  const RuntimeResourceHandle foreign{8, 5, 3, 1};
+  const RuntimeResourceHandle different_kind{7, 6, 3, 1};
+  int selected = 0, peers = 0, trees = 0;
+  auto client = std::make_shared<TestClient>([&] { ++selected; });
+  registry.retain_storage(client, {first, first});
+  for (const auto handle : {reused, foreign, different_kind})
+    registry.retain_storage(std::make_shared<TestClient>([&] { ++peers; }),
+                            {handle});
+  registry.retain(std::make_shared<TestClient>([&] { ++trees; }), {3});
+  EXPECT_THROW(registry.retain_storage(std::make_shared<TestClient>([] {}), {}),
+               std::invalid_argument);
+  EXPECT_THROW(registry.retire_storage({}), std::invalid_argument);
+  registry.retire_storage(first);
+  EXPECT_EQ(selected, 1);
+  EXPECT_EQ(peers, 0);
+  EXPECT_EQ(trees, 0);
+  registry.retire_storage(first);
+  EXPECT_EQ(selected, 1);
+  registry.retire_snode_tree(3);
+  EXPECT_EQ(trees, 1);
+  EXPECT_EQ(peers, 0);
+  registry.retire();
+  EXPECT_EQ(peers, 3);
+}
+
+TEST(RuntimeClientRegistry, FailedStorageDrainRetainsAllocationAndClient) {
+  RuntimeClientRegistry registry;
+  const RuntimeResourceHandle storage{9, 5, 0, 1};
+  int attempts = 0;
+  auto allocation = std::make_shared<int>(42);
+  std::weak_ptr<int> owner = allocation;
+  TestClient *identity = nullptr;
+  auto client = std::make_shared<TestClient>(
+      [&] {
+        EXPECT_FALSE(owner.expired());
+        registry.detach(identity);
+        if (++attempts == 1)
+          throw std::runtime_error("pending external user");
+      },
+      [&] { EXPECT_FALSE(owner.expired()); });
+  identity = client.get();
+  std::weak_ptr<TestClient> weak = client;
+  registry.retain_storage(client, {storage}, allocation);
+  client.reset();
+  allocation.reset();
+  EXPECT_THROW(registry.retire_storage(storage), std::runtime_error);
+  EXPECT_FALSE(owner.expired());
+  EXPECT_FALSE(weak.expired());
+  EXPECT_FALSE(registry.closed());
+  registry.retire_storage(storage);
+  EXPECT_TRUE(owner.expired());
+  EXPECT_TRUE(weak.expired());
+  EXPECT_EQ(attempts, 2);
+}
+
+TEST(RuntimeClientRegistry, FailedSNodeDrainKeepsOwnerAndCanRetry) {
+  RuntimeClientRegistry registry;
+  int attempts = 0, other = 0;
+  RuntimeClient *identity = nullptr;
+  auto client = std::make_shared<TestClient>([&] {
+    registry.detach(identity);
+    if (++attempts == 1)
+      throw std::runtime_error("pending device work");
+  });
+  identity = client.get();
+  auto remaining = std::make_shared<TestClient>([&] { ++other; });
+  registry.retain(client, {2});
+  registry.retain(remaining, {2});
+  std::weak_ptr<TestClient> weak = client;
+  client.reset();
+  EXPECT_THROW(registry.retire_snode_tree(2), std::runtime_error);
+  EXPECT_EQ(other, 1);
+  EXPECT_FALSE(weak.expired());
+  EXPECT_FALSE(registry.closed());
+  registry.retire_snode_tree(2);
+  EXPECT_TRUE(weak.expired());
+  EXPECT_EQ(attempts, 2);
+  EXPECT_EQ(other, 1);
+  registry.retire();
+}
+
+TEST(RuntimeClientRegistry, OwnerRetirementWaitsForSNodeDrain) {
+  RuntimeClientRegistry registry;
+  std::promise<void> entered, release, owner_started;
+  auto release_future = release.get_future();
+  std::atomic<bool> drained{false};
+  int retired = 0;
+  auto selected = std::make_shared<TestClient>([&] {
+    EXPECT_THROW(registry.retire(), std::logic_error);
+    EXPECT_THROW(registry.retire_snode_tree(4), std::logic_error);
+    entered.set_value();
+    release_future.wait();
+    drained = true;
+    ++retired;
+  });
+  auto peer = std::make_shared<TestClient>([&] {
+    EXPECT_TRUE(drained.load());
+    ++retired;
+  });
+  registry.retain(selected, {4});
+  registry.retain(peer);
+  auto tree =
+      std::async(std::launch::async, [&] { registry.retire_snode_tree(4); });
+  entered.get_future().wait();
+  EXPECT_THROW(registry.attach(std::make_shared<TestClient>([] {})),
+               std::runtime_error);
+  auto owner = std::async(std::launch::async, [&] {
+    owner_started.set_value();
+    registry.retire();
+  });
+  owner_started.get_future().wait();
+  EXPECT_EQ(owner.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  release.set_value();
+  tree.get();
+  owner.get();
+  EXPECT_EQ(retired, 2);
+  EXPECT_TRUE(registry.closed());
+}
 #if defined(TI_WITH_LLVM) || defined(TI_WITH_VULKAN)
 namespace {
 void check_program_retirement(Arch arch) {
@@ -201,6 +354,48 @@ TEST(RuntimeClientRegistry, CpuProgramRetiresBeforeDeviceDestruction) {
   check_program_retirement(host_arch());
 }
 
+TEST(RuntimeClientRegistry, ProgramSNodeFailurePreservesTreeAndOtherClients) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  auto *first = program.add_snode_tree(
+      std::make_unique<SNode>(0, SNodeType::root), false);
+  auto *second = program.add_snode_tree(
+      std::make_unique<SNode>(0, SNodeType::root), false);
+  const int first_id = first->id(), second_id = second->id();
+  const auto first_dependencies =
+      program.snapshot_snode_tree_dependencies({first_id});
+  int attempts = 0, peer = 0;
+  auto selected = std::make_shared<TestClient>([&] {
+    EXPECT_THROW(program.finalize(), std::logic_error);
+    if (++attempts == 1)
+      throw std::runtime_error("pending JIT code/root use");
+  });
+  auto other = std::make_shared<TestClient>([&] { ++peer; });
+  program.retain_runtime_client(selected, first_dependencies);
+  program.retain_runtime_client(
+      other, program.snapshot_snode_tree_dependencies({second_id}));
+  EXPECT_THROW(program.destroy_snode_tree(first), std::runtime_error);
+  EXPECT_EQ(program.snapshot_snode_tree_dependencies({first_id}).size(), 1);
+  EXPECT_EQ(peer, 0);
+  program.destroy_snode_tree(first);
+  EXPECT_EQ(attempts, 2);
+  EXPECT_EQ(peer, 0);
+  EXPECT_ANY_THROW(program.retain_runtime_client(selected, first_dependencies));
+  auto *replacement = program.add_snode_tree(
+      std::make_unique<SNode>(0, SNodeType::root), false);
+  ASSERT_EQ(replacement->id(), first_id);
+  EXPECT_NE(replacement->generation(), first_dependencies[0].generation);
+  EXPECT_ANY_THROW(program.retain_runtime_client(selected, first_dependencies));
+  program.destroy_snode_tree(replacement);
+  EXPECT_EQ(attempts, 2);
+  EXPECT_EQ(program.snapshot_snode_tree_dependencies({second_id}).size(), 1);
+  program.destroy_snode_tree(second);
+  EXPECT_EQ(peer, 1);
+  program.finalize();
+  EXPECT_EQ(attempts, 2);
+  EXPECT_EQ(peer, 1);
+}
+
 TEST(RuntimeClientRegistry, ConcurrentProgramFinalizationWaitsForClient) {
   Program program(host_arch());
   program.materialize_runtime();
@@ -227,6 +422,176 @@ TEST(RuntimeClientRegistry, ConcurrentProgramFinalizationWaitsForClient) {
   first.get();
   second.get();
   EXPECT_EQ(retired, 1);
+}
+
+TEST(RuntimeClientRegistry, ProgramFinalizationCannotOvertakeSNodeRetirement) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  auto *tree = program.add_snode_tree(
+      std::make_unique<SNode>(0, SNodeType::root), false);
+  std::promise<void> entered, release, finalizer_started;
+  auto release_future = release.get_future();
+  std::atomic<bool> tree_drained{false};
+  auto selected = std::make_shared<TestClient>([&] {
+    entered.set_value();
+    release_future.wait();
+    tree_drained = true;
+  });
+  auto owner =
+      std::make_shared<TestClient>([&] { EXPECT_TRUE(tree_drained.load()); });
+  program.retain_runtime_client(
+      selected, program.snapshot_snode_tree_dependencies({tree->id()}));
+  program.retain_runtime_client(owner);
+  auto destroy =
+      std::async(std::launch::async, [&] { program.destroy_snode_tree(tree); });
+  entered.get_future().wait();
+  auto finalize = std::async(std::launch::async, [&] {
+    finalizer_started.set_value();
+    program.finalize();
+  });
+  finalizer_started.get_future().wait();
+  EXPECT_EQ(finalize.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  EXPECT_EQ(program.runtime_fault_domain()->state(),
+            RuntimeLifecycleState::kHealthy);
+  release.set_value();
+  destroy.get();
+  finalize.get();
+  EXPECT_THROW(program.destroy_snode_tree(nullptr), std::runtime_error);
+}
+TEST(RuntimeClientRegistry, ExternalStorageFailureKeepsLiveGeneration) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  bool drained = false;
+  int releases = 0, attempts = 0;
+  const auto owner =
+      program.register_external_dense_storage(kDeviceNullAllocation, 0, [&] {
+        EXPECT_TRUE(drained);
+        ++releases;
+      });
+  auto client = std::make_shared<TestClient>([&] {
+    EXPECT_EQ(releases, 0);
+    if (++attempts == 1)
+      throw std::runtime_error("external storage user is still pending");
+    drained = true;
+  });
+  program.retain_external_storage_client(client, owner);
+  EXPECT_THROW(program.retire_external_dense_storage(owner),
+               std::runtime_error);
+  EXPECT_TRUE(program.validate_external_dense_storage_owner(owner));
+  EXPECT_EQ(releases, 0);
+  program.retire_external_dense_storage(owner);
+  EXPECT_EQ(releases, 1);
+  EXPECT_FALSE(program.validate_external_dense_storage_owner(owner));
+  const auto replacement = program.register_external_dense_storage(
+      kDeviceNullAllocation, 0, [&] { ++releases; });
+  EXPECT_EQ(replacement.external_slot, owner.external_slot);
+  EXPECT_NE(replacement.external_generation, owner.external_generation);
+  EXPECT_ANY_THROW(program.retain_external_storage_client(
+      std::make_shared<TestClient>([] {}), owner));
+  program.retire_external_dense_storage(replacement);
+  EXPECT_EQ(releases, 2);
+  program.finalize();
+}
+
+TEST(RuntimeClientRegistry, ExternalStorageLeaseOutlivesGlobalClientDrain) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  bool drained = false;
+  int releases = 0;
+  const auto owner =
+      program.register_external_dense_storage(kDeviceNullAllocation, 0, [&] {
+        EXPECT_TRUE(drained);
+        ++releases;
+      });
+  program.retain_external_storage_client(std::make_shared<TestClient>([&] {
+                                           EXPECT_EQ(releases, 0);
+                                           drained = true;
+                                         }),
+                                         owner);
+  program.finalize();
+  EXPECT_TRUE(drained);
+  EXPECT_EQ(releases, 1);
+}
+
+TEST(RuntimeClientRegistry, ExternalCloseFailureRemainsRetryable) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  bool fail = true;
+  int frees = 0;
+  const auto lifetime = program.weak_resource_lifetime_token();
+  const auto owner = program.register_external_dense_storage(
+      kDeviceNullAllocation, 0, [&] { ++frees; });
+  program.retain_external_storage_client(
+      std::make_shared<TestClient>([&] {
+        if (fail)
+          throw std::runtime_error("external client drain failed");
+      }),
+      owner);
+  EXPECT_THROW(
+      Program::close_external_dense_storage_if_alive(&program, lifetime, owner),
+      std::runtime_error);
+  EXPECT_FALSE(Program::retire_external_dense_storage_if_alive(
+      &program, lifetime, owner));
+  EXPECT_TRUE(program.validate_external_dense_storage_owner(owner));
+  EXPECT_EQ(frees, 0);
+  fail = false;
+  EXPECT_TRUE(Program::close_external_dense_storage_if_alive(&program, lifetime,
+                                                             owner));
+  EXPECT_EQ(frees, 1);
+  program.finalize();
+  EXPECT_FALSE(Program::close_external_dense_storage_if_alive(&program,
+                                                              lifetime, owner));
+  EXPECT_EQ(frees, 1);
+}
+
+TEST(RuntimeClientRegistry, ExternalRetirementCannotReenterBlockedFinalizer) {
+  Program program(host_arch());
+  program.materialize_runtime();
+  std::promise<void> entered, release;
+  auto released = release.get_future();
+  std::atomic<bool> drained{false};
+  int frees = 0;
+  const auto owner =
+      program.register_external_dense_storage(kDeviceNullAllocation, 0, [&] {
+        EXPECT_TRUE(drained.load());
+        ++frees;
+      });
+  program.retain_external_storage_client(
+      std::make_shared<TestClient>([&] {
+        entered.set_value();
+        released.wait();
+        // The finalizer holds its cold mutex while waiting on our resource
+        // guard. Reentry must reject before trying to acquire that mutex.
+        EXPECT_THROW(program.finalize(), std::logic_error);
+        EXPECT_THROW(program.destroy_snode_tree(nullptr), std::logic_error);
+        EXPECT_THROW(
+            Program::close_external_dense_storage_if_alive(
+                &program, program.weak_resource_lifetime_token(), owner),
+            std::logic_error);
+        drained = true;
+      }),
+      owner);
+  auto retire = std::async(std::launch::async, [&] {
+    EXPECT_TRUE(Program::close_external_dense_storage_if_alive(
+        &program, program.weak_resource_lifetime_token(), owner));
+  });
+  entered.get_future().wait();
+  auto finalize = std::async(std::launch::async, [&] { program.finalize(); });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (program.runtime_fault_domain()->state() ==
+             RuntimeLifecycleState::kHealthy &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  EXPECT_EQ(program.runtime_fault_domain()->state(),
+            RuntimeLifecycleState::kFinalizing);
+  EXPECT_EQ(finalize.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  release.set_value();
+  retire.get();
+  finalize.get();
+  EXPECT_EQ(frees, 1);
 }
 #endif
 #ifdef TI_WITH_CUDA

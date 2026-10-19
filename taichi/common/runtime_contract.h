@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// AOT runtime completion ownership and borrowed Program recorder callbacks.
-// Reject older pairs before crossing the C++ boundary.
-inline constexpr int kForgeNativeAbiRevision = 109;
+// Combined AOT completion ownership and independent CUDA execution domains.
+// Both parent branches changed private class layouts; reject either old pair.
+inline constexpr int kForgeNativeAbiRevision = 111;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -29,6 +29,12 @@ inline constexpr std::uint64_t kForgeBuildCupti = 1ull << 8;
 inline constexpr std::uint64_t kForgeDisplaySharedImageReuse = 1ull << 9;
 inline constexpr std::uint64_t kForgeCompletionWaitConcurrent = 1ull << 10;
 inline constexpr std::uint64_t kForgeCompletionBlockingWait = 1ull << 11;
+inline constexpr std::uint64_t kForgeCudaExecutionDomains = 1ull << 12;
+inline constexpr std::uint64_t kForgeCudaAotExecutionDomains = 1ull << 13;
+inline constexpr std::uint64_t kForgeCudaJitGraphExecutionDomains = 1ull << 14;
+inline constexpr std::uint64_t kForgeCudaExternalStorageExecutionDomains =
+    1ull << 15;
+inline constexpr std::uint64_t kForgeCudaCanvasExecutionDomains = 1ull << 16;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

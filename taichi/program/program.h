@@ -52,6 +52,10 @@
 
 namespace taichi::lang {
 
+namespace cuda {
+class ExecutionDomainRegistry;
+}
+
 namespace cuda::detail {
 enum class CudaAsyncTileAdmissionReason : std::uint8_t;
 }
@@ -621,6 +625,9 @@ class TI_DLL_EXPORT Program {
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain() const {
     return runtime_fault_domain_;
   }
+  // Cold native adapter shared by JIT and borrowed AOT execution. The owner
+  // retires all domains before releasing code/storage and the backend.
+  std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains();
   RuntimeStatisticsSnapshot runtime_statistics_snapshot();
   PrimitiveWorkspaceSnapshot primitive_workspace_snapshot() const noexcept {
     return primitive_workspace_arena_.snapshot();
@@ -1173,6 +1180,17 @@ class TI_DLL_EXPORT Program {
   // Explicit borrower ownership, released by detach or finalization. The
   // caller must retire its backend payload before detaching.
   void retain_runtime_client(const std::shared_ptr<RuntimeClient> &client);
+  // Live JIT borrowers register their frozen tree closure during preparation.
+  // Tree destruction drains only clients which reference that tree.
+  void retain_runtime_client(
+      const std::shared_ptr<RuntimeClient> &client,
+      const std::vector<SNodeTreeDependency> &snode_tree_dependencies);
+  // Cold borrowers of a window/external allocation must drain before its
+  // owner can release either API's backing device. Registration validates the
+  // exact external resource generation; submit performs no registry scan.
+  void retain_external_storage_client(
+      const std::shared_ptr<RuntimeClient> &client,
+      const storage::StorageOwnerRef &owner);
   void detach_runtime_client(RuntimeClient *client);
   gfx::GfxRuntime *get_gfx_runtime_for_borrowing();
   // Delayed resource owners use the typed token and helpers below to
@@ -1198,9 +1216,27 @@ class TI_DLL_EXPORT Program {
       Program *program,
       const std::weak_ptr<ProgramLifetimeToken> &lifetime,
       const storage::StorageOwnerRef &owner) noexcept;
+  // Explicit close propagates drain failures so callers can retry. A caller
+  // must not interpret a failed drain as permission to free backing storage.
+  static bool close_external_dense_storage_if_alive(
+      Program *program,
+      const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+      const storage::StorageOwnerRef &owner);
 
   using DenseStorageBindingCallback = std::function<void(
       const storage::ResolvedDenseBinding *, std::size_t)>;
+  struct DenseStorageBorrow {
+    DeviceAllocation allocation;
+    std::uint64_t byte_offset;
+    std::uint64_t byte_size;
+    std::shared_ptr<void> lease;
+    std::shared_ptr<ExternalSynchronizationDomain> external_access;
+  };
+  // Cold capability. The caller registers revocation before publishing the
+  // handle; unlike launch resolution this owns a durable allocation lease.
+  DenseStorageBorrow borrow_dense_storage(
+      const storage::DenseStorageDescriptor &descriptor,
+      const std::shared_ptr<RuntimeClient> &client);
   void with_resolved_dense_storage_bindings(
       const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
       const DenseStorageBindingCallback &callback);
@@ -4533,6 +4569,7 @@ class TI_DLL_EXPORT Program {
   std::unique_ptr<RuntimeClientRegistry> runtime_clients_;
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
+  std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains_;
   RuntimeTraceRecorder runtime_trace_;
   std::shared_ptr<RuntimeCompletionCudaEventPool>
       runtime_completion_cuda_event_pool_;
@@ -4613,7 +4650,10 @@ class TI_DLL_EXPORT Program {
       ~kRuntimeSubmissionWriterBit;
   std::atomic<std::uint64_t> runtime_submission_epoch_{0};
   std::atomic<std::uint64_t> last_runtime_completion_submission_epoch_{0};
-  std::atomic<std::uint64_t> next_runtime_completion_sequence_{1};
+  // Protected by RuntimeSubmissionWriteScope. A no-new-work recording must
+  // reuse this exact queue prefix, including its pending/error state; a
+  // sequence allocated by another domain cannot stand in for this prefix.
+  RuntimeCompletion last_default_runtime_completion_;
   mutable std::mutex runtime_completion_mutex_;
   std::deque<RuntimeCompletion> runtime_completions_;
   static constexpr std::size_t kRuntimeCompletionPollBudget = 8;

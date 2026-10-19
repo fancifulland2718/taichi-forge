@@ -1,6 +1,7 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
+#include "taichi/runtime/llvm/runtime_context_abi.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/system/profiler_annotation.h"
 #include "taichi/util/environ_config.h"
@@ -754,6 +755,10 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
        launcher_ctx->uses_bounded_range)) {
     return false;
   }
+  if (ctx.get_context().global_tmp_buffer &&
+      launcher_ctx->runtime_context_abi < LLVM::kRuntimeContextABI) {
+    return false;
+  }
   ensure_root_binding(*launcher_ctx);
   const auto &parameters = launcher_ctx->parameters;
   const Context::ResolvedTaskExecutionPlan *plan = nullptr;
@@ -974,6 +979,36 @@ std::uint32_t KernelLauncher::bounded_graph_grid_limit() {
   return grid > 0 ? static_cast<std::uint32_t>(grid) : 0;
 }
 
+void KernelLauncher::validate_execution_domain(Handle handle) {
+  std::shared_lock<std::shared_mutex> lock(registration_mutex());
+  const auto iter = contexts_.find(handle.get_launch_id());
+  if (iter == contexts_.end())
+    throw std::invalid_argument("CUDA execution kernel is not registered");
+  if (iter->second->runtime_context_abi < LLVM::kRuntimeContextABI)
+    throw std::invalid_argument(
+        "CUDA kernel was compiled without execution-instance temporaries");
+  if (const auto *blocker =
+          independent_runtime_state_blocker(iter->second->runtime_state))
+    throw std::invalid_argument(blocker);
+}
+
+void KernelLauncher::bind_execution_temporaries(GraphLaunchPacket &packet,
+                                                void *buffer,
+                                                std::size_t bytes) {
+  std::shared_lock<std::shared_mutex> lock(registration_mutex());
+  const auto iter = contexts_.find(packet.handle.get_launch_id());
+  TI_ERROR_IF(
+      iter == contexts_.end() ||
+          iter->second->runtime_context_abi < LLVM::kRuntimeContextABI,
+      "CUDA kernel was compiled without execution-instance temporaries");
+  TI_ERROR_IF(!buffer || bytes < taichi_global_tmp_buffer_size ||
+                  reinterpret_cast<std::uintptr_t>(buffer) % 8 != 0,
+              "CUDA execution temporaries require an aligned buffer of at "
+              "least {} bytes",
+              taichi_global_tmp_buffer_size);
+  packet.context.global_tmp_buffer = static_cast<char *>(buffer);
+}
+
 bool KernelLauncher::prepare_cuda_graph_bounded_packet(
     Handle handle,
     LaunchContextBuilder &ctx,
@@ -1180,6 +1215,9 @@ void KernelLauncher::capture_cuda_graph_launch(
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
   auto *cuda_module = launcher_ctx->jit_module;
+  TI_ERROR_IF(packet.context.global_tmp_buffer &&
+                  launcher_ctx->runtime_context_abi < LLVM::kRuntimeContextABI,
+              "CUDA packet code has no execution-instance temporary binding");
   TI_ERROR_IF(launcher_ctx->launch_abi != packet.launch_abi ||
                   (packet.launch_abi == KernelLaunchABI::graph_gate_v1 &&
                    (packet.arg_buffer_prefix_size !=
@@ -1230,6 +1268,10 @@ bool KernelLauncher::capture_cuda_graph_bounded_launch(
     return false;
   }
   const auto &launcher_ctx = iter->second;
+  if (packet.context.global_tmp_buffer &&
+      launcher_ctx->runtime_context_abi < LLVM::kRuntimeContextABI) {
+    return false;
+  }
   auto *cuda_jit_module =
       dynamic_cast<JITModuleCUDA *>(launcher_ctx->jit_module);
   if (cuda_jit_module == nullptr || packet.offloaded_tasks.size() != 1) {
@@ -1375,6 +1417,10 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   launcher_ctx = iter->second;
   TI_ERROR_IF(launcher_ctx->launch_abi != KernelLaunchABI::ordinary,
               "CUDA gated kernel requires its Graph gate launch recipe");
+  TI_ERROR_IF(
+      ctx.get_context().global_tmp_buffer &&
+          launcher_ctx->runtime_context_abi < LLVM::kRuntimeContextABI,
+      "CUDA kernel was compiled without execution-instance temporaries");
   TI_ERROR_IF(launcher_ctx->uses_bounded_range != ctx.has_cuda_bounded_range(),
               "CUDA exact kernel requires its bounded launch recipe");
   ensure_root_binding(*launcher_ctx);
@@ -1729,6 +1775,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     auto *executor = get_runtime_executor();
 
     auto data = compiled.get_internal_data().compiled_data.clone();
+    ctx->runtime_context_abi = LLVM::runtime_context_abi(*data.module);
+    ctx->runtime_state = LLVM::runtime_state_use(*data.module);
     auto parameters = compiled.get_internal_data().args;
     auto *jit_module = executor->create_jit_module(std::move(data.module),
                                                    data.cuda_max_registers);
@@ -1762,14 +1810,21 @@ KernelLauncher::Handle KernelLauncher::register_cuda_artifact_kernel(
     const LLVM::CompiledKernelData::InternalData &metadata,
     const CUDAKernelArtifact &artifact,
     const std::map<int, int> &tree_bindings,
-    KernelLaunchABI launch_abi) {
+    KernelLaunchABI launch_abi,
+    unsigned runtime_context_abi,
+    std::uint32_t runtime_state) {
   TI_ERROR_IF(launch_abi != KernelLaunchABI::ordinary &&
                   launch_abi != KernelLaunchABI::graph_gate_v1,
               "Unsupported CUDA kernel launch ABI");
+  TI_ERROR_IF(runtime_context_abi != 1 &&
+                  runtime_context_abi != LLVM::kRuntimeContextABI,
+              "Unsupported CUDA artifact RuntimeContext layout");
   std::unique_lock<std::shared_mutex> lock(registration_mutex());
   auto handle = make_handle();
   auto ctx = std::make_shared<Context>();
   ctx->launch_abi = launch_abi;
+  ctx->runtime_context_abi = runtime_context_abi;
+  ctx->runtime_state = runtime_state;
   ctx->snode_tree_ids = metadata.used_snode_tree_ids;
   ctx->parameters = metadata.args;
   ctx->offloaded_tasks = metadata.compiled_data.tasks;
@@ -1802,6 +1857,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   auto *executor = get_runtime_executor();
   auto data = LLVM::make_cuda_graph_gated_kernel(
       compiled.get_internal_data().compiled_data);
+  ctx->runtime_context_abi = LLVM::runtime_context_abi(*data.module);
+  ctx->runtime_state = LLVM::runtime_state_use(*data.module);
   auto parameters = compiled.get_internal_data().args;
   auto *jit_module = executor->create_jit_module(std::move(data.module),
                                                  data.cuda_max_registers);
