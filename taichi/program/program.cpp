@@ -19,6 +19,7 @@
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/rhi/cpu/inclusive_scan.h"
+#include "taichi/rhi/cpu/stable_sort.h"
 #include "taichi/rhi/cpu/reduce.h"
 #include "taichi/rhi/cpu/transform.h"
 #include "taichi/rhi/cpu/indexed_copy.h"
@@ -854,141 +855,8 @@ std::size_t cpu_primitive_workspace_bytes(
           .reserved_bytes);
 }
 
-uint32_t cpu_sortable_f32_key(float value, int nan_policy) {
-  uint32_t bits = 0;
-  std::memcpy(&bits, &value, sizeof(bits));
-  constexpr uint32_t kSign = 0x80000000u;
-  constexpr uint32_t kAbsMask = 0x7fffffffu;
-  constexpr uint32_t kInfBits = 0x7f800000u;
-  if (nan_policy == 0 && (bits & kAbsMask) > kInfBits) {
-    return 0xffffffffu;
-  }
-  if (nan_policy == 0 && (bits & kAbsMask) == 0) {
-    return kSign;
-  }
-  return (bits & kSign) ? ~bits : (bits ^ kSign);
-}
-
-uint64_t cpu_sortable_f64_key(double value, int nan_policy) {
-  uint64_t bits = 0;
-  std::memcpy(&bits, &value, sizeof(bits));
-  constexpr uint64_t kSign = 0x8000000000000000ull;
-  constexpr uint64_t kAbsMask = 0x7fffffffffffffffull;
-  constexpr uint64_t kInfBits = 0x7ff0000000000000ull;
-  if (nan_policy == 0 && (bits & kAbsMask) > kInfBits) {
-    return 0xffffffffffffffffull;
-  }
-  if (nan_policy == 0 && (bits & kAbsMask) == 0) {
-    return kSign;
-  }
-  return (bits & kSign) ? ~bits : (bits ^ kSign);
-}
-
-template <typename KeyT>
-bool cpu_sort_key_before(KeyT lhs,
-                         KeyT rhs,
-                         bool descending,
-                         int /*nan_policy*/) {
-  if (lhs == rhs) {
-    return false;
-  }
-  return descending ? lhs > rhs : lhs < rhs;
-}
-
-template <>
-bool cpu_sort_key_before<float>(float lhs,
-                                float rhs,
-                                bool descending,
-                                int nan_policy) {
-  uint32_t lhs_bits = 0;
-  uint32_t rhs_bits = 0;
-  std::memcpy(&lhs_bits, &lhs, sizeof(lhs_bits));
-  std::memcpy(&rhs_bits, &rhs, sizeof(rhs_bits));
-  constexpr uint32_t kAbsMask = 0x7fffffffu;
-  constexpr uint32_t kInfBits = 0x7f800000u;
-  const bool lhs_nan = (lhs_bits & kAbsMask) > kInfBits;
-  const bool rhs_nan = (rhs_bits & kAbsMask) > kInfBits;
-  if (nan_policy == 0 && (lhs_nan || rhs_nan)) {
-    return !lhs_nan && rhs_nan;
-  }
-  if (nan_policy == 0 && (lhs_bits & kAbsMask) == 0 &&
-      (rhs_bits & kAbsMask) == 0) {
-    return false;
-  }
-  const uint32_t lhs_key = cpu_sortable_f32_key(lhs, nan_policy);
-  const uint32_t rhs_key = cpu_sortable_f32_key(rhs, nan_policy);
-  if (lhs_key == rhs_key) {
-    return false;
-  }
-  return descending ? lhs_key > rhs_key : lhs_key < rhs_key;
-}
-
-template <>
-bool cpu_sort_key_before<double>(double lhs,
-                                 double rhs,
-                                 bool descending,
-                                 int nan_policy) {
-  uint64_t lhs_bits = 0;
-  uint64_t rhs_bits = 0;
-  std::memcpy(&lhs_bits, &lhs, sizeof(lhs_bits));
-  std::memcpy(&rhs_bits, &rhs, sizeof(rhs_bits));
-  constexpr uint64_t kAbsMask = 0x7fffffffffffffffull;
-  constexpr uint64_t kInfBits = 0x7ff0000000000000ull;
-  const bool lhs_nan = (lhs_bits & kAbsMask) > kInfBits;
-  const bool rhs_nan = (rhs_bits & kAbsMask) > kInfBits;
-  if (nan_policy == 0 && (lhs_nan || rhs_nan)) {
-    return !lhs_nan && rhs_nan;
-  }
-  if (nan_policy == 0 && (lhs_bits & kAbsMask) == 0 &&
-      (rhs_bits & kAbsMask) == 0) {
-    return false;
-  }
-  const uint64_t lhs_key = cpu_sortable_f64_key(lhs, nan_policy);
-  const uint64_t rhs_key = cpu_sortable_f64_key(rhs, nan_policy);
-  if (lhs_key == rhs_key) {
-    return false;
-  }
-  return descending ? lhs_key > rhs_key : lhs_key < rhs_key;
-}
-
-template <typename KeyT, typename ValueT>
-std::size_t cpu_stable_sort_impl(KeyT *keys,
-                                 ValueT *values,
-                                 std::size_t n,
-                                 bool descending,
-                                 int nan_policy) {
-  if (n <= 1) {
-    return 0;
-  }
-  if (values) {
-    struct Item {
-      KeyT key;
-      ValueT value;
-    };
-    std::vector<Item> items(n);
-    for (std::size_t i = 0; i < n; ++i) {
-      items[i] = {keys[i], values[i]};
-    }
-    std::stable_sort(items.begin(), items.end(), [&](const Item &lhs,
-                                                     const Item &rhs) {
-      return cpu_sort_key_before<KeyT>(
-          lhs.key, rhs.key, descending, nan_policy);
-    });
-    for (std::size_t i = 0; i < n; ++i) {
-      keys[i] = items[i].key;
-      values[i] = items[i].value;
-    }
-    return items.size() * sizeof(Item);
-  }
-
-  std::vector<KeyT> sorted_keys(keys, keys + n);
-  std::stable_sort(sorted_keys.begin(), sorted_keys.end(), [&](KeyT lhs,
-                                                               KeyT rhs) {
-    return cpu_sort_key_before<KeyT>(lhs, rhs, descending, nan_policy);
-  });
-  std::memcpy(keys, sorted_keys.data(), n * sizeof(KeyT));
-  return sorted_keys.size() * sizeof(KeyT);
-}
+using cpu::cpu_sort_key_before;
+using cpu::cpu_stable_sort_impl;
 
 template <typename KeyT>
 std::size_t cpu_stable_sort_value_dispatch(KeyT *keys,

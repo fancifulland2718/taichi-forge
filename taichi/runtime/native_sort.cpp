@@ -11,6 +11,7 @@
 #include "taichi/rhi/arch.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
+#include "taichi/rhi/cpu/stable_sort.h"
 #endif
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -44,6 +45,24 @@ class SortBase : public NativeOperation {
 };
 
 #ifdef TI_WITH_LLVM
+template <typename KeyT, typename ValueT>
+class CpuTypedSort final : public SortBase {
+ public:
+  CpuTypedSort(Arch arch, Device &device, const SortOperation &operation)
+      : SortBase(arch, device, operation) {
+    workspace_.prepare(operation.size, operation.value_bytes != 0);
+    bytes_ = workspace_.bytes();
+  }
+  void run_cpu() override {
+    cpu::cpu_stable_sort_impl(static_cast<KeyT *>(pointers[0]),
+                             static_cast<ValueT *>(pointers[1]), operation_.size,
+                             false, 0, &workspace_);
+  }
+
+ private:
+  cpu::StableSortWorkspace<KeyT, ValueT> workspace_;
+};
+
 class CpuSort final : public SortBase {
  public:
   using SortBase::SortBase;
@@ -196,12 +215,45 @@ void map_sort(SortBase &result, const SortOperation &operation, Map map) {
 }
 
 #ifdef TI_WITH_LLVM
+template <typename KeyT>
+std::shared_ptr<SortBase> make_cpu_sort(
+    Arch arch, Device &device, const SortOperation &operation) {
+  if (!operation.value_bytes ||
+      (operation.value_bytes == 4 && operation.value_scalar_bytes == 4))
+    return std::make_shared<CpuTypedSort<KeyT, std::uint32_t>>(arch, device, operation);
+  if (operation.value_bytes == 8 && operation.value_scalar_bytes == 8)
+    return std::make_shared<CpuTypedSort<KeyT, std::uint64_t>>(arch, device, operation);
+  auto raw = std::make_shared<CpuSort>(arch, device, operation);
+  raw->prepare(sizeof(KeyT));
+  return raw;
+}
+
 std::shared_ptr<NativeOperation>
 prepare_cpu_sort(Arch arch, Device &device, const SortOperation &operation) {
   auto *cpu_device = dynamic_cast<cpu::CpuDevice *>(&device);
   if (!cpu_device)
     throw std::invalid_argument("Sort requires a CPU device");
-  auto result = std::make_shared<CpuSort>(arch, device, operation);
+  std::shared_ptr<SortBase> result;
+  switch (operation.key_type) {
+    case NativeSortKeyType::u32:
+      result = make_cpu_sort<std::uint32_t>(arch, device, operation);
+      break;
+    case NativeSortKeyType::i32:
+      result = make_cpu_sort<std::int32_t>(arch, device, operation);
+      break;
+    case NativeSortKeyType::f32:
+      result = make_cpu_sort<float>(arch, device, operation);
+      break;
+    case NativeSortKeyType::u64:
+      result = make_cpu_sort<std::uint64_t>(arch, device, operation);
+      break;
+    case NativeSortKeyType::i64:
+      result = make_cpu_sort<std::int64_t>(arch, device, operation);
+      break;
+    case NativeSortKeyType::f64:
+      result = make_cpu_sort<double>(arch, device, operation);
+      break;
+  }
   map_sort(*result, operation, [&](DevicePtr ptr, std::size_t bytes) {
     void *mapped = nullptr;
     if (cpu_device->map_range_for_cpu_native(ptr, bytes, &mapped) !=
@@ -209,7 +261,6 @@ prepare_cpu_sort(Arch arch, Device &device, const SortOperation &operation) {
       throw std::invalid_argument("Sort CPU storage range is invalid");
     return mapped;
   });
-  result->prepare(static_cast<int>(operation.key_type) >= 3 ? 8 : 4);
   return result;
 }
 #endif

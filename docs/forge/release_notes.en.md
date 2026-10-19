@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU AOT scalar sorting shares JIT's stable key/value sorting core, preserving
+  duplicate-key, NaN and signed-zero ordering. Prepared owners reuse the primary
+  array and avoid indirect index sorting and extra copies. The standard library
+  stable sort may still allocate a transient merge buffer; this is not a claim
+  of allocation-free execution.
+
 - Vulkan cached kernels bind only roots actually referenced by their shaders,
   without requiring unrelated producer Fields. This fixes cached ndarray helpers
   and kernels loaded with fewer unrelated Fields, while preserving missing-resource
