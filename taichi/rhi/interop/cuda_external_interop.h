@@ -58,6 +58,13 @@ class RHI_DLL_EXPORT CudaExternalAllocation final
       CudaExternalMemoryImport memory,
       std::optional<CudaExternalSemaphorePairImport> semaphores = std::nullopt);
 
+  // Duplicate OS handles internally. The caller keeps all original handles
+  // on success and every failure path; the returned mapping owns the copies.
+  static std::shared_ptr<CudaExternalAllocation> create_borrowed(
+      cuda::CudaDevice *cuda_device,
+      CudaExternalMemoryImport memory,
+      CudaExternalSemaphorePairImport semaphores);
+
   ~CudaExternalAllocation() override;
   CudaExternalAllocation(const CudaExternalAllocation &) = delete;
   CudaExternalAllocation &operator=(const CudaExternalAllocation &) = delete;

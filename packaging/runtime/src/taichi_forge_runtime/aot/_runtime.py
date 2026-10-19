@@ -3,7 +3,8 @@
 This consumer covers ordinary kernels/CGraphs and primitive or tensor ndarrays.
 Fixed recordings support loaded kernels, declared native operations and private arrays.
 Explicit JIT borrowers can import scalar/tensor ndarrays with storage leases;
-structure arrays and arbitrary external-memory imports are not exposed here.
+Synchronized CUDA external linear buffers can be imported for selected-domain
+recipes without the DSL; structure arrays are not exposed here.
 Host transfers are explicit; kernel calls use device
 allocations directly. Close resources explicitly or use Runtime as a context
 manager. ``bind()`` reuses Python argument descriptors across submissions.
@@ -465,6 +466,78 @@ class Runtime:
                 shape, element_shape = _shape(shape), _shape(element_shape)
                 if size != math.prod(shape) * math.prod(element_shape) * width:
                     raise ValueError("Imported dense view layout disagrees with its extent")
+                memory = _Memory._from_import(self, handle, size)
+                return NdArray(memory, dtype, code, shape, element_shape)
+            except BaseException:
+                if memory is None:
+                    self._api.call(self._api.ti_free_memory, self._handle, handle)
+                else:
+                    memory.close()
+                raise
+
+    def import_cuda_external_memory(
+        self, *, memory_handle, ready_for_cuda, ready_for_external,
+        allocation_size, device_uuid, dtype, shape, element_shape=(),
+        byte_offset=0, dedicated=True, handle_type=None,
+    ):
+        """Import a synchronized external linear buffer for prepared recipes.
+
+        All original OS handles remain caller-owned on success and failure.
+        Keep the external allocation/device/semaphore objects alive until close.
+        Each complete initialization/replay consumes one ready signal and emits
+        one consumed signal. Ordinary launch/map/host-transfer paths reject it.
+        Enqueue the producer signal before submitting CUDA work; it may remain
+        pending on device. Enqueue the consumer wait after CUDA submit returns.
+        Import each physical pair once and use plan views for aliases. The
+        external producer remains responsible for draining its own queued work.
+        """
+        def integer(value, name):
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer")
+            result = operator.index(value)
+            if not 0 <= result <= 0xFFFFFFFFFFFFFFFF:
+                raise ValueError(f"{name} must fit uint64")
+            return result
+
+        code, _, width = _dtype(dtype)
+        shape, element_shape = _shape(shape), _shape(element_shape)
+        if any(x == 0 for x in element_shape):
+            raise ValueError("Tensor element extents must be positive")
+        if any(x > 0x7FFFFFFF for x in shape + element_shape):
+            raise ValueError("External view extents exceed native indexing")
+        size = math.prod(shape) * math.prod(element_shape) * width
+        allocation_size = integer(allocation_size, "allocation_size")
+        byte_offset = integer(byte_offset, "byte_offset")
+        if not 0 < size <= allocation_size or byte_offset > allocation_size - size:
+            raise ValueError("External view must be a positive range within its allocation")
+        if byte_offset % width:
+            raise ValueError("External view offset must be scalar aligned")
+        if not isinstance(device_uuid, (bytes, bytearray)) or len(device_uuid) != 16:
+            raise ValueError("device_uuid must contain exactly 16 bytes")
+        if type(dedicated) is not bool:
+            raise TypeError("dedicated must be bool")
+        if handle_type is None:
+            handle_type = "opaque_win32" if os.name == "nt" else "opaque_fd"
+        if handle_type not in ("opaque_win32", "opaque_fd"):
+            raise ValueError("handle_type must be opaque_win32 or opaque_fd")
+        handles = tuple(integer(value, name) for value, name in (
+            (memory_handle, "memory_handle"), (ready_for_cuda, "ready_for_cuda"),
+            (ready_for_external, "ready_for_external"),
+        ))
+        if len(set(handles)) != 3 or (handle_type == "opaque_win32" and not all(handles)):
+            raise ValueError("External memory and semaphore handles must be valid and distinct")
+        info = abi.CudaExternalMemoryImportInfo(
+            1 if handle_type == "opaque_win32" else 2, dedicated, *handles,
+            allocation_size, byte_offset, size, (C.c_uint8 * 16)(*device_uuid),
+        )
+        with self._lock:
+            self._check()
+            if self.arch != "cuda":
+                raise ValueError("Synchronized external import requires a CUDA runtime")
+            self._api.load_cuda_external_memory()
+            handle = self._api.call(self._api.ti_import_cuda_external_memory_ext, self._handle, C.byref(info))
+            memory = None
+            try:
                 memory = _Memory._from_import(self, handle, size)
                 return NdArray(memory, dtype, code, shape, element_shape)
             except BaseException:

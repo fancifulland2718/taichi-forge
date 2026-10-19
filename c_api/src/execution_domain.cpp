@@ -1,8 +1,14 @@
 #include "execution_domain.h"
 
 #ifdef TI_WITH_CUDA
+#include <algorithm>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
+#include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/interop/cuda_external_interop.h"
+#include "taichi/program/runtime_fault.h"
 #include "taichi/runtime/cuda/execution_domain.h"
 
 namespace capi {
@@ -80,6 +86,54 @@ TiCompletion CompletionPublication::commit(RuntimeCompletion completion) {
   return result;
 }
 }  // namespace capi
+
+TiMemory ti_import_cuda_external_memory_ext(
+    TiRuntime runtime,
+    const TiCudaExternalMemoryImportInfo *import_info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(import_info);
+  using namespace taichi::lang;
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  TI_CAPI_NOT_SUPPORTED_IF_RV(rt.arch != taichi::Arch::cuda);
+  rt.runtime_fault_domain()->throw_if_submission_disallowed(
+      "import external CUDA memory");
+  const auto &info = *import_info;
+  if ((info.handle_type != TI_CUDA_EXTERNAL_HANDLE_OPAQUE_WIN32 &&
+       info.handle_type != TI_CUDA_EXTERNAL_HANDLE_OPAQUE_FD) ||
+      info.dedicated > 1 || !info.allocation_size || !info.byte_size ||
+      info.allocation_size > std::numeric_limits<std::size_t>::max() ||
+      info.byte_offset > info.allocation_size ||
+      info.byte_size > info.allocation_size - info.byte_offset ||
+      info.memory_handle > std::numeric_limits<std::uintptr_t>::max() ||
+      info.ready_for_cuda > std::numeric_limits<std::uintptr_t>::max() ||
+      info.ready_for_external > std::numeric_limits<std::uintptr_t>::max())
+    throw MemoryBindingError("Invalid external CUDA memory import descriptor");
+  const auto type = info.handle_type == TI_CUDA_EXTERNAL_HANDLE_OPAQUE_WIN32
+                        ? ExternalOpaqueHandleType::kOpaqueWin32
+                        : ExternalOpaqueHandleType::kOpaqueFd;
+  CudaExternalMemoryImport memory;
+  memory.handle = {type, static_cast<std::uintptr_t>(info.memory_handle)};
+  memory.allocation_size = static_cast<std::size_t>(info.allocation_size);
+  memory.dedicated = info.dedicated != 0;
+  std::copy(std::begin(info.device_uuid), std::end(info.device_uuid),
+            memory.device_uuid.begin());
+  const CudaExternalSemaphorePairImport semaphores{
+      {type, static_cast<std::uintptr_t>(info.ready_for_cuda)},
+      {type, static_cast<std::uintptr_t>(info.ready_for_external)}};
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  auto allocation = CudaExternalAllocation::create_borrowed(
+      &static_cast<cuda::CudaDevice &>(rt.get()), memory, semaphores);
+  auto storage = std::make_shared<Runtime::BorrowedMemory>();
+  storage->owner = allocation;
+  storage->external_access = allocation;
+  return rt.register_memory(allocation->cuda_allocation(), info.byte_size,
+                            false, info.byte_offset, {}, info.byte_offset,
+                            false, std::move(storage));
+  TI_CAPI_TRY_CATCH_END();
+  return TI_NULL_HANDLE;
+}
 
 TiCudaExecutionDomain ti_create_cuda_execution_domain_ext(
     TiRuntime runtime,

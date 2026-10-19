@@ -137,6 +137,11 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
                             env=os.environ.copy(), capture_output=True, text=True, timeout=90)
     (tmp_path / "public-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     assert result.returncode == 0 and "PUBLIC_AOT_DOMAIN_OK" in result.stdout, result.stdout + result.stderr
+    external_consumer = Path(__file__).with_name("aot_external_memory_probe.py")
+    result = subprocess.run([sys.executable, "-S", str(external_consumer), str(directory)],
+                            env=os.environ.copy(), capture_output=True, text=True, timeout=90)
+    (tmp_path / "external-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+    assert result.returncode == 0 and "PUBLIC_AOT_EXTERNAL_MEMORY_OK" in result.stdout, result.stdout + result.stderr
     from tests.python.aot_execution_domain_probe import check
 
     with ti.aot.borrow_runtime() as borrower:

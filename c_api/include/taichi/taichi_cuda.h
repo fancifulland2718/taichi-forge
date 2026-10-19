@@ -66,6 +66,42 @@ typedef struct TiCompletionInfo {
   TiBool has_backend_work;
 } TiCompletionInfo;
 
+// Opaque external allocation plus one binary ready/consumed semaphore pair.
+// These are runtime import facts, never AOT artifact fields. Values are native
+// NT handles on Windows or file descriptors on Linux, not CUDA pointers.
+typedef enum TiCudaExternalHandleType {
+  TI_CUDA_EXTERNAL_HANDLE_OPAQUE_WIN32 = 1,
+  TI_CUDA_EXTERNAL_HANDLE_OPAQUE_FD = 2,
+} TiCudaExternalHandleType;
+
+typedef struct TiCudaExternalMemoryImportInfo {
+  TiCudaExternalHandleType handle_type;
+  TiBool dedicated;
+  uint64_t memory_handle;
+  uint64_t ready_for_cuda;
+  uint64_t ready_for_external;
+  uint64_t allocation_size;
+  uint64_t byte_offset;
+  uint64_t byte_size;
+  uint8_t device_uuid[16];
+} TiCudaExternalMemoryImportInfo;
+
+// Cold import of a finite linear buffer range on the same physical GPU.
+// All original OS handles remain caller-owned on success and failure. Internal
+// duplicates are imported and released by this runtime. Keep the external
+// allocation, producer API device and semaphore objects alive until
+// ti_free_memory (or runtime destruction) returns. Each complete
+// selected-domain recipe consumes one ready signal and publishes one consumed
+// signal. The producer must enqueue the ready signal before CUDA submission;
+// it may still be pending on device. Enqueue the external consumer wait after
+// CUDA submission returns. Ordinary/default entrypoints reject this memory. Free is a cold drain
+// of its dependent execution domains. The external producer remains responsible
+// for draining its own queued work. Import each physical semaphore pair once;
+// derive aliases through plan views.
+TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cuda_external_memory_ext(
+    TiRuntime runtime,
+    const TiCudaExternalMemoryImportInfo *import_info);
+
 // Cold construction, with explicit positive queue and instance capacities.
 // Priority is a scheduling hint; query the effective value on this device.
 TI_DLL_EXPORT TiCudaExecutionDomain TI_API_CALL

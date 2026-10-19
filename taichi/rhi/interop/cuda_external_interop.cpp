@@ -40,8 +40,28 @@ bool platform_accepts(ExternalOpaqueHandleType type) {
 class ConsumedExternalHandle {
  public:
   explicit ConsumedExternalHandle(ExternalOpaqueHandle handle,
-                                  bool owns_handle = true)
+                                  bool owns_handle = true,
+                                  bool duplicate = false)
       : handle_(handle), owns_handle_(owns_handle) {
+    if (duplicate && owns_handle_) {
+      // Until duplication succeeds this object must not close the original,
+      // including exceptions raised while validating its platform or value.
+      owns_handle_ = false;
+      validate();
+#if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(_MSC_VER)
+      HANDLE copy = nullptr;
+      TI_ERROR_IF(
+          !DuplicateHandle(GetCurrentProcess(), win32(), GetCurrentProcess(),
+                           &copy, 0, FALSE, DUPLICATE_SAME_ACCESS),
+          "Unable to duplicate external interop handle");
+      handle_.value = reinterpret_cast<std::uintptr_t>(copy);
+#else
+      const int copy = dup(fd());
+      TI_ERROR_IF(copy < 0, "Unable to duplicate external interop descriptor");
+      handle_.value = static_cast<std::uintptr_t>(copy);
+#endif
+      owns_handle_ = true;
+    }
   }
 
   void validate() const {
@@ -169,14 +189,16 @@ class CudaExternalAllocation::Impl {
  public:
   Impl(CudaDevice *cuda_device,
        CudaExternalMemoryImport memory,
-       std::optional<CudaExternalSemaphorePairImport> semaphores)
+       std::optional<CudaExternalSemaphorePairImport> semaphores,
+       bool duplicate_handles = false)
       : cuda_device_(cuda_device),
         allocation_size_(memory.allocation_size),
         device_uuid_(memory.device_uuid),
         synchronized_(semaphores.has_value()) {
-    // Take ownership before validation so every failure path releases all
-    // handles supplied to create().
-    ConsumedExternalHandle memory_handle(memory.handle);
+    // Own transferred handles (or private copies for create_borrowed) before
+    // validating the import, so failure releases only this object's handles.
+    ConsumedExternalHandle memory_handle(memory.handle, true,
+                                         duplicate_handles);
     std::optional<ConsumedExternalHandle> ready_for_cuda_handle;
     std::optional<ConsumedExternalHandle> ready_for_external_handle;
     if (semaphores) {
@@ -191,9 +213,10 @@ class CudaExternalAllocation::Impl {
            semaphores->ready_for_external.value !=
                semaphores->ready_for_cuda.value);
       ready_for_cuda_handle.emplace(semaphores->ready_for_cuda,
-                                    cuda_handle_is_unique);
+                                    cuda_handle_is_unique, duplicate_handles);
       ready_for_external_handle.emplace(semaphores->ready_for_external,
-                                        external_handle_is_unique);
+                                        external_handle_is_unique,
+                                        duplicate_handles);
     }
 
     memory_handle.validate();
@@ -481,6 +504,15 @@ CudaExternalAllocation::CudaExternalAllocation(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {
 }
 
+std::shared_ptr<CudaExternalAllocation> CudaExternalAllocation::create_borrowed(
+    CudaDevice *cuda_device,
+    CudaExternalMemoryImport memory,
+    CudaExternalSemaphorePairImport semaphores) {
+  return std::shared_ptr<CudaExternalAllocation>(
+      new CudaExternalAllocation(std::make_unique<Impl>(
+          cuda_device, std::move(memory), std::move(semaphores), true)));
+}
+
 CudaExternalAllocation::~CudaExternalAllocation() {
   try {
     impl_->close();
@@ -542,6 +574,14 @@ std::array<std::uint8_t, 16> current_cuda_external_device_uuid() {
 #else
 
 class CudaExternalAllocation::Impl {};
+
+std::shared_ptr<CudaExternalAllocation> CudaExternalAllocation::create_borrowed(
+    cuda::CudaDevice *,
+    CudaExternalMemoryImport,
+    CudaExternalSemaphorePairImport) {
+  TI_ERROR("External CUDA allocation requires CUDA support");
+  return nullptr;
+}
 
 std::shared_ptr<CudaExternalAllocation> CudaExternalAllocation::create(
     cuda::CudaDevice *,

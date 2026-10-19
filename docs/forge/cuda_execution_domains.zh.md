@@ -56,6 +56,21 @@ domain.close()  # 冷阶段，排空并退休资源
 
 ## 准备、初始化与提交
 
+无前端的独立 runtime 还提供 `runtime.import_cuda_external_memory()`，导入同一 GPU
+外部分配中的有限线性缓冲区。参数包括 OS memory handle、分配大小和设备 UUID、二进制
+`ready_for_cuda`/`ready_for_external` semaphore 对、dtype/shape 和可选字节偏移。
+成功和失败都保留调用者原始 OS handle；runtime 只导入自己的副本。外部分配、设备和
+semaphore 对象须保持到 imported memory 关闭，生产者还要自行排空其已提交工作。
+每个物理 semaphore 对只导入一次，别名用 execution-plan view 表达；普通 host transfer
+和默认 launch 不能绕过外部访问协议。
+
+每次接受的完整配方消费一个 ready 信号并发布一个 consumed 信号。生产者必须先把
+ready 信号**提交到 Vulkan 队列**，再调用 CUDA submit；信号可以仍在设备上等待。
+CUDA submit 返回后才提交外部 consumer wait。只把请求放入另一个主机线程的队列，
+还不能证明 Vulkan 提交已经发生。该协议不要求主机等待 GPU 完成，见
+[CUDA 外部 semaphore 顺序](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/graphics-interop.html)。
+当前实机资格限 Windows CUDA/Vulkan；存在 FD 导入代码不等于已验证 Linux 窗口。
+
 无源码 consumer 直接使用 runtime 包；需要共享现有 JIT owner 时，显式通过
 `ti.aot.borrow_runtime()` 获得同一套接口。假设模块导出了 `step`，并已准备参数字典：
 

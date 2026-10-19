@@ -75,6 +75,27 @@ the last domain wrapper cannot accidentally trigger destructive runtime close.
 
 ## Prepare, initialize and submit
 
+The source-free runtime also exposes `runtime.import_cuda_external_memory()`
+for a finite linear CUDA buffer imported from a same-GPU external allocation.
+Supply the allocation's OS handle, size and device UUID, a binary
+`ready_for_cuda`/`ready_for_external` semaphore pair, dtype/shape and optional
+byte offset. Original OS handles remain caller-owned on both success and
+failure; the runtime imports private duplicates. Keep the producer device,
+allocation and semaphore objects alive until the imported memory closes, and
+separately drain the producer's own queued work. Import each physical pair once
+and use execution-plan views for aliases. Ordinary host transfers and default
+launches reject these managed buffers.
+
+Each accepted complete recipe consumes one ready signal and publishes one
+consumed signal. The producer must **enqueue** its signal before CUDA submit;
+the signal may still be pending on device. Enqueue the external consumer wait
+after CUDA submit returns. A host request placed in another thread's work queue
+does not establish this ordering until that thread submits to Vulkan. No host
+wait for GPU completion is required by this protocol.
+See [CUDA external semaphore ordering](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/graphics-interop.html).
+Current real-device qualification is Windows CUDA/Vulkan; the FD import path
+does not constitute Linux window qualification.
+
 Use the runtime package directly in a source-free consumer, or obtain the same
 interface through `ti.aot.borrow_runtime()` when explicitly sharing a JIT owner.
 Given a module exporting `step` and its argument dictionary:
