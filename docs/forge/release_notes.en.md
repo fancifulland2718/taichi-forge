@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU/CUDA/Vulkan native affine transforms route packed vector/matrix ndarrays
+  through the existing per-lane core, fixing rejected payloads or partial writes.
+  Ordered PrimitiveSequence and Graph replay preserve all lanes; mismatched
+  element shapes are rejected before dispatch.
+
 - Vulkan `PrimitiveSequence` transform/gather/scatter fusion preserves all
   intermediate outputs and zero values from out-of-range gathers. Appending an
   operation invalidates the old plan. Read/write aliases retain ordered execution

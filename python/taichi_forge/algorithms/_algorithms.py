@@ -12363,6 +12363,8 @@ def _check_transform_request(src, dst, method, workspace):
     _check_no_struct_numeric_payload("experimental_transform()", src, dst)
     if src.dtype != dst.dtype:
         raise TypeError("experimental_transform() source and destination dtype must match.")
+    if isinstance(src, Ndarray) and isinstance(dst, Ndarray):
+        _check_ndarray_payload_compatible(src, dst, "experimental_transform()")
     src_is_view = _is_struct_scalar_member_view(src)
     dst_is_view = _is_struct_scalar_member_view(dst)
     src_view = _primitive_view(src)
@@ -12862,20 +12864,26 @@ def _try_native_dense_matrix_field_transform(
     return True
 
 
-def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bias, workspace):
-    src_payload = _packed_tensor_member_payload(src)
-    dst_payload = _packed_tensor_member_payload(dst)
+def _try_native_packed_tensor_transform(src, dst, method, value_type, scale, bias, workspace):
+    def payload(array):
+        if isinstance(array, (VectorNdarray, MatrixNdarray)):
+            item_bytes = array._get_element_size()
+            return array.arr, 0, item_bytes, item_bytes
+        return _packed_tensor_member_payload(array)
+
+    src_payload = payload(src)
+    dst_payload = payload(dst)
     if src_payload is None or dst_payload is None:
         return False
     src_arr, src_offset, src_stride, src_item_bytes = src_payload
     dst_arr, dst_offset, dst_stride, dst_item_bytes = dst_payload
     if src_item_bytes != dst_item_bytes:
         return False
-    scalar_bytes = _dtype_nbytes(src.scalar_dtype)
+    scalar_bytes = _dtype_nbytes(src.dtype if isinstance(src, Ndarray) else src.scalar_dtype)
     if scalar_bytes <= 0:
         return False
     lane_count = src_item_bytes // scalar_bytes
-    if lane_count <= 1:
+    if lane_count < 1:
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -13140,7 +13148,7 @@ def experimental_transform(
             src, dst, method, normalized_scale, normalized_bias
         ):
             return workspace
-        if _try_native_tensor_member_transform(
+        if _try_native_packed_tensor_transform(
             src,
             dst,
             method,
@@ -13211,6 +13219,15 @@ def experimental_transform(
     if _default_workspace_replay_enabled(workspace, "transform") and workspace._try_native_transform_plan(
         src, dst, method, scale, bias
     ):
+        _record_native_transform_ad(src, dst, scale)
+        return workspace
+    if isinstance(src, (VectorNdarray, MatrixNdarray)) and method in (
+        "auto", "cpu_native", "cuda_device", "vulkan_native"
+    ):
+        if not _try_native_packed_tensor_transform(
+            src, dst, method, value_type, scale, bias, workspace
+        ):
+            raise RuntimeError("Tensor ndarray transform requires a packed native backend.")
         _record_native_transform_ad(src, dst, scale)
         return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_transform(
