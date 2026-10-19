@@ -1878,11 +1878,15 @@ cuFFT 回归覆盖两次库调用、三个融合 map 区域、重复导出，以
 独立/借用消费。分支内含 native recording 的并行组合及自定义存储路线仍需各自的重建资格。
 
 Graph 实例拥有的 ndarray 声明（`private_ndarray` / `GraphOwnedNdarray`）可导出为
-首次清零的私有资源。同一声明的多个符号共享一份分配，kernel/provider 参数和显式
+首次清零的私有资源。同一实例分配的多个符号共享一份资源，kernel/provider 参数和显式
 梯度绑定统一映射。每份消费端 preparation 拥有全新状态；这里重建声明，不复制已
 执行过的生产端数组内容。固定的 live 数组仍需单独重建合同。
 CPU/CUDA/Vulkan 小规模测试覆盖状态累积、显式反向、别名与重新准备；CUDA GEMM
 序列另验证私有中间量和生产端关闭后的显式输入伴随。
+
+同一冻结定义构造的不同 retained 子图实例各自保留私有状态；重复引用同一个实例则
+保留别名和状态，kernel 代码仍共享。CPU/CUDA/Vulkan 已验证同一父图内的两种情况、
+绑定更新、下游真实反向 kernel 和消费端在途退休。
 
 固定的 Python 内建标量按 Graph 最终绑定值及每个物理 dispatch 的参数 dtype
 自动导出。相同类型和位载荷共用常量描述，不同 dtype 保持区分。三后端已验证

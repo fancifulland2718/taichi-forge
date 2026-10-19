@@ -2505,13 +2505,18 @@ export does not replace them with fixed-capacity work.
 
 Graph-instance-owned ndarray declarations (`private_ndarray` / `GraphOwnedNdarray`)
 now export as private resources with one-time zero initialization. Symbols sharing
-the same declaration retain one allocation, including kernel/provider and explicit
+the same instance allocation retain one resource, including kernel/provider and explicit
 gradient bindings. Every consumer preparation owns fresh state; this reconstructs
 the declaration, not the contents of an already executed producer. Live fixed arrays
 still require separate reconstruction contracts. Small
 CPU/CUDA/Vulkan tests cover accumulation, explicit reverse kernels, aliases and
 re-preparation; a CUDA GEMM sequence covers a private intermediate and its explicit
 input adjoint after producer closure.
+
+Retained subgraphs built from the same frozen definition keep separate private
+state for each instance. Reusing one instance preserves its aliases and state;
+kernel code remains shared. CPU/CUDA/Vulkan checks cover both cases in one parent,
+changed bindings, downstream reverse kernels and in-flight consumer retirement.
 
 Fixed built-in Python scalars now use the final Graph binding frame and each
 physical dispatch's argument dtype. Equal typed bit payloads share one constant

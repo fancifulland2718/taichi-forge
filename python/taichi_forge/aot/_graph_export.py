@@ -201,7 +201,7 @@ class _ExportContext:
                 if previous != allocator:
                     raise TaichiRuntimeError("AOT private aliases have conflicting storage owners")
 
-    def declare_private_bindings(self, bindings):
+    def declare_private_bindings(self, bindings, instance):
         from taichi_forge.graph._ir import InternalNdarrayRequirement
         from taichi_forge.lang._storage_view import DenseNdarrayView
         from taichi_forge.lang.util import cook_dtype
@@ -235,7 +235,10 @@ class _ExportContext:
             if core.data_type_size(dtype) != owner.element_bytes:
                 raise TaichiRuntimeError("AOT private ndarray element size differs from its declaration")
             self._private_names[name] = self._resource(
-                owner,
+                # A frozen declaration can be shared by distinct compiled
+                # instances. Only aliases of the actual instance allocation
+                # share storage; repeated uses of that instance still dedup.
+                instance._fixed_runtime_args[name],
                 dict(
                     kind="ndarray",
                     dtype=element_type,
@@ -542,7 +545,7 @@ class _ExportContext:
                         self.private_bindings[name] = self._scalar_values[name] = owner
                     else:
                         self.retained_arrays.bind_private(name, owner)
-                self.declare_private_bindings(spec.fixed_runtime_args)
+                self.declare_private_bindings(spec.fixed_runtime_args, graph._instance)
                 for lease in spec.lifetime_leases:
                     exporter = type(lease).__dict__.get("_export_aot_bindings")
                     if exporter is not None:
@@ -1149,7 +1152,7 @@ def export_graph(
             resource_inputs=resource_inputs,
         )
         context.declare_storage_plans(graph)
-        context.declare_private_bindings(spec.fixed_runtime_args)
+        context.declare_private_bindings(spec.fixed_runtime_args, graph._instance)
         source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
         context.control_names = set(spec.control_binding_plan.names)
         # Dispatch actions may already be flattened into ordinary physical
