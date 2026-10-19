@@ -146,6 +146,11 @@ class _ReductionExecutable(NativeGraphExecutable):
     def run(self):
         self._graph.run(self._bindings)
 
+    def _export_aot(self, context):
+        from taichi_forge.graph._segmented_reduce_export import export_segmented_reduce
+
+        export_segmented_reduce(self, context)
+
     @property
     def graph_physical_plan_id(self):
         return self._manifest.recipe_id

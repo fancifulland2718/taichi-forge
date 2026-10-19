@@ -150,6 +150,14 @@ _ROUTES = MappingProxyType({
                            "invalid_ids_ignored", "disjoint_output", "prepared_cpu_partial",
                            "gpu_direct_atomic_strategy", "device_atomic_capabilities", "explicit_adjoint_only")),
     ),
+    "segmented_reduce": (
+        PrimitiveAOTRoute(
+            "aot.Module.add_execution_plan", ("graph.GraphBuilder.segmented_reduce",), ("cuda",),
+            ("selected_materialized_graph", "i32_u32_sum", "frozen_segment_layout",
+             "exported_helper_closure", "selected_strategy_scratch", "disjoint_input_output",
+             "no_automatic_ad"),
+        ),
+    ),
     "segmented_scan": (
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.segmented_scan",), ("cuda",),

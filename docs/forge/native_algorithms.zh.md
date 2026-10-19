@@ -245,6 +245,15 @@ Sequence 导出冻结生产端 CPU 线程配置；显式计划省略 `cpu_max_th
 `builtin/scatter_add` v1。此路线尚不覆盖 tensor/strided/fused/two-level sequence；
 AOT 不自动生成伴随，可组合导出的 kernel 提供显式伴随。
 
+已物化的 CUDA `GraphBuilder.segmented_reduce()` recipe 可通过
+`Module.add_execution_plan()` 导出，输入/输出限不重叠的 scalar i32/u32 ndarray，
+layout 为 host 发布的不可变拓扑。导出保留选中的 serial、warp、block 或
+partial/finalize helper kernel。前三者仅保留 offsets；partial 路线仅保留分块/
+收尾边界与私有 partial，不携带未使用的原始 offsets 或逐元素 segment IDs。
+一个 plan 内重复拓扑数据共享；空 segment 写零，整数模加，导出不执行归约或读回
+设备拓扑，消费者无需 Python DSL 源码。该路线不覆盖
+`PrimitiveSequence.segmented_reduce()`、浮点 recipe 或自动微分。
+
 `PrimitiveSequence.grouped_reduce()` 与显式 `builtin/grouped_reduce` v1 描述支持
 CPU/CUDA/Vulkan 的 packed scalar sum：key 为 i32，value/output 为
 i32/u32/f32/i64/u64/f64。参数为 `size`、非零 `num_groups`、`dtype` 和可选的

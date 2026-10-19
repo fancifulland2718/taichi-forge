@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Selected CUDA Graph segmented reductions now export their actual helper
+  kernels and live topology/scratch arrays. Serial, warp, block and partial
+  strategies preserve i32/u32 sums and empty-segment writes in standalone AOT
+  consumers, without unused per-item IDs or a new automatic AD route.
 - CPU jobs wake workers once when becoming active, according to their useful
   parallelism. Queued submissions and worker joins no longer issue redundant
   wakeups. Full-pool jobs and shutdown retain broadcasts; task partitioning,

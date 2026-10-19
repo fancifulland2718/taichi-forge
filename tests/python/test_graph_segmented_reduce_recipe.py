@@ -105,9 +105,10 @@ def test_segmented_reduce_empty_domain_and_cold_semantic_rejections():
     definition, values, output, _, expected = _definition(lengths=(0, 0, 0))
     assert len(_recipes(definition)) == 1
     with definition.materialization_context() as context:
-        context.materialize(_recipes(definition)[0]).executor.run({})
-        ti.sync()
-        np.testing.assert_array_equal(output.to_numpy(), expected)
+        with context.materialize(_recipes(definition)[0]) as selected:
+            selected.executor.run({})
+            ti.sync()
+            np.testing.assert_array_equal(output.to_numpy(), expected)
     layout = ti.algorithms.SegmentedLayout.from_offsets(
         np.asarray((0, 1, 2, 3), np.int32), capacity=3
     )

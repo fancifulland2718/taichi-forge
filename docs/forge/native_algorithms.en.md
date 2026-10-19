@@ -317,6 +317,17 @@ application kernel code and require `builtin/scatter_add` v1 in the consumer.
 Tensor/strided/fused/two-level sequences are not covered by this route. AOT does
 not synthesize its adjoint; exported kernels can provide an explicit adjoint.
 
+Materialized CUDA `GraphBuilder.segmented_reduce()` recipes export through
+`Module.add_execution_plan()` for disjoint scalar i32/u32 ndarrays and immutable
+host-published segment layouts. Export preserves the selected serial, warp,
+block, or partial/finalize helper kernels. The first three retain only offsets;
+the partial route retains tile/final offsets and private partials, without unused
+original offsets or per-item segment IDs. Repeated identical topology data is
+shared within a plan. Empty segments write zero, integer sums wrap, and export
+does not execute the reduction or read device topology. Consumers need no Python
+DSL source. This route does not cover `PrimitiveSequence.segmented_reduce()`,
+floating-point recipes, or automatic differentiation.
+
 `PrimitiveSequence.grouped_reduce()` and explicit `builtin/grouped_reduce` v1
 descriptions support packed scalar sums on CPU/CUDA/Vulkan: i32 keys and
 i32/u32/f32/i64/u64/f64 values/outputs. Parameters are `size`, nonzero
