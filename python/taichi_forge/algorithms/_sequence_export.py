@@ -701,7 +701,7 @@ def _export_indexed_transform(sequence, context):
 def export_sequence(sequence, context):
     from ._algorithms import PrimitiveSequence
     from ._diagnostic_export import export_check_call, export_metric_call
-    from ._segmented_export import export_segmented_reduce
+    from ._segmented_export import export_segmented_reduce, export_segmented_scan
     from ._bucket_export import export_bucket_builder
 
     if type(sequence) is not PrimitiveSequence:
@@ -715,6 +715,7 @@ def export_sequence(sequence, context):
         "scatter_add": _scatter_add,
         "grouped_reduce": _grouped_reduce,
         "segmented_reduce": export_segmented_reduce,
+        "segmented_scan": export_segmented_scan,
         "bucket_builder": export_bucket_builder,
         "histogram": _histogram,
         "check": export_check_call, "metric": export_metric_call,

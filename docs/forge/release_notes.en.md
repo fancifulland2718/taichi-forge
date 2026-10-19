@@ -34,6 +34,16 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU/CUDA/Vulkan `PrimitiveSequence.segmented_scan` exports its serial or integer
+  global-scan strategy, inclusive/exclusive mode, exact in-place bindings and
+  strategy-specific padding behavior. Consumers retain immutable host/device
+  topology, private bases and dense Field snapshots without the frontend. Shared
+  workspaces preserve each call's selection; downstream DSL gradients remain usable
+  (the scan itself has no automatic adjoint). Disjoint segment correction now uses
+  ordinary stores, avoiding unnecessary atomics and the 64-bit atomic capability.
+  Vulkan scan also aligns input-view and hierarchical-scratch descriptors to the
+  device's storage-buffer requirement without copying the input.
+
 - Vulkan compiles unsigned integer negation with modular arithmetic, including
   negation introduced by subtraction simplification. This fixes `u32/u64`
   kernels and unsigned segmented-scan correction helpers failing in SPIR-V codegen.

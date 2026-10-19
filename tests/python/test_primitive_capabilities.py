@@ -118,6 +118,11 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         selected = next(r for r in segmented if r.forms == ("graph.GraphBuilder.segmented_reduce",))
         assert selected.backends == ("cuda",)
         assert {"selected_strategy_scratch", "no_automatic_ad"} <= set(selected.constraints)
+        scans = ti.algorithms.primitive_capability("segmented_scan").aot_routes
+        sequence_scan = next(r for r in scans if r.forms == ("segmented_scan",))
+        assert sequence_scan.backends == ("cpu", "cuda", "vulkan")
+        assert {"preserved_serial_or_integer_global_scan_strategy", "preserved_strategy_padding",
+                "exact_inplace_or_disjoint", "explicit_adjoint_only"} <= set(sequence_scan.constraints)
         histogram = ti.algorithms.primitive_capability("histogram").aot_routes
         assert any(r.forms == ("histogram",) and r.backends == ("cpu", "cuda", "vulkan") for r in histogram)
         assert any(r.forms == ("builtin/histogram",) and "empty_input_supported" in r.constraints for r in histogram)

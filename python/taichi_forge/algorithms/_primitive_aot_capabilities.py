@@ -197,6 +197,11 @@ _ROUTES = MappingProxyType({
         ),
     ),
     "segmented_scan": (
+        _sequence(("segmented_scan",), "packed_scalar", "sum", "i32_u32_f32_i64_u64_f64",
+                  "host_or_device_published_immutable_layout", "selected_topology_snapshot",
+                  "preserved_serial_or_integer_global_scan_strategy", "inclusive_or_exclusive",
+                  "exact_inplace_or_disjoint", "preserved_strategy_padding", "field_snapshot",
+                  "device_dtype_capabilities", "explicit_adjoint_only"),
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.segmented_scan",), ("cuda",),
             ("selected_materialized_graph", "i32_u32_sum", "frozen_segment_layout",

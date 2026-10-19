@@ -1538,7 +1538,8 @@ def segmented_scan_apply_bases_ndarray(
         if inclusive != 0:
             for local_index in range(end - begin):
                 index = begin + local_index
-                scanned[index] -= base
+                # Published segments are disjoint: each item has one writer.
+                scanned[index] = scanned[index] - base
         else:
             loop_config(serialize=True)
             for reverse_index in range(end - begin):
@@ -1567,7 +1568,7 @@ def segmented_scan_apply_bases_field(
         if inclusive != 0:
             for local_index in range(end - begin):
                 index = begin + local_index + scanned_offset
-                scanned[index] -= base
+                scanned[index] = scanned[index] - base
         else:
             loop_config(serialize=True)
             for reverse_index in range(end - begin):

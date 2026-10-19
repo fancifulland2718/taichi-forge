@@ -105,3 +105,100 @@ def export_segmented_reduce(call, context):
     kernel = helper._primal
     specialization = kernel.ensure_compiled(values, layout._offsets, output, layout.num_segments, _for_aot=True)
     context.kernel(kernel.compiled_kernels[specialization], tuple(args))
+
+
+def export_segmented_scan(call, context):
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from taichi_forge.graph._graph import Arg, ArgKind
+    from taichi_forge_runtime.aot import Scalar
+    from . import _algorithms as algorithms
+
+    if (
+        call.func is not algorithms.experimental_segmented_scan
+        or type(call.workspace) is not algorithms.SegmentedWorkspace
+        or set(call.kwargs) != {"inclusive", "op", "method", "workspace"}
+        or call.kwargs["workspace"] is not call.workspace
+        or len(call.args) != 3
+        or call.plan is not None
+    ):
+        raise TaichiRuntimeError("AOT segmented scan requires its concrete SegmentedWorkspace call")
+    values, layout, output = call.args
+    if call.kwargs["op"] != "sum" or not isinstance(call.kwargs["inclusive"], (bool, np.bool_)):
+        raise TaichiRuntimeError("AOT segmented scan requires sum and a boolean inclusive flag")
+    ndarray_mode, in_place = algorithms._check_segmented_request(
+        "AOT segmented scan", *call.args, method=call.kwargs["method"], workspace=call.workspace, scan=True
+    )
+    if any(len(d.index_shape) != 1 or d.element_shape for d in map(packed_description, (values, output))):
+        raise TaichiRuntimeError("AOT segmented scan requires packed scalar storage")
+    method = algorithms._select_segmented_scan_method(values.dtype, layout, call.kwargs["method"])
+    offsets = _topology_binding(layout, context)
+    arrays = context.retained_arrays
+
+    def scalar(value):
+        name = context._resource(
+            object(), {k: v for k, v in Scalar("i32", value).resource("count").items() if k != "name"}
+        )
+        return Arg(ArgKind.SCALAR, name, algorithms.i32)
+
+    count, inclusive = scalar(layout.num_segments), scalar(int(call.kwargs["inclusive"]))
+    offset_arg = Arg(ArgKind.NDARRAY, offsets, algorithms.i32, ndim=1)
+
+    def emit(helper, operands, args):
+        kernel = helper._primal
+        specialization = kernel.ensure_compiled(*operands, _for_aot=True)
+        context.kernel(kernel.compiled_kernels[specialization], tuple(args))
+
+    if method == "serial":
+        args = [offset_arg, count, inclusive]
+        if ndarray_mode:
+            helper = algorithms.segmented_scan_sum_serial_ndarray
+            source, destination = arrays.require(values), arrays.require(output)
+            context.binding_constraints.append(
+                dict(kind="disjoint", left=source, right=destination, allow_same_view=True)
+            )
+            args.insert(0, Arg(ArgKind.NDARRAY, source, values.dtype, ndim=1))
+            args.insert(2, Arg(ArgKind.NDARRAY, destination, output.dtype, ndim=1))
+        else:
+            helper = algorithms.segmented_scan_sum_serial_field
+            context.field_state(tuple(packed_description(a).tree_identity for a in (values, output)))
+        emit(helper, (values, layout._offsets, output, layout.num_segments, int(call.kwargs["inclusive"])), args)
+        return
+
+    from ._sequence_export import _scan, _transform
+
+    if not in_place:
+        workspace = call.workspace._get_transform_workspace(layout)
+        if type(workspace) is not algorithms.TransformWorkspace:
+            raise TaichiRuntimeError("AOT segmented scan requires its concrete transform child workspace")
+        child = algorithms._PrimitiveSequenceCall(
+            "transform", algorithms.experimental_transform, (values, output),
+            dict(scale=1, bias=0, method="auto"), workspace,
+        )
+        child.plan = algorithms._native_plan_cache_lookup(
+            workspace._native_transform_plans, workspace._native_transform_backend_for_method("auto"),
+            child.args, (1, 0),
+        )
+        _transform(child, context)
+    executor = call.workspace._get_scan_executor(layout)
+    if type(executor) is not algorithms.PrefixSumExecutor:
+        raise TaichiRuntimeError("AOT segmented scan requires its concrete scan child executor")
+    child = algorithms._PrimitiveSequenceCall(
+        "scan", algorithms._primitive_sequence_scan, (output,), {}, executor,
+    )
+    child.plan = algorithms._native_plan_cache_lookup(
+        executor._native_scan_plans, executor._native_scan_backend_for_arch(), child.args, (layout.capacity,),
+    )
+    _scan(child, context)
+    bases = call.workspace._get_base_buffer(values.dtype, layout)
+    # Gather overwrites every base, including empty segments, before correction.
+    base_arg = Arg(ArgKind.NDARRAY, arrays.declare_scratch(bases), values.dtype, ndim=1)
+    args = [offset_arg, base_arg, count]
+    if ndarray_mode:
+        gather, apply = algorithms.segmented_scan_gather_bases_ndarray, algorithms.segmented_scan_apply_bases_ndarray
+        args.insert(0, Arg(ArgKind.NDARRAY, arrays.require(output), output.dtype, ndim=1))
+    else:
+        gather, apply = algorithms.segmented_scan_gather_bases_field, algorithms.segmented_scan_apply_bases_field
+        context.field_state((packed_description(output).tree_identity,))
+    operands = (output, layout._offsets, bases, layout.num_segments)
+    emit(gather, operands, args)
+    emit(apply, operands + (int(call.kwargs["inclusive"]),), args + [inclusive])

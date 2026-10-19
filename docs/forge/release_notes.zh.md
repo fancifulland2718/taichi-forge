@@ -31,6 +31,13 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CPU/CUDA/Vulkan 的 `PrimitiveSequence.segmented_scan` 可保留 serial 或整数
+  global-scan 策略、inclusive/exclusive、精确原地绑定及各策略的 padding 行为导出。
+  独立消费者恢复不可变 host/device 拓扑、私有 bases 和 dense Field 快照；共享
+  workspace 按各调用恢复所选路径，下游 DSL 梯度仍可用（scan 本身没有自动伴随）。
+  互不重叠段的校正改为普通写入，去掉无用原子操作及额外的 64 位原子能力要求。
+  Vulkan scan 的输入 view 和多级 scratch 描述符同时遵守设备对齐要求，无输入拷贝。
+
 - Vulkan 为无符号整数取负生成同位宽模运算，包括减法简化引入的取负操作，
   修复 `u32/u64` kernel 及无符号 segmented-scan 校正 helper 的 SPIR-V 编译失败。
 

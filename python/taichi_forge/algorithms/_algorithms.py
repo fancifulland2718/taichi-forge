@@ -10743,6 +10743,25 @@ def experimental_segmented_reduce(
     return workspace
 
 
+def _select_segmented_scan_method(dtype, layout, method):
+    # Selection belongs to the request, not to a workspace's most recent call.
+    if method == "auto":
+        if (
+            dtype not in (f32, f64)
+            and current_cfg().arch == cuda
+            and layout.num_items >= _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_ITEMS
+            and layout.max_segment_length >= _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_SEGMENT_LENGTH
+        ):
+            return "global_scan"
+        return "serial"
+    if method == "global_scan" and dtype in (f32, f64):
+        raise ValueError(
+            "experimental_segmented_scan() global_scan is integer-only; use "
+            "method='serial' for numerically stable floating-point segments."
+        )
+    return method
+
+
 def experimental_segmented_scan(
     values,
     layout,
@@ -10776,22 +10795,7 @@ def experimental_segmented_scan(
         workspace=workspace,
         scan=True,
     )
-    selected_method = method
-    if selected_method == "auto":
-        selected_method = "serial"
-        if (
-            values.dtype not in (f32, f64)
-            and current_cfg().arch == cuda
-            and layout.num_items >= _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_ITEMS
-            and layout.max_segment_length
-            >= _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_SEGMENT_LENGTH
-        ):
-            selected_method = "global_scan"
-    if selected_method == "global_scan" and values.dtype in (f32, f64):
-        raise ValueError(
-            "experimental_segmented_scan() global_scan is integer-only; use "
-            "method='serial' for numerically stable floating-point segments."
-        )
+    selected_method = _select_segmented_scan_method(values.dtype, layout, method)
     if workspace is None:
         workspace = _segmented_default_workspace(
             "scan", values, layout, output, (op, method, bool(inclusive))
