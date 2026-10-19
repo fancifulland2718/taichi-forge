@@ -399,6 +399,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_transform_operation(result);
     register_indexed_copy_operation(result);
     register_scatter_add_operation(result);
+    register_grouped_reduce_operation(result);
     register_histogram_operation(result);
     register_diagnostic_operations(result);
     register_matrix_operations(result);
