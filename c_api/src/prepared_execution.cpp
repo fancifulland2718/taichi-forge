@@ -11,6 +11,7 @@
 #include "taichi/aot/execution_plan.h"
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_sort.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
@@ -1086,8 +1087,14 @@ static TiPreparedExecution prepare_execution_plan_impl(
   std::function<bool(const std::vector<aot::ExecutionPlan::Operation> &,
                      std::vector<FixedExecution::Operation> &)>
       bind_steps;
+  bool preparing_initialization = true;
   bind_steps = [&](const std::vector<aot::ExecutionPlan::Operation> &sequence,
                    std::vector<FixedExecution::Operation> &operations) {
+    // One map per ordered region and prepared frame, never in the potentially
+    // shared binding-family context. Recursive control/parallel regions have
+    // independent storage. Initializers retain their original private owners.
+    std::map<SortWorkspaceDescription::Signature,
+             std::shared_ptr<NativeSortWorkspace>> sort_workspaces;
     for (const auto &operation : sequence) {
       if (const auto *value =
               std::get_if<std::shared_ptr<const aot::ExecutionPlan::Branch>>(
@@ -1366,6 +1373,16 @@ static TiPreparedExecution prepare_execution_plan_impl(
             descriptor.value_scalar_bytes /= payload.elem_shape.dims[i];
         }
         try {
+          if (!preparing_initialization) {
+            const auto description = SortWorkspaceDescription::from(descriptor);
+            auto &workspace = sort_workspaces[description.signature()];
+            if (!workspace) {
+              workspace = prepare_sort_workspace(rt.arch, rt.get(), description);
+              prepared->native_resources.push_back(workspace);
+              prepared->replay_resources.insert(workspace.get());
+            }
+            descriptor.workspace = workspace;
+          }
           operations.emplace_back(
               prepare_sort_operation(rt.arch, rt.get(), descriptor));
         } catch (const std::invalid_argument &error) {
@@ -1473,6 +1490,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
             argument.value.native_resource);
     }
   }
+  preparing_initialization = false;
   if (!bind_steps(plan.operations, operations))
     return TI_NULL_HANDLE;
   if (used_bindings.size() != layouts.size())

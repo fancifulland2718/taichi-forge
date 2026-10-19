@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT native sorts share scratch for matching extents, key types and payload
+  layouts within each ordered replay region. CPU/CUDA/Vulkan retain separate
+  storage across recursive regions, initialization and independent binding frames,
+  with resource accounting and retirement preserved. No artifact-format change
+  or new input-size limit is required.
+
 - Native multi-key `PrimitiveSequence.sort_by_key()` exports packed scalar ndarray
   keys and optional payload to CPU/CUDA/Vulkan AOT, retaining its stable
   lexicographic sort/gather/affine strategy. CPU requires explicit `cpu_native`;

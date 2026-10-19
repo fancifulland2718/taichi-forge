@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 原生排序在同一顺序重放区域中，按相同尺寸、key 类型和载荷布局共用 scratch。
+  CPU/CUDA/Vulkan 的递归区域、初始化与独立绑定帧分别持有存储，保持资源计量及退休
+  合同；不改变产物格式，不新增输入规模上限。
+
 - 原生多键 `PrimitiveSequence.sort_by_key()` 可将 packed 标量 ndarray 键及可选载荷
   导出到 CPU/CUDA/Vulkan AOT，保留稳定字典序 sort/gather/affine 策略。CPU 需显式
   选择 `cpu_native`；冷导出不预热 producer 工作区，并按 dtype 共用置换临时数组。

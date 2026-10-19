@@ -1775,8 +1775,10 @@ CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part
 tensor/Struct/strided 载荷。CPU 需显式 `method="cpu_native"`，因为 CPU `auto` 选择的
 host 策略不能在导出时被静默替换；CUDA/Vulkan 可选 `auto` 或上述匹配的原生方法。
 导出保留既有逆序逐键 sort/gather/affine 序列，包括浮点恒等变换的语义，不预热
-producer 工作区。每个 prepared owner 私有一份 order 数组及每种 dtype 一份置换数组；
-原生排序 scratch 仍按 pass 独立持有。不新增 key 数量硬上限。单元素输入保留绑定
+producer 工作区。每个 prepared owner 私有一份 order 数组及每种 dtype 一份置换数组。
+同一顺序重放区域中，尺寸、key 类型和载荷布局相同的原生排序共用 scratch，由 owner
+计量一次；递归控制区域、独立 prepared frame、初始化及 CUDA 绑定帧分别持有存储。
+不同排序描述仍可执行并独立分配。不新增 key 数量硬上限。单元素输入保留绑定
 检查、不执行设备工作。排序本身无自动伴随，仍可导出后续 kernel 的梯度。
 
 持有的 scalar/vector/matrix ndarray 通过 `source_bindings` 命名；合格的连续 dense Field 使用

@@ -2299,8 +2299,12 @@ not snapshot Fields or support tensor/Struct/strided payloads. CPU requires expl
 silently replace. CUDA/Vulkan accept `auto` or their matching native method above.
 Export preserves the existing reversed-key sort/gather/affine sequence, including
 floating-point identity-transform semantics, without prewarming producer scratch.
-One order array and one reorder array per dtype are private to each prepared owner;
-native sorting scratch remains separate per pass. There is no added key-count cap.
+One order array and one reorder array per dtype are private to each prepared owner.
+Native sorts with equal extents, key types and payload layouts share scratch within
+an ordered replay region. Recursive control regions, independent prepared frames
+and initialization retain separate storage; CUDA binding frames also retain their
+own scratch. Different sort descriptions remain valid and use separate storage.
+The owner accounts for shared scratch once. There is no added key-count cap.
 Singleton inputs retain binding checks and perform no device work. Sorting itself
 has no automatic adjoint; exported downstream kernel gradients remain supported.
 
