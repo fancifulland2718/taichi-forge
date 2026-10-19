@@ -18,6 +18,7 @@ class LaunchContextBuilder;
 class NativeOperation;
 class NativeKernelResourceBinding;
 class RuntimeFaultDomain;
+class ExternalSynchronizationDomain;
 struct NativeRecordingState;
 namespace aot {
 class Kernel;
@@ -123,6 +124,11 @@ class FixedExecution {
   void run();
   RuntimeCompletion submit(
       const std::vector<RuntimeCompletion> &dependencies = {});
+  // Cold, once-only binding before publishing this instance to submitters.
+  // The whole replay owns one external epoch on its selected CUDA stream.
+  // Initialization has its own separately qualified access closure.
+  void bind_external_access(
+      std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains);
   // Called by an owner which has completed submitted work before retiring a
   // frame's external allocations. It does not retire sibling bindings.
   void retire_completed_binding(bool backend_safe = true);

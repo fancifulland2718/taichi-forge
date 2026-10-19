@@ -1,6 +1,7 @@
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/program/runtime_completion.h"
+#include "taichi/rhi/interop/external_access_epoch.h"
 
 #include <algorithm>
 #include <exception>
@@ -87,6 +88,8 @@ struct FixedExecution::State {
                                 std::shared_ptr<NativeOperation>>;
   struct CudaInstance final : RuntimeClient, RuntimeCompletionResources {
     std::shared_ptr<RuntimeCompletionResources> operands;
+    std::unique_ptr<PreparedExternalAccess> external_access;
+    ExternalStreamDomain external_stream;
     std::vector<CudaStep> steps;
     std::vector<std::shared_ptr<NativeOperation>> ordered;
     // Contains no ExecutionDomain reference. One domain registration owns the
@@ -114,6 +117,7 @@ struct FixedExecution::State {
       steps.clear();
       parts.clear();
       ordered.clear();
+      external_access.reset();
       std::atomic_store(&operands,
                         std::shared_ptr<RuntimeCompletionResources>{});
       retired = true;
@@ -1213,6 +1217,31 @@ FixedExecution::FixedExecution(
 }
 
 FixedExecution::~FixedExecution() = default;
+void FixedExecution::bind_external_access(
+    std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains) {
+#ifdef TI_WITH_CUDA
+  if (state_->cuda_domain && state_->cuda_instance) {
+    auto &instance = *state_->cuda_instance;
+    std::lock_guard<std::mutex> lock(instance.retirement_mutex);
+    if (instance.retired || instance.retirement_error ||
+        instance.external_access)
+      throw std::invalid_argument(
+          "External access requires an unbound live instance");
+    auto plan = std::make_unique<PreparedExternalAccess>(std::move(domains));
+    const auto selected = state_->cuda_domain->snapshot();
+    if (!selected.accepting)
+      throw std::invalid_argument(
+          "External access requires a live CUDA domain");
+    instance.external_stream =
+        ExternalStreamDomain::cuda(selected.owner, selected.identity,
+                                   reinterpret_cast<void *>(selected.stream));
+    instance.external_access = std::move(plan);
+    return;
+  }
+#endif
+  throw std::invalid_argument(
+      "Prepared external access requires an independent CUDA instance");
+}
 RuntimeCompletion FixedExecution::submit(
     const std::vector<RuntimeCompletion> &dependencies) {
 #ifdef TI_WITH_CUDA
@@ -1228,6 +1257,14 @@ RuntimeCompletion FixedExecution::submit(
             ? ordered
             : std::static_pointer_cast<RuntimeCompletionResources>(instance),
         [&](void *stream) {
+          std::optional<PreparedExternalAccess::Epoch> external;
+          if (instance->external_access) {
+            // Admission and exact dependency validation already succeeded.
+            // Busy/rejected calls never consume an external binary semaphore.
+            auto selected = instance->external_stream;
+            selected.native_stream = stream;
+            external.emplace(*instance->external_access, selected);
+          }
           std::size_t index = 0;
           for (const auto &step : instance->steps) {
             if (const auto *graph =
@@ -1236,6 +1273,8 @@ RuntimeCompletion FixedExecution::submit(
             else
               ordered->run(index++, stream);
           }
+          if (external)
+            external->release();
         },
         ordered ? std::function<void()>(
                       [&] { ordered->reserve(instance->ordered); })

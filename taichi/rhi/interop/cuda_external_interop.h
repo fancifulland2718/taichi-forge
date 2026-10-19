@@ -76,8 +76,9 @@ class RHI_DLL_EXPORT CudaExternalAllocation final
   bool synchronized() const noexcept;
   bool closed() const noexcept;
 
-  // Idempotent. It waits only for this allocation's last participating CUDA
-  // stream before releasing the imported mapping and CUDA-side semaphores.
+  // Idempotent. It waits for this allocation's last access prefix before
+  // releasing the mapping and CUDA-side semaphores. The prefix remains valid
+  // after stream destruction; driver object cleanup is a cold operation.
   void close();
 
  private:

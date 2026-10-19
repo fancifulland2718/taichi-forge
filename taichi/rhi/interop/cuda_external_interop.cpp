@@ -234,6 +234,10 @@ class CudaExternalAllocation::Impl {
         ready_for_cuda_ = import_external_semaphore(*ready_for_cuda_handle);
         ready_for_external_ =
             import_external_semaphore(*ready_for_external_handle);
+        // One reusable prefix marker per allocation, never per frame/kernel.
+        // It remains valid after an independent consumer stream is destroyed.
+        CUDADriver::get_instance().event_create(&consumer_completion_,
+                                                CU_EVENT_DISABLE_TIMING);
       }
     } catch (...) {
       destroy_resources_noexcept();
@@ -292,11 +296,13 @@ class CudaExternalAllocation::Impl {
 
     CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS params{};
     auto context_guard = CUDAContext::get_instance().get_guard();
+    unsealed_access_ = true;
     CUDADriver::get_instance().wait_external_semaphore_async(
         &ready_for_cuda_, &params, 1,
         static_cast<CUstream>(stream.native_stream));
     active_cuda_stream_ = stream;
     cuda_owned_ = true;
+    unsealed_access_ = false;
   }
 
   void release_from_consumer(const ExternalStreamDomain &stream) {
@@ -311,9 +317,8 @@ class CudaExternalAllocation::Impl {
                 "External CUDA allocation changed streams during an access "
                 "epoch");
 
-    signal_external(stream);
+    seal_external(stream);
     cuda_owned_ = false;
-    last_cuda_stream_ = stream;
   }
 
   void close() {
@@ -322,42 +327,34 @@ class CudaExternalAllocation::Impl {
       return;
     }
 
-    std::exception_ptr failure;
-    const auto attempt = [&failure](auto &&action) {
-      try {
-        action();
-      } catch (...) {
-        if (!failure) {
-          failure = std::current_exception();
-        }
-      }
-    };
-
+    TI_ERROR_IF(unsealed_access_,
+                "Cannot safely retire an unsealed external CUDA access");
     if (cuda_owned_) {
-      attempt([this] { signal_external(active_cuda_stream_); });
+      seal_external(active_cuda_stream_);
       cuda_owned_ = false;
-      last_cuda_stream_ = active_cuda_stream_;
     }
-    if (last_cuda_stream_.valid()) {
-      attempt([this] {
-        auto context_guard = CUDAContext::get_instance().get_guard();
-        CUDADriver::get_instance().stream_synchronize(
-            static_cast<CUstream>(last_cuda_stream_.native_stream));
-      });
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    if (completion_recorded_) {
+      auto &driver = CUDADriver::get_instance();
+      const auto result =
+          driver.event_synchronize.call_concurrent(consumer_completion_);
+      TI_ERROR_IF(result != CUDA_SUCCESS,
+                  "Cannot retire external CUDA access: {}",
+                  driver.event_synchronize.get_error_message(result));
     }
-    attempt([this] {
-      auto context_guard = CUDAContext::get_instance().get_guard();
-      destroy_resources();
-    });
+    // Failed completion is not permission to destroy memory or semaphores.
+    completion_recorded_ = false;
+    retiring_ = true;
+    destroy_resources();
     closed_ = true;
-    if (failure) {
-      std::rethrow_exception(failure);
-    }
   }
 
  private:
   void require_open() const {
-    TI_ERROR_IF(closed_, "External CUDA allocation is closed");
+    TI_ERROR_IF(closed_ || retiring_,
+                "External CUDA allocation is closed or retiring");
+    TI_ERROR_IF(unsealed_access_,
+                "External CUDA access is unsealed after failure");
   }
 
   void validate_cuda_stream(const ExternalStreamDomain &stream) {
@@ -371,12 +368,17 @@ class CudaExternalAllocation::Impl {
                 "External CUDA allocation belongs to another runtime");
   }
 
-  void signal_external(const ExternalStreamDomain &stream) {
+  void seal_external(const ExternalStreamDomain &stream) {
     CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS params{};
     auto context_guard = CUDAContext::get_instance().get_guard();
+    unsealed_access_ = true;
     CUDADriver::get_instance().signal_external_semaphore_async(
         &ready_for_external_, &params, 1,
         static_cast<CUstream>(stream.native_stream));
+    CUDADriver::get_instance().event_record(consumer_completion_,
+                                            stream.native_stream);
+    completion_recorded_ = true;
+    unsealed_access_ = false;
   }
 
   void destroy_resources() {
@@ -391,6 +393,12 @@ class CudaExternalAllocation::Impl {
       }
     };
 
+    attempt([this] {
+      if (consumer_completion_ != nullptr) {
+        CUDADriver::get_instance().event_destroy(consumer_completion_);
+        consumer_completion_ = nullptr;
+      }
+    });
     attempt([this] {
       if (cuda_allocation_ != kDeviceNullAllocation &&
           cuda_device_ != nullptr) {
@@ -448,13 +456,16 @@ class CudaExternalAllocation::Impl {
   bool synchronized_{false};
   bool cuda_owned_{false};
   bool closed_{false};
+  bool retiring_{false};
+  bool completion_recorded_{false};
+  bool unsealed_access_{false};
   DeviceAllocation cuda_allocation_{kDeviceNullAllocation};
   CUexternalMemory external_memory_{nullptr};
   void *mapped_buffer_{nullptr};
   CUexternalSemaphore ready_for_cuda_{nullptr};
   CUexternalSemaphore ready_for_external_{nullptr};
+  void *consumer_completion_{nullptr};
   ExternalStreamDomain active_cuda_stream_;
-  ExternalStreamDomain last_cuda_stream_;
 };
 
 std::shared_ptr<CudaExternalAllocation> CudaExternalAllocation::create(
@@ -470,7 +481,16 @@ CudaExternalAllocation::CudaExternalAllocation(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {
 }
 
-CudaExternalAllocation::~CudaExternalAllocation() = default;
+CudaExternalAllocation::~CudaExternalAllocation() {
+  try {
+    impl_->close();
+  } catch (...) {
+    // Destruction cannot make a failed drain safe. Retain the bounded native
+    // closure instead of freeing objects still referenced by the device.
+    TI_WARN("Retaining external CUDA allocation after failed retirement");
+    (void)impl_.release();
+  }
+}
 
 std::uint64_t CudaExternalAllocation::identity() const noexcept {
   return impl_->identity();
