@@ -4916,6 +4916,28 @@ downstream gradients and offset tensor views. Runtime/frontend wheels are
 The GeoPhys application, its sole TCM and 44 external dependency records remain
 unchanged. Runtime-only tensor consumers need neither the DSL nor NumPy.
 
+The compiled GeoPhys host also qualifies a complete fixed FEM/VBD step on
+Windows CPU/CUDA/Vulkan. A newly created eight-vertex, six-tetrahedron asset
+mixes fixed-corotated and stable Neo-Hookean materials with a pinned base.
+Prediction, two color-sweep iterations and finalization export through the
+existing Graph/kernel/Field contract. Six changing-timestep steps preserve
+positions, velocities, stresses, energies and device counters in independent
+loaded modules; in-flight retirement and Vulkan synchronization validation pass.
+The actual stable Neo-Hookean energy and its matrix gradient also match an
+independent stress reference, including inverted and singular deformation inputs.
+This does not qualify an automatic adjoint of the entire VBD solve or contact.
+
+The installed CUDA sm120 package now includes `fem_step` and `fem_material` beside
+`solve`, `render` and `candidates` in its sole 340,517-byte TCM. The application
+wheel is 58,828,410 bytes (+89,040), with all 534 host binaries and dependency
+declarations unchanged. Both new entries and the previous three pass installed
+consumption; Forge and all 44 external dependency records remain unchanged.
+Fixed FEM geometry/materials stay frozen; the compiled-host SDK creates new
+scenes through its existing public APIs. Independent simulations use separate
+loaded modules. The CPU/Vulkan checks use separately exported artifacts, not the
+CUDA binary. On this Windows system, cubin FEM preparation takes about 4.7 ms;
+runtime initialization and whole-module loading remain separate startup costs.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed

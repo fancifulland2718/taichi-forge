@@ -3732,6 +3732,21 @@ tensor transform 配套包刷新通过 Windows 正常安装，使用私有 ABI10
 （+1,453／+370），native DLL 增加 3,584 字节。GeoPhys 应用包、唯一 TCM 和 44 个
 外部依赖记录保持不变；runtime-only tensor 消费者不需要 DSL 或 NumPy。
 
+已编译的 GeoPhys 宿主还通过 Windows CPU/CUDA/Vulkan 完整固定 FEM/VBD 步资格。
+通过公开接口新建8顶点、6四面体资产，底面固定，混合 fixed-corotated 与 stable
+Neo-Hookean 材料。预测、两轮颜色迭代及收尾沿用已有 Graph/kernel/Field 合同导出。
+六步不同步长下，独立 loaded module 的位置、速度、应力、能量及设备计数保持正确；
+在途退休与 Vulkan 同步验证通过。真实 stable Neo-Hookean 能量及其矩阵梯度也与独立
+应力参考一致，包含倒置和奇异形变输入；这不代表整个 VBD 求解或接触已有自动伴随。
+
+正常安装的 CUDA sm120 应用包在原 solve/render/candidates 之外增加 `fem_step` 和
+`fem_material`，仍只有一个340,517字节TCM。应用wheel为58,828,410字节（+89,040），
+534个宿主二进制及依赖声明不变。新增两入口和原三入口安装消费通过；Forge组件与44个
+外部依赖记录不变。固定FEM入口的几何、材料保持冻结，已编译宿主SDK仍通过原公开API
+创建新场景；独立仿真使用不同loaded module。CPU/Vulkan资格来自分别导出的产物，
+不把CUDA二进制视为跨后端包。本机cubin FEM首次prepare约4.7ms，runtime初始化与
+整个module加载仍须单独计入启动成本。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index
