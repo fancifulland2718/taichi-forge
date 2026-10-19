@@ -4,6 +4,7 @@
 #include <set>
 
 namespace taichi::lang {
+void register_diagnostic_operations(NativeOperationRegistry &registry);
 void register_vulkan_ray_operations(NativeOperationRegistry &registry);
 void register_vulkan_ray_program_operations(NativeOperationRegistry &registry);
 void register_vulkan_graphics_operations(NativeOperationRegistry &registry);
@@ -399,6 +400,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_indexed_copy_operation(result);
     register_scatter_add_operation(result);
     register_histogram_operation(result);
+    register_diagnostic_operations(result);
     register_matrix_operations(result);
     register_cub_source_operations(result);
     register_cutlass_source_operations(result);

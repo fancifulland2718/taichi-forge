@@ -18269,11 +18269,8 @@ std::size_t Program::cpu_check_count_ndarray(Ndarray *values,
   const std::size_t n = values->get_nelement();
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::reduce_partitions(n, max_threads);
+  const bool use_parallel = target_threads > 1;
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
   const auto output_addr = get_ndarray_data_ptr_as_int(output);
   auto *output_ptr = reinterpret_cast<int32_t *>(output_addr);
@@ -18345,11 +18342,8 @@ std::size_t Program::cpu_check_count_strided_ndarray(Ndarray *values,
               "CPU native strided check_count source range is out of bounds.");
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::reduce_partitions(n, max_threads);
+  const bool use_parallel = target_threads > 1;
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
   const auto output_addr = get_ndarray_data_ptr_as_int(output);
   auto *values_ptr = reinterpret_cast<const uint8_t *>(values_addr);
@@ -18414,11 +18408,8 @@ std::size_t Program::cpu_check_count_dense_field(SNode *values,
       reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::reduce_partitions(n, max_threads);
+  const bool use_parallel = target_threads > 1;
   switch (value_type) {
     case 0:
       return cpu_check_count_strided_typed<int32_t>(
@@ -18502,11 +18493,8 @@ std::size_t Program::cpu_metric_reduce_ndarray(Ndarray *values,
   const std::size_t n = values->get_nelement();
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::reduce_partitions(n, max_threads);
+  const bool use_parallel = target_threads > 1;
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
   const auto other_addr = other ? get_ndarray_data_ptr_as_int(other) : 0;
   const auto output_addr = get_ndarray_data_ptr_as_int(output);
@@ -18592,11 +18580,8 @@ std::size_t Program::cpu_metric_reduce_strided_ndarray(
   const std::size_t n = values->get_nelement();
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::reduce_partitions(n, max_threads);
+  const bool use_parallel = target_threads > 1;
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
   const auto other_addr = get_ndarray_data_ptr_as_int(other);
   const auto output_addr = get_ndarray_data_ptr_as_int(output);
@@ -18663,11 +18648,8 @@ std::size_t Program::cpu_metric_reduce_dense_field(SNode *values,
   const auto output_addr = get_ndarray_data_ptr_as_int(output);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::reduce_partitions(n, max_threads);
+  const bool use_parallel = target_threads > 1;
   switch (value_type) {
     case 1:
       return cpu_metric_reduce_strided_typed<float>(
@@ -18740,11 +18722,8 @@ std::size_t Program::cpu_metric_reduce_dense_field_strided_ndarray(
   const auto *array_ptr = reinterpret_cast<const uint8_t *>(array_addr);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>(n / chunk_items + (n % chunk_items != 0),
-                            static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const int target_threads = cpu::reduce_partitions(n, max_threads);
+  const bool use_parallel = target_threads > 1;
   const auto *values_ptr = field_is_values ? field_ptr : array_ptr;
   const auto *other_ptr = field_is_values ? array_ptr : field_ptr;
   const std::size_t values_offset = field_is_values ? 0 : array_offset;
