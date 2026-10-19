@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Single-key native sort sequences export packed vector/matrix ndarray payloads
+  on CPU/CUDA/Vulkan without prewarming or extra helper code. Payload bits,
+  including NaNs and signed zero, remain intact. Standalone/borrowed consumers
+  and downstream kernel gradients are covered; prepared sort and multi-key
+  tensor payloads retain their separate contracts.
+
 - AOT native sorts share scratch for matching extents, key types and payload
   layouts within each ordered replay region. CPU/CUDA/Vulkan retain separate
   storage across recursive regions, initialization and independent binding frames,

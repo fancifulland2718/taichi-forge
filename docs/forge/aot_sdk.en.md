@@ -2290,6 +2290,17 @@ Vulkan compact/unique method is `vulkan_native`. Other strategies,
 descending/bitwise ordering, strided storage, fused sequences
 and unlisted operations still require their own export contracts.
 
+For single-key sorting, a scalar ndarray key can also carry an equally sized
+packed vector/matrix ndarray payload. The sequence accepts the six scalar lane
+types above and preserves every payload bit, including NaN payloads and signed
+zero, using the existing raw-record backend. Both `sort()` and single-part
+`sort_by_key()` export cold or after execution without additional helper code.
+Explicit `Module.add_primitive(..., "sort", values=...)` also accepts tensor
+records at binding time. This does not extend `prepare_sort()`'s scalar-only
+contract or qualify tensor Fields, Struct members, strided layouts or multi-key
+tensor payloads. Sorting has no automatic adjoint; downstream compiled kernel
+gradients can consume the reordered records.
+
 Multi-key `PrimitiveSequence.sort_by_key()` also exports stable lexicographic
 sorting of equally sized, disjoint, packed 1D scalar ndarrays, with optional
 scalar payload. Keys and payload support i32/u32/f32/i64/u64/f64, subject to device

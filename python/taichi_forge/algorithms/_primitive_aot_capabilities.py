@@ -63,8 +63,17 @@ def _indexed_copy_routes(mode):
 
 _ROUTES = MappingProxyType({
     "sort": (
-        _module("sort", *_SORT),
+        _module("sort", "stable_ascending", "nan_last", "scalar_keys",
+                "scalar_or_tensor_payload", "raw_payload_bits"),
         _sequence(("sort", "sort_by_key"), *_SORT, "single_lexicographic_key_part"),
+        PrimitiveAOTRoute(
+            "algorithms.PrimitiveSequence", ("sort", "sort_by_key"), _ALL,
+            ("single_lexicographic_key_part", "scalar_ndarray_keys",
+             "packed_vector_or_matrix_ndarray_payload", "named_source_bindings",
+             "stable_ascending", "nan_last", "raw_payload_bits",
+             "i32_u32_f32_i64_u64_f64", "unfused_sequence",
+             "selected_native_method", "no_automatic_ad"),
+        ),
         PrimitiveAOTRoute(
             "algorithms.PrimitiveSequence", ("sort_by_key",), _ALL,
             _SORT + ("multiple_lexicographic_key_parts", "packed_scalar_ndarrays",

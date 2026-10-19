@@ -1769,6 +1769,14 @@ CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part
 显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、strided
 存储、融合序列和未列出的操作仍需自己的导出合同。
 
+单键排序还允许 scalar ndarray key 携带等长的 packed vector/matrix ndarray 载荷。
+载荷 lane 支持上述六种标量类型，通过既有 raw-record 后端保留每一位，包括 NaN
+payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出或运行后导出，
+不新增 helper 代码。显式 `Module.add_primitive(..., "sort", values=...)` 在绑定时
+也接受 tensor 记录。这不扩展 `prepare_sort()` 原有的 scalar 合同，不代表 tensor
+Field、Struct 成员、strided 布局或多键 tensor 载荷已经接通。排序无自动伴随，
+后续已编译 kernel 的梯度仍可读取重排后的记录。
+
 多键 `PrimitiveSequence.sort_by_key()` 也可导出稳定字典序排序：键和可选标量载荷
 须为长度相同、互不别名的一维 packed 标量 ndarray，支持 i32/u32/f32/i64/u64/f64，
 并满足设备类型能力。数组通过 `source_bindings` 绑定；此路线不快照 Field，也不覆盖

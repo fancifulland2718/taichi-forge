@@ -450,15 +450,24 @@ def _sort(call, context):
     if set(options) != {"method", "stable", "descending", "precision", "nan_policy", "workspace"}:
         raise TaichiRuntimeError("AOT sequence sort has an unknown execution option")
     # This is the same native-first route used by public auto sort for compact
-    # scalar storage. Never execute/prewarm to discover it or silently replace
-    # an explicit CUB, shader or host strategy.
+    # scalar keys and packed ndarray records. Never execute/prewarm to discover
+    # it or silently replace an explicit CUB, shader or host strategy.
     if not getattr(impl.get_runtime().prog, capability)():
         raise TaichiRuntimeError("AOT sequence sort's selected native backend is unavailable")
     arrays = (keys,) if values is None else (keys, values)
     from taichi_forge.aot._graph_storage_bindings import packed_description
 
-    if any(len((desc := packed_description(a)).index_shape) != 1 or desc.element_shape for a in arrays):
-        raise TaichiRuntimeError("AOT sequence sort requires one-dimensional packed scalar storage")
+    descriptions = tuple(packed_description(a) for a in arrays)
+    if descriptions[0].element_shape or any(len(desc.index_shape) != 1 for desc in descriptions):
+        raise TaichiRuntimeError("AOT sequence sort requires one-dimensional packed storage and scalar keys")
+    if values is not None and descriptions[1].element_shape:
+        from taichi_forge.lang._ndarray import ScalarNdarray
+        from taichi_forge.lang.matrix import MatrixNdarray, VectorNdarray
+
+        # Dense tensor Fields and Struct members select different producer
+        # closures. Only packed ndarray records use this direct raw-copy sort.
+        if type(keys) is not ScalarNdarray or type(values) not in (VectorNdarray, MatrixNdarray):
+            raise TaichiRuntimeError("AOT tensor sort requires scalar ndarray keys and vector/matrix ndarray payload")
     algorithms._check_sort_request(keys, values, True, False, method, "exact", call.workspace, "last")
     if any(str(a.dtype) not in {"i32", "u32", "f32", "i64", "u64", "f64"} for a in arrays):
         raise TaichiRuntimeError("AOT sequence sort requires supported native scalar types")

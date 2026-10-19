@@ -236,6 +236,10 @@ prepared-recording and materialized-Graph export paths.
 `aot="selected_execution_plan_routes"` means the listed paths exist; it does not
 qualify every method, backend or layout in that family. For example, unique
 sequences cover CPU/CUDA/Vulkan while prepared recordings cover CUDA/Vulkan.
+Single-key `PrimitiveSequence.sort()` / `sort_by_key()` also export scalar
+ndarray keys with packed vector/matrix ndarray payloads. The raw-record sort
+preserves payload bits and adds no helper kernel; `prepare_sort()` keeps its
+separate scalar-only contract.
 Multi-key `PrimitiveSequence.sort_by_key()` has a separate route for disjoint,
 equally sized packed scalar ndarrays and an optional scalar payload on all three
 backends. CPU requires explicit `cpu_native`; GPU `auto` preserves the native
