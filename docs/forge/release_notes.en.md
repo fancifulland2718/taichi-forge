@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Prepared sorting, prefix sorting and compaction now reject automatic reverse
+  and forward AD before writing outputs, closing a path that silently omitted
+  gradients. Primal execution and explicitly differentiated downstream kernels remain supported.
+
 - Full-range `prepare_sort()` now supports CPU through the shared AOT stable-sort
   core, retaining lazy workspace across calls. CPU/CUDA/Vulkan ordinary mixed
   scalar Field/ndarray sorting uses the same native route and exports cold or

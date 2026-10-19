@@ -108,6 +108,12 @@ scratch or waiting for GPU completion. Pending native work retains storage throu
 the existing runtime completion mechanism. Do not close a plan before its Graph's
 last submission; close the Graph first when retiring both objects.
 
+Prepared full-range/prefix sorting and compaction reject execution inside
+`ti.ad.Tape()` or `ti.ad.FwdMode()` before writing outputs, matching their ordinary
+primitive policy. Run these discrete operations before entering automatic AD;
+downstream kernels can still use their normal gradients. Unique recordings retain
+the enclosing Graph's existing primal-only checks.
+
 ### Device-count prefix sort
 
 `prepare_sort(keys, values, count=count)` returns a `PreparedPrefixSortPlan`.

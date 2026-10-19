@@ -25,6 +25,8 @@ class PreparedCompactPlan(_PreparedNativePlan):
     runtime-ordered primitive, not a capture-safe command or a raw search axis.
     """
 
+    _ad_kind = "compact"
+
     def __init__(self, values, flags, output, count):
         self._prepare_columns(((values, output),), flags, count)
 

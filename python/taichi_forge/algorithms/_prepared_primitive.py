@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.algorithms import _autodiff
 from taichi_forge.lang import impl
 from taichi_forge.lang._storage_view import describe_storage
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -21,6 +22,7 @@ class _PreparedNativePlan:
     def run(self):
         """Execute on current contents without host readback."""
         self._validate_lifetime()
+        _autodiff.reject_unsupported_automatic_ad(self._ad_kind)
         self._workspace_bytes = self._execute(self._command)
 
     def close(self):
@@ -83,6 +85,8 @@ class PreparedSortPlan(_PreparedNativePlan):
     recordings made from it, but does not clear shared Program scratch or wait
     for the GPU. Existing runtime completion owns in-flight allocation release.
     """
+
+    _ad_kind = "sort"
 
     def __init__(self, keys, values=None, *, nan_policy="last"):
         if nan_policy not in ("last", "bitwise"):

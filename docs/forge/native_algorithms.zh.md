@@ -90,6 +90,10 @@ Vulkan 混合位宽 field 布局可能把 u64 放在仅 4 字节对齐的偏移�
 recording 失效，不清共享 scratch、不等待 GPU；已提交工作的存储由原有 runtime completion 保留。
 不要在 Graph 最后一次提交前关闭 plan；同时退休时先关闭 Graph。
 
+prepared 全范围／前缀排序与 compaction 在 `ti.ad.Tape()` 或 `ti.ad.FwdMode()` 内
+会在写输出前拒绝执行，与普通 primitive 的策略一致。先在自动微分上下文外执行这些
+离散操作，再对后续 kernel 正常求导；unique recording 继续由所属 Graph 的 primal-only 检查保护。
+
 ### 设备 count 有效前缀排序
 
 `prepare_sort(keys, values, count=count)` 返回 `PreparedPrefixSortPlan`。`count` 可为形状 `(1,)`
