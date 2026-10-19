@@ -4772,6 +4772,17 @@ mode on Vulkan; these checks do not extend that application route. These are
 additional export qualifications, not additional entries in the fixed three-entry
 delivery above or automatic derivatives for candidate processing.
 
+The closed GeoPhys Morton BVH also has separate Windows CPU/CUDA/Vulkan export
+qualification for swept triangle bounds, rebuild and refit. A 257-triangle fixture
+exercises two CUDA treelet blocks and the upper-level merge, equal Morton keys,
+position updates, degenerate/non-finite/out-of-domain diagnostics and recovery.
+Independent array references check the complete hierarchy. Standalone and borrowed
+consumers preserve state between the two entries, isolate separate loaded modules
+and retire an in-flight module while another continues. Downstream kernel gradients
+pass; BVH sorting and construction do not acquire automatic derivatives. These
+additional qualification artifacts do not add entries to the fixed delivery above
+or establish traversal, contact response or a complete deformable simulation step.
+
 After every export, generate each entry's argument names, types and dimensions
 from the current artifact and check them before packaging. Internal Graph names
 may contain producer instance identities, so a previous export's binding manifest
