@@ -4705,13 +4705,24 @@ application qualification.
 
 Fixed export of that production compute-render Graph also passes independent
 runtime-only consumption on CPU/CUDA/Vulkan, including position updates, image
-and depth comparisons, and module isolation. The qualified CUDA delivery profile
-puts the real SAP `solve` and fixed `render` entries in one 1.459 MB GeoPhys TCM.
-The installed 58.97 MB application wheel retains the same 534 host binaries and
-dependency declarations, with no Forge/vendor DLL or private Python source.
-Both entries alternate correctly without importing the application host, NumPy
-or the Forge frontend. This is two fixed entries sharing a module; it does not
-establish a physically coupled solve/render step or arbitrary-scene AOT coverage.
+and depth comparisons, and module isolation. The qualified CUDA sm120 delivery
+profile puts real SAP `solve`, fixed `render` and generic candidate processing
+`candidates` entries in one 250,929 B GeoPhys TCM. The 58,736,796 B application
+wheel retains the same 534 host binaries and dependency declarations, with no
+Forge/vendor DLL or private Python source. The candidate entry uses a fixed
+33-raw-slot/7-published-slot profile, covering duplicates, masking, overflow,
+revision mismatch, recovery after empty results, module isolation and actual
+downstream floating-point kernel gradients. These capacities are not Forge
+limits. Only the valid output prefix is defined; sorting and contact detection
+themselves gain no automatic derivative. All three installed entries execute
+without importing the application host, NumPy or Forge frontend. This does not
+establish a physically coupled step or arbitrary-scene AOT coverage.
+
+After every export, generate each entry's argument names, types and dimensions
+from the current artifact and check them before packaging. Internal Graph names
+may contain producer instance identities, so a previous export's binding manifest
+cannot simply be reused. Keep stable application-facing domain interfaces in the
+SDK host layer.
 
 The installed qualification also upgrades Forge runtime and its matching frontend
 independently while retaining the GeoPhys wheel and its single CUDA TCM. The
