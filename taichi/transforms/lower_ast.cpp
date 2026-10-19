@@ -57,6 +57,7 @@ class LowerAST : public IRVisitor {
   int current_block_depth_;
   bool current_stmt_replaced_{false};
   std::unordered_map<Stmt *, Stmt *> replacements_;
+  FlattenContext::MaterializedExpressions materialized_expressions_;
 
   void replace_with(Stmt *stmt, VecStatement &&lowered) {
     TI_ASSERT(stmt->parent == current_block_);
@@ -76,6 +77,7 @@ class LowerAST : public IRVisitor {
   FlattenContext make_flatten_ctx() {
     FlattenContext fctx;
     fctx.current_block = this->current_block_;
+    fctx.materialized_expressions = &materialized_expressions_;
     return fctx;
   }
 

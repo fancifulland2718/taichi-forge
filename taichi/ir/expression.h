@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_map>
+
 #include "taichi/program/compile_config.h"
 #include "taichi/util/str.h"
 #include "taichi/ir/ir.h"
@@ -20,8 +22,13 @@ class Expression {
   DataType ret_type;
 
   struct FlattenContext {
+    using MaterializedExpressions =
+        std::unordered_map<const Expression *, Stmt *>;
     VecStatement stmts;
     Block *current_block = nullptr;
+    // Owned by one LowerAST invocation. Frontend clones share expressions,
+    // so an expression's last stmt cannot identify this lowering's SSA value.
+    MaterializedExpressions *materialized_expressions = nullptr;
 
     inline Stmt *push_back(pStmt &&stmt) {
       return stmts.push_back(std::move(stmt));

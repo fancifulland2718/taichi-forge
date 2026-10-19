@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 
+import numpy as np
 import pytest
 import taichi_forge as ti
 from tests import test_utils
@@ -14,8 +15,9 @@ from tests.python.aot_kernel_as_probe import POSES, VERTICES, plan_parts
 
 
 @pytest.mark.parametrize("recipe", ["explicit", "graph"])
+@pytest.mark.parametrize("warm", [False, True])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_kernel_acceleration_structure(tmp_path, recipe):
+def test_aot_kernel_acceleration_structure(tmp_path, recipe, warm):
     if not ti.hardware.ray.is_available():
         pytest.skip("Vulkan ray query unavailable")
 
@@ -56,6 +58,25 @@ def test_aot_kernel_acceleration_structure(tmp_path, recipe):
         for i in range(hits.shape[0]):
             if hits[i, 0] > 0:
                 loss[0] += 0.5 * hits[i, 0] * hits[i, 0]
+
+    if warm:
+        # The same frontend query expressions must lower again for the AOT
+        # target after JIT has consumed and destroyed its temporary lowered IR.
+        vertices = ti.ndarray(ti.f32, (3, 3))
+        indices = ti.ndarray(ti.i32, (1, 3))
+        vertices.from_numpy(np.array(VERTICES, np.float32).reshape(3, 3))
+        indices.from_numpy(np.array([[0, 1, 2]], np.int32))
+        rays = ti.ndarray(ti.f32, (1, 8))
+        rays.from_numpy(np.array([[0, 0, 0, 0.01, 0, 0, 1, 3]], np.float32))
+        gates = ti.ndarray(ti.i32, 1)
+        gates.fill(1)
+        hits, ids = ti.ndarray(ti.f32, (1, 4)), ti.ndarray(ti.i32, (1, 4))
+        occluded = ti.ndarray(ti.i32, 1)
+        with ti.hardware.ray.TriangleBLAS(vertices, indices) as blas:
+            with ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas)]) as scene:
+                query(scene, rays, gates, hits, ids, occluded)
+                assert ids.to_numpy()[0, 3] == 1
+                assert occluded.to_numpy()[0] == 1
 
     start = time.perf_counter()
     module = ti.aot.Module(caps=["spirv_has_ray_query"])

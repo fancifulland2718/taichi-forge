@@ -53,4 +53,34 @@ TEST(LowerAST, PreservesLargeBlockOrderAndOperandIdentity) {
   EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
 }
 
+TEST(LowerAST, MaterializedCallsBelongToEachLowering) {
+  auto call = Expr::make<InternalFuncCallExpression>(
+      Operations::get(InternalOp::do_nothing), std::vector<Expr>{}, true);
+  call->type_check(nullptr);
+  auto source = std::make_unique<Block>();
+  source->push_back<FrontendExprStmt>(call);
+  source->push_back<FrontendExprStmt>(call);
+  auto one = Expr::make<ConstExpression>(int32(1));
+  one->type_check(nullptr);
+  auto conditional = Expr::make<TernaryOpExpression>(
+      TernaryOpType::ifte, one, call, one);
+  conditional->type_check(nullptr);
+  source->push_back<FrontendExprStmt>(conditional);
+  auto logical = Expr::make<BinaryOpExpression>(
+      BinaryOpType::logical_and, one, call);
+  logical->type_check(nullptr);
+  source->push_back<FrontendExprStmt>(logical);
+
+  // Frontend clones share expressions, but must not share lowered statements.
+  // Destroy each lowered tree before compiling the next target/request.
+  for (int i = 0; i < 3; ++i) {
+    auto lowered = irpass::analysis::clone(source.get());
+    irpass::lower_ast(lowered.get());
+    auto calls = irpass::analysis::gather_statements(
+        lowered.get(), [](Stmt *stmt) { return stmt->is<InternalFuncStmt>(); });
+    ASSERT_EQ(calls.size(), 1);
+    EXPECT_NO_THROW(irpass::analysis::verify(lowered.get()));
+  }
+}
+
 }  // namespace taichi::lang

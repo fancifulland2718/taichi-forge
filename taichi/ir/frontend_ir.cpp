@@ -504,6 +504,7 @@ void BinaryOpExpression::flatten(FlattenContext *ctx) {
 
     FlattenContext rctx;
     rctx.current_block = ctx->current_block;
+    rctx.materialized_expressions = ctx->materialized_expressions;
     auto rhs_stmt = flatten_rvalue(rhs, &rctx);
     rctx.push_back<LocalStoreStmt>(result, rhs_stmt, rhs_stmt->dbg_info);
 
@@ -543,11 +544,13 @@ void make_ifte(Expression::FlattenContext *ctx,
 
   Expression::FlattenContext lctx;
   lctx.current_block = ctx->current_block;
+  lctx.materialized_expressions = ctx->materialized_expressions;
   auto true_val_stmt = flatten_rvalue(true_val, &lctx);
   lctx.push_back<LocalStoreStmt>(result, true_val_stmt, true_val->dbg_info);
 
   Expression::FlattenContext rctx;
   rctx.current_block = ctx->current_block;
+  rctx.materialized_expressions = ctx->materialized_expressions;
   auto false_val_stmt = flatten_rvalue(false_val, &rctx);
   rctx.push_back<LocalStoreStmt>(result, false_val_stmt, false_val->dbg_info);
 
@@ -684,11 +687,19 @@ void InternalFuncCallExpression::type_check(const CompileConfig *) {
 }
 
 void InternalFuncCallExpression::flatten(FlattenContext *ctx) {
-  if (materialize_once && stmt != nullptr) {
-    return;
+  if (materialize_once) {
+    TI_ASSERT(ctx->materialized_expressions != nullptr);
+    const auto found = ctx->materialized_expressions->find(this);
+    if (found != ctx->materialized_expressions->end()) {
+      stmt = found->second;
+      return;
+    }
   }
   stmt = op->flatten(ctx, args, ret_type);
   stmt->dbg_info = dbg_info;
+  if (materialize_once) {
+    ctx->materialized_expressions->emplace(this, stmt);
+  }
 }
 
 void ExternalTensorExpression::flatten(FlattenContext *ctx) {
