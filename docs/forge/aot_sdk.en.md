@@ -5021,6 +5021,53 @@ subsequent processes 12–18 ms with uncontrolled driver-cache state. Including
 ray/shadow host modules establishes construction inputs, not qualification of
 every ray, shadow, material or platform combination.
 
+Subsequent application qualification covers native directional shadow+visibility,
+Vulkan primary rays+shadows, and CUDA/OptiX typed primary hits+compact occlusion
+in the same two-box scene. All three export the installed compiled host's existing
+Graph and pass standalone/borrowed image and depth comparisons, pose changes and
+restoration, independent modules and in-flight retirement. A changing shadow-map
+coverage digest also rejects stale-image false positives. Both Vulkan paths pass
+synchronization validation. Explicit geometry and initial-transform bindings let
+consumers reconstruct shared BLAS/GAS, two instances and the top-level AS, then
+retain the original device transform refit and query sequence.
+
+The real Vulkan export exposed two independent compiler bugs, now fixed:
+repeated JIT-to-AOT lowering reused destroyed IR pointers, and ordinary closest-ray
+loops emitted an instruction between `OpLoopMerge` and its branch. Materialized
+results now belong to each lowering pass, and the loop ordering is corrected.
+Cold/warm export, SPIR-V structure, three-backend gradient bindings and installed
+FEM/MPM material gradients pass. Rendering qualification is forward-only; no
+visibility adjoint is added.
+
+Five warm samples of the same work, waiting after each submission, give these
+median host-to-completion costs on this system:
+
+| Application path | Separate qualification TCM | AOT export | JIT | Standalone AOT | Borrowed AOT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Vulkan shadow+visibility | 316,088 B | 212 ms | 735 us | 208 us | 232 us |
+| Vulkan ray+shadow | 167,189 B | 129 ms | 432 us | 193 us | 187 us |
+| CUDA/OptiX ray+occlusion | 76,583 B | 455 ms | 534 us | 171 us | 154 us |
+
+Graph construction takes about 2–3 ms, with additional build/archive costs of
+89/48/363 ms. These exclude public scene initialization and do not qualify
+hundred-second compilation or large rendering throughput. OptiX preparation takes
+about 110–121 ms and its first launch another 29 ms; Vulkan preparation takes
+14–23 ms with uncontrolled driver caches. The application retains its 2048-square
+directional shadow map; private images total 16,795,648 bytes. Current resource
+counters exclude AS storage, so a zero counter does not mean zero memory.
+Applications explicitly select the externally installed OptiX library; the
+matching adapter comes from the installed Forge runtime. Vendor libraries are
+not copied into the application package.
+
+Matched runtime/frontend wheels are normally installed at 26,622,327/4,107,009
+bytes, increases of 2,144/27 bytes. The native DLL grows by 2,048 bytes; ABI108
+and plan21 remain unchanged. Application dev15, its sole 381,034-byte seven-entry
+CUDA TCM and all 44 external dependencies stay unchanged; the three qualification
+artifacts are not added to that delivery. Coverage is opaque, two-sided meshes
+on Windows RTX5090. GeoPhys still rejects its OptiX single-sided route; Forge's
+candidate-filtering capability does not qualify downstream integration. Punctual
+shadows, MASK and other platforms require their own qualification.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed

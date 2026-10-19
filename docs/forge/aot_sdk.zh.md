@@ -3801,6 +3801,38 @@ Field与数组存储。本机Graph构建约2.1ms、导出138ms、归档36ms。�
 初次观测约259ms、后续进程约12–18ms。新增ray/shadow模块仅补齐构造依赖，不能据此
 宣称所有光追、阴影、材质或跨平台组合均通过应用资格。
 
+后续实际组合验证已覆盖同一两盒场景的原生方向光 shadow+visibility、Vulkan 主光线+
+阴影查询，以及 CUDA/OptiX typed 主命中+compact occlusion。三条路线均从已安装编译
+宿主的原 Graph 导出；独立和借用消费者通过图像/深度、位姿更新/恢复、双 module
+资源隔离及在途退休。阴影图另检查随位姿变化的覆盖摘要，避免沿用旧图像造成假通过；
+两条 Vulkan 路线通过同步验证。光追资源显式绑定几何与初始实例变换，消费者重建共享
+BLAS/GAS、两个实例及顶层 AS，随后复用原有设备变换 refit 和查询次序。
+
+实际 Vulkan 导出还暴露并修复了两个独立编译器问题：先 JIT 后 AOT 的重复 lowering
+复用了已销毁 IR 指针；普通 closest-ray 循环的 `OpLoopMerge` 未紧邻分支。前者改为
+每次 lowering 保存物化结果，后者修正指令顺序。冷暖导出、SPIR-V 结构检查、三后端
+梯度绑定与已安装 FEM/MPM 材料梯度均通过。这里只验证渲染前向；没有新增可见性伴随。
+
+本机相同工作、预热后每次提交等待的五样本中位数如下，耗时为 host 到完成：
+
+| 实际路线 | 独立资格 TCM | AOT 导出 | JIT | 独立 AOT | 借用 AOT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Vulkan shadow+visibility | 316,088 B | 212 ms | 735 μs | 208 μs | 232 μs |
+| Vulkan ray+shadow | 167,189 B | 129 ms | 432 μs | 193 μs | 187 μs |
+| CUDA/OptiX ray+occlusion | 76,583 B | 455 ms | 534 μs | 171 μs | 154 μs |
+
+Graph 构建约2–3ms，额外构建/归档约89/48/363ms；不包含公开场景初始化，也不是百秒级
+编译或大型渲染吞吐测试。OptiX prepare 约110–121ms，首轮另有约29ms；Vulkan prepare
+约14–23ms，驱动缓存未受控。方向光沿用应用2048²阴影图，私有图像共16,795,648B。
+AS存储不包含在当前资源计数中，不能将计数0解释为零内存。厂商 OptiX 由应用显式指定
+外部安装路径；匹配 adapter 来自正常安装的 Forge runtime，不向应用包复制厂商库。
+
+配套 runtime/frontend wheel 已正常安装，分别26,622,327/4,107,009B，较上批增加
+2,144/27B；原生DLL增加2,048B，ABI108/plan21保持。应用dev15、唯一381,034B七入口CUDA
+TCM及44个外部依赖保持，三个资格产物未并入交付包。本批限定 Windows RTX5090 的
+不透明双面网格；GeoPhys 当前仍拒绝 OptiX 单面路线，不能用 Forge 的候选过滤能力
+替代下游接通验证。点光阴影、MASK 和其他平台组合仍需各自资格。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index

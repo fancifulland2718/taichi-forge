@@ -34,6 +34,16 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fix access violations when a ray-query kernel runs through JIT before being
+  recompiled for an AOT target. Frontend expressions requiring one-time
+  materialization now retain results per lowering pass, without reusing IR
+  pointers destroyed after an earlier compilation.
+
+- Vulkan closest-ray queries emit `OpLoopMerge` after evaluating the traversal
+  condition, immediately before the branch. This fixes SPIR-V structural
+  validation for full-hit and occlusion-only results while preserving traversal
+  semantics and result-buffer contracts.
+
 - CPU/CUDA/Vulkan AOT transform sequences support packed vector/matrix ndarrays
   through the shared `builtin/transform` descriptor. Tensor shape, prefix ranges
   and exact in-place aliases are checked during preparation. CPU retains its

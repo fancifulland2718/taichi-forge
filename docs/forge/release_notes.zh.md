@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 修复先 JIT 执行、再按 AOT 目标重编译光线查询 kernel 时的访问异常。只物化一次的
+  前端表达式现在按每次 lowering 保存结果，不再复用上次编译已销毁的 IR 指针。
+
+- Vulkan closest-ray 查询在计算遍历条件之后生成 `OpLoopMerge`，使其紧邻分支，
+  修复主命中及仅遮挡结果的 SPIR-V 结构验证错误；保持原有遍历与结果缓冲合同。
+
 - CPU/CUDA/Vulkan AOT transform 序列通过共享 `builtin/transform` 描述支持 packed
   向量／矩阵 ndarray，准备时验证 tensor shape、前缀范围及精确原地别名。CPU 保留
   tensor 分区策略，CUDA 在 owner stream 上保留逐 lane strided launch，Vulkan
