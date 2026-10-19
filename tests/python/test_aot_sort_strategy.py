@@ -8,7 +8,7 @@ from tests import test_utils
 
 
 @pytest.mark.parametrize("field_keys", [False, True])
-@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_mixed_field_ndarray_sort_does_not_change_host_strategy(
     field_keys, monkeypatch
 ):

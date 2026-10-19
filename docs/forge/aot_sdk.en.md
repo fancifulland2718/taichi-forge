@@ -2401,10 +2401,15 @@ consumer views preserve their guards. Independent/borrowed consumers, in-flight
 close and downstream kernel gradients are covered; fusion itself does not
 generate an adjoint. CPU/CUDA keep their ordinary operation sequence.
 
-Scalar sequence sorting requires all ndarrays or all qualified dense Fields.
-Mixing a Field and an ndarray selects host sorting in the producer and is rejected
-by automatic AOT export, including with `method="auto"`. An explicit AOT sort
-description can select the native route; export does not silently make that choice.
+Scalar sequence sorting accepts all ndarrays or all qualified dense Fields.
+CUDA/Vulkan also accept a compact scalar Field paired with a scalar ndarray,
+in either key/payload direction. Ordinary `sort` and single-part `sort_by_key`
+use the same native route for `auto` and the matching explicit native method;
+export works before or after execution without host sorting or helper kernels.
+`SortWorkspace` reuses the current storage bindings and releases them on clear
+or replacement. CPU mixed storage still selects host sorting and automatic AOT
+export rejects it. Descending, explicit host strategies and strided Fields are
+outside this mixed native route; export does not silently change their strategy.
 
 For single-key sorting, a scalar ndarray key can also carry an equally sized
 packed vector/matrix ndarray payload. The sequence accepts the six scalar lane

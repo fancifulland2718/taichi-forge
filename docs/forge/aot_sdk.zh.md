@@ -1852,10 +1852,15 @@ f64 位串。三个写范围彼此及与两个读范围不得重叠。越界 gat
 仍是合法 destination；标量对齐的消费者 view 保留边界外数据。已验证独立／借用
 消费者、在途关闭和下游 kernel 梯度；融合本身不自动生成伴随。CPU/CUDA 保持普通操作序列。
 
-标量 sequence 排序要求输入全部为 ndarray，或全部为符合条件的 dense Field。
-Field 与 ndarray 混用时，生产端选择 host 排序，自动 AOT 导出会拒绝该组合，
+标量 sequence 排序支持输入全部为 ndarray，或全部为符合条件的 dense Field。
+CUDA/Vulkan 也支持紧凑标量 Field 与标量 ndarray 混用，二者均可作为 key 或 payload。
+普通 `sort` 和单 key 的 `sort_by_key` 在 `auto` 或对应的显式原生方法下使用同一条
+原生路线；冷态、暖态均可导出，不经过 host 排序，也不增加辅助 kernel。
+`SortWorkspace` 复用当前存储绑定，在清理或替换时释放旧绑定。CPU 混合存储仍选择
+host 排序，自动 AOT 导出会拒绝该组合，
 包括 `method="auto"`。调用者可通过显式 AOT sort 描述主动选择原生路线，
-导出不会静默替换生产端策略。
+导出不会静默替换生产端策略。降序、显式 host 策略和带 stride 的 Field 不在这条
+混合原生路线的支持范围内。
 
 单键排序还允许 scalar ndarray key 携带等长的 packed vector/matrix ndarray 载荷。
 载荷 lane 支持上述六种标量类型，通过既有 raw-record 后端保留每一位，包括 NaN
