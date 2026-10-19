@@ -225,6 +225,7 @@ void Runtime::free_memory(TiMemory devmem) {
   retire_native_memory(devmem);
   retire_prepared_memory(devmem);
   std::shared_ptr<void> released;
+  std::shared_ptr<taichi::lang::ExternalSynchronizationDomain> released_access;
   {
     std::lock_guard<std::mutex> lock(memory_mutex_);
     const auto found = memories_.find(devmem);
@@ -241,6 +242,7 @@ void Runtime::free_memory(TiMemory devmem) {
                                    return entry.second.borrowed == borrowed;
                                  })) {
       borrowed->live = false;
+      released_access = std::move(borrowed->external_access);
       released = std::move(borrowed->owner);
     }
   }
@@ -274,7 +276,9 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
   }
 }
 
-Runtime::MemoryAllocation Runtime::get_memory(TiMemory memory) const {
+Runtime::MemoryAllocation Runtime::get_memory(
+    TiMemory memory,
+    bool prepared_external_access) const {
   std::lock_guard<std::mutex> lock(memory_mutex_);
   const auto found = memories_.find(memory);
   if (found == memories_.end()) {
@@ -282,6 +286,10 @@ Runtime::MemoryAllocation Runtime::get_memory(TiMemory memory) const {
   }
   if (found->second.borrowed && !found->second.borrowed->live)
     throw MemoryBindingError("Borrowed storage has retired with its owner");
+  if (!prepared_external_access && found->second.borrowed &&
+      found->second.borrowed->external_access)
+    throw MemoryBindingError(
+        "Synchronized external storage requires a prepared execution domain");
   return found->second;
 }
 
@@ -304,9 +312,11 @@ void Runtime::retire_borrowed_memory(
     retire_prepared_memory(handle);
   }
   std::shared_ptr<void> released;
+  std::shared_ptr<taichi::lang::ExternalSynchronizationDomain> released_access;
   {
     std::lock_guard<std::mutex> lock(memory_mutex_);
     borrowed->live = false;
+    released_access = std::move(borrowed->external_access);
     released = std::move(borrowed->owner);
   }
   // Host handle shells survive invalidation, so late close is idempotent.

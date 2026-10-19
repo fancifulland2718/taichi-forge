@@ -54,8 +54,20 @@ loan and all derived aliases after draining dependent executions; handle shells
 remain closeable. Ndarray loans retain the allocation after source wrapper
 collection. Import is cold and must run outside a borrowed submission scope.
 
+Synchronized CUDA external views can also be borrowed by JIT and loaded AOT
+recipes. Finite aliases retain the original synchronization owner. Each complete
+initialization or replay consumes one acquire/release epoch per external owner,
+even when several kernels or aliases use it. Private initialization does not
+consume a replay-only signal. If both phases use external storage, the producer
+must rearm between them. Busy or rejected admission consumes no signal.
+Ordinary AOT launch, memory copy/map/export and default prepared execution reject
+these managed imports. Native resource factories that inspect external operands
+during cold preparation are not qualified. Closing the external owner drains
+dependent domains before revoking every loan and alias; this is a cold operation.
+Canvas stream selection and source completion are a separate interface boundary.
+
 Binding frames, multiple workspace lanes, dynamic recipe selection, provider
-data without a live-loan description, strided/read-only/external views and unqualified
+data without a live-loan description, strided/read-only or unsynchronized external views and unqualified
 native routes reject during cold preparation without a default-stream fallback.
 Existing `Graph.run()`/`submit()` contracts stay unchanged. The Python Program
 owner retains the borrower used by `ti.graph.execution_domain()` so dropping

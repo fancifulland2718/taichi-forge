@@ -393,6 +393,7 @@ AotRuntimeClient::NdarrayImport AotRuntimeClient::import_dense_view(
   if (binding.allocation.device != &state.runtime->get())
     throw std::invalid_argument("Dense view belongs to another backend/device");
   borrowed->owner = std::move(owner);
+  borrowed->external_access = std::move(binding.external_access);
   const auto handle = state.runtime->register_memory(
       binding.allocation, binding.byte_size, false, binding.byte_offset, {},
       binding.byte_offset, false, std::move(borrowed));

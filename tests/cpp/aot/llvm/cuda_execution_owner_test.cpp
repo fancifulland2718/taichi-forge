@@ -12,6 +12,7 @@
 #include "c_api/src/taichi_llvm_impl.h"
 #include "c_api/src/execution_domain.h"
 #include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/interop/vulkan_cuda_interop.h"
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
 #include "c_api/src/execution_resources.h"
@@ -24,6 +25,196 @@
 
 namespace taichi::lang {
 namespace {
+
+TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
+  const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");
+  if (!folder || !cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto &device = static_cast<cuda::CudaDevice &>(*program.get_compute_device());
+  vulkan::VulkanDeviceCreator creator({});
+  auto *vk = static_cast<vulkan::VulkanDevice *>(creator.device());
+  Device::AllocParams allocation{};
+  allocation.size = 66 * sizeof(float);
+  allocation.export_sharing = true;
+  allocation.usage = AllocUsage::Storage;
+  auto [shared, status] = vk->allocate_memory_unique(allocation);
+  ASSERT_EQ(status, RhiResult::success);
+  allocation.export_sharing = false;
+  auto [observed, output_status] = vk->allocate_memory_unique(allocation);
+  ASSERT_EQ(output_status, RhiResult::success);
+  auto adapter = VulkanCudaExternalAllocation::create(vk, &device, *shared);
+  auto owner = program.register_external_dense_storage(
+      adapter->cuda_allocation(), allocation.size,
+      [adapter] { adapter->close(); }, adapter);
+  storage::DenseStorageLayoutSpec layout;
+  layout.scalar_type = PrimitiveType::f32;
+  layout.index_shape = {66};
+  layout.index_strides_bytes = {sizeof(float)};
+  auto description = storage::build_dense_storage_descriptor(
+      owner, storage::StorageSourceKind::kExternalDense, layout);
+  ASSERT_TRUE(description);
+  auto borrower = AotRuntimeClient::create(program);
+  auto *runtime = reinterpret_cast<::Runtime *>(borrower->handle());
+  auto rt = reinterpret_cast<TiRuntime>(runtime);
+  auto module = ti_load_aot_module(rt, folder);
+  ASSERT_NE(module, nullptr);
+  auto memory = reinterpret_cast<TiMemory>(
+      std::get<0>(borrower->import_dense_view(*description.descriptor)));
+  EXPECT_THROW(runtime->get_memory(memory), MemoryBindingError);
+  EXPECT_EQ(runtime->get_memory(memory, true).borrowed->external_access,
+            adapter);
+  std::array<TiNamedArgument, 3> arguments{};
+  arguments[0].name = "input";
+  arguments[0].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+  arguments[0].argument.value.ndarray = {
+      memory, {1, {66}}, {0, {}}, TI_DATA_TYPE_F32};
+  arguments[1].name = "seed";
+  arguments[1].argument.type = TI_ARGUMENT_TYPE_F32;
+  arguments[1].argument.value.f32 = 7.0f;
+  arguments[2].name = "n";
+  arguments[2].argument.type = TI_ARGUMENT_TYPE_I32;
+  arguments[2].argument.value.i32 = 64;
+  const std::string plan = R"({"version":3,"resources":[
+    {"kind":"ndarray","name":"temporary","dtype":"f32","shape":[64]},
+    {"kind":"ndarray_view","name":"view","array":"input","offset":1,"shape":[64]}],
+    "initialization":[{"kind":"fill32","destination":"temporary","value":0}],
+    "operations":[
+      {"kind":"kernel","entry":"stage","arguments":["temporary","seed","n"]},
+      {"kind":"copy","source":"temporary","destination":"view"},
+      {"kind":"kernel","entry":"stage","arguments":["view","seed","n"]}]})";
+  // Ordinary paths may not strip the imported epoch, including aliases.
+  EXPECT_EQ(ti_prepare_execution_plan_ext(rt, module, plan.size(), plan.c_str(),
+                                          arguments.size(), arguments.data(), 0,
+                                          nullptr),
+            nullptr);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_INVALID_ARGUMENT);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  std::array<TiArgument, 3> kernel_arguments{
+      arguments[0].argument, arguments[1].argument, arguments[2].argument};
+  ti_launch_kernel(rt, ti_get_aot_module_kernel(module, "stage"),
+                   kernel_arguments.size(), kernel_arguments.data());
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_INVALID_ARGUMENT);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  const TiCudaExecutionDomainCreateInfo options{1, 4, 0};
+  auto selected = ti_create_cuda_execution_domain_ext(rt, &options);
+  ASSERT_NE(selected, nullptr);
+  auto prepared = ti_prepare_execution_plan_on_domain_ext(
+      rt, module, selected, plan.size(), plan.c_str(), arguments.size(),
+      arguments.data(), 0, nullptr);
+  ASSERT_NE(prepared, nullptr);
+  auto *vk_stream =
+      static_cast<vulkan::VulkanStream *>(vk->get_compute_stream());
+  auto [producer, producer_status] = vk_stream->new_command_list_unique();
+  ASSERT_EQ(producer_status, RhiResult::success);
+  producer->buffer_fill(shared->get_ptr(), allocation.size, 0);
+  ASSERT_TRUE(adapter->release_vulkan_to_cuda(*vk_stream, producer.get()));
+  ti_initialize_prepared_ext(rt, prepared);
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  // Initializers touch only private storage and must not consume frame-ready.
+  EXPECT_EQ(adapter->access_state(),
+            VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire);
+  auto domain = capi::get_execution_domain(selected);
+  testing::CudaExternalGate capacity_gate;
+  auto occupied = domain->submit(
+      {}, nullptr, [&](void *stream) { capacity_gate.enqueue_wait(stream); });
+  TiCompletion ticket = nullptr;
+  EXPECT_FALSE(ti_try_submit_prepared_ext(rt, prepared, 0, nullptr, &ticket));
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  EXPECT_EQ(adapter->access_state(),
+            VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire);
+  capacity_gate.release();
+  occupied.wait();
+  auto [consumer, consumer_status] = vk_stream->new_command_list_unique();
+  ASSERT_EQ(consumer_status, RhiResult::success);
+  consumer->buffer_copy(observed->get_ptr(), shared->get_ptr(),
+                        allocation.size);
+  auto initialized_plan = plan;
+  const auto initializer =
+      initialized_plan.find("\"destination\":\"temporary\"");
+  ASSERT_NE(initializer, std::string::npos);
+  initialized_plan.replace(initializer,
+                           std::strlen("\"destination\":\"temporary\""),
+                           "\"destination\":\"input\"");
+  auto external_initializer = ti_prepare_execution_plan_on_domain_ext(
+      rt, module, selected, initialized_plan.size(), initialized_plan.c_str(),
+      arguments.size(), arguments.data(), 0, nullptr);
+  ASSERT_NE(external_initializer, nullptr);
+  ti_initialize_prepared_ext(rt, external_initializer);
+  ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  EXPECT_EQ(adapter->access_state(),
+            VulkanCudaExternalAllocation::AccessState::kAwaitingVulkanAcquire);
+  auto initialized = adapter->cycle_vulkan_to_cuda(*vk_stream, consumer.get());
+  ASSERT_TRUE(initialized);
+  ASSERT_TRUE(initialized->wait());
+  ti_destroy_prepared_ext(rt, external_initializer);
+  program.synchronize();
+  testing::CudaExternalGate default_gate;
+  default_gate.enqueue_wait(nullptr);
+  const auto binding_stats = program.debug_dense_storage_binding_stats();
+  const auto *requested_replays = std::getenv("TAICHI_F3_EXTERNAL_REPLAYS");
+  const int replay_count = requested_replays ? std::atoi(requested_replays) : 5;
+  ASSERT_GE(replay_count, 5);
+  ASSERT_LE(replay_count, 1000);
+  std::vector<double> submit_times;
+  submit_times.reserve(replay_count);
+  for (int i = 0; i < replay_count; ++i) {
+    {
+      ScopedExternalProfilerAnnotation submit("F3/public_external/submit");
+      const auto begin = std::chrono::steady_clock::now();
+      ASSERT_TRUE(
+          ti_try_submit_prepared_ext(rt, prepared, 0, nullptr, &ticket));
+      submit_times.push_back(std::chrono::duration<double, std::micro>(
+                                 std::chrono::steady_clock::now() - begin)
+                                 .count());
+    }
+    ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    auto consumed = adapter->cycle_vulkan_to_cuda(*vk_stream, consumer.get());
+    ASSERT_TRUE(consumed);
+    ASSERT_TRUE(consumed->wait());
+    ti_wait_completion_ext(ticket);
+    ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    ti_release_completion_ext(ticket);
+    EXPECT_FALSE(default_gate.timed_out());
+  }
+  std::sort(submit_times.begin(), submit_times.end());
+  std::cout << "public external submit_us p50="
+            << submit_times[replay_count / 2]
+            << " p95=" << submit_times[replay_count * 95 / 100]
+            << " accepted=" << replay_count << std::endl;
+  EXPECT_EQ(program.debug_dense_storage_binding_stats(), binding_stats);
+  std::array<float, 66> values{};
+  auto pointer = observed->get_ptr();
+  void *destination = values.data();
+  auto bytes = sizeof(values);
+  ASSERT_EQ(vk->readback_data(&pointer, &destination, &bytes),
+            RhiResult::success);
+  EXPECT_EQ(values.front(), 0.0f);
+  EXPECT_EQ(values.back(), 0.0f);
+  for (int i = 0; i < 64; ++i)
+    EXPECT_EQ(values[i + 1], 36.0f * 64 * 65 / 2 + i);
+  EXPECT_FALSE(default_gate.timed_out());
+  // Retirement itself must wait only the participating prefix, not default.
+  program.retire_external_dense_storage(owner);
+  EXPECT_TRUE(domain->snapshot().closed);
+  EXPECT_TRUE(adapter->closed());
+  EXPECT_THROW(runtime->get_memory(memory, true), MemoryBindingError);
+  EXPECT_FALSE(default_gate.timed_out());
+  {
+    ScopedExternalProfilerAnnotation release(
+        "F3/public_external/default_release");
+    default_gate.release();
+  }
+  ti_destroy_prepared_ext(rt, prepared);
+  ti_free_memory(rt, memory);
+  ti_destroy_aot_module(module);
+  ti_release_cuda_execution_domain_ext(selected);
+  borrower->close();
+  shared.reset();
+  observed.reset();
+  program.finalize();
+}
 
 TEST(CudaPublicExecutionAot, ExactDependenciesBusyAndReleasedInstanceLifetime) {
   const auto *folder = std::getenv("TAICHI_F3_CONTEXT_AOT_FOLDER");

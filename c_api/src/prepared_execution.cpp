@@ -58,6 +58,8 @@ struct PreparedExecution {
   std::unique_ptr<BoundGraphArguments> graph_arguments;
   std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
   std::vector<std::unique_ptr<BoundKernelArguments>> plan_arguments;
+  std::vector<std::shared_ptr<ExternalSynchronizationDomain>> replay_access;
+  std::vector<std::shared_ptr<ExternalSynchronizationDomain>> initial_access;
   std::unique_ptr<FixedExecution> native;
   std::unique_ptr<FixedExecution> initialization;
 
@@ -218,12 +220,16 @@ struct PreparedExecution {
             runtime.arch, runtime.get(), gfx_runtime, initializers, &sequence,
             runtime.runtime_fault_domain(), nullptr, nullptr, nullptr, nullptr,
             execution_binding);
+        if (!initial_access.empty())
+          initialization->bind_external_access(std::move(initial_access));
       }
       native = std::make_unique<FixedExecution>(
           runtime.arch, runtime.get(), gfx_runtime, operations, &sequence,
           runtime.runtime_fault_domain(), family ? family->replay : nullptr,
           family ? operands : nullptr, submission_recipe, nullptr,
           execution_binding);
+      if (!replay_access.empty())
+        native->bind_external_access(std::move(replay_access));
       if (family) {
         family->prepared = true;
         family->arrays->sealed = true;
@@ -840,6 +846,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
   prepared->owner = &mod;
   prepared->family = family;
   prepared->domain = domain;
+  // Reject unmanaged entry paths before private allocation/provider setup.
+  // This is a cold validation; submit uses only the frozen epoch closure.
+  for (const auto &[name, argument] : arguments)
+    if (!frozen_metadata.count(name) &&
+        argument->type == TI_ARGUMENT_TYPE_NDARRAY)
+      rt.get_memory(argument->value.ndarray.memory, bool(domain));
+  for (const auto &[name, binding] : layouts)
+    if (!frozen_metadata.count(name) && binding->gradient)
+      rt.get_memory(binding->gradient->memory, bool(domain));
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
   auto local_preparation =
@@ -1046,7 +1061,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
   };
   auto resource_bindings = capi::bind_execution_resources(
       rt, mod.get(), resource_description, arguments, layouts,
-      family ? family->arrays.get() : nullptr, frozen_metadata, resolve_allocator);
+      family ? family->arrays.get() : nullptr, frozen_metadata,
+      resolve_allocator, bool(domain));
   prepared->resources = std::move(resource_bindings.storage);
   struct Storage {
     DevicePtr pointer;
@@ -1063,11 +1079,12 @@ static TiPreparedExecution prepare_execution_plan_impl(
       throw MemoryBindingError("Execution memory operations require ndarrays");
     const auto &array = arg.value.ndarray;
     uint64_t element_bytes = 0;
-    const auto bytes = capi::validated_ndarray_bytes(rt, array, &element_bytes);
+    const auto bytes =
+        capi::validated_ndarray_bytes(rt, array, &element_bytes, bool(domain));
     if (offset > bytes)
       throw MemoryBindingError(
           "Execution memory offset exceeds ndarray extent");
-    const auto allocation = rt.get_memory(array.memory);
+    const auto allocation = rt.get_memory(array.memory, bool(domain));
     prepared->memories.push_back(array.memory);
     return Storage{
         allocation.allocation.get_ptr(allocation.byte_offset + offset),
@@ -1080,7 +1097,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
     if (found == native_arrays.end()) {
       storage(slot, 0);
       const auto &array = arguments.at(slot)->value.ndarray;
-      found = native_arrays.emplace(slot, capi::bind_native_array(rt, array)).first;
+      found =
+          native_arrays
+              .emplace(slot, capi::bind_native_array(rt, array, bool(domain)))
+              .first;
     }
     return found->second;
   };
@@ -1240,6 +1260,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
     if (const auto *native =
             std::get_if<NativeOperationDescription>(&resource.value)) {
       try {
+        // Provider factories may inspect data before replay. Until a factory
+        // declares an epoch-safe preparation contract, external operands are
+        // accepted only by operations within the complete prepared recipe.
+        for (const auto &[port, slot] : native->bindings) {
+          const auto input = arguments.find(slot);
+          if (input != arguments.end() &&
+              input->second->type == TI_ARGUMENT_TYPE_NDARRAY)
+            rt.get_memory(input->second->value.ndarray.memory);
+        }
         auto object = native_operation_registry().prepare_resource(
             preparation, decoded.at(native), native_inputs(*native));
         prepared->native_resources.push_back(object);
@@ -1414,7 +1443,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
             kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
             kernel_bindings.data(),
             kernel->bounded_range && !kernel->bounded_range->cuda,
-            kernel_resources);
+            kernel_resources, bool(domain));
         if (!bound)
           return false;
         bound->context->append_dispatch_label(kernel->label);
@@ -1525,7 +1554,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
             throw MemoryBindingError(
                 "Sort keys require i32/u32/f32/i64/u64/f64");
         }
-        if (rt.get_memory(array.memory).base_offset % keys.element_bytes)
+        if (rt.get_memory(array.memory, bool(domain)).base_offset %
+            keys.element_bytes)
           throw MemoryBindingError("Sort key storage is misaligned");
         SortOperation descriptor{
             keys.pointer, {}, array.shape.dims[0], key_type};
@@ -1535,7 +1565,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
           if (payload.shape.dim_count != 1 ||
               payload.shape.dims[0] != array.shape.dims[0] ||
               !values.element_bytes || values.element_bytes % 4 ||
-              rt.get_memory(payload.memory).base_offset % 4)
+              rt.get_memory(payload.memory, bool(domain)).base_offset % 4)
             throw MemoryBindingError(
                 "Sort payload requires matching 1D raw-word records");
           if (keys.size && values.size &&
@@ -1561,7 +1591,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
                      std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
         auto compact_storage = [&](const std::string &name) {
           auto result = storage(name, 0);
-          if (rt.get_memory(arguments.at(name)->value.ndarray.memory)
+          if (rt.get_memory(arguments.at(name)->value.ndarray.memory,
+                            bool(domain))
                   .base_offset %
               4)
             throw MemoryBindingError("Compact storage must be 4-byte aligned");
@@ -1615,7 +1646,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
         const auto &array = arguments.at(fill.destination)->value.ndarray;
         if (bytes > dst.size ||
             bytes > std::numeric_limits<std::size_t>::max() ||
-            rt.get_memory(array.memory).base_offset % 4)
+            rt.get_memory(array.memory, bool(domain)).base_offset % 4)
           throw MemoryBindingError(
               "Execution fill exceeds ndarray extent or alignment");
         operations.emplace_back(FixedExecution::BufferFill{
@@ -1664,6 +1695,28 @@ static TiPreparedExecution prepare_execution_plan_impl(
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");
+  if (domain) {
+    auto external_access = [&](const std::set<std::string> &names) {
+      std::vector<std::shared_ptr<ExternalSynchronizationDomain>> access;
+      auto add = [&](TiMemory handle) {
+        const auto memory = rt.get_memory(handle, true);
+        if (memory.borrowed && memory.borrowed->external_access)
+          access.push_back(memory.borrowed->external_access);
+      };
+      for (const auto &name : names) {
+        const auto argument = arguments.find(name);
+        if (argument != arguments.end() &&
+            argument->second->type == TI_ARGUMENT_TYPE_NDARRAY)
+          add(argument->second->value.ndarray.memory);
+        const auto binding = layouts.find(name);
+        if (binding != layouts.end() && binding->second->gradient)
+          add(binding->second->gradient->memory);
+      }
+      return access;
+    };
+    prepared->initial_access = external_access(plan.initialization_bindings);
+    prepared->replay_access = external_access(plan.replay_bindings);
+  }
   {
     for (const auto &name : plan.replay_bindings) {
       if (const auto arg = arguments.find(name); arg != arguments.end() &&

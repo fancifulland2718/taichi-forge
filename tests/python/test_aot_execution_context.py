@@ -124,14 +124,14 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
     }
     assert len(metadata["runtime_state_sha256"]) == 64
     result = subprocess.run(
-        [str(executable), "--gtest_filter=CudaExecutionContextAot.*:CudaPublicExecutionAot.*"],
+        [str(executable), "--gtest_filter=CudaExecutionContextAot.*:CudaPublicExecutionAot.*:CudaExecutionOwner.ExternalStorageLoanPreservesCompleteAotEpoch"],
         env=dict(os.environ, TAICHI_F3_CONTEXT_AOT_FOLDER=str(directory)),
         capture_output=True,
         text=True,
         timeout=90,
     )
     (tmp_path / "native-consumer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
-    assert result.returncode == 0 and "[  PASSED  ] 10 tests." in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0 and "[  PASSED  ] 11 tests." in result.stdout, result.stdout + result.stderr
     consumer = Path(__file__).with_name("aot_execution_domain_probe.py")
     result = subprocess.run([sys.executable, "-S", str(consumer), str(directory)],
                             env=os.environ.copy(), capture_output=True, text=True, timeout=90)

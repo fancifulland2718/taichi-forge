@@ -443,11 +443,13 @@ class Runtime:
                 raise
 
     def import_dense_view(self, view):
-        """Borrow a compact JIT dense Field/ndarray view without copying.
+        """Borrow a compact managed dense view without copying.
 
         Tree destruction drains dependent prepared users and revokes all
         aliases before freeing the root. The imported handle remains closeable.
         This cold call must run outside a borrowed runtime submission scope.
+        Synchronized CUDA external storage requires a prepared execution domain;
+        its semaphore pair is consumed once per complete initialization/replay.
         """
         self._check()
         if self._dense_view_importer is None:

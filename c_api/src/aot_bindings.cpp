@@ -139,8 +139,10 @@ void Runtime::retire_resources(bool synchronize) {
   for (const auto &[handle, memory] : memories) {
     // Disarm Program revocation callbacks even if a cold metadata snapshot
     // still holds BorrowedMemory after this Runtime has been destroyed.
-    if (memory.borrowed)
+    if (memory.borrowed) {
+      memory.borrowed->external_access.reset();
       memory.borrowed->owner.reset();
+    }
     if (memory.owns_allocation)
       cleanup([&] { get().dealloc_memory(memory.allocation); });
   }

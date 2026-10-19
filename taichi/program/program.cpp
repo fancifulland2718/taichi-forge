@@ -7152,8 +7152,9 @@ Program::DenseStorageBorrow Program::borrow_dense_storage(
   const auto &owner = descriptor.owner();
   TI_ERROR_IF(
       !client || (owner.kind != storage::StorageOwnerKind::kProgramNdarray &&
-                  owner.kind != storage::StorageOwnerKind::kSNodePayload),
-      "Dense storage borrowing requires a live program-owned range");
+                  owner.kind != storage::StorageOwnerKind::kSNodePayload &&
+                  owner.kind != storage::StorageOwnerKind::kExternalManaged),
+      "Dense storage borrowing requires a live managed range");
   const auto &properties = descriptor.properties();
   TI_ERROR_IF(
       !properties.ndarray_abi_compatible || !properties.compact_contiguous ||
@@ -7172,6 +7173,17 @@ Program::DenseStorageBorrow Program::borrow_dense_storage(
     auto lease = acquire_ndarray_external_lease(owner.ndarray_handle);
     TI_ERROR_IF(!lease, "Cannot retain borrowed ndarray storage");
     result.lease = std::make_shared<NdarrayResourceLease>(std::move(lease));
+  } else if (owner.kind == storage::StorageOwnerKind::kExternalManaged) {
+    auto [status, lease] = external_dense_storage_resources_.acquire(
+        external_dense_storage_handle(owner));
+    TI_ERROR_IF(status != ExternalDenseStorageRegistry::Result::kSuccess ||
+                    !lease || compile_config().arch != Arch::cuda ||
+                    !lease->synchronization_domain,
+                "External borrowing requires live synchronized CUDA storage");
+    result.external_access = lease->synchronization_domain;
+    result.lease =
+        std::make_shared<ExternalDenseStorageLease>(std::move(lease));
+    retain_external_storage_client(client, owner);
   } else {
     retain_runtime_client(client, {owner.tree});
   }

@@ -40,6 +40,7 @@
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+class ExternalSynchronizationDomain;
 namespace cuda {
 class ExecutionDomainRegistry;
 }
@@ -158,6 +159,8 @@ class Runtime {
     // Shared by all finite views of this loan. Mutation is cold and serialized
     // by submission_mutex; get_memory observes live under memory_mutex.
     std::shared_ptr<void> owner;
+    std::shared_ptr<taichi::lang::ExternalSynchronizationDomain>
+        external_access;
     bool live{true};
   };
   struct MemoryAllocation {
@@ -240,7 +243,10 @@ class Runtime {
                            uint64_t byte_offset = 0,
                            bool owns_allocation = true,
                            std::shared_ptr<BorrowedMemory> borrowed = {});
-  MemoryAllocation get_memory(TiMemory memory) const;
+  // Only whole-recipe cold binding may opt into external synchronization.
+  // Ordinary launch/copy/map/export paths cannot bypass the access epoch.
+  MemoryAllocation get_memory(TiMemory memory,
+                              bool prepared_external_access = false) const;
   void retire_borrowed_memory(const std::shared_ptr<BorrowedMemory> &borrowed);
   static std::uintptr_t new_handle_token();
   TiKernel register_kernel(KernelBinding binding);

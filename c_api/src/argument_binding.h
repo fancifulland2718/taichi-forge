@@ -26,9 +26,12 @@ taichi::lang::DataType ndarray_scalar_type(TiDataType type);
 // Validate primitive/tensor storage and return its declared logical byte size.
 uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,
-                                 uint64_t *element_bytes = nullptr);
-taichi::lang::NativeArrayBinding bind_native_array(Runtime &runtime,
-                                                   const TiNdArray &array);
+                                 uint64_t *element_bytes = nullptr,
+                                 bool prepared_external_access = false);
+taichi::lang::NativeArrayBinding bind_native_array(
+    Runtime &runtime,
+    const TiNdArray &array,
+    bool prepared_external_access = false);
 
 // Cold ABI marshalling shared by ordinary launch and prepared execution. These
 // own the host descriptors referenced by LaunchContextBuilder, not device data.
@@ -66,7 +69,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     const TiNdArrayBinding *bindings,
     bool cpu_bounded_range = false,
     const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
-        &resources = {});
+        &resources = {},
+    bool prepared_external_access = false);
 std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
     Runtime &runtime,
     TiComputeGraph graph,

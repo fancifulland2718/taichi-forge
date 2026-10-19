@@ -182,9 +182,11 @@ capi::NdArrayStorageLayout array_storage_layout(const TiNdArray &array) {
 uint64_t validate_array_storage(Runtime &runtime,
                                 const TiNdArray &array,
                                 uint64_t *element_bytes = nullptr,
-                                bool shader_storage = false) {
+                                bool shader_storage = false,
+                                bool prepared_external_access = false) {
   const auto layout = array_storage_layout(array);
-  const auto memory = runtime.get_memory(array.memory);
+  const auto memory =
+      runtime.get_memory(array.memory, prepared_external_access);
   if (shader_storage)
     taichi::lang::validate_native_shader_storage(runtime.arch, memory.allocation);
   if (memory.size < layout.bytes)
@@ -200,7 +202,8 @@ uint64_t validate_array_storage(Runtime &runtime,
 void validate_kernel_array(Runtime &runtime,
                            taichi::lang::aot::Kernel &kernel,
                            uint32_t index,
-                           const TiNdArray &array) {
+                           const TiNdArray &array,
+                           bool prepared_external_access = false) {
   using namespace taichi::lang;
   auto parameter = kernel.nested_parameters.find({int(index)});
   if (parameter == kernel.nested_parameters.end() ||
@@ -208,7 +211,8 @@ void validate_kernel_array(Runtime &runtime,
     throw MemoryBindingError(
         "Ndarray argument does not match the exported ABI");
   }
-  validate_array_storage(runtime, array, nullptr, true);
+  validate_array_storage(runtime, array, nullptr, true,
+                         prepared_external_access);
   const auto &param = parameter->second;
   const auto *abi =
       kernel.args_type->get_element_type({int(index)})->as<StructType>();
@@ -284,18 +288,24 @@ taichi::lang::DataType ndarray_scalar_type(TiDataType type) {
 
 uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,
-                                 uint64_t *element_bytes) {
-  return validate_array_storage(runtime, array, element_bytes);
+                                 uint64_t *element_bytes,
+                                 bool prepared_external_access) {
+  return validate_array_storage(runtime, array, element_bytes, false,
+                                prepared_external_access);
 }
 
 NdArrayStorageLayout ndarray_storage_layout(const TiNdArray &array) {
   return array_storage_layout(array);
 }
 
-taichi::lang::NativeArrayBinding bind_native_array(Runtime &runtime,
-                                                  const TiNdArray &array) {
-  const auto bytes = validated_ndarray_bytes(runtime, array);
-  const auto memory = runtime.get_memory(array.memory);
+taichi::lang::NativeArrayBinding bind_native_array(
+    Runtime &runtime,
+    const TiNdArray &array,
+    bool prepared_external_access) {
+  const auto bytes = validated_ndarray_bytes(runtime, array, nullptr,
+                                             prepared_external_access);
+  const auto memory =
+      runtime.get_memory(array.memory, prepared_external_access);
   return {memory.allocation.get_ptr(memory.byte_offset), bytes,
           ndarray_scalar_type(array.elem_type),
           {array.shape.dims, array.shape.dims + array.shape.dim_count},
@@ -312,7 +322,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     const TiNdArrayBinding *bindings,
     bool cpu_bounded_range,
     const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
-        &resources) {
+        &resources,
+    bool prepared_external_access) {
   TI_CAPI_ARGUMENT_NULL_RV(kernel);
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL_RV(args);
@@ -449,10 +460,12 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     const auto &arg = args[i];
     if (arg.type == TI_ARGUMENT_TYPE_NDARRAY) {
       if (!kernel_binding.layouts.count(i))
-        validate_kernel_array(runtime2, *ti_kernel, i, arg.value.ndarray);
+        validate_kernel_array(runtime2, *ti_kernel, i, arg.value.ndarray,
+                              prepared_external_access);
       result->memories.push_back(arg.value.ndarray.memory);
       if (gradient_args[i]) {
-        validate_array_storage(runtime2, *gradient_args[i], nullptr, true);
+        validate_array_storage(runtime2, *gradient_args[i], nullptr, true,
+                               prepared_external_access);
         result->memories.push_back(gradient_args[i]->memory);
       }
     }
@@ -495,10 +508,12 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
 
         const TiNdArray &ndarray = arg.value.ndarray;
 
-        const auto memory = runtime2.get_memory(ndarray.memory);
+        const auto memory =
+            runtime2.get_memory(ndarray.memory, prepared_external_access);
         const auto gradient_memory =
             gradient_args[i]
-                ? std::optional{runtime2.get_memory(gradient_args[i]->memory)}
+                ? std::optional{runtime2.get_memory(gradient_args[i]->memory,
+                                                    prepared_external_access)}
                 : std::nullopt;
         if (memory.byte_offset ||
             (gradient_memory && gradient_memory->byte_offset)) {

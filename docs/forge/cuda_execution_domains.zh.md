@@ -41,8 +41,16 @@ domain.close()  # 冷阶段，排空并退休资源
 全部派生别名，旧句柄仍可安全关闭；ndarray 借用则在源 Python 包装回收后保留分配。
 导入属于冷操作，不能嵌套在 borrowed submission scope 内。
 
+带同步域的 CUDA 外部视图也可借给 JIT 和已加载的 AOT recipe。有限切片及其别名保留原
+同步所有者；完整初始化或重放各自对每个外部所有者消费一次 acquire/release epoch，
+不因多个内核或多个别名重复消费。仅操作私有存储的初始化不消费重放阶段的信号；若两个
+阶段都访问外部存储，生产者须在阶段之间重新交还所有权。busy 或拒绝准入不消费信号。
+普通 AOT 调用、内存复制/映射/导出及默认 prepared 路径会拒绝这些托管导入；冷准备时
+可能读取外部输入的 native resource factory 尚未资格。关闭外部所有者属于冷操作，先
+排空相关执行域再撤销全部借用和别名。Canvas 选域及源完成票据仍是另一项接口边界。
+
 绑定帧、多 workspace lane、动态选择 recipe、尚未具备借用描述的 provider data、
-非紧凑/只读/外部存储视图，以及未资格的 native route 会在冷准备时拒绝，不回退到默认 stream。
+非紧凑/只读或无同步域的外部存储视图，以及未资格的 native route 会在冷准备时拒绝，不回退到默认 stream。
 默认 `Graph.run()`/`submit()` 合同不变。`ti.graph.execution_domain()` 的借用 runtime
 由 Program 的 Python owner 持有，避免丢弃最后一个域包装时意外触发破坏性关闭。
 

@@ -1230,6 +1230,7 @@ class TI_DLL_EXPORT Program {
     std::uint64_t byte_offset;
     std::uint64_t byte_size;
     std::shared_ptr<void> lease;
+    std::shared_ptr<ExternalSynchronizationDomain> external_access;
   };
   // Cold capability. The caller registers revocation before publishing the
   // handle; unlike launch resolution this owns a durable allocation lease.

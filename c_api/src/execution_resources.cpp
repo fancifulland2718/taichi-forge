@@ -59,7 +59,9 @@ void ExecutionResourceStorage::remove_owned_dependencies(
 TiMemory ExecutionResourceStorage::view(TiMemory parent,
                                         uint64_t offset,
                                         uint64_t bytes) {
-  const auto source = runtime_.get_memory(parent);
+  // Metadata-only aliasing preserves the synchronization owner. Every actual
+  // consumer must still opt into a prepared access epoch at its binding site.
+  const auto source = runtime_.get_memory(parent, true);
   if (offset > source.size || bytes > source.size - offset ||
       offset > std::numeric_limits<uint64_t>::max() - source.base_offset ||
       offset > std::numeric_limits<uint64_t>::max() - source.byte_offset)
@@ -139,7 +141,8 @@ ExecutionResourceBindings bind_execution_resources(
     SharedExecutionResources *shared,
     const std::unordered_set<std::string> &frozen_metadata,
     const std::function<std::shared_ptr<taichi::lang::NativeMemoryAllocator>(
-        const std::string &)> &allocator) {
+        const std::string &)> &allocator,
+    bool prepared_external_access) {
   using Recipes = taichi::lang::aot::ExecutionResources;
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
@@ -157,7 +160,8 @@ ExecutionResourceBindings bind_execution_resources(
     const auto &array = found->second->value.ndarray;
     if (!local.count(found->second) && !frozen_metadata.count(name) &&
         validated_sources.insert(found->second).second)
-      validated_ndarray_bytes(runtime, array);
+      validated_ndarray_bytes(runtime, array, nullptr,
+                              prepared_external_access);
     return array;
   };
   auto resolve = [&](const Recipes::Extent &ref) {
