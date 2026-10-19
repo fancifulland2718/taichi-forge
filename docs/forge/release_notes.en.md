@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Fix invalid pointer types in Vulkan `SharedArray` floating-point CAS fallback.
+  Each allocation uses consistent storage for atomics and ordinary loads/stores,
+  while other allocations retain native operations; f64 CAS min/max also use the
+  correct result type. Shared integer/float atomic features are reported, enabled
+  and checked independently of buffer features, including supported shared int64
+  atomics. AOT targets declare them through `spirv_has_shared_atomic_*` capabilities.
+
 - Fix access violations when a ray-query kernel runs through JIT before being
   recompiled for an AOT target. Frontend expressions requiring one-time
   materialization now retain results per lowering pass, without reusing IR

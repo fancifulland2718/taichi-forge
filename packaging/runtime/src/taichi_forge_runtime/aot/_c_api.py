@@ -49,6 +49,13 @@ CAPABILITY_NAMES = dict(
             "max_sampled_texture_collection_size",
             "vulkan_has_opacity_micromap",
             "vulkan_has_ray_tracing_pipeline",
+            "spirv_has_shared_atomic_int64",
+            "spirv_has_shared_atomic_float16_add",
+            "spirv_has_shared_atomic_float16_minmax",
+            "spirv_has_shared_atomic_float_add",
+            "spirv_has_shared_atomic_float_minmax",
+            "spirv_has_shared_atomic_float64_add",
+            "spirv_has_shared_atomic_float64_minmax",
         )
     )
 )

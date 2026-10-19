@@ -358,6 +358,14 @@ void detail::record_shader_atomic_float2_capabilities(
   if (features.shaderBufferFloat64AtomicMinMax) {
     caps.set(DeviceCapability::spirv_has_atomic_float64_minmax, true);
   }
+  caps.set(DeviceCapability::spirv_has_shared_atomic_float16_add,
+           features.shaderSharedFloat16AtomicAdd);
+  caps.set(DeviceCapability::spirv_has_shared_atomic_float16_minmax,
+           features.shaderSharedFloat16AtomicMinMax);
+  caps.set(DeviceCapability::spirv_has_shared_atomic_float_minmax,
+           features.shaderSharedFloat32AtomicMinMax);
+  caps.set(DeviceCapability::spirv_has_shared_atomic_float64_minmax,
+           features.shaderSharedFloat64AtomicMinMax);
 }
 
 VulkanDeviceCreator::VulkanDeviceCreator(
@@ -1169,6 +1177,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       if (shader_atomic_float_feature.shaderBufferFloat64Atomics) {
         caps.set(DeviceCapability::spirv_has_atomic_float64, true);
       }
+      caps.set(DeviceCapability::spirv_has_shared_atomic_float_add,
+               shader_atomic_float_feature.shaderSharedFloat32AtomicAdd);
+      caps.set(DeviceCapability::spirv_has_shared_atomic_float64_add,
+               shader_atomic_float_feature.shaderSharedFloat64AtomicAdd);
       *pNextEnd = &shader_atomic_float_feature;
       pNextEnd = &shader_atomic_float_feature.pNext;
     }
@@ -1190,10 +1202,12 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       features2.pNext = &shader_atomic_int64_feature;
       query_physical_device_features2(&features2);
       if (device_supported_features.shaderInt64 &&
-          shader_atomic_int64_feature.shaderBufferInt64Atomics) {
-        caps.set(DeviceCapability::spirv_has_atomic_int64, true);
-        shader_atomic_int64_feature.shaderBufferInt64Atomics = true;
-        shader_atomic_int64_feature.shaderSharedInt64Atomics = false;
+          (shader_atomic_int64_feature.shaderBufferInt64Atomics ||
+           shader_atomic_int64_feature.shaderSharedInt64Atomics)) {
+        caps.set(DeviceCapability::spirv_has_atomic_int64,
+                 shader_atomic_int64_feature.shaderBufferInt64Atomics);
+        caps.set(DeviceCapability::spirv_has_shared_atomic_int64,
+                 shader_atomic_int64_feature.shaderSharedInt64Atomics);
         *pNextEnd = &shader_atomic_int64_feature;
         pNextEnd = &shader_atomic_int64_feature.pNext;
       }

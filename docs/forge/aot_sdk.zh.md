@@ -3782,6 +3782,19 @@ module = ti.aot.Module(caps=[ti.DeviceCapability.spirv_has_atomic_float_add])
 这些短测试用于定位回退，不是中大规模吞吐或跨设备性能资格，也不意味着所有浮点归约
 在不同目标上逐位一致。CPU/CUDA的既有目标选择不受此Vulkan配置影响。
 
+上述 `spirv_has_atomic_float_add` 等既有原子能力指全局缓冲。`SharedArray` 使用独立的
+`spirv_has_shared_atomic_float_add`／`float64_add`／`float16_add`，以及对应的
+`float_minmax`／`float64_minmax`／`float16_minmax` 能力（均有相同
+`spirv_has_shared_atomic_` 前缀）。不要用缓冲能力代替共享内存能力。
+f64 共享 CAS 需要 `spirv_has_float64`、`spirv_has_int64` 和
+`spirv_has_shared_atomic_int64`；不支持的目标在编译或加载阶段拒绝。
+
+缺少原生浮点能力时，f32/f64 共享数组以相同宽度的整数位表示实现 CAS，普通读取与写入
+在边界做位转换。若一个数组混用加法与 min/max，其中任一操作需要 CAS，整个数组采用
+一致的存储表示；其他只用受支持原生指令的数组保留快路径。此修复不增加数组容量、
+scratch 或提交次数，并修正 f64 CAS min/max 的结果类型。旧版已生成的共享浮点 CAS
+SPIR-V 需要重新导出；更新 runtime 不会改写包内 shader。
+
 原生 graphics 路径的安装资格进一步发现并补齐了宿主依赖与资源缺口：显式选择该路径时，
 旧应用包缺少 `native_visibility`，四个 SPIR-V stage 文件也未交付。新增20个宿主模块
 （含按需导入的依赖），四个资源共2,548字节；旧537个宿主二进制逐字节保持。新应用wheel为

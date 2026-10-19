@@ -4990,6 +4990,22 @@ tests diagnose a regression; they do not qualify larger workloads, other devices
 or bitwise equality of floating-point reductions across targets. Existing
 CPU/CUDA target selection is unaffected by this Vulkan configuration.
 
+Existing atomic capabilities such as `spirv_has_atomic_float_add` describe global
+buffers. `SharedArray` uses independent `spirv_has_shared_atomic_float_add`,
+`spirv_has_shared_atomic_float64_add`, `spirv_has_shared_atomic_float16_add` and
+the corresponding `minmax` capabilities. Buffer support does not imply shared
+memory support. Shared f64 CAS requires `spirv_has_float64`, `spirv_has_int64`
+and `spirv_has_shared_atomic_int64`; unsupported targets fail during compilation
+or loading.
+
+Without native float operations, shared f32/f64 arrays use same-width integer
+storage for CAS, with bitcasts at ordinary load/store boundaries. If an array
+mixes addition and min/max and any operation requires CAS, the entire allocation
+uses one consistent storage type. Other allocations retain supported native
+operations. This correction adds no array capacity, scratch or submissions and
+also corrects the result type of f64 CAS min/max. Re-export previously generated
+shared float CAS SPIR-V: updating the runtime does not rewrite packaged shaders.
+
 Installed native-graphics qualification exposed and closed another host/resource
 gap: explicitly selecting this path failed because `native_visibility` was
 absent, and four SPIR-V stages were also missing. Twenty host modules, including

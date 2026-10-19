@@ -57,37 +57,43 @@ void IRBuilder::init_header() {
   // capability
   ib_.begin(spv::OpCapability).add(spv::CapabilityShader).commit(&header_);
 
-  if (caps_->get(cap::spirv_has_atomic_float64_add)) {
+  if (caps_->get(cap::spirv_has_atomic_float64_add) ||
+      caps_->get(cap::spirv_has_shared_atomic_float64_add)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat64AddEXT)
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float16_add)) {
+  if (caps_->get(cap::spirv_has_atomic_float16_add) ||
+      caps_->get(cap::spirv_has_shared_atomic_float16_add)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat16AddEXT)
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float_add)) {
+  if (caps_->get(cap::spirv_has_atomic_float_add) ||
+      caps_->get(cap::spirv_has_shared_atomic_float_add)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat32AddEXT)
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float_minmax)) {
+  if (caps_->get(cap::spirv_has_atomic_float_minmax) ||
+      caps_->get(cap::spirv_has_shared_atomic_float_minmax)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat32MinMaxEXT)
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float64_minmax)) {
+  if (caps_->get(cap::spirv_has_atomic_float64_minmax) ||
+      caps_->get(cap::spirv_has_shared_atomic_float64_minmax)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat64MinMaxEXT)
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float16_minmax)) {
+  if (caps_->get(cap::spirv_has_atomic_float16_minmax) ||
+      caps_->get(cap::spirv_has_shared_atomic_float16_minmax)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat16MinMaxEXT)
         .commit(&header_);
@@ -189,21 +195,27 @@ void IRBuilder::init_header() {
   }
 
   if (caps_->get(cap::spirv_has_atomic_float_add) ||
-      caps_->get(cap::spirv_has_atomic_float64_add)) {
+      caps_->get(cap::spirv_has_shared_atomic_float_add) ||
+      caps_->get(cap::spirv_has_atomic_float64_add) ||
+      caps_->get(cap::spirv_has_shared_atomic_float64_add)) {
     ib_.begin(spv::OpExtension)
         .add("SPV_EXT_shader_atomic_float_add")
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float16_add)) {
+  if (caps_->get(cap::spirv_has_atomic_float16_add) ||
+      caps_->get(cap::spirv_has_shared_atomic_float16_add)) {
     ib_.begin(spv::OpExtension)
         .add("SPV_EXT_shader_atomic_float16_add")
         .commit(&header_);
   }
 
   if (caps_->get(cap::spirv_has_atomic_float16_minmax) ||
+      caps_->get(cap::spirv_has_shared_atomic_float16_minmax) ||
       caps_->get(cap::spirv_has_atomic_float_minmax) ||
-      caps_->get(cap::spirv_has_atomic_float64_minmax)) {
+      caps_->get(cap::spirv_has_shared_atomic_float_minmax) ||
+      caps_->get(cap::spirv_has_atomic_float64_minmax) ||
+      caps_->get(cap::spirv_has_shared_atomic_float64_minmax)) {
     ib_.begin(spv::OpExtension)
         .add("SPV_EXT_shader_atomic_float_min_max")
         .commit(&header_);
@@ -2046,14 +2058,14 @@ Value IRBuilder::float_atomic(AtomicOpType op_type,
     return atomic_operation(
         addr_ptr, data,
         [&](Value lhs, Value rhs) {
-          return call_glsl450(t_fp32_, /*FMin*/ 37, lhs, rhs);
+          return call_glsl450(get_primitive_type(dt), /*FMin*/ 37, lhs, rhs);
         },
         dt);
   } else if (op_type == AtomicOpType::max) {
     return atomic_operation(
         addr_ptr, data,
         [&](Value lhs, Value rhs) {
-          return call_glsl450(t_fp32_, /*FMax*/ 40, lhs, rhs);
+          return call_glsl450(get_primitive_type(dt), /*FMax*/ 40, lhs, rhs);
         },
         dt);
   } else {
@@ -2074,10 +2086,12 @@ Value IRBuilder::integer_atomic(AtomicOpType op_type,
   }
 }
 
-void IRBuilder::require_int64_atomics() {
-  TI_ERROR_IF(!caps_->get(cap::spirv_has_atomic_int64),
-              "64-bit atomic updates require device capability "
-              "'spirv_has_atomic_int64'");
+void IRBuilder::require_int64_atomics(bool shared) {
+  const auto required = shared ? cap::spirv_has_shared_atomic_int64
+                               : cap::spirv_has_atomic_int64;
+  TI_ERROR_IF(!caps_->get(required),
+              "64-bit atomic updates require device capability '{}'",
+              to_string(required));
   declare_capability(spv::CapabilityInt64Atomics);
 }
 
@@ -2086,7 +2100,8 @@ Value IRBuilder::atomic_operation(Value addr_ptr,
                                   std::function<Value(Value, Value)> op,
                                   const DataType &dt) {
   if (data_type_bits(dt) == 64) {
-    require_int64_atomics();
+    require_int64_atomics(
+        addr_ptr.stype.storage_class == spv::StorageClassWorkgroup);
   }
   SType out_type = get_primitive_type(dt);
   SType res_type = get_primitive_uint_type(dt);

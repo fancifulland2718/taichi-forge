@@ -48,6 +48,14 @@ PER_DEVICE_CAPABILITY(vulkan_has_opacity_micromap)
 PER_DEVICE_CAPABILITY(spirv_has_subgroup_shuffle)
 PER_DEVICE_CAPABILITY(spirv_has_subgroup_shuffle_relative)
 PER_DEVICE_CAPABILITY(vulkan_has_ray_tracing_pipeline)
+// Workgroup atomics are independent of the existing buffer atomic features.
+PER_DEVICE_CAPABILITY(spirv_has_shared_atomic_int64)
+PER_DEVICE_CAPABILITY(spirv_has_shared_atomic_float16_add)
+PER_DEVICE_CAPABILITY(spirv_has_shared_atomic_float16_minmax)
+PER_DEVICE_CAPABILITY(spirv_has_shared_atomic_float_add)
+PER_DEVICE_CAPABILITY(spirv_has_shared_atomic_float_minmax)
+PER_DEVICE_CAPABILITY(spirv_has_shared_atomic_float64_add)
+PER_DEVICE_CAPABILITY(spirv_has_shared_atomic_float64_minmax)
 #endif
 
 #ifdef PER_BUFFER_FORMAT

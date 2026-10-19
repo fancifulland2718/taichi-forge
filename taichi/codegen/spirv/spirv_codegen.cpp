@@ -409,7 +409,7 @@ class TaskCodegen : public IRVisitor {
 
     fill_snode_to_root();
     collect_ray_query_result_masks();
-    collect_comparison_textures();
+    collect_resource_usage();
     ir_ = std::make_shared<spirv::IRBuilder>(arch_, caps_);
   }
 
@@ -650,7 +650,7 @@ class TaskCodegen : public IRVisitor {
     if (auto tensor_type = alloca_type->cast<TensorType>()) {
       auto elem_num = tensor_type->get_num_elements();
       spirv::SType elem_type =
-          ir_->get_primitive_type(tensor_type->get_element_type());
+          local_storage_type(alloca, tensor_type->get_element_type());
       spirv::SType arr_type = ir_->get_array_type(elem_type, elem_num);
       if (alloca->is_shared) {  // for shared memory / workgroup memory
         constexpr int kSharedArrayAlignment = 8;
@@ -683,7 +683,7 @@ class TaskCodegen : public IRVisitor {
     if (stmt->offset_used_as_index()) {
       if (stmt->origin->is<AllocaStmt>()) {
         spirv::SType ptr_type = ir_->get_pointer_type(
-            ir_->get_primitive_type(dt), origin_val.stype.storage_class);
+            local_storage_type(stmt->origin, dt), origin_val.stype.storage_class);
         ptr_val = ir_->make_value(spv::OpAccessChain, ptr_type, origin_val,
                                   offset_val);
         if (stmt->origin->as<AllocaStmt>()->is_shared) {
@@ -715,14 +715,22 @@ class TaskCodegen : public IRVisitor {
   void visit(LocalLoadStmt *stmt) override {
     auto ptr = stmt->src;
     spirv::Value ptr_val = ir_->query_value(ptr->raw_name());
-    spirv::Value val = ir_->load_variable(
-        ptr_val, ir_->get_primitive_type(stmt->element_type()));
+    const auto value_type = ir_->get_primitive_type(stmt->element_type());
+    spirv::Value val =
+        ir_->load_variable(ptr_val, local_storage_type(ptr, stmt->element_type()));
+    if (val.stype.id != value_type.id) {
+      val = ir_->make_value(spv::OpBitcast, value_type, val);
+    }
     ir_->register_value(stmt->raw_name(), val);
   }
 
   void visit(LocalStoreStmt *stmt) override {
     spirv::Value ptr_val = ir_->query_value(stmt->dest->raw_name());
     spirv::Value val = ir_->query_value(stmt->val->raw_name());
+    if (uses_shared_cas_storage(stmt->dest)) {
+      val = ir_->make_value(spv::OpBitcast,
+                            ir_->get_primitive_uint_type(stmt->val->ret_type), val);
+    }
     ir_->store_variable(ptr_val, val);
   }
 
@@ -4488,8 +4496,67 @@ class TaskCodegen : public IRVisitor {
     }
   }
 
-  void collect_comparison_textures() {
-    const auto ops = irpass::analysis::gather_statements(task_ir_, [](Stmt *item) {
+  const AllocaStmt *shared_allocation(const Stmt *ptr) const {
+    if (const auto *element = ptr->cast<MatrixPtrStmt>()) {
+      ptr = element->origin;
+    }
+    const auto *alloca = ptr->cast<AllocaStmt>();
+    return alloca && alloca->is_shared ? alloca : nullptr;
+  }
+
+  bool uses_shared_cas_storage(const Stmt *ptr) const {
+    return !shared_cas_allocations_.empty() &&
+           shared_cas_allocations_.count(shared_allocation(ptr)) != 0;
+  }
+
+  spirv::SType local_storage_type(const Stmt *ptr, DataType dt) {
+    return uses_shared_cas_storage(ptr) ? ir_->get_primitive_uint_type(dt)
+                                       : ir_->get_primitive_type(dt);
+  }
+
+  bool has_native_float_atomic(AtomicOpType op, DataType dt, bool shared) const {
+    const bool add = op == AtomicOpType::add || op == AtomicOpType::sub;
+    const bool minmax = op == AtomicOpType::min || op == AtomicOpType::max;
+    using cap = DeviceCapability;
+    if (dt->is_primitive(PrimitiveTypeID::f16)) {
+      return (add && caps_->get(shared ? cap::spirv_has_shared_atomic_float16_add
+                                      : cap::spirv_has_atomic_float16_add)) ||
+             (minmax &&
+              caps_->get(shared ? cap::spirv_has_shared_atomic_float16_minmax
+                                : cap::spirv_has_atomic_float16_minmax));
+    }
+    if (dt->is_primitive(PrimitiveTypeID::f32)) {
+      return (add && caps_->get(shared ? cap::spirv_has_shared_atomic_float_add
+                                      : cap::spirv_has_atomic_float_add)) ||
+             (minmax &&
+              caps_->get(shared ? cap::spirv_has_shared_atomic_float_minmax
+                                : cap::spirv_has_atomic_float_minmax));
+    }
+    if (dt->is_primitive(PrimitiveTypeID::f64)) {
+      return (add && caps_->get(shared ? cap::spirv_has_shared_atomic_float64_add
+                                      : cap::spirv_has_atomic_float64_add)) ||
+             (minmax &&
+              caps_->get(shared ? cap::spirv_has_shared_atomic_float64_minmax
+                                : cap::spirv_has_atomic_float64_minmax));
+    }
+    return false;
+  }
+
+  void collect_resource_usage() {
+    const auto ops = irpass::analysis::gather_statements(task_ir_, [&](Stmt *item) {
+      if (const auto *atomic = item->cast<AtomicOpStmt>()) {
+        const auto *alloca = shared_allocation(atomic->dest);
+        if (alloca) {
+          const auto dt = atomic->dest->element_type().ptr_removed();
+          if ((dt == PrimitiveType::f32 || dt == PrimitiveType::f64) &&
+              !has_native_float_atomic(atomic->op_type, dt, true)) {
+            // One allocation must use one physical element type. If any operation
+            // needs integer CAS, all its loads, stores and atomics use that type.
+            // Other allocations retain their native floating-point fast path.
+            shared_cas_allocations_.insert(alloca);
+          }
+        }
+      }
       return item->is<TextureOpStmt>();
     });
     for (const auto *item : ops) {
@@ -4966,38 +5033,11 @@ class TaskCodegen : public IRVisitor {
     // Shared arrays have already created an accesschain, use it directly.
     const bool dest_is_ptr = dest_val.stype.flag == TypeKind::kPtr;
 
-    const auto has_native_float_atomic = [&]() {
-      const bool is_add_or_sub = stmt->op_type == AtomicOpType::add ||
-                                 stmt->op_type == AtomicOpType::sub;
-      const bool is_min_or_max = stmt->op_type == AtomicOpType::min ||
-                                 stmt->op_type == AtomicOpType::max;
-      if (dt->is_primitive(PrimitiveTypeID::f16)) {
-        return (is_add_or_sub &&
-                caps_->get(
-                    DeviceCapability::spirv_has_atomic_float16_add)) ||
-               (is_min_or_max &&
-                caps_->get(
-                    DeviceCapability::spirv_has_atomic_float16_minmax));
-      }
-      if (dt->is_primitive(PrimitiveTypeID::f32)) {
-        return (is_add_or_sub &&
-                caps_->get(DeviceCapability::spirv_has_atomic_float_add)) ||
-               (is_min_or_max &&
-                caps_->get(
-                    DeviceCapability::spirv_has_atomic_float_minmax));
-      }
-      if (dt->is_primitive(PrimitiveTypeID::f64)) {
-        return (is_add_or_sub &&
-                caps_->get(
-                    DeviceCapability::spirv_has_atomic_float64_add)) ||
-               (is_min_or_max &&
-                caps_->get(
-                    DeviceCapability::spirv_has_atomic_float64_minmax));
-      }
-      return false;
-    };
     const bool use_native_float_atomic =
-        is_real(dt) && has_native_float_atomic();
+        is_real(dt) &&
+        has_native_float_atomic(stmt->op_type, dt,
+                                shared_allocation(stmt->dest) != nullptr) &&
+        !uses_shared_cas_storage(stmt->dest);
 
     TI_ERROR_IF(
         dt->is_primitive(PrimitiveTypeID::f16) &&
@@ -5075,7 +5115,8 @@ class TaskCodegen : public IRVisitor {
 
       if (use_native_atomics) {
         if (data_type_bits(dt) == 64) {
-          ir_->require_int64_atomics();
+          ir_->require_int64_atomics(
+              addr_ptr.stype.storage_class == spv::StorageClassWorkgroup);
         }
         auto uint_type = ir_->get_primitive_uint_type(dt);
 
@@ -7512,6 +7553,7 @@ class TaskCodegen : public IRVisitor {
       buffer_access_map_;
   std::vector<TextureBind> texture_binds_;
   std::set<std::vector<int>> comparison_textures_;
+  std::unordered_set<const AllocaStmt *> shared_cas_allocations_;
   std::set<std::vector<int>> sampling_textures_;
   std::uint64_t sampled_image_descriptor_count_{0};
   std::vector<AccelerationStructureBind> acceleration_structure_binds_;

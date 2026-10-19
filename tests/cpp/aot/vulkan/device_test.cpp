@@ -380,6 +380,8 @@ TEST(VulkanDeviceCapabilityTest, AtomicFloat2FeaturesMapIndependently) {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT;
   features.shaderBufferFloat16AtomicAdd = VK_TRUE;
   features.shaderBufferFloat64AtomicMinMax = VK_TRUE;
+  features.shaderSharedFloat16AtomicMinMax = VK_TRUE;
+  features.shaderSharedFloat32AtomicMinMax = VK_TRUE;
 
   DeviceCapabilityConfig caps;
   vulkan::detail::record_shader_atomic_float2_capabilities(caps, features);
@@ -390,6 +392,37 @@ TEST(VulkanDeviceCapabilityTest, AtomicFloat2FeaturesMapIndependently) {
   EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float16), 0u);
   EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float16_minmax), 0u);
   EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float_minmax), 0u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_shared_atomic_float16_add), 0u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_shared_atomic_float16_minmax), 1u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_shared_atomic_float_minmax), 1u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_shared_atomic_float64_minmax), 0u);
+}
+
+TEST(VulkanDeviceCapabilityTest, SharedAtomicFeaturesRemainIndependent) {
+  VkPhysicalDeviceShaderAtomicInt64Features atomic{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES};
+  atomic.shaderSharedInt64Atomics = VK_TRUE;
+  VkPhysicalDeviceVulkan12Features enabled{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  vulkan::detail::fold_vulkan12_feature_chain(&atomic, enabled);
+  EXPECT_TRUE(enabled.shaderSharedInt64Atomics);
+  EXPECT_FALSE(enabled.shaderBufferInt64Atomics);
+
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  caps.set(DeviceCapability::spirv_has_float16, true);
+  caps.set(DeviceCapability::spirv_has_float64, true);
+  caps.set(DeviceCapability::spirv_has_shared_atomic_float16_add, true);
+  caps.set(DeviceCapability::spirv_has_shared_atomic_float_add, true);
+  caps.set(DeviceCapability::spirv_has_shared_atomic_float64_minmax, true);
+  const auto module = make_spirv_header(caps);
+  const auto capabilities = spirv_capabilities(module);
+  EXPECT_TRUE(capabilities.count(spv::CapabilityAtomicFloat16AddEXT));
+  EXPECT_TRUE(capabilities.count(spv::CapabilityAtomicFloat32AddEXT));
+  EXPECT_TRUE(capabilities.count(spv::CapabilityAtomicFloat64MinMaxEXT));
+  EXPECT_TRUE(spirv_contains_string(module, "SPV_EXT_shader_atomic_float_add"));
+  EXPECT_TRUE(spirv_contains_string(module, "SPV_EXT_shader_atomic_float16_add"));
+  EXPECT_TRUE(spirv_contains_string(module, "SPV_EXT_shader_atomic_float_min_max"));
 }
 
 TEST(VulkanDeviceCapabilityTest, AtomicFloatHeaderMatchesScalarWidth) {
