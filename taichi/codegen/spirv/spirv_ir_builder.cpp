@@ -2073,15 +2073,19 @@ Value IRBuilder::integer_atomic(AtomicOpType op_type,
   }
 }
 
+void IRBuilder::require_int64_atomics() {
+  TI_ERROR_IF(!caps_->get(cap::spirv_has_atomic_int64),
+              "64-bit atomic updates require device capability "
+              "'spirv_has_atomic_int64'");
+  declare_capability(spv::CapabilityInt64Atomics);
+}
+
 Value IRBuilder::atomic_operation(Value addr_ptr,
                                   Value data,
                                   std::function<Value(Value, Value)> op,
                                   const DataType &dt) {
   if (data_type_bits(dt) == 64) {
-    TI_ERROR_IF(!caps_->get(cap::spirv_has_atomic_int64),
-                "64-bit atomic updates require device capability "
-                "'spirv_has_atomic_int64'");
-    declare_capability(spv::CapabilityInt64Atomics);
+    require_int64_atomics();
   }
   SType out_type = get_primitive_type(dt);
   SType res_type = get_primitive_uint_type(dt);

@@ -681,6 +681,8 @@ class IRBuilder {
                          Value data,
                          std::function<Value(Value, Value)> op,
                          const DataType &dt);
+  // Shared by native integer operations and integer CAS fallbacks.
+  void require_int64_atomics();
   Value rand_u32(Value global_tmp_);
   Value rand_f32(Value global_tmp_);
   Value rand_i32(Value global_tmp_);

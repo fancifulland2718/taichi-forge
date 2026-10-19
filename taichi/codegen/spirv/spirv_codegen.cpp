@@ -5072,6 +5072,9 @@ class TaskCodegen : public IRVisitor {
       }
 
       if (use_native_atomics) {
+        if (data_type_bits(dt) == 64) {
+          ir_->require_int64_atomics();
+        }
         auto uint_type = ir_->get_primitive_uint_type(dt);
 
         if (data.stype.id != addr_ptr.stype.element_type_id) {
