@@ -3890,7 +3890,9 @@ class TaskCodegen : public IRVisitor {
         if (is_signed(dst_dt)) {
           val = ir_->make_value(spv::OpSNegate, dst_type, operand_val);
         } else {
-          TI_NOT_IMPLEMENTED
+          // Unsigned negation wraps in the destination width. Simplification
+          // also produces it from subtraction, including segmented scan bases.
+          val = ir_->sub(ir_->uint_immediate_number(dst_type, 0), operand_val);
         }
       } else if (is_real(dst_dt)) {
         val = ir_->make_value(spv::OpFNegate, dst_type, operand_val);

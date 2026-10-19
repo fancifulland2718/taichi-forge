@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan compiles unsigned integer negation with modular arithmetic, including
+  negation introduced by subtraction simplification. This fixes `u32/u64`
+  kernels and unsigned segmented-scan correction helpers failing in SPIR-V codegen.
+
 - CPU/CUDA/Vulkan segmented-reduce sequences export published immutable layouts
   generated on the device. Cold export captures only the selected offsets or
   segment IDs at the shared Field/provider completion boundary, once per layout.
