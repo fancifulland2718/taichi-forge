@@ -17643,8 +17643,11 @@ VulkanSortRecording prepare_vulkan_sort_recording(
   const bool wide_keys = key_type >= 3;
   TI_ERROR_IF(key_offset % key_size != 0,
               "Vulkan native radix sort key offset must align to key type size.");
-  TI_ERROR_IF(use_values && value_offset % value_size != 0,
-              "Vulkan native radix sort value offset must align to value type size.");
+  // Packed tensor records can start after a scalar sibling in a Field root.
+  // Their origin need only satisfy the scalar lane alignment; descriptor
+  // alignment is handled independently by the staging path below.
+  TI_ERROR_IF(use_values && value_offset % expected_value_size != 0,
+              "Vulkan native radix sort value offset must align to scalar type size.");
   DeviceAllocation key_alloc = operation.keys;
   DeviceAllocation value_alloc =
       use_values ? DeviceAllocation(operation.values) : kDeviceNullAllocation;
