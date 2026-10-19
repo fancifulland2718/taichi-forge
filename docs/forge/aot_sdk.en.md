@@ -2287,8 +2287,21 @@ last; `sort_by_key` requires lexicographic order. `auto` must resolve to the
 existing native backend; explicit `cpu_native`, `cuda_device` or
 `vulkan_native_radix_u32` sorting requires its matching backend. The explicit
 Vulkan compact/unique method is `vulkan_native`. Other strategies,
-descending/bitwise ordering, strided storage, fused sequences
+descending/bitwise ordering, strided storage, other fused sequences
 and unlisted operations still require their own export contracts.
+
+The Vulkan scalar `transform → gather → scatter` sequence has a dedicated
+`builtin/indexed_transform` v1 contract. Cold export selects the same eligible
+fusion as JIT; export of an already selected fusion preserves that choice even
+if the preference changes. It retains all five bindings (`src`, `transformed`,
+`indices`, `gathered`, `dst`) and one dispatch, without prewarming or adding
+application shader code. Values are i32/u32/f32, indices are mutable i32, extents
+are fixed and nonempty, and scale/bias are frozen f64 bit strings. Writable
+ranges must be disjoint from each other and both reads. Out-of-range gathers
+produce zero, including when that index is a valid destination. Scalar-aligned
+consumer views preserve their guards. Independent/borrowed consumers, in-flight
+close and downstream kernel gradients are covered; fusion itself does not
+generate an adjoint. CPU/CUDA keep their ordinary operation sequence.
 
 Scalar sequence sorting requires all ndarrays or all qualified dense Fields.
 Mixing a Field and an ndarray selects host sorting in the producer and is rejected

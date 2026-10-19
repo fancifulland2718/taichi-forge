@@ -952,6 +952,28 @@ TEST(NativeOperationRegistry, TransformSchemaUsesExactScalarBits) {
   }
 }
 
+TEST(NativeOperationRegistry, IndexedTransformRequiresEveryObservableOutput) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"indexed_transform","version":1,
+      "parameters":{"src_size":4294967296,"index_size":7,"dst_size":4294967297,
+      "dtype":"f32","scale_bits":"8000000000000000","bias_bits":"7ff8000000000001"},
+      "bindings":{"src":"s","transformed":"t","indices":"i","gathered":"g","dst":"d"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "indexed_transform");
+  // Count limits belong to the selected device/shader ABI, not the schema.
+  for (const char *port : {"src", "transformed", "indices", "gathered", "dst"}) {
+    auto missing = op;
+    missing.bindings.erase(port);
+    EXPECT_THROW(registry.decode(missing), std::invalid_argument);
+  }
+  for (const auto &capability : registry.capabilities()) {
+    if (capability.kind == "indexed_transform") {
+      EXPECT_EQ(capability.arch, Arch::vulkan);
+      EXPECT_EQ(capability.mode, NativeOperationMode::vulkan_inline);
+    }
+  }
+}
+
 TEST(NativeOperationRegistry, IndexedCopySchemaPreservesLayoutAndActualBackendLimits) {
   const auto &registry = native_operation_registry();
   auto op = NativeOperationDescription::parse(liong::json::parse_complete(

@@ -642,14 +642,72 @@ def _consecutive(call, context):
         ))
 
 
+def _export_indexed_transform(sequence, context):
+    from taichi_forge_runtime.aot import Scalar
+    from . import _algorithms as algorithms
+
+    selected = sequence._fused_plan
+    candidate = algorithms._try_build_vulkan_indexed_transform_sequence_plan(
+        sequence._calls, impl.get_runtime().prog, invoke=False,
+        respect_preferences=selected is None,
+    )
+    if selected is not None and (
+        candidate is None
+        or type(selected) is not algorithms._NativePrimitivePlan
+        or selected.method_name != candidate.method_name
+        or not selected.matches_program(impl.get_runtime().prog)
+        or not algorithms._native_plan_request_matches(
+            selected, candidate.backend, candidate.objects, candidate.semantic_key
+        )
+    ):
+        raise TaichiRuntimeError("AOT sequence cannot reconstruct the selected fused strategy")
+    if candidate is None:
+        return False
+    # Validate the public requests without prewarming or running any operation.
+    transform, gather, scatter = sequence._calls
+    if (type(transform.workspace) is not algorithms.TransformWorkspace
+            or set(transform.kwargs) != {"scale", "bias", "method", "workspace"}
+            or transform.kwargs["workspace"] is not transform.workspace):
+        raise TaichiRuntimeError("AOT fusion requires its concrete TransformWorkspace")
+    algorithms._check_transform_request(
+        *transform.args, transform.kwargs["method"], transform.workspace
+    )
+    transform.workspace.check_shape(candidate.semantic_key[5])
+    for call, name in ((gather, "gather"), (scatter, "scatter")):
+        if (type(call.workspace) is not algorithms.IndexedCopyWorkspace
+                or set(call.kwargs) != {"method", "workspace"}
+                or call.kwargs["workspace"] is not call.workspace):
+            raise TaichiRuntimeError("AOT fusion requires its concrete IndexedCopyWorkspace")
+        algorithms._check_indexed_copy_request(
+            *call.args, call.kwargs["method"], call.workspace, f"experimental_{name}()"
+        )
+        call.workspace.check_shape(candidate.n)
+    _, _, scale, bias, index_size, src_size, dst_size = candidate.semantic_key
+    context.operations.append(dict(
+        kind="native", provider="builtin", operation="indexed_transform", version=1,
+        parameters=dict(
+            src_size=src_size, index_size=index_size, dst_size=dst_size,
+            dtype=str(candidate.objects[0].dtype),
+            scale_bits=Scalar("f64", scale).resource("scale")["bits"],
+            bias_bits=Scalar("f64", bias).resource("bias")["bits"],
+        ),
+        bindings={name: context.retained_arrays.require(array) for name, array in zip(
+            ("src", "transformed", "indices", "gathered", "dst"), candidate.objects
+        )},
+    ))
+    return True
+
+
 def export_sequence(sequence, context):
     from ._algorithms import PrimitiveSequence
     from ._diagnostic_export import export_check_call, export_metric_call
     from ._segmented_export import export_segmented_reduce
     from ._bucket_export import export_bucket_builder
 
-    if type(sequence) is not PrimitiveSequence or sequence._fused_plan is not None:
+    if type(sequence) is not PrimitiveSequence:
         raise TaichiRuntimeError("AOT sequence requires its concrete selected native reconstruction")
+    if _export_indexed_transform(sequence, context):
+        return
     exporters = {
         "sort": _sort, "sort_by_key": _sort, "scan": _scan, "reduce": _reduce,
         "transform": _transform,

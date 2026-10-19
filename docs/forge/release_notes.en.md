@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan scalar transform/gather/scatter fusion exports cold or preserves its
+  selected strategy in AOT. Consumers share JIT's single-dispatch core and all five
+  bindings, without additional application shaders or scratch. Coverage includes
+  standalone/borrowed consumers, offset views, retirement and downstream gradients.
+
 - CPU/CUDA/Vulkan native affine transforms route packed vector/matrix ndarrays
   through the existing per-lane core, fixing rejected payloads or partial writes.
   Ordered PrimitiveSequence and Graph replay preserve all lanes; mismatched

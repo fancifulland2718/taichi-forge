@@ -1767,7 +1767,16 @@ CPU/CUDA/Vulkan 的 `primitive_sequence()` 可导出原生 `sort`、单 key part
 `auto` 必须对应既有原生后端；显式 `cpu_native`、`cuda_device`、
 `vulkan_native_radix_u32` 排序分别要求匹配后端。compact/unique 对应的 Vulkan
 显式方法为 `vulkan_native`。其他策略、降序/bitwise 排序、strided
-存储、融合序列和未列出的操作仍需自己的导出合同。
+存储、其他融合序列和未列出的操作仍需自己的导出合同。
+
+Vulkan 标量 `transform → gather → scatter` 序列具有专门的
+`builtin/indexed_transform` v1 合同。冷导出按 JIT 的条件选择融合；已选中融合后，
+即使偏好设置改变，导出仍保留该选择。产物保存 `src`、`transformed`、`indices`、
+`gathered`、`dst` 五个绑定，保持一次 dispatch，不预热、不增加应用 shader 代码。
+值类型为 i32/u32/f32，索引为可更新的 i32，范围固定且非空，scale/bias 冻结为
+f64 位串。三个写范围彼此及与两个读范围不得重叠。越界 gather 写零，即使该索引
+仍是合法 destination；标量对齐的消费者 view 保留边界外数据。已验证独立／借用
+消费者、在途关闭和下游 kernel 梯度；融合本身不自动生成伴随。CPU/CUDA 保持普通操作序列。
 
 标量 sequence 排序要求输入全部为 ndarray，或全部为符合条件的 dense Field。
 Field 与 ndarray 混用时，生产端选择 host 排序，自动 AOT 导出会拒绝该组合，

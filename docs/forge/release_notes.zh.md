@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan 标量 transform/gather/scatter 融合序列可冷导出或保留已选策略导出到 AOT。
+  消费者复用 JIT 的一次 dispatch 核心，恢复全部五个绑定，无新增应用 shader 或
+  scratch；覆盖独立／借用消费者、偏移 view、在途退休及下游 kernel 梯度。
+
 - CPU/CUDA/Vulkan 原生 affine transform 将 packed 向量／矩阵 ndarray 路由到
   按 lane 处理的既有核心，修复拒绝合法载荷或只更新部分元素的问题；支持顺序
   PrimitiveSequence 与 Graph 重放，并提前拒绝不匹配的 element shape。

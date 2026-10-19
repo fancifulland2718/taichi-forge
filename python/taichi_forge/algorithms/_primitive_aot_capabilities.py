@@ -148,6 +148,18 @@ _ROUTES = MappingProxyType({
              "i32_u32_f32_i64_u64_f64", "exact_inplace_or_disjoint",
              "f64_coefficient_bits", "device_dtype_capabilities"),
         ),
+        PrimitiveAOTRoute(
+            "algorithms.PrimitiveSequence", ("transform_gather_scatter",), ("vulkan",),
+            _STORAGE + ("selected_fused_strategy", "packed_scalar_ndarrays", "i32_u32_f32",
+                        "nonempty_fixed_extents", "immutable_coefficients", "mutable_i32_indices",
+                        "disjoint_writes", "all_intermediate_outputs", "single_dispatch", "no_automatic_ad"),
+        ),
+        PrimitiveAOTRoute(
+            "aot.ExecutionPlan", ("builtin/indexed_transform",), ("vulkan",),
+            ("packed_scalar", "i32_u32_f32", "nonempty_fixed_extents", "f64_coefficient_bits",
+             "mutable_i32_indices", "disjoint_writes", "all_intermediate_outputs", "single_dispatch",
+             "no_automatic_ad"),
+        ),
     ),
     "gather": _indexed_copy_routes("gather"),
     "scatter": _indexed_copy_routes("scatter"),

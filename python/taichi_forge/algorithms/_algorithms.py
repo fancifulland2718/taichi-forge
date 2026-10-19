@@ -2194,8 +2194,8 @@ def _same_ndarray_storage(lhs, rhs):
     return lhs is rhs or getattr(lhs, "arr", None) is getattr(rhs, "arr", None)
 
 
-def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke):
-    if not _primitive_sequence_fusion_enabled() or current_cfg().arch != vulkan:
+def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke, respect_preferences=True):
+    if (respect_preferences and not _primitive_sequence_fusion_enabled()) or current_cfg().arch != vulkan:
         return None
     if len(calls) != 3:
         return None

@@ -219,6 +219,40 @@ void validate_indexed_transform_operation(
 }
 
 void register_transform_operation(NativeOperationRegistry &registry) {
+  registry.define<IndexedTransformOperation>(validate_indexed_transform_operation);
+  registry.register_schema<IndexedTransformOperation>(
+      "builtin", "indexed_transform",
+      {"src", "transformed", "indices", "gathered", "dst"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<IndexedTransformOperation> {
+        operation_json::fields(parameters,
+                               {"src_size", "index_size", "dst_size", "dtype",
+                                "scale_bits", "bias_bits"});
+        std::array<std::size_t, 3> sizes;
+        const char *names[] = {"src_size", "index_size", "dst_size"};
+        for (std::size_t i = 0; i < sizes.size(); ++i) {
+          const auto size = operation_json::integer(parameters[names[i]]);
+          if (!size || size > std::numeric_limits<std::size_t>::max())
+            throw std::invalid_argument(
+                "Indexed transform sizes must be nonempty and addressable");
+          sizes[i] = static_cast<std::size_t>(size);
+        }
+        const auto dtype = operation_json::name(parameters["dtype"]);
+        int type = 0;
+        while (type < 3 && transform_types()[type]->to_string() != dtype)
+          ++type;
+        if (type == 3)
+          throw std::invalid_argument("Indexed transform requires i32/u32/f32");
+        const auto scale = coefficient(parameters["scale_bits"]);
+        const auto bias = coefficient(parameters["bias_bits"]);
+        return [sizes, type, scale, bias](const NativeOperationBindings &bindings) {
+          return IndexedTransformOperation{
+              sizes[0], sizes[1], sizes[2], type, scale, bias,
+              bindings.at("src").array(), bindings.at("transformed").array(),
+              bindings.at("indices").array(), bindings.at("gathered").array(),
+              bindings.at("dst").array()};
+        };
+      });
   registry.define<TransformOperation>(validate);
   registry.register_schema<TransformOperation>(
       "builtin", "transform", {"src", "dst"},
@@ -269,6 +303,11 @@ void register_transform_operation(NativeOperationRegistry &registry) {
       });
 #endif
 #ifdef TI_WITH_VULKAN
+  registry.register_factory<IndexedTransformOperation>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](Arch, Device &device, const IndexedTransformOperation &op) {
+        return gfx::prepare_vulkan_indexed_transform_operation(device, op);
+      });
   registry.register_factory<TransformOperation>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](Arch, Device &device, const TransformOperation &op) {
