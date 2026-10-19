@@ -1,5 +1,6 @@
 #include "taichi/program/program.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_sort.h"
 #include "taichi/runtime/native_scan.h"
 #include "taichi/runtime/native_reduce.h"
 #include "taichi/runtime/native_transform.h"
@@ -18537,9 +18538,38 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
 
 namespace gfx {
 namespace {
+class FixedVulkanSortWorkspace final : public NativeSortWorkspace {
+ public:
+  FixedVulkanSortWorkspace(Device &device, const SortWorkspaceDescription &d)
+      : NativeSortWorkspace(Arch::vulkan, device, d) {
+    if (d.size > 1)
+      cache.ensure_device_only(&device);
+  }
+  std::size_t workspace_bytes() const override {
+    return cache.allocated_bytes();
+  }
+  VulkanRadixSortCache cache;
+};
+
 class FixedVulkanSort final : public NativeOperation {
  public:
-  explicit FixedVulkanSort(Device &device) : device_(device) {
+  FixedVulkanSort(Device &device, const SortOperation &operation)
+      : device_(device), external_workspace_(bool(operation.workspace)) {
+    workspace_ = operation.workspace
+                     ? std::dynamic_pointer_cast<FixedVulkanSortWorkspace>(
+                           operation.workspace)
+                     : std::make_shared<FixedVulkanSortWorkspace>(
+                           device, SortWorkspaceDescription::from(operation));
+    if (!workspace_ || &workspace_->device() != &device ||
+        !workspace_->matches(operation))
+      throw std::invalid_argument(
+          "Vulkan sort workspace does not match its operation");
+    if (operation.size <= 1)
+      return;
+    const auto value_type = operation.value_scalar_bytes == 8 ? 3 : 0;
+    recording_ = prepare_vulkan_sort_recording(
+        nullptr, &device_, workspace_->cache, operation, value_type, false,
+        false, nullptr);
   }
   Arch arch() const override {
     return Arch::vulkan;
@@ -18548,16 +18578,7 @@ class FixedVulkanSort final : public NativeOperation {
     return device_;
   }
   std::size_t workspace_bytes() const override {
-    return cache_.allocated_bytes();
-  }
-  void prepare(const SortOperation &operation) {
-    if (operation.size <= 1)
-      return;
-    cache_.ensure_device_only(&device_);
-    const auto value_type = operation.value_scalar_bytes == 8 ? 3 : 0;
-    recording_ =
-        prepare_vulkan_sort_recording(nullptr, &device_, cache_, operation,
-                                      value_type, false, false, nullptr);
+    return external_workspace_ ? 0 : workspace_->workspace_bytes();
   }
   void record_vulkan(Device *device, CommandList *commands) override {
     if (recording_.record)
@@ -18566,10 +18587,19 @@ class FixedVulkanSort final : public NativeOperation {
 
  private:
   Device &device_;
-  VulkanRadixSortCache cache_;
+  bool external_workspace_;
+  std::shared_ptr<FixedVulkanSortWorkspace> workspace_;
   VulkanSortRecording recording_;
 };
 }  // namespace
+
+std::shared_ptr<NativeSortWorkspace> prepare_vulkan_sort_workspace(
+    Device &device,
+    const SortWorkspaceDescription &description) {
+  if (!dynamic_cast<vulkan::VulkanDevice *>(&device))
+    throw std::invalid_argument("Sort workspace requires a Vulkan device");
+  return std::make_shared<FixedVulkanSortWorkspace>(device, description);
+}
 
 std::shared_ptr<NativeOperation> prepare_vulkan_sort_operation(
     Device &device,
@@ -18579,9 +18609,7 @@ std::shared_ptr<NativeOperation> prepare_vulkan_sort_operation(
                            (operation.value_bytes / 4))
     throw std::invalid_argument(
         "Vulkan sort exceeds its uint32 payload index ABI");
-  auto result = std::make_shared<FixedVulkanSort>(device);
-  result->prepare(operation);
-  return result;
+  return std::make_shared<FixedVulkanSort>(device, operation);
 }
 }  // namespace gfx
 
@@ -18590,12 +18618,14 @@ std::size_t Program::vulkan_radix_sort_u32_dense_field(SNode *keys,
                                                        int key_type,
                                                        int value_type,
                                                        std::size_t n) {
-  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
-              "Vulkan native dense field radix sort is only available on Vulkan.");
+  TI_ERROR_IF(
+      compile_config().arch != Arch::vulkan,
+      "Vulkan native dense field radix sort is only available on Vulkan.");
   TI_ERROR_IF(!keys,
               "Vulkan native dense field radix sort received null keys field.");
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
-              "Vulkan native dense field radix sort currently supports at most INT_MAX items.");
+              "Vulkan native dense field radix sort currently supports at most "
+              "INT_MAX items.");
   const size_t key_size = vulkan_sort_key_type_size(key_type);
   DataType key_dtype = vulkan_sort_key_data_type(key_type);
   TI_ERROR_IF(key_size == 0 || static_cast<const Type *>(key_dtype) == nullptr,

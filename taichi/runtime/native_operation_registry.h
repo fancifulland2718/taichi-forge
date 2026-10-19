@@ -232,6 +232,15 @@ class NativeOperationRegistry {
                      context, &value, NativeObjectKind::operation));
   }
 
+  template <typename Descriptor>
+  std::shared_ptr<NativeResource>
+  prepare_resource(Arch arch, Device &device, const Descriptor &value) const {
+    NativePreparationContext context(arch, device);
+    return prepare_impl(Descriptor::kind, Descriptor::version,
+                        typeid(Descriptor), context, &value,
+                        NativeObjectKind::resource);
+  }
+
   const NativeOperationCapability *find(const std::string &kind,
                                         std::uint32_t version,
                                         Arch arch) const;

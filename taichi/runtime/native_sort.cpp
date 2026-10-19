@@ -1,4 +1,5 @@
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_sort.h"
 
 #include <algorithm>
 #include <array>
@@ -24,7 +25,19 @@ namespace {
 class SortBase : public NativeOperation {
  public:
   SortBase(Arch arch, Device &device, SortOperation operation)
-      : arch_(arch), device_(device), operation_(operation) {
+      : arch_(arch),
+        device_(device),
+        operation_(operation),
+        workspace_(operation.workspace
+                       ? operation.workspace
+                       : prepare_sort_workspace(
+                             arch,
+                             device,
+                             SortWorkspaceDescription::from(operation))) {
+    if (workspace_->arch() != arch || &workspace_->device() != &device ||
+        !workspace_->matches(operation))
+      throw std::invalid_argument(
+          "Sort workspace does not match its operation");
   }
   Arch arch() const override {
     return arch_;
@@ -33,7 +46,7 @@ class SortBase : public NativeOperation {
     return device_;
   }
   std::size_t workspace_bytes() const override {
-    return bytes_;
+    return operation_.workspace ? 0 : workspace_->workspace_bytes();
   }
   std::array<void *, 2> pointers{};
 
@@ -41,43 +54,79 @@ class SortBase : public NativeOperation {
   Arch arch_;
   Device &device_;
   SortOperation operation_;
-  std::size_t bytes_{0};
+  std::shared_ptr<NativeSortWorkspace> workspace_;
+  template <typename T>
+  T *typed_workspace() {
+    auto *result = dynamic_cast<T *>(workspace_.get());
+    if (!result)
+      throw std::invalid_argument("Sort workspace backend/type mismatch");
+    return result;
+  }
 };
 
 #ifdef TI_WITH_LLVM
 template <typename KeyT, typename ValueT>
+class CpuTypedSortWorkspace final : public NativeSortWorkspace {
+ public:
+  CpuTypedSortWorkspace(Arch arch,
+                        Device &device,
+                        const SortWorkspaceDescription &description)
+      : NativeSortWorkspace(arch, device, description) {
+    storage.prepare(description.size, description.value_bytes != 0);
+  }
+  std::size_t workspace_bytes() const override {
+    return storage.bytes();
+  }
+  cpu::StableSortWorkspace<KeyT, ValueT> storage;
+};
+
+class CpuRawSortWorkspace final : public NativeSortWorkspace {
+ public:
+  CpuRawSortWorkspace(Arch arch,
+                      Device &device,
+                      const SortWorkspaceDescription &description)
+      : NativeSortWorkspace(arch, device, description) {
+    if (description.size <= 1)
+      return;
+    order.resize(description.size);
+    keys.resize(description.size *
+                (static_cast<int>(description.key_type) >= 3 ? 8 : 4));
+    values.resize(description.size * description.value_bytes);
+  }
+  std::size_t workspace_bytes() const override {
+    return order.size() * sizeof(std::uint32_t) + keys.size() + values.size();
+  }
+  std::vector<std::uint32_t> order;
+  std::vector<char> keys, values;
+};
+
+template <typename KeyT, typename ValueT>
 class CpuTypedSort final : public SortBase {
  public:
   CpuTypedSort(Arch arch, Device &device, const SortOperation &operation)
-      : SortBase(arch, device, operation) {
-    workspace_.prepare(operation.size, operation.value_bytes != 0);
-    bytes_ = workspace_.bytes();
+      : SortBase(arch, device, operation),
+        typed_(typed_workspace<CpuTypedSortWorkspace<KeyT, ValueT>>()) {
   }
   void run_cpu() override {
     cpu::cpu_stable_sort_impl(static_cast<KeyT *>(pointers[0]),
-                             static_cast<ValueT *>(pointers[1]), operation_.size,
-                             false, 0, &workspace_);
+                              static_cast<ValueT *>(pointers[1]),
+                              operation_.size, false, 0, &typed_->storage);
   }
 
  private:
-  cpu::StableSortWorkspace<KeyT, ValueT> workspace_;
+  CpuTypedSortWorkspace<KeyT, ValueT> *typed_;
 };
 
 class CpuSort final : public SortBase {
  public:
-  using SortBase::SortBase;
-  void prepare(std::size_t key_bytes) {
-    key_bytes_ = key_bytes;
-    if (operation_.size <= 1)
-      return;
-    order_.resize(operation_.size);
-    keys_.resize(operation_.size * key_bytes);
-    values_.resize(operation_.size * operation_.value_bytes);
-    bytes_ =
-        order_.size() * sizeof(std::uint32_t) + keys_.size() + values_.size();
+  CpuSort(Arch arch, Device &device, const SortOperation &operation)
+      : SortBase(arch, device, operation),
+        typed_(typed_workspace<CpuRawSortWorkspace>()),
+        key_bytes_(static_cast<int>(operation.key_type) >= 3 ? 8 : 4) {
   }
   template <typename T>
   void sort_indices() {
+    auto &order_ = typed_->order;
     const auto *keys = static_cast<const T *>(pointers[0]);
     std::sort(
         order_.begin(), order_.end(), [&](std::uint32_t a, std::uint32_t b) {
@@ -94,6 +143,9 @@ class CpuSort final : public SortBase {
   void run_cpu() override {
     if (operation_.size <= 1)
       return;
+    auto &order_ = typed_->order;
+    auto &keys_ = typed_->keys;
+    auto &values_ = typed_->values;
     std::iota(order_.begin(), order_.end(), 0u);
     switch (operation_.key_type) {
       case NativeSortKeyType::u32:
@@ -131,50 +183,85 @@ class CpuSort final : public SortBase {
   }
 
  private:
-  std::size_t key_bytes_{0};
-  std::vector<std::uint32_t> order_;
-  std::vector<char> keys_, values_;
+  CpuRawSortWorkspace *typed_;
+  std::size_t key_bytes_;
 };
 #endif
 
 #ifdef TI_WITH_CUDA
-class CudaSort final : public SortBase {
+class CudaSortWorkspace final : public NativeSortWorkspace {
  public:
-  using SortBase::SortBase;
-  void prepare() {
-    if (operation_.size <= 1)
+  CudaSortWorkspace(Arch arch,
+                    Device &device,
+                    const SortWorkspaceDescription &description)
+      : NativeSortWorkspace(arch, device, description) {
+    if (description.size <= 1)
       return;
     auto guard = CUDAContext::get_instance().get_guard();
     cuda::driver_prepare_sort();
     bytes_ = cuda::driver_stable_sort_workspace_bytes(
-        static_cast<int>(operation_.size),
-        static_cast<cuda::CudaDriverSortKeyType>(operation_.key_type),
-        static_cast<int>(operation_.value_bytes / 4));
+        static_cast<int>(description.size),
+        static_cast<cuda::CudaDriverSortKeyType>(description.key_type),
+        static_cast<int>(description.value_bytes / 4));
     Device::AllocParams params{};
     params.size = bytes_;
     params.usage = AllocUsage::Storage;
     auto [allocation, status] = device_.allocate_memory_unique(params);
     if (status != RhiResult::success)
       throw std::runtime_error("Unable to allocate fixed CUDA sort workspace");
-    workspace_ = std::move(allocation);
-    workspace_pointer_ =
-        static_cast<cuda::CudaDevice &>(device_).get_memory_addr(*workspace_);
+    storage_ = std::move(allocation);
+    pointer =
+        static_cast<cuda::CudaDevice &>(device_).get_memory_addr(*storage_);
+  }
+  std::size_t workspace_bytes() const override {
+    return bytes_;
+  }
+  void *pointer{nullptr};
+
+ private:
+  std::size_t bytes_{0};
+  DeviceAllocationUnique storage_;
+};
+
+class CudaSort final : public SortBase {
+ public:
+  CudaSort(Arch arch, Device &device, const SortOperation &operation)
+      : SortBase(arch, device, operation),
+        typed_(typed_workspace<CudaSortWorkspace>()) {
   }
   void record_cuda(void *stream) override {
     if (operation_.size > 1)
       cuda::driver_stable_sort_with_workspace(
           pointers[0], pointers[1], static_cast<int>(operation_.size),
           static_cast<cuda::CudaDriverSortKeyType>(operation_.key_type),
-          static_cast<int>(operation_.value_bytes / 4), workspace_pointer_,
+          static_cast<int>(operation_.value_bytes / 4), typed_->pointer,
           stream);
   }
 
  private:
-  DeviceAllocationUnique workspace_;
-  void *workspace_pointer_{nullptr};
+  CudaSortWorkspace *typed_;
 };
 #endif
+void validate_sort_workspace(Device &, const SortWorkspaceDescription &d) {
+  const auto type = static_cast<int>(d.key_type);
+  const std::size_t key_bytes = type >= 3 ? 8 : 4;
+  if (type < 0 || type > 5 || d.size > std::numeric_limits<int>::max() ||
+      d.value_bytes % 4 ||
+      (d.value_bytes &&
+       (!d.value_scalar_bytes || d.value_bytes % d.value_scalar_bytes)) ||
+      (!d.value_bytes && d.value_scalar_bytes) ||
+      d.value_bytes / 4 > std::numeric_limits<int>::max() ||
+      d.size > std::numeric_limits<std::size_t>::max() /
+                   (key_bytes + d.value_bytes + sizeof(std::uint32_t)))
+    throw std::invalid_argument(
+        "Sort workspace exceeds its record or i32 index ABI");
+}
+
 void validate_sort(Device &device, const SortOperation &operation) {
+  validate_sort_workspace(device, SortWorkspaceDescription::from(operation));
+  if (operation.workspace && (&operation.workspace->device() != &device ||
+                              !operation.workspace->matches(operation)))
+    throw std::invalid_argument("Sort workspace does not match its operation");
   const auto type = static_cast<int>(operation.key_type);
   const std::size_t key_bytes = type >= 3 ? 8 : 4;
   if (type < 0 || type > 5 ||
@@ -216,16 +303,53 @@ void map_sort(SortBase &result, const SortOperation &operation, Map map) {
 
 #ifdef TI_WITH_LLVM
 template <typename KeyT>
-std::shared_ptr<SortBase> make_cpu_sort(
-    Arch arch, Device &device, const SortOperation &operation) {
+std::shared_ptr<NativeResource> cpu_workspace_for_key(
+    Arch arch,
+    Device &device,
+    const SortWorkspaceDescription &d) {
+  if (!d.value_bytes || (d.value_bytes == 4 && d.value_scalar_bytes == 4))
+    return std::make_shared<CpuTypedSortWorkspace<KeyT, std::uint32_t>>(
+        arch, device, d);
+  if (d.value_bytes == 8 && d.value_scalar_bytes == 8)
+    return std::make_shared<CpuTypedSortWorkspace<KeyT, std::uint64_t>>(
+        arch, device, d);
+  return std::make_shared<CpuRawSortWorkspace>(arch, device, d);
+}
+std::shared_ptr<NativeResource> prepare_cpu_sort_workspace(
+    Arch arch,
+    Device &device,
+    const SortWorkspaceDescription &d) {
+  if (!dynamic_cast<cpu::CpuDevice *>(&device))
+    throw std::invalid_argument("Sort workspace requires a CPU device");
+  switch (d.key_type) {
+    case NativeSortKeyType::u32:
+      return cpu_workspace_for_key<std::uint32_t>(arch, device, d);
+    case NativeSortKeyType::i32:
+      return cpu_workspace_for_key<std::int32_t>(arch, device, d);
+    case NativeSortKeyType::f32:
+      return cpu_workspace_for_key<float>(arch, device, d);
+    case NativeSortKeyType::u64:
+      return cpu_workspace_for_key<std::uint64_t>(arch, device, d);
+    case NativeSortKeyType::i64:
+      return cpu_workspace_for_key<std::int64_t>(arch, device, d);
+    case NativeSortKeyType::f64:
+      return cpu_workspace_for_key<double>(arch, device, d);
+  }
+  throw std::invalid_argument("Unsupported CPU sort workspace key type");
+}
+
+template <typename KeyT>
+std::shared_ptr<SortBase> make_cpu_sort(Arch arch,
+                                        Device &device,
+                                        const SortOperation &operation) {
   if (!operation.value_bytes ||
       (operation.value_bytes == 4 && operation.value_scalar_bytes == 4))
-    return std::make_shared<CpuTypedSort<KeyT, std::uint32_t>>(arch, device, operation);
+    return std::make_shared<CpuTypedSort<KeyT, std::uint32_t>>(arch, device,
+                                                               operation);
   if (operation.value_bytes == 8 && operation.value_scalar_bytes == 8)
-    return std::make_shared<CpuTypedSort<KeyT, std::uint64_t>>(arch, device, operation);
-  auto raw = std::make_shared<CpuSort>(arch, device, operation);
-  raw->prepare(sizeof(KeyT));
-  return raw;
+    return std::make_shared<CpuTypedSort<KeyT, std::uint64_t>>(arch, device,
+                                                               operation);
+  return std::make_shared<CpuSort>(arch, device, operation);
 }
 
 std::shared_ptr<NativeOperation>
@@ -274,29 +398,52 @@ prepare_cuda_sort(Arch arch, Device &device, const SortOperation &operation) {
   map_sort(*result, operation, [&](DevicePtr ptr, std::size_t) {
     return static_cast<char *>(cuda_device->get_memory_addr(ptr)) + ptr.offset;
   });
-  result->prepare();
   return result;
 }
 #endif
 }  // namespace
 
 void register_sort_operation(NativeOperationRegistry &registry) {
+  registry.define<SortWorkspaceDescription>(validate_sort_workspace,
+                                            NativeObjectKind::resource);
   registry.define<SortOperation>(validate_sort);
 #ifdef TI_WITH_LLVM
+  registry.register_factory<SortWorkspaceDescription>(
+      host_arch(), NativeOperationMode::cpu, prepare_cpu_sort_workspace);
   registry.register_factory<SortOperation>(
       host_arch(), NativeOperationMode::cpu, prepare_cpu_sort);
 #endif
 #ifdef TI_WITH_CUDA
+  registry.register_factory<SortWorkspaceDescription>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch arch, Device &device, const SortWorkspaceDescription &d) {
+        if (!dynamic_cast<cuda::CudaDevice *>(&device))
+          throw std::invalid_argument("Sort workspace requires a CUDA device");
+        return std::make_shared<CudaSortWorkspace>(arch, device, d);
+      });
   registry.register_factory<SortOperation>(
       Arch::cuda, NativeOperationMode::cuda_capture, prepare_cuda_sort);
 #endif
 #ifdef TI_WITH_VULKAN
+  registry.register_factory<SortWorkspaceDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline,
+      [](Arch, Device &device, const SortWorkspaceDescription &d) {
+        return gfx::prepare_vulkan_sort_workspace(device, d);
+      });
   registry.register_factory<SortOperation>(
       Arch::vulkan, NativeOperationMode::vulkan_inline,
       [](Arch, Device &device, const SortOperation &operation) {
         return gfx::prepare_vulkan_sort_operation(device, operation);
       });
 #endif
+}
+
+std::shared_ptr<NativeSortWorkspace> prepare_sort_workspace(
+    Arch arch,
+    Device &device,
+    const SortWorkspaceDescription &description) {
+  return std::dynamic_pointer_cast<NativeSortWorkspace>(
+      native_operation_registry().prepare_resource(arch, device, description));
 }
 
 std::shared_ptr<NativeOperation> prepare_sort_operation(

@@ -146,6 +146,7 @@ struct CompactOperation {
 
 enum class NativeSortKeyType { u32, i32, f32, u64, i64, f64 };
 
+class NativeSortWorkspace;
 struct SortOperation {
   static constexpr const char *kind = "sort";
   static constexpr std::uint32_t version = 1;
@@ -155,6 +156,9 @@ struct SortOperation {
   NativeSortKeyType key_type;
   std::size_t value_bytes{0};
   std::size_t value_scalar_bytes{0};
+  // Optional storage shared only within a caller-proven ordered region.
+  // Its enclosing prepared owner accounts for it once and retains it.
+  std::shared_ptr<NativeSortWorkspace> workspace;
 };
 
 // Compact row-major interleaved complex f32 values. The inverse is
