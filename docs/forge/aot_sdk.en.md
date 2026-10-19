@@ -1905,6 +1905,30 @@ prepared.run()
 runtime.wait()
 ```
 
+On CPU/CUDA/Vulkan, `prepared.submit()` runs the same prepared work and returns a
+`SubmissionTicket`. Use `ticket.done()` to poll or `ticket.wait()` to wait without
+holding the runtime submission lock. The existing `run()` path does not create a
+ticket. Both standalone and borrowed runtimes support this API:
+
+```python
+with prepared.submit() as ticket:
+    ticket.wait()
+    # Consume output before another submission overwrites its arrays.
+```
+
+A ticket records device completion, not an output snapshot or a workspace lease.
+Waiting does not reserve output storage for the consumer. `ticket.close()` drops
+the handle without waiting; the owner retains pending native records and the
+existing resource retirement rules still apply. Explicit runtime shutdown or
+`ti.reset()` retires device handles first, so retained tickets can report their
+completed state or the first failure after owner shutdown. Calls on a closed
+ticket fail. The C API equivalents are `ti_submit_prepared_ext`,
+`ti_query_submission_ext`, `ti_wait_submission_ext` and
+`ti_destroy_submission_ext`; querying, waiting and destroying a ticket require
+no runtime pointer. This interface was validated on Windows CPU/CUDA/Vulkan with
+forward results, ndarray gradients, retirement and injected owner faults on the
+two GPU backends; it does not qualify asynchronous result/workspace leasing.
+
 Descriptions live under `executions/` in directory and `.tcm` modules, or can be
 saved separately with `ExecutionPlan.save/load`. C/C++ passes the same JSON
 document to `ti_prepare_execution_plan_ext`, with named arguments and explicit

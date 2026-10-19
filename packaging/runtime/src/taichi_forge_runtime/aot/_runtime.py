@@ -25,6 +25,7 @@ import threading
 from .. import _native
 from . import _c_api as abi
 from ._c_api import AotError
+from ._completion import SubmissionTicket
 
 __all__ = [
     "AotError",
@@ -875,6 +876,21 @@ class PreparedCall(_Resource):
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
 
     __call__ = run
+
+    def submit(self):
+        """Run and return a completion ticket; output storage remains caller-owned."""
+        runtime = self._runtime
+        with runtime._lock:
+            self._check()
+            if self._replay_owners is not None or (self._family is not None and not self._family.initialized):
+                self.initialize()
+            runtime._pending.add(self)
+            handle = runtime._api.call(runtime._api.ti_submit_prepared_ext, runtime._handle, self._handle)
+            try:
+                return SubmissionTicket(runtime._api, handle, (self,))
+            except BaseException:
+                runtime._api.call(runtime._api.ti_destroy_submission_ext, handle)
+                raise
 
     @property
     def binding_family_info(self):

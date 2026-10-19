@@ -1487,6 +1487,25 @@ prepared.run()
 runtime.wait()
 ```
 
+CPU/CUDA/Vulkan 上，`prepared.submit()` 执行同一份 prepared 工作并返回
+`SubmissionTicket`。`ticket.done()` 查询完成状态，`ticket.wait()` 等待完成且不占用
+runtime 提交锁。现有 `run()` 路径不创建票据。独立和借用 runtime 均支持：
+
+```python
+with prepared.submit() as ticket:
+    ticket.wait()
+    # 在下一次提交覆盖数组之前消费输出。
+```
+
+票据只记录设备完成，不是输出快照或工作区租约，等待不会替消费者保留输出存储。
+`ticket.close()` 丢弃句柄而不等待，owner 继续持有在途原生记录，资源仍按已有规则退休。
+显式关闭 runtime 或 `ti.reset()` 会先退休设备句柄，保留的票据在 owner 关闭后仍可报告
+完成状态或首个错误；已关闭票据的查询/等待会报错。C API 对应入口为
+`ti_submit_prepared_ext`、`ti_query_submission_ext`、`ti_wait_submission_ext` 和
+`ti_destroy_submission_ext`，查询、等待和销毁票据不需要 runtime 指针。Windows
+CPU/CUDA/Vulkan 已验证前向、ndarray 梯度及退休，两个 GPU 后端另验证注入的 owner
+故障；这不代表异步结果/完整工作区租约已经接通。
+
 描述保存到模块的 `executions/`，目录和 `.tcm` 均保留它；也可用
 `ExecutionPlan.save/load` 单独保存。C/C++ 可将同一 JSON 文档传给
 `ti_prepare_execution_plan_ext`，使用命名参数和 `TiNamedNdArrayBinding` 显式梯度。
