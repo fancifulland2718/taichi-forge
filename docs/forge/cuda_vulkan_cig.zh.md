@@ -101,7 +101,8 @@ NOT_READY。解除信号后数值正确。该实验测量依赖隔离，不是�
 
 2026-10-20 的固定容量 AOT 三槽测试在关联的同一个 Vulkan device 上执行了 10,000
 次交换，并进行场景资源重建和带在途工作关闭；每次有实际 Vulkan fill、AOT kernel、
-双向 binary semaphore 和数值 oracle。进程参数／暂存保留池在预热后保持 4 次原生
+device-local 共享显存及其所有权转移、双向 binary semaphore 和数值 oracle；仅在
+排空后的数值检查中复制到单独的 host-visible staging。进程参数／暂存保留池在预热后保持 4 次原生
 分配、0 次原生释放、20,480 bytes，第二个场景复用相同存储。该计数只覆盖该池，
 不能冒充全部显存或全部 CUDA API；测试中的显式票据／fence 等待用于槽回收资格，
 不是零等待性能证据。Graph 自有池另有复用与 pending-prefix 测试。

@@ -23,7 +23,8 @@ def check(folder, turns=10000):
     use_cig = os.environ.get("TI_TEST_CIG_MODE", "required") != "disabled"
     configure_cuda_context(owner.binding if use_cig else None, mode="required" if use_cig else "disabled")
     print("CIG_LIFETIME configured", flush=True)
-    report = dict(turns=turns, slots=3, associated_vulkan_device=True, scenes=[])
+    report = dict(turns=turns, slots=3, associated_vulkan_device=True,
+                  device_local_exchange=True, readback_only_after_drain=True, scenes=[])
     try:
         for scene in range(2):
             producers = []
@@ -35,6 +36,7 @@ def check(folder, turns=10000):
                     for slot in range(3):
                         print("CIG_LIFETIME slot", scene, slot, flush=True)
                         producer = RawProducer(owner)
+                        assert producer.memory_property_flags & 1
                         producers.append(producer)
                         image = runtime.import_cuda_external_memory(
                             memory_handle=producer.handles[0], ready_for_cuda=producer.handles[1],

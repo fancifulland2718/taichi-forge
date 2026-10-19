@@ -42,6 +42,10 @@ class BufferBarrier(C.Structure):
                 ("buffer", C.c_uint64), ("offset", C.c_uint64), ("size", C.c_uint64)]
 
 
+class BufferCopy(C.Structure):
+    _fields_ = [("source_offset", C.c_uint64), ("destination_offset", C.c_uint64), ("size", C.c_uint64)]
+
+
 class RawProducer:
     def __init__(self, owner):
         from taichi_forge_runtime.aot._cuda_context import _Config
@@ -52,6 +56,7 @@ class RawProducer:
         self.buffer = self.memory = self.pool = self.fence = 0
         self.command = C.c_void_p()
         self.acquire_command = C.c_void_p()
+        self.readback_command = C.c_void_p()
         self.mapped = C.c_void_p()
         prototype = C.WINFUNCTYPE
         get_instance = prototype(C.c_void_p, C.c_void_p, C.c_char_p)(self.info.get_instance_proc_addr)
@@ -81,16 +86,33 @@ class RawProducer:
         function("vkGetPhysicalDeviceMemoryProperties", None, C.c_void_p, C.POINTER(MemoryProperties), instance=True)(
             self.info.physical_device, C.byref(properties))
         memory_type = next(i for i in range(properties.type_count)
-                           if requirements.types & (1 << i) and properties.types[i].flags & 6 == 6)
+                           if requirements.types & (1 << i) and properties.types[i].flags & 1)
+        self.memory_property_flags = properties.types[memory_type].flags
         export = VkHeaderFlags(1000072002, None, 2)  # ExportMemoryAllocateInfo
         memory = C.c_uint64()
         vk_check(function("vkAllocateMemory", C.c_int32, C.c_void_p, C.POINTER(AllocationInfo), C.c_void_p, C.POINTER(C.c_uint64))(
             device, C.byref(AllocationInfo(5, C.addressof(export), requirements.size, memory_type)), None, C.byref(memory)))
         self.memory, self.allocation_size = memory.value, requirements.size
         vk_check(function("vkBindBufferMemory", C.c_int32, C.c_void_p, C.c_uint64, C.c_uint64, C.c_uint64)(device, buffer, memory, 0))
-        vk_check(function("vkMapMemory", C.c_int32, C.c_void_p, C.c_uint64, C.c_uint64, C.c_uint64, C.c_uint32, C.POINTER(C.c_void_p))(
-            device, memory, 0, 66 * 4, 0, C.byref(self.mapped)))
         self.export_handle(memory.value, True)
+        # A separate host-visible staging allocation is used only by read(),
+        # after the steady exchange. The externally shared allocation is VRAM.
+        readback = C.c_uint64()
+        vk_check(function("vkCreateBuffer", C.c_int32, C.c_void_p, C.POINTER(BufferInfo), C.c_void_p, C.POINTER(C.c_uint64))(
+            device, C.byref(BufferInfo(12, None, 0, 66 * 4, 2, 0, 0, None)), None, C.byref(readback)))
+        self.readback_buffer = readback.value
+        function("vkGetBufferMemoryRequirements", None, C.c_void_p, C.c_uint64, C.POINTER(MemoryRequirements))(
+            device, readback, C.byref(requirements))
+        host_type = next(i for i in range(properties.type_count)
+                         if requirements.types & (1 << i) and properties.types[i].flags & 6 == 6)
+        readback_memory = C.c_uint64()
+        vk_check(function("vkAllocateMemory", C.c_int32, C.c_void_p, C.POINTER(AllocationInfo), C.c_void_p, C.POINTER(C.c_uint64))(
+            device, C.byref(AllocationInfo(5, None, requirements.size, host_type)), None, C.byref(readback_memory)))
+        self.readback_memory = readback_memory.value
+        vk_check(function("vkBindBufferMemory", C.c_int32, C.c_void_p, C.c_uint64, C.c_uint64, C.c_uint64)(
+            device, readback, readback_memory, 0))
+        vk_check(function("vkMapMemory", C.c_int32, C.c_void_p, C.c_uint64, C.c_uint64, C.c_uint64, C.c_uint32, C.POINTER(C.c_void_p))(
+            device, readback_memory, 0, 66 * 4, 0, C.byref(self.mapped)))
         external = VkHeaderFlags(1000077000, None, 2)
         for _ in range(2):
             semaphore = C.c_uint64()
@@ -120,11 +142,20 @@ class RawProducer:
             device, C.byref(VkCommandAllocate(40, None, pool.value, 0, 1)), C.byref(self.acquire_command)))
         vk_check(function("vkBeginCommandBuffer", C.c_int32, C.c_void_p, C.POINTER(VkCommandBegin))(
             self.acquire_command, C.byref(VkCommandBegin(42, None, 4))))
-        # The consumed semaphore precedes reacquisition and coherent host read.
-        acquire = BufferBarrier(44, None, 0, 0x3000, 0xFFFFFFFE,
+        # The consumed semaphore precedes reacquisition for further transfers.
+        acquire = BufferBarrier(44, None, 0, 0x1800, 0xFFFFFFFE,
                                 self.info.compute_queue_family_index, self.buffer, 0, 66 * 4)
-        barrier(self.acquire_command, 1, 0x14000, 0, 0, None, 1, C.byref(acquire), 0, None)
+        barrier(self.acquire_command, 1, 0x1000, 0, 0, None, 1, C.byref(acquire), 0, None)
         vk_check(function("vkEndCommandBuffer", C.c_int32, C.c_void_p)(self.acquire_command))
+        vk_check(function("vkAllocateCommandBuffers", C.c_int32, C.c_void_p, C.POINTER(VkCommandAllocate), C.POINTER(C.c_void_p))(
+            device, C.byref(VkCommandAllocate(40, None, pool.value, 0, 1)), C.byref(self.readback_command)))
+        vk_check(function("vkBeginCommandBuffer", C.c_int32, C.c_void_p, C.POINTER(VkCommandBegin))(
+            self.readback_command, C.byref(VkCommandBegin(42, None, 4))))
+        function("vkCmdCopyBuffer", None, C.c_void_p, C.c_uint64, C.c_uint64, C.c_uint32, C.POINTER(BufferCopy))(
+            self.readback_command, self.buffer, self.readback_buffer, 1, C.byref(BufferCopy(0, 0, 66 * 4)))
+        host = BufferBarrier(44, None, 0x1000, 0x2000, 0xFFFFFFFF, 0xFFFFFFFF, self.readback_buffer, 0, 66 * 4)
+        barrier(self.readback_command, 0x1000, 0x4000, 0, 0, None, 1, C.byref(host), 0, None)
+        vk_check(function("vkEndCommandBuffer", C.c_int32, C.c_void_p)(self.readback_command))
         fence = C.c_uint64()
         vk_check(function("vkCreateFence", C.c_int32, C.c_void_p, C.POINTER(VkHeaderFlags), C.c_void_p, C.POINTER(C.c_uint64))(
             device, C.byref(VkHeaderFlags(8, None, 1)), None, C.byref(fence)))
@@ -156,15 +187,21 @@ class RawProducer:
 
     def read(self):
         self.wait()
+        vk_check(self.reset_native(self.info.device, 1, C.byref(C.c_uint64(self.fence))))
+        commands = (C.c_void_p * 1)(self.readback_command.value)
+        info = VkSubmit(4, None, 0, None, None, 1, C.cast(commands, C.c_void_p), 0, None)
+        vk_check(self.submit_native(self.info.compute_queue, 1, C.byref(info), self.fence))
+        self.wait()
         return C.string_at(self.mapped, 66 * 4)
 
     def close(self):
         self.wait()
         fn, device = self.function, self.info.device
-        fn("vkUnmapMemory", None, C.c_void_p, C.c_uint64)(device, self.memory)
+        fn("vkUnmapMemory", None, C.c_void_p, C.c_uint64)(device, self.readback_memory)
         for name, value in (("vkDestroyCommandPool", self.pool), ("vkDestroyFence", self.fence),
                             *(("vkDestroySemaphore", value) for value in self.semaphores),
-                            ("vkDestroyBuffer", self.buffer), ("vkFreeMemory", self.memory)):
+                            ("vkDestroyBuffer", self.buffer), ("vkFreeMemory", self.memory),
+                            ("vkDestroyBuffer", self.readback_buffer), ("vkFreeMemory", self.readback_memory)):
             fn(name, None, C.c_void_p, C.c_uint64, C.c_void_p)(device, value, None)
         close = C.WinDLL("kernel32").CloseHandle
         close.argtypes, close.restype = [C.c_void_p], C.c_int

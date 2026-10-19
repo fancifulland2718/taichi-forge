@@ -116,7 +116,9 @@ waits should retain ordinary CUDA. This scheduling advice still needs G3 testing
 The 2026-10-20 fixed-capacity AOT test completed 10,000 three-slot exchanges on
 the associated Vulkan device, scene-resource reconstruction, and close with
 accepted work in flight. Each exchange performs Vulkan fill, AOT kernels,
-bidirectional binary semaphores and numerical checks. After warm-up, the process
+device-local shared-memory ownership transfers and bidirectional binary
+semaphores. Numerical readback copies to separate host-visible staging only
+after draining. After warm-up, the process
 parameter/scratch pool stayed at 4 native allocations, 0 frees and 20,480 bytes;
 the next scene reused that storage. These counters cover this pool, not every
 allocation or CUDA API. Explicit ticket/fence waits qualify slot retirement,
