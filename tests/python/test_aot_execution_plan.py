@@ -1111,3 +1111,25 @@ def test_fft_description_preserves_direction_and_static_shape():
     assert restored.argument_names == ("x", "y")
     assert restored.kernel_entries == ()
     assert json.loads(restored.to_json())["operations"][0]["dimensions"] == [3, 5]
+def test_grouped_storage_rings_snapshot_independent_capacities():
+    operations = [dict(kind="kernel", entry="step", arguments=["a", "b", "out"])]
+    resources = [dict(kind="ndarray", name=name, dtype="i32", shape=[1]) for name in ("a", "b")]
+    recipe = dict(kind="ordered_temporary_ring", version=2, groups=[
+        dict(capacity=3, arrays=["a"]), dict(capacity=5, arrays=["b"])])
+    plan = ExecutionPlan(operations, resources=resources, storage_recipe=recipe)
+    snapshot = json.loads(plan.to_json())
+    assert snapshot["version"] == 22
+    assert len(snapshot["operations"]) == 1 and len(snapshot["resources"]) == 2
+    assert plan.argument_names == ("out",)
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    recipe["groups"][1]["capacity"] = 65
+    assert json.loads(plan.to_json())["storage_recipe"]["groups"][1]["capacity"] == 5
+    with pytest.raises(ValueError, match="version 22"):
+        ExecutionPlan.from_json(json.dumps(dict(snapshot, version=21)))
+    for groups in ([], {}, [None], [dict(capacity=True, arrays=["a", "b"])],
+                   [dict(capacity=0, arrays=["a", "b"])], [dict(capacity=3, arrays=[])],
+                   [dict(capacity=3, arrays=["a", "b"], extra=1)],
+                   [dict(capacity=3, arrays=["a", "b"]), dict(capacity=5, arrays=["b"])],
+                   [dict(capacity=3, arrays=["a", "b", "out"])]):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=resources, storage_recipe=dict(recipe, groups=groups))

@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <map>
+#include <algorithm>
 #include <type_traits>
 #include "taichi/aot/execution_plan.h"
 #include "taichi/common/operation_json.h"
@@ -57,22 +58,42 @@ void expand_ordered_storage_ring(ExecutionPlan &plan,
                                  const liong::json::JsonValue &recipe,
                                  std::set<std::string> &arguments) {
   using namespace operation_json;
-  fields(recipe, {"kind", "version", "capacity", "arrays"});
-  const auto capacity = integer(recipe["capacity"]);
-  if (name(recipe["kind"]) != "ordered_temporary_ring" ||
-      integer(recipe["version"]) != 1 || !capacity ||
-      capacity > std::numeric_limits<std::size_t>::max() ||
-      !recipe["arrays"].is_arr() || recipe["arrays"].arr.inner.empty())
+  if (name(recipe["kind"]) != "ordered_temporary_ring")
     throw std::invalid_argument("Invalid ordered storage ring recipe");
+  std::map<std::string, std::size_t> capacities;
+  std::size_t capacity = 0;
+  const auto add_group = [&](const auto &group) {
+    const auto count = integer(group["capacity"]);
+    if (!count || count > std::numeric_limits<std::size_t>::max() ||
+        !group["arrays"].is_arr() || group["arrays"].arr.inner.empty())
+      throw std::invalid_argument("Invalid ordered storage ring group");
+    capacity = std::max(capacity, static_cast<std::size_t>(count));
+    for (const auto &item : group["arrays"].arr.inner)
+      if (!capacities.emplace(name(item), static_cast<std::size_t>(count)).second)
+        throw std::invalid_argument("Duplicate storage ring array");
+  };
+  if (integer(recipe["version"]) == 1) {
+    fields(recipe, {"kind", "version", "capacity", "arrays"});
+    add_group(recipe);
+  } else if (integer(recipe["version"]) == 2) {
+    fields(recipe, {"kind", "version", "groups"});
+    if (!recipe["groups"].is_arr() || recipe["groups"].arr.inner.empty())
+      throw std::invalid_argument("Storage ring groups must be nonempty");
+    for (const auto &group : recipe["groups"].arr.inner) {
+      fields(group, {"capacity", "arrays"});
+      add_group(group);
+    }
+  } else {
+    throw std::invalid_argument("Unsupported storage ring recipe version");
+  }
   if (plan.cuda_binding_frames || plan.vulkan_submission ||
       !plan.initialization.empty() || plan.operations.empty())
     throw std::invalid_argument(
         "Storage rings require ordinary replay without another execution recipe");
 
   std::set<std::string> selected, used;
-  for (const auto &item : recipe["arrays"].arr.inner)
-    if (!selected.insert(name(item)).second)
-      throw std::invalid_argument("Duplicate storage ring array");
+  for (const auto &[array, count] : capacities)
+    selected.insert(array);
   for (auto &operation : plan.operations)
     operation_slots(operation, [&](const auto &slot) { used.insert(slot); });
   std::vector<ExecutionResources::Resource> arrays;
@@ -114,37 +135,56 @@ void expand_ordered_storage_ring(ExecutionPlan &plan,
   const auto operations = plan.operations;
   const auto copies = static_cast<std::size_t>(capacity - 1);
   reserve_copies(plan.operations, copies, operations.size());
-  reserve_copies(plan.resources.declarations, copies, arrays.size());
   reserve_copies(plan.constraints, copies, constraints.size());
+  std::size_t array_copies = 0;
+  for (const auto &array : arrays) {
+    const auto extra = capacities.at(array.name) - 1;
+    if (extra > plan.resources.declarations.max_size() - array_copies)
+      throw std::invalid_argument("Storage ring resources exceed address space");
+    array_copies += extra;
+  }
+  reserve_copies(plan.resources.declarations, 1, array_copies);
+  // Allocate names only for each group's own capacity. The whole execution
+  // has max(capacities) frames, not the Cartesian product or least common
+  // multiple. This is a declared shared frame schedule, not independent clocks.
+  std::map<std::string, std::vector<std::string>> names;
   std::size_t counter = 0;
-  for (std::size_t slot = 0; slot < copies; ++slot) {
-    std::map<std::string, std::string> names;
-    for (const auto &array : arrays) {
+  for (const auto &array : arrays) {
+    auto &slots = names[array.name];
+    slots.reserve(capacities.at(array.name));
+    slots.push_back(array.name);
+    for (std::size_t slot = 1; slot < capacities.at(array.name); ++slot) {
       std::string generated;
       do {
         generated = "__forge_aot_ring_" + std::to_string(counter++);
       } while (!reserved.insert(generated).second);
-      names.emplace(array.name, generated);
+      slots.push_back(generated);
       arguments.insert(generated);
       plan.replay_bindings.insert(generated);
     }
-    const auto rename = [&](std::string &value) {
-      if (const auto found = names.find(value); found != names.end())
-        value = found->second;
-    };
-    for (auto array : arrays) {
-      rename(array.name);
+  }
+  const auto rename = [&](std::string &value, std::size_t frame) {
+    if (const auto found = names.find(value); found != names.end())
+      value = found->second[frame % found->second.size()];
+  };
+  for (const auto &source : arrays) {
+    for (std::size_t slot = 1; slot < capacities.at(source.name); ++slot) {
+      auto array = source;
+      rename(array.name, slot);
       for (auto &dimension : std::get<ExecutionResources::Array>(array.value).shape)
         if (auto *extent = std::get_if<ExecutionResources::Extent>(&dimension))
-          rename(extent->array);
+          rename(extent->array, slot);
       plan.resources.declarations.push_back(std::move(array));
     }
+  }
+  for (std::size_t frame = 1; frame < capacity; ++frame) {
+    const auto bind = [&](std::string &value) { rename(value, frame); };
     for (auto operation : operations) {
-      operation_slots(operation, rename);
+      operation_slots(operation, bind);
       plan.operations.push_back(std::move(operation));
     }
     for (auto constraint : constraints) {
-      constraint_slots(constraint, rename);
+      constraint_slots(constraint, bind);
       plan.constraints.push_back(std::move(constraint));
     }
   }

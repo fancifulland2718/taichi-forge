@@ -624,6 +624,8 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
       if (version < 21 || has_initialization)
         throw std::invalid_argument(
             "Storage rings require plan version 21 without explicit initialization");
+      if (integer(selected->second["version"]) == 2 && version < 22)
+        throw std::invalid_argument("Grouped storage rings require plan version 22");
       expand_ordered_storage_ring(plan, selected->second, arguments);
     }
     plan.resources.analyze(arguments);

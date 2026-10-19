@@ -21,7 +21,7 @@ namespace taichi::lang::aot {
 // handles, backend commands and storage ownership. Binding consumes this only
 // in the cold phase; replay retains no JSON or symbolic argument lookups.
 struct ExecutionPlan {
-  static constexpr std::uint32_t kMaxVersion = 21;
+  static constexpr std::uint32_t kMaxVersion = 22;
   struct Kernel {
     struct BoundedRange {
       bool cuda{false};

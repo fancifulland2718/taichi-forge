@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include "taichi/aot/execution_plan.h"
 
 namespace taichi::lang::aot {
@@ -29,6 +30,24 @@ std::string changed(const std::string &before, const std::string &after) {
   result.replace(position, before.size(), after);
   return result;
 }
+
+const ExecutionResources::Array &array(const ExecutionPlan &plan,
+                                      const std::string &name) {
+  const auto found = std::find_if(plan.resources.declarations.begin(),
+                                  plan.resources.declarations.end(),
+                                  [&](const auto &value) { return value.name == name; });
+  if (found == plan.resources.declarations.end())
+    throw std::logic_error("Expected a declared array: " + name);
+  return std::get<ExecutionResources::Array>(found->value);
+}
+
+std::string grouped(const std::string &groups) {
+  auto result = changed(
+      R"("version":1,"capacity":3,"arrays":["scratch","temp"])",
+      R"("version":2,"groups":)" + groups);
+  result.replace(result.find(R"("version":21)"), 12, R"("version":22)");
+  return result;
+}
 }  // namespace
 
 TEST(OrderedStoragePlan, ExpandsBindingsAndConstraintsButKeepsCodeAndAllocator) {
@@ -41,11 +60,14 @@ TEST(OrderedStoragePlan, ExpandsBindingsAndConstraintsButKeepsCodeAndAllocator) 
   EXPECT_EQ(plan.constraints.size(), 13);
   const auto &kernel = std::get<ExecutionPlan::Kernel>(plan.operations[2]);
   EXPECT_EQ(kernel.entry, "assemble");
-  EXPECT_EQ(kernel.arguments,
-            (std::vector<std::string>{"x", "__forge_aot_ring_1", "__forge_aot_ring_2"}));
+  EXPECT_EQ(kernel.arguments[0], "x");
+  EXPECT_NE(kernel.arguments[1], "scratch");
+  EXPECT_NE(kernel.arguments[2], "temp");
+  EXPECT_NE(kernel.arguments[1], kernel.arguments[2]);
+  EXPECT_NE(kernel.arguments[1], "__forge_aot_ring_0");
   EXPECT_EQ(std::get<ExecutionPlan::Copy>(plan.operations[3]).source, kernel.arguments[2]);
-  const auto &scratch = std::get<ExecutionResources::Array>(plan.resources.declarations[5].value);
-  const auto &temp = std::get<ExecutionResources::Array>(plan.resources.declarations[6].value);
+  const auto &scratch = array(plan, kernel.arguments[1]);
+  const auto &temp = array(plan, kernel.arguments[2]);
   EXPECT_TRUE(scratch.zero_initialize);
   EXPECT_EQ(scratch.allocator, "pool");
   EXPECT_EQ(temp.allocator, "pool");
@@ -59,6 +81,60 @@ TEST(OrderedStoragePlan, ExpandsBindingsAndConstraintsButKeepsCodeAndAllocator) 
   const auto wide = ExecutionPlan::parse(changed("\"capacity\":3", "\"capacity\":65"));
   EXPECT_EQ(wide.operations.size(), 130);
   EXPECT_EQ(wide.resources.declarations.size(), 133);
+}
+
+TEST(OrderedStoragePlan, GroupsKeepTheirAllocationsWithoutProductFrames) {
+  const auto plan = ExecutionPlan::parse(grouped(R"([
+    {"capacity":3,"arrays":["scratch"]},
+    {"capacity":5,"arrays":["temp"]}])"));
+  ASSERT_TRUE(plan.storage_ring);
+  EXPECT_EQ(plan.storage_ring->capacity, 5);
+  EXPECT_EQ(plan.operations.size(), 10);
+  EXPECT_EQ(plan.resources.declarations.size(), 11);
+  EXPECT_EQ(plan.constraints.size(), 21);
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"dx", "out", "x"}));
+  std::vector<std::string> scratch, temp;
+  for (std::size_t frame = 0; frame < 5; ++frame) {
+    const auto &call = std::get<ExecutionPlan::Kernel>(plan.operations[frame * 2]);
+    EXPECT_EQ(call.entry, "assemble");
+    scratch.push_back(call.arguments[1]);
+    temp.push_back(call.arguments[2]);
+    EXPECT_EQ(std::get<ExecutionPlan::Copy>(plan.operations[frame * 2 + 1]).source,
+              temp.back());
+    EXPECT_EQ(array(plan, scratch.back()).allocator, "pool");
+    EXPECT_EQ(std::get<ExecutionResources::Extent>(array(plan, temp.back()).shape[0]).array,
+              scratch.back());
+  }
+  EXPECT_EQ(std::set<std::string>(scratch.begin(), scratch.end()).size(), 3);
+  EXPECT_EQ(std::set<std::string>(temp.begin(), temp.end()).size(), 5);
+  EXPECT_EQ(scratch[3], scratch[0]);
+  EXPECT_EQ(scratch[4], scratch[1]);
+  for (std::size_t frame = 1; frame < 5; ++frame) {
+    const auto &constraint = std::get<ExecutionPlan::Disjoint>(plan.constraints[5 + (frame - 1) * 4 + 1]);
+    EXPECT_EQ(constraint.left, scratch[frame]);
+    EXPECT_EQ(constraint.right, temp[frame]);
+  }
+  const auto wide = ExecutionPlan::parse(grouped(R"([
+    {"capacity":3,"arrays":["scratch"]},
+    {"capacity":65,"arrays":["temp"]}])"));
+  EXPECT_EQ(wide.storage_ring->capacity, 65);
+  EXPECT_EQ(wide.operations.size(), 130);
+  EXPECT_EQ(wide.resources.declarations.size(), 71);
+}
+
+TEST(OrderedStoragePlan, GroupedDeclarationsRejectAmbiguousOwnership) {
+  for (const auto *groups : {
+        R"([])", R"({})", R"([{"capacity":3,"arrays":[]}])",
+        R"([{"capacity":3,"arrays":["scratch","temp"]},{"capacity":5,"arrays":["temp"]}])",
+        R"([{"capacity":0,"arrays":["scratch","temp"]}])",
+        R"([{"capacity":true,"arrays":["scratch","temp"]}])",
+        R"([{"capacity":3,"arrays":["scratch","temp"],"extra":1}])",
+        R"([{"capacity":9223372036854775807,"arrays":["scratch","temp"]}])"}) {
+    EXPECT_THROW(ExecutionPlan::parse(grouped(groups)), std::invalid_argument) << groups;
+  }
+  auto legacy = grouped(R"([{"capacity":3,"arrays":["scratch","temp"]}])");
+  legacy.replace(legacy.find(R"("version":22)"), 12, R"("version":21)");
+  EXPECT_THROW(ExecutionPlan::parse(legacy), std::invalid_argument);
 }
 
 TEST(OrderedStoragePlan, RejectsInvalidCapacityAndUnprovenSharedAliases) {

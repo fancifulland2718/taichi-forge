@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 21
+_MAX_EXECUTION_PLAN_VERSION = 22
 
 
 def _resource_version(resources):
@@ -104,8 +104,10 @@ class ExecutionPlan:
             document["submission_recipe"] = submission_recipe
             document["version"] = 20
         if storage_recipe is not None:
+            from ._storage_recipe import storage_recipe_version
+
             document["storage_recipe"] = storage_recipe
-            document["version"] = 21
+            document["version"] = storage_recipe_version(storage_recipe)
         document["version"] = max(
             document["version"], _control_version(document["operations"] + document.get("initialization", [])),
             _constraint_version(document.get("constraints", [])),
@@ -162,9 +164,11 @@ class ExecutionPlan:
                 raise ValueError("Submission recipe must be an object")
             required = max(required, 20)
         if "storage_recipe" in value:
+            from ._storage_recipe import storage_recipe_version
+
             if value["storage_recipe"] is None:
                 raise ValueError("Storage recipe must be an object")
-            required = max(required, 21)
+            required = max(required, storage_recipe_version(value["storage_recipe"]))
         if value["version"] < required:
             raise ValueError(f"Execution features require execution plan version {required}")
         return cls(
