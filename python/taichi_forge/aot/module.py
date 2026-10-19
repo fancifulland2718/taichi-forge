@@ -234,7 +234,15 @@ class Module:
 
         Args:
           arch: Target backend architecture. Default to the one initialized in :func:`~taichi_forge.lang.init` if not specified.
-          caps (List[str]): Enabled device capabilities.
+          caps (List[str]): Explicit deployment target capabilities, recorded
+            as load-time requirements. They do not inherit the JIT device's
+            capabilities. On Vulkan, omitting caps selects base SPIR-V 1.3;
+            f32 atomic additions then use an integer CAS fallback. For targets
+            supporting native float atomics, declare
+            ``ti.DeviceCapability.spirv_has_atomic_float_add`` to enable them.
+            Select capabilities for the deployed devices, not merely those of
+            the export machine. ``compile_options`` does not enable hardware
+            capabilities.
           compile_options (dict): Optional export-only overrides for
             ``compile_tier``, ``advanced_optimization``, ``llvm_opt_level``,
             ``external_optimization_level``, ``fast_math`` and

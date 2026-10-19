@@ -4960,10 +4960,27 @@ host public API creates new scenes.
 Runtime costs still depend on backend and submission cadence. With the same
 borrowed executor, warm-up and explicit wait, a small paired sample submitting
 16 steps before waiting measures CUDA JIT/AOT at about 21.6/19.6 microseconds per
-step and Vulkan at 64.6/152.6. Vulkan AOT reduces host submission cost but still
-completes more slowly; the cause remains unresolved. These short checks identify
-regressions, not general speedups, large-workload throughput or device-wide
-performance qualification.
+step and Vulkan at 64.6/152.6. Further diagnosis traced this Vulkan gap to target
+capabilities: JIT uses the device capabilities, while AOT with omitted `caps`
+requires only base SPIR-V 1.3 and lowers float atomic addition to integer CAS.
+This is independent of advanced compiler optimization settings. For deployment
+targets supporting native float atomics, declare the requirement explicitly:
+
+```python
+module = ti.aot.Module(caps=[ti.DeviceCapability.spirv_has_atomic_float_add])
+```
+
+The artifact records this requirement and the loader checks the target device.
+Choose it from the deployment contract, rather than copying every capability of
+the export machine. This single capability replaces six CAS sites with native
+float additions in the example: the same 16-step cadence falls from about 153 to
+32 microseconds per step, versus about 55 for JIT in that sample. Enabling only
+subgroups does not improve this case. Standalone/borrowed execution, material
+gradients and synchronization validation pass; the TCM shrinks by 106 bytes.
+Default capabilities and synchronization contracts are unchanged. These short
+tests diagnose a regression; they do not qualify larger workloads, other devices
+or bitwise equality of floating-point reductions across targets. Existing
+CPU/CUDA target selection is unaffected by this Vulkan configuration.
 
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
