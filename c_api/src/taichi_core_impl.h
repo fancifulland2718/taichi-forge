@@ -154,6 +154,12 @@ class Runtime {
     class AotModule *owner;
     taichi::lang::aot::StructLayout layout;
   };
+  struct BorrowedMemory {
+    // Shared by all finite views of this loan. Mutation is cold and serialized
+    // by submission_mutex; get_memory observes live under memory_mutex.
+    std::shared_ptr<void> owner;
+    bool live{true};
+  };
   struct MemoryAllocation {
     taichi::lang::DeviceAllocation allocation;
     uint64_t size;
@@ -169,6 +175,7 @@ class Runtime {
     // Internal aliases can instead be owned by their enclosing module. That
     // lifetime is ordered by prepared retirement, not by a placeholder lease.
     bool owns_allocation{true};
+    std::shared_ptr<BorrowedMemory> borrowed;
   };
 
  private:
@@ -231,8 +238,10 @@ class Runtime {
                            uint64_t base_offset = 0,
                            std::shared_ptr<void> storage_owner = {},
                            uint64_t byte_offset = 0,
-                           bool owns_allocation = true);
+                           bool owns_allocation = true,
+                           std::shared_ptr<BorrowedMemory> borrowed = {});
   MemoryAllocation get_memory(TiMemory memory) const;
+  void retire_borrowed_memory(const std::shared_ptr<BorrowedMemory> &borrowed);
   static std::uintptr_t new_handle_token();
   TiKernel register_kernel(KernelBinding binding);
   TiComputeGraph register_graph(GraphBinding binding);

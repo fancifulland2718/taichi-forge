@@ -132,10 +132,18 @@ void Runtime::retire_resources(bool synchronize) {
   {
     std::lock_guard<std::mutex> memory_lock(memory_mutex_);
     memories.swap(memories_);
+    for (const auto &[handle, memory] : memories)
+      if (memory.borrowed)
+        memory.borrowed->live = false;
   }
-  for (const auto &[handle, memory] : memories)
+  for (const auto &[handle, memory] : memories) {
+    // Disarm Program revocation callbacks even if a cold metadata snapshot
+    // still holds BorrowedMemory after this Runtime has been destroyed.
+    if (memory.borrowed)
+      memory.borrowed->owner.reset();
     if (memory.owns_allocation)
       cleanup([&] { get().dealloc_memory(memory.allocation); });
+  }
   if (failure)
     std::rethrow_exception(failure);
 }

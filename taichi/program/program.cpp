@@ -7141,6 +7141,43 @@ void Program::resolve_dense_storage_launch_context(
   }
 }
 
+Program::DenseStorageBorrow Program::borrow_dense_storage(
+    const storage::DenseStorageDescriptor &descriptor,
+    const std::shared_ptr<RuntimeClient> &client) {
+  std::optional<SNodeTreeLifecycleReadGuard> tree_guard;
+  if (active_snode_tree_lifecycle_program != this)
+    tree_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
+  auto resource_guard = acquire_runtime_resource_submission_guard();
+  ensure_runtime_submission_allowed("borrow dense storage");
+  const auto &owner = descriptor.owner();
+  TI_ERROR_IF(
+      !client || (owner.kind != storage::StorageOwnerKind::kProgramNdarray &&
+                  owner.kind != storage::StorageOwnerKind::kSNodePayload),
+      "Dense storage borrowing requires a live program-owned range");
+  const auto &properties = descriptor.properties();
+  TI_ERROR_IF(
+      !properties.ndarray_abi_compatible || !properties.compact_contiguous ||
+          !properties.element_contiguous || !properties.canonical_aos ||
+          descriptor.access() != storage::StorageAccess::kReadWrite,
+      "Dense storage borrowing requires a compact read-write AOS range");
+  NdarrayLaunchLeases arrays;
+  ExternalDenseStorageLaunchLeases external;
+  const auto binding =
+      resolve_dense_storage_descriptor(descriptor, arrays, external);
+  DenseStorageBorrow result{
+      binding.allocation, binding.byte_offset, binding.byte_size, {}};
+  if (owner.kind == storage::StorageOwnerKind::kProgramNdarray) {
+    // Launch resolution may reuse an inflight lease. A cold borrower instead
+    // owns its own reference, independently of default-stream completion.
+    auto lease = acquire_ndarray_external_lease(owner.ndarray_handle);
+    TI_ERROR_IF(!lease, "Cannot retain borrowed ndarray storage");
+    result.lease = std::make_shared<NdarrayResourceLease>(std::move(lease));
+  } else {
+    retain_runtime_client(client, {owner.tree});
+  }
+  return result;
+}
+
 std::shared_ptr<PreparedNativeStorage> Program::prepare_native_storage(
     const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
     const std::vector<bool> &writable) {

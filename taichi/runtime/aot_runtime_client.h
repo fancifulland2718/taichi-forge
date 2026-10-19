@@ -12,6 +12,9 @@ namespace taichi::lang {
 class Program;
 class Ndarray;
 class Texture;
+namespace storage {
+class DenseStorageDescriptor;
+}
 namespace aot {
 struct CompiledGraph;
 }
@@ -38,6 +41,8 @@ class AotRuntimeClient final : public RuntimeClient {
                                    std::vector<int>,
                                    std::vector<int>>;
   NdarrayImport import_ndarray(const Ndarray *array);
+  NdarrayImport import_dense_view(
+      const storage::DenseStorageDescriptor &descriptor);
   // Opaque native-resource token; retains the Program's texture storage lease.
   std::uintptr_t import_texture(const Texture *texture);
   // Name, selected physical Graph, dispatch index, graph-gated launch ABI.

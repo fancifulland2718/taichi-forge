@@ -224,14 +224,26 @@ void Runtime::free_memory(TiMemory devmem) {
   std::lock_guard<std::recursive_mutex> submission_lock(submission_mutex());
   retire_native_memory(devmem);
   retire_prepared_memory(devmem);
-  std::lock_guard<std::mutex> lock(memory_mutex_);
-  const auto found = memories_.find(devmem);
-  if (found == memories_.end()) {
-    throw MemoryBindingError("Memory is not a live allocation of this runtime");
+  std::shared_ptr<void> released;
+  {
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    const auto found = memories_.find(devmem);
+    if (found == memories_.end()) {
+      throw MemoryBindingError(
+          "Memory is not a live allocation of this runtime");
+    }
+    if (found->second.owns_allocation)
+      this->get().dealloc_memory(found->second.allocation);
+    const auto borrowed = found->second.borrowed;
+    memories_.erase(found);
+    if (borrowed && std::none_of(memories_.begin(), memories_.end(),
+                                 [&](const auto &entry) {
+                                   return entry.second.borrowed == borrowed;
+                                 })) {
+      borrowed->live = false;
+      released = std::move(borrowed->owner);
+    }
   }
-  if (found->second.owns_allocation)
-    this->get().dealloc_memory(found->second.allocation);
-  memories_.erase(found);
 }
 
 TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
@@ -240,7 +252,8 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
                                   uint64_t base_offset,
                                   std::shared_ptr<void> storage_owner,
                                   uint64_t byte_offset,
-                                  bool owns_allocation) {
+                                  bool owns_allocation,
+                                  std::shared_ptr<BorrowedMemory> borrowed) {
   TI_ASSERT(allocation.device == &get());
   try {
     // Never reuse a token, including across runtime destruction. Refuse the
@@ -248,14 +261,14 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
     const auto handle = reinterpret_cast<TiMemory>(new_handle_token());
     std::lock_guard<std::mutex> lock(memory_mutex_);
     memories_.emplace(
-        handle,
-        MemoryAllocation{allocation, size, base_offset, storage_owner,
-                         byte_offset, owns_allocation && !storage_owner});
+        handle, MemoryAllocation{
+                    allocation, size, base_offset, storage_owner, byte_offset,
+                    owns_allocation && !storage_owner && !borrowed, borrowed});
     return handle;
   } catch (...) {
     // RHI import paths allocate their own wrapper too. Retire that wrapper;
     // the backend retains ownership rules for the external storage itself.
-    if (release_on_failure && owns_allocation && !storage_owner)
+    if (release_on_failure && owns_allocation && !storage_owner && !borrowed)
       get().dealloc_memory(allocation);
     throw;
   }
@@ -267,7 +280,37 @@ Runtime::MemoryAllocation Runtime::get_memory(TiMemory memory) const {
   if (found == memories_.end()) {
     throw MemoryBindingError("Memory is not a live allocation of this runtime");
   }
+  if (found->second.borrowed && !found->second.borrowed->live)
+    throw MemoryBindingError("Borrowed storage has retired with its owner");
   return found->second;
+}
+
+void Runtime::retire_borrowed_memory(
+    const std::shared_ptr<BorrowedMemory> &borrowed) {
+  std::lock_guard<std::recursive_mutex> submission_lock(submission_mutex());
+  if (!borrowed->live)
+    return;
+  std::vector<TiMemory> handles;
+  {
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    for (const auto &[handle, memory] : memories_)
+      if (memory.borrowed == borrowed)
+        handles.push_back(handle);
+  }
+  // Do not revoke the generation or release backing ownership on a failed
+  // drain. Retrying the original Program retirement remains safe.
+  for (auto handle : handles) {
+    retire_native_memory(handle);
+    retire_prepared_memory(handle);
+  }
+  std::shared_ptr<void> released;
+  {
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    borrowed->live = false;
+    released = std::move(borrowed->owner);
+  }
+  // Host handle shells survive invalidation, so late close is idempotent.
+  // The owner's destructor may detach its Program callback outside this lock.
 }
 
 AotModule::AotModule(Runtime &runtime,

@@ -29,13 +29,20 @@ domain.close()  # 冷阶段，排空并退休资源
 调用点的启动策略，不导出文件、重新编译前端或复制 Field 根。不同准备拥有独立的参数、
 控制缓冲区和声明的私有工作区；共享应用 ndarray 和 Field 仍需精确依赖。
 
-当前覆盖 scalar/tensor JIT ndarray、隐式 dense Field 访问、普通与 masked 控制及
+当前覆盖 scalar/tensor JIT ndarray、live dense Field/ndarray 的紧凑 AOS
+`ti.experimental.ndarray_view()` 范围、隐式 dense Field 访问、普通与 masked 控制及
 选定的 CUDA 并行区域。ndarray 的已有 `.grad` 同时借用，支持显式反向内核；不参与
 自动 Tape/FwdMode，初始化/提交会排斥该上下文及其并发进入过程。源 Graph 的 `close()`
 不会关闭已准备实例，Field 树销毁或 Program reset 则先退休相关实例再释放代码/存储。
 
-绑定帧、多 workspace lane、动态选择 recipe、尚未具备借用描述的 retained Field view
-和 provider data，以及未资格的 native route 会在冷准备时拒绝，不回退到默认 stream。
+显式参数及 Graph 保留的 dense view 均保留切片偏移和元素形状，不复制字段根，也不要求
+应用将 Field 改成新 ndarray。借用 AOT runtime 的 `runtime.import_dense_view(view)`
+在 CPU、CUDA、Vulkan 使用同一存储合同。字段树销毁先排空相关执行，再撤销借用及其
+全部派生别名，旧句柄仍可安全关闭；ndarray 借用则在源 Python 包装回收后保留分配。
+导入属于冷操作，不能嵌套在 borrowed submission scope 内。
+
+绑定帧、多 workspace lane、动态选择 recipe、尚未具备借用描述的 provider data、
+非紧凑/只读/外部存储视图，以及未资格的 native route 会在冷准备时拒绝，不回退到默认 stream。
 默认 `Graph.run()`/`submit()` 合同不变。`ti.graph.execution_domain()` 的借用 runtime
 由 Program 的 Python owner 持有，避免丢弃最后一个域包装时意外触发破坏性关闭。
 

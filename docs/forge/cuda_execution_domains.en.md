@@ -37,16 +37,25 @@ artifact, recompile the frontend or copy Field roots. Separate preparations own
 independent arguments, control buffers and declared private workspace. Shared
 application ndarrays and Fields still require exact dependencies.
 
-The current scope includes scalar/tensor JIT ndarrays, implicit dense Field
-access, ordinary and masked control, and selected CUDA parallel regions.
+The current scope includes scalar/tensor JIT ndarrays, compact AOS
+`ti.experimental.ndarray_view()` ranges over live dense Fields/ndarrays,
+implicit dense Field access, ordinary and masked control, and selected CUDA parallel regions.
 Existing ndarray `.grad` storage is borrowed for explicit adjoint kernels.
 Automatic Tape/FwdMode is not supported; initialization/submission rejects that
 context and concurrent AD entry. Closing the source Graph leaves prepared
 instances usable. Field-tree destruction or Program reset retires dependent
 instances before releasing code or storage.
 
-Binding frames, multiple workspace lanes, dynamic recipe selection, retained
-Field views/provider data without a live-loan description, and unqualified
+Explicit and retained dense views keep their finite offsets and element shapes.
+They do not copy roots or force application Fields into new ndarrays. The
+borrowed AOT runtime exposes `runtime.import_dense_view(view)` for the same
+storage boundary on CPU, CUDA and Vulkan. Destroying a Field tree revokes the
+loan and all derived aliases after draining dependent executions; handle shells
+remain closeable. Ndarray loans retain the allocation after source wrapper
+collection. Import is cold and must run outside a borrowed submission scope.
+
+Binding frames, multiple workspace lanes, dynamic recipe selection, provider
+data without a live-loan description, strided/read-only/external views and unqualified
 native routes reject during cold preparation without a default-stream fallback.
 Existing `Graph.run()`/`submit()` contracts stay unchanged. The Python Program
 owner retains the borrower used by `ti.graph.execution_domain()` so dropping

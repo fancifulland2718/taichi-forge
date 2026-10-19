@@ -1225,6 +1225,17 @@ class TI_DLL_EXPORT Program {
 
   using DenseStorageBindingCallback = std::function<void(
       const storage::ResolvedDenseBinding *, std::size_t)>;
+  struct DenseStorageBorrow {
+    DeviceAllocation allocation;
+    std::uint64_t byte_offset;
+    std::uint64_t byte_size;
+    std::shared_ptr<void> lease;
+  };
+  // Cold capability. The caller registers revocation before publishing the
+  // handle; unlike launch resolution this owns a durable allocation lease.
+  DenseStorageBorrow borrow_dense_storage(
+      const storage::DenseStorageDescriptor &descriptor,
+      const std::shared_ptr<RuntimeClient> &client);
   void with_resolved_dense_storage_bindings(
       const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
       const DenseStorageBindingCallback &callback);

@@ -610,6 +610,8 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("import_ndarray", &AotRuntimeClient::import_ndarray,
            py::call_guard<py::gil_scoped_release>())
+      .def("import_dense_view", &AotRuntimeClient::import_dense_view,
+           py::call_guard<py::gil_scoped_release>())
       .def("import_texture", &AotRuntimeClient::import_texture,
            py::call_guard<py::gil_scoped_release>())
       .def("import_jit_kernels", &AotRuntimeClient::import_jit_kernels,

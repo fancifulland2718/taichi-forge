@@ -9,8 +9,12 @@ from taichi_forge.aot._graph_export import _ExportContext, _lower_graph
 from taichi_forge.aot._graph_resource_bindings import ResourceInputBindings
 from taichi_forge.aot._graph_resource_sources import SourceResourceBindings
 from taichi_forge.aot._graph_source_bindings import SourceArrayBindings
+from taichi_forge.aot._graph_storage_bindings import RetainedArrayBindings
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
+from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
+from taichi_forge.lang.field import ScalarField
+from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._domain import CudaExecutionDomain
@@ -39,6 +43,22 @@ def execution_domain(*, capacity=2, instance_capacity=64, priority=0):
         )
 
 
+class _JitRetainedArrays(RetainedArrayBindings):
+    def require(self, owner):
+        if not isinstance(owner, (DenseNdarrayView, ScalarField, MatrixField)):
+            return super().require(owner)
+        context = self.context
+        identity = id(owner)
+        previous = context.live_names.get(identity)
+        if previous is not None:
+            return previous
+        view = owner if isinstance(owner, DenseNdarrayView) else ndarray_view(owner)
+        name = context._name("live")
+        context.live_arrays[name] = view
+        context.live_names[identity] = name
+        return name
+
+
 class _JitContext(_ExportContext):
     def __init__(self, graph):
         spec = graph._spec
@@ -60,6 +80,9 @@ class _JitContext(_ExportContext):
         )
         self.imports = []
         self.scalar_types = {}
+        self.live_arrays = {}
+        self.live_names = {}
+        self.retained_arrays = _JitRetainedArrays(module, self)
 
     def _kernel_entry(self, kernel, launch_abi, jit_source):
         if jit_source is None:
@@ -204,7 +227,10 @@ def prepare_graph(graph, arguments, *, execution_domain):
             )
             or None,
         )
-        if set(plan.argument_names) != set(spec.runtime_arg_names):
+        if (
+            set(plan.argument_names)
+            != set(spec.runtime_arg_names) | context.live_arrays.keys()
+        ):
             raise TaichiRuntimeError(
                 "JIT preparation changed the complete Graph binding contract"
             )
@@ -214,17 +240,20 @@ def prepare_graph(graph, arguments, *, execution_domain):
             )
         # Reject unsupported inputs before importing code or storage. Original
         # fixed workspace is never silently shared between independent calls.
+        arguments = dict(arguments, **context.live_arrays)
         for name, value in arguments.items():
             if name in context.scalar_types:
                 if type(value) not in (bool, int, float):
                     raise TypeError("Graph scalar inputs require bool, int or float")
-            elif not isinstance(value, Ndarray) or isinstance(value, StructNdarray):
+            elif not isinstance(value, (Ndarray, DenseNdarrayView)) or isinstance(
+                value, StructNdarray
+            ):
                 raise TypeError(
-                    "Graph preparation currently requires scalar/tensor JIT ndarrays"
+                    "Graph preparation requires scalar/tensor JIT ndarrays or dense views"
                 )
             elif (
-                value.arr is None or value._runtime_prog is not impl.get_runtime().prog
-            ):
+                isinstance(value, Ndarray) and value.arr is None
+            ) or value._runtime_prog is not impl.get_runtime().prog:
                 raise TaichiRuntimeError(
                     "Graph preparation requires arrays from the current Program"
                 )
@@ -236,20 +265,29 @@ def prepare_graph(graph, arguments, *, execution_domain):
         try:
 
             def borrow(array):
-                if not isinstance(array, Ndarray) or isinstance(array, StructNdarray):
+                if not isinstance(array, (Ndarray, DenseNdarrayView)) or isinstance(
+                    array, StructNdarray
+                ):
                     raise TypeError(
                         "Graph gradients require scalar/tensor JIT ndarrays"
                     )
                 if (
-                    array.arr is None
-                    or array._runtime_prog is not impl.get_runtime().prog
-                ):
+                    isinstance(array, Ndarray) and array.arr is None
+                ) or array._runtime_prog is not impl.get_runtime().prog:
                     raise TaichiRuntimeError(
                         "Graph storage belongs to a retired or different Program"
                     )
-                identity = array._runtime_allocation_identity
+                identity = (
+                    ("view", id(array.descriptor))
+                    if isinstance(array, DenseNdarrayView)
+                    else array._runtime_allocation_identity
+                )
                 if identity not in imported:
-                    imported[identity] = runtime.import_ndarray(array)
+                    imported[identity] = (
+                        runtime.import_dense_view(array)
+                        if isinstance(array, DenseNdarrayView)
+                        else runtime.import_ndarray(array)
+                    )
                 return imported[identity]
 
             bindings = {}

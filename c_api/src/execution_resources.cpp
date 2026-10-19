@@ -68,7 +68,8 @@ TiMemory ExecutionResourceStorage::view(TiMemory parent,
   // closure retains ordinary parents; module aliases share the module owner.
   auto memory = runtime_.register_memory(
       source.allocation, bytes, false, source.base_offset + offset,
-      source.storage_owner, source.byte_offset + offset, false);
+      source.storage_owner, source.byte_offset + offset, false,
+      source.borrowed);
   try {
     sizes_.emplace(memory, 0);
     memories_.push_back(memory);

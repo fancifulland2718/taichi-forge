@@ -128,6 +128,7 @@ class Runtime:
         self._lock = threading.RLock()
         self._borrower = None
         self._ndarray_importer = None
+        self._dense_view_importer = None
         self._texture_importer = None
         self._handle = None
         # Keep native registrations independently of Python wrapper lifetimes.
@@ -154,10 +155,12 @@ class Runtime:
             raise RuntimeError("Native AOT runtime creation returned no handle")
 
     @classmethod
-    def _from_borrowed(cls, client, library_path, *, ndarray_importer=None, texture_importer=None):
+    def _from_borrowed(cls, client, library_path, *, ndarray_importer=None, texture_importer=None,
+                       dense_view_importer=None):
         result = cls.__new__(cls)
         result._lock = result._borrower = client
         result._ndarray_importer = ndarray_importer
+        result._dense_view_importer = dense_view_importer
         result._texture_importer = texture_importer
         result._handle = None
         result._resources, result._pending = set(), set()
@@ -430,6 +433,36 @@ class Runtime:
                 shape, element_shape = _shape(shape), _shape(element_shape)
                 if size != math.prod(shape) * math.prod(element_shape) * width:
                     raise ValueError("Imported ndarray layout disagrees with its storage extent")
+                memory = _Memory._from_import(self, handle, size)
+                return NdArray(memory, dtype, code, shape, element_shape)
+            except BaseException:
+                if memory is None:
+                    self._api.call(self._api.ti_free_memory, self._handle, handle)
+                else:
+                    memory.close()
+                raise
+
+    def import_dense_view(self, view):
+        """Borrow a compact JIT dense Field/ndarray view without copying.
+
+        Tree destruction drains dependent prepared users and revokes all
+        aliases before freeing the root. The imported handle remains closeable.
+        This cold call must run outside a borrowed runtime submission scope.
+        """
+        self._check()
+        if self._dense_view_importer is None:
+            raise RuntimeError("Dense view import requires ti.aot.borrow_runtime()")
+        # Native import acquires tree lifetime before the Program resource gate.
+        # Entering self._lock here would invert that order against tree destroy.
+        handle, size, dtype, shape, element_shape = self._dense_view_importer(self._borrower, view)
+        with self._lock:
+            self._check()
+            memory = None
+            try:
+                code, _, width = _dtype(dtype)
+                shape, element_shape = _shape(shape), _shape(element_shape)
+                if size != math.prod(shape) * math.prod(element_shape) * width:
+                    raise ValueError("Imported dense view layout disagrees with its extent")
                 memory = _Memory._from_import(self, handle, size)
                 return NdArray(memory, dtype, code, shape, element_shape)
             except BaseException:

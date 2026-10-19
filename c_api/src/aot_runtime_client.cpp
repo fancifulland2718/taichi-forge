@@ -4,6 +4,7 @@
 #include <exception>
 #include <limits>
 #include "taichi/program/program.h"
+#include "taichi/program/storage_view.h"
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/texture_storage.h"
 #include "native_resource_registry.h"
@@ -20,6 +21,38 @@
 
 namespace taichi::lang {
 namespace {
+class BorrowedStorageRetirement final : public RuntimeClient {
+ public:
+  explicit BorrowedStorageRetirement(::Runtime &runtime) : runtime_(runtime) {
+  }
+  void retire() override {
+    // Same order as JIT code revocation: Program already owns its resource
+    // guard. Never enter the borrower's state mutex from this callback.
+    // A global retirement snapshot may invoke us after the borrower has
+    // destroyed Runtime. The owner disarms this callback before detaching it.
+    if (!active.load(std::memory_order_acquire))
+      return;
+    std::lock_guard<std::recursive_mutex> lock(runtime_.submission_mutex());
+    if (auto live = storage.lock())
+      runtime_.retire_borrowed_memory(live);
+  }
+  std::weak_ptr<::Runtime::BorrowedMemory> storage;
+  std::atomic<bool> active{true};
+
+ private:
+  ::Runtime &runtime_;
+};
+
+struct BorrowedStorageOwner {
+  Program &program;
+  std::shared_ptr<BorrowedStorageRetirement> retirement;
+  std::shared_ptr<void> lease;
+  ~BorrowedStorageOwner() {
+    retirement->active.store(false, std::memory_order_release);
+    program.detach_runtime_client(retirement.get());
+  }
+};
+
 class BorrowedSampledImage final : public NativeSampledImage {
  public:
   BorrowedSampledImage(ImageParams parameters,
@@ -315,6 +348,57 @@ std::uintptr_t AotRuntimeClient::import_texture(const Texture *texture) {
     leave();
     throw;
   }
+}
+
+AotRuntimeClient::NdarrayImport AotRuntimeClient::import_dense_view(
+    const storage::DenseStorageDescriptor &descriptor) {
+  auto &state = *state_;
+  std::lock_guard<std::recursive_mutex> lock(state.mutex);
+  if (state.closed || !state.program || !state.runtime)
+    throw std::runtime_error("AOT runtime is closed");
+  if (!state.scopes.empty())
+    throw std::logic_error(
+        "Borrowing dense storage must run outside a borrowed submission scope");
+  auto tree_guard = state.program->acquire_snode_tree_lifecycle_read_guard();
+  auto resource_guard =
+      state.program->acquire_runtime_resource_submission_guard();
+  state.program->ensure_runtime_submission_allowed("borrow dense view");
+  std::lock_guard<std::recursive_mutex> runtime_lock(
+      state.runtime->submission_mutex());
+  if (!descriptor.scalar_type()->is<PrimitiveType>())
+    throw std::invalid_argument(
+        "Dense view requires scalar or tensor elements");
+  auto shape = [](const std::vector<std::int64_t> &extents) {
+    std::vector<int> result;
+    if (extents.size() > 16)
+      throw std::invalid_argument(
+          "Dense view exceeds C API dimension capacity");
+    for (auto extent : extents) {
+      if (extent < 0 || extent > std::numeric_limits<int>::max())
+        throw std::invalid_argument("Dense view extent exceeds C API capacity");
+      result.push_back(static_cast<int>(extent));
+    }
+    return result;
+  };
+  NdarrayImport result{0, 0, descriptor.scalar_type()->to_string(),
+                       shape(descriptor.index_shape()),
+                       shape(descriptor.element_shape())};
+  auto borrowed = std::make_shared<::Runtime::BorrowedMemory>();
+  auto retirement = std::make_shared<BorrowedStorageRetirement>(*state.runtime);
+  auto owner = std::shared_ptr<BorrowedStorageOwner>(
+      new BorrowedStorageOwner{*state.program, retirement, {}});
+  retirement->storage = borrowed;
+  auto binding = state.program->borrow_dense_storage(descriptor, retirement);
+  owner->lease = std::move(binding.lease);
+  if (binding.allocation.device != &state.runtime->get())
+    throw std::invalid_argument("Dense view belongs to another backend/device");
+  borrowed->owner = std::move(owner);
+  const auto handle = state.runtime->register_memory(
+      binding.allocation, binding.byte_size, false, binding.byte_offset, {},
+      binding.byte_offset, false, std::move(borrowed));
+  std::get<0>(result) = reinterpret_cast<std::uintptr_t>(handle);
+  std::get<1>(result) = binding.byte_size;
+  return result;
 }
 
 AotRuntimeClient::NdarrayImport AotRuntimeClient::import_ndarray(

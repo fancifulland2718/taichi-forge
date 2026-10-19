@@ -33,6 +33,7 @@ def borrow_runtime():
     result = Runtime._from_borrowed(
         client, utils._loaded_native_runtime_path,
         ndarray_importer=_import_ndarray, texture_importer=_import_texture,
+        dense_view_importer=_import_dense_view,
     )
     runtime.register_runtime_object(result)
     return result
@@ -48,6 +49,17 @@ def _import_ndarray(client, array):
     if array.arr is None:
         raise RuntimeError("Cannot import an ndarray after its runtime was reset")
     return client.import_ndarray(array.arr)
+
+
+def _import_dense_view(client, view):
+    from taichi_forge.lang import impl
+    from taichi_forge.lang._storage_view import DenseNdarrayView
+
+    if not isinstance(view, DenseNdarrayView):
+        raise TypeError("AOT dense import requires an explicit ndarray_view")
+    if view._runtime_prog is not impl.get_runtime().prog:
+        raise RuntimeError("Cannot import a dense view from a retired Program")
+    return client.import_dense_view(view.descriptor)
 
 
 def _import_texture(client, texture):
