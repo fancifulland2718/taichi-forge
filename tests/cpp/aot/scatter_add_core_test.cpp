@@ -40,6 +40,59 @@ void check_accumulation() {
 }
 }  // namespace
 
+TEST(GroupedReduceCore, OverwritesOldResultsAndEmptyGroupsWithFewerWorkers) {
+  ThreadPool pool(2);
+  const std::array<int32_t, 7> keys{
+      2, 0, -1, 2, 4, std::numeric_limits<int32_t>::min(), 0};
+  const std::array<int32_t, 7> values{
+      std::numeric_limits<int32_t>::max(), 7, 13, 1, 17, 19, 3};
+  for (int partitions : {1, 3, 11}) {
+    std::array<int32_t, 5> output{37, 37, 37, 37, 91};
+    std::vector<int32_t> partial(
+        cpu::aggregation_workspace_bytes<int32_t>(4, partitions) / 4);
+    const auto *storage = partial.data();
+    cpu::grouped_reduce(keys.data(), values.data(), output.data(), keys.size(),
+                        4, partitions, partial.data(), &pool);
+    EXPECT_EQ(output, (std::array<int32_t, 5>{
+                          10, 0, std::numeric_limits<int32_t>::min(), 0, 91}));
+    std::fill(partial.begin(), partial.end(), 0);
+    const std::array<int32_t, 7> invalid{-1, -1, -1, -1, -1, -1, -1};
+    cpu::grouped_reduce(invalid.data(), values.data(), output.data(),
+                        keys.size(), 4, partitions, partial.data(), &pool);
+    EXPECT_EQ(output, (std::array<int32_t, 5>{0, 0, 0, 0, 91}));
+    EXPECT_EQ(storage, partial.data());
+  }
+}
+
+TEST(GroupedReduceCore, FloatOrderDoesNotReadThePreviousDestination) {
+  ThreadPool pool(1);
+  const std::array<float, 4> values{1e20f, 1.0f, -1e20f, 1.0f};
+  const std::array<int32_t, 4> keys{};
+  const auto nan = std::numeric_limits<float>::quiet_NaN();
+  float serial = nan, parallel = nan;
+  std::array<float, 2> partial{};
+  cpu::grouped_reduce(keys.data(), values.data(), &serial, 4, 1, 1,
+                      static_cast<float *>(nullptr), nullptr);
+  cpu::grouped_reduce(keys.data(), values.data(), &parallel, 4, 1, 2,
+                      partial.data(), &pool);
+  EXPECT_EQ(serial, 1.0f);
+  EXPECT_EQ(parallel, 0.0f);
+}
+
+TEST(GroupedReduceCore, EmptyInputsClearOnlyTheirOutputAndFailuresDoNotWrite) {
+  std::array<double, 4> output{37, 37, 37, 91};
+  cpu::grouped_reduce<double>(nullptr, nullptr, output.data(), 0, 3, 1, nullptr,
+                              nullptr);
+  EXPECT_EQ(output, (std::array<double, 4>{0, 0, 0, 91}));
+  output.fill(37);
+  const int32_t key = 0;
+  const double value = 7;
+  EXPECT_THROW(cpu::grouped_reduce<double>(&key, &value, output.data(), 1, 3, 2,
+                                           nullptr, nullptr),
+               std::invalid_argument);
+  EXPECT_EQ(output, (std::array<double, 4>{37, 37, 37, 37}));
+}
+
 TEST(ScatterAddCore, MutableAccumulationTailAndFewerWorkers) {
   check_accumulation<int32_t>();
   check_accumulation<uint32_t>();

@@ -1289,17 +1289,6 @@ struct CpuDenseFieldFillTaskContext {
 };
 
 template <typename T>
-struct CpuGroupedReduceTaskContext {
-  const int32_t *keys{nullptr};
-  const T *values{nullptr};
-  T *partial{nullptr};
-  T *output{nullptr};
-  std::size_t n{0};
-  std::size_t num_groups{0};
-  int num_threads{1};
-};
-
-template <typename T>
 struct CpuStridedGroupedReduceTaskContext {
   const int32_t *keys{nullptr};
   const uint8_t *values{nullptr};
@@ -2936,52 +2925,6 @@ std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
 }
 
 template <typename T>
-void cpu_grouped_reduce_count_task(void *raw_ctx,
-                                   int /*thread_id*/,
-                                   int task_id) {
-  auto *ctx = static_cast<CpuGroupedReduceTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  T *local =
-      ctx->partial + ctx->num_groups * static_cast<std::size_t>(tid);
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    int32_t key = ctx->keys[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_groups) {
-      local[key] = cpu_reduce_combine(local[key], ctx->values[i], 0);
-    }
-  }
-}
-
-template <typename T>
-void cpu_grouped_reduce_merge_task(void *raw_ctx,
-                                   int /*thread_id*/,
-                                   int task_id) {
-  auto *ctx = static_cast<CpuGroupedReduceTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->num_groups * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->num_groups * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t group = begin; group < end; ++group) {
-    T value{};
-    for (int t = 0; t < ctx->num_threads; ++t) {
-      value = cpu_reduce_combine(
-          value,
-          ctx->partial[ctx->num_groups * static_cast<std::size_t>(t) + group],
-          0);
-    }
-    ctx->output[group] = value;
-  }
-}
-
-template <typename T>
 void cpu_strided_grouped_reduce_count_task(void *raw_ctx,
                                            int /*thread_id*/,
                                            int task_id) {
@@ -3091,39 +3034,20 @@ std::size_t cpu_grouped_reduce_typed(const int32_t *keys_ptr,
                                      int target_threads) {
   TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
               "CPU native grouped reduce received a null data pointer.");
-  std::fill(output_ptr, output_ptr + num_groups, T{});
-  if (n == 0) {
-    return 0;
-  }
+  const int partitions =
+      cpu::scatter_add_workspace_partitions<T>(num_groups, target_threads);
   const std::size_t workspace_bytes =
-      static_cast<std::size_t>(target_threads) * num_groups * sizeof(T);
-  if (target_threads > 1 &&
-      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+      cpu::aggregation_workspace_bytes<T>(num_groups, partitions);
+  if (n && partitions > 1) {
     CpuPrimitiveScratchBuffer<T> partial(
-        PrimitiveWorkspaceFamily::grouped,
-        static_cast<std::size_t>(target_threads) * num_groups);
-    CpuGroupedReduceTaskContext<T> ctx;
-    ctx.keys = keys_ptr;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.output = output_ptr;
-    ctx.n = n;
-    ctx.num_groups = num_groups;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_grouped_reduce_count_task<T>);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_grouped_reduce_merge_task<T>);
+        PrimitiveWorkspaceFamily::grouped, workspace_bytes / sizeof(T));
+    cpu::grouped_reduce(keys_ptr, values_ptr, output_ptr, n, num_groups,
+                        partitions, partial.data(),
+                        get_cpu_primitive_thread_pool(max_threads));
     return workspace_bytes;
   }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_groups) {
-      output_ptr[key] = cpu_reduce_combine(output_ptr[key], values_ptr[i], 0);
-    }
-  }
+  cpu::grouped_reduce(keys_ptr, values_ptr, output_ptr, n, num_groups, 1,
+                      static_cast<T *>(nullptr), nullptr);
   return 0;
 }
 
