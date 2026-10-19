@@ -221,7 +221,9 @@ def test_retained_graph_instances_keep_selected_pools(tmp_path):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_retained_pool_export_rejects_unmatched_owners_and_nested_arenas(monkeypatch):
+def test_retained_pool_export_rejects_unmatched_owners_and_unqualified_arenas(
+    monkeypatch,
+):
     from dataclasses import replace
     from tests.python.test_graph_resource_lifetime_recipe import (
         _definition,
@@ -279,13 +281,31 @@ def test_retained_pool_export_rejects_unmatched_owners_and_nested_arenas(monkeyp
                 parent.append_native(_RetainedGraph(selected.executor, output))
                 graph = parent.compile()
                 rejected = ti.aot.Module()
-                with pytest.raises(
-                    ti.TaichiRuntimeError, match="fixed sequential binding recipe"
-                ):
-                    rejected.add_execution_plan(
-                        "nested_arena", graph, source_bindings=dict(output=output)
+                with monkeypatch.context() as altered:
+                    altered.setattr(
+                        selected.executor._spec,
+                        "native_execution_observer_leases",
+                        (object(),),
                     )
+                    with pytest.raises(
+                        (ti.TaichiRuntimeError, ValueError),
+                        match="qualified ordered CUDA|single-stream CUDA",
+                    ):
+                        rejected.add_execution_plan(
+                            "unqualified_arena",
+                            graph,
+                            source_bindings=dict(output=output),
+                        )
                 assert (
                     not rejected._exported_kernels and not rejected._graph_export_failed
                 )
+                exported = rejected.add_execution_plan(
+                    "nested_arena", graph, source_bindings=dict(output=output)
+                )
+                assert len(exported.kernel_entries) == 2
+                recipe = json.loads(exported.to_json()).get("storage_recipe")
+                if flavor == ":generation-owned-storage":
+                    assert recipe["capacity"] == 3
+                else:
+                    assert recipe is None
                 graph.close()

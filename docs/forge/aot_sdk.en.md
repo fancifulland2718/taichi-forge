@@ -2974,8 +2974,10 @@ below with its selected capacity and allocator. Export checks the resolved
 whole-buffer mapping of every slot without reading scratch contents. Transient
 scratch has no cross-invocation persistence contract; same-queue ordering protects
 native cyclic reuse. Replay does not invoke Python allocation/binding callbacks.
-Unknown factories, partial arenas, unqualified schedules and nested temporary
-arenas still fail preflight, before publishing code.
+Retained sequential parents can contain these qualified arenas: each materialized
+arena keeps its own storage group, and repeated references to one instance reuse
+that group. Unknown factories, partial arenas, unqualified schedules and parent
+operations outside the buffer-only ring contract fail before publishing code.
 
 Explicit execution plans can use an ordered private storage ring on CPU, CUDA
 and Vulkan (plan v21). The existing native executor prepares each frame once,
@@ -3001,6 +3003,25 @@ one replay; argument/resource/workspace byte counts cover the entire prepared
 owner. Closing a dependency or borrowed Program retires all its frames before
 their storage is released. Replaying does not poll completion from Python.
 
+Plan v22 also supports several storage groups in one execution:
+
+```python
+storage_recipe = dict(
+    kind="ordered_temporary_ring", version=2,
+    groups=[dict(capacity=3, arrays=["scratch_a"]),
+            dict(capacity=5, arrays=["scratch_b"])],
+)
+```
+
+This declares one whole-plan phase of length `max(capacities)`. At phase `j`,
+group `i` uses slot `j % capacity_i`; the phase wraps with the whole plan. These
+are not independent per-group clocks. The example allocates eight arrays and
+prepares five execution frames, without a Cartesian product of capacities.
+Automatic parent export uses this schedule only for qualified transient scratch,
+which has no cross-invocation persistence contract. The v21 single-group recipe
+keeps its original cyclic semantics. Kernel code remains shared across frames
+and separately materialized instances.
+
 This recipe does not provide concurrent Graph lanes. Automatic arena export is
 limited to the qualified CUDA route above. The recipe rejects control/native/image
 operations, dynamic launches, other execution recipes, explicit initialization
@@ -3021,9 +3042,12 @@ and lifecycle checks, not a large-application speedup or Linux qualification.
 Installed Windows qualification also covers automatic CUDA arena export and
 retained private-pool subgraphs, including aliases, independent owners, real
 downstream gradients and in-flight retirement. Runtime-only consumers load these
-artifacts without importing the frontend. The frontend wheel is 4,107,741 bytes
-(+570); the existing ABI108 runtime, sole GeoPhys TCM and 44 separately installed
-dependencies remain unchanged. This does not qualify complete workspace lanes.
+artifacts without importing the frontend. Separate targeted checks cover grouped
+CPU/Vulkan execution and CUDA parent arenas with capacities 3+5 and 3+65, including
+repeated child instances, rebinding, downstream gradients and retirement. The
+parent fixture retains four code entries. This does not qualify SAP or other
+application-specific concurrent workspaces; the explicit workspace-pool API has
+its own ownership contract.
 
 Independent prepares rebuild separate pools; selected CUDA binding families
 share their own pool and arrays. Allocation records retain pool backing through

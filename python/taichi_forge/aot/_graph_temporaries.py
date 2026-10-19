@@ -67,9 +67,20 @@ def declare_ordered_temporaries(context, graph, allocator):
             arrays.append(context._private_names[symbol])
         context.reconstructed_temporary_actions.add(id(action))
     if type(arena) is _GraphTemporaryArena:
-        context.storage_recipe = dict(
-            kind="ordered_temporary_ring",
-            version=1,
-            capacity=arena.capacity,
-            arrays=list(dict.fromkeys(arrays)),
+        group = dict(capacity=arena.capacity, arrays=list(dict.fromkeys(arrays)))
+        previous = context._temporary_storage_groups.setdefault(
+            id(arena), (arena, group)
         )
+        if previous[0] is not arena or previous[1] != group:
+            raise TaichiRuntimeError("AOT temporary arena changed within one export")
+        groups = [value[1] for value in context._temporary_storage_groups.values()]
+        if len(groups) == 1:
+            context.storage_recipe = dict(
+                kind="ordered_temporary_ring", version=1, **group
+            )
+        else:
+            # Distinct instances retain independent capacity and allocation.
+            # Repeated references to one retained instance reuse the same group.
+            context.storage_recipe = dict(
+                kind="ordered_temporary_ring", version=2, groups=groups
+            )

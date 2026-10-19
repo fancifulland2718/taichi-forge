@@ -27,6 +27,7 @@ class _ExportContext:
         self.operations = []
         self.initialization = []
         self.storage_recipe = None
+        self._temporary_storage_groups = {}
         self._initialization_resources = {}
         self.data_payloads = {}
         self._data_keys = {}
@@ -35,6 +36,7 @@ class _ExportContext:
         self.kernels = {}
         self.kernel_launch_abis = {}
         self._used_kernel_entries = set()
+        self._buffer_only_kernels = True
         self._state_dependencies = {}
         self.root_dependencies = ()
         self.root_payloads = ()
@@ -486,6 +488,8 @@ class _ExportContext:
         ):
             raise TaichiRuntimeError("AOT gated code requires a plain selected CUDA dispatch")
         bindings = [self.kernel_binding(arg) for arg in args]
+        if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY) for arg in args):
+            self._buffer_only_kernels = False
         if self.source_arrays is not None:
             self.source_arrays.validate_kernel(args, bindings)
         if any(arg.tag not in (core.ArgKind.SCALAR, core.ArgKind.NDARRAY, core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION, core.ArgKind.ACCELERATION_STRUCTURE) for arg in args):
@@ -529,7 +533,6 @@ class _ExportContext:
             if (
                 graph._workspace_lane_capacity != 1
                 or graph._qualified_fusion_selector is not None
-                or any(plan.temporary_arena for plan in getattr(spec, "_storage_plans", ()))
                 or getattr(spec, "_binding_executor_factory", None) is not None
                 or spec.control_binding_plan.names
             ):
@@ -1210,6 +1213,8 @@ def export_graph(
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
         if context.storage_recipe is not None:
+            if not context._buffer_only_kernels:
+                raise TaichiRuntimeError("AOT storage rings require ordinary buffer dispatches")
             # Validate aliases, AD and the entire selected schedule before any
             # code is published; the arena proof alone cannot cover these.
             ExecutionPlan(

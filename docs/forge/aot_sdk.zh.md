@@ -2280,8 +2280,9 @@ factory 或与已物化 owner 不匹配的配置在发布前拒绝。已选 CUDA
 单槽 ordered arena 保留原路线；已完整物化的 completion arena 导出为下述有序 ring，
 保留选定容量和分配器。导出逐槽检查已解析的完整缓冲映射，不读回 scratch 内容。
 临时 scratch 不承诺跨调用保留内容，由同队列顺序保护原生轮转复用；重放不调用
-Python 分配/绑定回调。未知 factory、未完整物化的 arena、未经证明的调度和父图
-嵌套 temporary arena 仍在发布代码前报错。
+Python 分配/绑定回调。保留顺序子图的父图也可包含这些已证明的 arena：不同物化
+实例分别保留存储组，同一实例重复出现则复用同一组。未知 factory、未完整物化的
+arena、未经证明的调度，以及超出纯缓冲轮转合同的父图操作，均在发布代码前报错。
 
 显式执行计划现支持CPU/CUDA/Vulkan上的有序私有存储轮转（plan v21）。原生执行器在
 准备期建立各槽绑定，每次调用只执行一个槽，仍使用同一有序后端队列：
@@ -2302,6 +2303,22 @@ plan = aot.ExecutionPlan(
 allocator仍共享。`dispatch_count`表示单次重放，参数/资源/工作区字节统计整个owner。
 依赖关闭或借用Program退出时，所有槽先退休再释放存储；重放不增加Python完成轮询。
 
+plan v22 另支持同一执行中的多个存储组：
+
+```python
+storage_recipe = dict(
+    kind="ordered_temporary_ring", version=2,
+    groups=[dict(capacity=3, arrays=["scratch_a"]),
+            dict(capacity=5, arrays=["scratch_b"])],
+)
+```
+
+全图共用长度为 `max(capacities)` 的阶段序列；阶段 `j` 下，第 `i` 组使用
+`j % capacity_i` 号槽，随全图阶段一起回绕，并非各组独立计数。例中只分配八份数组、
+准备五个执行帧，不产生容量的笛卡尔积。父图自动导出仅将此规则用于已证明的临时
+scratch，不承诺跨调用保留内容。v21 单组配方保持原来的轮转语义。不同帧和不同物化
+实例继续共享 kernel 代码。
+
 这一配方不提供Graph并行lanes；arena自动导出仅覆盖上述已证明的CUDA路线。
 当前拒绝控制/native/image操作、动态launch、其他执行配方、显式初始化序列、依赖所选
 数组的共享别名，以及所选数组自身的梯度绑定；数组`initial_data`/`zero_initialize`
@@ -2316,8 +2333,9 @@ Windows 已验证 CPU/CUDA/Vulkan 的 1/3/65 槽计划、正常安装的独立/�
 
 正常安装的 Windows 包另通过 CUDA arena 自动导出及父图私有池验证，覆盖别名、
 独立 owner、真实下游梯度和在途退休；仅 runtime 的消费者无需导入前端即可加载。
-前端 wheel 为 4,107,741 字节（增加 570），既有 ABI108 runtime、GeoPhys 唯一 TCM
-及 44 个独立安装的依赖保持不变。这不代表完整 workspace lanes 已通过验证。
+单独的定向检查覆盖 CPU/Vulkan 多组执行，以及容量为 3+5、3+65 的 CUDA 父图 arena，
+包括重复子图实例、重绑定、下游梯度和退休；父图夹具保持四个代码入口。这不代表
+SAP 或其他应用的并发工作区已通过验证；显式 workspace pool API 有自己的所有权合同。
 
 独立 prepare 重建各自的池，已选 CUDA 参数绑定族共享其池和数组。分配记录持有池的
 底层存储直至在途工作退休；关闭外部绑定池会退休依赖的调用。重放不增加查询，也不
