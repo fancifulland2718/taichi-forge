@@ -34,7 +34,7 @@ struct GatedPackets {
       driver.graph_destroy(graph);
     for (auto &packet : packets)
       if (packet.device_arg_buffer)
-        driver.mem_free(packet.device_arg_buffer);
+        driver.mem_free_async(packet.device_arg_buffer, nullptr);
     if (stream)
       driver.stream_destroy(stream);
   }

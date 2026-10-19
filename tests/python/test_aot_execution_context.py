@@ -13,31 +13,7 @@ from taichi_forge_runtime.aot import Scalar
 from tests import test_utils
 
 
-@pytest.mark.parametrize(
-    "artifact_format,explicit_target", (("bc", False), ("ptx", False), ("ptx", True), ("cubin", True))
-)
-@pytest.mark.parametrize("tier", ("fast", "balanced", "full"))
-@test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_saved_execution_context_isolates_temporary_storage(artifact_format, explicit_target, tier, tmp_path):
-    executable = Path(
-        os.environ.get(
-            "TI_TEST_CPP_EXECUTABLE",
-            str(
-                Path(__file__).resolve().parents[2]
-                / "build"
-                / (
-                    "taichi_cuda_execution_domain_tests.exe"
-                    if os.name == "nt"
-                    else "taichi_cuda_execution_domain_tests"
-                )
-            ),
-        )
-    )
-    if not executable.is_file():
-        pytest.skip("Requires the native CUDA execution-domain test executable")
-    if artifact_format == "cubin" and not (os.environ.get("TI_CUDA_PTXAS_PATH") or shutil.which("ptxas")):
-        pytest.skip("Requires an external ptxas for cubin export")
-
+def export_execution_context_module(tmp_path, artifact_format, explicit_target, tier):
     @ti.func
     def transform(value: ti.types.vector(2, ti.f32)) -> ti.f32:
         return value[0] + value[1] * 2.0 + 1.0
@@ -123,6 +99,35 @@ def test_saved_execution_context_isolates_temporary_storage(artifact_format, exp
         name: 1 for name in ("stage", "gated_stage", "field_stage_0", "field_stage_1")
     }
     assert len(metadata["runtime_state_sha256"]) == 64
+    return directory
+
+
+@pytest.mark.parametrize(
+    "artifact_format,explicit_target", (("bc", False), ("ptx", False), ("ptx", True), ("cubin", True))
+)
+@pytest.mark.parametrize("tier", ("fast", "balanced", "full"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_saved_execution_context_isolates_temporary_storage(artifact_format, explicit_target, tier, tmp_path):
+    executable = Path(
+        os.environ.get(
+            "TI_TEST_CPP_EXECUTABLE",
+            str(
+                Path(__file__).resolve().parents[2]
+                / "build"
+                / (
+                    "taichi_cuda_execution_domain_tests.exe"
+                    if os.name == "nt"
+                    else "taichi_cuda_execution_domain_tests"
+                )
+            ),
+        )
+    )
+    if not executable.is_file():
+        pytest.skip("Requires the native CUDA execution-domain test executable")
+    if artifact_format == "cubin" and not (os.environ.get("TI_CUDA_PTXAS_PATH") or shutil.which("ptxas")):
+        pytest.skip("Requires an external ptxas for cubin export")
+
+    directory = export_execution_context_module(tmp_path, artifact_format, explicit_target, tier)
     result = subprocess.run(
         [str(executable), "--gtest_filter=CudaExecutionContextAot.*:CudaPublicExecutionAot.*:CudaExecutionOwner.ExternalStorageLoanPreservesCompleteAotEpoch"],
         env=dict(os.environ, TAICHI_F3_CONTEXT_AOT_FOLDER=str(directory)),

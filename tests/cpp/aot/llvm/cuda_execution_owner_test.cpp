@@ -32,6 +32,9 @@ TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
     GTEST_SKIP();
   Program program(Arch::cuda);
   program.materialize_runtime();
+  // Direct driver calls below have the same explicit context obligation as
+  // an external native consumer; runtime entry points restore their caller.
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto &device = static_cast<cuda::CudaDevice &>(*program.get_compute_device());
   vulkan::VulkanDeviceCreator creator({});
   auto *vk = static_cast<vulkan::VulkanDevice *>(creator.device());
@@ -181,7 +184,8 @@ TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
     ti_wait_completion_ext(ticket);
     ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
     ti_release_completion_ext(ticket);
-    EXPECT_EQ(driver.event_query.call(default_pending), CUDA_ERROR_NOT_READY);
+    EXPECT_EQ(driver.event_query.call(default_pending), CUDA_ERROR_NOT_READY)
+        << "Vulkan producer still pending=" << default_gate.producer_pending();
     EXPECT_FALSE(default_gate.timed_out());
   }
   std::sort(submit_times.begin(), submit_times.end());
@@ -360,7 +364,8 @@ TEST(CudaPublicExecutionAot, ExactDependenciesBusyAndReleasedInstanceLifetime) {
             << " p95=" << times[950] << " accepted=" << times.size()
             << " busy=" << busy_count << std::endl;
   EXPECT_FALSE(gate.timed_out());
-  EXPECT_FALSE(ti_query_completion_ext(ticket));
+  EXPECT_FALSE(ti_query_completion_ext(ticket))
+      << "Vulkan producer still pending=" << gate.producer_pending();
   TiCompletion dependent = nullptr;
   ASSERT_TRUE(ti_try_submit_prepared_ext(rt, calls[1], 1, &ticket, &dependent));
   EXPECT_FALSE(ti_query_completion_ext(dependent));

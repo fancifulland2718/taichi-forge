@@ -34,7 +34,7 @@ Use `features.get(name, False)` for older packages. Missing declarations do not
 become support because a version or commit looks newer. Device/driver support,
 same-GPU sharing and each recipe's compiler/provider facts are checked at cold
 creation/preparation. A true build declaration does not qualify Linux windows
-or every provider. Existing bootstrap and private ABI 110 are unchanged; an
+or every provider. Existing bootstrap and private ABI 111 are unchanged; an
 incompatible shim/native pair is rejected before C++ bindings are entered.
 
 ## Current JIT Graphs

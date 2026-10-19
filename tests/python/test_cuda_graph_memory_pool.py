@@ -49,14 +49,20 @@ def test_pool_isolation_reuse_and_nonblocking_trim_preserve_live_storage():
     first, second = _pool(), _pool(0)
     allocations_before = ti_core.query_int64("cuda_async_allocation_calls")
     a, b = _storage(first, 65537), _storage(second, 4099)
-    assert ti_core.query_int64("cuda_async_allocation_calls") == allocations_before + 2
+    native_pool = first.snapshot()["native_async_pool"]
+    assert ti_core.query_int64("cuda_async_allocation_calls") == allocations_before + 2 * native_pool
     np.testing.assert_array_equal(a.to_numpy(), np.zeros(65537, np.int32))
     a.fill(123)
     b.fill(47)
     ti.sync()
     first_before, second_before = first.snapshot(), second.snapshot()
-    assert first_before["release_threshold_bytes"] == 32 << 20
-    assert second_before["release_threshold_bytes"] == 0
+    if native_pool:
+        assert first_before["release_threshold_bytes"] == 32 << 20
+        assert second_before["release_threshold_bytes"] == 0
+    else:
+        assert first_before["retained_device_pool"] == 1
+        assert "release_threshold_bytes" not in first_before
+        assert first_before["native_allocation_calls"] == 1
     assert first_before["used_current_bytes"] == 65537 * 4
     assert second_before["used_current_bytes"] == 4099 * 4
     first.trim()

@@ -1,7 +1,7 @@
 #pragma once
 
 // Test-only, real pending device dependency. Vulkan queues a binary signal
-// behind a host event before CUDA queues its wait. No CUDA spin kernel or
+// behind a host-signaled timeline before CUDA queues its wait. No GPU spin or
 // unrecorded event is used. A watchdog only prevents a broken test hanging;
 // every positive assertion must happen before release and without timeout.
 #include <atomic>
@@ -37,11 +37,52 @@ class CudaExternalGate {
       VkPhysicalDeviceProperties2 properties{
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
       properties.pNext = &id;
-      const auto &vk = device_.vk_device();
-      vk.instance_functions().vkGetPhysicalDeviceProperties2(
+      const auto &original = device_.vk_device();
+      original.instance_functions().vkGetPhysicalDeviceProperties2(
           device_.vk_physical_device(), &properties);
       if (std::memcmp(cuda_uuid.bytes, id.deviceUUID, VK_UUID_SIZE) != 0)
         throw std::runtime_error("Test gate requires the same CUDA/Vulkan GPU");
+
+      // A vkCmdWaitEvents gate can occupy an engine and be released by the
+      // Windows driver under cross-context pressure. Queue-level timeline
+      // waits provide a real unsignaled dependency without running GPU work.
+      VkPhysicalDeviceTimelineSemaphoreFeatures timeline_feature{
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+      VkPhysicalDeviceFeatures2 features{
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+      features.pNext = &timeline_feature;
+      original.instance_functions().vkGetPhysicalDeviceFeatures2(
+          device_.vk_physical_device(), &features);
+      if (!timeline_feature.timelineSemaphore)
+        throw std::runtime_error(
+            "Test gate requires Vulkan timeline semaphores");
+      float priority = 1;
+      VkDeviceQueueCreateInfo queue_info{
+          VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+      queue_info.queueFamilyIndex = device_.compute_queue_family_index();
+      queue_info.queueCount = 1;
+      queue_info.pQueuePriorities = &priority;
+      const char *extensions[] = {VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
+                                  VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
+#ifdef _WIN32
+                                  VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME
+#else
+                                  VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME
+#endif
+      };
+      VkDeviceCreateInfo create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+      create.pNext = &timeline_feature;
+      create.queueCreateInfoCount = 1;
+      create.pQueueCreateInfos = &queue_info;
+      create.enabledExtensionCount = 3;
+      create.ppEnabledExtensionNames = extensions;
+      VkDevice logical = VK_NULL_HANDLE;
+      check(original.instance_functions().vkCreateDevice(
+          device_.vk_physical_device(), &create, nullptr, &logical));
+      timeline_device_ = vkapi::DeviceHandle(device_.vk_instance(), logical);
+      const auto &vk = timeline_device_;
+      vk.functions().vkGetDeviceQueue(vk, queue_info.queueFamilyIndex, 0,
+                                      &queue_);
 
       VkExportSemaphoreCreateInfo external{
           VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
@@ -87,41 +128,32 @@ class CudaExternalGate {
       if (result != CUDA_SUCCESS)
         throw std::runtime_error(
             driver.import_external_semaphore.get_error_message(result));
-      VkEventCreateInfo event_info{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
-      check(vk.functions().vkCreateEvent(vk, &event_info, nullptr, &event_));
+      VkSemaphoreTypeCreateInfo type{
+          VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+      type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+      VkSemaphoreCreateInfo timeline_info{
+          VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+      timeline_info.pNext = &type;
+      check(vk.functions().vkCreateSemaphore(vk, &timeline_info, nullptr,
+                                             &timeline_));
       VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
       check(vk.functions().vkCreateFence(vk, &fence_info, nullptr, &fence_));
-      VkCommandPoolCreateInfo pool_info{
-          VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-      pool_info.queueFamilyIndex = device_.compute_queue_family_index();
-      check(
-          vk.functions().vkCreateCommandPool(vk, &pool_info, nullptr, &pool_));
-      VkCommandBufferAllocateInfo allocation{
-          VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-      allocation.commandPool = pool_;
-      allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-      allocation.commandBufferCount = 1;
-      VkCommandBuffer command{};
-      check(vk.functions().vkAllocateCommandBuffers(vk, &allocation, &command));
-      VkCommandBufferBeginInfo begin{
-          VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-      check(vk.functions().vkBeginCommandBuffer(command, &begin));
-      vk.functions().vkCmdWaitEvents(command, 1, &event_,
-                                     VK_PIPELINE_STAGE_HOST_BIT,
-                                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
-                                     nullptr, 0, nullptr, 0, nullptr);
-      check(vk.functions().vkEndCommandBuffer(command));
+      const std::uint64_t wait_value = 1, binary_value = 0;
+      VkTimelineSemaphoreSubmitInfo values{
+          VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+      values.waitSemaphoreValueCount = values.signalSemaphoreValueCount = 1;
+      values.pWaitSemaphoreValues = &wait_value;
+      values.pSignalSemaphoreValues = &binary_value;
+      VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
       VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-      submit.commandBufferCount = 1;
-      submit.pCommandBuffers = &command;
+      submit.pNext = &values;
+      submit.waitSemaphoreCount = 1;
+      submit.pWaitSemaphores = &timeline_;
+      submit.pWaitDstStageMask = &stage;
       submit.signalSemaphoreCount = 1;
       submit.pSignalSemaphores = &semaphore_;
-      {
-        auto queue_lock = device_.acquire_external_compute_queue_lock();
-        check(vk.functions().vkQueueSubmit(device_.compute_queue(), 1, &submit,
-                                           fence_));
-        submitted_ = true;
-      }
+      check(vk.functions().vkQueueSubmit(queue_, 1, &submit, fence_));
+      submitted_ = true;
       watchdog_ = std::thread([this] {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!changed_.wait_for(lock, std::chrono::seconds(5),
@@ -163,8 +195,11 @@ class CudaExternalGate {
 
   void release() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!released_ && event_) {
-      device_.vk_device().functions().vkSetEvent(device_.vk_device(), event_);
+    if (!released_ && timeline_) {
+      VkSemaphoreSignalInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+      signal.semaphore = timeline_;
+      signal.value = 1;
+      timeline_device_.functions().vkSignalSemaphore(timeline_device_, &signal);
       released_ = true;
       changed_.notify_all();
     }
@@ -172,6 +207,11 @@ class CudaExternalGate {
 
   bool timed_out() const {
     return timed_out_.load();
+  }
+
+  bool producer_pending() const {
+    const auto &vk = timeline_device_;
+    return vk.functions().vkGetFenceStatus(vk, fence_) == VK_NOT_READY;
   }
 
  private:
@@ -184,7 +224,9 @@ class CudaExternalGate {
     release();
     if (watchdog_.joinable())
       watchdog_.join();
-    const auto &vk = device_.vk_device();
+    if (!timeline_device_)
+      return;
+    const auto &vk = timeline_device_;
     if (submitted_)
       vk.functions().vkWaitForFences(vk, 1, &fence_, VK_TRUE, UINT64_MAX);
     if (cuda_semaphore_) {
@@ -196,22 +238,22 @@ class CudaExternalGate {
       }
       driver.external_semaphore_destroy.call(cuda_semaphore_);
     }
-    if (pool_)
-      vk.functions().vkDestroyCommandPool(vk, pool_, nullptr);
     if (fence_)
       vk.functions().vkDestroyFence(vk, fence_, nullptr);
-    if (event_)
-      vk.functions().vkDestroyEvent(vk, event_, nullptr);
+    if (timeline_)
+      vk.functions().vkDestroySemaphore(vk, timeline_, nullptr);
     if (semaphore_)
       vk.functions().vkDestroySemaphore(vk, semaphore_, nullptr);
+    vk.functions().vkDestroyDevice(vk, nullptr);
   }
 
   vulkan::VulkanDeviceCreator creator_;
   vulkan::VulkanDevice &device_;
   VkSemaphore semaphore_{};
-  VkEvent event_{};
+  vkapi::DeviceHandle timeline_device_;
+  VkQueue queue_{};
+  VkSemaphore timeline_{};
   VkFence fence_{};
-  VkCommandPool pool_{};
   CUexternalSemaphore cuda_semaphore_{};
   bool submitted_{false};
   void *wait_completion_{nullptr};

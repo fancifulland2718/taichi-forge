@@ -80,6 +80,8 @@ def check(runtime, folder):
 
 if __name__ == "__main__":
     sys.meta_path.insert(0, NoFrontend())
+    from cuda_cig_test_owner import configure_test_context
+    configure_test_context()
     from taichi_forge_runtime.aot import Runtime
 
     with Runtime("cuda") as owner:

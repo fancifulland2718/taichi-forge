@@ -27,7 +27,7 @@ JIT Graph 也可以冷准备为独立实例，借用已选定的编译代码和�
 
 对旧包使用 `features.get(name, False)`；不能从版本号或较新的提交推定能力。具体设备/
 驱动、同 GPU 共享及 recipe 的编译/provider 条件在冷创建和准备时检查。声明为真不代表
-Linux 窗口或所有 provider 已通过验收。沿用现有 bootstrap 与 ABI 110；不匹配的 shim/
+Linux 窗口或所有 provider 已通过验收。沿用现有 bootstrap 与 ABI 111；不匹配的 shim/
 native 在进入 C++ 绑定前拒绝。
 
 ## 当前 JIT Graph

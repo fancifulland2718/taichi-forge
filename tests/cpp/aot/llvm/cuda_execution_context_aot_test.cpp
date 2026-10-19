@@ -27,7 +27,7 @@ struct ContextPackets {
     auto guard = CUDAContext::get_instance().get_guard();
     for (auto &packet : packets)
       if (packet.device_arg_buffer)
-        CUDADriver::get_instance().mem_free.call(packet.device_arg_buffer);
+        CUDADriver::get_instance().mem_free_async(packet.device_arg_buffer, nullptr);
   }
 };
 

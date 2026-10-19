@@ -398,6 +398,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   # objects rather than expanding the package ABI for test helpers.
   add_executable(taichi_cuda_execution_domain_tests
     tests/cpp/rhi/common/cuda_execution_domain_test.cpp
+    tests/cpp/rhi/common/cuda_retained_memory_test.cpp
     tests/cpp/aot/runtime_client_test.cpp
     tests/cpp/program/external_dense_storage_test.cpp
     tests/cpp/aot/prepared_external_access_test.cpp
@@ -423,4 +424,17 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   add_test(NAME taichi_cuda_execution_domain_tests
     COMMAND taichi_cuda_execution_domain_tests)
   set_tests_properties(taichi_cuda_execution_domain_tests PROPERTIES TIMEOUT 30)
+  if(WIN32)
+    if(TARGET taichi_runtime_c_api)
+      target_sources(taichi_cuda_execution_domain_tests PRIVATE
+        tests/cpp/rhi/common/cuda_cig_test_environment.cpp)
+    endif()
+    add_library(taichi_vulkan_cig_fixture SHARED
+      tests/cpp/rhi/common/vulkan_cig_fixture.cpp)
+    target_include_directories(taichi_vulkan_cig_fixture PRIVATE
+      ${PROJECT_SOURCE_DIR}/c_api/include
+      ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include)
+    set_target_properties(taichi_vulkan_cig_fixture PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+  endif()
 endif()
