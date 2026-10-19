@@ -177,10 +177,6 @@ void ThreadPool::run(int splits,
       update_atomic_max(telemetry_max_queue_depth_, queue_depth);
     }
     activate_next_job_locked();
-    // A new job can use up to its requested number of already-created
-    // workers. Waking all is only a cold submit-side cost; workers that do not
-    // obtain a task sleep again under the same mutex.
-    worker_cv_.notify_all();
     completion_cv_.wait(lock, [&job] { return job.completed; });
     exception = job.exception;
   }
@@ -205,6 +201,19 @@ void ThreadPool::activate_next_job_locked() {
       active_job_ = job;
       if (job->telemetry) {
         job->activated_ns = steady_clock_now_ns();
+      }
+      // All waiters share the same eligibility predicate. Notify the new
+      // job's demand once, while holding mutex_, so a woken worker cannot
+      // re-enter the wait set during this batch. A queued submitter must not
+      // wake workers for the still-active predecessor. Startup/returning
+      // workers observe the predicate directly without needing a notification.
+      const int workers = std::min(job->splits, job->desired_num_threads);
+      if (workers == max_num_threads_) {
+        worker_cv_.notify_all();
+      } else {
+        for (int i = 0; i < workers; ++i) {
+          worker_cv_.notify_one();
+        }
       }
       return;
     }
@@ -292,10 +301,8 @@ void ThreadPool::target() {
       if (!join_job_locked(&job)) {
         continue;
       }
-      // Let another worker join before this one consumes the remaining atomic
-      // chunks. The job stays isolated, but chunk claims no longer serialize
-      // through the global pool mutex.
-      worker_cv_.notify_one();
+      // Activation already notified the required workers. An extra relay wake
+      // would recruit waiters beyond this job's useful parallelism.
     }
 
     std::exception_ptr exception;
@@ -368,13 +375,6 @@ void ThreadPool::target() {
       active_job_ = nullptr;
       activate_next_job_locked();
       completion_cv_.notify_all();
-      // Idle workers already wait on the predicate. Waking every worker
-      // after the final chunk competes with the submitter that must resume
-      // Python and dominated small range launches. Only a queued successor
-      // needs a worker wake-up here.
-      if (active_job_ != nullptr) {
-        worker_cv_.notify_all();
-      }
     }
   }
 }

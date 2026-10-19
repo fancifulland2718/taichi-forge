@@ -108,6 +108,93 @@ void throwing_task(void *, int, int task_id) {
   }
 }
 
+struct RecruitmentContext {
+  explicit RecruitmentContext(int expected) : expected(expected) {
+  }
+  const int expected;
+  std::mutex mutex;
+  std::condition_variable cv;
+  int arrived{0};
+  bool timed_out{false};
+};
+
+void recruitment_task(void *context, int, int) {
+  auto &state = *static_cast<RecruitmentContext *>(context);
+  std::unique_lock<std::mutex> lock(state.mutex);
+  ++state.arrived;
+  state.cv.notify_all();
+  if (!state.cv.wait_for(lock, std::chrono::seconds(2), [&] {
+        return state.arrived == state.expected || state.timed_out;
+      })) {
+    state.timed_out = true;
+    state.cv.notify_all();
+  }
+}
+
+TEST(ThreadPoolTest, ChangingWorkerDemandRecruitsEnoughWorkers) {
+  ThreadPool pool(32);
+  for (int iteration = 0; iteration < 3; ++iteration) {
+    for (int workers : {1, 4, 32, 2, 16}) {
+      RecruitmentContext context(workers);
+      // Each task waits for the requested peers. Finishing all tasks on a
+      // single awakened worker cannot falsely pass this liveness check.
+      pool.run(workers, workers, &context, recruitment_task);
+      EXPECT_FALSE(context.timed_out) << "workers=" << workers;
+      EXPECT_EQ(context.arrived, workers);
+    }
+  }
+}
+
+TEST(ThreadPoolTest, QueuedWideSuccessorWakesAfterCancellation) {
+  ThreadPool pool(32);
+  pool.set_telemetry_enabled(true);
+  FifoContext blocked;
+  RecruitmentContext successor(8);
+  std::atomic<bool> caught{false};
+  std::thread first([&] {
+    try {
+      pool.run(1, 1, &blocked, [](void *raw, int, int) {
+        auto &state = *static_cast<FifoContext *>(raw);
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.first_started = true;
+        state.started_cv.notify_one();
+        state.release_cv.wait(lock, [&] { return state.release_first; });
+        throw std::runtime_error("expected predecessor cancellation");
+      });
+    } catch (const std::runtime_error &) {
+      caught = true;
+    }
+  });
+  {
+    std::unique_lock<std::mutex> lock(blocked.mutex);
+    blocked.started_cv.wait(lock, [&] { return blocked.first_started; });
+  }
+  std::thread second([&] { pool.run(8, 8, &successor, recruitment_task); });
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!pool.telemetry_statistics().queued_jobs &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_EQ(pool.telemetry_statistics().queued_jobs, 1);
+  {
+    std::lock_guard<std::mutex> lock(blocked.mutex);
+    blocked.release_first = true;
+    blocked.release_cv.notify_one();
+  }
+  first.join();
+  second.join();
+  EXPECT_TRUE(caught);
+  EXPECT_FALSE(successor.timed_out);
+  EXPECT_EQ(successor.arrived, 8);
+  const auto stats = pool.telemetry_statistics();
+  EXPECT_EQ(stats.jobs_completed, 2);
+  EXPECT_EQ(stats.exception_jobs, 1);
+  EXPECT_EQ(stats.tasks_completed, 8);
+  std::atomic<int> completed{0};
+  pool.run(3, 1, &completed, count_task);
+  EXPECT_EQ(completed, 3);
+}
+
 TEST(ThreadPoolTest, ConcurrentRunCallsKeepTheirContextsIsolated) {
   constexpr int kCallers = 4;
   constexpr int kSplits = 64;

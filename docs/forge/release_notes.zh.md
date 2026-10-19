@@ -31,6 +31,8 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CPU 任务在成为活动任务时按实际并行需求统一唤醒 worker，排队提交和 worker
+  加入不再重复唤醒。全池任务和退出仍使用广播，任务分区、完成通知与异常处理不变。
 - Packed scalar grouped sum 可通过原生 sequence 或 `builtin/grouped_reduce` v1
   导出到 CPU/CUDA/Vulkan，覆盖空输入、可变 key、快照和显式伴随组合。CPU 与
   scatter-add 共用 owner/partial 管理；GPU 保留直接原子策略，不替换 Vulkan bucket。

@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU jobs wake workers once when becoming active, according to their useful
+  parallelism. Queued submissions and worker joins no longer issue redundant
+  wakeups. Full-pool jobs and shutdown retain broadcasts; task partitioning,
+  completion and exception handling are unchanged.
 - Packed scalar grouped sum exports through native sequences or
   `builtin/grouped_reduce` v1 on CPU/CUDA/Vulkan, including empty input, mutable
   keys, snapshots and explicit adjoint composition. CPU shares owner/partial
