@@ -21,7 +21,7 @@ layout(push_constant) uniform Params {
   uint values_stride;
   uint other_offset;
   uint other_stride;
-  uint unused0;
+  uint output_offset;
   uint unused1;
 } params;
 
@@ -47,5 +47,5 @@ void main() {
     acc = max(acc, metric_abs(value));
   }
 
-  atomicMax(output_buf.data[0], floatBitsToUint(acc));
+  atomicMax(output_buf.data[params.output_offset], floatBitsToUint(acc));
 }

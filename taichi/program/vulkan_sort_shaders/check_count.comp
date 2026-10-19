@@ -43,7 +43,7 @@ layout(push_constant) uniform Params {
   uint n;
   uint offset;
   uint stride;
-  uint unused0;
+  uint output_offset;
   uint unused1;
 } params;
 
@@ -109,6 +109,6 @@ void main() {
   }
 
   if (lid == 0u) {
-    atomicAdd(output_buf.data[0], local_reduce[0]);
+    atomicAdd(output_buf.data[params.output_offset], local_reduce[0]);
   }
 }

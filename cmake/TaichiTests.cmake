@@ -91,6 +91,7 @@ if(TI_WITH_LLVM)
 endif()
 
 if(TI_WITH_VULKAN)
+  # Includes native primitive preparation and fixed-replay ownership checks.
   file(GLOB TAICHI_TESTS_VULKAN_SOURCE "tests/cpp/aot/vulkan/*.cpp")
   list(APPEND TAICHI_TESTS_SOURCE ${TAICHI_TESTS_VULKAN_SOURCE})
 endif()
