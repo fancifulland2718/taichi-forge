@@ -9,6 +9,8 @@
 #include "taichi/codegen/llvm/cuda_root_binding.h"
 #include "llvm/IR/Verifier.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
+#include "taichi/rhi/cpu/cpu_device.h"
+#include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/dx12/aot_module_loader_impl.h"
 
 #ifdef TI_WITH_CUDA
@@ -430,6 +432,28 @@ TEST(LlvmAotMetadataTest, InitialRootDataValidatesExactStorageAndUniqueIds) {
   entries[0].size = 32;
   entries[0].sha256[0] = 'g';
   EXPECT_ANY_THROW(aot::validate_initial_root_data(entries, sizes));
+}
+
+TEST(LlvmAotMetadataTest, CpuFinalizeRetiresAllocationsBeforeExecutorDestruction) {
+  CompileConfig cfg;
+  cfg.arch = host_arch();
+  LlvmProgramImpl program(cfg, nullptr);
+  auto *device = static_cast<cpu::CpuDevice *>(
+      program.get_runtime_executor()->llvm_device());
+  Device::AllocParams params{};
+  params.size = 32;
+  DeviceAllocation allocation;
+  ASSERT_EQ(device->allocate_memory(params, &allocation), RhiResult::success);
+  void *mapped = nullptr;
+  ASSERT_EQ(device->map_range_for_cpu_native(allocation.get_ptr(), 32, &mapped),
+            RhiResult::success);
+
+  // A Python plan may retain the executor after Program::finalize resets the
+  // host pool. Its old allocation records must already be retired, otherwise
+  // a delayed destructor can release a new allocation at the reused address.
+  program.finalize();
+  EXPECT_EQ(device->map_range_for_cpu_native(allocation.get_ptr(), 32, &mapped),
+            RhiResult::invalid_usage);
 }
 
 TEST(LlvmAotMetadataTest, ResourceReservationsPrecedeAllocation) {

@@ -1495,6 +1495,12 @@ void LlvmRuntimeExecutor::finalize() {
   snode_tree_runtime_host_directory_.clear();
   snode_tree_runtime_directory_capacity_ = 0;
   snode_tree_runtime_directory_growth_events_ = 0;
+  if (arch_is_cpu(config_.arch)) {
+    // Program resets the host pool after this boundary. Retained Python plans
+    // can delay executor destruction past the next Program's allocations;
+    // retire the old records now so they cannot release reused host addresses.
+    llvm_device()->clear();
+  }
   if (config_.arch == Arch::cuda || config_.arch == Arch::amdgpu) {
     const bool backend_calls_safe =
         llvm_device() == nullptr || llvm_device()->backend_calls_safe();
