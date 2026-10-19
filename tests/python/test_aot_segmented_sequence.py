@@ -142,12 +142,20 @@ def test_segmented_sequence_shared_workspace_and_cold_export(tmp_path):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_segmented_serial_field_snapshot_and_explicit_adjoint(tmp_path):
+@pytest.mark.parametrize("device_layout", [False, True])
+def test_segmented_serial_field_snapshot_and_explicit_adjoint(tmp_path, device_layout):
     values = ti.field(ti.f32, shape=9, offset=5)
     reduced = ti.field(ti.f32, shape=4, offset=11)
     values.from_numpy(np.arange(9, dtype=np.float32))
     offsets = [0, 0, 2, 2, 7]
-    layout = ti.algorithms.SegmentedLayout.from_offsets(np.asarray(offsets, np.int32), capacity=9)
+    if device_layout:
+        counts = ti.ndarray(ti.i32, 4)
+        counts.from_numpy(np.diff(np.asarray(offsets, np.int32)))
+        layout = ti.algorithms.SegmentedLayout._from_device_counts(
+            counts, num_items=7, max_segment_length=5, capacity=9
+        )
+    else:
+        layout = ti.algorithms.SegmentedLayout.from_offsets(np.asarray(offsets, np.int32), capacity=9)
     sequence = ti.algorithms.primitive_sequence().segmented_reduce(values, layout, reduced)
 
     @ti.kernel
@@ -201,7 +209,8 @@ def test_segmented_sequence_rejects_unknown_topology_and_changed_cached_strategy
     counts = ti.ndarray(ti.i32, 2)
     counts.from_numpy(np.asarray([4, 3], np.int32))
     layout = ti.algorithms.SegmentedLayout._from_device_counts(counts, num_items=7, max_segment_length=4, capacity=9)
+    layout._encoding = "unknown_generation"
     graph = _graph(ti.algorithms.primitive_sequence().segmented_reduce(values, layout, output))
-    with pytest.raises(ti.TaichiRuntimeError, match="host-published immutable"):
+    with pytest.raises(ti.TaichiRuntimeError, match="published immutable topology"):
         ti.aot.Module().add_execution_plan("device_layout", graph, source_bindings=dict(values=values, output=output))
     graph.close()

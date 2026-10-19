@@ -114,6 +114,7 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         sequence = next(r for r in segmented if r.entry_point == "algorithms.PrimitiveSequence")
         assert sequence.backends == ("cpu", "cuda", "vulkan")
         assert {"preserved_grouped_or_serial_strategy", "serial_field_snapshot", "explicit_adjoint_only"} <= set(sequence.constraints)
+        assert {"host_or_device_published_immutable_layout", "selected_topology_snapshot"} <= set(sequence.constraints)
         selected = next(r for r in segmented if r.forms == ("graph.GraphBuilder.segmented_reduce",))
         assert selected.backends == ("cuda",)
         assert {"selected_strategy_scratch", "no_automatic_ad"} <= set(selected.constraints)

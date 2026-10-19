@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CPU/CUDA/Vulkan 的 segmented-reduce 序列可导出设备生成且已发布的不可变布局。
+  冷导出仅批量捕获所选策略所需的 offsets 或 segment IDs，与 Field/provider 快照
+  共用完成边界；相同布局不重复复制，结构校验失败时不读回，消费者无逐次拓扑读回。
+
 - Vulkan 标量 transform/gather/scatter 融合序列可冷导出或保留已选策略导出到 AOT。
   消费者复用 JIT 的一次 dispatch 核心，恢复全部五个绑定，无新增应用 shader 或
   scratch；覆盖独立／借用消费者、偏移 view、在途退休及下游 kernel 梯度。

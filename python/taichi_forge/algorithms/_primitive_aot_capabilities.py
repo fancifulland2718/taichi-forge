@@ -185,7 +185,8 @@ _ROUTES = MappingProxyType({
     ),
     "segmented_reduce": (
         _sequence(("segmented_reduce",), "packed_scalar", "sum", "i32_u32_f32_i64_u64_f64",
-                  "host_published_immutable_layout", "preserved_grouped_or_serial_strategy",
+                  "host_or_device_published_immutable_layout", "selected_topology_snapshot",
+                  "preserved_grouped_or_serial_strategy",
                   "disjoint_input_output", "frozen_cpu_partition_strategy",
                   "serial_field_snapshot", "device_dtype_capabilities", "explicit_adjoint_only"),
         PrimitiveAOTRoute(

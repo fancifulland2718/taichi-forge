@@ -40,6 +40,7 @@ class RetainedArrayBindings:
         self.private_arrays = {}
         self.private_roles = {}
         self.private_usages = {}
+        self.immutable_snapshots = {}
         self.existing = {_field_key(packed_description(module._fields[name])): name for name in module._array_fields}
 
     def require(self, owner):
@@ -123,6 +124,24 @@ class RetainedArrayBindings:
         if previous != resource:
             raise TaichiRuntimeError("AOT private array reconstruction changed within one export")
         return resource
+
+    def declare_snapshot(self, owner):
+        """Capture qualified immutable recipe storage with the export closure.
+
+        The concrete exporter proves immutability; arbitrary mutable application
+        state still requires the existing explicit snapshot contract. No device
+        transfer occurs until the whole Graph has passed structural preflight.
+        """
+        identity = self._private_identity(owner, "data")
+        if identity not in self.private_arrays:
+            descriptor = packed_description(owner)
+            name = self.context._name("resource")
+            self.immutable_snapshots[identity] = (
+                owner, name, str(descriptor.scalar_type), tuple(descriptor.index_shape),
+                tuple(descriptor.element_shape),
+            )
+            self.private_arrays[identity] = name
+        return self.private_arrays[identity]
 
     def _private_identity(self, owner, role):
         identity = self.context.source_arrays.identity(owner)

@@ -5,6 +5,32 @@ import numpy as np
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
+def _topology_binding(layout, context, *, segment_ids=False):
+    """Retain only the immutable topology consumed by the selected strategy."""
+    from . import _algorithms as algorithms
+
+    if type(layout) is not algorithms.SegmentedLayout:
+        raise TaichiRuntimeError("AOT segmented operations require a concrete published layout")
+    layout._require_current_runtime()
+    owner = layout._segment_ids if segment_ids else layout._offsets
+    arrays = context.retained_arrays
+    previous = arrays.private_arrays.get(arrays._private_identity(owner, "data"))
+    if previous is not None:
+        return previous
+    if layout._offsets_host is None:
+        if layout._encoding != "device_counts" or layout._device_generation_stats is None:
+            raise TaichiRuntimeError("AOT segmented operations require a published immutable topology")
+        return arrays.declare_snapshot(owner)
+    if segment_ids:
+        # Capacity, including ignored padding, is part of the grouped strategy.
+        data = np.full(layout.capacity, -1, dtype=np.int32)
+        for segment, (begin, end) in enumerate(zip(layout._offsets_host, layout._offsets_host[1:])):
+            data[begin:end] = segment
+    else:
+        data = np.asarray(layout._offsets_host, dtype=np.int32)
+    return arrays.declare_data(owner, data.tobytes())
+
+
 def export_segmented_reduce(call, context):
     from taichi_forge.aot._graph_storage_bindings import packed_description
     from taichi_forge.graph._graph import Arg, ArgKind
@@ -21,8 +47,8 @@ def export_segmented_reduce(call, context):
     ):
         raise TaichiRuntimeError("AOT segmented reduce requires its concrete SegmentedWorkspace call")
     values, layout, output = call.args
-    if type(layout) is not algorithms.SegmentedLayout or layout._offsets_host is None:
-        raise TaichiRuntimeError("AOT segmented reduce requires host-published immutable offsets")
+    if type(layout) is not algorithms.SegmentedLayout:
+        raise TaichiRuntimeError("AOT segmented reduce requires a concrete published layout")
     if call.kwargs["op"] != "sum":
         raise TaichiRuntimeError("AOT segmented reduce requires op='sum'")
     method = call.kwargs["method"]
@@ -56,15 +82,11 @@ def export_segmented_reduce(call, context):
             (algorithms._grouped_reduce_value_type(values.dtype),
              algorithms._SUPPORTED_GROUPED_REDUCE_OPS["sum"], layout.capacity, layout.num_segments),
         )
-        # Keep capacity (including ignored padding) to preserve CPU partitions.
-        ids = np.full(layout.capacity, -1, dtype=np.int32)
-        for segment, (begin, end) in enumerate(zip(layout._offsets_host, layout._offsets_host[1:])):
-            ids[begin:end] = segment
-        arrays.declare_data(layout._segment_ids, ids.tobytes())
+        _topology_binding(layout, context, segment_ids=True)
         _grouped_reduce(child, context)
         return
 
-    offsets = arrays.declare_data(layout._offsets, np.asarray(layout._offsets_host, dtype=np.int32).tobytes())
+    offsets = _topology_binding(layout, context)
     count = context._resource(
         object(), {k: v for k, v in Scalar("i32", layout.num_segments).resource("count").items() if k != "name"}
     )

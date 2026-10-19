@@ -344,14 +344,16 @@ class _ExportContext:
                 raise TaichiRuntimeError("AOT Graph has conflicting Field lifetime dependencies")
 
     def materialize_provider_data(self, module):
-        """Sample exact compiled roots and selected provider arrays together."""
+        """Sample compiled roots, provider arrays and immutable recipe data once."""
         import numpy as np
 
         from taichi_forge.lang import impl
         from taichi_forge.lang.util import to_numpy_type
 
-        pending = tuple(self._provider_data.values())
-        arrays = [owner.arr for owner, _, _, _ in pending]
+        pending = tuple((*entry, ()) for entry in self._provider_data.values()) + tuple(
+            self.retained_arrays.immutable_snapshots.values()
+        )
+        arrays = [owner.arr for owner, _, _, _, _ in pending]
         program = impl.get_runtime().prog
         ids = sorted(
             set(module._aot_builder._used_snode_tree_ids(sorted(self._used_kernel_entries)))
@@ -367,18 +369,18 @@ class _ExportContext:
                     raise TaichiRuntimeError("AOT compiled Field lifetime changed during export")
             snapshot = program._snapshot_dense_state(dependencies, arrays)
             self.root_dependencies, self.root_payloads = dependencies, snapshot["roots"]
-            for (owner, name, dtype, shape), data in zip(pending, snapshot["arrays"]):
-                self.data_resource(owner, data, dtype=dtype, shape=shape, name=name)
+            for (owner, name, dtype, shape, element_shape), data in zip(pending, snapshot["arrays"]):
+                self.data_resource(owner, data, dtype=dtype, shape=shape, element_shape=element_shape, name=name)
             return
         if not pending:
             return
         hosts = [
-            np.empty(shape, dtype=to_numpy_type(array.element_data_type()))
-            for array, (_, _, _, shape) in zip(arrays, pending)
+            np.empty(shape + element_shape, dtype=to_numpy_type(array.element_data_type()))
+            for array, (_, _, _, shape, element_shape) in zip(arrays, pending)
         ]
         program.copy_ndarrays_to_host(arrays, hosts, snapshot=True)
-        for (owner, name, dtype, shape), host in zip(pending, hosts):
-            self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, name=name)
+        for (owner, name, dtype, shape, element_shape), host in zip(pending, hosts):
+            self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, element_shape=element_shape, name=name)
 
     def kernel_binding(self, arg):
         if arg.tag in (core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION, core.ArgKind.ACCELERATION_STRUCTURE):

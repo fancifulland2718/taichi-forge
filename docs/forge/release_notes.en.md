@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CPU/CUDA/Vulkan segmented-reduce sequences export published immutable layouts
+  generated on the device. Cold export captures only the selected offsets or
+  segment IDs at the shared Field/provider completion boundary, once per layout.
+  Rejected structures perform no readback; consumers do not read topology back.
+
 - Vulkan scalar transform/gather/scatter fusion exports cold or preserves its
   selected strategy in AOT. Consumers share JIT's single-dispatch core and all five
   bindings, without additional application shaders or scratch. Coverage includes
