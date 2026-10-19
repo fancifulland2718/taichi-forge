@@ -2207,6 +2207,35 @@ Graph 执行计划自动导出可保留已选的私有 ndarray 代次池，包�
 配套（当前 private ABI 46）。CPU/CUDA/Vulkan 小用例已验证宽整数、固定参数前向/反向与
 退休；CPU 另覆盖窄整数及 F16/F64。普通 Graph 固定 scalar 的自动导出复用此资源格式。
 
+SDK 可在导出 Graph 或 `ExecutionPlan` 时，明确将公共参数绑定为普通资源描述：
+
+```python
+policy = [
+    aot.Scalar("f32", 0.01).resource("internal_dt"),
+    dict(kind="ndarray", name="internal_counter", dtype="i32",
+         shape=[1], zero_initialize=True),
+    dict(kind="ndarray_view", name="internal_output", array="result",
+         offset=0, shape=[17]),
+]
+plan = module.add_execution_plan("step", graph, argument_resources=policy)
+# 已加载的计划也可采用相同策略，无需重编 kernel：
+bound_plan = original_plan.with_argument_resources(policy)
+prepared = bound_plan.prepare(loaded_module, arguments)
+```
+
+每份描述必须对应已有公共参数，沿用通常的资源依赖与绑定规则。返回计划的
+`argument_names` 即消费接口：示例中对外输出名变为 `result`，固定标量和私有计数器
+不再需要调用者绑定，其余参数仍公开。原计划保持不变。view 保留内部参数和梯度引用，
+不复制数组内容、不改写操作名称；已有存储及提交方案保持不变。
+
+应用须明确选择哪些值是固定配置、哪些缓冲属于私有状态，不会隐式捕获生产端活值。
+独立 prepare 隔离私有数组；已选 CUDA 绑定族共享这些数组及其初始化，沿用既有初始化、
+resize、退休和梯度合同。`initial_data` 可引用已经由 `module.add_data()` 注册的字节。
+非法策略和缺失的注册数据在发布 Graph 定义前报错；实际消费端存储及后端能力仍在
+prepare 时验证。这是冷边界的绑定策略操作，不增加逐次重放的 Python 适配、kernel
+或原生格式版本。Windows CPU/CUDA/Vulkan 已验证前向/反向、初始数据、独立所有者和
+关闭；CUDA 另验证绑定族共享状态以及关闭一个绑定后其余绑定继续执行。
+
 计划可用 `gradients={"primal_name": "gradient_name"}` 将内部或外部数组绑定到已
 导出的显式梯度，复用普通 kernel 的绑定检查，不为 native 操作自动生成导数。同一
 primal 不得再由调用者重复指定梯度。内部数组默认未初始化，每次重放所需清零、复制应

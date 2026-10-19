@@ -2877,6 +2877,44 @@ CPU/CUDA/Vulkan checks cover exact wide integers, fixed-parameter forward/revers
 kernels and retirement; CPU additionally covers narrow integers and F16/F64.
 Ordinary Graph fixed scalars use this same resource format during automatic export.
 
+An SDK can explicitly replace public arguments with ordinary resource descriptions
+when exporting a Graph or an `ExecutionPlan`:
+
+```python
+policy = [
+    aot.Scalar("f32", 0.01).resource("internal_dt"),
+    dict(kind="ndarray", name="internal_counter", dtype="i32",
+         shape=[1], zero_initialize=True),
+    dict(kind="ndarray_view", name="internal_output", array="result",
+         offset=0, shape=[17]),
+]
+plan = module.add_execution_plan("step", graph, argument_resources=policy)
+# A loaded plan can use the same policy without recompiling its kernels:
+bound_plan = original_plan.with_argument_resources(policy)
+prepared = bound_plan.prepare(loaded_module, arguments)
+```
+
+Each description must name an existing public argument; the normal resource
+dependency and binding rules still apply. The returned plan's `argument_names`
+is the consumer interface: in this example, `result` replaces the internal output
+name, while the fixed scalar and private counter need no caller binding. Other
+arguments remain public. The original plan is unchanged. Views preserve the
+internal argument and gradient references without copying array contents or
+renaming operations. Existing storage and submission recipes are preserved.
+
+The application explicitly decides which values are fixed configuration and which
+buffers are private state. No live producer values are captured implicitly.
+Private arrays are isolated by independent preparation; selected CUDA binding
+families share them and their initialization. Existing initialization, resize,
+retirement and gradient contracts apply. `initial_data` may reference bytes already
+registered with `module.add_data()`. Invalid policies and missing registered data
+are rejected before Graph definitions are published; preparation still validates
+actual consumer storage and backend capabilities. This is a cold binding-policy
+operation, adding no per-replay Python adaptation, kernel or native format version.
+Windows CPU/CUDA/Vulkan checks cover forward/reverse execution, initial data,
+independent owners and closure; CUDA additionally covers shared binding-family
+state and continued execution after closing a sibling.
+
 Declare `gradients={"primal_name": "gradient_name"}` on the plan to bind private
 or external arrays to exported explicit gradients. This reuses ordinary kernel
 binding checks and supplies no automatic derivative for native operations. A

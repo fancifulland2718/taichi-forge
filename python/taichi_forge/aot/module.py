@@ -472,7 +472,15 @@ class Module:
         self._data_payloads.update(data)
 
     def add_execution_plan(
-        self, name, plan, *, gradients=None, snapshot_state=False, source_bindings=None, resource_bindings=None
+        self,
+        name,
+        plan,
+        *,
+        gradients=None,
+        snapshot_state=False,
+        source_bindings=None,
+        resource_bindings=None,
+        argument_resources=None,
     ):
         """Export ordered loaded-kernel/copy/fill commands with symbolic storage.
 
@@ -489,6 +497,14 @@ class Module:
         consumer; Field state is shared by all entries of one loaded module and
         initialized once. Separate module instances isolate Field state. Changes
         to an already exported root snapshot require a new producer module.
+
+        ``argument_resources`` supplies persistent resource descriptions named
+        after public plan arguments. Explicit scalars freeze configuration;
+        ndarrays become private to each independent prepared owner (shared within
+        a selected CUDA binding family); ndarray views can retain an internal
+        name while exposing a stable public array name. No producer
+        data is implicitly captured. The policy is preflighted before Graph
+        definitions are published and preserves the selected execution recipe.
 
         ``source_bindings`` maps public names to scalar producer ndarrays held
         by qualified native operations. Export freezes type and shape, without
@@ -564,6 +580,7 @@ class Module:
                 snapshot_state=snapshot_state,
                 source_bindings=source_bindings,
                 resource_bindings=resource_bindings,
+                argument_resources=argument_resources,
             )
         elif not isinstance(plan, ExecutionPlan):
             raise TypeError("Expected an ExecutionPlan or compiled Graph")
@@ -575,6 +592,8 @@ class Module:
             raise ValueError("source_bindings requires a compiled Graph")
         elif resource_bindings is not None:
             raise ValueError("resource_bindings requires a compiled Graph")
+        elif argument_resources is not None:
+            plan = plan.with_argument_resources(argument_resources)
         snapshot = ExecutionPlan.from_json(plan.to_json())
         missing = set(snapshot.kernel_entries) - self._exported_kernels.keys()
         if missing:

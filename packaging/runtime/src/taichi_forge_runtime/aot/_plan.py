@@ -576,6 +576,37 @@ class ExecutionPlan:
         }
         self._persistent_argument_names = retained_arguments(resources, gradients, native_roots)
 
+    def with_argument_resources(self, resources):
+        """Return a plan whose selected arguments use persistent resources.
+
+        Each ordinary resource description must name an existing public argument.
+        Scalars can freeze explicit configuration, ndarrays provide persistent
+        storage, and views can expose stable public array names without copying.
+        Independent prepares isolate private arrays; selected CUDA binding
+        families share them according to their existing state contract.
+        This changes binding policy only: it does not compile, execute or mutate
+        this plan. Existing resource, alias, gradient and retirement contracts
+        still apply. The caller chooses which inputs may be fixed or made private.
+        """
+        additions = list(resources)
+        public = set(self.argument_names)
+        seen = set()
+        for resource in additions:
+            if not isinstance(resource, dict):
+                raise TypeError("Argument resources must be named resource descriptions")
+            name = resource.get("name")
+            if not isinstance(name, str) or name not in public:
+                raise ValueError(f"Argument resource does not name a public argument: {name!r}")
+            if name in seen:
+                raise ValueError(f"Duplicate argument resource: {name}")
+            seen.add(name)
+        document = json.loads(self._json)
+        document.pop("version")
+        document.setdefault("resources", []).extend(additions)
+        # Recompute the required format version when new resource features are
+        # introduced, preserving every existing execution and storage choice.
+        return ExecutionPlan(**document)
+
     def prepare(self, module, arguments, *, gradients=None):
         """Resolve a frozen plan to the same native executor as kernel.prepare()."""
         return self._prepare(module, arguments, gradients=gradients)

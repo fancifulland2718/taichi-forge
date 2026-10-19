@@ -1092,7 +1092,16 @@ def _node(context, node, *, dispatch_offsets=None, gated_body_begin=None):
         raise TaichiRuntimeError("AOT execution Graph has unreconstructed fixed bindings")
 
 
-def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_bindings=None, resource_bindings=None):
+def export_graph(
+    module,
+    graph,
+    *,
+    gradients=None,
+    snapshot_state=False,
+    source_bindings=None,
+    resource_bindings=None,
+    argument_resources=None,
+):
     """Preflight the entire region before publishing any module definitions."""
     with graph._lifecycle_lock:
         graph._check_runtime_valid()
@@ -1190,6 +1199,23 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         from ._graph_constraints import export_constraints
 
         constraints = export_constraints(spec, context.binding, additional=context.binding_constraints)
+        if argument_resources is not None:
+            argument_resources = _snapshot(list(argument_resources))
+            # Validate the full binding policy before publishing kernels, roots
+            # or views. Pending provider data already has its resource identity;
+            # its bytes are sampled at the existing completion boundary below.
+            policy_plan = ExecutionPlan(
+                context.operations,
+                initialization=context.initialization or None,
+                resources=context.resources,
+                gradients=mapped_gradients or None,
+                constraints=constraints or None,
+                binding_strategy=binding_strategy,
+                submission_recipe=submission_recipe,
+            ).with_argument_resources(argument_resources)
+            missing_data = set(policy_plan.data_entries) - context.data_payloads.keys() - module._data_payloads.keys()
+            if missing_data:
+                raise ValueError("Argument resources reference unexported data: " + ", ".join(sorted(missing_data)))
         try:
             context.retained_arrays.publish()
             for name, kernel in context.kernels.items():
@@ -1219,9 +1245,13 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
             )
             if set(plan.argument_names) != expected_names:
                 raise TaichiRuntimeError("AOT Graph reconstruction changed the public binding contract")
+            if argument_resources is not None:
+                plan = plan.with_argument_resources(argument_resources)
             for key in plan.data_entries:
                 if key not in context.data_payloads:
-                    raise TaichiRuntimeError("AOT Graph reconstruction omitted an initial data payload")
+                    if key not in module._data_payloads:
+                        raise TaichiRuntimeError("AOT Graph reconstruction omitted an initial data payload")
+                    continue
                 if key in module._data_payloads and module._data_payloads[key] != context.data_payloads[key]:
                     raise ValueError("AOT data digest collision")
             module._add_initial_root_snapshots(context.root_dependencies, context.root_payloads)
@@ -1233,5 +1263,7 @@ def export_graph(module, graph, *, gradients=None, snapshot_state=False, source_
         module._exported_kernels.update(context.kernels)
         module._kernel_launch_abis.update(context.kernel_launch_abis)
         module._content.extend("kernel:" + name for name in context.kernels)
-        module._data_payloads.update({key: context.data_payloads[key] for key in plan.data_entries})
+        module._data_payloads.update(
+            {key: context.data_payloads[key] for key in plan.data_entries if key in context.data_payloads}
+        )
         return plan
