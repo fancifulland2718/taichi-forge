@@ -4836,6 +4836,20 @@ The core DLL grows by 1 KiB; compressed runtime/frontend wheels remain about
 remain unchanged. Six backend/loading-order combinations, the fixed application
 entries and consumer-created SDK scenes pass with the new package pair.
 
+Contact-island qualification exposed two correctness defects: a late contact
+failed to union earlier connected components, and native Vulkan i64/u64 atomic
+instructions omitted a required SPIR-V capability. After repair, small full and
+mapping fixtures re-exported from the compiled host pass CPU/CUDA/Vulkan
+standalone/borrowed connectivity, output refresh, module isolation and in-flight
+close checks, including Vulkan validation. This does not qualify all contact
+combinations or the full cross-step persistence contract, and does not claim
+that integer grouping itself is differentiable. Affected older Vulkan artifacts
+must be re-exported. Only one of 534 host modules is rebuilt; the application
+wheel grows by 1,620 bytes to 58,739,370 bytes, retaining the sole application TCM
+and 44 external dependency records. The Forge core DLL grows by 512 bytes. The
+matched packages are normally installed; fixed application entries, six new SDK
+scenes and six backend/loading-order combinations pass regression checks.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed
