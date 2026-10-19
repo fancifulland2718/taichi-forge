@@ -278,6 +278,23 @@ CUDA segmented dense-field fallback、tensor/strided/fused sequence 尚不属于
 不会在导出时静默替换策略。纯原生包无需应用 shader 代码，消费端需提供
 `builtin/grouped_reduce` v1。可组合 kernel 提供显式伴随；不自动生成 AOT 伴随。
 
+显式 `builtin/bucket_builder` v1 描述支持 CPU/CUDA/Vulkan 一维 packed 标量或
+tensor 载荷，dtype 为 i32/u32/f32/i64/u64/f64。参数为 `size`、非零 `num_bins`、
+`dtype`、`element_shape`（标量用 `[]`），可选 `cpu_max_threads` 和 `vulkan_policy`。
+绑定名为 `keys`、`values`、`offsets`、`output`；keys/offsets 为 i32。每轮忽略
+无效 key，覆盖 `num_bins + 1` 个 offsets，只写有效 output 前缀，保留尾部和
+载荷位模式。CPU 保持桶内输入次序，GPU 桶内次序不指定。空输入只清零 offsets。
+实际读写区间及两个写区间须不重叠；支持带偏移的 packed view。
+
+CPU/CUDA/Vulkan 的 prepared owner 持有计数/游标/scan/partial 中实际需要的存储，
+CPU 共用 runtime 线程池。准备不写输入输出，`workspace_bytes` 报告临时存储。
+Vulkan 偏好字段 `private_enabled`、`private_min_items`、`private_max_bins`、
+`private_max_bytes` 默认 true、65536、1024、4194304，在准备时固定；消费端环境
+变量不改变该描述。私有策略超出预算或设备/shared-array 容量时可退回直接算法，
+这些是选型偏好而非输入上限。i32 item count、后端参数宽度及地址范围仍须满足。
+纯原生包不携带应用 shader，runtime 须提供该 v1 操作。目前此入口不自动导出
+bucket sequence、strided/Struct 成员组合或伴随；其他可微操作的合同保持。
+
 `PrimitiveSequence.histogram()` 与显式 `builtin/histogram` v1 描述支持
 CPU/CUDA/Vulkan packed scalar i32/u32 ID 和 i32/i64 counter。参数为 `size`、
 非零 `num_bins`、`value_dtype`、`counter_dtype`，以及可选 `cpu_max_threads`、

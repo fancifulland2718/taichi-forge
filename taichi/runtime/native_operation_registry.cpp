@@ -401,6 +401,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_scatter_add_operation(result);
     register_grouped_reduce_operation(result);
     register_histogram_operation(result);
+    register_bucket_builder_operation(result);
     register_diagnostic_operations(result);
     register_matrix_operations(result);
     register_cub_source_operations(result);

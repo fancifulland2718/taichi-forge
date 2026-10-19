@@ -25,6 +25,37 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, BucketSchemaPreservesPayloadAndAlgorithmPolicy) {
+  const auto &registry = native_operation_registry();
+  NativeOperationDescription d;
+  d.provider = "builtin";
+  d.operation = "bucket_builder";
+  d.bindings = {
+      {"keys", "k"}, {"values", "v"}, {"offsets", "o"}, {"output", "r"}};
+  for (
+      const auto *p :
+      {R"({"size":0,"num_bins":7,"dtype":"f64","element_shape":[2,3]})",
+       R"({"size":2147483647,"num_bins":2147483648,"dtype":"i32","element_shape":[],"cpu_max_threads":2,"vulkan_policy":{"private_enabled":false,"private_min_items":8589934592,"private_max_bins":0,"private_max_bytes":0}})"}) {
+    d.parameters = liong::json::parse_complete(p);
+    EXPECT_EQ(registry.decode(d).kind(), "bucket_builder");
+  }
+  for (
+      const auto *p :
+      {R"({"size":2147483648,"num_bins":7,"dtype":"i32","element_shape":[]})",
+       R"({"size":true,"num_bins":7,"dtype":"i32","element_shape":[]})",
+       R"({"size":0,"num_bins":0,"dtype":"i32","element_shape":[]})",
+       R"({"size":1,"num_bins":7,"dtype":"i16","element_shape":[]})",
+       R"({"size":1,"num_bins":7,"dtype":"i32","element_shape":[0]})",
+       R"({"size":1,"num_bins":7,"dtype":"i32","element_shape":[9223372036854775807]})",
+       R"({"size":1,"num_bins":7,"dtype":"i32","element_shape":[],"cpu_max_threads":0})",
+       R"({"size":1,"num_bins":7,"dtype":"i32","element_shape":[],"vulkan_policy":{"private_enabled":1}})",
+       R"({"size":1,"num_bins":7,"dtype":"i32","element_shape":[],"vulkan_policy":{"private_max_bytes":-1}})",
+       R"({"size":1,"num_bins":7,"dtype":"i32","element_shape":[],"vulkan_policy":{"unknown":0}})"}) {
+    d.parameters = liong::json::parse_complete(p);
+    EXPECT_THROW(registry.decode(d), std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, HistogramSchemaPreservesEmptyInputAndWidePolicy) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription d;

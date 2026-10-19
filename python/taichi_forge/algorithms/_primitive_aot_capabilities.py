@@ -169,6 +169,16 @@ _ROUTES = MappingProxyType({
              "selected_provider_dependencies", "disjoint_input_output"),
         ),
     ),
+    "bucket_builder": (
+        PrimitiveAOTRoute(
+            "aot.ExecutionPlan", ("builtin/bucket_builder",), _ALL,
+            ("one_dimensional_packed_payload", "scalar_or_tensor", "i32_u32_f32_i64_u64_f64",
+             "mutable_i32_keys", "i32_offsets", "fixed_prefix_extent", "empty_input_supported",
+             "invalid_ids_ignored", "preserved_output_tail", "disjoint_writes",
+             "cpu_stable_gpu_unspecified_order", "prepared_owner_scratch",
+             "frozen_algorithm_preferences", "no_automatic_ad"),
+        ),
+    ),
     "histogram": (
         _sequence(("histogram",), "packed_scalar", "i32_u32_ids", "i32_i64_counters",
                   "overwrite_bins", "invalid_ids_ignored", "disjoint_output",

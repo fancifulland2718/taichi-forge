@@ -347,6 +347,7 @@ void register_indexed_copy_operation(NativeOperationRegistry &registry);
 void register_scatter_add_operation(NativeOperationRegistry &registry);
 void register_grouped_reduce_operation(NativeOperationRegistry &registry);
 void register_histogram_operation(NativeOperationRegistry &registry);
+void register_bucket_builder_operation(NativeOperationRegistry &registry);
 void register_matrix_operations(NativeOperationRegistry &registry);
 void register_cub_source_operations(NativeOperationRegistry &registry);
 void register_cutlass_source_operations(NativeOperationRegistry &registry);

@@ -361,6 +361,29 @@ native packages need no application shader code and require `builtin/grouped_red
 v1 in the consumer. Exported kernels can provide an explicit adjoint; AOT does not
 synthesize it automatically.
 
+Explicit `builtin/bucket_builder` v1 descriptions support one-dimensional packed
+scalar or tensor payloads on CPU/CUDA/Vulkan: i32/u32/f32/i64/u64/f64. Parameters
+are `size`, nonzero `num_bins`, `dtype`, `element_shape` (`[]` for scalars), and
+optional `cpu_max_threads` and `vulkan_policy`. Bindings are `keys`, `values`,
+`offsets`, and `output`; keys and offsets use i32. Replay ignores invalid keys,
+overwrites `num_bins + 1` offsets and only the valid output prefix, preserving
+the tail and payload bits. CPU preserves input order within buckets; GPU bucket
+order is unspecified. Empty input only clears offsets. Actual read/write ranges
+and the two write ranges must be disjoint. Offset packed views are supported.
+
+Prepared owners retain the count/cursor/scan/partial storage their backend uses;
+CPU shares the runtime thread pool. Preparation leaves arrays unchanged and
+`workspace_bytes` reports scratch. Vulkan preferences `private_enabled`,
+`private_min_items`, `private_max_bins`, and `private_max_bytes` default to true,
+65536, 1024, and 4194304. Preparation freezes them; consumer environment variables
+do not change the description. Exceeding private scratch preferences or device/
+shared-array capacity can select direct counting. These are algorithm choices,
+not input limits; i32 item counts, backend parameter widths and address ranges
+still apply. Pure-native archives contain no application shaders and require the
+v1 operation in the runtime. This entry does not yet automatically export bucket
+sequences, strided/Struct member compositions, or adjoints; other differentiable
+operations retain their contracts.
+
 `PrimitiveSequence.histogram()` and explicit `builtin/histogram` v1 descriptions
 support CPU/CUDA/Vulkan packed scalar i32/u32 IDs and i32/i64 counters. Parameters
 are `size`, nonzero `num_bins`, `value_dtype`, `counter_dtype`, and optional
