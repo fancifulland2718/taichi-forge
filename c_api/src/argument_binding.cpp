@@ -806,6 +806,13 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
     const auto &arg = args[i];
     if (arg.argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
       const auto &array = arg.argument.value.ndarray;
+      // Legacy CGraph IValues carry an allocation, not a resolved finite view.
+      // Reject before any dispatch; complete execution plans and kernels use
+      // the resolved dense binder and preserve offsets on every backend.
+      if (runtime2.get_memory(array.memory).byte_offset)
+        throw MemoryBindingError(
+            "Offset views require a kernel or complete execution plan; "
+            "legacy AOT Graph arguments cannot represent the offset");
       if (!graph_binding.layouts.count(arg.name)) {
         validate_array_storage(runtime2, array, nullptr, true);
         const auto found = graph.args.find(arg.name);
@@ -826,6 +833,10 @@ std::unique_ptr<BoundGraphArguments> bind_graph_arguments(
       const auto grad = gradient_args.find(arg.name);
       if (grad != gradient_args.end()) {
         validate_array_storage(runtime2, *grad->second, nullptr, true);
+        if (runtime2.get_memory(grad->second->memory).byte_offset)
+          throw MemoryBindingError(
+              "Offset gradient views require a kernel or complete execution "
+              "plan");
         result->memories.push_back(grad->second->memory);
       }
     }

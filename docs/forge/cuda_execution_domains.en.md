@@ -54,6 +54,14 @@ loan and all derived aliases after draining dependent executions; handle shells
 remain closeable. Ndarray loans retain the allocation after source wrapper
 collection. Import is cold and must run outside a borrowed submission scope.
 
+Ordinary host/device transfers and CPU/CUDA pointer exports preserve the finite
+view's offset and size. Mapping applies the offset when the underlying memory
+is host-visible. Legacy CGraph arguments cannot represent offset views: use a
+kernel or a complete execution plan, rather than a legacy `module.graph()`
+launch. Legacy Vulkan memory export also rejects nonzero buffer-relative
+offsets, since its offset field describes the VkDeviceMemory binding instead.
+Both reject before submitting any work or exposing the parent allocation.
+
 Synchronized CUDA external views can also be borrowed by JIT and loaded AOT
 recipes. Finite aliases retain the original synchronization owner. Each complete
 initialization or replay consumes one acquire/release epoch per external owner,

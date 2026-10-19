@@ -258,6 +258,9 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
                                   std::shared_ptr<BorrowedMemory> borrowed) {
   TI_ASSERT(allocation.device == &get());
   try {
+    if (byte_offset > std::numeric_limits<size_t>::max() ||
+        size > std::numeric_limits<size_t>::max() - byte_offset)
+      throw MemoryBindingError("Memory range overflows device address space");
     // Never reuse a token, including across runtime destruction. Refuse the
     // machine's exhausted handle space instead of wrapping into a live token.
     const auto handle = reinterpret_cast<TiMemory>(new_handle_token());
@@ -651,10 +654,13 @@ void *ti_map_memory(TiRuntime runtime, TiMemory devmem) {
   TI_CAPI_ARGUMENT_NULL_RV(devmem);
 
   Runtime *runtime2 = (Runtime *)runtime;
-  TI_ASSERT(runtime2->get().map(devmem2devalloc(*runtime2, devmem), &out) ==
+  const auto memory = runtime2->get_memory(devmem);
+  TI_ASSERT(runtime2->get().map(memory.allocation, &out) ==
                 taichi::lang::RhiResult::success &&
             "RHI map memory failed: "
             "Mapping Memory without VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT set");
+  if (out)
+    out = static_cast<char *>(out) + memory.byte_offset;
   TI_CAPI_TRY_CATCH_END();
   return out;
 }
@@ -758,7 +764,7 @@ taichi::lang::DevicePtr resolve_memory_slice(Runtime &runtime,
       slice.size > std::numeric_limits<size_t>::max()) {
     throw MemoryBindingError("Memory slice exceeds its allocation capacity");
   }
-  return allocation.allocation.get_ptr(slice.offset);
+  return allocation.allocation.get_ptr(allocation.byte_offset + slice.offset);
 }
 
 void check_transfer_result(taichi::lang::RhiResult result) {

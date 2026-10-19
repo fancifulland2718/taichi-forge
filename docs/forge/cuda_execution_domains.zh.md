@@ -41,6 +41,12 @@ domain.close()  # 冷阶段，排空并退休资源
 全部派生别名，旧句柄仍可安全关闭；ndarray 借用则在源 Python 包装回收后保留分配。
 导入属于冷操作，不能嵌套在 borrowed submission scope 内。
 
+普通主机/设备传输和 CPU/CUDA 指针导出保留有限视图的偏移及大小；底层可映射内存的 map
+同样应用偏移。旧 CGraph 参数不能表达非零偏移，应使用 kernel 或完整 execution plan，
+不能通过旧 `module.graph()` 调用忽略切片。旧 Vulkan memory export 的 offset 描述
+VkDeviceMemory 绑定位置，因此拒绝非零 buffer-relative 偏移。两者均在设备提交或
+暴露父分配前拒绝。
+
 带同步域的 CUDA 外部视图也可借给 JIT 和已加载的 AOT recipe。有限切片及其别名保留原
 同步所有者；完整初始化或重放各自对每个外部所有者消费一次 acquire/release epoch，
 不因多个内核或多个别名重复消费。仅操作私有存储的初始化不消费重放阶段的信号；若两个
