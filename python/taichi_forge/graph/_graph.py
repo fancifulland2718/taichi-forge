@@ -960,15 +960,17 @@ class _GraphObservationArena:
 
 @kernel_impl.kernel
 def _pack_structured_submission_telemetry(
-    predicate: ndarray_type.ndarray(dtype=i32, ndim=0),
-    counter: ndarray_type.ndarray(dtype=i32, ndim=0),
-    status: ndarray_type.ndarray(dtype=i32, ndim=0),
+    predicate: ndarray_type.ndarray(dtype=i32),
+    counter: ndarray_type.ndarray(dtype=i32),
+    status: ndarray_type.ndarray(dtype=i32),
     destination: ndarray_type.ndarray(dtype=i32, ndim=1),
     offset: i32,
 ):
-    destination[offset] = predicate[None]
-    destination[offset + 1] = counter[None]
-    destination[offset + 2] = status[None]
+    # Structured control accepts one scalar at any index rank. Keep all three
+    # loads in the same task without flattening/copying the caller's arrays.
+    destination[offset] = predicate[impl.static([0] * len(predicate.shape))]
+    destination[offset + 1] = counter[impl.static([0] * len(counter.shape))]
+    destination[offset + 2] = status[impl.static([0] * len(status.shape))]
 
 
 @kernel_impl.kernel
@@ -1245,11 +1247,12 @@ class _GraphStructuredTelemetryRecorder:
         value = context.runtime_args()[name]
         if (
             not isinstance(value, Ndarray)
-            or value.shape != ()
+            or value.element_shape
+            or any(int(extent) != 1 for extent in value.shape)
             or str(value.dtype) != str(i32)
         ):
             raise TaichiRuntimeError(
-                "Graph submission telemetry requires scalar i32 ndarray "
+                "Graph submission telemetry requires single-element scalar i32 ndarray "
                 f"{role} resources"
             )
         return value

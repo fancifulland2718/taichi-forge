@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Graph submission telemetry accepts single-element scalar i32 control arrays
+  at any index rank, matching ordinary structured execution. Enabling telemetry
+  no longer rejects valid `(1,)` or `(1, 1)` predicate/counter arrays.
+
 - Host pools size their first reusable slab from the allocation request and
   alignment, reducing idle reservation for small independent runtimes while
   retaining geometric growth and request-sized large allocations.
