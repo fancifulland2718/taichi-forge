@@ -2,6 +2,9 @@
 
 [中文](aot_sdk.zh.md)
 
+For application artifact selection, producer/consumer cost and package ownership,
+see [AOT deployment profiles](aot_deployment_profiles.en.md).
+
 The 0.6.4 development build can install a separate C/C++ SDK. The producer uses
 Forge Python to export modules; the consumer links `TaichiForge::c_api` and does
 not import Python. CPU/CUDA still use the supplied LLVM runtime and compiler.

@@ -2,6 +2,8 @@
 
 [English](aot_sdk.en.md)
 
+应用产物选择、生产/消费成本和包归属见 [AOT 部署配置](aot_deployment_profiles.zh.md)。
+
 0.6.4 开发版可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
 消费端链接 `TaichiForge::c_api`，无需导入 Python。CPU/CUDA 仍使用随 SDK
 提供的 LLVM runtime 与编译器。这是一份完整 SDK，不是无编译器 runtime。
