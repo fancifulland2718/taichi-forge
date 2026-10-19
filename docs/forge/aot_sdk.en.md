@@ -2694,9 +2694,9 @@ Artifacts with initial roots require LLVM schema 7 for BC/PTX/cubin or GFX metad
 3 and matching newer runtime components. Loading validates and initializes the data
 once; replay adds no state uploads or copy kernels. Windows CPU/CUDA/Vulkan tests
 cover scalar/vector Fields, real kernel.grad, shared Fields with private workspace,
-independent modules, repeated exports, bad payloads and close/reset. Complete
-GeoPhys Field-backed SolvePlans and arbitrary native providers still need their
-own qualification.
+independent modules, repeated exports, bad payloads and close/reset. The fixed
+GeoPhys SAP Field-backed CG profile is qualified separately below; other complete
+SolvePlan combinations and native providers still need their own qualification.
 
 CPU/CUDA/Vulkan tests cover multi-dispatch square and explicit-adjoint providers,
 nonzero state, old/new numeric publications, compositions, interleaved independent
@@ -5085,6 +5085,40 @@ artifacts are not added to that delivery. Coverage is opaque, two-sided meshes
 on Windows RTX5090. GeoPhys still rejects its OptiX single-sided route; Forge's
 candidate-filtering capability does not qualify downstream integration. Punctual
 shadows, MASK and other platforms require their own qualification.
+
+Actual SAP SolvePlan qualification adds one missing compiled host module. The
+dev16 application wheel is 61,415,001 bytes (+35,356); all 557 previous host
+binaries, four shader assets and the sole 381,034-byte seven-entry TCM remain
+unchanged, with 44 separately installed external dependencies. A two-clique,
+six-active-DOF Windows CPU/CUDA/Vulkan case exports the original Newton/CG/line-search
+sequence. Standalone and borrowed consumers pass the reference solution, complete
+control state, replay, independent modules and in-flight retirement; Vulkan
+synchronization validation also passes. A real downstream 0.5*v² kernel gradient
+works; this does not qualify automatic differentiation of the full SAP solver or
+matrix-free participants.
+
+The profile explicitly selects `update_policy="pinned"` before Graph construction.
+The GeoPhys bridge's default `rebind` remains non-exportable; application adoption
+must expose this cold configuration. Existing `add_field(..., as_array=True)` and
+`module_array` resources preserve RHS/output aliases with surrounding Field kernels;
+new independent ndarrays cannot replace those bindings. Separate CPU/CUDA/Vulkan
+qualification artifacts are 417,554/164,837/380,735 bytes and are not added to the
+application delivery TCM. Observed Graph construction takes 1.86/2.81/0.94 seconds,
+export 1.66/2.40/0.25 seconds and downstream-gradient export 47/81/22 ms. Initial
+CPU BC preparation still costs about 0.90–0.92 seconds, CUDA cubin 106–114 ms and
+Vulkan 28–166 ms. These short samples include actual driver/cache state; they are
+neither controlled cold-start measurements nor large-simulation throughput.
+
+Explicit Vulkan buffer and shared-memory native float-add capabilities replace
+72 CAS sites with 72 native additions in this case. The TCM becomes 376,341 bytes
+with unchanged workspace and submission structure. Standalone/borrowed execution,
+gradients and synchronization validation pass. Alternating both targets in one
+runtime measures median completion at 20.78 ms per step for baseline versus
+17.98 ms for native atomics. GPU timings vary substantially across sampling periods,
+so this does not change the default target or promise general acceleration.
+Matching installed runtime/frontend wheels are 26,624,656/4,106,949 bytes; the native
+DLL grows by 4,096 bytes. ABI108/plan21 remain unchanged, with a refreshed compilation
+cache epoch.
 
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK

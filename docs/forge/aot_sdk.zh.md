@@ -2019,8 +2019,8 @@ bitpacked 等非纯 dense 存储继续拒绝。同一生产模块的重复导出
 含初值的 LLVM BC/PTX/cubin 使用 schema 7，GFX 使用 metadata 3；旧 runtime 必须
 升级配套组件。加载时校验数据并初始化一次，重放不添加状态上传或 copy kernel。
 Windows CPU/CUDA/Vulkan 已验证标量/向量 Field、真实 kernel.grad、共享 Field 与
-独立 workspace、多模块隔离、重复导出、错误载荷及 close/reset；完整 GeoPhys
-Field-backed SolvePlan 和任意原生 provider 的覆盖仍需分别验证。
+独立 workspace、多模块隔离、重复导出、错误载荷及 close/reset。下文另记录了 GeoPhys
+SAP 的固定 Field-backed CG 配置；其他完整 SolvePlan 组合及原生 provider 仍需分别验证。
 
 CPU/CUDA/Vulkan 测试覆盖多 dispatch 方阵及显式伴随 provider、非零状态、新旧数值发布、
 组合、独立消费者交错执行和退休。嵌套 block 通过公共 `ndarray_view` 资源重建公共端口、
@@ -3846,6 +3846,27 @@ AS存储不包含在当前资源计数中，不能将计数0解释为零内存�
 TCM及44个外部依赖保持，三个资格产物未并入交付包。本批限定 Windows RTX5090 的
 不透明双面网格；GeoPhys 当前仍拒绝 OptiX 单面路线，不能用 Forge 的候选过滤能力
 替代下游接通验证。点光阴影、MASK 和其他平台组合仍需各自资格。
+
+实际 SAP 可选 SolvePlan 的资格补齐了一个缺失的已编译宿主模块；应用 dev16 wheel 为
+61,415,001B（+35,356B），原557个宿主二进制、四个shader资源和唯一381,034B七入口TCM
+保持，44个外部依赖独立安装。Windows CPU/CUDA/Vulkan 的两clique、六活动DOF案例沿
+原Newton／CG／line-search序列导出，独立与借用消费通过参考解、完整控制状态、重复执行、
+双module隔离和在途退休；Vulkan同步验证通过。下游0.5*v²的真实kernel.grad可用，
+此资格不表示整个SAP求解器自动可微或matrix-free参与者已经覆盖。
+
+该配置在构图前显式选择 `update_policy="pinned"`；GeoPhys桥的默认 `rebind` 仍拒绝导出，
+应用接通时需暴露相应冷配置。RHS和结果端口使用现有 `add_field(..., as_array=True)` 与
+`module_array` 资源保持对周围Field kernel的别名；独立分配新的ndarray不能替代此绑定。
+固定资格产物CPU/CUDA/Vulkan分别为417,554/164,837/380,735B，未加入应用交付TCM。
+本机Graph构建约1.86/2.81/0.94s，导出1.66/2.40/0.25s，附加梯度导出47/81/22ms；
+CPU BC首次prepare仍需约0.90–0.92s，CUDA cubin约106–114ms，Vulkan约28–166ms。
+这些包含实际驱动／缓存状态的短样本不代表受控冷启动或大型仿真吞吐。
+
+Vulkan显式选择缓冲与共享内存的原生float add后，该例72处CAS变为72处原生加，TCM为
+376,341B，工作区和提交结构保持。独立／借用、梯度及同步验证通过。同runtime交替对照
+的每步完成中位数为基础目标20.78ms、原生目标17.98ms，但不同采样期GPU耗时明显波动，
+不据此修改默认目标或承诺普遍加速。配套安装runtime/frontend wheel为26,624,656/
+4,106,949B；原生DLL增加4,096B，ABI108/plan21保持，编译缓存版本已刷新。
 
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
