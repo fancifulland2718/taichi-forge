@@ -339,6 +339,7 @@ void DeviceBiCGSTAB::release_workspace() {
 
 void DeviceBiCGSTAB::initialize_cuda() {
 #if defined(TI_WITH_CUDA)
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto &cublas = CUBLASDriver::get_instance();
   TI_ERROR_IF(!cublas.is_loaded() && !cublas.load_cublas(),
               "Device BiCGSTAB failed to load cuBLAS.");
@@ -368,6 +369,7 @@ void DeviceBiCGSTAB::initialize_cuda() {
 void DeviceBiCGSTAB::release_cuda() {
 #if defined(TI_WITH_CUDA)
   if (cublas_handle_) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUBLASDriver::get_instance().cubDestroy(
         static_cast<cublasHandle_t>(cublas_handle_));
   }
@@ -961,6 +963,11 @@ void DeviceBiCGSTAB::solve(Program *program,
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
   auto operator_generation = operator_plan_->pin();
+#if defined(TI_WITH_CUDA)
+  std::optional<CUDAContext::ContextGuard> context_guard;
+  if (program_->compile_config().arch == Arch::cuda)
+    context_guard.emplace(&CUDAContext::get_instance());
+#endif
   auto preconditioner_generation =
       preconditioner_plan_
           ? preconditioner_plan_->update_and_pin(operator_generation)

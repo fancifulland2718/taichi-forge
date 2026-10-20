@@ -24,6 +24,10 @@
 #include "taichi/rhi/cuda/cusparse_plan.h"
 #include "taichi/util/environ_config.h"
 
+#if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
+
 #define BUILD(TYPE)                                                         \
   {                                                                         \
     using T = Eigen::Triplet<float##TYPE>;                                  \
@@ -1963,6 +1967,7 @@ SparseCsrPattern::SparseCsrPattern(Program *program,
         "csr", rows, cols, 1, cpu_row_offsets_, cpu_column_indices_);
   } else if (arch_is_cuda(arch)) {
 #if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
     std::vector<int32_t> host_row_offsets(
         static_cast<std::size_t>(rows) + 1);
     std::vector<int32_t> host_column_indices(nnz_size);
@@ -2069,6 +2074,7 @@ SparseCsrPattern::SparseCsrPattern(Program *program,
 SparseCsrPattern::~SparseCsrPattern() {
 #if defined(TI_WITH_CUDA)
   if (arch_is_cuda(arch_)) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     if (cuda_column_indices_) {
       CUDADriver::get_instance().mem_free.call_with_warning(
           cuda_column_indices_);
@@ -2427,6 +2433,7 @@ SparseBsrPattern::SparseBsrPattern(Program *program,
         cpu_column_indices_);
   } else if (arch_is_cuda(arch)) {
 #if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
     std::vector<int32_t> host_row_offsets(
         static_cast<std::size_t>(block_rows) + 1);
     std::vector<int32_t> host_column_indices(block_nnz_size);
@@ -2543,6 +2550,7 @@ SparseBsrPattern::SparseBsrPattern(Program *program,
 SparseBsrPattern::~SparseBsrPattern() {
 #if defined(TI_WITH_CUDA)
   if (arch_is_cuda(arch_)) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     if (cuda_column_indices_) {
       CUDADriver::get_instance().mem_free.call_with_warning(
           cuda_column_indices_);
@@ -2875,6 +2883,7 @@ CuSparseMatrix::CuSparseMatrix(
   TI_ERROR_IF(!pattern || !arch_is_cuda(pattern->arch()) ||
                   !pattern->program(),
               "Internal CUDA CSR matrices require a CUDA-owned pattern.");
+  auto context_guard = CUDAContext::get_instance().get_guard();
   Program *prog = pattern->program();
   auto &cusparse = CUSPARSEDriver::get_instance();
   if (!cusparse.is_loaded() && !cusparse.load_cusparse()) {
@@ -3085,6 +3094,7 @@ void CuSparseMatrix::reset_spmv_resources() {
 
 void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
 #if defined(TI_WITH_CUDA)
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(pattern_ && prog != pattern_->program(),
               "Internal shared CUDA CSR value updates require the owning "
@@ -3142,6 +3152,7 @@ void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
 
 CuSparseMatrix::~CuSparseMatrix() {
 #if defined(TI_WITH_CUDA)
+  auto context_guard = CUDAContext::get_instance().get_guard();
   reset_triangular_resources();
   reset_spmm_resources();
   reset_spmv_resources();
@@ -3457,6 +3468,7 @@ void CuSparseMatrix::spmv(size_t dX,
                           CUstream stream,
                           bool prepare_only) {
 #if defined(TI_WITH_CUDA)
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   if (!prepare_only)
@@ -3903,6 +3915,7 @@ CuSparseBsrMatrix::CuSparseBsrMatrix(
   TI_ERROR_IF(!pattern || !arch_is_cuda(pattern->arch()) ||
                   !pattern->program(),
               "Internal BSR matrices require a CUDA-owned pattern.");
+  auto context_guard = CUDAContext::get_instance().get_guard();
   Program *prog = pattern->program();
   auto &cusparse = CUSPARSEDriver::get_instance();
   if (!cusparse.is_loaded() && !cusparse.load_cusparse()) {
@@ -3984,6 +3997,7 @@ void CuSparseBsrMatrix::reset_spmv_resources() {
 
 CuSparseBsrMatrix::~CuSparseBsrMatrix() {
 #if defined(TI_WITH_CUDA)
+  auto context_guard = CUDAContext::get_instance().get_guard();
   reset_spmv_resources();
   if (matrix_)
     CUSPARSEDriver::get_instance().cpDestroySpMat(matrix_);
@@ -4008,6 +4022,7 @@ void CuSparseBsrMatrix::spmv(size_t dX,
                              CUstream stream,
                              bool prepare_only) {
 #if defined(TI_WITH_CUDA)
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   if (!prepare_only)
@@ -4104,6 +4119,7 @@ void CuSparseBsrMatrix::nd_spmv_kernel(Program *prog,
 
 void CuSparseBsrMatrix::update_values(Program *prog, const Ndarray &values) {
 #if defined(TI_WITH_CUDA)
+  auto context_guard = CUDAContext::get_instance().get_guard();
   auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(!prog || prog != pattern_->program() ||
                   !arch_is_cuda(prog->compile_config().arch),

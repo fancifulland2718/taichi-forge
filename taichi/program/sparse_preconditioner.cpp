@@ -4,6 +4,7 @@
 #include "taichi/program/program.h"
 
 #if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
 #endif
@@ -503,6 +504,7 @@ SparseJacobiPreconditionerPlan::SparseJacobiPreconditionerPlan(
     TI_ERROR_IF(!cuda_matrix,
                 "CUDA Sparse Jacobi plans currently require scalar CSR "
                 "matrices.");
+    auto context_guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
     driver.memcpy_device_to_host(row_offsets.data(),
                                  cuda_matrix->get_row_ptr(), row_bytes);
@@ -700,6 +702,7 @@ void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
     std::uint32_t status = kSparseRefreshSuccess;
     if (backend_family_ == "cuda") {
 #if defined(TI_WITH_CUDA)
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().memcpy_device_to_host(
           &status,
           reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
@@ -1066,6 +1069,7 @@ SparseBlockJacobiPreconditionerPlan::SparseBlockJacobiPreconditionerPlan(
   } else if (backend_family_ == "cuda") {
 #if defined(TI_WITH_CUDA)
     auto *typed = static_cast<CuSparseBsrMatrix *>(matrix_);
+    auto context_guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
     driver.memcpy_device_to_host(row_offsets.data(),
                                  typed->get_block_row_offsets(), row_bytes);
@@ -1283,6 +1287,7 @@ void SparseBlockJacobiPreconditionerPlan::refresh_numeric(
     std::uint32_t status = kSparseRefreshSuccess;
     if (backend_family_ == "cuda") {
 #if defined(TI_WITH_CUDA)
+      auto context_guard = CUDAContext::get_instance().get_guard();
       CUDADriver::get_instance().memcpy_device_to_host(
           &status,
           reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
