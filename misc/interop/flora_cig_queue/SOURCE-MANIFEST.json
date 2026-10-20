@@ -1,0 +1,66 @@
+{
+  "flora-queue-routing": {
+    "src/Bindings/FloraRenderer.cpp": {
+      "before_normalized_sha256": "88569b1dee92ea38a02e4263ca863bbb393234d2a1371526fc7b99c62dc255a8",
+      "after_normalized_sha256": "8be219b8c681f33f592af2cf951e69190fe497938da89aaf7dae873557f6a340"
+    },
+    "src/Interop/ComputeQueue.h": {
+      "before_normalized_sha256": null,
+      "after_normalized_sha256": "968265fd5bec335111c4c96d954dcc82f803c04eac4a2314c42c00e25b7a00c3"
+    },
+    "src/Interop/SharedFrameStream.cpp": {
+      "before_normalized_sha256": "1b6f6c624c99308c2f7490cbb7cb172265e108260348794a2b9b45848d7e427f",
+      "after_normalized_sha256": "570848272e2faa0e55d15c2fd234d2e405385f47975a276469318121e8ad027a"
+    },
+    "src/Interop/SharedTransformStream.cpp": {
+      "before_normalized_sha256": "1f0e03577e55cc689da492f0f6a47ff1046b47721fbba372ef728c7ea19ee3d6",
+      "after_normalized_sha256": "a6d3fdd05c756b5011825dd4e737f2d0bc3072d838dd1e6c900de5374566f6c2"
+    },
+    "src/RayTracedShadow/AccelerationStructure.cpp": {
+      "before_normalized_sha256": "101d913bca8fc4ad34115e46fa8a9b2d1f551e471b97b76a0128c53fe3b35de8",
+      "after_normalized_sha256": "2b113eef0fbcfae4edc9fb3a3ea509a8e1560e07bc2ee791ecd1706bd10ba1c4"
+    },
+    "src/RayTracedShadow/SceneGeometryProvider.cpp": {
+      "before_normalized_sha256": "3273dae4bcd0e584b200558663934923f2566f42149a9cec6c6393e309c5460a",
+      "after_normalized_sha256": "40bc2306659053b6fa0e47a032b1924133020d96c2c7da4194332db36a4dc7bb"
+    }
+  },
+  "nvrhi-queue-sharing": {
+    "src/vulkan/vulkan-backend.h": {
+      "before_normalized_sha256": "42811179394e096f410f1a43143888f4ac8074515591c4405499be6e7ebc5fb8",
+      "after_normalized_sha256": "956c55857ff8786069022b67380bc7abd9e9cf09fa148284c01dc76c55af1571"
+    },
+    "src/vulkan/vulkan-buffer.cpp": {
+      "before_normalized_sha256": "4878bfc1959dffbe9ed15a38b5f43591d57435953b463041788e8df96fdccd3c",
+      "after_normalized_sha256": "569fec8bf271c1b387301d8df0c0e5541822889498ea304b7766b348c2af24dc"
+    },
+    "src/vulkan/vulkan-device.cpp": {
+      "before_normalized_sha256": "18ec48b8500b45ebe977e9f31050b1473d7908131c5e8ae3f897216aeb492e7a",
+      "after_normalized_sha256": "ac1b86818c0b21252a5de8d426c8092ec7535c02531f5c87e4230f43d3b39890"
+    },
+    "src/vulkan/vulkan-queries.cpp": {
+      "before_normalized_sha256": "112881dbd2098502c07b4e069ae14da5f1638137a9899b90e9dfb27ba7f3765f",
+      "after_normalized_sha256": "42e4eff24e3e579bcb4ae87956fc01b9a0802f51ef68ffe9a17bd8f971df4f62"
+    },
+    "src/vulkan/vulkan-state-tracking.cpp": {
+      "before_normalized_sha256": "cf016210aa767393de2a2af881aea90ff0ac9a8c8db4e2d40e8d4245882544d2",
+      "after_normalized_sha256": "5c2645f4c2bebe7a492d6d331a5e4c432f18a12746f24800219e5d509312b0bd"
+    },
+    "src/vulkan/vulkan-texture.cpp": {
+      "before_normalized_sha256": "207e278b4e3a8f7059d68cc671d17c97ec27630f8fe461abfc7296f5415c22f9",
+      "after_normalized_sha256": "fbceedfec0a26352663a3999d3d05b0c0eabea51f32fbdbd8585c2d7f999268c"
+    }
+  },
+  "donut-queue-initialization": {
+    "src/app/vulkan/DeviceManager_VK.cpp": {
+      "before_normalized_sha256": "a0b5cfb72d62e9642ae22ceb84cc4789570fb43f3b8daae191badfdfab86fc2d",
+      "after_normalized_sha256": "782cdc4d010774ad20e64ee3480855079d4b6853f265d45baf3307c8cee55de1"
+    }
+  },
+  "provenance": {
+    "flora_base": "9251c23f64a770af19dbd243014f4baf1d447d31 plus the existing GeoPhys lifetime/shader candidate and ready integration",
+    "baseline_native_sha256": "7982f09722c153ab8c899c204439b99d711c5c75a471e61b904e42fc13f3e6b6",
+    "candidate_native_sha256": "c242ae1944b6c4674e91b35e982a22a65e30e224350b5edcd784e5a2f581d903",
+    "build_overlay": "The local build compiles isolated source copies. Apply the three patches to their actual repositories for a normal build; the temporary CMake overlay is not a product change."
+  }
+}

@@ -1,0 +1,2 @@
+# Unified patches contain mandatory context spaces on empty source lines.
+*.patch text eol=lf -whitespace

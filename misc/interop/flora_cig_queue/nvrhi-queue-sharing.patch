@@ -1,0 +1,132 @@
+--- a/src/vulkan/vulkan-backend.h
++++ b/src/vulkan/vulkan-backend.h
+@@ -161,6 +161,7 @@
+         vk::Device device;
+         vk::AllocationCallbacks *allocationCallbacks;
+         vk::PipelineCache pipelineCache;
++        std::vector<uint32_t> sharedQueueFamilies;
+ 
+         struct {
+             bool KHR_synchronization2 = false;
+--- a/src/vulkan/vulkan-buffer.cpp
++++ b/src/vulkan/vulkan-buffer.cpp
+@@ -126,6 +126,9 @@
+         if (desc.sharedResourceFlags == SharedResourceFlags::Shared)
+             bufferInfo.setPNext(&externalBuffer);
+ 
++        if (desc.sharedResourceFlags != SharedResourceFlags::Shared && m_Context.sharedQueueFamilies.size() > 1) {
++            bufferInfo.setSharingMode(vk::SharingMode::eConcurrent).setQueueFamilyIndices(m_Context.sharedQueueFamilies);
++        }
+         vk::Result res = m_Context.device.createBuffer(&bufferInfo, m_Context.allocationCallbacks, &buffer->buffer);
+         CHECK_VK_FAIL(res);
+ 
+--- a/src/vulkan/vulkan-device.cpp
++++ b/src/vulkan/vulkan-device.cpp
+@@ -55,6 +55,9 @@
+         , m_Allocator(m_Context)
+         , m_TimerQueryAllocator(desc.maxTimerQueries, true)
+     {
++        if (desc.graphicsQueue && desc.computeQueue && desc.graphicsQueueIndex != desc.computeQueueIndex) {
++            m_Context.sharedQueueFamilies = {uint32_t(desc.graphicsQueueIndex), uint32_t(desc.computeQueueIndex)};
++        }
+         if (desc.graphicsQueue)
+         {
+             m_Queues[uint32_t(CommandQueue::Graphics)] = std::make_unique<Queue>(m_Context,
+--- a/src/vulkan/vulkan-queries.cpp
++++ b/src/vulkan/vulkan-queries.cpp
+@@ -122,6 +122,7 @@
+         assert(query->beginQueryIndex >= 0);
+         assert(!query->started);
+         assert(m_CurrentCmdBuf);
++        m_CurrentCmdBuf->referencedResources.push_back(query);
+ 
+         query->resolved = false;
+ 
+@@ -140,6 +141,7 @@
+         assert(!query->resolved);
+ 
+         assert(m_CurrentCmdBuf);
++        m_CurrentCmdBuf->referencedResources.push_back(query);
+ 
+         m_CurrentCmdBuf->cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_Device->getTimerQueryPool(), query->endQueryIndex);
+         query->started = true;
+--- a/src/vulkan/vulkan-state-tracking.cpp
++++ b/src/vulkan/vulkan-state-tracking.cpp
+@@ -25,6 +25,29 @@
+ 
+ namespace nvrhi::vulkan
+ {
++    // Concurrent resources may return to a graphics initial state on compute.
++    // Their image layout remains unchanged; graphics-only stages/accesses are
++    // represented by queue-supported memory scopes. Inter-queue visibility is
++    // provided by the explicit timeline dependency at the phase boundary.
++    template<class Mapping>
++    static void queueSupportedScope(Mapping& state, CommandQueue queue)
++    {
++        if (queue != CommandQueue::Compute) return;
++        constexpr uint64_t graphicsStages = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
++            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
++            VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
++            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
++            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
++            VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT |
++            VK_PIPELINE_STAGE_TASK_SHADER_BIT_NV | VK_PIPELINE_STAGE_MESH_SHADER_BIT_NV |
++            VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
++        using StageMask = typename decltype(state.stageFlags)::MaskType;
++        if (!(uint64_t(static_cast<StageMask>(state.stageFlags)) & graphicsStages)) return;
++        state.stageFlags = decltype(state.stageFlags)(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
++        if (state.accessMask)
++            state.accessMask = decltype(state.accessMask)(VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
++    }
++
+     
+     void CommandList::setResourceStatesForBindingSet(IBindingSet* _bindingSet)
+     {
+@@ -164,6 +187,8 @@
+         {
+             ResourceStateMapping before = convertResourceState(barrier.stateBefore);
+             ResourceStateMapping after = convertResourceState(barrier.stateAfter);
++            queueSupportedScope(before, m_CommandListParameters.queueType);
++            queueSupportedScope(after, m_CommandListParameters.queueType);
+ 
+             if ((before.stageFlags != beforeStageFlags || after.stageFlags != afterStageFlags) && !imageBarriers.empty())
+             {
+@@ -219,6 +244,8 @@
+         {
+             ResourceStateMapping before = convertResourceState(barrier.stateBefore);
+             ResourceStateMapping after = convertResourceState(barrier.stateAfter);
++            queueSupportedScope(before, m_CommandListParameters.queueType);
++            queueSupportedScope(after, m_CommandListParameters.queueType);
+ 
+             if ((before.stageFlags != beforeStageFlags || after.stageFlags != afterStageFlags) && !bufferBarriers.empty())
+             {
+@@ -262,6 +289,8 @@
+         {
+             ResourceStateMapping2 before = convertResourceState2(barrier.stateBefore);
+             ResourceStateMapping2 after = convertResourceState2(barrier.stateAfter);
++            queueSupportedScope(before, m_CommandListParameters.queueType);
++            queueSupportedScope(after, m_CommandListParameters.queueType);
+ 
+             assert(after.imageLayout != vk::ImageLayout::eUndefined);
+ 
+@@ -308,6 +337,8 @@
+         {
+             ResourceStateMapping2 before = convertResourceState2(barrier.stateBefore);
+             ResourceStateMapping2 after = convertResourceState2(barrier.stateAfter);
++            queueSupportedScope(before, m_CommandListParameters.queueType);
++            queueSupportedScope(after, m_CommandListParameters.queueType);
+ 
+             Buffer* buffer = static_cast<Buffer*>(barrier.buffer);
+ 
+--- a/src/vulkan/vulkan-texture.cpp
++++ b/src/vulkan/vulkan-texture.cpp
+@@ -332,6 +332,9 @@
+         assert(texture);
+         fillTextureInfo(texture, desc);
+ 
++        if (desc.sharedResourceFlags != SharedResourceFlags::Shared && m_Context.sharedQueueFamilies.size() > 1) {
++            texture->imageInfo.setSharingMode(vk::SharingMode::eConcurrent).setQueueFamilyIndices(m_Context.sharedQueueFamilies);
++        }
+         vk::Result res = m_Context.device.createImage(&texture->imageInfo, m_Context.allocationCallbacks, &texture->image);
+         ASSERT_VK_OK(res);
+         CHECK_VK_FAIL(res)

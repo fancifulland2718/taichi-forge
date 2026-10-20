@@ -192,6 +192,20 @@ qualification therefore does not qualify a complete RT renderer. Neither that
 partial workaround nor successful validation-layer runs constitute a production
 fix or performance evidence.
 
+Further controls on the same day isolated the failure to the reserved graphics
+queue family: a second queue in that family still failed, while a dedicated
+compute family passed full-sized transfers and computation. An owner-side
+queue-routing candidate completed real RT rendering, headed simulation and AOT
+consumption. The initial queue candidate gained about 18% physics throughput;
+final-native samples reached about 47 FPS / 140 physics steps per second.
+Performance conclusions must distinguish revisions and background compilation,
+as detailed in the report. An API dump also showed the old
+validation layer dropping the reservation's `pNext`, so its successful run did
+not exercise the same device configuration. See the
+[queue repair and validation scope](cuda_vulkan_cig_queue_validation.en.md).
+The repair belongs to the Vulkan device owner; Forge does not take over its
+render queues, and this repair adds no AOT format or ABI revision.
+
 Headed ordinary-CUDA controls exercised a native readiness query, an exported
 and reloaded AOT output kernel, and a Canvas execution domain. Ready admission
 did not establish a stable application frame-rate improvement; keep it opt-in

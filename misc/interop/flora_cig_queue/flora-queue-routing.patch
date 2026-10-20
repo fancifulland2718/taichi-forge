@@ -1,0 +1,813 @@
+--- a/src/Bindings/FloraRenderer.cpp
++++ b/src/Bindings/FloraRenderer.cpp
+@@ -1,3 +1,4 @@
++#include "../Interop/ComputeQueue.h"
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 xio-md
+ 
+@@ -790,6 +791,7 @@
+             parameters.enableDebugRuntime = options.enable_debug;
+             parameters.enableNvrhiValidationLayer = options.enable_debug;
+             parameters.enableRayTracingExtensions = true;
++            parameters.enableComputeQueue = g_cuda_cig_requested;
+             parameters.maxFramesInFlight = 1;
+ 
+             if (options.enable_external_interop)
+@@ -911,6 +913,9 @@
+             if (!device)
+                 throw std::runtime_error("Vulkan initialization returned no NVRHI device.");
+ 
++            if (g_cuda_cig_requested && flora::interop::work_queue(device) != nvrhi::CommandQueue::Compute)
++                throw std::runtime_error("CiG rendering requires a dedicated Vulkan compute queue.");
++
+             if (device_info.name.empty())
+             {
+                 const std::string selected_name = manager->GetRendererString();
+@@ -1040,10 +1045,35 @@
+             return graphics_queue_state->acquire();
+         }
+ 
++        // Only device timeline dependencies are introduced at pass boundaries.
++        nvrhi::CommandListHandle begin_graphics_phase(nvrhi::ICommandList* work) {
++            if (work->getDesc().queueType == nvrhi::CommandQueue::Graphics) return work;
++            work->close();
++            auto graphics = device->createCommandList();
++            if (!graphics) throw std::runtime_error("Failed to create graphics phase command list.");
++            {
++                auto lock = acquire_graphics_queue();
++                auto id = flora::interop::submit_work(device, work);
++                device->queueWaitForCommandList(nvrhi::CommandQueue::Graphics, work->getDesc().queueType, id);
++            }
++            graphics->open();
++            return graphics;
++        }
++        void end_graphics_phase(nvrhi::ICommandList* work, nvrhi::ICommandList* graphics) {
++            if (work == graphics) return;
++            graphics->close();
++            {
++                auto lock = acquire_graphics_queue();
++                auto id = device->executeCommandList(graphics, nvrhi::CommandQueue::Graphics);
++                device->queueWaitForCommandList(work->getDesc().queueType, nvrhi::CommandQueue::Graphics, id);
++            }
++            work->open();
++        }
++
+         void submit_and_wait(nvrhi::ICommandList* command)
+         {
+             auto lock = acquire_graphics_queue();
+-            device->executeCommandList(command);
++            flora::interop::submit_work(device, command);
+             if (!device->waitForIdle())
+             {
+                 throw std::runtime_error(
+@@ -1056,10 +1086,10 @@
+             nvrhi::IEventQuery* completion)
+         {
+             auto lock = acquire_graphics_queue();
+-            device->executeCommandList(command);
++            flora::interop::submit_work(device, command);
+             device->setEventQuery(
+                 completion,
+-                nvrhi::CommandQueue::Graphics);
++                command->getDesc().queueType);
+         }
+ 
+         void wait_for_graphics_idle()
+@@ -1101,7 +1131,7 @@
+                     "Failed to stat FVLM file for GPU upload: " +
+                     size_error.message());
+ 
+-            auto upload_command = device->createCommandList();
++            auto upload_command = flora::interop::create_work_command(device);
+             if (!upload_command)
+                 throw std::runtime_error("Failed to create the VLM upload command list.");
+             upload_command->open();
+@@ -1217,7 +1247,7 @@
+             device = session->device->getNativeObject(nvrhi::ObjectTypes::VK_Device);
+             if (!vk_device || !device)
+                 throw std::runtime_error("Shared-frame completion requires Vulkan.");
+-            timeline = vk_device->getQueueSemaphore(nvrhi::CommandQueue::Graphics);
++            timeline = vk_device->getQueueSemaphore(flora::interop::work_queue(session->device));
+             auto loader = GetModuleHandleW(L"vulkan-1.dll");
+             auto get_proc = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                 loader ? GetProcAddress(loader, "vkGetDeviceProcAddr") : nullptr);
+@@ -1451,7 +1481,7 @@
+             default_camera.target = {0.0f, 0.0f, 0.0f};
+             cameras.push_back(default_camera);
+ 
+-            command_list = session->device->createCommandList();
++            command_list = flora::interop::create_work_command(session->device);
+             if (!command_list)
+                 throw std::runtime_error("Failed to create a renderer command list.");
+ 
+@@ -1626,7 +1656,7 @@
+             }
+ 
+             if (!batch.command)
+-                batch.command = session->device->createCommandList();
++                batch.command = flora::interop::create_work_command(session->device);
+             if (!batch.completion)
+                 batch.completion = session->device->createEventQuery();
+             if (!batch.command || !batch.completion)
+@@ -2228,12 +2258,15 @@
+             auto pass = std::make_unique<donut::render::LightProbeProcessingPass>(
+                 session->device, session->shader_factory, session->common_passes,
+                 std::max(128u,size), nvrhi::Format::RGBA16_FLOAT);
++            auto reflection_phase = session->begin_graphics_phase(command);
++            auto* reflection_command = reflection_phase.Get();
+             for (std::uint32_t mip=0; mip<levels; ++mip)
+             {
+                 const float r = levels > 1 ? float(mip)/float(levels-1u) : 0.f;
+-                pass->RenderSpecularMap(command, r*r, source->texture,
++                pass->RenderSpecularMap(reflection_command, r*r, source->texture,
+                     nvrhi::TextureSubresourceSet(0,source_desc.mipLevels,0,6), filtered, 0, mip);
+             }
++            session->end_graphics_phase(command, reflection_command);
+             reflection_texture = std::move(source);
+             reflection_specular_map = std::move(filtered);
+             reflection_processing_pass = std::move(pass);
+@@ -2389,7 +2422,9 @@
+                         environment_latlong_texture->texture,
+                         1.0f);
+ 
+-                command->clearDepthStencilTexture(
++                auto conversion_phase = session->begin_graphics_phase(command);
++                auto* conversion_command = conversion_phase.Get();
++                conversion_command->clearDepthStencilTexture(
+                     environment_conversion_depth,
+                     nvrhi::AllSubresources,
+                     true,
+@@ -2397,8 +2432,11 @@
+                     false,
+                     0);
+                 environment_conversion_pass->Render(
+-                    command,
++                    conversion_command,
+                     environment_conversion_view);
++                conversion_command->setPermanentTextureState(environment_source_map,
++                    nvrhi::ResourceStates::ShaderResource);
++                session->end_graphics_phase(command, conversion_command);
+             }
+             else
+             {
+@@ -2418,7 +2456,7 @@
+                         source_size * 4u * sizeof(float));
+                 }
+             }
+-            command->setPermanentTextureState(
++            if (!use_latlong) command->setPermanentTextureState(
+                 environment_source_map,
+                 nvrhi::ResourceStates::ShaderResource);
+ 
+@@ -2463,8 +2501,10 @@
+                     std::max(128u, specular_size),
+                     nvrhi::Format::RGBA16_FLOAT);
+ 
++            auto probe_phase = session->begin_graphics_phase(command);
++            auto* probe_command = probe_phase.Get();
+             light_probe_processing_pass->GenerateCubemapMips(
+-                command,
++                probe_command,
+                 environment_source_map,
+                 0u,
+                 0u,
+@@ -2475,7 +2515,7 @@
+                 0u,
+                 6u);
+             light_probe_processing_pass->RenderDiffuseMap(
+-                command,
++                probe_command,
+                 environment_source_map,
+                 source_subresources,
+                 environment_diffuse_map,
+@@ -2486,7 +2526,7 @@
+                 const float normalized_mip = static_cast<float>(mip) /
+                     static_cast<float>(specular_mip_levels - 1u);
+                 light_probe_processing_pass->RenderSpecularMap(
+-                    command,
++                    probe_command,
+                     normalized_mip * normalized_mip,
+                     environment_source_map,
+                     source_subresources,
+@@ -2494,8 +2534,9 @@
+                     0u,
+                     mip);
+             }
+-            light_probe_processing_pass->RenderEnvironmentBrdfTexture(command);
+-
++            light_probe_processing_pass->RenderEnvironmentBrdfTexture(probe_command);
++
++            session->end_graphics_phase(command, probe_command);
+             environment_probe = std::make_shared<donut::engine::LightProbe>();
+             environment_probe->name = "Flora Studio Environment";
+             environment_probe->diffuseMap = environment_diffuse_map;
+@@ -3182,7 +3223,7 @@
+         {
+             clear_forward(command, resources);
+ 
+-            ensure_environment_resources(command);
++
+             if (environment_enabled && environment_visible &&
+                 environment_source_map)
+             {
+@@ -3512,7 +3553,7 @@
+                 !rt_shadows && prebake_shadows_enabled &&
+                     acceleration.built);
+             const auto& lights = scene->GetSceneGraph()->GetLights();
+-            ensure_environment_resources(command);
++
+             const auto probes = active_environment_probes();
+ 
+             // Fixed VLM publishes per-pixel full-environment coverage in the
+@@ -3570,6 +3611,8 @@
+             radiance_inputs.ambientColorBottom = dm::float3::zero();
+             deferred_pass->Render(command, resources.view, radiance_inputs);
+ 
++            auto overlay_phase = session->begin_graphics_phase(command);
++            auto* overlay_command = overlay_phase.Get();
+             if (environment_enabled && environment_visible &&
+                 environment_source_map && resources.radiance_framebuffer)
+             {
+@@ -3589,7 +3632,7 @@
+                                 : environment_texture_intensity);
+                 }
+                 resources.gi_environment_map_pass->Render(
+-                    command,
++                    overlay_command,
+                     resources.view);
+             }
+ 
+@@ -3606,13 +3649,13 @@
+                     transparent_context;
+                 forward_pass->PrepareLights(
+                     transparent_context,
+-                    command,
++                    overlay_command,
+                     lights,
+                     dm::float3::zero(),
+                     dm::float3::zero(),
+                     probes);
+                 donut::render::RenderCompositeView(
+-                    command,
++                    overlay_command,
+                     &resources.view,
+                     &resources.view,
+                     *resources.radiance_framebuffer,
+@@ -3623,6 +3666,7 @@
+                     "Flora GI Forward Blended Overlay");
+             }
+ 
++            session->end_graphics_phase(command, overlay_command);
+             const auto composite_begin = Clock::now();
+             lighting_composite_pass->render(
+                 command,
+@@ -3760,7 +3804,7 @@
+                 throw std::runtime_error("Failed to create the shadow TLAS.");
+             }
+ 
+-            auto build = session->device->createCommandList();
++            auto build = flora::interop::create_work_command(session->device);
+             if (!build)
+             {
+                 throw std::runtime_error(
+@@ -4224,11 +4268,14 @@
+                 temporal_state.history_valid,
+                 resources.view,
+                 resources.view);
++            auto taa_phase = session->begin_graphics_phase(command);
++            auto* taa_command = taa_phase.Get();
+             session->common_passes->BlitTexture(
+-                command,
++                taa_command,
+                 resources.final_color_framebuffer->GetFramebuffer(
+                     resources.view),
+                 temporal_state.resolved_color);
++            session->end_graphics_phase(command, taa_command);
+             temporal_state.pass->AdvanceFrame();
+             temporal_state.history_valid = true;
+             frame_stats.temporal_aa_ms +=
+@@ -4273,6 +4320,7 @@
+                     ? previous_view_it->second
+                     : resources.view;
+ 
++            ensure_environment_resources(command);
+             const auto raster_begin = Clock::now();
+             if (frame_timers) frame_timers->begin(command, "refresh_tlas");
+             refresh_scene_if_needed(command);
+@@ -4285,25 +4333,28 @@
+                 page_request_readback,
+                 reset_page_requests,
+                 gpu_timers);
++            auto graphics_phase = session->begin_graphics_phase(command);
++            auto* raster_command = graphics_phase.Get();
+             const bool time_cluster_raster =
+                 gpu_timers && cluster_raster_enabled &&
+                 cluster_raster_pass && cluster_gpu_storage;
+             if (time_cluster_raster)
+-                command->beginTimerQuery(gpu_timers->raster);
++                raster_command->beginTimerQuery(gpu_timers->raster);
+             if (gi_pipeline)
+             {
+-                command->clearTextureFloat(resources.area_diffuse, nvrhi::AllSubresources, nvrhi::Color(0.f));
+-                command->clearTextureFloat(resources.area_specular, nvrhi::AllSubresources, nvrhi::Color(0.f));
++                raster_command->clearTextureFloat(resources.area_diffuse, nvrhi::AllSubresources, nvrhi::Color(0.f));
++                raster_command->clearTextureFloat(resources.area_specular, nvrhi::AllSubresources, nvrhi::Color(0.f));
+             }
+             if (gi_pipeline)
+-                render_gbuffer(command, resources, previous_view);
++                render_gbuffer(raster_command, resources, previous_view);
+             else
+-                render_forward(command, resources);
++                render_forward(raster_command, resources);
+             if (time_cluster_raster)
+             {
+-                command->endTimerQuery(gpu_timers->raster);
++                raster_command->endTimerQuery(gpu_timers->raster);
+                 gpu_timers->raster_recorded = true;
+             }
++            session->end_graphics_phase(command, raster_command);
+             record_cluster_hzb(
+                 command, camera_index, resources, gpu_timers);
+             if (frame_timers) frame_timers->end(command, "gbuffer");
+@@ -4791,30 +4842,32 @@
+                         : nullptr,
+                     true,
+                     nullptr);
+-                command_list->clearDepthStencilTexture(
++                auto sensor_phase = session->begin_graphics_phase(command_list);
++                auto* sensor_command = sensor_phase.Get();
++                sensor_command->clearDepthStencilTexture(
+                     resources.depth,
+                     nvrhi::AllSubresources,
+                     true,
+                     1.0f,
+                     false,
+                     0);
+-                command_list->clearTextureFloat(
++                sensor_command->clearTextureFloat(
+                     resources.diffuse,
+                     nvrhi::AllSubresources,
+                     nvrhi::Color(0.0f));
+-                command_list->clearTextureFloat(
++                sensor_command->clearTextureFloat(
+                     resources.specular,
+                     nvrhi::AllSubresources,
+                     nvrhi::Color(0.0f));
+-                command_list->clearTextureFloat(
++                sensor_command->clearTextureFloat(
+                     resources.normals,
+                     nvrhi::AllSubresources,
+                     nvrhi::Color(0.0f));
+-                command_list->clearTextureFloat(
++                sensor_command->clearTextureFloat(
+                     resources.emissive,
+                     nvrhi::AllSubresources,
+                     nvrhi::Color(0.0f));
+-                command_list->clearTextureFloat(
++                sensor_command->clearTextureFloat(
+                     resources.motion_vectors,
+                     nvrhi::AllSubresources,
+                     nvrhi::Color(0.0f));
+@@ -4823,10 +4876,10 @@
+                 if (cluster_raster_enabled && cluster_raster_pass &&
+                     cluster_gpu_storage)
+                 {
+-                    command_list->beginMarker(
++                    sensor_command->beginMarker(
+                         "Flora Cluster A1 Sensor GBuffer");
+                     (void)cluster_raster_pass->render_geometry(
+-                        command_list,
++                        sensor_command,
+                         *cluster_gpu_storage,
+                         resources.view,
+                         resources.view,
+@@ -4835,12 +4888,12 @@
+                         cluster_materials_by_id,
+                         *gbuffer_pass,
+                         gbuffer_context);
+-                    command_list->endMarker();
++                    sensor_command->endMarker();
+                     if (cluster_fallback_opaque)
+                     {
+                         donut::render::GBufferFillPass::Context fallback_context;
+                         donut::render::RenderCompositeView(
+-                            command_list,
++                            sensor_command,
+                             &resources.view,
+                             &resources.view,
+                             *resources.gbuffer_framebuffer,
+@@ -4854,7 +4907,7 @@
+                 else
+                 {
+                     donut::render::RenderCompositeView(
+-                        command_list,
++                        sensor_command,
+                         &resources.view,
+                         &resources.view,
+                         *resources.gbuffer_framebuffer,
+@@ -4865,7 +4918,7 @@
+                         "Flora Sensor GBuffer");
+                 }
+ 
+-                command_list->clearTextureUInt(
++                sensor_command->clearTextureUInt(
+                     resources.identifiers,
+                     nvrhi::AllSubresources,
+                     0);
+@@ -4873,10 +4926,10 @@
+                 if (cluster_raster_enabled && cluster_raster_pass &&
+                     cluster_gpu_storage)
+                 {
+-                    command_list->beginMarker(
++                    sensor_command->beginMarker(
+                         "Flora Cluster A1 Sensor IDs");
+                     (void)cluster_raster_pass->render_geometry(
+-                        command_list,
++                        sensor_command,
+                         *cluster_gpu_storage,
+                         resources.view,
+                         resources.view,
+@@ -4885,12 +4938,12 @@
+                         cluster_materials_by_id,
+                         *id_pass,
+                         id_context);
+-                    command_list->endMarker();
++                    sensor_command->endMarker();
+                     if (cluster_fallback_opaque)
+                     {
+                         donut::render::GBufferFillPass::Context fallback_context;
+                         donut::render::RenderCompositeView(
+-                            command_list,
++                            sensor_command,
+                             &resources.view,
+                             &resources.view,
+                             *resources.id_framebuffer,
+@@ -4904,7 +4957,7 @@
+                 else
+                 {
+                     donut::render::RenderCompositeView(
+-                        command_list,
++                        sensor_command,
+                         &resources.view,
+                         &resources.view,
+                         *resources.id_framebuffer,
+@@ -4915,6 +4968,7 @@
+                         "Flora Sensor IDs");
+                 }
+ 
++                session->end_graphics_phase(command_list, sensor_command);
+                 record_cluster_hzb(
+                     command_list, camera_index, resources, nullptr);
+ 
+@@ -5054,7 +5108,7 @@
+         void ensure_primary_command_list()
+         {
+             if (!command_list)
+-                command_list = session->device->createCommandList();
++                command_list = flora::interop::create_work_command(session->device);
+             if (!command_list)
+             {
+                 throw std::runtime_error(
+@@ -5564,7 +5618,7 @@
+             desc.keepInitialState = true;
+             desc.debugName = "Flora Transform Diagnostic";
+             auto readback = session->device->createBuffer(desc);
+-            auto copy = session->device->createCommandList();
++            auto copy = flora::interop::create_work_command(session->device);
+             if (!readback || !copy)
+             {
+                 throw std::runtime_error(
+@@ -6440,9 +6494,9 @@
+         }
+         m_impl->discard_pending_batches();
+         auto queue_lock=m_impl->session->acquire_graphics_queue();
+-        auto command=m_impl->session->device->createCommandList(); command->open();
++        auto command=flora::interop::create_work_command(m_impl->session->device); command->open();
+         m_impl->vlm_sample_pass->upload_surface_cache(command,charts,ranges,rgba,width,height);
+-        command->close(); m_impl->session->device->executeCommandList(command); m_impl->session->device->waitForIdle();
++        command->close(); flora::interop::submit_work(m_impl->session->device, command); m_impl->session->device->waitForIdle();
+         m_impl->surface_cache_instances=std::move(instances);
+         // Refresh per-view bindings for the new cache generation.
+         m_impl->view_resources.clear();
+@@ -6702,7 +6756,7 @@
+         const auto source_bytes = std::filesystem::file_size(path, size_error);
+         if (size_error)
+             throw std::runtime_error("Failed to stat FVDL: " + size_error.message());
+-        auto command = m_impl->session->device->createCommandList();
++        auto command = flora::interop::create_work_command(m_impl->session->device);
+         if (!command)
+             throw std::runtime_error("Failed to create SparseDelta upload command list.");
+         command->open();
+@@ -6939,7 +6993,7 @@
+             m_impl->make_acceleration_structures();
+         }
+ 
+-        auto command = m_impl->session->device->createCommandList();
++        auto command = flora::interop::create_work_command(m_impl->session->device);
+         if (!command)
+             throw std::runtime_error("Failed to create a shared-frame command list.");
+ 
+@@ -7756,7 +7810,7 @@
+ 
+         if (!m_impl->transform_command_list)
+             m_impl->transform_command_list =
+-                m_impl->session->device->createCommandList();
++                flora::interop::create_work_command(m_impl->session->device);
+         auto command = m_impl->transform_command_list;
+         if (!command)
+             throw std::runtime_error("Failed to create a GPU transform command list.");
+@@ -8071,7 +8125,7 @@
+             m_impl->cluster_decode_pass = std::move(pass);
+         }
+ 
+-        auto command = m_impl->session->device->createCommandList();
++        auto command = flora::interop::create_work_command(m_impl->session->device);
+         if (!command)
+             throw std::runtime_error(
+                 "Failed to create the Flora Cluster A1 upload command list.");
+@@ -8482,7 +8536,7 @@
+         }
+ 
+         const auto upload_begin = Clock::now();
+-        auto command = m_impl->session->device->createCommandList();
++        auto command = flora::interop::create_work_command(m_impl->session->device);
+         if (!command)
+             throw std::runtime_error("Failed to create PreBake upload command list.");
+         std::shared_ptr<flora::shadow::PreBakeShadowGpuStorage> candidate;
+--- /dev/null
++++ b/src/Interop/ComputeQueue.h
+@@ -0,0 +1,17 @@
++#pragma once
++#include <nvrhi/nvrhi.h>
++
++namespace flora::interop {
++// CiG reserves the graphics family for graphics and external CUDA work.
++// The owner enables a dedicated compute queue before creating any resources.
++inline nvrhi::CommandQueue work_queue(nvrhi::IDevice* device) {
++    return device->queryFeatureSupport(nvrhi::Feature::ComputeQueue)
++        ? nvrhi::CommandQueue::Compute : nvrhi::CommandQueue::Graphics;
++}
++inline nvrhi::CommandListHandle create_work_command(nvrhi::IDevice* device) {
++    return device->createCommandList(nvrhi::CommandListParameters().setQueueType(work_queue(device)));
++}
++inline uint64_t submit_work(nvrhi::IDevice* device, nvrhi::ICommandList* command) {
++    return device->executeCommandList(command, command->getDesc().queueType);
++}
++}
+--- a/src/Interop/SharedFrameStream.cpp
++++ b/src/Interop/SharedFrameStream.cpp
+@@ -1,3 +1,4 @@
++#include "ComputeQueue.h"
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 xio-md
+ 
+@@ -72,7 +73,7 @@
+             : context_keepalive(std::move(context)) {
+             auto* vk=static_cast<nvrhi::vulkan::IDevice*>(source->getNativeObject(nvrhi::ObjectTypes::Nvrhi_VK_Device).pointer);
+             device=source->getNativeObject(nvrhi::ObjectTypes::VK_Device);
+-            timeline=vk->getQueueSemaphore(nvrhi::CommandQueue::Graphics);
++            timeline=vk->getQueueSemaphore(work_queue(source));
+             auto proc=reinterpret_cast<PFN_vkGetDeviceProcAddr>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"),"vkGetDeviceProcAddr"));
+             query=proc ? reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(proc(device,"vkGetSemaphoreCounterValue")) : nullptr;
+             if(!timeline || !query) throw std::runtime_error("Shared frame readiness requires Vulkan timeline query.");
+--- a/src/Interop/SharedTransformStream.cpp
++++ b/src/Interop/SharedTransformStream.cpp
+@@ -1,3 +1,4 @@
++#include "ComputeQueue.h"
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 xio-md
+ 
+@@ -215,6 +216,7 @@
+             m_context_keepalive = std::move(context_keepalive);
+             m_graphics_queue_state = std::move(graphics_queue_state);
+             m_device = device;
++            m_work_queue = work_queue(device);
+             m_record_count = record_count;
+             m_slot_count = slot_count;
+ 
+@@ -287,7 +289,7 @@
+ 
+             // A newly-created slot is available to its first producer. Signal all
+             // consumed semaphores in one real queue submission (not host signaling).
+-            nvrhi::CommandListHandle initialization = m_device->createCommandList();
++            nvrhi::CommandListHandle initialization = m_device->createCommandList(nvrhi::CommandListParameters().setQueueType(m_work_queue));
+             if (!initialization)
+                 throw std::runtime_error("Failed to create the semaphore initialization command list.");
+             initialization->open();
+@@ -300,13 +302,13 @@
+                 {
+                     synchronization_registered = true;
+                     m_vulkan_device->queueSignalSemaphore(
+-                        nvrhi::CommandQueue::Graphics,
++                        m_work_queue,
+                         slot.consumed,
+                         0);
+                 }
+                 m_device->executeCommandList(
+                     initialization,
+-                    nvrhi::CommandQueue::Graphics);
++                    m_work_queue);
+                 wait_for_graphics_queue();
+             }
+             catch (...)
+@@ -386,17 +388,17 @@
+             {
+                 auto queue_lock = m_graphics_queue_state->acquire();
+                 m_vulkan_device->queueWaitForSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].ready,
+                     0);
+                 synchronization_registered = true;
+                 m_vulkan_device->queueSignalSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].consumed,
+                     0);
+                 return m_device->executeCommandList(
+                     command_list,
+-                    nvrhi::CommandQueue::Graphics);
++                    m_work_queue);
+             }
+             catch (...)
+             {
+@@ -430,17 +432,17 @@
+             {
+                 auto queue_lock = m_graphics_queue_state->acquire();
+                 m_vulkan_device->queueWaitForSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].consumed,
+                     0);
+                 synchronization_registered = true;
+                 m_vulkan_device->queueSignalSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].ready,
+                     0);
+                 return m_device->executeCommandList(
+                     command_list,
+-                    nvrhi::CommandQueue::Graphics);
++                    m_work_queue);
+             }
+             catch (...)
+             {
+@@ -464,7 +466,7 @@
+             validate_slot(slot);
+ 
+ #ifdef _WIN32
+-            nvrhi::CommandListHandle command_list = m_device->createCommandList();
++            nvrhi::CommandListHandle command_list = m_device->createCommandList(nvrhi::CommandListParameters().setQueueType(m_work_queue));
+             if (!command_list)
+                 throw std::runtime_error("Failed to create a debug-consume command list.");
+ 
+@@ -482,15 +484,15 @@
+             {
+                 auto queue_lock = m_graphics_queue_state->acquire();
+                 m_vulkan_device->queueWaitForSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].ready,
+                     0);
+                 synchronization_registered = true;
+                 m_vulkan_device->queueSignalSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].consumed,
+                     0);
+-                m_device->executeCommandList(command_list, nvrhi::CommandQueue::Graphics);
++                m_device->executeCommandList(command_list, m_work_queue);
+                 wait_for_graphics_queue();
+             }
+             catch (...)
+@@ -534,7 +536,7 @@
+             }
+ 
+ #ifdef _WIN32
+-            nvrhi::CommandListHandle command_list = m_device->createCommandList();
++            nvrhi::CommandListHandle command_list = m_device->createCommandList(nvrhi::CommandListParameters().setQueueType(m_work_queue));
+             if (!command_list)
+                 throw std::runtime_error("Failed to create a debug-publish command list.");
+ 
+@@ -551,15 +553,15 @@
+             {
+                 auto queue_lock = m_graphics_queue_state->acquire();
+                 m_vulkan_device->queueWaitForSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].consumed,
+                     0);
+                 synchronization_registered = true;
+                 m_vulkan_device->queueSignalSemaphore(
+-                    nvrhi::CommandQueue::Graphics,
++                    m_work_queue,
+                     m_slots[slot].ready,
+                     0);
+-                m_device->executeCommandList(command_list, nvrhi::CommandQueue::Graphics);
++                m_device->executeCommandList(command_list, m_work_queue);
+                 wait_for_graphics_queue();
+             }
+             catch (...)
+@@ -749,7 +751,7 @@
+             nvrhi::EventQueryHandle event = m_device->createEventQuery();
+             if (!event)
+                 throw std::runtime_error("Failed to create a graphics-queue completion event.");
+-            m_device->setEventQuery(event, nvrhi::CommandQueue::Graphics);
++            m_device->setEventQuery(event, m_work_queue);
+             m_device->waitEventQuery(event);
+         }
+ #endif
+@@ -834,6 +836,7 @@
+         std::shared_ptr<void> m_context_keepalive;
+         std::shared_ptr<SharedGraphicsQueueState> m_graphics_queue_state;
+         nvrhi::IDevice* m_device = nullptr;
++        nvrhi::CommandQueue m_work_queue = nvrhi::CommandQueue::Graphics;
+         nvrhi::vulkan::IDevice* m_vulkan_device = nullptr;
+         nvrhi::BufferHandle m_shared_buffer;
+         nvrhi::BufferHandle m_readback_buffer;
+--- a/src/RayTracedShadow/AccelerationStructure.cpp
++++ b/src/RayTracedShadow/AccelerationStructure.cpp
+@@ -1,3 +1,4 @@
++#include "../Interop/ComputeQueue.h"
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 xio-md
+ 
+@@ -124,7 +125,7 @@
+     // Build all BLASes in a single command list
+     if (!pending.empty())
+     {
+-        auto cmdList = device->createCommandList();
++        auto cmdList = flora::interop::create_work_command(device);
+         if (!cmdList)
+             throw std::runtime_error(
+                 "Failed to create the BLAS build command list.");
+@@ -134,7 +135,7 @@
+             nvrhi::utils::BuildBottomLevelAccelStruct(cmdList, pending[i].handle, pending[i].desc);
+         }
+         cmdList->close();
+-        device->executeCommandList(cmdList);
++        flora::interop::submit_work(device, cmdList);
+         if (!device->waitForIdle())
+             throw std::runtime_error("Vulkan BLAS build failed while waiting for idle");
+     }
+@@ -202,7 +203,7 @@
+         return result;
+     }
+ 
+-    auto cmdList = device->createCommandList();
++    auto cmdList = flora::interop::create_work_command(device);
+     cmdList->open();
+     cmdList->buildTopLevelAccelStruct(
+         result.tlas,
+@@ -210,7 +211,7 @@
+         instances.size(),
+         nvrhi::rt::AccelStructBuildFlags::PreferFastTrace);
+     cmdList->close();
+-    device->executeCommandList(cmdList);
++    flora::interop::submit_work(device, cmdList);
+     if (!device->waitForIdle())
+         throw std::runtime_error("Vulkan TLAS build failed while waiting for idle");
+ 
+--- a/src/RayTracedShadow/SceneGeometryProvider.cpp
++++ b/src/RayTracedShadow/SceneGeometryProvider.cpp
+@@ -1,3 +1,4 @@
++#include "../Interop/ComputeQueue.h"
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 xio-md
+ 
+@@ -374,7 +375,7 @@
+             throw std::runtime_error(
+                 "Failed to allocate the combined shadow index buffer.");
+ 
+-        auto cmdList = device->createCommandList();
++        auto cmdList = flora::interop::create_work_command(device);
+         if (!cmdList)
+             throw std::runtime_error(
+                 "Failed to create the shadow geometry upload command list.");
+@@ -386,7 +387,7 @@
+         cmdList->writeBuffer(resources.combinedIndexBuffer, allIndices.data(), allIndices.size() * sizeof(uint32_t));
+         cmdList->setPermanentBufferState(resources.combinedIndexBuffer, nvrhi::ResourceStates::ShaderResource);
+         cmdList->close();
+-        device->executeCommandList(cmdList);
++        flora::interop::submit_work(device, cmdList);
+         if (!device->waitForIdle())
+             throw std::runtime_error("Vulkan shadow geometry upload failed");
+     }
+@@ -449,7 +450,7 @@
+     resources.geometryCount = static_cast<uint32_t>(resources.geometryMetas.size());
+ 
+     {
+-        auto cmdList = device->createCommandList();
++        auto cmdList = flora::interop::create_work_command(device);
+         if (!cmdList)
+             throw std::runtime_error(
+                 "Failed to create the shadow metadata upload command list.");
+@@ -507,7 +508,7 @@
+         }
+ 
+         cmdList->close();
+-        device->executeCommandList(cmdList);
++        flora::interop::submit_work(device, cmdList);
+         if (!device->waitForIdle())
+             throw std::runtime_error("Vulkan shadow metadata upload failed");
+     }
