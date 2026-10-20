@@ -4112,9 +4112,12 @@ void VulkanStream::command_sync() {
   std::vector<vkapi::IVkFence> fences;
   {
     std::lock_guard<std::mutex> submission_lock(submission_mutex_);
-    TI_ERROR_IF(submission_batch_depth_ != 0,
-                "Cannot synchronize a Vulkan stream inside an active "
-                "submission batch");
+    // A host readback can synchronize a prefix of an open Graph batch. Submit
+    // its pending commands before waiting, but keep the batch depth so later
+    // segments retain the outer transaction and receive their own tail fence.
+    if (submission_batch_depth_ != 0) {
+      flush_submission_batch_locked();
+    }
     fences.reserve(submitted_cmdbuffers_.size());
     for (const auto &tracked : submitted_cmdbuffers_) {
       fences.push_back(tracked.fence);

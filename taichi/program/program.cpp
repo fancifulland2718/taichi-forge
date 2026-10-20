@@ -7538,6 +7538,25 @@ void Program::synchronize() {
       runtime_completion_tracking_enabled_.exchange(
           true, std::memory_order_acq_rel);
   {
+    // Nested submission scopes share one reader. A synchronous host operation
+    // inside a Graph must yield that reader before waiting for the writer.
+    // Keep the outer SNode/resource guards and TLS scope; restore its reader
+    // after the writer on success and on exceptions, before later segments run.
+    struct ReaderPause {
+      explicit ReaderPause(Program *owner)
+          : program(runtime_completion_detail::active_runtime_submission_program() ==
+                            owner
+                        ? owner
+                        : nullptr) {
+        if (program)
+          program->release_runtime_submission_reader();
+      }
+      ~ReaderPause() {
+        if (program)
+          program->acquire_runtime_submission_reader();
+      }
+      Program *program;
+    } reader_pause(this);
     RuntimeSubmissionWriteScope completion_submission_scope(this);
     try {
       program_impl_->synchronize();
