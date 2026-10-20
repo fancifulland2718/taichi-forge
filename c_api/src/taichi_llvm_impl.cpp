@@ -132,6 +132,7 @@ TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
     cfg.executor = executor_;
     taichi::lang::LLVM::AotModuleParams aot_params;
     aot_params.executor_ = executor_;
+    aot_params.allocation_result_buffer = result_buffer;
     aot_params.kernel_launcher =
         std::make_unique<taichi::lang::cpu::KernelLauncher>(std::move(cfg));
     aot_params.module_path = module_path;
@@ -143,6 +144,7 @@ TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
     cfg.executor = executor_;
     taichi::lang::LLVM::AotModuleParams aot_params;
     aot_params.executor_ = executor_;
+    aot_params.allocation_result_buffer = result_buffer;
     aot_params.kernel_launcher =
         std::make_unique<taichi::lang::cuda::KernelLauncher>(std::move(cfg));
     aot_params.module_path = module_path;
@@ -152,21 +154,8 @@ TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
 #endif
   }
 
-  /* TODO(zhanlue): expose allocate/deallocate_snode_tree_type() to C-API
-     Let's initialize SNodeTrees automatically for now since SNodeTreeType isn't
-     ready yet.
-  */
-  auto *llvm_aot_module =
-      dynamic_cast<taichi::lang::LLVM::LlvmAotModule *>(aot_module.get());
-  TI_ASSERT(llvm_aot_module != nullptr);
-  const auto tree_ids = llvm_aot_module->get_snode_tree_ids();
-  // The module has already validated and reserved its resource mapping.
-  for (int tree_id : tree_ids) {
-    auto *snode_tree = aot_module->get_snode_tree(std::to_string(tree_id));
-    taichi::lang::LLVM::allocate_aot_snode_tree_type(
-        aot_module.get(), snode_tree, this->result_buffer);
-  }
-
+  // The module validates and reserves every tree identity at load time.
+  // Kernel dependencies and explicit root views initialize storage on demand.
   return (TiAotModule)(new AotModule(*this, std::move(aot_module)));
 }
 

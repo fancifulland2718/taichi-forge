@@ -611,6 +611,87 @@ TEST(LlvmAotTest, DenseRelocationCuda) {
 #endif
 }
 
+static void run_demand_root_test(Arch arch) {
+  CompileConfig cfg;
+  cfg.arch = arch;
+  LlvmRuntimeExecutor executor(cfg, nullptr);
+  uint64 *result_buffer = nullptr;
+  executor.materialize_runtime(nullptr, &result_buffer);
+  const char *folder = std::getenv("TAICHI_AOT_FOLDER_PATH");
+  ASSERT_NE(folder, nullptr);
+  auto load = [&]() {
+    LLVM::AotModuleParams params;
+    params.executor_ = &executor;
+    params.module_path = folder;
+    params.allocation_result_buffer = result_buffer;
+    if (arch_is_cpu(arch)) {
+      params.kernel_launcher = std::make_unique<cpu::KernelLauncher>(
+          cpu::KernelLauncher::Config{&executor});
+    } else {
+#ifdef TI_WITH_CUDA
+      params.kernel_launcher = std::make_unique<cuda::KernelLauncher>(
+          cuda::KernelLauncher::Config{&executor});
+#endif
+    }
+    return LLVM::make_aot_module(std::move(params));
+  };
+  auto invoke = [](aot::Module &module, const char *name, bool returns = false) {
+    auto *kernel = module.get_kernel(name);
+    LaunchContextBuilder context(kernel);
+    kernel->launch(context);
+    return returns ? context.get_ret<int>(0) : 0;
+  };
+  auto first = load();
+  auto second = load();
+  ASSERT_EQ(static_cast<LLVM::LlvmAotModule &>(*first).get_num_snode_trees(), 3u);
+  for (int id = 0; id < 6; ++id) {
+    EXPECT_TRUE(executor.has_snode_tree_binding(id));
+    EXPECT_FALSE(executor.has_snode_tree_runtime_state(id));
+  }
+  // Metadata queries must not allocate any root. A view can precede kernels.
+  EXPECT_EQ(first->get_root_storage_view("right").bytes, 16u);
+  EXPECT_FALSE(executor.has_snode_tree_runtime_state(0));
+  EXPECT_TRUE(executor.has_snode_tree_runtime_state(1));
+  EXPECT_FALSE(executor.has_snode_tree_runtime_state(2));
+  EXPECT_EQ(invoke(*first, "peek_right", true), 23);
+  invoke(*first, "bump_right");
+  first->get_root_storage_view("right");
+  EXPECT_EQ(invoke(*first, "peek_right", true), 24);
+  invoke(*first, "bump_left");
+  invoke(*first, "bump_left");
+  EXPECT_EQ(invoke(*first, "peek_left", true), 13);
+  EXPECT_FALSE(executor.has_snode_tree_runtime_state(2));
+  EXPECT_EQ(invoke(*second, "peek_left", true), 11);
+  EXPECT_FALSE(executor.has_snode_tree_runtime_state(4));
+  EXPECT_FALSE(executor.has_snode_tree_runtime_state(5));
+  first.reset();
+  for (int id = 0; id < 3; ++id)
+    EXPECT_FALSE(executor.has_snode_tree_binding(id));
+  auto replacement = load();
+  EXPECT_EQ(invoke(*replacement, "peek_left", true), 11);
+  EXPECT_EQ(invoke(*second, "peek_left", true), 11);
+  replacement.reset();
+  second.reset();
+  for (int id = 0; id < 6; ++id) {
+    EXPECT_FALSE(executor.has_snode_tree_binding(id));
+    EXPECT_FALSE(executor.has_snode_tree_runtime_state(id));
+  }
+}
+
+TEST(LlvmAotTest, DemandRootsCpu) {
+  run_demand_root_test(Arch::x64);
+}
+
+TEST(LlvmAotTest, DemandRootsCuda) {
+#ifdef TI_WITH_CUDA
+  if (!is_cuda_api_available())
+    GTEST_SKIP();
+  run_demand_root_test(Arch::cuda);
+#else
+  GTEST_SKIP();
+#endif
+}
+
 TEST(LlvmAotTest, CpuKernel) {
   CompileConfig cfg;
   cfg.arch = Arch::x64;

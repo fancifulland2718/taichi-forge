@@ -35,8 +35,10 @@ std::string read_artifact(const io::VirtualDir &directory,
 LlvmAotModule::LlvmAotModule(
     const std::string &module_path,
     LlvmRuntimeExecutor *executor,
-    std::unique_ptr<LLVM::KernelLauncher> kernel_launcher)
+    std::unique_ptr<LLVM::KernelLauncher> kernel_launcher,
+    uint64 *allocation_result_buffer)
     : executor_(executor),
+      allocation_result_buffer_(allocation_result_buffer),
       kernel_launcher_(std::move(kernel_launcher)),
       directory_(io::VirtualDir::open(module_path)) {
   TI_ASSERT(executor_ != nullptr);
@@ -168,6 +170,13 @@ LlvmAotModule::LlvmAotModule(
   TI_ERROR_IF(!metadata.initial_root_data.empty() && !dense_root_storage_,
               "AOT initial root state requires relocatable dense trees.");
   aot::validate_initial_root_data(metadata.initial_root_data, root_sizes);
+  if (allocation_result_buffer_) {
+    // Preserve load-time integrity failures without allocating unused device
+    // roots or retaining expanded snapshots. Allocation revalidates the
+    // selected payload, including directory-backed artifacts changed later.
+    for (const auto &entry : metadata.initial_root_data)
+      load_data(entry.sha256, entry.size);
+  }
   root_storage_views_ = aot::load_root_storage_views(*directory_);
   TI_ERROR_IF(!root_storage_views_.empty() && (!relocatable || sparse),
               "AOT root storage views require relocatable dense trees.");
@@ -258,7 +267,10 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
         bindings.emplace(id, tree_bindings_.at(id));
       resolve_aot_tree_ids(*loaded.compiled_data.module, bindings);
     }
-    for (int &id : loaded.used_snode_tree_ids)
+  }
+  for (int &id : loaded.used_snode_tree_ids) {
+    ensure_snode_tree_initialized(id);
+    if (!metadata_.resource_binding.empty())
       id = tree_bindings_.at(id);
   }
   return loaded;
@@ -420,12 +432,25 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
       compiled.get_internal_data());
 }
 
+void LlvmAotModule::ensure_snode_tree_initialized(int logical_tree_id) {
+  TI_ERROR_IF(is_corrupted(), "Cannot initialize an invalid LLVM AOT module.");
+  const int physical_tree_id = tree_bindings_.at(logical_tree_id);
+  if (!allocation_result_buffer_ ||
+      is_snode_tree_initialized(physical_tree_id))
+    return;
+  auto *field = get_snode_tree(std::to_string(logical_tree_id));
+  allocate_aot_snode_tree_type(this, field, allocation_result_buffer_);
+}
+
 LlvmAotModule::RootStorage LlvmAotModule::get_root_storage(int tree_id) {
   const auto binding = tree_bindings_.find(tree_id);
   if (!dense_root_storage_ ||
       binding == tree_bindings_.end() || tree_id < 0 ||
-      static_cast<std::size_t>(tree_id) >= root_storage_sizes_.size() ||
-      !is_snode_tree_initialized(binding->second))
+      static_cast<std::size_t>(tree_id) >= root_storage_sizes_.size())
+    throw std::invalid_argument(
+        "AOT root storage requires an initialized module-local dense tree");
+  ensure_snode_tree_initialized(tree_id);
+  if (!is_snode_tree_initialized(binding->second))
     throw std::invalid_argument(
         "AOT root storage requires an initialized module-local dense tree");
   return {executor_->get_snode_tree_device_ptr(binding->second),
@@ -508,7 +533,8 @@ void allocate_aot_snode_tree_type(aot::Module *aot_module,
 std::unique_ptr<aot::Module> make_aot_module(AotModuleParams mod_params) {
   return std::make_unique<LlvmAotModule>(mod_params.module_path,
                                          mod_params.executor_,
-                                         std::move(mod_params.kernel_launcher));
+                                         std::move(mod_params.kernel_launcher),
+                                         mod_params.allocation_result_buffer);
 }
 
 }  // namespace LLVM

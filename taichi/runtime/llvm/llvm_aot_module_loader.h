@@ -20,7 +20,8 @@ class LlvmAotModule final : public aot::Module {
  public:
   explicit LlvmAotModule(const std::string &module_path,
                          LlvmRuntimeExecutor *executor,
-                         std::unique_ptr<LLVM::KernelLauncher> kernel_launcher);
+                         std::unique_ptr<LLVM::KernelLauncher> kernel_launcher,
+                         uint64 *allocation_result_buffer = nullptr);
   ~LlvmAotModule() override;
 
   Arch arch() const override {
@@ -66,6 +67,7 @@ class LlvmAotModule final : public aot::Module {
       const std::string &name) override;
 
  protected:
+  void ensure_snode_tree_initialized(int logical_tree_id);
   RootStorage get_root_storage(int tree_id) override;
   const io::VirtualDir *data_source() const override {
     return directory_.get();
@@ -91,6 +93,9 @@ class LlvmAotModule final : public aot::Module {
   std::unique_ptr<aot::Field> make_new_field(const std::string &name) override;
 
   LlvmRuntimeExecutor *const executor_{nullptr};
+  // Non-null for runtime-owned modules. Native callers that allocate trees
+  // explicitly retain their existing allocation contract.
+  uint64 *const allocation_result_buffer_{nullptr};
   std::unique_ptr<LLVM::KernelLauncher> kernel_launcher_{nullptr};
   std::unique_ptr<LlvmOfflineCacheFileReader> cache_reader_{nullptr};
   DeviceCapabilityConfig required_caps_;
@@ -113,6 +118,7 @@ struct TI_DLL_EXPORT AotModuleParams {
   std::string module_path;
   LlvmRuntimeExecutor *executor_{nullptr};
   std::unique_ptr<LLVM::KernelLauncher> kernel_launcher{nullptr};
+  uint64 *allocation_result_buffer{nullptr};
 };
 
 TI_DLL_EXPORT std::unique_ptr<aot::Module> make_aot_module(

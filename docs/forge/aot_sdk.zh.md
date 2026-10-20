@@ -2230,6 +2230,15 @@ baseline。若后续后端编译失败，该模块不能保存，须新建模块
 CPU/CUDA 的 LLVM 模块和 Vulkan 模块均可直接加载 `.tcm`。加载器保留压缩归档字节，
 按需读取内核载荷，不需要将整个归档展开到临时目录。
 
+CPU/CUDA 的 runtime-owned LLVM 模块也按实际使用初始化根存储：加载时校验元数据和
+已声明的初始快照，并保留全部树 ID；准备 kernel 或访问 `module_array` 根视图时，
+只分配其依赖的根并恢复初值。后续入口共享已修改的状态，不会重新初始化。未使用的根
+不分配设备存储，关闭时仍释放其保留的身份。目录源在加载后被修改时，首次初始化会
+重新校验对应快照；失败的模块不可继续使用，应关闭后重新加载。
+此行为需要配对的 private ABI 127 组件，产物格式不变；Vulkan 沿用其资源加载路径。
+Windows CPU/CUDA 检查覆盖按需分配数量、视图先于 kernel、实际梯度、非 demoted dense
+列表、多模块及独立/借用的失败退休；Vulkan 的初值、根视图和梯度回归通过。
+
 `Module.archive()` 默认省略 LLVM 的调试用 `metadata.json` 和缓存锁文件。
 CPU/CUDA 仍使用原有的 `metadata.tcb` 与 `aot_metadata.json`；Vulkan 加载所需的
 `metadata.json` 始终保留。需要调试文件时使用

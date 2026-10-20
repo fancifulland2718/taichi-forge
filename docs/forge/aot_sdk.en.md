@@ -2914,6 +2914,20 @@ CPU/CUDA LLVM modules and Vulkan modules can load directly from `.tcm` files.
 The loader retains compressed archive bytes and reads kernel payloads on demand;
 it does not extract the whole archive to a temporary directory.
 
+Runtime-owned CPU/CUDA LLVM modules also initialize root storage on demand.
+Loading validates metadata and declared initial snapshots and reserves all tree
+identities. Preparing a kernel or accessing a `module_array` root view allocates
+only its dependencies and restores their initial state. Later entries share
+modified state without reinitialization. Unused roots consume no device storage;
+closing the module still releases their reserved identities. If a directory
+source changes after loading, first initialization revalidates the selected
+snapshot. A failed module must be closed and reloaded before further use.
+This requires matching private ABI 127 components without changing artifact
+formats; Vulkan retains its resource-loading path. Windows CPU/CUDA checks cover
+allocation counts, views before kernels, actual gradients, non-demoted dense
+lists, multiple modules and standalone/borrowed failure retirement. Vulkan
+initial-state, root-view and gradient regressions also pass.
+
 `Module.archive()` omits LLVM's diagnostic `metadata.json` and cache lock file
 by default. CPU/CUDA loading still uses the unchanged `metadata.tcb` and
 `aot_metadata.json`; Vulkan's required `metadata.json` remains in the archive.
