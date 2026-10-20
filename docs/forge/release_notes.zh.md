@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 轻量 AOT 消费端通过模块布局查询支持固定 AoS 数组；普通／固定 kernel、Graph 和
+  显式计划共用既有原生绑定合同，可组合下游浮点反向，无需 DSL/NumPy 或新增原生 ABI。
+
 - AOT 原生 transform 支持 CPU/CUDA/Vulkan 紧凑向量／矩阵 Field，保留模块存储、
   已选 CPU 调度、CUDA 一次展平 launch 与 Vulkan packed dispatch；不新增 packing
   kernel 或复制，需配套私有 ABI115 组件。

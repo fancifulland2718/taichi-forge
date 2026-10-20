@@ -182,6 +182,17 @@ class NamedBinding(C.Structure):
     _fields_ = [("name", C.c_char_p), ("layout_version", UInt), ("layout", Handle), ("gradient", C.POINTER(NdArray))]
 
 
+class NdArrayLayoutInfo(C.Structure):
+    _fields_ = [("version", UInt), ("member_count", UInt), ("element_stride", C.c_uint64), ("alignment", C.c_uint64)]
+
+
+class NdArrayLayoutMember(C.Structure):
+    _fields_ = [
+        ("path", C.c_char_p), ("scalar_type", UInt), ("element_shape", Shape),
+        ("offset", C.c_uint64), ("size", C.c_uint64), ("alignment", C.c_uint64),
+    ]
+
+
 class BindingFamilyInfo(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in ("identity", "bindings", "executables", "resource_bytes")]
 
@@ -276,6 +287,16 @@ class Api:
             "ti_destroy_aot_module": ([Handle], None),
             "ti_get_aot_module_kernel": ([Handle, C.c_char_p], Handle),
             "ti_get_aot_module_compute_graph": ([Handle, C.c_char_p], Handle),
+            "ti_get_kernel_ndarray_layout_ext": ([Handle, Handle, UInt], Handle),
+            "ti_get_compute_graph_ndarray_layout_ext": ([Handle, Handle, C.c_char_p], Handle),
+            "ti_get_ndarray_layout_info_ext": ([Handle, Handle, C.POINTER(NdArrayLayoutInfo)], None),
+            "ti_get_ndarray_layout_member_ext": ([Handle, Handle, UInt, C.POINTER(NdArrayLayoutMember)], None),
+            "ti_launch_kernel_with_bindings_ext": (
+                [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding)], None,
+            ),
+            "ti_launch_compute_graph_with_bindings_ext": (
+                [Handle, Handle, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)], None,
+            ),
             "ti_prepare_kernel_ext": ([Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding)], Handle),
             "ti_prepare_compute_graph_ext": (
                 [Handle, Handle, UInt, C.POINTER(NamedArgument), UInt, C.POINTER(NamedBinding)],

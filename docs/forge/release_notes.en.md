@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- The lightweight AOT consumer accepts fixed-AoS arrays through module-owned
+  layout queries. Ordinary and prepared kernel/Graph calls and explicit plans
+  share the existing native binding contract, including downstream float AD;
+  no DSL/NumPy import or new native ABI is required.
+
 - AOT native transforms accept packed vector/matrix Fields on CPU/CUDA/Vulkan,
   preserving module storage and the selected CPU policy, single flat CUDA
   launch and packed Vulkan dispatch. No packing kernels or copies are added;

@@ -1,10 +1,10 @@
 """AOT resource owners and ordinary entry binding, independent of the DSL.
 
-This consumer covers ordinary kernels/CGraphs and primitive or tensor ndarrays.
+This consumer covers ordinary kernels/CGraphs and primitive, tensor or fixed-AoS ndarrays.
 Fixed recordings support loaded kernels, declared native operations and private arrays.
 Explicit JIT borrowers can import scalar/tensor ndarrays with storage leases;
 Synchronized CUDA external linear buffers can be imported for selected-domain
-recipes without the DSL; structure arrays are not exposed here.
+recipes without the DSL. Structure arrays use layouts queried from loaded entries.
 Host transfers are explicit; kernel calls use device
 allocations directly. Close resources explicitly or use Runtime as a context
 manager. ``bind()`` reuses Python argument descriptors across submissions.
@@ -27,6 +27,7 @@ from .. import _native
 from . import _c_api as abi
 from ._c_api import AotError
 from ._completion import SubmissionTicket
+from ._struct import StructLayout
 
 __all__ = [
     "AotError",
@@ -336,11 +337,19 @@ class Runtime:
 
         Usage describes the native allocation, not access synchronization.
         Include ``storage`` when the same array is passed to an AOT kernel.
+        ``dtype`` can be a scalar name or a StructLayout queried from a loaded
+        entry. Structure arrays use the exported AoS stride and whole-record IO.
         """
         with self._lock:
             self._check()
-            code, _, width = _dtype(dtype)
             shape, element_shape = _shape(shape), _shape(element_shape)
+            if isinstance(dtype, StructLayout):
+                dtype._check(self)
+                if element_shape:
+                    raise ValueError("A structure array cannot have an element_shape")
+                code, width = 13, dtype.element_stride
+            else:
+                code, _, width = _dtype(dtype)
             size = math.prod(shape) * math.prod(element_shape) * width
             if size > 0xFFFFFFFFFFFFFFFF:
                 raise ValueError("Array byte size exceeds uint64")
@@ -730,6 +739,8 @@ class NdArray:
         if self._memory._runtime is not runtime:
             raise ValueError("An ndarray belongs to a different AOT runtime")
         self._memory._check()
+        if isinstance(self.dtype, StructLayout):
+            self.dtype._check(runtime)
         return abi.NdArray(
             self._memory._handle,
             _native_shape(self.shape),
@@ -863,6 +874,8 @@ def _argument(runtime, value, owners):
         result = abi.Argument()
         result.type, result.value.ndarray = 2, value._descriptor(runtime)
         owners.append(value._memory)
+        if isinstance(value.dtype, StructLayout):
+            owners.append(value.dtype._module)
         return result
     if isinstance(value, Scalar):
         return value._argument()
@@ -873,6 +886,24 @@ def _argument(runtime, value, owners):
     raise TypeError("AOT arguments must be ndarrays, NativeResource, Scalar, int or float")
 
 
+def _layout_binding(key, value, *, named=False):
+    if isinstance(value, NdArray) and isinstance(value.dtype, StructLayout):
+        kind = abi.NamedBinding if named else abi.Binding
+        return kind(_name(key) if named else key, value.dtype.version, value.dtype._handle, None)
+    return None
+
+
+def _gradient_binding(runtime, key, primal, gradient, owners, *, named=False):
+    if not isinstance(primal, NdArray) or not isinstance(gradient, NdArray):
+        raise TypeError("A gradient and its primal must be NdArrays")
+    if isinstance(primal.dtype, StructLayout) or isinstance(gradient.dtype, StructLayout):
+        raise ValueError("Structure ndarray gradients are not supported")
+    kind = abi.NamedBinding if named else abi.Binding
+    descriptor = gradient._descriptor(runtime)
+    owners.append(gradient._memory)
+    return kind(_name(key) if named else key, 0, None, C.pointer(descriptor))
+
+
 class BoundCall:
     """Fixed Python argument descriptors submitted through the public C API.
 
@@ -880,8 +911,8 @@ class BoundCall:
     retain modules and allocations until the runtime finishes submitted work.
     """
 
-    def __init__(self, entry, arguments, gradients, owners):
-        self._entry, self._arguments, self._gradients = entry, arguments, gradients
+    def __init__(self, entry, arguments, bindings, owners):
+        self._entry, self._arguments, self._bindings = entry, arguments, bindings
         self._owners = tuple(dict.fromkeys(owners))
 
     def run(self):
@@ -894,9 +925,9 @@ class BoundCall:
             # Even a failing launch may have submitted earlier native work.
             runtime._pending.update(self._owners)
             function = (
-                runtime._api.ti_launch_compute_graph_with_gradients_ext
+                runtime._api.ti_launch_compute_graph_with_bindings_ext
                 if isinstance(self._entry, Graph)
-                else runtime._api.ti_launch_kernel_with_gradients_ext
+                else runtime._api.ti_launch_kernel_with_bindings_ext
             )
             runtime._api.call(
                 function,
@@ -904,8 +935,8 @@ class BoundCall:
                 self._entry._handle,
                 len(self._arguments),
                 self._arguments,
-                len(self._gradients),
-                self._gradients,
+                len(self._bindings),
+                self._bindings,
             )
 
     __call__ = run
@@ -917,18 +948,6 @@ class BoundCall:
             for owner in self._owners:
                 owner._check()
             graph = isinstance(self._entry, Graph)
-            binding_type = abi.NamedBinding if graph else abi.Binding
-            bindings = (binding_type * len(self._gradients))(
-                *[
-                    binding_type(
-                        gradient.name if graph else gradient.argument_index,
-                        0,
-                        None,
-                        C.pointer(gradient.gradient),
-                    )
-                    for gradient in self._gradients
-                ]
-            )
             function = runtime._api.ti_prepare_compute_graph_ext if graph else runtime._api.ti_prepare_kernel_ext
             handle = runtime._api.call(
                 function,
@@ -936,8 +955,8 @@ class BoundCall:
                 self._entry._handle,
                 len(self._arguments),
                 self._arguments,
-                len(bindings),
-                bindings,
+                len(self._bindings),
+                self._bindings,
             )
             return PreparedCall(runtime, handle, self._owners)
 
@@ -1123,6 +1142,29 @@ class PreparedCall(_Resource):
 class Kernel:
     def __init__(self, module, handle):
         self._module, self._handle = module, handle
+        self._layouts = {}
+
+    def ndarray_layout(self, argument):
+        """Query and cache an exported structure argument's immutable AoS ABI.
+
+        Pass a kernel argument index, or a Graph argument name. Use the result
+        as Runtime.ndarray's dtype and pack records using its member offsets.
+        """
+        runtime = self._module._runtime
+        named = isinstance(self, Graph)
+        key = _name(argument) if named else operator.index(argument)
+        if not named and not 0 <= key <= 0xFFFFFFFF:
+            raise ValueError("Argument index must fit uint32")
+        with runtime._lock:
+            self._module._check()
+            if key not in self._layouts:
+                query = (
+                    runtime._api.ti_get_compute_graph_ndarray_layout_ext if named
+                    else runtime._api.ti_get_kernel_ndarray_layout_ext
+                )
+                handle = runtime._api.call(query, runtime._handle, self._handle, key)
+                self._layouts[key] = StructLayout._query(self._module, handle)
+            return self._layouts[key]
 
     def bind(self, *arguments, gradients=None):
         runtime = self._module._runtime
@@ -1130,16 +1172,16 @@ class Kernel:
             self._module._check()
             owners = [self._module]
             native = (abi.Argument * len(arguments))(*[_argument(runtime, value, owners) for value in arguments])
-            bindings = []
+            bindings = [
+                binding for index, value in enumerate(arguments)
+                if (binding := _layout_binding(index, value)) is not None
+            ]
             for index, gradient in (gradients or {}).items():
                 index = operator.index(index)
                 if not 0 <= index < len(arguments) or not isinstance(arguments[index], NdArray):
                     raise ValueError("Gradient indices must refer to ndarray arguments")
-                if not isinstance(gradient, NdArray):
-                    raise TypeError("A gradient must be an NdArray")
-                bindings.append(abi.Gradient(index, gradient._descriptor(runtime)))
-                owners.append(gradient._memory)
-            return BoundCall(self, native, (abi.Gradient * len(bindings))(*bindings), owners)
+                bindings.append(_gradient_binding(runtime, index, arguments[index], gradient, owners))
+            return BoundCall(self, native, (abi.Binding * len(bindings))(*bindings), owners)
 
     def run(self, *arguments, gradients=None):
         self.bind(*arguments, gradients=gradients).run()
@@ -1162,15 +1204,15 @@ class Graph(Kernel):
                     for name, value in arguments.items()
                 ]
             )
-            bindings = []
+            bindings = [
+                binding for name, value in arguments.items()
+                if (binding := _layout_binding(name, value, named=True)) is not None
+            ]
             for name, gradient in (gradients or {}).items():
                 if name not in arguments or not isinstance(arguments[name], NdArray):
                     raise ValueError("Gradient names must refer to ndarray arguments")
-                if not isinstance(gradient, NdArray):
-                    raise TypeError("A gradient must be an NdArray")
-                bindings.append(abi.NamedGradient(_name(name), gradient._descriptor(runtime)))
-                owners.append(gradient._memory)
-            return BoundCall(self, native, (abi.NamedGradient * len(bindings))(*bindings), owners)
+                bindings.append(_gradient_binding(runtime, name, arguments[name], gradient, owners, named=True))
+            return BoundCall(self, native, (abi.NamedBinding * len(bindings))(*bindings), owners)
 
     def run(self, arguments, *, gradients=None):
         self.bind(arguments, gradients=gradients).run()

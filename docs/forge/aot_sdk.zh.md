@@ -1450,7 +1450,8 @@ CPU/CUDA 稀疏树的版本与固定执行合同见下文资源章节；其他�
 
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
 选择同一套兼容核心和资源。Python 消费入口支持本文列出的 texture、native resource
-和执行计划，以及显式借用 owner 的 ndarray/texture 导入；尚不包括结构数组、任意
+和执行计划，以及显式借用 owner 的 ndarray/texture 导入；固定 AoS 结构数组使用下文的
+模块布局接口。尚不包括任意
 外部设备内存或未声明的 native Graph/provider。不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
 后端的前向/反向与两种 AOT/JIT 加载顺序。
 
@@ -3402,6 +3403,32 @@ C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用�
 须在 `caps` 声明 `spirv_has_int8`、`spirv_has_int16`、
 `spirv_has_int8_storage`、`spirv_has_int16_storage`。
 
+轻量 Python 消费端直接复用这套模块 ABI：
+
+```python
+kernel = module.kernel("update")
+layout = kernel.ndarray_layout(0)  # Graph 使用 graph.ndarray_layout("records")
+records = runtime.ndarray(layout, 17)
+payload = bytearray(records.nbytes)
+# 按 layout.element_stride 和 layout.member(path).offset 组织完整记录。
+records.write(payload)
+call = kernel.prepare(records, output)
+call.run()
+runtime.wait()
+```
+
+`StructLayout.members` 是不可变的 `StructMember` 元组，提供点分路径、dtype、
+element_shape、offset、size 与 alignment。entry 缓存布局查询，反复 bound/prepared
+执行不查询或重建成员表。完整记录的字节传输使用查询所得 ABI，无 NumPy 或 DSL 依赖。
+普通 kernel/Graph、prepared call 和显式 ExecutionPlan 均可绑定，并与普通 ndarray
+梯度共存；结构数组自身仍不支持梯度。关闭模块后其布局失效，数组保留分配 owner，
+在途执行沿用既有退休合同。捕获 StructNdarray 的自动导出和任意成员 stride 仍是后续资源合同。
+
+Windows CPU/CUDA/Vulkan 验证包括嵌套 i8/u16/f32、向量/矩阵成员、padding 保持、
+普通/固定/计划执行、真实后段浮点反向、空数组、Graph 写入前拒绝、双模块和在途退休，
+另有 Vulkan 同步验证。相同后端的原标量/tensor 消费回归通过。本项复用原生 ABI 和计划格式，
+不增加 kernel 或设备 workspace。
+
 初始化时通过 `ti_get_kernel_ndarray_layout_ext` 或
 `ti_get_compute_graph_ndarray_layout_ext` 获取模块拥有的 `TiNdArrayLayout`。
 使用 `ti_get_ndarray_layout_info_ext` 和 `ti_get_ndarray_layout_member_ext`
@@ -3422,8 +3449,8 @@ dispatch 前报错；Graph 会在第一项 dispatch 前检查全部结构与梯�
 与使用需要串行协调。
 
 含结构的 Graph 使用 `graphs.v2.json`；仅标量/tensor 数组的 Graph 保留旧表示。
-新 loader 同时读取两种格式，旧 loader 不能消费结构 Graph。本范围是直接调用与普通
-CGraph，不包含任意 stride/切片、指针成员、结构梯度或 native Graph capture。
+新 loader 同时读取两种格式，旧 loader 不能消费结构 Graph。本范围包括直接调用、普通
+CGraph 及其固定准备，不包含任意 stride/切片、指针成员或结构梯度。
 Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重绑定、退休，以及
 同一 Graph 中结构前向工作与显式绑定的普通 ndarray 反向微分组合。
 

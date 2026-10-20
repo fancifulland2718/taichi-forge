@@ -1866,7 +1866,8 @@ management to GC timing. Optional `library_path` and `runtime_path` select the
 shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
 core/resource set. The Python consumer supports the textures, native resources,
 execution plans and explicit owner-borrowed ndarray/texture imports described
-here. Structure arrays, arbitrary external device memory and undeclared native
+here. Fixed-AoS structure arrays use the module layouts described below.
+Arbitrary external device memory and undeclared native
 Graphs/providers remain outside that contract; the C/C++
 capabilities below are separate. Windows x64 checks cover all three backends,
 forward/reverse work and both AOT/JIT loading orders.
@@ -4453,6 +4454,38 @@ types still require the target capabilities; for example, Vulkan modules using
 8/16-bit integers must declare `spirv_has_int8`, `spirv_has_int16`,
 `spirv_has_int8_storage` and `spirv_has_int16_storage` in `caps`.
 
+The lightweight Python consumer uses the same module-owned ABI:
+
+```python
+kernel = module.kernel("update")
+layout = kernel.ndarray_layout(0)  # graph.ndarray_layout("records") for a Graph
+records = runtime.ndarray(layout, 17)
+payload = bytearray(records.nbytes)
+# Pack whole records using layout.element_stride and layout.member(path).offset.
+records.write(payload)
+call = kernel.prepare(records, output)
+call.run()
+runtime.wait()
+```
+
+`StructLayout.members` is an immutable tuple of `StructMember` records with
+dotted path, dtype, element_shape, offset, size and alignment. The entry caches
+its layout query; repeated bound/prepared execution does not query or rebuild
+member tables. Whole-record buffers use the queried ABI, without a NumPy or DSL
+dependency. Ordinary kernels/Graphs, prepared calls and explicit ExecutionPlans
+accept these arrays alongside primitive/tensor gradient bindings. Struct arrays
+themselves cannot carry gradients. Closing the module invalidates its layout;
+arrays retain their allocation owner, and submitted work uses the existing
+retirement contract. Private captured StructNdarray export and arbitrary member
+strides remain separate resource contracts.
+
+Windows CPU/CUDA/Vulkan checks cover nested i8/u16/f32 records with vector/matrix
+members, unchanged padding, ordinary/prepared/plan calls, downstream float AD,
+empty arrays, rejection before Graph writes, independent modules and in-flight
+retirement, including Vulkan synchronization validation. Existing scalar/tensor
+consumers pass the same backend regression set. This addition reuses the native
+ABI and plan format; it adds no kernel or device workspace.
+
 Obtain a module-owned `TiNdArrayLayout` once with
 `ti_get_kernel_ndarray_layout_ext` or
 `ti_get_compute_graph_ndarray_layout_ext`. Query its version, element stride,
@@ -4481,8 +4514,8 @@ their runtime and serialize host-side module/binding lifetime changes with use.
 
 Structure Graphs use `graphs.v2.json`; primitive/tensor-only Graphs retain the
 old representation. New loaders read both; old loaders cannot consume structure
-Graph exports. This covers direct calls and ordinary CGraphs, not arbitrary
-strides/slices, pointer members, structure gradients or native Graph capture.
+Graph exports. This covers direct calls, ordinary CGraphs and their fixed
+preparation, not arbitrary strides/slices, pointer members or structure gradients.
 Small Windows CPU/CUDA/Vulkan and CUDA PTX consumers verify nested mixed-type
 records, rebinding, retirement, and Graphs combining structure forward work
 with explicitly bound primitive-array reverse differentiation.
