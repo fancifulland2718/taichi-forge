@@ -9,9 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Combined CUDA execution domains, prepared CPU storage and executor host pools.
-// Reject either independently built parent pair before crossing the boundary.
-inline constexpr int kForgeNativeAbiRevision = 116;
+// Native array bindings carry optional affine layout facts across this boundary.
+inline constexpr int kForgeNativeAbiRevision = 117;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

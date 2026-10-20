@@ -64,6 +64,7 @@ list(REMOVE_ITEM TAICHI_TESTS_SOURCE
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/struct_layout_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/execution_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_array_contract_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/fixed_branch_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/host_branch_contract_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/ordered_storage_ring_test.cpp")
