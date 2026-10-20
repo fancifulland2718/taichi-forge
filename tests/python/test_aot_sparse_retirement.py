@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import shutil
+import struct
 import zipfile
 
 import pytest
@@ -51,6 +52,52 @@ def test_aot_vulkan_sparse_fixed_execution(tmp_path, pool):
     _sparse_module(tmp_path, None, consumer="aot_sparse_fixed_probe.py", export_extra=export_growth)
 
 
+@pytest.mark.parametrize("ballot", [False, True], ids=["atomic", "ballot"])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_aot_vulkan_sparse_listgen_ballot(tmp_path, ballot):
+    with ti.aot.borrow_runtime() as runtime:
+        if not runtime.device_capabilities().get("spirv_has_subgroup_ballot", 0):
+            pytest.skip("Vulkan device lacks subgroup ballot")
+    ti.cfg.spirv_listgen_subgroup_ballot = ballot
+    ti.cfg.vulkan_pointer_independent_pool = True
+
+    def inspect_artifact(artifact):
+        instructions = {339: 0, 342: 0}  # GroupNonUniformBallot / BallotBitCount.
+        shaders = 0
+        with zipfile.ZipFile(artifact) as archive:
+            for name in archive.namelist():
+                if not name.endswith(".spv"):
+                    continue
+                shaders += 1
+                data = archive.read(name)
+                words = struct.unpack(f"<{len(data) // 4}I", data)
+                offset = 5
+                while offset < len(words):
+                    size, opcode = words[offset] >> 16, words[offset] & 0xFFFF
+                    assert size and offset + size <= len(words), name
+                    if opcode in instructions:
+                        instructions[opcode] += 1
+                    offset += size
+        assert shaders
+        assert all(
+            (count > 0) == ballot for count in instructions.values()
+        ), instructions
+        (tmp_path / "ballot-shaders.json").write_text(
+            json.dumps(
+                dict(enabled=ballot, shaders=shaders, instructions=instructions)
+            ),
+            encoding="utf-8",
+        )
+
+    _sparse_module(
+        tmp_path,
+        None,
+        consumer="aot_sparse_fixed_probe.py",
+        aot_caps=["spirv_has_subgroup_basic", "spirv_has_subgroup_ballot"],
+        inspect_artifact=inspect_artifact,
+    )
+
+
 def _make_list_growth_export(tmp_path):
     # A separate module grows the shared list after the consumer has
     # recorded its first module. Only one sparse cell is ever touched.
@@ -74,7 +121,16 @@ def _make_list_growth_export(tmp_path):
     return export_growth
 
 
-def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=None, consumer=None):
+def _sparse_module(
+    tmp_path,
+    artifact_format,
+    multilevel=False,
+    *,
+    export_extra=None,
+    consumer=None,
+    aot_caps=None,
+    inspect_artifact=None,
+):
     # Ensure the producer tree ID differs from the compact artifact ID.
     unrelated = ti.field(ti.i32, shape=1)
     unrelated[0] = 7
@@ -132,6 +188,8 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=
         if artifact_format == "cubin"
         else None
     )
+    if aot_caps is not None:
+        caps = aot_caps
     module = ti.aot.Module(artifact_format=artifact_format, caps=caps)
     for kernel in (activate, gather, deactivate, energy, sparse_energy, gather_grad):
         module.add_kernel(kernel)
@@ -153,6 +211,8 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=
         export_extra(module)
     artifact = tmp_path / "sparse.tcm"
     module.archive(str(artifact))
+    if inspect_artifact is not None:
+        inspect_artifact(artifact)
     with zipfile.ZipFile(artifact) as archive:
         metadata = json.loads(archive.read("metadata.json" if arch == "vulkan" else "aot_metadata.json"))
     if arch == "vulkan":
@@ -198,6 +258,9 @@ def _sparse_module(tmp_path, artifact_format, multilevel=False, *, export_extra=
             )
             assert result.returncode == 0, result.stdout + result.stderr
             assert "Failed to retire" not in result.stdout + result.stderr
+            assert not any(marker in result.stdout + result.stderr for marker in (
+                "VUID-", "Validation Error", "SYNC-HAZARD"
+            )), result.stdout + result.stderr
             continue
         result = subprocess.run(
             [

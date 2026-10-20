@@ -1,6 +1,7 @@
 """Sparse prepared replay interleaved with ordinary calls and module retirement."""
 
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -90,7 +91,11 @@ def main(arch, mode, artifact, legacy=""):
         survivor[0] = 91
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime(arch)
+        kwargs = (
+            dict(device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0)))
+            if arch == "vulkan" else {}
+        )
+        runtime = Runtime(arch, **kwargs)
     timings = []
     with runtime:
         out, alternate = (runtime.ndarray("f32", 3) for _ in range(2))
