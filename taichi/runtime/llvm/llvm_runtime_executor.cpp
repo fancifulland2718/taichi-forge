@@ -1053,7 +1053,8 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         config_.cuda_sparse_pool_size_GB == 0;
     if (use_cuda_auto_pool_geometry) {
       // Mirror runtime.cpp constants:
-      //   * runtime_NodeAllocator_initialize: chunk_num_elements = 16 * 1024
+      //   * runtime_NodeAllocator_initialize_ex uses the chunk geometry
+      //     computed here and passed by the allocator initialization below.
       //   * NodeManager ctor: while (chunk_elements > 1 &&
       //         chunk_elements * element_size > 128 MiB) chunk_elements /= 2
       // ListManager keeps the first 16 chunk pointers inline and grows the

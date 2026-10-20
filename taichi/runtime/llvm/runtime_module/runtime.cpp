@@ -1843,19 +1843,6 @@ void LLVMRuntime_initialize_thread_pool(LLVMRuntime *runtime,
   runtime->parallel_for = (parallel_for_type)parallel_for;
 }
 
-void runtime_NodeAllocator_initialize(LLVMRuntime *runtime,
-                                      int tree_id,
-                                      int local_id,
-                                      std::size_t node_size) {
-  auto *state = snode_runtime_state(runtime, tree_id, local_id);
-#if !ARCH_cuda && !ARCH_amdgpu
-  state->node_allocator = acquire_node_manager(runtime, node_size, 1024 * 16);
-#else
-  state->node_allocator =
-      runtime->create<NodeManager>(runtime, node_size, 1024 * 16);
-#endif
-}
-
 // Phase 1-D (2026-05): initialize a NodeAllocator with a custom
 // chunk_num_elements. When num_cells_per_container is small, a
 // reduced chunk size dramatically cuts per-SNode pool VRAM (e.g.

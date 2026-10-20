@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Remove an unused internal sparse allocator entry from the LLVM runtime.
+  CUDA startup no longer compiles and loads this redundant device kernel;
+  sparse allocation continues to use the existing adaptive allocator.
+
 - Legacy cuSOLVER, cuSPARSE, cuBLAS and cuFFT wrappers report their own status
   names and numeric codes instead of interpreting them as CUDA driver errors.
   Unknown statuses preserve the original number; reporting does not retry the
