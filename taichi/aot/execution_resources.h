@@ -34,6 +34,8 @@ struct ExecutionResources {
     // Optional cold native allocator. Empty keeps the runtime's ordinary
     // allocation policy. No process-local pool/handle is serialized.
     std::string allocator;
+    // Named fixed-AoS module layout, mutually exclusive with Resource::dtype.
+    std::string layout;
   };
   struct Scalar {
     // Exact C API scalar payload, independent of JSON numeric precision.
@@ -49,6 +51,10 @@ struct ExecutionResources {
   struct ModuleArray {
     std::string view;
   };
+  struct Member {
+    std::string array;
+    std::string path;
+  };
   struct HostBlob {
     // Immutable bytes in the existing content-addressed module data directory.
     std::string data;
@@ -63,7 +69,8 @@ struct ExecutionResources {
                  Scalar,
                  View,
                  ModuleArray,
-                 HostBlob>
+                 HostBlob,
+                 Member>
         value;
   };
 

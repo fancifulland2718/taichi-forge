@@ -74,7 +74,7 @@ def validate_storage_recipe(document, replay_arguments):
         if resource["name"] in selected:
             continue
         references = []
-        if resource["kind"] in ("extent", "ndarray_view"):
+        if resource["kind"] in ("extent", "ndarray_view", "ndarray_member"):
             references.append(resource["array"])
         if resource["kind"] == "native":
             references.extend(resource["bindings"].values())

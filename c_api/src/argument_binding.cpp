@@ -82,7 +82,8 @@ void validate_struct_argument(Runtime &runtime,
                               TiNdArrayLayout provided,
                               TiNdArrayLayout expected,
                               uint32_t version,
-                              size_t ndim) {
+                              size_t ndim,
+                              bool prepared_external_access = false) {
   const auto &layout = runtime.get_layout(provided);
   const auto &required = runtime.get_layout(expected);
   if (version != taichi::lang::aot::StructLayout::kVersion ||
@@ -94,33 +95,12 @@ void validate_struct_argument(Runtime &runtime,
     throw MemoryBindingError("Structure binding requires an ndarray argument");
   }
   const auto &array = argument.value.ndarray;
-  if (array.elem_type != TI_DATA_TYPE_UNKNOWN ||
-      array.elem_shape.dim_count != 0 || array.shape.dim_count != ndim ||
-      array.shape.dim_count > kTiNdShapeDimensionCapacity) {
+  if (array.shape.dim_count != ndim) {
     throw MemoryBindingError(
         "Structure ndarray type or rank does not match exported ABI");
   }
-  uint64_t bytes = layout.stride;
-  for (uint32_t i = 0; i < array.shape.dim_count; ++i) {
-    const auto extent = array.shape.dims[i];
-    if (extent > std::numeric_limits<int>::max() ||
-        (extent != 0 &&
-         bytes > std::numeric_limits<uint64_t>::max() / extent)) {
-      throw MemoryBindingError(
-          "Structure ndarray shape overflows native indexing");
-    }
-    bytes *= extent;
-  }
-  const auto memory = runtime.get_memory(array.memory);
-  taichi::lang::validate_native_shader_storage(runtime.arch, memory.allocation);
-  if (memory.size < bytes) {
-    throw MemoryBindingError(
-        "Structure ndarray buffer is smaller than its declared shape");
-  }
-  if (memory.base_offset % layout.alignment != 0) {
-    throw MemoryBindingError(
-        "Imported memory does not satisfy structure alignment");
-  }
+  capi::validated_struct_ndarray_bytes(runtime, array, provided, version,
+                                       prepared_external_access);
 }
 
 bool same_ndarray_shape(const TiNdShape &a, const TiNdShape &b) {
@@ -298,6 +278,80 @@ NdArrayStorageLayout ndarray_storage_layout(const TiNdArray &array) {
   return array_storage_layout(array);
 }
 
+NdArrayStorageLayout struct_ndarray_storage_layout(
+    const TiNdArray &array, const taichi::lang::aot::StructLayout &layout) {
+  if (array.elem_type != TI_DATA_TYPE_UNKNOWN ||
+      array.elem_shape.dim_count != 0 ||
+      array.shape.dim_count > kTiNdShapeDimensionCapacity)
+    throw MemoryBindingError("Structure ndarray type or rank is invalid");
+  uint64_t bytes = layout.stride;
+  for (uint32_t i = 0; i < array.shape.dim_count; ++i) {
+    const auto extent = array.shape.dims[i];
+    if (extent > std::numeric_limits<int>::max() ||
+        (extent && bytes > std::numeric_limits<uint64_t>::max() / extent))
+      throw MemoryBindingError("Structure ndarray shape overflows native indexing");
+    bytes *= extent;
+  }
+  return {bytes, layout.stride, static_cast<uint32_t>(layout.alignment)};
+}
+
+uint64_t validated_struct_ndarray_bytes(Runtime &runtime,
+                                        const TiNdArray &array,
+                                        TiNdArrayLayout handle,
+                                        uint32_t version,
+                                        bool prepared_external_access) {
+  if (version != taichi::lang::aot::StructLayout::kVersion)
+    throw MemoryBindingError("Unsupported structure ndarray layout version");
+  const auto layout = struct_ndarray_storage_layout(array, runtime.get_layout(handle));
+  const auto memory = runtime.get_memory(array.memory, prepared_external_access);
+  taichi::lang::validate_native_shader_storage(runtime.arch, memory.allocation);
+  if (memory.size < layout.bytes)
+    throw MemoryBindingError("Structure ndarray buffer is smaller than its declared shape");
+  if (memory.base_offset % layout.alignment)
+    throw MemoryBindingError("Imported memory does not satisfy structure alignment");
+  return layout.bytes;
+}
+
+taichi::lang::NativeArrayBinding project_struct_ndarray_member(
+    const TiNdArray &array,
+    const taichi::lang::aot::StructLayout &layout,
+    const std::string &path) {
+  using namespace taichi::lang;
+  const auto parent = struct_ndarray_storage_layout(array, layout);
+  const auto member = std::find_if(layout.members.begin(), layout.members.end(),
+                                   [&](const auto &m) { return m.path == path; });
+  if (member == layout.members.end())
+    throw MemoryBindingError("Unknown structure ndarray member: " + path);
+  NativeArrayBinding result;
+  result.bytes = parent.bytes;
+  result.scalar_type = member->scalar_type;
+  result.shape.assign(array.shape.dims, array.shape.dims + array.shape.dim_count);
+  result.element_shape.assign(member->shape.begin(), member->shape.end());
+  auto strides = std::make_shared<NativeArrayStrides>();
+  auto packed_strides = [](const auto &shape, std::uint64_t stride) {
+    std::vector<std::int64_t> result(shape.size());
+    for (std::size_t i = shape.size(); i > 0; --i) {
+      if (stride > std::uint64_t(std::numeric_limits<std::int64_t>::max()) ||
+          (shape[i - 1] &&
+           stride > std::uint64_t(std::numeric_limits<std::int64_t>::max()) /
+                        shape[i - 1]))
+        throw MemoryBindingError("Structure member strides overflow address space");
+      result[i - 1] = stride;
+      stride *= shape[i - 1];
+    }
+    return result;
+  };
+  strides->index_bytes = packed_strides(result.shape, layout.stride);
+  strides->element_bytes =
+      packed_strides(result.element_shape, data_type_size(result.scalar_type));
+  // Empty arrays have no member address. Keep their logical extent zero even
+  // when the selected member has a nonzero offset in a populated record.
+  strides->byte_offset = parent.bytes ? member->offset : 0;
+  result.strides = std::move(strides);
+  validate_native_dense_array_layout(result);
+  return result;
+}
+
 taichi::lang::NativeArrayBinding bind_native_array(
     Runtime &runtime,
     const TiNdArray &array,
@@ -377,7 +431,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     const auto &binding = *bound_args[index];
     validate_struct_argument(
         runtime2, args[index], binding.layout, expected, binding.layout_version,
-        ti_kernel->nested_parameters.at({int(index)}).total_dim);
+        ti_kernel->nested_parameters.at({int(index)}).total_dim,
+        prepared_external_access);
   }
   const auto gradient_count = gradient_bindings.size();
   const auto *gradients = gradient_bindings.data();

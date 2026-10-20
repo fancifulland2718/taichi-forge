@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <unordered_set>
+#include "taichi/runtime/native_array_contract.h"
 
 namespace capi {
 ExecutionResourceStorage::~ExecutionResourceStorage() {
@@ -134,7 +135,7 @@ TiDataType scalar_type(const std::string &name) {
 
 ExecutionResourceBindings bind_execution_resources(
     Runtime &runtime,
-    taichi::lang::aot::Module &module,
+    AotModule &module,
     const taichi::lang::aot::ExecutionResources &resources,
     std::unordered_map<std::string, const TiArgument *> &arguments,
     std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts,
@@ -146,26 +147,58 @@ ExecutionResourceBindings bind_execution_resources(
   using Recipes = taichi::lang::aot::ExecutionResources;
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
+  result.gradients.reserve(resources.order.size() + resources.gradients.size());
   std::vector<uint64_t> sizes(resources.order.size());
   std::vector<uint64_t> view_offsets(resources.order.size());
   std::vector<taichi::lang::DevicePtr> module_pointers(resources.order.size());
   std::map<std::string, std::vector<std::uint8_t>> payloads;
   std::unordered_set<const TiArgument *> local, validated_sources;
-  auto array_source = [&](const std::string &name) -> const TiNdArray & {
+  auto structure_layout = [&](const std::string &name)
+      -> const taichi::lang::aot::StructLayout & {
+    const auto found = layouts.find(name);
+    if (found == layouts.end() || !found->second->layout ||
+        found->second->layout_version != taichi::lang::aot::StructLayout::kVersion ||
+        found->second->gradient)
+      throw MemoryBindingError("Missing or invalid structure resource layout: " + name);
+    result.layout_sources.insert(name);
+    return runtime.get_layout(found->second->layout);
+  };
+  auto storage_layout = [&](const std::string &name, const TiNdArray &array) {
+    return array.elem_type == TI_DATA_TYPE_UNKNOWN
+               ? struct_ndarray_storage_layout(array, structure_layout(name))
+               : ndarray_storage_layout(array);
+  };
+  auto bind_layout = [&](const std::string &name, TiNdArrayLayout handle) {
+    result.gradients.push_back(
+        {name.c_str(), taichi::lang::aot::StructLayout::kVersion, handle, nullptr});
+    if (!layouts.emplace(name, &result.gradients.back()).second)
+      throw MemoryBindingError("Private structure resource shadows a layout: " + name);
+  };
+  auto array_source = [&](const std::string &name, bool shape_only = false) -> const TiNdArray & {
     const auto found = arguments.find(name);
     if (found == arguments.end() ||
         found->second->type != TI_ARGUMENT_TYPE_NDARRAY)
       throw MemoryBindingError("Execution shape source is not an ndarray: " +
                                name);
     const auto &array = found->second->value.ndarray;
+    if (result.native_arrays.count(name) && !shape_only)
+      throw MemoryBindingError("Affine member cannot be used as packed parent storage: " + name);
     if (!local.count(found->second) && !frozen_metadata.count(name) &&
-        validated_sources.insert(found->second).second)
-      validated_ndarray_bytes(runtime, array, nullptr,
-                              prepared_external_access);
+        validated_sources.insert(found->second).second) {
+      if (array.elem_type == TI_DATA_TYPE_UNKNOWN) {
+        structure_layout(name);
+        const auto &binding = *layouts.at(name);
+        validated_struct_ndarray_bytes(runtime, array, binding.layout,
+                                        binding.layout_version,
+                                        prepared_external_access);
+      } else {
+        validated_ndarray_bytes(runtime, array, nullptr, prepared_external_access);
+      }
+    }
     return array;
   };
   auto resolve = [&](const Recipes::Extent &ref) {
-    const auto &array = array_source(ref.array);
+    const auto &array = array_source(ref.array, true);
     if (ref.axis >= array.shape.dim_count)
       throw MemoryBindingError("Execution shape axis exceeds array rank: " +
                                ref.array);
@@ -179,12 +212,29 @@ ExecutionResourceBindings bind_execution_resources(
         std::holds_alternative<Recipes::HostBlob>(recipe.value))
       continue;
     auto &argument = result.arguments[pos];
+    if (const auto *member = std::get_if<Recipes::Member>(&recipe.value)) {
+      const auto &parent = array_source(member->array);
+      auto projected = project_struct_ndarray_member(
+          parent, structure_layout(member->array), member->path);
+      argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+      auto &array = argument.value.ndarray;
+      array.shape = parent.shape;
+      array.elem_type = scalar_type(projected.scalar_type->to_string());
+      array.elem_shape.dim_count = static_cast<uint32_t>(projected.element_shape.size());
+      std::copy(projected.element_shape.begin(), projected.element_shape.end(),
+                array.elem_shape.dims);
+      result.native_arrays.emplace(recipe.name, std::move(projected));
+      if (!arguments.emplace(recipe.name, &argument).second)
+        throw MemoryBindingError("Execution member shadows an external binding: " + recipe.name);
+      local.insert(&argument);
+      continue;
+    }
     const auto *view = std::get_if<Recipes::View>(&recipe.value);
     auto dtype_name = recipe.dtype;
     Recipes::Array module_array;
     const auto *array_description = std::get_if<Recipes::Array>(&recipe.value);
     if (const auto *source = std::get_if<Recipes::ModuleArray>(&recipe.value)) {
-      const auto bound = module.get_root_storage_view(source->view);
+      const auto bound = module.get().get_root_storage_view(source->view);
       dtype_name = bound.layout.dtype;
       for (const auto extent : bound.layout.shape)
         module_array.shape.emplace_back(extent);
@@ -195,12 +245,16 @@ ExecutionResourceBindings bind_execution_resources(
         throw MemoryBindingError("Module storage belongs to another device");
     }
     const auto dtype =
-        view ? array_source(view->array).elem_type : scalar_type(dtype_name);
+        view ? array_source(view->array).elem_type
+             : array_description && !array_description->layout.empty()
+                   ? TI_DATA_TYPE_UNKNOWN : scalar_type(dtype_name);
     if (view) {
       argument.type = TI_ARGUMENT_TYPE_NDARRAY;
       auto &array = argument.value.ndarray;
       array = array_source(view->array);
-      const auto parent = ndarray_storage_layout(array);
+      const auto parent = storage_layout(view->array, array);
+      if (array.elem_type == TI_DATA_TYPE_UNKNOWN)
+        bind_layout(recipe.name, layouts.at(view->array)->layout);
       constexpr auto rank_capacity =
           sizeof(array.shape.dims) / sizeof(uint32_t);
       if (view->shape.size() > rank_capacity)
@@ -214,7 +268,7 @@ ExecutionResourceBindings bind_execution_resources(
         array.shape.dims[axis] =
             literal ? *literal : resolve(std::get<Recipes::Extent>(dimension));
       }
-      sizes[pos] = ndarray_storage_layout(array).bytes;
+      sizes[pos] = storage_layout(recipe.name, array).bytes;
       if (view->offset > parent.bytes / parent.element_bytes)
         throw MemoryBindingError("Execution view offset exceeds parent shape");
       view_offsets[pos] = view->offset * parent.element_bytes;
@@ -241,14 +295,16 @@ ExecutionResourceBindings bind_execution_resources(
       }
       std::copy(desc->element_shape.begin(), desc->element_shape.end(),
                 array.elem_shape.dims);
-      sizes[pos] = ndarray_storage_layout(array).bytes;
+      if (!desc->layout.empty())
+        bind_layout(recipe.name, module.get_layout_handle(desc->layout));
+      sizes[pos] = storage_layout(recipe.name, array).bytes;
       if (!desc->initial_data.empty() &&
           !(shared && shared->arrays.count(recipe.name)) &&
           resources.materialize[resources.order[pos]]) {
         const auto found = payloads.find(desc->initial_data);
         if (found == payloads.end())
           payloads.emplace(desc->initial_data,
-                           module.load_data(desc->initial_data, sizes[pos]));
+                           module.get().load_data(desc->initial_data, sizes[pos]));
         else if (found->second.size() != sizes[pos])
           throw MemoryBindingError(
               "Execution initial data size differs between resource "
@@ -305,13 +361,16 @@ ExecutionResourceBindings bind_execution_resources(
     local.insert(&argument);
   }
 
-  result.gradients.reserve(resources.gradients.size());
   for (const auto &[primal, gradient] : resources.gradients) {
     const auto &value = *arguments.at(primal);
     const auto &derivative = *arguments.at(gradient);
     if (value.type != TI_ARGUMENT_TYPE_NDARRAY ||
         derivative.type != TI_ARGUMENT_TYPE_NDARRAY)
       throw MemoryBindingError("Execution gradient names must bind ndarrays");
+    if (result.native_arrays.count(primal) || result.native_arrays.count(gradient) ||
+        value.value.ndarray.elem_type == TI_DATA_TYPE_UNKNOWN ||
+        derivative.value.ndarray.elem_type == TI_DATA_TYPE_UNKNOWN)
+      throw MemoryBindingError("Structure arrays and members do not expose gradient bindings");
     TiNamedNdArrayBinding binding{};
     if (auto previous = layouts.find(primal); previous != layouts.end()) {
       binding = *previous->second;
@@ -366,6 +425,19 @@ ExecutionResourceBindings bind_execution_resources(
   for (std::size_t pos = 0; pos < resources.order.size(); ++pos) {
     auto &argument = result.arguments[pos];
     const auto &name = resources.declarations[resources.order[pos]].name;
+    if (const auto *member = std::get_if<Recipes::Member>(
+            &resources.declarations[resources.order[pos]].value)) {
+      if (resources.materialize[resources.order[pos]]) {
+        const auto parent = arguments.at(member->array)->value.ndarray.memory;
+        const auto memory = runtime.get_memory(parent, prepared_external_access);
+        auto &projected = result.native_arrays.at(name);
+        projected.pointer = memory.allocation.get_ptr(memory.byte_offset);
+        projected.base_offset = memory.base_offset;
+        taichi::lang::resolve_native_dense_array(runtime.arch, projected);
+        result.native_memories.push_back(parent);
+      }
+      continue;
+    }
     if (module_pointers[pos].device) {
       if (resources.materialize[resources.order[pos]]) {
         if (shared && shared->stable_names.count(name)) {
@@ -458,6 +530,10 @@ ExecutionResourceBindings bind_execution_resources(
       throw MemoryBindingError("Unable to upload execution initial data");
     offset += count;
   }
+  // Shape-only users have already resolved their dimensions. Only qualified
+  // native consumers may obtain these physical views from here onward.
+  for (const auto &[name, binding] : result.native_arrays)
+    arguments.erase(name);
   return result;
 }
 }  // namespace capi

@@ -21,6 +21,8 @@ struct NdArrayStorageLayout {
   uint32_t alignment;
 };
 NdArrayStorageLayout ndarray_storage_layout(const TiNdArray &array);
+NdArrayStorageLayout struct_ndarray_storage_layout(
+    const TiNdArray &array, const taichi::lang::aot::StructLayout &layout);
 taichi::lang::DataType ndarray_scalar_type(TiDataType type);
 
 // Validate primitive/tensor storage and return its declared logical byte size.
@@ -28,6 +30,18 @@ uint64_t validated_ndarray_bytes(Runtime &runtime,
                                  const TiNdArray &array,
                                  uint64_t *element_bytes = nullptr,
                                  bool prepared_external_access = false);
+uint64_t validated_struct_ndarray_bytes(
+    Runtime &runtime,
+    const TiNdArray &array,
+    TiNdArrayLayout layout,
+    uint32_t version,
+    bool prepared_external_access = false);
+// Pure projection uses compiler-derived member offsets/stride. Binding adds the
+// existing parent allocation identity; neither form creates storage or a lease.
+taichi::lang::NativeArrayBinding project_struct_ndarray_member(
+    const TiNdArray &array,
+    const taichi::lang::aot::StructLayout &layout,
+    const std::string &path);
 taichi::lang::NativeArrayBinding bind_native_array(
     Runtime &runtime,
     const TiNdArray &array,
