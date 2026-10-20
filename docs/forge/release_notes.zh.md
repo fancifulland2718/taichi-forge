@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- `Graph.submit()` 在设备分段之间执行同步 host 操作时不再等待自己持有的提交读锁。
+  Vulkan 提交并等待当前 batch 前段，保留外层 batch 供后续工作继续使用。
+  Windows CPU/CUDA/Vulkan 验证覆盖 host 排序、父 Graph、计时、失败恢复及完成／退休；
+  原生路径仍复用 batch fence。私有 ABI 和 AOT 格式不变。
+
 - 普通 `sort()`／单键 `sort_by_key()` 的标量 Field key＋packed 向量／矩阵 Field
   载荷在 CPU/CUDA/Vulkan 共用 prepared 原生排序，消除此前的 host 排序回退。
   AOT 导出相同记录，不增加 helper 代码。正常安装下的冷暖消费、稳定顺序与载荷位、

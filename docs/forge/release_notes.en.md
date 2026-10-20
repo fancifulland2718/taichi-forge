@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- `Graph.submit()` supports synchronous host operations between device segments
+  without waiting on its own submission reader. Vulkan submits and waits for
+  the pending batch prefix while preserving the outer batch for later work.
+  Windows CPU/CUDA/Vulkan checks cover host sorting, parent Graphs, timing,
+  failure recovery and completion/retirement; native batch fence reuse remains.
+  The private ABI and AOT format are unchanged.
+
 - Ordinary `sort()` / single-key `sort_by_key()` with scalar Field keys and
   packed vector/matrix Field payloads share prepared native sorting on
   CPU/CUDA/Vulkan, eliminating the previous host sorting fallback. AOT exports
