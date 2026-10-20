@@ -283,6 +283,15 @@ class LaunchContextBuilder {
   int64 get_struct_ret_int(const std::vector<int> &index);
   uint64 get_struct_ret_uint(const std::vector<int> &index);
 
+  // Ordinary CGraph dispatches have no host result consumer. Keep the compiled
+  // result ABI and device storage, but omit the otherwise unused GPU readback.
+  void discard_return_values() noexcept {
+    readback_return_values_ = false;
+  }
+  bool return_values_requested() const noexcept {
+    return readback_return_values_;
+  }
+
   RuntimeContext &get_context();
 
   void append_dispatch_label(const std::string &label);
@@ -324,6 +333,7 @@ class LaunchContextBuilder {
   std::unique_ptr<char[]> arg_buffer_;
   std::unique_ptr<char[]> result_buffer_;
   const StructType *ret_type_;
+  bool readback_return_values_{true};
   bool has_cpu_bounded_range_binding_{false};
   bool has_cuda_bounded_range_binding_{false};
   std::vector<int> cuda_bounded_extent_arg_id_;

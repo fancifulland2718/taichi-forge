@@ -104,6 +104,31 @@ void run_dense_field_kernel(Arch arch, taichi::lang::Device *device) {
     alias->launch(alias_builder);
     gfx_runtime->synchronize();
     EXPECT_FLOAT_EQ(alias_builder.get_ret<float>(0), 0.2);
+
+    uint64 sentinel = 0xa5a5a5a5a5a5a5a5ull;
+    LaunchContextBuilder discarded(simple_ret_kernel);
+    discarded.discard_return_values();
+    discarded.get_context().result_buffer = &sentinel;
+    simple_ret_kernel->launch(discarded);
+    gfx_runtime->synchronize();
+    EXPECT_EQ(sentinel, 0xa5a5a5a5a5a5a5a5ull);
+    EXPECT_ANY_THROW(discarded.get_ret<float>(0));
+
+    auto *external_return = vk_module->get_kernel("external_return");
+    ASSERT_NE(external_return, nullptr);
+    std::array<float, 2> external_values{1.0f, 3.0f};
+    LaunchContextBuilder external(external_return);
+    external.discard_return_values();
+    external.get_context().result_buffer = &sentinel;
+    external.set_arg_external_array_with_shape(
+        {0}, reinterpret_cast<uintptr_t>(external_values.data()),
+        sizeof(external_values), {2});
+    external_return->launch(external);
+    // External array writes still require host completion even when the
+    // kernel's separate return value is discarded.
+    EXPECT_FLOAT_EQ(external_values[0], 2.0f);
+    EXPECT_FLOAT_EQ(external_values[1], 4.0f);
+    EXPECT_EQ(sentinel, 0xa5a5a5a5a5a5a5a5ull);
   }
 
   {

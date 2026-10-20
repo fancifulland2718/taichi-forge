@@ -795,7 +795,9 @@ class HostDeviceContextBlitter {
       return false;
     }
 
-    bool require_sync = ctx_attribs_->rets().size() > 0;
+    const bool read_returns =
+        ctx_attribs_->has_rets() && host_ctx_.return_values_requested();
+    bool require_sync = read_returns;
     std::vector<DevicePtr> readback_dev_ptrs;
     std::vector<void *> readback_host_ptrs;
     std::vector<size_t> readback_sizes;
@@ -842,7 +844,7 @@ class HostDeviceContextBlitter {
         device_->get_compute_stream()->command_sync();
       }
 
-      if (!ctx_attribs_->has_rets()) {
+      if (!read_returns) {
         return true;
       }
     } else {

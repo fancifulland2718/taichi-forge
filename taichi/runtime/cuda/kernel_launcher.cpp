@@ -1727,7 +1727,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   if (!retain_ordinary_launch_buffers_ && device_arg_buffer != nullptr) {
     CUDADriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
   }
-  if (ctx.result_buffer_size > 0) {
+  if (ctx.result_buffer_size > 0 && ctx.return_values_requested()) {
     CUDADriver::get_instance().memcpy_device_to_host_async(
         host_result_buffer, device_result_buffer, ctx.result_buffer_size,
         nullptr);

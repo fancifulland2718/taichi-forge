@@ -1882,6 +1882,12 @@ calls. A nonempty host result waits for completion. Void kernels continue to
 return `None` without adding a wait. These result reads do not add automatic
 differentiation or prepared/Graph result frames.
 
+Ordinary CGraph dispatches discard kernel return values and return `None`.
+CUDA/Vulkan omit the unused host result readback while retaining the compiled
+device result storage, array writes and execution dependencies. Host external
+array writes still complete before their launch returns. Prepared execution
+continues to require kernels without returns.
+
 C consumers query `ti_get_kernel_return_info_ext` for `TiKernelReturnInfo` and
 call `ti_launch_kernel_with_result_ext` with exactly `buffer_size` host bytes.
 The module owns the immutable schema-1 `layout_json`; copy it before closing the

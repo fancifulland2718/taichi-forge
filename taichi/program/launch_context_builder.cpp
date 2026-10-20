@@ -262,6 +262,8 @@ void LaunchContextBuilder::set_arg(const std::vector<int> &i, T v) {
 
 template <typename T>
 T LaunchContextBuilder::get_ret(int i) {
+  TI_ERROR_IF(!return_values_requested(),
+              "Kernel return values were discarded by this launch");
   return taichi_union_cast_with_different_sizes<T>(ctx_->result_buffer[i]);
 }
 
@@ -849,6 +851,8 @@ void LaunchContextBuilder::set_arg_matrix(int arg_id, const Matrix &matrix) {
 }
 
 TypedConstant LaunchContextBuilder::fetch_ret(const std::vector<int> &index) {
+  TI_ERROR_IF(!return_values_requested(),
+              "Kernel return values were discarded by this launch");
   const Type *dt = ret_type_->get_element_type(index);
   int offset = ret_type_->get_element_offset(index);
   return fetch_ret_impl(offset, dt);

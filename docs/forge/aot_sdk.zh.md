@@ -1476,6 +1476,10 @@ Python 数字（`u1` 为布尔），向量对应元组，矩阵对应嵌套元�
 包装对象只查询一次，绑定调用复用解码方案。非空 host 结果会等待完成；无返回值
 kernel 仍返回 `None`，不增加等待。这不增加自动求导或 prepared/Graph 结果帧。
 
+普通 CGraph 丢弃各 kernel 的返回值，并返回 `None`。CUDA/Vulkan 省去无消费者的
+host 结果回读，保留编译后的设备结果存储、数组写回及执行依赖。外部 host 数组的
+写回仍在对应 launch 返回前完成。prepared 执行仍要求无返回值的 kernel。
+
 C 消费者先用 `ti_get_kernel_return_info_ext` 查询 `TiKernelReturnInfo`，再给
 `ti_launch_kernel_with_result_ext` 提供恰好 `buffer_size` 字节的 host 缓冲。
 不可变的 schema-1 `layout_json` 属于模块，须在模块关闭前复制。`results` 数组

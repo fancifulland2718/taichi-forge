@@ -19,6 +19,12 @@ def compile_dense_field_aot_test(arch):
         return sum
 
     @ti.kernel
+    def external_return(values: ti.types.ndarray(ti.f32, ndim=1)) -> ti.f32:
+        for i in range(2):
+            values[i] += 1
+        return values[0]
+
+    @ti.kernel
     def init():
         for index in range(n):
             place[index] = index
@@ -36,6 +42,7 @@ def compile_dense_field_aot_test(arch):
     m = ti.aot.Module()
     m.add_kernel(simple_return)
     m.add_kernel(simple_return, name="simple_return_alias")
+    m.add_kernel(external_return)
     m.add_kernel(init)
     m.add_kernel(ret)
     m.add_field("place", place)

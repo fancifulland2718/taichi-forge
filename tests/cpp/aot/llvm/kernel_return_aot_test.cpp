@@ -32,6 +32,22 @@ static void run_return_tests(aot::Module *mod,
   EXPECT_EQ(builder.get_struct_ret_float({0, 1, 0}), 2);
   EXPECT_EQ(builder.get_struct_ret_float({0, 1, 1}), 3);
   EXPECT_EQ(builder.get_struct_ret_float({0, 1, 2}), 4);
+
+  LaunchContextBuilder discarded(k_ret);
+  discarded.discard_return_values();
+  auto *host_result =
+      reinterpret_cast<unsigned char *>(discarded.get_context().result_buffer);
+  std::fill_n(host_result, discarded.result_buffer_size, 0xa5);
+  k_ret->launch(discarded);
+  exec->synchronize();
+  if (exec->get_config().arch == Arch::cuda) {
+    // Device results still have their compiled storage, but no asynchronous
+    // copy may target the caller's discarded host buffer.
+    for (std::size_t i = 0; i < discarded.result_buffer_size; ++i)
+      EXPECT_EQ(host_result[i], 0xa5);
+  }
+  EXPECT_ANY_THROW(discarded.get_struct_ret_int({0, 0}));
+  EXPECT_ANY_THROW(discarded.get_ret<int64>(0));
   // Check assertion error from ti.kernel
   exec->check_runtime_error(result_buffer);
 }

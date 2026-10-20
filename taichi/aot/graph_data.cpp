@@ -5828,6 +5828,7 @@ void CompiledGraph::run(
   for (const auto &dispatch : dispatches) {
     TI_ASSERT(dispatch.compiled_kernel);
     LaunchContextBuilder launch_ctx(dispatch.compiled_kernel);
+    launch_ctx.discard_return_values();
     set_cuda_bounded_range_binding(dispatch, launch_ctx);
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
