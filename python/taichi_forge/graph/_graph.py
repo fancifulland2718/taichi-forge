@@ -19781,6 +19781,13 @@ class Graph:
                         if observation_lease is not None
                         else None
                     )
+                    # Native-only Graphs may never have compiled a kernel.
+                    # Finish cold root/AOT storage transitions before the
+                    # transaction takes its SNode lifecycle read guard:
+                    # finalization needs the corresponding exclusive guard.
+                    if runtime._materialize_dirty or runtime._pending_aot_snode_trees:
+                        with runtime._kernel_compilation_lock:
+                            runtime.materialize()
                     queue_before = (
                         _queue_submission_snapshot() if telemetry_enabled else None
                     )
