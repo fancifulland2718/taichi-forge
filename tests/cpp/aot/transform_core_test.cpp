@@ -70,4 +70,32 @@ TEST(TransformCore, PackedFieldAndArrayKeepTheirSchedulingPolicies) {
   EXPECT_EQ(cpu::transform_partitions(262144, 4, true), 4);
 }
 
+TEST(TransformCore, StridedMembersPreserveNeighborsAcrossWorkerPartitions) {
+  struct Record {
+    std::uint32_t tag, value, other, tail;
+  };
+  std::array<Record, 17> records;
+  for (std::uint32_t i = 0; i < records.size(); ++i)
+    records[i] = {0xa5a5a5a5u, 0xffffffffu - i, 0, 91};
+  const auto before = records;
+  auto *bytes = reinterpret_cast<std::uint8_t *>(records.data());
+  ThreadPool pool(2);
+  cpu::transform_strided<std::uint32_t>(
+      bytes, bytes, 16, offsetof(Record, value), sizeof(Record),
+      offsetof(Record, other), sizeof(Record), 2, 3, 7, &pool);
+  for (int i = 0; i < records.size(); ++i) {
+    EXPECT_EQ(records[i].tag, before[i].tag);
+    EXPECT_EQ(records[i].tail, before[i].tail);
+    EXPECT_EQ(records[i].value, before[i].value);
+    EXPECT_EQ(records[i].other, i < 16 ? before[i].value * 2u + 3u : 0u);
+  }
+  cpu::transform_strided<std::uint32_t>(
+      bytes, bytes, 16, offsetof(Record, other), sizeof(Record),
+      offsetof(Record, other), sizeof(Record), 2, 1, 1, nullptr);
+  for (int i = 0; i < 16; ++i)
+    EXPECT_EQ(records[i].other, (before[i].value * 2u + 3u) * 2u + 1u);
+  EXPECT_NO_THROW(cpu::transform_strided<float>(
+      nullptr, nullptr, 0, 4, 20, 8, 20, 2, 3, 2, nullptr));
+}
+
 }  // namespace taichi::lang
