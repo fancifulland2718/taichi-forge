@@ -60,7 +60,8 @@ file(GLOB_RECURSE TAICHI_TESTS_SOURCE
 list(REMOVE_ITEM TAICHI_TESTS_SOURCE
     "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/cuda_cig_test_environment.cpp"
     "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/vulkan_cig_fixture.cpp"
-    "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/native_vulkan_cig_probe.cpp")
+    "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/native_vulkan_cig_probe.cpp"
+    "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/vulkan_cig_transfer_probe.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/struct_layout_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/execution_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cpp")
@@ -443,5 +444,13 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
       ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include)
     set_target_properties(taichi_vulkan_cig_fixture PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+    add_executable(taichi_vulkan_cig_transfer_probe
+      tests/cpp/rhi/common/vulkan_cig_transfer_probe.cpp)
+    target_include_directories(taichi_vulkan_cig_transfer_probe PRIVATE
+      ${PROJECT_SOURCE_DIR}/c_api/include
+      ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include)
+    set_target_properties(taichi_vulkan_cig_transfer_probe PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+    add_dependencies(taichi_vulkan_cig_transfer_probe taichi_vulkan_cig_fixture)
   endif()
 endif()

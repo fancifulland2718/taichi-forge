@@ -119,12 +119,32 @@ struct Owner {
       ++family;
     if (family == families)
       throw std::runtime_error("No shared graphics/compute queue family");
+    // Opt-in control for drivers whose reserved graphics family loses the
+    // device on large Vulkan transfer/compute work. Keep the external CUDA
+    // queue associated with graphics and expose the real compute family.
+    uint32_t compute_family = family;
+    char work_queue[32]{};
+    if (GetEnvironmentVariableA("TI_TEST_CIG_COMPUTE_QUEUE", work_queue,
+                                sizeof(work_queue))) {
+      if (std::strcmp(work_queue, "dedicated") != 0)
+        throw std::runtime_error("TI_TEST_CIG_COMPUTE_QUEUE must be dedicated");
+      compute_family = 0;
+      while (compute_family < families &&
+             (!queues[compute_family].queueCount ||
+              !(queues[compute_family].queueFlags & VK_QUEUE_COMPUTE_BIT) ||
+              (queues[compute_family].queueFlags & VK_QUEUE_GRAPHICS_BIT)))
+        ++compute_family;
+      if (compute_family == families)
+        throw std::runtime_error("No dedicated compute queue family");
+    }
     float priority = 1;
     VkDeviceQueueCreateInfo queue_info{
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queue_info.queueFamilyIndex = family;
     queue_info.queueCount = 1;
     queue_info.pQueuePriorities = &priority;
+    VkDeviceQueueCreateInfo queue_infos[] = {queue_info, queue_info};
+    queue_infos[1].queueFamilyIndex = compute_family;
     const char *extensions[] = {
         VK_NV_EXTERNAL_COMPUTE_QUEUE_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
@@ -139,17 +159,17 @@ struct Owner {
     reserve.pNext = &timeline;
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_info.pNext = &reserve;
-    device_info.queueCreateInfoCount = 1;
-    device_info.pQueueCreateInfos = &queue_info;
+    device_info.queueCreateInfoCount = compute_family == family ? 1 : 2;
+    device_info.pQueueCreateInfos = queue_infos;
     device_info.enabledExtensionCount = 3;
     device_info.ppEnabledExtensionNames = extensions;
     check(vkCreateDevice(runtime.physical_device, &device_info, nullptr,
                          &runtime.device),
           "create device");
-    vkGetDeviceQueue(runtime.device, family, 0, &runtime.compute_queue);
-    runtime.graphics_queue = runtime.compute_queue;
-    runtime.compute_queue_family_index = runtime.graphics_queue_family_index =
-        family;
+    vkGetDeviceQueue(runtime.device, compute_family, 0, &runtime.compute_queue);
+    vkGetDeviceQueue(runtime.device, family, 0, &runtime.graphics_queue);
+    runtime.compute_queue_family_index = compute_family;
+    runtime.graphics_queue_family_index = family;
     runtime.get_instance_proc_addr = vkGetInstanceProcAddr;
     runtime.api_version = VK_API_VERSION_1_2;
     const auto create = reinterpret_cast<PFN_vkCreateExternalComputeQueueNV>(
