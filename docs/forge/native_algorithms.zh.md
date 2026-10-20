@@ -348,6 +348,11 @@ key 为连续标量 i32 Field 或 ndarray。保留已选的清零→packed scatt
 tensor scatter-add 所需的配对 ABI125 组件。显式 `builtin/grouped_reduce` 仍保留
 标量合同；本序列路线不自动生成原生伴随。
 
+Windows CPU/CUDA/Vulkan 正常安装后的独立／借用消费通过，覆盖 2×3 f32、
+f64 向量、8×8 i32 Field、重复覆盖、全部无效 key 后恢复有效 key、输入不变、
+父 Graph、显式下游梯度和退休；Vulkan 同步验证通过。本前端扩展复用已有
+ABI125 runtime wheel，不增加原生库或应用 shader。
+
 显式 `builtin/bucket_builder` v1 描述支持 CPU/CUDA/Vulkan 一维 packed 标量或
 tensor 载荷，dtype 为 i32/u32/f32/i64/u64/f64。参数为 `size`、非零 `num_bins`、
 `dtype`、`element_shape`（标量用 `[]`），可选 `cpu_max_threads` 和 `vulkan_policy`。

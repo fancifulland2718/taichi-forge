@@ -458,6 +458,13 @@ artificial component limit is added. Consumers use the paired ABI125 components
 required by tensor scatter-add. The explicit `builtin/grouped_reduce` description
 retains its scalar contract; this sequence route adds no automatic native adjoint.
 
+Windows CPU/CUDA/Vulkan normal installations pass standalone and borrowed
+consumption for 2×3 f32, vector f64 and 8×8 i32 Fields. Checks include repeated
+overwrite, all-invalid keys followed by valid keys, unchanged inputs, parent
+Graphs, explicit downstream gradients and retirement. Vulkan synchronization
+validation passes. This frontend extension reuses the existing ABI125 runtime
+wheel; it adds no native library or application shader.
+
 Explicit `builtin/bucket_builder` v1 descriptions support one-dimensional packed
 scalar or tensor payloads on CPU/CUDA/Vulkan: i32/u32/f32/i64/u64/f64. Parameters
 are `size`, nonzero `num_bins`, `dtype`, `element_shape` (`[]` for scalars), and

@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT `PrimitiveSequence.grouped_reduce()` 支持 CPU/CUDA/Vulkan 的 packed 向量／矩阵
+  Field，保留现有清零与 scatter-add 阶段；重放覆盖空组并忽略无效 key。复用 ABI125
+  runtime，不增加 helper 或改变格式；正常安装、下游梯度与 Vulkan 同步验证通过。
+
 - AOT scatter-add 支持 CPU/CUDA/Vulkan 的 packed 向量／矩阵 Field，索引可为
   标量 i32 Field 或 ndarray；保留累加原值、可变索引及 JIT 算法，不添加打包
   helper 或人为分量数上限。需要配对的私有 ABI125 组件；正常安装消费、显式

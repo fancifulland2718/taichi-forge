@@ -34,6 +34,12 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT `PrimitiveSequence.grouped_reduce()` exports packed vector/matrix Fields
+  on CPU/CUDA/Vulkan by preserving the existing zero-fill and scatter-add stages.
+  Replays overwrite empty groups and ignore invalid keys. It reuses ABI125
+  runtime components without new helpers or format changes; normal installations,
+  downstream gradients and Vulkan synchronization validation pass.
+
 - AOT scatter-add supports packed vector/matrix Fields on CPU/CUDA/Vulkan,
   with scalar i32 Field or ndarray indices. It preserves accumulation into
   existing values, mutable indices and the JIT algorithms without packing
