@@ -12,14 +12,17 @@
 namespace taichi::lang {
 
 std::string get_cuda_error_message(uint32 err) {
-  const char *err_name_ptr;
-  const char *err_string_ptr;
+  const char *err_name_ptr = nullptr;
+  const char *err_string_ptr = nullptr;
   auto &driver = CUDADriver::get_instance_without_context();
-  driver.get_error_name(err, &err_name_ptr);
-  driver.get_error_string(err, &err_string_ptr);
-  return fmt::format("{} driver error {}: {}",
+  if (driver.detected()) {
+    driver.get_error_name(err, &err_name_ptr);
+    driver.get_error_string(err, &err_string_ptr);
+  }
+  return fmt::format("{} driver error {} (code={}): {}",
                      cuda::detail::driver_provider_name(driver.get_provider()),
-                     err_name_ptr, err_string_ptr);
+                     err_name_ptr ? err_name_ptr : "UNKNOWN_STATUS", err,
+                     err_string_ptr ? err_string_ptr : "No driver description");
 }
 
 CUDADriverBase::CUDADriverBase() {

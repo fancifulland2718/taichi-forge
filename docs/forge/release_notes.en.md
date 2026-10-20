@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Legacy cuSOLVER, cuSPARSE, cuBLAS and cuFFT wrappers report their own status
+  names and numeric codes instead of interpreting them as CUDA driver errors.
+  Unknown statuses preserve the original number; reporting does not retry the
+  failed operation or change solver behavior.
 - External CUDA calls through the shared submission boundary activate Forge's
   context and restore the caller's context on success or failure. OptiX cold
   initialization, pipeline preparation, queries and retirement no longer rely

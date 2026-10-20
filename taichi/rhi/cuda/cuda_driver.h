@@ -12,6 +12,7 @@
 #include "taichi/rhi/backend_error.h"
 #include "taichi/rhi/common/runtime_telemetry.h"
 #include "taichi/rhi/cuda/cuda_types.h"
+#include "taichi/rhi/cuda/library_status.h"
 
 #if (0)
 // Turn on to check for compatibility
@@ -213,6 +214,11 @@ class CUDADriverFunction {
   }
 
   std::string get_error_message(uint32 err) {
+    const auto status = cuda::detail::library_status(symbol_name_, err);
+    if (status.library) {
+      return fmt::format("{} error {} (code={}) while calling {} ({})",
+                         status.library, status.name, err, name_, symbol_name_);
+    }
     return get_cuda_error_message(err) +
            fmt::format(" while calling {} ({})", name_, symbol_name_);
   }
