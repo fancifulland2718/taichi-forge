@@ -41,6 +41,15 @@ def test_named_structure_layout_without_kernel(tmp_path):
     with ZipFile(tmp_path / "invalid.tcm", "w", compression=ZIP_DEFLATED) as archive:
         for name, payload in contents.items():
             archive.writestr(name, json.dumps(metadata) if name == "array_layouts.json" else payload)
+    original = contents["array_layouts.json"]
+    for suffix, invalid in (
+        ("trailing", original + b"{}"),
+        ("nul", original + b"\0"),
+        ("duplicate", b'{"version":1,' + original[1:]),
+    ):
+        with ZipFile(tmp_path / f"invalid-{suffix}.tcm", "w", compression=ZIP_DEFLATED) as archive:
+            for name, payload in contents.items():
+                archive.writestr(name, invalid if name == "array_layouts.json" else payload)
     # Re-saving a different generation must remove stale layout metadata.
     module.save(tmp_path / "directory")
     ti.aot.Module().save(tmp_path / "directory")

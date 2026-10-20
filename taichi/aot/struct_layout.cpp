@@ -159,9 +159,8 @@ NamedStructLayouts load_struct_layout_artifact(const io::VirtualDir *directory) 
   std::vector<std::uint8_t> bytes;
   if (!directory->load_file(kLayoutFilename, bytes) || bytes.empty())
     throw std::invalid_argument("Unreadable AOT ndarray layout metadata");
-  return parse_struct_layout_artifact(liong::json::parse(
-      reinterpret_cast<const char *>(bytes.data()),
-      reinterpret_cast<const char *>(bytes.data() + bytes.size())));
+  return parse_struct_layout_artifact(liong::json::parse_complete(
+      std::string(bytes.begin(), bytes.end())));
 }
 
 void write_struct_layout_artifact(const NamedStructLayouts &layouts,

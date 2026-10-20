@@ -4510,7 +4510,9 @@ helper kernel is needed.
 The `array_layouts.json` v1 catalog stores each structure type once even when
 several names reference it. It loads on the first query and caches subsequent
 lookups. Named layouts share the existing module-owned handles and retirement
-contract and cannot cross runtimes. This extension requires matching private
+contract and cannot cross runtimes. Trailing content, NUL and duplicate JSON
+object keys are rejected; a failed read does not cache a partial catalog.
+This extension requires matching private
 ABI116 components; the execution-plan format is unchanged. Publishing a layout
 does not itself enable native member-view operations or private captured
 structure-array export.

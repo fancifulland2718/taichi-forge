@@ -59,10 +59,13 @@ def main(mode, arch, artifact):
                     other._api.ti_get_aot_module_ndarray_layout_ext, other._handle, modules[0]._handle, b"record"
                 ),
             )
-        invalid = runtime.load_module(Path(artifact).with_name("invalid.tcm"))
-        for _ in range(2):
-            reject(aot.AotError, lambda: invalid.ndarray_layout("record"))
-        invalid.close()
+        invalid_paths = sorted(Path(artifact).parent.glob("invalid*.tcm"))
+        assert invalid_paths
+        for invalid_path in invalid_paths:
+            invalid = runtime.load_module(invalid_path)
+            for _ in range(2):
+                reject(aot.AotError, lambda: invalid.ndarray_layout("record"))
+            invalid.close()
         old_handle = modules[0]._handle
         modules[0].close()
         reject(RuntimeError, lambda: runtime.ndarray(layout, 1))
