@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 普通 `sort()`／单键 `sort_by_key()` 的标量 Field key＋packed 向量／矩阵 Field
+  载荷在 CPU/CUDA/Vulkan 共用 prepared 原生排序，消除此前的 host 排序回退。
+  AOT 导出相同记录，不增加 helper 代码。正常安装下的冷暖消费、稳定顺序与载荷位、
+  下游梯度、退休及 Vulkan 同步验证通过，复用 ABI125 runtime。
+
 - AOT `PrimitiveSequence.grouped_reduce()` 支持 CPU/CUDA/Vulkan 的 packed 向量／矩阵
   Field，保留现有清零与 scatter-add 阶段；重放覆盖空组并忽略无效 key。复用 ABI125
   runtime，不增加 helper 或改变格式；正常安装、下游梯度与 Vulkan 同步验证通过。

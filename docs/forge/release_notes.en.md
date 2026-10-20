@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Ordinary `sort()` / single-key `sort_by_key()` with scalar Field keys and
+  packed vector/matrix Field payloads share prepared native sorting on
+  CPU/CUDA/Vulkan, eliminating the previous host sorting fallback. AOT exports
+  the same records without extra helper code. Installed cold/warm consumers,
+  stable ordering and payload bits, downstream gradients, retirement and Vulkan
+  synchronization validation pass; the ABI125 runtime is reused.
+
 - AOT `PrimitiveSequence.grouped_reduce()` exports packed vector/matrix Fields
   on CPU/CUDA/Vulkan by preserving the existing zero-fill and scatter-add stages.
   Replays overwrite empty groups and ignore invalid keys. It reuses ABI125

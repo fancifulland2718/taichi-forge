@@ -1890,6 +1890,10 @@ payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出�
 布局仍不属于这些 sequence 路线。排序无自动伴随，
 后续已编译 kernel 的梯度仍可读取重排后的记录。
 
+Windows CPU/CUDA/Vulkan 正常安装验收覆盖矩阵 f32、向量 i64 和 8×8 i32 Field 载荷、
+冷暖导出、独立／借用消费、父 Graph、输入更新、下游梯度和退休；Vulkan 同步验证通过。
+此前端改动复用 ABI125 runtime，不增加应用代码载荷；prepared sort 仍保留后端 workspace。
+
 CPU/CUDA/Vulkan 的 `prepare_sort(keys, values)` recording 也支持标量／向量／矩阵载荷，
 包括紧凑 dense Field 和带偏移的紧凑 ndarray view。既有 retained-storage 导出器
 用同一 sort 操作重建标量 key 与完整载荷记录，不预热、不增加 helper 代码。

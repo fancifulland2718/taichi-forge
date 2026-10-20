@@ -2452,6 +2452,13 @@ Struct members and strided layouts remain outside these sequence routes.
 Sorting has no automatic adjoint; downstream compiled kernel
 gradients can consume the reordered records.
 
+Installed Windows CPU/CUDA/Vulkan qualification covers matrix f32, vector i64
+and 8×8 i32 Field payloads, cold/warm export, standalone/borrowed consumers,
+parent Graphs, mutable inputs, downstream gradients and retirement. Vulkan
+synchronization validation passes. This frontend change reuses the ABI125
+runtime and adds no application code payload; prepared sort retains its
+backend workspace.
+
 CPU/CUDA/Vulkan `prepare_sort(keys, values)` recordings also accept scalar/vector/matrix
 payloads, including packed dense Fields and offset packed ndarray views. The
 existing retained-storage exporter reconstructs the scalar key and complete payload
