@@ -4,7 +4,9 @@
 
 namespace taichi::lang {
 
-// Packed, nonempty reduction. Output may be scalar or a vector; only its first
+enum class ReduceStrategy { packed_array, scalar_field, strided_scalar };
+
+// Nonempty reduction. Output may be scalar or a vector; only its first
 // element is written. Read and write ranges must be disjoint.
 struct ReduceOperation {
   static constexpr const char *kind = "reduce";
@@ -17,7 +19,16 @@ struct ReduceOperation {
   int cpu_max_threads{0};
   NativeArrayBinding values;
   NativeArrayBinding output;
+  // Scalar Fields select packed arithmetic when their actual record strides
+  // are contiguous; member ndarrays retain the explicit strided method.
+  ReduceStrategy strategy{ReduceStrategy::packed_array};
 };
+
+struct ReduceAddressing {
+  std::uint64_t values_offset{0}, values_stride{0}, output_offset{0}, output_stride{0};
+};
+ReduceAddressing qualify_reduce_addressing(
+    Arch arch, Device &device, const ReduceOperation &operation);
 
 class NativeOperation;
 namespace gfx {

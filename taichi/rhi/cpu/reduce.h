@@ -143,4 +143,83 @@ void reduce(const T *values, T *output, int op, std::size_t n,
   }
 }
 
+template <typename T>
+struct CpuStridedReduceTaskContext {
+  const std::uint8_t *values;
+  T *partial;
+  std::size_t n, offset, stride;
+  int num_threads, op;
+};
+
+template <typename T>
+T cpu_reduce_sum_strided_range(const std::uint8_t *values,
+                               std::size_t offset, std::size_t stride,
+                               std::size_t begin, std::size_t end) {
+  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+    using U = std::make_unsigned_t<T>;
+    U acc = 0;
+    for (std::size_t i = begin; i < end; ++i) {
+      U bits;
+      std::memcpy(&bits, values + offset + i * stride, sizeof(T));
+      acc += bits;
+    }
+    T result;
+    std::memcpy(&result, &acc, sizeof(T));
+    return result;
+  } else {
+    T acc{};
+    for (std::size_t i = begin; i < end; ++i)
+      acc += *reinterpret_cast<const T *>(values + offset + i * stride);
+    return acc;
+  }
+}
+
+template <typename T>
+void cpu_strided_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuStridedReduceTaskContext<T> *>(raw_ctx);
+  const auto begin = partition_boundary(ctx->n, ctx->num_threads, task_id);
+  const auto end = partition_boundary(ctx->n, ctx->num_threads, task_id + 1);
+  if (ctx->op == 0) {
+    ctx->partial[task_id] = cpu_reduce_sum_strided_range<T>(
+        ctx->values, ctx->offset, ctx->stride, begin, end);
+    return;
+  }
+  T acc = cpu_reduce_identity<T>(ctx->op);
+  for (std::size_t i = begin; i < end; ++i)
+    acc = cpu_reduce_combine(
+        acc, *reinterpret_cast<const T *>(ctx->values + ctx->offset + i * ctx->stride),
+        ctx->op);
+  ctx->partial[task_id] = acc;
+}
+
+// The caller proves the physical window and alias separation. Both JIT and
+// AOT preserve the same partition order; only the first output is written.
+template <typename T>
+void reduce_strided(const std::uint8_t *values, T *output, int op,
+                     std::size_t n, std::size_t offset, std::size_t stride,
+                     int partitions, T *partial, ThreadPool *pool) {
+  if (!values || !output || !n || op < 0 || op > 2 || partitions < 1 ||
+      std::size_t(partitions) > n || (partitions > 1 && (!partial || !pool)) ||
+      stride < sizeof(T) || offset % alignof(T) || stride % alignof(T) ||
+      offset > std::numeric_limits<std::size_t>::max() - sizeof(T) ||
+      n - 1 > (std::numeric_limits<std::size_t>::max() - offset - sizeof(T)) / stride)
+    throw std::invalid_argument("CPU strided reduction has invalid storage or scheduler");
+  if (partitions > 1) {
+    CpuStridedReduceTaskContext<T> context{values, partial, n, offset, stride, partitions, op};
+    pool->run(partitions, partitions, &context, cpu_strided_reduce_task<T>);
+    T result = cpu_reduce_identity<T>(op);
+    for (int i = 0; i < partitions; ++i)
+      result = cpu_reduce_combine(result, partial[i], op);
+    output[0] = result;
+  } else if (op == 0) {
+    output[0] = cpu_reduce_sum_strided_range<T>(values, offset, stride, 0, n);
+  } else {
+    T result = cpu_reduce_identity<T>(op);
+    for (std::size_t i = 0; i < n; ++i)
+      result = cpu_reduce_combine(
+          result, *reinterpret_cast<const T *>(values + offset + i * stride), op);
+    output[0] = result;
+  }
+}
+
 }  // namespace taichi::lang::cpu

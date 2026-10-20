@@ -3,6 +3,7 @@
 #include <limits>
 #include <utility>
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_reduce.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/image_transfer.h"
@@ -921,12 +922,68 @@ TEST(NativeOperationRegistry, ReduceSchemaPreservesBackendSpecificScheduling) {
            R"({"size":4,"dtype":"f32","op":"product"})",
            R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":0})",
            R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":true})",
+           R"({"size":4,"dtype":"f32","op":"sum","strategy":true})",
+           R"({"size":4,"dtype":"f32","op":"sum","strategy":"auto"})",
            R"({"size":4,"dtype":"f32","op":"sum","cpu_max_threads":2147483648})"}) {
     auto bad = op;
     bad.parameters = liong::json::parse_complete(parameters);
     EXPECT_THROW(registry.decode(bad), std::invalid_argument) << parameters;
   }
 }
+
+#ifdef TI_WITH_LLVM
+TEST(NativeOperationRegistry, ReduceStridedMembersShareAnAllocationAndRetainWorkspace) {
+  cpu::CpuDevice device;
+  auto [allocation, status] = device.allocate_memory_unique({17 * 16});
+  ASSERT_EQ(status, RhiResult::success);
+  void *mapped = nullptr;
+  ASSERT_EQ(device.map(allocation->get_ptr(0), &mapped), RhiResult::success);
+  auto *records = static_cast<float *>(mapped);
+  for (int i = 0; i < 17; ++i) {
+    records[i * 4] = 37;
+    records[i * 4 + 1] = float(i);
+    records[i * 4 + 2] = -9;
+    records[i * 4 + 3] = 91;
+  }
+  NativeArrayBinding values;
+  values.pointer = allocation->get_ptr();
+  values.bytes = 17 * 16;
+  values.scalar_type = PrimitiveType::f32;
+  values.shape = {17};
+  values.strides = std::make_shared<const NativeArrayStrides>(
+      NativeArrayStrides{{16}, {}, 4});
+  auto output = values;
+  output.strides = std::make_shared<const NativeArrayStrides>(
+      NativeArrayStrides{{16}, {}, 8});
+  NativePreparationContext context(host_arch(), device);
+  const auto &registry = native_operation_registry();
+  ReduceOperation description{11, 1, 0, 1, values, output,
+                              ReduceStrategy::strided_scalar};
+  auto prepared = std::dynamic_pointer_cast<NativeOperation>(registry.prepare(context, description));
+  ASSERT_NE(prepared, nullptr);
+  EXPECT_EQ(prepared->workspace_bytes(), 0);
+  prepared->run_cpu();
+  EXPECT_EQ(records[2], 55);
+  records[1] = 7;
+  prepared->run_cpu();
+  EXPECT_EQ(records[2], 62);
+  for (int i = 0; i < 17; ++i) {
+    EXPECT_EQ(records[i * 4], 37);
+    EXPECT_EQ(records[i * 4 + 3], 91);
+    if (i) EXPECT_EQ(records[i * 4 + 2], -9);
+  }
+  description.output = values;
+  EXPECT_THROW(registry.prepare(context, description), std::invalid_argument);
+  description.output = output;
+  description.strategy = ReduceStrategy::packed_array;
+  EXPECT_THROW(registry.prepare(context, description), std::invalid_argument);
+  description.strategy = ReduceStrategy::scalar_field;
+  description.size = 18;
+  EXPECT_THROW(registry.prepare(context, description), std::invalid_argument);
+  EXPECT_EQ(records[2], 62);
+  device.unmap(*allocation);
+}
+#endif
 
 TEST(NativeOperationRegistry, TransformSchemaUsesExactScalarBits) {
   const auto &registry = native_operation_registry();

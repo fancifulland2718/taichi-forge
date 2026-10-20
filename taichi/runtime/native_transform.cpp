@@ -276,15 +276,9 @@ TransformAddressing qualify_transform_addressing(
         {{resolve_native_storage_range(arch, op.dst.pointer, op.size * record), 0}});
     return {0, record, 0, record};
   }
-  auto prefix = [&](const NativeArrayBinding &array) {
-    const auto facts = validate_native_dense_array_layout(array);
-    auto result = array;
-    result.shape = {op.size};
-    result.strides = std::make_shared<const NativeArrayStrides>(NativeArrayStrides{
-        {facts.properties.record_stride}, {}, facts.layout.byte_offset});
-    return result;
-  };
-  const auto src = prefix(op.src), dst = prefix(op.dst);
+  const auto type = transform_types()[op.value_type];
+  const auto src = native_scalar_prefix(op.src, op.size, type);
+  const auto dst = native_scalar_prefix(op.dst, op.size, type);
   const auto a = resolve_native_dense_array(arch, src);
   const auto b = resolve_native_dense_array(arch, dst);
   if (!a.proven_disjoint(b) && !a.proven_same_mapping(b))

@@ -276,6 +276,22 @@ prefix; their optional positive `cpu_max_threads` parameter freezes the CPU
 strategy, otherwise it uses the consumer configuration. AOT does not generate
 an adjoint. This extension requires matching
 frontend/runtime private ABI 106 components.
+
+Reduction export also accepts one-dimensional scalar `StructNdarray` members,
+including `field(path, component=...)`, and flat dense scalar Fields with positive
+uniform record strides on CPU/CUDA/Vulkan. Member arrays use a named or captured
+typed parent; Fields use module-root snapshots and a scalar Field output.
+Explicit `builtin/reduce` parameters select `strategy="strided_scalar"` for
+member storage or `"scalar_field"` for the existing Field algorithm selection;
+the omitted strategy retains packed arrays. Read/write separation is checked
+for the accessed prefix, so distinct scalar members of the same parent can be
+used as input/output. Only the first output is written; siblings and tails remain
+unchanged. CPU shares the JIT strided core and frozen partition order; CUDA/Vulkan
+reuse their native kernels and prepared scratch. Vulkan may retain its existing
+aligned scalar-output staging. There is no full-array packing helper or extra
+application shader in the TCM. This route requires paired private ABI123
+components; it adds no automatic reduction adjoint.
+
 `PrimitiveSequence.transform()` and explicit `builtin/transform` v1 descriptions
 cover nonempty, one-dimensional packed scalar affine transforms on CPU/CUDA/Vulkan
 for i32/u32/i64/u64/f32/f64. Accessed ranges must be exactly identical or physically

@@ -27,13 +27,21 @@ const std::array<DataType, 6> &reduce_types() {
 void validate(Device &device, const ReduceOperation &op) {
   const auto &types = reduce_types();
   if (!op.size || op.op < 0 || op.op > 2 || op.cpu_max_threads < 0 ||
-      op.value_type < 0 || op.value_type >= types.size())
+      op.value_type < 0 || op.value_type >= types.size() ||
+      (op.strategy != ReduceStrategy::packed_array &&
+       op.strategy != ReduceStrategy::scalar_field &&
+       op.strategy != ReduceStrategy::strided_scalar))
     throw std::invalid_argument(
         "Reduce requires nonempty supported sum/min/max");
   const std::uint64_t width = op.value_type < 3 ? 4 : 8;
   for (const auto *array : {&op.values, &op.output}) {
     if (array->pointer.device != &device)
       throw std::invalid_argument("Reduce requires same-device arrays");
+    if (op.strategy != ReduceStrategy::packed_array) {
+      native_scalar_prefix(*array, array == &op.values ? op.size : 1,
+                            types[op.value_type]);
+      continue;
+    }
     const bool scalar = array == &op.output && array->shape.empty();
     validate_native_array_layout(
         *array,
@@ -60,14 +68,7 @@ class ReduceBase : public NativeOperation {
         size_(op.size),
         type_(op.value_type),
         op_(op.op) {
-    for (const auto *array : {&op.values, &op.output}) {
-      validate_native_shader_storage(arch, array->pointer);
-      resolve_native_storage_range(arch, array->pointer, array->bytes);
-    }
-    const auto width = type_ < 3 ? 4 : 8;
-    validate_native_read_write_disjoint(
-        {resolve_native_storage_range(arch, op.values.pointer, size_ * width)},
-        {resolve_native_storage_range(arch, op.output.pointer, width)});
+    addressing_ = qualify_reduce_addressing(arch, device, op);
   }
   Arch arch() const override {
     return arch_;
@@ -85,6 +86,7 @@ class ReduceBase : public NativeOperation {
   std::size_t size_;
   int type_, op_;
   std::size_t bytes_{0};
+  ReduceAddressing addressing_;
   void *values_{nullptr}, *output_{nullptr};
 };
 
@@ -94,6 +96,9 @@ class CpuReduce final : public ReduceBase {
  public:
   CpuReduce(NativePreparationContext &context, const ReduceOperation &op)
       : ReduceBase(context.arch, context.device, op),
+        strided_(op.strategy == ReduceStrategy::strided_scalar ||
+                 (op.strategy == ReduceStrategy::scalar_field &&
+                  addressing_.values_stride != sizeof(T))),
         pool_(context.cpu_thread_pool),
         partitions_(cpu::reduce_partitions(op.size,
                                            op.cpu_max_threads
@@ -115,11 +120,24 @@ class CpuReduce final : public ReduceBase {
     }
   }
   void run_cpu() override {
-    cpu::reduce(static_cast<const T *>(values_), static_cast<T *>(output_), op_,
+    if (strided_) {
+      cpu::reduce_strided<T>(
+          static_cast<const std::uint8_t *>(values_),
+          reinterpret_cast<T *>(static_cast<std::uint8_t *>(output_) +
+                                 addressing_.output_offset),
+          op_, size_, addressing_.values_offset, addressing_.values_stride,
+          partitions_, partial_.data(), pool_);
+      return;
+    }
+    cpu::reduce(reinterpret_cast<const T *>(
+                    static_cast<const std::uint8_t *>(values_) + addressing_.values_offset),
+                reinterpret_cast<T *>(
+                    static_cast<std::uint8_t *>(output_) + addressing_.output_offset), op_,
                 size_, partitions_, partial_.data(), pool_);
   }
 
  private:
+  bool strided_;
   ThreadPool *pool_;
   int partitions_;
   std::vector<T> partial_;
@@ -176,9 +194,11 @@ class CudaReduce final : public ReduceBase {
     cuda::driver_prepare_reduce();
   }
   void record_cuda(void *stream) override {
-    cuda::driver_reduce_with_workspace(
+    cuda::driver_reduce_strided_with_workspace(
         values_, output_, static_cast<int>(size_),
         static_cast<cuda::CudaTransformValueType>(type_),
+        addressing_.values_offset, addressing_.values_stride,
+        addressing_.output_offset, addressing_.output_stride,
         static_cast<cuda::CudaHierarchicalReduceOp>(op_), scratch_, stream);
   }
 
@@ -189,6 +209,32 @@ class CudaReduce final : public ReduceBase {
 #endif
 }  // namespace
 
+ReduceAddressing qualify_reduce_addressing(
+    Arch arch, Device &device, const ReduceOperation &op) {
+  validate(device, op);
+  for (const auto *array : {&op.values, &op.output}) {
+    validate_native_shader_storage(arch, array->pointer);
+    resolve_native_storage_range(arch, array->pointer, array->bytes);
+  }
+  const auto width = op.value_type < 3 ? 4 : 8;
+  if (op.strategy == ReduceStrategy::packed_array) {
+    validate_native_read_write_disjoint(
+        {resolve_native_storage_range(arch, op.values.pointer, op.size * width)},
+        {resolve_native_storage_range(arch, op.output.pointer, width)});
+    return {0, std::uint64_t(width), 0, std::uint64_t(width)};
+  }
+  const auto type = reduce_types()[op.value_type];
+  const auto src = native_scalar_prefix(op.values, op.size, type);
+  const auto dst = native_scalar_prefix(op.output, 1, type);
+  if (!resolve_native_dense_array(arch, src).proven_disjoint(
+          resolve_native_dense_array(arch, dst)))
+    throw std::invalid_argument("Reduce input and output members overlap");
+  return {std::uint64_t(src.strides->byte_offset),
+          std::uint64_t(src.strides->index_bytes[0]),
+          std::uint64_t(dst.strides->byte_offset),
+          std::uint64_t(dst.strides->index_bytes[0])};
+}
+
 void register_reduce_operation(NativeOperationRegistry &registry) {
   registry.define<ReduceOperation>(validate);
   registry.register_schema<ReduceOperation>(
@@ -196,7 +242,7 @@ void register_reduce_operation(NativeOperationRegistry &registry) {
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<ReduceOperation> {
         operation_json::fields(parameters,
-                               {"size", "dtype", "op", "cpu_max_threads"});
+                               {"size", "dtype", "op", "cpu_max_threads", "strategy"});
         const auto size = operation_json::integer(parameters["size"]);
         if (!size || size > std::numeric_limits<std::size_t>::max())
           throw std::invalid_argument(
@@ -222,14 +268,30 @@ void register_reduce_operation(NativeOperationRegistry &registry) {
             (!*threads || *threads > std::numeric_limits<int>::max()))
           throw std::invalid_argument(
               "Reduce CPU configuration must fit its positive int ABI");
+        auto strategy = ReduceStrategy::packed_array;
+        if (const auto selected = parameters.obj.inner.find("strategy");
+            selected != parameters.obj.inner.end()) {
+          const auto name = operation_json::name(selected->second);
+          if (name == "strided_scalar")
+            strategy = ReduceStrategy::strided_scalar;
+          else if (name == "scalar_field")
+            strategy = ReduceStrategy::scalar_field;
+          else if (name != "packed_array")
+            throw std::invalid_argument("Reduce strategy is invalid");
+        }
         return
-            [size, type, op, threads](const NativeOperationBindings &bindings) {
+            [size, type, op, threads, strategy](const NativeOperationBindings &bindings) {
               return ReduceOperation{static_cast<std::size_t>(size),
                                      type,
                                      op,
                                      static_cast<int>(threads.value_or(0)),
-                                     bindings.at("values").array(),
-                                     bindings.at("output").array()};
+                                     strategy != ReduceStrategy::packed_array
+                                         ? bindings.at("values").dense_array()
+                                         : bindings.at("values").array(),
+                                     strategy != ReduceStrategy::packed_array
+                                         ? bindings.at("output").dense_array()
+                                         : bindings.at("output").array(),
+                                     strategy};
             };
       });
 #ifdef TI_WITH_LLVM

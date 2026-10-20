@@ -486,6 +486,24 @@ std::uint64_t stride_gcd(const storage::DenseStorageLayoutSpec &layout) {
 }
 }  // namespace
 
+NativeArrayBinding native_scalar_prefix(const NativeArrayBinding &array,
+                                        std::uint64_t count,
+                                        DataType scalar_type) {
+  const auto facts = validate_native_dense_array_layout(array);
+  const auto &p = facts.properties;
+  if (!count || array.scalar_type != scalar_type ||
+      !array.element_shape.empty() || p.item_count < count ||
+      !p.single_record_stride_compatible || p.has_negative_stride ||
+      p.uniqueness != storage::StorageMappingUniqueness::kProvenUnique)
+    throw std::invalid_argument(
+        "Scalar prefix requires a unique positive uniform record-strided view");
+  auto result = array;
+  result.shape = {count};
+  result.strides = std::make_shared<const NativeArrayStrides>(
+      NativeArrayStrides{{p.record_stride}, {}, facts.layout.byte_offset});
+  return result;
+}
+
 NativeDenseArrayView::NativeDenseArrayView(NativeDenseArrayLayout layout,
                                          NativeStorageRange storage)
     : layout_(std::move(layout)) {

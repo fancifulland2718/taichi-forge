@@ -948,17 +948,6 @@ std::size_t sort_key_type_size(int key_type) {
   }
 }
 
-template <typename T>
-struct CpuStridedReduceTaskContext {
-  const uint8_t *values{nullptr};
-  T *partial{nullptr};
-  std::size_t n{0};
-  std::size_t offset{0};
-  std::size_t stride{0};
-  int num_threads{1};
-  int op{0};
-};
-
 struct CpuFillU32TaskContext {
   uint32_t *data{nullptr};
   std::size_t words{0};
@@ -1206,62 +1195,6 @@ int cpu_aggregation_target_threads(std::size_t n,
 using cpu::cpu_reduce_identity;
 using cpu::cpu_reduce_combine;
 using cpu::cpu_reduce_sum_contiguous_range;
-
-template <typename T>
-T cpu_reduce_sum_strided_range(const uint8_t *values,
-                               std::size_t offset,
-                               std::size_t stride,
-                               std::size_t begin,
-                               std::size_t end) {
-  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-    using U = std::make_unsigned_t<T>;
-    U acc = 0;
-    for (std::size_t i = begin; i < end; ++i) {
-      const auto *value =
-          reinterpret_cast<const T *>(values + offset + i * stride);
-      U bits = 0;
-      std::memcpy(&bits, value, sizeof(T));
-      acc += bits;
-    }
-    T result{};
-    std::memcpy(&result, &acc, sizeof(T));
-    return result;
-  } else {
-    T acc{};
-    for (std::size_t i = begin; i < end; ++i) {
-      const auto *value =
-          reinterpret_cast<const T *>(values + offset + i * stride);
-      acc += *value;
-    }
-    return acc;
-  }
-}
-
-template <typename T>
-void cpu_strided_reduce_task(void *raw_ctx,
-                             int /*thread_id*/,
-                             int task_id) {
-  auto *ctx = static_cast<CpuStridedReduceTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  if (ctx->op == 0) {
-    ctx->partial[tid] = cpu_reduce_sum_strided_range<T>(
-        ctx->values, ctx->offset, ctx->stride, begin, end);
-    return;
-  }
-  T acc = cpu_reduce_identity<T>(ctx->op);
-  for (std::size_t i = begin; i < end; ++i) {
-    const auto *value = reinterpret_cast<const T *>(
-        ctx->values + ctx->offset + i * ctx->stride);
-    acc = cpu_reduce_combine(acc, *value, ctx->op);
-  }
-  ctx->partial[tid] = acc;
-}
 
 void cpu_fill_u32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   auto *ctx = static_cast<CpuFillU32TaskContext *>(raw_ctx);
@@ -3362,38 +3295,15 @@ std::size_t cpu_reduce_strided_typed(const uint8_t *values_ptr,
   TI_ERROR_IF(!values_ptr || !output_ptr,
               "CPU native strided reduce received a null data pointer.");
 
-  T result = cpu_reduce_identity<T>(op);
   if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<T> partial(num_threads);
-    CpuStridedReduceTaskContext<T> ctx;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.offset = offset;
-    ctx.stride = stride;
-    ctx.num_threads = num_threads;
-    ctx.op = op;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(num_threads, num_threads, &ctx, cpu_strided_reduce_task<T>);
-    for (int tid = 0; tid < num_threads; ++tid) {
-      result = cpu_reduce_combine(result, partial[tid], op);
-    }
-    output_ptr[0] = result;
+    std::vector<T> partial(target_threads);
+    cpu::reduce_strided(values_ptr, output_ptr, op, n, offset, stride,
+                         target_threads, partial.data(),
+                         get_cpu_primitive_thread_pool(max_threads));
     return partial.size() * sizeof(T);
   }
-
-  if (op == 0) {
-    output_ptr[0] =
-        cpu_reduce_sum_strided_range<T>(values_ptr, offset, stride, 0, n);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto *value =
-        reinterpret_cast<const T *>(values_ptr + offset + i * stride);
-    result = cpu_reduce_combine(result, *value, op);
-  }
-  output_ptr[0] = result;
+  cpu::reduce_strided(values_ptr, output_ptr, op, n, offset, stride,
+                       1, static_cast<T *>(nullptr), nullptr);
   return 0;
 }
 

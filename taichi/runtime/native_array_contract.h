@@ -86,6 +86,13 @@ struct NativeDenseArrayLayout {
 NativeDenseArrayLayout validate_native_dense_array_layout(
     const NativeArrayBinding &array);
 
+// Preserve a nonempty scalar prefix of a unique positive uniform record view.
+// Validates the complete supplied window before flattening its index shape.
+// No device access, allocation or ownership change is performed.
+NativeArrayBinding native_scalar_prefix(const NativeArrayBinding &array,
+                                        std::uint64_t count,
+                                        DataType scalar_type);
+
 // Validated physical view with the same borrowed lifetime as NativeStorageRange.
 // No allocation or lease is created. Comparing views is independent of element
 // count; uncertain overlap remains unproven, including unknown imported memory.

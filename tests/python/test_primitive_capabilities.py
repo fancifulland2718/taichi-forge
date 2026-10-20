@@ -89,6 +89,12 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         assert reduce_sequence.backends == ("cpu", "cuda", "vulkan")
         assert "frozen_cpu_partition_strategy" in reduce_sequence.constraints
         assert any(r.forms == ("builtin/reduce",) for r in reduction.aot_routes)
+        for marker in ("scalar_leaf_or_tensor_component", "one_dimensional_scalar_affine_dense_field",
+                       "scalar_field_or_strided_scalar_strategy"):
+            route = next(r for r in reduction.aot_routes if marker in r.constraints)
+            assert route.backends == ("cpu", "cuda", "vulkan")
+            assert "packed_storage" not in route.constraints
+            assert "no_automatic_ad" in route.constraints
         rle = ti.algorithms.primitive_capability("run_length_encode").aot_routes
         assert len(rle) == 1 and rle[0].entry_point == "algorithms.PrimitiveSequence"
         assert rle[0].backends == ("cpu", "cuda", "vulkan")

@@ -49,6 +49,12 @@ void driver_reduce_with_workspace(void *values,
                                    void *workspace,
                                    void *stream);
 
+void driver_reduce_strided_with_workspace(
+    void *values, void *output, int num_items, CudaTransformValueType value_type,
+    std::size_t values_offset, std::size_t values_stride,
+    std::size_t output_offset, std::size_t output_stride,
+    CudaHierarchicalReduceOp op, void *workspace, void *stream);
+
 std::size_t driver_inclusive_scan_strided(
     void *data,
     int num_items,

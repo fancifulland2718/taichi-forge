@@ -59,7 +59,9 @@ def _scan(call, context):
 
 
 def _reduce(call, context):
-    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from math import prod
+    from taichi_forge.aot._graph_storage_bindings import field_description, packed_description
+    from taichi_forge.lang._storage_view import describe_storage
     from . import _algorithms as algorithms
 
     if (
@@ -72,11 +74,28 @@ def _reduce(call, context):
         raise TaichiRuntimeError("AOT reduce requires its concrete ReduceWorkspace")
     values, output = call.args
     algorithms._check_reduce_request(*call.args, **call.kwargs)
-    source, destination = (packed_description(a) for a in call.args)
-    if (
-        len(source.index_shape) != 1 or source.element_shape
-        or len(destination.index_shape) > 1 or destination.element_shape
-    ):
+    members = any(type(a) is algorithms.StructNdarrayScalarMemberView for a in call.args)
+    fields = all(type(a) is algorithms.ScalarField for a in call.args)
+    strategy = "strided_scalar" if members else "scalar_field" if fields else "packed_array"
+    if members:
+        if any(type(a) not in (algorithms.StructNdarrayScalarMemberView, algorithms.ScalarNdarray)
+               for a in call.args):
+            raise TaichiRuntimeError("AOT scalar member reduce requires scalar ndarray/member storage")
+        descriptions = [describe_storage(a) for a in call.args]
+        if any(not d.supported for d in descriptions):
+            raise TaichiRuntimeError("AOT scalar member reduce requires qualified dense storage")
+        source, destination = (d.descriptor for d in descriptions)
+    elif fields:
+        source, destination = (field_description(a) for a in call.args)
+    else:
+        source, destination = (packed_description(a) for a in call.args)
+    if source.element_shape or destination.element_shape:
+        raise TaichiRuntimeError("AOT reduce requires scalar storage")
+    if strategy != "packed_array":
+        if any(not d.properties["single_record_stride_compatible"] or d.properties["has_negative_stride"]
+               for d in (source, destination)):
+            raise TaichiRuntimeError("AOT scalar reduce requires a positive uniform record stride")
+    elif len(source.index_shape) != 1 or len(destination.index_shape) > 1:
         raise TaichiRuntimeError("AOT reduce requires packed scalar storage")
     arch = impl.current_cfg().arch
     backend, capability = {
@@ -94,17 +113,23 @@ def _reduce(call, context):
     ):
         raise TaichiRuntimeError("AOT reduce dtype is unavailable on this Vulkan device")
     op = call.kwargs["op"]
+    methods = {
+        "cpu_reduce_strided_ndarray", "cuda_device_reduce_strided_ndarray",
+        "vulkan_reduce_strided_ndarray",
+    } if members else {
+        "cpu_reduce_ndarray", "cpu_reduce_dense_field",
+        "cuda_device_reduce_ndarray", "cuda_device_reduce_dense_field",
+        "vulkan_reduce_ndarray", "vulkan_reduce_dense_field",
+    }
     if call.plan is not None and (
         type(call.plan) is not algorithms._NativePrimitivePlan
         or not algorithms._native_plan_request_matches(call.plan, backend, (values, output), (op,))
-        or call.plan.method_name not in {
-            "cpu_reduce_ndarray", "cpu_reduce_dense_field",
-            "cuda_device_reduce_ndarray", "cuda_device_reduce_dense_field",
-            "vulkan_reduce_ndarray", "vulkan_reduce_dense_field",
-        }
+        or call.plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT reduce cannot reconstruct the selected cached strategy")
-    parameters = dict(size=source.index_shape[0], dtype=str(source.scalar_type), op=op)
+    parameters = dict(size=prod(source.index_shape), dtype=str(source.scalar_type), op=op)
+    if strategy != "packed_array":
+        parameters["strategy"] = strategy
     if backend == "cpu_native":
         parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
     context.operations.append(dict(

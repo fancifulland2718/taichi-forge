@@ -57,6 +57,32 @@ TEST(NativeArrayContract, LogicalPayloadDoesNotReplaceAccessibleSpan) {
   EXPECT_NO_THROW(validate_native_dense_array_layout(array));
 }
 
+TEST(NativeArrayContract, ScalarPrefixFlattensUniformRecordsWithoutRepacking) {
+  auto array = member();
+  array.shape = {3, 5};
+  array.strides = std::make_shared<const NativeArrayStrides>(
+      NativeArrayStrides{{100, 20}, {}, 4});
+  const auto prefix = native_scalar_prefix(array, 11, PrimitiveType::f32);
+  EXPECT_EQ(prefix.shape, (std::vector<std::uint64_t>{11}));
+  EXPECT_EQ(prefix.strides->index_bytes, (std::vector<std::int64_t>{20}));
+  EXPECT_EQ(prefix.strides->byte_offset, 4);
+  EXPECT_EQ(prefix.bytes, array.bytes);
+  EXPECT_EQ(prefix.pointer, array.pointer);
+  EXPECT_EQ(validate_native_dense_array_layout(prefix).properties.reachable_end, 208);
+  EXPECT_THROW(native_scalar_prefix(array, 16, PrimitiveType::f32), std::invalid_argument);
+  EXPECT_THROW(native_scalar_prefix(array, 0, PrimitiveType::f32), std::invalid_argument);
+  EXPECT_THROW(native_scalar_prefix(array, 11, PrimitiveType::i32), std::invalid_argument);
+  array.shape = {};
+  array.strides = std::make_shared<const NativeArrayStrides>(
+      NativeArrayStrides{{}, {}, 8});
+  EXPECT_EQ(native_scalar_prefix(array, 1, PrimitiveType::f32).strides->index_bytes,
+            (std::vector<std::int64_t>{4}));
+  array = member(17, 0, 4);
+  EXPECT_THROW(native_scalar_prefix(array, 1, PrimitiveType::f32), std::invalid_argument);
+  array = member(17, -20, 324);
+  EXPECT_THROW(native_scalar_prefix(array, 11, PrimitiveType::f32), std::invalid_argument);
+}
+
 TEST(NativeArrayContract, RejectsMalformedLayoutsBeforeDeviceAccess) {
   auto array = member();
   array.shape = {std::numeric_limits<std::uint64_t>::max()};

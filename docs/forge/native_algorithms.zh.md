@@ -217,6 +217,18 @@ scratch 的合同。AOT scan 不生成伴随，应用可另外导出自己的显
 浮点结果保持各后端原有顺序合同，不承诺跨后端逐位一致。显式描述可选择固定输入
 前缀；可选正整数参数 `cpu_max_threads` 冻结 CPU 策略，省略则采用消费端配置。
 AOT 不生成伴随。此扩展要求配对的 frontend/runtime 私有 ABI 106 组件。
+
+CPU/CUDA/Vulkan 的归约导出也支持一维 `StructNdarray` 标量成员（含
+`field(path, component=...)`）以及具有正向统一记录步幅的平坦 dense 标量 Field。
+成员数组绑定具名或快照捕获的完整类型父数组；Field 使用模块根快照和标量 Field
+输出。显式 `builtin/reduce` 的参数可用 `strategy="strided_scalar"` 选择成员存储，
+或用 `"scalar_field"` 保留既有 Field 算法选择；省略时保持连续数组路线。
+准备时按实际访问前缀证明读写分离，允许同一父数组中互不重叠的标量成员作为输入、
+输出。仅写输出首元素，其余成员和尾部保持不变。CPU 与 JIT 共用步幅归约核心及
+冻结分区顺序，CUDA/Vulkan 复用既有原生 kernel 和提前准备的 scratch；Vulkan
+可能沿用已有的标量输出对齐暂存。不添加整数组打包辅助 kernel，也不向 TCM 添加
+应用 shader。此路线要求配对的私有 ABI123 组件，不自动生成归约伴随。
+
 `PrimitiveSequence.transform()` 与显式 `builtin/transform` v1 描述支持 CPU/CUDA/Vulkan
 上的非空、一维连续标量 affine 变换，覆盖 i32/u32/i64/u64/f32/f64。输入输出可为
 准确相同的访问区间，或物理不重叠的区间；部分重叠在准备时拒绝。显式描述可选择

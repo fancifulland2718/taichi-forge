@@ -9686,6 +9686,8 @@ VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
               "Vulkan native reduce received null storage.");
   TI_ERROR_IF(n == 0,
               "Vulkan native reduce expects at least one input item.");
+  TI_ERROR_IF(n > std::numeric_limits<uint32_t>::max(),
+              "Vulkan native reduce exceeds its uint32 count ABI.");
   TI_ERROR_IF(value_type < 0 || value_type > 5,
               "Vulkan native reduce received an unsupported value type.");
   const auto &caps = device->get_caps();
@@ -9734,6 +9736,17 @@ VulkanPreparedReduce prepare_vulkan_reduce(Program *program,
   };
   if (member_source) {
     check_strided("source", offset, stride);
+    const auto word_max = std::numeric_limits<uint32_t>::max();
+    const auto first_word = offset / sizeof(uint32_t);
+    const auto step_words = stride / sizeof(uint32_t);
+    const auto last_lane = element_size / sizeof(uint32_t) - 1;
+    TI_ERROR_IF(first_word > word_max - last_lane || step_words > word_max ||
+                    n - 1 > (word_max - last_lane - first_word) / step_words,
+                "Vulkan reduce source exceeds its uint32 shader address ABI.");
+    const auto range_limit = device->get_storage_buffer_binding_limits().max_range;
+    TI_ERROR_IF(offset > range_limit || element_size > range_limit - offset ||
+                    n - 1 > (range_limit - offset - element_size) / stride,
+                "Vulkan reduce source exceeds its storage buffer range.");
   }
   if (member_destination) {
     check_strided("destination", output_offset, output_stride);
@@ -9985,14 +9998,12 @@ class FixedVulkanReduce final : public NativeOperation {
       : device_(device), values_(op.values.pointer), output_(op.output.pointer) {
     if (op.size > std::numeric_limits<std::uint32_t>::max())
       throw std::invalid_argument("Reduce exceeds its Vulkan uint32 shader ABI");
-    for (const auto *array : {&op.values, &op.output}) {
-      validate_native_shader_storage(Arch::vulkan, array->pointer);
-      resolve_native_storage_range(Arch::vulkan, array->pointer, array->bytes);
-    }
+    const auto addressing = qualify_reduce_addressing(Arch::vulkan, device, op);
     const std::size_t width = op.value_type < 3 ? 4 : 8;
-    validate_native_read_write_disjoint(
-        {resolve_native_storage_range(Arch::vulkan, values_, op.size * width)},
-        {resolve_native_storage_range(Arch::vulkan, output_, width)});
+    const bool strided = op.strategy == ReduceStrategy::strided_scalar ||
+                         (op.strategy == ReduceStrategy::scalar_field &&
+                          (addressing.values_stride != width ||
+                           addressing.output_stride != width));
     cache_.reduce_i32_sum_atomic_bindings.ring.exact_capacity = true;
     cache_.reduce_single_bindings.ring.exact_capacity = true;
     cache_.reduce_single_strided_bindings.ring.exact_capacity = true;
@@ -10001,8 +10012,9 @@ class FixedVulkanReduce final : public NativeOperation {
     cache_.reduce_final_bindings.ring.exact_capacity = true;
     prepared_ = prepare_vulkan_reduce(
         nullptr, &device, cache_, values_, output_, op.size, width, width,
-        op.value_type, op.op, values_.offset, width, output_.offset, width,
-        false, false);
+        op.value_type, op.op, values_.offset + addressing.values_offset,
+        addressing.values_stride, output_.offset + addressing.output_offset,
+        addressing.output_stride, strided, strided);
   }
   Arch arch() const override { return Arch::vulkan; }
   Device &device() const override { return device_; }

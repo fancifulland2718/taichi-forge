@@ -745,11 +745,21 @@ void driver_reduce_with_workspace(void *values,
                                    CudaHierarchicalReduceOp op,
                                    void *workspace,
                                    void *stream) {
+  const auto width = value_type_size(value_type);
+  driver_reduce_strided_with_workspace(values, output, num_items, value_type,
+                                       0, width, 0, width, op, workspace, stream);
+}
+
+void driver_reduce_strided_with_workspace(
+    void *values, void *output, int num_items, CudaTransformValueType value_type,
+    std::size_t values_offset, std::size_t values_stride,
+    std::size_t output_offset, std::size_t output_stride,
+    CudaHierarchicalReduceOp op, void *workspace, void *stream) {
   TI_ERROR_IF(driver_reduce_workspace_bytes(num_items, value_type) && !workspace,
               "Fixed CUDA reduction requires its prepared workspace.");
-  const auto width = value_type_size(value_type);
-  driver_reduce_strided_impl(values, output, num_items, value_type, 0, width,
-                              0, width, op, stream, nullptr, workspace);
+  driver_reduce_strided_impl(values, output, num_items, value_type,
+                              values_offset, values_stride, output_offset,
+                              output_stride, op, stream, nullptr, workspace);
 }
 
 static std::pair<int, int> histogram_type_indices(
