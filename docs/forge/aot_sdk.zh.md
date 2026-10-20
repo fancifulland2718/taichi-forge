@@ -3451,6 +3451,10 @@ Windows CPU/CUDA/Vulkan 验证包括嵌套 i8/u16/f32、向量/矩阵成员、pa
 不能跨 runtime 使用。此扩展需要配套私有 ABI116 组件，执行计划格式不变；仅发布
 布局不会自动接通结构数组成员视图的原生操作或私有捕获导出。
 
+Windows CPU/CUDA/Vulkan 的正常安装验证覆盖无kernel目录、独立／借用消费者、
+坏元数据及退休，并回归已有结构执行和后段浮点反向。双名称单类型夹具的目录为512B，
+压缩TCM相对空模块增加326B，无可执行产物；这些数字仅描述该小夹具。
+
 内存与外层 shape 仍放入原 `TiArgument` 的 ndarray，设置
 `elem_type=TI_DATA_TYPE_UNKNOWN`、空 `elem_shape`；将查询所得布局与版本填入
 `TiNdArrayBinding` / `TiNamedNdArrayBinding`，调用

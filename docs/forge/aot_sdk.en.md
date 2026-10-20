@@ -4515,6 +4515,12 @@ ABI116 components; the execution-plan format is unchanged. Publishing a layout
 does not itself enable native member-view operations or private captured
 structure-array export.
 
+Normal Windows CPU/CUDA/Vulkan installations pass kernel-free catalog,
+standalone/borrowed, malformed-metadata and retirement checks, alongside existing
+structured execution and downstream float AD. The two-name, one-type fixture
+has a 512-byte catalog and adds 326 bytes to the compressed TCM over an empty
+module, with no executable artifact. These sizes describe that small fixture.
+
 Pass memory and outer shape through the existing `TiArgument` ndarray, setting
 `elem_type=TI_DATA_TYPE_UNKNOWN` and an empty `elem_shape`. Supply the queried
 layout and version in `TiNdArrayBinding` or `TiNamedNdArrayBinding`, then call
