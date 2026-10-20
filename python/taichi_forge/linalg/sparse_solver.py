@@ -606,12 +606,14 @@ class SparseSolver:
         )
 
     def record_solve(self, *, rhs="rhs", solution="solution"):
-        """Record a fixed successful CPU factor for Graph and AOT execution.
+        """Record a successful Eigen or cuSOLVERSp factor for Graph and AOT.
 
         RHS/output bindings may change between executions. Changing the matrix
-        or refactorizing requires a new recording. AOT saves canonical CSC data
-        and reconstructs its own Eigen factor; it does not serialize live
-        pointers. Automatic differentiation through this solve is not defined;
+        or refactorizing requires a new recording. AOT saves compressed data
+        and reconstructs its own factor; it does not serialize live pointers.
+        Root JIT Graphs use an ordered native call. Loaded CUDA LLT captures
+        fixed solves; legacy LU retains its ordered host numerical phase.
+        Automatic differentiation through this solve is not defined;
         an explicit adjoint solve can be recorded separately.
         """
         from ._sparse_solver_recording import SparseSolveRecording

@@ -173,6 +173,48 @@ TEST(CudaSparseSolverCore, RawVectorsWithoutProgramRestoreContextAndRetire) {
       EXPECT_ANY_THROW(solver->solve_dense_vector(
           matrix, {device_rhs, PrimitiveType::f64, 3},
           {device_output, PrimitiveType::f32, 3}));
+      if (std::string(method) == "LLT") {
+        cuda.context_set_current(owned_context);
+        cuda.stream_synchronize(nullptr);
+        void *stream = nullptr;
+        cuda.stream_create(&stream, CU_STREAM_NON_BLOCKING);
+        CUgraph graph = nullptr;
+        cuda.stream_begin_capture(stream, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
+        try {
+          static_cast<CuSparseSolver &>(*solver).record_dense_vector(
+              matrix, {device_rhs, PrimitiveType::f32, 3},
+              {device_output, PrimitiveType::f32, 3}, stream);
+        } catch (...) {
+          cuda.stream_end_capture.call(stream, &graph);
+          if (graph)
+            cuda.graph_destroy.call(graph);
+          cuda.stream_destroy.call(stream);
+          throw;
+        }
+        cuda.stream_end_capture(stream, &graph);
+        CUgraphExec executable = nullptr;
+        cuda.graph_instantiate_with_flags(&executable, graph, 0);
+        std::array<float, 3> sentinel{-17, -17, -17};
+        for (float scale : {2.0f, 3.0f}) {
+          std::array<float, 3> input{6 * scale, 10 * scale, 8 * scale};
+          cuda.memcpy_host_to_device(device_rhs, input.data(), sizeof(input));
+          cuda.memcpy_host_to_device(device_output, sentinel.data(),
+                                     sizeof(sentinel));
+          cuda.graph_launch(executable, stream);
+          cuda.stream_synchronize(stream);
+          cuda.memcpy_device_to_host(output.data(), device_output, sizeof(output));
+          for (int i = 0; i < 3; ++i)
+            EXPECT_NEAR(output[i], scale * (i + 1), 1e-5);
+        }
+        cuda.graph_exec_destroy(executable);
+        cuda.graph_destroy(graph);
+        cuda.stream_destroy(stream);
+        cuda.memcpy_host_to_device(device_rhs, rhs.data(), sizeof(rhs));
+        solver->solve_dense_vector(
+            matrix, {device_rhs, PrimitiveType::f32, 3},
+            {device_output, PrimitiveType::f32, 3});
+        cuda.context_set_current(nullptr);
+      }
       // Destruction must retire queued solves with its own context.
       solver.reset();
       void *restored = owned_context;

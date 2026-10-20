@@ -115,8 +115,8 @@ def test_sparse_direct_aot_cpu_reconstruction_and_explicit_adjoint(tmp_path):
         assert "Failed to retire" not in result.stdout + result.stderr
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
-def test_sparse_direct_cpu_factory_does_not_advertise_gpu_support():
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_sparse_direct_factory_does_not_advertise_vulkan_support():
     with ti.aot.borrow_runtime() as runtime:
         assert runtime.probe_native_resource("sparse_direct_plan")["available"] is False
         assert not runtime.native_operation_capabilities("sparse_direct_solve")

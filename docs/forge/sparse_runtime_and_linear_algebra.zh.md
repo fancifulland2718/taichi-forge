@@ -425,9 +425,45 @@ solver 重新分解后，需要重新录制。AOT 导出保存规范化 CSC 数�
 独立 runtime 和借用 runtime 都通过现有 prepared owner 管理资源；冷构造复制完
 seed 后可释放 seed，factor 随依赖它的执行退休。已报告的 workspace 计数包含已知
 matrix/permutation 存储，未包含 Eigen 的全部内部 factor 分配。这里没有新增
-CUDA/Vulkan 直接求解能力，也没有定义 solve 的自动伴随；可显式组合后续 kernel
+Vulkan 直接求解能力，也没有定义 solve 的自动伴随；可显式组合后续 kernel
 梯度与适用的伴随方程求解。该 CPU recording 尚未接入 Python structured
 Sequential 的 backend-command 路径。部署接口见 [独立 AOT SDK](aot_sdk.zh.md)。
+
+### 旧 CUDA 直接求解的 AOT 重建
+
+`provider="cusolver_sp"` 的成功 LLT/LU factor 同样可以通过上述
+`record_solve()` 导出。普通 JIT 根 Graph 使用原生调用；其中 LU 明确保留
+host 边界，不能放入要求无 host readback 的设备 recording。
+导出包在消费端重建私有 CSR、ordering、factor 和 workspace，
+不携带源 solver 的地址或厂商对象。
+
+| AOT 操作 | CUDA 数值与执行合同 |
+| --- | --- |
+| `sparse_direct/solve` | 固定 `f32` LLT factor；设备 capture，可与前后 kernel 录入同一个 CUDA Graph，并支持独立 execution domain |
+| `sparse_direct/solve_ordered` | 固定 LU 或 LLT/LU `refactor_solve`；使用默认 CUDA stream 的有序 host 调用，不能捕获进设备条件体或用于独立 execution domain |
+
+资源沿用 `sparse_direct/plan`，选择 `implementation="cusolver_sp"`；
+支持 `f32`、LLT/LU、AMD/COLAMD 和 CSR/CSC seed。索引仍是底层数值核心的
+i32 表示。`solve_ordered` 的 RHS 分组和可选 `values` 绑定与 `solve` 相同；
+数值更新沿原始 compressed 顺序，整组只分解一次。冷构造冻结规范化映射，
+重复调用复用工作区，host 已有的规范化 values 不会上传后又下载一遍。
+
+`native_operation_capabilities("sparse_direct_solve")` 报告 `cuda_capture`，
+`sparse_direct_ordered_solve` 报告 `cuda_ordered`；具体方法、phase、绑定及
+外部依赖仍在冷准备时检查。旧 cuSOLVER/cuSPARSE 动态库由用户安装，通过
+现有进程动态库搜索路径定位；`Runtime.configure_library()` 不为该旧 provider
+增加路径重定向，厂商库也不会加入应用 TCM。
+
+seed 在冷复制完成后可释放。共享因子的可变 scratch 只能同时绑定一个
+execution domain；同域内按现有提交顺序使用，释放全部执行租约后可重新绑定。
+已排队的工作沿用 Forge 完成事件和退休顺序。数值失败不继续使用旧 factor；
+失败的 prepared CUDA 执行应关闭并重新准备。workspace 统计是准备时的已知
+matrix、映射和 core scratch，不包含全部厂商 factor 分配，也不是运行峰值；
+首次 refactor 仍可能建立 factor workspace。
+
+这里验证了独立与借用 runtime、固定/分组求解、父 Graph 导出、独立域、
+关闭退休及后续 kernel 梯度与显式伴随方程；没有新增 solve 自动微分，
+也没有将旧 provider 的 LU 改成设备算法。需要实际 LDLT 时使用前述 cuDSS 路线。
 
 ## Sparse SNode runtime 行为
 

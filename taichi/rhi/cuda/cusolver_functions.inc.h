@@ -7,6 +7,7 @@ PER_CUSOLVER_FUNCTION(csGetProperty, cusolverGetProperty, libraryPropertyType, v
 // cusolver functions for solve A*x = b
 PER_CUSOLVER_FUNCTION(csSpCreate, cusolverSpCreate, cusolverSpHandle_t * );
 PER_CUSOLVER_FUNCTION(csSpDestory, cusolverSpDestroy, cusolverSpHandle_t );
+PER_CUSOLVER_FUNCTION(csSpSetStream, cusolverSpSetStream, cusolverSpHandle_t, CUstream);
 PER_CUSOLVER_FUNCTION(csSpXcsrissymHost, cusolverSpXcsrissymHost, cusolverSpHandle_t,int ,int ,const cusparseMatDescr_t ,const void *,const void *,const void *,void *);
 PER_CUSOLVER_FUNCTION(csSpXcsrsymrcmHost, cusolverSpXcsrsymrcmHost, cusolverSpHandle_t ,int ,int ,const cusparseMatDescr_t ,const void *,const void *,void *);
 PER_CUSOLVER_FUNCTION(csSpXcsrsymamdHost, cusolverSpXcsrsymamdHost, cusolverSpHandle_t ,int ,int ,const cusparseMatDescr_t ,const void *,const void *,void *);

@@ -43,4 +43,11 @@ struct SparseDirectSolveOperation {
   std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> rhs_outputs;
 };
 
+// CUDA host numerical phases have a different composition contract from a
+// fixed LLT solve. Both operations share the same reconstructed factor owner.
+struct SparseDirectOrderedSolveOperation : SparseDirectSolveOperation {
+  static constexpr const char *kind = "sparse_direct_ordered_solve";
+  static constexpr std::uint32_t version = 1;
+};
+
 }  // namespace taichi::lang

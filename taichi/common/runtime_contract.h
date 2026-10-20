@@ -10,7 +10,7 @@ namespace taichi {
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // External CUDA scopes own a context guard across Python adapter calls.
-inline constexpr int kForgeNativeAbiRevision = 129;
+inline constexpr int kForgeNativeAbiRevision = 130;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

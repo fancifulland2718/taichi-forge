@@ -464,11 +464,56 @@ rebuild triplets.
 Independent and borrowed runtimes use the existing prepared owner. Seed inputs
 can be released after cold construction copies them; factors retire with their
 dependent executions. Reported workspace bytes include known matrix/permutation
-storage, not all opaque Eigen factor allocations. This adds no CUDA/Vulkan direct
+storage, not all opaque Eigen factor allocations. This adds no Vulkan direct
 solver capability or automatic solve adjoint. Subsequent kernel gradients and
 applicable adjoint equations can be composed explicitly. This CPU recording is
 not wired into Python structured Sequential's backend-command path. See the
 [standalone AOT SDK](aot_sdk.en.md) for deployment.
+
+### Reconstructing legacy CUDA direct solvers in AOT
+
+Successful LLT/LU factors from `provider="cusolver_sp"` can also use
+`record_solve()` above. Ordinary JIT root Graphs invoke the native solve;
+LU retains an explicit host boundary and cannot enter a device recording
+requiring no host readback. Consumers reconstruct private CSR storage,
+ordering, factors and workspace. Packages contain no source solver addresses
+or vendor objects.
+
+| AOT operation | CUDA numerical and execution contract |
+| --- | --- |
+| `sparse_direct/solve` | Fixed `f32` LLT factor; device capture with surrounding kernels in one CUDA Graph, including independent execution domains |
+| `sparse_direct/solve_ordered` | Fixed LU or LLT/LU `refactor_solve`; ordered host invocation on the default CUDA stream, outside device control bodies and independent execution domains |
+
+Both use `sparse_direct/plan` with `implementation="cusolver_sp"`.
+Supported policies are `f32`, LLT/LU, AMD/COLAMD and CSR/CSC seeds, using the
+existing numerical core's i32 indices. `solve_ordered` uses the same RHS groups
+and optional `values` binding as `solve`. Updates retain the original compressed
+order and factor once for the whole group. Cold construction freezes the
+normalization map. Calls reuse scratch, and already normalized host values are
+not uploaded and then downloaded again.
+
+`native_operation_capabilities("sparse_direct_solve")` reports `cuda_capture`;
+`sparse_direct_ordered_solve` reports `cuda_ordered`. Concrete methods, phases,
+bindings and dependencies are checked during cold preparation. Users install
+the legacy cuSOLVER/cuSPARSE libraries through the existing process library
+search path. `Runtime.configure_library()` does not redirect this legacy
+provider's libraries, and vendor libraries are not included in application TCMs.
+
+Seed storage can be released after construction copies it. Mutable factor
+scratch binds to one execution domain at a time, follows that domain's existing
+submission order, and can be rebound after all execution leases retire.
+Queued work uses Forge's existing completion and retirement paths. Numerical
+failure cannot reuse stale factors; close and prepare a new CUDA execution
+after a failed sequence. Workspace accounting covers known matrix, permutation
+and core scratch at preparation time, excludes opaque vendor factor allocations
+and is not a peak-memory measurement. The first refactor may still allocate
+factor workspace.
+
+Qualification covers independent/borrowed runtimes, fixed/grouped solves,
+parent Graph export, independent domains, retirement, subsequent kernel
+gradients and explicit adjoint equations. It adds no automatic solve
+differentiation and does not turn legacy LU into a device algorithm. Use the
+cuDSS route described above for actual LDLT.
 
 ## Sparse SNode runtime behavior
 

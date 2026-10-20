@@ -12,6 +12,10 @@
 #include "taichi/program/sparse_solver.h"
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
+#if defined(TI_WITH_LLVM) && defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_device.h"
+#endif
 
 namespace taichi::lang {
 namespace {
@@ -25,8 +29,13 @@ void validate_policy(const SparseDirectPlanDescription &d) {
       (d.method != "LLT" && d.method != "LDLT" && d.method != "LU") ||
       (d.ordering != "AMD" && d.ordering != "COLAMD") ||
       (d.format != "csr" && d.format != "csc") ||
-      d.implementation != "eigen")
+      (d.implementation != "eigen" && d.implementation != "cusolver_sp"))
     throw std::invalid_argument("Unsupported sparse direct numerical policy");
+  if (d.implementation == "cusolver_sp" &&
+      (d.dtype != PrimitiveType::f32 ||
+       (d.method != "LLT" && d.method != "LU")))
+    throw std::invalid_argument(
+        "Legacy cuSOLVERSp supports f32 LLT/LU; LDLT requires cuDSS");
 }
 
 void validate_vector(Device &device,
@@ -256,6 +265,286 @@ class CpuSparseDirectSolve final : public NativeOperation {
   std::vector<std::pair<const void *, void *>> pairs_;
 };
 #endif
+
+#if defined(TI_WITH_LLVM) && defined(TI_WITH_CUDA)
+NativeOperationAvailability probe_cuda_sparse_direct() {
+  if (!CUDADriver::get_instance_without_context().nvidia_extensions_available())
+    return {};
+  auto &sparse = CUSPARSEDriver::get_instance();
+  auto &solver = CUSOLVERDriver::get_instance();
+  if ((!sparse.is_loaded() && !sparse.load_cusparse()) ||
+      (!solver.is_loaded() && !solver.load_cusolver()))
+    return {};
+  return {sparse.cpDnVecSetValues.available() &&
+              sparse.cpSetStream.available() &&
+              solver.csSpSetStream.available(),
+          0};
+}
+
+void *cuda_pointer(Device &device, const NativeArrayBinding &array) {
+  auto *cuda = dynamic_cast<cuda::CudaDevice *>(&device);
+  if (!cuda)
+    throw std::invalid_argument("Sparse direct requires a CUDA device");
+  auto *base = static_cast<char *>(cuda->get_memory_addr(array.pointer));
+  return base ? base + array.pointer.offset : nullptr;
+}
+
+template <typename Value>
+std::vector<Value> cuda_read(Device &device,
+                             const NativeArrayBinding &array) {
+  resolve_native_storage_range(Arch::cuda, array.pointer, array.bytes);
+  std::vector<Value> values(array.bytes / sizeof(Value));
+  if (!values.empty())
+    CUDADriver::get_instance().memcpy_device_to_host(
+        values.data(), cuda_pointer(device, array), array.bytes);
+  return values;
+}
+
+class OwnedCudaMatrix final : public CuSparseMatrix {
+ public:
+  using CuSparseMatrix::CuSparseMatrix;
+
+  void assign(const std::vector<float> &values) {
+    // The plan validates all values before advancing the numeric generation.
+    record_numeric_update(values.size() * sizeof(float));
+    if (!values.empty())
+      CUDADriver::get_instance().memcpy_host_to_device(
+          get_val_ptr(), const_cast<float *>(values.data()),
+          values.size() * sizeof(float));
+  }
+};
+
+class CudaSparseDirectPlan final : public SparseDirectPlanResource {
+ public:
+  CudaSparseDirectPlan(Device &device, const SparseDirectPlanDescription &d)
+      : SparseDirectPlanResource(d), device_(device) {
+    if (d.implementation != "cusolver_sp")
+      throw std::invalid_argument("CUDA sparse direct requires cuSOLVERSp");
+    auto submission_guard =
+        CUDAContext::get_instance().get_submission_lock_guard();
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    // Cold seeds may have producers on other streams. They are copied once;
+    // no source pointers or vendor objects cross the persistence boundary.
+    auto &cuda = CUDADriver::get_instance();
+    cuda.context_synchronize();
+    auto offsets = cuda_read<int>(device, d.arrays[0]);
+    auto indices = cuda_read<int>(device, d.arrays[1]);
+    auto values = cuda_read<float>(device, d.arrays[2]);
+    validate_native_csr_indices(offsets, indices, d.rows);
+    std::vector<Eigen::Triplet<float>> triplets;
+    triplets.reserve(d.nonzeros);
+    for (int group = 0; group < int(d.rows); ++group) {
+      for (int i = offsets[group]; i < offsets[group + 1]; ++i) {
+        if (!std::isfinite(values[i]))
+          throw std::invalid_argument("Sparse direct seed values must be finite");
+        triplets.emplace_back(d.format == "csr" ? group : indices[i],
+                              d.format == "csr" ? indices[i] : group,
+                              values[i]);
+      }
+    }
+    using Matrix = Eigen::SparseMatrix<float, Eigen::RowMajor>;
+    Matrix canonical(d.rows, d.rows);
+    canonical.setFromTriplets(triplets.begin(), triplets.end());
+    canonical.makeCompressed();
+    permutation_.resize(d.nonzeros);
+    for (std::size_t i = 0; i < triplets.size(); ++i) {
+      const auto &entry = triplets[i];
+      const int begin = canonical.outerIndexPtr()[entry.row()];
+      const int end = canonical.outerIndexPtr()[entry.row() + 1];
+      permutation_[i] = int(
+          std::lower_bound(canonical.innerIndexPtr() + begin,
+                           canonical.innerIndexPtr() + end, int(entry.col())) -
+          canonical.innerIndexPtr());
+    }
+    // Keep partial allocations private until the matrix assumes ownership.
+    std::array<void *, 3> storage{};
+    const std::array<std::size_t, 3> bytes{
+        sizeof(int) * (d.rows + 1), sizeof(int) * d.nonzeros,
+        sizeof(float) * d.nonzeros};
+    const std::array<const void *, 3> source{
+        canonical.outerIndexPtr(), canonical.innerIndexPtr(),
+        canonical.valuePtr()};
+    try {
+      for (int i = 0; i < 3; ++i) {
+        cuda.malloc(&storage[i], std::max(bytes[i], std::size_t{1}));
+        if (bytes[i])
+          cuda.memcpy_host_to_device(storage[i], const_cast<void *>(source[i]),
+                                    bytes[i]);
+      }
+      matrix_ = std::make_unique<OwnedCudaMatrix>(
+          nullptr, int(d.rows), int(d.rows), d.dtype, storage[0], storage[1],
+          storage[2], int(d.nonzeros));
+    } catch (...) {
+      for (auto pointer : storage)
+        if (pointer)
+          cuda.mem_free.call(pointer);
+      throw;
+    }
+    auto core = make_cusparse_solver(d.dtype, d.method, d.ordering);
+    solver_.reset(static_cast<CuSparseSolver *>(core.release()));
+    if (d.refactor) {
+      input_values_.resize(d.nonzeros);
+      canonical_values_.resize(d.nonzeros);
+      solver_->analyze_pattern(*matrix_);
+    } else if (!solver_->compute(*matrix_)) {
+      throw std::invalid_argument("Sparse direct seed factorization failed");
+    }
+    completion_ = std::make_shared<CudaProviderCompletionResource>();
+    known_bytes_ = bytes[0] + bytes[1] + bytes[2] +
+                   permutation_.capacity() * sizeof(int) +
+                   (input_values_.capacity() + canonical_values_.capacity()) *
+                       sizeof(float);
+    description_.arrays = {};
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return device_;
+  }
+  std::size_t workspace_bytes() const override {
+    // This includes core scratch, not opaque vendor-owned factor allocations.
+    return known_bytes_ + solver_->runtime_statistics().at("workspace_bytes");
+  }
+  bool retains_input(const std::string &) const override {
+    return false;
+  }
+  const std::shared_ptr<CudaProviderCompletionResource> &completion() const {
+    return completion_;
+  }
+  void refactor(const void *values) {
+    auto submission_guard =
+        CUDAContext::get_instance().get_submission_lock_guard();
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &cuda = CUDADriver::get_instance();
+    cuda.stream_synchronize(nullptr);
+    if (!input_values_.empty())
+      cuda.memcpy_device_to_host(input_values_.data(), const_cast<void *>(values),
+                                input_values_.size() * sizeof(float));
+    for (std::size_t i = 0; i < input_values_.size(); ++i) {
+      if (!std::isfinite(input_values_[i]))
+        throw std::invalid_argument("Sparse direct values must be finite");
+      canonical_values_[permutation_[i]] = input_values_[i];
+    }
+    matrix_->assign(canonical_values_);
+    solver_->factorize_from_host_values(*matrix_, canonical_values_);
+    if (!solver_->info())
+      throw std::invalid_argument("Sparse direct numeric factorization failed");
+  }
+  void solve(const void *rhs, void *output, void *capture_stream = nullptr) {
+    const SparseSolverConstVectorView input{rhs, description_.dtype,
+                                            std::size_t(description_.rows)};
+    const SparseSolverVectorView result{output, description_.dtype,
+                                        std::size_t(description_.rows)};
+    if (capture_stream)
+      solver_->record_dense_vector(*matrix_, input, result, capture_stream);
+    else
+      solver_->solve_dense_vector(*matrix_, input, result);
+  }
+
+ private:
+  Device &device_;
+  // Enclosing executions retire before dropping this plan. The solver owns
+  // descriptors referring to the matrix, so it must be destroyed first.
+  std::unique_ptr<OwnedCudaMatrix> matrix_;
+  std::unique_ptr<CuSparseSolver> solver_;
+  std::vector<int> permutation_;
+  std::vector<float> input_values_, canonical_values_;
+  std::shared_ptr<CudaProviderCompletionResource> completion_;
+  std::size_t known_bytes_{0};
+};
+
+template <bool Ordered>
+class CudaSparseDirectSolve final : public NativeOperation {
+ public:
+  explicit CudaSparseDirectSolve(const SparseDirectSolveOperation &op)
+      : plan_(std::dynamic_pointer_cast<CudaSparseDirectPlan>(op.plan)) {
+    if (!plan_)
+      throw std::invalid_argument("CUDA sparse solve has another plan type");
+    if (!Ordered && (plan_->description().refactor ||
+                     plan_->description().method != "LLT"))
+      throw std::invalid_argument(
+          "CUDA sparse capture requires fixed LLT; use solve_ordered for "
+          "Host LU or numeric refactor");
+    if (op.values)
+      values_ = cuda_pointer(plan_->device(), *op.values);
+    for (const auto &[rhs, output] : op.rhs_outputs)
+      pairs_.emplace_back(cuda_pointer(plan_->device(), rhs),
+                           cuda_pointer(plan_->device(), output));
+  }
+  Arch arch() const override {
+    return Arch::cuda;
+  }
+  Device &device() const override {
+    return plan_->device();
+  }
+  std::size_t workspace_bytes() const override {
+    return 0;
+  }
+  NativeOperationMode execution_mode() const override {
+    return Ordered ? NativeOperationMode::cuda_ordered
+                   : NativeOperationMode::cuda_capture;
+  }
+  std::shared_ptr<CudaProviderCompletionResource> cuda_ordered_resource()
+      const override {
+    return plan_->completion();
+  }
+  void validate_cuda_execution_domain() const override {
+    if (Ordered)
+      throw std::invalid_argument(
+          "Legacy sparse host numerical phases require the default CUDA "
+          "execution domain");
+  }
+  void record_cuda(void *stream) override {
+    if (Ordered)
+      throw std::invalid_argument("Sparse host phases cannot be captured");
+    for (const auto &[rhs, output] : pairs_)
+      plan_->solve(rhs, output, stream);
+  }
+  void run_cuda_ordered(void *stream) override {
+    if (!Ordered || stream)
+      throw std::invalid_argument(
+          "Sparse ordered solve requires the default CUDA stream");
+    if (plan_->description().refactor)
+      plan_->refactor(values_);
+    for (const auto &[rhs, output] : pairs_)
+      plan_->solve(rhs, output);
+  }
+
+ private:
+  std::shared_ptr<CudaSparseDirectPlan> plan_;
+  const void *values_{nullptr};
+  std::vector<std::pair<const void *, void *>> pairs_;
+};
+#endif
+
+template <typename Op>
+void register_solve_schema(NativeOperationRegistry &registry,
+                            const char *operation) {
+  registry.define<Op>(validate_solve);
+  registry.register_schema<Op>(
+      "sparse_direct", operation, {"plan"},
+      [](const liong::json::JsonValue &p)
+          -> typename NativeOperationRegistry::Binder<Op> {
+        operation_json::fields(p, {"rhs_count"});
+        const auto count = operation_json::integer(p["rhs_count"]);
+        if (!count)
+          throw std::invalid_argument("Sparse direct RHS group cannot be empty");
+        return [count](const NativeOperationBindings &b) {
+          Op op;
+          op.plan = b.at("plan").resource<SparseDirectPlanResource>();
+          if (const auto values = b.find("values"); values != b.end())
+            op.values = values->second.array();
+          for (std::uint64_t i = 0; i < count; ++i)
+            op.rhs_outputs.emplace_back(
+                b.at("rhs_" + std::to_string(i)).array(),
+                b.at("output_" + std::to_string(i)).array());
+          return op;
+        };
+      },
+      {}, {"values"},
+      {NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}}});
+}
 }  // namespace
 
 void register_sparse_direct_operations(NativeOperationRegistry &registry) {
@@ -273,29 +562,9 @@ void register_sparse_direct_operations(NativeOperationRegistry &registry) {
           return bound;
         };
       });
-  registry.define<SparseDirectSolveOperation>(validate_solve);
-  registry.register_schema<SparseDirectSolveOperation>(
-      "sparse_direct", "solve", {"plan"},
-      [](const liong::json::JsonValue &p)
-          -> NativeOperationRegistry::Binder<SparseDirectSolveOperation> {
-        operation_json::fields(p, {"rhs_count"});
-        const auto count = operation_json::integer(p["rhs_count"]);
-        if (!count)
-          throw std::invalid_argument("Sparse direct RHS group cannot be empty");
-        return [count](const NativeOperationBindings &b) {
-          SparseDirectSolveOperation op;
-          op.plan = b.at("plan").resource<SparseDirectPlanResource>();
-          if (const auto values = b.find("values"); values != b.end())
-            op.values = values->second.array();
-          for (std::uint64_t i = 0; i < count; ++i)
-            op.rhs_outputs.emplace_back(
-                b.at("rhs_" + std::to_string(i)).array(),
-                b.at("output_" + std::to_string(i)).array());
-          return op;
-        };
-      },
-      {}, {"values"},
-      {NativeOperationRegistry::BindingGroup{"rhs_count", {"rhs", "output"}}});
+  register_solve_schema<SparseDirectSolveOperation>(registry, "solve");
+  register_solve_schema<SparseDirectOrderedSolveOperation>(registry,
+                                                          "solve_ordered");
 #ifdef TI_WITH_LLVM
   registry.register_factory<SparseDirectPlanDescription>(
       host_arch(), NativeOperationMode::cpu,
@@ -313,6 +582,26 @@ void register_sparse_direct_operations(NativeOperationRegistry &registry) {
           return std::make_shared<CpuSparseDirectSolve<float>>(op);
         return std::make_shared<CpuSparseDirectSolve<double>>(op);
       });
+#endif
+#if defined(TI_WITH_LLVM) && defined(TI_WITH_CUDA)
+  registry.register_factory<SparseDirectPlanDescription>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch, Device &device, const SparseDirectPlanDescription &d) {
+        return std::make_shared<CudaSparseDirectPlan>(device, d);
+      },
+      probe_cuda_sparse_direct);
+  registry.register_factory<SparseDirectSolveOperation>(
+      Arch::cuda, NativeOperationMode::cuda_capture,
+      [](Arch, Device &, const SparseDirectSolveOperation &op) {
+        return std::make_shared<CudaSparseDirectSolve<false>>(op);
+      },
+      probe_cuda_sparse_direct);
+  registry.register_factory<SparseDirectOrderedSolveOperation>(
+      Arch::cuda, NativeOperationMode::cuda_ordered,
+      [](Arch, Device &, const SparseDirectOrderedSolveOperation &op) {
+        return std::make_shared<CudaSparseDirectSolve<true>>(op);
+      },
+      probe_cuda_sparse_direct);
 #endif
 }
 }  // namespace taichi::lang

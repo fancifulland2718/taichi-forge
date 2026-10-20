@@ -194,6 +194,17 @@ class CuSparseSolver : public SparseSolver {
   void solve_dense_vector(const SparseMatrix &matrix,
                           const SparseSolverConstVectorView &rhs,
                           const SparseSolverVectorView &solution) override;
+  // Fixed LLT factors only. The enclosing recording retains this solver and
+  // its operands, serializes use of its workspace, and retires the stream.
+  void record_dense_vector(const SparseMatrix &matrix,
+                           const SparseSolverConstVectorView &rhs,
+                           const SparseSolverVectorView &solution,
+                           void *stream);
+  // Internal resource bridge: values are the current matrix's canonical CSR
+  // values, already validated and uploaded by its owner. Reuse that host copy
+  // instead of downloading it again after a resource's numeric update.
+  void factorize_from_host_values(const SparseMatrix &matrix,
+                                  const std::vector<float> &values);
   std::map<std::string, std::uint64_t> runtime_statistics() const;
   std::vector<int> ordering_permutation() const;
 
@@ -202,7 +213,9 @@ class CuSparseSolver : public SparseSolver {
   void clear_analysis_resources();
   void reorder(const CuSparseMatrix &sm);
   void validate_analyzed_pattern(const CuSparseMatrix &sm) const;
-  void refresh_factorization_values(const CuSparseMatrix &sm);
+  void refresh_factorization_values(const CuSparseMatrix &sm,
+                                     const float *host_values = nullptr);
+  void factorize_impl(const SparseMatrix &sm, const float *host_values);
   void analyze_pattern_cholesky(const SparseMatrix &sm);
   void analyze_pattern_lu(const SparseMatrix &sm);
   void factorize_cholesky(const SparseMatrix &sm);

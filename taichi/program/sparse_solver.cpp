@@ -599,18 +599,24 @@ void CuSparseSolver::validate_analyzed_pattern(const CuSparseMatrix &A) const {
 #endif
 }
 
-void CuSparseSolver::refresh_factorization_values(const CuSparseMatrix &A) {
+void CuSparseSolver::refresh_factorization_values(const CuSparseMatrix &A,
+                                                  const float *host_values) {
 #if defined(TI_WITH_CUDA)
   if (loaded_matrix_id_ == A.matrix_id() &&
       loaded_numeric_version_ == A.numeric_version()) {
     return;
   }
   const auto nnz = static_cast<std::size_t>(A.get_nnz());
-  std::vector<float> values(nnz);
-  CUDADriver::get_instance().memcpy_device_to_host(
-      values.data(), A.get_val_ptr(), sizeof(float) * nnz);
+  std::vector<float> downloaded;
+  if (!host_values) {
+    downloaded.resize(nnz);
+    if (nnz)
+      CUDADriver::get_instance().memcpy_device_to_host(
+          downloaded.data(), A.get_val_ptr(), sizeof(float) * nnz);
+    host_values = downloaded.data();
+  }
   for (std::size_t j = 0; j < nnz; ++j) {
-    h_csrValB_[j] = values[h_mapBfromA_[j]];
+    h_csrValB_[j] = host_values[h_mapBfromA_[j]];
   }
   if (solver_type_ == SolverType::Cholesky) {
     CUDADriver::get_instance().memcpy_host_to_device(d_csrValB_, h_csrValB_,
@@ -705,6 +711,20 @@ void CuSparseSolver::analyze_pattern_lu(const SparseMatrix &sm) {
 #endif
 }
 void CuSparseSolver::factorize(const SparseMatrix &sm) {
+  factorize_impl(sm, nullptr);
+}
+
+void CuSparseSolver::factorize_from_host_values(
+    const SparseMatrix &sm,
+    const std::vector<float> &values) {
+  const auto &matrix = require_cuda_csr_matrix(sm);
+  TI_ERROR_IF(values.size() != std::size_t(matrix.get_nnz()),
+              "CUDA sparse host values must match the canonical CSR count.");
+  factorize_impl(sm, values.data());
+}
+
+void CuSparseSolver::factorize_impl(const SparseMatrix &sm,
+                                    const float *host_values) {
 #if defined(TI_WITH_CUDA)
   auto submission_guard =
       CUDAContext::get_instance().get_submission_lock_guard();
@@ -717,7 +737,7 @@ void CuSparseSolver::factorize(const SparseMatrix &sm) {
 #if defined(TI_WITH_CUDA)
   CUDADriver::get_instance().stream_synchronize(nullptr);
 #endif
-  refresh_factorization_values(A);
+  refresh_factorization_values(A, host_values);
   switch (solver_type_) {
     case SolverType::Cholesky:
       factorize_cholesky(sm);
@@ -889,6 +909,37 @@ void CuSparseSolver::prepare_solve_workspace() {
                        permuted_solution_, CUSPARSE_INDEX_32I,
                        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
   ++descriptor_creations_;
+#else
+  TI_NOT_IMPLEMENTED
+#endif
+}
+
+void CuSparseSolver::record_dense_vector(
+    const SparseMatrix &matrix,
+    const SparseSolverConstVectorView &rhs,
+    const SparseSolverVectorView &solution,
+    void *stream) {
+#if defined(TI_WITH_CUDA)
+  auto submission_guard =
+      CUDAContext::get_instance().get_submission_lock_guard();
+  auto context_guard = CUDAContext::get_instance().get_guard();
+  TI_ERROR_IF(solver_type_ != SolverType::Cholesky || !stream,
+              "CUDA sparse capture requires fixed LLT factors and a stream.");
+  validate_factorization(matrix);
+  validate_dense_vectors(rhs, solution);
+  auto &solver = CUSOLVERDriver::get_instance();
+  auto &sparse = CUSPARSEDriver::get_instance();
+  solver.csSpSetStream(cusolver_handle_, static_cast<CUstream>(stream));
+  try {
+    sparse.cpSetStream(cusparse_handel_, static_cast<CUstream>(stream));
+    solve_cholesky(rhs.data, solution.data);
+  } catch (...) {
+    sparse.cpSetStream.call(cusparse_handel_, nullptr);
+    solver.csSpSetStream.call(cusolver_handle_, nullptr);
+    throw;
+  }
+  sparse.cpSetStream(cusparse_handel_, nullptr);
+  solver.csSpSetStream(cusolver_handle_, nullptr);
 #else
   TI_NOT_IMPLEMENTED
 #endif

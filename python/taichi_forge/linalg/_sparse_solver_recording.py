@@ -1,8 +1,8 @@
-"""Fixed-factor CPU recordings and pointer-free resource export."""
+"""Fixed-factor recordings and pointer-free CPU/CUDA resource export."""
 
 from taichi_forge._lib import core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
-from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
+from taichi_forge.graph._native import BackendCommandRecording, NativeGraphExecutable, NativeGraphNode
 from taichi_forge.hardware._native_adapter import native_recording_node, validate_exact_bindings
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -11,18 +11,19 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 class SparseSolveRecording(BackendCommandRecording):
     def __init__(self, solver, rhs, solution):
-        if solver.selected_provider != "eigen" or solver.matrix is None:
-            raise TaichiRuntimeError("SparseSolver.record_solve currently requires a factored CPU Eigen solver")
+        if solver.selected_provider not in ("eigen", "cusolver_sp") or solver.matrix is None:
+            raise TaichiRuntimeError("SparseSolver.record_solve requires a factored Eigen or cuSOLVERSp solver")
         if rhs == solution:
             raise ValueError("SparseSolver RHS and solution names must differ")
         solver.matrix._ensure_valid()
         solver.solver.validate_factorization(solver.matrix.matrix)
         super().__init__(
-            backend="cpu",
+            backend="cpu" if solver.selected_provider == "eigen" else "cuda",
             binding_names=(rhs, solution),
             command_count=1,
             workspace_ownership="provider_generation",
             replay_mode="rerecord",
+            no_host_readback=solver.selected_provider == "eigen" or solver._solver_type == "LLT",
         )
         object.__setattr__(self, "_solver", solver)
         object.__setattr__(self, "_matrix", solver.matrix)
@@ -69,14 +70,23 @@ class SparseSolveRecording(BackendCommandRecording):
 
     def _export_aot(self, context):
         self.validate_graph_lifetime()
-        if context.arch not in (core.Arch.x64, core.Arch.arm64):
-            raise TaichiRuntimeError("CPU SparseSolver recording requires a CPU AOT target")
         solver = self._solver
+        implementation = solver.selected_provider
+        cpu = implementation == "eigen"
+        if context.arch not in ((core.Arch.x64, core.Arch.arm64) if cpu else (core.Arch.cuda,)):
+            raise TaichiRuntimeError("SparseSolver recording and AOT target backends must match")
 
         def snapshot():
-            rows, count, dtype, offsets, indices, values = core._snapshot_eigen_sparse_solver(
-                solver.solver, self._matrix.matrix
-            )
+            if cpu:
+                rows, count, dtype, offsets, indices, values = core._snapshot_eigen_sparse_solver(
+                    solver.solver, self._matrix.matrix
+                )
+            else:
+                rows, columns, offsets, indices, values = self._matrix.matrix._snapshot_cuda_csr(self._program)
+                if columns != rows:
+                    raise TaichiRuntimeError("SparseSolver export requires a square CSR matrix")
+                count, dtype = len(values) // 4, "f32"
+                self.validate_graph_lifetime()
             arrays = {}
             for name, scalar, payload, size in (
                 ("offsets", "i32", offsets, rows + 1),
@@ -92,19 +102,19 @@ class SparseSolveRecording(BackendCommandRecording):
                     rows=rows,
                     nonzeros=count,
                     dtype=dtype,
-                    implementation="eigen",
+                    implementation=implementation,
                     method=solver._solver_type,
                     ordering=solver._ordering,
-                    format="csc",
+                    format="csc" if cpu else "csr",
                     phase="solve",
                 ),
                 bindings=arrays,
             )
 
-        resource = context.resource_once(solver, snapshot, policy=("eigen_factor", self._generation))
+        resource = context.resource_once(solver, snapshot, policy=(implementation, self._generation))
         context.native(
             "sparse_direct",
-            "solve",
+            "solve" if cpu or solver._solver_type == "LLT" else "solve_ordered",
             parameters=dict(rhs_count=1),
             bindings=dict(plan=resource, rhs_0=self.binding_names[0], output_0=self.binding_names[1]),
         )
@@ -112,8 +122,49 @@ class SparseSolveRecording(BackendCommandRecording):
         return ()
 
     def _as_graph_native_node(self):
+        if not self.no_host_readback:
+            return _HostSparseSolveNode(self)
         return native_recording_node(
             self,
             lifetime_leases=(self._solver, self._matrix),
-            debug_info=dict(kind="sparse_direct_solve", implementation="eigen"),
+            debug_info=dict(kind="sparse_direct_solve", implementation=self._solver.selected_provider),
         )
+
+
+class _HostSparseSolveNode(NativeGraphNode, NativeGraphExecutable):
+    """Explicit root host boundary; never a no-readback device recording."""
+
+    def __init__(self, recording):
+        self._recording = recording
+
+    def compile(self):
+        return self
+
+    def run(self, runtime_args):
+        self._recording.execute(runtime_args)
+
+    def validate_graph_lifetime(self):
+        self._recording.validate_graph_lifetime()
+
+    def validate_graph_bindings(self, runtime_args):
+        self._recording.validate_graph_bindings(runtime_args)
+
+    @property
+    def runtime_arg_schema(self):
+        return tuple(RuntimeBinding(name, "ndarray") for name in self._recording.binding_names)
+
+    @property
+    def resource_effects(self):
+        return self._recording.resource_effects
+
+    @property
+    def lifetime_leases(self):
+        return (self._recording,)
+
+    @property
+    def debug_info(self):
+        return dict(kind="sparse_direct_host_lu", implementation="cusolver_sp")
+
+    def _export_aot(self, context):
+        self._recording._export_aot(context)
+        context.reconstructed_binding_validators.add(id(self))

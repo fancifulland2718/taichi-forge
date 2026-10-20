@@ -6,7 +6,9 @@ import sys
 from taichi_forge_runtime.aot import AotError, ExecutionPlan, Runtime
 
 
-def resource_spec(name="solver", *, dtype="f32", method="LLT", ordering="AMD", format="csc", refactor=False):
+def resource_spec(
+    name="solver", *, dtype="f32", method="LLT", ordering="AMD", format="csc", refactor=False, implementation="eigen"
+):
     return dict(
         kind="native",
         name=name,
@@ -17,7 +19,7 @@ def resource_spec(name="solver", *, dtype="f32", method="LLT", ordering="AMD", f
             rows=3,
             nonzeros=7,
             dtype=dtype,
-            implementation="eigen",
+            implementation=implementation,
             method=method,
             ordering=ordering,
             format=format,
@@ -27,7 +29,7 @@ def resource_spec(name="solver", *, dtype="f32", method="LLT", ordering="AMD", f
     )
 
 
-def solve_op(pairs, values=None):
+def solve_op(pairs, values=None, *, ordered=False):
     bindings = dict(plan="solver")
     for index, (rhs, output) in enumerate(pairs):
         bindings[f"rhs_{index}"], bindings[f"output_{index}"] = rhs, output
@@ -36,7 +38,7 @@ def solve_op(pairs, values=None):
     return dict(
         kind="native",
         provider="sparse_direct",
-        operation="solve",
+        operation="solve_ordered" if ordered else "solve",
         version=1,
         parameters=dict(rhs_count=len(pairs)),
         bindings=bindings,
