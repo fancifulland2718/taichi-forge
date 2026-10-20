@@ -67,6 +67,76 @@ TEST(StorageViewTest, CanonicalAosAndSoaRemainDistinct) {
   EXPECT_EQ(soa_properties.reachable_end, 24);
 }
 
+TEST(StorageViewTest, LayoutAnalysisDoesNotRequireOrAuthorizeAnOwner) {
+  DenseStorageLayoutSpec layout;
+  layout.scalar_type = PrimitiveType::f32;
+  layout.index_shape = {2, 3};
+  layout.index_strides_bytes = {60, 20};
+  layout.element_shape = {3};
+  layout.element_strides_bytes = {4};
+  layout.byte_offset = 8;
+  auto analysis = analyze_dense_storage_layout(layout);
+  ASSERT_TRUE(analysis);
+  EXPECT_EQ(analysis.properties.scalar_count, 18u);
+  EXPECT_EQ(analysis.properties.item_count, 6u);
+  EXPECT_EQ(analysis.properties.reachable_begin, 8);
+  EXPECT_EQ(analysis.properties.reachable_end, 120);
+  EXPECT_EQ(analysis.properties.record_stride, 20);
+  EXPECT_TRUE(analysis.properties.single_record_stride_compatible);
+  EXPECT_FALSE(analysis.properties.ndarray_abi_compatible);
+  EXPECT_FALSE(analysis.properties.compact_contiguous);
+  EXPECT_EQ(build_dense_storage_descriptor(
+                {}, StorageSourceKind::kStructTensorMember, layout).reason,
+            StorageFailureReason::kInvalidOwner);
+  EXPECT_EQ(build_dense_storage_descriptor(
+                host_owner(), StorageSourceKind::kUnknown, layout).reason,
+            StorageFailureReason::kUnsupportedStorageKind);
+
+  layout.index_shape = {3};
+  layout.index_strides_bytes = {-20};
+  layout.byte_offset = 44;
+  analysis = analyze_dense_storage_layout(layout);
+  ASSERT_TRUE(analysis);
+  EXPECT_TRUE(analysis.properties.has_negative_stride);
+  EXPECT_EQ(analysis.properties.reachable_begin, 4);
+  EXPECT_EQ(analysis.properties.reachable_end, 56);
+  EXPECT_EQ(analysis.properties.uniqueness,
+            StorageMappingUniqueness::kProvenUnique);
+  EXPECT_FALSE(analysis.properties.single_record_stride_compatible);
+
+  layout.index_shape = {0};
+  analysis = analyze_dense_storage_layout(layout);
+  ASSERT_TRUE(analysis);
+  EXPECT_TRUE(analysis.properties.empty);
+  EXPECT_EQ(analysis.properties.scalar_count, 0u);
+  EXPECT_EQ(analysis.properties.reachable_begin, 44);
+  EXPECT_EQ(analysis.properties.reachable_end, 44);
+}
+
+TEST(StorageViewTest, OwnerFreeAnalysisRejectsInvalidLayoutArithmetic) {
+  DenseStorageLayoutSpec layout;
+  layout.scalar_type = PrimitiveType::f32;
+  layout.index_shape = {3};
+  layout.index_strides_bytes = {-20};
+  layout.byte_offset = 4;
+  EXPECT_EQ(analyze_dense_storage_layout(layout).reason,
+            StorageFailureReason::kInvalidOffset);
+  layout.byte_offset = 0;
+  layout.index_strides_bytes = {(std::numeric_limits<std::int64_t>::max)()};
+  EXPECT_EQ(analyze_dense_storage_layout(layout).reason,
+            StorageFailureReason::kArithmeticOverflow);
+  layout.index_strides_bytes.clear();
+  EXPECT_EQ(analyze_dense_storage_layout(layout).reason,
+            StorageFailureReason::kInvalidRank);
+  layout.index_strides_bytes = {4};
+  layout.index_shape = {-1};
+  EXPECT_EQ(analyze_dense_storage_layout(layout).reason,
+            StorageFailureReason::kInvalidShape);
+  layout.scalar_type = PrimitiveType::unknown;
+  EXPECT_EQ(analyze_dense_storage_layout(layout).reason,
+            StorageFailureReason::kInvalidDtype);
+}
+
 TEST(StorageViewTest, RecordStrideIsQualifiedWithoutPretendingGeneralAffine) {
   auto member = build_f32({7}, {16}, {}, {}, 4, host_owner(3),
                           StorageSourceKind::kStructScalarMember);

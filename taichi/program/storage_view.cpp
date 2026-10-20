@@ -575,19 +575,9 @@ struct DenseStorageDescriptorAccess {
   }
 };
 
-DenseStorageBuildResult build_dense_storage_descriptor(
-    StorageOwnerRef owner,
-    StorageSourceKind source_kind,
+DenseStorageLayoutAnalysis analyze_dense_storage_layout(
     const DenseStorageLayoutSpec &layout) {
-  DenseStorageBuildResult result;
-  if (!owner.valid()) {
-    result.reason = StorageFailureReason::kInvalidOwner;
-    return result;
-  }
-  if (source_kind == StorageSourceKind::kUnknown) {
-    result.reason = StorageFailureReason::kUnsupportedStorageKind;
-    return result;
-  }
+  DenseStorageLayoutAnalysis result;
   std::uint64_t scalar_size = 0;
   std::uint64_t scalar_alignment = 0;
   if (!scalar_type_info(layout.scalar_type, &scalar_size, &scalar_alignment)) {
@@ -609,8 +599,8 @@ DenseStorageBuildResult build_dense_storage_descriptor(
   const std::size_t index_rank = layout.index_shape.size();
   const std::size_t element_rank = layout.element_shape.size();
   const std::size_t total_rank = index_rank + element_rank;
-  std::array<std::int64_t, kMaxDenseStorageRank> extents{};
-  std::array<std::int64_t, kMaxDenseStorageRank> strides{};
+  auto &extents = result.extents;
+  auto &strides = result.strides_bytes;
   for (std::size_t i = 0; i < index_rank; ++i) {
     extents[i] = layout.index_shape[i];
     strides[i] = layout.index_strides_bytes[i];
@@ -620,7 +610,7 @@ DenseStorageBuildResult build_dense_storage_descriptor(
     strides[index_rank + i] = layout.element_strides_bytes[i];
   }
 
-  DenseStorageProperties properties;
+  auto &properties = result.properties;
   properties.scalar_size = scalar_size;
   properties.scalar_alignment = scalar_alignment;
   properties.scalar_count = 1;
@@ -802,6 +792,31 @@ DenseStorageBuildResult build_dense_storage_descriptor(
                                    properties.reachable_begin) == compact_bytes;
   }
 
+  return result;
+}
+
+DenseStorageBuildResult build_dense_storage_descriptor(
+    StorageOwnerRef owner,
+    StorageSourceKind source_kind,
+    const DenseStorageLayoutSpec &layout) {
+  DenseStorageBuildResult result;
+  if (!owner.valid()) {
+    result.reason = StorageFailureReason::kInvalidOwner;
+    return result;
+  }
+  if (source_kind == StorageSourceKind::kUnknown) {
+    result.reason = StorageFailureReason::kUnsupportedStorageKind;
+    return result;
+  }
+  const auto analysis = analyze_dense_storage_layout(layout);
+  if (!analysis) {
+    result.reason = analysis.reason;
+    return result;
+  }
+  const auto index_rank = layout.index_shape.size();
+  const auto element_rank = layout.element_shape.size();
+  const auto &extents = analysis.extents;
+  const auto &strides = analysis.strides_bytes;
   const std::uint64_t fingerprint = descriptor_fingerprint(
       owner, source_kind, layout.scalar_type, layout.access, index_rank,
       element_rank, extents, strides, layout.byte_offset);
@@ -809,7 +824,7 @@ DenseStorageBuildResult build_dense_storage_descriptor(
       std::move(owner), source_kind, layout.scalar_type, layout.access,
       static_cast<std::uint8_t>(index_rank),
       static_cast<std::uint8_t>(element_rank), extents, strides,
-      layout.byte_offset, properties, fingerprint);
+      layout.byte_offset, analysis.properties, fingerprint);
   return result;
 }
 
