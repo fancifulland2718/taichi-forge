@@ -4582,6 +4582,13 @@ without a member address or allocation. Native transforms captured from
 parents, explicit private snapshots and retained subgraphs. They reuse the
 strided implementation, adding no packing kernel, component copy or replay check.
 
+This component route passes normally installed standalone/borrowed consumers on
+Windows CPU/CUDA/Vulkan, covering prefixes, in-place transforms, parent Graphs,
+private snapshots, unchanged sibling members, failed bindings and in-flight
+retirement. Vulkan synchronization validation and an actual downstream energy
+kernel's explicit backward pass also pass; the native transform itself is not
+declared automatically differentiable.
+
 Plan version 24 can freeze the complete structure ABI and outer shape:
 
 ```python
@@ -5201,6 +5208,17 @@ The installed closure also passes bounded CUDA SAP export and independent AOT
 consumption. This does not qualify the complete GeoPhys public API,
 all dependency profiles, solver branches or nonlinear solver gradients; those remain
 separate application/deployment work.
+
+An independent `sdk,usd` profile also passes consumer-created two-sphere and
+three-box USD scenes on Windows CPython 3.10 with CPU/CUDA/Vulkan. The normally
+installed 633-module application builds solvers through public scene/runtime
+interfaces and advances four steps against analytic free-fall positions and
+velocities, with private source access denied and Vulkan synchronization validation.
+OpenUSD 25.8 is installed as a separate `usd-core` wheel; the application host and
+sole TCM are unchanged. Its 12,727,831-byte wheel is external dependency size.
+This covers basic rigid scenes without contact, not arbitrary USD assets, plugin
+schemas, contact or complete solver gradients. Successful import does not mean
+the fixed TCM has been specialized for the new scene.
 
 An expanded 534-module application profile also passes source-hidden offscreen
 compute raster rendering on Windows CPU/CUDA/Vulkan: consumer-created two-box

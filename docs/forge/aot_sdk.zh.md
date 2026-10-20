@@ -3500,6 +3500,10 @@ extent，不产生成员地址或分配。`StructNdarray.field(path, component=.
 原生变换可自动导出，覆盖公开父数组、显式私有快照和保留子图；仍使用原步幅实现，
 不增加 packing kernel、分量副本或逐次重放校验。
 
+上述分量路线已通过 Windows CPU/CUDA/Vulkan 正常安装组件的独立/借用消费，
+包括 prefix、原地变换、父图、私有快照、未选成员保持、失败绑定和在途退休；
+Vulkan 同步验证及下游能量 kernel 的显式反向通过。这里不声明原生变换自动可微。
+
 plan24 可冻结完整结构 ABI 和外层 shape：
 
 ```python
@@ -3956,6 +3960,13 @@ stubs、entry points、别名及CPU/CUDA/Vulkan两种静态尺寸的前向/Tape�
 Vulkan分别创建两个球体和三个箱体的MJCF新场景，拒绝访问内部源码，并对照源码及解析解。
 该安装包也通过小规模CUDA SAP导出和独立AOT消费；这不等于整个GeoPhys
 公开API、所有依赖配置、solver分支或非线性求解器反向已取得资格，后者仍是应用/部署工作。
+
+独立 `sdk,usd` 配置也已通过 Windows CPython 3.10 的 CPU/CUDA/Vulkan 新场景验证：
+使用正常安装的633模块应用包，由消费端创建两个球体和三个箱体的USD场景，经公开
+scene/runtime接口构建求解器并推进四步，位置/速度符合自由落体解析解，私有源码访问
+被拒绝，Vulkan同步验证通过。OpenUSD 25.8作为独立 `usd-core` wheel安装，应用宿主及
+唯一TCM未变；其12,727,831B wheel不计入应用包体。该资格覆盖无接触的基础刚体场景，
+不代表任意USD资产、插件schema、接触或完整求解器反向；导入成功也不等于固定TCM已特化新场景。
 
 扩展到534个模块的应用配置还通过了Windows CPU/CUDA/Vulkan隐藏源码离屏compute光栅化：
 消费端创建两个箱体、三个球体的网格场景，覆盖两种分辨率、与源码参照的图像/深度比较及
