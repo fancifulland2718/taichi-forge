@@ -9,6 +9,7 @@ void register_vulkan_ray_operations(NativeOperationRegistry &registry);
 void register_vulkan_ray_program_operations(NativeOperationRegistry &registry);
 void register_vulkan_graphics_operations(NativeOperationRegistry &registry);
 void register_vulkan_compute_operations(NativeOperationRegistry &registry);
+void register_vulkan_buffer_operations(NativeOperationRegistry &registry);
 void register_optix_program_operations(NativeOperationRegistry &registry);
 void register_optix_launch_operations(NativeOperationRegistry &registry);
 void register_optix_micromap_resources(NativeOperationRegistry &registry);
@@ -391,6 +392,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_vulkan_ray_program_operations(result);
     register_vulkan_graphics_operations(result);
     register_vulkan_compute_operations(result);
+    register_vulkan_buffer_operations(result);
     register_blas_operations(result);
     register_cusparse_operations(result);
     register_cusparse_bsr_operations(result);

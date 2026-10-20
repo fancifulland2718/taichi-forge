@@ -771,6 +771,34 @@ Graph 私有图像导出使用
 Windows 小夹具验证非方形三级颜色/深度图像、分数 LOD 过滤、fetch、普通/已选择导出、
 借用、更新、退休及下游梯度。逻辑 texel 字节统计包含每一级，不代表驱动实际驻留大小。
 
+### Vulkan buffer 命令序列
+
+`Module.add_execution_plan()` 将 `ti.graph.VulkanBufferCommandRecording`
+重建为 `vulkan_rhi/buffer_commands@1`。使用
+`runtime.native_operation_capabilities("vulkan_buffer_commands")` 查询工厂：
+具备该能力的 Vulkan runtime 返回 `vulkan_inline`，CPU/CUDA 不报告执行模式。
+
+参数包含 `buffer_count` 和非空 `commands` 列表，绑定为 `buffer_0` 至
+`buffer_{buffer_count-1}`。命令按原顺序保存，以 buffer 索引引用操作数：
+
+- `fill_u32`：`destination`、`bytes`、`value`（uint32 位模式），可选字节偏移
+  `destination_offset`。
+- `copy`：`destination`、`source`、`bytes`，可选字节偏移
+  `destination_offset`、`source_offset`。
+- `buffer_barrier`：`destination`，覆盖对应 buffer。
+- `memory_barrier`：无操作数。仅有 memory barrier 的序列不需要 buffer 绑定。
+
+传输范围必须非空、按4字节对齐，并位于紧凑绑定窗口内。准备阶段检查设备身份、
+真实 transfer usage 和 copy 物理重叠，含不同导入包装的别名。不同命令可以有意
+复用存储，显式 barrier 保留原顺序语义。不设置人为命令条数上限，重复执行不重新
+解析存储或回读 host。原生命令列表占 host 内存；`workspace_bytes == 0` 表示没有
+私有设备 scratch，不代表 runtime 总内存为零。
+
+导出沿用现有资源链路保留公开数组、紧凑 view 和显式快照的 dense Field root。
+在途存储和命令由既有执行 owner 负责退休。Windows 资格覆盖独立/借用消费、父图
+导出、偏移及 Field/view sentinel、双模块实例、失败准备、输入更新和退休。
+夹具的梯度来自后段 kernel；buffer copy 本身不自动生成伴随。
+
 ### 显式 Vulkan 图像区域传输
 
 公共 native registry 在 `image` provider 下提供以下 version 1 操作：

@@ -996,6 +996,41 @@ non-square three-level color/depth chains, fractional LOD filtering, fetching,
 ordinary/selected export, borrowing, updates, retirement and downstream gradients.
 Logical texel bytes include every level; they are not driver residency estimates.
 
+### Vulkan buffer command sequences
+
+`Module.add_execution_plan()` reconstructs `ti.graph.VulkanBufferCommandRecording`
+as `vulkan_rhi/buffer_commands@1`. Discover its factory with
+`runtime.native_operation_capabilities("vulkan_buffer_commands")`, which returns
+`vulkan_inline` on supported Vulkan runtimes and no mode on CPU/CUDA.
+
+The parameters contain `buffer_count` and a nonempty `commands` list. Bindings
+are `buffer_0` through `buffer_{buffer_count-1}`. Commands preserve their original
+order and use buffer indices:
+
+- `fill_u32`: `destination`, `bytes`, `value` (a uint32 bit pattern), optional
+  `destination_offset` in bytes.
+- `copy`: `destination`, `source`, `bytes`, optional `destination_offset` and
+  `source_offset` in bytes.
+- `buffer_barrier`: `destination`, covering that buffer.
+- `memory_barrier`: no operands. A sequence containing only memory barriers
+  has zero buffer bindings.
+
+Transfers require nonempty four-byte-aligned ranges within packed binding
+windows. Preparation checks device identity, actual transfer usage and physical
+copy overlap, including imported aliases. Different commands may intentionally
+reuse storage; explicit barriers retain their sequence semantics. There is no
+arbitrary command-count limit and no per-replay storage resolution or host
+readback. Native command storage is host memory; `workspace_bytes == 0` reports
+no private device scratch, not zero total runtime memory.
+
+Export preserves public arrays, retained packed views and snapshotted dense Field
+roots through the existing resource machinery. In-flight storage and command
+retirement use the same execution owner as other native operations. Windows
+qualification covers independent/borrowed consumption, parent export, offsets,
+Field/view sentinels, two module instances, failed preparation, input updates and
+retirement. Gradients in the fixture belong to downstream kernels; buffer copy
+does not automatically generate an adjoint.
+
 ### Explicit Vulkan image region transfers
 
 The common native registry provides version 1 operations under provider `image`:

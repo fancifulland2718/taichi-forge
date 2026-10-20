@@ -521,6 +521,11 @@ class VulkanBufferCommand:
 class VulkanBufferCommandRecording(BackendCommandRecording):
     """A whole Vulkan buffer command sequence recorded by one C++ call."""
 
+    def _export_aot(self, context):
+        from ._aot_buffer_commands import export
+
+        return export(self, context)
+
     def __init__(self, commands):
         commands = tuple(commands)
         if not commands or not all(

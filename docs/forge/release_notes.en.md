@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT Graph export reconstructs `VulkanBufferCommandRecording` through the
+  common native registry, preserving fill/copy offsets and explicit barriers.
+  Independent and borrowed consumers retain the existing resource lifecycle;
+  dense Field/view snapshots and downstream kernel gradients are covered.
+  Buffer preparation checks physical aliases and address overflow, and removes
+  the arbitrary 4096-command limit. CPU/CUDA do not advertise this Vulkan route.
+
 - CUDA profiler synchronization and toolkit management activate Forge's CUDA
   context and restore the caller's context. Clearing or querying profiling
   records no longer requires a Forge context to remain current on the thread.

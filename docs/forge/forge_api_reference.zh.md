@@ -193,10 +193,17 @@ vendor runtime 就自动成为默认 provider。
 
 仍要求 4-byte 对齐 range、显式 barrier、
 runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 内调用，
-不支持 structured `Sequential` 或 AOT serialization，也不等于 RasterPass/AS provider。
+不支持 structured `Sequential`，也不等于 RasterPass/AS provider。
 越界、overlap copy、错误 backend/device、reset 后的旧 Graph
 都会失败。0.6.4 移除了此前 4096 条命令的软件上限；命令存储仍受可用内存约束。
 该功能完全使用官方 wheel 已包含的 runtime，不增加 wheel 发行矩阵。
+
+0.6.4 的 `Module.add_execution_plan()` 可通过共享的
+`vulkan_rhi/buffer_commands@1` 导出该具体 recording，保留显式 barrier 及仅含
+barrier 的序列。公开数组由 `source_bindings` 指定，保留的 dense Field/view 状态
+遵守已有 `snapshot_state=True` 合同。准备时一次检查有限范围、copy 物理别名和
+transfer usage；既有执行 owner 持有操作数直至在途工作退休。
+详见 [AOT buffer 命令合同](aot_sdk.zh.md#vulkan-buffer-命令序列)。
 
 ### `ti.hardware.image.VulkanImageCopyRecording`（0.6.3）
 

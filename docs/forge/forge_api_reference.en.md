@@ -238,12 +238,20 @@ bindings; content-only updates do not require rebinding.
 
 The contract requires four-byte-aligned ranges, explicit barriers, the runtime-ordered compute queue,
 and `rerecord` replay. It is not callable inside `@ti.kernel`, is not qualified
-inside a structured `Sequential` or for AOT serialization, and is not itself a
+inside a structured `Sequential`, and is not itself a
 RasterPass or AS provider. Bounds errors, overlapping copies, backend/device
 mismatches, and Graph use after reset fail. Version 0.6.4 removes the previous
 4096-command software limit; command storage remains subject to available memory.
 The route uses only runtime code already present in official wheels and does
 not add a wheel variant.
+
+In 0.6.4, `Module.add_execution_plan()` exports this concrete recording through
+the shared `vulkan_rhi/buffer_commands@1` operation, including explicit barriers
+and barrier-only sequences. Public arrays use `source_bindings`; retained dense
+Field/view state uses the existing `snapshot_state=True` contract. Preparation
+checks finite ranges, physical copy aliases and transfer usage once. Existing
+execution owners retain operands until submitted work retires. See the
+[AOT buffer command contract](aot_sdk.en.md#vulkan-buffer-command-sequences).
 
 ### `ti.hardware.image.VulkanImageCopyRecording` (0.6.3)
 

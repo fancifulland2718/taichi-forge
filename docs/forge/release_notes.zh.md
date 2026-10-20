@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT Graph 导出通过共用 native registry 重建 `VulkanBufferCommandRecording`，
+  保留 fill/copy 偏移和显式 barrier。独立/借用消费者沿用既有资源生命周期，
+  覆盖 dense Field/view 快照和后段 kernel 梯度。buffer 准备检查物理别名与地址溢出，
+  移除人为的 4096 条命令上限；CPU/CUDA 不报告这条 Vulkan 专用路线。
+
 - CUDA profiler 同步及工具管理现在激活 Forge 所属 context 并恢复调用方 context，
   清空或查询记录不再依赖线程上残留的 Forge context。
 
