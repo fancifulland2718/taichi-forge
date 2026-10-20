@@ -156,6 +156,20 @@ Graph wait/独立普通 CUDA context 的 event bridge。仅 Vulkan 队列挂起�
 
 ## 本机验证范围与复现
 
+2026-10-20 的真实渲染器接入进一步暴露了本机 RTX 5090 / 610.88 路线的边界：
+预留 external compute queue 的 Vulkan device 在较大传输中可能发生 device loss，
+即使尚未建立 CUDA context。关闭预留的普通 Vulkan 对照通过；关闭隐式工具层仍可
+复现失败。独立 Vulkan 控制中，4 KiB fill / copy 分块可以通过图像大小的数值校验，
+但渲染器采用传输分块后仍在 BLAS 构建失败。因此，不能将小缓冲交换资格扩大为
+真实 RT 渲染资格，也不能只替换传输路径就宣布问题解决。验证层下的成功运行未作为
+生产修复或性能证据。
+
+普通 CUDA 的有头对照已经走通原生就绪查询、导出后加载的 AOT 输出 kernel 和 Canvas
+执行域。就绪准入没有获得稳定的应用帧率提升；它仍适用于避免 CiG 未满足等待的
+阻塞，不应在普通 CUDA 上默认启用。验收须同时测量新画面吞吐、物理吞吐和完整图像
+及物理状态，不能以后台等待函数的耗时或调用次数代替。关闭窗口会退休依赖 Canvas
+存储的执行域，消费端须先消费已接受的外部帧，再销毁窗口；这属于冷退出路径。
+
 2026-10-20 的固定容量 AOT 三槽测试在关联的同一个 Vulkan device 上执行了 10,000
 次交换，并进行场景资源重建和带在途工作关闭；每次有实际 Vulkan fill、AOT kernel、
 device-local 共享显存及其所有权转移、双向 binary semaphore 和数值 oracle；仅在

@@ -181,6 +181,26 @@ unresolved device waits must be queued ahead of time.
 
 ## Local qualification and reproduction
 
+A real-renderer integration on 2026-10-20 exposed an additional boundary on
+the local RTX 5090 / 610.88 setup: a Vulkan device reserving external compute
+queues can lose the device during larger transfers, even before CUDA context
+creation. Ordinary Vulkan without reservation passed; disabling implicit tool
+layers did not remove the failure. Independent Vulkan controls passed an
+image-sized numerical check with 4 KiB fill/copy chunks, but the renderer still
+failed during BLAS construction after transfer chunking. Small-buffer exchange
+qualification therefore does not qualify a complete RT renderer. Neither that
+partial workaround nor successful validation-layer runs constitute a production
+fix or performance evidence.
+
+Headed ordinary-CUDA controls exercised a native readiness query, an exported
+and reloaded AOT output kernel, and a Canvas execution domain. Ready admission
+did not establish a stable application frame-rate improvement; keep it opt-in
+for its specific dependency-isolation purpose. Measure new-frame throughput,
+physics throughput, image correctness and physics state together. Background
+wait duration or call counts alone are insufficient. Window destruction retires
+domains borrowing Canvas storage: consume accepted external frames before
+destroying the window, on the cold shutdown path.
+
 The 2026-10-20 fixed-capacity AOT test completed 10,000 three-slot exchanges on
 the associated Vulkan device, scene-resource reconstruction, and close with
 accepted work in flight. Each exchange performs Vulkan fill, AOT kernels,
