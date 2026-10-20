@@ -382,6 +382,43 @@ x1 = solver.solve(rhs1)
 CPU 支持 LLT、LDLT、LU 和 AMD/COLAMD ordering。CUDA 路径是 scalar CSR
 `f32`，并保留文档列出的 factorization 限制。Vulkan 没有 stored direct solver。
 
+### CPU 直接求解的 Graph 与 AOT
+
+成功分解后的 CPU Eigen solver 可以录制固定 factor：
+
+```python
+solver.compute(A)
+builder = ti.graph.GraphBuilder()
+builder.append_native(solver.record_solve(rhs="b", solution="x"))
+graph = builder.compile()
+graph.run({"b": rhs, "x": output})
+
+module = ti.aot.Module()
+module.add_execution_plan("solve", graph)
+module.archive("solver.tcm")
+```
+
+`b/x` 必须为与 matrix 同 dtype、长度的独立 scalar ndarray。支持 `f32/f64`、
+LLT/LDLT/LU、AMD/COLAMD 以及输入 Eigen CSR/CSC；普通根 Graph 可以多次使用同一
+factor。RHS 和输出绑定可更换；源 matrix 改值、换 pattern 或
+solver 重新分解后，需要重新录制。AOT 导出保存规范化 CSC 数据与数值策略，
+消费端重建自己的 factor，已导出的包不受之后的源对象变化影响。
+
+显式 AOT 的 `sparse_direct/plan` 资源接受 `rows`、`nonzeros`、`dtype`、
+`implementation="eigen"`、`method`、`ordering`、`format="csr"|"csc"` 和
+`phase="solve"|"refactor_solve"`。输入绑定为 `offsets/indices/values`；
+索引沿用现有 i32 数值核心。`sparse_direct/solve` 通过 `plan` 与
+`rhs_0/output_0` 等绑定和 `rhs_count` 指定一组 RHS；refactor 模式额外绑定
+`values`，其顺序与原 compressed 数据一致，每次执行只为整组重做一次数值分解。
+拓扑规范化和更新映射在冷准备时完成，不在重放时重建 triplet。
+
+独立 runtime 和借用 runtime 都通过现有 prepared owner 管理资源；冷构造复制完
+seed 后可释放 seed，factor 随依赖它的执行退休。已报告的 workspace 计数包含已知
+matrix/permutation 存储，未包含 Eigen 的全部内部 factor 分配。这里没有新增
+CUDA/Vulkan 直接求解能力，也没有定义 solve 的自动伴随；可显式组合后续 kernel
+梯度与适用的伴随方程求解。该 CPU recording 尚未接入 Python structured
+Sequential 的 backend-command 路径。部署接口见 [独立 AOT SDK](aot_sdk.zh.md)。
+
 ## Sparse SNode runtime 行为
 
 Sparse SNode 遍历与分配遵循以下内存和执行规则：

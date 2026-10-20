@@ -415,6 +415,48 @@ On CPU, supported factorization types are LLT, LDLT, and LU with AMD/COLAMD
 ordering. The CUDA route is scalar CSR `f32` and retains its documented
 factorization restrictions. Vulkan has no stored direct solver.
 
+### CPU direct solves in Graph and AOT
+
+A successfully factored CPU Eigen solver can record a fixed factor:
+
+```python
+solver.compute(A)
+builder = ti.graph.GraphBuilder()
+builder.append_native(solver.record_solve(rhs="b", solution="x"))
+graph = builder.compile()
+graph.run({"b": rhs, "x": output})
+
+module = ti.aot.Module()
+module.add_execution_plan("solve", graph)
+module.archive("solver.tcm")
+```
+
+`b/x` must be disjoint scalar ndarrays matching the matrix dtype and length.
+Supported inputs are Eigen CSR/CSC with `f32/f64`, LLT/LDLT/LU and AMD/COLAMD.
+An ordinary root Graph can use the same factor repeatedly. RHS/output bindings
+may change; changing matrix values or topology, or refactorizing the solver,
+requires a new recording. AOT stores canonical CSC data and the numerical policy.
+Consumers reconstruct their own factors, independently of later source mutations.
+
+The explicit AOT `sparse_direct/plan` resource takes `rows`, `nonzeros`, `dtype`,
+`implementation="eigen"`, `method`, `ordering`, `format="csr"|"csc"` and
+`phase="solve"|"refactor_solve"`. Bind `offsets/indices/values`; indices retain
+the existing numerical core's i32 representation. A `sparse_direct/solve`
+operation binds `plan`, `rhs_0/output_0`, etc., and declares `rhs_count`.
+Refactor mode also binds `values` in the original compressed order and performs
+one numeric factorization for the entire RHS group per invocation. Topology
+normalization and the update permutation are prepared once; replay does not
+rebuild triplets.
+
+Independent and borrowed runtimes use the existing prepared owner. Seed inputs
+can be released after cold construction copies them; factors retire with their
+dependent executions. Reported workspace bytes include known matrix/permutation
+storage, not all opaque Eigen factor allocations. This adds no CUDA/Vulkan direct
+solver capability or automatic solve adjoint. Subsequent kernel gradients and
+applicable adjoint equations can be composed explicitly. This CPU recording is
+not wired into Python structured Sequential's backend-command path. See the
+[standalone AOT SDK](aot_sdk.en.md) for deployment.
+
 ## Sparse SNode runtime behavior
 
 Sparse SNode traversal and allocation use the following memory and execution

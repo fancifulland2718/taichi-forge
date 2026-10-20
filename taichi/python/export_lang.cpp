@@ -9370,6 +9370,43 @@ void export_lang(py::module &m) {
 
   m.def("make_sparse_solver", &make_sparse_solver);
   m.def("make_cusparse_solver", &make_cusparse_solver);
+  m.def("_snapshot_eigen_sparse_solver",
+        [](SparseSolver &solver, const SparseMatrix &matrix) {
+          solver.validate_factorization(matrix);
+          const auto stats = matrix.debug_runtime_statistics();
+          TI_ERROR_IF(stats.backend_family != "cpu" ||
+                          stats.provider_name != "eigen" ||
+                          (stats.storage_format != "csr" &&
+                           stats.storage_format != "csc"),
+                      "SparseSolver export requires a CPU Eigen CSR/CSC matrix");
+          const auto dtype = matrix.get_data_type();
+          TI_ERROR_IF(dtype != PrimitiveType::f32 &&
+                          dtype != PrimitiveType::f64,
+                      "SparseSolver export requires f32 or f64");
+          auto snapshot = [&](auto scalar) {
+            using Scalar = decltype(scalar);
+            using Matrix = Eigen::SparseMatrix<Scalar>;
+            using RowMatrix =
+                Eigen::SparseMatrix<Scalar, Eigen::RowMajor>;
+            Matrix canonical;
+            if (stats.storage_format == "csc")
+              canonical = *static_cast<const Matrix *>(matrix.get_matrix());
+            else
+              canonical = *static_cast<const RowMatrix *>(matrix.get_matrix());
+            canonical.makeCompressed();
+            auto bytes = [](const auto *data, std::size_t count) {
+              return py::bytes(reinterpret_cast<const char *>(data),
+                               count * sizeof(*data));
+            };
+            return py::make_tuple(
+                canonical.rows(), canonical.nonZeros(), data_type_name(dtype),
+                bytes(canonical.outerIndexPtr(), canonical.cols() + 1),
+                bytes(canonical.innerIndexPtr(), canonical.nonZeros()),
+                bytes(canonical.valuePtr(), canonical.nonZeros()));
+          };
+          return dtype == PrimitiveType::f32 ? snapshot(float(0))
+                                             : snapshot(double(0));
+        });
 
   // Conjugate Gradient solver
   auto sparse_solve_result_to_dict = [](const SparseSolveResult &result) {

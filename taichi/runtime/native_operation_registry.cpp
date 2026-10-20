@@ -12,6 +12,7 @@ void register_vulkan_compute_operations(NativeOperationRegistry &registry);
 void register_optix_program_operations(NativeOperationRegistry &registry);
 void register_optix_launch_operations(NativeOperationRegistry &registry);
 void register_optix_micromap_resources(NativeOperationRegistry &registry);
+void register_sparse_direct_operations(NativeOperationRegistry &registry);
 void NativeOperationRegistry::register_schema_impl(
     NativeOperationDescription::Key key,
     Key definition_key,
@@ -408,6 +409,7 @@ const NativeOperationRegistry &native_operation_registry() {
     register_cutlass_source_operations(result);
     register_parallel_sort_operations(result);
     register_cudss_operations(result);
+    register_sparse_direct_operations(result);
     register_cusolverdn_operations(result);
     register_cublaslt_operations(result);
     register_cutensor_operations(result);

@@ -599,6 +599,19 @@ class SparseSolver:
             f"The parameter type: {type(b)} is not supported in linear solvers for now."
         )
 
+    def record_solve(self, *, rhs="rhs", solution="solution"):
+        """Record a fixed successful CPU factor for Graph and AOT execution.
+
+        RHS/output bindings may change between executions. Changing the matrix
+        or refactorizing requires a new recording. AOT saves canonical CSC data
+        and reconstructs its own Eigen factor; it does not serialize live
+        pointers. Automatic differentiation through this solve is not defined;
+        an explicit adjoint solve can be recorded separately.
+        """
+        from ._sparse_solver_recording import SparseSolveRecording
+
+        return SparseSolveRecording(self, rhs, solution)
+
     def info(self):
         """Check if the linear systems are solved successfully.
 
