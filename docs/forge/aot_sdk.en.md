@@ -4576,10 +4576,22 @@ structural type after preflight. Cold and cached native strategies, nested scala
 paths, and retained parent-Graph composition use the same native operation.
 No packing kernel or private member buffer is generated.
 
-Automatic reconstruction of private structure snapshots, tensor-component
-selection and strided Field roots remain separate work. Structure gradients and
-an automatic adjoint for the native transform remain outside this contract;
-ordinary downstream float kernels can use their existing exported gradients.
+Explicit `snapshot_state=True` also saves complete captured structure arrays,
+and ordinary scalar/tensor arrays, that are absent from `source_bindings`.
+Export samples these arrays and required Field roots at one completion boundary,
+preserving every record byte, including padding. References to the same source
+allocation share one reconstructed resource. Each independent prepared owner
+owns separate mutable array state and retains it across replay. Named source
+arrays remain consumer inputs; their contents are not captured. Cold and warm
+exports save the array state at their respective export boundaries. Field state
+continues to be shared within each loaded module.
+
+Structure snapshots add no packing kernel, per-frame host check or separate
+ownership mechanism. Qualified private initial data and scratch use the same
+complete layout description. Tensor-component selection and strided Field roots
+remain separate work. Structure gradients and an automatic adjoint for the
+native transform remain outside this contract; ordinary downstream float
+kernels can use their existing exported gradients.
 
 Pass memory and outer shape through the existing `TiArgument` ndarray, setting
 `elem_type=TI_DATA_TYPE_UNKNOWN` and an empty `elem_shape`. Supply the queried

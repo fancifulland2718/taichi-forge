@@ -518,8 +518,10 @@ class Module:
         Graph definition or device handle; the consumer binds arrays and records
         native execution at its cold boundary.
 
-        ``snapshot_state=True`` snapshots qualified provider workspace and dense
-        Field roots at export. Provider workspace is private to each prepared
+        ``snapshot_state=True`` snapshots qualified provider workspace, captured
+        ndarrays without a public source binding, and dense Field roots at one
+        export boundary. Complete struct records retain their layout and padding.
+        Captured arrays and provider workspace are private to each prepared
         consumer; Field state is shared by all entries of one loaded module and
         initialized once. Separate module instances isolate Field state. Changes
         to an already exported root snapshot require a new producer module.
@@ -532,9 +534,10 @@ class Module:
         data is implicitly captured. The policy is preflighted before Graph
         definitions are published and preserves the selected execution recipe.
 
-        ``source_bindings`` maps public names to scalar producer ndarrays held
+        ``source_bindings`` maps public names to qualified producer ndarrays held
         by qualified native operations. Export freezes type and shape, without
         copying data or storing addresses; consumers supply their own arrays.
+        These arrays remain public even with ``snapshot_state=True``.
         Reuse a kernel's symbolic name when it accesses the same storage.
         An f32 CUDA CSR/BSR SparseMatrix names its compressed numeric values,
         not the ndarray originally copied into the matrix. Its topology stays

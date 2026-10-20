@@ -8,6 +8,7 @@ from taichi_forge.lang._storage_view import DenseNdarrayView, describe_storage
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.matrix import MatrixField, MatrixNdarray, VectorNdarray
+from ._graph_array_data import ArrayDataLayout, ArraySnapshot
 
 _SOURCE_NDARRAY_TYPES = (ScalarNdarray, VectorNdarray, MatrixNdarray)
 
@@ -40,7 +41,7 @@ class RetainedArrayBindings:
         self.private_arrays = {}
         self.private_roles = {}
         self.private_usages = {}
-        self.immutable_snapshots = {}
+        self.snapshots = {}
         self.existing = {_field_key(packed_description(module._fields[name])): name for name in module._array_fields}
 
     def require(self, owner):
@@ -49,6 +50,8 @@ class RetainedArrayBindings:
             identity = context.source_arrays.identity(owner)
             if identity in self.private_arrays:
                 return self.private_arrays[identity]
+            if context.source_arrays.find(owner) is None and context.snapshot_state:
+                return self.declare_snapshot(owner, mutable=True)
             return context.source_arrays.require(owner)
         if type(owner) is StructNdarrayScalarMemberView:
             if owner.component is not None:
@@ -102,14 +105,12 @@ class RetainedArrayBindings:
         if self.private_usages.setdefault(identity, required_usage) != required_usage:
             raise TaichiRuntimeError("AOT scratch allocation usage changed within one export")
         if identity not in self.private_arrays:
-            descriptor = packed_description(owner)
+            layout = self.data_layout(owner)
             self.private_arrays[identity] = self.context._resource(
                 owner,
                 dict(
                     kind="ndarray",
-                    dtype=str(descriptor.scalar_type),
-                    shape=list(descriptor.index_shape),
-                    element_shape=list(descriptor.element_shape),
+                    **layout.resource_fields(),
                     **({"usage": list(required_usage)} if usage is not None else {}),
                 ),
             )
@@ -118,13 +119,13 @@ class RetainedArrayBindings:
     def declare_data(self, owner, data):
         """A concrete recipe supplies immutable construction-time array data."""
         identity = self._private_identity(owner, "data")
-        descriptor = packed_description(owner)
+        layout = self.data_layout(owner)
+        if len(data) != layout.byte_size:
+            raise ValueError("AOT construction data does not match its complete array layout")
         resource = self.context.data_resource(
             owner,
             data,
-            dtype=str(descriptor.scalar_type),
-            shape=list(descriptor.index_shape),
-            element_shape=list(descriptor.element_shape),
+            **layout.resource_fields(),
             readonly=True,
         )
         previous = self.private_arrays.setdefault(identity, resource)
@@ -132,30 +133,39 @@ class RetainedArrayBindings:
             raise TaichiRuntimeError("AOT private array reconstruction changed within one export")
         return resource
 
-    def declare_snapshot(self, owner):
-        """Capture qualified immutable recipe storage with the export closure.
+    def declare_snapshot(self, owner, *, mutable=False):
+        """Capture private recipe storage with the complete export closure.
 
         The concrete exporter proves immutability; arbitrary mutable application
         state still requires the existing explicit snapshot contract. No device
         transfer occurs until the whole Graph has passed structural preflight.
         """
-        identity = self._private_identity(owner, "data")
+        if mutable and not self.context.snapshot_state:
+            raise TaichiRuntimeError("AOT captured arrays require explicit snapshot_state=True at export")
+        identity = self._private_identity(owner, "state" if mutable else "data")
         if identity not in self.private_arrays:
-            descriptor = packed_description(owner)
             name = self.context._name("resource")
-            self.immutable_snapshots[identity] = (
-                owner, name, str(descriptor.scalar_type), tuple(descriptor.index_shape),
-                tuple(descriptor.element_shape),
-            )
+            self.snapshots[identity] = ArraySnapshot(owner, name, self.data_layout(owner))
             self.private_arrays[identity] = name
         return self.private_arrays[identity]
+
+    def data_layout(self, owner):
+        if type(owner) is StructNdarray:
+            return ArrayDataLayout(
+                tuple(owner.shape), core.data_type_size(owner.dtype),
+                layout=self.context.source_arrays.structure_layout(owner.struct_type))
+        descriptor = packed_description(owner)
+        return ArrayDataLayout(
+            tuple(descriptor.index_shape),
+            core.data_type_size(descriptor.scalar_type) * prod(descriptor.element_shape),
+            dtype=str(descriptor.scalar_type), element_shape=tuple(descriptor.element_shape))
 
     def _private_identity(self, owner, role):
         identity = self.context.source_arrays.identity(owner)
         if self.context.source_arrays.find(owner) is not None:
             raise TaichiRuntimeError("AOT private recipe storage cannot also be an external source binding")
         if self.private_roles.setdefault(identity, role) != role:
-            raise TaichiRuntimeError("AOT scratch cannot alias immutable recipe data")
+            raise TaichiRuntimeError("AOT private storage cannot alias a different reconstruction role")
         return identity
 
     def bind_private(self, name, owner):

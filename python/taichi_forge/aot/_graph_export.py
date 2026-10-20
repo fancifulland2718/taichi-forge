@@ -206,8 +206,10 @@ class _ExportContext:
 
     def declare_private_bindings(self, bindings, instance):
         from taichi_forge.graph._ir import InternalNdarrayRequirement
+        from taichi_forge.lang._ndarray import StructNdarray
         from taichi_forge.lang._storage_view import DenseNdarrayView
         from taichi_forge.lang.util import cook_dtype
+        from ._graph_storage_bindings import _SOURCE_NDARRAY_TYPES
 
         for name, owner in bindings.items():
             if self.source_resources is not None and name in self.source_resources.owners:
@@ -227,6 +229,9 @@ class _ExportContext:
             if type(owner) is DenseNdarrayView:
                 # Reconstruct its finite packed range against a named parent or
                 # qualified module root; never widen it to the backing storage.
+                self.retained_arrays.bind_private(name, owner)
+                continue
+            if self.snapshot_state and type(owner) in (*_SOURCE_NDARRAY_TYPES, StructNdarray):
                 self.retained_arrays.bind_private(name, owner)
                 continue
             if not isinstance(owner, InternalNdarrayRequirement):
@@ -256,8 +261,12 @@ class _ExportContext:
             )
             self.private_bindings[name] = owner
 
-    def data_resource(self, owner, data, *, dtype, shape, element_shape=(), name=None, readonly=False, usage=None):
+    def data_resource(self, owner, data, *, shape, dtype=None, element_shape=(), layout=None,
+                      name=None, readonly=False, usage=None):
         """Stage already frozen data; never sample a live owner during export."""
+        from ._graph_array_data import array_resource_fields
+
+        fields = array_resource_fields(shape=shape, dtype=dtype, element_shape=element_shape, layout=layout)
         if type(data) is not bytes:
             raise TypeError("AOT resource data must be an immutable byte snapshot")
         previous = self._data_keys.get(id(data))
@@ -274,12 +283,12 @@ class _ExportContext:
             # operation or expose it as mutable state.
             if name is not None:
                 raise ValueError("Shared read-only AOT data cannot reserve a private binding name")
-            identity = key, dtype, tuple(shape), tuple(element_shape), tuple(sorted(usage or ()))
+            identity = key, dtype, layout, tuple(shape), tuple(element_shape), tuple(sorted(usage or ()))
             owner = self._readonly_data_owners.setdefault(identity, owner)
         return self._resource(
             owner,
             dict(
-                kind="ndarray", dtype=dtype, shape=shape, element_shape=element_shape, initial_data=key,
+                kind="ndarray", **fields, initial_data=key,
                 **({"usage": sorted(usage)} if usage is not None else {}),
             ),
             name=name,
@@ -319,6 +328,7 @@ class _ExportContext:
         """Declare qualified provider storage; sample the complete closure once."""
         from taichi_forge.graph._native import ProviderOwnedNdarrayBinding
         from taichi_forge.lang import impl
+        from ._graph_array_data import ArrayDataLayout, ArraySnapshot
 
         if mutable and not self.snapshot_state:
             raise TaichiRuntimeError("AOT provider workspace requires explicit snapshot_state=True at export")
@@ -330,12 +340,13 @@ class _ExportContext:
         dtype, shape = str(array.element_data_type()), tuple(array.shape)
         if tuple(array.total_shape()) != shape:
             raise TaichiRuntimeError("AOT provider data currently requires scalar arrays")
+        layout = ArrayDataLayout(shape, core.data_type_size(array.element_data_type()), dtype=dtype)
         if cached is None:
             resource = self._name("resource")
-            self._provider_data[identity] = (owner, resource, dtype, shape)
+            self._provider_data[identity] = ArraySnapshot(owner, resource, layout)
         else:
-            _, resource, previous_dtype, previous_shape = cached
-            if (dtype, shape) != (previous_dtype, previous_shape):
+            resource = cached.name
+            if layout != cached.layout:
                 raise TaichiRuntimeError("AOT provider allocation changed its data description")
         if name in self.private_bindings and self.private_bindings[name] is not owner:
             raise TaichiRuntimeError("AOT provider data binding changed within one export")
@@ -357,12 +368,8 @@ class _ExportContext:
         import numpy as np
 
         from taichi_forge.lang import impl
-        from taichi_forge.lang.util import to_numpy_type
-
-        pending = tuple((*entry, ()) for entry in self._provider_data.values()) + tuple(
-            self.retained_arrays.immutable_snapshots.values()
-        )
-        arrays = [owner.arr for owner, _, _, _, _ in pending]
+        pending = (*self._provider_data.values(), *self.retained_arrays.snapshots.values())
+        arrays = [item.owner.arr for item in pending]
         program = impl.get_runtime().prog
         ids = sorted(
             set(module._aot_builder._used_snode_tree_ids(sorted(self._used_kernel_entries)))
@@ -378,18 +385,18 @@ class _ExportContext:
                     raise TaichiRuntimeError("AOT compiled Field lifetime changed during export")
             snapshot = program._snapshot_dense_state(dependencies, arrays)
             self.root_dependencies, self.root_payloads = dependencies, snapshot["roots"]
-            for (owner, name, dtype, shape, element_shape), data in zip(pending, snapshot["arrays"]):
-                self.data_resource(owner, data, dtype=dtype, shape=shape, element_shape=element_shape, name=name)
+            for item, data in zip(pending, snapshot["arrays"], strict=True):
+                self.data_resource(item.owner, data, **item.layout.resource_fields(), name=item.name)
             return
         if not pending:
             return
-        hosts = [
-            np.empty(shape + element_shape, dtype=to_numpy_type(array.element_data_type()))
-            for array, (_, _, _, shape, element_shape) in zip(arrays, pending)
-        ]
+        # Snapshot whole storage records, including structure padding. The
+        # existing Program transfer checks exact byte counts and one completion
+        # boundary for the complete batch; no per-member packing is needed.
+        hosts = [np.empty(item.layout.byte_size, dtype=np.uint8) for item in pending]
         program.copy_ndarrays_to_host(arrays, hosts, snapshot=True)
-        for (owner, name, dtype, shape, element_shape), host in zip(pending, hosts):
-            self.data_resource(owner, host.tobytes(), dtype=dtype, shape=shape, element_shape=element_shape, name=name)
+        for item, host in zip(pending, hosts, strict=True):
+            self.data_resource(item.owner, host.tobytes(), **item.layout.resource_fields(), name=item.name)
 
     def kernel_binding(self, arg):
         if arg.tag in (core.ArgKind.TEXTURE, core.ArgKind.RWTEXTURE, core.ArgKind.TEXTURE_COLLECTION, core.ArgKind.ACCELERATION_STRUCTURE):

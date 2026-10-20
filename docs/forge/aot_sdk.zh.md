@@ -3497,8 +3497,17 @@ sequence 捕获的原生标量叶成员变换。为完整 `StructNdarray` 父数
 冷／暖原生策略、嵌套标量路径、保留子图的父 Graph 组合复用同一原生操作，
 不生成 packing kernel 或成员私有缓冲。
 
-私有结构快照的自动重建、tensor 分量选择和带步幅 Field root 仍是独立待办。本项
-不提供结构梯度或原生变换自动伴随；后续普通浮点 kernel 可使用已有的导出梯度。
+显式 `snapshot_state=True` 还可保存 Graph 捕获且未列入 `source_bindings` 的完整
+结构数组，以及普通标量／tensor 数组。导出在同一个完成边界批量读取这些数组与
+所需 Field root，保留结构记录的全部字节和 padding。同一源数组的多个引用共享
+一份重建资源；每个独立 prepared owner 拥有独立可变数组，重放沿用其状态。
+`source_bindings` 中的数组仍由消费者提供，不保存其内容。冷／暖导出分别捕获
+当时的数组状态；模块 Field 仍按原合同在模块内共享。
+
+结构快照不增加 packing kernel、逐帧 host 检查或第二套资源所有权；已证明的
+私有初值与 scratch 也共用完整布局描述。tensor 分量选择和带步幅 Field root
+仍是独立待办。本项不提供结构梯度或原生变换自动伴随；后续普通浮点 kernel
+可使用已有的导出梯度。
 
 内存与外层 shape 仍放入原 `TiArgument` 的 ndarray，设置
 `elem_type=TI_DATA_TYPE_UNKNOWN`、空 `elem_shape`；将查询所得布局与版本填入
