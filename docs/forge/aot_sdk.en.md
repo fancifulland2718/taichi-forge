@@ -4882,6 +4882,35 @@ compile a second copy. Imports that replace their own module or `__file__` need
 explicit inventory entries. An observed import list is not proof of complete
 dynamic dependency coverage.
 
+Before compiling an inventory, the separate private `_host_inventory.py` tool
+can audit ordinary and function-local imports without executing the application
+or importing the DSL:
+
+```sh
+python python/taichi_forge/tools/_host_inventory.py --spec app-host.json \
+    --source-root complete-private-source --root simulation.solver > import-audit.json
+```
+
+Selected modules are read from the frozen specification; `--source-root` supplies
+candidate files for missing local modules. Omit it to use the specification's
+source tree. Repeat `--root` for public entry modules, or omit roots to inspect
+all selected modules. The traversal continues through already selected modules,
+follows package initializers and declared aliases, and compares exact filename
+spelling so a class name is not confused with a differently cased module.
+The JSON report includes missing candidates and hashes, import sites, unresolved
+local imports, external module names and some dynamic/wildcard import sites.
+It does not map external imports to installable distributions or change the
+inventory, build cache, dependency lock or consumer package.
+
+This is advisory static analysis: optional and type-checking branches can add
+unused candidates; dynamic imports, plugins and resources can still be missed.
+Review the report against the intended public profile before freezing additions.
+Only explicit `--fail-on-missing` makes missing candidates or unresolved local
+imports return exit status 1; an empty report is not full reachability proof.
+Keep actual source-blocked installation and execution qualification. The audit
+is independent of the hashed compilation producer and does not invalidate
+otherwise unchanged host binaries.
+
 The output contains only declared extensions and `host-manifest.json` with
 relative artifact names, hashes, template entries and producer identity. Cache
 hits verify the artifact bytes and skip template construction and compilation.
