@@ -183,7 +183,7 @@ ExecutionResourceBindings bind_execution_resources(
                                name);
     const auto &array = found->second->value.ndarray;
     if (result.native_arrays.count(name) && !shape_only)
-      throw MemoryBindingError("Affine member cannot be used as packed parent storage: " + name);
+      throw MemoryBindingError("Affine array cannot be used as packed parent storage: " + name);
     if (!local.count(found->second) && !frozen_metadata.count(name) &&
         validated_sources.insert(found->second).second) {
       if (array.elem_type == TI_DATA_TYPE_UNKNOWN) {
@@ -244,6 +244,22 @@ ExecutionResourceBindings bind_execution_resources(
       module_pointers[pos] = bound.pointer;
       if (bound.pointer.device != &runtime.get())
         throw MemoryBindingError("Module storage belongs to another device");
+      if (!bound.packed) {
+        taichi::lang::NativeArrayBinding native;
+        native.pointer = bound.pointer;
+        native.bytes = bound.bytes;
+        native.scalar_type = ndarray_scalar_type(scalar_type(dtype_name));
+        native.shape.assign(bound.layout.shape.begin(), bound.layout.shape.end());
+        native.element_shape.assign(bound.layout.element_shape.begin(),
+                                      bound.layout.element_shape.end());
+        native.strides = std::make_shared<const taichi::lang::NativeArrayStrides>(
+            taichi::lang::NativeArrayStrides{
+                bound.layout.index_strides_bytes,
+                bound.layout.element_strides_bytes,
+                static_cast<std::int64_t>(bound.byte_offset)});
+        taichi::lang::validate_native_dense_array_layout(native);
+        result.native_arrays.emplace(recipe.name, std::move(native));
+      }
     }
     const auto dtype =
         view ? array_source(view->array).elem_type
@@ -444,6 +460,13 @@ ExecutionResourceBindings bind_execution_resources(
     }
     if (module_pointers[pos].device) {
       if (resources.materialize[resources.order[pos]]) {
+        if (const auto native = result.native_arrays.find(name);
+            native != result.native_arrays.end()) {
+          // Module roots outlive their prepared executions. Keep the affine
+          // view native-only; a packed memory alias would lose its strides.
+          taichi::lang::resolve_native_dense_array(runtime.arch, native->second);
+          continue;
+        }
         if (shared && shared->stable_names.count(name)) {
           if (!shared_array(name, argument.value.ndarray)) {
             argument.value.ndarray.memory =

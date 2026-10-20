@@ -387,8 +387,9 @@ TEST(GfxAotValidation, SparseAndPackedStorageCannotExposePlainRootViews) {
   tree.resources.root_size = 16;
   tree.resources.snode_ids = {10, 11};
   data.snode_tree_resources = {tree};
-  dir.files["root_storage.json"] = R"({"version":1,"views":{"values":{
-    "tree_id":0,"byte_offset":0,"dtype":"f32","shape":[4],"element_shape":[]}}})";
+  dir.files["root_storage.json"] = R"({"version":2,"views":{"values":{
+    "tree_id":0,"byte_offset":0,"dtype":"f32","shape":[4],"element_shape":[],
+    "index_strides_bytes":[4],"element_strides_bytes":[]}}})";
   auto update = [&] {
     dir.files["metadata.json"] =
         liong::json::print(liong::json::serialize(data));

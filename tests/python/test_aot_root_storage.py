@@ -144,13 +144,14 @@ def test_aot_module_array_opt_in_preserves_legacy_field_export(tmp_path):
 
 
 @test_utils.test(arch=[ti.cpu], offline_cache=False)
-def test_aot_module_array_rejects_strided_field(tmp_path):
+def test_aot_module_array_exports_strided_field_layout(tmp_path):
     values = ti.field(ti.i32)
     other = ti.field(ti.i32)
     ti.root.dense(ti.i, 4).place(values, other)
     module = ti.aot.Module()
-    with pytest.raises(ValueError, match="packed dense"):
-        module.add_field("strided", values, as_array=True)
-    module.add_field("strided", values)
+    module.add_field("strided", values, as_array=True)
     module.save(tmp_path)
-    assert not (tmp_path / "root_storage.json").exists()
+    metadata = json.loads((tmp_path / "root_storage.json").read_text())
+    assert metadata["version"] == 2
+    assert metadata["views"]["strided"]["index_strides_bytes"] == [8]
+    assert metadata["views"]["strided"]["element_strides_bytes"] == []

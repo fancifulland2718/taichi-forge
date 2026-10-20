@@ -1125,7 +1125,11 @@ static TiPreparedExecution prepare_execution_plan_impl(
     uint64_t size;
     uint64_t element_bytes;
   };
+  auto native_arrays = std::move(resource_bindings.native_arrays);
   auto storage = [&](const std::string &name, uint64_t offset) {
+    if (const auto native = native_arrays.find(name);
+        native != native_arrays.end() && native->second.strides)
+      throw MemoryBindingError("Execution memory operation requires packed storage: " + name);
     const auto found = arguments.find(name);
     if (found == arguments.end())
       throw MemoryBindingError(
@@ -1157,7 +1161,6 @@ static TiPreparedExecution prepare_execution_plan_impl(
         allocation.allocation.get_ptr(allocation.byte_offset + offset),
         bytes - offset, element_bytes};
   };
-  auto native_arrays = std::move(resource_bindings.native_arrays);
   auto array_binding =
       [&](const std::string &slot) -> const NativeArrayBinding & {
     auto found = native_arrays.find(slot);
@@ -1826,8 +1829,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
         prepared->replay_resources.insert(object->second.get());
         continue;
       }
-      // Affine members have no standalone TiArgument or allocation. Their
-      // complete parent chain is already present in the replay closure below.
+      // Affine views have no separate allocation. Struct parents are retained
+      // by the replay closure; Field roots live with this execution's module.
       if (const auto member = native_arrays.find(name);
           member != native_arrays.end() && member->second.strides)
         continue;

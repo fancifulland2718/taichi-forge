@@ -3275,14 +3275,15 @@ module.add_execution_plan("sort_fields", aot.ExecutionPlan(
 ```
 
 `as_array` defaults to false. Opting in freezes scalar dtype, shape, tensor element
-shape and byte offset in `root_storage.json`; tree IDs are relocated with the
-artifact. `module_array` uses those layouts rather than caller-provided pointers
-or copies. LLVM requires relocatable plain dense trees. Nonpacked/strided Fields
-are rejected, and an exported view name cannot be rebound to another Field.
+shape, byte offset and actual axis strides in `root_storage.json`; tree IDs are
+relocated with the artifact. `module_array` uses those layouts rather than
+caller-provided pointers or copies. LLVM requires relocatable plain dense trees.
+Layouts must be aligned and provably unique, and an exported view name cannot
+be rebound to another Field.
 Ordinary Field export remains unchanged. This does not capture initial Field
 values; existing dense-state snapshots or explicit initialization remain necessary.
 
-A module array may parent an `ndarray_view`, supply extent metadata, or participate
+A packed module array may parent an `ndarray_view`, supply extent metadata, or participate
 in explicit ndarray gradient bindings. Aliases add no device storage to
 `resource_bytes`; module roots remain accounted separately. Preparation checks
 names, layouts and root bounds. Replay uses the already-bound storage. Closing a
@@ -3292,6 +3293,25 @@ CPU/CUDA/Vulkan tests cover Field→native sort→Field kernels, real `.grad`, t
 copies, subviews, malformed bounds and standalone/borrowed retirement. This is the
 shared storage contract, not automatic export of arbitrary Field-based helpers.
 Current Python/native components must have matching private ABI revisions.
+
+Strided module arrays bind the actual physical window within their root and are
+available only to native operations that explicitly accept that layout.
+The `builtin/transform` strategy `strided_scalar` accepts scalar Fields with
+positive uniform record strides, including interleaved `Struct.field` members
+and linearly traversable multidimensional Fields under one flat dense node.
+Cold and cached primitive-sequence Graph export use this strategy, with
+`snapshot_state=True` preserving the complete root's initial state. No packing
+kernel, private member copy or per-replay layout query is added. Ordinary packed
+kernel arguments, copies/fills and packed subviews reject these views during
+preparation. Tests cover one/two dimensions, nonzero index origins, prefix and
+in-place transforms, untouched sibling members, parent Graphs, independent module
+state, standalone/borrowed executors and in-flight retirement. Explicit reverse
+kernels for a downstream floating-point computation work; this does not supply
+an automatic adjoint for the native transform or arbitrary tensor-component operations.
+
+This extension requires paired private ABI121 components and root metadata
+format 2; execution plans remain at v24. Re-export earlier 0.6.4 development
+artifacts with format 1 root catalogs; no intermediate-format converter is provided.
 
 Plans can separate one-time initialization from replay:
 
@@ -4588,8 +4608,8 @@ continues to be shared within each loaded module.
 
 Structure snapshots add no packing kernel, per-frame host check or separate
 ownership mechanism. Qualified private initial data and scratch use the same
-complete layout description. Tensor-component selection and strided Field roots
-remain separate work. Structure gradients and an automatic adjoint for the
+complete layout description. Tensor-component selection remains separate work;
+strided Field roots use the module-array contract above. Structure gradients and an automatic adjoint for the
 native transform remain outside this contract; ordinary downstream float
 kernels can use their existing exported gradients.
 

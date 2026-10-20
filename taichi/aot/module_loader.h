@@ -109,7 +109,11 @@ class TI_DLL_EXPORT Module {
   };
   struct BoundRootStorageView {
     RootStorageView layout;
+    // Window origin; affine coordinates are relative to this pointer.
     DevicePtr pointer;
+    std::uint64_t bytes;
+    std::uint64_t byte_offset;
+    bool packed;
   };
   // Cold, non-owning alias. The module must outlive its prepared executions;
   // its owner retires all recordings before freeing any root allocation.

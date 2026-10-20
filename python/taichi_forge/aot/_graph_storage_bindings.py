@@ -22,6 +22,17 @@ def packed_description(owner):
     return description.descriptor
 
 
+def field_description(owner):
+    description = describe_storage(owner)
+    if (
+        not description.supported
+        or not description.properties["aligned"]
+        or description.properties["uniqueness"] != "kProvenUnique"
+    ):
+        raise TaichiRuntimeError("AOT retained Fields require aligned unique affine dense storage")
+    return description.descriptor
+
+
 def _field_key(descriptor):
     return (
         tuple(descriptor.tree_identity),
@@ -29,6 +40,8 @@ def _field_key(descriptor):
         str(descriptor.scalar_type),
         tuple(descriptor.index_shape),
         tuple(descriptor.element_shape),
+        tuple(descriptor.index_strides_bytes),
+        tuple(descriptor.element_strides_bytes),
     )
 
 
@@ -42,7 +55,7 @@ class RetainedArrayBindings:
         self.private_roles = {}
         self.private_usages = {}
         self.snapshots = {}
-        self.existing = {_field_key(packed_description(module._fields[name])): name for name in module._array_fields}
+        self.existing = {_field_key(field_description(module._fields[name])): name for name in module._array_fields}
 
     def require(self, owner):
         context = self.context
@@ -85,7 +98,7 @@ class RetainedArrayBindings:
             )
         if type(owner) not in (ScalarField, MatrixField):
             raise TaichiRuntimeError("AOT retained array requires a named ndarray or a qualified dense Field/view")
-        descriptor = packed_description(owner)
+        descriptor = field_description(owner)
         dependency = tuple(descriptor.tree_identity)
         context.field_state((dependency,))
         self.tree_ids.add(dependency[0])

@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// ExecutionPlan adds frozen structure layout constraints at the prepare boundary.
-inline constexpr int kForgeNativeAbiRevision = 120;
+// Module root views carry affine strides and a validated physical window.
+inline constexpr int kForgeNativeAbiRevision = 121;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

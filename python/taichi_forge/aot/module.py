@@ -344,9 +344,10 @@ class Module:
         Args:
           name: name of taichi field
           field: taichi field
-          as_array: Also expose packed dense storage as a named ``module_array``
-            execution resource on CPU/CUDA/Vulkan. The view shares module state;
-            LLVM exports require relocatable dense trees. Defaults to False.
+          as_array: Also expose dense storage as a named ``module_array``
+            execution resource on CPU/CUDA/Vulkan. Affine layouts require a
+            native operation that accepts their strides. The view shares module
+            state; LLVM exports require relocatable dense trees. Defaults to False.
 
         Example::
 
@@ -372,10 +373,12 @@ class Module:
             from taichi_forge.lang._storage_view import describe_storage
 
             storage = describe_storage(field)
-            if not storage.supported or not all(
-                storage.properties[key] for key in ("compact_contiguous", "ndarray_abi_compatible", "aligned")
+            if (
+                not storage.supported
+                or not storage.properties["aligned"]
+                or storage.properties["uniqueness"] != "kProvenUnique"
             ):
-                raise ValueError("AOT module array views require aligned packed dense Field storage")
+                raise ValueError("AOT module array views require aligned unique affine dense Field storage")
         is_scalar = True
         self._fields[name] = field
         column_num = 1

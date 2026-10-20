@@ -3,6 +3,7 @@
 #include "taichi/aot/root_storage.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/common/operation_json.h"
+#include "taichi/program/storage_view.h"
 
 namespace taichi::lang::aot {
 TEST(ExecutionPlan, VulkanSubmissionRequiresV20AndExactReplayCoverage) {
@@ -338,21 +339,24 @@ void validate_provider_description(const std::string &document) {
 TEST(AotRootStorage, PackedLayoutsValidateSizesAndOffsets) {
   const auto parse = [](const std::string &layout) {
     return parse_root_storage_views(liong::json::parse_complete(
-        "{\"version\":1,\"views\":{\"values\":" + layout + "}}"));
+        "{\"version\":2,\"views\":{\"values\":" + layout + "}}"));
   };
   const auto values = parse(R"({"tree_id":2,"byte_offset":68,"dtype":"f32",
-    "shape":[17],"element_shape":[2]})");
+    "shape":[17],"element_shape":[2],
+    "index_strides_bytes":[8],"element_strides_bytes":[4]})");
   const auto &value = values.at("values");
   EXPECT_EQ(value.tree_id, 2);
   EXPECT_EQ(value.byte_offset, 68);
   EXPECT_EQ(value.bytes(), 136);
   EXPECT_EQ(parse(R"({"tree_id":0,"byte_offset":0,"dtype":"i32",
-    "shape":[],"element_shape":[]})")
+    "shape":[],"element_shape":[],
+    "index_strides_bytes":[],"element_strides_bytes":[]})")
                 .at("values")
                 .bytes(),
             4);
   EXPECT_EQ(parse(R"({"tree_id":0,"byte_offset":0,"dtype":"f64",
-    "shape":[0],"element_shape":[]})")
+    "shape":[0],"element_shape":[],
+    "index_strides_bytes":[8],"element_strides_bytes":[]})")
                 .at("values")
                 .bytes(),
             0);
@@ -367,7 +371,58 @@ TEST(AotRootStorage, PackedLayoutsValidateSizesAndOffsets) {
        R"({"tree_id":0,"byte_offset":0,"dtype":"f64","shape":[4294967295,4294967295],"element_shape":[]})",
        R"({"tree_id":0,"byte_offset":0,"dtype":"f32","shape":[4294967296],"element_shape":[]})",
        R"({"tree_id":0,"byte_offset":0,"dtype":"f32","shape":[17],"element_shape":[],"address":123})"})
-    EXPECT_THROW(parse(layout), std::invalid_argument) << layout;
+  {
+    std::string complete(layout);
+    complete.pop_back();
+    complete += R"(,"index_strides_bytes":[4],"element_strides_bytes":[]})";
+    EXPECT_THROW(parse(complete), std::invalid_argument) << complete;
+  }
+  EXPECT_THROW(parse(R"({"tree_id":0,"byte_offset":0,"dtype":"f32",
+    "shape":[17],"element_shape":[]})"), std::invalid_argument);
+}
+
+TEST(AotRootStorage, AffineWindowsPreserveStridesAndRejectInvalidMappings) {
+  RootStorageView view{2, 12, "f32", {3, 17}, {}, {17 * 16, 16}, {}};
+  EXPECT_EQ(view.bytes(), 3 * 17 * 4);
+  const auto properties = view.properties();
+  EXPECT_EQ(properties.reachable_begin, 12);
+  EXPECT_EQ(properties.reachable_end, 12 + 50 * 16 + 4);
+  EXPECT_FALSE(properties.compact_contiguous);
+  EXPECT_EQ(properties.record_stride, 16);
+  auto different = view;
+  different.index_strides_bytes = {17 * 32, 32};
+  EXPECT_FALSE(view == different);
+  view.byte_offset += 50 * 16;
+  view.index_strides_bytes = {-17 * 16, -16};
+  EXPECT_EQ(view.properties().reachable_begin, properties.reachable_begin);
+  EXPECT_EQ(view.properties().reachable_end, properties.reachable_end);
+
+  view = {0, 4, "f32", {17}, {}, {16}, {}};
+  const auto base = view;
+  view.index_strides_bytes = {2};
+  EXPECT_THROW(view.properties(), std::invalid_argument);
+  view = base;
+  view.index_strides_bytes = {0};
+  EXPECT_THROW(view.properties(), std::invalid_argument);
+  view = base;
+  view.index_strides_bytes = {-16};
+  EXPECT_THROW(view.properties(), std::invalid_argument);
+  view = base;
+  view.index_strides_bytes.clear();
+  EXPECT_THROW(view.properties(), std::invalid_argument);
+  view = base;
+  view.index_strides_bytes = {std::numeric_limits<std::int64_t>::max()};
+  EXPECT_THROW(view.properties(), std::invalid_argument);
+
+  const auto parsed = parse_root_storage_views(liong::json::parse_complete(
+      R"({"version":2,"views":{"member":{"tree_id":2,"byte_offset":12,"dtype":"f32",
+      "shape":[3,17],"element_shape":[],"index_strides_bytes":[272,16],
+      "element_strides_bytes":[]}}})"));
+  EXPECT_EQ(parsed.at("member").properties().reachable_end, properties.reachable_end);
+  EXPECT_THROW(parse_root_storage_views(liong::json::parse_complete(
+      R"({"version":2,"views":{"member":{"tree_id":0,"byte_offset":0,"dtype":"f32",
+      "shape":[17],"element_shape":[],"index_strides_bytes":[true],
+      "element_strides_bytes":[]}}})")), std::invalid_argument);
 }
 
 TEST(ExecutionPlan, ModuleArraysSupplyStorageShapesAndGradients) {

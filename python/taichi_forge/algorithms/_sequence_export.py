@@ -116,7 +116,8 @@ def _reduce(call, context):
 
 
 def _transform(call, context):
-    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from math import prod
+    from taichi_forge.aot._graph_storage_bindings import field_description, packed_description
     from taichi_forge.lang._storage_view import describe_storage
     from taichi_forge_runtime.aot import Scalar
     from . import _algorithms as algorithms
@@ -132,6 +133,7 @@ def _transform(call, context):
     src, dst = call.args
     packed_fields = any(type(a) is algorithms.MatrixField for a in call.args)
     members = any(type(a) is algorithms.StructNdarrayScalarMemberView for a in call.args)
+    scalar_fields = any(type(a) is algorithms.ScalarField for a in call.args) and not packed_fields
     if packed_fields:
         # Match the whole-Field entry path, which accepts the native numeric
         # types before the narrower generic Field fallback is considered.
@@ -149,9 +151,21 @@ def _transform(call, context):
         if any(not d.supported for d in descriptions):
             raise TaichiRuntimeError("AOT scalar member transform requires qualified dense storage")
         source, destination = (d.descriptor for d in descriptions)
+    elif scalar_fields:
+        source, destination = (field_description(a) for a in call.args)
     else:
         source, destination = (packed_description(a) for a in call.args)
-    if any(len(d.index_shape) != 1 for d in (source, destination)):
+    strided_fields = scalar_fields and any(
+        len(d.index_shape) != 1
+        or not all(d.properties[key] for key in ("compact_contiguous", "ndarray_abi_compatible"))
+        for d in (source, destination)
+    )
+    if strided_fields and any(
+        not d.properties["single_record_stride_compatible"] or d.properties["has_negative_stride"]
+        for d in (source, destination)
+    ):
+        raise TaichiRuntimeError("AOT scalar Field transform requires a positive uniform record stride")
+    if not strided_fields and any(len(d.index_shape) != 1 for d in (source, destination)):
         raise TaichiRuntimeError("AOT transform requires one-dimensional packed storage")
     element_shape = tuple(source.element_shape)
     tensor = bool(element_shape)
@@ -198,11 +212,11 @@ def _transform(call, context):
         raise TaichiRuntimeError("AOT transform cannot reconstruct the selected cached strategy")
     context.operations.append(dict(
         kind="native", provider="builtin", operation="transform", version=1,
-        parameters=dict(size=source.index_shape[0], dtype=str(source.scalar_type),
+        parameters=dict(size=prod(source.index_shape), dtype=str(source.scalar_type),
                         scale_bits=Scalar("f64", float(scale)).resource("scale")["bits"],
                         bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"],
                         **(dict(element_shape=list(element_shape)) if tensor else {}),
-                        **(dict(strategy="strided_scalar") if members else
+                        **(dict(strategy="strided_scalar") if members or strided_fields else
                            dict(strategy="packed_field") if packed_fields else {})),
         bindings=dict(src=context.retained_arrays.require(src),
                       dst=context.retained_arrays.require(dst)),

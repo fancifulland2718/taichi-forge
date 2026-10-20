@@ -1375,7 +1375,7 @@ def _primitive_view_from_description(
     )
 
 
-def _primitive_view(arr):
+def _primitive_view(arr, *, allow_dense_nd=False):
     """Build a provider-role view from authoritative storage metadata.
 
     Native algorithms still need the concrete ndarray/SNode handle selected by
@@ -1428,11 +1428,24 @@ def _primitive_view(arr):
     ):
         return None
     shape = _tuple_shape(arr.shape)
-    if len(shape) > 1:
+    if len(shape) > 1 and not allow_dense_nd:
         return None
     description = describe_storage(arr)
     if not description.supported:
         return None
+    if len(shape) > 1:
+        properties = description.properties
+        parent = arr._snode.ptr.parent
+        if (
+            not properties["single_record_stride_compatible"]
+            or properties["has_negative_stride"]
+            or properties["uniqueness"] != "kProvenUnique"
+            or parent is None
+            or parent.type != _ti_core.SNodeType.dense
+            or parent.parent is None
+            or parent.parent.type != _ti_core.SNodeType.root
+        ):
+            return None
     return _primitive_view_from_description(
         "scalar_field" if len(shape) == 0 else "dense_field",
         arr,
@@ -1505,7 +1518,9 @@ def _primitive_view_descriptor_key(view):
 
 
 def _primitive_plan_object_key(obj):
-    view = _primitive_view(obj)
+    # Cache identity describes storage even when an operation separately rejects
+    # its rank. Multidimensional transform plans retain the same owner proof.
+    view = _primitive_view(obj, allow_dense_nd=True)
     if view is None:
         return ("object", id(obj))
     return _primitive_view_descriptor_key(view)
@@ -12455,8 +12470,8 @@ def _check_transform_request(src, dst, method, workspace):
         _check_ndarray_payload_compatible(src, dst, "experimental_transform()")
     src_is_view = _is_struct_scalar_member_view(src)
     dst_is_view = _is_struct_scalar_member_view(dst)
-    src_view = _primitive_view(src)
-    dst_view = _primitive_view(dst)
+    src_view = _primitive_view(src, allow_dense_nd=True)
+    dst_view = _primitive_view(dst, allow_dense_nd=True)
     dense_native_view = (
         src_view is not None
         and dst_view is not None
@@ -12498,8 +12513,8 @@ def _check_transform_request(src, dst, method, workspace):
 def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch != cuda:
         return False
-    src_view = _primitive_view(src)
-    dst_view = _primitive_view(dst)
+    src_view = _primitive_view(src, allow_dense_nd=True)
+    dst_view = _primitive_view(dst, allow_dense_nd=True)
     if (
         src_view is not None
         and dst_view is not None
@@ -12626,8 +12641,8 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
 def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch != vulkan:
         return False
-    src_view = _primitive_view(src)
-    dst_view = _primitive_view(dst)
+    src_view = _primitive_view(src, allow_dense_nd=True)
+    dst_view = _primitive_view(dst, allow_dense_nd=True)
     if (
         src_view is not None
         and dst_view is not None
@@ -12754,8 +12769,8 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
 def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
-    src_view = _primitive_view(src)
-    dst_view = _primitive_view(dst)
+    src_view = _primitive_view(src, allow_dense_nd=True)
+    dst_view = _primitive_view(dst, allow_dense_nd=True)
     if (
         src_view is not None
         and dst_view is not None

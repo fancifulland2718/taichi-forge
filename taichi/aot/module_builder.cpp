@@ -13,10 +13,11 @@ void AotModuleBuilder::add_root_storage_view(
   const auto &properties = descriptor.properties();
   if (name.empty() || name.find('\0') != std::string::npos ||
       descriptor.owner().kind != storage::StorageOwnerKind::kSNodePayload ||
-      !properties.compact_contiguous || !properties.ndarray_abi_compatible ||
-      !properties.aligned || descriptor.byte_offset() < 0)
+      !properties.aligned ||
+      properties.uniqueness != storage::StorageMappingUniqueness::kProvenUnique ||
+      descriptor.byte_offset() < 0)
     throw std::invalid_argument(
-        "AOT root storage requires a named packed dense Field view");
+        "AOT root storage requires a named aligned affine dense Field view");
   aot::RootStorageView view;
   view.tree_id = descriptor.owner().tree.tree_id;
   view.byte_offset = static_cast<std::uint64_t>(descriptor.byte_offset());
@@ -31,7 +32,9 @@ void AotModuleBuilder::add_root_storage_view(
   };
   copy_shape(descriptor.index_shape(), view.shape);
   copy_shape(descriptor.element_shape(), view.element_shape);
-  view.bytes();
+  view.index_strides_bytes = descriptor.index_strides_bytes();
+  view.element_strides_bytes = descriptor.element_strides_bytes();
+  view.properties();
   const auto [found, inserted] = root_storage_views_.emplace(name, view);
   if (!inserted && !(found->second == view))
     throw std::invalid_argument(

@@ -1,5 +1,6 @@
 #include "taichi/aot/module_loader.h"
 #include "taichi/common/virtual_dir.h"
+#include "taichi/program/storage_view.h"
 #include "picosha2.h"
 #include <limits>
 
@@ -33,16 +34,19 @@ Module::BoundRootStorageView Module::get_root_storage_view(
   if (found == root_storage_views_.end())
     throw std::invalid_argument("Unknown AOT root storage view: " + name);
   const auto &view = found->second;
-  const auto bytes = view.bytes();
+  const auto properties = view.properties();
+  const auto begin = static_cast<std::uint64_t>(properties.reachable_begin);
+  const auto bytes = static_cast<std::uint64_t>(properties.reachable_end) - begin;
   auto root = get_root_storage(view.tree_id);
-  if (!root.pointer.device || view.byte_offset > root.bytes ||
-      bytes > root.bytes - view.byte_offset ||
-      view.byte_offset >
+  if (!root.pointer.device || begin > root.bytes ||
+      bytes > root.bytes - begin ||
+      begin >
           std::numeric_limits<std::uint64_t>::max() - root.pointer.offset)
     throw ArtifactLoadError(
         "AOT root storage view exceeds its module allocation");
-  root.pointer.offset += view.byte_offset;
-  return {view, root.pointer};
+  root.pointer.offset += begin;
+  return {view, root.pointer, bytes, view.byte_offset - begin,
+          properties.compact_contiguous && properties.ndarray_abi_compatible};
 }
 
 namespace {

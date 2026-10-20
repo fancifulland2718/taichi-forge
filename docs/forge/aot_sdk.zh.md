@@ -2497,19 +2497,33 @@ module.add_execution_plan("sort_fields", aot.ExecutionPlan(
 ))
 ```
 
-`as_array` 默认关闭。显式启用后，标量 dtype、形状、tensor element shape 与字节偏移
-冻结在 `root_storage.json`，tree ID 随产物重定位。`module_array` 使用该布局，
-不接受生产进程指针，也不复制 Field。LLVM 要求可重定位的纯 dense 树；非连续/带跨步
-Field 明确拒绝，已导出的视图名称不能重绑定到其他 Field。普通 Field 导出行为不变。
+`as_array` 默认关闭。显式启用后，标量 dtype、形状、tensor element shape、字节偏移
+及各轴真实步幅冻结在 `root_storage.json`，tree ID 随产物重定位。`module_array`
+使用该布局，不接受生产进程指针，也不复制 Field。LLVM 要求可重定位的纯 dense 树；
+布局须对齐且可证明不存在重叠索引，已导出的视图名称不能重绑定到其他 Field。
+普通 Field 导出行为不变。
 此选项不采样 Field 初值；仍需已有 dense-state 快照或显式初始化。
 
-模块数组可作为 `ndarray_view` 的父对象、extent 形状来源或显式 ndarray 梯度绑定。
+连续模块数组可作为 `ndarray_view` 的父对象、extent 形状来源或显式 ndarray 梯度绑定。
 别名不增加 `resource_bytes` 设备存储，模块 root 单独计量。准备时检查名称、布局与
 root 边界，重放使用已绑定存储。关闭 preparation 只释放其别名；关闭模块先退休相关
 录制，再释放 root。不同模块实例的状态独立。CPU/CUDA/Vulkan 测试覆盖
 Field→原生 sort→Field kernel、真实 `.grad`、tensor 复制、子视图、损坏边界及独立/
 借用退休。这是公共存储合同，任意 Field helper 的自动导出仍需逐项接入。
 当前 Python/native 组件须使用配套的 private ABI 版本。
+
+带步幅的模块数组直接绑定 root 内的实际物理窗口，仅供显式支持此布局的原生操作使用。
+`builtin/transform` 的 `strided_scalar` 策略支持正向、均匀记录步幅的标量 Field，
+包括交错 `Struct.field` 成员及平坦 dense 节点下可线性遍历的多维 Field。
+primitive sequence 的冷／暖 Graph 导出复用该策略，配合 `snapshot_state=True`
+保存完整 root 初值；不增加 packing kernel、私有成员副本或每次重放的布局查询。
+普通 packed kernel 参数、copy/fill、packed 子视图仍在准备期拒绝此类视图。
+已验证一／二维、非零索引起点、前缀／原位变换、同树其他成员保持、父 Graph、
+双模块隔离、独立／借用执行器及在途退休；后段普通浮点 kernel 的显式反向可用，
+不由此提供原生变换的自动伴随或任意 tensor 分量操作。
+
+此扩展要求配对的私有 ABI121 组件及 root 元数据格式2；执行计划仍为 v24。
+此前 0.6.4 开发产物中的格式1 root 目录需重新导出，不提供中间格式兼容转换。
 
 计划可以将一次性初始化与重放分开：
 
@@ -3505,8 +3519,8 @@ sequence 捕获的原生标量叶成员变换。为完整 `StructNdarray` 父数
 当时的数组状态；模块 Field 仍按原合同在模块内共享。
 
 结构快照不增加 packing kernel、逐帧 host 检查或第二套资源所有权；已证明的
-私有初值与 scratch 也共用完整布局描述。tensor 分量选择和带步幅 Field root
-仍是独立待办。本项不提供结构梯度或原生变换自动伴随；后续普通浮点 kernel
+私有初值与 scratch 也共用完整布局描述。tensor 分量选择仍是独立待办；
+带步幅 Field root 使用前述模块数组合同。本项不提供结构梯度或原生变换自动伴随；后续普通浮点 kernel
 可使用已有的导出梯度。
 
 内存与外层 shape 仍放入原 `TiArgument` 的 ndarray，设置
