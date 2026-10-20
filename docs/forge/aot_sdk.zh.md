@@ -3429,6 +3429,10 @@ Windows CPU/CUDA/Vulkan 验证包括嵌套 i8/u16/f32、向量/矩阵成员、pa
 另有 Vulkan 同步验证。相同后端的原标量/tensor 消费回归通过。本项复用原生 ABI 和计划格式，
 不增加 kernel 或设备 workspace。
 
+正常安装 runtime wheel 后，六个三后端独立／借用消费者及已安装封闭宿主 CUDA batch
+回归通过。此次 Python 接口使压缩 runtime wheel 增加1,802B，前端、应用唯一 TCM
+及独立依赖安装保持不变。
+
 初始化时通过 `ti_get_kernel_ndarray_layout_ext` 或
 `ti_get_compute_graph_ndarray_layout_ext` 获取模块拥有的 `TiNdArrayLayout`。
 使用 `ti_get_ndarray_layout_info_ext` 和 `ti_get_ndarray_layout_member_ext`

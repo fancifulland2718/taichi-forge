@@ -4486,6 +4486,11 @@ retirement, including Vulkan synchronization validation. Existing scalar/tensor
 consumers pass the same backend regression set. This addition reuses the native
 ABI and plan format; it adds no kernel or device workspace.
 
+Normal Windows runtime-wheel installation passes all six standalone/borrowed
+backend consumers and the installed compiled-host CUDA batch regression. This
+Python addition increases the compressed runtime wheel by 1,802 bytes; frontend,
+application TCM and independent dependency installations remain unchanged.
+
 Obtain a module-owned `TiNdArrayLayout` once with
 `ti_get_kernel_ndarray_layout_ext` or
 `ti_get_compute_graph_ndarray_layout_ext`. Query its version, element stride,
