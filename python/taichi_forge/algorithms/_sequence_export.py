@@ -129,7 +129,14 @@ def _transform(call, context):
     ):
         raise TaichiRuntimeError("AOT transform requires its concrete TransformWorkspace")
     src, dst = call.args
-    algorithms._check_transform_request(src, dst, call.kwargs["method"], call.workspace)
+    packed_fields = any(type(a) is algorithms.MatrixField for a in call.args)
+    if packed_fields:
+        # Match the whole-Field entry path, which accepts the native numeric
+        # types before the narrower generic Field fallback is considered.
+        algorithms._check_matching_matrix_fields("experimental_transform()", src, dst)
+        call.workspace.check_shape(algorithms._shape_numel(src))
+    else:
+        algorithms._check_transform_request(src, dst, call.kwargs["method"], call.workspace)
     source, destination = (packed_description(a) for a in call.args)
     if any(len(d.index_shape) != 1 for d in (source, destination)):
         raise TaichiRuntimeError("AOT transform requires one-dimensional packed storage")
@@ -137,8 +144,10 @@ def _transform(call, context):
     tensor = bool(element_shape)
     if element_shape != tuple(destination.element_shape) or (tensor and any(
         type(a) not in (algorithms.VectorNdarray, algorithms.MatrixNdarray) for a in call.args
-    )):
-        raise TaichiRuntimeError("AOT tensor transform requires matching packed vector/matrix ndarrays")
+    ) and not packed_fields):
+        raise TaichiRuntimeError("AOT tensor transform requires matching packed vector/matrix ndarrays or Fields")
+    if packed_fields and any(a._native_dense_packed_plan() is None for a in call.args):
+        raise TaichiRuntimeError("AOT tensor Field transform requires its native packed layout")
     scale, bias = algorithms._normalize_transform_args(src.dtype, call.kwargs["scale"], call.kwargs["bias"])
     arch = impl.current_cfg().arch
     backend, capability = {
@@ -155,7 +164,7 @@ def _transform(call, context):
         algorithms._transform_value_type(src.dtype)
     ):
         raise TaichiRuntimeError("AOT transform dtype is unavailable on this Vulkan device")
-    methods = {
+    methods = {"transform_affine_dense_field_packed"} if packed_fields else {
         "cpu_transform_affine_packed_strided_ndarray",
         "cuda_device_transform_affine_packed_strided_ndarray",
         "vulkan_transform_affine_packed_strided_ndarray",
@@ -176,7 +185,8 @@ def _transform(call, context):
         parameters=dict(size=source.index_shape[0], dtype=str(source.scalar_type),
                         scale_bits=Scalar("f64", float(scale)).resource("scale")["bits"],
                         bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"],
-                        **(dict(element_shape=list(element_shape)) if tensor else {})),
+                        **(dict(element_shape=list(element_shape)) if tensor else {}),
+                        **(dict(strategy="packed_field") if packed_fields else {})),
         bindings=dict(src=context.retained_arrays.require(src),
                       dst=context.retained_arrays.require(dst)),
     ))

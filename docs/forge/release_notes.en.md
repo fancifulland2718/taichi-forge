@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT native transforms accept packed vector/matrix Fields on CPU/CUDA/Vulkan,
+  preserving module storage and the selected CPU policy, single flat CUDA
+  launch and packed Vulkan dispatch. No packing kernels or copies are added;
+  matching private ABI 115 components are required.
+
 - Host producer scripts retain LF checkout bytes across Git newline settings,
   preventing unchanged source-hidden modules from recompiling solely because
   the checkout uses `core.autocrlf`. Exact toolchain and artifact checks remain.

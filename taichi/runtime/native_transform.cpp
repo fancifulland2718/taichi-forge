@@ -108,7 +108,8 @@ class CpuTransform final : public TransformBase {
         pool_(context.cpu_thread_pool),
         partitions_(
             cpu::transform_partitions(scalar_count_, context.cpu_max_threads,
-                                       !op.element_shape.empty())) {
+                                       !op.element_shape.empty() &&
+                                           op.strategy == TransformStrategy::packed_array)) {
     auto *cpu = dynamic_cast<cpu::CpuDevice *>(&device_);
     if (!cpu ||
         cpu->map_range_for_cpu_native(op.src.pointer, op.src.bytes, &src_) !=
@@ -167,8 +168,9 @@ class CudaTransform final : public TransformBase {
   CudaTransform(Device &device, const TransformOperation &op)
       : TransformBase(Arch::cuda, device, op),
         scale_(op.scale),
-        bias_(op.bias), packed_(!op.element_shape.empty()) {
-    if (size_ > std::numeric_limits<std::uint32_t>::max())
+        bias_(op.bias), packed_(!op.element_shape.empty() &&
+                              op.strategy == TransformStrategy::packed_array) {
+    if ((packed_ ? size_ : scalar_count_) > std::numeric_limits<std::uint32_t>::max())
       throw std::invalid_argument(
           "Transform exceeds the CUDA uint32 shader count ABI");
     auto *cuda = dynamic_cast<cuda::CudaDevice *>(&device);
@@ -196,7 +198,7 @@ class CudaTransform final : public TransformBase {
       return;
     }
     cuda::driver_transform_affine_on_stream(
-        src_, dst_, static_cast<std::uint32_t>(size_),
+        src_, dst_, static_cast<std::uint32_t>(scalar_count_),
         static_cast<cuda::CudaTransformValueType>(type_), scale_, bias_,
         stream);
   }
@@ -216,6 +218,11 @@ double coefficient(const operation_json::JsonValue &value) {
 }  // namespace
 
 std::size_t transform_item_bytes(const TransformOperation &op) {
+  if (op.strategy != TransformStrategy::packed_array &&
+      op.strategy != TransformStrategy::packed_field)
+    throw std::invalid_argument("Transform strategy is invalid");
+  if (op.strategy == TransformStrategy::packed_field && op.element_shape.empty())
+    throw std::invalid_argument("Packed Field transform requires a tensor element shape");
   if (op.value_type < 0 || op.value_type >= transform_types().size())
     throw std::invalid_argument("Transform requires a supported dtype");
   std::size_t bytes = op.value_type < 3 ? 4 : 8;
@@ -293,7 +300,7 @@ void register_transform_operation(NativeOperationRegistry &registry) {
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<TransformOperation> {
         operation_json::fields(parameters,
-                               {"size", "dtype", "scale_bits", "bias_bits", "element_shape"});
+                               {"size", "dtype", "scale_bits", "bias_bits", "element_shape", "strategy"});
         const auto size = operation_json::integer(parameters["size"]);
         if (!size || size > std::numeric_limits<std::size_t>::max())
           throw std::invalid_argument(
@@ -316,20 +323,30 @@ void register_transform_operation(NativeOperationRegistry &registry) {
           for (const auto &axis : shape->second.arr.inner)
             element_shape.push_back(operation_json::integer(axis));
         }
+        auto strategy = TransformStrategy::packed_array;
+        if (const auto selected = parameters.obj.inner.find("strategy");
+            selected != parameters.obj.inner.end()) {
+          const auto name = operation_json::name(selected->second);
+          if (name == "packed_field")
+            strategy = TransformStrategy::packed_field;
+          else if (name != "packed_array")
+            throw std::invalid_argument("Transform strategy is invalid");
+        }
         // Decode layout arithmetic before binding or allocating consumer state.
         TransformOperation descriptor;
         descriptor.size = size;
         descriptor.value_type = type;
         descriptor.element_shape = element_shape;
+        descriptor.strategy = strategy;
         transform_item_bytes(descriptor);
         return
-            [size, type, scale, bias, element_shape](const NativeOperationBindings &bindings) {
+            [size, type, scale, bias, element_shape, strategy](const NativeOperationBindings &bindings) {
               return TransformOperation{static_cast<std::size_t>(size),
                                         type,
                                         scale,
                                         bias,
                                         bindings.at("src").array(),
-                                        bindings.at("dst").array(), element_shape};
+                                        bindings.at("dst").array(), element_shape, strategy};
             };
       });
 #ifdef TI_WITH_LLVM

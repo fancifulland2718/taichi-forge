@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 原生 transform 支持 CPU/CUDA/Vulkan 紧凑向量／矩阵 Field，保留模块存储、
+  已选 CPU 调度、CUDA 一次展平 launch 与 Vulkan packed dispatch；不新增 packing
+  kernel 或复制，需配套私有 ABI115 组件。
+
 - 宿主构建脚本固定使用 LF 换行，避免 `core.autocrlf` 改变检出字节后使未修改的
   封闭宿主模块全部重新编译；工具链身份及产物完整性校验保持。
 

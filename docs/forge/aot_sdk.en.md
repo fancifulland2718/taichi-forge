@@ -2389,10 +2389,21 @@ policy, CUDA per-lane strided launches and Vulkan packed dispatch. They add no
 application kernel or private scratch. Bindings allow exact in-place or disjoint
 ranges; partial overlap and incompatible element shapes are rejected. Explicit
 consumer plans also support scalar-aligned offset tensor views and selected
-prefixes without changing surrounding records. This route does not cover tensor
-Fields, Struct members or arbitrary strides. Compiled downstream kernel gradients
-are qualified; the native transform does not acquire an automatic adjoint.
-Use matching private ABI 108 runtime/frontend components.
+prefixes without changing surrounding records. Compiled downstream kernel
+gradients are qualified; the native transform does not acquire an automatic adjoint.
+
+Packed vector/matrix Fields with one index dimension also export, preserving
+module-root identity and the producer's selected `strategy="packed_field"`.
+This uses the scalar CPU scheduling policy, one flattened CUDA affine launch,
+and the existing packed Vulkan dispatch. It does not convert the Field to a
+temporary ndarray or add packing kernels. Cold/warm export, exact in-place and
+disjoint bindings, unchanged prefix tails, independent module state, downstream
+kernel gradients and in-flight retirement pass Windows CPU/CUDA/Vulkan checks,
+including Vulkan synchronization validation. CUDA profiling confirms six native
+affine kernels for six JIT calls and likewise for six prepared AOT calls, rather
+than expanding a matrix into one launch per lane. Struct members and arbitrary
+strides still require their own export contracts. Use matching private ABI 115
+runtime/frontend components; ndarray execution defaults remain unchanged.
 
 The Vulkan scalar `transform → gather → scatter` sequence has a dedicated
 `builtin/indexed_transform` v1 contract. Cold export selects the same eligible

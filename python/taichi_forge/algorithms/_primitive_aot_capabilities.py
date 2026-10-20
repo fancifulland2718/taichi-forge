@@ -155,6 +155,11 @@ _ROUTES = MappingProxyType({
                   "exact_inplace_or_disjoint", "immutable_coefficients",
                   "preserved_cpu_partition_policy_cuda_lane_launches_vulkan_packed_dispatch",
                   "device_dtype_capabilities", "explicit_adjoint_only"),
+        _sequence(("transform",), "nonempty", "one_dimensional_packed_tensor_fields",
+                  "vector_or_matrix", "i32_u32_f32_i64_u64_f64", "affine",
+                  "exact_inplace_or_disjoint", "immutable_coefficients", "module_root_identity",
+                  "preserved_scalar_cpu_policy_flat_cuda_launch_packed_vulkan_dispatch",
+                  "device_dtype_capabilities", "explicit_adjoint_only"),
         PrimitiveAOTRoute(
             "aot.ExecutionPlan", ("builtin/transform",), _ALL,
             ("packed_scalar_or_tensor", "nonempty_fixed_prefix", "affine", "element_shape",

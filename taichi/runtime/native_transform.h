@@ -4,6 +4,8 @@
 
 namespace taichi::lang {
 
+enum class TransformStrategy { packed_array, packed_field };
+
 // Packed scalar/tensor affine transform. Exact in-place or disjoint ranges;
 // only the selected prefix is written. Coefficients retain the native double
 // argument contract and convert to the selected arithmetic type at preparation.
@@ -17,6 +19,10 @@ struct TransformOperation {
   NativeArrayBinding src;
   NativeArrayBinding dst;
   std::vector<std::uint64_t> element_shape;
+  // Preserve the producer's scheduler/launch selection independently of the
+  // consumer binding type: packed Fields use one flat CUDA launch and the
+  // scalar CPU policy, while Vulkan uses the same packed shader for both.
+  TransformStrategy strategy{TransformStrategy::packed_array};
 };
 
 std::size_t transform_item_bytes(const TransformOperation &operation);

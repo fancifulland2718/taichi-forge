@@ -968,6 +968,23 @@ TEST(NativeOperationRegistry, TransformTensorLayoutIsCheckedBeforeBinding) {
   }
 }
 
+TEST(NativeOperationRegistry, TransformPreservesSelectedPackedFieldStrategy) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"transform","version":1,
+      "parameters":{"size":7,"dtype":"f32","element_shape":[2,3],
+      "strategy":"packed_field","scale_bits":"4008000000000000","bias_bits":"401c000000000000"},
+      "bindings":{"src":"s","dst":"d"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "transform");
+  for (const char *strategy : {"true", "3", "\"flatten_everything\""}) {
+    auto bad = op;
+    bad.parameters.obj.inner["strategy"] = liong::json::parse_complete(strategy);
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  op.parameters.obj.inner["element_shape"] = liong::json::parse_complete("[]");
+  EXPECT_THROW(registry.decode(op), std::invalid_argument);
+}
+
 TEST(NativeOperationRegistry, IndexedTransformRequiresEveryObservableOutput) {
   const auto &registry = native_operation_registry();
   auto op = NativeOperationDescription::parse(liong::json::parse_complete(

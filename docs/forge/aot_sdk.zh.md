@@ -1844,9 +1844,17 @@ ndarray。`builtin/transform` v1 描述保存确切的 `element_shape`、基础 
 冷导出和已选策略导出保留 CPU 分区策略、CUDA 逐 lane strided launch 及 Vulkan packed
 dispatch，不增加应用 kernel 或私有 scratch。绑定允许完全原位或不相交的范围，拒绝部分
 重叠和不匹配的 element shape。显式消费者计划还支持标量对齐的 tensor 偏移视图及指定
-前缀，保留范围外记录。本路线不覆盖 tensor Field、Struct 成员或任意 stride。
+前缀，保留范围外记录。
 已验证编译后的下游 kernel 梯度；原生 transform 本身不自动生成伴随。
-需使用配套的私有 ABI108 runtime／前端组件。
+
+具有一维索引的紧凑向量／矩阵 Field 也可导出，保留模块根存储身份及生产端已选的
+`strategy="packed_field"`。此策略使用 CPU 普通标量调度、CUDA 一次展平 affine
+launch 和既有 Vulkan packed dispatch，不转换到临时 ndarray 或新增 packing kernel。
+Windows CPU/CUDA/Vulkan 已验证冷热导出、完全原位及不相交绑定、前缀尾部保持、
+双模块状态隔离、真实下游梯度及在途退休，另有 Vulkan 同步验证。CUDA profiler确认
+六次JIT和六次AOT分别执行六个原生affine kernel，不按矩阵lane重复launch。
+Struct成员和任意stride仍需独立导出合同。需配套私有ABI115 runtime／前端组件；
+原ndarray执行默认不变。
 
 Vulkan 标量 `transform → gather → scatter` 序列具有专门的
 `builtin/indexed_transform` v1 合同。冷导出按 JIT 的条件选择融合；已选中融合后，
