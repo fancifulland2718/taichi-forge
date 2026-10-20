@@ -296,9 +296,23 @@ Normally installed standalone and borrowed runtimes pass this scalar-member
 route on Windows CPU/CUDA/Vulkan, including cold/warm export, prefixes, parent
 Graphs, private snapshots, unchanged siblings, rejected aliases and in-flight
 retirement. An explicit downstream energy-kernel backward pass and Vulkan
-synchronization validation also pass. Whole vector/matrix Field reductions
-remain a separate export gap; selecting one scalar tensor component does not
-imply support for that whole-tensor entry point.
+synchronization validation also pass.
+
+Whole packed vector/matrix Fields also export nonempty, one-dimensional
+sum/min/max into a matching tensor Field with scalar index shape. The explicit
+`builtin/reduce` description uses `strategy="packed_field"` and the exact
+`element_shape`; it can select a fixed input prefix and writes only the first
+output record. CPU/CUDA/Vulkan preserve the existing per-component algorithm
+and reuse one workspace across components. Vulkan retains distinct prepared
+bindings and orders reuse of its shared parameters, partials and aligned output.
+Component count has no artificial ceiling; shape arithmetic and actual device
+address limits are checked. No packing kernel or application shader is added.
+This route requires paired private ABI124 components. Module-root ownership,
+parent Graphs and explicit downstream kernel gradients retain their contracts;
+the native reduction gains no automatic adjoint. Vulkan f64 observation or
+gradient kernels require their declared AOT target capabilities, including
+`spirv_has_float64` and, where the generated storage code uses it,
+`spirv_has_int64`.
 
 `PrimitiveSequence.transform()` and explicit `builtin/transform` v1 descriptions
 cover nonempty, one-dimensional packed scalar affine transforms on CPU/CUDA/Vulkan

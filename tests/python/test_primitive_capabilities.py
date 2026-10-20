@@ -95,6 +95,11 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
             assert route.backends == ("cpu", "cuda", "vulkan")
             assert "packed_storage" not in route.constraints
             assert "no_automatic_ad" in route.constraints
+        tensor_reduce = next(r for r in reduction.aot_routes
+                             if "one_dimensional_packed_tensor_fields" in r.constraints)
+        assert tensor_reduce.backends == ("cpu", "cuda", "vulkan")
+        assert {"preserved_lane_order", "shared_lane_workspace", "no_automatic_ad"} <= set(tensor_reduce.constraints)
+        assert any("exact_tensor_element_shape" in r.constraints for r in reduction.aot_routes)
         rle = ti.algorithms.primitive_capability("run_length_encode").aot_routes
         assert len(rle) == 1 and rle[0].entry_point == "algorithms.PrimitiveSequence"
         assert rle[0].backends == ("cpu", "cuda", "vulkan")

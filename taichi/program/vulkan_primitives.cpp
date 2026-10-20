@@ -10001,6 +10001,7 @@ class FixedVulkanReduce final : public NativeOperation {
     const auto addressing = qualify_reduce_addressing(Arch::vulkan, device, op);
     const std::size_t width = op.value_type < 3 ? 4 : 8;
     const bool strided = op.strategy == ReduceStrategy::strided_scalar ||
+                         op.strategy == ReduceStrategy::packed_field ||
                          (op.strategy == ReduceStrategy::scalar_field &&
                           (addressing.values_stride != width ||
                            addressing.output_stride != width));
@@ -10010,17 +10011,38 @@ class FixedVulkanReduce final : public NativeOperation {
     cache_.reduce_private_bindings.ring.exact_capacity = true;
     cache_.reduce_private_strided_bindings.ring.exact_capacity = true;
     cache_.reduce_final_bindings.ring.exact_capacity = true;
-    prepared_ = prepare_vulkan_reduce(
-        nullptr, &device, cache_, values_, output_, op.size, width, width,
-        op.value_type, op.op, values_.offset + addressing.values_offset,
-        addressing.values_stride, output_.offset + addressing.output_offset,
-        addressing.output_stride, strided, strided);
+    // Preparation stores wrappers before any command list finalizes them.
+    // Reserve actual lane capacity so later lanes cannot overwrite earlier
+    // bindings; the buffers and pipelines remain shared.
+    cache_.reduce_single_strided_bindings.ring.ensure_device(&device, addressing.lanes);
+    cache_.reduce_private_strided_bindings.ring.ensure_device(&device, addressing.lanes);
+    cache_.reduce_final_bindings.ring.ensure_device(&device, addressing.lanes);
+    prepared_.reserve(addressing.lanes);
+    for (std::size_t lane = 0; lane < addressing.lanes; ++lane) {
+      const auto lane_offset = lane * width;
+      prepared_.push_back(prepare_vulkan_reduce(
+          nullptr, &device, cache_, values_, output_, op.size, width, width,
+          op.value_type, op.op,
+          values_.offset + addressing.values_offset + lane_offset,
+          addressing.values_stride,
+          output_.offset + addressing.output_offset + lane_offset,
+          addressing.output_stride, strided, strided));
+    }
   }
   Arch arch() const override { return Arch::vulkan; }
   Device &device() const override { return device_; }
   std::size_t workspace_bytes() const override { return cache_.allocated_bytes(); }
   void record_vulkan(Device *device, CommandList *commands) override {
-    prepared_.record(device, commands);
+    for (std::size_t lane = 0; lane < prepared_.size(); ++lane) {
+      if (lane) {
+        // Previous compute/transfer reads must finish before the next lane
+        // overwrites the shared parameters, partials or aligned result.
+        for (const auto buffer : {cache_.params, cache_.partial, cache_.aligned_output})
+          if (buffer != kDeviceNullAllocation)
+            commands->buffer_barrier(buffer);
+      }
+      prepared_[lane].record(device, commands);
+    }
   }
   NativeVulkanRecordingRequirements vulkan_recording_requirements() const override {
     NativeVulkanRecordingRequirements result;
@@ -10032,7 +10054,7 @@ class FixedVulkanReduce final : public NativeOperation {
   Device &device_;
   DevicePtr values_, output_;
   VulkanReduceCache cache_;
-  VulkanPreparedReduce prepared_;
+  std::vector<VulkanPreparedReduce> prepared_;
 };
 
 std::size_t vulkan_reduce_storage_impl(Program *program,

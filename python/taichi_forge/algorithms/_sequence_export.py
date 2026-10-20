@@ -73,10 +73,18 @@ def _reduce(call, context):
     ):
         raise TaichiRuntimeError("AOT reduce requires its concrete ReduceWorkspace")
     values, output = call.args
-    algorithms._check_reduce_request(*call.args, **call.kwargs)
     members = any(type(a) is algorithms.StructNdarrayScalarMemberView for a in call.args)
     fields = all(type(a) is algorithms.ScalarField for a in call.args)
-    strategy = "strided_scalar" if members else "scalar_field" if fields else "packed_array"
+    tensors = all(type(a) is algorithms.MatrixField for a in call.args)
+    if tensors:
+        algorithms._check_matching_matrix_fields(
+            "AOT reduce", values, output, require_same_shape=False)
+        if (call.kwargs["op"] not in algorithms._SUPPORTED_REDUCE_OPS
+                or call.kwargs["method"] not in algorithms._SUPPORTED_REDUCE_METHODS):
+            raise TaichiRuntimeError("AOT tensor reduce requires a supported operation and method")
+    else:
+        algorithms._check_reduce_request(*call.args, **call.kwargs)
+    strategy = "strided_scalar" if members else "scalar_field" if fields else "packed_field" if tensors else "packed_array"
     if members:
         if any(type(a) not in (algorithms.StructNdarrayScalarMemberView, algorithms.ScalarNdarray)
                for a in call.args):
@@ -89,7 +97,14 @@ def _reduce(call, context):
         source, destination = (field_description(a) for a in call.args)
     else:
         source, destination = (packed_description(a) for a in call.args)
-    if source.element_shape or destination.element_shape:
+    element_shape = tuple(source.element_shape)
+    if tensors:
+        if (not element_shape or element_shape != tuple(destination.element_shape)
+                or len(source.index_shape) != 1 or destination.index_shape
+                or not source.index_shape[0]
+                or any(a._native_dense_packed_plan() is None for a in call.args)):
+            raise TaichiRuntimeError("AOT tensor reduce requires matching packed vector/matrix Fields")
+    elif source.element_shape or destination.element_shape:
         raise TaichiRuntimeError("AOT reduce requires scalar storage")
     if strategy != "packed_array":
         if any(not d.properties["single_record_stride_compatible"] or d.properties["has_negative_stride"]
@@ -117,6 +132,9 @@ def _reduce(call, context):
         "cpu_reduce_strided_ndarray", "cuda_device_reduce_strided_ndarray",
         "vulkan_reduce_strided_ndarray",
     } if members else {
+        "cpu_reduce_dense_field_packed", "cuda_device_reduce_dense_field_packed",
+        "vulkan_reduce_dense_field_packed",
+    } if tensors else {
         "cpu_reduce_ndarray", "cpu_reduce_dense_field",
         "cuda_device_reduce_ndarray", "cuda_device_reduce_dense_field",
         "vulkan_reduce_ndarray", "vulkan_reduce_dense_field",
@@ -130,6 +148,8 @@ def _reduce(call, context):
     parameters = dict(size=prod(source.index_shape), dtype=str(source.scalar_type), op=op)
     if strategy != "packed_array":
         parameters["strategy"] = strategy
+    if tensors:
+        parameters["element_shape"] = list(element_shape)
     if backend == "cpu_native":
         parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
     context.operations.append(dict(

@@ -231,8 +231,18 @@ CPU/CUDA/Vulkan 的归约导出也支持一维 `StructNdarray` 标量成员（�
 
 该标量成员路线已通过Windows CPU/CUDA/Vulkan正常安装后的独立与借用runtime验证，
 覆盖冷暖导出、前缀、父Graph、私有快照、相邻成员不变、别名拒绝和在途退休。
-实际下游能量kernel的显式反向和Vulkan同步验证也通过。整向量／矩阵Field归约
-仍是独立的导出缺口；选择一个标量tensor分量不代表整个tensor入口已经支持。
+实际下游能量kernel的显式反向和Vulkan同步验证也通过。
+
+整向量／矩阵 packed Field 也支持非空一维 sum/min/max 导出，输出为元素形状相同、
+索引形状为标量的 tensor Field。显式 `builtin/reduce` 描述使用
+`strategy="packed_field"` 和准确的 `element_shape`，可选择固定输入前缀，仅写输出
+首条记录。CPU/CUDA/Vulkan 保留既有逐分量算法，在分量之间复用同一 workspace。
+Vulkan 保存各分量独立的预备绑定，并为参数、partial 和对齐输出的共享复用保留顺序。
+不设置人为分量数上限，只检查形状运算溢出和实际设备地址限制；不添加打包 kernel
+或应用 shader。此路线要求配对的私有 ABI124 组件。模块根所有权、父 Graph 及显式
+下游 kernel 梯度保持原合同，原生归约不新增自动伴随。Vulkan 的 f64 观察或梯度
+kernel 需要声明相应 AOT 目标能力，包括 `spirv_has_float64`，以及生成的存储代码
+使用时所需的 `spirv_has_int64`。
 
 `PrimitiveSequence.transform()` 与显式 `builtin/transform` v1 描述支持 CPU/CUDA/Vulkan
 上的非空、一维连续标量 affine 变换，覆盖 i32/u32/i64/u64/f32/f64。输入输出可为

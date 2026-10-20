@@ -931,7 +931,86 @@ TEST(NativeOperationRegistry, ReduceSchemaPreservesBackendSpecificScheduling) {
   }
 }
 
+TEST(NativeOperationRegistry, ReduceTensorShapeIsValidatedBeforeBinding) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"reduce","version":1,
+      "parameters":{"size":17,"dtype":"f64","op":"sum","strategy":"packed_field",
+                    "element_shape":[8,8]},"bindings":{"values":"v","output":"o"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "reduce");
+  for (const char *shape : {"true", "[]", "[0]", "[-1]", "[true]", "[1.5]",
+                            "[9223372036854775807]", "[4294967296,4294967296]"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(
+        std::string(R"({"size":17,"dtype":"f64","op":"sum","strategy":"packed_field","element_shape":)") +
+        shape + "}");
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument) << shape;
+  }
+  for (const char *strategy : {"packed_array", "scalar_field", "strided_scalar"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(
+        std::string(R"({"size":17,"dtype":"f32","op":"sum","element_shape":[2,3],"strategy":")") +
+        strategy + R"("})");
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  ReduceOperation wide;
+  wide.size = 1;
+  wide.value_type = 1;
+  wide.strategy = ReduceStrategy::packed_field;
+  wide.element_shape = {1, 65};
+  EXPECT_EQ(reduce_item_bytes(wide), 260);
+  wide.size = std::numeric_limits<std::size_t>::max() / 260 + 1;
+  EXPECT_THROW(reduce_item_bytes(wide), std::invalid_argument);
+}
+
 #ifdef TI_WITH_LLVM
+TEST(NativeOperationRegistry, ReduceTensorLanesPreservePrefixAndOutputTail) {
+  cpu::CpuDevice device;
+  auto [input, status] = device.allocate_memory_unique({17 * 6 * sizeof(float)});
+  auto [output, output_status] = device.allocate_memory_unique({3 * 6 * sizeof(float)});
+  ASSERT_EQ(status, RhiResult::success);
+  ASSERT_EQ(output_status, RhiResult::success);
+  void *mapped_input = nullptr, *mapped_output = nullptr;
+  ASSERT_EQ(device.map(*input, &mapped_input), RhiResult::success);
+  ASSERT_EQ(device.map(*output, &mapped_output), RhiResult::success);
+  auto *values = static_cast<float *>(mapped_input);
+  auto *result = static_cast<float *>(mapped_output);
+  for (int i = 0; i < 17 * 6; ++i)
+    values[i] = float(i % 6 * 10 + i / 6);
+  std::fill(result, result + 18, -9);
+  NativeArrayBinding src, dst;
+  src.pointer = input->get_ptr();
+  src.bytes = 17 * 6 * 4;
+  src.scalar_type = PrimitiveType::f32;
+  src.shape = {17};
+  src.element_shape = {2, 3};
+  dst = src;
+  dst.pointer = output->get_ptr();
+  dst.bytes = 3 * 6 * 4;
+  dst.shape = {3};
+  const auto &registry = native_operation_registry();
+  for (int op = 0; op < 3; ++op) {
+    ReduceOperation description{11, 1, op, 4, src, dst,
+                                ReduceStrategy::packed_field, {2, 3}};
+    auto prepared = registry.prepare(host_arch(), device, description);
+    ASSERT_NE(prepared, nullptr);
+    EXPECT_EQ(prepared->workspace_bytes(), 0);
+    for (int replay = 0; replay < 2; ++replay) {
+      prepared->run_cpu();
+      for (int lane = 0; lane < 6; ++lane)
+        EXPECT_EQ(result[lane], op == 0 ? lane * 110 + 55 :
+                               op == 1 ? lane * 10 : lane * 10 + 10);
+      for (int i = 6; i < 18; ++i) EXPECT_EQ(result[i], -9);
+    }
+    description.output.element_shape = {3, 2};
+    EXPECT_THROW(registry.prepare(host_arch(), device, description), std::invalid_argument);
+    description.output = src;
+    EXPECT_THROW(registry.prepare(host_arch(), device, description), std::invalid_argument);
+  }
+  device.unmap(*input);
+  device.unmap(*output);
+}
+
 TEST(NativeOperationRegistry, ReduceStridedMembersShareAnAllocationAndRetainWorkspace) {
   cpu::CpuDevice device;
   auto [allocation, status] = device.allocate_memory_unique({17 * 16});

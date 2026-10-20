@@ -133,6 +133,11 @@ _ROUTES = MappingProxyType({
         _sequence(("reduce",), "sum_min_max", "i32_u32_f32_i64_u64_f64",
                   "disjoint_input_output", "frozen_cpu_partition_strategy",
                   "device_dtype_capabilities", "explicit_adjoint_only"),
+        _sequence(("reduce",), "nonempty", "one_dimensional_packed_tensor_fields",
+                  "vector_or_matrix", "scalar_field_output", "module_root_snapshot",
+                  "sum_min_max", "i32_u32_f32_i64_u64_f64", "disjoint_input_output",
+                  "preserved_lane_order", "frozen_cpu_partition_strategy",
+                  "shared_lane_workspace", "device_dtype_capabilities", "no_automatic_ad"),
         PrimitiveAOTRoute(
             "algorithms.PrimitiveSequence", ("reduce",), _ALL,
             ("unfused_sequence", "selected_native_method", "one_dimensional_scalar_struct_members",
@@ -162,6 +167,13 @@ _ROUTES = MappingProxyType({
              "positive_uniform_record_stride", "nonempty_fixed_prefix", "sum_min_max",
              "i32_u32_f32_i64_u64_f64", "first_output_element", "disjoint_input_output",
              "prepared_owner_scratch", "device_dtype_capabilities", "no_automatic_ad"),
+        ),
+        PrimitiveAOTRoute(
+            "aot.ExecutionPlan", ("builtin/reduce",), _ALL,
+            ("packed_field_strategy", "exact_tensor_element_shape", "nonempty_fixed_prefix",
+             "sum_min_max", "i32_u32_f32_i64_u64_f64", "first_output_record",
+             "disjoint_input_output", "preserved_lane_order", "shared_lane_workspace",
+             "device_dtype_capabilities", "no_automatic_ad"),
         ),
         PrimitiveAOTRoute(
             "aot.Module.add_execution_plan", ("graph.GraphBuilder.reduce",), ("cuda",),

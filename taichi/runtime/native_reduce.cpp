@@ -30,14 +30,17 @@ void validate(Device &device, const ReduceOperation &op) {
       op.value_type < 0 || op.value_type >= types.size() ||
       (op.strategy != ReduceStrategy::packed_array &&
        op.strategy != ReduceStrategy::scalar_field &&
-       op.strategy != ReduceStrategy::strided_scalar))
+       op.strategy != ReduceStrategy::strided_scalar &&
+       op.strategy != ReduceStrategy::packed_field))
     throw std::invalid_argument(
         "Reduce requires nonempty supported sum/min/max");
   const std::uint64_t width = op.value_type < 3 ? 4 : 8;
+  const auto record = reduce_item_bytes(op);
   for (const auto *array : {&op.values, &op.output}) {
     if (array->pointer.device != &device)
       throw std::invalid_argument("Reduce requires same-device arrays");
-    if (op.strategy != ReduceStrategy::packed_array) {
+    if (op.strategy == ReduceStrategy::scalar_field ||
+        op.strategy == ReduceStrategy::strided_scalar) {
       native_scalar_prefix(*array, array == &op.values ? op.size : 1,
                             types[op.value_type]);
       continue;
@@ -47,14 +50,14 @@ void validate(Device &device, const ReduceOperation &op) {
         *array,
         {scalar ? std::vector<std::uint64_t>{}
                 : std::vector<std::uint64_t>{array == &op.values ? op.size : 1},
-         {},
-         width,
+         op.element_shape,
+         record,
          width,
          false,
          types[op.value_type]->to_string()});
     const auto count = scalar ? 1 : array->shape[0];
-    if (count > std::numeric_limits<std::size_t>::max() / width ||
-        array->bytes != count * width)
+    if (count > std::numeric_limits<std::size_t>::max() / record ||
+        array->bytes != count * record)
       throw std::invalid_argument(
           "Reduce requires exact packed storage extents");
   }
@@ -97,6 +100,7 @@ class CpuReduce final : public ReduceBase {
   CpuReduce(NativePreparationContext &context, const ReduceOperation &op)
       : ReduceBase(context.arch, context.device, op),
         strided_(op.strategy == ReduceStrategy::strided_scalar ||
+                 op.strategy == ReduceStrategy::packed_field ||
                  (op.strategy == ReduceStrategy::scalar_field &&
                   addressing_.values_stride != sizeof(T))),
         pool_(context.cpu_thread_pool),
@@ -121,12 +125,15 @@ class CpuReduce final : public ReduceBase {
   }
   void run_cpu() override {
     if (strided_) {
-      cpu::reduce_strided<T>(
-          static_cast<const std::uint8_t *>(values_),
-          reinterpret_cast<T *>(static_cast<std::uint8_t *>(output_) +
-                                 addressing_.output_offset),
-          op_, size_, addressing_.values_offset, addressing_.values_stride,
-          partitions_, partial_.data(), pool_);
+      for (std::size_t lane = 0; lane < addressing_.lanes; ++lane) {
+        const auto lane_offset = lane * sizeof(T);
+        cpu::reduce_strided<T>(
+            static_cast<const std::uint8_t *>(values_),
+            reinterpret_cast<T *>(static_cast<std::uint8_t *>(output_) +
+                                   addressing_.output_offset + lane_offset),
+            op_, size_, addressing_.values_offset + lane_offset,
+            addressing_.values_stride, partitions_, partial_.data(), pool_);
+      }
       return;
     }
     cpu::reduce(reinterpret_cast<const T *>(
@@ -194,12 +201,16 @@ class CudaReduce final : public ReduceBase {
     cuda::driver_prepare_reduce();
   }
   void record_cuda(void *stream) override {
-    cuda::driver_reduce_strided_with_workspace(
-        values_, output_, static_cast<int>(size_),
-        static_cast<cuda::CudaTransformValueType>(type_),
-        addressing_.values_offset, addressing_.values_stride,
-        addressing_.output_offset, addressing_.output_stride,
-        static_cast<cuda::CudaHierarchicalReduceOp>(op_), scratch_, stream);
+    const auto width = type_ < 3 ? 4 : 8;
+    for (std::size_t lane = 0; lane < addressing_.lanes; ++lane) {
+      const auto lane_offset = lane * width;
+      cuda::driver_reduce_strided_with_workspace(
+          values_, output_, static_cast<int>(size_),
+          static_cast<cuda::CudaTransformValueType>(type_),
+          addressing_.values_offset + lane_offset, addressing_.values_stride,
+          addressing_.output_offset + lane_offset, addressing_.output_stride,
+          static_cast<cuda::CudaHierarchicalReduceOp>(op_), scratch_, stream);
+    }
   }
 
  private:
@@ -209,6 +220,23 @@ class CudaReduce final : public ReduceBase {
 #endif
 }  // namespace
 
+std::size_t reduce_item_bytes(const ReduceOperation &op) {
+  if (op.value_type < 0 || op.value_type >= reduce_types().size())
+    throw std::invalid_argument("Reduce requires a supported dtype");
+  if ((op.strategy == ReduceStrategy::packed_field) != !op.element_shape.empty())
+    throw std::invalid_argument(
+        "Packed Field reduce requires tensor shape; scalar strategies do not");
+  std::size_t bytes = op.value_type < 3 ? 4 : 8;
+  for (const auto axis : op.element_shape) {
+    if (!axis || axis > std::numeric_limits<std::size_t>::max() / bytes)
+      throw std::invalid_argument("Reduce payload exceeds address space");
+    bytes *= axis;
+  }
+  if (op.size > std::numeric_limits<std::size_t>::max() / bytes)
+    throw std::invalid_argument("Reduce prefix exceeds address space");
+  return bytes;
+}
+
 ReduceAddressing qualify_reduce_addressing(
     Arch arch, Device &device, const ReduceOperation &op) {
   validate(device, op);
@@ -217,11 +245,13 @@ ReduceAddressing qualify_reduce_addressing(
     resolve_native_storage_range(arch, array->pointer, array->bytes);
   }
   const auto width = op.value_type < 3 ? 4 : 8;
-  if (op.strategy == ReduceStrategy::packed_array) {
+  if (op.strategy == ReduceStrategy::packed_array ||
+      op.strategy == ReduceStrategy::packed_field) {
+    const auto record = reduce_item_bytes(op);
     validate_native_read_write_disjoint(
-        {resolve_native_storage_range(arch, op.values.pointer, op.size * width)},
-        {resolve_native_storage_range(arch, op.output.pointer, width)});
-    return {0, std::uint64_t(width), 0, std::uint64_t(width)};
+        {resolve_native_storage_range(arch, op.values.pointer, op.size * record)},
+        {resolve_native_storage_range(arch, op.output.pointer, record)});
+    return {0, record, 0, record, record / width};
   }
   const auto type = reduce_types()[op.value_type];
   const auto src = native_scalar_prefix(op.values, op.size, type);
@@ -242,7 +272,7 @@ void register_reduce_operation(NativeOperationRegistry &registry) {
       [](const liong::json::JsonValue &parameters)
           -> NativeOperationRegistry::Binder<ReduceOperation> {
         operation_json::fields(parameters,
-                               {"size", "dtype", "op", "cpu_max_threads", "strategy"});
+                               {"size", "dtype", "op", "cpu_max_threads", "strategy", "element_shape"});
         const auto size = operation_json::integer(parameters["size"]);
         if (!size || size > std::numeric_limits<std::size_t>::max())
           throw std::invalid_argument(
@@ -276,22 +306,40 @@ void register_reduce_operation(NativeOperationRegistry &registry) {
             strategy = ReduceStrategy::strided_scalar;
           else if (name == "scalar_field")
             strategy = ReduceStrategy::scalar_field;
+          else if (name == "packed_field")
+            strategy = ReduceStrategy::packed_field;
           else if (name != "packed_array")
             throw std::invalid_argument("Reduce strategy is invalid");
         }
+        std::vector<std::uint64_t> element_shape;
+        const auto shape = parameters.obj.inner.find("element_shape");
+        if (shape != parameters.obj.inner.end()) {
+          if (!shape->second.is_arr())
+            throw std::invalid_argument("Reduce element_shape must be an array");
+          for (const auto &axis : shape->second.arr.inner)
+            element_shape.push_back(operation_json::integer(axis));
+        }
+        ReduceOperation descriptor;
+        descriptor.size = size;
+        descriptor.value_type = type;
+        descriptor.strategy = strategy;
+        descriptor.element_shape = element_shape;
+        reduce_item_bytes(descriptor);  // Reject arithmetic before any binding.
+        const bool affine = strategy == ReduceStrategy::scalar_field ||
+                            strategy == ReduceStrategy::strided_scalar;
         return
-            [size, type, op, threads, strategy](const NativeOperationBindings &bindings) {
+            [size, type, op, threads, strategy, element_shape, affine](const NativeOperationBindings &bindings) {
               return ReduceOperation{static_cast<std::size_t>(size),
                                      type,
                                      op,
                                      static_cast<int>(threads.value_or(0)),
-                                     strategy != ReduceStrategy::packed_array
+                                     affine
                                          ? bindings.at("values").dense_array()
                                          : bindings.at("values").array(),
-                                     strategy != ReduceStrategy::packed_array
+                                     affine
                                          ? bindings.at("output").dense_array()
                                          : bindings.at("output").array(),
-                                     strategy};
+                                     strategy, element_shape};
             };
       });
 #ifdef TI_WITH_LLVM
