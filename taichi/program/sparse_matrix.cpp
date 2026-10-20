@@ -1644,6 +1644,9 @@ std::unique_ptr<SparseMatrix> SparseMatrixBuilder::build_cuda() {
   TI_ERROR_IF(built_, "SparseMatrixBuilder build is already in progress.");
   built_ = true;
 #ifdef TI_WITH_CUDA
+  auto submission_guard =
+      CUDAContext::get_instance().get_submission_lock_guard();
+  auto context_guard = CUDAContext::get_instance().get_guard();
   try {
     TI_ERROR_IF(!ndarray_data_base_ptr_ || !program_,
                 "SparseMatrixBuilder storage is not available.");

@@ -519,7 +519,10 @@ class SparseSolver:
                     self.solver = replacement
                 self.solver.analyze()
             else:
-                self.solver.analyze_pattern(sparse_matrix.matrix)
+                try:
+                    self.solver.analyze_pattern(sparse_matrix.matrix)
+                finally:
+                    self._factorization_active = self.solver.info()
             self._factorization_active = False
             self._solve_dispatches_since_factorization = 0
             self.matrix = sparse_matrix
@@ -551,9 +554,12 @@ class SparseSolver:
             if self._selected_provider == "cudss":
                 self.solver.factorize(sparse_matrix)
             else:
-                self.solver.factorize(sparse_matrix.matrix)
+                try:
+                    self.solver.factorize(sparse_matrix.matrix)
+                finally:
+                    self._factorization_active = self.solver.info()
             self._record_factorization_dispatch(
-                successful=self.solver.info() if self._selected_provider == "eigen" else True
+                successful=self.info()
             )
             self.matrix = sparse_matrix
         else:
@@ -613,11 +619,13 @@ class SparseSolver:
         return SparseSolveRecording(self, rhs, solution)
 
     def info(self):
-        """Check if the linear systems are solved successfully.
+        """Check whether a successful numeric factorization is available.
 
         Returns:
-            bool: True if the solving process succeeded, False otherwise.
+            bool: True after successful factorization, False before it or after numeric failure.
         """
+        if self.solver is None:
+            return False
         if self._selected_provider == "cudss":
             return bool(self.solver.statistics()["factorized"])
         return self.solver.info()

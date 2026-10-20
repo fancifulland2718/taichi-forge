@@ -412,8 +412,21 @@ factorization makes that factorization stale; `solve()` rejects it
 until factorization is refreshed.
 
 On CPU, supported factorization types are LLT, LDLT, and LU with AMD/COLAMD
-ordering. The CUDA route is scalar CSR `f32` and retains its documented
-factorization restrictions. Vulkan has no stored direct solver.
+ordering. The legacy CUDA `cusolver_sp` route accepts scalar CSR `f32`, LLT
+(positive definite) and LU, with AMD/COLAMD ordering. COLAMD is computed from
+the host pattern at analysis time; the numerical provider remains cuSOLVERSp.
+`LDLT` is rejected instead of silently running Cholesky. Select an explicitly
+supported symmetric-indefinite provider, such as cuDSS, when required.
+This change does not alter automatic provider admission: without cuDSS
+admission evidence, `auto` still selects the legacy route and cannot execute
+LDLT. Use `SparseSolver(solver_type="LDLT", provider="cudss",
+library_path=...)` to request the existing cuDSS route explicitly.
+LU factorization and solve use the vendor's host implementation and transfer
+each RHS and result. LLT retains device vectors and descriptors across solves;
+LU retains its host vectors. Refactorization reuses sufficient workspace.
+`info()` is false before a successful factorization and after a numeric
+failure; a later successful refactorization restores the solver.
+Vulkan has no stored direct solver.
 
 ### CPU direct solves in Graph and AOT
 

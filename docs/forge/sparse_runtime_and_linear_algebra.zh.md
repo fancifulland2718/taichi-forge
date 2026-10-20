@@ -379,8 +379,18 @@ x1 = solver.solve(rhs1)
 `analyze_pattern()`。factorization 后更新 values 会使 factorization stale，
 在重新 factorize 前 `solve()` 会拒绝执行。
 
-CPU 支持 LLT、LDLT、LU 和 AMD/COLAMD ordering。CUDA 路径是 scalar CSR
-`f32`，并保留文档列出的 factorization 限制。Vulkan 没有 stored direct solver。
+CPU 支持 LLT、LDLT、LU 和 AMD/COLAMD ordering。旧 CUDA `cusolver_sp` 路径
+支持 scalar CSR `f32`、LLT（正定）和 LU，以及 AMD/COLAMD 排序。
+COLAMD 在 analysis 时使用 host pattern 计算，数值实现仍为 cuSOLVERSp。
+`LDLT` 会明确拒绝，不再静默执行 Cholesky；需要对称不定求解时，应显式选择
+支持该语义的 provider，例如 cuDSS。本次不改变自动 provider 准入策略；
+没有 cuDSS 准入证据时，`auto` 仍选择旧路线，因而不能执行 LDLT。
+可用 `SparseSolver(solver_type="LDLT", provider="cudss", library_path=...)`
+显式请求已有的 cuDSS 路线。LU 分解和求解使用厂商 host 实现，
+每次传输 RHS 和结果。LLT 复用设备向量和描述符，LU 复用 host 向量；
+refactorization 在容量足够时复用 workspace。成功分解前或数值失败后，
+`info()` 返回 false，后续成功 refactorization 可以恢复。
+Vulkan 没有 stored direct solver。
 
 ### CPU 直接求解的 Graph 与 AOT
 

@@ -4,6 +4,9 @@
 #include <vector>
 
 #include "taichi/program/sparse_solver.h"
+#if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
 
 namespace taichi::lang {
 namespace {
@@ -122,6 +125,69 @@ TEST(CpuSparseSolverCore, StaleOrFailedFactorCannotSolveAndCanRecover) {
   for (int row = 0; row < 3; ++row)
     EXPECT_NEAR(output[row], row + 1, 1e-12);
 }
+
+#if defined(TI_WITH_CUDA)
+TEST(CudaSparseSolverCore, RawVectorsWithoutProgramRestoreContextAndRetire) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  auto context_guard = CUDAContext::get_instance().get_guard();
+  auto &cuda = CUDADriver::get_instance();
+  auto &sparse = CUSPARSEDriver::get_instance();
+  auto &solver_api = CUSOLVERDriver::get_instance();
+  if ((!sparse.is_loaded() && !sparse.load_cusparse()) ||
+      (!solver_api.is_loaded() && !solver_api.load_cusolver()))
+    GTEST_SKIP();
+  // This test deliberately constructs no Program or Ndarray. A runtime-only
+  // resource can own the same compressed storage and call the same core.
+  auto upload = [&](auto &values) {
+    void *result = nullptr;
+    cuda.malloc(&result, sizeof(values));
+    cuda.memcpy_host_to_device(result, values.data(), sizeof(values));
+    return result;
+  };
+  std::array<int, 4> rows{0, 2, 5, 7};
+  std::array<int, 7> columns{0, 1, 0, 1, 2, 1, 2};
+  std::array<float, 7> values{4, 1, 1, 3, 1, 1, 2};
+  auto *device_rows = upload(rows);
+  auto *device_columns = upload(columns);
+  auto *device_values = upload(values);
+  cusparseSpMatDescr_t descriptor = nullptr;
+  sparse.cpCreateCsr(&descriptor, 3, 3, 7, device_rows, device_columns,
+                     device_values, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                     CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+  CuSparseMatrix matrix(descriptor, 3, 3, PrimitiveType::f32, device_rows,
+                        device_columns, device_values, 7);
+  std::array<float, 3> rhs{6, 10, 8}, output{-17, -17, -17};
+  auto *device_rhs = upload(rhs);
+  auto *device_output = upload(output);
+  void *owned_context = nullptr;
+  cuda.context_get_current(&owned_context);
+  for (const char *method : {"LLT", "LU"}) {
+    for (const char *ordering : {"AMD", "COLAMD"}) {
+      auto solver = make_cusparse_solver(PrimitiveType::f32, method, ordering);
+      cuda.context_set_current(nullptr);
+      ASSERT_TRUE(solver->compute(matrix));
+      solver->solve_dense_vector(
+          matrix, {device_rhs, PrimitiveType::f32, 3},
+          {device_output, PrimitiveType::f32, 3});
+      EXPECT_ANY_THROW(solver->solve_dense_vector(
+          matrix, {device_rhs, PrimitiveType::f64, 3},
+          {device_output, PrimitiveType::f32, 3}));
+      // Destruction must retire queued solves with its own context.
+      solver.reset();
+      void *restored = owned_context;
+      cuda.context_get_current(&restored);
+      EXPECT_EQ(restored, nullptr);
+      cuda.context_set_current(owned_context);
+      cuda.memcpy_device_to_host(output.data(), device_output, sizeof(output));
+      for (int i = 0; i < 3; ++i)
+        EXPECT_NEAR(output[i], i + 1, 1e-5);
+    }
+  }
+  cuda.mem_free(device_rhs);
+  cuda.mem_free(device_output);
+}
+#endif
 
 }  // namespace
 }  // namespace taichi::lang

@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -124,6 +125,7 @@ class CuSparseSolver : public SparseSolver {
 
  private:
   SolverType solver_type_{SolverType::Cholesky};
+  std::string ordering_{"AMD"};
   csrcholInfo_t info_{nullptr};
   csrluInfoHost_t lu_info_{nullptr};
   cusolverSpHandle_t cusolver_handle_{nullptr};
@@ -131,6 +133,21 @@ class CuSparseSolver : public SparseSolver {
   cusparseMatDescr_t descr_{nullptr};
   void *gpu_buffer_{nullptr};
   void *cpu_buffer_{nullptr};
+  std::size_t gpu_buffer_bytes_{0};
+  std::size_t cpu_buffer_bytes_{0};
+  bool factor_workspace_prepared_{false};
+  void *permuted_rhs_{nullptr};
+  void *permuted_solution_{nullptr};
+  cusparseDnVecDescr_t rhs_descriptor_{nullptr};
+  cusparseDnVecDescr_t solution_descriptor_{nullptr};
+  cusparseSpVecDescr_t permuted_rhs_descriptor_{nullptr};
+  cusparseSpVecDescr_t permuted_solution_descriptor_{nullptr};
+  std::vector<float> host_rhs_, host_permuted_rhs_;
+  std::vector<float> host_solution_, host_permuted_solution_;
+  std::uint64_t workspace_allocations_{0};
+  std::uint64_t descriptor_creations_{0};
+  std::uint64_t solve_calls_{0};
+  std::uint64_t rhs_readback_bytes_{0};
   bool is_analyzed_{false};
   bool is_factorized_{false};
 
@@ -154,13 +171,13 @@ class CuSparseSolver : public SparseSolver {
 
  public:
   CuSparseSolver();
-  explicit CuSparseSolver(SolverType solver_type) : solver_type_(solver_type) {
+  explicit CuSparseSolver(SolverType solver_type,
+                          std::string ordering = "AMD")
+      : solver_type_(solver_type), ordering_(std::move(ordering)) {
     init_solver();
   }
   ~CuSparseSolver() override;
-  bool compute(const SparseMatrix &sm) override {
-    TI_NOT_IMPLEMENTED;
-  };
+  bool compute(const SparseMatrix &sm) override;
   void analyze_pattern(const SparseMatrix &sm) override;
 
   void factorize(const SparseMatrix &sm) override;
@@ -170,8 +187,15 @@ class CuSparseSolver : public SparseSolver {
                 const Ndarray &x);
 
   bool info() override {
-    TI_NOT_IMPLEMENTED;
-  };
+    return factorization_recorded_ && is_factorized_;
+  }
+  // Ordered on Forge's legacy default CUDA stream. Storage must remain alive
+  // until that stream completes. LU includes a synchronous host solve.
+  void solve_dense_vector(const SparseMatrix &matrix,
+                          const SparseSolverConstVectorView &rhs,
+                          const SparseSolverVectorView &solution) override;
+  std::map<std::string, std::uint64_t> runtime_statistics() const;
+  std::vector<int> ordering_permutation() const;
 
  private:
   void init_solver();
@@ -183,14 +207,9 @@ class CuSparseSolver : public SparseSolver {
   void analyze_pattern_lu(const SparseMatrix &sm);
   void factorize_cholesky(const SparseMatrix &sm);
   void factorize_lu(const SparseMatrix &sm);
-  void solve_cholesky(Program *prog,
-                      const SparseMatrix &sm,
-                      const Ndarray &b,
-                      const Ndarray &x);
-  void solve_lu(Program *prog,
-                const SparseMatrix &sm,
-                const Ndarray &b,
-                const Ndarray &x);
+  void prepare_solve_workspace();
+  void solve_cholesky(const void *rhs, void *solution);
+  void solve_lu(const void *rhs, void *solution);
 };
 
 std::unique_ptr<SparseSolver> make_sparse_solver(DataType dt,
