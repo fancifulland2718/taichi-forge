@@ -218,14 +218,18 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
     return Err::kParseMetadataFailed;
   }
   const llvm::MemoryBufferRef buffer(file.src_code(), "<string>");
-  auto ret = decode_llvm_module(buffer, llvm_ctx_,
+  auto context = std::make_shared<llvm::LLVMContext>();
+  auto ret = decode_llvm_module(buffer, *context,
                                 detect_llvm_module_encoding(buffer));
   if (!ret) {  // File not found or Parse failed
     TI_DEBUG("Fail to parse llvm::Module from string: {}",
              llvm::toString(ret.takeError()));
     return Err::kParseSrcCodeFailed;
   }
+  // AOT producers and executable clones can outlive the disk-cache entry.
+  // Retire the previous module while its previous context is still retained.
   data_.compiled_data.module = std::move(*ret);
+  data_.compiled_data.module_context_owner = std::move(context);
   return Err::kNoError;
 }
 
