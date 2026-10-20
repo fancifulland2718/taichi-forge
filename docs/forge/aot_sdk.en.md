@@ -2440,8 +2440,15 @@ types above and preserves every payload bit, including NaN payloads and signed
 zero, using the existing raw-record backend. Both `sort()` and single-part
 `sort_by_key()` export cold or after execution without additional helper code.
 Explicit `Module.add_primitive(..., "sort", values=...)` also accepts tensor
-records at binding time. This sequence route does not qualify tensor Fields,
-Struct members or strided layouts.
+records at binding time.
+Scalar Field keys with packed vector/matrix Field payloads now share the
+existing prepared native record sort in ordinary `sort()` and single-key
+`sort_by_key()`. CPU/CUDA/Vulkan `auto` and matching explicit native methods
+use this route; AOT requires stable ascending order and NaNs last. Export before
+or after execution preserves the same root-owned records with
+`snapshot_state=True`, without host sorting or extra helper code. Rebinding or
+clearing a `SortWorkspace` retires its previous prepared bindings.
+Struct members and strided layouts remain outside these sequence routes.
 Sorting has no automatic adjoint; downstream compiled kernel
 gradients can consume the reordered records.
 

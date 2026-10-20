@@ -201,9 +201,14 @@ explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
 单键 `PrimitiveSequence.sort()` / `sort_by_key()` 也支持 scalar ndarray key 携带
 packed vector/matrix ndarray 载荷导出，raw-record 排序保持载荷位模式、不新增
 helper kernel；全范围 `prepare_sort()` 也支持紧凑标量／向量／矩阵载荷的三后端导出。
+普通单键排序现在也为标量 Field key＋packed 向量／矩阵 Field 载荷复用相同的
+prepared 原生记录算法。`auto` 及匹配的显式原生方法不经过 host 排序；冷暖
+sequence 导出使用模块根快照重建同一操作。workspace 复用当前绑定，在重绑时替换、
+clear 时释放。保持同键稳定顺序、NaN 载荷与正负零，不新增 shader、runtime ABI
+或人为分量数上限；降序、显式 host 和 strided fallback 仍遵守各自合同。
 多键 `PrimitiveSequence.sort_by_key()` 单独列出三后端导出路线，接受互不别名、
-长度相同的 packed 标量 ndarray 键及可选标量载荷。CPU 需显式 `cpu_native`，GPU
-`auto` 保留原生 sort/gather/affine 策略；Field、tensor/Struct 载荷和 strided 布局
+长度相同的 packed 标量 ndarray 键及可选标量／tensor ndarray 载荷。CPU 需显式 `cpu_native`，GPU
+`auto` 保留原生 sort/gather/affine 策略；Field、Struct 载荷和 strided 布局
 不属于此路线，详见 [AOT 存储与导出合同](aot_sdk.zh.md)。
 `PrimitiveSequence.scan()` 可导出 CPU/CUDA/Vulkan 上一维连续标量存储的原位 inclusive sum，
 类型包括 i32/u32/f32/i64/u64/f64，仍需满足设备的类型能力。其 `builtin/scan` 录制对象持有

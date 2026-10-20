@@ -248,12 +248,20 @@ qualify every method, backend or layout in that family. For example, unique
 sequences cover CPU/CUDA/Vulkan while prepared recordings cover CUDA/Vulkan.
 Single-key `PrimitiveSequence.sort()` / `sort_by_key()` also export scalar
 ndarray keys with packed vector/matrix ndarray payloads. The raw-record sort
-preserves payload bits and adds no helper kernel; `prepare_sort()` keeps its
-separate scalar-only contract.
+preserves payload bits and adds no helper kernel; full-range `prepare_sort()`
+also exports scalar/vector/matrix payloads on all three backends.
+Ordinary single-key sorting now uses the same prepared native record algorithm
+for scalar Field keys with packed vector/matrix Field payloads. `auto` and the
+matching explicit native method avoid host sorting, and cold/warm sequence
+export reconstructs the same operation with module-root snapshots. Workspace
+bindings are reused, replaced on rebinding and released on clear. Equal-key
+order, NaN payloads and signed zeros are preserved. No new shader, runtime ABI
+or component-count limit is introduced; descending, explicit host and strided
+fallbacks keep their separate contracts.
 Multi-key `PrimitiveSequence.sort_by_key()` has a separate route for disjoint,
-equally sized packed scalar ndarrays and an optional scalar payload on all three
+equally sized packed scalar ndarrays and an optional scalar/tensor ndarray payload on all three
 backends. CPU requires explicit `cpu_native`; GPU `auto` preserves the native
-sort/gather/affine strategy. Fields, tensor/Struct payloads and strided layouts
+sort/gather/affine strategy. Fields, Struct payloads and strided layouts
 are outside this route. See [AOT storage and export contracts](aot_sdk.en.md).
 `PrimitiveSequence.scan()` exports in-place inclusive sums on one-dimensional
 packed scalar storage on CPU/CUDA/Vulkan. It supports i32/u32/f32/i64/u64/f64,

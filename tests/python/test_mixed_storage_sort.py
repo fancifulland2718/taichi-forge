@@ -31,9 +31,9 @@ def test_mixed_sort_cache_stability_and_rebinding(field_keys, monkeypatch):
         values.from_numpy(np.arange(n, dtype=np.int32))
         ti.algorithms.sort(keys, values, workspace=workspace, method=selected)
         if selected == "auto":
-            cached = workspace._mixed_storage_sort_plan
+            cached = workspace._prepared_storage_sort_plan
         else:
-            assert workspace._mixed_storage_sort_plan is cached
+            assert workspace._prepared_storage_sort_plan is cached
         np.testing.assert_array_equal(values.to_numpy(), expected)
         # Includes signed zero and NaN payload preservation.
         np.testing.assert_array_equal(keys.to_numpy().view(np.uint32), data[expected].view(np.uint32))
@@ -43,10 +43,10 @@ def test_mixed_sort_cache_stability_and_rebinding(field_keys, monkeypatch):
     keys.from_numpy(data)
     values.from_numpy(np.arange(n, dtype=np.int32))
     ti.algorithms.sort_by_key([keys], values, workspace=workspace)
-    assert workspace._mixed_storage_sort_plan is not cached
+    assert workspace._prepared_storage_sort_plan is not cached
     assert cached.report()["closed"]
     workspace.clear()  # Release bindings while the ordered native work is in flight.
-    assert workspace._mixed_storage_sort_plan is None
+    assert workspace._prepared_storage_sort_plan is None
     np.testing.assert_array_equal(values.to_numpy(), expected)
     # No workspace is required; temporary bindings keep the same semantics.
     ti.algorithms.sort(keys, values)
@@ -93,8 +93,8 @@ def test_mixed_sort_cache_preserves_nan_policy():
         ti.algorithms.sort(keys, values, workspace=workspace, nan_policy=policy)
         if previous is not None:
             assert previous.report()["closed"]
-            assert previous is not workspace._mixed_storage_sort_plan
-        previous = workspace._mixed_storage_sort_plan
+            assert previous is not workspace._prepared_storage_sort_plan
+        previous = workspace._prepared_storage_sort_plan
         expected = np.argsort(data if policy == "last" else sortable, kind="stable")
         np.testing.assert_array_equal(values.to_numpy(), expected)
     workspace.clear()
@@ -108,7 +108,7 @@ def test_mixed_sort_workspace_rebinds_after_runtime_reset():
     keys.from_numpy(np.array([2, 1, 0], np.int32))
     values.from_numpy(np.array([0, 1, 2], np.int32))
     ti.algorithms.sort(keys, values, workspace=workspace)
-    previous = workspace._mixed_storage_sort_plan
+    previous = workspace._prepared_storage_sort_plan
     ti.reset()
     ti.init(arch=arch, offline_cache=False)
     keys, values = ti.field(ti.i32, 3), ti.ndarray(ti.i32, 3)

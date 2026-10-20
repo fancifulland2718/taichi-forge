@@ -67,6 +67,11 @@ _ROUTES = MappingProxyType({
                 "scalar_or_tensor_payload", "raw_payload_bits"),
         _sequence(("sort", "sort_by_key"), *_SORT, "single_lexicographic_key_part",
                   "all_ndarrays_or_all_dense_scalar_fields"),
+        _sequence(("sort", "sort_by_key"), "stable_ascending", "nan_last",
+                  "single_lexicographic_key_part", "scalar_field_keys",
+                  "packed_vector_or_matrix_field_payload", "module_root_snapshot",
+                  "preserved_prepared_record_sort", "raw_payload_bits",
+                  "i32_u32_f32_i64_u64_f64", "disjoint_keys_and_payload", "no_automatic_ad"),
         PrimitiveAOTRoute(
             "algorithms.PrimitiveSequence", ("sort", "sort_by_key"), _ALL,
             _STORAGE + _SORT + ("mixed_scalar_field_and_ndarray", "single_lexicographic_key_part",

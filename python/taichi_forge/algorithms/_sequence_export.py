@@ -634,24 +634,29 @@ def _sort(call, context):
     descriptions = tuple(packed_description(a) for a in arrays)
     if descriptions[0].element_shape or any(len(desc.index_shape) != 1 for desc in descriptions):
         raise TaichiRuntimeError("AOT sequence sort requires one-dimensional packed storage and scalar keys")
+    prepared_storage = values is not None and algorithms._native_prepared_sort_supported(
+        keys, values, method=options["method"], descending=False, nan_policy="last"
+    )
     if values is not None and descriptions[1].element_shape:
         from taichi_forge.lang._ndarray import ScalarNdarray
         from taichi_forge.lang.matrix import MatrixNdarray, VectorNdarray
 
-        # Dense tensor Fields and Struct members select different producer
-        # closures. Only packed ndarray records use this direct raw-copy sort.
-        if type(keys) is not ScalarNdarray or type(values) not in (VectorNdarray, MatrixNdarray):
-            raise TaichiRuntimeError("AOT tensor sort requires scalar ndarray keys and vector/matrix ndarray payload")
+        # The ordinary Field route shares the prepared raw-record algorithm.
+        # Other tensor layouts must retain their own qualified producer closure.
+        if not prepared_storage and (
+            type(keys) is not ScalarNdarray or type(values) not in (VectorNdarray, MatrixNdarray)
+        ):
+            raise TaichiRuntimeError(
+                "AOT tensor sort requires packed ndarray records or its prepared Field strategy"
+            )
     if not all(isinstance(a, algorithms.Ndarray) for a in arrays):
         # Keep storage qualification shared with ordinary sort, including
-        # mixed scalar Field/ndarray pairs on CPU/CUDA/Vulkan.
+        # mixed scalar pairs and packed tensor Fields on CPU/CUDA/Vulkan.
         views = tuple(algorithms._primitive_view(a) for a in arrays)
         if not all(
             view is not None and view.is_dense_field and view.stride == core.data_type_size(desc.scalar_type)
             for view, desc in zip(views, descriptions)
-        ) and not algorithms._native_mixed_sort_supported(
-            keys, values, method=options["method"], descending=False, nan_policy="last"
-        ):
+        ) and not prepared_storage:
             raise TaichiRuntimeError(
                 "AOT sequence sort requires the producer's native storage strategy; "
                 "use an explicit AOT sort description to select a different backend route"

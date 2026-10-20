@@ -88,7 +88,7 @@ def test_mixed_sort_export_cold_warm_and_downstream_ad(tmp_path, field_keys, mon
         "kernel",
         "kernel",
     ]
-    assert sequence._calls[0].workspace._mixed_storage_sort_plan is None
+    assert sequence._calls[0].workspace._prepared_storage_sort_plan is None
     np.testing.assert_array_equal(fixed.to_numpy(), [123] * n)
     np.testing.assert_array_equal(mixed.to_numpy(), [456] * n)
     arrays = {name: ti.ndarray(dtype, 1 if name == "out_loss" else n) for name, dtype in dtypes.items()}
@@ -103,7 +103,7 @@ def test_mixed_sort_export_cold_warm_and_downstream_ad(tmp_path, field_keys, mon
     gradient[expected] = 2 * np.arange(1, n + 1) * source[expected]
     np.testing.assert_array_equal(arrays["out_ids"].to_numpy(), expected)
     np.testing.assert_array_equal(arrays["dx"].to_numpy(), gradient)
-    plan = sequence._calls[0].workspace._mixed_storage_sort_plan
+    plan = sequence._calls[0].workspace._prepared_storage_sort_plan
     # A module has one initial snapshot per Field tree. Restore that state
     # before adding the warmed recipe, while retaining its prepared bindings.
     fixed.fill(123)
@@ -112,7 +112,7 @@ def test_mixed_sort_export_cold_warm_and_downstream_ad(tmp_path, field_keys, mon
     loss.fill(0)
     loss.grad.fill(0)
     module.add_execution_plan("warm", graph, source_bindings={"mixed": mixed}, snapshot_state=True)
-    assert sequence._calls[0].workspace._mixed_storage_sort_plan is plan
+    assert sequence._calls[0].workspace._prepared_storage_sort_plan is plan
     assert len(module._exported_kernels) == 4  # Sort adds no helper code.
     artifact = tmp_path / "mixed-sort.tcm"
     module.archive(str(artifact))

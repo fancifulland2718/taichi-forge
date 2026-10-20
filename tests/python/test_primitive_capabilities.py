@@ -139,6 +139,12 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         tensor_grouped = next(r for r in grouped if "one_dimensional_packed_tensor_fields" in r.constraints)
         assert tensor_grouped.entry_point == "algorithms.PrimitiveSequence"
         assert {"preserved_zero_fill_and_packed_scatter", "overwrite_groups"} <= set(tensor_grouped.constraints)
+        tensor_sort = next(
+            r for r in ti.algorithms.primitive_capability("sort").aot_routes
+            if "packed_vector_or_matrix_field_payload" in r.constraints
+        )
+        assert tensor_sort.backends == ("cpu", "cuda", "vulkan")
+        assert {"preserved_prepared_record_sort", "raw_payload_bits", "no_automatic_ad"} <= set(tensor_sort.constraints)
         segmented = ti.algorithms.primitive_capability("segmented_reduce").aot_routes
         assert len(segmented) == 2
         sequence = next(r for r in segmented if r.entry_point == "algorithms.PrimitiveSequence")

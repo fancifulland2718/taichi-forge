@@ -34,6 +34,7 @@ This API is Forge-only. Code that must run unchanged on vanilla Taichi should co
 
 With `method="auto"`:
 
+- CPU: uses native stable sorting for supported packed keys and payloads.
 - CUDA: uses Forge's stable driver-only radix provider. It is built on the
   dynamically loaded CUDA Driver API and does not require CUB, CUDART, or a
   local CUDA Toolkit. `cuda_cub_split32` is never selected automatically.
@@ -48,7 +49,8 @@ Explicit methods:
   development-reference methods. They are available only in a build configured
   with `TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=ON`, emit
   `DeprecationWarning`, and are not included in standard runtime wheels.
-- `method="vulkan_native_radix_u32"`: force the current Vulkan radix8 path for supported 32-bit ndarray keys.
+- `method="cpu_native"`: select native CPU stable sorting for supported storage.
+- `method="vulkan_native_radix_u32"`: force the Vulkan radix8 path for supported scalar key types and storage.
 - `method="host_stable"`: force the host stable fallback.
 - `method="legacy"`: use the vanilla-compatible odd-even merge implementation.
 
@@ -58,7 +60,7 @@ CUDA driver-only fast path:
 
 - Keys: `ti.u32`, `ti.i32`, `ti.f32`, `ti.u64`, `ti.i64`, `ti.f64`
 - Values: optional scalar numeric, vector/tensor ndarray, or 4-byte-aligned
-  StructNdarray raw payload
+  StructNdarray raw payload; scalar Field keys may carry packed vector/matrix Fields
 - Container: 1D `ti.ndarray` and root-dense scalar fields admitted by the
   capability contract
 - Implementation: stable 4-bit-per-pass LSD radix, 1,024 items per block, and
@@ -94,6 +96,9 @@ Use named source bindings for ndarrays or `snapshot_state=True` for Fields.
 The existing AOT sort operation reconstructs the same records without additional
 helper kernels. Ordinary scalar Field/ndarray pairs in either direction also use
 this native route with `auto` or the matching explicit native method on all three backends.
+The same applies to scalar Field keys with packed vector/matrix Field payloads:
+ordinary calls and cold/warm AOT export reuse the complete native records.
+`SortWorkspace` caches one binding pair and releases it on replacement or clear.
 This extension does not change the separate `count=` prefix-sort contract or
 admit Struct/strided payloads. Sorting has no automatic adjoint; downstream
 compiled gradients can consume its result. See [AOT SDK](aot_sdk.en.md).

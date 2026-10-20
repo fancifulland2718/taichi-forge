@@ -33,6 +33,7 @@ ti.algorithms.sort(
 
 当 `method="auto"` 时：
 
+- CPU：对受支持的紧凑 key/payload 使用原生稳定排序。
 - CUDA：默认使用 Forge 自有的 stable driver-only radix provider。该路径只依赖动态加载的
   CUDA Driver API，不要求 CUB、CUDART 或本机 CUDA Toolkit；
   `cuda_cub_split32` 永远不会被自动选择。
@@ -45,7 +46,8 @@ ti.algorithms.sort(
 - `method="cuda_cub_native"` / `method="cuda_cub_split32"`：仅供开发期参考的弃用
   method。只有以 `TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=ON` 构建时才可用，调用会产生
   `DeprecationWarning`，标准 runtime wheel 不包含这些 provider。
-- `method="vulkan_native_radix_u32"`：强制当前 Vulkan radix8 路径，仅支持 32-bit ndarray key。
+- `method="cpu_native"`：对受支持存储选择 CPU 原生稳定排序。
+- `method="vulkan_native_radix_u32"`：对受支持标量 key 类型及存储强制 Vulkan radix8 路径。
 - `method="host_stable"`：强制 host stable fallback。
 - `method="legacy"`：使用与标准兼容的 odd-even merge 实现。
 
@@ -54,7 +56,8 @@ ti.algorithms.sort(
 CUDA driver-only fast path：
 
 - Keys：`ti.u32`、`ti.i32`、`ti.f32`、`ti.u64`、`ti.i64`、`ti.f64`
-- Values：可选标量数值、vector/tensor ndarray 或 4-byte 对齐的 StructNdarray raw payload
+- Values：可选标量数值、vector/tensor ndarray 或 4-byte 对齐的 StructNdarray raw payload；
+  标量 Field key 也可携带 packed 向量／矩阵 Field
 - 容器：一维 `ti.ndarray`，以及 capability 明确接受的 root-dense scalar field
 - 实现：每 pass 4 bit 的 stable LSD radix；每 block 处理 1024 项，并分层扫描 16 路
   block histogram。嵌入 PTX 以 sm_50/PTX 4.0 为兼容目标，不包含 CUDA Toolkit header
@@ -84,6 +87,8 @@ CPU/Vulkan 接受 NaNs-last，CUDA 还接受 bitwise 位序。
 具名 source bindings，Field 使用 `snapshot_state=True`。既有 AOT sort 操作重建
 相同记录，无需新增辅助 kernel。三个后端的普通标量 Field/ndarray 混合排序也通过
 `auto` 或对应的显式原生方法使用这条路线，两个 key/payload 方向均可。
+标量 Field key＋packed 向量／矩阵 Field 载荷同样如此：普通调用与冷暖 AOT 导出
+复用完整原生记录；`SortWorkspace` 缓存当前绑定对，在替换或 clear 时释放。
 此次扩展不改变独立的 `count=` 前缀排序合同，也不接纳 Struct／strided 载荷。
 排序自身无自动伴随；后续编译的梯度可以使用排序结果。见 [AOT SDK](aot_sdk.zh.md)。
 

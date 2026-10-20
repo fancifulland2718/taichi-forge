@@ -1882,8 +1882,12 @@ CPU/CUDA/Vulkan 也支持紧凑标量 Field 与标量 ndarray 混用，二者均
 载荷 lane 支持上述六种标量类型，通过既有 raw-record 后端保留每一位，包括 NaN
 payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出或运行后导出，
 不新增 helper 代码。显式 `Module.add_primitive(..., "sort", values=...)` 在绑定时
-也接受 tensor 记录。该 sequence 路线不代表 tensor Field、Struct 成员或 strided
-布局已经接通。排序无自动伴随，
+也接受 tensor 记录。标量 Field key＋packed 向量／矩阵 Field 载荷现在也在普通
+`sort()` 和单键 `sort_by_key()` 中复用既有 prepared 原生记录排序。CPU/CUDA/Vulkan
+的 `auto` 及对应显式原生方法走此路线；AOT 要求稳定升序与 NaN last。冷暖导出通过
+`snapshot_state=True` 保留相同模块根记录，无 host 排序或额外 helper 代码。
+`SortWorkspace` 重绑或清理时退休旧的 prepared 绑定。Struct 成员与 strided
+布局仍不属于这些 sequence 路线。排序无自动伴随，
 后续已编译 kernel 的梯度仍可读取重排后的记录。
 
 CPU/CUDA/Vulkan 的 `prepare_sort(keys, values)` recording 也支持标量／向量／矩阵载荷，
