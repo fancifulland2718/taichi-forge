@@ -6,6 +6,7 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/program/program.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -25,6 +26,20 @@
 
 namespace taichi::lang {
 
+// Contiguous scalar vectors in the solver's address space. The caller owns
+// their storage through completion; no Program or Ndarray is needed here.
+struct SparseSolverConstVectorView {
+  const void *data;
+  DataType dtype;
+  std::size_t size;
+};
+
+struct SparseSolverVectorView {
+  void *data;
+  DataType dtype;
+  std::size_t size;
+};
+
 class SparseSolver {
  protected:
   int rows_{0};
@@ -38,6 +53,8 @@ class SparseSolver {
 
   void invalidate_factorization();
   void record_factorization(const SparseMatrix &sm);
+  void validate_dense_vectors(const SparseSolverConstVectorView &rhs,
+                              const SparseSolverVectorView &solution) const;
 
  public:
   virtual ~SparseSolver() = default;
@@ -51,6 +68,9 @@ class SparseSolver {
   virtual void analyze_pattern(const SparseMatrix &sm) = 0;
   virtual void factorize(const SparseMatrix &sm) = 0;
   virtual bool info() = 0;
+  virtual void solve_dense_vector(const SparseMatrix &matrix,
+                                 const SparseSolverConstVectorView &rhs,
+                                 const SparseSolverVectorView &solution);
   void validate_factorization(const SparseMatrix &sm) const;
 };
 
@@ -63,6 +83,8 @@ class EigenSparseSolver : public SparseSolver {
 
   void remember_pattern(const EigenMatrix &matrix);
   void require_same_pattern(const EigenMatrix &matrix) const;
+  void solve_dense_values(const SparseSolverConstVectorView &rhs,
+                          const SparseSolverVectorView &solution);
 
  public:
   ~EigenSparseSolver() override = default;
@@ -78,6 +100,9 @@ class EigenSparseSolver : public SparseSolver {
                 const Ndarray &b,
                 const Ndarray &x);
   bool info() override;
+  void solve_dense_vector(const SparseMatrix &matrix,
+                          const SparseSolverConstVectorView &rhs,
+                          const SparseSolverVectorView &solution) override;
 };
 
 DECLARE_EIGEN_LLT_SOLVER(float32, LLT, AMD);

@@ -3,6 +3,7 @@
 #include "sparse_solver.h"
 
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 
@@ -92,6 +93,44 @@ struct key_hash {
 }  // namespace
 
 namespace taichi::lang {
+
+void SparseSolver::validate_dense_vectors(
+    const SparseSolverConstVectorView &rhs,
+    const SparseSolverVectorView &solution) const {
+  TI_ERROR_IF(!factorization_recorded_,
+              "SparseSolver has no successful numeric factorization.");
+  TI_ERROR_IF(rhs.dtype != dtype_ || solution.dtype != dtype_,
+              "SparseSolver vectors must have the factorization dtype {}.",
+              data_type_name(dtype_));
+  TI_ERROR_IF(rhs.size != static_cast<std::size_t>(rows_) ||
+                  solution.size != static_cast<std::size_t>(cols_),
+              "SparseSolver expects {} RHS and {} solution scalars.", rows_,
+              cols_);
+  TI_ERROR_IF(!rhs.data || !solution.data,
+              "SparseSolver vectors require non-null storage.");
+  const auto width = static_cast<std::size_t>(data_type_size(dtype_));
+  const auto limit = std::numeric_limits<std::uintptr_t>::max();
+  TI_ERROR_IF(rhs.size > limit / width || solution.size > limit / width,
+              "SparseSolver vector byte extent overflows the address space.");
+  const auto rhs_begin = reinterpret_cast<std::uintptr_t>(rhs.data);
+  const auto solution_begin = reinterpret_cast<std::uintptr_t>(solution.data);
+  const auto rhs_bytes = rhs.size * width;
+  const auto solution_bytes = solution.size * width;
+  TI_ERROR_IF(rhs_begin % width || solution_begin % width ||
+                  rhs_begin > limit - rhs_bytes ||
+                  solution_begin > limit - solution_bytes,
+              "SparseSolver vectors require aligned, representable storage.");
+  TI_ERROR_IF(rhs_begin < solution_begin + solution_bytes &&
+                  solution_begin < rhs_begin + rhs_bytes,
+              "SparseSolver RHS and solution storage must not overlap.");
+}
+
+void SparseSolver::solve_dense_vector(
+    const SparseMatrix &matrix,
+    const SparseSolverConstVectorView &rhs,
+    const SparseSolverVectorView &solution) {
+  TI_ERROR("This sparse solver does not expose a raw dense-vector entry.");
+}
 
 void SparseSolver::invalidate_factorization() {
   factorization_recorded_ = false;
@@ -235,7 +274,32 @@ void EigenSparseSolver<EigenSolver, EigenMatrix>::factorize(
 template <class EigenSolver, class EigenMatrix>
 template <typename T>
 T EigenSparseSolver<EigenSolver, EigenMatrix>::solve(const T &b) {
-  return solver_.solve(b);
+  T result(cols_);
+  solve_dense_values({b.data(), dtype_, static_cast<std::size_t>(b.size())},
+                     {result.data(), dtype_,
+                      static_cast<std::size_t>(result.size())});
+  return result;
+}
+
+template <class EigenSolver, class EigenMatrix>
+void EigenSparseSolver<EigenSolver, EigenMatrix>::solve_dense_values(
+    const SparseSolverConstVectorView &rhs,
+    const SparseSolverVectorView &solution) {
+  validate_dense_vectors(rhs, solution);
+  using Scalar = typename EigenMatrix::Scalar;
+  using Vector = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>;
+  Eigen::Map<Vector>(static_cast<Scalar *>(solution.data), cols_) =
+      solver_.solve(Eigen::Map<const Vector>(
+          static_cast<const Scalar *>(rhs.data), rows_));
+}
+
+template <class EigenSolver, class EigenMatrix>
+void EigenSparseSolver<EigenSolver, EigenMatrix>::solve_dense_vector(
+    const SparseMatrix &matrix,
+    const SparseSolverConstVectorView &rhs,
+    const SparseSolverVectorView &solution) {
+  validate_factorization(matrix);
+  solve_dense_values(rhs, solution);
 }
 
 EIGEN_LLT_SOLVE_INSTANTIATION(float32, LLT, AMD, f);
@@ -265,10 +329,17 @@ void EigenSparseSolver<EigenSolver, EigenMatrix>::solve_rf(
     const SparseMatrix &sm,
     const Ndarray &b,
     const Ndarray &x) {
-  validate_factorization(sm);
+  TI_ERROR_IF(b.shape.size() != 1 || x.shape.size() != 1 ||
+                  !b.get_element_shape().empty() ||
+                  !x.get_element_shape().empty(),
+              "SparseSolver expects one-dimensional scalar ndarrays.");
   size_t db = prog->get_ndarray_data_ptr_as_int(&b);
   size_t dX = prog->get_ndarray_data_ptr_as_int(&x);
-  Eigen::Map<T>((V *)dX, rows_) = solver_.solve(Eigen::Map<T>((V *)db, cols_));
+  solve_dense_vector(
+      sm, {reinterpret_cast<const void *>(db), b.get_element_data_type(),
+           b.get_nelement()},
+      {reinterpret_cast<void *>(dX), x.get_element_data_type(),
+       x.get_nelement()});
 }
 
 INSTANTIATE_LLT_SOLVE_RF(float32, LLT, COLAMD, Eigen::VectorXf)

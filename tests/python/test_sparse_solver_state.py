@@ -62,3 +62,27 @@ def test_cpu_sparse_numeric_failure_invalidates_info_and_public_state(route):
     assert solver.info()
     assert solver.provider_status()["reuse"]["factorization_active"]
     np.testing.assert_allclose(solver.solve(rhs), expected, rtol=1e-6)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_sparse_solve_rejects_wrong_ndarray_layout_before_reading():
+    matrix = _matrix([[4.0, 1.0, 0.0], [1.0, 3.0, 0.0], [0.0, 0.0, 2.0]], ti.f32)
+    solver = ti.linalg.SparseSolver(solver_type="LLT")
+    solver.compute(matrix)
+    for rhs, message in (
+        (ti.ndarray(ti.f64, 3), "factorization dtype"),
+        (ti.ndarray(ti.f32, 2), "RHS and"),
+        (ti.ndarray(ti.f32, (3, 1)), "one-dimensional scalar"),
+        (ti.Vector.ndarray(2, ti.f32, 3), "one-dimensional scalar"),
+        (np.zeros(2, dtype=np.float32), "RHS and"),
+    ):
+        with pytest.raises(RuntimeError, match=message):
+            solver.solve(rhs)
+    # Rejected binding must not invalidate or corrupt the numeric factor.
+    assert solver.info()
+    rhs = np.asarray([1, 2, 3], dtype=np.float32)
+    np.testing.assert_allclose(
+        solver.solve(rhs),
+        np.linalg.solve(np.asarray([[4, 1, 0], [1, 3, 0], [0, 0, 2]]), rhs),
+        rtol=1e-6,
+    )
