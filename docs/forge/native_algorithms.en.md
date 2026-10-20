@@ -78,16 +78,20 @@ graph.close()
 plan.close()
 ```
 
-`PreparedSortPlan` supports CUDA/Vulkan compact, naturally aligned 1D scalar
+`PreparedSortPlan` supports CPU/CUDA/Vulkan compact, naturally aligned 1D scalar
 ndarrays and qualified dense fields/views, with i32/u32/f32/i64/u64/f64 keys and
-optional equally sized scalar payloads. Key/payload ranges must not overlap.
-Sorting is stable and ascending. Both backends accept `nan_policy="last"`;
+optional equally sized scalar/vector/matrix payloads. Key/payload ranges must not overlap.
+Sorting is stable and ascending. All three backends accept `nan_policy="last"`;
 CUDA additionally accepts the existing `"bitwise"` sortable-key order.
 
 Preparation does not execute the sort, submit GPU work, synchronize, or allocate
 scratch. It freezes storage descriptors and resource generations without copying
-fields into ndarrays. Existing backend pipelines/workspace remain lazy and shared
-by the Program; warm execution before timing. Workspace growth may synchronize.
+fields into ndarrays. GPU pipelines/workspace remain lazy and shared by the
+Program. CPU reuses the AOT stable-sort core with lazy plan-owned scratch, retained
+across runs and released on close. Floating-point key/payload sorting caches one
+ordering key per record, included in the reported workspace. Reported bytes exclude
+the transient merge buffer that `std::stable_sort` may allocate. Warm execution before timing;
+GPU workspace growth may synchronize.
 Mixed-width Vulkan field layouts can place u64 at a merely 4-byte-aligned offset;
 such ranges are rejected, not silently copied. Use naturally aligned storage.
 
@@ -103,6 +107,12 @@ preparation again. Runtime reset or source retirement invalidates the plan.
 scratch or waiting for GPU completion. Pending native work retains storage through
 the existing runtime completion mechanism. Do not close a plan before its Graph's
 last submission; close the Graph first when retiring both objects.
+
+Prepared full-range/prefix sorting and compaction reject execution inside
+`ti.ad.Tape()` or `ti.ad.FwdMode()` before writing outputs, matching their ordinary
+primitive policy. Run these discrete operations before entering automatic AD;
+downstream kernels can still use their normal gradients. Unique recordings retain
+the enclosing Graph's existing primal-only checks.
 
 ### Device-count prefix sort
 

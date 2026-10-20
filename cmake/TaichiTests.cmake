@@ -54,6 +54,13 @@ file(GLOB_RECURSE TAICHI_TESTS_SOURCE
         "tests/cpp/struct/*.cpp"
         "tests/cpp/transforms/*.cpp"
         "tests/cpp/offline_cache/*.cpp")
+# These Windows/C API fixtures belong to the explicitly configured CiG targets
+# below; the standalone probe has its own main(). The generic test target must
+# not acquire their headers, exports, global environment or entry point.
+list(REMOVE_ITEM TAICHI_TESTS_SOURCE
+    "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/cuda_cig_test_environment.cpp"
+    "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/vulkan_cig_fixture.cpp"
+    "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/native_vulkan_cig_probe.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/struct_layout_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/execution_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cpp")

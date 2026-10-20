@@ -34,6 +34,51 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Incremental native builds retain an unchanged runtime anchor and use Clang
+  depfiles for LLVM runtime bitcode. Reconfiguring a wheel build no longer
+  recompiles those unchanged inputs; transitive header changes still rebuild.
+  Qualified on Windows/Ninja. This does not change application kernel options.
+
+- The lightweight AOT consumer accepts fixed-AoS arrays through module-owned
+  layout queries. Ordinary and prepared kernel/Graph calls and explicit plans
+  share the existing native binding contract, including downstream float AD;
+  no DSL/NumPy import or new native ABI is required.
+
+- AOT native transforms accept packed vector/matrix Fields on CPU/CUDA/Vulkan,
+  preserving module storage and the selected CPU policy, single flat CUDA
+  launch and packed Vulkan dispatch. No packing kernels or copies are added;
+  matching private ABI 115 components are required.
+
+- Host producer scripts retain LF checkout bytes across Git newline settings,
+  preventing unchanged source-hidden modules from recompiling solely because
+  the checkout uses `core.autocrlf`. Exact toolchain and artifact checks remain.
+
+- Graph submission telemetry accepts single-element scalar i32 control arrays
+  at any index rank, matching ordinary structured execution. Enabling telemetry
+  no longer rejects valid `(1,)` or `(1, 1)` predicate/counter arrays.
+
+- Host pools size their first reusable slab from the allocation request and
+  alignment, reducing idle reservation for small independent runtimes while
+  retaining geometric growth and request-sized large allocations.
+
+- CPU AOT runtime memory is isolated from unrelated JIT resets, fixing an access
+  violation when an independent consumer continued after `ti.reset()`.
+  Borrowed consumers retain their existing owner retirement contract.
+
+- Prepared sorting, prefix sorting and compaction now reject automatic reverse
+  and forward AD before writing outputs, closing a path that silently omitted
+  gradients. Primal execution and explicitly differentiated downstream kernels remain supported.
+
+- Full-range `prepare_sort()` now supports CPU through the shared AOT stable-sort
+  core, retaining lazy workspace across calls. CPU/CUDA/Vulkan ordinary mixed
+  scalar Field/ndarray sorting uses the same native route and exports cold or
+  warm to AOT. Sorting remains discrete; downstream compiled gradients are supported.
+
+- CPU stable payload sorting computes floating-point ordering keys once per input,
+  reducing repeated NaN and signed-zero checks while preserving ordering and payload
+  bits. The additional keys are included in workspace accounting. CPU finalization
+  also retires allocation records before releasing the owning runtime's host pool.
+
 - Fix invalid pointer types in Vulkan `SharedArray` floating-point CAS fallback.
   Each allocation uses consistent storage for atomics and ordinary loads/stores,
   while other allocations retain native operations; f64 CAS min/max also use the

@@ -35,7 +35,7 @@ HostMemoryPool::HostMemoryPool(bool adaptive_chunk_policy)
       new UnifiedAllocator(this, adaptive_chunk_policy_));
 
   TI_TRACE(
-      "Memory pool created. Adaptive chunks={}, initial slab={} MiB, maximum "
+      "Memory pool created. Adaptive chunks={}, initial slab ceiling={} MiB, maximum "
       "slab={} MiB",
       adaptive_chunk_policy_,
       UnifiedAllocator::initial_allocator_size / 1024 / 1024,

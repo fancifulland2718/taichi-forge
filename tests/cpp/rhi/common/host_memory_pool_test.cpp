@@ -394,6 +394,62 @@ TEST(HostMemoryPool, AdaptiveSlabsGrowGeometricallyAndStopAtMaximum) {
   EXPECT_EQ(sizes, (std::vector<std::size_t>{64, 128, 256, 256}));
 }
 
+TEST(HostMemoryPool, FirstAdaptiveSlabFollowsRequestAndContinuesGrowth) {
+  const auto page = HostMemoryPool::page_size;
+  AdaptiveAllocatorSizeGuard allocator_size(16 * page, 64 * page);
+  auto pool = HostMemoryPoolTestHelper::createPool(true);
+  auto *first = pool->allocate(3 * page + 1, page);
+  expectAllocationInsideRawChunk(*pool, first, 3 * page + 1);
+  EXPECT_EQ(pool->get_stats().reserved_bytes, 4 * page);
+  auto *second = pool->allocate(page, page);
+  expectAllocationInsideRawChunk(*pool, second, page);
+  EXPECT_EQ(pool->get_stats().reserved_bytes, 12 * page);
+  EXPECT_EQ(pool->get_stats().slab_chunks, 2);
+  pool->release(3 * page + 1, first);
+  pool->release(page, second);
+  EXPECT_EQ(pool->get_stats().reserved_bytes, 0);
+}
+
+TEST(HostMemoryPool, LargeAndExclusiveRequestsDoNotSeedFirstAdaptiveSlab) {
+  const auto page = HostMemoryPool::page_size;
+  AdaptiveAllocatorSizeGuard allocator_size(16 * page, 64 * page);
+  auto pool = HostMemoryPoolTestHelper::createPool(true);
+  pool->allocate(17 * page, page);
+  pool->allocate(3 * page, page, true);
+  auto *small_allocation = pool->allocate(1, 1);
+  expectAllocationInsideRawChunk(*pool, small_allocation, 1);
+  auto stats = pool->get_stats();
+  EXPECT_EQ(stats.reserved_bytes, 21 * page);
+  EXPECT_EQ(stats.slab_chunks, 1);
+  EXPECT_EQ(stats.large_chunks, 1);
+  EXPECT_EQ(stats.exclusive_chunks, 1);
+
+  pool->reset();
+  pool->allocate(3 * page, 1);
+  EXPECT_EQ(pool->get_stats().reserved_bytes, 4 * page);
+}
+
+TEST(HostMemoryPool, FirstAdaptiveSlabHandlesNonPowerOfTwoBoundsAndAlignment) {
+  const auto page = HostMemoryPool::page_size;
+  AdaptiveAllocatorSizeGuard allocator_size(3 * page, 5 * page);
+  auto pool = HostMemoryPoolTestHelper::createPool(true);
+  auto *first = pool->allocate(2 * page + 1, 1);
+  expectAllocationInsideRawChunk(*pool, first, 2 * page + 1);
+  EXPECT_EQ(pool->get_stats().reserved_bytes, 3 * page);
+  auto *second = pool->allocate(3 * page, page);
+  expectAllocationInsideRawChunk(*pool, second, 3 * page);
+  EXPECT_EQ(pool->get_stats().reserved_bytes, 8 * page);
+  pool->reset();
+
+  auto *aligned = pool->allocate(page + 1, 3 * page);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(aligned) % (3 * page), 0);
+  expectAllocationInsideRawChunk(*pool, aligned, page + 1);
+  EXPECT_EQ(pool->get_stats().large_chunks, 1);
+  pool->allocate(0, 1);
+  EXPECT_EQ(pool->get_stats().slab_chunks, 1);
+  expectUnifiedChunksConsistent(*pool);
+}
+
 TEST(HostMemoryPool, AdaptiveLargeRequestDoesNotInflateNextSlab) {
   AdaptiveAllocatorSizeGuard allocator_size(64, 256);
   auto pool = HostMemoryPoolTestHelper::createPool(true);

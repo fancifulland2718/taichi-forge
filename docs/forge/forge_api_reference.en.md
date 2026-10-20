@@ -1400,16 +1400,21 @@ for GPU completion.
 | `capacity_bytes`, `used_bytes`, `available_bytes` | Allocator-owned capacity, bump-cursor consumption including alignment, and still-allocatable tails. |
 | `alignment_waste_bytes`, `unreclaimed_released_bytes`, `wasted_bytes` | Alignment loss, released slab bytes that the current policy cannot reuse, and their sum. |
 | `*_chunk_count` | Current total, adaptive slab, request-larger-than-the-next-slab, and exclusive mapping counts. |
-| `peak_reserved_bytes`, `peak_used_bytes`, `peak_wasted_bytes`, `peak_chunk_count` | Host-pool lifetime peaks; they intentionally survive Program reset. |
+| `peak_reserved_bytes`, `peak_used_bytes`, `peak_wasted_bytes`, `peak_chunk_count` | Owning host-pool lifetime peaks; a new LLVM executor starts new counters after retirement. |
 
 The older flat `host_requested_live_bytes`, `host_raw_bytes`, and
 `host_capacity_bytes` fields remain compatibility aliases. New measurement
 code should prefer `host_allocator`. `ti.tools.memory_pool_stats()` exposes
 the same host values in its legacy dictionary and remains a diagnostic
 snapshot, not a reset or allocator-control API.
+LLVM host statistics cover the current executor and exclude independent AOT
+runtimes. Non-LLVM paths retain the legacy host-pool scope. Compare snapshots
+within the same owner and pool lifetime when measuring across resets.
 
-The default host policy starts with a 16 MiB slab and grows geometrically up
-to the existing 1 GiB ceiling. A request larger than the next slab receives a
+The default host policy sizes its first reusable slab from the request and
+alignment, starting at a page and doubling as needed up to the existing
+16 MiB initial-slab bound. Later slabs grow geometrically up to the existing
+1 GiB slab ceiling. A request larger than the next slab receives a
 request-sized, alignment-safe large mapping without advancing that sequence.
 
 
@@ -1645,8 +1650,8 @@ Limits:
 
 Returns `PreparedSortPlan` with `run()`, `record()`, `report()` and idempotent
 `close()` (also a context manager). Fixed compact, naturally aligned 1D scalar
-CUDA/Vulkan storage is validated without executing the sort; contents may then
-change in place. Backend workspace remains lazy and Program-owned. Recording is
+CPU/CUDA/Vulkan storage is validated without executing the sort; contents may then
+change in place. Workspace remains lazy, owned by the CPU plan or GPU Program arena. Recording is
 a runtime-ordered Graph action, not a capture-safe CUDA sort. See
 [prepared sort](native_algorithms.en.md#prepared-sort-063) for dtype, alignment,
 NaN policy and lifetime boundaries.

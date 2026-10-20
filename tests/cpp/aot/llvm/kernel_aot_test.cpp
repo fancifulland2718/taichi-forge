@@ -1,5 +1,8 @@
 #include "gtest/gtest.h"
 
+#include <atomic>
+#include <thread>
+
 #include "taichi/program/kernel_profiler.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
@@ -9,6 +12,8 @@
 #include "taichi/codegen/llvm/cuda_root_binding.h"
 #include "llvm/IR/Verifier.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
+#include "taichi/rhi/cpu/cpu_device.h"
+#include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/dx12/aot_module_loader_impl.h"
 
 #ifdef TI_WITH_CUDA
@@ -430,6 +435,83 @@ TEST(LlvmAotMetadataTest, InitialRootDataValidatesExactStorageAndUniqueIds) {
   entries[0].size = 32;
   entries[0].sha256[0] = 'g';
   EXPECT_ANY_THROW(aot::validate_initial_root_data(entries, sizes));
+}
+
+TEST(LlvmAotMetadataTest, CpuFinalizeRetiresAllocationsBeforeExecutorDestruction) {
+  CompileConfig cfg;
+  cfg.arch = host_arch();
+  LlvmProgramImpl program(cfg, nullptr);
+  auto *device = static_cast<cpu::CpuDevice *>(
+      program.get_runtime_executor()->llvm_device());
+  Device::AllocParams params{};
+  params.size = 32;
+  DeviceAllocation allocation;
+  ASSERT_EQ(device->allocate_memory(params, &allocation), RhiResult::success);
+  void *mapped = nullptr;
+  ASSERT_EQ(device->map_range_for_cpu_native(allocation.get_ptr(), 32, &mapped),
+            RhiResult::success);
+
+  // A Python plan may retain the executor after Program::finalize. Allocation
+  // records and the executor-owned host pool must retire at finalization.
+  program.finalize();
+  EXPECT_EQ(device->map_range_for_cpu_native(allocation.get_ptr(), 32, &mapped),
+            RhiResult::invalid_usage);
+  EXPECT_EQ(program.get_runtime_executor()
+                ->get_host_memory_pool_stats().reserved_bytes, 0u);
+  EXPECT_EQ(device->allocate_memory(params, &allocation),
+            RhiResult::invalid_usage);
+}
+
+TEST(LlvmAotMetadataTest, CpuRuntimePoolSurvivesOtherExecutorFinalization) {
+  CompileConfig survivor_config;
+  survivor_config.arch = host_arch();
+  survivor_config.cpu_max_num_threads = 2;
+  LlvmRuntimeExecutor survivor(survivor_config, nullptr);
+  uint64 *result_buffer = nullptr;
+  survivor.materialize_runtime(nullptr, &result_buffer);
+  const auto before = survivor.get_host_memory_pool_stats();
+  ASSERT_GT(before.requested_live_bytes, 0u);
+  RecordProperty("cpu_host_requested_live_bytes",
+                 std::to_string(before.requested_live_bytes));
+  RecordProperty("cpu_host_reserved_bytes", std::to_string(before.reserved_bytes));
+  RecordProperty("cpu_host_used_bytes", std::to_string(before.used_bytes));
+
+  CompileConfig other_config;
+  other_config.arch = host_arch();
+  other_config.cpu_max_num_threads = 2;
+  LlvmProgramImpl other(other_config, nullptr);
+  uint64 *other_result_buffer = nullptr;
+  other.get_runtime_executor()->materialize_runtime(nullptr,
+                                                   &other_result_buffer);
+  EXPECT_NE(result_buffer, other_result_buffer);
+  const auto after = survivor.get_host_memory_pool_stats();
+  EXPECT_EQ(after.allocate_count, before.allocate_count);
+  EXPECT_EQ(after.requested_live_bytes, before.requested_live_bytes);
+  std::atomic<bool> observed{false};
+  std::atomic<bool> retired{false};
+  std::thread observer([&] {
+    do {
+      other.get_runtime_executor()->get_host_memory_pool_stats();
+      observed.store(true);
+    } while (!retired.load());
+  });
+  while (!observed.load()) {
+    std::this_thread::yield();
+  }
+  other.finalize();
+  retired.store(true);
+  observer.join();
+  EXPECT_EQ(other.get_runtime_executor()
+                ->get_host_memory_pool_stats().reserved_bytes, 0u);
+
+  // Non-LLVM JIT teardown still resets the legacy global pool. Neither this
+  // runtime's result buffer nor its LLVM host callbacks may refer to it.
+  HostMemoryPool::get_instance().reset();
+  survivor.check_runtime_error(result_buffer);
+  auto allocation = survivor.allocate_memory_on_device(32, result_buffer);
+  survivor.deallocate_memory_on_device(allocation);
+  EXPECT_GT(survivor.get_host_memory_pool_stats().allocate_count,
+            before.allocate_count);
 }
 
 TEST(LlvmAotMetadataTest, ResourceReservationsPrecedeAllocation) {

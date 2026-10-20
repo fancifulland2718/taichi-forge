@@ -21,7 +21,7 @@ constexpr std::size_t kLlvmElementListChunkSizeClasses = 11;
 
 // Keep a small amount of destroyed CPU sparse payload hot for fast SNodeTree
 // reconstruction, but do not let large transient trees permanently pin the
-// process-wide HostMemoryPool. The budget covers ListManager chunks and
+// executor's HostMemoryPool. The budget covers ListManager chunks and
 // directories plus direct ambient allocations; manager objects remain reusable.
 constexpr std::size_t kLlvmHostSparseRecycledPayloadBudgetBytes = 16UL << 20;
 

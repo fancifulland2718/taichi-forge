@@ -70,12 +70,15 @@ graph.close()
 plan.close()
 ```
 
-`PreparedSortPlan` 支持 CUDA/Vulkan 上紧凑、自然对齐的一维标量 ndarray 和合格 dense field/view。
-keys 与可选等长 payload 支持 i32/u32/f32/i64/u64/f64，两个范围不得重叠；固定为升序稳定排序。
-两后端都支持 `nan_policy="last"`，CUDA 还支持现有 `"bitwise"` sortable-key 位序。
+`PreparedSortPlan` 支持 CPU/CUDA/Vulkan 上紧凑、自然对齐的一维标量 ndarray 和合格 dense field/view。
+keys 与可选等长标量／向量／矩阵 payload 支持 i32/u32/f32/i64/u64/f64，两个范围不得重叠；固定为升序稳定排序。
+三个后端都支持 `nan_policy="last"`，CUDA 还支持现有 `"bitwise"` sortable-key 位序。
 
 准备不执行排序、不提交 GPU 工作、不同步、不分配 scratch；只冻结存储描述与资源 generation，不做
-field→ndarray 复制。后端 pipeline/workspace 仍由 Program 按需共享，计时前需预热，workspace 增长可能同步。
+field→ndarray 复制。GPU pipeline/workspace 仍由 Program 按需共享；CPU 复用 AOT 稳定排序核心，
+由 plan 在首次执行时分配工作区，后续复用，close 时释放。浮点 key/payload 排序为每条记录
+缓存一个排序键，计入工作区报告；报告不包含 `std::stable_sort` 可能分配的瞬时 merge buffer。
+计时前需预热，GPU workspace 增长可能同步。
 Vulkan 混合位宽 field 布局可能把 u64 放在仅 4 字节对齐的偏移上；这种范围明确拒绝，不隐式复制，需使用自然
 对齐存储。
 
@@ -86,6 +89,10 @@ Vulkan 混合位宽 field 布局可能把 u64 放在仅 4 字节对齐的偏移�
 内容可原位改变；换存储、改结构需重新准备。runtime reset 或源资源退休使 plan 失效。`close()` 幂等并使已有
 recording 失效，不清共享 scratch、不等待 GPU；已提交工作的存储由原有 runtime completion 保留。
 不要在 Graph 最后一次提交前关闭 plan；同时退休时先关闭 Graph。
+
+prepared 全范围／前缀排序与 compaction 在 `ti.ad.Tape()` 或 `ti.ad.FwdMode()` 内
+会在写输出前拒绝执行，与普通 primitive 的策略一致。先在自动微分上下文外执行这些
+离散操作，再对后续 kernel 正常求导；unique recording 继续由所属 Graph 的 primal-only 检查保护。
 
 ### 设备 count 有效前缀排序
 
@@ -193,7 +200,7 @@ explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
 覆盖 CPU/CUDA/Vulkan，prepared recording 覆盖 CUDA/Vulkan。
 单键 `PrimitiveSequence.sort()` / `sort_by_key()` 也支持 scalar ndarray key 携带
 packed vector/matrix ndarray 载荷导出，raw-record 排序保持载荷位模式、不新增
-helper kernel；`prepare_sort()` 仍遵循单独的 scalar 合同。
+helper kernel；全范围 `prepare_sort()` 也支持紧凑标量／向量／矩阵载荷的三后端导出。
 多键 `PrimitiveSequence.sort_by_key()` 单独列出三后端导出路线，接受互不别名、
 长度相同的 packed 标量 ndarray 键及可选标量载荷。CPU 需显式 `cpu_native`，GPU
 `auto` 保留原生 sort/gather/affine 策略；Field、tensor/Struct 载荷和 strided 布局

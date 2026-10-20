@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace taichi::lang::cpu {
@@ -108,12 +110,23 @@ inline bool cpu_sort_key_before<double>(double lhs,
   return descending ? lhs_key > rhs_key : lhs_key < rhs_key;
 }
 
+template <typename KeyT, typename ValueT,
+          bool Floating = std::is_floating_point_v<KeyT>>
+struct StableSortItem {
+  KeyT key;
+  ValueT value;
+};
+
+template <typename KeyT, typename ValueT>
+struct StableSortItem<KeyT, ValueT, true> {
+  KeyT key;
+  ValueT value;
+  std::conditional_t<sizeof(KeyT) == 4, uint32_t, uint64_t> order;
+};
+
 template <typename KeyT, typename ValueT>
 struct StableSortWorkspace {
-  struct Item {
-    KeyT key;
-    ValueT value;
-  };
+  using Item = StableSortItem<KeyT, ValueT>;
   std::vector<Item> items;
   std::vector<KeyT> sorted_keys;
 
@@ -146,11 +159,30 @@ std::size_t cpu_stable_sort_impl(KeyT *keys,
     for (std::size_t i = 0; i < n; ++i) {
       items[i].key = keys[i];
       std::memcpy(&items[i].value, values + i, sizeof(ValueT));
+      if constexpr (std::is_floating_point_v<KeyT>) {
+        auto &order = items[i].order;
+        if constexpr (sizeof(KeyT) == 4) {
+          order = cpu_sortable_f32_key(keys[i], nan_policy);
+        } else {
+          order = cpu_sortable_f64_key(keys[i], nan_policy);
+        }
+        // Compute NaN/signed-zero ordering once per input, rather than on
+        // every comparison. NaNs-last remains last for descending sorts too.
+        if (descending &&
+            !(nan_policy == 0 &&
+              order == std::numeric_limits<std::decay_t<decltype(order)>>::max())) {
+          order = ~order;
+        }
+      }
     }
     std::stable_sort(items.begin(), items.end(), [&](const Item &lhs,
                                                      const Item &rhs) {
-      return cpu_sort_key_before<KeyT>(
-          lhs.key, rhs.key, descending, nan_policy);
+      if constexpr (std::is_floating_point_v<KeyT>) {
+        return lhs.order < rhs.order;
+      } else {
+        return cpu_sort_key_before<KeyT>(
+            lhs.key, rhs.key, descending, nan_policy);
+      }
     });
     for (std::size_t i = 0; i < n; ++i) {
       keys[i] = items[i].key;

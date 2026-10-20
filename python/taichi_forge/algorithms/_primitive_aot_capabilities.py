@@ -69,6 +69,11 @@ _ROUTES = MappingProxyType({
                   "all_ndarrays_or_all_dense_scalar_fields"),
         PrimitiveAOTRoute(
             "algorithms.PrimitiveSequence", ("sort", "sort_by_key"), _ALL,
+            _STORAGE + _SORT + ("mixed_scalar_field_and_ndarray", "single_lexicographic_key_part",
+                               "unfused_sequence", "selected_native_method", "no_automatic_ad"),
+        ),
+        PrimitiveAOTRoute(
+            "algorithms.PrimitiveSequence", ("sort", "sort_by_key"), _ALL,
             ("single_lexicographic_key_part", "scalar_ndarray_keys",
              "packed_vector_or_matrix_ndarray_payload", "named_source_bindings",
              "stable_ascending", "nan_last", "raw_payload_bits",
@@ -84,9 +89,12 @@ _ROUTES = MappingProxyType({
                      "unfused_sequence", "selected_native_method", "cpu_explicit_cpu_native",
                      "preserved_scalar_sort_gather_affine_strategy", "tensor_gather_copy_back", "no_automatic_ad"),
         ),
-        _prepared(("algorithms.prepare_sort",), "stable_ascending", "nan_last", "scalar_keys",
-                  "scalar_or_tensor_payload", "raw_payload_bits", "packed_dense_fields_and_ndarray_views",
-                  "fixed_extent", "no_automatic_ad"),
+        PrimitiveAOTRoute(
+            "aot.Module.add_execution_plan", ("algorithms.prepare_sort",), _ALL,
+            _STORAGE + ("concrete_prepared_recording", "stable_ascending", "nan_last", "scalar_keys",
+                        "scalar_or_tensor_payload", "raw_payload_bits", "packed_dense_fields_and_ndarray_views",
+                        "fixed_extent", "no_automatic_ad"),
+        ),
     ),
     "compact": (
         _module("compact", "stable_selection", "valid_count_prefix"),
@@ -146,6 +154,11 @@ _ROUTES = MappingProxyType({
                   "vector_or_matrix", "i32_u32_f32_i64_u64_f64", "affine",
                   "exact_inplace_or_disjoint", "immutable_coefficients",
                   "preserved_cpu_partition_policy_cuda_lane_launches_vulkan_packed_dispatch",
+                  "device_dtype_capabilities", "explicit_adjoint_only"),
+        _sequence(("transform",), "nonempty", "one_dimensional_packed_tensor_fields",
+                  "vector_or_matrix", "i32_u32_f32_i64_u64_f64", "affine",
+                  "exact_inplace_or_disjoint", "immutable_coefficients", "module_root_identity",
+                  "preserved_scalar_cpu_policy_flat_cuda_launch_packed_vulkan_dispatch",
                   "device_dtype_capabilities", "explicit_adjoint_only"),
         PrimitiveAOTRoute(
             "aot.ExecutionPlan", ("builtin/transform",), _ALL,

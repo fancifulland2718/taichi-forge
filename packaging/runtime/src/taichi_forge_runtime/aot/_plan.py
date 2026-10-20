@@ -617,7 +617,10 @@ class ExecutionPlan:
 
     def _prepare(self, module, arguments, *, gradients=None, source=None, execution_domain=None):
         from . import _c_api as abi
-        from ._runtime import NativeResource, NdArray, PreparedCall, _BindingFamily, _argument, _name
+        from ._runtime import (
+            NativeResource, NdArray, PreparedCall, _BindingFamily, _argument, _name,
+            _gradient_binding, _layout_binding,
+        )
 
         runtime = module._runtime
         with runtime._lock:
@@ -650,17 +653,14 @@ class ExecutionPlan:
                 return abi.NamedArgument(_name(name), argument)
 
             native = (abi.NamedArgument * len(arguments))(*[bind(name, value) for name, value in arguments.items()])
-            gradient_descriptors = []
-            bindings = []
+            bindings = [
+                binding for name, value in arguments.items()
+                if (binding := _layout_binding(name, value, named=True)) is not None
+            ]
             for name, gradient in (gradients or {}).items():
                 if name not in arguments or not isinstance(arguments[name], NdArray):
                     raise ValueError("Gradient names must refer to ndarray arguments")
-                if not isinstance(gradient, NdArray):
-                    raise TypeError("A gradient must be an NdArray")
-                descriptor = gradient._descriptor(runtime)
-                gradient_descriptors.append(descriptor)
-                bindings.append(abi.NamedBinding(_name(name), 0, None, C.pointer(descriptor)))
-                owners.append(gradient._memory)
+                bindings.append(_gradient_binding(runtime, name, arguments[name], gradient, owners, named=True))
                 if name in self._replay_argument_names:
                     replay_owners.append(gradient._memory)
             function, prefix = (

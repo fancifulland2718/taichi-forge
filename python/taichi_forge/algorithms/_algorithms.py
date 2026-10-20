@@ -127,7 +127,7 @@ from taichi_forge.lang._ndarray import (
     StructNdarrayScalarMemberView,
     StructNdarrayTensorMemberView,
 )
-from taichi_forge.lang.field import _dense_native_field_layout_supported
+from taichi_forge.lang.field import ScalarField, _dense_native_field_layout_supported
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang._storage_view import describe_storage
 from taichi_forge.lang.kernel_impl import data_oriented
@@ -4337,6 +4337,7 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
         self._radix_u32_buffers = {}
         self._vulkan_graph_u32_buffers = {}
         self._vulkan_graph_u32_execs = {}
+        self._mixed_storage_sort_plan = None
         self._init_order_apply_workspace("sort")
         self._cuda_device_active = False
         self._cuda_cub_active = False
@@ -4355,6 +4356,9 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
         return self
 
     def clear(self):
+        if self._mixed_storage_sort_plan is not None:
+            self._mixed_storage_sort_plan.close()
+            self._mixed_storage_sort_plan = None
         if self._cuda_device_active:
             self._clear_cuda_device_backend_workspace()
         if self._cuda_cub_active:
@@ -9056,6 +9060,80 @@ def _native_sort_tensor_member_values(
     return workspace
 
 
+def _mixed_storage_sort_method(method, descending, nan_policy):
+    arch = current_cfg().arch
+    if descending:
+        return None
+    if arch in (x64, arm64) and method in ("auto", "cpu_native") and nan_policy == "last":
+        return "cpu_stable_sort_available"
+    if arch == cuda and method in ("auto", "cuda_device"):
+        return "cuda_device_radix_sort_available"
+    if arch == vulkan and method in ("auto", "vulkan_native_radix_u32") and nan_policy == "last":
+        return "vulkan_radix_sort_available"
+    return None
+
+
+def _native_mixed_sort_supported(keys, values, *, method, descending, nan_policy):
+    """Qualify the shared producer/export route without executing the sort."""
+    capability = _mixed_storage_sort_method(method, descending, nan_policy)
+    if capability is None or not (
+        isinstance(keys, ScalarNdarray) and isinstance(values, ScalarField)
+        or isinstance(keys, ScalarField) and isinstance(values, ScalarNdarray)
+    ):
+        return False
+    if keys.dtype not in _SORT_KEY_DTYPES or values.dtype not in _SORT_VALUE_DTYPES:
+        return False
+    views = (_primitive_view(keys), _primitive_view(values))
+    if not all(
+        view is not None
+        and (view.is_plain_ndarray or view.is_dense_field)
+        and len(view.shape) == 1
+        and not view.element_shape
+        and view.stride == _dtype_nbytes(view.dtype)
+        for view in views
+    ):
+        return False
+    return views[0].shape == views[1].shape and _prog_available(get_runtime().prog, capability)
+
+
+def _try_native_mixed_storage_sort(keys, values, *, method, workspace, descending, nan_policy):
+    if values is None or isinstance(keys, Ndarray) == isinstance(values, Ndarray):
+        return False
+    if _mixed_storage_sort_method(method, descending, nan_policy) is None:
+        return False
+    plan = None if workspace is None else workspace._mixed_storage_sort_plan
+    if not (
+        plan is not None
+        and plan._program is get_runtime().prog
+        and plan._owners[0] is keys
+        and plan._owners[1] is values
+        and plan._description["nan_policy"] == nan_policy
+    ):
+        if not _native_mixed_sort_supported(
+            keys, values, method=method, descending=descending, nan_policy=nan_policy
+        ):
+            return False
+        from ._prepared_primitive import PreparedSortPlan
+
+        replacement = PreparedSortPlan(keys, values, nan_policy=nan_policy)
+        if plan is not None:
+            plan.close()
+        plan = replacement
+        if workspace is not None:
+            # Retain only the current bindings. Rebinding replaces this plan;
+            # clearing the workspace releases its owners and storage lease.
+            workspace._mixed_storage_sort_plan = plan
+    plan.run()
+    if workspace is not None:
+        if current_cfg().arch == cuda:
+            workspace._cuda_device_active = True
+        elif current_cfg().arch == vulkan:
+            workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(workspace.workspace_bytes_current, plan._workspace_bytes)
+        workspace.workspace_bytes_peak = max(workspace.workspace_bytes_peak, workspace.workspace_bytes_current)
+    return True
+
+
 def _try_native_dense_field_sort(
     keys,
     values,
@@ -9371,8 +9449,10 @@ def sort(
 
     This is a Taichi Forge extension. `auto` selects the native CPU stable sort,
     CUDA Driver stable radix fallback on CUDA when available, the native
-    Vulkan radix8 path for supported ndarray key dtypes on Vulkan, and otherwise
-    falls back to a host stable sort. Use ``method="legacy"`` for the original
+    Vulkan radix8 path for supported dense key dtypes on Vulkan. CPU/CUDA/Vulkan
+    also accept compact scalar Field/ndarray pairs in either direction. Other
+    supported storage and order combinations fall back to a host stable sort.
+    Use ``method="legacy"`` for the original
     odd-even merge implementation.
     """
 
@@ -9381,6 +9461,10 @@ def sort(
     _check_sort_request(
         keys, values, stable, descending, method, precision, workspace, nan_policy
     )
+    if _try_native_mixed_storage_sort(
+        keys, values, method=method, workspace=workspace, descending=descending, nan_policy=nan_policy
+    ):
+        return
     if method == "auto":
         _auto_sort(
             keys,

@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from taichi_forge._lib import core
+from taichi_forge.algorithms import _autodiff
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import (
     DispatchGraphAction,
@@ -170,6 +171,7 @@ class _PrefixExecutable(NativeGraphExecutable):
     def run(self):
         if impl.get_runtime().prog is not self._program:
             raise TaichiRuntimeError("Prepared prefix sort belongs to another runtime")
+        _autodiff.reject_unsupported_automatic_ad("sort")
         self._compiled.jit_run_cached(impl.current_cfg(), self._flattened, self._cache)
 
     @property

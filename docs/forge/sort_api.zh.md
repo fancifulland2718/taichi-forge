@@ -70,17 +70,20 @@ Vulkan native fast path：
 
 ## 预绑定排序
 
-`ti.algorithms.prepare_sort(keys, values=None)` 固定存储绑定，可在 CUDA/Vulkan 上
+`ti.algorithms.prepare_sort(keys, values=None)` 固定存储绑定，可在 CPU/CUDA/Vulkan 上
 重复直接执行，或通过 `plan.record()` 放入 Graph。key 为一维标量；等长载荷支持
 标量、向量和矩阵，lane 类型为 i32/u32/f32/i64/u64/f64。紧凑 ndarray、dense Field
 和紧凑 ndarray view 共用存储生命周期合同。整记录搬运保留 NaN payload、正负零等
-全部位模式。准备阶段不排序、不提交设备工作；首次执行由既有后端 arena 提供 scratch。
+全部位模式。准备阶段不排序、不提交设备工作。CPU 复用已有 AOT 稳定排序核心，
+scratch 由 plan 持有；GPU 使用既有 Program arena，均在首次执行时按需分配。
+CPU/Vulkan 接受 NaNs-last，CUDA 还接受 bitwise 位序。
 `plan.report()` 的物理计划标识包含 `value_element_shape`。使用完毕关闭计划；Field
 退休后相应绑定失效。
 
 这些 recording 可在执行前或执行后导出 AOT，要求 `nan_policy="last"`。ndarray 使用
 具名 source bindings，Field 使用 `snapshot_state=True`。既有 AOT sort 操作重建
-相同记录，无需新增辅助 kernel。CPU 继续使用普通／sequence 或显式 AOT 排序。
+相同记录，无需新增辅助 kernel。三个后端的普通标量 Field/ndarray 混合排序也通过
+`auto` 或对应的显式原生方法使用这条路线，两个 key/payload 方向均可。
 此次扩展不改变独立的 `count=` 前缀排序合同，也不接纳 Struct／strided 载荷。
 排序自身无自动伴随；后续编译的梯度可以使用排序结果。见 [AOT SDK](aot_sdk.zh.md)。
 

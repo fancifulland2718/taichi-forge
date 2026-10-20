@@ -7429,8 +7429,7 @@ RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
       runtime_completion_resource_count(kCudaProviderPlanResourceKind) +
       pending_cuda_provider_plans;
 
-  const HostMemoryPoolStats host =
-      HostMemoryPool::get_instance().get_stats();
+  const HostMemoryPoolStats host = get_host_memory_pool_stats();
   snapshot.memory.host_requested_live_bytes = {
       host.requested_live_bytes, true};
   snapshot.memory.host_raw_bytes = {host.reserved_bytes, true};
@@ -8259,6 +8258,15 @@ void Program::finalize() {
   // Reset memory pool
   best_effort("reset host memory pool",
               [&] { HostMemoryPool::get_instance().reset(); });
+}
+
+HostMemoryPoolStats Program::get_host_memory_pool_stats() const {
+#ifdef TI_WITH_LLVM
+  if (auto *llvm_impl = dynamic_cast<LlvmProgramImpl *>(program_impl_.get())) {
+    return llvm_impl->get_runtime_executor()->get_host_memory_pool_stats();
+  }
+#endif
+  return HostMemoryPool::get_instance().get_stats();
 }
 
 void Program::clear_primitive_workspaces() {

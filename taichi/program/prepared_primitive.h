@@ -11,15 +11,20 @@
 namespace taichi::lang {
 
 class PreparedNativeStorage;
+class NativeOperation;
 class Program;
 
-// Fixed storage metadata, not a second workspace owner or device recording.
-// The Program arena still owns radix scratch and pipeline caches. Borrowed
-// ndarray wrappers never free the underlying allocation.
+// Fixed storage bindings, not a second device recording.
+// The Program arena owns GPU radix scratch/pipelines. CPU uses the shared
+// native sort operation's retained workspace. Borrowed ndarray wrappers never
+// free the underlying allocation.
 class PreparedPrimitiveSort {
  private:
   friend class Program;
   std::shared_ptr<PreparedNativeStorage> storage_;
+  // The existing AOT CPU operation retains its own stable-sort workspace.
+  // Populate it on first execution, under the Program submission guard.
+  mutable std::shared_ptr<NativeOperation> cpu_operation_;
   std::array<std::unique_ptr<Ndarray>, 2> views_;
   std::array<std::uintptr_t, 2> cuda_pointers_{};
   int count_{0};

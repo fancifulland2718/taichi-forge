@@ -31,6 +31,40 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 原生增量构建保留未改变的 runtime anchor，并用 Clang depfile 跟踪 LLVM runtime
+  bitcode；wheel 重新配置不再重复编译这些未改输入，传递头文件改变仍正确触发构建。
+  已验证 Windows/Ninja，不改变应用 kernel 编译选项。
+
+- 轻量 AOT 消费端通过模块布局查询支持固定 AoS 数组；普通／固定 kernel、Graph 和
+  显式计划共用既有原生绑定合同，可组合下游浮点反向，无需 DSL/NumPy 或新增原生 ABI。
+
+- AOT 原生 transform 支持 CPU/CUDA/Vulkan 紧凑向量／矩阵 Field，保留模块存储、
+  已选 CPU 调度、CUDA 一次展平 launch 与 Vulkan packed dispatch；不新增 packing
+  kernel 或复制，需配套私有 ABI115 组件。
+
+- 宿主构建脚本固定使用 LF 换行，避免 `core.autocrlf` 改变检出字节后使未修改的
+  封闭宿主模块全部重新编译；工具链身份及产物完整性校验保持。
+
+- Graph 提交遥测接受任意索引维数的单元素标量 i32 控制数组，与普通结构化执行一致。
+  启用遥测不再拒绝合法的 `(1,)` 或 `(1, 1)` predicate/counter 数组。
+
+- host 内存池按实际请求和对齐确定首个可复用 slab，减少小型独立 runtime 的闲置
+  预留，保留后续几何增长和大请求按需分配。
+
+- CPU AOT runtime 的内存不再受其他 JIT reset 影响，修复独立 consumer 在
+  `ti.reset()` 后继续执行时的访问冲突；借用 consumer 仍随所属 owner 一起退休。
+
+- prepared 排序、前缀排序与 compaction 现在会在写输出前拒绝自动反向／前向微分，
+  修复原入口可能静默漏掉梯度的问题；普通执行与后续 kernel 的显式梯度保持可用。
+
+- 全范围 `prepare_sort()` 新增 CPU 支持，复用 AOT 稳定排序核心并按需保留工作区。
+  CPU/CUDA/Vulkan 的普通标量 Field/ndarray 混合排序使用同一原生路线，可冷态或暖态
+  导出 AOT。排序仍是离散操作，支持后续已编译 kernel 的梯度。
+
+- CPU 稳定 payload 排序按输入预计算浮点排序键，减少重复的 NaN 和有符号零判断，
+  保留原顺序与 payload 位语义；新增排序键计入工作区大小。CPU finalize 同时在释放
+  所属 runtime 的 host 内存池前退休分配记录。
+
 - 修复 Vulkan `SharedArray` 浮点 CAS 回退使用错误指针类型的问题，按数组统一原子操作
   与普通读写的存储表示，保留其他数组的原生快路径；同时修正 f64 CAS min/max 类型。
   共享内存的整数／浮点原子能力与全局缓冲分别报告、启用和验证，不再主动关闭设备支持的

@@ -8,10 +8,8 @@ from tests import test_utils
 
 
 @pytest.mark.parametrize("field_keys", [False, True])
-@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_mixed_field_ndarray_sort_does_not_change_host_strategy(
-    field_keys, monkeypatch
-):
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_explicit_host_mixed_sort_does_not_change_strategy(field_keys, monkeypatch):
     n = 7
     field = ti.field(ti.i32, n)
     ndarray = ti.ndarray(ti.i32, n)
@@ -27,16 +25,14 @@ def test_mixed_field_ndarray_sort_does_not_change_host_strategy(
         return host(*args, **kwargs)
 
     monkeypatch.setattr(algorithms, "_host_stable_sort", observe)
-    sequence = ti.algorithms.primitive_sequence().sort(keys, values)
+    sequence = ti.algorithms.primitive_sequence().sort(keys, values, method="host_stable")
     builder = ti.graph.GraphBuilder()
     builder.append_native(sequence)
     graph = builder.compile()
 
     def reject_export():
         module = ti.aot.Module()
-        with pytest.raises(
-            ti.TaichiRuntimeError, match="producer's native storage strategy"
-        ):
+        with pytest.raises(ti.TaichiRuntimeError, match="stable ascending native strategy"):
             module.add_execution_plan(
                 "sort",
                 graph,

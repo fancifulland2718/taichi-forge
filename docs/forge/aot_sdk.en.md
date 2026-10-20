@@ -77,6 +77,12 @@ Sharing this binary does not automatically share mutable runtime instances or
 make arrays interchangeable between independently created runtimes. The AOT
 artifact and native recording/provider support boundaries below still apply.
 
+CPU host allocations, runtime callbacks and result buffers belong to their
+LLVM executor. An independent CPU `Runtime` survives `ti.reset()` of another
+CPU/CUDA/Vulkan JIT owner. A `borrow_runtime()` consumer instead shares its JIT
+executor and retires with that owner. Runtime host-memory statistics describe
+the current executor, excluding independent AOT owners.
+
 Optional cuDSS, cuSOLVERDn, cuBLASLt, cuTENSOR, cuSPARSELt, AmgX and VkFFT adapters have separate SDK components.
 Enable their build targets, then build and install only the selected adapter:
 
@@ -1860,7 +1866,8 @@ management to GC timing. Optional `library_path` and `runtime_path` select the
 shared binary and LLVM resources. A mixed AOT/JIT process uses one compatible
 core/resource set. The Python consumer supports the textures, native resources,
 execution plans and explicit owner-borrowed ndarray/texture imports described
-here. Structure arrays, arbitrary external device memory and undeclared native
+here. Fixed-AoS structure arrays use the module layouts described below.
+Arbitrary external device memory and undeclared native
 Graphs/providers remain outside that contract; the C/C++
 capabilities below are separate. Windows x64 checks cover all three backends,
 forward/reverse work and both AOT/JIT loading orders.
@@ -1959,6 +1966,14 @@ must advance across submissions must keep its intended shared identity; the pool
 does not merge or migrate private state. External providers retain their existing
 transaction and exclusivity rules. Submissions use the same ordered runtime queue.
 
+Module Field roots, including `module_array` aliases, belong to the loaded module
+and remain shared across its workspace slots. They are not per-plan private
+arrays. This lets sequential submissions advance one simulation state while
+keeping separately leased outputs. To isolate independent Field-based worlds,
+load a separate module for each world; do not replace its Field aliases with new
+ndarrays. Completion protects storage lifetime, while a result lease protects
+only its owned outputs, not snapshots of the module's shared state.
+
 Each lease submits once. `done()`/`wait()` preserve result ownership;
 `release()` waits and returns the slot, while `discard()` gives up results and
 allows reclamation after completion. Raw array references must not be used after
@@ -1975,6 +1990,11 @@ prepared sorting, terminal results for zero/early/budget-limited loops, standalo
 and borrowed retirement, and owner reset. CUDA also covers 65 one-element slots
 and injected owner failure. This qualifies the explicit pool API, not automatic
 conversion of a downstream solver's exclusive workspace or multi-stream execution.
+Additional checks cover shared Field roots, per-slot private counters, retained
+outputs, real downstream gradients, independent modules and retirement. The
+qualified pinned SAP fixture also passes with two retained output leases on all
+three backends, using its original module Field aliases and ordered execution.
+This is one shared SAP state with separate results, not independent solver worlds.
 
 Descriptions live under `executions/` in directory and `.tcm` modules, or can be
 saved separately with `ExecutionPlan.save/load`. C/C++ passes the same JSON
@@ -2370,10 +2390,27 @@ policy, CUDA per-lane strided launches and Vulkan packed dispatch. They add no
 application kernel or private scratch. Bindings allow exact in-place or disjoint
 ranges; partial overlap and incompatible element shapes are rejected. Explicit
 consumer plans also support scalar-aligned offset tensor views and selected
-prefixes without changing surrounding records. This route does not cover tensor
-Fields, Struct members or arbitrary strides. Compiled downstream kernel gradients
-are qualified; the native transform does not acquire an automatic adjoint.
-Use matching private ABI 108 runtime/frontend components.
+prefixes without changing surrounding records. Compiled downstream kernel
+gradients are qualified; the native transform does not acquire an automatic adjoint.
+
+Packed vector/matrix Fields with one index dimension also export, preserving
+module-root identity and the producer's selected `strategy="packed_field"`.
+This uses the scalar CPU scheduling policy, one flattened CUDA affine launch,
+and the existing packed Vulkan dispatch. It does not convert the Field to a
+temporary ndarray or add packing kernels. Cold/warm export, exact in-place and
+disjoint bindings, unchanged prefix tails, independent module state, downstream
+kernel gradients and in-flight retirement pass Windows CPU/CUDA/Vulkan checks,
+including Vulkan synchronization validation. CUDA profiling confirms six native
+affine kernels for six JIT calls and likewise for six prepared AOT calls, rather
+than expanding a matrix into one launch per lane. Struct members and arbitrary
+strides still require their own export contracts. Use matching private ABI 115
+runtime/frontend components; ndarray execution defaults remain unchanged.
+
+The matching Windows runtime/frontend wheels pass normal installation and the
+CPU/CUDA/Vulkan Field checks, including consumers with only the runtime installed.
+The installed compiled-host three-world rigid batch and existing application
+entries also pass. The application wheel and sole TCM remain unchanged, as do
+all 44 independently installed dependencies; no application TCM is added to Forge.
 
 The Vulkan scalar `transform → gather → scatter` sequence has a dedicated
 `builtin/indexed_transform` v1 contract. Cold export selects the same eligible
@@ -2388,10 +2425,14 @@ consumer views preserve their guards. Independent/borrowed consumers, in-flight
 close and downstream kernel gradients are covered; fusion itself does not
 generate an adjoint. CPU/CUDA keep their ordinary operation sequence.
 
-Scalar sequence sorting requires all ndarrays or all qualified dense Fields.
-Mixing a Field and an ndarray selects host sorting in the producer and is rejected
-by automatic AOT export, including with `method="auto"`. An explicit AOT sort
-description can select the native route; export does not silently make that choice.
+Scalar sequence sorting accepts all ndarrays or all qualified dense Fields.
+CPU/CUDA/Vulkan also accept a compact scalar Field paired with a scalar ndarray,
+in either key/payload direction. Ordinary `sort` and single-part `sort_by_key`
+use the same native route for `auto` and the matching explicit native method;
+export works before or after execution without host sorting or helper kernels.
+`SortWorkspace` reuses the current storage bindings and releases them on clear
+or replacement. Descending, explicit host strategies and strided Fields are
+outside this mixed native route; export does not silently change their strategy.
 
 For single-key sorting, a scalar ndarray key can also carry an equally sized
 packed vector/matrix ndarray payload. The sequence accepts the six scalar lane
@@ -2404,14 +2445,15 @@ Struct members or strided layouts.
 Sorting has no automatic adjoint; downstream compiled kernel
 gradients can consume the reordered records.
 
-CUDA/Vulkan `prepare_sort(keys, values)` recordings also accept scalar/vector/matrix
+CPU/CUDA/Vulkan `prepare_sort(keys, values)` recordings also accept scalar/vector/matrix
 payloads, including packed dense Fields and offset packed ndarray views. The
 existing retained-storage exporter reconstructs the scalar key and complete payload
 record with the same sort operation, without prewarming or adding helper code.
 Cold and warm export, standalone/borrowed consumption, raw payload bits, lifetime
 retirement and downstream kernel gradients are checked. Field snapshots in one
 module must share one initial root state. This does not extend the separate
-`count=` prefix-sort route or add CPU prepared sorting. See [Sort API](sort_api.en.md).
+`count=` prefix-sort route. CPU plans retain their lazy stable-sort workspace;
+GPU plans continue to use the Program arena. See [Sort API](sort_api.en.md).
 
 Multi-key `PrimitiveSequence.sort_by_key()` also exports stable lexicographic
 sorting of equally sized, disjoint, packed 1D scalar ndarrays, with optional
@@ -2444,7 +2486,8 @@ graphs also snapshot their required Fields. Views are published after structural
 preflight and reused across exports in the same module. CUDA/Vulkan recordings
 from `prepare_sort`, `prepare_compact`, and `prepare_unique`/`prepare_unique_by_key`
 also export; prepared compact checks include offset packed Field vector-record
-views. CPU retains the sequence route.
+views. CPU supports the sequence and full-range prepared-sort routes; prepared
+compact/unique remain CUDA/Vulkan.
 
 Unique keeps the first item of each consecutive integer-key run without sorting.
 Fixed `size` preserves producer semantics; only the count prefix is valid and
@@ -3047,7 +3090,7 @@ and lifecycle checks, not a large-application speedup or Linux qualification.
 Installed Windows qualification also covers automatic CUDA arena export and
 retained private-pool subgraphs, including aliases, independent owners, real
 downstream gradients and in-flight retirement. Runtime-only consumers load these
-artifacts without importing the frontend. Separate targeted checks cover grouped
+artifacts without importing the frontend. Installed checks also cover grouped
 CPU/Vulkan execution and CUDA parent arenas with capacities 3+5 and 3+65, including
 repeated child instances, rebinding, downstream gradients and retirement. The
 parent fixture retains four code entries. This does not qualify SAP or other
@@ -4411,6 +4454,43 @@ types still require the target capabilities; for example, Vulkan modules using
 8/16-bit integers must declare `spirv_has_int8`, `spirv_has_int16`,
 `spirv_has_int8_storage` and `spirv_has_int16_storage` in `caps`.
 
+The lightweight Python consumer uses the same module-owned ABI:
+
+```python
+kernel = module.kernel("update")
+layout = kernel.ndarray_layout(0)  # graph.ndarray_layout("records") for a Graph
+records = runtime.ndarray(layout, 17)
+payload = bytearray(records.nbytes)
+# Pack whole records using layout.element_stride and layout.member(path).offset.
+records.write(payload)
+call = kernel.prepare(records, output)
+call.run()
+runtime.wait()
+```
+
+`StructLayout.members` is an immutable tuple of `StructMember` records with
+dotted path, dtype, element_shape, offset, size and alignment. The entry caches
+its layout query; repeated bound/prepared execution does not query or rebuild
+member tables. Whole-record buffers use the queried ABI, without a NumPy or DSL
+dependency. Ordinary kernels/Graphs, prepared calls and explicit ExecutionPlans
+accept these arrays alongside primitive/tensor gradient bindings. Struct arrays
+themselves cannot carry gradients. Closing the module invalidates its layout;
+arrays retain their allocation owner, and submitted work uses the existing
+retirement contract. Private captured StructNdarray export and arbitrary member
+strides remain separate resource contracts.
+
+Windows CPU/CUDA/Vulkan checks cover nested i8/u16/f32 records with vector/matrix
+members, unchanged padding, ordinary/prepared/plan calls, downstream float AD,
+empty arrays, rejection before Graph writes, independent modules and in-flight
+retirement, including Vulkan synchronization validation. Existing scalar/tensor
+consumers pass the same backend regression set. This addition reuses the native
+ABI and plan format; it adds no kernel or device workspace.
+
+Normal Windows runtime-wheel installation passes all six standalone/borrowed
+backend consumers and the installed compiled-host CUDA batch regression. This
+Python addition increases the compressed runtime wheel by 1,802 bytes; frontend,
+application TCM and independent dependency installations remain unchanged.
+
 Obtain a module-owned `TiNdArrayLayout` once with
 `ti_get_kernel_ndarray_layout_ext` or
 `ti_get_compute_graph_ndarray_layout_ext`. Query its version, element stride,
@@ -4439,8 +4519,8 @@ their runtime and serialize host-side module/binding lifetime changes with use.
 
 Structure Graphs use `graphs.v2.json`; primitive/tensor-only Graphs retain the
 old representation. New loaders read both; old loaders cannot consume structure
-Graph exports. This covers direct calls and ordinary CGraphs, not arbitrary
-strides/slices, pointer members, structure gradients or native Graph capture.
+Graph exports. This covers direct calls, ordinary CGraphs and their fixed
+preparation, not arbitrary strides/slices, pointer members or structure gradients.
 Small Windows CPU/CUDA/Vulkan and CUDA PTX consumers verify nested mixed-type
 records, rebinding, retirement, and Graphs combining structure forward work
 with explicitly bound primitive-array reverse differentiation.
@@ -4856,6 +4936,35 @@ This records an existing import contract; it does not install an import hook or
 compile a second copy. Imports that replace their own module or `__file__` need
 explicit inventory entries. An observed import list is not proof of complete
 dynamic dependency coverage.
+
+Before compiling an inventory, the separate private `_host_inventory.py` tool
+can audit ordinary and function-local imports without executing the application
+or importing the DSL:
+
+```sh
+python python/taichi_forge/tools/_host_inventory.py --spec app-host.json \
+    --source-root complete-private-source --root simulation.solver > import-audit.json
+```
+
+Selected modules are read from the frozen specification; `--source-root` supplies
+candidate files for missing local modules. Omit it to use the specification's
+source tree. Repeat `--root` for public entry modules, or omit roots to inspect
+all selected modules. The traversal continues through already selected modules,
+follows package initializers and declared aliases, and compares exact filename
+spelling so a class name is not confused with a differently cased module.
+The JSON report includes missing candidates and hashes, import sites, unresolved
+local imports, external module names and some dynamic/wildcard import sites.
+It does not map external imports to installable distributions or change the
+inventory, build cache, dependency lock or consumer package.
+
+This is advisory static analysis: optional and type-checking branches can add
+unused candidates; dynamic imports, plugins and resources can still be missed.
+Review the report against the intended public profile before freezing additions.
+Only explicit `--fail-on-missing` makes missing candidates or unresolved local
+imports return exit status 1; an empty report is not full reachability proof.
+Keep actual source-blocked installation and execution qualification. The audit
+is independent of the hashed compilation producer and does not invalidate
+otherwise unchanged host binaries.
 
 The output contains only declared extensions and `host-manifest.json` with
 relative artifact names, hashes, template entries and producer identity. Cache
@@ -5314,6 +5423,36 @@ microseconds. The measurements are correctness-fixture costs, not application
 throughput or controlled cross-process speedups. Extra qualification archives
 remain outside the application wheel; its sole 381,034-byte TCM, installed Forge
 packages and external dependencies are unchanged.
+
+The installed source-hidden host also qualifies a complete homogeneous Rigid
+batch step through the public scene importer and `materialize_rigid` on Windows
+CPU/CUDA/Vulkan. The three-world fixture uses a fixed box and free sphere, soft
+EFC Newton contact, Euler integration, and no CCD or ground. Four steps check
+preparation, contact assembly, Newton iteration, writeback, integration and
+kinematics against independent MuJoCo geometry and an f64 SOCP/KKT reference.
+An empty-contact world, parent composition, alternating output bindings,
+independent module state, in-flight retirement and an actual downstream energy
+gradient pass; Vulkan synchronization validation also passes. This qualifies
+this full profile, not every solver/material/topology or the Newton solve's
+adjoint. CPU/Vulkan retain this component's fixed-group masked iteration.
+
+On the same CUDA executor, Nsight records six `cuGraphLaunch` calls for six
+complete JIT `Graph.submit` steps and likewise for six prepared AOT steps.
+The only standalone kernel and device-to-host read in each range belong to
+terminal runtime error checking. Flat-loop `Graph.run` retains its synchronous
+diagnostic reports: this example uses 24 launches and 25 reads for six steps.
+It is a separate route, not an equivalent asynchronous performance baseline.
+Parent export adds only the two marker kernels and reuses the step code.
+
+The dev18 qualification wheel contains 633 host extensions and is 69,809,395
+bytes, up 7,946,863 bytes from dev17. All prior 560 extensions, the sole
+381,034-byte seven-entry application TCM, shader resources, Forge components
+and 44 independently installed dependencies are unchanged. The batch archives
+are qualification outputs rather than additional packaged TCMs. Some added
+modules support optional imports; their presence is not route qualification.
+Generic new-scene specialization still uses the independently installed Forge
+frontend. No new runtime implementation or default selection was needed for
+this batch profile.
 
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK

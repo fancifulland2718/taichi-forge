@@ -56,6 +56,8 @@ namespace cuda {
 class ExecutionDomainRegistry;
 }
 
+struct HostMemoryPoolStats;
+
 namespace cuda::detail {
 enum class CudaAsyncTileAdmissionReason : std::uint8_t;
 }
@@ -629,6 +631,7 @@ class TI_DLL_EXPORT Program {
   // retires all domains before releasing code/storage and the backend.
   std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains();
   RuntimeStatisticsSnapshot runtime_statistics_snapshot();
+  HostMemoryPoolStats get_host_memory_pool_stats() const;
   PrimitiveWorkspaceSnapshot primitive_workspace_snapshot() const noexcept {
     return primitive_workspace_arena_.snapshot();
   }

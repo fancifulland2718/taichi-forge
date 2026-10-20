@@ -78,19 +78,22 @@ Unsupported combinations still sort correctly through the host stable fallback u
 ## Prepared sorting
 
 `ti.algorithms.prepare_sort(keys, values=None)` freezes the storage bindings for
-repeated CUDA/Vulkan execution, directly or through `plan.record()` in a Graph.
+repeated CPU/CUDA/Vulkan execution, directly or through `plan.record()` in a Graph.
 Keys are one-dimensional scalars; equally sized payloads can be scalars, vectors
 or matrices with i32/u32/f32/i64/u64/f64 lanes. Packed ndarrays, dense Fields and
 packed ndarray views share the storage lifetime contract. Whole records move
 without changing their bits, including NaN payloads and signed zero. Preparation
-neither sorts nor submits device work; the existing backend arena supplies scratch
-on first execution. `plan.report()` includes `value_element_shape` in the physical
+neither sorts nor submits device work. CPU reuses the existing AOT stable-sort
+core and retains scratch in the plan; GPU scratch uses the existing Program arena.
+Both allocate scratch lazily on first execution. CPU/Vulkan accept NaNs-last;
+CUDA also accepts bitwise ordering. `plan.report()` includes `value_element_shape` in the physical
 plan identity. Close the plan when finished; retiring a Field invalidates its bindings.
 
 These recordings export to AOT cold or after execution, with `nan_policy="last"`.
 Use named source bindings for ndarrays or `snapshot_state=True` for Fields.
 The existing AOT sort operation reconstructs the same records without additional
-helper kernels. CPU continues to use ordinary/sequence or explicit AOT sorting.
+helper kernels. Ordinary scalar Field/ndarray pairs in either direction also use
+this native route with `auto` or the matching explicit native method on all three backends.
 This extension does not change the separate `count=` prefix-sort contract or
 admit Struct/strided payloads. Sorting has no automatic adjoint; downstream
 compiled gradients can consume its result. See [AOT SDK](aot_sdk.en.md).

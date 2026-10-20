@@ -69,7 +69,8 @@ def test_runtime_statistics_kernel_completion_sync_and_memory():
     assert before["program_domain"] > 0
     assert before["memory"]["live_resources"] >= 1
     assert isinstance(before["memory"]["host_raw_bytes"], int)
-    legacy_host = dict(_ti_core.get_host_memory_pool_stats())
+    legacy_host = dict(_ti_core.get_host_memory_pool_stats(prog))
+    assert ti.tools.memory_pool_stats()["host"] == legacy_host
     assert before["memory"]["host_raw_bytes"] == legacy_host["raw_bytes"]
     host_allocator = before["memory"]["host_allocator"]
     assert host_allocator["requested_live_bytes"] == legacy_host[

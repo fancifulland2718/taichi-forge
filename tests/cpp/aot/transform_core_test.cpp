@@ -61,4 +61,13 @@ TEST(TransformCore, InvalidSchedulerDoesNotWriteAndEmptyRangeIsNoOp) {
       17);
 }
 
+TEST(TransformCore, PackedFieldAndArrayKeepTheirSchedulingPolicies) {
+  // The same scalar work may use different selected producer policies. These
+  // are algorithm crossover points, not restrictions on accepted input size.
+  EXPECT_EQ(cpu::transform_partitions(65536, 4, false), 1);
+  EXPECT_EQ(cpu::transform_partitions(65536, 4, true), 2);
+  EXPECT_EQ(cpu::transform_partitions(262144, 4, false), 4);
+  EXPECT_EQ(cpu::transform_partitions(262144, 4, true), 4);
+}
+
 }  // namespace taichi::lang

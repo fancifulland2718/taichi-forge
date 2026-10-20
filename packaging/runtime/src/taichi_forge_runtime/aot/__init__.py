@@ -11,7 +11,9 @@ from ._external_ready import CudaExternalReadyGate
 from ._completion import SubmissionTicket
 from ._workspace import WorkspaceBusyError, WorkspaceLease, WorkspacePool
 from ._domain import Completion, CudaExecutionDomain
+from ._struct import StructLayout, StructMember
 
 __all__ = ["AotError", "Runtime", "Module", "NativeResource", "NdArray", "Kernel", "Graph", "BoundCall", "PreparedCall", "Scalar", "ExecutionPlan", "SubmissionTicket", "WorkspaceBusyError", "WorkspaceLease", "WorkspacePool", "Completion", "CudaExecutionDomain"]
 __all__ += ["CudaVulkanContextBinding", "configure_cuda_context", "cuda_context_info"]
 __all__ += ["CudaExternalReadyGate"]
+__all__ += ["StructLayout", "StructMember"]

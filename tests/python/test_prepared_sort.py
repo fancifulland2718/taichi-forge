@@ -40,7 +40,7 @@ def test_prepared_sort_misaligned_wide_keys_and_views():
 
 
 @pytest.mark.parametrize("storage", ("ndarray", "field", "view"))
-@test_utils.test(arch=[ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
 def test_prepared_sort_cold_binding_stability_and_graph(storage, monkeypatch):
     n = 4097
     if storage == "field":
@@ -79,6 +79,8 @@ def test_prepared_sort_cold_binding_stability_and_graph(storage, monkeypatch):
     np.testing.assert_array_equal(keys.to_numpy(), keys_np)
     np.testing.assert_array_equal(values.to_numpy(), values_np)
     assert plan.report()["workspace_bytes_last_observed"] is None
+    expected_owner = "prepared_plan" if ti.lang.impl.current_cfg().arch == ti.cpu else "program_primitive_arena"
+    assert plan.report()["workspace_owner"] == expected_owner
     physical_id = plan.report()["physical_plan_id"]
 
     # Execution must not rebuild Python storage descriptors or call public sort.
@@ -110,7 +112,7 @@ def test_prepared_sort_cold_binding_stability_and_graph(storage, monkeypatch):
     graph.close()
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
 def test_prepared_sort_lifetime_and_failed_preparation():
     builder = ti.FieldsBuilder()
     keys = ti.field(ti.i32)
@@ -142,7 +144,7 @@ def test_prepared_sort_lifetime_and_failed_preparation():
     fresh.close()
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
 def test_prepared_sort_float_nan_and_tiny_ranges():
     keys = ti.ndarray(ti.f32, shape=7)
     payload = ti.ndarray(ti.i32, shape=7)
@@ -166,7 +168,37 @@ def test_prepared_sort_float_nan_and_tiny_ranges():
     np.testing.assert_array_equal(one.to_numpy(), [19])
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_prepared_cpu_sort_rejects_unsupported_policy_before_execution():
+    values = ti.ndarray(ti.f32, 3)
+    data = np.array([2, np.nan, -1], np.float32)
+    values.from_numpy(data)
+    before = ti.lang.impl.get_runtime().prog._runtime_statistics_snapshot()
+    with pytest.raises(RuntimeError, match="nan_policy='last'"):
+        ti.algorithms.prepare_sort(values, nan_policy="bitwise")
+    after = ti.lang.impl.get_runtime().prog._runtime_statistics_snapshot()
+    assert before["submission"] == after["submission"]
+    np.testing.assert_array_equal(values.to_numpy(), data)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_prepared_cpu_sort_wide_keys_and_payload_bits():
+    for dtype, data in (
+        (ti.i64, np.array([2**40, -(2**40), 0, 2**40, -1], np.int64)),
+        (ti.f64, np.array([np.nan, -0.0, 0.0, -np.inf, np.nan], np.float64)),
+    ):
+        keys, values = ti.field(dtype, 5), ti.ndarray(ti.f64, 5)
+        bits = np.array([0xFFF8000000000001, 0x8000000000000000, 0x7FF8000000001234, 0, 0x3FF0000000000000], np.uint64)
+        keys.from_numpy(data)
+        values.from_numpy(bits.view(np.float64))
+        with ti.algorithms.prepare_sort(keys, values) as plan:
+            plan.run()
+            expected = np.argsort(data, kind="stable")
+            np.testing.assert_array_equal(keys.to_numpy(), data[expected])
+            np.testing.assert_array_equal(values.to_numpy().view(np.uint64), bits[expected])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], vulkan_sparse_experimental=False)
 def test_prepared_sort_between_producer_and_consumer_and_async_close():
     n = 1025
     keys, payload, output = (ti.ndarray(ti.i32, n) for _ in range(3))

@@ -87,6 +87,9 @@ class CpuDevice : public LlvmDevice {
   AllocInfo get_alloc_info(const DeviceAllocation handle);
 
   CpuDevice();
+  // The executor owns the runtime pool. Allocation leases retain it while
+  // memory is exposed; the device alone must not keep a retired runtime alive.
+  explicit CpuDevice(std::weak_ptr<HostMemoryPool> host_memory_pool);
   ~CpuDevice() override;
 
   RhiResult allocate_memory(const AllocParams &params,
@@ -147,8 +150,13 @@ class CpuDevice : public LlvmDevice {
     AllocationRecord(void *ptr,
                      size_t size,
                      bool use_cached,
-                     bool is_imported)
-        : ptr(ptr), size(size), use_cached(use_cached), is_imported(is_imported) {
+                     bool is_imported,
+                     std::shared_ptr<HostMemoryPool> host_memory_pool)
+        : ptr(ptr),
+          size(size),
+          use_cached(use_cached),
+          is_imported(is_imported),
+          host_memory_pool(std::move(host_memory_pool)) {
     }
     ~AllocationRecord();
     AllocationRecord(const AllocationRecord &) = delete;
@@ -164,8 +172,13 @@ class CpuDevice : public LlvmDevice {
     size_t size{0};
     bool use_cached{false};
     bool is_imported{false};
+    std::shared_ptr<HostMemoryPool> host_memory_pool;
   };
 
+  // A standalone RHI device owns its pool; an executor-backed device borrows
+  // the executor's pool and retains it only through live allocation records.
+  std::shared_ptr<HostMemoryPool> owned_host_memory_pool_;
+  std::weak_ptr<HostMemoryPool> host_memory_pool_;
   AllocationRegistry<AllocationRecord> allocations_;
   using AllocationLease = AllocationRegistry<AllocationRecord>::Lease;
   std::mutex mapping_lifecycle_mutex_;

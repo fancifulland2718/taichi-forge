@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.algorithms import _autodiff
 from taichi_forge.lang import impl
 from taichi_forge.lang._storage_view import describe_storage
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -21,6 +22,7 @@ class _PreparedNativePlan:
     def run(self):
         """Execute on current contents without host readback."""
         self._validate_lifetime()
+        _autodiff.reject_unsupported_automatic_ad(self._ad_kind)
         self._workspace_bytes = self._execute(self._command)
 
     def close(self):
@@ -45,7 +47,7 @@ class _PreparedNativePlan:
             "binding_policy": "fixed_dense_storage",
             "replay_mode": "rerecord",
             "stream_binding": "runtime_ordered",
-            "workspace_owner": "program_primitive_arena",
+            "workspace_owner": getattr(self, "_workspace_owner", "program_primitive_arena"),
             "workspace_preparation": "lazy_first_execution",
             "workspace_bytes_last_observed": self._workspace_bytes,
             "device_capture": False,
@@ -63,25 +65,28 @@ class _PreparedNativePlan:
 
 
 class PreparedSortPlan(_PreparedNativePlan):
-    """A stable ascending in-place sort over fixed CUDA/Vulkan dense storage.
+    """A stable ascending in-place sort over fixed CPU/CUDA/Vulkan dense storage.
 
     Keys are compact 1D scalar ranges; optional payloads are equally sized
     scalar/vector/matrix ranges with i32/u32/f32/i64/u64/f64 lanes. Ndarrays and
     qualified dense fields/views share this path. Equal keys preserve
-    payload order. Vulkan supports ``nan_policy="last"`` only; CUDA also
-    supports ``"bitwise"`` (the existing sortable-bit order). Other algorithms, descending order and raw provider
-    selection are deliberately not options of this plan.
+    payload order. CPU/Vulkan support ``nan_policy="last"`` only; CUDA also
+    supports ``"bitwise"`` (the existing sortable-bit order). Other algorithms,
+    descending order and raw provider selection are not options of this plan.
 
     Preparation validates layout, access and lifetime without sorting, issuing
     GPU work, synchronizing or allocating scratch. Backend pipelines/workspace
-    remain lazy and Program-owned, so the first run is not a steady-state timing
-    sample. Native workspace growth can synchronize as in ordinary sort.
+    remain lazy; GPU scratch is Program-owned and CPU scratch is plan-owned,
+    so the first run is not a steady-state timing sample. GPU workspace growth
+    can synchronize as in ordinary sort.
 
     Contents may change in place between runs. Replacement, shape/layout change
     or runtime reset requires a new plan. ``close()`` invalidates this plan and
     recordings made from it, but does not clear shared Program scratch or wait
     for the GPU. Existing runtime completion owns in-flight allocation release.
     """
+
+    _ad_kind = "sort"
 
     def __init__(self, keys, values=None, *, nan_policy="last"):
         if nan_policy not in ("last", "bitwise"):
@@ -107,9 +112,11 @@ class PreparedSortPlan(_PreparedNativePlan):
         self._command = command
         self._execute = program._execute_primitive_sort
         self._workspace_bytes = None
-        self._backend = "cuda" if impl.current_cfg().arch == _ti_core.Arch.cuda else "vulkan"
+        arch = impl.current_cfg().arch
+        self._backend = "cuda" if arch == _ti_core.Arch.cuda else "vulkan" if arch == _ti_core.Arch.vulkan else "cpu"
+        self._workspace_owner = "prepared_plan" if self._backend == "cpu" else "program_primitive_arena"
         self._description = {
-            "kind": "stable_radix_sort",
+            "kind": "stable_sort" if self._backend == "cpu" else "stable_radix_sort",
             "backend": self._backend,
             "count": int(descriptions[0].descriptor.index_shape[0]),
             "key_dtype": str(descriptions[0].descriptor.scalar_type),

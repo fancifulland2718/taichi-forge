@@ -49,11 +49,15 @@ def memory_pool_stats() -> Dict[str, Dict[str, Any]]:
 
     Notes
     -----
-    Counters are cumulative since process start. To measure a region,
-    snapshot before and after and diff fields manually.
+    With an active LLVM Program, host counters belong to its executor and
+    exclude independent AOT runtimes. Otherwise they describe the legacy host
+    pool. Device counters retain their backend pool scope. To measure a region,
+    snapshot before and after within the same owner and diff fields manually.
     """
+    from taichi_forge.lang import impl
+
     return {
-        "host": dict(_ti_core.get_host_memory_pool_stats()),
+        "host": dict(_ti_core.get_host_memory_pool_stats(impl.get_runtime().prog)),
         "device": dict(_ti_core.get_device_memory_pool_stats()),
     }
 

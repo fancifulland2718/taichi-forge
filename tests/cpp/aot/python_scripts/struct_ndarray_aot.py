@@ -65,6 +65,15 @@ def export(arch, directory, ptx=False, initialize=True, *, artifact_format=None,
     mixed.dispatch(evaluate, x_arg, y_arg)
     mixed.dispatch(evaluate.grad, x_arg, y_arg)
     module.add_graph("differentiate", mixed.compile())
+    module.add_kernel(evaluate)
+    module.add_kernel(evaluate.grad, name="backward")
+    module.add_execution_plan("records", ti.aot.ExecutionPlan([
+        dict(kind="fill32", destination="dx", value=0),
+        dict(kind="fill32", destination="dy", value=1065353216),
+        dict(kind="kernel", entry="update", arguments=["records", "result"]),
+        dict(kind="kernel", entry="evaluate", arguments=["result", "energy"]),
+        dict(kind="kernel", entry="backward", arguments=["result", "energy"]),
+    ], gradients=dict(result="dx", energy="dy")))
     module.save(str(directory))
     return record, update, graph
 

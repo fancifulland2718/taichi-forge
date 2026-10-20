@@ -61,6 +61,11 @@ cmake --install BUILD --prefix SDK --component TaichiSDK
 通过 `TI_PREBUILT_PYTHON_RUNTIME_DIR` 单独构建 shim 时，对包含兼容 C API 的
 runtime 同样启用 `TI_WITH_RUNTIME_C_API=ON`。这会编译 `borrow_runtime()` 绑定，
 核心及 SDK 文件仍由 runtime 分发包持有；发行 shim 配置已启用此选项。
+CPU host 分配、runtime 回调和结果缓冲由各自的 LLVM 执行器持有。独立 CPU
+`Runtime` 可在另一个 CPU/CUDA/Vulkan JIT owner 执行 `ti.reset()` 后继续使用；
+`borrow_runtime()` 则共享所属 JIT 执行器，并随该 owner 一起退休。
+runtime 的 host 内存统计反映当前执行器，不计入独立 AOT owner 的分配。
+
 共用二进制库不会自动共用可变 runtime 实例，
 也不允许独立创建的 runtime 任意交换数组。下文的 AOT 产物和 native
 recording/provider 支持边界仍然适用。
@@ -1445,7 +1450,8 @@ CPU/CUDA 稀疏树的版本与固定执行合同见下文资源章节；其他�
 
 可选 `library_path`、`runtime_path` 分别指定共享原生库和 LLVM 资源；AOT/JIT 混用
 选择同一套兼容核心和资源。Python 消费入口支持本文列出的 texture、native resource
-和执行计划，以及显式借用 owner 的 ndarray/texture 导入；尚不包括结构数组、任意
+和执行计划，以及显式借用 owner 的 ndarray/texture 导入；固定 AoS 结构数组使用下文的
+模块布局接口。尚不包括任意
 外部设备内存或未声明的 native Graph/provider。不能与下文 C/C++ 支持面混为一谈。Windows x64 已验证三个
 后端的前向/反向与两种 AOT/JIT 加载顺序。
 
@@ -1531,6 +1537,11 @@ with loaded.prepare_workspace_pool(
 的物理状态必须保持其预期共享身份，pool 不合并或迁移私有状态。外部 provider 仍遵守
 原有事务和独占规则，全部提交使用现有 runtime 的同一有序队列。
 
+模块 Field 根及其 `module_array` 别名属于加载的模块，仍由该模块的所有工作区槽
+共享，并非每份计划的私有数组。这允许顺序提交推进同一仿真状态，同时分别保留结果。
+需要隔离独立的 Field 场景时，应分别加载模块，不能把 Field 别名替换为新 ndarray。
+完成信号保护存储寿命，结果租约保护其拥有的输出，不会为共享模块状态建立快照。
+
 每份租约只提交一次。`done()`/`wait()` 保留结果所有权；`release()` 等待后归还，
 `discard()` 放弃结果但仍需完成后才可回收。归还后不得继续使用此前取得的裸数组引用。
 无就绪槽时 `acquire()` 报 `WorkspaceBusyError`；`acquire(wait=True)` 可等待已放弃的
@@ -1542,6 +1553,9 @@ Windows CPU/CUDA/Vulkan 已验证独立私有状态、ndarray 梯度、prepared 
 预算耗尽的 terminal、独立与借用退休及 owner reset；CUDA 另验证 65 个单元素槽和注入
 的 owner 故障。这是显式 pool API 的资格，不代表自动改造下游 solver 的独占工作区或
 跨 stream 并行已经接通。
+另已验证共享 Field 根、每槽私有计数、保留输出、真实下游梯度、独立模块和退休。
+已取得资格的 pinned SAP 小夹具也在三后端通过双输出租约，保持原模块 Field 别名
+与有序执行；它表示同一 SAP 状态的分别保留结果，不表示两个独立 solver 场景。
 
 描述保存到模块的 `executions/`，目录和 `.tcm` 均保留它；也可用
 `ExecutionPlan.save/load` 单独保存。C/C++ 可将同一 JSON 文档传给
@@ -1831,9 +1845,21 @@ ndarray。`builtin/transform` v1 描述保存确切的 `element_shape`、基础 
 冷导出和已选策略导出保留 CPU 分区策略、CUDA 逐 lane strided launch 及 Vulkan packed
 dispatch，不增加应用 kernel 或私有 scratch。绑定允许完全原位或不相交的范围，拒绝部分
 重叠和不匹配的 element shape。显式消费者计划还支持标量对齐的 tensor 偏移视图及指定
-前缀，保留范围外记录。本路线不覆盖 tensor Field、Struct 成员或任意 stride。
+前缀，保留范围外记录。
 已验证编译后的下游 kernel 梯度；原生 transform 本身不自动生成伴随。
-需使用配套的私有 ABI108 runtime／前端组件。
+
+具有一维索引的紧凑向量／矩阵 Field 也可导出，保留模块根存储身份及生产端已选的
+`strategy="packed_field"`。此策略使用 CPU 普通标量调度、CUDA 一次展平 affine
+launch 和既有 Vulkan packed dispatch，不转换到临时 ndarray 或新增 packing kernel。
+Windows CPU/CUDA/Vulkan 已验证冷热导出、完全原位及不相交绑定、前缀尾部保持、
+双模块状态隔离、真实下游梯度及在途退休，另有 Vulkan 同步验证。CUDA profiler确认
+六次JIT和六次AOT分别执行六个原生affine kernel，不按矩阵lane重复launch。
+Struct成员和任意stride仍需独立导出合同。需配套私有ABI115 runtime／前端组件；
+原ndarray执行默认不变。
+
+配套 Windows runtime／前端 wheel 已通过正常安装与 CPU/CUDA/Vulkan Field 验证，
+包括仅安装 runtime 的消费者。已安装封闭宿主的三 world Rigid 完整 batch 及既有
+应用入口也通过。应用 wheel、唯一 TCM 与 44 项独立依赖保持不变，Forge 不增加应用 TCM。
 
 Vulkan 标量 `transform → gather → scatter` 序列具有专门的
 `builtin/indexed_transform` v1 合同。冷导出按 JIT 的条件选择融合；已选中融合后，
@@ -1844,10 +1870,13 @@ f64 位串。三个写范围彼此及与两个读范围不得重叠。越界 gat
 仍是合法 destination；标量对齐的消费者 view 保留边界外数据。已验证独立／借用
 消费者、在途关闭和下游 kernel 梯度；融合本身不自动生成伴随。CPU/CUDA 保持普通操作序列。
 
-标量 sequence 排序要求输入全部为 ndarray，或全部为符合条件的 dense Field。
-Field 与 ndarray 混用时，生产端选择 host 排序，自动 AOT 导出会拒绝该组合，
-包括 `method="auto"`。调用者可通过显式 AOT sort 描述主动选择原生路线，
-导出不会静默替换生产端策略。
+标量 sequence 排序支持输入全部为 ndarray，或全部为符合条件的 dense Field。
+CPU/CUDA/Vulkan 也支持紧凑标量 Field 与标量 ndarray 混用，二者均可作为 key 或 payload。
+普通 `sort` 和单 key 的 `sort_by_key` 在 `auto` 或对应的显式原生方法下使用同一条
+原生路线；冷态、暖态均可导出，不经过 host 排序，也不增加辅助 kernel。
+`SortWorkspace` 复用当前存储绑定，在清理或替换时释放旧绑定。
+导出不会静默替换生产端策略。降序、显式 host 策略和带 stride 的 Field 不在这条
+混合原生路线的支持范围内。
 
 单键排序还允许 scalar ndarray key 携带等长的 packed vector/matrix ndarray 载荷。
 载荷 lane 支持上述六种标量类型，通过既有 raw-record 后端保留每一位，包括 NaN
@@ -1857,12 +1886,13 @@ payload 和正负零。`sort()` 及单 part 的 `sort_by_key()` 均可冷导出�
 布局已经接通。排序无自动伴随，
 后续已编译 kernel 的梯度仍可读取重排后的记录。
 
-CUDA/Vulkan 的 `prepare_sort(keys, values)` recording 也支持标量／向量／矩阵载荷，
+CPU/CUDA/Vulkan 的 `prepare_sort(keys, values)` recording 也支持标量／向量／矩阵载荷，
 包括紧凑 dense Field 和带偏移的紧凑 ndarray view。既有 retained-storage 导出器
 用同一 sort 操作重建标量 key 与完整载荷记录，不预热、不增加 helper 代码。
 已检查冷暖导出、独立／借用消费、载荷位模式、生命周期退休及后续 kernel 梯度。
 同一模块的 Field 快照须共享相同初始根状态。该扩展不改变独立的 `count=` 前缀
-排序路线，也不增加 CPU prepared sort。见 [Sort API](sort_api.zh.md)。
+排序路线。CPU plan 按需持有稳定排序工作区；GPU 继续使用 Program arena。
+见 [Sort API](sort_api.zh.md)。
 
 多键 `PrimitiveSequence.sort_by_key()` 也可导出稳定字典序排序：键须为一维 packed
 标量 ndarray，可选载荷允许标量或 packed 向量／矩阵 ndarray，要求长度相同且互不别名。
@@ -1885,7 +1915,8 @@ element shape 共用置换数组；tensor 另需一份 i32 身份索引，每项
 kernel 共用同一 root。没有 kernel 的纯原生图也会保存所需 Field 初值。结构预检通过后
 才发布视图，同一模块多次导出复用已有视图。CUDA/Vulkan 的 `prepare_sort`、
 `prepare_compact`、`prepare_unique`/`prepare_unique_by_key` recording 也可导出；
-prepared compact 已验证带偏移的连续 Field 向量记录视图。CPU 保持 sequence 路线。
+prepared compact 已验证带偏移的连续 Field 向量记录视图。CPU 支持 sequence 和全范围
+prepared sort；prepared compact/unique 仍为 CUDA/Vulkan 路线。
 
 unique 保留每个连续整数键段的第一项，不隐式排序。固定 `size` 保持生产端语义；
 只有 count 指示的输出前缀有效，尾部保持不变。非空输入使用一个 head kernel 和一次
@@ -2336,7 +2367,7 @@ Windows 已验证 CPU/CUDA/Vulkan 的 1/3/65 槽计划、正常安装的独立/�
 
 正常安装的 Windows 包另通过 CUDA arena 自动导出及父图私有池验证，覆盖别名、
 独立 owner、真实下游梯度和在途退休；仅 runtime 的消费者无需导入前端即可加载。
-单独的定向检查覆盖 CPU/Vulkan 多组执行，以及容量为 3+5、3+65 的 CUDA 父图 arena，
+正常安装检查也覆盖 CPU/Vulkan 多组执行，以及容量为 3+5、3+65 的 CUDA 父图 arena，
 包括重复子图实例、重绑定、下游梯度和退休；父图夹具保持四个代码入口。这不代表
 SAP 或其他应用的并发工作区已通过验证；显式 workspace pool API 有自己的所有权合同。
 
@@ -3372,6 +3403,36 @@ C API 分配/导入函数返回的内存句柄归属于对应 runtime。使用�
 须在 `caps` 声明 `spirv_has_int8`、`spirv_has_int16`、
 `spirv_has_int8_storage`、`spirv_has_int16_storage`。
 
+轻量 Python 消费端直接复用这套模块 ABI：
+
+```python
+kernel = module.kernel("update")
+layout = kernel.ndarray_layout(0)  # Graph 使用 graph.ndarray_layout("records")
+records = runtime.ndarray(layout, 17)
+payload = bytearray(records.nbytes)
+# 按 layout.element_stride 和 layout.member(path).offset 组织完整记录。
+records.write(payload)
+call = kernel.prepare(records, output)
+call.run()
+runtime.wait()
+```
+
+`StructLayout.members` 是不可变的 `StructMember` 元组，提供点分路径、dtype、
+element_shape、offset、size 与 alignment。entry 缓存布局查询，反复 bound/prepared
+执行不查询或重建成员表。完整记录的字节传输使用查询所得 ABI，无 NumPy 或 DSL 依赖。
+普通 kernel/Graph、prepared call 和显式 ExecutionPlan 均可绑定，并与普通 ndarray
+梯度共存；结构数组自身仍不支持梯度。关闭模块后其布局失效，数组保留分配 owner，
+在途执行沿用既有退休合同。捕获 StructNdarray 的自动导出和任意成员 stride 仍是后续资源合同。
+
+Windows CPU/CUDA/Vulkan 验证包括嵌套 i8/u16/f32、向量/矩阵成员、padding 保持、
+普通/固定/计划执行、真实后段浮点反向、空数组、Graph 写入前拒绝、双模块和在途退休，
+另有 Vulkan 同步验证。相同后端的原标量/tensor 消费回归通过。本项复用原生 ABI 和计划格式，
+不增加 kernel 或设备 workspace。
+
+正常安装 runtime wheel 后，六个三后端独立／借用消费者及已安装封闭宿主 CUDA batch
+回归通过。此次 Python 接口使压缩 runtime wheel 增加1,802B，前端、应用唯一 TCM
+及独立依赖安装保持不变。
+
 初始化时通过 `ti_get_kernel_ndarray_layout_ext` 或
 `ti_get_compute_graph_ndarray_layout_ext` 获取模块拥有的 `TiNdArrayLayout`。
 使用 `ti_get_ndarray_layout_info_ext` 和 `ti_get_ndarray_layout_member_ext`
@@ -3392,8 +3453,8 @@ dispatch 前报错；Graph 会在第一项 dispatch 前检查全部结构与梯�
 与使用需要串行协调。
 
 含结构的 Graph 使用 `graphs.v2.json`；仅标量/tensor 数组的 Graph 保留旧表示。
-新 loader 同时读取两种格式，旧 loader 不能消费结构 Graph。本范围是直接调用与普通
-CGraph，不包含任意 stride/切片、指针成员、结构梯度或 native Graph capture。
+新 loader 同时读取两种格式，旧 loader 不能消费结构 Graph。本范围包括直接调用、普通
+CGraph 及其固定准备，不包含任意 stride/切片、指针成员或结构梯度。
 Windows CPU/CUDA/Vulkan 与 CUDA PTX 小夹具验证了嵌套混合类型、重绑定、退休，以及
 同一 Graph 中结构前向工作与显式绑定的普通 ndarray 反向微分组合。
 
@@ -3700,6 +3761,26 @@ python python/taichi_forge/tools/_host_build.py --spec app-host.json \
 `"aliases": {"solver_alias": {"target": "simulation.solver", "registered_by": "simulation"}}`。
 这只记录现有导入合同，不安装导入钩子，也不重复编译模块。会替换自身模块或
 `__file__` 的初始化器需要显式加入；观察到的导入清单不能证明动态依赖已经完整。
+
+编译清单前，可用独立私有工具 `_host_inventory.py` 审计普通及函数内延迟导入，
+无需执行应用或导入DSL：
+
+```sh
+python python/taichi_forge/tools/_host_inventory.py --spec app-host.json \
+    --source-root complete-private-source --root simulation.solver > import-audit.json
+```
+
+已选模块读取清单中的冻结源码；`--source-root` 提供缺失本地模块的候选文件，省略则
+使用清单源码树。可重复 `--root` 指定公开入口模块，省略则检查全部已选模块。
+遍历会继续检查已经入选的模块，并跟随包初始化器及已声明别名；文件名按精确大小写
+比较，避免将类名误认为大小写不同的模块。JSON报告包含缺失候选及哈希、导入位置、
+无法解析的本地导入、外部模块名以及部分动态／星号导入位置。它不将外部模块映射为
+可安装发行包，也不修改清单、构建缓存、依赖锁或消费包。
+
+这属于建议性静态分析：可选及类型检查分支可能带来无用候选；动态导入、插件和资源
+仍可能遗漏。按计划交付的公开配置审查后再冻结新增内容。仅显式 `--fail-on-missing`
+会在缺失候选或无法解析本地导入时返回退出码1；空报告不证明完整可达性，仍需封锁
+源码后的正常安装与执行验证。审计独立于已哈希的编译生产器，不使原宿主二进制失效。
 
 输出只有声明的扩展与 `host-manifest.json`，记录相对产物名、哈希、模板条目和生产
 身份。缓存命中核对二进制内容，并跳过模板构造和编译；源码、生产器或工具链变化会
@@ -4010,6 +4091,26 @@ Rigid夹具有四个场景物体、32个存储项，EFC为65个packet项；此�
 完成约112–118／193–254μs，radix约227–230／568–647μs。这些是正确性夹具成本，
 不是应用吞吐或受控跨进程加速比。额外资格归档不加入应用wheel；唯一381,034B应用TCM、
 已安装Forge包和外部依赖保持不变。
+
+已安装的封闭宿主还在 Windows CPU/CUDA/Vulkan 上通过公开场景导入与
+`materialize_rigid` 完成同构 Rigid batch 整步资格。三 world 夹具使用固定盒、自由球、
+soft EFC Newton 接触与 Euler 积分，关闭 CCD 和 ground。四步覆盖前处理、接触组装、
+Newton 迭代、写回、积分与运动学刷新，并用独立 MuJoCo 几何及 f64 SOCP/KKT 参考
+检查结果。无接触 world、父图组合、交替输出绑定、双 module 状态隔离、在途退休及
+真实下游能量梯度通过，另有 Vulkan 同步验证。此资格覆盖该完整配置，不扩展为任意
+solver／材料／拓扑或 Newton 求解自身的伴随；CPU/Vulkan 保留该组件的固定组掩码迭代。
+
+同一 CUDA 执行器上，Nsight 确认六次完整 JIT `Graph.submit` 与六次 AOT prepared
+执行分别只有六次 `cuGraphLaunch`。各范围内唯一独立 kernel 和设备到主机读取来自
+末端 runtime 错误检查。平坦循环的 `Graph.run` 保留同步诊断报告，此例六步为24次
+launch、25次读取；它是不同执行路线，不能作为等价异步性能基线。父图导出仅新增
+两个标记 kernel，整步代码复用。
+
+dev18 资格应用 wheel 含633个宿主扩展，大小69,809,395B，较dev17增加7,946,863B。
+原560扩展、唯一381,034B七入口应用TCM、shader资源、Forge组件及44项独立安装依赖
+保持不变。batch资格归档不作为额外TCM装入应用包；新增模块包含可选导入分支，不因
+编译入包就获得路线资格。通用新场景特化仍使用独立安装的Forge前端。本配置无需新增
+runtime实现或修改默认选择。
 
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
