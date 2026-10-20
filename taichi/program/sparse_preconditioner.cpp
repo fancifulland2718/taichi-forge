@@ -547,6 +547,10 @@ SparseJacobiPreconditionerPlan::SparseJacobiPreconditionerPlan(
       row_bytes + column_bytes + value_bytes;
   auto inverse = extract_host_csr_inverse(
       row_offsets, column_indices, values, rows_, &diagonal_offsets_);
+#if defined(TI_WITH_CUDA)
+  if (backend_family_ == "cuda")
+    cuda::driver_prepare_sparse_preconditioner();
+#endif
   try {
     device_inverse_ = program_->create_ndarray(
         PrimitiveType::f32, {rows_}, ExternalArrayLayout::kNull, false);
@@ -1108,6 +1112,10 @@ SparseBlockJacobiPreconditionerPlan::SparseBlockJacobiPreconditionerPlan(
                 "{} Sparse block-Jacobi plans require at most {} block "
                 "rows for device refresh status encoding.",
                 backend_family_, kSparseRefreshSuccess >> 3u);
+#if defined(TI_WITH_CUDA)
+    if (backend_family_ == "cuda")
+      cuda::driver_prepare_sparse_preconditioner();
+#endif
     try {
       device_factor_blocks_ = program_->create_ndarray(
           PrimitiveType::f32,

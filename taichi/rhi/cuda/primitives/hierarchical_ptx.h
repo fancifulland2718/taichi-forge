@@ -27,6 +27,10 @@ enum class CudaDriverSortKeyType : int {
 
 bool driver_hierarchical_available();
 
+// Resolve sparse helpers before a caller begins native stream capture.
+void driver_prepare_sparse_preconditioner();
+void driver_prepare_sparse_solve();
+
 // Cold Graph preparation and exact, caller-owned scratch. Recording never
 // acquires the mutable Program arena; the Graph retains the bound allocation.
 std::size_t driver_scan_workspace_bytes(int num_items,
@@ -344,7 +348,7 @@ void driver_sparse_gmres_scalar_f32(void *initial_residual_squared,
                                     void *stream);
 
 std::size_t driver_compact_workspace_bytes(int num_items);
-void driver_prepare_compact();
+void driver_prepare_compact(int num_items);
 void driver_compact_with_workspace(void *values,
                                    void *flags,
                                    void *output,

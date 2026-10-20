@@ -103,8 +103,10 @@ struct KernelSet {
   void *sparse_bsr_spmv_f32{nullptr};
 };
 
-std::once_flag kernel_set_once;
-KernelSet kernel_set;
+using KernelFamily = CudaPrimitiveFamily;
+constexpr auto kFamilyCount = static_cast<std::size_t>(KernelFamily::count);
+std::array<std::once_flag, kFamilyCount> kernel_set_once;
+std::array<KernelSet, kFamilyCount> kernel_sets;
 
 std::size_t value_type_index(CudaTransformValueType value_type) {
   const int index = static_cast<int>(value_type);
@@ -151,176 +153,136 @@ std::size_t sort_key_type_index(CudaDriverSortKeyType key_type) {
   return static_cast<std::size_t>(index);
 }
 
-void load_kernel_set_once() {
+void load_kernel_set_once(KernelFamily family) {
   auto &ctx = CUDAContext::get_instance();
   auto context_guard = ctx.get_guard();
   auto &driver = CUDADriver::get_instance();
-  driver.module_load_data_ex(&kernel_set.module, kCudaHierarchicalPtx, 0,
-                             nullptr, nullptr);
-
-  constexpr std::array<const char *, 6> suffixes{"i32", "f32", "u32",
-                                                 "u64", "i64", "f64"};
-  for (std::size_t i = 0; i < suffixes.size(); ++i) {
-    const std::string scan_name = std::string("scan_blocks_") + suffixes[i];
-    const std::string scan_tiled_name =
-        std::string("scan_tiles_") + suffixes[i];
-    const std::string uniform_name = std::string("uniform_add_") + suffixes[i];
-    const std::string reduce_name = std::string("reduce_blocks_") + suffixes[i];
-    const std::string add_name = std::string("add_strided_") + suffixes[i];
-    const std::string scatter_add_name =
-        std::string("scatter_add_strided_") + suffixes[i];
-    const std::string zero_name = std::string("zero_strided_") + suffixes[i];
-    driver.module_get_function(&kernel_set.scan[i], kernel_set.module,
-                               scan_name.c_str());
-    driver.module_get_function(&kernel_set.scan_tiled[i], kernel_set.module,
-                               scan_tiled_name.c_str());
-    driver.module_get_function(&kernel_set.uniform_add[i], kernel_set.module,
-                               uniform_name.c_str());
-    driver.module_get_function(&kernel_set.reduce[i], kernel_set.module,
-                               reduce_name.c_str());
-    driver.module_get_function(&kernel_set.add[i], kernel_set.module,
-                               add_name.c_str());
-    driver.module_get_function(&kernel_set.scatter_add[i], kernel_set.module,
-                               scatter_add_name.c_str());
-    driver.module_get_function(&kernel_set.zero[i], kernel_set.module,
-                               zero_name.c_str());
+  const auto index = static_cast<std::size_t>(family);
+  KernelSet loaded;
+  try {
+    driver.module_load_data_ex(&loaded.module, kCudaPrimitiveModules[index], 0,
+                               nullptr, nullptr);
+    auto load = [&](void *&function, const std::string &name) {
+      driver.module_get_function(&function, loaded.module, name.c_str());
+    };
+    switch (family) {
+      case KernelFamily::scan: {
+        constexpr std::array<const char *, 6> suffixes{
+            "i32", "f32", "u32", "u64", "i64", "f64"};
+        for (std::size_t i = 0; i < suffixes.size(); ++i) {
+          load(loaded.scan[i], std::string("scan_blocks_") + suffixes[i]);
+          load(loaded.scan_tiled[i], std::string("scan_tiles_") + suffixes[i]);
+          load(loaded.uniform_add[i], std::string("uniform_add_") + suffixes[i]);
+        }
+        break;
+      }
+      case KernelFamily::reduce: {
+        constexpr std::array<const char *, 6> suffixes{
+            "i32", "f32", "u32", "u64", "i64", "f64"};
+        for (std::size_t i = 0; i < suffixes.size(); ++i) {
+          load(loaded.reduce[i], std::string("reduce_blocks_") + suffixes[i]);
+        }
+        break;
+      }
+      case KernelFamily::histogram: {
+        load(loaded.zero_bins[0], "zero_bins_i32");
+        load(loaded.zero_bins[1], "zero_bins_i64");
+        load(loaded.histogram[0][0], "histogram_i32_i32");
+        load(loaded.histogram[1][0], "histogram_u32_i32");
+        load(loaded.histogram[0][1], "histogram_i32_i64");
+        load(loaded.histogram[1][1], "histogram_u32_i64");
+        break;
+      }
+      case KernelFamily::transform: {
+        constexpr std::array<const char *, 6> suffixes{
+            "i32", "f32", "u32", "u64", "i64", "f64"};
+        for (std::size_t i = 0; i < suffixes.size(); ++i) {
+          load(loaded.add[i], std::string("add_strided_") + suffixes[i]);
+          load(loaded.scatter_add[i], std::string("scatter_add_strided_") + suffixes[i]);
+          load(loaded.zero[i], std::string("zero_strided_") + suffixes[i]);
+        }
+        load(loaded.add_scaled[0], "add_scaled_strided_f32");
+        load(loaded.add_scaled[1], "add_scaled_strided_f64");
+        load(loaded.gather_add[0], "gather_add_strided_f32");
+        load(loaded.gather_add[1], "gather_add_strided_f64");
+        break;
+      }
+      case KernelFamily::compact: {
+        load(loaded.compact_rank_tiles, "compact_rank_tiles_i32");
+        load(loaded.compact_scatter_tiled, "compact_scatter_tiled_words");
+        break;
+      }
+      case KernelFamily::bucket: {
+        load(loaded.copy_i32, "copy_i32_strided");
+        load(loaded.bucket_scatter, "bucket_scatter_words");
+        break;
+      }
+      case KernelFamily::sort: {
+        constexpr std::array<const char *, 6> suffixes{
+            "u32", "i32", "f32", "u64", "i64", "f64"};
+        for (std::size_t i = 0; i < suffixes.size(); ++i) {
+          load(loaded.radix_init[i], std::string("radix_init_") + suffixes[i]);
+        }
+        load(loaded.radix_rank4[0], "radix_rank4_u32");
+        load(loaded.radix_rank4[1], "radix_rank4_u64");
+        load(loaded.radix_hist_scan, "radix_hist_scan");
+        load(loaded.radix_hist_uniform, "radix_hist_uniform");
+        load(loaded.radix_scatter4[0], "radix_scatter4_u32");
+        load(loaded.radix_scatter4[1], "radix_scatter4_u64");
+        load(loaded.radix_gather_words, "radix_gather_words");
+        load(loaded.radix_copy_words, "radix_copy_words");
+        break;
+      }
+      case KernelFamily::sparse_solver: {
+        load(loaded.sparse_diagonal_apply_f32, "sparse_diagonal_apply_f32");
+        load(loaded.sparse_diagonal_refresh_f32, "sparse_diagonal_refresh_f32");
+        load(loaded.sparse_block_cholesky_refresh_f32, "sparse_block_cholesky_refresh_f32");
+        load(loaded.sparse_block_diagonal_apply_f32, "sparse_block_diagonal_apply_f32");
+        load(loaded.sparse_minres_scalar_f32, "sparse_minres_scalar_f32");
+        load(loaded.sparse_minres_vector_state_f32, "sparse_minres_vector_state_f32");
+        load(loaded.sparse_minres_commit_f32, "sparse_minres_commit_f32");
+        load(loaded.sparse_bicgstab_scalar_f32, "sparse_bicgstab_scalar_f32");
+        load(loaded.sparse_bicgstab_direction_f32, "sparse_bicgstab_direction_f32");
+        load(loaded.sparse_bicgstab_intermediate_f32, "sparse_bicgstab_intermediate_f32");
+        load(loaded.sparse_bicgstab_commit_f32, "sparse_bicgstab_commit_f32");
+        load(loaded.sparse_bicgstab_reconcile_f32, "sparse_bicgstab_reconcile_f32");
+        load(loaded.sparse_gmres_multi_dot_partial_f32, "sparse_gmres_multi_dot_partial_f32");
+        load(loaded.sparse_gmres_multi_dot_final_f32, "sparse_gmres_multi_dot_final_f32");
+        load(loaded.sparse_gmres_projection_f32, "sparse_gmres_projection_f32");
+        load(loaded.sparse_gmres_basis_f32, "sparse_gmres_basis_f32");
+        load(loaded.sparse_gmres_combine_f32, "sparse_gmres_combine_f32");
+        load(loaded.sparse_gmres_scalar_f32, "sparse_gmres_scalar_f32");
+        break;
+      }
+      case KernelFamily::sparse_assembly: {
+        load(loaded.sparse_assembly_pack_validate, "sparse_assembly_pack_validate");
+        load(loaded.sparse_assembly_pack_packed_validate, "sparse_assembly_pack_packed_validate");
+        load(loaded.sparse_assembly_mark_segments, "sparse_assembly_mark_segments");
+        load(loaded.sparse_assembly_scatter_segments, "sparse_assembly_scatter_segments");
+        load(loaded.sparse_assembly_reduce_segments, "sparse_assembly_reduce_segments");
+        load(loaded.sparse_assembly_emit_csr, "sparse_assembly_emit_csr");
+        load(loaded.sparse_assembly_finalize_control, "sparse_assembly_finalize_control");
+        load(loaded.sparse_csr_spmv_f32, "sparse_csr_spmv_f32");
+        load(loaded.sparse_bsr_spmv_f32, "sparse_bsr_spmv_f32");
+        break;
+      }
+      case KernelFamily::count:
+        TI_ERROR("Invalid CUDA primitive family");
+    }
+  } catch (...) {
+    // Publish the family only after all functions resolve. call_once can retry
+    // without retaining an incomplete module after a failed preparation.
+    if (loaded.module)
+      (void)driver.module_unload.call(loaded.module);
+    throw;
   }
-  driver.module_get_function(&kernel_set.zero_bins[0], kernel_set.module,
-                             "zero_bins_i32");
-  driver.module_get_function(&kernel_set.zero_bins[1], kernel_set.module,
-                             "zero_bins_i64");
-  driver.module_get_function(&kernel_set.histogram[0][0], kernel_set.module,
-                             "histogram_i32_i32");
-  driver.module_get_function(&kernel_set.histogram[1][0], kernel_set.module,
-                             "histogram_u32_i32");
-  driver.module_get_function(&kernel_set.histogram[0][1], kernel_set.module,
-                             "histogram_i32_i64");
-  driver.module_get_function(&kernel_set.histogram[1][1], kernel_set.module,
-                             "histogram_u32_i64");
-  driver.module_get_function(&kernel_set.compact_rank_tiles,
-                             kernel_set.module, "compact_rank_tiles_i32");
-  driver.module_get_function(&kernel_set.compact_scatter_tiled,
-                             kernel_set.module,
-                             "compact_scatter_tiled_words");
-  driver.module_get_function(&kernel_set.copy_i32, kernel_set.module,
-                             "copy_i32_strided");
-  driver.module_get_function(&kernel_set.bucket_scatter, kernel_set.module,
-                             "bucket_scatter_words");
-  driver.module_get_function(&kernel_set.add_scaled[0], kernel_set.module,
-                             "add_scaled_strided_f32");
-  driver.module_get_function(&kernel_set.add_scaled[1], kernel_set.module,
-                             "add_scaled_strided_f64");
-  driver.module_get_function(&kernel_set.sparse_diagonal_apply_f32,
-                             kernel_set.module,
-                             "sparse_diagonal_apply_f32");
-  driver.module_get_function(&kernel_set.sparse_diagonal_refresh_f32,
-                             kernel_set.module,
-                             "sparse_diagonal_refresh_f32");
-  driver.module_get_function(
-      &kernel_set.sparse_block_cholesky_refresh_f32, kernel_set.module,
-      "sparse_block_cholesky_refresh_f32");
-  driver.module_get_function(&kernel_set.sparse_block_diagonal_apply_f32,
-                             kernel_set.module,
-                             "sparse_block_diagonal_apply_f32");
-  driver.module_get_function(&kernel_set.sparse_minres_scalar_f32,
-                             kernel_set.module,
-                             "sparse_minres_scalar_f32");
-  driver.module_get_function(&kernel_set.sparse_minres_vector_state_f32,
-                             kernel_set.module,
-                             "sparse_minres_vector_state_f32");
-  driver.module_get_function(&kernel_set.sparse_minres_commit_f32,
-                             kernel_set.module,
-                             "sparse_minres_commit_f32");
-  driver.module_get_function(&kernel_set.sparse_bicgstab_scalar_f32,
-                             kernel_set.module,
-                             "sparse_bicgstab_scalar_f32");
-  driver.module_get_function(&kernel_set.sparse_bicgstab_direction_f32,
-                             kernel_set.module,
-                             "sparse_bicgstab_direction_f32");
-  driver.module_get_function(&kernel_set.sparse_bicgstab_intermediate_f32,
-                             kernel_set.module,
-                             "sparse_bicgstab_intermediate_f32");
-  driver.module_get_function(&kernel_set.sparse_bicgstab_commit_f32,
-                             kernel_set.module,
-                             "sparse_bicgstab_commit_f32");
-  driver.module_get_function(&kernel_set.sparse_bicgstab_reconcile_f32,
-                             kernel_set.module,
-                             "sparse_bicgstab_reconcile_f32");
-  driver.module_get_function(&kernel_set.sparse_gmres_multi_dot_partial_f32,
-                             kernel_set.module,
-                             "sparse_gmres_multi_dot_partial_f32");
-  driver.module_get_function(&kernel_set.sparse_gmres_multi_dot_final_f32,
-                             kernel_set.module,
-                             "sparse_gmres_multi_dot_final_f32");
-  driver.module_get_function(&kernel_set.sparse_gmres_projection_f32,
-                             kernel_set.module,
-                             "sparse_gmres_projection_f32");
-  driver.module_get_function(&kernel_set.sparse_gmres_basis_f32,
-                             kernel_set.module,
-                             "sparse_gmres_basis_f32");
-  driver.module_get_function(&kernel_set.sparse_gmres_combine_f32,
-                             kernel_set.module,
-                             "sparse_gmres_combine_f32");
-  driver.module_get_function(&kernel_set.sparse_gmres_scalar_f32,
-                             kernel_set.module,
-                             "sparse_gmres_scalar_f32");
-  driver.module_get_function(&kernel_set.gather_add[0], kernel_set.module,
-                             "gather_add_strided_f32");
-  driver.module_get_function(&kernel_set.gather_add[1], kernel_set.module,
-                             "gather_add_strided_f64");
-  constexpr std::array<const char *, 6> sort_suffixes{"u32", "i32", "f32",
-                                                      "u64", "i64", "f64"};
-  for (std::size_t i = 0; i < sort_suffixes.size(); ++i) {
-    const std::string radix_init_name =
-        std::string("radix_init_") + sort_suffixes[i];
-    driver.module_get_function(&kernel_set.radix_init[i], kernel_set.module,
-                               radix_init_name.c_str());
-  }
-  driver.module_get_function(&kernel_set.radix_rank4[0], kernel_set.module,
-                             "radix_rank4_u32");
-  driver.module_get_function(&kernel_set.radix_rank4[1], kernel_set.module,
-                             "radix_rank4_u64");
-  driver.module_get_function(&kernel_set.radix_hist_scan, kernel_set.module,
-                             "radix_hist_scan");
-  driver.module_get_function(&kernel_set.radix_hist_uniform,
-                             kernel_set.module, "radix_hist_uniform");
-  driver.module_get_function(&kernel_set.radix_scatter4[0], kernel_set.module,
-                             "radix_scatter4_u32");
-  driver.module_get_function(&kernel_set.radix_scatter4[1], kernel_set.module,
-                             "radix_scatter4_u64");
-  driver.module_get_function(&kernel_set.radix_gather_words, kernel_set.module,
-                             "radix_gather_words");
-  driver.module_get_function(&kernel_set.radix_copy_words, kernel_set.module,
-                             "radix_copy_words");
-  driver.module_get_function(&kernel_set.sparse_assembly_pack_validate,
-                             kernel_set.module,
-                             "sparse_assembly_pack_validate");
-  driver.module_get_function(
-      &kernel_set.sparse_assembly_pack_packed_validate, kernel_set.module,
-      "sparse_assembly_pack_packed_validate");
-  driver.module_get_function(&kernel_set.sparse_assembly_mark_segments,
-                             kernel_set.module,
-                             "sparse_assembly_mark_segments");
-  driver.module_get_function(&kernel_set.sparse_assembly_scatter_segments,
-                             kernel_set.module,
-                             "sparse_assembly_scatter_segments");
-  driver.module_get_function(&kernel_set.sparse_assembly_reduce_segments,
-                             kernel_set.module,
-                             "sparse_assembly_reduce_segments");
-  driver.module_get_function(&kernel_set.sparse_assembly_emit_csr,
-                             kernel_set.module, "sparse_assembly_emit_csr");
-  driver.module_get_function(&kernel_set.sparse_assembly_finalize_control,
-                             kernel_set.module,
-                             "sparse_assembly_finalize_control");
-  driver.module_get_function(&kernel_set.sparse_csr_spmv_f32,
-                             kernel_set.module, "sparse_csr_spmv_f32");
-  driver.module_get_function(&kernel_set.sparse_bsr_spmv_f32,
-                             kernel_set.module, "sparse_bsr_spmv_f32");
+  kernel_sets[index] = loaded;
 }
 
-KernelSet &kernels() {
-  std::call_once(kernel_set_once, load_kernel_set_once);
-  return kernel_set;
+KernelSet &kernels(KernelFamily family) {
+  const auto index = static_cast<std::size_t>(family);
+  std::call_once(kernel_set_once[index], load_kernel_set_once, family);
+  return kernel_sets[index];
 }
 
 class DriverWorkspace final {
@@ -522,7 +484,7 @@ std::size_t driver_inclusive_scan_strided_for_family(
 
   const std::uint32_t n = static_cast<std::uint32_t>(num_items);
   const auto type_index = value_type_index(value_type);
-  auto &kernel = kernels();
+  auto &kernel = kernels(KernelFamily::scan);
   const auto layout = scan_layout(n, value_size);
   std::optional<PrimitiveWorkspaceArena::Lease<DriverWorkspace>> workspace;
   std::array<void *, 8> level_ptrs{};
@@ -617,7 +579,17 @@ std::size_t driver_scan_workspace_bytes(int num_items,
 }
 
 void driver_prepare_scan() {
-  (void)kernels();
+  (void)kernels(KernelFamily::scan);
+}
+
+void driver_prepare_sparse_preconditioner() {
+  (void)kernels(KernelFamily::sparse_solver);
+}
+
+void driver_prepare_sparse_solve() {
+  (void)kernels(KernelFamily::sparse_solver);
+  (void)kernels(KernelFamily::sparse_assembly);
+  (void)kernels(KernelFamily::transform);
 }
 
 void driver_inclusive_scan_with_workspace(void *data,
@@ -670,7 +642,7 @@ static std::size_t driver_reduce_strided_impl(void *values,
   }
 
   const auto type_index = value_type_index(value_type);
-  auto &kernel = kernels();
+  auto &kernel = kernels(KernelFamily::reduce);
   auto launch_reduce = [&](void *input, std::uint64_t input_offset,
                            std::uint64_t input_stride, std::uint32_t count,
                            void *result, std::uint64_t result_offset,
@@ -735,7 +707,7 @@ std::size_t driver_reduce_workspace_bytes(int num_items,
 }
 
 void driver_prepare_reduce() {
-  (void)kernels();
+  (void)kernels(KernelFamily::reduce);
 }
 
 void driver_reduce_with_workspace(void *values,
@@ -803,7 +775,7 @@ static std::size_t driver_histogram_strided_impl(
                   (bins_offset < bins_stride || num_bins == UINT32_MAX),
               "CUDA histogram leading clear exceeds its view or count ABI.");
 
-  auto &kernel = kernels();
+  auto &kernel = kernels(KernelFamily::histogram);
   void *bins_arg = bins;
   std::uint64_t bins_offset_arg = bins_offset;
   std::uint64_t bins_stride_arg = bins_stride;
@@ -842,7 +814,7 @@ static std::size_t driver_histogram_strided_impl(
 void driver_prepare_histogram(CudaTransformValueType value_type,
                               CudaTransformValueType bin_type) {
   const auto [value, bin] = histogram_type_indices(value_type, bin_type);
-  auto &kernel = kernels();
+  auto &kernel = kernels(KernelFamily::histogram);
   (void)kernel.zero_bins[bin];
   (void)kernel.histogram[value][bin];
 }
@@ -908,7 +880,7 @@ std::size_t driver_add_strided(void *src,
                            &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().add[value_type_index(value_type)], "cuda_driver_add", args, {},
+      kernels(KernelFamily::transform).add[value_type_index(value_type)], "cuda_driver_add", args, {},
       grid, kBlockDim, 0, stream);
   return 0;
 }
@@ -950,7 +922,7 @@ std::size_t driver_add_scaled_strided(void *src,
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   const std::size_t type_index =
       value_type == CudaTransformValueType::f32 ? 0 : 1;
-  CUDAContext::get_instance().launch(kernels().add_scaled[type_index],
+  CUDAContext::get_instance().launch(kernels(KernelFamily::transform).add_scaled[type_index],
                                      "cuda_driver_add_scaled", args, {}, grid,
                                      kBlockDim, 0, stream);
   return 0;
@@ -997,14 +969,14 @@ static std::size_t driver_scatter_add_strided_impl(
       &count_arg,   &bound_arg};
   const unsigned grid = count_arg / kBlockDim + (count_arg % kBlockDim != 0);
   CUDAContext::get_instance().launch(
-      kernels().scatter_add[value_type_index(value_type)],
+      kernels(KernelFamily::transform).scatter_add[value_type_index(value_type)],
       "cuda_driver_scatter_add", args, {}, grid, kBlockDim, 0, stream);
   return 0;
 }
 
 void driver_prepare_scatter_add(CudaTransformValueType value_type) {
   const auto type = value_type_index(value_type);
-  (void)kernels().scatter_add[type];
+  (void)kernels(KernelFamily::transform).scatter_add[type];
 }
 
 std::size_t driver_scatter_add_on_stream(void *src,
@@ -1100,7 +1072,7 @@ std::size_t driver_gather_add_strided(void *src,
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   const std::size_t type_index =
       value_type == CudaTransformValueType::f32 ? 0 : 1;
-  CUDAContext::get_instance().launch(kernels().gather_add[type_index],
+  CUDAContext::get_instance().launch(kernels(KernelFamily::transform).gather_add[type_index],
                                      "cuda_driver_gather_add", args, {}, grid,
                                      kBlockDim, 0, stream);
   return 0;
@@ -1126,7 +1098,7 @@ static std::size_t driver_zero_strided_impl(void *dst,
                            &count_arg};
   const unsigned grid = count_arg / kBlockDim + (count_arg % kBlockDim != 0);
   CUDAContext::get_instance().launch(
-      kernels().zero[value_type_index(value_type)], "cuda_driver_zero", args,
+      kernels(KernelFamily::transform).zero[value_type_index(value_type)], "cuda_driver_zero", args,
       {}, grid, kBlockDim, 0, stream);
   return 0;
 }
@@ -1177,8 +1149,17 @@ std::size_t driver_compact_workspace_bytes(int num_items) {
   return compact_workspace_layout(num_items).bytes;
 }
 
-void driver_prepare_compact() {
-  (void)kernels();
+void driver_prepare_compact(int num_items) {
+  const auto layout = compact_workspace_layout(num_items);
+  if (num_items == 0) {
+    (void)kernels(KernelFamily::transform);
+    return;
+  }
+  (void)kernels(KernelFamily::compact);
+  // A single tile publishes its count directly. Prepare the same closure
+  // selected by compact_strided_impl, including its multi-tile prefix scan.
+  if (layout.tiles > 1)
+    (void)kernels(KernelFamily::scan);
 }
 
 static std::size_t compact_strided_impl(
@@ -1237,7 +1218,7 @@ static std::size_t compact_strided_impl(
   std::size_t scan_bytes = 0;
   if (!reuse_prefix) {
     CUDAContext::get_instance().launch(
-        kernels().compact_rank_tiles, "cuda_driver_compact_rank_tiles",
+        kernels(KernelFamily::compact).compact_rank_tiles, "cuda_driver_compact_rank_tiles",
         rank_args, {}, tile_grid, kBlockDim, 0, stream);
     if (tile_count > 1) {
       if (fixed_workspace) {
@@ -1272,7 +1253,7 @@ static std::size_t compact_strided_impl(
       &count_arg,         &words_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().compact_scatter_tiled, "cuda_driver_compact_scatter",
+      kernels(KernelFamily::compact).compact_scatter_tiled, "cuda_driver_compact_scatter",
       scatter_args, {}, grid, kBlockDim, 0, stream);
   return fixed_workspace ? layout.bytes
                          : (*workspace)->allocated_bytes() + scan_bytes;
@@ -1381,7 +1362,7 @@ static std::size_t driver_bucket_builder_strided_impl(
       &cursor_arg,  &cursor_offset_arg,  &cursor_stride_arg,
       &bins_arg};
   const unsigned bins_grid = (bins_arg + kBlockDim - 1u) / kBlockDim;
-  CUDAContext::get_instance().launch(kernels().copy_i32,
+  CUDAContext::get_instance().launch(kernels(KernelFamily::bucket).copy_i32,
                                      "cuda_driver_bucket_cursor", copy_args, {},
                                      bins_grid, kBlockDim, 0, stream);
 
@@ -1405,7 +1386,7 @@ static std::size_t driver_bucket_builder_strided_impl(
         &words_arg};
     const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
     CUDAContext::get_instance().launch(
-        kernels().bucket_scatter, "cuda_driver_bucket_scatter", scatter_args,
+        kernels(KernelFamily::bucket).bucket_scatter, "cuda_driver_bucket_scatter", scatter_args,
         {}, grid, kBlockDim, 0, stream);
   }
   return scan_bytes;
@@ -1416,9 +1397,10 @@ std::size_t driver_bucket_builder_workspace_bytes(int num_items, int num_bins) {
 }
 
 void driver_prepare_bucket_builder() {
-  // The existing module contains zero, histogram, scan, cursor copy and scatter.
-  // Resolve it before capture; preparation performs no user computation.
-  (void)kernels();
+  // Resolve the complete dependency closure before capture.
+  (void)kernels(KernelFamily::bucket);
+  (void)kernels(KernelFamily::histogram);
+  (void)kernels(KernelFamily::scan);
 }
 
 void driver_bucket_builder_with_workspace(void *keys,
@@ -1500,7 +1482,7 @@ static std::size_t driver_grouped_reduce_strided_impl(void *keys,
 
 void driver_prepare_grouped_reduce(CudaTransformValueType value_type) {
   const auto type = value_type_index(value_type);
-  const auto &loaded = kernels();
+  const auto &loaded = kernels(KernelFamily::transform);
   (void)loaded.zero[type];
   (void)loaded.scatter_add[type];
 }
@@ -1556,7 +1538,7 @@ void driver_sparse_diagonal_apply_f32(void *inverse_diagonal,
       &inverse_arg, &input_arg, &output_arg, &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_diagonal_apply_f32,
+      kernels(KernelFamily::sparse_solver).sparse_diagonal_apply_f32,
       "cuda_driver_sparse_diagonal_apply_f32", args, {}, grid, kBlockDim, 0,
       stream);
 }
@@ -1582,7 +1564,7 @@ void driver_sparse_diagonal_refresh_f32(void *values,
                            &status_arg, &rows_arg, &nnz_arg};
   const unsigned grid = (rows_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_diagonal_refresh_f32,
+      kernels(KernelFamily::sparse_solver).sparse_diagonal_refresh_f32,
       "cuda_driver_sparse_diagonal_refresh_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1619,7 +1601,7 @@ void driver_sparse_block_cholesky_refresh_f32(
   const unsigned grid =
       (block_rows_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_block_cholesky_refresh_f32,
+      kernels(KernelFamily::sparse_solver).sparse_block_cholesky_refresh_f32,
       "cuda_driver_sparse_block_cholesky_refresh_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1648,7 +1630,7 @@ void driver_sparse_block_diagonal_apply_f32(void *factor_blocks,
   const unsigned grid =
       (block_rows_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_block_diagonal_apply_f32,
+      kernels(KernelFamily::sparse_solver).sparse_block_diagonal_apply_f32,
       "cuda_driver_sparse_block_diagonal_apply_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1681,7 +1663,7 @@ void driver_sparse_minres_scalar_f32(void *initial_residual_squared,
                            &stage_arg, &limit_arg, &preconditioner_arg,
                            &stop_arg};
   CUDAContext::get_instance().launch(
-      kernels().sparse_minres_scalar_f32,
+      kernels(KernelFamily::sparse_solver).sparse_minres_scalar_f32,
       "cuda_driver_sparse_minres_scalar_f32", args, {}, 1, 1, 0, stream);
 }
 
@@ -1707,7 +1689,7 @@ void driver_sparse_minres_vector_state_f32(void *source,
                            &count_arg, &coefficient_arg, &add_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_minres_vector_state_f32,
+      kernels(KernelFamily::sparse_solver).sparse_minres_vector_state_f32,
       "cuda_driver_sparse_minres_vector_state_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1742,7 +1724,7 @@ void driver_sparse_minres_commit_f32(void *v,
                            &state_arg, &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_minres_commit_f32,
+      kernels(KernelFamily::sparse_solver).sparse_minres_commit_f32,
       "cuda_driver_sparse_minres_commit_f32", args, {}, grid, kBlockDim,
       0, stream);
 }
@@ -1772,7 +1754,7 @@ void driver_sparse_bicgstab_scalar_f32(void *initial_residual_squared,
                            &state_arg, &absolute_tolerance,
                            &relative_tolerance, &stage_arg, &limit_arg};
   CUDAContext::get_instance().launch(
-      kernels().sparse_bicgstab_scalar_f32,
+      kernels(KernelFamily::sparse_solver).sparse_bicgstab_scalar_f32,
       "cuda_driver_sparse_bicgstab_scalar_f32", args, {}, 1, 1, 0,
       stream);
 }
@@ -1797,7 +1779,7 @@ void driver_sparse_bicgstab_direction_f32(void *residual,
                            &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_bicgstab_direction_f32,
+      kernels(KernelFamily::sparse_solver).sparse_bicgstab_direction_f32,
       "cuda_driver_sparse_bicgstab_direction_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1821,7 +1803,7 @@ void driver_sparse_bicgstab_intermediate_f32(void *residual,
                            &intermediate_arg, &state_arg, &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_bicgstab_intermediate_f32,
+      kernels(KernelFamily::sparse_solver).sparse_bicgstab_intermediate_f32,
       "cuda_driver_sparse_bicgstab_intermediate_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1854,7 +1836,7 @@ void driver_sparse_bicgstab_commit_f32(void *solution_direction,
       &residual_arg, &state_arg, &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_bicgstab_commit_f32,
+      kernels(KernelFamily::sparse_solver).sparse_bicgstab_commit_f32,
       "cuda_driver_sparse_bicgstab_commit_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1887,7 +1869,7 @@ void driver_sparse_bicgstab_reconcile_f32(void *true_residual,
       &state_arg, &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_bicgstab_reconcile_f32,
+      kernels(KernelFamily::sparse_solver).sparse_bicgstab_reconcile_f32,
       "cuda_driver_sparse_bicgstab_reconcile_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1923,14 +1905,14 @@ void driver_sparse_gmres_multi_dot_f32(void *basis,
       &basis_arg, &work_arg, &partials_arg, &state_arg, &count_arg,
       &stride_arg, &basis_count_arg, &group_count_arg};
   CUDAContext::get_instance().launch(
-      kernels().sparse_gmres_multi_dot_partial_f32,
+      kernels(KernelFamily::sparse_solver).sparse_gmres_multi_dot_partial_f32,
       "cuda_driver_sparse_gmres_multi_dot_partial_f32", partial_args, {},
       group_count_arg, kBlockDim, 0, stream);
   std::vector<void *> final_args{
       &partials_arg, &projection_arg, &state_arg, &group_count_arg,
       &basis_count_arg};
   CUDAContext::get_instance().launch(
-      kernels().sparse_gmres_multi_dot_final_f32,
+      kernels(KernelFamily::sparse_solver).sparse_gmres_multi_dot_final_f32,
       "cuda_driver_sparse_gmres_multi_dot_final_f32", final_args, {},
       basis_count_arg, kBlockDim, 0, stream);
 }
@@ -1967,7 +1949,7 @@ void driver_sparse_gmres_projection_f32(void *basis,
       &count_arg, &stride_arg, &restart_arg, &step_arg, &pass_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_gmres_projection_f32,
+      kernels(KernelFamily::sparse_solver).sparse_gmres_projection_f32,
       "cuda_driver_sparse_gmres_projection_f32", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -1999,7 +1981,7 @@ void driver_sparse_gmres_basis_f32(void *source,
                            &mode_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_gmres_basis_f32,
+      kernels(KernelFamily::sparse_solver).sparse_gmres_basis_f32,
       "cuda_driver_sparse_gmres_basis_f32", args, {}, grid, kBlockDim, 0,
       stream);
 }
@@ -2025,7 +2007,7 @@ void driver_sparse_gmres_combine_f32(void *basis,
                            &state_arg, &count_arg, &stride_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_gmres_combine_f32,
+      kernels(KernelFamily::sparse_solver).sparse_gmres_combine_f32,
       "cuda_driver_sparse_gmres_combine_f32", args, {}, grid, kBlockDim, 0,
       stream);
 }
@@ -2078,7 +2060,7 @@ void driver_sparse_gmres_scalar_f32(void *initial_residual_squared,
       &absolute_tolerance, &relative_tolerance, &restart_arg,
       &max_iterations_arg, &stage_arg, &step_arg, &limit_arg};
   CUDAContext::get_instance().launch(
-      kernels().sparse_gmres_scalar_f32,
+      kernels(KernelFamily::sparse_solver).sparse_gmres_scalar_f32,
       "cuda_driver_sparse_gmres_scalar_f32", args, {}, 1, 1, 0, stream);
 }
 
@@ -2115,7 +2097,7 @@ void driver_sparse_assembly_pack_validate(void *triplet_rows,
       &columns_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_assembly_pack_validate,
+      kernels(KernelFamily::sparse_assembly).sparse_assembly_pack_validate,
       "cuda_driver_sparse_assembly_pack_validate", args, {}, grid, kBlockDim,
       0, stream);
 }
@@ -2148,7 +2130,7 @@ void driver_sparse_assembly_pack_packed_validate(void *packed_triplets,
       &rows_arg,            &columns_arg};
   const unsigned grid = (capacity_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_assembly_pack_packed_validate,
+      kernels(KernelFamily::sparse_assembly).sparse_assembly_pack_packed_validate,
       "cuda_driver_sparse_assembly_pack_packed_validate", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -2173,7 +2155,7 @@ void driver_sparse_assembly_mark_segments(void *sorted_keys,
       &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_assembly_mark_segments,
+      kernels(KernelFamily::sparse_assembly).sparse_assembly_mark_segments,
       "cuda_driver_sparse_assembly_mark_segments", args, {}, grid, kBlockDim,
       0, stream);
 }
@@ -2203,7 +2185,7 @@ void driver_sparse_assembly_scatter_segments(void *sorted_keys,
       &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_assembly_scatter_segments,
+      kernels(KernelFamily::sparse_assembly).sparse_assembly_scatter_segments,
       "cuda_driver_sparse_assembly_scatter_segments", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -2230,7 +2212,7 @@ void driver_sparse_assembly_reduce_segments(void *sorted_values,
       &active_count_arg, &control_arg, &count_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_assembly_reduce_segments,
+      kernels(KernelFamily::sparse_assembly).sparse_assembly_reduce_segments,
       "cuda_driver_sparse_assembly_reduce_segments", args, {}, grid,
       kBlockDim, 0, stream);
 }
@@ -2263,7 +2245,7 @@ void driver_sparse_assembly_emit_csr(void *unique_keys,
       &columns_arg};
   const unsigned grid = (capacity_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_assembly_emit_csr,
+      kernels(KernelFamily::sparse_assembly).sparse_assembly_emit_csr,
       "cuda_driver_sparse_assembly_emit_csr", args, {}, grid, kBlockDim, 0,
       stream);
 }
@@ -2281,7 +2263,7 @@ void driver_sparse_assembly_finalize_control(void *active_count,
   std::vector<void *> args{
       &active_count_arg, &control_arg, &capacity_arg};
   CUDAContext::get_instance().launch(
-      kernels().sparse_assembly_finalize_control,
+      kernels(KernelFamily::sparse_assembly).sparse_assembly_finalize_control,
       "cuda_driver_sparse_assembly_finalize_control", args, {}, 1, 1, 0,
       stream);
 }
@@ -2306,7 +2288,7 @@ void driver_sparse_csr_spmv_f32(void *row_offsets,
                            &input_arg, &output_arg, &rows_arg};
   const unsigned grid = (rows_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_csr_spmv_f32, "cuda_driver_sparse_csr_spmv_f32", args,
+      kernels(KernelFamily::sparse_assembly).sparse_csr_spmv_f32, "cuda_driver_sparse_csr_spmv_f32", args,
       {}, grid, kBlockDim, 0, stream);
 }
 
@@ -2338,7 +2320,7 @@ void driver_sparse_bsr_spmv_f32(void *row_offsets,
                            &block_size_arg};
   const unsigned grid = (rows + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().sparse_bsr_spmv_f32, "cuda_driver_sparse_bsr_spmv_f32", args,
+      kernels(KernelFamily::sparse_assembly).sparse_bsr_spmv_f32, "cuda_driver_sparse_bsr_spmv_f32", args,
       {}, grid, kBlockDim, 0, stream);
 }
 
@@ -2434,7 +2416,7 @@ SortWorkspaceLayout sort_workspace_layout(int num_items,
 }  // namespace
 
 void driver_prepare_sort() {
-  (void)kernels();
+  (void)kernels(KernelFamily::sort);
 }
 
 std::size_t driver_stable_sort_workspace_bytes(int num_items,
@@ -2509,7 +2491,7 @@ static std::size_t stable_radix_sort_impl(
   void *values_output =
       has_values ? static_cast<void *>(base + values_output_offset) : nullptr;
 
-  auto &kernel = kernels();
+  auto &kernel = kernels(KernelFamily::sort);
   const std::size_t type_index = sort_key_type_index(key_type);
   const std::size_t width_index = key_size == sizeof(std::uint32_t) ? 0 : 1;
   std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);

@@ -2239,6 +2239,12 @@ CPU/CUDA 的 runtime-owned LLVM 模块也按实际使用初始化根存储：加
 Windows CPU/CUDA 检查覆盖按需分配数量、视图先于 kernel、实际梯度、非 demoted dense
 列表、多模块及独立/借用的失败退休；Vulkan 的初值、根视图和梯度回归通过。
 
+CUDA 原生 primitive 按实际使用的功能家族准备独立辅助模块，组合操作在 Graph 捕获前
+准备完整依赖；compact 仅在分块布局确实需要时准备前缀扫描模块。这些公共模块属于
+共享 runtime，不会在每份应用归档中重复打包。应用导出为 cubin 后，内部 runtime/helper
+PTX 首次使用仍可能触发驱动编译；已有驱动缓存可以降低该成本。仅将应用导出为 cubin，
+不代表 runtime 初始化已经完全无需编译。
+
 `Module.archive()` 默认省略 LLVM 的调试用 `metadata.json` 和缓存锁文件。
 CPU/CUDA 仍使用原有的 `metadata.tcb` 与 `aot_metadata.json`；Vulkan 加载所需的
 `metadata.json` 始终保留。需要调试文件时使用

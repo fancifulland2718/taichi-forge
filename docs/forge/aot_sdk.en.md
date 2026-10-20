@@ -2928,6 +2928,15 @@ allocation counts, views before kernels, actual gradients, non-demoted dense
 lists, multiple modules and standalone/borrowed failure retirement. Vulkan
 initial-state, root-view and gradient regressions also pass.
 
+CUDA native primitives prepare separate helper modules for the operation
+families they use. Composite operations prepare their dependencies before
+Graph capture; compact prepares a prefix-scan helper only when its tile layout
+needs one. These modules belong to the shared runtime, not each application
+archive. An application exported as cubin can still incur first-use driver
+compilation for internal runtime/helper PTX. A populated driver cache reduces
+that cost; cubin application export alone does not promise compilation-free
+runtime initialization.
+
 `Module.archive()` omits LLVM's diagnostic `metadata.json` and cache lock file
 by default. CPU/CUDA loading still uses the unchanged `metadata.tcb` and
 `aot_metadata.json`; Vulkan's required `metadata.json` remains in the archive.

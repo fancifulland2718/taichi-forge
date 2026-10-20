@@ -1,8 +1,10 @@
-// Source of the low-PTX CUDA scan/reduce/histogram provider.
+// Source of the low-PTX CUDA primitive families.
 //
 // This file is not part of the normal CMake target.  It is compiled with the
 // repository-provisioned Clang in CUDA device-only mode, with -nocudainc and
-// -nocudalib, and the resulting PTX is embedded in hierarchical_ptx.inc.h.
+// -nocudalib and a TI_CUDA_PRIMITIVE_<FAMILY> define. Each family has its own
+// module in hierarchical_ptx.inc.h so preparing one operation does not compile
+// unrelated entry points. Device mathematics stays shared in this source.
 // Keep this source free of CUDA Toolkit headers and runtime calls.
 
 #define __device__ __attribute__((device))
@@ -496,6 +498,7 @@ __device__ void reduce_blocks_impl(const u8 *values,
                              output_stride, op, warp_sums);                    \
   }
 
+#if defined(TI_CUDA_PRIMITIVE_SCAN)
 DEFINE_SCAN_KERNEL(scan_blocks_i32, i32)
 DEFINE_SCAN_KERNEL(scan_blocks_u32, u32)
 DEFINE_SCAN_KERNEL(scan_blocks_f32, float)
@@ -516,13 +519,16 @@ DEFINE_UNIFORM_KERNEL(uniform_add_f32, float)
 DEFINE_UNIFORM_KERNEL(uniform_add_i64, i64)
 DEFINE_UNIFORM_KERNEL(uniform_add_u64, u64)
 DEFINE_UNIFORM_KERNEL(uniform_add_f64, double)
+#endif
 
+#if defined(TI_CUDA_PRIMITIVE_REDUCE)
 DEFINE_REDUCE_KERNEL(reduce_blocks_i32, i32)
 DEFINE_REDUCE_KERNEL(reduce_blocks_u32, u32)
 DEFINE_REDUCE_KERNEL(reduce_blocks_f32, float)
 DEFINE_REDUCE_KERNEL(reduce_blocks_i64, i64)
 DEFINE_REDUCE_KERNEL(reduce_blocks_u64, u64)
 DEFINE_REDUCE_KERNEL(reduce_blocks_f64, double)
+#endif
 
 __device__ i32 atomic_add_i32(i32 *address, i32 value) {
   i32 old;
@@ -596,6 +602,7 @@ __device__ void zero_bins_impl(u8 *bins,
                                    bins, bins_offset, bins_stride, num_bins);  \
   }
 
+#if defined(TI_CUDA_PRIMITIVE_HISTOGRAM)
 extern "C" __global__ void zero_bins_i32(u8 *bins,
                                          u64 bins_offset,
                                          u64 bins_stride,
@@ -614,6 +621,7 @@ DEFINE_HISTOGRAM_KERNEL(histogram_i32_i32, i32, i32)
 DEFINE_HISTOGRAM_KERNEL(histogram_u32_i32, u32, i32)
 DEFINE_HISTOGRAM_KERNEL(histogram_i32_i64, i32, i64)
 DEFINE_HISTOGRAM_KERNEL(histogram_u32_i64, u32, i64)
+#endif
 
 __device__ u32 atomic_add_u32(u32 *address, u32 value) {
   u32 old;
@@ -832,6 +840,7 @@ __device__ void gather_add_strided_impl(const u8 *src,
   DEFINE_SCATTER_ADD_KERNEL(scatter_add_strided_##SUFFIX, TYPE) \
   DEFINE_ZERO_KERNEL(zero_strided_##SUFFIX, TYPE)
 
+#if defined(TI_CUDA_PRIMITIVE_TRANSFORM)
 DEFINE_TYPED_LINEAR_KERNELS(i32, i32)
 DEFINE_TYPED_LINEAR_KERNELS(u32, u32)
 DEFINE_TYPED_LINEAR_KERNELS(f32, float)
@@ -842,7 +851,9 @@ DEFINE_ADD_SCALED_KERNEL(add_scaled_strided_f32, float)
 DEFINE_ADD_SCALED_KERNEL(add_scaled_strided_f64, double)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f32, float)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f64, double)
+#endif
 
+#if defined(TI_CUDA_PRIMITIVE_SPARSE_SOLVER)
 __device__ void sparse_refresh_atomic_min_u32(u32 *address, u32 value) {
   u32 previous;
   asm volatile("atom.global.min.u32 %0, [%1], %2;"
@@ -2247,6 +2258,9 @@ extern "C" __global__ void sparse_block_diagonal_apply_f32(
   }
 }
 
+#endif
+
+#if defined(TI_CUDA_PRIMITIVE_COMPACT)
 extern "C" __global__ void compact_rank_tiles_i32(const u8 *flags,
                                                   u64 flags_offset,
                                                   u64 flags_stride,
@@ -2344,6 +2358,9 @@ extern "C" __global__ void compact_scatter_tiled_words(
   }
 }
 
+#endif
+
+#if defined(TI_CUDA_PRIMITIVE_BUCKET)
 extern "C" __global__ void copy_i32_strided(const u8 *src,
                                             u64 src_offset,
                                             u64 src_stride,
@@ -2390,6 +2407,9 @@ extern "C" __global__ void bucket_scatter_words(const u8 *keys,
   }
 }
 
+#endif
+
+#if defined(TI_CUDA_PRIMITIVE_SORT)
 template <typename T>
 __device__ u32 sortable_key32(T value, i32 nan_policy);
 
@@ -2719,6 +2739,9 @@ extern "C" __global__ void radix_copy_words(const u32 *src,
   }
 }
 
+#endif
+
+#if defined(TI_CUDA_PRIMITIVE_SPARSE_ASSEMBLY)
 __device__ bool sparse_assembly_finite(float value) {
   return (bit_cast<u32>(value) & 0x7f800000u) != 0x7f800000u;
 }
@@ -3058,3 +3081,4 @@ extern "C" __global__ void sparse_bsr_spmv_f32(
     output[row] = sum;
   }
 }
+#endif

@@ -149,7 +149,7 @@ class CudaCompact final : public CompactBase {
       return;
     auto &context = CUDAContext::get_instance();
     auto guard = context.get_guard();
-    cuda::driver_prepare_compact();
+    cuda::driver_prepare_compact(static_cast<int>(operation_.size));
     bytes_ =
         cuda::driver_compact_workspace_bytes(static_cast<int>(operation_.size));
     Device::AllocParams params{};

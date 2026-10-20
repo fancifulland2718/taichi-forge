@@ -875,6 +875,7 @@ bool DeviceGMRES::try_submit_cuda_cycle(
   } else {
     bsr->spmv(address(current_), address(work_), nullptr);
   }
+  cuda::driver_prepare_sparse_solve();
   const CUstream capture_stream = cuda_replay_->ensure_capture_stream();
   driver.stream_synchronize(capture_stream);
   auto &cublas = CUBLASDriver::get_instance();

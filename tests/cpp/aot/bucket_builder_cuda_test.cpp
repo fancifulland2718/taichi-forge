@@ -3,6 +3,7 @@
 #ifdef TI_WITH_CUDA
 #include <algorithm>
 #include <array>
+#include <future>
 #include <limits>
 #include <vector>
 
@@ -195,6 +196,24 @@ TEST(BucketBuilderCuda, FixedCaptureBoundariesPayloadsAndIndependentOwners) {
   for (int bins : {1, 5, 1024, 1025})
     for (int words : {1, 3})
       check_capture(bins, words);
+}
+
+TEST(BucketBuilderCuda, ConcurrentFamilyPreparationKeepsCaptureDependencies) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  // Initialize the owned context on this thread, then race overlapping cold
+  // families. No operation may observe another family's partially filled set.
+  (void)CUDAContext::get_instance();
+  auto scan = std::async(std::launch::async, cuda::driver_prepare_scan);
+  auto compact = std::async(std::launch::async, [] {
+    cuda::driver_prepare_compact(1025);
+  });
+  auto bucket =
+      std::async(std::launch::async, cuda::driver_prepare_bucket_builder);
+  ASSERT_NO_THROW(scan.get());
+  ASSERT_NO_THROW(compact.get());
+  ASSERT_NO_THROW(bucket.get());
+  check_capture(1025, 3);
 }
 
 TEST(BucketBuilderCuda, WorkspaceUsesCountsOnlyAndHasNoArbitraryBinCap) {
