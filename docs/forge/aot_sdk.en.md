@@ -4524,7 +4524,7 @@ has a 512-byte catalog and adds 326 bytes to the compressed TCM over an empty
 module, with no executable artifact. These sizes describe that small fixture.
 
 Explicit execution plans can allocate typed private parents and project their
-members with plan version 23 and matching private ABI119 components:
+members with plan version 23 and matching private ABI120 components:
 
 ```python
 resources = [
@@ -4541,6 +4541,23 @@ dotted path resolves through the actual target layout during preparation.
 Members allocate no storage; they retain their parent and preserve record
 stride, member offset and scalar type. Shape-only references do not allocate
 the parent.
+
+Plan version 24 can freeze the complete structure ABI and outer shape:
+
+```python
+constraints = [
+    dict(kind="struct_array_layout", array="state",
+         layout="records", exact_shape=[17]),
+]
+```
+
+`layout` refers to a named layout in the consuming module. Equal structural
+types published under different names are compatible; equal record widths
+alone are insufficient. Public bindings are checked before private resource
+resolution, and private descriptors before allocation or initialization.
+The constraint is checked again for a new CUDA binding-family frame; replay
+does not repeat it. Ordinary `ndarray_member` declarations without this
+constraint continue to resolve against the supplied parent layout.
 
 The `builtin/transform` v1 operation accepts `strategy="strided_scalar"` for a
 positive, unique scalar record mapping, with the existing `size`, `dtype`,

@@ -1311,6 +1311,32 @@ TEST(ExecutionPlan, TypedLayoutRejectsEqualWidthReinterpretation) {
   layout_only.dtype.clear();
   EXPECT_NO_THROW(validate_native_array_layout(array, layout_only));
 }
+TEST(ExecutionPlan, StructureConstraintsRequireNamedLayoutAndExactShape) {
+  const auto document = [](const std::string &constraint, int version = 24) {
+    return std::string("{\"version\":") + std::to_string(version) +
+        R"(,"operations":[{"kind":"copy","source":"records","destination":"out"}],
+           "constraints":[)" + constraint + "]}";
+  };
+  const std::string valid =
+      R"({"kind":"struct_array_layout","array":"records","layout":"particle","exact_shape":[17,0]})";
+  const auto plan = ExecutionPlan::parse(document(valid));
+  const auto &required =
+      std::get<ExecutionPlan::StructArrayLayout>(plan.constraints[0]);
+  EXPECT_EQ(required.array, "records");
+  EXPECT_EQ(required.layout, "particle");
+  EXPECT_EQ(required.exact_shape, (std::vector<std::uint64_t>{17, 0}));
+  EXPECT_THROW(ExecutionPlan::parse(document(valid, 23)), std::invalid_argument);
+  for (const auto *invalid : {
+      R"({"kind":"struct_array_layout","array":"records","layout":"","exact_shape":[17]})",
+      R"({"kind":"struct_array_layout","array":"unused","layout":"particle","exact_shape":[17]})",
+      R"({"kind":"struct_array_layout","array":"records","layout":"particle","exact_shape":[true]})",
+      R"({"kind":"struct_array_layout","array":"records","layout":"particle","exact_shape":[-1]})",
+      R"({"kind":"struct_array_layout","array":"records","layout":"particle","exact_shape":null})",
+      R"({"kind":"struct_array_layout","array":"records","layout":"particle"})",
+      R"({"kind":"struct_array_layout","array":"records","layout":"particle","exact_shape":[17],"dtype":"f32"})"})
+    EXPECT_THROW(ExecutionPlan::parse(document(invalid)), std::invalid_argument);
+}
+
 TEST(ExecutionPlan, StructuredMembersRetainTheirParentsWithoutPacking) {
   const auto plan = ExecutionPlan::parse(R"({
     "version":23,"operations":[{"kind":"native","provider":"builtin",

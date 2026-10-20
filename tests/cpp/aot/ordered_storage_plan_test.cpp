@@ -83,6 +83,23 @@ TEST(OrderedStoragePlan, ExpandsBindingsAndConstraintsButKeepsCodeAndAllocator) 
   EXPECT_EQ(wide.resources.declarations.size(), 133);
 }
 
+TEST(OrderedStoragePlan, StructureConstraintsFollowEachPrivateSlot) {
+  const auto plan = ExecutionPlan::parse(R"({"version":24,
+    "operations":[{"kind":"copy","source":"state","destination":"output"}],
+    "resources":[{"kind":"ndarray","name":"state","layout":"particle","shape":[17]}],
+    "constraints":[{"kind":"struct_array_layout","array":"state","layout":"particle","exact_shape":[17]}],
+    "storage_recipe":{"kind":"ordered_temporary_ring","version":1,"capacity":3,"arrays":["state"]}})");
+  ASSERT_EQ(plan.operations.size(), 3);
+  ASSERT_EQ(plan.constraints.size(), 3);
+  for (std::size_t i = 0; i < 3; ++i) {
+    const auto &required =
+        std::get<ExecutionPlan::StructArrayLayout>(plan.constraints[i]);
+    EXPECT_EQ(required.array, std::get<ExecutionPlan::Copy>(plan.operations[i]).source);
+    EXPECT_EQ(required.layout, "particle");
+    EXPECT_EQ(required.exact_shape, (std::vector<std::uint64_t>{17}));
+  }
+}
+
 TEST(OrderedStoragePlan, GroupsKeepTheirAllocationsWithoutProductFrames) {
   const auto plan = ExecutionPlan::parse(grouped(R"([
     {"capacity":3,"arrays":["scratch"]},

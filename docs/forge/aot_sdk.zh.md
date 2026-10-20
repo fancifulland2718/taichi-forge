@@ -3456,7 +3456,7 @@ Windows CPU/CUDA/Vulkan 的正常安装验证覆盖无kernel目录、独立／�
 坏元数据及退休，并回归已有结构执行和后段浮点反向。双名称单类型夹具的目录为512B，
 压缩TCM相对空模块增加326B，无可执行产物；这些数字仅描述该小夹具。
 
-显式执行计划可使用 plan23 和配套私有 ABI119 组件分配私有结构父数组，再投影成员：
+显式执行计划可使用 plan23 和配套私有 ABI120 组件分配私有结构父数组，再投影成员：
 
 ```python
 resources = [
@@ -3470,6 +3470,20 @@ resources = [
 结构 ndarray，或按完整记录切片的 packed `ndarray_view`；带点路径在准备时按目标
 布局解析。成员不分配存储，保留父对象、记录步幅、成员偏移和标量类型；仅查询 shape
 不会迫使父数组分配。
+
+plan24 可冻结完整结构 ABI 和外层 shape：
+
+```python
+constraints = [
+    dict(kind="struct_array_layout", array="state",
+         layout="records", exact_shape=[17]),
+]
+```
+
+`layout` 引用消费模块内的命名布局。不同名称公布的相同结构类型兼容，仅记录宽度
+相同则不够。公开绑定在私有资源解析前检查，私有描述符在分配或初始化前检查。
+CUDA binding family 的新参数帧会重新校验，重放时不重复检查。未声明此约束的普通
+`ndarray_member` 仍按实际传入的父数组布局解析。
 
 `builtin/transform` v1 可指定 `strategy="strided_scalar"`，接受正向、唯一的标量
 记录映射，并沿用 `size`、`dtype`、`scale_bits`、`bias_bits` 参数。CPU/CUDA/Vulkan

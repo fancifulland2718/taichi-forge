@@ -75,5 +75,7 @@ ExecutionResourceBindings bind_execution_resources(
     const std::unordered_set<std::string> &frozen_metadata = {},
     const std::function<std::shared_ptr<taichi::lang::NativeMemoryAllocator>(
         const std::string &)> &allocator = {},
-    bool prepared_external_access = false);
+    bool prepared_external_access = false,
+    // Called after the metadata closure, before allocators, uploads or aliases.
+    const std::function<void()> &validate_metadata = {});
 }  // namespace capi

@@ -21,7 +21,7 @@ namespace taichi::lang::aot {
 // handles, backend commands and storage ownership. Binding consumes this only
 // in the cold phase; replay retains no JSON or symbolic argument lookups.
 struct ExecutionPlan {
-  static constexpr std::uint32_t kMaxVersion = 23;
+  static constexpr std::uint32_t kMaxVersion = 24;
   struct Kernel {
     struct BoundedRange {
       bool cuda{false};
@@ -114,6 +114,11 @@ struct ExecutionPlan {
     std::string array;
     NativeArrayLayoutRequirement required;
   };
+  struct StructArrayLayout {
+    std::string array;
+    std::string layout;
+    std::vector<std::uint64_t> exact_shape;
+  };
   struct Disjoint {
     std::string left;
     std::string right;
@@ -134,7 +139,8 @@ struct ExecutionPlan {
     std::vector<std::string> right_path;
   };
   using Constraint =
-      std::variant<ArrayLayout, Disjoint, DisjointWrites, ResourceAlias>;
+      std::variant<ArrayLayout, StructArrayLayout, Disjoint, DisjointWrites,
+                   ResourceAlias>;
   std::vector<Constraint> constraints;
   std::vector<Operation> operations;
   std::vector<Operation> initialization;

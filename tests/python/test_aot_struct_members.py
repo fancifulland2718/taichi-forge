@@ -28,6 +28,10 @@ def test_structure_member_resources_and_native_transform(tmp_path):
             if ti.cfg.arch == ti.vulkan else [])
     module = ti.aot.Module(caps=caps)
     module.add_ndarray_layout("records", record)
+    module.add_ndarray_layout("records_alias", record)
+    # Identical stride and selected scalar members, different complete ABI.
+    module.add_ndarray_layout("other_records", ti.types.struct(
+        tag=ti.u8, value=ti.f32, other=ti.f32, tail=ti.i8))
 
     @ti.kernel
     def read_records(records: ti.types.ndarray(record, ndim=1), output: ti.types.ndarray(ti.f32, ndim=1)):
@@ -77,6 +81,12 @@ def test_structure_member_resources_and_native_transform(tmp_path):
     assert json.loads(plan.to_json())["version"] == 23
     assert set(plan.argument_names) == {"records_out", "output", "energy", "dx", "dy"}
     module.add_execution_plan("private", plan)
+    for name, expected in (("frozen_private", "records"), ("bad_private", "other_records")):
+        module.add_execution_plan(name, ti.aot.ExecutionPlan(
+            member_ops, resources=private, gradients=dict(output="dx", energy="dy"),
+            constraints=[dict(kind="struct_array_layout", array="state",
+                              layout=expected, exact_shape=[17])],
+        ))
     module.add_execution_plan(
         "inplace", ti.aot.ExecutionPlan(
             [transform("other", "other"), dict(kind="copy", source="state", destination="records_out")],
@@ -90,6 +100,17 @@ def test_structure_member_resources_and_native_transform(tmp_path):
     ]
     module.add_execution_plan("external", ti.aot.ExecutionPlan(
         [transform("value", "other")], resources=external))
+    frozen = [dict(kind="struct_array_layout", array="records",
+                   layout="records", exact_shape=[17])]
+    module.add_execution_plan("frozen_external", ti.aot.ExecutionPlan(
+        [transform("value", "other")], resources=external, constraints=frozen))
+    module.add_execution_plan("frozen_empty", ti.aot.ExecutionPlan(
+        [dict(kind="copy", source="records", destination="output")],
+        constraints=[dict(frozen[0], exact_shape=[0])]))
+    if ti.cfg.arch == ti.cuda:
+        module.add_execution_plan("frozen_family", ti.aot.ExecutionPlan(
+            [transform("value", "other")], resources=external, constraints=frozen,
+            binding_strategy="cuda_immutable_argument_frames"))
     module.add_execution_plan("packed_output", ti.aot.ExecutionPlan(
         [transform("value", "output")], resources=external))
     for name, operation, resources in (

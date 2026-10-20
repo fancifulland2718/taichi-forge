@@ -860,6 +860,49 @@ static TiPreparedExecution prepare_execution_plan_impl(
   for (const auto &[name, binding] : layouts)
     if (!frozen_metadata.count(name) && binding->gradient)
       rt.get_memory(binding->gradient->memory, bool(domain));
+  // A frozen structure source carries its whole named ABI, not merely a member
+  // path or record width. Check public sources before resolving private data;
+  // private descriptors are checked after metadata resolution, before allocation.
+  auto validate_structure = [&](const aot::ExecutionPlan::StructArrayLayout &required,
+                                bool private_storage) {
+    const auto argument = arguments.find(required.array);
+    const auto binding = layouts.find(required.array);
+    if (argument == arguments.end() ||
+        argument->second->type != TI_ARGUMENT_TYPE_NDARRAY ||
+        binding == layouts.end() || !binding->second->layout ||
+        binding->second->gradient ||
+        binding->second->layout_version != aot::StructLayout::kVersion)
+      throw MemoryBindingError("Structure constraint requires a typed ndarray: " +
+                               required.array);
+    const auto &provided = rt.get_layout(binding->second->layout);
+    const auto &expected = rt.get_layout(mod.get_layout_handle(required.layout));
+    if (provided.type != expected.type || provided.stride != expected.stride)
+      throw MemoryBindingError("Structure layout does not match frozen source: " +
+                               required.array);
+    const auto &array = argument->second->value.ndarray;
+    capi::struct_ndarray_storage_layout(array, provided);
+    if (required.exact_shape.size() != array.shape.dim_count ||
+        !std::equal(required.exact_shape.begin(), required.exact_shape.end(),
+                    array.shape.dims))
+      throw MemoryBindingError("Structure shape does not match frozen source: " +
+                               required.array);
+    if (!private_storage)
+      capi::validated_struct_ndarray_bytes(
+          rt, array, binding->second->layout, binding->second->layout_version,
+          bool(domain));
+    used_bindings.insert(required.array);
+  };
+  std::vector<const aot::ExecutionPlan::StructArrayLayout *> private_structures;
+  for (const auto &constraint : plan.constraints) {
+    const auto *required =
+        std::get_if<aot::ExecutionPlan::StructArrayLayout>(&constraint);
+    if (!required || (rebinding && !plan.replay_bindings.count(required->array)))
+      continue;
+    if (arguments.count(required->array))
+      validate_structure(*required, false);
+    else
+      private_structures.push_back(required);
+  }
   // Optional providers are admitted before allocating private plan resources.
   // There is no dependency probing on replay, nor on unrelated operations.
   auto local_preparation =
@@ -1067,7 +1110,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
   auto resource_bindings = capi::bind_execution_resources(
       rt, mod, resource_description, arguments, layouts,
       family ? family->arrays.get() : nullptr, frozen_metadata,
-      resolve_allocator, bool(domain));
+      resolve_allocator, bool(domain), [&] {
+        for (const auto *required : private_structures)
+          validate_structure(*required, true);
+      });
   prepared->resources = std::move(resource_bindings.storage);
   prepared->memories.insert(prepared->memories.end(),
                              resource_bindings.native_memories.begin(),
@@ -1143,6 +1189,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
   // Resolve certificates before creating provider state or recording commands.
   // These maps disappear after prepare; replay carries only frozen bindings.
   for (const auto &constraint : plan.constraints) {
+    if (std::holds_alternative<aot::ExecutionPlan::StructArrayLayout>(constraint))
+      continue;  // Validated before allocating private resources.
     if (rebinding) {
       bool relevant = true;
       const auto used = [&](const std::string &name) {

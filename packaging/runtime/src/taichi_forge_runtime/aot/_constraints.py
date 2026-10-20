@@ -43,6 +43,15 @@ def validate_constraints(constraints, used):
                     integer(axis, positive=key == "element_shape")
             integer(constraint["record_bytes"], positive=True)
             integer(constraint["alignment"], positive=True)
+        elif constraint.get("kind") == "struct_array_layout":
+            if set(constraint) != {"kind", "array", "layout", "exact_shape"}:
+                raise ValueError("Invalid structure layout constraint fields")
+            binding(constraint["array"])
+            _name(constraint["layout"])
+            if not isinstance(constraint["exact_shape"], list):
+                raise ValueError("Constraint shape must be a list")
+            for axis in constraint["exact_shape"]:
+                integer(axis)
         elif constraint.get("kind") == "disjoint":
             if set(constraint) - {"allow_same_view"} != {"kind", "left", "right"}:
                 raise ValueError("Invalid disjoint constraint fields")

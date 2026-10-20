@@ -42,7 +42,9 @@ def main(mode, arch, artifact):
             frame = {name: runtime.ndarray("f32", 17) for name in ("output", "energy", "dx", "dy")}
             frame["records_out"] = runtime.ndarray(layout, 17)
             frames.append(frame)
-            calls.append(module.prepare_execution("private", frame))
+            calls.append(module.prepare_execution("frozen_private", frame))
+        reject((aot.AotError, ValueError),
+               lambda: module.prepare_execution("bad_private", frames[0]))
         expected_bytes = transformed(initial, 0, 16)
         expected = [3 * i * .5 + 7 for i in range(16)] + [-9]
         for call, frame in zip(calls, frames):
@@ -59,9 +61,38 @@ def main(mode, arch, artifact):
         assert frames[0]["records_out"].read() == expected_bytes
         records = runtime.ndarray(layout, 17)
         records.write(initial)
-        external = module.prepare_execution("external", dict(records=records))
+        external = module.prepare_execution("frozen_external", dict(records=records))
         external()
         assert records.read() == transformed(initial, 1, 16)
+        alias = runtime.ndarray(module.ndarray_layout("records_alias"), 17)
+        alias.write(initial)
+        with module.prepare_execution("frozen_external", dict(records=alias)) as call:
+            call()
+            assert alias.read() == transformed(initial, 1, 16)
+        invalid = [
+            runtime.ndarray(module.ndarray_layout("other_records"), 17),
+            runtime.ndarray(layout, 18),
+            runtime.ndarray(layout, (1, 17)),
+            runtime.ndarray("f32", 17 * 4),
+        ]
+        for candidate in invalid:
+            before = candidate.read()
+            reject((aot.AotError, ValueError), lambda: module.prepare_execution(
+                "frozen_external", dict(records=candidate)))
+            assert candidate.read() == before
+        if arch == "cuda":
+            with module.prepare_execution("frozen_family", dict(records=records)) as family:
+                with family.prepare_binding(dict(records=alias)) as frame:
+                    frame()
+                    assert alias.read() == transformed(initial, 1, 16)
+                for candidate in invalid:
+                    reject((aot.AotError, ValueError),
+                           lambda: family.prepare_binding(dict(records=candidate)))
+        empty_parent = runtime.ndarray(layout, 0)
+        empty_output = runtime.ndarray(layout, 0)
+        with module.prepare_execution("frozen_empty", dict(records=empty_parent, output=empty_output)) as empty:
+            empty()
+            assert empty_output.read() == b""
         packed = runtime.ndarray("f32", 16)
         with module.prepare_execution("packed_output", dict(records=records, output=packed)) as copy:
             copy()

@@ -143,7 +143,8 @@ ExecutionResourceBindings bind_execution_resources(
     const std::unordered_set<std::string> &frozen_metadata,
     const std::function<std::shared_ptr<taichi::lang::NativeMemoryAllocator>(
         const std::string &)> &allocator,
-    bool prepared_external_access) {
+    bool prepared_external_access,
+    const std::function<void()> &validate_metadata) {
   using Recipes = taichi::lang::aot::ExecutionResources;
   ExecutionResourceBindings result;
   result.arguments.resize(resources.order.size());
@@ -384,6 +385,9 @@ ExecutionResourceBindings bind_execution_resources(
     result.gradients.push_back(binding);
     layouts[primal] = &result.gradients.back();
   }
+
+  if (validate_metadata)
+    validate_metadata();
 
   // Vulkan buffer transfers require four-byte extents. Keep artifact hashes
   // and size checks over logical bytes; initialize only owned tail padding.

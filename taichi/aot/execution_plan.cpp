@@ -523,6 +523,14 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
             throw std::invalid_argument(
                 "Record size and alignment must be positive");
           plan.constraints.emplace_back(std::move(layout));
+        } else if (kind == "struct_array_layout") {
+          if (version < 24)
+            throw std::invalid_argument(
+                "Structure layout constraints require execution plan version 24");
+          fields(constraint, {"kind", "array", "layout", "exact_shape"});
+          plan.constraints.emplace_back(StructArrayLayout{
+              binding(constraint["array"]), name(constraint["layout"]),
+              shape(constraint["exact_shape"], false)});
         } else if (kind == "disjoint") {
           fields(constraint, {"kind", "left", "right", "allow_same_view"});
           plan.constraints.emplace_back(Disjoint{

@@ -6,6 +6,27 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
+def test_struct_layout_constraints_freeze_the_named_type_and_shape():
+    operations = [dict(kind="copy", source="records", destination="output")]
+    constraint = dict(kind="struct_array_layout", array="records", layout="particle", exact_shape=[17, 0])
+    plan = ExecutionPlan(operations, constraints=[constraint])
+    assert json.loads(plan.to_json())["version"] == 24
+    assert plan.argument_names == ("output", "records")
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 24"):
+        ExecutionPlan.from_json(json.dumps(dict(json.loads(plan.to_json()), version=23)))
+    for change in (
+        dict(layout=""), dict(layout=3), dict(array="unused"), dict(exact_shape=None),
+        dict(exact_shape=[True]), dict(exact_shape=[-1]), dict(exact_shape=[1 << 63]),
+        dict(element_shape=[]), dict(dtype="f32"), dict(minimum_shape=[17]),
+    ):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, constraints=[dict(constraint, **change)])
+    for field in constraint:
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, constraints=[{k: v for k, v in constraint.items() if k != field}])
+
+
 def test_storage_recipe_is_compact_and_keeps_shared_allocator_and_gradients():
     pool = dict(kind="native", name="pool", provider="memory", operation="pool", version=1, parameters={}, bindings={})
     state = dict(kind="ndarray", name="scratch", dtype="f32", shape=[3], allocator="pool", zero_initialize=True)

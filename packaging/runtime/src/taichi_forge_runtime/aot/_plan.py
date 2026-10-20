@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 23
+_MAX_EXECUTION_PLAN_VERSION = 24
 
 
 def _resource_version(resources):
@@ -22,6 +22,8 @@ def _resource_version(resources):
 
 
 def _constraint_version(constraints):
+    if any(isinstance(c, dict) and c.get("kind") == "struct_array_layout" for c in constraints):
+        return 24
     return 17 if any(isinstance(c, dict) and c.get("kind") == "resource_alias" for c in constraints) else 1
 
 

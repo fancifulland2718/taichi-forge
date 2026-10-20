@@ -30,7 +30,8 @@ template <typename Visit>
 void constraint_slots(ExecutionPlan::Constraint &constraint, Visit visit) {
   std::visit([&](auto &value) {
     using T = std::decay_t<decltype(value)>;
-    if constexpr (std::is_same_v<T, ExecutionPlan::ArrayLayout>) {
+    if constexpr (std::is_same_v<T, ExecutionPlan::ArrayLayout> ||
+                  std::is_same_v<T, ExecutionPlan::StructArrayLayout>) {
       visit(value.array);
     } else if constexpr (std::is_same_v<T, ExecutionPlan::DisjointWrites>) {
       for (auto &slot : value.reads)
