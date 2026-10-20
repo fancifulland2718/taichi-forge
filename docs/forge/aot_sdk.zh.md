@@ -3517,6 +3517,9 @@ sequence 捕获的原生标量叶成员变换。为完整 `StructNdarray` 父数
 一份重建资源；每个独立 prepared owner 拥有独立可变数组，重放沿用其状态。
 `source_bindings` 中的数组仍由消费者提供，不保存其内容。冷／暖导出分别捕获
 当时的数组状态；模块 Field 仍按原合同在模块内共享。
+普通图与保留子图均先解析 recipe 明确声明的 scratch／data 角色，再捕获其余数组。
+例如 consecutive unique 的标记工作区由首个 kernel 完整写入，不读取或打包其旧内容；
+真正的重建角色冲突仍会拒绝。
 
 结构快照不增加 packing kernel、逐帧 host 检查或第二套资源所有权；已证明的
 私有初值与 scratch 也共用完整布局描述。tensor 分量选择仍是独立待办；

@@ -211,6 +211,7 @@ class _ExportContext:
         from taichi_forge.lang.util import cook_dtype
         from ._graph_storage_bindings import _SOURCE_NDARRAY_TYPES
 
+        captured = []
         for name, owner in bindings.items():
             if self.source_resources is not None and name in self.source_resources.owners:
                 if self.source_resources.owners[name] is not owner:
@@ -229,10 +230,10 @@ class _ExportContext:
             if type(owner) is DenseNdarrayView:
                 # Reconstruct its finite packed range against a named parent or
                 # qualified module root; never widen it to the backing storage.
-                self.retained_arrays.bind_private(name, owner)
+                captured.append((name, owner))
                 continue
             if self.snapshot_state and type(owner) in (*_SOURCE_NDARRAY_TYPES, StructNdarray):
-                self.retained_arrays.bind_private(name, owner)
+                captured.append((name, owner))
                 continue
             if not isinstance(owner, InternalNdarrayRequirement):
                 continue
@@ -260,6 +261,21 @@ class _ExportContext:
                 ),
             )
             self.private_bindings[name] = owner
+        return captured
+
+    def declare_recipe_bindings(self, graph):
+        """Resolve explicit reconstruction roles before generic state capture."""
+        spec = graph._spec
+        self.declare_storage_plans(graph)
+        captured = self.declare_private_bindings(spec.fixed_runtime_args, graph._instance)
+        for lease in spec.lifetime_leases:
+            exporter = type(lease).__dict__.get("_export_aot_bindings")
+            if exporter is not None:
+                exporter(lease, self)
+        # A qualified producer may already have proved scratch/data ownership.
+        # Reuse that resource; only otherwise-unclassified arrays become state.
+        for name, owner in captured:
+            self.retained_arrays.bind_private(name, owner)
 
     def data_resource(self, owner, data, *, shape, dtype=None, element_shape=(), layout=None,
                       name=None, readonly=False, usage=None):
@@ -563,12 +579,7 @@ class _ExportContext:
                         self.private_bindings[name] = self._scalar_values[name] = owner
                     else:
                         self.retained_arrays.bind_private(name, owner)
-                self.declare_storage_plans(graph)
-                self.declare_private_bindings(spec.fixed_runtime_args, graph._instance)
-                for lease in spec.lifetime_leases:
-                    exporter = type(lease).__dict__.get("_export_aot_bindings")
-                    if exporter is not None:
-                        exporter(lease, self)
+                self.declare_recipe_bindings(graph)
                 for node in spec.nodes:
                     _node(self, node)
                 if any(
@@ -1124,14 +1135,9 @@ def _lower_graph(context, graph):
     contracts. Only code publication and live storage ownership differ.
     """
     spec = graph._spec
-    context.declare_storage_plans(graph)
-    context.declare_private_bindings(spec.fixed_runtime_args, graph._instance)
     context.source_resources.images.preflight(context.arch, spec._texture_binding_requirements)
     context.control_names = set(spec.control_binding_plan.names)
-    for lease in spec.lifetime_leases:
-        exporter = type(lease).__dict__.get("_export_aot_bindings")
-        if exporter is not None:
-            exporter(lease, context)
+    context.declare_recipe_bindings(graph)
     operation_ends = []
     for node in spec.nodes:
         _node(context, node)

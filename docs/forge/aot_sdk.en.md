@@ -4605,6 +4605,11 @@ owns separate mutable array state and retains it across replay. Named source
 arrays remain consumer inputs; their contents are not captured. Cold and warm
 exports save the array state at their respective export boundaries. Field state
 continues to be shared within each loaded module.
+Both ordinary and retained subgraphs resolve explicit recipe scratch/data roles
+before capturing otherwise-unclassified arrays. Consecutive unique's head
+workspace, for example, is completely overwritten by its first kernel and its
+old contents are neither read nor packaged. Conflicting reconstruction roles
+still fail export.
 
 Structure snapshots add no packing kernel, per-frame host check or separate
 ownership mechanism. Qualified private initial data and scratch use the same
