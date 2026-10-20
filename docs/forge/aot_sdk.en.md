@@ -2405,6 +2405,12 @@ than expanding a matrix into one launch per lane. Struct members and arbitrary
 strides still require their own export contracts. Use matching private ABI 115
 runtime/frontend components; ndarray execution defaults remain unchanged.
 
+The matching Windows runtime/frontend wheels pass normal installation and the
+CPU/CUDA/Vulkan Field checks, including consumers with only the runtime installed.
+The installed compiled-host three-world rigid batch and existing application
+entries also pass. The application wheel and sole TCM remain unchanged, as do
+all 44 independently installed dependencies; no application TCM is added to Forge.
+
 The Vulkan scalar `transform → gather → scatter` sequence has a dedicated
 `builtin/indexed_transform` v1 contract. Cold export selects the same eligible
 fusion as JIT; export of an already selected fusion preserves that choice even

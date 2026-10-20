@@ -1856,6 +1856,10 @@ Windows CPU/CUDA/Vulkan 已验证冷热导出、完全原位及不相交绑定�
 Struct成员和任意stride仍需独立导出合同。需配套私有ABI115 runtime／前端组件；
 原ndarray执行默认不变。
 
+配套 Windows runtime／前端 wheel 已通过正常安装与 CPU/CUDA/Vulkan Field 验证，
+包括仅安装 runtime 的消费者。已安装封闭宿主的三 world Rigid 完整 batch 及既有
+应用入口也通过。应用 wheel、唯一 TCM 与 44 项独立依赖保持不变，Forge 不增加应用 TCM。
+
 Vulkan 标量 `transform → gather → scatter` 序列具有专门的
 `builtin/indexed_transform` v1 合同。冷导出按 JIT 的条件选择融合；已选中融合后，
 即使偏好设置改变，导出仍保留该选择。产物保存 `src`、`transformed`、`indices`、
