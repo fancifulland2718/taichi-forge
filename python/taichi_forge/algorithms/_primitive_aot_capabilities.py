@@ -260,6 +260,12 @@ _ROUTES = MappingProxyType({
                            "prepared_cpu_partial", "device_atomic_capabilities", "explicit_adjoint_only")),
     ),
     "grouped_reduce": (
+        _sequence(("grouped_reduce",), "nonempty", "one_dimensional_packed_tensor_fields",
+                  "matching_vector_or_matrix", "scalar_i32_field_or_ndarray_keys",
+                  "module_root_snapshot", "sum", "overwrite_groups", "invalid_keys_ignored",
+                  "preserved_zero_fill_and_packed_scatter", "i32_u32_f32_i64_u64_f64",
+                  "disjoint_output", "frozen_cpu_record_partitions", "gpu_direct_atomic_strategy",
+                  "device_atomic_capabilities", "explicit_adjoint_only"),
         _sequence(("grouped_reduce",), "packed_scalar", "sum", "i32_u32_f32_i64_u64_f64",
                   "mutable_i32_keys", "overwrite_groups", "invalid_ids_ignored", "disjoint_output",
                   "frozen_cpu_partition_strategy", "gpu_direct_atomic_strategy",

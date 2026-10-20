@@ -331,7 +331,6 @@ def _indexed_copy(call, context):
 
 
 def _scatter_add(call, context):
-    from taichi_forge.aot._graph_storage_bindings import packed_description
     from . import _algorithms as algorithms
 
     if (
@@ -343,13 +342,23 @@ def _scatter_add(call, context):
     ):
         raise TaichiRuntimeError("AOT scatter-add requires its concrete ScatterAddWorkspace")
     src, indices, dst = call.args
+    parameters = _scatter_add_parameters(src, indices, dst, call.kwargs["method"], call.plan)
+    call.workspace.check_shape(parameters["size"], parameters["dst_items"])
+    context.operations.append(_scatter_add_operation(src, indices, dst, parameters, context))
+
+
+def _scatter_add_parameters(src, indices, dst, method, plan):
+    """Qualify the same accumulation stage for standalone and grouped export."""
+    from taichi_forge.aot._graph_storage_bindings import packed_description
+    from . import _algorithms as algorithms
+
     tensors = all(type(a) is algorithms.MatrixField for a in (src, dst))
     if tensors:
         algorithms._check_matching_matrix_fields(
             "AOT scatter-add", src, dst, require_same_shape=False)
     else:
-        algorithms._check_scatter_add_request(*call.args, **call.kwargs)
-    source, index, destination = (packed_description(a) for a in call.args)
+        algorithms._check_scatter_add_request(src, indices, dst, method=method, workspace=None)
+    source, index, destination = (packed_description(a) for a in (src, indices, dst))
     if (any(len(d.index_shape) != 1 for d in (source, index, destination))
             or index.element_shape or indices.dtype != algorithms.i32
             or source.index_shape != index.index_shape):
@@ -361,7 +370,6 @@ def _scatter_add(call, context):
     elif source.element_shape or destination.element_shape:
         raise TaichiRuntimeError("AOT scatter-add requires scalar storage")
     n, bound = source.index_shape[0], destination.index_shape[0]
-    call.workspace.check_shape(n, bound)
     arch = impl.current_cfg().arch
     backend, prefix, capability = {
         core.Arch.x64: ("cpu_native", "cpu", "cpu_scatter_add_available"),
@@ -370,7 +378,7 @@ def _scatter_add(call, context):
         core.Arch.vulkan: ("vulkan_native", "vulkan", "vulkan_scatter_add_available"),
     }.get(arch, (None, None, None))
     prog = impl.get_runtime().prog
-    if (backend is None or call.kwargs["method"] not in ("auto", backend)
+    if (backend is None or method not in ("auto", backend)
             or not getattr(prog, capability)()):
         raise TaichiRuntimeError("AOT scatter-add requires its available direct native strategy")
     value_type = algorithms._scatter_add_value_type(source.scalar_type)
@@ -382,10 +390,10 @@ def _scatter_add(call, context):
         f"{prefix}_scatter_add_{suffix}"
         for suffix in ("ndarray", "dense_field", "dense_field_indices_field")
     }
-    if call.plan is not None and (
-        type(call.plan) is not algorithms._NativePrimitivePlan
-        or not algorithms._native_plan_request_matches(call.plan, backend, (src, indices, dst), (value_type,))
-        or call.plan.method_name not in methods
+    if plan is not None and (
+        type(plan) is not algorithms._NativePrimitivePlan
+        or not algorithms._native_plan_request_matches(plan, backend, (src, indices, dst), (value_type,))
+        or plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT scatter-add cannot reconstruct the selected cached strategy")
     parameters = dict(size=n, dst_items=bound, dtype=str(source.scalar_type))
@@ -393,11 +401,58 @@ def _scatter_add(call, context):
         parameters.update(strategy="packed_field", element_shape=list(source.element_shape))
     if backend == "cpu_native":
         parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
-    context.operations.append(dict(
+    return parameters
+
+
+def _scatter_add_operation(src, indices, dst, parameters, context):
+    return dict(
         kind="native", provider="builtin", operation="scatter_add", version=1,
         parameters=parameters,
         bindings=dict(src=context.retained_arrays.require(src), indices=context.retained_arrays.require(indices),
                       dst=context.retained_arrays.require(dst)),
+    )
+
+
+def _packed_grouped_reduce(call, context):
+    import math
+    from . import _algorithms as algorithms
+
+    keys, values, output = call.args
+    method = call.kwargs["method"]
+    if call.kwargs["op"] != "sum" or method not in ("auto", "cpu_native", "cuda_device", "vulkan_native"):
+        raise TaichiRuntimeError("AOT tensor grouped reduce requires its native clear-and-scatter strategy")
+    backend = call.workspace._native_grouped_reduce_backend_for_method(method)
+    value_type = algorithms._grouped_reduce_value_type(values.dtype)
+    if any(len(a.shape) != 1 for a in call.args):
+        raise TaichiRuntimeError("AOT tensor grouped reduce requires one-dimensional storage")
+    n, groups = keys.shape[0], output.shape[0]
+    call.workspace.check_shape(n, groups)
+    # Dense Fields have nonempty extents. Do not replace a cached component
+    # group with an unrelated scalar reduction, or drop its zeroing stage.
+    scatter_plan = None
+    if call.plan is not None:
+        semantic = call.workspace._packed_grouped_reduce_semantic_key(
+            method, value_type, algorithms._SUPPORTED_GROUPED_REDUCE_OPS["sum"], n, groups)
+        if (type(call.plan) is not algorithms._NativePrimitivePlanGroup
+                or not algorithms._native_plan_request_matches(call.plan, backend, call.args, semantic)
+                or len(call.plan.plans) != 2):
+            raise TaichiRuntimeError("AOT tensor grouped reduce cannot reconstruct the selected cached strategy")
+        fill, scatter_plan = call.plan.plans
+        lanes = algorithms._matrix_field_element_shape(output)
+        fill_semantic = ("packed_grouped_reduce_zero_fill", value_type, groups, math.prod(lanes))
+        if (type(fill) is not algorithms._NativePrimitivePlan
+                or fill.method_name != "fill_dense_field_packed"
+                or not algorithms._native_plan_request_matches(fill, backend, (output,), fill_semantic)):
+            raise TaichiRuntimeError("AOT tensor grouped reduce cannot reconstruct the selected zero fill")
+    if not callable(getattr(impl.get_runtime().prog, "fill_dense_field_packed", None)):
+        raise TaichiRuntimeError("AOT tensor grouped reduce requires native packed zero fill")
+    parameters = _scatter_add_parameters(values, keys, output, method, scatter_plan)
+    scatter = _scatter_add_operation(values, keys, output, parameters, context)
+    # Zero bits represent zero for all supported scalar types, including f64.
+    # Existing fill and scatter operations share root ownership and dependencies.
+    context.operations.extend((
+        dict(kind="fill32", destination=scatter["bindings"]["dst"], value=0),
+        scatter,
     ))
 
 
@@ -414,6 +469,9 @@ def _grouped_reduce(call, context):
     ):
         raise TaichiRuntimeError("AOT grouped reduce requires its concrete GroupedReduceWorkspace")
     keys, values, output = call.args
+    if all(type(a) is algorithms.MatrixField for a in (values, output)):
+        _packed_grouped_reduce(call, context)
+        return
     algorithms._check_grouped_reduce_request(*call.args, **call.kwargs)
     descriptions = tuple(packed_description(a) for a in call.args)
     if any(len(d.index_shape) != 1 or d.element_shape for d in descriptions):

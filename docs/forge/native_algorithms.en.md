@@ -444,6 +444,20 @@ native packages need no application shader code and require `builtin/grouped_red
 v1 in the consumer. Exported kernels can provide an explicit adjoint; AOT does not
 synthesize it automatically.
 
+Packed vector/matrix Field values and outputs have a separate
+`PrimitiveSequence.grouped_reduce()` route for `sum`, `auto` or the matching
+`cpu_native`/`cuda_device`/`vulkan_native` method, and contiguous scalar i32 Field
+or ndarray keys. It preserves the selected zero-fill followed by packed
+scatter-add, using existing `fill32` and `builtin/scatter_add` operations.
+Each replay clears all output groups, including empty groups and the all-invalid
+key case. Both tensor shapes must match; storage must be one-dimensional,
+nonempty and packed. Cold export does not execute the stages; warm export
+validates both cached stages. Module roots, parent Graphs and completion lifetime
+use the existing owner. No helper kernel, separate executor, format revision or
+artificial component limit is added. Consumers use the paired ABI125 components
+required by tensor scatter-add. The explicit `builtin/grouped_reduce` description
+retains its scalar contract; this sequence route adds no automatic native adjoint.
+
 Explicit `builtin/bucket_builder` v1 descriptions support one-dimensional packed
 scalar or tensor payloads on CPU/CUDA/Vulkan: i32/u32/f32/i64/u64/f64. Parameters
 are `size`, nonzero `num_bins`, `dtype`, `element_shape` (`[]` for scalars), and

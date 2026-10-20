@@ -338,6 +338,16 @@ CUDA segmented dense-field fallback、tensor/strided/fused sequence 尚不属于
 不会在导出时静默替换策略。纯原生包无需应用 shader 代码，消费端需提供
 `builtin/grouped_reduce` v1。可组合 kernel 提供显式伴随；不自动生成 AOT 伴随。
 
+packed 向量／矩阵 Field 的 value/output 有独立的 `PrimitiveSequence.grouped_reduce()`
+导出路线：支持 `sum`、`auto` 或匹配后端的 `cpu_native`/`cuda_device`/`vulkan_native`，
+key 为连续标量 i32 Field 或 ndarray。保留已选的清零→packed scatter-add，
+复用现有 `fill32` 和 `builtin/scatter_add`。每轮清零全部输出组，空组以及全部 key
+无效时也正确写零。两个 tensor 元素形状须相同，索引布局须为非空一维 packed。
+冷导出不执行阶段，暖导出检查两个缓存阶段。模块根、父 Graph 和完成寿命沿用
+现有 owner，不新增 helper kernel、执行器、格式版本或人为分量数上限。消费端使用
+tensor scatter-add 所需的配对 ABI125 组件。显式 `builtin/grouped_reduce` 仍保留
+标量合同；本序列路线不自动生成原生伴随。
+
 显式 `builtin/bucket_builder` v1 描述支持 CPU/CUDA/Vulkan 一维 packed 标量或
 tensor 载荷，dtype 为 i32/u32/f32/i64/u64/f64。参数为 `size`、非零 `num_bins`、
 `dtype`、`element_shape`（标量用 `[]`），可选 `cpu_max_threads` 和 `vulkan_policy`。
