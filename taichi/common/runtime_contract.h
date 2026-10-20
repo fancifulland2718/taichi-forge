@@ -11,7 +11,7 @@ namespace taichi {
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
 // Combined CUDA execution domains, prepared CPU storage and executor host pools.
 // Reject either independently built parent pair before crossing the boundary.
-inline constexpr int kForgeNativeAbiRevision = 115;
+inline constexpr int kForgeNativeAbiRevision = 116;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

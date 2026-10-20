@@ -3439,6 +3439,18 @@ Windows CPU/CUDA/Vulkan 验证包括嵌套 i8/u16/f32、向量/矩阵成员、pa
 查询版本、元素步长、对齐及叶成员的点分路径、标量类型、tensor shape 和字节偏移。
 应用按此目标布局组织数据，不能假定宿主 C/C++ struct 的 padding 相同。
 
+布局也可以独立于可执行入口发布。在导出端调用
+`module.add_ndarray_layout("records", record_type)`，其中 `record_type` 是
+`ti.types.struct(...)`；消费端通过 `module.ndarray_layout("records")` 获取同一
+`StructLayout` 并传给 `runtime.ndarray`。C API 对应
+`ti_get_aot_module_ndarray_layout_ext(runtime, module, "records")`。
+这不需要空 helper kernel：即使模块没有 kernel 或 Graph，也可保存、加载和分配该布局。
+
+命名目录使用 `array_layouts.json` v1，多个名称引用相同结构时只存一份类型；目录在
+首次查询时加载，重复查询使用缓存。布局与现有入口共享模块拥有的句柄及退休合同，
+不能跨 runtime 使用。此扩展需要配套私有 ABI116 组件，执行计划格式不变；仅发布
+布局不会自动接通结构数组成员视图的原生操作或私有捕获导出。
+
 内存与外层 shape 仍放入原 `TiArgument` 的 ndarray，设置
 `elem_type=TI_DATA_TYPE_UNKNOWN`、空 `elem_shape`；将查询所得布局与版本填入
 `TiNdArrayBinding` / `TiNamedNdArrayBinding`，调用

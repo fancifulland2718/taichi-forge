@@ -12,6 +12,7 @@
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/initial_root_data.h"
 #include "taichi/aot/root_storage.h"
+#include "taichi/aot/struct_layout.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/program/kernel_compile_request.h"
 
@@ -54,6 +55,8 @@ class AotModuleBuilder {
   void add_kernel_template(const std::string &identifier,
                            const std::string &key,
                            Kernel *kernel);
+
+  void add_ndarray_layout(const std::string &name, DataType type);
 
   virtual void load(const std::string &output_dir);
 
@@ -126,6 +129,7 @@ class AotModuleBuilder {
   std::unordered_map<std::string, aot::CompiledGraph> graphs_;
   std::map<int, aot::InitialRootData> initial_root_data_;
   aot::RootStorageViews root_storage_views_;
+  aot::NamedStructLayouts ndarray_layouts_;
   KernelCompileOptions compile_options_;
   bool compile_options_frozen_{false};
 

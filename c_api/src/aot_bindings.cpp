@@ -191,6 +191,11 @@ TiKernel AotModule::get_kernel_handle(const std::string &name) {
   return handle;
 }
 
+TiNdArrayLayout AotModule::get_layout_handle(const std::string &name) {
+  check_code_live();
+  return layout_handle(aot_module_->get_ndarray_layout(name));
+}
+
 TiComputeGraph AotModule::get_graph_handle(const std::string &name) {
   check_code_live();
   auto found = graph_handles_.find(name);
@@ -244,6 +249,24 @@ TiNdArrayLayout ti_get_kernel_ndarray_layout_ext(TiRuntime runtime,
   if (found == binding.layouts.end())
     throw MemoryBindingError("Argument has no structure layout");
   result = found->second;
+  TI_CAPI_TRY_CATCH_END();
+  return result;
+}
+
+TiNdArrayLayout ti_get_aot_module_ndarray_layout_ext(TiRuntime runtime,
+                                                  TiAotModule module,
+                                                  const char *name) {
+  TiNdArrayLayout result = TI_NULL_HANDLE;
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(module);
+  TI_CAPI_ARGUMENT_NULL_RV(name);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto *owner = reinterpret_cast<AotModule *>(module);
+  if (!rt.owns_module(owner))
+    throw MemoryBindingError("Module is not live in this runtime");
+  result = owner->get_layout_handle(name);
   TI_CAPI_TRY_CATCH_END();
   return result;
 }

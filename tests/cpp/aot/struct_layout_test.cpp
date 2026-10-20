@@ -23,8 +23,9 @@ DataType example_type() {
 class JsonDir : public io::VirtualDir {
  public:
   std::string contents;
+  std::string filename{"graphs.v2.json"};
   bool get_file_size(const std::string &name, size_t &size) const override {
-    if (name != "graphs.v2.json")
+    if (name != filename)
       return false;
     size = contents.size();
     return true;
@@ -93,5 +94,42 @@ TEST(AotStructLayout, GraphV2RestoresTypesAndRejectsInconsistentMetadata) {
   artifact.struct_types["step"]["records"] = example_type();
   artifact.struct_types["step"]["unused"] = example_type();
   EXPECT_THROW(load(), std::invalid_argument);
+}
+
+TEST(AotStructLayout, NamedCatalogDeduplicatesAndLoadsWithoutGraphs) {
+  const auto type = example_type();
+  auto artifact = make_struct_layout_artifact({{"record", type}, {"alias", type}});
+  EXPECT_EQ(artifact.types.size(), 1u);
+  EXPECT_EQ(artifact.layouts.at("record"), artifact.layouts.at("alias"));
+  JsonDir directory;
+  directory.filename = "array_layouts.json";
+  directory.contents = liong::json::print(liong::json::serialize(artifact));
+  const auto restored = load_struct_layout_artifact(&directory);
+  EXPECT_EQ(restored.at("record"), type);
+  EXPECT_EQ(restored.at("alias"), type);
+  EXPECT_TRUE(load_struct_layout_artifact(nullptr).empty());
+  directory.filename = "absent";
+  EXPECT_TRUE(load_struct_layout_artifact(&directory).empty());
+}
+
+TEST(AotStructLayout, NamedCatalogRejectsInvalidTypesAndReferences) {
+  const auto type = example_type();
+  auto artifact = make_struct_layout_artifact({{"record", type}});
+  auto parse = [&] {
+    return parse_struct_layout_artifact(liong::json::serialize(artifact));
+  };
+  artifact.version = 2;
+  EXPECT_THROW(parse(), std::invalid_argument);
+  artifact.version = 1;
+  artifact.layouts.at("record") = 1;
+  EXPECT_THROW(parse(), std::invalid_argument);
+  artifact.layouts.at("record") = 0;
+  artifact.types.push_back(type);
+  EXPECT_THROW(parse(), std::invalid_argument);
+  artifact.layouts.emplace("alias", 1);
+  EXPECT_THROW(parse(), std::invalid_argument);
+  EXPECT_THROW(make_struct_layout_artifact({{"", type}}), std::invalid_argument);
+  EXPECT_THROW(make_struct_layout_artifact({{"scalar", PrimitiveType::f32}}),
+               std::invalid_argument);
 }
 }  // namespace taichi::lang::aot

@@ -264,6 +264,9 @@ class Runtime {
   void retire_module(class AotModule *owner);
   void invalidate_module_entries(class AotModule *owner);
   void register_module(class AotModule *owner);
+  bool owns_module(class AotModule *owner) const {
+    return modules_.count(owner) != 0;
+  }
   // Explicit borrower retirement: recordings before code and buffers. The
   // Program finalizer has already synchronized and passes false.
   void retire_resources(bool synchronize);
@@ -367,6 +370,7 @@ class AotModule {
 
   TiKernel get_kernel_handle(const std::string &name);
   TiComputeGraph get_graph_handle(const std::string &name);
+  TiNdArrayLayout get_layout_handle(const std::string &name);
 
   taichi::lang::aot::Kernel *get_kernel(const std::string &name);
   taichi::lang::aot::CompiledGraph *get_cgraph(const std::string &name);

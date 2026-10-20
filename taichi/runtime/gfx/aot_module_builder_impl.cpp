@@ -182,6 +182,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
 
   {
     aot::write_struct_graph_artifact(graphs_, output_dir);
+    aot::write_struct_layout_artifact(ndarray_layouts_, output_dir);
     const aot::GraphMap empty;
     std::string json = liong::json::print(liong::json::serialize(
         aot::has_struct_graph_arguments(graphs_) ? empty : graphs_));

@@ -311,6 +311,7 @@ class Module:
         self._graph_export_failed = False
         self._fields = {}
         self._array_fields = set()
+        self._ndarray_layouts = {}
         rtm = impl.get_runtime()
         rtm._finalize_root_fb_for_aot()
         self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps)
@@ -319,6 +320,23 @@ class Module:
         if options is not None:
             self._aot_builder.set_compile_options(options)
         self._content = []
+
+    def add_ndarray_layout(self, name, dtype):
+        """Publish a named fixed-AoS struct ABI without compiling a kernel.
+
+        Consumers query ``module.ndarray_layout(name)`` and use the result as
+        ``runtime.ndarray``'s dtype. Equal types share one serialized record.
+        """
+        from taichi_forge.lang.struct import StructType
+
+        if not isinstance(name, str) or not name or "\0" in name:
+            raise ValueError("Layout names must be nonempty strings without NUL")
+        if not isinstance(dtype, StructType):
+            raise TypeError("AOT ndarray layouts require a struct type")
+        self._aot_builder.add_ndarray_layout(name, dtype.dtype)
+        if name not in self._ndarray_layouts:
+            self._ndarray_layouts[name] = dtype.dtype
+            self._content.append("ndarray_layout:" + name)
 
     def add_field(self, name, field, *, as_array=False):
         """Add a taichi field to the AOT module.

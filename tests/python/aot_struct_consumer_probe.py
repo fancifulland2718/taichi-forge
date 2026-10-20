@@ -72,6 +72,9 @@ def main(mode, arch, artifact):
         kernel = modules[0].kernel("update")
         graph = modules[0].graph("step")
         layout = kernel.ndarray_layout(0)
+        named_layout = modules[0].ndarray_layout("records")
+        assert named_layout._handle == layout._handle
+        assert named_layout.members == layout.members
         assert kernel.ndarray_layout(0) is layout
         assert graph.ndarray_layout("records").members == layout.members
         assert layout.member("basis").element_shape == (2, 2)

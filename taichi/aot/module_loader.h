@@ -14,6 +14,7 @@
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/initial_root_data.h"
 #include "taichi/aot/root_storage.h"
+#include "taichi/aot/struct_layout.h"
 
 namespace taichi::io {
 struct VirtualDir;
@@ -113,6 +114,7 @@ class TI_DLL_EXPORT Module {
   // Cold, non-owning alias. The module must outlive its prepared executions;
   // its owner retires all recordings before freeing any root allocation.
   BoundRootStorageView get_root_storage_view(const std::string &name);
+  DataType get_ndarray_layout(const std::string &name);
 
   Kernel *get_kernel(const std::string &name);
   KernelTemplate *get_kernel_template(const std::string &name);
@@ -142,6 +144,8 @@ class TI_DLL_EXPORT Module {
     throw std::invalid_argument("This AOT backend has no root storage views");
   }
   RootStorageViews root_storage_views_;
+  NamedStructLayouts ndarray_layouts_;
+  bool ndarray_layouts_loaded_{false};
   virtual const io::VirtualDir *data_source() const {
     return nullptr;
   }

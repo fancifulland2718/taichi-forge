@@ -153,6 +153,19 @@ void AotModuleBuilder::load(const std::string &output_dir) {
   TI_ERROR("Aot loader not supported");
 }
 
+void AotModuleBuilder::add_ndarray_layout(const std::string &name, DataType type) {
+  if (name.empty() || name.find('\0') != std::string::npos)
+    throw std::invalid_argument("Invalid AOT ndarray layout name");
+  const auto found = ndarray_layouts_.find(name);
+  if (found != ndarray_layouts_.end()) {
+    if (found->second != type)
+      throw std::invalid_argument("Conflicting AOT ndarray layout name");
+    return;
+  }
+  aot::StructLayout checked(type);
+  ndarray_layouts_.emplace(name, type);
+}
+
 void AotModuleBuilder::dump_graph(std::string output_dir) const {
   const std::string graph_file = fmt::format("{}/graphs.tcb", output_dir);
   aot::write_struct_graph_artifact(graphs_, output_dir);

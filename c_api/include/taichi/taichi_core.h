@@ -1206,6 +1206,10 @@ TI_DLL_EXPORT void TI_API_CALL ti_launch_compute_graph_with_gradients_ext(
 
 TI_DLL_EXPORT TiNdArrayLayout TI_API_CALL ti_get_kernel_ndarray_layout_ext(
     TiRuntime runtime, TiKernel kernel, uint32_t argument_index);
+// A named layout requires no kernel or Graph entry. The returned handle shares
+// the same module owner and type cache as argument-derived layouts.
+TI_DLL_EXPORT TiNdArrayLayout TI_API_CALL ti_get_aot_module_ndarray_layout_ext(
+    TiRuntime runtime, TiAotModule module, const char *name);
 TI_DLL_EXPORT TiNdArrayLayout TI_API_CALL ti_get_compute_graph_ndarray_layout_ext(
     TiRuntime runtime, TiComputeGraph graph, const char *name);
 TI_DLL_EXPORT void TI_API_CALL ti_get_ndarray_layout_info_ext(

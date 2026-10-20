@@ -5666,6 +5666,7 @@ void export_lang(py::module &m) {
       .def("set_compile_options", &AotModuleBuilder::set_compile_options)
       .def("set_artifact_format", &AotModuleBuilder::set_artifact_format)
       .def("add_field", &AotModuleBuilder::add_field)
+      .def("add_ndarray_layout", &AotModuleBuilder::add_ndarray_layout)
       .def("add", &AotModuleBuilder::add)
       .def("_add_with_launch_abi", &AotModuleBuilder::add_with_launch_abi)
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)
