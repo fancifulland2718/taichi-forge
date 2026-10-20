@@ -253,7 +253,9 @@ EIGEN_LU_SOLVE_INSTANTIATION(float64, LU, COLAMD, d);
 
 template <class EigenSolver, class EigenMatrix>
 bool EigenSparseSolver<EigenSolver, EigenMatrix>::info() {
-  return solver_.info() == Eigen::Success;
+  // Eigen's info() requires initialization; symbolic analysis alone also
+  // does not establish a usable numeric factorization.
+  return factorization_recorded_ && solver_.info() == Eigen::Success;
 }
 
 template <class EigenSolver, class EigenMatrix>
@@ -795,8 +797,10 @@ std::unique_ptr<SparseSolver> make_sparse_solver(DataType dt,
       solver_factory = {
           MAKE_SOLVER(float32, LLT, AMD),  MAKE_SOLVER(float32, LLT, COLAMD),
           MAKE_SOLVER(float32, LDLT, AMD), MAKE_SOLVER(float32, LDLT, COLAMD),
+          MAKE_SOLVER(float32, LU, AMD),   MAKE_SOLVER(float32, LU, COLAMD),
           MAKE_SOLVER(float64, LLT, AMD),  MAKE_SOLVER(float64, LLT, COLAMD),
-          MAKE_SOLVER(float64, LDLT, AMD), MAKE_SOLVER(float64, LDLT, COLAMD)};
+          MAKE_SOLVER(float64, LDLT, AMD), MAKE_SOLVER(float64, LDLT, COLAMD),
+          MAKE_SOLVER(float64, LU, AMD),   MAKE_SOLVER(float64, LU, COLAMD)};
   static const std::unordered_map<std::string, std::string> dt_map = {
       {"f32", "float32"}, {"f64", "float64"}};
   auto it = dt_map.find(taichi::lang::data_type_name(dt));
@@ -808,18 +812,6 @@ std::unique_ptr<SparseSolver> make_sparse_solver(DataType dt,
   if (solver_factory.find(solver_key) != solver_factory.end()) {
     auto solver_func = solver_factory.at(solver_key);
     return solver_func();
-  } else if (solver_type == "LU") {
-    if (it->first == "f32") {
-      using EigenMatrix = Eigen::SparseMatrix<float32>;
-      using LU = Eigen::SparseLU<EigenMatrix>;
-      return std::make_unique<EigenSparseSolver<LU, EigenMatrix>>();
-    } else if (it->first == "f64") {
-      using EigenMatrix = Eigen::SparseMatrix<float64>;
-      using LU = Eigen::SparseLU<EigenMatrix>;
-      return std::make_unique<EigenSparseSolver<LU, EigenMatrix>>();
-    } else {
-      TI_ERROR("Not supported sparse solver data type: {}", it->second);
-    }
   } else
     TI_ERROR("Not supported sparse solver type: {}", solver_type);
 }

@@ -171,11 +171,11 @@ class SparseSolver:
             },
         }
 
-    def _record_factorization_dispatch(self):
+    def _record_factorization_dispatch(self, *, successful=True):
         self._factorization_dispatches += 1
         self._factorization_generation += 1
         self._solve_dispatches_since_factorization = 0
-        self._factorization_active = True
+        self._factorization_active = bool(successful)
 
     def _record_solve_dispatch(self, result):
         self._solve_dispatches += 1
@@ -483,8 +483,8 @@ class SparseSolver:
                 )
             taichi_arch = taichi_forge.lang.impl.get_runtime().prog.config().arch
             if taichi_arch == _ti_core.Arch.x64 or taichi_arch == _ti_core.Arch.arm64:
-                self.solver.compute(sparse_matrix.matrix)
-                self._record_factorization_dispatch()
+                successful = self.solver.compute(sparse_matrix.matrix)
+                self._record_factorization_dispatch(successful=successful)
             elif taichi_arch == _ti_core.Arch.cuda:
                 self.analyze_pattern(sparse_matrix)
                 self.factorize(sparse_matrix)
@@ -552,7 +552,9 @@ class SparseSolver:
                 self.solver.factorize(sparse_matrix)
             else:
                 self.solver.factorize(sparse_matrix.matrix)
-            self._record_factorization_dispatch()
+            self._record_factorization_dispatch(
+                successful=self.solver.info() if self._selected_provider == "eigen" else True
+            )
             self.matrix = sparse_matrix
         else:
             self._type_assert(sparse_matrix)
