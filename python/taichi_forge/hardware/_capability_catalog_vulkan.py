@@ -209,7 +209,7 @@ def vulkan_command_operations(_operation):
                 "Compute-to-graphics-to-compute ordering uses backend semaphores and does not add a host wait.",
                 "Indirect draws consume kernel-produced command/count ndarrays without host readback; declared geometry bounds are validated conservatively.",
                 "Fixed-count indirect is baseline Vulkan; multi-draw, nonzero firstInstance, and count-buffer variants are admitted from active-device feature facts.",
-                "Bindless buffers are bounded immutable table snapshots (maximum 64 slots); variable-count/runtime arrays are reported but not exposed.",
+                "Bindless buffers are immutable fixed-count table snapshots admitted against the active device's descriptor limits; variable-count/runtime arrays are reported but not exposed.",
                 "Retained Graph replay keys include every descriptor allocation generation, preventing in-flight table overwrite or stale descriptor reuse.",
             ),
         ),

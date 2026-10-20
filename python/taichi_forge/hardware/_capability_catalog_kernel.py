@@ -86,7 +86,7 @@ def kernel_intrinsic_operations(_operation):
                 "NVIDIA CUDA Driver array and texture-object symbols",
                 "one, two, or four channels",
                 "matching min and mag filters",
-                "JIT CUDA kernel execution",
+                "CUDA kernel execution",
             ),
             public_api="ti.Texture(..., sampler=ti.hardware.sampling.SamplerConfig(...))",
             notes=(
@@ -95,7 +95,7 @@ def kernel_intrinsic_operations(_operation):
                 "fetch is lowered to a hardware texture instruction at the normalized texel center so integer coordinates remain exact.",
                 "Formats that cannot satisfy the existing vec4-f32 sampled contract fail before CUDA array allocation.",
                 "Cached CUDA Graph capture retains sampled texture generations; content uploads preserve the object and replacement uses a bounded executable slot. Capable runtimes also expose immutable binding-frame recipes with preparation-only parameter uploads and retained sampled resources.",
-                "This is an explicit resource API: Forge does not silently replace ndarray loads, and CUDA texture AOT manifests are not qualified by this contract.",
+                "This is an explicit resource API: Forge does not silently replace ndarray loads. AOT sampled images use explicit reconstruction or borrow the existing owner; CUDA retains its single-mip basic-sampler contract, and downstream kernel gradients do not differentiate texture sampling.",
             ),
         ),
         _operation(
