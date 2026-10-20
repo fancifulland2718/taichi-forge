@@ -314,6 +314,14 @@ gradient kernels require their declared AOT target capabilities, including
 `spirv_has_float64` and, where the generated storage code uses it,
 `spirv_has_int64`.
 
+Normally installed Windows CPU/CUDA/Vulkan runtimes pass standalone and borrowed
+tensor consumers, including 2x3 f32 matrices, f64 vectors and 8x8 i32 matrices,
+prefixes, parent Graphs, independent module states and in-flight retirement.
+Explicit downstream gradients and Vulkan synchronization validation pass.
+A 4099-record, 2x3 f32 case retains 0/20/32 bytes of CPU/CUDA/Vulkan workspace
+across all six components and adds no application code payload. Module Field
+storage, descriptor bindings and driver allocations are separate from workspace.
+
 `PrimitiveSequence.transform()` and explicit `builtin/transform` v1 descriptions
 cover nonempty, one-dimensional packed scalar affine transforms on CPU/CUDA/Vulkan
 for i32/u32/i64/u64/f32/f64. Accessed ranges must be exactly identical or physically

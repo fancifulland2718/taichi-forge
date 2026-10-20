@@ -244,6 +244,12 @@ Vulkan 保存各分量独立的预备绑定，并为参数、partial 和对齐�
 kernel 需要声明相应 AOT 目标能力，包括 `spirv_has_float64`，以及生成的存储代码
 使用时所需的 `spirv_has_int64`。
 
+Windows CPU/CUDA/Vulkan 正常安装后的独立／借用 tensor 消费通过，覆盖 2×3 f32
+矩阵、f64 向量、8×8 i32 矩阵、前缀、父 Graph、独立模块状态和在途退休。
+显式下游梯度与 Vulkan 同步验证通过。4099 条记录、2×3 f32 样本的六个分量共用
+CPU/CUDA/Vulkan 的 0/20/32 字节 workspace，不增加应用代码载荷。模块 Field 存储、
+描述符绑定和驱动分配另计，workspace 不代表全部运行内存。
+
 `PrimitiveSequence.transform()` 与显式 `builtin/transform` v1 描述支持 CPU/CUDA/Vulkan
 上的非空、一维连续标量 affine 变换，覆盖 i32/u32/i64/u64/f32/f64。输入输出可为
 准确相同的访问区间，或物理不重叠的区间；部分重叠在准备时拒绝。显式描述可选择

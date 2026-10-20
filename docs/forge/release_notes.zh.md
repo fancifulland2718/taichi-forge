@@ -31,6 +31,10 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT 原生 sum/min/max 归约支持 CPU/CUDA/Vulkan 的整向量／矩阵 packed Field，
+  保留逐分量算法并共用 scratch，不增加应用 shader 或人为分量数上限。需要配对的
+  私有 ABI124 组件；正常安装、显式下游梯度与 Vulkan 同步验证通过。
+
 - 原生增量构建保留未改变的 runtime anchor，并用 Clang depfile 跟踪 LLVM runtime
   bitcode；wheel 重新配置不再重复编译这些未改输入，传递头文件改变仍正确触发构建。
   已验证 Windows/Ninja，不改变应用 kernel 编译选项。
