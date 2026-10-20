@@ -995,6 +995,7 @@ struct VulkanCapabilities {
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR ray_tracing_properties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
   bool cooperative_matrix{false};
+  bool compute_full_subgroups{false};
   bool multi_draw_indirect{false};
   bool draw_indirect_first_instance{false};
   bool draw_indirect_count{false};
@@ -1012,6 +1013,27 @@ struct VulkanCapabilities {
   std::uint32_t subgroup_size{0};
   VkShaderStageFlags cooperative_matrix_supported_stages{0};
   std::vector<VulkanCooperativeMatrixProperty> cooperative_matrix_properties;
+
+  bool cooperative_matrix_f16_f32_valid(uint32_t m,
+                                        uint32_t n,
+                                        uint32_t k,
+                                        uint32_t required_subgroup_size) const {
+    if (!cooperative_matrix || !compute_full_subgroups || !m || !n || !k ||
+        !required_subgroup_size || required_subgroup_size != subgroup_size ||
+        !(cooperative_matrix_supported_stages & VK_SHADER_STAGE_COMPUTE_BIT))
+      return false;
+    for (const auto &property : cooperative_matrix_properties) {
+      if (property.m == m && property.n == n && property.k == k &&
+          property.a_type == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+          property.b_type == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+          property.c_type == VK_COMPONENT_TYPE_FLOAT32_KHR &&
+          property.result_type == VK_COMPONENT_TYPE_FLOAT32_KHR &&
+          property.scope == VK_SCOPE_SUBGROUP_KHR &&
+          !property.saturating_accumulation)
+        return true;
+    }
+    return false;
+  }
 
   // Shared cold admission and command-recording check. Avoid multiplying three
   // uint32 dimensions: even uint64 cannot represent their full product.

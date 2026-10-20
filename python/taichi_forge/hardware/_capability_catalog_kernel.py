@@ -399,13 +399,15 @@ def kernel_intrinsic_operations(_operation):
                 "subgroup-scoped f16/f16/f32/f32 non-saturating tuple",
                 "SPV_KHR_cooperative_matrix load/mul-add/store",
                 "top-level static dense range and subgroup-aligned block_dim",
+                "full compute subgroups and matching persisted M/N/K/subgroup requirements",
             ),
             public_api="ti.hardware.matrix.cooperative_mma_f16_f32",
             notes=(
-                "Explicit JIT kernel intrinsic; ordinary matrix multiplication is not rewritten and there is no implicit fallback.",
+                "Explicit kernel intrinsic with shared JIT/AOT lowering; ordinary matrix multiplication is not rewritten and there is no implicit fallback.",
                 "Supported M/N/K and subgroup size come from the active device instead of copying the CUDA m16n16k16 contract.",
                 "Qualified locally on NVIDIA Vulkan; AMD and Intel execution remain unqualified until device evidence is available.",
-                "AOT, graph resource arguments, saturation, column-major layouts, and escaping tile values are not supported.",
+                "AOT metadata version 8 preserves exact device requirements; ordinary kernels and exported Graph matrix arguments share cold admission.",
+                "Downstream kernel gradients compose with explicit matrix adjoints; automatic MMA differentiation, saturation, column-major layouts, and escaping tile values are not supported.",
             ),
         ),
     )

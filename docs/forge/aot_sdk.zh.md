@@ -2788,6 +2788,20 @@ scratch；CUDA context/module/Graph 存储不计入 `workspace_bytes`。无需 c
 物理别名、错误绑定恢复及 owner 退休。通过下游真实 `kernel.grad` 加显式 MMA 伴随核对
 反向结果；这不新增 MMA 自动求导或 JIT recipe 选择资格。
 
+Vulkan 的 `ti.hardware.matrix.cooperative_mma_f16_f32` 通过普通 kernel 和 Graph
+导出路径使用紧凑矩阵 ndarray 参数。导出时声明
+`Module(caps=["spirv_has_cooperative_matrix", "spirv_has_float16"])`；普通标量
+方式读取 f16 输入还需要 `spirv_has_int16` 和 `spirv_has_int16_storage`。
+GFX metadata8 为每个任务保存精确 M/N/K 和 subgroup 宽度，prepare 在创建 pipeline
+前核对目标设备的 subgroup 作用域、非饱和 f16/f16/f32/f32 tuple 及完整 compute
+subgroup 支持。不匹配或缺失的要求在冷阶段报错；旧 cooperative 产物需要重新导出，
+runtime 和 frontend 组件保持配对。
+
+本路径沿用固定 subgroup 的 lowering 和低于1.6的 SPIR-V 目标，不增加逐次重放的
+能力查询或 shader 指令。Windows NVIDIA Vulkan 已验证独立/借用执行、独立绑定、
+重放、准备失败恢复和退休，以及真实下游 `kernel.grad` 与显式 A/B/C 伴随。
+这不提供 MMA 自动微分，也不表示 AMD/Intel 设备已实测；普通矩阵乘法不会自动替换。
+
 CUDA 还通过外部 cuBLAS 注册 `gemm_f32`：
 
 ```python

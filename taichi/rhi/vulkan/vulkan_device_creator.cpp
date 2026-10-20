@@ -794,6 +794,11 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       vk_api_version >= VK_API_VERSION_1_1 &&
       cooperative_matrix_extension_requested &&
       has_device_extension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+  const bool subgroup_control_available =
+      vk_api_version >= VK_API_VERSION_1_3 ||
+      (has_device_extension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) &&
+       (!manual_create ||
+        extension_was_requested(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)));
   const bool draw_indirect_count_extension_requested =
       !manual_create ||
       extension_was_requested(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
@@ -926,6 +931,11 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (cooperative_matrix_extension_available &&
                name == VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) {
+      enabled_extensions.push_back(ext.extensionName);
+    } else if (cooperative_matrix_extension_available &&
+               subgroup_control_available &&
+               vk_api_version < VK_API_VERSION_1_3 &&
+               name == VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (draw_indirect_count_extension_available &&
                name == VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME) {
@@ -1100,6 +1110,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix_feature{};
   cooperative_matrix_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+  VkPhysicalDeviceSubgroupSizeControlFeatures subgroup_control_feature{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
   VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{};
   dynamic_rendering_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
@@ -1354,6 +1366,18 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     // compute stage is supported and retain the exact admission tuples for
     // later typed lowering.
     if (cooperative_matrix_extension_available) {
+      if (subgroup_control_available) {
+        features2.pNext = &subgroup_control_feature;
+        query_physical_device_features2(&features2);
+        // Current shaders use the device's fixed subgroup width, not an
+        // independently requested or varying subgroup size.
+        subgroup_control_feature.subgroupSizeControl = VK_FALSE;
+        if (subgroup_control_feature.computeFullSubgroups) {
+          *pNextEnd = &subgroup_control_feature;
+          pNextEnd = &subgroup_control_feature.pNext;
+          ti_device_->vk_caps().compute_full_subgroups = true;
+        }
+      }
       features2.pNext = &cooperative_matrix_feature;
       query_physical_device_features2(&features2);
 
@@ -1366,6 +1390,7 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       query_physical_device_properties2(&properties2);
 
       if (cooperative_matrix_feature.cooperativeMatrix &&
+          ti_device_->vk_caps().compute_full_subgroups &&
           (matrix_stage_properties.cooperativeMatrixSupportedStages &
            VK_SHADER_STAGE_COMPUTE_BIT) &&
           vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR != nullptr) {

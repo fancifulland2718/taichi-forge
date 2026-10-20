@@ -25,6 +25,8 @@
 #include "taichi/rhi/vulkan/vulkan_pipeline_diagnostics.h"
 #include "taichi/rhi/vulkan/vulkan_present_policy.h"
 #include "taichi/system/profiler.h"
+#include "taichi/rhi/common/spirv_capability.h"
+#include "external/SPIRV-Headers/include/spirv/unified1/spirv.hpp"
 
 #include "spirv_reflect.h"
 
@@ -809,6 +811,16 @@ void VulkanPipeline::create_shader_stages(const Params &params) {
     VkPipelineShaderStageCreateInfo &shader_stage_info =
         shader_stages_.emplace_back();
 
+    if (spirv_declares_capability(code_view.data, code_view.size / 4,
+                                  spv::CapabilityCooperativeMatrixKHR)) {
+      RHI_THROW_UNLESS(
+          code_view.stage == VK_SHADER_STAGE_COMPUTE_BIT &&
+              ti_device_.vk_caps().compute_full_subgroups,
+          std::invalid_argument(
+              "Cooperative matrix shaders require full compute subgroups"));
+      shader_stage_info.flags |=
+          VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+    }
     shader_entry_points_.push_back(code_view.entry_point);
     VkShaderModule shader_module = create_shader_module(device_, code_view);
 

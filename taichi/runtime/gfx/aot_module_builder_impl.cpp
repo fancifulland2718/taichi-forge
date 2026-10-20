@@ -165,6 +165,9 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
         }
       }
       for (auto &task : kernel.tasks_attribs) {
+        if (!task.cooperative_matrix_requirements.empty())
+          artifact.metadata_version =
+              std::max(artifact.metadata_version, uint32_t(8));
         for (auto &bind : task.buffer_binds) {
           if (bind.buffer.type == spirv::TaskAttributes::BufferType::Root) {
             TI_ASSERT(bind.buffer.root_id.size() == 1);

@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "taichi/runtime/gfx/runtime.h"
+#include "taichi/runtime/gfx/cooperative_matrix.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/graph_artifact.h"
 
@@ -541,6 +542,13 @@ class AotModuleImpl : public aot::Module {
       }
       if (code.size() < 5 || code[0] != 0x07230203) {
         shader_errors_[index] = "Invalid SPIR-V header: " + path;
+        return false;
+      }
+      try {
+        validate_cooperative_matrix_metadata(
+            task, code, ti_aot_data_.metadata_version);
+      } catch (const std::exception &error) {
+        shader_errors_[index] = path + ": " + error.what();
         return false;
       }
       codes.emplace_back(std::move(code));

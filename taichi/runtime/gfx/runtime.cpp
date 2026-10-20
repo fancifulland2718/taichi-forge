@@ -1,6 +1,7 @@
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/runtime/gfx/snode_tree_resources.h"
 #include "taichi/runtime/gfx/descriptor_binding.h"
+#include "taichi/runtime/gfx/cooperative_matrix.h"
 #include "external/PicoSHA2/picosha2.h"
 #include <random>
 #ifdef _WIN32
@@ -1087,6 +1088,8 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
   task_uses_listgen_buffer_.resize(task_attribs.size(), false);
 
   for (int i = 0; i < task_attribs.size(); ++i) {
+    validate_cooperative_matrix_device(
+        ti_params.device, task_attribs[i], spirv_bins[i]);
     if (task_attribs[i].task_type == OffloadedTaskType::listgen) {
       required_listgen_capacity_entries_ = std::max(
           required_listgen_capacity_entries_,

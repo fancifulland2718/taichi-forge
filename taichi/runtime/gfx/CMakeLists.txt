@@ -15,6 +15,7 @@ target_sources(gfx_runtime
     aot_snode_resources.cpp
     aot_module_builder_impl.cpp
     aot_module_loader_impl.cpp
+    cooperative_matrix.cpp
     kernel_launcher.cpp
   )
 if(TI_WITH_VULKAN_POINTER)
@@ -35,3 +36,6 @@ target_include_directories(gfx_runtime
         ${LLVM_INCLUDE_DIRS}
   )
 target_link_libraries(gfx_runtime PRIVATE taichi_common)
+if(TI_WITH_VULKAN)
+  target_link_libraries(gfx_runtime PRIVATE vulkan_rhi)
+endif()

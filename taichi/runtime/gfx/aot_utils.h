@@ -37,9 +37,10 @@ inline std::string kernel_identity(spirv::TaichiKernelAttributes attributes,
  * AOT module data for the Unified Device API backend.
  */
 struct TaichiAotData {
-  // v6 reconstructs sparse resources; v7 adds descriptor ndarray byte offsets.
+  // v6 reconstructs sparse resources; v7 adds descriptor ndarray byte offsets;
+  // v8 records exact cooperative-matrix dimensions and fixed subgroup width.
   // Artifacts without these semantics retain their older minimum version.
-  static constexpr uint32_t kMetadataVersion = 7;
+  static constexpr uint32_t kMetadataVersion = 8;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

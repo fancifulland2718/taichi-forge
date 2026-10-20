@@ -3665,6 +3665,24 @@ physical aliases, failed-binding recovery and owner retirement. A downstream
 `kernel.grad` plus explicitly assembled MMA adjoints checks reverse results;
 this does not add automatic differentiation of MMA or new JIT recipe selection.
 
+Vulkan's `ti.hardware.matrix.cooperative_mma_f16_f32` uses the ordinary kernel
+and Graph export paths with packed matrix ndarray arguments. Export with
+`Module(caps=["spirv_has_cooperative_matrix", "spirv_has_float16"])`; ordinary
+scalar reads of f16 inputs additionally require `spirv_has_int16` and
+`spirv_has_int16_storage`. GFX metadata version 8 records each task's exact
+M/N/K and subgroup width. Preparation checks the destination device's
+subgroup-scoped, non-saturating f16/f16/f32/f32 tuple and full-compute-subgroup
+support before pipeline creation. Incompatible or missing requirements fail
+in the cold phase. Re-export older cooperative artifacts; keep runtime and
+frontend components paired.
+
+This retains the existing fixed-subgroup lowering and SPIR-V target below 1.6.
+It adds no per-replay capability checks or extra shader instructions. Windows
+NVIDIA Vulkan checks cover standalone/borrowed execution, separate bindings,
+replay, failed preparation and retirement, plus actual downstream `kernel.grad`
+and explicit A/B/C adjoints. This does not add automatic MMA differentiation
+or qualify AMD/Intel devices. Ordinary matrix multiplication is not rewritten.
+
 CUDA also registers `gemm_f32` using external cuBLAS:
 
 ```python

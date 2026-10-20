@@ -25,6 +25,19 @@ enum class SparseOverflowKind : uint32_t {
   Dynamic = 2,
 };
 
+// Exact deployment requirements for the current subgroup f16/f16/f32/f32
+// non-saturating MMA intrinsic. This is not a general materialized matrix type.
+struct CooperativeMatrixRequirement {
+  std::uint32_t m{0}, n{0}, k{0}, subgroup_size{0};
+
+  bool operator==(const CooperativeMatrixRequirement &other) const {
+    return m == other.m && n == other.n && k == other.k &&
+           subgroup_size == other.subgroup_size;
+  }
+
+  TI_IO_DEF(m, n, k, subgroup_size);
+};
+
 /**
  * Per offloaded task attributes.
  */
@@ -186,6 +199,7 @@ struct TaskAttributes {
   std::vector<BufferBind> buffer_binds;
   std::vector<TextureBind> texture_binds;
   std::vector<AccelerationStructureBind> acceleration_structure_binds;
+  std::vector<CooperativeMatrixRequirement> cooperative_matrix_requirements;
   // Only valid when |task_type| is range_for.
   std::optional<RangeForAttributes> range_for_attribs;
   // VS-3 (2026-05): host-side sparse listgen reuse metadata. Defaults mean
@@ -221,7 +235,8 @@ struct TaskAttributes {
             sparse_list_snode_id,
             sparse_list_parent_snode_id,
             may_mutate_sparse_topology,
-            sparse_mutation_snode_id);
+            sparse_mutation_snode_id,
+            cooperative_matrix_requirements);
 };
 
 /**

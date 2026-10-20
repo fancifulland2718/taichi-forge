@@ -4693,6 +4693,14 @@ class TaskCodegen : public IRVisitor {
       TI_ERROR_IF(m <= 0 || n <= 0 || k <= 0 || subgroup_size <= 0,
                   "Vulkan cooperative-matrix dimensions and subgroup size "
                   "must be positive.");
+      const CooperativeMatrixRequirement requirement{
+          static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(n),
+          static_cast<std::uint32_t>(k),
+          static_cast<std::uint32_t>(subgroup_size)};
+      auto &requirements = task_attribs_.cooperative_matrix_requirements;
+      if (std::find(requirements.begin(), requirements.end(), requirement) ==
+          requirements.end())
+        requirements.push_back(requirement);
 
       auto *offloaded = stmt->parent ? stmt->parent->parent_stmt() : nullptr;
       TI_ERROR_IF(offloaded == nullptr || !offloaded->is<OffloadedStmt>() ||
