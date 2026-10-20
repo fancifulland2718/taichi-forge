@@ -31,6 +31,11 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- AOT scatter-add 支持 CPU/CUDA/Vulkan 的 packed 向量／矩阵 Field，索引可为
+  标量 i32 Field 或 ndarray；保留累加原值、可变索引及 JIT 算法，不添加打包
+  helper 或人为分量数上限。需要配对的私有 ABI125 组件；正常安装消费、显式
+  下游梯度与 Vulkan 同步验证通过。
+
 - AOT 原生 sum/min/max 归约支持 CPU/CUDA/Vulkan 的整向量／矩阵 packed Field，
   保留逐分量算法并共用 scratch，不增加应用 shader 或人为分量数上限。需要配对的
   私有 ABI124 组件；正常安装、显式下游梯度与 Vulkan 同步验证通过。

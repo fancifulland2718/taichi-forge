@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- AOT scatter-add supports packed vector/matrix Fields on CPU/CUDA/Vulkan,
+  with scalar i32 Field or ndarray indices. It preserves accumulation into
+  existing values, mutable indices and the JIT algorithms without packing
+  helpers or an artificial component limit. Paired private ABI125 components
+  are required; installed consumers, explicit downstream gradients and Vulkan
+  synchronization validation pass.
+
 - AOT native sum/min/max reductions support whole packed vector/matrix Fields
   on CPU/CUDA/Vulkan. They preserve per-component algorithms and share scratch
   across components without new application shaders or an artificial component

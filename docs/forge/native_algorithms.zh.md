@@ -300,6 +300,11 @@ partial；CUDA 保留逐分量 launch，Vulkan 保留单次 packed dispatch。�
 helper 或应用 shader，也不设置人为分量数上限；检查形状溢出及实际设备／ABI 限制。
 此路线需要配对的私有 ABI125 组件，不新增原生算子的自动伴随。
 
+Windows CPU/CUDA/Vulkan 正常安装后的独立／借用消费通过，覆盖 2×3 f32 矩阵、
+f64 向量、8×8 i32 矩阵、索引变化、重复累加、前缀、父 Graph 和模块退休。
+显式下游梯度与 Vulkan 同步验证通过。4099 条记录、2×3 f32 样本不增加应用代码
+载荷或原生 workspace；120,940 字节的模块根快照与驱动分配另计。
+
 已物化的 CUDA `GraphBuilder.segmented_reduce()` recipe 可通过
 `Module.add_execution_plan()` 导出，输入/输出限不重叠的 scalar i32/u32 ndarray，
 layout 为 host 发布的不可变拓扑。导出保留选中的 serial、warp、block 或

@@ -393,6 +393,13 @@ or application shader is added, and component count has no artificial limit.
 Shape overflow and actual device/ABI limits are checked. This route requires
 paired private ABI125 components and adds no automatic native adjoint.
 
+Windows CPU/CUDA/Vulkan standalone and borrowed consumers pass after normal
+installation, covering 2×3 f32 matrices, f64 vectors, 8×8 i32 matrices, changed
+indices, repeated accumulation, prefixes, parent Graphs and module retirement.
+Explicit downstream gradients and Vulkan synchronization validation also pass.
+A 4099-record, 2×3 f32 case adds no application code payload or native workspace;
+its 120,940-byte module-root snapshot and driver allocations are separate costs.
+
 Materialized CUDA `GraphBuilder.segmented_reduce()` recipes export through
 `Module.add_execution_plan()` for disjoint scalar i32/u32 ndarrays and immutable
 host-published segment layouts. Export preserves the selected serial, warp,
