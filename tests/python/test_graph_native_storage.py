@@ -5,6 +5,16 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_buffer_recording_has_no_artificial_command_limit():
+    # Cold preparation only; no large GPU workload or timing benchmark.
+    recording = ti.graph.VulkanBufferCommandRecording(
+        (ti.graph.VulkanBufferCommand.memory_barrier(),) * 4097
+    )
+    prepared = recording.prepare_graph_execute({})
+    assert callable(prepared)
+
+
 def _offset_field():
     padding = ti.field(ti.i32)
     values = ti.field(ti.i32)

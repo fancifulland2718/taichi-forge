@@ -194,8 +194,9 @@ vendor runtime 就自动成为默认 provider。
 仍要求 4-byte 对齐 range、显式 barrier、
 runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 内调用，
 不支持 structured `Sequential` 或 AOT serialization，也不等于 RasterPass/AS provider。
-越界、overlap copy、错误 backend/device、reset 后的旧 Graph 和超过 4096 条 command
-都会失败。该功能完全使用官方 wheel 已包含的 runtime，不增加 wheel 发行矩阵。
+越界、overlap copy、错误 backend/device、reset 后的旧 Graph
+都会失败。0.6.4 移除了此前 4096 条命令的软件上限；命令存储仍受可用内存约束。
+该功能完全使用官方 wheel 已包含的 runtime，不增加 wheel 发行矩阵。
 
 ### `ti.hardware.image.VulkanImageCopyRecording`（0.6.3）
 

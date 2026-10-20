@@ -8837,13 +8837,12 @@ PreparedVulkanBufferCommands Program::prepare_vulkan_buffer_commands(
     const std::vector<VulkanBufferCommand> &commands) {
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan buffer command recording requires the Vulkan backend.");
-  TI_ERROR_IF(commands.empty() || commands.size() > 4096,
-              "Vulkan buffer recording requires between 1 and 4096 commands.");
+  TI_ERROR_IF(commands.empty(),
+              "Vulkan buffer recording requires at least one command.");
   std::vector<storage::DenseStorageDescriptor> descriptors;
   std::vector<bool> writable;
   std::vector<std::pair<std::size_t, std::size_t>> indices;
-  descriptors.reserve(commands.size() * 2);
-  writable.reserve(commands.size() * 2);
+  indices.reserve(commands.size());
   const auto absent = (std::numeric_limits<std::size_t>::max)();
   auto add_binding = [&](Ndarray *array,
                          const storage::DenseStorageDescriptor *descriptor,
@@ -8893,19 +8892,14 @@ PreparedVulkanBufferCommands Program::prepare_vulkan_buffer_commands(
       std::make_shared<std::vector<PreparedVulkanBufferCommands::Command>>();
   resolved->reserve(commands.size());
   auto range = [&](std::size_t binding_index, std::size_t offset,
-                   std::size_t bytes, const char *role) {
+                   std::size_t bytes) {
     const auto &binding = plan.storage->binding(binding_index);
-    TI_ERROR_IF(offset > binding.bytes || bytes > binding.bytes - offset,
-                "Vulkan buffer command {} range offset {} plus {} bytes "
-                "exceeds {} bytes.",
-                role, offset, bytes, binding.bytes);
-    TI_ERROR_IF(
-        ((binding.pointer.offset + offset) & 3u) || (bytes & 3u),
-        "Vulkan buffer command {} offset and size must be four-byte aligned.",
-        role);
-    auto pointer = binding.pointer;
-    pointer.offset += offset;
-    return pointer;
+    try {
+      return resolve_vulkan_buffer_command_range(binding.pointer, binding.bytes,
+                                                  offset, bytes);
+    } catch (const std::invalid_argument &error) {
+      TI_ERROR("{}", error.what());
+    }
   };
   for (std::size_t i = 0; i < commands.size(); ++i) {
     const auto &command = commands[i];
@@ -8914,21 +8908,16 @@ PreparedVulkanBufferCommands Program::prepare_vulkan_buffer_commands(
                                                command.value};
     if (command.kind == VulkanBufferCommandKind::kFillU32 ||
         command.kind == VulkanBufferCommandKind::kCopy) {
-      TI_ERROR_IF(!command.bytes,
-                  "Vulkan buffer fill/copy requires a nonzero byte count.");
       item.destination = range(indices[i].first, command.destination_offset,
-                               command.bytes, "destination");
+                               command.bytes);
       if (command.kind == VulkanBufferCommandKind::kCopy) {
         item.source = range(indices[i].second, command.source_offset,
-                            command.bytes, "source");
-        const auto &dst =
-            static_cast<const DeviceAllocation &>(item.destination);
-        const auto &src = static_cast<const DeviceAllocation &>(item.source);
-        TI_ERROR_IF(
-            dst == src &&
-                item.destination.offset < item.source.offset + command.bytes &&
-                item.source.offset < item.destination.offset + command.bytes,
-            "Vulkan buffer copy regions overlap within one allocation.");
+                            command.bytes);
+        try {
+          validate_vulkan_buffer_copy(item.destination, item.source, command.bytes);
+        } catch (const std::invalid_argument &error) {
+          TI_ERROR("{}", error.what());
+        }
       }
     } else if (command.kind == VulkanBufferCommandKind::kBufferBarrier) {
       item.destination = plan.storage->binding(indices[i].first).pointer;
@@ -8944,24 +8933,7 @@ void Program::execute_vulkan_buffer_commands(
   with_prepared_native_storage(*plan.storage, [&] {
     enqueue_compute_op_lambda(
         [commands = plan.commands](Device *, CommandList *cmdlist) {
-          for (const auto &command : *commands) {
-            switch (command.kind) {
-              case VulkanBufferCommandKind::kFillU32:
-                cmdlist->buffer_fill(command.destination, command.bytes,
-                                     command.value);
-                break;
-              case VulkanBufferCommandKind::kCopy:
-                cmdlist->buffer_copy(command.destination, command.source,
-                                     command.bytes);
-                break;
-              case VulkanBufferCommandKind::kBufferBarrier:
-                cmdlist->buffer_barrier(command.destination);
-                break;
-              case VulkanBufferCommandKind::kMemoryBarrier:
-                cmdlist->memory_barrier();
-                break;
-            }
-          }
+          taichi::lang::record_vulkan_buffer_commands(*cmdlist, *commands);
         },
         {});
     mark_runtime_submission_pending();

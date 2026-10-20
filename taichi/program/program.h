@@ -24,6 +24,7 @@
 #include "taichi/runtime/vulkan_ray_query_packet.h"
 #include "taichi/runtime/vulkan_ray_types.h"
 #include "taichi/runtime/vulkan_graphics_types.h"
+#include "taichi/runtime/vulkan_buffer_commands.h"
 #include <taichi/program/runtime_fault.h>
 #include <taichi/program/runtime_trace.h>
 #include <taichi/program/primitive_workspace.h>
@@ -152,13 +153,6 @@ struct PreparedExternalCudaStorage {
   std::vector<RuntimeResourceHandle> texture_handles;
 };
 
-enum class VulkanBufferCommandKind : std::uint8_t {
-  kFillU32,
-  kCopy,
-  kBufferBarrier,
-  kMemoryBarrier,
-};
-
 struct VulkanBufferCommand {
   VulkanBufferCommandKind kind{VulkanBufferCommandKind::kMemoryBarrier};
   Ndarray *destination{nullptr};
@@ -169,18 +163,6 @@ struct VulkanBufferCommand {
   std::size_t source_offset{0};
   std::size_t bytes{0};
   std::uint32_t value{0};
-};
-
-struct PreparedVulkanBufferCommands {
-  struct Command {
-    VulkanBufferCommandKind kind;
-    DevicePtr destination;
-    DevicePtr source;
-    std::size_t bytes;
-    std::uint32_t value;
-  };
-  std::shared_ptr<PreparedNativeStorage> storage;
-  std::shared_ptr<const std::vector<Command>> commands;
 };
 
 // Cold-qualified ray bindings. Aligned descriptor ranges and shader offsets

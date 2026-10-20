@@ -240,7 +240,8 @@ The contract requires four-byte-aligned ranges, explicit barriers, the runtime-o
 and `rerecord` replay. It is not callable inside `@ti.kernel`, is not qualified
 inside a structured `Sequential` or for AOT serialization, and is not itself a
 RasterPass or AS provider. Bounds errors, overlapping copies, backend/device
-mismatches, Graph use after reset, and recordings over 4096 commands fail.
+mismatches, and Graph use after reset fail. Version 0.6.4 removes the previous
+4096-command software limit; command storage remains subject to available memory.
 The route uses only runtime code already present in official wheels and does
 not add a wheel variant.
 
