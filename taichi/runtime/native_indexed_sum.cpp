@@ -43,19 +43,23 @@ void validate(Device &device, const ScatterAddOperation &op) {
       op.value_type < 0 || op.value_type >= types.size())
     throw std::invalid_argument(
         "Indexed sum requires numeric prefixes and nonempty output");
+  const auto record = scatter_add_item_bytes(op);
   for (const auto *a : {&op.src, &op.indices, &op.dst}) {
     const auto type =
         a == &op.indices ? DataType(PrimitiveType::i32) : types[op.value_type];
     const std::uint64_t width = data_type_size(type);
+    const auto item = a == &op.indices ? width : record;
+    const auto shape = a == &op.indices ? std::vector<std::uint64_t>{}
+                                        : op.element_shape;
     const auto count = a == &op.dst ? op.dst_items : op.size;
     if (a->pointer.device != &device)
       throw std::invalid_argument("Scatter-add requires same-device arrays");
     validate_native_array_layout(
-        *a, {{count}, {}, width, width, false, type->to_string()});
-    if (a->shape[0] > std::numeric_limits<std::size_t>::max() / width ||
-        a->bytes != a->shape[0] * width)
+        *a, {{count}, shape, item, width, false, type->to_string()});
+    if (a->shape[0] > std::numeric_limits<std::size_t>::max() / item ||
+        a->bytes != a->shape[0] * item)
       throw std::invalid_argument(
-          "Scatter-add requires exact packed scalar storage");
+          "Scatter-add requires exact packed storage");
   }
 }
 
@@ -66,6 +70,9 @@ class IndexedSumBase : public NativeOperation {
         device_(device),
         size_(op.size),
         bound_(op.dst_items),
+        record_(scatter_add_item_bytes(op)),
+        lanes_(record_ / (op.value_type < 3 ? 4 : 8)),
+        packed_(op.strategy == ScatterAddStrategy::packed_field),
         type_(op.value_type) {
     validate_scatter_add_storage(arch, op);
   }
@@ -82,7 +89,8 @@ class IndexedSumBase : public NativeOperation {
  protected:
   Arch arch_;
   Device &device_;
-  std::size_t size_, bound_, bytes_{0};
+  std::size_t size_, bound_, record_, lanes_, bytes_{0};
+  bool packed_;
   int type_;
   void *src_{nullptr}, *indices_{nullptr}, *dst_{nullptr};
 };
@@ -95,11 +103,15 @@ class CpuIndexedSum final : public IndexedSumBase {
                 const ScatterAddOperation &op)
       : IndexedSumBase(context.arch, context.device, op),
         pool_(context.cpu_thread_pool),
-        partitions_(cpu::scatter_add_partitions<T>(
-            size_,
-            bound_,
-            op.cpu_max_threads ? op.cpu_max_threads
-                               : context.cpu_max_threads)) {
+        partitions_(packed_
+                        ? cpu::packed_scatter_add_partitions<T>(
+                              size_, bound_, lanes_,
+                              op.cpu_max_threads ? op.cpu_max_threads
+                                                 : context.cpu_max_threads)
+                        : cpu::scatter_add_partitions<T>(
+                              size_, bound_,
+                              op.cpu_max_threads ? op.cpu_max_threads
+                                                 : context.cpu_max_threads)) {
     auto *cpu = dynamic_cast<cpu::CpuDevice *>(&device_);
     if (!cpu ||
         cpu->map_range_for_cpu_native(op.src.pointer, op.src.bytes, &src_) !=
@@ -111,11 +123,19 @@ class CpuIndexedSum final : public IndexedSumBase {
         (partitions_ > 1 && !pool_))
       throw std::invalid_argument(
           "Indexed sum CPU storage or scheduler is invalid");
-    bytes_ = cpu::scatter_add_workspace_bytes<T>(bound_, partitions_);
+    bytes_ = cpu::scatter_add_workspace_bytes<T>(bound_ * lanes_, partitions_);
     partial_.resize(bytes_ / sizeof(T));
   }
   void run_cpu() override {
     std::fill(partial_.begin(), partial_.end(), T{});
+    if (packed_) {
+      cpu::packed_scatter_add(
+          static_cast<const uint8_t *>(src_), 0, record_,
+          static_cast<const int32_t *>(indices_),
+          static_cast<uint8_t *>(dst_), 0, record_, size_, bound_, lanes_,
+          partitions_, partial_.data(), pool_);
+      return;
+    }
     cpu::indexed_sum<T, accumulate>(static_cast<const T *>(src_),
                                     static_cast<const int32_t *>(indices_),
                                     static_cast<T *>(dst_), size_, bound_,
@@ -179,8 +199,11 @@ class CudaIndexedSum final : public IndexedSumBase {
     const auto type = static_cast<cuda::CudaTransformValueType>(type_);
     if constexpr (accumulate) {
       const auto bound = std::min<std::size_t>(bound_, std::size_t{1} << 31);
-      cuda::driver_scatter_add_on_stream(src_, indices_, dst_, size_, bound,
-                                         type, stream);
+      const auto width = type_ < 3 ? 4 : 8;
+      for (std::size_t lane = 0; lane < lanes_; ++lane)
+        cuda::driver_scatter_add_strided_on_stream(
+            src_, indices_, dst_, size_, bound, type, lane * width, record_,
+            0, sizeof(int32_t), lane * width, record_, stream);
     } else {
       cuda::driver_grouped_reduce_on_stream(indices_, src_, dst_, size_, bound_,
                                             type, stream);
@@ -190,18 +213,36 @@ class CudaIndexedSum final : public IndexedSumBase {
 #endif
 }  // namespace
 
+std::size_t scatter_add_item_bytes(const ScatterAddOperation &op) {
+  if (op.value_type < 0 || op.value_type >= indexed_sum_types().size() ||
+      (op.strategy != ScatterAddStrategy::packed_array &&
+       op.strategy != ScatterAddStrategy::packed_field))
+    throw std::invalid_argument("Scatter-add requires a supported type and strategy");
+  if ((op.strategy == ScatterAddStrategy::packed_field) != !op.element_shape.empty())
+    throw std::invalid_argument("Packed Field scatter-add requires its tensor shape");
+  std::size_t bytes = op.value_type < 3 ? 4 : 8;
+  for (const auto axis : op.element_shape) {
+    if (!axis || axis > std::numeric_limits<std::size_t>::max() / bytes)
+      throw std::invalid_argument("Scatter-add payload exceeds address space");
+    bytes *= axis;
+  }
+  if (std::max(op.size, op.dst_items) > std::numeric_limits<std::size_t>::max() / bytes)
+    throw std::invalid_argument("Scatter-add prefix exceeds address space");
+  return bytes;
+}
+
 void validate_scatter_add_storage(Arch arch, const ScatterAddOperation &op) {
+  const auto record = scatter_add_item_bytes(op);
   for (const auto *a : {&op.src, &op.indices, &op.dst}) {
     validate_native_shader_storage(arch, a->pointer);
     resolve_native_storage_range(arch, a->pointer, a->bytes);
   }
-  const auto width = op.value_type < 3 ? 4 : 8;
   validate_native_read_write_disjoint(
-      {resolve_native_storage_range(arch, op.src.pointer, op.size * width),
+      {resolve_native_storage_range(arch, op.src.pointer, op.size * record),
        resolve_native_storage_range(arch, op.indices.pointer,
                                     op.size * sizeof(int32_t))},
       {resolve_native_storage_range(arch, op.dst.pointer,
-                                    op.dst_items * width)});
+                                    op.dst_items * record)});
 }
 
 namespace {
@@ -218,8 +259,12 @@ void register_indexed_sum(NativeOperationRegistry &registry) {
       [input_port, index_port, output_port](const liong::json::JsonValue &p) ->
       typename NativeOperationRegistry::Binder<Descriptor> {
         const char *bound_name = accumulate ? "dst_items" : "num_groups";
-        operation_json::fields(
-            p, {"size", bound_name, "dtype", "cpu_max_threads"});
+        if constexpr (accumulate)
+          operation_json::fields(p, {"size", bound_name, "dtype", "cpu_max_threads",
+                                     "strategy", "element_shape"});
+        else
+          operation_json::fields(
+              p, {"size", bound_name, "dtype", "cpu_max_threads"});
         const auto size = operation_json::integer(p["size"]);
         const auto bound = operation_json::integer(p[bound_name]);
         if ((accumulate && !size) || !bound || size > SIZE_MAX ||
@@ -238,8 +283,34 @@ void register_indexed_sum(NativeOperationRegistry &registry) {
         if (threads && (!*threads || *threads > INT_MAX))
           throw std::invalid_argument(
               "Indexed sum CPU configuration must fit its positive int ABI");
+        auto strategy = ScatterAddStrategy::packed_array;
+        std::vector<std::uint64_t> element_shape;
+        if constexpr (accumulate) {
+          const auto requested = p.obj.inner.find("strategy");
+          if (requested != p.obj.inner.end()) {
+            const auto name = operation_json::name(requested->second);
+            if (name == "packed_field")
+              strategy = ScatterAddStrategy::packed_field;
+            else if (name != "packed_array")
+              throw std::invalid_argument("Scatter-add strategy is invalid");
+          }
+          const auto shape = p.obj.inner.find("element_shape");
+          if (shape != p.obj.inner.end()) {
+            if (!shape->second.is_arr())
+              throw std::invalid_argument("Scatter-add element_shape must be an array");
+            for (const auto &axis : shape->second.arr.inner)
+              element_shape.push_back(operation_json::integer(axis));
+          }
+        }
+        ScatterAddOperation description;
+        description.size = size;
+        description.dst_items = bound;
+        description.value_type = type;
+        description.strategy = strategy;
+        description.element_shape = element_shape;
+        scatter_add_item_bytes(description);  // Check arithmetic before binding.
         return [size, bound, type, threads, input_port, index_port,
-                output_port](const NativeOperationBindings &bindings) {
+                output_port, strategy, element_shape](const NativeOperationBindings &bindings) {
           const auto &source = bindings.at(input_port).array();
           const auto &index = bindings.at(index_port).array();
           const auto &output = bindings.at(output_port).array();
@@ -248,7 +319,7 @@ void register_indexed_sum(NativeOperationRegistry &registry) {
                 size_t(size), size_t(bound),
                 type,         static_cast<int>(threads.value_or(0)),
                 source,       index,
-                output};
+                output, strategy, element_shape};
           else
             return Descriptor{
                 size_t(size), size_t(bound),

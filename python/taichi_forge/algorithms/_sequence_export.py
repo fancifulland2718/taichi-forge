@@ -343,10 +343,23 @@ def _scatter_add(call, context):
     ):
         raise TaichiRuntimeError("AOT scatter-add requires its concrete ScatterAddWorkspace")
     src, indices, dst = call.args
-    algorithms._check_scatter_add_request(*call.args, **call.kwargs)
+    tensors = all(type(a) is algorithms.MatrixField for a in (src, dst))
+    if tensors:
+        algorithms._check_matching_matrix_fields(
+            "AOT scatter-add", src, dst, require_same_shape=False)
+    else:
+        algorithms._check_scatter_add_request(*call.args, **call.kwargs)
     source, index, destination = (packed_description(a) for a in call.args)
-    if any(len(d.index_shape) != 1 or d.element_shape for d in (source, index, destination)):
-        raise TaichiRuntimeError("AOT scatter-add requires packed scalar storage")
+    if (any(len(d.index_shape) != 1 for d in (source, index, destination))
+            or index.element_shape or indices.dtype != algorithms.i32
+            or source.index_shape != index.index_shape):
+        raise TaichiRuntimeError("AOT scatter-add requires one-dimensional storage and matching scalar i32 indices")
+    if tensors:
+        if (not source.element_shape or source.element_shape != destination.element_shape
+                or any(a._native_dense_packed_plan() is None for a in (src, dst))):
+            raise TaichiRuntimeError("AOT tensor scatter-add requires matching packed vector/matrix Fields")
+    elif source.element_shape or destination.element_shape:
+        raise TaichiRuntimeError("AOT scatter-add requires scalar storage")
     n, bound = source.index_shape[0], destination.index_shape[0]
     call.workspace.check_shape(n, bound)
     arch = impl.current_cfg().arch
@@ -363,16 +376,21 @@ def _scatter_add(call, context):
     value_type = algorithms._scatter_add_value_type(source.scalar_type)
     if arch == core.Arch.vulkan and not prog.vulkan_scatter_add_value_type_available(value_type):
         raise TaichiRuntimeError("AOT scatter-add dtype atomics are unavailable on Vulkan")
+    methods = {
+        "scatter_add_dense_field_packed", "scatter_add_dense_field_packed_indices_field",
+    } if tensors else {
+        f"{prefix}_scatter_add_{suffix}"
+        for suffix in ("ndarray", "dense_field", "dense_field_indices_field")
+    }
     if call.plan is not None and (
         type(call.plan) is not algorithms._NativePrimitivePlan
         or not algorithms._native_plan_request_matches(call.plan, backend, (src, indices, dst), (value_type,))
-        or call.plan.method_name not in {
-            f"{prefix}_scatter_add_{suffix}"
-            for suffix in ("ndarray", "dense_field", "dense_field_indices_field")
-        }
+        or call.plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT scatter-add cannot reconstruct the selected cached strategy")
     parameters = dict(size=n, dst_items=bound, dtype=str(source.scalar_type))
+    if tensors:
+        parameters.update(strategy="packed_field", element_shape=list(source.element_shape))
     if backend == "cpu_native":
         parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
     context.operations.append(dict(

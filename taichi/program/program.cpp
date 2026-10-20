@@ -1061,22 +1061,6 @@ struct CpuStridedScatterAddIoTaskContext {
   int num_threads{1};
 };
 
-template <typename T>
-struct CpuPackedScatterAddIoTaskContext {
-  const uint8_t *src{nullptr};
-  const int32_t *indices{nullptr};
-  T *partial{nullptr};
-  uint8_t *dst{nullptr};
-  std::size_t n{0};
-  std::size_t dst_items{0};
-  int lane_count{1};
-  std::size_t src_offset{0};
-  std::size_t src_stride{0};
-  std::size_t dst_offset{0};
-  std::size_t dst_stride{0};
-  int num_threads{1};
-};
-
 struct CpuCompactCountTaskContext {
   const uint8_t *flags{nullptr};
   std::size_t flags_stride{sizeof(int32_t)};
@@ -2094,68 +2078,6 @@ void cpu_strided_scatter_add_io_merge_task(void *raw_ctx,
 }
 
 template <typename T>
-void cpu_packed_scatter_add_io_count_task(void *raw_ctx,
-                                          int /*thread_id*/,
-                                          int task_id) {
-  auto *ctx = static_cast<CpuPackedScatterAddIoTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const auto lanes = static_cast<std::size_t>(ctx->lane_count);
-  T *local = ctx->partial +
-             ctx->dst_items * lanes * static_cast<std::size_t>(tid);
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    const auto index = static_cast<std::size_t>(ctx->indices[i]);
-    if (index < ctx->dst_items) {
-      const uint8_t *src_item =
-          ctx->src + ctx->src_offset + i * ctx->src_stride;
-      T *local_item = local + index * lanes;
-      for (std::size_t lane = 0; lane < lanes; ++lane) {
-        const auto *value =
-            reinterpret_cast<const T *>(src_item + lane * sizeof(T));
-        local_item[lane] = cpu_reduce_combine(local_item[lane], *value, 0);
-      }
-    }
-  }
-}
-
-template <typename T>
-void cpu_packed_scatter_add_io_merge_task(void *raw_ctx,
-                                          int /*thread_id*/,
-                                          int task_id) {
-  auto *ctx = static_cast<CpuPackedScatterAddIoTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const auto lanes = static_cast<std::size_t>(ctx->lane_count);
-  const std::size_t total = ctx->dst_items * lanes;
-  const std::size_t begin =
-      total * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      total * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t scalar_i = begin; scalar_i < end; ++scalar_i) {
-    const std::size_t item = scalar_i / lanes;
-    const std::size_t lane = scalar_i - item * lanes;
-    T value{};
-    for (int t = 0; t < ctx->num_threads; ++t) {
-      value = cpu_reduce_combine(
-          value,
-          ctx->partial[(ctx->dst_items * lanes) * static_cast<std::size_t>(t) +
-                       scalar_i],
-          0);
-    }
-    auto *dst_value = reinterpret_cast<T *>(
-        ctx->dst + ctx->dst_offset + item * ctx->dst_stride +
-        lane * sizeof(T));
-    *dst_value = cpu_reduce_combine(*dst_value, value, 0);
-  }
-}
-
-template <typename T>
 std::size_t cpu_scatter_add_typed(const T *src_ptr,
                                   const int32_t *indices_ptr,
                                   T *dst_ptr,
@@ -2295,64 +2217,26 @@ std::size_t cpu_scatter_add_packed_strided_io_typed(
     int lane_count,
     int max_threads,
     int target_threads) {
-  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
-              "CPU native packed scatter-add received a null data pointer.");
   TI_ERROR_IF(lane_count <= 0,
               "CPU native packed scatter-add received an invalid lane count.");
   const auto lanes = static_cast<std::size_t>(lane_count);
-  TI_ERROR_IF(dst_items >
-                  std::numeric_limits<std::size_t>::max() / lanes,
-              "CPU native packed scatter-add destination scalar count "
-              "overflowed.");
-  const std::size_t dst_scalars = dst_items * lanes;
-  TI_ERROR_IF(static_cast<std::size_t>(target_threads) >
-                  std::numeric_limits<std::size_t>::max() / dst_scalars,
-              "CPU native packed scatter-add workspace size overflowed.");
-  const std::size_t workspace_items =
-      static_cast<std::size_t>(target_threads) * dst_scalars;
-  TI_ERROR_IF(workspace_items >
-                  std::numeric_limits<std::size_t>::max() / sizeof(T),
-              "CPU native packed scatter-add workspace byte size overflowed.");
-  const std::size_t workspace_bytes = workspace_items * sizeof(T);
-  if (target_threads > 1 &&
-      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
-    CpuPrimitiveScratchBuffer<T> partial(
-        PrimitiveWorkspaceFamily::scatter_add, workspace_items);
-    CpuPackedScatterAddIoTaskContext<T> ctx;
-    ctx.src = src_ptr;
-    ctx.indices = indices_ptr;
-    ctx.partial = partial.data();
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.dst_items = dst_items;
-    ctx.lane_count = lane_count;
-    ctx.src_offset = src_offset;
-    ctx.src_stride = src_stride;
-    ctx.dst_offset = dst_offset;
-    ctx.dst_stride = dst_stride;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_packed_scatter_add_io_count_task<T>);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_packed_scatter_add_io_merge_task<T>);
-    return workspace_bytes;
+  const auto scalars = cpu::packed_scatter_add_scalars(dst_items, lanes);
+  const auto partitions =
+      cpu::scatter_add_workspace_partitions<T>(scalars, target_threads);
+  const auto bytes = cpu::scatter_add_workspace_bytes<T>(scalars, partitions);
+  if (partitions == 1) {
+    cpu::packed_scatter_add(
+        src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+        dst_stride, n, dst_items, lanes, 1, static_cast<T *>(nullptr), nullptr);
+    return 0;
   }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto index = static_cast<std::size_t>(indices_ptr[i]);
-    if (index < dst_items) {
-      const uint8_t *src_item = src_ptr + src_offset + i * src_stride;
-      uint8_t *dst_item = dst_ptr + dst_offset + index * dst_stride;
-      for (std::size_t lane = 0; lane < lanes; ++lane) {
-        const auto *value =
-            reinterpret_cast<const T *>(src_item + lane * sizeof(T));
-        auto *dst_value =
-            reinterpret_cast<T *>(dst_item + lane * sizeof(T));
-        *dst_value = cpu_reduce_combine(*dst_value, *value, 0);
-      }
-    }
-  }
-  return 0;
+  CpuPrimitiveScratchBuffer<T> partial(PrimitiveWorkspaceFamily::scatter_add,
+                                       bytes / sizeof(T));
+  cpu::packed_scatter_add(
+      src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+      dst_stride, n, dst_items, lanes, partitions, partial.data(),
+      get_cpu_primitive_thread_pool(max_threads));
+  return bytes;
 }
 
 template <typename Invoke>

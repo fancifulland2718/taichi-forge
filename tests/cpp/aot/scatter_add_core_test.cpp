@@ -158,4 +158,62 @@ TEST(ScatterAddCore, OptionalWorkspaceBudgetDoesNotLimitInputCapacity) {
   EXPECT_EQ(partitions, 1);
   EXPECT_EQ(cpu::scatter_add_workspace_bytes<double>(maximum, partitions), 0);
 }
+
+TEST(ScatterAddCore, PackedLanesPreserveNeighborsAndMutableAccumulation) {
+  ThreadPool pool(1);
+  constexpr std::size_t n = 13, bound = 4, lanes = 2, stride = 4;
+  std::array<int32_t, n> index{0, 2, -1, 4, 1, 2, 0, 3, 1, 4, -1, 3, 0};
+  std::array<int32_t, n * stride> src;
+  for (int i = 0; i < src.size(); ++i) src[i] = i + 1;
+  for (int parts : {1, 3, 17}) {
+    std::array<int32_t, (bound + 1) * stride> dst, expected;
+    dst.fill(37);
+    expected = dst;
+    std::vector<int32_t> partial(cpu::scatter_add_workspace_bytes<int32_t>(bound * lanes, parts) / 4);
+    for (int replay = 0; replay < 2; ++replay) {
+      std::fill(partial.begin(), partial.end(), 0);
+      cpu::packed_scatter_add(
+          reinterpret_cast<const uint8_t *>(src.data()), 4, stride * 4,
+          index.data(), reinterpret_cast<uint8_t *>(dst.data()), 4, stride * 4,
+          n, bound, lanes, parts, partial.data(), &pool);
+      for (int i = 0; i < n; ++i)
+        if (index[i] >= 0 && index[i] < bound)
+          for (int lane = 0; lane < lanes; ++lane)
+            expected[index[i] * stride + 1 + lane] += src[i * stride + 1 + lane];
+      EXPECT_EQ(dst, expected);
+    }
+  }
+}
+
+TEST(ScatterAddCore, PackedFloatOrderRetainsProducerRecordPartitions) {
+  ThreadPool pool(1);
+  const std::array<float, 8> src{1e20f, 1, 1, 2, -1e20f, 3, 1, 4};
+  const std::array<int32_t, 4> indices{};
+  for (int partitions : {1, 2}) {
+    std::array<float, 2> dst{37, 37};
+    std::vector<float> partial(cpu::scatter_add_workspace_bytes<float>(2, partitions) / 4);
+    cpu::packed_scatter_add(
+        reinterpret_cast<const uint8_t *>(src.data()), 0, 8, indices.data(),
+        reinterpret_cast<uint8_t *>(dst.data()), 0, 8, 4, 1, 2, partitions,
+        partial.data(), &pool);
+    EXPECT_EQ(dst[0], partitions == 1 ? 1 : 37);
+    EXPECT_EQ(dst[1], 47);
+  }
+}
+
+TEST(ScatterAddCore, PackedWorkspacePolicyAndInvalidSchedulerDoNotWrite) {
+  // Shape metadata alone exercises wide lanes and optional workspace fallback.
+  EXPECT_EQ(cpu::packed_scatter_add_partitions<float>(262147, 1024, 65, 4), 4);
+  EXPECT_EQ(cpu::packed_scatter_add_partitions<double>(262147, 1024, 4097, 4), 1);
+  const auto maximum = std::numeric_limits<std::size_t>::max();
+  EXPECT_THROW(cpu::packed_scatter_add_scalars(maximum, 2), std::invalid_argument);
+  const std::array<float, 2> src{1, 2};
+  std::array<float, 2> dst{37, 41};
+  int32_t index = 0;
+  EXPECT_THROW(cpu::packed_scatter_add(
+      reinterpret_cast<const uint8_t *>(src.data()), 0, 8, &index,
+      reinterpret_cast<uint8_t *>(dst.data()), 0, 8, 1, 1, 2, 2,
+      static_cast<float *>(nullptr), nullptr), std::invalid_argument);
+  EXPECT_EQ(dst, (std::array<float, 2>{37, 41}));
+}
 }  // namespace taichi::lang

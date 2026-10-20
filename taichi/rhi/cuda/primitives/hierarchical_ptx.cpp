@@ -1035,6 +1035,19 @@ std::size_t driver_scatter_add_strided(void *src,
                                        void *stream) {
   TI_ERROR_IF(num_items < 0 || index_bound < 0,
               "CUDA Driver scatter-add received a negative size.");
+  return driver_scatter_add_strided_on_stream(
+      src, indices, dst, num_items, index_bound, value_type, src_offset,
+      src_stride, indices_offset, indices_stride, dst_offset, dst_stride,
+      stream);
+}
+
+std::size_t driver_scatter_add_strided_on_stream(
+    void *src, void *indices, void *dst,
+    std::uint32_t num_items, std::uint32_t index_bound,
+    CudaTransformValueType value_type,
+    std::size_t src_offset, std::size_t src_stride,
+    std::size_t indices_offset, std::size_t indices_stride,
+    std::size_t dst_offset, std::size_t dst_stride, void *stream) {
   return driver_scatter_add_strided_impl(
       src, indices, dst, num_items, index_bound, value_type, src_offset,
       src_stride, indices_offset, indices_stride, dst_offset, dst_stride,

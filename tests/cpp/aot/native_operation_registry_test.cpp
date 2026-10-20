@@ -4,6 +4,7 @@
 #include <utility>
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_reduce.h"
+#include "taichi/runtime/native_scatter_add.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/image_transfer.h"
@@ -108,6 +109,82 @@ TEST(NativeOperationRegistry, ScatterAddSchemaKeepsBackendSpecificLimitsAtPrepar
     EXPECT_THROW(registry.decode(d), std::invalid_argument);
   }
 }
+
+TEST(NativeOperationRegistry, ScatterTensorShapeIsValidatedBeforeBinding) {
+  const auto &registry = native_operation_registry();
+  auto op = NativeOperationDescription::parse(liong::json::parse_complete(
+      R"({"kind":"native","provider":"builtin","operation":"scatter_add","version":1,
+      "parameters":{"size":17,"dst_items":5,"dtype":"f64","strategy":"packed_field",
+                    "element_shape":[8,8]},"bindings":{"src":"s","indices":"i","dst":"d"}})"));
+  EXPECT_EQ(registry.decode(op).kind(), "scatter_add");
+  for (const char *shape : {"true", "[]", "[0]", "[-1]", "[true]", "[1.5]",
+                            "[9223372036854775807]", "[4294967296,4294967296]"}) {
+    auto bad = op;
+    bad.parameters = liong::json::parse_complete(
+        std::string(R"({"size":17,"dst_items":5,"dtype":"f64","strategy":"packed_field","element_shape":)") +
+        shape + "}");
+    EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  }
+  auto bad = op;
+  bad.parameters = liong::json::parse_complete(
+      R"({"size":17,"dst_items":5,"dtype":"f64","element_shape":[2,3]})");
+  EXPECT_THROW(registry.decode(bad), std::invalid_argument);
+  ScatterAddOperation wide;
+  wide.size = 1;
+  wide.dst_items = 1;
+  wide.value_type = 1;
+  wide.strategy = ScatterAddStrategy::packed_field;
+  wide.element_shape = {1, 65};
+  EXPECT_EQ(scatter_add_item_bytes(wide), 260);
+  wide.dst_items = std::numeric_limits<std::size_t>::max() / 260 + 1;
+  EXPECT_THROW(scatter_add_item_bytes(wide), std::invalid_argument);
+}
+
+#ifdef TI_WITH_LLVM
+TEST(NativeOperationRegistry, ScatterTensorPrefixAccumulatesAndPreservesTail) {
+  cpu::CpuDevice device;
+  auto [source, s] = device.allocate_memory_unique({17 * 6 * 4});
+  auto [index, i] = device.allocate_memory_unique({17 * 4});
+  auto [target, t] = device.allocate_memory_unique({7 * 6 * 4});
+  ASSERT_EQ(s, RhiResult::success);
+  ASSERT_EQ(i, RhiResult::success);
+  ASSERT_EQ(t, RhiResult::success);
+  void *sp = nullptr, *ip = nullptr, *tp = nullptr;
+  ASSERT_EQ(device.map(*source, &sp), RhiResult::success);
+  ASSERT_EQ(device.map(*index, &ip), RhiResult::success);
+  ASSERT_EQ(device.map(*target, &tp), RhiResult::success);
+  auto *values = static_cast<float *>(sp);
+  auto *indices = static_cast<int32_t *>(ip);
+  auto *result = static_cast<float *>(tp);
+  for (int k = 0; k < 17 * 6; ++k) values[k] = float(k % 13 - 6);
+  for (int k = 0; k < 17; ++k) indices[k] = k % 6 - 1;
+  std::fill(result, result + 42, 37.f);
+  std::vector<float> expected(result, result + 42);
+  NativeArrayBinding src{source->get_ptr(), 17 * 6 * 4, PrimitiveType::f32, {17}, {2, 3}};
+  NativeArrayBinding ix{index->get_ptr(), 17 * 4, PrimitiveType::i32, {17}, {}};
+  NativeArrayBinding dst{target->get_ptr(), 7 * 6 * 4, PrimitiveType::f32, {7}, {2, 3}};
+  ScatterAddOperation description{11, 4, 1, 4, src, ix, dst,
+                                  ScatterAddStrategy::packed_field, {2, 3}};
+  const auto &registry = native_operation_registry();
+  auto prepared = registry.prepare(host_arch(), device, description);
+  EXPECT_EQ(prepared->workspace_bytes(), 0);
+  for (int replay = 0; replay < 2; ++replay) {
+    prepared->run_cpu();
+    for (int k = 0; k < 11; ++k)
+      if (indices[k] >= 0 && indices[k] < 4)
+        for (int lane = 0; lane < 6; ++lane)
+          expected[indices[k] * 6 + lane] += values[k * 6 + lane];
+    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), result));
+  }
+  description.dst.element_shape = {3, 2};
+  EXPECT_THROW(registry.prepare(host_arch(), device, description), std::invalid_argument);
+  description.dst = src;
+  EXPECT_THROW(registry.prepare(host_arch(), device, description), std::invalid_argument);
+  device.unmap(*source);
+  device.unmap(*index);
+  device.unmap(*target);
+}
+#endif
 
 TEST(NativeOperationRegistry, MemoryPoolSchemaIsColdAndBackendQualified) {
   const auto &registry = native_operation_registry();

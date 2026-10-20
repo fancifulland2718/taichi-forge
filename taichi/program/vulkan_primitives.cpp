@@ -11507,9 +11507,10 @@ class FixedVulkanScatterAdd final : public NativeOperation {
     validate_scatter_add_storage(Arch::vulkan, op);
     cache_.ensure_pipelines(&device);
     const auto width = vulkan_scan_value_type_size(op.value_type);
+    const auto record = scatter_add_item_bytes(op);
     prepared_ = prepare_vulkan_scatter_add(
         nullptr, &device, cache_, src_, indices_, dst_, op.size, op.dst_items,
-        op.value_type, width, width);
+        op.value_type, record, record, record / width);
   }
   Arch arch() const override {
     return Arch::vulkan;

@@ -289,8 +289,16 @@ Sequence 导出冻结生产端 CPU 线程配置；显式计划省略 `cpu_max_th
 `workspace_bytes` 报告保留的 partial；CUDA/Vulkan 不需 scratch。整数按类型位宽
 模加法，浮点顺序取决于后端及分区，GPU 重复目标的累加顺序不保证确定性。
 准备不会执行算子或修改目标。纯原生计划不携带应用 kernel 代码，消费端须提供
-`builtin/scatter_add` v1。此路线尚不覆盖 tensor/strided/fused/two-level sequence；
+`builtin/scatter_add` v1。此路线尚不覆盖 strided/fused/two-level sequence；
 AOT 不自动生成伴随，可组合导出的 kernel 提供显式伴随。
+
+packed 向量／矩阵 Field 也可导出，要求输入输出元素形状相同，索引为连续标量
+i32 Field 或 ndarray。显式描述使用 `strategy="packed_field"` 和 `element_shape`，
+保留相同的前缀、累加原值、可变索引和读写分离规则。Field 存储由模块持有，
+公开 ndarray 索引保持输入绑定。CPU 与 JIT 共用 packed 核心，冻结记录分区并保留
+partial；CUDA 保留逐分量 launch，Vulkan 保留单次 packed dispatch。不添加打包
+helper 或应用 shader，也不设置人为分量数上限；检查形状溢出及实际设备／ABI 限制。
+此路线需要配对的私有 ABI125 组件，不新增原生算子的自动伴随。
 
 已物化的 CUDA `GraphBuilder.segmented_reduce()` recipe 可通过
 `Module.add_execution_plan()` 导出，输入/输出限不重叠的 scalar i32/u32 ndarray，

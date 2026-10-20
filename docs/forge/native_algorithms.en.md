@@ -379,8 +379,19 @@ at the selected bit width; floating-point order depends on backend/partitioning
 and GPU duplicate-target ordering is not deterministic. Preparation neither runs
 the operation nor mutates the destination. Pure native plans contain no
 application kernel code and require `builtin/scatter_add` v1 in the consumer.
-Tensor/strided/fused/two-level sequences are not covered by this route. AOT does
-not synthesize its adjoint; exported kernels can provide an explicit adjoint.
+Strided/fused/two-level sequences are not covered by this route. AOT does not
+synthesize its adjoint; exported kernels can provide an explicit adjoint.
+
+Packed vector/matrix Fields also export with matching element shapes and
+contiguous scalar i32 Field or ndarray indices. The explicit description uses
+`strategy="packed_field"` and `element_shape`, with the same prefix, existing-value
+accumulation, mutable-index and disjoint-access rules. Field storage belongs to
+the module; public ndarray indices remain bound inputs. CPU shares the JIT packed
+core, freezes record partitions and retains its partials; CUDA preserves
+per-component launches and Vulkan its single packed dispatch. No packing helper
+or application shader is added, and component count has no artificial limit.
+Shape overflow and actual device/ABI limits are checked. This route requires
+paired private ABI125 components and adds no automatic native adjoint.
 
 Materialized CUDA `GraphBuilder.segmented_reduce()` recipes export through
 `Module.add_execution_plan()` for disjoint scalar i32/u32 ndarrays and immutable

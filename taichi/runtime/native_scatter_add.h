@@ -4,6 +4,8 @@
 
 namespace taichi::lang {
 
+enum class ScatterAddStrategy { packed_array, packed_field };
+
 struct ScatterAddOperation {
   static constexpr const char *kind = "scatter_add";
   static constexpr std::uint32_t version = 1;
@@ -11,8 +13,11 @@ struct ScatterAddOperation {
   int value_type{0};
   int cpu_max_threads{0};
   NativeArrayBinding src, indices, dst;
+  ScatterAddStrategy strategy{ScatterAddStrategy::packed_array};
+  std::vector<std::uint64_t> element_shape;
 };
 
+std::size_t scatter_add_item_bytes(const ScatterAddOperation &operation);
 void validate_scatter_add_storage(Arch arch,
                                   const ScatterAddOperation &operation);
 class NativeOperation;

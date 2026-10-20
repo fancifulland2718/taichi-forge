@@ -133,6 +133,14 @@ std::size_t driver_scatter_add_on_stream(void *src,
                                         CudaTransformValueType value_type,
                                         void *stream);
 
+std::size_t driver_scatter_add_strided_on_stream(
+    void *src, void *indices, void *dst,
+    std::uint32_t num_items, std::uint32_t index_bound,
+    CudaTransformValueType value_type,
+    std::size_t src_offset, std::size_t src_stride,
+    std::size_t indices_offset, std::size_t indices_stride,
+    std::size_t dst_offset, std::size_t dst_stride, void *stream);
+
 std::size_t driver_scatter_add_strided(void *src,
                                        void *indices,
                                        void *dst,
