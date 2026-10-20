@@ -8565,6 +8565,12 @@ intptr_t Program::get_ndarray_data_ptr_as_int(const Ndarray *ndarray) {
   return reinterpret_cast<intptr_t>(data_ptr);
 }
 
+struct Program::ExternalCudaSubmissionScope::CurrentContext {
+#ifdef TI_WITH_CUDA
+  CUDAContext::ContextGuard guard{&CUDAContext::get_instance()};
+#endif
+};
+
 Program::ExternalCudaSubmissionScope::ExternalCudaSubmissionScope(
     Program *program)
     : program_(program),
@@ -8574,7 +8580,10 @@ Program::ExternalCudaSubmissionScope::ExternalCudaSubmissionScope(
   TI_ERROR_IF(program_->finalized_,
               "Cannot register an external CUDA provider submission after "
               "Program finalize");
+  current_context_ = std::make_unique<CurrentContext>();
 }
+
+Program::ExternalCudaSubmissionScope::~ExternalCudaSubmissionScope() = default;
 
 void Program::ExternalCudaSubmissionScope::commit(
     const std::vector<const Ndarray *> &ndarrays,
@@ -8646,6 +8655,11 @@ void Program::invoke_external_cuda_prepared(
     const PreparedExternalCudaStorage &packet,
     const std::function<void()> &invoke) {
   with_prepared_native_storage(*packet.storage, [&] {
+#ifdef TI_WITH_CUDA
+    // The resource gate pins allocations, but it does not activate their
+    // context. A foreign library may have changed the calling thread's context.
+    auto context_guard = CUDAContext::get_instance().get_guard();
+#endif
     if (!packet.texture_handles.empty()) {
       TextureLaunchLeases texture_leases;
       for (const auto handle : packet.texture_handles) {

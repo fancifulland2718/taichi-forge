@@ -999,9 +999,11 @@ class TI_DLL_EXPORT Program {
   // Holds the same host submission boundary as built-in native primitives
   // while a Python adapter invokes a user-installed CUDA library. The scope
   // must be committed after a call that may have enqueued work; destruction
-  // releases the lock but never waits for the GPU.
+  // restores the calling thread's CUDA context and releases the lock without
+  // waiting for the GPU. Like the submission lock, the scope is thread-affine.
   class ExternalCudaSubmissionScope {
    public:
+    ~ExternalCudaSubmissionScope();
     ExternalCudaSubmissionScope(const ExternalCudaSubmissionScope &) = delete;
     ExternalCudaSubmissionScope &operator=(
         const ExternalCudaSubmissionScope &) = delete;
@@ -1011,9 +1013,11 @@ class TI_DLL_EXPORT Program {
    private:
     friend class Program;
     explicit ExternalCudaSubmissionScope(Program *program);
+    struct CurrentContext;
 
     Program *program_{nullptr};
     RuntimeResourceSubmissionGuard guard_;
+    std::unique_ptr<CurrentContext> current_context_;
     bool committed_{false};
   };
   RuntimeResourceSubmissionGuard acquire_runtime_resource_submission_guard() {

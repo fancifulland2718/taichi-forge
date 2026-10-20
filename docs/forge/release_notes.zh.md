@@ -31,6 +31,12 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- 共用提交边界内的外部 CUDA 调用现在激活 Forge 所属 context，并在成功或异常后恢复
+  调用线程原有的 context。OptiX 冷初始化、管线准备、查询及释放不再依赖线程恰好
+  持有正确 context。Windows CUDA 验证覆盖空／其他 context、普通／实例化场景、
+  Graph、主命中与遮挡、miss 写回及退休；CPU/Vulkan 互补回归通过。
+  runtime/frontend 需配对更新到私有 ABI126；AOT plan25/root2 和 provider C ABI 不变。
+
 - `Graph.submit()` 在设备分段之间执行同步 host 操作时不再等待自己持有的提交读锁。
   Vulkan 提交并等待当前 batch 前段，保留外层 batch 供后续工作继续使用。
   Windows CPU/CUDA/Vulkan 验证覆盖 host 排序、父 Graph、计时、失败恢复及完成／退休；

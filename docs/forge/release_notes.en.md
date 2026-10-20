@@ -34,6 +34,15 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- External CUDA calls through the shared submission boundary activate Forge's
+  context and restore the caller's context on success or failure. OptiX cold
+  initialization, pipeline preparation, queries and retirement no longer rely
+  on the caller already having the correct context. Windows CUDA checks cover
+  empty/foreign contexts, ordinary/instanced scenes, Graphs, typed hits,
+  occlusion, miss writes and retirement; complementary CPU/Vulkan checks pass.
+  Update runtime/frontend together to private ABI126; AOT plan25/root2 and the
+  provider C ABI are unchanged.
+
 - `Graph.submit()` supports synchronous host operations between device segments
   without waiting on its own submission reader. Vulkan submits and waits for
   the pending batch prefix while preserving the outer batch for later work.

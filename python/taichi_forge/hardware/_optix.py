@@ -717,6 +717,17 @@ def _invoke_checked(api, function, *args):
         raise TaichiRuntimeError(_provider_error(api))
 
 
+def _invoke_cold(program, function, *args):
+    # Context creation/destruction must use the same owned CUDA context as
+    # prepared calls, even when this thread currently has none or a foreign one.
+    # These cold calls enqueue no replay work and need no submission commit.
+    scope = program._begin_external_cuda_submission()
+    try:
+        return function(*args)
+    finally:
+        del scope
+
+
 @dataclass(frozen=True)
 class _PreparedOptixCall:
     owner: object
@@ -823,7 +834,9 @@ class OptixProvider:
                     _runtime_library_argument(runtime_path),
                 )
                 result = int(
-                    candidate_loaded.api.create_context(
+                    _invoke_cold(
+                        program,
+                        candidate_loaded.api.create_context,
                         ctypes.byref(desc), ctypes.byref(candidate_context)
                     )
                 )
@@ -1031,7 +1044,9 @@ class OptixProvider:
         context = self._context
         if runtime_generation_matches(self):
             self._runtime_prog.synchronize()
-            result = int(self._loaded.api.destroy_context(context))
+            result = int(_invoke_cold(
+                self._runtime_prog, self._loaded.api.destroy_context, context
+            ))
             if result != _SUCCESS:
                 raise TaichiRuntimeError(_provider_error(self._loaded.api))
         self._context = None
@@ -2176,7 +2191,9 @@ class OptixTriangleGAS:
         gas = self._gas
         if runtime_generation_matches(self):
             self._runtime_prog.synchronize()
-            result = int(self.provider._loaded.api.destroy_triangle_gas(gas))
+            result = int(_invoke_cold(
+                self._runtime_prog, self.provider._loaded.api.destroy_triangle_gas, gas
+            ))
             if result != _SUCCESS:
                 raise TaichiRuntimeError(_provider_error(self.provider._loaded.api))
         self._gas = None
@@ -2540,7 +2557,9 @@ class OptixInstanceScene:
         scene = self._scene
         if runtime_generation_matches(self):
             self._runtime_prog.synchronize()
-            result = int(self.provider._loaded.api.destroy_instance_scene(scene))
+            result = int(_invoke_cold(
+                self._runtime_prog, self.provider._loaded.api.destroy_instance_scene, scene
+            ))
             if result != _SUCCESS:
                 raise TaichiRuntimeError(_provider_error(self.provider._loaded.api))
         self._scene = None
@@ -2779,7 +2798,9 @@ class OptixTriangleScene:
         scene = self._scene
         if runtime_generation_matches(self):
             self._runtime_prog.synchronize()
-            result = int(self.provider._loaded.api.destroy_triangle_scene(scene))
+            result = int(_invoke_cold(
+                self._runtime_prog, self.provider._loaded.api.destroy_triangle_scene, scene
+            ))
             if result != _SUCCESS:
                 raise TaichiRuntimeError(_provider_error(self.provider._loaded.api))
         self._scene = None
