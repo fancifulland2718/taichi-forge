@@ -52,6 +52,14 @@ external arrays by name where appropriate; snapshot only the state that belongs
 to the exported module. Multiple entries do not automatically couple their
 simulation state or combine their submissions.
 
+Keep the source Graphs, Field roots and their application owners alive until the
+combined `archive()`/`save()` finishes. Do not close an entry's renderer or solver
+immediately after exporting it and then construct another entry: closing may
+destroy Field roots, and a later object can reuse the same tree ID with a different
+generation and layout. Those roots cannot share one module's initial state.
+Use the application's `ExitStack` or `try/finally` to retire sources after archiving
+and on failure, while keeping snapshots of shared roots consistent.
+
 The deployment dictionary above is application data, not a new Forge parser or
 runtime API. An application manifest can record its backend, format, required
 target, artifact hash, entry arguments and dependency profile. Forge validates

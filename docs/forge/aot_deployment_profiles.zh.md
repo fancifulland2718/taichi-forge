@@ -45,6 +45,12 @@ module.archive("geophys.tcm")
 各 Graph 仍须满足普通 execution-plan 导出合同；适用时通过命名绑定接收外部数组，
 只快照归属于导出模块的状态。多个入口不会自动耦合其仿真状态或合并提交。
 
+组合导出期间，保持各入口的源 Graph、Field 根及其应用 owner 存活，直到最终
+`archive()`／`save()` 完成。不要在导出一个入口后立即关闭其 renderer／solver，
+再创建另一个入口：关闭操作可能销毁 Field 根，后续对象复用同一 tree ID 时已是
+不同代次与布局，不能成为同一模块的旧根状态。使用应用自己的 `ExitStack` 或
+`try/finally` 在归档后统一退休，失败时也清理；保持共享根的初始快照一致。
+
 上述 deployment 字典是应用数据，不是新的 Forge 解析器或 runtime API。应用清单
 可以记录后端、格式、所需目标、产物哈希、入口参数和依赖配置；Forge 校验 TCM 中
 权威的目标与 launch metadata。依赖解析和调用准备放在重复执行循环之前。
