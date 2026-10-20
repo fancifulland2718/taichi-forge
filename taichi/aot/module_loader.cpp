@@ -8,6 +8,23 @@
 
 namespace taichi::lang {
 namespace aot {
+DataType Module::get_ndarray_layout(const std::string &name) {
+  if (is_corrupted())
+    throw ArtifactLoadError("Cannot query layout from an invalid AOT module");
+  if (!ndarray_layouts_loaded_) {
+    try {
+      ndarray_layouts_ = load_struct_layout_artifact(data_source());
+    } catch (const std::exception &error) {
+      throw ArtifactLoadError(error.what());
+    }
+    ndarray_layouts_loaded_ = true;
+  }
+  const auto found = ndarray_layouts_.find(name);
+  if (found == ndarray_layouts_.end())
+    throw std::invalid_argument("Unknown AOT ndarray layout: " + name);
+  return found->second;
+}
+
 Module::BoundRootStorageView Module::get_root_storage_view(
     const std::string &name) {
   if (is_corrupted())

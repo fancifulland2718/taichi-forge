@@ -55,6 +55,7 @@ def export(arch, directory, ptx=False, initialize=True, *, artifact_format=None,
         options["caps"] = ["spirv_has_int8", "spirv_has_int16",
                            "spirv_has_int8_storage", "spirv_has_int16_storage"]
     module = ti.aot.Module(**options)
+    module.add_ndarray_layout("records", record)
     module.add_kernel(update)
     module.add_kernel(other)
     module.add_graph("step", graph)

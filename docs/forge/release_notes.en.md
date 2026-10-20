@@ -39,6 +39,11 @@ lifetimes. The entries below describe the changes.
   recompiles those unchanged inputs; transitive header changes still rebuild.
   Qualified on Windows/Ninja. This does not change application kernel options.
 
+- AOT modules can publish named structure layouts without helper kernels used
+  only for layout queries. The catalog deduplicates types, loads on demand and
+  uses existing module handles and retirement. Requires matching private ABI116
+  components; the plan format is unchanged.
+
 - The lightweight AOT consumer accepts fixed-AoS arrays through module-owned
   layout queries. Ordinary and prepared kernel/Graph calls and explicit plans
   share the existing native binding contract, including downstream float AD;

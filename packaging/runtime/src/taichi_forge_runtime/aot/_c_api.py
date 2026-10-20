@@ -288,6 +288,7 @@ class Api:
             "ti_get_aot_module_kernel": ([Handle, C.c_char_p], Handle),
             "ti_get_aot_module_compute_graph": ([Handle, C.c_char_p], Handle),
             "ti_get_kernel_ndarray_layout_ext": ([Handle, Handle, UInt], Handle),
+            "ti_get_aot_module_ndarray_layout_ext": ([Handle, Handle, C.c_char_p], Handle),
             "ti_get_compute_graph_ndarray_layout_ext": ([Handle, Handle, C.c_char_p], Handle),
             "ti_get_ndarray_layout_info_ext": ([Handle, Handle, C.POINTER(NdArrayLayoutInfo)], None),
             "ti_get_ndarray_layout_member_ext": ([Handle, Handle, UInt, C.POINTER(NdArrayLayoutMember)], None),

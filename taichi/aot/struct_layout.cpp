@@ -1,5 +1,8 @@
 #include "taichi/aot/struct_layout.h"
 
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -95,6 +98,85 @@ StructLayout::StructLayout(DataType type) : type(type) {
       stride % alignment != 0) {
     throw std::invalid_argument("Invalid StructNdarray element stride");
   }
+}
+
+namespace {
+constexpr const char *kLayoutFilename = "array_layouts.json";
+
+void validate_layout_name(const std::string &name) {
+  if (name.empty() || name.find('\0') != std::string::npos)
+    throw std::invalid_argument("Invalid AOT ndarray layout name");
+}
+}  // namespace
+
+StructLayoutArtifact make_struct_layout_artifact(
+    const NamedStructLayouts &layouts) {
+  StructLayoutArtifact result;
+  std::map<const Type *, std::uint64_t> indices;
+  for (const auto &[name, type] : layouts) {
+    validate_layout_name(name);
+    const auto [it, added] = indices.emplace(static_cast<const Type *>(type),
+                                            result.types.size());
+    if (added) {
+      StructLayout checked(type);
+      result.types.push_back(type);
+    }
+    result.layouts.emplace(name, it->second);
+  }
+  return result;
+}
+
+NamedStructLayouts parse_struct_layout_artifact(
+    const liong::json::JsonValue &json) {
+  StructLayoutArtifact artifact;
+  liong::json::deserialize(json, artifact);
+  if (artifact.version != 1)
+    throw std::invalid_argument("Unsupported AOT ndarray layout artifact version");
+  NamedStructLayouts result;
+  std::vector<bool> used(artifact.types.size());
+  std::unordered_set<const Type *> unique;
+  for (const auto &[name, index] : artifact.layouts) {
+    validate_layout_name(name);
+    if (index >= artifact.types.size())
+      throw std::invalid_argument("AOT ndarray layout references an unknown type");
+    if (!used[index]) {
+      if (!unique.insert(static_cast<const Type *>(artifact.types[index])).second)
+        throw std::invalid_argument("Duplicate AOT ndarray layout type");
+      StructLayout checked(artifact.types[index]);
+      used[index] = true;
+    }
+    result.emplace(name, artifact.types[index]);
+  }
+  if (std::find(used.begin(), used.end(), false) != used.end())
+    throw std::invalid_argument("Unused AOT ndarray layout type");
+  return result;
+}
+
+NamedStructLayouts load_struct_layout_artifact(const io::VirtualDir *directory) {
+  std::size_t size = 0;
+  if (!directory || !directory->get_file_size(kLayoutFilename, size))
+    return {};
+  std::vector<std::uint8_t> bytes;
+  if (!directory->load_file(kLayoutFilename, bytes) || bytes.empty())
+    throw std::invalid_argument("Unreadable AOT ndarray layout metadata");
+  return parse_struct_layout_artifact(liong::json::parse(
+      reinterpret_cast<const char *>(bytes.data()),
+      reinterpret_cast<const char *>(bytes.data() + bytes.size())));
+}
+
+void write_struct_layout_artifact(const NamedStructLayouts &layouts,
+                                 const std::string &directory) {
+  const auto path = std::filesystem::path(directory) / kLayoutFilename;
+  if (layouts.empty()) {
+    std::filesystem::remove(path);
+    return;
+  }
+  const auto json = liong::json::print(
+      liong::json::serialize(make_struct_layout_artifact(layouts)));
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  stream.write(json.data(), json.size());
+  if (!stream)
+    throw std::runtime_error("Unable to write AOT ndarray layout metadata");
 }
 
 }  // namespace taichi::lang::aot

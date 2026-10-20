@@ -4499,6 +4499,22 @@ alignment and leaf members with `ti_get_ndarray_layout_info_ext` and
 tensor shapes and byte offsets. Pack data using this target layout; host C/C++
 structs are not assumed to have the same padding.
 
+Layouts can also be published independently of executable entries. Export with
+`module.add_ndarray_layout("records", record_type)`, where `record_type` is a
+`ti.types.struct(...)`, then query `module.ndarray_layout("records")` in the
+consumer and pass that `StructLayout` to `runtime.ndarray`. The C API equivalent
+is `ti_get_aot_module_ndarray_layout_ext(runtime, module, "records")`. Saving,
+loading and allocating this layout works without any kernel or Graph; no empty
+helper kernel is needed.
+
+The `array_layouts.json` v1 catalog stores each structure type once even when
+several names reference it. It loads on the first query and caches subsequent
+lookups. Named layouts share the existing module-owned handles and retirement
+contract and cannot cross runtimes. This extension requires matching private
+ABI116 components; the execution-plan format is unchanged. Publishing a layout
+does not itself enable native member-view operations or private captured
+structure-array export.
+
 Pass memory and outer shape through the existing `TiArgument` ndarray, setting
 `elem_type=TI_DATA_TYPE_UNKNOWN` and an empty `elem_shape`. Supply the queried
 layout and version in `TiNdArrayBinding` or `TiNamedNdArrayBinding`, then call

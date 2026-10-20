@@ -822,6 +822,23 @@ class Module(_Resource):
 
     _kind = "module"
 
+    def ndarray_layout(self, name):
+        """Query a named fixed-AoS layout without loading executable entries."""
+        runtime = self._runtime
+        key = _name(name)
+        with runtime._lock:
+            self._check()
+            layouts = getattr(self, "_ndarray_layouts", None)
+            if layouts is None:
+                layouts = self._ndarray_layouts = {}
+            if key not in layouts:
+                handle = runtime._api.call(
+                    runtime._api.ti_get_aot_module_ndarray_layout_ext,
+                    runtime._handle, self._handle, key,
+                )
+                layouts[key] = StructLayout._query(self, handle)
+            return layouts[key]
+
     def execution_plan(self, name):
         """Read a named persistent plan from a directory or .tcm module."""
         from urllib.parse import quote
