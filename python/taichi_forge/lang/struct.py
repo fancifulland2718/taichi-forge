@@ -279,6 +279,16 @@ _
         if shape is None and offset is not None:
             raise TaichiSyntaxError("shape cannot be None when offset is being set")
 
+        if shape is not None:
+            if isinstance(shape, numbers.Number):
+                shape = (shape,)
+            if isinstance(offset, numbers.Number):
+                offset = (offset,)
+            if offset is not None and len(shape) != len(offset):
+                raise TaichiSyntaxError(
+                    f"The dimensionality of shape and offset must be the same ({len(shape)} != {len(offset)})"
+                )
+
         field_dict = {}
 
         for key, dtype in members.items():
@@ -288,7 +298,6 @@ _
                     field_dict[key] = dtype.field(
                         shape=None,
                         name=field_name,
-                        offset=offset,
                         needs_grad=needs_grad,
                         needs_dual=needs_dual,
                     )
@@ -296,7 +305,6 @@ _
                     field_dict[key] = dtype.field(
                         shape=None,
                         name=field_name,
-                        offset=offset,
                         needs_grad=needs_grad,
                         needs_dual=needs_dual,
                         ndim=getattr(dtype, "ndim", 2),
@@ -306,21 +314,13 @@ _
                     dtype,
                     shape=None,
                     name=field_name,
-                    offset=offset,
                     needs_grad=needs_grad,
                     needs_dual=needs_dual,
                 )
 
+        # Members remain unplaced until the complete struct is assembled.
+        # Apply the index offset once, to primal/gradient/dual placement below.
         if shape is not None:
-            if isinstance(shape, numbers.Number):
-                shape = (shape,)
-            if isinstance(offset, numbers.Number):
-                offset = (offset,)
-
-            if offset is not None and len(shape) != len(offset):
-                raise TaichiSyntaxError(
-                    f"The dimensionality of shape and offset must be the same ({len(shape)} != {len(offset)})"
-                )
             dim = len(shape)
             if layout == Layout.SOA:
                 for e in field_dict.values():
