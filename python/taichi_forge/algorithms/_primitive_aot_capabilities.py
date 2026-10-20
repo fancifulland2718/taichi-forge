@@ -139,7 +139,7 @@ _ROUTES = MappingProxyType({
                   "disjoint_input_output", "frozen_cpu_partition_strategy",
                   "device_dtype_capabilities", "explicit_adjoint_only"),
         _sequence(("reduce",), "nonempty", "one_dimensional_packed_tensor_fields",
-                  "vector_or_matrix", "scalar_field_output", "module_root_snapshot",
+                  "vector_or_matrix", "zero_dimensional_field_output", "matching_element_shape", "module_root_snapshot",
                   "sum_min_max", "i32_u32_f32_i64_u64_f64", "disjoint_input_output",
                   "preserved_lane_order", "frozen_cpu_partition_strategy",
                   "shared_lane_workspace", "device_dtype_capabilities", "no_automatic_ad"),
