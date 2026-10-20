@@ -1,8 +1,13 @@
 #include "gtest/gtest.h"
 #include "taichi/aot/graph_artifact.h"
 #include "taichi/aot/struct_layout.h"
+#include "taichi/aot/value_layout.h"
+#if defined(TI_WITH_VULKAN) || defined(TI_WITH_OPENGL)
+#include "taichi/runtime/gfx/runtime.h"
+#endif
 
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace taichi::lang::aot {
@@ -149,5 +154,128 @@ TEST(AotStructLayout, NamedCatalogRejectsTrailingDataAndDuplicateObjectKeys) {
   directory.contents = "{\"version\":1," + document.substr(1);
   EXPECT_THROW(load_struct_layout_artifact(&directory),
                liong::json::JsonException);
+}
+
+TEST(AotValueLayout, ScalarTensorAndEmptyResultUseCompiledCapacity) {
+  auto &factory = TypeFactory::get_instance();
+  ValueLayout scalar(PrimitiveType::f64, 16, ValueStorage::Host);
+  ASSERT_EQ(scalar.members.size(), 1u);
+  EXPECT_EQ(scalar.buffer_size, 16u);
+  EXPECT_EQ(scalar.members[0].size, 8u);
+  EXPECT_TRUE(scalar.members[0].indices.empty());
+  EXPECT_TRUE(scalar.members[0].shape.empty());
+  auto tensor = factory.get_tensor_type({9, 9}, PrimitiveType::f32);
+  ValueLayout matrix(tensor, 324, ValueStorage::Host);
+  ASSERT_EQ(matrix.members.size(), 1u);
+  EXPECT_EQ(matrix.members[0].shape, std::vector<int>({9, 9}));
+  EXPECT_EQ(matrix.members[0].size, 324u);
+  auto rank_three = factory.get_tensor_type({2, 3, 4}, PrimitiveType::i16);
+  ValueLayout cube(rank_three, 48, ValueStorage::Host);
+  EXPECT_EQ(cube.members[0].shape, std::vector<int>({2, 3, 4}));
+  ValueLayout empty(factory.get_struct_type({}), 0, ValueStorage::Host);
+  EXPECT_TRUE(empty.members.empty());
+  EXPECT_EQ(empty.buffer_size, 0u);
+}
+
+TEST(AotValueLayout, GfxScalarWidthsPreserveExplicitPaddingAndIndices) {
+  auto &factory = TypeFactory::get_instance();
+  auto vector = factory.get_tensor_type({3}, PrimitiveType::f32);
+  auto flags = factory.get_tensor_type({2}, PrimitiveType::u1);
+  auto inner = factory.get_struct_type(
+      {{PrimitiveType::u1, "enabled", 0}, {flags, "flags", 4}}, "4-");
+  auto type = factory.get_struct_type(
+      {{inner, "inner", 0}, {vector, "vector", 16},
+       {PrimitiveType::i32, "tail", 32}}, "1-");
+  ValueLayout layout(type, 48, ValueStorage::Gfx);
+  ASSERT_EQ(layout.members.size(), 4u);
+  EXPECT_EQ(layout.buffer_size, 48u);  // Preserve target trailing padding.
+  EXPECT_EQ(layout.members[0].scalar_size, 4u);
+  EXPECT_EQ(layout.members[1].path, "inner.flags");
+  EXPECT_EQ(layout.members[1].indices, std::vector<int>({0, 1}));
+  EXPECT_EQ(layout.members[1].offset, 4u);
+  EXPECT_EQ(layout.members[1].size, 8u);
+  EXPECT_EQ(layout.members[2].offset, 16u);
+  EXPECT_EQ(layout.members[2].size, 12u);
+  EXPECT_EQ(layout.members[3].offset, 32u);
+  EXPECT_THROW(ValueLayout(type, 35, ValueStorage::Gfx),
+               std::invalid_argument);
+}
+
+TEST(AotValueLayout, SharesNaturalRecordOffsetsWithoutLosingTensorMetadata) {
+  const auto type = example_type();
+  StructLayout record(type);
+  ValueLayout value(type, record.stride, ValueStorage::Host);
+  ASSERT_EQ(record.members.size(), value.members.size());
+  for (std::size_t i = 0; i < record.members.size(); ++i) {
+    EXPECT_EQ(record.members[i].path, value.members[i].path);
+    EXPECT_EQ(record.members[i].offset, value.members[i].offset);
+    EXPECT_EQ(record.members[i].size, value.members[i].size);
+    EXPECT_EQ(record.members[i].alignment, value.members[i].scalar_alignment);
+    EXPECT_EQ(record.members[i].shape, value.members[i].shape);
+  }
+  EXPECT_EQ(value.members[2].indices, std::vector<int>({1, 1}));
+}
+
+#if defined(TI_WITH_VULKAN) || defined(TI_WITH_OPENGL)
+TEST(AotValueLayout, UsesActualGfxUniformAndStorageBufferLayouts) {
+  auto &factory = TypeFactory::get_instance();
+  const auto *type = factory.get_struct_type(
+      {{PrimitiveType::u1, "enabled"},
+       {factory.get_tensor_type({2}, PrimitiveType::u1), "flags"},
+       {factory.get_tensor_type({3}, PrimitiveType::f32), "vector"},
+       {PrimitiveType::i16, "tail"}})->as<StructType>();
+  for (const auto &name : {"1-", "4-"}) {
+    const auto [compiled, bytes] =
+        gfx::GfxRuntime::get_struct_type_with_data_layout(type, name);
+    ValueLayout value(compiled, bytes, ValueStorage::Gfx);
+    ASSERT_EQ(value.members.size(), 4u);
+    EXPECT_EQ(value.members[0].size, 4u);
+    EXPECT_EQ(value.members[1].size, 8u);
+    EXPECT_EQ(value.members[2].size, 12u);
+    EXPECT_EQ(value.members[3].size, 2u);
+    for (std::size_t i = 0; i < value.members.size(); ++i)
+      EXPECT_EQ(value.members[i].offset, compiled->elements()[i].offset);
+    EXPECT_EQ(bytes, std::string(name) == "1-" ? 48u : 26u);
+  }
+}
+#endif
+
+TEST(AotValueLayout, RejectsOverlapsOverflowAndNonValueTypes) {
+  auto &factory = TypeFactory::get_instance();
+  auto zero_overlap = factory.get_struct_type(
+      {{PrimitiveType::i32, "a", 0}, {PrimitiveType::f32, "b", 0}}, "4-");
+  EXPECT_THROW(ValueLayout(zero_overlap, 8, ValueStorage::Gfx),
+               std::invalid_argument);
+  auto overlap = factory.get_struct_type(
+      {{PrimitiveType::i32, "a", 0}, {PrimitiveType::f32, "b", 2}}, "4-");
+  EXPECT_THROW(ValueLayout(overlap, 8, ValueStorage::Gfx),
+               std::invalid_argument);
+  auto overflow = factory.get_struct_type(
+      {{PrimitiveType::i32, "a", std::numeric_limits<std::size_t>::max() - 3}},
+      "4-");
+  EXPECT_THROW(ValueLayout(overflow, std::numeric_limits<std::size_t>::max(),
+                           ValueStorage::Gfx), std::invalid_argument);
+  auto large = factory.get_tensor_type({std::numeric_limits<int>::max()},
+                                       PrimitiveType::f64);
+  EXPECT_THROW(ValueLayout(large, 0, ValueStorage::Host),
+               std::invalid_argument);
+  EXPECT_THROW(ValueLayout(PrimitiveType::unknown, 8, ValueStorage::Host),
+               std::invalid_argument);
+  EXPECT_THROW(ValueLayout(factory.get_pointer_type(PrimitiveType::f32), 8,
+                           ValueStorage::Host), std::invalid_argument);
+  EXPECT_THROW(ValueLayout(PrimitiveType::i32, 3, ValueStorage::Host),
+               std::invalid_argument);
+}
+
+TEST(AotStructLayout, ValueReflectionDoesNotWidenArrayElementContract) {
+  auto &factory = TypeFactory::get_instance();
+  EXPECT_THROW(StructLayout{factory.get_struct_type({})},
+               std::invalid_argument);
+  auto duplicate = factory.get_struct_type(
+      {{PrimitiveType::f32, "a"}, {PrimitiveType::f32, "a"}});
+  EXPECT_THROW(StructLayout{duplicate}, std::invalid_argument);
+  auto tensor = factory.get_tensor_type({2, 3, 4}, PrimitiveType::f32);
+  auto rank_three = factory.get_struct_type({{tensor, "value"}});
+  EXPECT_THROW(StructLayout{rank_three}, std::invalid_argument);
 }
 }  // namespace taichi::lang::aot

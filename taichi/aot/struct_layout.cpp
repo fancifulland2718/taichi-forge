@@ -1,4 +1,5 @@
 #include "taichi/aot/struct_layout.h"
+#include "taichi/aot/value_layout.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -10,90 +11,135 @@
 namespace taichi::lang::aot {
 namespace {
 
-void reflect(DataType type,
-             const std::string &path,
-             std::size_t base,
-             std::vector<StructLayoutMember> &members) {
+struct ReflectionExtent {
+  std::size_t size;
+  std::size_t alignment;
+};
+
+ReflectionExtent reflect(DataType type,
+                         const std::string &path,
+                         std::vector<int> &indices,
+                         std::vector<ValueLayoutMember> &members,
+                         ValueStorage storage,
+                         bool array_element) {
   if (const auto *structure = type->cast<StructType>()) {
     std::unordered_set<std::string> names;
     std::size_t end = 0;
-    if (structure->elements().empty()) {
+    std::size_t alignment = 1;
+    if (array_element && structure->elements().empty()) {
       throw std::invalid_argument(
           "Empty StructNdarray elements are unsupported");
     }
+    const bool compiled_offsets = structure->get_layout() != "none";
     for (int i = 0; i < structure->elements().size(); ++i) {
       const auto &member = structure->elements()[i];
-      if (member.name.empty() || member.name.find('.') != std::string::npos ||
-          !names.insert(member.name).second) {
+      if (array_element &&
+          (member.name.empty() || member.name.find('.') != std::string::npos ||
+           !names.insert(member.name).second)) {
         throw std::invalid_argument("Invalid StructNdarray member path");
       }
       // Validate types before invoking the native layout helpers (pointer and
       // unresolved primitive types do not have a portable AoS layout).
       const auto first_child = members.size();
-      reflect(member.type,
-              path.empty() ? member.name : path + "." + member.name, 0,
-              members);
-      const auto offset = structure->get_element_offset({i});
-      const auto size = data_type_size(member.type);
-      const auto alignment = data_type_alignment(member.type);
-      if (offset < end || offset % alignment != 0 ||
-          offset > std::numeric_limits<int>::max() - size) {
-        throw std::invalid_argument("Invalid StructNdarray member layout");
+      indices.push_back(i);
+      const auto child = reflect(
+          member.type, path.empty() ? member.name : path + "." + member.name,
+          indices, members, storage, array_element);
+      indices.pop_back();
+      // An explicit compiled layout with all-zero offsets must not be
+      // reinterpreted as an implicit natural layout (which can hide overlap).
+      const auto offset = compiled_offsets ? member.offset
+                                           : structure->get_element_offset({i});
+      if (offset < end || offset % child.alignment != 0 ||
+          offset > std::numeric_limits<std::size_t>::max() - child.size) {
+        throw std::invalid_argument("Invalid value member layout");
+      }
+      if (array_element &&
+          offset > std::numeric_limits<int>::max() - child.size) {
+        throw std::invalid_argument("StructNdarray member exceeds native type size");
       }
       // Child offsets were relative to this member. No second padding
       // algorithm is used; the compiler's StructType supplies every offset.
-      for (auto child = first_child; child < members.size(); ++child) {
-        members[child].offset += base + offset;
+      for (auto index = first_child; index < members.size(); ++index) {
+        members[index].offset += offset;
       }
-      end = offset + size;
+      end = offset + child.size;
+      alignment = std::max(alignment, child.alignment);
     }
-    const auto alignment = data_type_alignment(type);
-    if (end > std::numeric_limits<int>::max() - (alignment - 1)) {
-      throw std::invalid_argument(
-          "StructNdarray stride exceeds native type size");
+    if (array_element) {
+      if (end > std::numeric_limits<int>::max() - (alignment - 1)) {
+        throw std::invalid_argument(
+            "StructNdarray stride exceeds native type size");
+      }
+      // Only array elements use the existing natural AoS stride. Compiled
+      // value buffers supply their size externally and never get repacked.
+      return {static_cast<std::size_t>(data_type_size(type)), alignment};
     }
-    return;
+    return {end, alignment};
   }
   auto scalar = type;
   std::vector<int> shape;
+  std::size_t count = 1;
   if (const auto *tensor = type->cast<TensorType>()) {
     shape = tensor->get_shape();
     scalar = tensor->get_element_type();
-    if (shape.empty() || shape.size() > 2) {
+    if (shape.empty() || (array_element && shape.size() > 2)) {
       throw std::invalid_argument(
-          "StructNdarray supports vector/matrix members");
+          "Invalid value tensor shape; StructNdarray supports vector/matrix members");
     }
-    uint64_t count = 1;
     for (int extent : shape) {
+      // TensorType represents its element count and native byte size as int.
       if (extent <= 0 || count > std::numeric_limits<int>::max() / extent) {
-        throw std::invalid_argument("Invalid StructNdarray tensor extent");
+        throw std::invalid_argument("Invalid value tensor extent");
       }
       count *= extent;
-    }
-    if (!scalar->is<PrimitiveType>() || data_type_size(scalar) <= 0 ||
-        count > std::numeric_limits<int>::max() / data_type_size(scalar)) {
-      throw std::invalid_argument("Invalid StructNdarray tensor scalar type");
     }
   }
   if (!scalar->is<PrimitiveType>() || data_type_size(scalar) <= 0) {
     throw std::invalid_argument(
-        "StructNdarray requires concrete scalar members");
+        "Value layouts require concrete scalar members");
   }
-  members.push_back({path, scalar, shape, base,
-                     static_cast<std::size_t>(data_type_size(type)),
-                     static_cast<std::size_t>(data_type_alignment(type))});
+  const auto scalar_size = static_cast<std::size_t>(
+      storage == ValueStorage::Gfx ? data_type_size_gfx(scalar)
+                                    : data_type_size(scalar));
+  if (count > std::numeric_limits<int>::max() / scalar_size) {
+    throw std::invalid_argument("Value tensor exceeds native type size");
+  }
+  members.push_back({path, indices, scalar, shape, 0, count * scalar_size,
+                     scalar_size, scalar_size});
+  return {count * scalar_size, scalar_size};
 }
 
 }  // namespace
+
+ValueLayout::ValueLayout(DataType type,
+                         std::size_t buffer_size,
+                         ValueStorage storage)
+    : type(type), buffer_size(buffer_size) {
+  std::vector<int> indices;
+  const auto extent = reflect(type, "", indices, members, storage, false);
+  if (extent.size > buffer_size) {
+    throw std::invalid_argument("Value members exceed compiled buffer size");
+  }
+}
 
 StructLayout::StructLayout(DataType type) : type(type) {
   if (!type->is<StructType>()) {
     throw std::invalid_argument(
         "StructNdarray layout requires a structure type");
   }
-  reflect(type, "", 0, members);
-  stride = data_type_size(type);
-  alignment = data_type_alignment(type);
+  std::vector<ValueLayoutMember> values;
+  std::vector<int> indices;
+  const auto extent =
+      reflect(type, "", indices, values, ValueStorage::Host, true);
+  stride = extent.size;
+  alignment = extent.alignment;
+  members.reserve(values.size());
+  for (auto &value : values) {
+    members.push_back({std::move(value.path), value.scalar_type,
+                       std::move(value.shape), value.offset, value.size,
+                       value.scalar_alignment});
+  }
   if (stride == 0 || stride > std::numeric_limits<int>::max() ||
       stride % alignment != 0) {
     throw std::invalid_argument("Invalid StructNdarray element stride");
