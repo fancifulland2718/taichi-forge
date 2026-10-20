@@ -9,15 +9,34 @@ function(COMPILE_LLVM_RUNTIME rtm_arch)
         # This is device bitcode only; preserve the native CPU ABI.
         list(APPEND runtime_target_flags -fno-short-wchar)
     endif()
-    # Keep this for now, as .bc need to be generated.
-    add_custom_target(
-        "generate_llvm_runtime_${rtm_arch}"
-        COMMAND ${CLANG_EXECUTABLE} ${CLANG_OSX_FLAGS} ${runtime_target_flags} -c runtime.cpp -o "runtime_${rtm_arch}.bc" -fno-exceptions -emit-llvm -std=c++17 -D "ARCH_${rtm_arch}" -I ${PROJECT_SOURCE_DIR};
-        # TODO, it's better to avoid polluting the source dir, keep in build
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    )
+    # Keep the existing output location for runtime loaders and install rules.
+    # Compiler depfiles track transitive project and toolchain headers; a target
+    # with only COMMAND would rebuild these bitcode files on every invocation.
+    set(runtime_bitcode "${CMAKE_CURRENT_SOURCE_DIR}/runtime_${rtm_arch}.bc")
+    set(runtime_command ${CLANG_EXECUTABLE} ${CLANG_OSX_FLAGS} ${runtime_target_flags}
+        -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime.cpp" -o "${runtime_bitcode}" -fno-exceptions -emit-llvm
+        -std=c++17 -D "ARCH_${rtm_arch}" -I "${PROJECT_SOURCE_DIR}")
+    if (CMAKE_GENERATOR MATCHES "Ninja|Makefiles" OR CMAKE_VERSION VERSION_GREATER_EQUAL "3.21")
+        set(runtime_depfile "${CMAKE_CURRENT_BINARY_DIR}/runtime_${rtm_arch}.d")
+        add_custom_command(
+            OUTPUT "${runtime_bitcode}"
+            COMMAND ${runtime_command} -MD -MF "${runtime_depfile}" -MQ "${runtime_bitcode}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime.cpp" "${CLANG_EXECUTABLE}"
+            DEPFILE "${runtime_depfile}"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            VERBATIM
+        )
+        add_custom_target("generate_llvm_runtime_${rtm_arch}" DEPENDS "${runtime_bitcode}")
+    else()
+        # CMake 3.20 Visual Studio/Xcode generators do not understand DEPFILE.
+        # Preserve their always-build behavior rather than miss header changes.
+        add_custom_target("generate_llvm_runtime_${rtm_arch}"
+            COMMAND ${runtime_command}
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            VERBATIM)
+    endif()
     add_dependencies(${CORE_LIBRARY_NAME} "generate_llvm_runtime_${rtm_arch}")
-    install(FILES "${CMAKE_SOURCE_DIR}/taichi/runtime/llvm/runtime_module/runtime_${arch}.bc"
+    install(FILES "${runtime_bitcode}"
             DESTINATION ${INSTALL_LIB_DIR}/runtime
             COMPONENT runtime)
 

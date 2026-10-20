@@ -1109,8 +1109,9 @@ if(TI_WITH_PYTHON)
             add_library(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} SHARED)
             set(_ti_runtime_anchor_source
                 "${CMAKE_CURRENT_BINARY_DIR}/${CORE_PYTHON_RUNTIME_LIBRARY_NAME}_anchor.cpp")
-            file(WRITE "${_ti_runtime_anchor_source}"
-                "extern \"C\" void taichi_runtime_anchor() {}\n")
+            file(CONFIGURE OUTPUT "${_ti_runtime_anchor_source}"
+                CONTENT "extern \"C\" void taichi_runtime_anchor() {}\n"
+                @ONLY NEWLINE_STYLE LF)
             target_sources(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
                 PRIVATE "${_ti_runtime_anchor_source}")
             target_compile_definitions(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}

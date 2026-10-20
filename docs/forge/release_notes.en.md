@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Incremental native builds retain an unchanged runtime anchor and use Clang
+  depfiles for LLVM runtime bitcode. Reconfiguring a wheel build no longer
+  recompiles those unchanged inputs; transitive header changes still rebuild.
+  Qualified on Windows/Ninja. This does not change application kernel options.
+
 - The lightweight AOT consumer accepts fixed-AoS arrays through module-owned
   layout queries. Ordinary and prepared kernel/Graph calls and explicit plans
   share the existing native binding contract, including downstream float AD;
