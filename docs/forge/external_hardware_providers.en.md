@@ -605,9 +605,12 @@ CUDA CSR matrix. `CudssPlan` separates `analyze()`, `factorize()` /
   retired. Close it deterministically afterwards.
 - Budget for opaque analysis, factor, and workspace memory. The CSR input bytes
   are not the provider's total peak memory.
-- Use `provider="auto"` only with matching Forge admission evidence. Without
-  evidence, auto does not probe cuDSS and retains cuSOLVERSp. Use
-  `provider="cudss"` when the application intentionally selects the provider.
+- For LLT/LU, `provider="auto"` selects cuDSS only with matching Forge admission
+  evidence; without it, auto retains cuSOLVERSp without probing cuDSS. CUDA LDLT
+  requires cuDSS capability and checks availability even without performance
+  evidence, since cuSOLVERSp cannot implement the requested algorithm. A missing
+  or unsuitable provider produces an error. Use `provider="cudss"` to select it
+  explicitly.
 
 The recommended physics workload is a repeatedly solved fixed-pattern sparse
 system where analysis and usually refactorization are amortized. For a

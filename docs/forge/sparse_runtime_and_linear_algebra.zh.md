@@ -382,15 +382,21 @@ x1 = solver.solve(rhs1)
 CPU 支持 LLT、LDLT、LU 和 AMD/COLAMD ordering。旧 CUDA `cusolver_sp` 路径
 支持 scalar CSR `f32`、LLT（正定）和 LU，以及 AMD/COLAMD 排序。
 COLAMD 在 analysis 时使用 host pattern 计算，数值实现仍为 cuSOLVERSp。
-`LDLT` 会明确拒绝，不再静默执行 Cholesky；需要对称不定求解时，应显式选择
-支持该语义的 provider，例如 cuDSS。本次不改变自动 provider 准入策略；
-没有 cuDSS 准入证据时，`auto` 仍选择旧路线，因而不能执行 LDLT。
+旧 provider 对 `LDLT` 明确拒绝，不再静默执行 Cholesky。CUDA `LDLT` 的 `auto`
+会在冷准备时检查 cuDSS 的可用性，不要求与不支持 LDLT 的 cuSOLVERSp 比较性能。
+缺库、矩阵合同不符或计划创建失败时明确报错，不回退为 LLT。LLT/LU 的 `auto`
+继续要求匹配的性能准入证据才会选择 cuDSS；没有证据时保留旧路线。
 可用 `SparseSolver(solver_type="LDLT", provider="cudss", library_path=...)`
 显式请求已有的 cuDSS 路线。LU 分解和求解使用厂商 host 实现，
 每次传输 RHS 和结果。LLT 复用设备向量和描述符，LU 复用 host 向量；
 refactorization 在容量足够时复用 workspace。成功分解前或数值失败后，
 `info()` 返回 false，后续成功 refactorization 可以恢复。
 Vulkan 没有 stored direct solver。
+
+选中 cuDSS 后，`record_solve()` 委托其已有的 recording/export 路径，AOT 保存实际
+选中的分解类型和矩阵数据；消费端配置独立安装的厂商库，不重新做性能选择。
+`provider_status()["admission"]["reason"] == "required_factorization_capability"`
+表示 LDLT 因算法能力选中 cuDSS，不代表已测得加速。
 
 ### CPU 直接求解的 Graph 与 AOT
 

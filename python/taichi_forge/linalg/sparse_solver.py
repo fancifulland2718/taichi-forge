@@ -21,8 +21,9 @@ class SparseSolver:
         library_path: Optional user-managed cuDSS shared-library path.
         provider_profile: Optional validated, exact-workload performance
             evidence for ``provider="auto"``. Explicit providers are never
-            cost-gated. Without evidence, CUDA auto selection remains on the
-            embedded cuSOLVERSp route and does not probe cuDSS.
+            cost-gated. For LLT/LU, auto without evidence retains cuSOLVERSp
+            without probing cuDSS. LDLT requires cuDSS and checks availability
+            without comparing its cost to the unsupported cuSOLVERSp route.
         expected_reuse: Expected solves per factorization for the current
             workload. ``None`` explicitly adopts the evidence profile's
             assumption; a positive integer re-evaluates amortized cost for
@@ -269,6 +270,16 @@ class SparseSolver:
             and identity["storage_format"] == "csr"
             and sparse_matrix.n == sparse_matrix.m
         )
+        # Performance evidence can compare only implementations of the
+        # requested factorization. Legacy cuSOLVERSp has no LDLT implementation.
+        requires_cudss = (
+            self._provider_request == "auto" and self._solver_type == "LDLT"
+        )
+        cost_gated = self._provider_request == "auto" and not requires_cudss
+        if requires_cudss:
+            # A failed cold selection may be retried after dependency repair.
+            self._provider_fallback_reason = None
+            self._provider_admission = None
         resolved_cudss_library = self._library_path
         cudss_provider_binary_sha256 = None
         cudss_adapter_binary_sha256 = None
@@ -293,7 +304,7 @@ class SparseSolver:
 
         if (
             cudss_eligible
-            and self._provider_request == "auto"
+            and cost_gated
             and self._provider_profile is None
         ):
             self._provider_fallback_reason = "missing_admission_evidence"
@@ -303,7 +314,7 @@ class SparseSolver:
                 "reason": "missing_admission_evidence",
             }
         elif cudss_eligible and self._provider_request in ("auto", "cudss"):
-            if self._provider_request == "auto":
+            if cost_gated:
                 from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
                     cudss_adapter_sha256,
                     cudss_library_sha256,
@@ -370,7 +381,7 @@ class SparseSolver:
                 if item.descriptor.operation_id == "linalg.solve.cudss"
             )
             if resolved.discovery == "available":
-                if self._provider_request == "auto":
+                if cost_gated:
                     admission = self._evaluate_cudss_admission(
                         sparse_matrix,
                         {
@@ -393,7 +404,10 @@ class SparseSolver:
                     self._provider_admission = {
                         "admitted": True,
                         "route": "provider",
-                        "reason": "explicit_provider_request",
+                        "reason": (
+                            "required_factorization_capability"
+                            if requires_cudss else "explicit_provider_request"
+                        ),
                     }
                 matrix_type = {
                     "LLT": "spd",
@@ -413,6 +427,10 @@ class SparseSolver:
                         self._provider_fallback_reason = (
                             "cudss_plan_creation_failed:" + type(exc).__name__
                         )
+                        if requires_cudss:
+                            self._raise_cuda_ldlt_unavailable(
+                                self._provider_fallback_reason
+                            )
                     else:
                         self._selected_provider = "cudss"
                         self._provider_selection_identity = selection_identity
@@ -436,11 +454,27 @@ class SparseSolver:
                 "reason": self._provider_fallback_reason,
             }
 
+        if requires_cudss:
+            self._raise_cuda_ldlt_unavailable(self._provider_fallback_reason)
         self.solver = _ti_core.make_cusparse_solver(
             self.dtype, self._solver_type, self._ordering
         )
         self._selected_provider = "cusolver_sp"
         self._provider_selection_identity = selection_identity
+
+    def _raise_cuda_ldlt_unavailable(self, reason):
+        self._provider_fallback_reason = reason
+        self._provider_admission = {
+            "admitted": False,
+            "route": "unavailable",
+            "reason": reason,
+        }
+        raise TaichiRuntimeError(
+            "CUDA LDLT requires an available cuDSS provider for a square scalar "
+            "f32 CUDA CSR matrix; cuSOLVERSp has no LDLT implementation. "
+            f"cuDSS selection failed: {reason}. Install a compatible cuDSS "
+            "runtime and its dependencies, or supply library_path."
+        )
 
     def _make_cudss_plan(
         self, sparse_matrix, matrix_type=None, *, library_path=None
@@ -606,7 +640,7 @@ class SparseSolver:
         )
 
     def record_solve(self, *, rhs="rhs", solution="solution"):
-        """Record a successful Eigen or cuSOLVERSp factor for Graph and AOT.
+        """Record a successful factor from the selected provider for Graph and AOT.
 
         RHS/output bindings may change between executions. Changing the matrix
         or refactorizing requires a new recording. AOT saves compressed data
@@ -618,6 +652,8 @@ class SparseSolver:
         """
         from ._sparse_solver_recording import SparseSolveRecording
 
+        if self._selected_provider == "cudss":
+            return self.solver.recording(rhs=rhs, solution=solution)
         return SparseSolveRecording(self, rhs, solution)
 
     def info(self):

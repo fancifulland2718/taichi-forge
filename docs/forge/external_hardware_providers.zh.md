@@ -469,8 +469,10 @@ Forge 当前要求 CUDA Driver API 12.0 或更高版本，以及 square scalar f
 - 在 direct call 和已提交 root-Graph action 全部 retire 前保持 plan 存活，之后确定性关闭；
 - 为不透明的 analysis、factor 与 workspace memory 预留预算；CSR input bytes 不是 provider
   总峰值；
-- 只有存在匹配的 Forge admission evidence 时才使用 `provider="auto"`。没有 evidence 时，
-  auto 不会 probe cuDSS，并保留 cuSOLVERSp。应用有意选择时使用 `provider="cudss"`。
+- LLT/LU 的 `provider="auto"` 只在有匹配的 Forge admission evidence 时选择 cuDSS；
+  没有 evidence 时保留 cuSOLVERSp，不 probe cuDSS。CUDA LDLT 必须满足算法能力，
+  即使没有性能证据也会检查 cuDSS 可用性，因为 cuSOLVERSp 不实现 LDLT；缺库或
+  provider 不适用时明确报错。应用也可以用 `provider="cudss"` 显式选择。
 
 推荐的 physics workload 是反复求解的 fixed-pattern sparse system，其中 analysis，通常还有
 refactorization，能够被充分摊销。对于一次性、小规模或频繁 remesh 的系统，应测量完整

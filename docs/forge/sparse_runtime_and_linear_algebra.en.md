@@ -415,11 +415,13 @@ On CPU, supported factorization types are LLT, LDLT, and LU with AMD/COLAMD
 ordering. The legacy CUDA `cusolver_sp` route accepts scalar CSR `f32`, LLT
 (positive definite) and LU, with AMD/COLAMD ordering. COLAMD is computed from
 the host pattern at analysis time; the numerical provider remains cuSOLVERSp.
-`LDLT` is rejected instead of silently running Cholesky. Select an explicitly
-supported symmetric-indefinite provider, such as cuDSS, when required.
-This change does not alter automatic provider admission: without cuDSS
-admission evidence, `auto` still selects the legacy route and cannot execute
-LDLT. Use `SparseSolver(solver_type="LDLT", provider="cudss",
+The legacy provider rejects `LDLT` instead of silently running Cholesky.
+For CUDA LDLT, `auto` checks cuDSS availability during cold preparation without
+requiring a cost comparison with cuSOLVERSp, which does not implement LDLT.
+Missing dependencies, an ineligible matrix, or plan creation failure produce
+an explicit error; they never fall back to LLT. LLT/LU still require matching
+performance admission evidence to select cuDSS and otherwise retain the legacy
+route. Use `SparseSolver(solver_type="LDLT", provider="cudss",
 library_path=...)` to request the existing cuDSS route explicitly.
 LU factorization and solve use the vendor's host implementation and transfer
 each RHS and result. LLT retains device vectors and descriptors across solves;
@@ -427,6 +429,13 @@ LU retains its host vectors. Refactorization reuses sufficient workspace.
 `info()` is false before a successful factorization and after a numeric
 failure; a later successful refactorization restores the solver.
 Vulkan has no stored direct solver.
+
+When cuDSS is selected, `record_solve()` delegates to its existing recording
+and export path. AOT preserves the selected factorization and matrix data;
+the consumer configures independently installed vendor libraries without
+repeating performance selection. An admission reason of
+`required_factorization_capability` denotes an algorithm requirement, not a
+measured speedup.
 
 ### CPU direct solves in Graph and AOT
 
