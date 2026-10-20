@@ -1470,6 +1470,22 @@ Vulkan 复用固定命令。返回对象可重复调用、读取 `info`，使用
 执行对象；暖态只查原生句柄，不重新装箱参数或扫描全部数组 owner。
 公开 Python 消费示例添加 `--prepared` 即可验证此路径。
 
+普通 `Kernel.run()`/`Kernel.__call__()` 与绑定后的调用可以返回编译值：标量对应
+Python 数字（`u1` 为布尔），向量对应元组，矩阵对应嵌套元组，结构对应字典，
+多个返回值对应元组。位宽、padding 和形状来自已加载的编译布局，每个 Kernel
+包装对象只查询一次，绑定调用复用解码方案。非空 host 结果会等待完成；无返回值
+kernel 仍返回 `None`，不增加等待。这不增加自动求导或 prepared/Graph 结果帧。
+
+C 消费者先用 `ti_get_kernel_return_info_ext` 查询 `TiKernelReturnInfo`，再给
+`ti_launch_kernel_with_result_ext` 提供恰好 `buffer_size` 字节的 host 缓冲。
+不可变的 schema-1 `layout_json` 属于模块，须在模块关闭前复制。`results` 数组
+包含标量/张量叶子（`dtype`、`shape`、`offset`、`scalar_size`）与递归结构
+（`members`，每项含 `name`、`value`）；偏移相对整个结果缓冲，张量标量槽连续。
+校验在提交前进行，失败调用不覆盖调用方结果。旧的 void C launch 入口丢弃结果，
+但同样在释放接收存储前完成非空结果回读。Windows CPU/CUDA/Vulkan 验证覆盖普通
+独立/借用消费、重复绑定、混合位宽嵌套值、显式 ndarray 伴随和退休；prepared
+仍要求无 host 返回值的 kernel。
+
 对应 C API 为 `ti_prepare_kernel_ext` / `ti_prepare_compute_graph_ext`，使用
 `TiNdArrayBinding` / `TiNamedNdArrayBinding`，随后调用 `ti_launch_prepared_ext`
 和 `ti_destroy_prepared_ext`。这些入口覆盖无 host 返回值的普通 kernel 批次，

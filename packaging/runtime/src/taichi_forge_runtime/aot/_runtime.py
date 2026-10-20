@@ -28,6 +28,7 @@ from . import _c_api as abi
 from ._c_api import AotError
 from ._completion import SubmissionTicket
 from ._struct import StructLayout
+from ._value import ReturnLayout
 
 __all__ = [
     "AotError",
@@ -948,6 +949,8 @@ class BoundCall:
     def __init__(self, entry, arguments, bindings, owners):
         self._entry, self._arguments, self._bindings = entry, arguments, bindings
         self._owners = tuple(dict.fromkeys(owners))
+        layout = entry._return_layout
+        self._result = C.create_string_buffer(layout.size) if layout is not None and layout.size else None
 
     def run(self):
         module = self._entry._module
@@ -958,6 +961,18 @@ class BoundCall:
                 owner._check()
             # Even a failing launch may have submitted earlier native work.
             runtime._pending.update(self._owners)
+            if self._result is not None:
+                runtime._api.call(
+                    runtime._api.ti_launch_kernel_with_result_ext,
+                    runtime._handle, self._entry._handle,
+                    len(self._arguments), self._arguments,
+                    len(self._bindings), self._bindings,
+                    self._entry._return_layout.size, self._result,
+                )
+                # A successful nonempty host result completes prior ordinary
+                # work, just like wait(); keep owners on every failure path.
+                runtime._pending.clear()
+                return self._entry._return_layout.decode(self._result)
             function = (
                 runtime._api.ti_launch_compute_graph_with_bindings_ext
                 if isinstance(self._entry, Graph)
@@ -972,6 +987,8 @@ class BoundCall:
                 len(self._bindings),
                 self._bindings,
             )
+            if self._entry._return_layout is not None:
+                return self._entry._return_layout.decode(b"")
 
     __call__ = run
 
@@ -1185,6 +1202,8 @@ class Kernel:
     def __init__(self, module, handle):
         self._module, self._handle = module, handle
         self._layouts = {}
+        layout = None if isinstance(self, Graph) else ReturnLayout(module, handle)
+        self._return_layout = layout if layout is not None and layout.has_values else None
 
     def ndarray_layout(self, argument):
         """Query and cache an exported structure argument's immutable AoS ABI.
@@ -1226,7 +1245,11 @@ class Kernel:
             return BoundCall(self, native, (abi.Binding * len(bindings))(*bindings), owners)
 
     def run(self, *arguments, gradients=None):
-        self.bind(*arguments, gradients=gradients).run()
+        """Run and return Python scalars, tuples or named dictionaries.
+
+        Nonempty host results wait for completion. Void calls remain asynchronous.
+        """
+        return self.bind(*arguments, gradients=gradients).run()
 
     def prepare(self, *arguments, gradients=None):
         return self.bind(*arguments, gradients=gradients).prepare()

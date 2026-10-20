@@ -140,6 +140,7 @@ class MetalRuntime;
 class PreparedExecutionRegistry;
 class NativeResourceRegistry;
 struct SubmissionCompletionState;
+struct BoundKernelArguments;
 }  // namespace capi
 
 class Runtime {
@@ -148,6 +149,10 @@ class Runtime {
     class AotModule *owner;
     taichi::lang::aot::Kernel *kernel;
     std::unordered_map<uint32_t, TiNdArrayLayout> layouts;
+    mutable std::string return_layout;
+    // A failed launch/wait may leave a host readback in flight. Keep the whole
+    // binding until a successful wait, or the owner's synchronized retirement.
+    mutable std::shared_ptr<capi::BoundKernelArguments> pending_return;
   };
   struct GraphBinding {
     class AotModule *owner;
@@ -262,6 +267,7 @@ class Runtime {
   const GraphBinding &get_graph(TiComputeGraph graph) const;
   const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
   void retire_module(class AotModule *owner);
+  void wait_for_kernel_returns(class AotModule *owner);
   void invalidate_module_entries(class AotModule *owner);
   void register_module(class AotModule *owner);
   bool owns_module(class AotModule *owner) const {

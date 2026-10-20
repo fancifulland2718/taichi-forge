@@ -3,6 +3,9 @@
 #include <atomic>
 #include <limits>
 
+#include "taichi/aot/value_layout.h"
+#include "taichi/common/json_serde.h"
+
 namespace {
 taichi::lang::DataType ndarray_payload(taichi::lang::aot::Kernel &kernel,
                                        const std::vector<int> &index) {
@@ -33,6 +36,55 @@ TiDataType scalar_type(taichi::lang::DataType type) {
   SCALAR(U64, u64);
 #undef SCALAR
   throw MemoryBindingError("Unsupported structure scalar type");
+}
+
+liong::json::JsonValue value_tree(
+    taichi::lang::DataType type,
+    const taichi::lang::aot::ValueLayout &layout,
+    std::size_t &leaf) {
+  using namespace liong::json;
+  if (const auto *structure = type->cast<taichi::lang::StructType>()) {
+    JsonArray members;
+    std::unordered_set<std::string> names;
+    for (const auto &member : structure->elements()) {
+      if (member.name.empty() || !names.insert(member.name).second)
+        throw MemoryBindingError("Invalid value structure member name");
+      members.inner.emplace_back(JsonObject{
+          {"name", JsonValue(member.name)},
+          {"value", value_tree(member.type, layout, leaf)}});
+    }
+    return JsonValue(JsonObject{{"kind", JsonValue("struct")},
+                                {"members", JsonValue(std::move(members))}});
+  }
+  const auto &member = layout.members.at(leaf++);
+  return JsonValue(JsonObject{
+      {"kind", JsonValue(member.shape.empty() ? "scalar" : "tensor")},
+      {"dtype", JsonValue(member.scalar_type->to_string())},
+      {"shape", serialize(member.shape)},
+      {"offset", JsonValue(member.offset)},
+      {"scalar_size", JsonValue(member.scalar_size)}});
+}
+
+std::string return_layout_json(taichi::lang::aot::Kernel &kernel,
+                                taichi::Arch arch) {
+  using namespace liong::json;
+  using namespace taichi::lang::aot;
+  JsonArray results;
+  if (kernel.ret_type) {
+    ValueLayout layout(kernel.ret_type, kernel.ret_size,
+                       taichi::arch_uses_llvm(arch) ? ValueStorage::Host
+                                                  : ValueStorage::Gfx);
+    std::size_t leaf = 0;
+    for (const auto &member : kernel.ret_type->elements())
+      results.inner.push_back(value_tree(member.type, layout, leaf));
+    if (leaf != layout.members.size())
+      throw MemoryBindingError("Inconsistent return value layout");
+  } else if (kernel.ret_size) {
+    throw MemoryBindingError("Missing compiled return type");
+  }
+  return print(JsonValue(JsonObject{{"version", JsonValue(1)},
+                                    {"buffer_size", JsonValue(kernel.ret_size)},
+                                    {"results", JsonValue(std::move(results))}}));
 }
 }  // namespace
 
@@ -86,6 +138,18 @@ const taichi::lang::aot::StructLayout &Runtime::get_layout(
 void Runtime::retire_module(AotModule *owner) {
   modules_.erase(owner);
   invalidate_module_entries(owner);
+}
+
+void Runtime::wait_for_kernel_returns(AotModule *owner) {
+  for (const auto &[handle, binding] : kernels_) {
+    if (binding.owner == owner && binding.pending_return) {
+      // A failed wait must leave the module and its readback buffers alive.
+      wait();
+      for (const auto &[other_handle, other] : kernels_)
+        other.pending_return.reset();
+      return;
+    }
+  }
 }
 
 void Runtime::invalidate_module_entries(AotModule *owner) {
@@ -236,6 +300,21 @@ TiComputeGraph AotModule::get_graph_handle(const std::string &name) {
   auto handle = runtime_->register_graph(std::move(binding));
   graph_handles_.emplace(name, handle);
   return handle;
+}
+
+void ti_get_kernel_return_info_ext(TiRuntime runtime,
+                                    TiKernel kernel,
+                                    TiKernelReturnInfo *info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(info);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &binding = rt.get_kernel(kernel);
+  if (binding.return_layout.empty())
+    binding.return_layout = return_layout_json(*binding.kernel, rt.arch);
+  *info = {binding.kernel->ret_size, binding.return_layout.c_str()};
+  TI_CAPI_TRY_CATCH_END();
 }
 
 TiNdArrayLayout ti_get_kernel_ndarray_layout_ext(TiRuntime runtime,

@@ -193,6 +193,10 @@ class NdArrayLayoutMember(C.Structure):
     ]
 
 
+class KernelReturnInfo(C.Structure):
+    _fields_ = [("buffer_size", C.c_uint64), ("layout_json", C.c_char_p)]
+
+
 class BindingFamilyInfo(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in ("identity", "bindings", "executables", "resource_bytes")]
 
@@ -292,6 +296,10 @@ class Api:
             "ti_get_compute_graph_ndarray_layout_ext": ([Handle, Handle, C.c_char_p], Handle),
             "ti_get_ndarray_layout_info_ext": ([Handle, Handle, C.POINTER(NdArrayLayoutInfo)], None),
             "ti_get_ndarray_layout_member_ext": ([Handle, Handle, UInt, C.POINTER(NdArrayLayoutMember)], None),
+            "ti_get_kernel_return_info_ext": ([Handle, Handle, C.POINTER(KernelReturnInfo)], None),
+            "ti_launch_kernel_with_result_ext": (
+                [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding), C.c_uint64, C.c_void_p], None,
+            ),
             "ti_launch_kernel_with_bindings_ext": (
                 [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding)], None,
             ),

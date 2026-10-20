@@ -1218,6 +1218,17 @@ TI_DLL_EXPORT void TI_API_CALL ti_get_ndarray_layout_member_ext(
     TiRuntime runtime, TiNdArrayLayout layout, uint32_t index,
     TiNdArrayLayoutMember *member);
 
+// Cold reflection of the compiled return buffer. layout_json is an immutable
+// schema-1 value tree (results, scalar/tensor leaves and named structures), with
+// byte offsets and scalar slot sizes from the target compiler's layout. Copy
+// the JSON before destroying the owning module. No device work is submitted.
+typedef struct TiKernelReturnInfo {
+  uint64_t buffer_size;
+  const char *layout_json;
+} TiKernelReturnInfo;
+TI_DLL_EXPORT void TI_API_CALL ti_get_kernel_return_info_ext(
+    TiRuntime runtime, TiKernel kernel, TiKernelReturnInfo *info);
+
 // All bindings, including every dispatch of a Graph, are validated before
 // submission. Memory, layouts, kernels and Graphs must belong to this runtime.
 // Descriptors are read during this call; device storage must remain alive until
@@ -1226,6 +1237,15 @@ TI_DLL_EXPORT void TI_API_CALL ti_launch_kernel_with_bindings_ext(
     TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
     const TiArgument *args, uint32_t binding_count,
     const TiNdArrayBinding *bindings);
+// Copy ordinary kernel returns to caller-owned host storage. result_size must
+// equal the queried buffer_size; validation precedes submission. A nonempty
+// return buffer requires completion before returning, including when the older
+// void launch API discards it. Void kernels retain their asynchronous behavior.
+// On failure, result_data is not modified. This does not enable prepared returns.
+TI_DLL_EXPORT void TI_API_CALL ti_launch_kernel_with_result_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t binding_count,
+    const TiNdArrayBinding *bindings, uint64_t result_size, void *result_data);
 TI_DLL_EXPORT void TI_API_CALL ti_launch_compute_graph_with_bindings_ext(
     TiRuntime runtime, TiComputeGraph graph, uint32_t arg_count,
     const TiNamedArgument *args, uint32_t binding_count,

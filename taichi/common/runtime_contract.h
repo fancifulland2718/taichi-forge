@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// External CUDA scopes own a context guard across Python adapter calls.
-inline constexpr int kForgeNativeAbiRevision = 131;
+// Ordinary AOT calls expose compiled return layouts and completed host results.
+inline constexpr int kForgeNativeAbiRevision = 132;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

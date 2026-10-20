@@ -223,7 +223,7 @@ def decl_ret(dtype):
     if isinstance(dtype, StructType):
         dtype = dtype.dtype
     if isinstance(dtype, MatrixType):
-        dtype = _ti_core.get_type_factory_instance().get_tensor_type([dtype.n, dtype.m], dtype.dtype)
+        dtype = dtype.tensor_type
     else:
         dtype = cook_dtype(dtype)
     impl.get_runtime().compiling_callable.insert_ret(dtype)

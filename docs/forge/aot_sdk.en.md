@@ -1873,6 +1873,28 @@ cleared nor seeded automatically. `entry.bind(...)` freezes Python argument
 descriptors for repeated `call()` submissions; this is ordinary execution,
 not a captured GPU Graph.
 
+Ordinary `Kernel.run()`/`Kernel.__call__()` and bound calls return compiled
+values: scalars become Python numbers (booleans for `u1`), vectors become tuples,
+matrices become nested tuples, structures become dictionaries, and multiple
+returns become a tuple. The loaded compiler layout determines scalar widths,
+padding and shape; it is queried once per Kernel wrapper and reused by bound
+calls. A nonempty host result waits for completion. Void kernels continue to
+return `None` without adding a wait. These result reads do not add automatic
+differentiation or prepared/Graph result frames.
+
+C consumers query `ti_get_kernel_return_info_ext` for `TiKernelReturnInfo` and
+call `ti_launch_kernel_with_result_ext` with exactly `buffer_size` host bytes.
+The module owns the immutable schema-1 `layout_json`; copy it before closing the
+module. Its `results` array contains scalar/tensor leaves (`dtype`, `shape`,
+`offset`, `scalar_size`) and recursive structures (`members`, each with `name`
+and `value`). Offsets are absolute within the result buffer; tensor scalar slots
+are contiguous. Validation precedes submission and failed calls do not overwrite
+the caller's result buffer. Older void C launch entry points discard results,
+but also complete a nonempty return readback before releasing its host storage.
+Windows CPU/CUDA/Vulkan checks cover ordinary independent and borrowed consumers,
+repeated bindings, mixed-width nested values, explicit ndarray adjoints and
+retirement. Prepared execution still requires kernels without host returns.
+
 `entry.prepare(...)` (or `bound_call.prepare()`) prepares immutable native
 execution without running the kernels. CPU uses resolved function entries and
 one ordered batch, CUDA uses a CUDA Graph, and Vulkan reuses fixed commands.

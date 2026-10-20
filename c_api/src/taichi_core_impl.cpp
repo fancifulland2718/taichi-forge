@@ -971,6 +971,7 @@ void ti_destroy_aot_module(TiAotModule aot_module) {
   auto *module = reinterpret_cast<AotModule *>(aot_module);
   std::lock_guard<std::recursive_mutex> lock(
       module->runtime().submission_mutex());
+  module->runtime().wait_for_kernel_returns(module);
   module->runtime().retire_prepared_module(module);
   delete module;
   TI_CAPI_TRY_CATCH_END();
@@ -1061,6 +1062,50 @@ void ti_launch_kernel_with_gradients_ext(
   TI_CAPI_TRY_CATCH_END();
 }
 
+namespace {
+void launch_kernel_result(Runtime &rt,
+                          TiKernel kernel,
+                          uint32_t arg_count,
+                          const TiArgument *args,
+                          uint32_t binding_count,
+                          const TiNdArrayBinding *bindings,
+                          bool copy_result,
+                          uint64_t result_size,
+                          void *result_data) {
+  auto bound = capi::bind_kernel_arguments(rt, kernel, arg_count, args,
+                                           binding_count, bindings);
+  if (!bound)
+    return;
+  if (copy_result && (result_size != bound->kernel->ret_size ||
+                      (result_size && !result_data)))
+    throw MemoryBindingError("Return storage must match the compiled buffer size");
+  if (!bound->context->result_buffer_size) {
+    bound->kernel->launch(*bound->context);
+    return;
+  }
+  const auto &entry = rt.get_kernel(kernel);
+  if (entry.pending_return) {
+    rt.wait();
+    entry.pending_return.reset();
+  }
+  // Retain before the first submission: even a launch that throws may have
+  // queued a device-to-host copy. Successful completion is the only release
+  // point; failed waits keep this binding with the existing module owner.
+  entry.pending_return = std::move(bound);
+  const auto &pending = *entry.pending_return;
+  pending.kernel->launch(*pending.context);
+  // GFX launch already waits and copies nonempty returns in device_to_host().
+  // LLVM launch needs its explicit wait, which also reports kernel assertions.
+  if (taichi::arch_uses_llvm(rt.arch))
+    rt.wait();
+  rt.complete_submission_completions();
+  if (copy_result)
+    std::memcpy(result_data, pending.context->get_context().result_buffer,
+                result_size);
+  entry.pending_return.reset();
+}
+}  // namespace
+
 void ti_launch_kernel_with_bindings_ext(
     TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
     const TiArgument *args, uint32_t binding_count,
@@ -1069,10 +1114,21 @@ void ti_launch_kernel_with_bindings_ext(
   TI_CAPI_ARGUMENT_NULL(runtime);
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
-  auto bound = capi::bind_kernel_arguments(rt, kernel, arg_count, args,
-                                           binding_count, bindings);
-  if (bound)
-    bound->kernel->launch(*bound->context);
+  launch_kernel_result(rt, kernel, arg_count, args, binding_count, bindings,
+                        false, 0, nullptr);
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_launch_kernel_with_result_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t binding_count,
+    const TiNdArrayBinding *bindings, uint64_t result_size, void *result_data) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  launch_kernel_result(rt, kernel, arg_count, args, binding_count, bindings,
+                        true, result_size, result_data);
   TI_CAPI_TRY_CATCH_END();
 }
 
