@@ -34,6 +34,7 @@ std::vector<ExecutionResources::Dimension> shape(const JsonValue &value) {
 bool is_array(const ExecutionResources::Resource &resource) {
   return std::holds_alternative<ExecutionResources::Array>(resource.value) ||
          std::holds_alternative<ExecutionResources::View>(resource.value) ||
+         std::holds_alternative<ExecutionResources::Member>(resource.value) ||
          std::holds_alternative<ExecutionResources::ModuleArray>(
              resource.value);
 }
@@ -67,6 +68,8 @@ std::vector<std::string> ExecutionResources::dependencies(
                  std::get_if<ExecutionResources::View>(&resource.value)) {
     result.push_back(view->array);
     dimensions = &view->shape;
+  } else if (const auto *member = std::get_if<Member>(&resource.value)) {
+    result.push_back(member->array);
   } else if (const auto *native =
                  std::get_if<NativeOperationDescription>(&resource.value)) {
     for (const auto &[port, slot] : native->bindings)
@@ -115,18 +118,35 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
         result.declarations.push_back(std::move(resource));
         continue;
       }
+      if (kind == "ndarray_member") {
+        fields(value, {"kind", "name", "array", "path"});
+        if (integer(root["version"]) < 23)
+          throw std::invalid_argument("Array members require execution plan version 23");
+        resource.value = Member{name(value["array"]), name(value["path"])};
+        result.declarations.push_back(std::move(resource));
+        continue;
+      }
       if (kind == "module_array") {
         fields(value, {"kind", "name", "view"});
         resource.value = ModuleArray{name(value["view"])};
         result.declarations.push_back(std::move(resource));
         continue;
       }
-      resource.dtype = name(value["dtype"]);
+      const bool structured = kind == "ndarray" && value.obj.inner.count("layout");
+      if (!structured)
+        resource.dtype = name(value["dtype"]);
       if (kind == "ndarray") {
         fields(value, {"kind", "name", "dtype", "shape", "element_shape",
                        "zero_initialize", "initial_data", "usage",
-                       "allocator"});
+                       "allocator", "layout"});
         auto &array = std::get<Array>(resource.value);
+        if (structured) {
+          if (integer(root["version"]) < 23 || value.obj.inner.count("dtype") ||
+              value.obj.inner.count("element_shape"))
+            throw std::invalid_argument(
+                "Structure resources require version 23, layout and no primitive dtype/element_shape");
+          array.layout = name(value["layout"]);
+        }
         if (const auto allocator = value.obj.inner.find("allocator");
             allocator != value.obj.inner.end()) {
           if (integer(root["version"]) < 19)
@@ -265,10 +285,14 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
 
   for (const auto &[primal, gradient] : gradients) {
     for (const auto *ref : {&primal, &gradient})
-      if (const auto found = indices.find(*ref);
-          found != indices.end() && !is_array(declarations[found->second]))
-        throw std::invalid_argument(
-            "Execution gradient reference requires an ndarray: " + *ref);
+      if (const auto found = indices.find(*ref); found != indices.end()) {
+        const auto &resource = declarations[found->second];
+        const auto *array = std::get_if<Array>(&resource.value);
+        if (!is_array(resource) || std::holds_alternative<Member>(resource.value) ||
+            (array && !array->layout.empty()))
+          throw std::invalid_argument(
+              "Execution gradient reference requires a primitive ndarray: " + *ref);
+      }
     arguments.insert(primal);
     arguments.insert(gradient);
   }
@@ -293,6 +317,10 @@ void ExecutionResources::analyze(std::set<std::string> &arguments) {
       if (materialize[*it])
         if (const auto parent = indices.find(view->array);
             parent != indices.end())
+          materialize[parent->second] = true;
+    } else if (const auto *member = std::get_if<Member>(&declarations[*it].value)) {
+      if (materialize[*it])
+        if (const auto parent = indices.find(member->array); parent != indices.end())
           materialize[parent->second] = true;
     }
   }
@@ -339,6 +367,8 @@ std::set<std::string> ExecutionResources::runtime_bindings(
           add(slot);
       if (const auto *view = std::get_if<View>(&resource->second->value))
         add(view->array);
+      if (const auto *member = std::get_if<Member>(&resource->second->value))
+        add(member->array);
     }
   }
   return roots;

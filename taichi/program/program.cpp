@@ -987,18 +987,6 @@ template <typename T>
 using CpuTransformTaskContext = cpu::TransformTaskContext<T>;
 
 template <typename T>
-struct CpuStridedTransformTaskContext {
-  const uint8_t *src{nullptr};
-  T *dst{nullptr};
-  std::size_t n{0};
-  std::size_t offset{0};
-  std::size_t stride{0};
-  T scale{};
-  T bias{};
-  int num_threads{1};
-};
-
-template <typename T>
 struct CpuStridedToStridedTransformTaskContext {
   const uint8_t *src{nullptr};
   uint8_t *dst{nullptr};
@@ -1392,47 +1380,6 @@ void cpu_compact_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
 }
 
 template <typename T>
-void cpu_strided_transform_task(void *raw_ctx,
-                                int /*thread_id*/,
-                                int task_id) {
-  auto *ctx = static_cast<CpuStridedTransformTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    const auto *value = reinterpret_cast<const T *>(
-        ctx->src + ctx->offset + i * ctx->stride);
-    ctx->dst[i] = (*value) * ctx->scale + ctx->bias;
-  }
-}
-
-template <typename T>
-void cpu_strided_to_strided_transform_task(void *raw_ctx,
-                                           int /*thread_id*/,
-                                           int task_id) {
-  auto *ctx =
-      static_cast<CpuStridedToStridedTransformTaskContext<T> *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    const auto *value = reinterpret_cast<const T *>(
-        ctx->src + ctx->src_offset + i * ctx->src_stride);
-    auto *out = reinterpret_cast<T *>(
-        ctx->dst + ctx->dst_offset + i * ctx->dst_stride);
-    *out = (*value) * ctx->scale + ctx->bias;
-  }
-}
-
-template <typename T>
 void cpu_packed_strided_to_strided_transform_task(void *raw_ctx,
                                                   int /*thread_id*/,
                                                   int task_id) {
@@ -1487,26 +1434,11 @@ void cpu_transform_run_strided_typed(const uint8_t *src_ptr,
                                      bool use_parallel,
                                      int target_threads,
                                      int max_threads) {
-  if (use_parallel) {
-    CpuStridedTransformTaskContext<T> ctx;
-    ctx.src = src_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.offset = offset;
-    ctx.stride = stride;
-    ctx.scale = scale;
-    ctx.bias = bias;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_strided_transform_task<T>);
-    return;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto *value =
-        reinterpret_cast<const T *>(src_ptr + offset + i * stride);
-    dst_ptr[i] = (*value) * scale + bias;
-  }
+  cpu::transform_strided(src_ptr, reinterpret_cast<std::uint8_t *>(dst_ptr),
+                         n, offset, stride, 0, sizeof(T), scale, bias,
+                         use_parallel ? target_threads : 1,
+                         use_parallel ? get_cpu_primitive_thread_pool(max_threads)
+                                      : nullptr);
 }
 
 template <typename T>
@@ -1522,30 +1454,11 @@ void cpu_transform_run_strided_to_strided_typed(const uint8_t *src_ptr,
                                                 bool use_parallel,
                                                 int target_threads,
                                                 int max_threads) {
-  if (use_parallel) {
-    CpuStridedToStridedTransformTaskContext<T> ctx;
-    ctx.src = src_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.src_offset = src_offset;
-    ctx.src_stride = src_stride;
-    ctx.dst_offset = dst_offset;
-    ctx.dst_stride = dst_stride;
-    ctx.scale = scale;
-    ctx.bias = bias;
-    ctx.num_threads = target_threads;
-    auto pool = get_cpu_primitive_thread_pool(max_threads);
-    pool->run(target_threads, target_threads, &ctx,
-             cpu_strided_to_strided_transform_task<T>);
-    return;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    const auto *value =
-        reinterpret_cast<const T *>(src_ptr + src_offset + i * src_stride);
-    auto *out =
-        reinterpret_cast<T *>(dst_ptr + dst_offset + i * dst_stride);
-    *out = (*value) * scale + bias;
-  }
+  cpu::transform_strided(src_ptr, dst_ptr, n, src_offset, src_stride,
+                         dst_offset, dst_stride, scale, bias,
+                         use_parallel ? target_threads : 1,
+                         use_parallel ? get_cpu_primitive_thread_pool(max_threads)
+                                      : nullptr);
 }
 
 template <typename T>

@@ -132,4 +132,22 @@ TEST(AotStructLayout, NamedCatalogRejectsInvalidTypesAndReferences) {
   EXPECT_THROW(make_struct_layout_artifact({{"scalar", PrimitiveType::f32}}),
                std::invalid_argument);
 }
+
+TEST(AotStructLayout, NamedCatalogRejectsTrailingDataAndDuplicateObjectKeys) {
+  JsonDir directory;
+  directory.filename = "array_layouts.json";
+  const auto document = liong::json::print(liong::json::serialize(
+      make_struct_layout_artifact({{"record", example_type()}})));
+  directory.contents = document + " \t\r\n";
+  EXPECT_EQ(load_struct_layout_artifact(&directory).size(), 1u);
+  for (const auto &suffix : {std::string("{}"), std::string("garbage"),
+                             std::string(1, '\0')}) {
+    directory.contents = document + suffix;
+    EXPECT_THROW(load_struct_layout_artifact(&directory),
+                 liong::json::JsonException);
+  }
+  directory.contents = "{\"version\":1," + document.substr(1);
+  EXPECT_THROW(load_struct_layout_artifact(&directory),
+               liong::json::JsonException);
+}
 }  // namespace taichi::lang::aot

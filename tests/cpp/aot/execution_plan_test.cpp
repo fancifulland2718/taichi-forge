@@ -1311,4 +1311,57 @@ TEST(ExecutionPlan, TypedLayoutRejectsEqualWidthReinterpretation) {
   layout_only.dtype.clear();
   EXPECT_NO_THROW(validate_native_array_layout(array, layout_only));
 }
+TEST(ExecutionPlan, StructuredMembersRetainTheirParentsWithoutPacking) {
+  const auto plan = ExecutionPlan::parse(R"({
+    "version":23,"operations":[{"kind":"native","provider":"builtin",
+      "operation":"transform","version":1,"parameters":{"size":3,"dtype":"f32",
+      "scale_bits":"3ff0000000000000","bias_bits":"0000000000000000",
+      "strategy":"strided_scalar"},"bindings":{"src":"member","dst":"out"}}],
+    "resources":[
+      {"kind":"ndarray_member","name":"member","array":"view","path":"inner.value"},
+      {"kind":"ndarray_view","name":"view","array":"records","offset":1,"shape":[3]},
+      {"kind":"ndarray","name":"records","layout":"record_type","shape":[4]},
+      {"kind":"ndarray","name":"unused","layout":"unused_type","shape":[1000000000]}]
+  })");
+  EXPECT_EQ(plan.arguments, (std::vector<std::string>{"out"}));
+  EXPECT_EQ(plan.resources.order, (std::vector<std::size_t>{2, 1, 0}));
+  EXPECT_EQ(plan.resources.materialize, (std::vector<bool>{true, true, true, false}));
+  const auto retained = plan.resources.runtime_bindings({"member"});
+  EXPECT_EQ(retained, (std::set<std::string>{"member", "view", "records"}));
+  EXPECT_EQ(std::get<ExecutionResources::Array>(plan.resources.declarations[2].value).layout,
+            "record_type");
+}
+
+TEST(ExecutionPlan, StructuredMemberShapesDoNotForcePrivateAllocation) {
+  const auto plan = ExecutionPlan::parse(R"({
+    "version":23,"operations":[{"kind":"kernel","entry":"consume","arguments":["n"]}],
+    "resources":[
+      {"kind":"ndarray","name":"records","layout":"record_type","shape":[0]},
+      {"kind":"ndarray_member","name":"member","array":"records","path":"value"},
+      {"kind":"extent","name":"n","dtype":"i32","array":"member","axis":0}]
+  })");
+  EXPECT_TRUE(plan.arguments.empty());
+  EXPECT_FALSE(plan.resources.materialize[0]);
+  EXPECT_FALSE(plan.resources.materialize[1]);
+  EXPECT_TRUE(plan.resources.materialize[2]);
+}
+
+TEST(ExecutionPlan, StructuredResourcesRejectInconsistentDeclarations) {
+  for (const auto *resource : {
+       R"({"kind":"ndarray","name":"a","layout":"records","dtype":"f32","shape":[3]})",
+       R"({"kind":"ndarray","name":"a","layout":"records","element_shape":[2],"shape":[3]})",
+       R"({"kind":"ndarray","name":"a","layout":"","shape":[3]})",
+       R"({"kind":"ndarray_member","name":"a","array":"a","path":"value"})",
+       R"({"kind":"ndarray_member","name":"a","array":"parent","path":""})"}) {
+    EXPECT_THROW(ExecutionPlan::parse(
+        std::string(R"({"version":23,"operations":[],"resources":[)") +
+        resource + "]}"), std::invalid_argument);
+  }
+  EXPECT_THROW(ExecutionPlan::parse(R"({"version":22,"operations":[],"resources":[
+    {"kind":"ndarray_member","name":"a","array":"parent","path":"value"}]})"),
+               std::invalid_argument);
+  EXPECT_THROW(ExecutionPlan::parse(R"({"version":23,"operations":[],"resources":[
+    {"kind":"ndarray","name":"a","layout":"records","shape":[3]}],
+    "gradients":{"a":"da"}})"), std::invalid_argument);
+}
 }  // namespace taichi::lang::aot

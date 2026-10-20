@@ -34,13 +34,24 @@ struct NativeOperationDescription {
 // Validated owner-local storage metadata. JIT and AOT adapters supply the same
 // cold view; providers retain prepared commands, not this symbolic binding map.
 // The enclosing executor owns storage leases through completion.
+struct NativeArrayStrides {
+  std::vector<std::int64_t> index_bytes;
+  std::vector<std::int64_t> element_bytes;
+  // Relative to NativeArrayBinding::pointer, not the allocation's origin.
+  std::int64_t byte_offset{0};
+};
+
 struct NativeArrayBinding {
   DevicePtr pointer;
+  // Accessible storage window beginning at pointer, not logical payload size.
+  // Packed adapters supply the exact packed extent; affine views may have gaps.
   std::uint64_t bytes{0};
   DataType scalar_type;
   std::vector<std::uint64_t> shape;
   std::vector<std::uint64_t> element_shape;
+  // Imported allocation origin, used only for alignment qualification.
   std::uint64_t base_offset{0};
+  std::shared_ptr<const NativeArrayStrides> strides;
 };
 class NativeBinding {
  public:
@@ -52,6 +63,15 @@ class NativeBinding {
       throw std::invalid_argument("Native resource binding is null");
   }
   const NativeArrayBinding &array() const {
+    const auto &value = dense_array();
+    if (value.strides)
+      throw std::invalid_argument(
+          "Native operation requires a packed array binding");
+    return value;
+  }
+  // Opt-in only. The operation must validate the affine layout and physical
+  // range before preparing commands; this accessor does not certify either.
+  const NativeArrayBinding &dense_array() const {
     const auto *value = std::get_if<NativeArrayBinding>(&value_);
     if (!value)
       throw std::invalid_argument("Native binding requires an ndarray");

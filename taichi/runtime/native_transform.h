@@ -4,7 +4,7 @@
 
 namespace taichi::lang {
 
-enum class TransformStrategy { packed_array, packed_field };
+enum class TransformStrategy { packed_array, packed_field, strided_scalar };
 
 // Packed scalar/tensor affine transform. Exact in-place or disjoint ranges;
 // only the selected prefix is written. Coefficients retain the native double
@@ -26,6 +26,14 @@ struct TransformOperation {
 };
 
 std::size_t transform_item_bytes(const TransformOperation &operation);
+
+struct TransformAddressing {
+  std::uint64_t src_offset{0}, src_stride{0}, dst_offset{0}, dst_stride{0};
+};
+// Common cold physical proof for CPU/CUDA/Vulkan. Offsets are relative to each
+// binding's pointer; only the selected prefix participates in write aliasing.
+TransformAddressing qualify_transform_addressing(
+    Arch arch, Device &device, const TransformOperation &operation);
 
 // One transform/gather/scatter dispatch, including both visible intermediate
 // outputs. Writable ranges must be disjoint from each other and both inputs.

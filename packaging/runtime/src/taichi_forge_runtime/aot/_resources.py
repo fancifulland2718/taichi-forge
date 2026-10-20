@@ -8,7 +8,7 @@ def retained_arguments(resources, gradients, arguments):
     for name in pending:
         resource = by_name.get(name, {})
         refs = list(resource.get("bindings", {}).values()) if resource.get("kind") == "native" else []
-        if resource.get("kind") == "ndarray_view":
+        if resource.get("kind") in ("ndarray_view", "ndarray_member"):
             refs.append(resource["array"])
         if resource.get("kind") == "ndarray" and "allocator" in resource:
             refs.append(resource["allocator"])
@@ -45,7 +45,9 @@ def external_arguments(resources, gradients, arguments):
             raise ValueError("Execution resource entries must be objects")
         kind = resource.get("kind")
         if kind == "ndarray":
-            required, optional = {"kind", "name", "dtype", "shape"}, {
+            required, optional = {"kind", "name", "shape"}, {
+                "dtype",
+                "layout",
                 "element_shape",
                 "zero_initialize",
                 "initial_data",
@@ -56,6 +58,8 @@ def external_arguments(resources, gradients, arguments):
             required, optional = {"kind", "name", "dtype", "array", "axis"}, set()
         elif kind == "ndarray_view":
             required, optional = {"kind", "name", "array", "offset", "shape"}, set()
+        elif kind == "ndarray_member":
+            required, optional = {"kind", "name", "array", "path"}, set()
         elif kind == "module_array":
             required, optional = {"kind", "name", "view"}, set()
         elif kind == "scalar":
@@ -70,7 +74,15 @@ def external_arguments(resources, gradients, arguments):
             raise ValueError(f"Invalid {kind} resource fields")
         name = resource["name"]
         _name(name)
-        if kind not in ("native", "ndarray_view", "module_array", "host_blob"):
+        structured = kind == "ndarray" and "layout" in resource
+        if kind == "ndarray":
+            if ("dtype" in resource) == structured:
+                raise ValueError("Array resources require either dtype or layout")
+            if structured:
+                _name(resource["layout"])
+                if "element_shape" in resource:
+                    raise ValueError("Structure resources cannot override element_shape")
+        if kind not in ("native", "ndarray_view", "ndarray_member", "module_array", "host_blob") and not structured:
             _name(resource["dtype"])
         if name in by_name:
             raise ValueError(f"Duplicate execution resource: {name}")
@@ -91,6 +103,10 @@ def external_arguments(resources, gradients, arguments):
                 raise ValueError("Execution host blob requires a lowercase SHA-256 key and nonnegative int64 byte_size")
         elif kind == "module_array":
             _name(resource["view"])
+        elif kind == "ndarray_member":
+            _name(resource["array"])
+            _name(resource["path"])
+            refs.append(resource["array"])
         elif kind in ("ndarray", "ndarray_view"):
             if "allocator" in resource:
                 _name(resource["allocator"])
@@ -148,7 +164,7 @@ def external_arguments(resources, gradients, arguments):
     for name, refs in references.items():
         for parent in refs:
             if parent in by_name:
-                if by_name[name]["kind"] != "native" and by_name[parent]["kind"] not in ("ndarray", "ndarray_view", "module_array"):
+                if by_name[name]["kind"] != "native" and by_name[parent]["kind"] not in ("ndarray", "ndarray_view", "ndarray_member", "module_array"):
                     raise ValueError(f"Execution shape reference requires an ndarray: {parent}")
         all_refs = list(refs)
         if name in allocators:
@@ -173,8 +189,11 @@ def external_arguments(resources, gradients, arguments):
         _name(primal)
         _name(gradient)
         for name in (primal, gradient):
-            if name in by_name and by_name[name]["kind"] not in ("ndarray", "ndarray_view", "module_array"):
-                raise ValueError(f"Execution gradient reference requires an ndarray: {name}")
+            if name in by_name and (
+                by_name[name]["kind"] not in ("ndarray", "ndarray_view", "module_array")
+                or "layout" in by_name[name]
+            ):
+                raise ValueError(f"Execution gradient reference requires a primitive ndarray: {name}")
         arguments.update((primal, gradient))
     # Allocator dependencies belong to storage demand, not shape metadata.
     materialize = set(arguments)
@@ -184,7 +203,7 @@ def external_arguments(resources, gradients, arguments):
         resource = by_name[name]
         if resource["kind"] == "native":
             materialize.update(resource["bindings"].values())
-        elif resource["kind"] == "ndarray_view":
+        elif resource["kind"] in ("ndarray_view", "ndarray_member"):
             materialize.add(resource["array"])
         elif name in allocators:
             materialize.add(allocators[name])

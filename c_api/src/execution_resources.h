@@ -59,11 +59,15 @@ struct ExecutionResourceBindings {
   std::unique_ptr<ExecutionResourceStorage> storage;
   std::vector<TiArgument> arguments;
   std::vector<TiNamedNdArrayBinding> gradients;
+  // Affine members are native-only views, never disguised packed TiArguments.
+  std::map<std::string, taichi::lang::NativeArrayBinding> native_arrays;
+  std::vector<TiMemory> native_memories;
+  std::unordered_set<std::string> layout_sources;
   std::vector<ZeroInitialization> zero_initializations;
 };
 ExecutionResourceBindings bind_execution_resources(
     Runtime &runtime,
-    taichi::lang::aot::Module &module,
+    AotModule &module,
     const taichi::lang::aot::ExecutionResources &resources,
     std::unordered_map<std::string, const TiArgument *> &arguments,
     std::unordered_map<std::string, const TiNamedNdArrayBinding *> &layouts,

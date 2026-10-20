@@ -70,4 +70,50 @@ void transform(const T *src,
   }
 }
 
+template <typename T>
+struct StridedTransformTaskContext {
+  const std::uint8_t *src;
+  std::uint8_t *dst;
+  std::size_t n, src_offset, src_stride, dst_offset, dst_stride;
+  T scale, bias;
+  int num_threads;
+};
+
+template <typename T>
+void strided_transform_task(void *raw, int, int task) {
+  const auto &ctx = *static_cast<StridedTransformTaskContext<T> *>(raw);
+  const auto begin = partition_boundary(ctx.n, ctx.num_threads, task);
+  const auto end = partition_boundary(ctx.n, ctx.num_threads, task + 1);
+  for (auto i = begin; i < end; ++i) {
+    const auto value = *reinterpret_cast<const T *>(ctx.src + ctx.src_offset + i * ctx.src_stride);
+    *reinterpret_cast<T *>(ctx.dst + ctx.dst_offset + i * ctx.dst_stride) =
+        value * ctx.scale + ctx.bias;
+  }
+}
+
+// The caller validates reachable spans, scalar alignment and aliasing once.
+// Keep the JIT scalar scheduling policy and allocation-free serial path.
+template <typename T>
+void transform_strided(const std::uint8_t *src,
+                       std::uint8_t *dst,
+                       std::size_t n,
+                       std::size_t src_offset,
+                       std::size_t src_stride,
+                       std::size_t dst_offset,
+                       std::size_t dst_stride,
+                       T scale, T bias, int partitions, ThreadPool *pool) {
+  static_assert(std::is_unsigned_v<T> || std::is_floating_point_v<T>);
+  if (partitions < 1 || (n && (!src || !dst)) || (n && partitions > 1 && !pool))
+    throw std::invalid_argument("Strided transform requires storage and scheduler");
+  if (!n)
+    return;
+  StridedTransformTaskContext<T> ctx{
+      src, dst, n, src_offset, src_stride, dst_offset, dst_stride,
+      scale, bias, partitions};
+  if (partitions > 1)
+    pool->run(partitions, partitions, &ctx, strided_transform_task<T>);
+  else
+    strided_transform_task<T>(&ctx, 0, 0);
+}
+
 }  // namespace taichi::lang::cpu

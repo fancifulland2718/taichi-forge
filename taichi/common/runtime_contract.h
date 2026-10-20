@@ -9,9 +9,9 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Combined native external readiness, CPU ownership and named AOT layouts.
-// Pair the Python shim and runtime; compiled AOT formats remain unchanged.
-inline constexpr int kForgeNativeAbiRevision = 118;
+// Combine native external readiness with typed parents and affine AOT members.
+// Reject either independently built parent pair before crossing the boundary.
+inline constexpr int kForgeNativeAbiRevision = 119;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

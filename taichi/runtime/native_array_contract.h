@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include "taichi/program/storage_view.h"
 #include "taichi/runtime/native_operation_description.h"
 
 namespace taichi::lang {
@@ -74,5 +75,45 @@ struct NativeArrayLayoutRequirement {
 
 void validate_native_array_layout(const NativeArrayBinding &array,
                                   const NativeArrayLayoutRequirement &required);
+
+// Owner-independent, cold validation. Does not authorize access to a device or
+// certify unique writes; an operation must qualify its supported mapping.
+struct NativeDenseArrayLayout {
+  storage::DenseStorageLayoutSpec layout;
+  storage::DenseStorageProperties properties;
+};
+
+NativeDenseArrayLayout validate_native_dense_array_layout(
+    const NativeArrayBinding &array);
+
+// Validated physical view with the same borrowed lifetime as NativeStorageRange.
+// No allocation or lease is created. Comparing views is independent of element
+// count; uncertain overlap remains unproven, including unknown imported memory.
+class NativeDenseArrayView {
+ public:
+  const NativeDenseArrayLayout &layout() const {
+    return layout_;
+  }
+  const NativeStorageRange &range() const {
+    return range_;
+  }
+  bool proven_disjoint(const NativeDenseArrayView &other) const noexcept;
+  // Exact coordinate mapping, including dtype and shape, not just equal bounds.
+  // This is not a certificate for internal uniqueness of a writable mapping.
+  bool proven_same_mapping(const NativeDenseArrayView &other) const noexcept;
+
+ private:
+  friend NativeDenseArrayView resolve_native_dense_array(
+      Arch arch, const NativeArrayBinding &array);
+  NativeDenseArrayView(NativeDenseArrayLayout layout,
+                       NativeStorageRange storage);
+  NativeDenseArrayLayout layout_;
+  NativeStorageRange origin_;
+  NativeStorageRange range_;
+  std::uint64_t stride_gcd_{0};
+};
+
+NativeDenseArrayView resolve_native_dense_array(
+    Arch arch, const NativeArrayBinding &array);
 
 }  // namespace taichi::lang

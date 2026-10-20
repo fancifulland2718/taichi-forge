@@ -4510,10 +4510,50 @@ helper kernel is needed.
 The `array_layouts.json` v1 catalog stores each structure type once even when
 several names reference it. It loads on the first query and caches subsequent
 lookups. Named layouts share the existing module-owned handles and retirement
-contract and cannot cross runtimes. This extension requires matching private
+contract and cannot cross runtimes. Trailing content, NUL and duplicate JSON
+object keys are rejected; a failed read does not cache a partial catalog.
+This extension requires matching private
 ABI116 components; the execution-plan format is unchanged. Publishing a layout
 does not itself enable native member-view operations or private captured
 structure-array export.
+
+Normal Windows CPU/CUDA/Vulkan installations pass kernel-free catalog,
+standalone/borrowed, malformed-metadata and retirement checks, alongside existing
+structured execution and downstream float AD. The two-name, one-type fixture
+has a 512-byte catalog and adds 326 bytes to the compressed TCM over an empty
+module, with no executable artifact. These sizes describe that small fixture.
+
+Explicit execution plans can allocate typed private parents and project their
+members with plan version 23 and matching private ABI119 components:
+
+```python
+resources = [
+    dict(kind="ndarray", name="state", layout="records", shape=[17]),
+    dict(kind="ndarray_member", name="value", array="state", path="inner.value"),
+]
+```
+
+`layout` names a module-published structure layout and replaces `dtype` and
+`element_shape`. Private parents retain the existing `zero_initialize`,
+`initial_data`, allocator and lifetime contracts. A member can also reference a
+public structure ndarray or a packed `ndarray_view` of complete records. Its
+dotted path resolves through the actual target layout during preparation.
+Members allocate no storage; they retain their parent and preserve record
+stride, member offset and scalar type. Shape-only references do not allocate
+the parent.
+
+The `builtin/transform` v1 operation accepts `strategy="strided_scalar"` for a
+positive, unique scalar record mapping, with the existing `size`, `dtype`,
+`scale_bits` and `bias_bits` parameters. CPU/CUDA/Vulkan reuse their strided
+transform implementation. A packed destination, two disjoint members of one
+parent, and an identical in-place mapping are supported; overlapping mappings
+fail preparation. Only the selected prefix changes. This adds no packing
+kernel or workspace. Ordinary packed operations and kernel arguments still
+reject a projected member; pass the complete typed parent to structure kernels.
+This explicit-plan support does not yet enable automatic Graph export of
+captured structure members or strided Field roots. Structure gradients and an
+automatic adjoint for the native transform remain outside this contract;
+ordinary downstream float kernels can use their existing exported gradients.
 
 Pass memory and outer shape through the existing `TiArgument` ndarray, setting
 `elem_type=TI_DATA_TYPE_UNKNOWN` and an empty `elem_shape`. Supply the queried

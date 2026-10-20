@@ -1065,10 +1065,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
     return allocator;
   };
   auto resource_bindings = capi::bind_execution_resources(
-      rt, mod.get(), resource_description, arguments, layouts,
+      rt, mod, resource_description, arguments, layouts,
       family ? family->arrays.get() : nullptr, frozen_metadata,
       resolve_allocator, bool(domain));
   prepared->resources = std::move(resource_bindings.storage);
+  prepared->memories.insert(prepared->memories.end(),
+                             resource_bindings.native_memories.begin(),
+                             resource_bindings.native_memories.end());
+  used_bindings.insert(resource_bindings.layout_sources.begin(),
+                        resource_bindings.layout_sources.end());
   struct Storage {
     DevicePtr pointer;
     uint64_t size;
@@ -1084,8 +1089,19 @@ static TiPreparedExecution prepare_execution_plan_impl(
       throw MemoryBindingError("Execution memory operations require ndarrays");
     const auto &array = arg.value.ndarray;
     uint64_t element_bytes = 0;
-    const auto bytes =
-        capi::validated_ndarray_bytes(rt, array, &element_bytes, bool(domain));
+    uint64_t bytes;
+    if (array.elem_type == TI_DATA_TYPE_UNKNOWN) {
+      const auto binding = layouts.find(name);
+      if (binding == layouts.end() || binding->second->gradient)
+        throw MemoryBindingError("Structure memory operation requires its layout: " + name);
+      bytes = capi::validated_struct_ndarray_bytes(
+          rt, array, binding->second->layout, binding->second->layout_version,
+          bool(domain));
+      element_bytes = rt.get_layout(binding->second->layout).stride;
+      used_bindings.insert(name);
+    } else {
+      bytes = capi::validated_ndarray_bytes(rt, array, &element_bytes, bool(domain));
+    }
     if (offset > bytes)
       throw MemoryBindingError(
           "Execution memory offset exceeds ndarray extent");
@@ -1095,7 +1111,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
         allocation.allocation.get_ptr(allocation.byte_offset + offset),
         bytes - offset, element_bytes};
   };
-  std::map<std::string, NativeArrayBinding> native_arrays;
+  auto native_arrays = std::move(resource_bindings.native_arrays);
   auto array_binding =
       [&](const std::string &slot) -> const NativeArrayBinding & {
     auto found = native_arrays.find(slot);
@@ -1115,6 +1131,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
     auto found = storage_ranges.find(slot);
     if (found == storage_ranges.end()) {
       const auto &array = array_binding(slot);
+      if (array.strides)
+        throw MemoryBindingError("Packed range constraint cannot qualify an affine member: " + slot);
       found = storage_ranges
                   .emplace(slot, resolve_native_storage_range(
                                      rt.arch, array.pointer, array.bytes))
@@ -1150,6 +1168,16 @@ static TiPreparedExecution prepare_execution_plan_impl(
       } else if (std::holds_alternative<aot::ExecutionPlan::Disjoint>(
                      constraint)) {
         const auto &pair = std::get<aot::ExecutionPlan::Disjoint>(constraint);
+        const auto &a = array_binding(pair.left);
+        const auto &b = array_binding(pair.right);
+        if (a.strides || b.strides) {
+          const auto left = resolve_native_dense_array(rt.arch, a);
+          const auto right = resolve_native_dense_array(rt.arch, b);
+          if (!left.proven_disjoint(right) &&
+              !(pair.allow_same_view && left.proven_same_mapping(right)))
+            throw MemoryBindingError("Cannot prove affine bindings disjoint or identical");
+          continue;
+        }
         const auto &left = storage_range(pair.left);
         const auto &right = storage_range(pair.right);
         bool accepted = left.proven_disjoint(right);
@@ -1750,6 +1778,11 @@ static TiPreparedExecution prepare_execution_plan_impl(
         prepared->replay_resources.insert(object->second.get());
         continue;
       }
+      // Affine members have no standalone TiArgument or allocation. Their
+      // complete parent chain is already present in the replay closure below.
+      if (const auto member = native_arrays.find(name);
+          member != native_arrays.end() && member->second.strides)
+        continue;
       const auto &argument = *arguments.at(name);
       if (argument.type == TI_ARGUMENT_TYPE_NDARRAY) {
         prepared->replay_memories.insert(argument.value.ndarray.memory);

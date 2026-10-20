@@ -46,6 +46,16 @@ void validate(Device &device, const TransformOperation &op) {
   for (const auto *array : {&op.src, &op.dst}) {
     if (array->pointer.device != &device)
       throw std::invalid_argument("Transform requires same-device arrays");
+    if (op.strategy == TransformStrategy::strided_scalar) {
+      const auto facts = validate_native_dense_array_layout(*array);
+      const auto &p = facts.properties;
+      if (array->scalar_type != types[op.value_type] ||
+          !array->element_shape.empty() || p.item_count < op.size ||
+          !p.single_record_stride_compatible || p.has_negative_stride ||
+          p.uniqueness != storage::StorageMappingUniqueness::kProvenUnique)
+        throw std::invalid_argument("Scalar transform requires a unique positive record-strided view");
+      continue;
+    }
     validate_native_array_layout(*array, {{op.size},
                                           op.element_shape,
                                           record,
@@ -66,14 +76,7 @@ class TransformBase : public NativeOperation {
         record_bytes_(transform_item_bytes(op)),
         scalar_count_(op.size * (record_bytes_ / (op.value_type < 3 ? 4 : 8))),
         type_(op.value_type) {
-    for (const auto *array : {&op.src, &op.dst}) {
-      validate_native_shader_storage(arch, array->pointer);
-      resolve_native_storage_range(arch, array->pointer, array->bytes);
-    }
-    const auto bytes = size_ * record_bytes_;
-    validate_native_disjoint_writes(
-        {resolve_native_storage_range(arch, op.src.pointer, bytes)},
-        {{resolve_native_storage_range(arch, op.dst.pointer, bytes), 0}});
+    addressing_ = qualify_transform_addressing(arch, device, op);
   }
   Arch arch() const override {
     return arch_;
@@ -91,6 +94,7 @@ class TransformBase : public NativeOperation {
   std::size_t size_;
   std::size_t record_bytes_, scalar_count_;
   int type_;
+  TransformAddressing addressing_;
   void *src_{nullptr}, *dst_{nullptr};
 };
 
@@ -105,6 +109,7 @@ class CpuTransform final : public TransformBase {
       : TransformBase(context.arch, context.device, op),
         scale_(scale),
         bias_(bias),
+        strided_(op.strategy == TransformStrategy::strided_scalar),
         pool_(context.cpu_thread_pool),
         partitions_(
             cpu::transform_partitions(scalar_count_, context.cpu_max_threads,
@@ -121,12 +126,21 @@ class CpuTransform final : public TransformBase {
           "Transform CPU storage or scheduler is invalid");
   }
   void run_cpu() override {
+    if (strided_) {
+      cpu::transform_strided(
+          static_cast<const std::uint8_t *>(src_), static_cast<std::uint8_t *>(dst_),
+          size_, addressing_.src_offset, addressing_.src_stride,
+          addressing_.dst_offset, addressing_.dst_stride,
+          scale_, bias_, partitions_, pool_);
+      return;
+    }
     cpu::transform(static_cast<const T *>(src_), static_cast<T *>(dst_), scalar_count_,
                    scale_, bias_, partitions_, pool_);
   }
 
  private:
   T scale_, bias_;
+  bool strided_;
   ThreadPool *pool_;
   int partitions_;
 };
@@ -169,7 +183,8 @@ class CudaTransform final : public TransformBase {
       : TransformBase(Arch::cuda, device, op),
         scale_(op.scale),
         bias_(op.bias), packed_(!op.element_shape.empty() &&
-                              op.strategy == TransformStrategy::packed_array) {
+                              op.strategy == TransformStrategy::packed_array),
+        strided_(op.strategy == TransformStrategy::strided_scalar) {
     if ((packed_ ? size_ : scalar_count_) > std::numeric_limits<std::uint32_t>::max())
       throw std::invalid_argument(
           "Transform exceeds the CUDA uint32 shader count ABI");
@@ -180,7 +195,7 @@ class CudaTransform final : public TransformBase {
            op.src.pointer.offset;
     dst_ = static_cast<char *>(cuda->get_memory_addr(op.dst.pointer)) +
            op.dst.pointer.offset;
-    if (packed_)
+    if (packed_ || strided_)
       cuda::driver_prepare_transform_strided(
           static_cast<cuda::CudaTransformValueType>(type_));
     else
@@ -188,6 +203,14 @@ class CudaTransform final : public TransformBase {
           static_cast<cuda::CudaTransformValueType>(type_));
   }
   void record_cuda(void *stream) override {
+    if (strided_) {
+      cuda::driver_transform_affine_strided_on_stream(
+          src_, dst_, static_cast<std::uint32_t>(size_),
+          static_cast<cuda::CudaTransformValueType>(type_),
+          addressing_.src_offset, addressing_.src_stride,
+          addressing_.dst_offset, addressing_.dst_stride, scale_, bias_, stream);
+      return;
+    }
     if (packed_) {
       const auto width = type_ < 3 ? 4u : 8u;
       for (std::size_t offset = 0; offset < record_bytes_; offset += width)
@@ -205,7 +228,7 @@ class CudaTransform final : public TransformBase {
 
  private:
   double scale_, bias_;
-  bool packed_;
+  bool packed_, strided_;
 };
 #endif
 
@@ -219,10 +242,13 @@ double coefficient(const operation_json::JsonValue &value) {
 
 std::size_t transform_item_bytes(const TransformOperation &op) {
   if (op.strategy != TransformStrategy::packed_array &&
-      op.strategy != TransformStrategy::packed_field)
+      op.strategy != TransformStrategy::packed_field &&
+      op.strategy != TransformStrategy::strided_scalar)
     throw std::invalid_argument("Transform strategy is invalid");
   if (op.strategy == TransformStrategy::packed_field && op.element_shape.empty())
     throw std::invalid_argument("Packed Field transform requires a tensor element shape");
+  if (op.strategy == TransformStrategy::strided_scalar && !op.element_shape.empty())
+    throw std::invalid_argument("Strided scalar transform cannot select tensor lanes");
   if (op.value_type < 0 || op.value_type >= transform_types().size())
     throw std::invalid_argument("Transform requires a supported dtype");
   std::size_t bytes = op.value_type < 3 ? 4 : 8;
@@ -234,6 +260,39 @@ std::size_t transform_item_bytes(const TransformOperation &op) {
   if (op.size > std::numeric_limits<std::size_t>::max() / bytes)
     throw std::invalid_argument("Transform prefix exceeds address space");
   return bytes;
+}
+
+TransformAddressing qualify_transform_addressing(
+    Arch arch, Device &device, const TransformOperation &op) {
+  validate(device, op);
+  for (const auto *array : {&op.src, &op.dst}) {
+    validate_native_shader_storage(arch, array->pointer);
+    resolve_native_storage_range(arch, array->pointer, array->bytes);
+  }
+  const auto record = transform_item_bytes(op);
+  if (op.strategy != TransformStrategy::strided_scalar) {
+    validate_native_disjoint_writes(
+        {resolve_native_storage_range(arch, op.src.pointer, op.size * record)},
+        {{resolve_native_storage_range(arch, op.dst.pointer, op.size * record), 0}});
+    return {0, record, 0, record};
+  }
+  auto prefix = [&](const NativeArrayBinding &array) {
+    const auto facts = validate_native_dense_array_layout(array);
+    auto result = array;
+    result.shape = {op.size};
+    result.strides = std::make_shared<const NativeArrayStrides>(NativeArrayStrides{
+        {facts.properties.record_stride}, {}, facts.layout.byte_offset});
+    return result;
+  };
+  const auto src = prefix(op.src), dst = prefix(op.dst);
+  const auto a = resolve_native_dense_array(arch, src);
+  const auto b = resolve_native_dense_array(arch, dst);
+  if (!a.proven_disjoint(b) && !a.proven_same_mapping(b))
+    throw std::invalid_argument("Transform members overlap without an identical coordinate mapping");
+  return {std::uint64_t(src.strides->byte_offset),
+          std::uint64_t(src.strides->index_bytes[0]),
+          std::uint64_t(dst.strides->byte_offset),
+          std::uint64_t(dst.strides->index_bytes[0])};
 }
 
 void validate_indexed_transform_operation(
@@ -329,6 +388,8 @@ void register_transform_operation(NativeOperationRegistry &registry) {
           const auto name = operation_json::name(selected->second);
           if (name == "packed_field")
             strategy = TransformStrategy::packed_field;
+          else if (name == "strided_scalar")
+            strategy = TransformStrategy::strided_scalar;
           else if (name != "packed_array")
             throw std::invalid_argument("Transform strategy is invalid");
         }
@@ -345,8 +406,12 @@ void register_transform_operation(NativeOperationRegistry &registry) {
                                         type,
                                         scale,
                                         bias,
-                                        bindings.at("src").array(),
-                                        bindings.at("dst").array(), element_shape, strategy};
+                                        strategy == TransformStrategy::strided_scalar
+                                            ? bindings.at("src").dense_array()
+                                            : bindings.at("src").array(),
+                                        strategy == TransformStrategy::strided_scalar
+                                            ? bindings.at("dst").dense_array()
+                                            : bindings.at("dst").array(), element_shape, strategy};
             };
       });
 #ifdef TI_WITH_LLVM

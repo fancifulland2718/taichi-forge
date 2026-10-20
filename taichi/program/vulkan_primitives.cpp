@@ -11824,23 +11824,20 @@ class FixedVulkanTransform final : public NativeOperation {
       : device_(device), src_(op.src.pointer), dst_(op.dst.pointer) {
     if (op.size > std::numeric_limits<std::uint32_t>::max())
       throw std::invalid_argument("Transform exceeds its Vulkan uint32 shader ABI");
-    for (const auto *array : {&op.src, &op.dst}) {
-      validate_native_shader_storage(Arch::vulkan, array->pointer);
-      resolve_native_storage_range(Arch::vulkan, array->pointer, array->bytes);
-    }
+    const auto addressing = qualify_transform_addressing(Arch::vulkan, device, op);
     const std::size_t width = op.value_type < 3 ? 4 : 8;
     const auto record = transform_item_bytes(op);
     const auto bytes = op.size * record;
     if (bytes > device.get_storage_buffer_binding_limits().max_range)
       throw std::invalid_argument("Transform exceeds Vulkan descriptor range");
-    validate_native_disjoint_writes(
-        {resolve_native_storage_range(Arch::vulkan, src_, bytes)},
-        {{resolve_native_storage_range(Arch::vulkan, dst_, bytes), 0}});
+    const bool member = op.strategy == TransformStrategy::strided_scalar ||
+                        !op.element_shape.empty();
     cache_.ensure_pipelines(&device);
     prepared_ = prepare_vulkan_transform(
         nullptr, &device, cache_, src_, dst_, op.size, record, record, op.value_type,
-        record / width, src_.offset, record, dst_.offset, record, op.scale,
-        op.bias, !op.element_shape.empty(), !op.element_shape.empty());
+        record / width, src_.offset + addressing.src_offset, addressing.src_stride,
+        dst_.offset + addressing.dst_offset, addressing.dst_stride, op.scale,
+        op.bias, member, member);
   }
   Arch arch() const override { return Arch::vulkan; }
   Device &device() const override { return device_; }

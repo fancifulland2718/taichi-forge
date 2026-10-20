@@ -187,6 +187,23 @@ struct DenseStorageProperties {
   StorageMappingUniqueness uniqueness{StorageMappingUniqueness::kUnknown};
 };
 
+// Pure layout facts, independent of a Program or allocation owner. Callers must
+// still validate their own allocation range, lifetime and access contract.
+// Properties and inline coordinates are valid only when the analysis succeeds.
+struct DenseStorageLayoutAnalysis {
+  StorageFailureReason reason{StorageFailureReason::kNone};
+  DenseStorageProperties properties;
+  std::array<std::int64_t, kMaxDenseStorageRank> extents{};
+  std::array<std::int64_t, kMaxDenseStorageRank> strides_bytes{};
+
+  explicit operator bool() const noexcept {
+    return reason == StorageFailureReason::kNone;
+  }
+};
+
+TI_DLL_EXPORT DenseStorageLayoutAnalysis analyze_dense_storage_layout(
+    const DenseStorageLayoutSpec &layout);
+
 // Submission-scoped device capability derived from an immutable descriptor
 // only after its owner generation has been validated. Descriptors deliberately
 // do not contain DeviceAllocation or raw-pointer state; backends may consume

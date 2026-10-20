@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <set>
 #include <tuple>
 #include <type_traits>
+#include "taichi/ir/type_utils.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
@@ -348,6 +350,8 @@ void validate_native_shader_storage(Arch arch, DeviceAllocation allocation) {
 void validate_native_array_layout(
     const NativeArrayBinding &array,
     const NativeArrayLayoutRequirement &required) {
+  if (array.strides)
+    throw std::invalid_argument("Array requires explicit affine qualification");
   if (!required.dtype.empty() &&
       array.scalar_type->to_string() != required.dtype)
     throw std::invalid_argument(
@@ -377,6 +381,178 @@ void validate_native_array_layout(
       array.pointer.offset % required.alignment != complementary_offset)
     throw std::invalid_argument(
         "Array record size or alignment is incompatible");
+}
+
+NativeDenseArrayLayout validate_native_dense_array_layout(
+    const NativeArrayBinding &array) {
+  if (!array.scalar_type->is<PrimitiveType>() || is_quant(array.scalar_type) ||
+      array.scalar_type->is_primitive(PrimitiveTypeID::unknown))
+    throw std::invalid_argument("Dense array requires a scalar storage type");
+  const auto width = data_type_size(array.scalar_type);
+  if (width <= 0)
+    throw std::invalid_argument("Dense array has an invalid scalar width");
+  NativeDenseArrayLayout result;
+  auto &layout = result.layout;
+  layout.scalar_type = array.scalar_type;
+  auto shape = [](const auto &source, bool element) {
+    std::vector<std::int64_t> result;
+    result.reserve(source.size());
+    for (auto axis : source) {
+      if (axis > std::uint64_t(std::numeric_limits<std::int64_t>::max()) ||
+          (element && !axis))
+        throw std::invalid_argument("Dense array has an invalid shape");
+      result.push_back(static_cast<std::int64_t>(axis));
+    }
+    return result;
+  };
+  layout.index_shape = shape(array.shape, false);
+  layout.element_shape = shape(array.element_shape, true);
+  if (array.strides) {
+    layout.index_strides_bytes = array.strides->index_bytes;
+    layout.element_strides_bytes = array.strides->element_bytes;
+    layout.byte_offset = array.strides->byte_offset;
+  } else {
+    std::int64_t stride = width;
+    auto packed = [&](const auto &shape, auto &strides) {
+      strides.resize(shape.size());
+      for (std::size_t i = shape.size(); i > 0; --i) {
+        strides[i - 1] = stride;
+        if (shape[i - 1] &&
+            stride > std::numeric_limits<std::int64_t>::max() / shape[i - 1])
+          throw std::invalid_argument("Dense array packed strides overflow");
+        stride *= shape[i - 1];
+      }
+    };
+    packed(layout.element_shape, layout.element_strides_bytes);
+    packed(layout.index_shape, layout.index_strides_bytes);
+  }
+  const auto analysis = storage::analyze_dense_storage_layout(layout);
+  if (!analysis)
+    throw std::invalid_argument("Dense array layout is invalid: " +
+                                std::to_string(static_cast<int>(analysis.reason)));
+  result.properties = analysis.properties;
+  auto &p = result.properties;
+  if (std::uint64_t(p.reachable_end) > array.bytes)
+    throw std::invalid_argument("Dense array exceeds its accessible storage window");
+  // Reduce before adding: even imported origins at UINT64_MAX must not wrap.
+  const auto alignment = p.scalar_alignment;
+  const auto origin_remainder =
+      (array.base_offset % alignment + array.pointer.offset % alignment) %
+      alignment;
+  p.aligned =
+      (origin_remainder + std::uint64_t(layout.byte_offset) % alignment) %
+          alignment ==
+      0;
+  auto aligned_strides = [&](const auto &shape, const auto &strides) {
+    for (std::size_t i = 0; i < shape.size(); ++i)
+      if (shape[i] > 1 && strides[i] % std::int64_t(alignment))
+        return false;
+    return true;
+  };
+  p.aligned &= aligned_strides(layout.index_shape, layout.index_strides_bytes) &&
+               aligned_strides(layout.element_shape,
+                               layout.element_strides_bytes);
+  if (!p.aligned)
+    throw std::invalid_argument("Dense array storage is misaligned");
+  return result;
+}
+
+namespace {
+NativeStorageRange subrange(NativeStorageRange range,
+                            std::uint64_t offset,
+                            std::uint64_t bytes) {
+  extent(offset, bytes, range.bytes);
+  range.memory_offset = checked_add(range.memory_offset, offset);
+  range.buffer_offset = checked_add(range.buffer_offset, offset);
+  range.bytes = bytes;
+  return range;
+}
+
+std::uint64_t stride_gcd(const storage::DenseStorageLayoutSpec &layout) {
+  std::uint64_t result = 0;
+  auto include = [&](const auto &shape, const auto &strides) {
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+      if (shape[i] <= 1)
+        continue;
+      const auto stride = strides[i];
+      const auto magnitude = stride < 0 ? std::uint64_t(-(stride + 1)) + 1
+                                        : std::uint64_t(stride);
+      result = std::gcd(result, magnitude);
+    }
+  };
+  include(layout.index_shape, layout.index_strides_bytes);
+  include(layout.element_shape, layout.element_strides_bytes);
+  return result;
+}
+}  // namespace
+
+NativeDenseArrayView::NativeDenseArrayView(NativeDenseArrayLayout layout,
+                                         NativeStorageRange storage)
+    : layout_(std::move(layout)) {
+  const auto &p = layout_.properties;
+  origin_ = subrange(storage, layout_.layout.byte_offset,
+                     p.empty ? 0 : p.scalar_size);
+  range_ = subrange(storage, p.reachable_begin,
+                    p.reachable_end - p.reachable_begin);
+  stride_gcd_ = stride_gcd(layout_.layout);
+  const auto origin_offset =
+      origin_.buffer ? origin_.buffer_offset : origin_.memory_offset;
+  if (origin_offset % p.scalar_alignment)
+    throw std::invalid_argument("Dense array physical origin is misaligned");
+}
+
+NativeDenseArrayView resolve_native_dense_array(
+    Arch arch, const NativeArrayBinding &array) {
+  auto layout = validate_native_dense_array_layout(array);
+  auto storage = resolve_native_storage_range(arch, array.pointer, array.bytes);
+  return NativeDenseArrayView(std::move(layout), storage);
+}
+
+bool NativeDenseArrayView::proven_disjoint(
+    const NativeDenseArrayView &other) const noexcept {
+  if (range_.proven_disjoint(other.range_))
+    return true;
+  if (!origin_.device || origin_.device != other.origin_.device)
+    return false;
+  std::uint64_t a, b;
+  if (origin_.buffer && origin_.buffer == other.origin_.buffer) {
+    a = origin_.buffer_offset;
+    b = other.origin_.buffer_offset;
+  } else if (origin_.memory && origin_.memory == other.origin_.memory) {
+    a = origin_.memory_offset;
+    b = other.origin_.memory_offset;
+  } else {
+    return false;
+  }
+  // All scalar starts are congruent to their origin modulo this GCD. Prove
+  // separation only if the scalar byte intervals cannot meet on that lattice.
+  const auto step = std::gcd(stride_gcd_, other.stride_gcd_);
+  if (!step)
+    return false;
+  const auto residue = b >= a ? (b - a) % step
+                             : (step - (a - b) % step) % step;
+  return residue >= layout_.properties.scalar_size &&
+         step - residue >= other.layout_.properties.scalar_size;
+}
+
+bool NativeDenseArrayView::proven_same_mapping(
+    const NativeDenseArrayView &other) const noexcept {
+  const auto &a = layout_.layout;
+  const auto &b = other.layout_.layout;
+  if (!origin_.proven_same_range(other.origin_) ||
+      a.scalar_type != b.scalar_type || a.index_shape != b.index_shape ||
+      a.element_shape != b.element_shape)
+    return false;
+  auto same_strides = [](const auto &shape, const auto &a, const auto &b) {
+    for (std::size_t i = 0; i < shape.size(); ++i)
+      if (shape[i] > 1 && a[i] != b[i])
+        return false;
+    return true;
+  };
+  return same_strides(a.index_shape, a.index_strides_bytes,
+                      b.index_strides_bytes) &&
+         same_strides(a.element_shape, a.element_strides_bytes,
+                      b.element_strides_bytes);
 }
 
 }  // namespace taichi::lang

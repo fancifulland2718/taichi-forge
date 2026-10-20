@@ -3448,8 +3448,36 @@ Windows CPU/CUDA/Vulkan 验证包括嵌套 i8/u16/f32、向量/矩阵成员、pa
 
 命名目录使用 `array_layouts.json` v1，多个名称引用相同结构时只存一份类型；目录在
 首次查询时加载，重复查询使用缓存。布局与现有入口共享模块拥有的句柄及退休合同，
+目录拒绝尾随内容、NUL和重复JSON对象键；读取失败不会缓存部分目录。
 不能跨 runtime 使用。此扩展需要配套私有 ABI116 组件，执行计划格式不变；仅发布
 布局不会自动接通结构数组成员视图的原生操作或私有捕获导出。
+
+Windows CPU/CUDA/Vulkan 的正常安装验证覆盖无kernel目录、独立／借用消费者、
+坏元数据及退休，并回归已有结构执行和后段浮点反向。双名称单类型夹具的目录为512B，
+压缩TCM相对空模块增加326B，无可执行产物；这些数字仅描述该小夹具。
+
+显式执行计划可使用 plan23 和配套私有 ABI119 组件分配私有结构父数组，再投影成员：
+
+```python
+resources = [
+    dict(kind="ndarray", name="state", layout="records", shape=[17]),
+    dict(kind="ndarray_member", name="value", array="state", path="inner.value"),
+]
+```
+
+`layout` 引用模块公布的结构布局，替代 `dtype` 和 `element_shape`。私有父数组沿用
+已有 `zero_initialize`、`initial_data`、allocator 和退休合同。成员也可引用公开
+结构 ndarray，或按完整记录切片的 packed `ndarray_view`；带点路径在准备时按目标
+布局解析。成员不分配存储，保留父对象、记录步幅、成员偏移和标量类型；仅查询 shape
+不会迫使父数组分配。
+
+`builtin/transform` v1 可指定 `strategy="strided_scalar"`，接受正向、唯一的标量
+记录映射，并沿用 `size`、`dtype`、`scale_bits`、`bias_bits` 参数。CPU/CUDA/Vulkan
+复用原有步幅变换实现；支持 packed 输出、同父数组的不相交成员及完全相同映射的
+原位操作，其他重叠映射在准备时拒绝。只修改选定前缀，不增加 packing kernel 或
+工作区。普通 packed 操作和 kernel 参数仍拒绝投影成员；结构 kernel 应绑定完整父数组。
+本项显式计划支持尚未接通捕获成员或带步幅 Field root 的 Graph 自动导出，也不提供
+结构梯度或原生变换自动伴随；后续普通浮点 kernel 可使用已有的导出梯度。
 
 内存与外层 shape 仍放入原 `TiArgument` 的 ndarray，设置
 `elem_type=TI_DATA_TYPE_UNKNOWN`、空 `elem_shape`；将查询所得布局与版本填入

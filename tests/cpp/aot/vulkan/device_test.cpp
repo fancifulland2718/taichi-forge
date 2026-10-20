@@ -650,6 +650,22 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
   EXPECT_TRUE(first.proven_same_range(range(1)));
   EXPECT_TRUE(first.proven_disjoint(range(2)));
   EXPECT_FALSE(first.proven_same_range(range(2)));
+  // Affine members must retain that physical identity too: wrappers and
+  // VkBuffers can differ while the underlying record addresses are identical.
+  auto member = [&](DeviceAllocation allocation, std::int64_t offset) {
+    NativeArrayBinding array{allocation.get_ptr(), 64, PrimitiveType::f32, {3}};
+    array.strides = std::make_shared<const NativeArrayStrides>(
+        NativeArrayStrides{{20}, {}, offset});
+    return resolve_native_dense_array(Arch::vulkan, array);
+  };
+  const auto member_a = member(storage.imports[0], 4);
+  const auto member_alias = member(storage.imports[1], 4);
+  const auto member_b = member(storage.imports[1], 8);
+  EXPECT_TRUE(member_a.proven_same_mapping(member_alias));
+  EXPECT_FALSE(member_a.proven_disjoint(member_alias));
+  EXPECT_FALSE(member_a.range().proven_disjoint(member_b.range()));
+  EXPECT_TRUE(member_a.proven_disjoint(member_b));
+  EXPECT_TRUE(member_a.proven_disjoint(member(storage.imports[2], 4)));
   // Queue partition proofs must resolve physical memory, even for distinct
   // allocation wrappers and distinct VkBuffers. Repeated in-group uses are legal.
   EXPECT_THROW(validate_native_allocation_groups_disjoint(
@@ -692,6 +708,10 @@ TEST(VulkanDeviceTest, NativeStorageRangesTrackAliasedBufferMemory) {
   EXPECT_ANY_THROW(accesses.validate(*device));
   accesses.reads = {{storage.imports[1].get_ptr(), 16}};
   EXPECT_NO_THROW(accesses.validate(*device));
+  const auto unknown_member = member(unknown, 4);
+  EXPECT_TRUE(unknown_member.proven_same_mapping(member_alias));
+  EXPECT_TRUE(unknown_member.proven_disjoint(member_b));
+  EXPECT_FALSE(unknown_member.proven_disjoint(member_a));
 }
 
 TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
