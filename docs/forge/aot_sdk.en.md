@@ -5340,6 +5340,36 @@ throughput or controlled cross-process speedups. Extra qualification archives
 remain outside the application wheel; its sole 381,034-byte TCM, installed Forge
 packages and external dependencies are unchanged.
 
+The installed source-hidden host also qualifies a complete homogeneous Rigid
+batch step through the public scene importer and `materialize_rigid` on Windows
+CPU/CUDA/Vulkan. The three-world fixture uses a fixed box and free sphere, soft
+EFC Newton contact, Euler integration, and no CCD or ground. Four steps check
+preparation, contact assembly, Newton iteration, writeback, integration and
+kinematics against independent MuJoCo geometry and an f64 SOCP/KKT reference.
+An empty-contact world, parent composition, alternating output bindings,
+independent module state, in-flight retirement and an actual downstream energy
+gradient pass; Vulkan synchronization validation also passes. This qualifies
+this full profile, not every solver/material/topology or the Newton solve's
+adjoint. CPU/Vulkan retain this component's fixed-group masked iteration.
+
+On the same CUDA executor, Nsight records six `cuGraphLaunch` calls for six
+complete JIT `Graph.submit` steps and likewise for six prepared AOT steps.
+The only standalone kernel and device-to-host read in each range belong to
+terminal runtime error checking. Flat-loop `Graph.run` retains its synchronous
+diagnostic reports: this example uses 24 launches and 25 reads for six steps.
+It is a separate route, not an equivalent asynchronous performance baseline.
+Parent export adds only the two marker kernels and reuses the step code.
+
+The dev18 qualification wheel contains 633 host extensions and is 69,809,395
+bytes, up 7,946,863 bytes from dev17. All prior 560 extensions, the sole
+381,034-byte seven-entry application TCM, shader resources, Forge components
+and 44 independently installed dependencies are unchanged. The batch archives
+are qualification outputs rather than additional packaged TCMs. Some added
+modules support optional imports; their presence is not route qualification.
+Generic new-scene specialization still uses the independently installed Forge
+frontend. No new runtime implementation or default selection was needed for
+this batch profile.
+
 For external dependencies, use standard resolution with the qualified producer
 versions in `packaging/constraints/sdk-release.txt`. Resolve the selected SDK
 wheel/extras and its Forge dependencies for the target Python/platform; installed

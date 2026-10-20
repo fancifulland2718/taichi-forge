@@ -4029,6 +4029,26 @@ Rigid夹具有四个场景物体、32个存储项，EFC为65个packet项；此�
 不是应用吞吐或受控跨进程加速比。额外资格归档不加入应用wheel；唯一381,034B应用TCM、
 已安装Forge包和外部依赖保持不变。
 
+已安装的封闭宿主还在 Windows CPU/CUDA/Vulkan 上通过公开场景导入与
+`materialize_rigid` 完成同构 Rigid batch 整步资格。三 world 夹具使用固定盒、自由球、
+soft EFC Newton 接触与 Euler 积分，关闭 CCD 和 ground。四步覆盖前处理、接触组装、
+Newton 迭代、写回、积分与运动学刷新，并用独立 MuJoCo 几何及 f64 SOCP/KKT 参考
+检查结果。无接触 world、父图组合、交替输出绑定、双 module 状态隔离、在途退休及
+真实下游能量梯度通过，另有 Vulkan 同步验证。此资格覆盖该完整配置，不扩展为任意
+solver／材料／拓扑或 Newton 求解自身的伴随；CPU/Vulkan 保留该组件的固定组掩码迭代。
+
+同一 CUDA 执行器上，Nsight 确认六次完整 JIT `Graph.submit` 与六次 AOT prepared
+执行分别只有六次 `cuGraphLaunch`。各范围内唯一独立 kernel 和设备到主机读取来自
+末端 runtime 错误检查。平坦循环的 `Graph.run` 保留同步诊断报告，此例六步为24次
+launch、25次读取；它是不同执行路线，不能作为等价异步性能基线。父图导出仅新增
+两个标记 kernel，整步代码复用。
+
+dev18 资格应用 wheel 含633个宿主扩展，大小69,809,395B，较dev17增加7,946,863B。
+原560扩展、唯一381,034B七入口应用TCM、shader资源、Forge组件及44项独立安装依赖
+保持不变。batch资格归档不作为额外TCM装入应用包；新增模块包含可选导入分支，不因
+编译入包就获得路线资格。通用新场景特化仍使用独立安装的Forge前端。本配置无需新增
+runtime实现或修改默认选择。
+
 外部依赖使用标准解析工具，生产环境版本锁在 `packaging/constraints/sdk-release.txt`。
 按目标Python/平台解析选中的SDK wheel/extras及其Forge依赖；已安装版本约束本身不是
 完整锁。下例假定 `requirements.in` 描述本次交付入口，本地wheel通过pip的标准index
