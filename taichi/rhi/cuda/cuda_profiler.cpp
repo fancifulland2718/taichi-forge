@@ -27,6 +27,7 @@ ProfilingToolkit get_toolkit_enum(std::string toolkit_name) {
 }
 
 bool KernelProfilerCUDA::set_profiler_toolkit(std::string toolkit_name) {
+  auto context_guard = CUDAContext::get_instance().get_guard();
   sync();
   ProfilingToolkit set_toolkit = get_toolkit_enum(toolkit_name);
   TI_TRACE("profiler toolkit enum = {} >>> {}", int(tool_), int(set_toolkit));
@@ -72,6 +73,7 @@ bool KernelProfilerCUDA::reinit_with_metrics(
   if (tool_ == ProfilingToolkit::event) {
     return false;
   } else if (tool_ == ProfilingToolkit::cupti) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     cupti_toolkit_->end_profiling();
     cupti_toolkit_->deinit_cupti();
     cupti_toolkit_->reset_metrics(metrics);
@@ -200,6 +202,10 @@ bool KernelProfilerCUDA::statistics_on_traced_records() {
 }
 
 void KernelProfilerCUDA::sync() {
+  // Public profiler queries can run with no current CUDA context, or with an
+  // application's unrelated context. Synchronize the profiler's owner and
+  // restore the caller just as ordinary Forge submissions do.
+  auto context_guard = CUDAContext::get_instance().get_guard();
   CUDADriver::get_instance().stream_synchronize(nullptr);
 }
 
@@ -210,6 +216,7 @@ void KernelProfilerCUDA::update() {
     statistics_on_traced_records();
     event_toolkit_->clear();
   } else if (tool_ == ProfilingToolkit::cupti) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     TI_ERROR_IF(!cupti_toolkit_->update_record(records_size_after_sync_,
                                                 traced_records_),
                 "CUPTI failed to update kernel profiler records");

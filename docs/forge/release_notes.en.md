@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA profiler synchronization and toolkit management activate Forge's CUDA
+  context and restore the caller's context. Clearing or querying profiling
+  records no longer requires a Forge context to remain current on the thread.
+
 - Remove an unused internal sparse allocator entry from the LLVM runtime.
   CUDA startup no longer compiles and loads this redundant device kernel;
   sparse allocation continues to use the existing adaptive allocator.

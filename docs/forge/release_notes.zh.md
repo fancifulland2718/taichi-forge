@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- CUDA profiler 同步及工具管理现在激活 Forge 所属 context 并恢复调用方 context，
+  清空或查询记录不再依赖线程上残留的 Forge context。
+
 - 删除 LLVM runtime 中无人调用的旧稀疏 allocator 入口，避免 CUDA 启动时
   编译和加载这份重复设备 kernel；实际稀疏分配继续使用现有自适应 allocator。
 
