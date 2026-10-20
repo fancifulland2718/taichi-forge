@@ -31,8 +31,11 @@ class RHI_DLL_EXPORT PreparedExternalAccess final {
         duplicate = true;
         break;
       }
-      if (!duplicate)
+      if (!duplicate) {
+        if (domain->has_consumer_ready_query())
+          ready_domains_.push_back(domain);
         domains_.push_back(std::move(domain));
+      }
     }
   }
 
@@ -87,12 +90,19 @@ class RHI_DLL_EXPORT PreparedExternalAccess final {
   Epoch acquire(ExternalStreamDomain stream) const {
     return Epoch(*this, stream);
   }
+  bool ready() const {
+    for (const auto &domain : ready_domains_)
+      if (!domain->consumer_ready())
+        return false;
+    return true;
+  }
   std::size_t size() const noexcept {
     return domains_.size();
   }
 
  private:
   std::vector<std::shared_ptr<ExternalSynchronizationDomain>> domains_;
+  std::vector<std::shared_ptr<ExternalSynchronizationDomain>> ready_domains_;
 };
 
 // One coarse ownership interval shared by all views from the same external

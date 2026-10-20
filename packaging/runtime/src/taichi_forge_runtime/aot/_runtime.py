@@ -479,7 +479,7 @@ class Runtime:
     def import_cuda_external_memory(
         self, *, memory_handle, ready_for_cuda, ready_for_external,
         allocation_size, device_uuid, dtype, shape, element_shape=(),
-        byte_offset=0, dedicated=True, handle_type=None,
+        byte_offset=0, dedicated=True, handle_type=None, ready_gate=None,
     ):
         """Import a synchronized external linear buffer for prepared recipes.
 
@@ -491,7 +491,17 @@ class Runtime:
         pending on device. Enqueue the consumer wait after CUDA submit returns.
         Import each physical pair once and use plan views for aliases. The
         external producer remains responsible for draining its own queued work.
+
+        An optional CudaExternalReadyGate retains native producer query state.
+        An unready input makes prepared submit return None before any device
+        work; accepted calls still perform the full semaphore protocol. Epochs
+        start at 1 per imported pair. Initialization inputs must already be ready.
         """
+        from ._external_ready import CudaExternalReadyGate, _ReadyGate
+
+        if ready_gate is not None and not isinstance(ready_gate, CudaExternalReadyGate):
+            raise TypeError("ready_gate must be CudaExternalReadyGate")
+
         def integer(value, name):
             if isinstance(value, bool):
                 raise TypeError(f"{name} must be an integer")
@@ -535,8 +545,15 @@ class Runtime:
             self._check()
             if self.arch != "cuda":
                 raise ValueError("Synchronized external import requires a CUDA runtime")
-            self._api.load_cuda_external_memory()
-            handle = self._api.call(self._api.ti_import_cuda_external_memory_ext, self._handle, C.byref(info))
+            if ready_gate is None:
+                self._api.load_cuda_external_memory()
+                handle = self._api.call(self._api.ti_import_cuda_external_memory_ext, self._handle, C.byref(info))
+            else:
+                self._api.load_cuda_external_ready_gate()
+                handle = self._api.call(
+                    self._api.ti_import_cuda_external_memory_with_ready_gate_ext,
+                    self._handle, C.byref(info), C.cast(ready_gate._address, C.POINTER(_ReadyGate)),
+                )
             memory = None
             try:
                 memory = _Memory._from_import(self, handle, size)
@@ -1028,18 +1045,22 @@ class PreparedCall(_Resource):
             runtime._pending.add(self)
             runtime._api.call(runtime._api.ti_launch_prepared_ext, runtime._handle, self._handle)
 
-    def submit(self, *, wait_for=()):
-        """Try one complete replay, returning an exact ticket or None if full.
+    def submit(self, *, wait_for=(), ready_only=False):
+        """Try one replay, returning a ticket or None if full or input unready.
 
         Initialize explicitly in the cold phase. Dependencies enqueue device
         waits on their exact prefixes; this method never waits on the host.
+        With ready_only=True, a pending dependency also returns None before
+        device submission. External native ready gates are always checked.
         """
         from ._domain import Completion
 
+        if type(ready_only) is not bool:
+            raise TypeError("ready_only must be bool")
         predecessors = tuple(wait_for)
         if self._execution_domain is None:
-            if predecessors:
-                raise ValueError("wait_for requires an execution-domain binding")
+            if predecessors or ready_only:
+                raise ValueError("wait_for/ready_only requires an execution-domain binding")
             return self._submit_ordinary()
         runtime = self._runtime
         if any(not isinstance(ticket, Completion) for ticket in predecessors):
@@ -1050,8 +1071,12 @@ class PreparedCall(_Resource):
         with runtime._lock:
             self._check()
             handle = abi.Handle()
+            function = runtime._api.ti_try_submit_prepared_ext
+            if ready_only:
+                runtime._api.load_cuda_ready_submit()
+                function = runtime._api.ti_try_submit_prepared_ready_ext
             accepted = runtime._api.call(
-                runtime._api.ti_try_submit_prepared_ext,
+                function,
                 runtime._handle, self._handle, len(dependencies), dependencies, C.byref(handle),
             )
         if not accepted:

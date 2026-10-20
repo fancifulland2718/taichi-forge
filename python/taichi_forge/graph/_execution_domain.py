@@ -163,11 +163,11 @@ class GraphExecution:
         finally:
             self._owner._active_graph_submissions -= 1
 
-    def submit(self, *, wait_for=()):
+    def submit(self, *, wait_for=(), ready_only=False):
         """Return an exact completion, or None if busy, without a host wait."""
         self._begin()
         try:
-            return self._prepared.submit(wait_for=wait_for)
+            return self._prepared.submit(wait_for=wait_for, ready_only=ready_only)
         finally:
             self._owner._active_graph_submissions -= 1
 

@@ -163,6 +163,38 @@ TI_DLL_EXPORT TiMemory TI_API_CALL ti_import_cuda_external_memory_ext(
     TiRuntime runtime,
     const TiCudaExternalMemoryImportInfo *import_info);
 
+// Nonblocking native query for the next ready signal on one imported pair.
+// Epochs start at 1 and advance only after an accepted access enqueues its real
+// CUDA semaphore wait. Busy attempts consume neither epochs nor signals.
+// Return TI_ERROR_SUCCESS and set ready to TI_TRUE only after that exact
+// producer signal has completed. Preserve it until the consumer acquires it.
+// Queries must not wait, submit GPU work, reenter Forge, or depend on Python.
+typedef TiError(TI_API_CALL *TiCudaExternalReadyQuery)(void *owner,
+                                                       uint64_t epoch,
+                                                       TiBool *ready);
+typedef struct TiCudaExternalReadyGate {
+  uint32_t struct_size;
+  uint32_t schema_version;  // 1
+  void *owner;
+  TiCudaContextOwnerRetain retain_owner;
+  TiCudaContextOwnerRelease release_owner;
+  TiCudaExternalReadyQuery query;
+} TiCudaExternalReadyGate;
+
+// Optional cold import with ready-only admission. The descriptor is copied;
+// its native owner must retain the query state and producer device through
+// CUDA retirement. The original allocation/semaphore lifetime rules still
+// apply. Calls are serialized per runtime.
+// Prepared submit returns false/no error before any device effect if any
+// input is unready. A ready query never replaces acquire/release semaphores.
+// Initialization also checks readiness and must be performed with ready inputs.
+// Pending explicit completion dependencies retain their usual device waits.
+TI_DLL_EXPORT TiMemory TI_API_CALL
+ti_import_cuda_external_memory_with_ready_gate_ext(
+    TiRuntime runtime,
+    const TiCudaExternalMemoryImportInfo *import_info,
+    const TiCudaExternalReadyGate *ready_gate);
+
 // Cold construction, with explicit positive queue and instance capacities.
 // Priority is a scheduling hint; query the effective value on this device.
 TI_DLL_EXPORT TiCudaExecutionDomain TI_API_CALL
@@ -205,7 +237,8 @@ ti_prepare_execution_plan_on_domain_ext(TiRuntime runtime,
                                         const TiNamedArgument *args,
                                         uint32_t binding_count,
                                         const TiNamedNdArrayBinding *bindings);
-// True publishes an owned exact completion. False with no error means full;
+// True publishes an owned exact completion. False with no error means full
+// or an optional external ready gate is not ready;
 // no work/dependency wait is queued and *completion is null. All dependencies
 // must belong to the same runtime generation. Does not implicitly initialize.
 // Releasing a domain-bound prepared handle retains its finite recording and
@@ -217,6 +250,16 @@ ti_try_submit_prepared_ext(TiRuntime runtime,
                            uint32_t dependency_count,
                            const TiCompletion *dependencies,
                            TiCompletion *completion);
+
+// Ready-only variant: additionally returns false/no error if any validated
+// completion dependency is still pending. It does not wait or enqueue partial
+// dependencies. Completed dependencies retain the ordinary ownership checks.
+TI_DLL_EXPORT TiBool TI_API_CALL
+ti_try_submit_prepared_ready_ext(TiRuntime runtime,
+                                 TiPreparedExecution execution,
+                                 uint32_t dependency_count,
+                                 const TiCompletion *dependencies,
+                                 TiCompletion *completion);
 
 // These calls do not access or lock the originating Runtime. Query, wait and
 // independent submission may proceed concurrently. Reset/fault remains visible

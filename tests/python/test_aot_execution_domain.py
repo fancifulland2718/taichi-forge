@@ -88,7 +88,7 @@ def test_ordinary_and_selected_submit_use_their_own_completion(tmp_path):
         with pytest.raises(RuntimeError, match="ordinary queue ticket"):
             runtime._api.call(runtime._api.ti_submit_prepared_ext, runtime._handle, selected._handle)
         selected.initialize()
-        ticket = selected.submit(wait_for=())
+        ticket = selected.submit(wait_for=(), ready_only=True)
         assert isinstance(ticket, Completion)
         ticket.wait()
         assert list(C.cast(C.create_string_buffer(out.read()), C.POINTER(C.c_int32 * 8)).contents) == [2] * 8

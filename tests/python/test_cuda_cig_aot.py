@@ -39,6 +39,7 @@ def test_cig_aot_numerics_and_external_epochs(artifact_format, explicit_target, 
     for name, arguments in (
         ("aot_execution_domain_probe.py", [str(directory)]),
         ("cuda_cig_lifetime_probe.py", [str(directory), str(tmp_path / "external-epochs.json"), "100"]),
+        ("cuda_external_ready_probe.py", [str(directory), str(tmp_path / "external-ready.json"), "gate", "20"]),
     ):
         result = subprocess.run(
             [sys.executable, "-S", str(Path(__file__).with_name(name)), *arguments],

@@ -363,6 +363,18 @@ TEST(CudaPublicExecutionAot, ExactDependenciesBusyAndReleasedInstanceLifetime) {
       capi::get_execution_domain(physics)->latest_completion().sequence();
   TiCompletion rejected = nullptr;
   EXPECT_FALSE(
+      ti_try_submit_prepared_ready_ext(rt, calls[1], 1, &blocked, &rejected));
+  EXPECT_EQ(rejected, nullptr);
+  EXPECT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  EXPECT_EQ(capi::get_execution_domain(physics)->latest_completion().sequence(),
+            sequence);
+  const TiCompletion mixed_dependencies[] = {blocked, foreign_ticket};
+  EXPECT_FALSE(ti_try_submit_prepared_ready_ext(rt, calls[1], 2,
+                                                mixed_dependencies, &rejected));
+  EXPECT_EQ(rejected, nullptr);
+  EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  EXPECT_FALSE(
       ti_try_submit_prepared_ext(rt, calls[1], 1, &foreign_ticket, &rejected));
   EXPECT_EQ(rejected, nullptr);
   EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
@@ -376,6 +388,11 @@ TEST(CudaPublicExecutionAot, ExactDependenciesBusyAndReleasedInstanceLifetime) {
   }
   ti_wait_completion_ext(active);
   ASSERT_EQ(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  TiCompletion ready_dependent = nullptr;
+  ASSERT_TRUE(ti_try_submit_prepared_ready_ext(rt, calls[1], 1, &active,
+                                               &ready_dependent));
+  ti_wait_completion_ext(ready_dependent);
+  ti_release_completion_ext(ready_dependent);
   auto context = CUDAContext::get_instance().get_guard();
   std::array<float, count> values{};
   CUDADriver::get_instance().memcpy_device_to_host(values.data(), pointers[1],

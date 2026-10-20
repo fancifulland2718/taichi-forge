@@ -56,8 +56,9 @@ class ExecutionDomain {
   // All predecessor validation and capacity checks precede device effects.
   // Capacity exhaustion is immediate; no other domain is polled or drained.
   // Optional host-only admission reserves provider transactions after those
-  // checks and before any dependency is enqueued. It must not call the GPU,
-  // wait, or reenter this domain. An exception leaves the domain usable and
+  // checks and before any dependency is enqueued. Nonblocking producer status
+  // queries are allowed; it must not enqueue work, wait, or reenter this
+  // domain. An exception leaves the domain usable and
   // consumes no sequence; resources must own rollback of partial reservations.
   // Destruction of rejected resources occurs outside the admission mutex.
   RuntimeCompletion submit(

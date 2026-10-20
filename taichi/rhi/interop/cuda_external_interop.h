@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -63,7 +64,8 @@ class RHI_DLL_EXPORT CudaExternalAllocation final
   static std::shared_ptr<CudaExternalAllocation> create_borrowed(
       cuda::CudaDevice *cuda_device,
       CudaExternalMemoryImport memory,
-      CudaExternalSemaphorePairImport semaphores);
+      CudaExternalSemaphorePairImport semaphores,
+      std::function<bool(std::uint64_t)> ready = {});
 
   ~CudaExternalAllocation() override;
   CudaExternalAllocation(const CudaExternalAllocation &) = delete;
@@ -73,6 +75,8 @@ class RHI_DLL_EXPORT CudaExternalAllocation final
   bool retirement_waits_for_consumer() const noexcept override {
     return synchronized();
   }
+  bool consumer_ready() const override;
+  bool has_consumer_ready_query() const noexcept override;
   void acquire_for_consumer(const ExternalStreamDomain &stream) override;
   void release_from_consumer(const ExternalStreamDomain &stream) override;
 

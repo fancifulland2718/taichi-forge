@@ -58,6 +58,17 @@ class RHI_DLL_EXPORT ExternalSynchronizationDomain {
   virtual bool retirement_waits_for_consumer() const noexcept {
     return false;
   }
+  // Optional nonblocking admission predicate for the next access epoch. A
+  // false result consumes nothing. True does not replace the device acquire.
+  // The producer must keep that epoch ready until the serialized consumer
+  // acquires it. Implementations must not wait, enqueue work or reenter Forge.
+  // The immutable capability is inspected only during cold recipe binding.
+  virtual bool has_consumer_ready_query() const noexcept {
+    return false;
+  }
+  virtual bool consumer_ready() const {
+    return true;
+  }
   virtual void acquire_for_consumer(const ExternalStreamDomain &stream) = 0;
   virtual void release_from_consumer(const ExternalStreamDomain &stream) = 0;
 };

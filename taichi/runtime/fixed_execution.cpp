@@ -1276,9 +1276,14 @@ RuntimeCompletion FixedExecution::submit(
           if (external)
             external->release();
         },
-        ordered ? std::function<void()>(
-                      [&] { ordered->reserve(instance->ordered); })
-                : std::function<void()>{});
+        [&] {
+          // All readiness checks precede provider reservations, dependency
+          // waits, external semaphore consumption and sequence allocation.
+          if (instance->external_access && !instance->external_access->ready())
+            throw cuda::ExecutionDomainBusy();
+          if (ordered)
+            ordered->reserve(instance->ordered);
+        });
   }
 #endif
   throw std::invalid_argument(

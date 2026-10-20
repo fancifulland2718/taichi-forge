@@ -43,7 +43,7 @@ def test_graph_execution_domain_live_fields_and_frozen_bindings():
     ready = first.submit()
     ready.wait()
     np.testing.assert_array_equal(out.to_numpy(), np.full(8, (1 << 40) + 11))
-    second.submit(wait_for=(ready,)).wait()
+    second.submit(wait_for=(ready,), ready_only=True).wait()
     np.testing.assert_array_equal(out.to_numpy(), np.full(8, 49))
     np.testing.assert_array_equal(field.to_numpy(), np.full(8, 12))
     # Collection of source/call wrappers cannot close the live code loan.

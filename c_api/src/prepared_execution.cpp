@@ -1857,11 +1857,12 @@ TiPreparedExecution ti_prepare_execution_plan_on_domain_ext(
                                      binding_count, bindings, {}, domain);
 }
 
-TiBool ti_try_submit_prepared_ext(TiRuntime runtime,
-                                  TiPreparedExecution execution,
-                                  uint32_t dependency_count,
-                                  const TiCompletion *dependencies,
-                                  TiCompletion *completion) {
+static TiBool try_submit_prepared_impl(TiRuntime runtime,
+                                       TiPreparedExecution execution,
+                                       uint32_t dependency_count,
+                                       const TiCompletion *dependencies,
+                                       TiCompletion *completion,
+                                       bool ready_only) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(completion);
   *completion = TI_NULL_HANDLE;
@@ -1873,9 +1874,28 @@ TiBool ti_try_submit_prepared_ext(TiRuntime runtime,
   predecessors.reserve(dependency_count);
   for (uint32_t i = 0; i < dependency_count; ++i)
     predecessors.push_back(capi::get_completion(dependencies[i]));
-  capi::CompletionPublication publication;
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  if (ready_only) {
+    const auto &entry = rt.prepared_registry().get(execution);
+    if (!entry.live || !entry.domain || !entry.domain_initialized)
+      throw MemoryBindingError(
+          "Ready submit requires an initialized live CUDA execution-domain "
+          "instance");
+    const auto &owner = rt.runtime_fault_domain();
+    owner->throw_if_new_submission_disallowed("ready CUDA submission");
+    const auto domain = entry.domain->snapshot();
+    if (!domain.accepting || domain.closed)
+      throw MemoryBindingError("CUDA execution domain is closing or closed");
+    // Validate the entire list before querying any prefix. A pending valid
+    // ticket must not hide a foreign or invalid ticket later in the list.
+    for (const auto &dependency : predecessors)
+      dependency.validate_cuda_dependency(domain.owner, owner);
+    for (const auto &dependency : predecessors)
+      if (!dependency.done())
+        return TI_FALSE;
+  }
+  capi::CompletionPublication publication;
   try {
     *completion = publication.commit(
         rt.prepared_registry().submit(execution, predecessors));
@@ -1885,6 +1905,24 @@ TiBool ti_try_submit_prepared_ext(TiRuntime runtime,
   return TI_TRUE;
   TI_CAPI_TRY_CATCH_END();
   return TI_FALSE;
+}
+
+TiBool ti_try_submit_prepared_ext(TiRuntime runtime,
+                                  TiPreparedExecution execution,
+                                  uint32_t dependency_count,
+                                  const TiCompletion *dependencies,
+                                  TiCompletion *completion) {
+  return try_submit_prepared_impl(runtime, execution, dependency_count,
+                                  dependencies, completion, false);
+}
+
+TiBool ti_try_submit_prepared_ready_ext(TiRuntime runtime,
+                                        TiPreparedExecution execution,
+                                        uint32_t dependency_count,
+                                        const TiCompletion *dependencies,
+                                        TiCompletion *completion) {
+  return try_submit_prepared_impl(runtime, execution, dependency_count,
+                                  dependencies, completion, true);
 }
 #endif
 

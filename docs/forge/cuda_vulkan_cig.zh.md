@@ -7,6 +7,8 @@ external compute queue。此接口不依赖 Flora 或 NVIGI，不替代执行域
 **当前为显式选择的实验路线，普通 CUDA 仍为默认值。** 本机驱动在 CiG 的一条 stream
 等待外部信号时，会阻塞另一条 stream 上独立的 kernel；因此不能直接替代普通 CUDA
 的绘图／物理隔离调度。没有 GeoPhys/Flora 并发帧率的合格或加速声明。
+外部输入现在可绑定原生就绪门禁，避免把未就绪的等待排入 CiG；这不改变驱动中已排入
+等待的行为，应用仍需使用下述准入方式。
 
 ## 初始化和所有权
 
@@ -98,6 +100,59 @@ NOT_READY。解除信号后数值正确。该实验测量依赖隔离，不是�
 所有权。未就绪时跳过普通渲染请求或保留最新请求，物理继续提交；不要先向 CiG 排入
 一个可能长期挂起的外部 wait。所需就绪信息属于原生 producer，Forge 不猜测其私有
 句柄。若应用必须预先排入未就绪的外部等待，继续使用普通 CUDA。此建议仍需 G3 对照。
+
+### 原生就绪准入
+
+`Runtime.import_cuda_external_memory(..., ready_gate=gate)` 接受
+`CudaExternalReadyGate`，capsule 名为 `taichi.cuda_external_ready_gate.v1`，指向
+`TiCudaExternalReadyGate`。C 入口是
+`ti_import_cuda_external_memory_with_ready_gate_ext()`；原有 import 接口保持原语义。
+Forge 复制描述并 retain 原生 owner，直到导入分配安全退休。owner 必须保留查询状态和
+Vulkan device；原有共享分配及 semaphore 的存活义务仍然适用。
+
+producer 的原生 `query(owner, epoch, ready)` 必须是无等待、无提交、不可重入 Forge 的
+查询，例如已提交 producer release 的 fence 状态或 timeline counter。`epoch` 从 1
+开始，每个实际消费的 ready 信号递增一次。只在对应轮次的 ready 信号已经完成时返回
+true，并保持该状态直到消费；旧轮次的已完成 fence 不能放行下一轮。callback 不能依赖
+Python 解释器或抛异常。查询错误会拒绝本次提交，不消费信号。
+
+提交先校验依赖和容量，再检查冷绑定时已去重的外部输入，最后才排入任何设备等待或
+执行 provider 准入。任一输入未就绪时返回 `None`，不分配提交序号、不消费信号、不
+产生部分 GPU 工作。检查次数取决于显式外部输入数量，不扫描 kernel 或 Graph 指令。
+就绪后仍执行完整的 ready/consumed 协议；不会以主机观察代替设备所有权交接。
+
+`PreparedCall.submit(wait_for=..., ready_only=True)` 还会在 native 中一次性校验所有前驱，
+任一票据未完成也返回 `None`。已完成票据保持原有 runtime/generation 与所有权校验。
+JIT 的 prepared Graph execution 同样接受 `ready_only`；C 入口为
+`ti_try_submit_prepared_ready_ext()`。默认值保留原有设备等待语义。
+
+```python
+from taichi_forge_runtime.aot import CudaExternalReadyGate
+
+gate = CudaExternalReadyGate(producer_ready_capsule)  # 原生 producer 提供
+image = runtime.import_cuda_external_memory(**external_import, ready_gate=gate)
+render = module.prepare_execution("render", {"image": image}, execution_domain=render_domain)
+render.initialize()  # 冷阶段；若初始化访问外部输入，该输入须已就绪
+
+ticket = render.submit(wait_for=(snapshot_ticket,), ready_only=True)
+if ticket is not None:
+    enqueue_external_consumer_wait()  # 继续原有 consumed 协议
+# None 时保留最新普通渲染请求，继续独立仿真；无需在此轮询等待。
+```
+
+这些是消费端运行时状态，AOT schema 8、runtime context ABI 2 和 BC/PTX/cubin 的编译
+合同均不改变。内部同步域虚表增加就绪查询，因此 Python/native 配对 ABI 一次更新至
+112；不是给 artifact 增加版本或元数据字段。
+
+原生隔离实验还检查了只挂起 Vulkan 队列、只挂起 CUDA 外部 timeline 等待，以及
+Graph wait/独立普通 CUDA context 的 event bridge。仅 Vulkan 队列挂起时独立 CiG
+计算能完成；另外两种设备等待改写仍未解除阻塞，故未作为运行时后端采用。
+`cuda_external_ready_probe.py` 用真实 Vulkan producer fence 和独立 AOT 数值工作验证
+新门禁，并保留直接等待的负对照。人工延迟只用于隔离判据，不是正常帧延迟或 FPS。
+
+就绪准入应按需启用：它消除输入未就绪带来的调度阻塞，但对本来已就绪的短交接仍有
+查询开销。建议有界地保留最新渲染请求，在 producer 进展或下一次 UI 更新时重试，
+不要持续轮询到提交成功；必须提前排入未满足设备等待的工作仍适合普通 CUDA。
 
 ## 本机验证范围与复现
 

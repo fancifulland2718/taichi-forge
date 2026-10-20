@@ -9,6 +9,8 @@ and application speedup are separate facts.
 default.** On the tested driver, a pending external wait in one CiG stream blocks
 independent kernels in another. It is not a qualified replacement for ordinary
 CUDA physics/render isolation, and no GeoPhys/Flora throughput gain is claimed.
+Native readiness gates can now prevent unready external waits from entering
+CiG. They do not change the driver's behavior for waits already submitted.
 
 ## Binding and lifetime
 
@@ -112,6 +114,70 @@ requests while physics continues; do not enqueue a potentially long external
 wait into CiG first. Readiness belongs to the native producer; Forge does not
 guess private Vulkan handles. Applications that must enqueue unresolved external
 waits should retain ordinary CUDA. This scheduling advice still needs G3 testing.
+
+### Native ready admission
+
+`Runtime.import_cuda_external_memory(..., ready_gate=gate)` accepts a
+`CudaExternalReadyGate`. Its capsule, `taichi.cuda_external_ready_gate.v1`,
+points to `TiCudaExternalReadyGate`. C consumers use
+`ti_import_cuda_external_memory_with_ready_gate_ext()`; the original import
+keeps its semantics. Forge copies the descriptor and retains its native owner
+through safe import retirement. The owner retains query state and the Vulkan
+device; the original allocation/semaphore lifetime obligations still apply.
+
+The native `query(owner, epoch, ready)` must not wait, submit work, reenter Forge,
+throw, or depend on Python. A producer fence or timeline counter can provide
+readiness. Epochs start at 1 per imported pair and advance only when an actual
+CUDA acquire queues the real semaphore wait. Report true only after that exact
+producer signal completes, preserving readiness until consumption. An old
+signaled fence must not authorize the next epoch. Query errors reject submission
+without consuming a signal.
+
+Submission validates dependencies and capacity, then checks the external inputs
+deduplicated at cold binding, before provider admission or any device wait.
+An unready input returns `None` without a submission sequence, signal consumption
+or partial device work. The checks scale with explicit external inputs, not
+kernel counts or graph instruction scans. Accepted work still uses the full
+ready/consumed ownership protocol.
+
+`PreparedCall.submit(wait_for=..., ready_only=True)` additionally validates all
+predecessors in native code and returns `None` if any ticket is pending. Completed
+dependencies retain runtime/generation and ownership validation. Prepared JIT
+Graph executions accept the same option. The C entry is
+`ti_try_submit_prepared_ready_ext()`; the default retains device-wait semantics.
+
+```python
+from taichi_forge_runtime.aot import CudaExternalReadyGate
+
+gate = CudaExternalReadyGate(producer_ready_capsule)  # Native producer contract
+image = runtime.import_cuda_external_memory(**external_import, ready_gate=gate)
+render = module.prepare_execution("render", {"image": image}, execution_domain=render_domain)
+render.initialize()  # Cold; external initialization inputs must already be ready
+
+ticket = render.submit(wait_for=(snapshot_ticket,), ready_only=True)
+if ticket is not None:
+    enqueue_external_consumer_wait()  # Preserve the existing consumed protocol
+# On None, retain the latest render request and continue independent physics.
+```
+
+These are consumer runtime facts. AOT schema 8, runtime context ABI 2 and
+BC/PTX/cubin compilation contracts are unchanged. The internal synchronization
+domain vtable gains a readiness query, requiring one Python/native ABI update
+to 112; no artifact version or metadata field is added.
+
+Native controls isolated the Vulkan-only hold from the CUDA external timeline
+wait. The former allowed independent CiG progress. Moving the CUDA wait into a
+Graph or bridging it through an ordinary CUDA context/event did not restore
+progress, so neither is used as a runtime backend. `cuda_external_ready_probe.py`
+checks the new gate with a real Vulkan producer fence, independent numerical AOT
+work and a direct-wait negative control. The artificial hold tests isolation;
+it is not normal frame latency or application FPS.
+
+Keep the gate opt-in: it removes the scheduling blockage caused by an unready
+input, but querying readiness adds host work to an already-ready handoff. Use a
+bounded latest-request policy and retry on producer progress or the next UI tick;
+do not spin until admission succeeds. Ordinary CUDA remains preferable when
+unresolved device waits must be queued ahead of time.
 
 ## Local qualification and reproduction
 

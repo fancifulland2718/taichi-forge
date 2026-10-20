@@ -10,6 +10,15 @@ class CountingExternalDomain final : public ExternalSynchronizationDomain {
   std::uint64_t identity() const noexcept override {
     return id_;
   }
+  bool consumer_ready() const override {
+    ++queries;
+    if (fail_ready)
+      throw std::runtime_error("ready query failed");
+    return ready;
+  }
+  bool has_consumer_ready_query() const noexcept override {
+    return true;
+  }
   void acquire_for_consumer(const ExternalStreamDomain &stream) override {
     if (fail_acquire)
       throw std::runtime_error("acquire failed");
@@ -27,6 +36,8 @@ class CountingExternalDomain final : public ExternalSynchronizationDomain {
       throw std::runtime_error("release failed");
   }
   bool fail_acquire{false}, fail_release{false}, active{false};
+  bool ready{true}, fail_ready{false};
+  mutable unsigned queries{0};
   unsigned acquires{0}, releases{0};
   ExternalStreamDomain selected;
 
@@ -108,6 +119,67 @@ TEST(PreparedExternalAccess,
 
 namespace taichi::lang {
 namespace {
+TEST(PreparedExternalAccess,
+     UnreadyInputRejectsWholeRecipeWithoutDeviceEffects) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto &device = static_cast<cuda::CudaDevice &>(*program.get_compute_device());
+  auto [buffer, status] =
+      device.allocate_memory_unique({sizeof(std::uint32_t)});
+  ASSERT_EQ(status, RhiResult::success);
+  auto domain = program.cuda_execution_domains()->create({1, 0});
+  struct Operands final : RuntimeCompletionResources {
+    DeviceAllocationUnique allocation;
+    std::size_t retained_resource_count(std::uint32_t) const noexcept override {
+      return 1;
+    }
+  };
+  auto operands = std::make_shared<Operands>();
+  operands->allocation = std::move(buffer);
+  FixedExecution::CudaExecutionBinding binding{domain, operands};
+  FixedExecution recipe(
+      Arch::cuda, device, nullptr,
+      {FixedExecution::BufferFill{operands->allocation->get_ptr(),
+                                  sizeof(std::uint32_t), 12345}},
+      nullptr, program.runtime_fault_domain(), nullptr, nullptr, nullptr,
+      nullptr, &binding);
+  auto first = std::make_shared<CountingExternalDomain>(1);
+  auto second = std::make_shared<CountingExternalDomain>(2);
+  second->ready = false;
+  recipe.bind_external_access({first, second, first});
+  EXPECT_ANY_THROW(recipe.submit({RuntimeCompletion{}}));
+  EXPECT_EQ(first->queries, 0);
+  for (int i = 0; i < 1000; ++i)
+    EXPECT_THROW(recipe.submit(), cuda::ExecutionDomainBusy);
+  EXPECT_EQ(domain->snapshot().pending, 0);
+  EXPECT_EQ(first->queries, 1000);
+  EXPECT_EQ(second->queries, 1000);
+  EXPECT_EQ(first->acquires, 0);
+  EXPECT_EQ(second->acquires, 0);
+  second->fail_ready = true;
+  EXPECT_THROW(recipe.submit(), std::runtime_error);
+  EXPECT_EQ(domain->snapshot().pending, 0);
+  EXPECT_EQ(first->acquires, 0);
+  second->fail_ready = false;
+  second->ready = true;
+  auto done = recipe.submit();
+  done.wait();
+  EXPECT_EQ(first->acquires, 1);
+  EXPECT_EQ(second->acquires, 1);
+  EXPECT_EQ(first->releases, 1);
+  EXPECT_EQ(second->releases, 1);
+  std::uint32_t actual = 0;
+  auto context = CUDAContext::get_instance().get_guard();
+  CUDADriver::get_instance().memcpy_device_to_host(
+      &actual, device.get_memory_addr(*operands->allocation), sizeof(actual));
+  EXPECT_EQ(actual, 12345);
+  domain->close();
+  operands->allocation.reset();
+  program.finalize();
+}
+
 TEST(PreparedExternalAccess,
      VulkanInteropReplaysAndRetiresAfterStreamDestruction) {
   if (!cuda::ExecutionDomain::available())

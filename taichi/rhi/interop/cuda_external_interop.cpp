@@ -190,11 +190,13 @@ class CudaExternalAllocation::Impl {
   Impl(CudaDevice *cuda_device,
        CudaExternalMemoryImport memory,
        std::optional<CudaExternalSemaphorePairImport> semaphores,
-       bool duplicate_handles = false)
+       bool duplicate_handles = false,
+       std::function<bool(std::uint64_t)> ready = {})
       : cuda_device_(cuda_device),
         allocation_size_(memory.allocation_size),
         device_uuid_(memory.device_uuid),
-        synchronized_(semaphores.has_value()) {
+        synchronized_(semaphores.has_value()),
+        ready_(std::move(ready)) {
     // Own transferred handles (or private copies for create_borrowed) before
     // validating the import, so failure releases only this object's handles.
     ConsumedExternalHandle memory_handle(memory.handle, true,
@@ -309,6 +311,16 @@ class CudaExternalAllocation::Impl {
     return closed_;
   }
 
+  bool consumer_ready() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    require_open();
+    return !ready_ || ready_(next_epoch_);
+  }
+
+  bool has_consumer_ready_query() const noexcept {
+    return bool(ready_);
+  }
+
   void acquire_for_consumer(const ExternalStreamDomain &stream) {
     std::lock_guard<std::mutex> lock(mutex_);
     require_open();
@@ -316,6 +328,7 @@ class CudaExternalAllocation::Impl {
                 "External CUDA allocation has no synchronization domain");
     validate_cuda_stream(stream);
     TI_ERROR_IF(cuda_owned_, "External CUDA allocation was acquired twice");
+    TI_ERROR_IF(next_epoch_ == 0, "External CUDA access epoch exhausted");
 
     CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS params{};
     auto context_guard = CUDAContext::get_instance().get_guard();
@@ -326,6 +339,7 @@ class CudaExternalAllocation::Impl {
     active_cuda_stream_ = stream;
     cuda_owned_ = true;
     unsealed_access_ = false;
+    ++next_epoch_;
   }
 
   void release_from_consumer(const ExternalStreamDomain &stream) {
@@ -482,6 +496,10 @@ class CudaExternalAllocation::Impl {
   bool retiring_{false};
   bool completion_recorded_{false};
   bool unsealed_access_{false};
+  // Retains the native producer through successful CUDA retirement. An epoch
+  // advances only when its real semaphore wait has been enqueued.
+  std::function<bool(std::uint64_t)> ready_;
+  std::uint64_t next_epoch_{1};
   DeviceAllocation cuda_allocation_{kDeviceNullAllocation};
   CUexternalMemory external_memory_{nullptr};
   void *mapped_buffer_{nullptr};
@@ -507,10 +525,11 @@ CudaExternalAllocation::CudaExternalAllocation(std::unique_ptr<Impl> impl)
 std::shared_ptr<CudaExternalAllocation> CudaExternalAllocation::create_borrowed(
     CudaDevice *cuda_device,
     CudaExternalMemoryImport memory,
-    CudaExternalSemaphorePairImport semaphores) {
-  return std::shared_ptr<CudaExternalAllocation>(
-      new CudaExternalAllocation(std::make_unique<Impl>(
-          cuda_device, std::move(memory), std::move(semaphores), true)));
+    CudaExternalSemaphorePairImport semaphores,
+    std::function<bool(std::uint64_t)> ready) {
+  return std::shared_ptr<CudaExternalAllocation>(new CudaExternalAllocation(
+      std::make_unique<Impl>(cuda_device, std::move(memory),
+                             std::move(semaphores), true, std::move(ready))));
 }
 
 CudaExternalAllocation::~CudaExternalAllocation() {
@@ -553,6 +572,14 @@ bool CudaExternalAllocation::closed() const noexcept {
   return impl_->closed();
 }
 
+bool CudaExternalAllocation::consumer_ready() const {
+  return impl_->consumer_ready();
+}
+
+bool CudaExternalAllocation::has_consumer_ready_query() const noexcept {
+  return impl_->has_consumer_ready_query();
+}
+
 void CudaExternalAllocation::acquire_for_consumer(
     const ExternalStreamDomain &stream) {
   impl_->acquire_for_consumer(stream);
@@ -578,7 +605,8 @@ class CudaExternalAllocation::Impl {};
 std::shared_ptr<CudaExternalAllocation> CudaExternalAllocation::create_borrowed(
     cuda::CudaDevice *,
     CudaExternalMemoryImport,
-    CudaExternalSemaphorePairImport) {
+    CudaExternalSemaphorePairImport,
+    std::function<bool(std::uint64_t)>) {
   TI_ERROR("External CUDA allocation requires CUDA support");
   return nullptr;
 }
@@ -625,6 +653,15 @@ bool CudaExternalAllocation::synchronized() const noexcept {
 
 bool CudaExternalAllocation::closed() const noexcept {
   return true;
+}
+
+bool CudaExternalAllocation::consumer_ready() const {
+  TI_NOT_IMPLEMENTED;
+  return false;
+}
+
+bool CudaExternalAllocation::has_consumer_ready_query() const noexcept {
+  return false;
 }
 
 void CudaExternalAllocation::acquire_for_consumer(

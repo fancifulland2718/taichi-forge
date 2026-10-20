@@ -340,6 +340,32 @@ class Api:
         function.argtypes, function.restype = [Handle, C.POINTER(CudaExternalMemoryImportInfo)], Handle
         self.ti_import_cuda_external_memory_ext = function
 
+    def load_cuda_external_ready_gate(self):
+        from ._external_ready import _ReadyGate
+
+        name = "ti_import_cuda_external_memory_with_ready_gate_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime lacks native external ready gates") from error
+        function.argtypes = [Handle, C.POINTER(CudaExternalMemoryImportInfo), C.POINTER(_ReadyGate)]
+        function.restype = Handle
+        setattr(self, name, function)
+
+    def load_cuda_ready_submit(self):
+        name = "ti_try_submit_prepared_ready_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime lacks ready-only CUDA submission") from error
+        function.argtypes = [Handle, Handle, UInt, C.POINTER(Handle), C.POINTER(Handle)]
+        function.restype = UInt
+        setattr(self, name, function)
+
     def load_cuda_domains(self):
         if getattr(self, "_cuda_domains_loaded", False):
             return

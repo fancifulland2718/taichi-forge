@@ -87,9 +87,10 @@ TiCompletion CompletionPublication::commit(RuntimeCompletion completion) {
 }
 }  // namespace capi
 
-TiMemory ti_import_cuda_external_memory_ext(
+static TiMemory import_cuda_external_memory_impl(
     TiRuntime runtime,
-    const TiCudaExternalMemoryImportInfo *import_info) {
+    const TiCudaExternalMemoryImportInfo *import_info,
+    const TiCudaExternalReadyGate *ready_gate) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(import_info);
@@ -99,6 +100,27 @@ TiMemory ti_import_cuda_external_memory_ext(
   TI_CAPI_NOT_SUPPORTED_IF_RV(rt.arch != taichi::Arch::cuda);
   rt.runtime_fault_domain()->throw_if_submission_disallowed(
       "import external CUDA memory");
+  std::function<bool(std::uint64_t)> ready;
+  if (ready_gate) {
+    if (ready_gate->struct_size != sizeof(TiCudaExternalReadyGate) ||
+        ready_gate->schema_version != 1)
+      throw MemoryBindingError("Invalid external CUDA ready gate descriptor");
+    const auto gate = *ready_gate;
+    if (!gate.owner || !gate.retain_owner || !gate.release_owner || !gate.query)
+      throw MemoryBindingError("Invalid external CUDA ready gate descriptor");
+    if (gate.retain_owner(gate.owner) != TI_ERROR_SUCCESS)
+      throw MemoryBindingError("External CUDA ready gate retain failed");
+    auto owner = std::shared_ptr<void>(gate.owner, gate.release_owner);
+    ready = [owner = std::move(owner),
+             query = gate.query](std::uint64_t epoch) {
+      TiBool result = TI_FALSE;
+      const auto error = query(owner.get(), epoch, &result);
+      if (error != TI_ERROR_SUCCESS || result > TI_TRUE)
+        throw MemoryBindingError("External CUDA ready gate query failed: " +
+                                 std::to_string(error));
+      return result == TI_TRUE;
+    };
+  }
   const auto &info = *import_info;
   if ((info.handle_type != TI_CUDA_EXTERNAL_HANDLE_OPAQUE_WIN32 &&
        info.handle_type != TI_CUDA_EXTERNAL_HANDLE_OPAQUE_FD) ||
@@ -124,7 +146,8 @@ TiMemory ti_import_cuda_external_memory_ext(
       {type, static_cast<std::uintptr_t>(info.ready_for_external)}};
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
   auto allocation = CudaExternalAllocation::create_borrowed(
-      &static_cast<cuda::CudaDevice &>(rt.get()), memory, semaphores);
+      &static_cast<cuda::CudaDevice &>(rt.get()), memory, semaphores,
+      std::move(ready));
   auto storage = std::make_shared<Runtime::BorrowedMemory>();
   storage->owner = allocation;
   storage->external_access = allocation;
@@ -133,6 +156,23 @@ TiMemory ti_import_cuda_external_memory_ext(
                             false, std::move(storage));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
+}
+
+TiMemory ti_import_cuda_external_memory_ext(
+    TiRuntime runtime,
+    const TiCudaExternalMemoryImportInfo *import_info) {
+  return import_cuda_external_memory_impl(runtime, import_info, nullptr);
+}
+
+TiMemory ti_import_cuda_external_memory_with_ready_gate_ext(
+    TiRuntime runtime,
+    const TiCudaExternalMemoryImportInfo *import_info,
+    const TiCudaExternalReadyGate *ready_gate) {
+  if (!ready_gate) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_NULL, "ready_gate");
+    return TI_NULL_HANDLE;
+  }
+  return import_cuda_external_memory_impl(runtime, import_info, ready_gate);
 }
 
 TiCudaExecutionDomain ti_create_cuda_execution_domain_ext(
