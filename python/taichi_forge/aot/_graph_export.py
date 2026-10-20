@@ -1185,7 +1185,7 @@ def export_graph(
         from ._graph_resource_bindings import ResourceInputBindings
 
         source_resources = SourceResourceBindings(source_bindings, spec.fixed_runtime_args)
-        source_arrays = SourceArrayBindings(source_resources.arrays, spec.fixed_runtime_args)
+        source_arrays = SourceArrayBindings(source_resources.arrays, spec.fixed_runtime_args, module)
         resource_inputs = ResourceInputBindings(resource_bindings, spec.fixed_runtime_args)
         non_resource_names = (
             (set(spec.runtime_arg_names) - source_resources.owners.keys())
@@ -1256,6 +1256,7 @@ def export_graph(
             if missing_data:
                 raise ValueError("Argument resources reference unexported data: " + ", ".join(sorted(missing_data)))
         try:
+            source_arrays.publish()
             context.retained_arrays.publish()
             for name, kernel in context.kernels.items():
                 if name in context.kernel_launch_abis:

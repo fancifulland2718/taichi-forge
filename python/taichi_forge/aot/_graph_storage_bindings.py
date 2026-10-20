@@ -3,7 +3,7 @@
 from math import prod
 
 from taichi_forge._lib import core
-from taichi_forge.lang._ndarray import ScalarNdarray
+from taichi_forge.lang._ndarray import ScalarNdarray, StructNdarray, StructNdarrayScalarMemberView
 from taichi_forge.lang._storage_view import DenseNdarrayView, describe_storage
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
@@ -45,11 +45,18 @@ class RetainedArrayBindings:
 
     def require(self, owner):
         context = self.context
-        if type(owner) in _SOURCE_NDARRAY_TYPES:
+        if type(owner) in (*_SOURCE_NDARRAY_TYPES, StructNdarray):
             identity = context.source_arrays.identity(owner)
             if identity in self.private_arrays:
                 return self.private_arrays[identity]
             return context.source_arrays.require(owner)
+        if type(owner) is StructNdarrayScalarMemberView:
+            if owner.component is not None:
+                raise TaichiRuntimeError("AOT structure member export requires a scalar leaf path")
+            return context._resource(
+                owner, dict(kind="ndarray_member", array=self.require(owner.base),
+                            path=".".join(owner.path)),
+            )
         if type(owner) is DenseNdarrayView:
             selected = packed_description(owner)
             parent = packed_description(owner._source)

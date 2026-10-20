@@ -3490,8 +3490,15 @@ CUDA binding family 的新参数帧会重新校验，重放时不重复检查。
 复用原有步幅变换实现；支持 packed 输出、同父数组的不相交成员及完全相同映射的
 原位操作，其他重叠映射在准备时拒绝。只修改选定前缀，不增加 packing kernel 或
 工作区。普通 packed 操作和 kernel 参数仍拒绝投影成员；结构 kernel 应绑定完整父数组。
-本项显式计划支持尚未接通捕获成员或带步幅 Field root 的 Graph 自动导出，也不提供
-结构梯度或原生变换自动伴随；后续普通浮点 kernel 可使用已有的导出梯度。
+`Module.add_execution_plan(..., graph, source_bindings=...)` 也可导出 primitive
+sequence 捕获的原生标量叶成员变换。为完整 `StructNdarray` 父数组和各普通公开输出
+命名，不为成员视图单独命名。导出记录成员路径，以 `struct_array_layout` 约束冻结父
+数组 ABI/shape，在预检通过后复用或发布命名布局；相同结构类型共享布局。
+冷／暖原生策略、嵌套标量路径、保留子图的父 Graph 组合复用同一原生操作，
+不生成 packing kernel 或成员私有缓冲。
+
+私有结构快照的自动重建、tensor 分量选择和带步幅 Field root 仍是独立待办。本项
+不提供结构梯度或原生变换自动伴随；后续普通浮点 kernel 可使用已有的导出梯度。
 
 内存与外层 shape 仍放入原 `TiArgument` 的 ndarray，设置
 `elem_type=TI_DATA_TYPE_UNKNOWN`、空 `elem_shape`；将查询所得布局与版本填入

@@ -117,6 +117,7 @@ def _reduce(call, context):
 
 def _transform(call, context):
     from taichi_forge.aot._graph_storage_bindings import packed_description
+    from taichi_forge.lang._storage_view import describe_storage
     from taichi_forge_runtime.aot import Scalar
     from . import _algorithms as algorithms
 
@@ -130,6 +131,7 @@ def _transform(call, context):
         raise TaichiRuntimeError("AOT transform requires its concrete TransformWorkspace")
     src, dst = call.args
     packed_fields = any(type(a) is algorithms.MatrixField for a in call.args)
+    members = any(type(a) is algorithms.StructNdarrayScalarMemberView for a in call.args)
     if packed_fields:
         # Match the whole-Field entry path, which accepts the native numeric
         # types before the narrower generic Field fallback is considered.
@@ -137,7 +139,18 @@ def _transform(call, context):
         call.workspace.check_shape(algorithms._shape_numel(src))
     else:
         algorithms._check_transform_request(src, dst, call.kwargs["method"], call.workspace)
-    source, destination = (packed_description(a) for a in call.args)
+    if members:
+        # The selected JIT entry accepts scalar members and ordinary ndarrays.
+        # Reconstruct the same parent/leaf mapping; never insert a packing pass.
+        if any(type(a) not in (algorithms.StructNdarrayScalarMemberView, algorithms.ScalarNdarray)
+               for a in call.args):
+            raise TaichiRuntimeError("AOT scalar member transform requires scalar ndarray/member storage")
+        descriptions = [describe_storage(a) for a in call.args]
+        if any(not d.supported for d in descriptions):
+            raise TaichiRuntimeError("AOT scalar member transform requires qualified dense storage")
+        source, destination = (d.descriptor for d in descriptions)
+    else:
+        source, destination = (packed_description(a) for a in call.args)
     if any(len(d.index_shape) != 1 for d in (source, destination)):
         raise TaichiRuntimeError("AOT transform requires one-dimensional packed storage")
     element_shape = tuple(source.element_shape)
@@ -164,7 +177,10 @@ def _transform(call, context):
         algorithms._transform_value_type(src.dtype)
     ):
         raise TaichiRuntimeError("AOT transform dtype is unavailable on this Vulkan device")
-    methods = {"transform_affine_dense_field_packed"} if packed_fields else {
+    methods = {
+        "cpu_transform_affine_strided_ndarray", "cuda_device_transform_affine_strided_ndarray",
+        "vulkan_transform_affine_strided_ndarray", "vulkan_transform_affine_strided_ndarray_trusted",
+    } if members else {"transform_affine_dense_field_packed"} if packed_fields else {
         "cpu_transform_affine_packed_strided_ndarray",
         "cuda_device_transform_affine_packed_strided_ndarray",
         "vulkan_transform_affine_packed_strided_ndarray",
@@ -186,7 +202,8 @@ def _transform(call, context):
                         scale_bits=Scalar("f64", float(scale)).resource("scale")["bits"],
                         bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"],
                         **(dict(element_shape=list(element_shape)) if tensor else {}),
-                        **(dict(strategy="packed_field") if packed_fields else {})),
+                        **(dict(strategy="strided_scalar") if members else
+                           dict(strategy="packed_field") if packed_fields else {})),
         bindings=dict(src=context.retained_arrays.require(src),
                       dst=context.retained_arrays.require(dst)),
     ))

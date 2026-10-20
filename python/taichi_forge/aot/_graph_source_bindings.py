@@ -5,13 +5,14 @@ from math import prod
 
 from taichi_forge._lib import core
 from taichi_forge.lang import impl
+from taichi_forge.lang._ndarray import StructNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 from ._graph_storage_bindings import _SOURCE_NDARRAY_TYPES, packed_description
 
 
 class SourceArrayBindings:
-    def __init__(self, bindings, fixed_bindings):
+    def __init__(self, bindings, fixed_bindings, module=None):
         if bindings is None:
             bindings = {}
         if not isinstance(bindings, Mapping):
@@ -21,6 +22,8 @@ class SourceArrayBindings:
         self.layouts = {}
         self.used = set()
         self.constraints = []
+        self.module = module
+        self.pending_layouts = {}
         for name, owner in self.arrays.items():
             if not isinstance(name, str) or not name or "\0" in name:
                 raise ValueError("Source binding names must be nonempty strings without NUL")
@@ -32,6 +35,12 @@ class SourceArrayBindings:
             self.names[identity] = name
             dtype, shape, element_shape = self.layout(owner)
             self.layouts[name] = (dtype, shape, element_shape)
+            if type(owner) is StructNdarray:
+                self.constraints.append(dict(
+                    kind="struct_array_layout", array=name,
+                    layout=self.structure_layout(owner.struct_type), exact_shape=list(shape),
+                ))
+                continue
             scalar_bytes = core.data_type_size(dtype)
             self.constraints.append(
                 dict(
@@ -61,14 +70,16 @@ class SourceArrayBindings:
             # Keep the matrix owner alive in arrays; its native numeric storage
             # is distinct from the ndarray copied by from_pattern/update_values.
             return ("sparse_values", id(owner.matrix))
-        if type(owner) not in _SOURCE_NDARRAY_TYPES:
-            raise TypeError("Source bindings require scalar/vector/matrix ndarrays or qualified SparseMatrix values")
+        if type(owner) not in (*_SOURCE_NDARRAY_TYPES, StructNdarray):
+            raise TypeError("Source bindings require ndarrays or qualified SparseMatrix values")
         if owner.arr is None or owner._runtime_prog is not impl.get_runtime().prog:
             raise TaichiRuntimeError("Source binding belongs to a retired or different runtime")
         return owner._runtime_allocation_identity
 
     @staticmethod
     def layout(owner):
+        if type(owner) is StructNdarray:
+            return owner.dtype, tuple(owner.shape), ()
         if type(owner) in _SOURCE_NDARRAY_TYPES:
             descriptor = packed_description(owner)
             return descriptor.scalar_type, tuple(descriptor.index_shape), tuple(descriptor.element_shape)
@@ -77,7 +88,7 @@ class SourceArrayBindings:
     def find(self, owner):
         from taichi_forge.linalg.sparse_matrix import SparseMatrix
 
-        if type(owner) not in (*_SOURCE_NDARRAY_TYPES, SparseMatrix):
+        if type(owner) not in (*_SOURCE_NDARRAY_TYPES, StructNdarray, SparseMatrix):
             return None
         name = self.names.get(self.identity(owner))
         if name is not None:
@@ -106,3 +117,25 @@ class SourceArrayBindings:
     def validate_used(self, runtime_names):
         if self.arrays.keys() - self.used - set(runtime_names):
             raise ValueError("source_bindings contains arrays unused by the exported Graph")
+
+    def structure_layout(self, dtype):
+        if self.module is None:
+            raise TaichiRuntimeError("Structure source export requires a module layout catalog")
+        for name, published in self.module._ndarray_layouts.items():
+            if published == dtype.dtype:
+                return name
+        for name, pending in self.pending_layouts.items():
+            if pending.dtype == dtype.dtype:
+                return name
+        index = len(self.module._ndarray_layouts) + len(self.pending_layouts)
+        name = f"__forge_aot_struct_{index}"
+        while name in self.module._ndarray_layouts or name in self.pending_layouts:
+            index += 1
+            name = f"__forge_aot_struct_{index}"
+        self.pending_layouts[name] = dtype
+        return name
+
+    def publish(self):
+        # Publication follows whole-Graph preflight, like retained Field views.
+        for name, dtype in self.pending_layouts.items():
+            self.module.add_ndarray_layout(name, dtype)

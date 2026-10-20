@@ -4567,9 +4567,18 @@ parent, and an identical in-place mapping are supported; overlapping mappings
 fail preparation. Only the selected prefix changes. This adds no packing
 kernel or workspace. Ordinary packed operations and kernel arguments still
 reject a projected member; pass the complete typed parent to structure kernels.
-This explicit-plan support does not yet enable automatic Graph export of
-captured structure members or strided Field roots. Structure gradients and an
-automatic adjoint for the native transform remain outside this contract;
+`Module.add_execution_plan(..., graph, source_bindings=...)` can also export
+native scalar-leaf transforms captured by a primitive sequence. Name the complete
+`StructNdarray` parent and each ordinary public output, rather than its member
+views. Export records the member paths, freezes the parent ABI/shape with a
+`struct_array_layout` constraint, and reuses or publishes one named layout per
+structural type after preflight. Cold and cached native strategies, nested scalar
+paths, and retained parent-Graph composition use the same native operation.
+No packing kernel or private member buffer is generated.
+
+Automatic reconstruction of private structure snapshots, tensor-component
+selection and strided Field roots remain separate work. Structure gradients and
+an automatic adjoint for the native transform remain outside this contract;
 ordinary downstream float kernels can use their existing exported gradients.
 
 Pass memory and outer shape through the existing `TiArgument` ndarray, setting
