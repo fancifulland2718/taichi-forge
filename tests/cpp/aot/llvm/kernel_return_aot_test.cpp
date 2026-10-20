@@ -5,6 +5,7 @@
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 #include "taichi/program/launch_context_builder.h"
 #include "taichi/runtime/cpu/kernel_launcher.h"
+#include "tests/cpp/aot/value_parameter_check.h"
 
 #ifdef TI_WITH_CUDA
 
@@ -24,6 +25,7 @@ static void run_return_tests(aot::Module *mod,
                              LlvmRuntimeExecutor *exec,
                              uint64 *result_buffer) {
   aot::Kernel *k_ret = mod->get_kernel("test_ret");
+  EXPECT_FALSE(k_ret->value_parameter_types.has_value());
 
   LaunchContextBuilder builder(k_ret);
   k_ret->launch(builder);
@@ -48,6 +50,7 @@ static void run_return_tests(aot::Module *mod,
   }
   EXPECT_ANY_THROW(discarded.get_struct_ret_int({0, 0}));
   EXPECT_ANY_THROW(discarded.get_ret<int64>(0));
+  aot_test_utils::check_value_parameters(mod, [&] { exec->synchronize(); });
   // Check assertion error from ti.kernel
   exec->check_runtime_error(result_buffer);
 }

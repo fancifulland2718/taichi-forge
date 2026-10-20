@@ -15,6 +15,7 @@
 #include "taichi/aot/initial_root_data.h"
 #include "taichi/aot/root_storage.h"
 #include "taichi/aot/struct_layout.h"
+#include "taichi/aot/value_parameters.h"
 
 namespace taichi::io {
 struct VirtualDir;
@@ -150,6 +151,8 @@ class TI_DLL_EXPORT Module {
   RootStorageViews root_storage_views_;
   NamedStructLayouts ndarray_layouts_;
   bool ndarray_layouts_loaded_{false};
+  NamedValueParameters value_parameters_;
+  bool value_parameters_loaded_{false};
   virtual const io::VirtualDir *data_source() const {
     return nullptr;
   }

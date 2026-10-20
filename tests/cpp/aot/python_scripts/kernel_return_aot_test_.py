@@ -2,6 +2,7 @@ import argparse
 import os
 
 import taichi_forge as ti
+from value_parameter_fixture import add_value_parameter_kernels
 
 
 def compile_kernel_return_aot(arch):
@@ -19,6 +20,7 @@ def compile_kernel_return_aot(arch):
     m = ti.aot.Module()
 
     m.add_kernel(test_ret, template_args={})
+    add_value_parameter_kernels(m)
 
     m.save(dir_name)
 

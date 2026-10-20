@@ -267,6 +267,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
 
   dump_graph(output_dir);
   aot::write_struct_layout_artifact(ndarray_layouts_, output_dir);
+  aot::write_value_parameter_artifact(value_parameters_, output_dir);
 }
 
 const std::vector<int> &LlvmAotModuleBuilder::kernel_snode_tree_ids(

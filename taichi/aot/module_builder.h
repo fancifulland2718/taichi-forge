@@ -13,6 +13,7 @@
 #include "taichi/aot/initial_root_data.h"
 #include "taichi/aot/root_storage.h"
 #include "taichi/aot/struct_layout.h"
+#include "taichi/aot/value_parameters.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/program/kernel_compile_request.h"
 
@@ -130,6 +131,7 @@ class AotModuleBuilder {
   std::map<int, aot::InitialRootData> initial_root_data_;
   aot::RootStorageViews root_storage_views_;
   aot::NamedStructLayouts ndarray_layouts_;
+  aot::NamedValueParameters value_parameters_;
   KernelCompileOptions compile_options_;
   bool compile_options_frozen_{false};
 

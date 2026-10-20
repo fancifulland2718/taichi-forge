@@ -109,6 +109,31 @@ Kernel *Module::get_kernel(const std::string &name) {
     return itr->second.get();
   }
   auto k = make_new_kernel(name);
+  if (k) {
+    try {
+      if (!value_parameters_loaded_) {
+        value_parameters_ = load_value_parameter_artifact(data_source());
+        value_parameters_loaded_ = true;
+      }
+      const auto values = value_parameters_.find(name);
+      if (values != value_parameters_.end()) {
+        for (const auto &[indices, logical] : values->second) {
+          const auto parameter = k->nested_parameters.find(indices);
+          if (parameter == k->nested_parameters.end() ||
+              parameter->second.is_array || parameter->second.is_argpack ||
+              parameter->second.ptype != ParameterType::kScalar)
+            throw std::invalid_argument("Value parameter does not name a pure value");
+          // GFX ArgAttributes can contain an unknown dtype for aggregates.
+          // The compiled args_type remains the authoritative physical ABI.
+          validate_value_parameter_type(
+              logical, compiled_value_parameter_type(*k, indices));
+        }
+        k->value_parameter_types = values->second;
+      }
+    } catch (const std::exception &error) {
+      throw ArtifactLoadError(error.what());
+    }
+  }
   auto *kptr = k.get();
   loaded_kernels_[name] = std::move(k);
   return kptr;

@@ -4,6 +4,8 @@
 #include "taichi/util/lang_util.h"
 
 #include <stack>
+#include <map>
+#include <optional>
 
 namespace taichi::lang {
 
@@ -112,6 +114,10 @@ class TI_DLL_EXPORT CallableBase {
   };
 
   std::vector<Parameter> parameter_list;
+  // Host binding semantics before matrix arguments are lowered to structures.
+  // AOT exports these through the common value-parameter artifact, separately
+  // from executable/cache metadata and the physical launch ABI.
+  std::optional<std::map<std::vector<int>, DataType>> value_parameter_types;
   // Note: `nested_parameters` stores not only nested parameters, but also
   // those parameters in `parameter_list`.
   std::unordered_map<std::vector<int>,
@@ -146,6 +152,9 @@ class TI_DLL_EXPORT Callable : public CallableBase {
 
   std::vector<int> insert_scalar_param(const DataType &dt,
                                        const std::string &name = "");
+  std::vector<int> insert_value_param(const DataType &lowered,
+                                    const DataType &logical,
+                                    const std::string &name);
   std::vector<int> insert_arr_param(const DataType &dt,
                                     int total_dim,
                                     std::vector<int> element_shape,

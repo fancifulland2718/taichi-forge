@@ -2,6 +2,7 @@ import argparse
 import os
 
 import taichi_forge as ti
+from value_parameter_fixture import add_value_parameter_kernels
 
 
 def compile_dense_field_aot_test(arch):
@@ -46,6 +47,7 @@ def compile_dense_field_aot_test(arch):
     m.add_kernel(init)
     m.add_kernel(ret)
     m.add_field("place", place)
+    add_value_parameter_kernels(m)
     m.save(dir_name)
 
 

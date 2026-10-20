@@ -61,6 +61,12 @@ bool AotModuleBuilder::needs_kernel_export(
 void AotModuleBuilder::record_kernel_export(const std::string &name,
                                             Kernel *kernel,
                                             const std::string &launch_abi) {
+  if (kernel->value_parameter_types) {
+    for (const auto &[indices, logical] : *kernel->value_parameter_types)
+      aot::validate_value_parameter_type(
+          logical, aot::compiled_value_parameter_type(*kernel, indices));
+    value_parameters_.emplace(name, *kernel->value_parameter_types);
+  }
   kernel_exports_.emplace(name, ExportIdentity{kernel, launch_abi});
   if (launch_abi == "ordinary")
     ordinary_export_names_.emplace(kernel, name);

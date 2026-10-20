@@ -63,6 +63,7 @@ list(REMOVE_ITEM TAICHI_TESTS_SOURCE
     "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/native_vulkan_cig_probe.cpp"
     "${PROJECT_SOURCE_DIR}/tests/cpp/rhi/common/vulkan_cig_transfer_probe.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/struct_layout_test.cpp")
+list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/value_parameters_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/execution_plan_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_operation_registry_test.cpp")
 list(APPEND TAICHI_TESTS_SOURCE "tests/cpp/aot/native_array_contract_test.cpp")

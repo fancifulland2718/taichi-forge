@@ -104,7 +104,7 @@ def get_type_for_kernel_args(dtype, name):
 
 def decl_matrix_arg(matrixtype, name, arg_depth):
     arg_type = get_type_for_kernel_args(matrixtype, name)
-    arg_id = impl.get_runtime().compiling_callable.insert_scalar_param(arg_type, name)
+    arg_id = impl.get_runtime().compiling_callable.insert_value_param(arg_type, matrixtype.tensor_type, name)
     argload_di = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     arg_load = Expr(
         _ti_core.make_arg_load_expr(arg_id, arg_type, create_load=False, arg_depth=arg_depth, dbg_info=argload_di)
@@ -114,7 +114,7 @@ def decl_matrix_arg(matrixtype, name, arg_depth):
 
 def decl_struct_arg(structtype, name, arg_depth):
     arg_type = get_type_for_kernel_args(structtype, name)
-    arg_id = impl.get_runtime().compiling_callable.insert_scalar_param(arg_type, name)
+    arg_id = impl.get_runtime().compiling_callable.insert_value_param(arg_type, structtype.dtype, name)
     argload_di = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     arg_load = Expr(
         _ti_core.make_arg_load_expr(arg_id, arg_type, create_load=False, arg_depth=arg_depth, dbg_info=argload_di)

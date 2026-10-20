@@ -1,4 +1,5 @@
 #include "tests/cpp/aot/gfx_utils.h"
+#include "tests/cpp/aot/value_parameter_check.h"
 
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #include "taichi/runtime/gfx/aot_graph_data.h"
@@ -79,9 +80,12 @@ void run_dense_field_kernel(Arch arch, taichi::lang::Device *device) {
   EXPECT_EQ(root_size, 40);
   gfx_runtime->add_root_buffer(root_size);
 
+  check_value_parameters(vk_module.get(), [&] { gfx_runtime->synchronize(); });
+
   {
     auto simple_ret_kernel = vk_module->get_kernel("simple_return");
     EXPECT_TRUE(simple_ret_kernel);
+    EXPECT_FALSE(simple_ret_kernel->value_parameter_types.has_value());
     LaunchContextBuilder builder(simple_ret_kernel);
     auto &host_ctx = builder.get_context();
     host_ctx.result_buffer = result_buffer;

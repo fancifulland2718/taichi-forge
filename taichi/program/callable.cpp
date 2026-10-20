@@ -16,6 +16,16 @@ std::vector<int> Callable::insert_scalar_param(const DataType &dt,
   return add_parameter(p);
 }
 
+std::vector<int> Callable::insert_value_param(const DataType &lowered,
+                                            const DataType &logical,
+                                            const std::string &name) {
+  auto indices = insert_scalar_param(lowered, name);
+  if (!value_parameter_types)
+    value_parameter_types.emplace();
+  value_parameter_types->emplace(indices, logical);
+  return indices;
+}
+
 int Callable::insert_ret(const DataType &dt) {
   rets.emplace_back(dt->get_compute_type());
   return (int)rets.size() - 1;
