@@ -217,8 +217,10 @@ def test_optix_instance_recording_export_and_retained_geometry(tmp_path):
         builder = ti.graph.GraphBuilder()
         builder.append_native(sbt_scene.record_typed(1), admission="explicit")
         graph = builder.compile()
-        with pytest.raises(ti.TaichiRuntimeError, match="SBT offsets"):
-            module.add_execution_plan("sbt", graph)
+        # Nonzero SBT offsets are supported by the current scene schema, but
+        # reconstruction still requires explicit geometry/transform seeds.
+        with pytest.raises(ti.TaichiRuntimeError, match="resource_bindings"):
+            module.add_execution_plan("missing_instance_seeds", graph)
         graph.close()
         assert len(module._exported_kernels) == 4 and not module._data_payloads
         artifact = tmp_path / "instances.tcm"
