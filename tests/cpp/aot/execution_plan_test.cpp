@@ -1427,6 +1427,31 @@ TEST(ExecutionPlan, StructuredMemberShapesDoNotForcePrivateAllocation) {
   EXPECT_TRUE(plan.resources.materialize[2]);
 }
 
+TEST(ExecutionPlan, TensorComponentsPreserveParentClosureAndRequireVersion25) {
+  const auto document = [](const std::string &component, int version = 25) {
+    return std::string("{\"version\":") + std::to_string(version) +
+           R"(,"operations":[{"kind":"kernel","entry":"consume","arguments":["n"]}],
+           "resources":[
+             {"kind":"ndarray","name":"records","layout":"type","shape":[17]},
+             {"kind":"ndarray_member","name":"member","array":"records","path":"inner.matrix","component":)" +
+           component + R"(},
+             {"kind":"extent","name":"n","dtype":"i32","array":"member","axis":0}]})";
+  };
+  const auto plan = ExecutionPlan::parse(document("[1,2]"));
+  const auto &member =
+      std::get<ExecutionResources::Member>(plan.resources.declarations[1].value);
+  EXPECT_EQ(member.component, (std::vector<std::uint32_t>{1, 2}));
+  EXPECT_EQ(plan.resources.runtime_bindings({"member"}),
+            (std::set<std::string>{"member", "records"}));
+  EXPECT_FALSE(plan.resources.materialize[0]);
+  EXPECT_FALSE(plan.resources.materialize[1]);
+  for (const auto *indices :
+       {"[]", "null", "1", "[true]", "[-1]", "[1.0]", "[4294967296]"})
+    EXPECT_THROW(ExecutionPlan::parse(document(indices)), std::invalid_argument);
+  EXPECT_THROW(ExecutionPlan::parse(document("[1,2]", 24)),
+               std::invalid_argument);
+}
+
 TEST(ExecutionPlan, StructuredResourcesRejectInconsistentDeclarations) {
   for (const auto *resource : {
        R"({"kind":"ndarray","name":"a","layout":"records","dtype":"f32","shape":[3]})",

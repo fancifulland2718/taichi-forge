@@ -4562,6 +4562,26 @@ Members allocate no storage; they retain their parent and preserve record
 stride, member offset and scalar type. Shape-only references do not allocate
 the parent.
 
+Plan version 25 and paired private ABI122 components can also select one scalar
+lane of a vector/matrix leaf:
+
+```python
+dict(kind="ndarray_member", name="lane", array="state",
+     path="inner.matrix", component=[1, 2])
+```
+
+`component` supplies a complete index in the frozen leaf type's axis order.
+Omitting it still selects the complete leaf. The consumer derives the offset
+from that leaf's shape and scalar width, preserving the parent record stride;
+the producer does not supply a raw address or byte offset. Empty lists, negative,
+boolean, noninteger and out-of-uint32 indices fail format validation. Wrong rank,
+out-of-bounds indices and component selection on a scalar leaf fail preparation,
+including shape-only references. An empty parent can still report a zero extent
+without a member address or allocation. Native transforms captured from
+`StructNdarray.field(path, component=...)` export automatically with public
+parents, explicit private snapshots and retained subgraphs. They reuse the
+strided implementation, adding no packing kernel, component copy or replay check.
+
 Plan version 24 can freeze the complete structure ABI and outer shape:
 
 ```python
@@ -4613,7 +4633,7 @@ still fail export.
 
 Structure snapshots add no packing kernel, per-frame host check or separate
 ownership mechanism. Qualified private initial data and scratch use the same
-complete layout description. Tensor-component selection remains separate work;
+complete layout description. Scalar tensor lanes use the `component` recipe above;
 strided Field roots use the module-array contract above. Structure gradients and an automatic adjoint for the
 native transform remain outside this contract; ordinary downstream float
 kernels can use their existing exported gradients.

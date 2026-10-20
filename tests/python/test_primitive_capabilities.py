@@ -102,6 +102,11 @@ def test_aot_routes_distinguish_public_entry_points_without_runtime_probes(monke
         field_transform = next(r for r in transform if "one_dimensional_packed_tensor_fields" in r.constraints)
         assert field_transform.backends == ("cpu", "cuda", "vulkan")
         assert "preserved_scalar_cpu_policy_flat_cuda_launch_packed_vulkan_dispatch" in field_transform.constraints
+        for marker in ("scalar_leaf_or_tensor_component", "scalar_affine_dense_fields", "strided_scalar_strategy"):
+            route = next(r for r in transform if marker in r.constraints)
+            assert route.backends == ("cpu", "cuda", "vulkan")
+            assert "packed_storage" not in route.constraints
+            assert "no_automatic_ad" in route.constraints
         fused = next(r for r in transform if r.forms == ("transform_gather_scatter",))
         assert fused.backends == ("vulkan",)
         assert {"selected_fused_strategy", "all_intermediate_outputs", "single_dispatch"} <= set(fused.constraints)

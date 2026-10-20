@@ -59,7 +59,7 @@ def external_arguments(resources, gradients, arguments):
         elif kind == "ndarray_view":
             required, optional = {"kind", "name", "array", "offset", "shape"}, set()
         elif kind == "ndarray_member":
-            required, optional = {"kind", "name", "array", "path"}, set()
+            required, optional = {"kind", "name", "array", "path"}, {"component"}
         elif kind == "module_array":
             required, optional = {"kind", "name", "view"}, set()
         elif kind == "scalar":
@@ -106,6 +106,12 @@ def external_arguments(resources, gradients, arguments):
         elif kind == "ndarray_member":
             _name(resource["array"])
             _name(resource["path"])
+            if "component" in resource:
+                component = resource["component"]
+                if not isinstance(component, list) or not component:
+                    raise ValueError("Member component requires a nonempty index list")
+                for index in component:
+                    word(index)
             refs.append(resource["array"])
         elif kind in ("ndarray", "ndarray_view"):
             if "allocator" in resource:

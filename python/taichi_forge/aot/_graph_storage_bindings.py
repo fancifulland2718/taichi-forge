@@ -67,11 +67,10 @@ class RetainedArrayBindings:
                 return self.declare_snapshot(owner, mutable=True)
             return context.source_arrays.require(owner)
         if type(owner) is StructNdarrayScalarMemberView:
-            if owner.component is not None:
-                raise TaichiRuntimeError("AOT structure member export requires a scalar leaf path")
             return context._resource(
                 owner, dict(kind="ndarray_member", array=self.require(owner.base),
-                            path=".".join(owner.path)),
+                            path=".".join(owner.path),
+                            **(dict(component=list(owner.component)) if owner.component is not None else {})),
             )
         if type(owner) is DenseNdarrayView:
             selected = packed_description(owner)

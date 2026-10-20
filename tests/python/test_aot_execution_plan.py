@@ -6,6 +6,25 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
+def test_tensor_member_components_are_explicit_and_versioned():
+    member = dict(kind="ndarray_member", name="lane", array="records", path="inner.m", component=[1, 2])
+    extent = dict(kind="extent", name="n", dtype="i32", array="lane", axis=0)
+    operations = [dict(kind="kernel", entry="consume", arguments=["n"])]
+    plan = ExecutionPlan(operations, resources=[member, extent])
+    document = json.loads(plan.to_json())
+    assert document["version"] == 25 and plan.argument_names == ("records",)
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 25"):
+        ExecutionPlan.from_json(json.dumps(dict(document, version=24)))
+    for component in ([], None, 1, [True], [-1], [1.0], [1 << 32]):
+        with pytest.raises(ValueError):
+            ExecutionPlan(operations, resources=[dict(member, component=component), extent])
+    # Tensor rank and bounds need the consumer's frozen type, not a guessed
+    # producer layout. Format validation preserves these indices for preflight.
+    assert json.loads(ExecutionPlan(
+        operations, resources=[dict(member, component=[0, 1, 2]), extent]).to_json())["version"] == 25
+
+
 def test_struct_layout_constraints_freeze_the_named_type_and_shape():
     operations = [dict(kind="copy", source="records", destination="output")]
     constraint = dict(kind="struct_array_layout", array="records", layout="particle", exact_shape=[17, 0])

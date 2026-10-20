@@ -3485,6 +3485,21 @@ resources = [
 布局解析。成员不分配存储，保留父对象、记录步幅、成员偏移和标量类型；仅查询 shape
 不会迫使父数组分配。
 
+plan25 和配套私有 ABI122 组件还可选择 vector／matrix 叶中的一个标量分量：
+
+```python
+dict(kind="ndarray_member", name="lane", array="state",
+     path="inner.matrix", component=[1, 2])
+```
+
+`component` 按冻结叶类型的轴顺序指定完整索引，省略时仍表示完整叶。消费端从
+叶 shape 和标量宽度计算分量偏移，保留父记录步幅；不能传生产进程的裸地址或字节偏移。
+空列表、负数、bool、非整数及超出 uint32 的索引在格式解析时拒绝；维数、越界或
+对标量叶选分量在准备期拒绝，即使成员只用于 shape 查询也检查。空父数组仍可查询零
+extent，不产生成员地址或分配。`StructNdarray.field(path, component=...)` 捕获的
+原生变换可自动导出，覆盖公开父数组、显式私有快照和保留子图；仍使用原步幅实现，
+不增加 packing kernel、分量副本或逐次重放校验。
+
 plan24 可冻结完整结构 ABI 和外层 shape：
 
 ```python
@@ -3522,7 +3537,7 @@ sequence 捕获的原生标量叶成员变换。为完整 `StructNdarray` 父数
 真正的重建角色冲突仍会拒绝。
 
 结构快照不增加 packing kernel、逐帧 host 检查或第二套资源所有权；已证明的
-私有初值与 scratch 也共用完整布局描述。tensor 分量选择仍是独立待办；
+私有初值与 scratch 也共用完整布局描述。tensor 标量分量使用前述 `component` 配方；
 带步幅 Field root 使用前述模块数组合同。本项不提供结构梯度或原生变换自动伴随；后续普通浮点 kernel
 可使用已有的导出梯度。
 

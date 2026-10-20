@@ -161,10 +161,33 @@ _ROUTES = MappingProxyType({
                   "preserved_scalar_cpu_policy_flat_cuda_launch_packed_vulkan_dispatch",
                   "device_dtype_capabilities", "explicit_adjoint_only"),
         PrimitiveAOTRoute(
+            "algorithms.PrimitiveSequence", ("transform",), _ALL,
+            ("unfused_sequence", "selected_native_method", "one_dimensional_scalar_struct_members",
+             "scalar_leaf_or_tensor_component", "named_or_snapshot_typed_parent",
+             "frozen_parent_layout", "positive_uniform_record_stride",
+             "i32_u32_f32_i64_u64_f64", "exact_inplace_or_disjoint",
+             "immutable_coefficients", "device_dtype_capabilities", "no_automatic_ad"),
+        ),
+        PrimitiveAOTRoute(
+            "algorithms.PrimitiveSequence", ("transform",), _ALL,
+            ("unfused_sequence", "selected_native_method", "scalar_affine_dense_fields",
+             "flat_dense_node", "positive_uniform_record_stride", "module_root_snapshot",
+             "preserved_native_strided_strategy", "i32_u32_f32_i64_u64_f64",
+             "exact_inplace_or_disjoint", "immutable_coefficients",
+             "device_dtype_capabilities", "no_automatic_ad"),
+        ),
+        PrimitiveAOTRoute(
             "aot.ExecutionPlan", ("builtin/transform",), _ALL,
             ("packed_scalar_or_tensor", "nonempty_fixed_prefix", "affine", "element_shape",
              "i32_u32_f32_i64_u64_f64", "exact_inplace_or_disjoint",
              "f64_coefficient_bits", "device_dtype_capabilities"),
+        ),
+        PrimitiveAOTRoute(
+            "aot.ExecutionPlan", ("builtin/transform",), _ALL,
+            ("strided_scalar_strategy", "scalar_member_or_affine_module_root",
+             "positive_uniform_record_stride", "fixed_prefix_extent",
+             "i32_u32_f32_i64_u64_f64", "exact_inplace_or_disjoint",
+             "f64_coefficient_bits", "device_dtype_capabilities", "no_automatic_ad"),
         ),
         PrimitiveAOTRoute(
             "algorithms.PrimitiveSequence", ("transform_gather_scatter",), ("vulkan",),

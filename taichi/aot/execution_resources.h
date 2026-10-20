@@ -54,6 +54,8 @@ struct ExecutionResources {
   struct Member {
     std::string array;
     std::string path;
+    // Empty selects the complete leaf; otherwise select one scalar tensor lane.
+    std::vector<std::uint32_t> component;
   };
   struct HostBlob {
     // Immutable bytes in the existing content-addressed module data directory.

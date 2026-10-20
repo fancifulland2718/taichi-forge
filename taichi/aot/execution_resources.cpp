@@ -119,10 +119,20 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
         continue;
       }
       if (kind == "ndarray_member") {
-        fields(value, {"kind", "name", "array", "path"});
+        fields(value, {"kind", "name", "array", "path", "component"});
         if (integer(root["version"]) < 23)
           throw std::invalid_argument("Array members require execution plan version 23");
-        resource.value = Member{name(value["array"]), name(value["path"])};
+        Member member{name(value["array"]), name(value["path"]), {}};
+        if (const auto found = value.obj.inner.find("component");
+            found != value.obj.inner.end()) {
+          if (integer(root["version"]) < 25 || !found->second.is_arr() ||
+              found->second.arr.inner.empty())
+            throw std::invalid_argument(
+                "Member components require version 25 and a nonempty index array");
+          for (const auto &index : found->second.arr.inner)
+            member.component.push_back(word(index));
+        }
+        resource.value = std::move(member);
         result.declarations.push_back(std::move(resource));
         continue;
       }

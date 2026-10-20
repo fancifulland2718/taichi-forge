@@ -41,7 +41,8 @@ uint64_t validated_struct_ndarray_bytes(
 taichi::lang::NativeArrayBinding project_struct_ndarray_member(
     const TiNdArray &array,
     const taichi::lang::aot::StructLayout &layout,
-    const std::string &path);
+    const std::string &path,
+    const std::vector<std::uint32_t> &component);
 taichi::lang::NativeArrayBinding bind_native_array(
     Runtime &runtime,
     const TiNdArray &array,

@@ -216,7 +216,7 @@ ExecutionResourceBindings bind_execution_resources(
     if (const auto *member = std::get_if<Recipes::Member>(&recipe.value)) {
       const auto &parent = array_source(member->array);
       auto projected = project_struct_ndarray_member(
-          parent, structure_layout(member->array), member->path);
+          parent, structure_layout(member->array), member->path, member->component);
       argument.type = TI_ARGUMENT_TYPE_NDARRAY;
       auto &array = argument.value.ndarray;
       array.shape = parent.shape;

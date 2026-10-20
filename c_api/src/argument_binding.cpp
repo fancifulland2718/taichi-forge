@@ -315,7 +315,8 @@ uint64_t validated_struct_ndarray_bytes(Runtime &runtime,
 taichi::lang::NativeArrayBinding project_struct_ndarray_member(
     const TiNdArray &array,
     const taichi::lang::aot::StructLayout &layout,
-    const std::string &path) {
+    const std::string &path,
+    const std::vector<std::uint32_t> &component) {
   using namespace taichi::lang;
   const auto parent = struct_ndarray_storage_layout(array, layout);
   const auto member = std::find_if(layout.members.begin(), layout.members.end(),
@@ -344,9 +345,29 @@ taichi::lang::NativeArrayBinding project_struct_ndarray_member(
   strides->index_bytes = packed_strides(result.shape, layout.stride);
   strides->element_bytes =
       packed_strides(result.element_shape, data_type_size(result.scalar_type));
+  std::uint64_t offset = member->offset;
+  if (offset > std::uint64_t(std::numeric_limits<std::int64_t>::max()))
+    throw MemoryBindingError("Structure member offset overflows address space");
+  if (!component.empty()) {
+    if (component.size() != result.element_shape.size())
+      throw MemoryBindingError("Structure member component rank does not match its tensor shape");
+    for (std::size_t axis = 0; axis < component.size(); ++axis) {
+      if (component[axis] >= result.element_shape[axis])
+        throw MemoryBindingError("Structure member component index is out of bounds");
+      // packed_strides proved the full tensor size fits int64; an in-bounds
+      // component's product and sum therefore fit within that same tensor.
+      const auto delta = component[axis] *
+                         static_cast<std::uint64_t>(strides->element_bytes[axis]);
+      if (delta > std::uint64_t(std::numeric_limits<std::int64_t>::max()) - offset)
+        throw MemoryBindingError("Structure member component offset overflows address space");
+      offset += delta;
+    }
+    result.element_shape.clear();
+    strides->element_bytes.clear();
+  }
   // Empty arrays have no member address. Keep their logical extent zero even
   // when the selected member has a nonzero offset in a populated record.
-  strides->byte_offset = parent.bytes ? member->offset : 0;
+  strides->byte_offset = parent.bytes ? offset : 0;
   result.strides = std::move(strides);
   validate_native_dense_array_layout(result);
   return result;
