@@ -229,6 +229,11 @@ CPU/CUDA/Vulkan 的归约导出也支持一维 `StructNdarray` 标量成员（�
 可能沿用已有的标量输出对齐暂存。不添加整数组打包辅助 kernel，也不向 TCM 添加
 应用 shader。此路线要求配对的私有 ABI123 组件，不自动生成归约伴随。
 
+该标量成员路线已通过Windows CPU/CUDA/Vulkan正常安装后的独立与借用runtime验证，
+覆盖冷暖导出、前缀、父Graph、私有快照、相邻成员不变、别名拒绝和在途退休。
+实际下游能量kernel的显式反向和Vulkan同步验证也通过。整向量／矩阵Field归约
+仍是独立的导出缺口；选择一个标量tensor分量不代表整个tensor入口已经支持。
+
 `PrimitiveSequence.transform()` 与显式 `builtin/transform` v1 描述支持 CPU/CUDA/Vulkan
 上的非空、一维连续标量 affine 变换，覆盖 i32/u32/i64/u64/f32/f64。输入输出可为
 准确相同的访问区间，或物理不重叠的区间；部分重叠在准备时拒绝。显式描述可选择

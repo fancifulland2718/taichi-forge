@@ -292,6 +292,14 @@ aligned scalar-output staging. There is no full-array packing helper or extra
 application shader in the TCM. This route requires paired private ABI123
 components; it adds no automatic reduction adjoint.
 
+Normally installed standalone and borrowed runtimes pass this scalar-member
+route on Windows CPU/CUDA/Vulkan, including cold/warm export, prefixes, parent
+Graphs, private snapshots, unchanged siblings, rejected aliases and in-flight
+retirement. An explicit downstream energy-kernel backward pass and Vulkan
+synchronization validation also pass. Whole vector/matrix Field reductions
+remain a separate export gap; selecting one scalar tensor component does not
+imply support for that whole-tensor entry point.
+
 `PrimitiveSequence.transform()` and explicit `builtin/transform` v1 descriptions
 cover nonempty, one-dimensional packed scalar affine transforms on CPU/CUDA/Vulkan
 for i32/u32/i64/u64/f32/f64. Accessed ranges must be exactly identical or physically
