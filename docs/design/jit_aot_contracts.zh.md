@@ -95,6 +95,16 @@ resource/alias 校验管理，同配置不同 owner 不自动合并。
 按位编码，整数系数仍遵守现有 binding 的精确表示约束。布局准入及 backend/workspace
 政策仍分阶段验证；此迁移不扩充 AOT 支持的布局。暖态继续直接调用缓存 method/args。
 
+Gather/Scatter、ScatterAdd、Histogram、scalar GroupedReduce、BucketBuilder 及
+check/metric 也使用该定义层和默认 binding。packed GroupedReduce 保留清零后 scatter
+的组合；CUDA GroupedReduce 的别名保留实际 atomic 路线。BucketBuilder 的普通 raw
+StructNdarray 路线保留，AOT 仍只接纳既有数值布局。check/metric 保留私有 scalar 和
+原有 layout 准入，未新增自动微分支持。CPU 线程与 Vulkan 导出偏好等准备政策仍由原层负责。
+
+cuBLAS GEMM 的普通调用、recording 和导出共用 `GemmDefinition`，保持原 handle、
+提交及 beta 对输出读写的影响。dot/axpy/scal/nrm2 已有 native 描述与 factory；它们没有
+因此新增普通 Python recording。共享定义不代表新的后端、布局或自动微分资格。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典

@@ -121,6 +121,21 @@ Layout admission and backend/workspace policies still have separate validation
 stages. This migration adds no AOT layouts, and warm replay directly invokes
 the cached method and arguments.
 
+Gather/Scatter, ScatterAdd, Histogram, scalar GroupedReduce, BucketBuilder and
+check/metric also use this definition layer and the default binding adapter.
+Packed GroupedReduce retains its clear-then-scatter composition; CUDA grouped
+aliases retain their selected atomic route. Ordinary BucketBuilder still accepts
+raw StructNdarray payloads, while AOT retains its existing numeric-layout admission.
+Check/metric keep private scalars and existing layout admission without adding
+autodiff support. CPU thread counts and Vulkan export preferences remain separate
+preparation policies.
+
+Ordinary cuBLAS GEMM, recordings and export share `GemmDefinition`, retaining
+existing handles, submission and beta-dependent output access. Dot/axpy/scal/nrm2
+already have native descriptions and factories; this does not add ordinary Python
+recordings for them. Shared definitions do not imply new backend, layout or
+autodiff qualification.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive
