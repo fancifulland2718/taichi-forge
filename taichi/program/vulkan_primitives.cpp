@@ -3502,6 +3502,7 @@ struct VulkanCompactCache {
   DeviceAllocation prefix{kDeviceNullAllocation};
   VulkanScanCache scan;
   std::unique_ptr<Pipeline> compact_i32_flags;
+  std::unique_ptr<Pipeline> compact_offset_flags, compact_offset_scatter;
   std::unique_ptr<Pipeline> compact_i32_scatter;
   std::unique_ptr<Pipeline> compact_i32_scatter_packet;
   VulkanResourceSetReplayRing<2> flags_bindings;
@@ -3542,6 +3543,8 @@ struct VulkanCompactCache {
 
   void reset_pipelines() {
     compact_i32_flags.reset();
+    compact_offset_flags.reset();
+    compact_offset_scatter.reset();
     compact_i32_scatter.reset();
     compact_i32_scatter_packet.reset();
     reset_resource_sets();
@@ -3577,6 +3580,15 @@ struct VulkanCompactCache {
           dev, kCompactI32ScatterPacketSpv,
           "vulkan_compact_i32_scatter_packet");
     }
+  }
+
+  void ensure_offset_pipelines(Device *dev) {
+    if (!compact_offset_flags)
+      compact_offset_flags = create_pipeline(dev, kCompactI32FlagsOffsetSpv,
+                                             "vulkan_compact_flags_offset");
+    if (!compact_offset_scatter)
+      compact_offset_scatter = create_pipeline(dev, kCompactI32ScatterOffsetSpv,
+                                               "vulkan_compact_scatter_offset");
   }
 
   DeviceAllocation alloc_storage(size_t bytes) {
@@ -15558,9 +15570,17 @@ std::size_t Program::vulkan_compact_ranges(DevicePtr values_ptr,
   const size_t flags_offset = flags_ptr.offset;
   const size_t output_offset = output_ptr.offset;
   const size_t count_offset = count_ptr.offset;
+  const auto limits = device->get_storage_buffer_binding_limits();
+  const auto alignment = limits.offset_alignment;
+  const bool offset_views = values_offset % alignment || flags_offset % alignment ||
+                            output_offset % alignment || count_offset % alignment;
+  if (offset_views)
+    cache.ensure_offset_pipelines(device);
   DeviceAllocation prefix_alloc = cache.prefix;
-  Pipeline *flags_pipeline = cache.compact_i32_flags.get();
-  Pipeline *scatter_pipeline = cache.compact_i32_scatter.get();
+  Pipeline *flags_pipeline = offset_views ? cache.compact_offset_flags.get()
+                                         : cache.compact_i32_flags.get();
+  Pipeline *scatter_pipeline = offset_views ? cache.compact_offset_scatter.get()
+                                           : cache.compact_i32_scatter.get();
   const bool profiler_scopes = profiler != nullptr;
   const uint32_t flag_groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
@@ -15571,12 +15591,39 @@ std::size_t Program::vulkan_compact_ranges(DevicePtr values_ptr,
   const bool use_fused_recording =
       compact_fuse_max_n_config > 0 &&
       n <= static_cast<size_t>(compact_fuse_max_n_config);
-  ShaderResourceSet *flags_resource_set =
+  // Scalar-aligned subviews may violate descriptor-offset alignment. Bind an
+  // aligned enclosing range and use the existing offset shaders, as fixed AOT
+  // compaction does. Preserve the Program arena, prefix reuse and replay caches.
+  auto request = [&](DeviceAllocation allocation, uint64_t offset, size_t bytes) {
+    const auto lead = offset % alignment;
+    TI_ERROR_IF(lead % sizeof(uint32_t) || lead > limits.max_range ||
+                    bytes > limits.max_range - lead ||
+                    lead / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max() ||
+                    bytes / sizeof(uint32_t) > std::numeric_limits<uint32_t>::max() - lead / sizeof(uint32_t),
+                "Vulkan compact view exceeds its physical descriptor or uint32 address range");
+    return rw_buffer_request(allocation, offset - lead, bytes + lead);
+  };
+  ShaderResourceSet *flags_resource_set;
+  ShaderResourceSet *scatter_resource_set;
+  if (offset_views) {
+    flags_resource_set = cache.flags_bindings.bind(this, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            request(flags_alloc, flags_offset, prefix_bytes),
+            request(prefix_alloc, 0, prefix_bytes)}).bindings;
+    scatter_resource_set = cache.scatter_bindings.bind(this, device,
+        std::array<VulkanRwBufferBindingRequest, 5>{
+            request(values_alloc, values_offset, value_total_bytes),
+            request(flags_alloc, flags_offset, prefix_bytes),
+            request(prefix_alloc, 0, prefix_bytes),
+            request(output_alloc, output_offset, value_total_bytes),
+            request(count_alloc, count_offset, sizeof(int32_t))}).bindings;
+  } else {
+    flags_resource_set =
       cache
           .bind_flags_resource_set(this, flags_alloc, flags_offset,
                                    prefix_alloc, prefix_bytes)
           .bindings;
-  ShaderResourceSet *scatter_resource_set =
+    scatter_resource_set =
       cache
           .bind_scatter_resource_set(
               this, values_alloc, values_offset, value_total_bytes, flags_alloc,
@@ -15584,33 +15631,43 @@ std::size_t Program::vulkan_compact_ranges(DevicePtr values_ptr,
               output_offset, count_alloc, count_offset)
           .bindings;
 
+  }
+  const std::array<uint32_t, 2> flags_push{
+      static_cast<uint32_t>(n), static_cast<uint32_t>(flags_offset % alignment / 4)};
+  const std::array<uint32_t, 7> scatter_push{
+      static_cast<uint32_t>(n), static_cast<uint32_t>(item_words),
+      static_cast<uint32_t>(values_offset % alignment / 4),
+      static_cast<uint32_t>(flags_offset % alignment / 4),
+      static_cast<uint32_t>(output_offset % alignment / 4),
+      static_cast<uint32_t>(count_offset % alignment / 4), reuse_prefix ? 0u : 1u};
+  auto dispatch_flags = [=](CommandList *commands) {
+    const char *scope = profiler_scopes ? "vulkan_compact_i32_flags" : nullptr;
+    if (offset_views)
+      dispatch_pipeline_with_push_constants(commands, flags_pipeline, flags_resource_set,
+          flags_push.data(), sizeof(flags_push), flag_groups, 1, 1, scope);
+    else
+      dispatch_pipeline(commands, flags_pipeline, flags_resource_set, flag_groups, 1, 1, scope);
+  };
+  auto dispatch_scatter = [=](CommandList *commands) {
+    const char *scope = profiler_scopes ? "vulkan_compact_i32_scatter" : nullptr;
+    if (offset_views)
+      dispatch_pipeline_with_push_constants(commands, scatter_pipeline, scatter_resource_set,
+          scatter_push.data(), sizeof(scatter_push), word_groups, 1, 1, scope);
+    else
+      dispatch_pipeline(commands, scatter_pipeline, scatter_resource_set, word_groups, 1, 1, scope);
+  };
+
   if (use_fused_recording && !reuse_prefix) {
     auto scan_plan = prepare_vulkan_i32_scan(this, cache.scan, prefix_alloc, n);
     cache.cached_bytes = cache.allocated_bytes();
     auto record_compact_fused =
-        [flags_alloc, flags_offset, prefix_alloc, prefix_bytes, flags_pipeline,
-         flag_groups, values_alloc, values_offset, output_alloc, output_offset,
-         count_alloc, count_offset, scatter_pipeline, scan_plan,
-         value_total_bytes, word_groups, flags_resource_set,
-         scatter_resource_set, profiler_scopes](Device *op_device,
-                                                CommandList *cmdlist) {
-          {
-            ShaderResourceSet *bindings = flags_resource_set;
-            dispatch_pipeline(cmdlist, flags_pipeline, bindings,
-                              flag_groups, 1, 1,
-                              profiler_scopes ? "vulkan_compact_i32_flags"
-                                              : nullptr);
-            cmdlist->buffer_barrier(prefix_alloc);
-          }
+        [prefix_alloc, output_alloc, count_alloc, scan_plan, profiler_scopes,
+         dispatch_flags, dispatch_scatter](Device *op_device, CommandList *cmdlist) {
+          dispatch_flags(cmdlist);
+          cmdlist->buffer_barrier(prefix_alloc);
           record_vulkan_i32_scan(op_device, cmdlist, scan_plan,
                                  profiler_scopes);
-          {
-            ShaderResourceSet *bindings = scatter_resource_set;
-            dispatch_pipeline(cmdlist, scatter_pipeline, bindings,
-                              word_groups, 1, 1,
-                              profiler_scopes ? "vulkan_compact_i32_scatter"
-                                              : nullptr);
-          }
+          dispatch_scatter(cmdlist);
           cmdlist->buffer_barrier(output_alloc);
           cmdlist->buffer_barrier(count_alloc);
         };
@@ -15629,14 +15686,8 @@ std::size_t Program::vulkan_compact_ranges(DevicePtr values_ptr,
   }
 
   auto record_compact_flags =
-      [flags_alloc, flags_offset, prefix_alloc, prefix_bytes, flags_pipeline,
-       flag_groups, flags_resource_set,
-       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        ShaderResourceSet *bindings = flags_resource_set;
-        dispatch_pipeline(cmdlist, flags_pipeline, bindings, flag_groups,
-                          1, 1,
-                          profiler_scopes ? "vulkan_compact_i32_flags"
-                                          : nullptr);
+      [prefix_alloc, dispatch_flags](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_flags(cmdlist);
         cmdlist->buffer_barrier(prefix_alloc);
       };
   VulkanCommandReplayKey flags_command_key;
@@ -15660,16 +15711,9 @@ std::size_t Program::vulkan_compact_ranges(DevicePtr values_ptr,
   cache.cached_bytes = cache.allocated_bytes();
 
   auto record_compact_scatter =
-      [values_alloc, values_offset, flags_alloc, flags_offset, prefix_alloc,
-       output_alloc, output_offset, count_alloc, count_offset, prefix_bytes,
-       value_total_bytes, scatter_pipeline, word_groups, scatter_resource_set,
-       profiler_scopes](
+      [output_alloc, count_alloc, dispatch_scatter](
            Device * /*op_device*/, CommandList *cmdlist) {
-        ShaderResourceSet *bindings = scatter_resource_set;
-        dispatch_pipeline(cmdlist, scatter_pipeline, bindings,
-                          word_groups, 1, 1,
-                          profiler_scopes ? "vulkan_compact_i32_scatter"
-                                          : nullptr);
+        dispatch_scatter(cmdlist);
         cmdlist->buffer_barrier(output_alloc);
         cmdlist->buffer_barrier(count_alloc);
       };
@@ -15687,6 +15731,7 @@ std::size_t Program::vulkan_compact_ranges(DevicePtr values_ptr,
   push_vulkan_command_key_range(scatter_command_key, count_alloc, count_offset,
                                 sizeof(int32_t));
   scatter_command_key.push(word_groups);
+  scatter_command_key.push(reuse_prefix);
   scatter_command_key.push_ptr(scatter_pipeline);
   scatter_command_key.push_ptr(scatter_resource_set);
   if (!cache.dense_field_scatter_command_replay.submit_or_record(

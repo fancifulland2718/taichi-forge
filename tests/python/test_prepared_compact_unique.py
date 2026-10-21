@@ -7,9 +7,9 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("n", (17, 4097))
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, vulkan_sparse_experimental=False)
-def test_prepared_compact_vector_subranges_and_changing_predicates(monkeypatch):
-    n = 4097
+def test_prepared_compact_vector_subranges_and_changing_predicates(monkeypatch, n):
     values = ti.Vector.ndarray(3, ti.i32, n + 4)
     flags = ti.ndarray(ti.i32, n + 4)
     output = ti.Vector.ndarray(3, ti.i32, n + 6)
@@ -53,6 +53,46 @@ def test_prepared_compact_vector_subranges_and_changing_predicates(monkeypatch):
     plan.close()
     with pytest.raises(RuntimeError, match="closed"):
         plan.run()
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_prepared_compact_columns_reuse_prefix_with_offset_views():
+    from taichi_forge.algorithms._prepared_compact import PreparedCompactPlan
+
+    n = 17
+    view = ti.experimental.ndarray_view
+    values = [ti.ndarray(dtype, n + 3) for dtype in (ti.i32, ti.u64)]
+    outputs = [ti.ndarray(dtype, n + 5) for dtype in (ti.i32, ti.u64)]
+    flags, count = ti.ndarray(ti.i32, n + 2), ti.ndarray(ti.i32, 3)
+    source = [np.arange(n + 3, dtype=dtype) for dtype in (np.int32, np.uint64)]
+    source[1] += np.uint64(1 << 45)
+    for value, data in zip(values, source):
+        value.from_numpy(data)
+    plan = PreparedCompactPlan._from_columns(
+        tuple(
+            (view(value, slices=slice(1, n + 1)), view(output, slices=slice(1, n + 1)))
+            for value, output in zip(values, outputs)
+        ),
+        view(flags, slices=slice(1, n + 1)),
+        view(count, slices=slice(1, 2)),
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(plan.record())
+    graph = builder.compile()
+    for execute, shift in ((plan.run, 0), (lambda: graph.run({}), 1), (plan.run, 2)):
+        mask = (np.arange(n) + shift) % 3 != 0
+        flags.from_numpy(np.r_[0, mask, 0].astype(np.int32))
+        count.fill(99)
+        for output in outputs:
+            output.fill(91)
+        execute()
+        np.testing.assert_array_equal(count.to_numpy(), [99, mask.sum(), 99])
+        for output, data in zip(outputs, source):
+            expected = np.full(n + 5, 91, dtype=data.dtype)
+            expected[1 : 1 + mask.sum()] = data[1 : n + 1][mask]
+            np.testing.assert_array_equal(output.to_numpy(), expected)
+    graph.close()
+    plan.close()
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False, vulkan_sparse_experimental=False)
