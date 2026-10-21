@@ -19,6 +19,11 @@ def _snapshot(context, matrix, formats):
     if identity["backend_family"] != "cuda" or storage not in formats or identity["dtype"] != "f32":
         raise TaichiRuntimeError("AOT cuSPARSE recording requires f32 CUDA " + "/".join(formats).upper() + " storage")
     live_values = context.source_arrays.find(matrix)
+    public = context.public_resource(matrix)
+    if public is not None:
+        if live_values is not None:
+            raise ValueError("A public cuSPARSE matrix owns its values; source_bindings cannot replace them")
+        return public, storage
 
     def snapshot():
         if storage == "bsr":
@@ -79,7 +84,12 @@ def export_spmm(recording, context):
 
 def export_triangular(recording, context):
     recording.validate_graph_lifetime()
-    mutable_values = context.source_arrays.find(recording.matrix) is not None
+    # Public matrices keep consumer-owned values which may change between
+    # submissions. Their private triangular analysis must refresh each replay.
+    mutable_values = (
+        context.source_arrays.find(recording.matrix) is not None
+        or context.public_resource(recording.matrix) is not None
+    )
     matrix = snapshot_csr(context, recording.matrix)
     plan = NativeResourceBinding(
         recording,
