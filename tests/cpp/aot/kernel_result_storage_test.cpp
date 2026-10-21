@@ -78,6 +78,40 @@ void check_storage(Arch arch, Device &device) {
   EXPECT_FALSE(first.matches(arch, device, different));
 }
 
+void check_discarded_pool(Arch arch, Device &device) {
+  const auto kernel = result_kernel();
+  std::shared_ptr<NativeKernelResultStorage> retained;
+  {
+    NativeKernelResultPool sequential(arch, device), concurrent(arch, device);
+    retained = sequential.acquire(kernel);
+    EXPECT_FALSE(retained->observable());
+    // Logical dispatch count is not allocation count, and no scale cap is
+    // needed to share an identical compiled result layout in this region.
+    for (int i = 0; i < 65; ++i)
+      EXPECT_EQ(sequential.acquire(kernel), retained);
+    EXPECT_EQ(sequential.resources().size(), 1u);
+    EXPECT_NE(concurrent.acquire(kernel)->allocation(), retained->allocation());
+    auto changed = kernel;
+    changed.ret_size = 24;
+    EXPECT_NE(sequential.acquire(changed)->allocation(), retained->allocation());
+    changed = kernel;
+    changed.ret_type = TypeFactory::get_instance().get_struct_type(
+        {{PrimitiveType::i32, "0", 0}, {PrimitiveType::i64, "1", 8}},
+        "result-test")->as<StructType>();
+    EXPECT_NE(sequential.acquire(changed)->allocation(), retained->allocation());
+    EXPECT_EQ(sequential.resources().size(), 3u);
+    CallableBase empty;
+    EXPECT_EQ(sequential.acquire(empty), nullptr);
+    changed.ret_size = 1;
+    EXPECT_THROW(sequential.acquire(changed), std::invalid_argument);
+    EXPECT_EQ(sequential.resources().size(), 3u);
+  }
+  // The prepared owner can keep the allocation after cold analysis retires.
+  EXPECT_TRUE(retained->matches(arch, device, kernel));
+  std::array<std::uint8_t, 16> output{};
+  EXPECT_THROW(retained->read_completed(output.data(), output.size()), std::invalid_argument);
+}
+
 #ifdef TI_WITH_LLVM
 class FailingResultDevice : public cpu::CpuDevice {
  public:
@@ -112,6 +146,12 @@ class FailingResultDevice : public cpu::CpuDevice {
 TEST(KernelResultStorage, CpuIndependentFramesPreservePadding) {
   cpu::CpuDevice device;
   check_storage(host_arch(), device);
+}
+TEST(KernelResultStorage, CpuDiscardedScopeSharesOnlyMatchingLayouts) {
+  FailingResultDevice device;
+  device.fail_upload = true;  // Discarded scratch must not initialize/upload.
+  check_discarded_pool(host_arch(), device);
+  EXPECT_EQ(device.live, 0);
 }
 TEST(KernelResultStorage, InvalidLayoutsAndVoidDoNotAllocate) {
   FailingResultDevice device;
@@ -174,6 +214,14 @@ TEST(KernelResultStorage, CudaIndependentFramesPreservePadding) {
   auto lock = CUDAContext::get_instance().get_submission_lock_guard();
   check_storage(Arch::cuda, device);
 }
+TEST(KernelResultStorage, CudaDiscardedScopeSharesOnlyMatchingLayouts) {
+  if (!CUDADriver::get_instance_without_context().detected())
+    GTEST_SKIP();
+  cuda::CudaDevice device;
+  auto guard = CUDAContext::get_instance().get_guard();
+  auto lock = CUDAContext::get_instance().get_submission_lock_guard();
+  check_discarded_pool(Arch::cuda, device);
+}
 #endif
 #ifdef TI_WITH_VULKAN
 TEST(KernelResultStorage, VulkanIndependentFramesPreservePadding) {
@@ -181,6 +229,12 @@ TEST(KernelResultStorage, VulkanIndependentFramesPreservePadding) {
     GTEST_SKIP();
   vulkan::VulkanDeviceCreator creator({});
   check_storage(Arch::vulkan, *creator.device());
+}
+TEST(KernelResultStorage, VulkanDiscardedScopeSharesOnlyMatchingLayouts) {
+  if (!vulkan::is_vulkan_api_available())
+    GTEST_SKIP();
+  vulkan::VulkanDeviceCreator creator({});
+  check_discarded_pool(Arch::vulkan, *creator.device());
 }
 #endif
 }  // namespace

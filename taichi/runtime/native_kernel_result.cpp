@@ -10,7 +10,13 @@
 namespace taichi::lang {
 NativeKernelResultStorage::NativeKernelResultStorage(
     Arch arch, Device &device, const CallableBase &kernel)
-    : arch_(arch), device_(device), type_(kernel.ret_type), bytes_(kernel.ret_size) {
+    : NativeKernelResultStorage(arch, device, kernel, Use::host_result) {
+}
+
+NativeKernelResultStorage::NativeKernelResultStorage(
+    Arch arch, Device &device, const CallableBase &kernel, Use use)
+    : arch_(arch), device_(device), type_(kernel.ret_type), bytes_(kernel.ret_size),
+      use_(use) {
   const bool host = arch_is_cpu(arch) || arch == Arch::cuda;
   if (!host && arch != Arch::vulkan)
     throw std::invalid_argument("Kernel results require CPU, CUDA or Vulkan");
@@ -25,13 +31,17 @@ NativeKernelResultStorage::NativeKernelResultStorage(
   if (!bytes_)
     return;
   auto [allocation, status] = device.allocate_memory_unique(
-      {bytes_, false, arch == Arch::vulkan, false, AllocUsage::Storage});
+      {bytes_, false, arch == Arch::vulkan && observable(), false, AllocUsage::Storage});
   if (status != RhiResult::success)
     throw std::runtime_error("Unable to allocate kernel result storage");
   allocation_ = std::move(allocation);
   const auto range = resolve_native_storage_range(arch_, allocation_->get_ptr(), bytes_);
   if (host)
     address_ = range.memory_offset;
+  // Discarded results are write-only scratch. No observer can read their
+  // padding, so they need neither cold initialization nor an upload/wait.
+  if (!observable())
+    return;
   // Kernels write leaves, not padding. Initialize only on cold construction so
   // raw C result copies cannot reveal earlier allocation contents.
   const std::vector<std::uint8_t> zero(bytes_, 0);
@@ -50,6 +60,8 @@ bool NativeKernelResultStorage::matches(Arch arch, Device &device,
 
 void NativeKernelResultStorage::read_completed(void *destination,
                                                std::size_t bytes) const {
+  if (!observable())
+    throw std::invalid_argument("Discarded kernel results have no host consumer");
   if (bytes != bytes_ || (bytes && !destination))
     throw std::invalid_argument("Kernel result destination must match compiled size");
   if (!bytes)
@@ -68,5 +80,25 @@ void NativeKernelResultStorage::read_completed(void *destination,
   auto source = allocation_->get_ptr();
   if (device_.readback_data(&source, &destination, &bytes, 1) != RhiResult::success)
     throw std::runtime_error("Unable to read completed kernel result storage");
+}
+
+std::shared_ptr<NativeKernelResultStorage> NativeKernelResultPool::acquire(
+    const CallableBase &kernel) {
+  if (!kernel.ret_size)
+    return {};
+  auto &layouts = frames_[kernel.ret_type];
+  const auto found = layouts.find(kernel.ret_size);
+  if (found != layouts.end())
+    return found->second;
+  auto result = std::make_shared<NativeKernelResultStorage>(
+      arch_, device_, kernel, NativeKernelResultStorage::Use::discarded);
+  resources_.push_back(result);
+  try {
+    layouts.emplace(kernel.ret_size, result);
+  } catch (...) {
+    resources_.pop_back();
+    throw;
+  }
+  return result;
 }
 }  // namespace taichi::lang
