@@ -1,15 +1,14 @@
 """Cold adoption of a complete JIT recipe into an independent CUDA instance."""
 
 import ctypes
-from types import SimpleNamespace
 
 from taichi_forge._lib import core
-from taichi_forge.aot._graph_constraints import export_constraints
-from taichi_forge.aot._graph_export import _ExportContext, _lower_graph
-from taichi_forge.aot._graph_resource_bindings import ResourceInputBindings
-from taichi_forge.aot._graph_resource_sources import SourceResourceBindings
-from taichi_forge.aot._graph_source_bindings import SourceArrayBindings
-from taichi_forge.aot._graph_storage_bindings import RetainedArrayBindings
+from taichi_forge.graph._lowering import GraphLoweringContext, lower_frozen_graph
+from taichi_forge.graph._lowering_array_sources import SourceArrayBindings
+from taichi_forge.graph._lowering_arrays import RetainedArrayBindings
+from taichi_forge.graph._lowering_constraints import export_constraints
+from taichi_forge.graph._lowering_resource_bindings import ResourceInputBindings
+from taichi_forge.graph._lowering_resource_sources import SourceResourceBindings
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
 from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
@@ -44,6 +43,9 @@ def execution_domain(*, capacity=2, instance_capacity=64, priority=0):
 
 
 class _JitRetainedArrays(RetainedArrayBindings):
+    def declare_snapshot(self, *args, **kwargs):
+        return self.context.data_resource()
+
     def require(self, owner):
         if not isinstance(owner, (DenseNdarrayView, ScalarField, MatrixField)):
             return super().require(owner)
@@ -59,20 +61,11 @@ class _JitRetainedArrays(RetainedArrayBindings):
         return name
 
 
-class _JitContext(_ExportContext):
+class _JitContext(GraphLoweringContext):
     def __init__(self, graph):
         spec = graph._spec
-        # Only the export transaction's naming and binding machinery is used.
-        # This owner has no AOT builder, state snapshot or artifact path.
-        module = SimpleNamespace(
-            _arch=core.Arch.cuda,
-            _exported_kernels={},
-            _kernel_launch_abis={},
-            _fields={},
-            _array_fields=(),
-        )
         super().__init__(
-            module,
+            core.Arch.cuda,
             set(spec.runtime_arg_names) | set(spec.fixed_runtime_args),
             source_arrays=SourceArrayBindings(None, spec.fixed_runtime_args),
             source_resources=SourceResourceBindings(None, spec.fixed_runtime_args),
@@ -82,7 +75,13 @@ class _JitContext(_ExportContext):
         self.scalar_types = {}
         self.live_arrays = {}
         self.live_names = {}
-        self.retained_arrays = _JitRetainedArrays(module, self)
+        self.retained_arrays = _JitRetainedArrays(self)
+
+    def data_resource(self, *args, **kwargs):
+        raise TaichiRuntimeError("JIT preparation requires a live storage loan for retained Field views/provider data")
+
+    host_blob_resource = data_resource
+    provider_data_binding = data_resource
 
     def _kernel_entry(self, kernel, launch_abi, jit_source):
         if jit_source is None:
@@ -209,15 +208,7 @@ def prepare_graph(graph, arguments, *, execution_domain):
         arguments, version = graph._snapshot_binding_source(arguments)
         spec._validate_runtime_arg_names(arguments, "Graph.prepare")
         context = _JitContext(graph)
-        _lower_graph(context, graph)
-        if (
-            context.retained_arrays.fields
-            or context._provider_data
-            or context.data_payloads
-        ):
-            raise TaichiRuntimeError(
-                "JIT preparation requires a live storage loan for retained Field views/provider data"
-            )
+        lower_frozen_graph(context, graph)
         plan = ExecutionPlan(
             context.operations,
             initialization=context.initialization or None,

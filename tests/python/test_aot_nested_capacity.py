@@ -126,7 +126,7 @@ def _check_nested_capacity(budget, regions, lowering, route, tmp_path, *, inner_
         builder.dispatch(publish, outer, total, public["terminal"])
         definition = builder.freeze()
         if route in ("device_update", "masked") and not explicit_route:
-            from taichi_forge.aot._graph_export import _cuda_nested_while
+            from taichi_forge.graph._lowering import _cuda_nested_while
 
             source = definition._runtime_spec.structured_control_nodes[0]
             assert source._cuda_nested_submission_options["execution_route"] == "auto"

@@ -2493,7 +2493,7 @@ class _DeviceExtentGraphContract:
     graph_publish_time_binding_validation_stable = True
 
     def _export_aot_bindings(self, context):
-        from taichi_forge.aot._bounded_export import extent_contract
+        from taichi_forge.graph._lowering_bounded import extent_contract
 
         extent_contract(self, context)
 
@@ -2563,7 +2563,7 @@ class _OrderedOffsetsGraphContract:
     graph_publish_time_binding_validation_stable = True
 
     def _export_aot_bindings(self, context):
-        from taichi_forge.aot._bounded_export import offsets_contract
+        from taichi_forge.graph._lowering_bounded import offsets_contract
 
         offsets_contract(self, context)
 

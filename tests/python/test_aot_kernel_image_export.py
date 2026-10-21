@@ -237,7 +237,7 @@ def test_aot_kernel_image_graph_export(tmp_path, recipe):
     "case", ["private", "duplicate", "seed", "nul", "unused", "unsupported"]
 )
 def test_public_resource_export_binding_boundaries(case):
-    from taichi_forge.aot._graph_resource_bindings import ResourceInputBindings
+    from taichi_forge.graph._lowering_resource_bindings import ResourceInputBindings
 
     first, second = object(), object()
     with pytest.raises((ValueError, ti.TaichiRuntimeError)):

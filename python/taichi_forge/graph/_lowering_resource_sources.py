@@ -7,7 +7,7 @@ from taichi_forge.hardware._ray import InstanceTLAS
 from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.exception import TaichiRuntimeError
 
-from ._graph_image_bindings import SourceImageBindings
+from taichi_forge.graph._lowering_image_sources import SourceImageBindings
 
 
 class SourceAccelerationStructures:

@@ -11,7 +11,7 @@ import zipfile
 import numpy as np
 import pytest
 import taichi_forge as ti
-from taichi_forge.aot._graph_resource_bindings import ResourceInputBindings
+from taichi_forge.graph._lowering_resource_bindings import ResourceInputBindings
 from tests import test_utils
 from tests.python.aot_optix_probe import VERTICES
 

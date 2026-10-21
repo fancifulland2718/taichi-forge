@@ -252,7 +252,7 @@ def test_optix_alpha_recording_export(tmp_path):
                     jit_graph.close()
                     texture._delete_runtime_texture()
                     with pytest.raises(ti.TaichiRuntimeError, match="retired"):
-                        from taichi_forge.aot._graph_image_bindings import (
+                        from taichi_forge.graph._lowering_image_sources import (
                             SourceImageBindings,
                         )
 
@@ -286,7 +286,7 @@ def test_optix_alpha_recording_export(tmp_path):
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_image_source_metadata_validates_kernel_texture_export():
-    from taichi_forge.aot._graph_image_bindings import SourceImageBindings
+    from taichi_forge.graph._lowering_image_sources import SourceImageBindings
 
     @ti.kernel
     def fetch(
