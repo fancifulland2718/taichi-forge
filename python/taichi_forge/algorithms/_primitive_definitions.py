@@ -14,6 +14,48 @@ METRIC_OPS = {"max_abs": 0, "max_abs_delta": 1}
 METRIC_VALUE_TYPE = {f32: 1, f64: 5}
 
 
+@dataclass(frozen=True)
+class BucketBuilderDefinition:
+    size: int
+    num_bins: int
+    dtype: object
+    element_shape: tuple = ()
+    raw_payload: bool = False
+
+    def __post_init__(self):
+        object.__setattr__(self, "element_shape", tuple(self.element_shape))
+
+    @property
+    def value_type(self):
+        # The existing native driver receives the actual raw element byte size
+        # from the ndarray. Its scalar tag remains i32 for opaque payloads.
+        return 0 if self.raw_payload else NATIVE_VALUE_TYPE[self.dtype]
+
+    def bind(self, keys, values, offsets, output, *, cpu_max_threads=None, vulkan_policy=None):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
+        if self.raw_payload:
+            raise ValueError("AOT bucket requires a packed numeric payload")
+        parameters = dict(
+            size=self.size, num_bins=self.num_bins, dtype=str(self.dtype), element_shape=self.element_shape
+        )
+        if cpu_max_threads is not None:
+            parameters["cpu_max_threads"] = cpu_max_threads
+        if vulkan_policy is not None:
+            parameters["vulkan_policy"] = vulkan_policy
+        return NativeOperationBinding(
+            NativeDefinition("builtin", "bucket_builder", parameters),
+            (
+                NativeArrayBinding("keys", keys, GraphAccess.READ),
+                NativeArrayBinding("values", values, GraphAccess.READ),
+                NativeArrayBinding("offsets", offsets, GraphAccess.WRITE),
+                # Invalid keys leave an unused tail in output unchanged.
+                NativeArrayBinding("output", output, GraphAccess.READ_WRITE),
+            ),
+        )
+
+
 def _diagnostic_binding(operation, parameters, values, output, other, *, cpu_max_threads, vulkan_items_per_group):
     from taichi_forge.graph._ir import GraphAccess
     from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding

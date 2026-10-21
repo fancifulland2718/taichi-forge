@@ -7,6 +7,7 @@ from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
+from ._primitive_definitions import BucketBuilderDefinition
 
 def _producer_setting(suffix, default):
     name = "TI_VULKAN_BUCKET_BUILDER_" + suffix
@@ -118,33 +119,19 @@ def export_bucket_builder(call, context):
         raise TaichiRuntimeError(
             "AOT bucket cannot reconstruct the selected cached strategy"
         )
-    parameters = dict(
-        size=n,
-        num_bins=bins,
-        dtype=str(source.scalar_type),
-        element_shape=list(source.element_shape),
-    )
+    definition = BucketBuilderDefinition(n, bins, source.scalar_type, source.element_shape)
+    if call.plan is not None:
+        if call.plan.definition != definition:
+            raise TaichiRuntimeError("AOT bucket definition differs from the selected native call")
+        definition = call.plan.definition
+    policy = {}
     if arch in (core.Arch.x64, core.Arch.arm64):
-        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
+        policy["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
     elif arch == core.Arch.vulkan:
-        parameters["vulkan_policy"] = dict(
+        policy["vulkan_policy"] = dict(
             private_enabled=_producer_setting("PRIVATE", 1) != 0,
             private_min_items=max(0, _producer_setting("PRIVATE_MIN_N", 65536)),
             private_max_bins=max(0, _producer_setting("PRIVATE_MAX_BINS", 1024)),
             private_max_bytes=max(0, _producer_setting("PRIVATE_MAX_BYTES", 4 << 20)),
         )
-    context.operations.append(
-        dict(
-            kind="native",
-            provider="builtin",
-            operation="bucket_builder",
-            version=1,
-            parameters=parameters,
-            bindings={
-                name: context.retained_arrays.require(value)
-                for name, value in zip(
-                    ("keys", "values", "offsets", "output"), call.args
-                )
-            },
-        )
-    )
+    definition.bind(keys, values, offsets, output, **policy).lower(context)

@@ -114,6 +114,9 @@ def test_bucket_native_registry_runtime_only_and_borrowed(tmp_path):
     arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, cpu_max_num_threads=4
 )
 def test_bucket_sequence_cold_and_cached_export(tmp_path, monkeypatch):
+    from taichi_forge.algorithms._primitive_definitions import BucketBuilderDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     for key, value in (
         ("PRIVATE", 1),
         ("PRIVATE_MIN_N", 0),
@@ -151,16 +154,35 @@ def test_bucket_sequence_cold_and_cached_export(tmp_path, monkeypatch):
         builder.append_native(sequence)
         graph = builder.compile()
         name = f"sequence_{n}"
-        plan = module.add_execution_plan(
-            name,
-            graph,
-            source_bindings=dict(
-                keys=keys, values=values, offsets=offsets, output=output
-            ),
-        )
+        bound = []
+        original_bind = BucketBuilderDefinition.bind
+
+        def observe_binding(definition, *args, **kwargs):
+            bound.append(definition)
+            return original_bind(definition, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(BucketBuilderDefinition, "bind", observe_binding)
+            plan = module.add_execution_plan(
+                name, graph, source_bindings=dict(keys=keys, values=values, offsets=offsets, output=output)
+            )
+        assert len(bound) == 1
+        if cached:
+            assert bound[0] is sequence._calls[0].plan.definition
         assert before == tuple(
             a.to_numpy().tobytes() for a in (keys, values, offsets, output)
         )
+        if cached:
+
+            def reject_conversion(*args, **kwargs):
+                raise AssertionError("warm bucket replay must not rebuild its native description")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(BucketBuilderDefinition, "bind", reject_conversion)
+                patch.setattr(NativeOperationBinding, "lower", reject_conversion)
+                graph.run({})
+                graph.run({})
+            assert before == tuple(a.to_numpy().tobytes() for a in (keys, values, offsets, output))
         if not cached:
             workspace = sequence._calls[0].workspace
             assert sequence._calls[0].plan is None

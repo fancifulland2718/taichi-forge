@@ -188,6 +188,14 @@ def test_struct_ndarray_payload_cuda_native_primitives():
 
 
 @test_utils.test(arch=[ti.cuda])
+def test_struct_ndarray_payload_cuda_driver_bucket():
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_bucket_builder_available():
+        pytest.skip("CUDA Driver raw-payload bucket builder is unavailable.")
+    _run_struct_bucket_builder("cuda_device")
+
+
+@test_utils.test(arch=[ti.cuda])
 def test_struct_ndarray_payload_cuda_driver_sort():
     prog = impl.get_runtime().prog
     if not (

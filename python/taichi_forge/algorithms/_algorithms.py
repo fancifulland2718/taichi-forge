@@ -34,6 +34,8 @@ from taichi_forge.algorithms._primitive_definitions import (
     REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
     ScanDefinition,
     HistogramDefinition,
+    BucketBuilderDefinition,
+    NATIVE_VALUE_TYPE as _BUCKET_BUILDER_VALUE_TYPE,
     CheckDefinition,
     MetricDefinition,
     NATIVE_VALUE_TYPE as _CHECK_VALUE_TYPE,
@@ -197,7 +199,6 @@ _SCATTER_ADD_FIELD_DTYPES = (i32, f32)
 _SUPPORTED_BUCKET_BUILDER_METHODS = supported_primitive_methods("bucket_builder")
 _BUCKET_BUILDER_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _BUCKET_BUILDER_FIELD_DTYPES = (i32,)
-_BUCKET_BUILDER_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_GROUPED_REDUCE_METHODS = supported_primitive_methods("grouped_reduce")
 _GROUPED_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _GROUPED_REDUCE_FIELD_DTYPES = (i32,)
@@ -7678,6 +7679,7 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         n,
         num_bins,
         prog,
+        definition,
     ):
         backend = self._native_bucket_builder_backend_for_current_arch()
         if backend is None:
@@ -7695,6 +7697,7 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_bucket_builder_plan = plan
 
@@ -15374,6 +15377,10 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
         keys, values, offsets, output, value_type, n, num_bins
     ):
         return True
+    definition = BucketBuilderDefinition(
+        n, num_bins, values.dtype, getattr(values, "element_shape", ()), _is_opaque_raw_payload(values)
+    )
+    value_type, n, num_bins = definition.value_type, definition.size, definition.num_bins
     if dense_field_mode:
         value_size = _dtype_nbytes(values.dtype)
         if not (
@@ -15426,6 +15433,7 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
         n,
         num_bins,
         prog,
+        definition,
     )
     return True
 
@@ -15460,6 +15468,10 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
         keys, values, offsets, output, value_type, n, num_bins
     ):
         return True
+    definition = BucketBuilderDefinition(
+        n, num_bins, values.dtype, getattr(values, "element_shape", ()), _is_opaque_raw_payload(values)
+    )
+    value_type, n, num_bins = definition.value_type, definition.size, definition.num_bins
     if dense_field_mode:
         value_size = _dtype_nbytes(values.dtype)
         if not (
@@ -15510,6 +15522,7 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
         n,
         num_bins,
         prog,
+        definition,
     )
     return True
 
@@ -15540,6 +15553,10 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
         keys, values, offsets, output, value_type, n, num_bins
     ):
         return True
+    definition = BucketBuilderDefinition(
+        n, num_bins, values.dtype, getattr(values, "element_shape", ()), _is_opaque_raw_payload(values)
+    )
+    value_type, n, num_bins = definition.value_type, definition.size, definition.num_bins
     if dense_field_mode:
         value_size = _dtype_nbytes(values.dtype)
         if not (
@@ -15591,6 +15608,7 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
         n,
         num_bins,
         prog,
+        definition,
     )
     return True
 
