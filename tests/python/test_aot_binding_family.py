@@ -14,9 +14,17 @@ from tests import test_utils
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_aot_binding_family_forward_reverse_and_retirement(tmp_path):
     @ti.kernel
-    def advance(state: ti.types.ndarray(ti.f32, ndim=1)):
+    def advance(state: ti.types.ndarray(ti.f32, ndim=1)) -> ti.f32:
         for i in range(17):
             state[i] += 1
+        return state[0]
+
+    @ti.kernel
+    def initialize(seed: ti.types.ndarray(ti.f32, ndim=1),
+                   state: ti.types.ndarray(ti.f32, ndim=1)) -> ti.f32:
+        for i in range(17):
+            state[i] = seed[i]
+        return state[0]
 
     @ti.kernel
     def forward(
@@ -29,6 +37,7 @@ def test_aot_binding_family_forward_reverse_and_retirement(tmp_path):
 
     module = ti.aot.Module()
     module.add_kernel(advance)
+    module.add_kernel(initialize)
     module.add_kernel(forward)
     module.add_kernel(forward.grad, name="reverse")
     plan = ti.aot.ExecutionPlan(
@@ -39,7 +48,7 @@ def test_aot_binding_family_forward_reverse_and_retirement(tmp_path):
             dict(kind="kernel", entry="forward", arguments=["x_view", "state", "y"]),
             dict(kind="kernel", entry="reverse", arguments=["x_view", "state", "y"]),
         ],
-        initialization=[dict(kind="copy", source="seed", destination="state")],
+        initialization=[dict(kind="kernel", entry="initialize", arguments=["seed", "state"])],
         resources=[
             dict(kind="ndarray", name="state", dtype="f32", shape=[dict(array="seed", axis=0)]),
             dict(kind="ndarray", name="dy", dtype="f32", shape=[17]),

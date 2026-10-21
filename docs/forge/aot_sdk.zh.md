@@ -1564,8 +1564,15 @@ CUDA debug 的 Graph 准备不在 capture 内同步 stream，执行后的断言�
 
 普通 CGraph 丢弃各 kernel 的返回值，并返回 `None`。CUDA/Vulkan 省去无消费者的
 host 结果回读，保留编译后的设备结果存储、数组写回及执行依赖。外部 host 数组的
-写回仍在对应 launch 返回前完成。prepared CGraph/ExecutionPlan 尚不接纳含返回值的
-kernel；上述结果接口仅用于直接 kernel 准备。
+写回仍在对应 launch 返回前完成。prepared CGraph/ExecutionPlan 也接纳含返回值的
+dispatch，包括初始化与控制区域；丢弃数值，保留数组副作用与显式梯度绑定，
+`result()` 仍仅用于直接 kernel。
+准备时，相同编译结果布局在顺序区域内共享只写暂存；CUDA 并行分支及独立准备对象
+分别持有结果帧。丢弃帧无需零初始化、主机可读分配或读回，存活至在途工作退休。
+去重后的字节数计入 `info["native_resource_bytes"]`，不增加代码载荷或持久计划格式。
+Windows CPU/CUDA/Vulkan 已验证普通/固定 CGraph、显式计划、零轮/早停/预算耗尽、
+嵌套控制、真实后段反向与退休；CUDA 另覆盖并行分支、绑定族初始化和选定执行域，
+Vulkan 包含同步验证。
 
 C 消费者先用 `ti_get_kernel_return_info_ext` 查询 `TiKernelReturnInfo`，再给
 `ti_launch_kernel_with_result_ext` 提供恰好 `buffer_size` 字节的 host 缓冲。
@@ -1580,7 +1587,7 @@ prepared kernel 使用同一布局，调用 `ti_read_prepared_kernel_result_ext`
 
 对应 C API 为 `ti_prepare_kernel_ext` / `ti_prepare_compute_graph_ext`，使用
 `TiNdArrayBinding` / `TiNamedNdArrayBinding`，随后调用 `ti_launch_prepared_ext`
-和 `ti_destroy_prepared_ext`。这些入口覆盖直接 kernel 与无返回值的 Graph 批次，
+和 `ti_destroy_prepared_ext`。这些入口覆盖直接 kernel 与丢弃各 dispatch 返回值的 Graph 批次，
 CPU/CUDA 稀疏树的版本与固定执行合同见下文资源章节；其他资源通过对应的重建合同
 接入。产物不保存设备 Graph 句柄，消费者加载代码后再准备。
 

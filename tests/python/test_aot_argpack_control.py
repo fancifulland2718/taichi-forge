@@ -23,22 +23,26 @@ def test_aot_argpack_control_and_suffix_adjoint(tmp_path):
     @ti.kernel
     def condition(p: pack, count: ti.types.ndarray(ti.i32, 1),
                   predicate: ti.types.ndarray(ti.i32, 1),
-                  limits: ti.types.ndarray(ti.i32, 1), slot: ti.i32):
+                  limits: ti.types.ndarray(ti.i32, 1), slot: ti.i32) -> ti.i32:
         predicate[0] = int(count[0] < limits[slot] and p.gain > 0)
+        return count[0]
 
     @ti.kernel
-    def advance(p: pack, count: ti.types.ndarray(ti.i32, 1)):
+    def advance(p: pack, count: ti.types.ndarray(ti.i32, 1)) -> ti.i32:
         count[0] += 1
         for i in p.values:
             p.values[i] += p.child.step
+        return count[0]
 
     @ti.kernel
-    def zero(count: ti.types.ndarray(ti.i32, 1)):
+    def zero(count: ti.types.ndarray(ti.i32, 1)) -> ti.i32:
         count[0] = 0
+        return count[0]
 
     @ti.kernel
-    def increment(count: ti.types.ndarray(ti.i32, 1)):
+    def increment(count: ti.types.ndarray(ti.i32, 1)) -> ti.i32:
         count[0] += 1
+        return count[0]
 
     @ti.kernel
     def energy(p: pack, loss: ti.types.ndarray(ti.f32, 1, needs_grad=True)):

@@ -41,5 +41,16 @@ def export(directory):
     module = ti.aot.Module()
     module.add_kernel(advance)
     module.add_kernel(read_energy)
+    module.add_kernel(publish)
+    module.add_kernel(energy)
+    module.add_kernel(energy.grad, name="backward")
     module.add_graph("step", builder.compile())
+    module.add_execution_plan("step", ti.aot.ExecutionPlan([
+        dict(kind="kernel", entry="advance", arguments=["state", "amount"]),
+        dict(kind="kernel", entry="advance", arguments=["state", "amount"]),
+        dict(kind="kernel", entry="publish", arguments=["state"]),
+        dict(kind="kernel", entry="energy", arguments=["x", "loss"]),
+        dict(kind="kernel", entry="read_energy", arguments=["loss"]),
+        dict(kind="kernel", entry="backward", arguments=["x", "loss"]),
+    ], gradients=dict(x="dx", loss="dloss")))
     module.save(str(directory))

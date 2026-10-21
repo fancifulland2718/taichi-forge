@@ -3310,7 +3310,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     begin_timing(operation_index, compute_timing_stream);
     auto &pd = prepared[kernel_index++];
     record_graph_argpack_reads(pd, commands.get());
-    if (const auto &result = pd.host_ctx->prepared_result) {
+    if (const auto &result = pd.host_ctx->prepared_result;
+        result && result->observable()) {
       // Cold initialization, a preceding replay or explicit readback may be
       // the previous access. Record a reusable transition, not a host wait.
       commands->buffer_transition(
@@ -3441,7 +3442,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
       commands->memory_barrier();
       slot.resource_sets.push_back(std::move(resources));
     }
-    if (const auto &result = pd.host_ctx->prepared_result) {
+    if (const auto &result = pd.host_ctx->prepared_result;
+        result && result->observable()) {
       commands->buffer_transition(
           result->allocation().get_ptr(), result->device_payload_bytes(),
           {BufferBarrierStage::Compute, BufferBarrierAccess::ShaderWrite,
@@ -3587,11 +3589,15 @@ GfxRuntime::prepare_fixed_control_graph(
   auto registration = register_graph_replay(1);
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   FixedSparseReplayResources sparse;
+  std::unordered_set<const NativeKernelResultStorage *> retained_results;
   for (const auto &dispatch : dispatches) {
     const auto found = ti_kernels_.find(dispatch.handle.get_launch_id());
     TI_ERROR_IF(found == ti_kernels_.end(),
                 "Prepared Vulkan control requires registered kernels");
     sparse.include(*found->second);
+    if (dispatch.host_ctx && dispatch.host_ctx->prepared_result &&
+        retained_results.insert(dispatch.host_ctx->prepared_result.get()).second)
+      owners.push_back(dispatch.host_ctx->prepared_result);
   }
   prepare_fixed_sparse_resources(sparse, owners);
   for (const int tree_id : snode_tree_ids) {
@@ -3966,9 +3972,15 @@ bool GfxRuntime::launch_graph_impl(
       return reject();
     }
     auto *ti_kernel = kernel_iter->second.get();
-    if (ti_kernel->get_ret_buffer_size() != 0 ||
-        (!prepare_only && !ti_kernel->runtime_argpack_args().empty())) {
+    if (!prepare_only && !ti_kernel->runtime_argpack_args().empty()) {
       return reject();
+    }
+    if (ti_kernel->get_ret_buffer_size()) {
+      const auto &result = dispatch.host_ctx->prepared_result;
+      if (!prepare_only || !result || result->observable() ||
+          &result->device() != device_ ||
+          result->device_payload_bytes() != ti_kernel->get_ret_buffer_size())
+        return reject();
     }
     // FixedExecution qualifies and retains independent immutable pack owners.
     // Ordinary mutable JIT Graph packs still need their own generation contract.
@@ -4204,7 +4216,17 @@ bool GfxRuntime::launch_graph_impl(
             push_graph_allocation_key(structure_key, allocation);
             break;
           }
-          case CompiledTaichiKernel::BufferBindingKind::RetsRw:
+          case CompiledTaichiKernel::BufferBindingKind::RetsRw: {
+            const auto allocation = dispatch.host_ctx->prepared_result->allocation();
+            key.push_back(0xB104u);
+            key.push_back(static_cast<uint64_t>(bind.binding));
+            push_graph_allocation_key(key, allocation);
+            // Hazard barriers name this allocation, not just its descriptor.
+            structure_key.push_back(0xB104u);
+            structure_key.push_back(static_cast<uint64_t>(bind.binding));
+            push_graph_allocation_key(structure_key, allocation);
+            break;
+          }
           case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
             return reject();
         }
@@ -5270,14 +5292,15 @@ bool GfxRuntime::launch_graph_impl(
             state.effect_reads += may_read ? 1 : 0;
             state.effect_writes += may_write ? 1 : 0;
           }
-          if (bind.buffer.type == BufferType::Rets ||
-              bind.buffer.type == BufferType::NodeAllocatorPool) {
+          if (bind.buffer.type == BufferType::NodeAllocatorPool) {
             task.global_read = task.global_read || may_read;
             task.global_write = task.global_write || may_write;
             continue;
           }
           DeviceAllocation allocation = kDeviceNullAllocation;
-          if (bind.buffer.type == BufferType::ExtArr) {
+          if (bind.buffer.type == BufferType::Rets) {
+            allocation = pd.host_ctx->prepared_result->allocation();
+          } else if (bind.buffer.type == BufferType::ExtArr) {
             allocation = pd.any_arrays->at(bind.buffer.root_id);
           } else {
             DeviceAllocation *resolved =

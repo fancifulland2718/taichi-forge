@@ -26,7 +26,7 @@ def read(value, code):
     return data.tolist()
 
 
-def main(mode, arch, path):
+def main(mode, arch, path, execution):
     if mode == "standalone":
         sys.meta_path.insert(0, NoFrontend())
         from taichi_forge_runtime import aot
@@ -45,6 +45,20 @@ def main(mode, arch, path):
 
         ti.init(arch=getattr(ti, arch), offline_cache=False, cpu_max_num_threads=4)
         runtime = ti.aot.borrow_runtime()
+    def bind(module, arguments, gradients):
+        if execution == "plan":
+            values = dict(arguments, amount=aot.Scalar("i32", arguments["amount"]),
+                          dx=gradients["x"], dloss=gradients["loss"])
+            bound = module.prepare_execution("step", values)
+        else:
+            bound = module.graph("step").bind(arguments, gradients=gradients)
+            if execution == "prepared":
+                bound = bound.prepare()
+        if execution != "ordinary":
+            # Two advances share the vector frame; read_energy has one scalar.
+            assert bound.info["native_resource_bytes"] == 16, bound.info
+        return bound
+
     with runtime:
         module = runtime.load_module(path)
         sibling = runtime.load_module(path)
@@ -63,8 +77,7 @@ def main(mode, arch, path):
         del incomplete["amount"]
         reject(aot.AotError, lambda: graph(incomplete, gradients=gradients))
         assert read(state, "i") == [0, 0]
-        step = graph.bind(arguments, gradients=gradients)
-        reject(aot.AotError, step.prepare)
+        step = bind(module, arguments, gradients)
         for _ in range(4):
             assert step() is None
         assert read(state, "i") == [24, 24]
@@ -72,9 +85,7 @@ def main(mode, arch, path):
         assert read(dx, "f") == [8, 16, -24, 4]
         assert module.kernel("read_energy")(loss, gradients={0: dloss}) == 57
         assert module.kernel("advance")(state, -2) == (22, -2, 2)
-        alternate = sibling.graph("step").bind(
-            dict(arguments, amount=-2), gradients=gradients
-        )
+        alternate = bind(sibling, dict(arguments, amount=-2), gradients)
         alternate()
         assert read(state, "i") == [18, 18]
         # Close immediately after asynchronous dispatches; storage and code must
@@ -97,15 +108,15 @@ def main(mode, arch, path):
         loss, dloss = late.ndarray("f32", 1), late.ndarray("f32", 1)
         for value, size in ((state, 8), (x, 16), (dx, 16), (loss, 4), (dloss, 4)):
             value.write(bytes(size))
-        active = late_module.graph("step").bind(
+        active = bind(late_module,
             dict(state=state, amount=1, x=x, loss=loss),
-            gradients=dict(x=dx, loss=dloss),
+            dict(x=dx, loss=dloss),
         )
         active()
         ti.reset()
         reject(RuntimeError, active)
         late.close()
-    print(mode, arch, "discarded returns passed")
+    print(mode, arch, execution, "discarded returns passed")
 
 
 if __name__ == "__main__":

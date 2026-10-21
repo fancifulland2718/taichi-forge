@@ -38,8 +38,11 @@ lifetimes. The entries below describe the changes.
   owns an independent result frame; `run/submit` stay asynchronous and `result()`
   explicitly waits for the latest successful submission. Older tickets do not
   snapshot values. Composite decoding reuses compiled layouts; void preparations
-  add no result allocation or readback. Returning dispatches in prepared
-  CGraph/ExecutionPlan entries remain unsupported.
+  add no result allocation or readback. Prepared CGraph/ExecutionPlan dispatches
+  discard returns using shared scratch per sequential result layout, with
+  separate storage for concurrent CUDA branches and independent bindings.
+  Initialization, conditional/nested control, explicit gradients and in-flight
+  retirement are qualified on Windows CPU/CUDA/Vulkan without per-dispatch readback.
 
 - CUDA JIT and AOT consumers prepare the internal runtime by functional group:
   core entries at initialization, sparse allocation and statistics on first

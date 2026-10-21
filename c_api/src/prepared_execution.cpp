@@ -168,6 +168,71 @@ struct PreparedExecution {
     plan_arguments.clear();
   }
 
+  void bind_discarded_results(
+      Runtime &runtime,
+      const std::vector<FixedExecution::Operation> &operations,
+      bool replay) {
+    using Operations = std::vector<FixedExecution::Operation>;
+    std::unordered_set<const void *> active;
+    std::unordered_map<LaunchContextBuilder *, NativeKernelResultPool *> scopes;
+    // Keep scope identities alive until the complete walk is validated.
+    std::vector<std::unique_ptr<NativeKernelResultPool>> pools;
+    auto make_pool = [&]() -> NativeKernelResultPool & {
+      pools.push_back(std::make_unique<NativeKernelResultPool>(runtime.arch,
+                                                              runtime.get()));
+      return *pools.back();
+    };
+    std::function<void(const Operations &, NativeKernelResultPool &)> visit;
+    visit = [&](const Operations &steps, NativeKernelResultPool &pool) {
+      for (const auto &step : steps) {
+        if (const auto *dispatch = std::get_if<FixedExecution::Dispatch>(&step)) {
+          if (!dispatch->kernel || !dispatch->context)
+            throw MemoryBindingError("Prepared dispatch is missing its kernel or context");
+          if (!dispatch->kernel->ret_size)
+            continue;
+          auto [scope, inserted] = scopes.emplace(dispatch->context, &pool);
+          if (!inserted && scope->second != &pool)
+            throw MemoryBindingError("Concurrent dispatches require distinct argument contexts");
+          // Direct kernel preparations already own an observable frame.
+          if (!dispatch->context->prepared_result)
+            dispatch->context->prepared_result = pool.acquire(*dispatch->kernel);
+          continue;
+        }
+        auto enter = [&](const auto &node) {
+          if (!node || !active.insert(node.get()).second)
+            throw MemoryBindingError("Invalid prepared control structure");
+        };
+        if (const auto *branch = std::get_if<
+                std::shared_ptr<const FixedExecution::Branch>>(&step)) {
+          enter(*branch);
+          visit((*branch)->condition, pool);
+          for (const auto &body : (*branch)->bodies)
+            visit(body, pool);
+          active.erase(branch->get());
+        } else if (const auto *loop = std::get_if<
+                       std::shared_ptr<const FixedExecution::While>>(&step)) {
+          enter(*loop);
+          visit((*loop)->condition, pool);
+          visit((*loop)->body, pool);
+          active.erase(loop->get());
+        } else if (const auto *parallel = std::get_if<
+                       std::shared_ptr<const FixedExecution::Parallel>>(&step)) {
+          enter(*parallel);
+          for (const auto &body : (*parallel)->branches)
+            visit(body, make_pool());
+          active.erase(parallel->get());
+        }
+      }
+    };
+    visit(operations, make_pool());
+    for (const auto &pool : pools)
+      for (const auto &result : pool->resources()) {
+        native_resources.push_back(result);
+        if (replay)
+          replay_resources.insert(result.get());
+      }
+  }
+
   void prepare_operations(
       Runtime &runtime,
       const std::vector<FixedExecution::Operation> &operations,
@@ -180,6 +245,11 @@ struct PreparedExecution {
       gfx_runtime = &gfx->get_gfx_runtime();
 #endif
     try {
+      // Cold binding precedes capture of domain/family operands. Initialization
+      // has a separate lifetime; later family members do not replay it.
+      bind_discarded_results(runtime, operations, true);
+      if ((!family || !family->prepared) && !initializers.empty())
+        bind_discarded_results(runtime, initializers, false);
       FixedExecution::CudaExecutionBinding selected{domain, {}};
       if (domain) {
         struct DomainOperands final : RuntimeCompletionResources {

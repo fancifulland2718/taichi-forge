@@ -34,7 +34,9 @@
 - CPU/CUDA/Vulkan 直接 AOT kernel 的固定准备支持返回值。每个绑定拥有独立结果帧，
   `run/submit` 保持异步，`result()` 显式等待并读取最近一次成功提交；旧 ticket 不保存
   数值快照。复用编译布局解码复合值，无返回值路径不增加结果分配或读回。
-  prepared CGraph/ExecutionPlan 的含返回值 dispatch 尚未接通。
+  prepared CGraph/ExecutionPlan 丢弃各 dispatch 返回值，相同布局在顺序区域内共享
+  暂存，CUDA 并行分支与独立绑定使用不同存储。Windows CPU/CUDA/Vulkan 已验证
+  初始化、条件/嵌套控制、显式梯度和在途退休，不增加逐 dispatch 读回。
 
 - CUDA JIT/AOT 消费者按功能组准备内部 runtime：初始化准备基础入口，稀疏分配
   和统计在首次使用时准备。各组共享既有执行器状态和模块所有权，用户 kernel

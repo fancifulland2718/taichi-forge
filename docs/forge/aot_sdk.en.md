@@ -2005,9 +2005,20 @@ capture; assertions from the executed graph are still reported on wait.
 Ordinary CGraph dispatches discard kernel return values and return `None`.
 CUDA/Vulkan omit the unused host result readback while retaining the compiled
 device result storage, array writes and execution dependencies. Host external
-array writes still complete before their launch returns. Prepared CGraph and
-ExecutionPlan entries still require kernels without returns; the result API
-above applies only to direct kernel preparation.
+array writes still complete before their launch returns. Prepared CGraphs and
+ExecutionPlans also accept returning dispatches, including their initialization
+and control regions. They discard those values and preserve array effects and
+explicit gradient bindings; `result()` remains a direct-kernel interface.
+During preparation, identical compiled result layouts share write-only scratch
+within a sequential region. Concurrent CUDA branches and independent prepared
+bindings have separate frames. Discarded frames require no zero initialization,
+host-visible allocation or readback, and remain owned through in-flight retirement.
+Their unique byte sizes contribute to `info["native_resource_bytes"]`. No new
+code payload or serialized execution-plan format is required.
+Windows CPU/CUDA/Vulkan checks cover ordinary/prepared CGraphs, explicit plans,
+zero/early/budgeted and nested control, actual suffix adjoints and retirement.
+CUDA additionally qualifies parallel branches, binding-family initialization
+and selected execution domains; Vulkan checks include synchronization validation.
 
 C consumers query `ti_get_kernel_return_info_ext` for `TiKernelReturnInfo` and
 call `ti_launch_kernel_with_result_ext` with exactly `buffer_size` host bytes.
