@@ -9,6 +9,15 @@ Callable::Callable() = default;
 
 Callable::~Callable() = default;
 
+void Callable::record_argument_origin(const std::vector<int> &physical,
+                                      const std::vector<int> &logical,
+                                      const std::string &name,
+                                      const std::string &kind) {
+  if (!argument_origins)
+    argument_origins.emplace();
+  argument_origins->push_back({logical, physical, name, kind});
+}
+
 std::vector<int> Callable::insert_scalar_param(const DataType &dt,
                                                const std::string &name) {
   auto p = Parameter(dt->get_compute_type(), /*is_array=*/false);

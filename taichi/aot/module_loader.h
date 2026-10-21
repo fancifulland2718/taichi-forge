@@ -16,6 +16,7 @@
 #include "taichi/aot/root_storage.h"
 #include "taichi/aot/struct_layout.h"
 #include "taichi/aot/value_parameters.h"
+#include "taichi/aot/argument_origins.h"
 
 namespace taichi::io {
 struct VirtualDir;
@@ -153,6 +154,8 @@ class TI_DLL_EXPORT Module {
   bool ndarray_layouts_loaded_{false};
   NamedValueParameters value_parameters_;
   bool value_parameters_loaded_{false};
+  NamedArgumentOrigins argument_origins_;
+  bool argument_origins_loaded_{false};
   virtual const io::VirtualDir *data_source() const {
     return nullptr;
   }

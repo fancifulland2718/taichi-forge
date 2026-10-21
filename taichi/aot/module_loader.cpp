@@ -130,6 +130,15 @@ Kernel *Module::get_kernel(const std::string &name) {
         }
         k->value_parameter_types = values->second;
       }
+      if (!argument_origins_loaded_) {
+        argument_origins_ = load_argument_origin_artifact(data_source());
+        argument_origins_loaded_ = true;
+      }
+      const auto origins = argument_origins_.find(name);
+      if (origins != argument_origins_.end()) {
+        validate_argument_origins(*k, origins->second);
+        k->argument_origins = origins->second;
+      }
     } catch (const std::exception &error) {
       throw ArtifactLoadError(error.what());
     }

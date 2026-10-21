@@ -2,6 +2,7 @@
 #include "taichi/inc/constants.h"
 #include "taichi/rhi/device.h"
 #include "taichi/util/lang_util.h"
+#include "taichi/program/argument_origin.h"
 
 #include <stack>
 #include <map>
@@ -118,6 +119,9 @@ class TI_DLL_EXPORT CallableBase {
   // AOT exports these through the common value-parameter artifact, separately
   // from executable/cache metadata and the physical launch ABI.
   std::optional<std::map<std::vector<int>, DataType>> value_parameter_types;
+  // Only kernels with packs need a public-to-physical argument tree. Resource
+  // leaves can be lifted to root parameters without losing their public owner.
+  std::optional<ArgumentOrigins> argument_origins;
   // Note: `nested_parameters` stores not only nested parameters, but also
   // those parameters in `parameter_list`.
   std::unordered_map<std::vector<int>,
@@ -182,6 +186,11 @@ class TI_DLL_EXPORT Callable : public CallableBase {
   std::vector<int> insert_argpack_param_and_push(const std::string &name = "");
 
   void pop_argpack_stack();
+
+  void record_argument_origin(const std::vector<int> &physical,
+                              const std::vector<int> &logical,
+                              const std::string &name,
+                              const std::string &kind);
 
   int insert_ret(const DataType &dt);
 

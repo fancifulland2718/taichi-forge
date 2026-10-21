@@ -629,17 +629,23 @@ class ASTTransformer(Builder):
         assert args.kw_defaults == []
         assert args.kwarg is None
 
-        def decl_and_create_variable(annotation, name, arg_features, pending_argpack_members, prefix_name, arg_depth):
+        def decl_and_create_variable(
+            annotation, name, arg_features, pending_argpack_members, prefix_name, arg_depth, argument_path=None
+        ):
             full_name = prefix_name + "_" + name
+            def origin(kind):
+                return (argument_path, name, kind) if argument_path is not None else None
+
             if not isinstance(annotation, primitive_types.RefType):
                 ctx.kernel_args.append(name)
             if isinstance(annotation, ArgPackType):
-                kernel_arguments.push_argpack_arg(name)
+                kernel_arguments.push_argpack_arg(name, _origin=origin("argpack"))
                 d = {}
                 pending_members = []
                 for j, (_name, anno) in enumerate(annotation.members.items()):
                     result, obj = decl_and_create_variable(
-                        anno, _name, arg_features[j], pending_argpack_members, full_name, arg_depth + 1
+                        anno, _name, arg_features[j], pending_argpack_members, full_name, arg_depth + 1,
+                        argument_path + [j] if argument_path is not None else None,
                     )
                     if not result:
                         d[_name] = None
@@ -659,6 +665,7 @@ class ASTTransformer(Builder):
                         to_taichi_type(arg_features),
                         full_name,
                     ),
+                    origin("sparse_matrix_builder"),
                 )
             if isinstance(annotation, ndarray_type.NdarrayType):
                 byte_offset = 0
@@ -693,29 +700,33 @@ class ASTTransformer(Builder):
                 return False, (
                     kernel_arguments.decl_ndarray_arg,
                     ndarray_args,
+                    origin("ndarray"),
                 )
             if isinstance(annotation, texture_type.TextureType):
-                return False, (kernel_arguments.decl_texture_arg, (arg_features[0], full_name))
+                return False, (kernel_arguments.decl_texture_arg, (arg_features[0], full_name), origin("texture"))
             if isinstance(annotation, texture_type.TextureCollectionType):
                 return False, (
                     kernel_arguments.decl_texture_collection_arg,
                     (arg_features[0], arg_features[1], full_name),
+                    origin("texture_collection"),
                 )
             if isinstance(annotation, texture_type.RWTextureType):
                 return False, (
                     kernel_arguments.decl_rw_texture_arg,
                     (arg_features[0], arg_features[1], arg_features[2], full_name),
+                    origin("rw_texture"),
                 )
             if isinstance(annotation, ray_type.AccelerationStructureType):
                 return False, (
                     kernel_arguments.decl_acceleration_structure_arg,
                     (full_name,),
+                    origin("acceleration_structure"),
                 )
             if isinstance(annotation, MatrixType):
-                return True, kernel_arguments.decl_matrix_arg(annotation, name, arg_depth)
+                return True, kernel_arguments.decl_matrix_arg(annotation, name, arg_depth, _origin=origin("value"))
             if isinstance(annotation, StructType):
-                return True, kernel_arguments.decl_struct_arg(annotation, name, arg_depth)
-            return True, kernel_arguments.decl_scalar_arg(annotation, name, arg_depth)
+                return True, kernel_arguments.decl_struct_arg(annotation, name, arg_depth, _origin=origin("value"))
+            return True, kernel_arguments.decl_scalar_arg(annotation, name, arg_depth, _origin=origin("value"))
 
         def transform_as_kernel():
             # Treat return type
@@ -728,14 +739,26 @@ class ASTTransformer(Builder):
             # unique across packs (or across nested underscore-separated paths).
             pending_argpack_members = []
             create_variable_later = dict()
+            record_origins = any(isinstance(arg.annotation, ArgPackType) for arg in ctx.func.arguments)
+            public_index = 0
             for i, arg in enumerate(args.args):
+                annotation = ctx.func.arguments[i].annotation
+                argument_path = None
+                if not isinstance(annotation, annotations.template):
+                    if record_origins:
+                        argument_path = [public_index]
+                    public_index += 1
                 if isinstance(ctx.func.arguments[i].annotation, ArgPackType):
-                    kernel_arguments.push_argpack_arg(ctx.func.arguments[i].name)
+                    kernel_arguments.push_argpack_arg(
+                        ctx.func.arguments[i].name,
+                        _origin=(argument_path, ctx.func.arguments[i].name, "argpack"),
+                    )
                     d = {}
                     pending_members = []
                     for j, (name, anno) in enumerate(ctx.func.arguments[i].annotation.members.items()):
                         result, obj = decl_and_create_variable(
-                            anno, name, ctx.arg_features[i][j], pending_argpack_members, "__argpack_" + name, 1
+                            anno, name, ctx.arg_features[i][j], pending_argpack_members, "__argpack_" + name, 1,
+                            argument_path + [j],
                         )
                         if not result:
                             d[name] = None
@@ -754,10 +777,11 @@ class ASTTransformer(Builder):
                         pending_argpack_members,
                         "",
                         0,
+                        argument_path,
                     )
-                    ctx.create_variable(arg.arg, obj if result else obj[0](*obj[1]))
-            for argpack, name, func, params in pending_argpack_members:
-                argpack[name] = func(*params)
+                    ctx.create_variable(arg.arg, obj if result else obj[0](*obj[1], _origin=obj[2]))
+            for argpack, name, func, params, argument_origin in pending_argpack_members:
+                argpack[name] = func(*params, _origin=argument_origin)
             for k, v in create_variable_later.items():
                 ctx.create_variable(k, v)
 

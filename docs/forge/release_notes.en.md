@@ -51,6 +51,10 @@ lifetimes. The entries below describe the changes.
   Repeated resource member names across packs retain distinct bindings in
   declaration order, fixing frontend `NoneType` compilation errors for nested
   packs and their explicit adjoints.
+  AOT exports now preserve explicit public member paths across template removal
+  and resource lifting, share layouts across aliases, and validate these paths
+  against loaded kernel parameters. This metadata adds no device code;
+  independent pack owners and prepared consumption remain separate work.
 
 - Vulkan loads boolean vector and nested structure arguments using their
   integer buffer slots before converting them to boolean expressions. This

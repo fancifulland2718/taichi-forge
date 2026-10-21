@@ -794,6 +794,7 @@ void Kernel::retire_definition(bool preserve_relocatable_abi) {
   std::vector<Parameter>().swap(parameter_list);
   decltype(nested_parameters)().swap(nested_parameters);
   value_parameter_types.reset();
+  argument_origins.reset();
   decltype(argpack_types)().swap(argpack_types);
   std::vector<Ret>().swap(rets);
   args_type = nullptr;

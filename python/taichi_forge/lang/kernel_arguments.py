@@ -63,7 +63,13 @@ class SparseMatrixProxy:
         return SparseMatrixEntry(self.ptr, i, j, self.dtype)
 
 
-def decl_scalar_arg(dtype, name, arg_depth):
+def _record_argument_origin(physical, origin):
+    if origin is not None:
+        logical, name, kind = origin
+        impl.get_runtime().compiling_callable.record_argument_origin(physical, logical, name, kind)
+
+
+def decl_scalar_arg(dtype, name, arg_depth, *, _origin=None):
     is_ref = False
     if isinstance(dtype, RefType):
         is_ref = True
@@ -73,6 +79,7 @@ def decl_scalar_arg(dtype, name, arg_depth):
         arg_id = impl.get_runtime().compiling_callable.insert_pointer_param(dtype, name)
     else:
         arg_id = impl.get_runtime().compiling_callable.insert_scalar_param(dtype, name)
+    _record_argument_origin(arg_id, _origin)
 
     argload_di = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     return Expr(
@@ -102,9 +109,10 @@ def get_type_for_kernel_args(dtype, name):
     return dtype
 
 
-def decl_matrix_arg(matrixtype, name, arg_depth):
+def decl_matrix_arg(matrixtype, name, arg_depth, *, _origin=None):
     arg_type = get_type_for_kernel_args(matrixtype, name)
     arg_id = impl.get_runtime().compiling_callable.insert_value_param(arg_type, matrixtype.tensor_type, name)
+    _record_argument_origin(arg_id, _origin)
     argload_di = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     arg_load = Expr(
         _ti_core.make_arg_load_expr(arg_id, arg_type, create_load=False, arg_depth=arg_depth, dbg_info=argload_di)
@@ -112,9 +120,10 @@ def decl_matrix_arg(matrixtype, name, arg_depth):
     return matrixtype.from_taichi_object(arg_load)
 
 
-def decl_struct_arg(structtype, name, arg_depth):
+def decl_struct_arg(structtype, name, arg_depth, *, _origin=None):
     arg_type = get_type_for_kernel_args(structtype, name)
     arg_id = impl.get_runtime().compiling_callable.insert_value_param(arg_type, structtype.dtype, name)
+    _record_argument_origin(arg_id, _origin)
     argload_di = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     arg_load = Expr(
         _ti_core.make_arg_load_expr(arg_id, arg_type, create_load=False, arg_depth=arg_depth, dbg_info=argload_di)
@@ -122,8 +131,9 @@ def decl_struct_arg(structtype, name, arg_depth):
     return structtype.from_taichi_object(arg_load)
 
 
-def push_argpack_arg(name):
-    impl.get_runtime().compiling_callable.insert_argpack_param_and_push(name)
+def push_argpack_arg(name, *, _origin=None):
+    arg_id = impl.get_runtime().compiling_callable.insert_argpack_param_and_push(name)
+    _record_argument_origin(arg_id, _origin)
 
 
 def decl_argpack_arg(argpacktype, member_dict):
@@ -131,7 +141,7 @@ def decl_argpack_arg(argpacktype, member_dict):
     return argpacktype.from_taichi_object(member_dict)
 
 
-def decl_sparse_matrix(dtype, name):
+def decl_sparse_matrix(dtype, name, *, _origin=None):
     value_type = cook_dtype(dtype)
     if impl.current_cfg().arch == _ti_core.Arch.vulkan:
         return SparseMatrixProxy(
@@ -141,12 +151,14 @@ def decl_sparse_matrix(dtype, name):
                 name,
                 False,
                 _ti_core.BoundaryMode.UNSAFE,
+                _origin=_origin,
             ),
             value_type,
         )
     ptr_type = cook_dtype(u64)
     # Treat the sparse matrix argument as a scalar since we only need to pass in the base pointer
     arg_id = impl.get_runtime().compiling_callable.insert_scalar_param(ptr_type, name)
+    _record_argument_origin(arg_id, _origin)
     argload_di = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     return SparseMatrixProxy(
         _ti_core.make_arg_load_expr(arg_id, ptr_type, is_ptr=False, dbg_info=argload_di), value_type
@@ -163,8 +175,11 @@ def decl_ndarray_arg(
     byte_stride=0,
     logical_element_type=None,
     runtime_affine=True,
+    *,
+    _origin=None,
 ):
     arg_id = impl.get_runtime().compiling_callable.insert_ndarray_param(element_type, ndim, name, needs_grad)
+    _record_argument_origin(arg_id, _origin)
     if byte_stride:
         return AnyArray(
             _ti_core.make_external_tensor_strided_expr(
@@ -186,23 +201,26 @@ def decl_ndarray_arg(
     )
 
 
-def decl_texture_arg(num_dimensions, name):
+def decl_texture_arg(num_dimensions, name, *, _origin=None):
     # FIXME: texture_arg doesn't have element_shape so better separate them
     arg_id = impl.get_runtime().compiling_callable.insert_texture_param(num_dimensions, name)
+    _record_argument_origin(arg_id, _origin)
     dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     return TextureSampler(_ti_core.make_texture_ptr_expr(arg_id, num_dimensions, 0, dbg_info), num_dimensions)
 
 
-def decl_texture_collection_arg(num_dimensions, capacity, name):
+def decl_texture_collection_arg(num_dimensions, capacity, name, *, _origin=None):
     arg_id = impl.get_runtime().compiling_callable.insert_texture_collection_param(
         num_dimensions, capacity, name
     )
+    _record_argument_origin(arg_id, _origin)
     return TextureCollectionAccessor(arg_id, num_dimensions, capacity)
 
 
-def decl_rw_texture_arg(num_dimensions, buffer_format, lod, name):
+def decl_rw_texture_arg(num_dimensions, buffer_format, lod, name, *, _origin=None):
     # FIXME: texture_arg doesn't have element_shape so better separate them
     arg_id = impl.get_runtime().compiling_callable.insert_rw_texture_param(num_dimensions, buffer_format, name, lod)
+    _record_argument_origin(arg_id, _origin)
     dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     return RWTextureAccessor(
         _ti_core.make_rw_texture_ptr_expr(arg_id, num_dimensions, 0, buffer_format, lod, dbg_info),
@@ -211,8 +229,9 @@ def decl_rw_texture_arg(num_dimensions, buffer_format, lod, name):
     )
 
 
-def decl_acceleration_structure_arg(name):
+def decl_acceleration_structure_arg(name, *, _origin=None):
     arg_id = impl.get_runtime().compiling_callable.insert_acceleration_structure_param(name)
+    _record_argument_origin(arg_id, _origin)
     dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     return AccelerationStructureAccessor(
         _ti_core.make_acceleration_structure_ptr_expr(arg_id, 0, dbg_info)
