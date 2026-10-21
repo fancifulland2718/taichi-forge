@@ -171,7 +171,7 @@ def export(recording, context):
                 command_offset=draw.command_offset,
                 count_offset=draw.count_offset or 0,
                 max_draw_count=draw.max_draw_count,
-                stride=draw.command_stride or (20 if item.index_buffer is not None else 16),
+                stride=draw._resolved_stride(item.index_buffer is not None),
                 vertex_record_limit=draw.vertex_record_limit,
                 instance_record_limit=draw.instance_record_limit,
                 index_element_limit=draw.index_element_limit,

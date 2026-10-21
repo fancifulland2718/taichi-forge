@@ -328,6 +328,30 @@ class IndirectDraw:
         if not isinstance(self.first_instance_may_be_nonzero, bool):
             raise TypeError("first_instance_may_be_nonzero must be a bool")
 
+    def _resolved_stride(self, indexed):
+        # VkDrawIndirectCommand and VkDrawIndexedIndirectCommand have fixed
+        # native ABI sizes; this is not a policy limit on command counts.
+        command_size = 20 if indexed else 16
+        stride = self.command_stride or command_size
+        if stride < command_size:
+            raise ValueError("command_stride is smaller than the Vulkan indirect command ABI")
+        return stride
+
+
+def _validate_draw_indexing(draw, indexed):
+    if indexed:
+        if draw.index_bounds is None:
+            raise ValueError("indexed draws require declared index_bounds")
+        if draw.first_vertex != 0:
+            raise ValueError("indexed draws use vertex_offset instead of first_vertex")
+    else:
+        if draw.index_bounds is not None:
+            raise ValueError("index_bounds require an indexed draw")
+        if draw.vertex_offset != 0:
+            raise ValueError("vertex_offset requires an indexed draw")
+        if draw.first_index != 0:
+            raise ValueError("first_index requires an indexed draw")
+
 
 @dataclass(frozen=True)
 class ShaderBufferBinding:
@@ -483,39 +507,14 @@ class GraphicsPassDraw:
         index_buffer = self.index_buffer
         if index_buffer is not None:
             index_buffer = _name(index_buffer, "index-buffer binding")
-            if indirect:
-                if self.draw.index_element_limit == 0:
-                    raise ValueError(
-                        "indexed indirect draws require index_element_limit"
-                    )
-            else:
-                if self.draw.index_bounds is None:
-                    raise ValueError("indexed draws require declared index_bounds")
-                if self.draw.first_vertex != 0:
-                    raise ValueError(
-                        "indexed draws use vertex_offset instead of first_vertex"
-                    )
-        else:
-            if indirect:
-                if self.draw.index_element_limit != 0:
-                    raise ValueError(
-                        "index_element_limit requires an indexed indirect draw"
-                    )
-            else:
-                if self.draw.index_bounds is not None:
-                    raise ValueError("index_bounds require an indexed draw")
-                if self.draw.vertex_offset != 0:
-                    raise ValueError("vertex_offset requires an indexed draw")
-                if self.draw.first_index != 0:
-                    raise ValueError("first_index requires an indexed draw")
-
         if indirect:
-            command_size = 20 if index_buffer is not None else 16
-            stride = self.draw.command_stride or command_size
-            if stride < command_size:
-                raise ValueError(
-                    "command_stride is smaller than the Vulkan indirect command ABI"
-                )
+            if index_buffer is not None and self.draw.index_element_limit == 0:
+                raise ValueError("indexed indirect draws require index_element_limit")
+            if index_buffer is None and self.draw.index_element_limit != 0:
+                raise ValueError("index_element_limit requires an indexed indirect draw")
+            self.draw._resolved_stride(index_buffer is not None)
+        else:
+            _validate_draw_indexing(self.draw, index_buffer is not None)
 
         shader_buffers = {} if self.shader_buffers is None else self.shader_buffers
         if not isinstance(shader_buffers, dict):
@@ -641,19 +640,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             depth = _name(depth, "depth binding")
         if index_buffer is not None:
             index_buffer = _name(index_buffer, "index-buffer binding")
-            if draw.index_bounds is None:
-                raise ValueError("indexed draws require declared index_bounds")
-            if draw.first_vertex != 0:
-                raise ValueError(
-                    "indexed draws use vertex_offset instead of first_vertex"
-                )
-        else:
-            if draw.index_bounds is not None:
-                raise ValueError("index_bounds require an indexed draw")
-            if draw.vertex_offset != 0:
-                raise ValueError("vertex_offset requires an indexed draw")
-            if draw.first_index != 0:
-                raise ValueError("first_index requires an indexed draw")
+        _validate_draw_indexing(draw, index_buffer is not None)
         if not isinstance(vertex_buffers, dict):
             raise TypeError("vertex_buffers must map binding integers to names")
         normalized_vertices = {}
@@ -1187,7 +1174,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                         draw.command_offset,
                         0 if draw.count_offset is None else draw.count_offset,
                         draw.max_draw_count,
-                        draw.command_stride or (20 if index is not None else 16),
+                        draw._resolved_stride(index is not None),
                         draw.vertex_record_limit,
                         draw.instance_record_limit,
                         draw.index_element_limit,
