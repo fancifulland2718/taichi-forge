@@ -34,6 +34,8 @@ from taichi_forge.algorithms._primitive_definitions import (
     REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
     ScanDefinition,
     HistogramDefinition,
+    GroupedReduceDefinition,
+    GROUPED_REDUCE_OPS as _SUPPORTED_GROUPED_REDUCE_OPS,
     HISTOGRAM_VALUE_TYPE as _HISTOGRAM_VALUE_TYPE,
     HISTOGRAM_BIN_TYPE as _HISTOGRAM_BIN_TYPE,
     IndexedCopyDefinition,
@@ -205,7 +207,6 @@ _BUCKET_BUILDER_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _BUCKET_BUILDER_FIELD_DTYPES = (i32,)
 _BUCKET_BUILDER_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_GROUPED_REDUCE_METHODS = supported_primitive_methods("grouped_reduce")
-_SUPPORTED_GROUPED_REDUCE_OPS = {"sum": 0}
 _GROUPED_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _GROUPED_REDUCE_FIELD_DTYPES = (i32,)
 _SCAN_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
@@ -7940,6 +7941,7 @@ class GroupedReduceWorkspace:
         n,
         num_groups,
         prog,
+        definition,
     ):
         objects, semantic_key = self._native_grouped_reduce_request_signature(
             keys, values, output, value_type, op_id, n, num_groups
@@ -7954,6 +7956,7 @@ class GroupedReduceWorkspace:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_grouped_reduce_plan = plan
 
@@ -15920,6 +15923,10 @@ def _try_cuda_device_grouped_reduce(
     ):
         return True
 
+    definition = GroupedReduceDefinition(n, num_groups, values.dtype, op)
+    value_type, op_id = definition.value_type, definition.op_id
+    n, num_groups = definition.size, definition.num_groups
+
     def finish(method_name, call_args, temp_bytes):
         workspace._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
         workspace._record_native_grouped_reduce_plan(
@@ -15934,6 +15941,7 @@ def _try_cuda_device_grouped_reduce(
             n,
             num_groups,
             prog,
+            definition,
         )
         return True
     if dense_field_mode:
@@ -16046,6 +16054,10 @@ def _try_vulkan_grouped_reduce(
     ):
         return True
 
+    definition = GroupedReduceDefinition(n, num_groups, values.dtype, op)
+    value_type, op_id = definition.value_type, definition.op_id
+    n, num_groups = definition.size, definition.num_groups
+
     def finish(method_name, call_args, temp_bytes):
         workspace._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
         workspace._record_native_grouped_reduce_plan(
@@ -16060,6 +16072,7 @@ def _try_vulkan_grouped_reduce(
             n,
             num_groups,
             prog,
+            definition,
         )
         return True
 
@@ -16293,6 +16306,10 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
     ):
         return True
 
+    definition = GroupedReduceDefinition(n, num_groups, values.dtype, op)
+    value_type, op_id = definition.value_type, definition.op_id
+    n, num_groups = definition.size, definition.num_groups
+
     def finish(method_name, call_args, temp_bytes):
         workspace._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
         workspace._record_native_grouped_reduce_plan(
@@ -16307,6 +16324,7 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
             n,
             num_groups,
             prog,
+            definition,
         )
         return True
 

@@ -17,7 +17,10 @@ from tests.python.aot_scan_probe import reject
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, cpu_max_num_threads=4
 )
-def test_grouped_reduce_sequence_runtime_only_and_borrowed(tmp_path):
+def test_grouped_reduce_sequence_runtime_only_and_borrowed(tmp_path, monkeypatch):
+    from taichi_forge.algorithms._primitive_definitions import GroupedReduceDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     module = ti.aot.Module()
     arch = ti.lang.impl.current_cfg().arch
     cases = []
@@ -88,9 +91,27 @@ def test_grouped_reduce_sequence_runtime_only_and_borrowed(tmp_path):
         graph = builder.compile()
         name = f"grouped_{dtype}_{n}"
         before = tuple(a.to_numpy().tobytes() for a in (src, indices, dst))
-        plan = module.add_execution_plan(
-            name, graph, source_bindings=dict(src=src, indices=indices, dst=dst)
-        )
+        definitions = []
+        bind = GroupedReduceDefinition.bind
+
+        def observe(definition, *args, **kwargs):
+            definitions.append(definition)
+            return bind(definition, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(GroupedReduceDefinition, "bind", observe)
+            plan = module.add_execution_plan(name, graph, source_bindings=dict(src=src, indices=indices, dst=dst))
+        assert len(definitions) == 1
+        if dtype in (ti.f32, ti.i32):
+            assert definitions[0] is sequence._calls[0].plan.definition
+
+            def no_conversion(*args, **kwargs):
+                raise AssertionError("warm grouped reduce must retain its native plan")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(GroupedReduceDefinition, "__post_init__", no_conversion)
+                patch.setattr(NativeOperationBinding, "lower", no_conversion)
+                sequence.run()
         assert before == tuple(a.to_numpy().tobytes() for a in (src, indices, dst))
         entry = json.loads(plan.to_json())["operations"][0]
         assert entry["operation"] == "grouped_reduce"

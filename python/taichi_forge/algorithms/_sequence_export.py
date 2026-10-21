@@ -516,15 +516,19 @@ def _grouped_reduce(call, context):
         or call.plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT grouped reduce cannot reconstruct the selected cached strategy")
-    parameters = dict(size=n, num_groups=groups, dtype=str(values.dtype))
-    if backend == "cpu_native_two_level":
-        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
-    context.operations.append(dict(
-        kind="native", provider="builtin", operation="grouped_reduce", version=1,
-        parameters=parameters,
-        bindings=dict(keys=context.retained_arrays.require(keys), values=context.retained_arrays.require(values),
-                      output=context.retained_arrays.require(output)),
-    ))
+    from ._primitive_definitions import GroupedReduceDefinition
+
+    definition = GroupedReduceDefinition(n, groups, values.dtype, call.kwargs["op"])
+    if call.plan is not None:
+        if call.plan.definition != definition:
+            raise TaichiRuntimeError("AOT grouped-reduce definition differs from the selected native call")
+        definition = call.plan.definition
+    definition.bind(
+        keys,
+        values,
+        output,
+        cpu_max_threads=max(1, impl.current_cfg().cpu_max_num_threads) if backend == "cpu_native_two_level" else None,
+    ).lower(context)
 
 
 def _histogram(call, context):

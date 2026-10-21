@@ -8,6 +8,45 @@ from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 NATIVE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
 HISTOGRAM_BIN_TYPE = {i32: 0, i64: 4}
+GROUPED_REDUCE_OPS = {"sum": 0}
+
+
+@dataclass(frozen=True)
+class GroupedReduceDefinition:
+    size: int
+    num_groups: int
+    dtype: object
+    op: str = "sum"
+
+    def __post_init__(self):
+        if self.op not in GROUPED_REDUCE_OPS:
+            raise ValueError(f"grouped reduce op must be one of {sorted(GROUPED_REDUCE_OPS)}.")
+        if self.dtype not in NATIVE_VALUE_TYPE:
+            raise TypeError("unsupported grouped reduce dtype")
+
+    @property
+    def value_type(self):
+        return NATIVE_VALUE_TYPE[self.dtype]
+
+    @property
+    def op_id(self):
+        return GROUPED_REDUCE_OPS[self.op]
+
+    def bind(self, keys, values, output, *, cpu_max_threads=None):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
+        parameters = dict(size=self.size, num_groups=self.num_groups, dtype=str(self.dtype))
+        if cpu_max_threads is not None:
+            parameters["cpu_max_threads"] = cpu_max_threads
+        return NativeOperationBinding(
+            NativeDefinition("builtin", "grouped_reduce", parameters),
+            (
+                NativeArrayBinding("keys", keys, GraphAccess.READ),
+                NativeArrayBinding("values", values, GraphAccess.READ),
+                NativeArrayBinding("output", output, GraphAccess.WRITE),
+            ),
+        )
 
 
 @dataclass(frozen=True)
