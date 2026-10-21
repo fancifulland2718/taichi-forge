@@ -76,6 +76,18 @@ cuBLASLt 已选 algorithm/layout/epilogue 在原物化点冻结；cuTENSOR 直�
 仍可逐次改变，recording 在创建时固定自己的系数。物化后的 workspace 要求作为重建约束，
 不覆盖语义参数，也不在导出时重新运行选型。
 
+资源自身的数组输入由 `NativeResourceBinding.arrays` 表达；VkFFT 的普通 plan 创建、
+detached source 和重建使用同一冻结定义及已选 batch tile。子资源使用已解析的
+`NativeResourceReference`，由已有 context 按 owner 去重，不逐次递归展开整个 DAG。
+cuSPARSE 的 SpMM、triangular 参数和 recording 端口同样来自共同定义；矩阵快照仍是
+单次导出事务，冻结参数不会冻结 live numeric values。
+
+CSR/BSR 可通过 `resource_bindings={matrix: "name"}` 引用消费者创建的 native 矩阵，
+此时导出不读回或打包矩阵内容。矩阵拥有自己的 values，不能同时把它映射为独立
+`source_bindings` 系数端口。共享公开 CSR 的 triangular 保留私有 analysis，并在每次
+solve 前更新；公开 triangular plan handle 尚未获得导出资格。显式公开身份由原
+resource/alias 校验管理，同配置不同 owner 不自动合并。
+
 [`_primitive_definitions.py`](../../python/taichi_forge/algorithms/_primitive_definitions.py)
 提供 Scan、Reduce、Transform 的冷阶段定义。普通 native 调用从中取得 dtype、范围、
 运算/系数，缓存计划保留该定义；AOT 在确认具体 layout 和 selected method 后消费它。

@@ -94,6 +94,22 @@ cuTENSOR direct calls retain per-call alpha/beta; a recording freezes its own
 coefficients. Materialized workspace requirements constrain reconstruction
 without replacing semantic parameters or rerunning selection during export.
 
+`NativeResourceBinding.arrays` describes a resource's own array inputs. VkFFT
+creation, detached sources and reconstruction consume one frozen definition
+and the selected batch tile. Child resources use resolved
+`NativeResourceReference` symbols; the existing context deduplicates owners
+without expanding a shared DAG at every use. cuSPARSE SpMM/triangular parameters
+and recording ports also use shared definitions. Matrix snapshots remain an
+export transaction; frozen parameters do not freeze live numeric values.
+
+CSR/BSR support `resource_bindings={matrix: "name"}` for a consumer-created
+native matrix, without reading back or packaging its contents. The matrix owns
+its values and cannot also map to a separate `source_bindings` coefficient port.
+Triangular execution sharing a public CSR keeps private analysis and refreshes
+it before every solve. Public triangular plan handles remain unqualified for
+export. Existing resource/alias checks govern explicit public identities;
+different owners with equal configurations are not implicitly merged.
+
 [`_primitive_definitions.py`](../../python/taichi_forge/algorithms/_primitive_definitions.py)
 provides cold definitions for Scan, Reduce and Transform. Ordinary native calls
 consume their dtype, extent and operation/coefficients; cached plans retain the
