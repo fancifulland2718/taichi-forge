@@ -14,7 +14,10 @@ from tests.python.test_graph_hardware_recipe import _spmm_definition
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_spmm_recordings_share_csr_snapshot_and_selected_plan(tmp_path):
+def test_spmm_recordings_share_csr_snapshot_and_selected_plan(tmp_path, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding
+    from taichi_forge.hardware._cusparse_definitions import SpmmDefinition
+
     if not ti.hardware.linalg.cusparse_spmm_is_available():
         pytest.skip("External cuSPARSE SpMM is unavailable")
     definition, operation, providers, bindings, expected = _spmm_definition()
@@ -65,7 +68,17 @@ def test_spmm_recordings_share_csr_snapshot_and_selected_plan(tmp_path):
 
     def export(name):
         before = matrix._debug_runtime_stats()["transfers"]["device_to_host_bytes"]
-        plan = module.add_execution_plan(name, graph)
+        lowered = []
+        lower = NativeOperationBinding.lower
+
+        def observe(binding, context, **kwargs):
+            lowered.append(binding.definition.operation)
+            return lower(binding, context, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(NativeOperationBinding, "lower", observe)
+            plan = module.add_execution_plan(name, graph)
+        assert lowered == ["spmm_f32", "spmm_f32", "spmv_f32"]
         after = matrix._debug_runtime_stats()["transfers"]["device_to_host_bytes"]
         assert after - before == 144, "SpMV and both SpMM calls must sample this CSR only once"
         document = json.loads(plan.to_json())
@@ -82,6 +95,15 @@ def test_spmm_recordings_share_csr_snapshot_and_selected_plan(tmp_path):
     live = dict(bindings, vector=ti.ndarray(ti.f32, 5), result=ti.ndarray(ti.f32, 7))
     live["vector"].fill(1)
     graph.run(graph.bind(live))
+
+    def no_conversion(*args, **kwargs):
+        raise AssertionError("warm SpMM must not construct or lower a definition")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SpmmDefinition, "operation", no_conversion)
+        patch.setattr(NativeDefinition, "parameter_dict", no_conversion)
+        patch.setattr(NativeOperationBinding, "lower", no_conversion)
+        graph.run(graph.bind(live))
     prepared = export("legacy_prepared")
     assert prepared["operations"][0]["parameters"]["preprocess"] == (
         "required" if legacy.plan_info()["preprocessed"] else "none"

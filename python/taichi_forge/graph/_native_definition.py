@@ -69,6 +69,22 @@ class NativeArrayBinding:
 
 
 @dataclass(frozen=True)
+class NativeResourceReference:
+    """An already resolved resource symbol, owned by the lowering context.
+
+    Snapshot/asset adapters may need to publish data before they can provide a
+    resource. A reference connects that result without repeating its factory.
+    """
+
+    name: str
+    arrays = ()
+
+    def __post_init__(self):
+        if not isinstance(self.name, str) or not self.name or "\0" in self.name:
+            raise ValueError("Native resource references require a nonempty symbol without NUL")
+
+
+@dataclass(frozen=True)
 class NativeResourceBinding:
     """A live owner and the definition which can rebuild its private state."""
 
@@ -126,6 +142,11 @@ class NativeOperationBinding:
             raise ValueError("Native resource requirements reference an unknown port")
         bindings = _array_symbols(self.arrays, context)
         for port, resource in self.resources:
+            if isinstance(resource, NativeResourceReference):
+                if requirements.get(port):
+                    raise ValueError("Resolved resources cannot accept new preparation requirements")
+                bindings[port] = resource.name
+                continue
             definition = resource.definition
             parameters = definition.parameter_dict()
             extra = requirements.get(port, {})

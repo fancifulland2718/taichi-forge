@@ -1,5 +1,8 @@
 """Cold sparse snapshots shared by qualified recording exporters."""
 
+from dataclasses import replace
+
+from taichi_forge.graph._native_definition import NativeResourceReference
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -47,36 +50,25 @@ def snapshot_csr(context, matrix):
 def export_spmv(recording, context):
     recording.validate_graph_lifetime()
     resource, storage = _snapshot(context, recording.matrix, ("csr", "bsr"))
-    context.native(
-        "cusparse",
-        "bsr_spmv_f32" if storage == "bsr" else "spmv_f32",
-        bindings=dict(matrix=resource, input=recording.input, output=recording.output),
-    )
+    expected = "bsr_spmv_f32" if storage == "bsr" else "spmv_f32"
+    if recording._native_binding.definition.operation != expected:
+        raise TaichiRuntimeError("cuSPARSE matrix format changed since recording creation")
+    replace(
+        recording._native_binding,
+        resources=(("matrix", NativeResourceReference(resource)),),
+    ).lower(context)
     return ()
 
 
 def export_spmm(recording, context):
     recording.validate_graph_lifetime()
-    code = recording._algorithm_code
-    parameters = dict(
-        rhs_count=recording.rhs_count,
-        algorithm="csr_alg2" if code == 0 else "csr_alg3",
-        preprocess="optional" if code == 1 else "required" if code == 3 else "none",
-    )
-    info = recording.plan_info()
-    if info["prepared"]:
-        parameters["expected_workspace_bytes"] = info["workspace_bytes"]
-        # A materialized legacy optional policy has already selected its
-        # preprocessing outcome. Persist that result instead of reselecting it.
-        if code == 1:
-            parameters["preprocess"] = "required" if info["preprocessed"] else "none"
+    definition = recording._definition.operation(recording.plan_info())
     resource = snapshot_csr(context, recording.matrix)
-    context.native(
-        "cusparse",
-        "spmm_f32",
-        parameters=parameters,
-        bindings=dict(matrix=resource, input=recording.input, output=recording.output),
-    )
+    replace(
+        recording._native_binding,
+        definition=definition,
+        resources=(("matrix", NativeResourceReference(resource)),),
+    ).lower(context)
     return ()
 
 

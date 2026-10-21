@@ -5,6 +5,8 @@ from numbers import Real
 from types import MappingProxyType
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native_definition import NativeDefinition
+from taichi_forge.hardware._cusparse_definitions import SPMM_ALGORITHMS, SpmmDefinition, bind_sparse_operation
 from taichi_forge.graph._native import (
     BackendCommandRecording,
     _CudaGraphCaptureRecipe,
@@ -412,9 +414,15 @@ class CusparseSpmvRecording(BackendCommandRecording):
             raise ValueError("CUDA cuSPARSE binding names must be nonempty strings")
         if input == output:
             raise ValueError("CUDA cuSPARSE binding names must be unique")
+        native_binding = bind_sparse_operation(
+            NativeDefinition("cusparse", "bsr_spmv_f32" if identity["storage_format"] == "bsr" else "spmv_f32", {}),
+            input,
+            output,
+        )
+        object.__setattr__(self, "_native_binding", native_binding)
         super().__init__(
             backend="cuda",
-            binding_names=names,
+            binding_names=native_binding.binding_names,
             command_count=1,
             queue="compute",
             stream_binding="runtime_ordered",
@@ -424,8 +432,6 @@ class CusparseSpmvRecording(BackendCommandRecording):
             no_host_readback=True,
         )
         object.__setattr__(self, "matrix", matrix)
-        object.__setattr__(self, "input", input)
-        object.__setattr__(self, "output", output)
         object.__setattr__(
             self,
             "_cuda_capture_recipe",
@@ -444,12 +450,12 @@ class CusparseSpmvRecording(BackendCommandRecording):
             memory_resources,
         )
 
+    input = property(lambda self: self._native_binding.arrays[0].value)
+    output = property(lambda self: self._native_binding.arrays[1].value)
+
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.input, GraphAccess.READ),
-            ResourceEffect(self.output, GraphAccess.WRITE),
-        )
+        return self._native_binding.resource_effects
 
     def _export_aot(self, context):
         from taichi_forge.hardware._aot_cusparse import export_spmv
@@ -854,12 +860,7 @@ class CusparseSpmmRecording(BackendCommandRecording):
     loaded cuSPARSE release.
     """
 
-    _ALGORITHMS = {
-        "row_major": 0,
-        "deterministic": 1,  # compatibility: optional preprocessing
-        "csr3_direct": 2,
-        "csr3_preprocessed": 3,
-    }
+    _ALGORITHMS = SPMM_ALGORITHMS
 
     def _export_aot(self, context):
         from taichi_forge.hardware._aot_cusparse import export_spmm
@@ -881,15 +882,8 @@ class CusparseSpmmRecording(BackendCommandRecording):
 
         if not isinstance(matrix, SparseMatrix):
             raise TypeError("CUDA cuSPARSE SpMM matrix must be a SparseMatrix")
-        if isinstance(rhs_count, bool) or not isinstance(rhs_count, int):
-            raise TypeError("CUDA cuSPARSE SpMM rhs_count must be an integer")
-        if rhs_count < 2 or rhs_count > 0x7FFFFFFF:
-            raise ValueError("CUDA cuSPARSE SpMM rhs_count must be in [2, INT_MAX]")
-        if algorithm not in self._ALGORITHMS:
-            raise ValueError(
-                "CUDA cuSPARSE SpMM algorithm must be row_major, deterministic, "
-                "csr3_direct, or csr3_preprocessed"
-            )
+        definition = SpmmDefinition(rhs_count, algorithm)
+        object.__setattr__(self, "_definition", definition)
         matrix._ensure_valid()  # pylint: disable=W0212
         contract = matrix._get_format_contract()  # pylint: disable=W0212
         identity = contract["identity"]
@@ -910,9 +904,11 @@ class CusparseSpmmRecording(BackendCommandRecording):
             raise ValueError("CUDA cuSPARSE binding names must be nonempty strings")
         if input == output:
             raise ValueError("CUDA cuSPARSE binding names must be unique")
+        native_binding = bind_sparse_operation(definition.operation(), input, output)
+        object.__setattr__(self, "_native_binding", native_binding)
         super().__init__(
             backend="cuda",
-            binding_names=names,
+            binding_names=native_binding.binding_names,
             command_count=1,
             queue="compute",
             stream_binding="runtime_ordered",
@@ -922,11 +918,6 @@ class CusparseSpmmRecording(BackendCommandRecording):
             no_host_readback=True,
         )
         object.__setattr__(self, "matrix", matrix)
-        object.__setattr__(self, "rhs_count", rhs_count)
-        object.__setattr__(self, "algorithm", algorithm)
-        object.__setattr__(self, "_algorithm_code", self._ALGORITHMS[algorithm])
-        object.__setattr__(self, "input", input)
-        object.__setattr__(self, "output", output)
         object.__setattr__(
             self,
             "_cuda_capture_recipe",
@@ -941,12 +932,15 @@ class CusparseSpmmRecording(BackendCommandRecording):
         object.__setattr__(self, "_memory_resources", memory_resources)
         object.__setattr__(self, "_plan_info_snapshot", None)
 
+    input = property(lambda self: self._native_binding.arrays[0].value)
+    output = property(lambda self: self._native_binding.arrays[1].value)
+    rhs_count = property(lambda self: self._definition.rhs_count)
+    algorithm = property(lambda self: self._definition.algorithm)
+    _algorithm_code = property(lambda self: self._definition.algorithm_code)
+
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.input, GraphAccess.READ),
-            ResourceEffect(self.output, GraphAccess.WRITE),
-        )
+        return self._native_binding.resource_effects
 
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA cuSPARSE SpMM")
