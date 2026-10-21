@@ -1692,6 +1692,9 @@ VkAccessFlags buffer_barrier_access_to_vk(
   if (int(accesses & BufferBarrierAccess::HostWrite)) {
     result |= VK_ACCESS_HOST_WRITE_BIT;
   }
+  if (int(accesses & BufferBarrierAccess::UniformRead)) {
+    result |= VK_ACCESS_UNIFORM_READ_BIT;
+  }
   return result;
 }
 

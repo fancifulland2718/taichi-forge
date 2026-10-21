@@ -1504,8 +1504,11 @@ CPU/CUDA/Vulkan 普通调用可通过
 创建时复制值和描述符，并保留成员依赖。同一 owner 可供参数来源及布局兼容的 kernel
 复用，包括显式反向和另一独立加载的模块。修改值或成员绑定时创建新包；ndarray 内容
 可以原地更新。显式关闭成员 allocation 会使包及依赖调用失效；关闭包会等待已提交
-工作结束后释放存储。包存储不持有 producer module 指针。prepared 参数包执行及 Graph 持久
-资源重建仍是尚未完成资格验证的独立边界。
+工作结束后释放存储。包存储不持有 producer module 指针。CPU/CUDA/Vulkan 无返回值
+kernel 也可通过 `kernel.prepare(pack, total, gradients={1: dtotal})` 使用同一参数包，
+包括显式反向及借用 JIT runtime。prepare 保留带代次的根 owner，一次性录制 Vulkan
+uniform 读取依赖；重放不重建或上传只读包存储。关闭包、成员或模块会在已提交工作
+完成后使依赖的 prepared 调用失效。Graph 持久资源重建及结构化 Graph 参数包路径仍待完成。
 
 C 消费者通过 `ti_get_kernel_argpack_info_ext` 查询布局，通过
 `ti_create_kernel_argpack_ext` 创建同一 owner。以 `TiArgPackMember` 的相对整数路径

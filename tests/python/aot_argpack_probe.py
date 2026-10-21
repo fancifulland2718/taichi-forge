@@ -69,13 +69,29 @@ def main(arch, artifact):
         assert read(loss) == [106]
         assert read(dx) == [13, -41, 37]
 
-        samples = []
-        for _ in range(5):
-            start = time.perf_counter()
-            call.run()
-            runtime.wait()
-            samples.append(time.perf_counter() - start)
-        times["ordinary_warm_complete_seconds"] = statistics.median(samples)
+        start = time.perf_counter()
+        prepared, prepared_reverse = call.prepare(), reverse.prepare()
+        times["prepare_forward_reverse_seconds"] = time.perf_counter() - start
+        times["prepared_argument_bytes"] = prepared.info["argument_bytes"]
+        assert read(loss) == [106]  # Preparation does not execute the kernel.
+        write(loss, [0])
+        write(dx, [0, 0, 0])
+        start = time.perf_counter()
+        prepared.run()
+        prepared_reverse.run()
+        runtime.wait()
+        times["prepared_first_forward_reverse_seconds"] = time.perf_counter() - start
+        assert read(loss) == [106]
+        assert read(dx) == [13, -41, 37]
+
+        for mode, entry in (("ordinary", call), ("prepared", prepared)):
+            samples = []
+            for _ in range(5):
+                start = time.perf_counter()
+                entry.run()
+                runtime.wait()
+                samples.append(time.perf_counter() - start)
+            times[mode + "_warm_complete_seconds"] = statistics.median(samples)
 
         values["basis"][0][0] = 3
         values["child"]["settings"]["scale"] = 3
@@ -83,16 +99,20 @@ def main(arch, artifact):
         other = runtime.load_module(artifact)
         next_forward, next_reverse = other.kernel("explicit"), other.kernel("backward")
         module.close()
+        reject((RuntimeError, aot.AotError), prepared.run)
         write(x, [-1, 4, -2])
         write(dx, [0, 0, 0])
         write(loss, [0])
-        next_forward(replacement, loss, gradients={1: dloss})
-        next_reverse(replacement, loss, gradients={1: dloss})
+        next_call = next_forward.prepare(replacement, loss, gradients={1: dloss})
+        next_adjoint = next_reverse.prepare(replacement, loss, gradients={1: dloss})
+        next_call.run()
+        next_adjoint.run()
         # Closing the pack completes its in-flight work; no producer is needed.
         replacement.close()
+        reject((RuntimeError, aot.AotError), next_call.run)
         assert read(loss) == [278]
         assert read(dx) == [-17, 119, -35]
-        stale = next_forward.bind(pack, loss, gradients={1: dloss})
+        stale = next_forward.prepare(pack, loss, gradients={1: dloss})
         x.close()
         reject(aot.AotError, stale.run)
         assert read(loss) == [278]

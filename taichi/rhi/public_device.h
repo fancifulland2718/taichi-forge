@@ -388,6 +388,7 @@ enum class BufferBarrierAccess : uint32_t {
   ConditionalCommandRead = 32,
   HostRead = 64,
   HostWrite = 128,
+  UniformRead = 256,
 };
 
 MAKE_ENUM_FLAGS(BufferBarrierAccess)

@@ -4,9 +4,12 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include "c_api/src/taichi_core_impl.h"
 #include "c_api/src/native_resource_registry.h"
+#include "c_api/src/argument_binding.h"
+#include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_argpack_storage.h"
 
 namespace taichi::lang {
@@ -23,10 +26,13 @@ class AotPackSession {
   TiAotModule module{nullptr};
   std::vector<TiMemory> memories;
   std::vector<TiNativeResource> resources;
+  std::vector<TiPreparedExecution> executions;
   ~AotPackSession() {
     if (!handle)
       return;
     ti_wait(handle);
+    for (auto execution : executions)
+      ti_destroy_prepared_ext(handle, execution);
     for (auto resource : resources)
       if (resource)
         ti_destroy_native_resource_ext(handle, resource);
@@ -133,7 +139,8 @@ class AotPackSession {
   }
 };
 
-void check_aot_pack(TiArch arch, const char *backend, bool public_factory = false) {
+void check_aot_pack(TiArch arch, const char *backend, bool public_factory = false,
+                   bool prepared = false) {
   const char *directory = std::getenv("TI_TEST_ARGPACK_AOT_ROOT");
   if (!directory)
     GTEST_SKIP() << "Set TI_TEST_ARGPACK_AOT_ROOT to the exported fixture directory";
@@ -174,9 +181,32 @@ void check_aot_pack(TiArch arch, const char *backend, bool public_factory = fals
   bindings[1].gradient = &dx;
   const uint32_t argument_count = public_factory ? 2 : 3;
   const uint32_t binding_count = public_factory ? 1 : 2;
+  if (prepared) {
+    auto &rt = session.runtime();
+    std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+    auto bound = capi::bind_kernel_arguments(rt, forward, argument_count, arguments,
+                                            binding_count, bindings);
+    ASSERT_NE(bound, nullptr);
+    // A valid packet with its owner list removed must fail before recording.
+    FixedExecution::Dispatch unowned{bound->kernel, bound->context.get()};
+    EXPECT_THROW((FixedExecution(rt.arch, rt.get(), nullptr, {unowned})),
+                 std::invalid_argument);
+  }
+  std::map<std::pair<TiKernel, TiNativeResource>, TiPreparedExecution> fixed;
   auto launch = [&](TiKernel kernel) {
-    ti_launch_kernel_with_bindings_ext(session.handle, kernel, argument_count,
-                                       arguments, binding_count, bindings);
+    if (prepared) {
+      auto &execution = fixed[{kernel, arguments[0].value.native_resource}];
+      if (!execution) {
+        execution = ti_prepare_kernel_ext(session.handle, kernel, argument_count,
+                                          arguments, binding_count, bindings);
+        ASSERT_NE(execution, nullptr);
+        session.executions.push_back(execution);
+      }
+      ti_launch_prepared_ext(session.handle, execution);
+    } else {
+      ti_launch_kernel_with_bindings_ext(session.handle, kernel, argument_count,
+                                        arguments, binding_count, bindings);
+    }
     check_error();
   };
   launch(forward);
@@ -194,6 +224,12 @@ void check_aot_pack(TiArch arch, const char *backend, bool public_factory = fals
   EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
   ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
   EXPECT_EQ(session.read(total), (std::vector<float>{84}));
+  if (prepared) {
+    ti_launch_prepared_ext(session.handle, session.executions.front());
+    EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+    EXPECT_EQ(session.read(total), (std::vector<float>{84}));
+  }
 
   arguments[0].value.native_resource = make_pack(3);
   session.write(x, {-1, 4, -2});
@@ -226,6 +262,9 @@ TEST(ArgPackAotBinding, CpuForwardAdjointRebindAndRetirement) {
 TEST(ArgPackAotBinding, CpuPublicFactoryAndLogicalArguments) {
   check_aot_pack(TI_ARCH_X64, "cpu", true);
 }
+TEST(ArgPackAotBinding, CpuPreparedOwnersAndRetirement) {
+  check_aot_pack(TI_ARCH_X64, "cpu", true, true);
+}
 #endif
 #ifdef TI_WITH_CUDA
 TEST(ArgPackAotBinding, CudaForwardAdjointRebindAndRetirement) {
@@ -234,6 +273,9 @@ TEST(ArgPackAotBinding, CudaForwardAdjointRebindAndRetirement) {
 TEST(ArgPackAotBinding, CudaPublicFactoryAndLogicalArguments) {
   check_aot_pack(TI_ARCH_CUDA, "cuda", true);
 }
+TEST(ArgPackAotBinding, CudaPreparedOwnersAndRetirement) {
+  check_aot_pack(TI_ARCH_CUDA, "cuda", true, true);
+}
 #endif
 #ifdef TI_WITH_VULKAN
 TEST(ArgPackAotBinding, VulkanForwardAdjointRebindAndRetirement) {
@@ -241,6 +283,9 @@ TEST(ArgPackAotBinding, VulkanForwardAdjointRebindAndRetirement) {
 }
 TEST(ArgPackAotBinding, VulkanPublicFactoryAndLogicalArguments) {
   check_aot_pack(TI_ARCH_VULKAN, "vulkan", true);
+}
+TEST(ArgPackAotBinding, VulkanPreparedOwnersAndRetirement) {
+  check_aot_pack(TI_ARCH_VULKAN, "vulkan", true, true);
 }
 #endif
 }  // namespace

@@ -503,7 +503,7 @@ FixedExecution::FixedExecution(
             !dispatch->context->argpack_ptrs.empty())
           throw std::invalid_argument(
               "Fixed execution requires loaded entries without returns or "
-              "ArgPacks");
+              "Program-owned ArgPacks");
 #ifdef TI_WITH_CUDA
         if (execution_binding) {
           auto *kernel = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
@@ -527,6 +527,12 @@ FixedExecution::FixedExecution(
           state_->kernel_resources.push_back(resource);
         }
         for (const auto &[index, param] : dispatch->kernel->nested_parameters) {
+          // One qualified root owner covers every nested pack in its subtree.
+          // Resolved pointers alone cannot keep their storage alive for replay.
+          if (param.is_argpack && index.size() == 1 &&
+              !resource_arguments.count(index))
+            throw std::invalid_argument(
+                "Fixed ArgPacks require generation-qualified root owners");
           if ((param.ptype == ParameterType::kTexture ||
                 param.ptype == ParameterType::kRWTexture ||
                 param.ptype == ParameterType::kAccelerationStructure ||

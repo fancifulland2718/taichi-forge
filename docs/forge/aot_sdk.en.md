@@ -1920,8 +1920,13 @@ an exported adjoint or an independently loaded module. Change values or member
 bindings by creating a new pack; ndarray contents can change in place. Explicitly
 closing a member allocation invalidates the pack and its dependent calls. Pack
 close waits for submitted work before releasing storage. Pack storage carries
-no producer-module pointers. Prepared pack execution and persistent Graph pack
-reconstruction remain separate, not yet qualified interfaces.
+no producer-module pointers. No-return kernels also accept the same packs through
+`kernel.prepare(pack, total, gradients={1: dtotal})` on CPU/CUDA/Vulkan, including
+explicit adjoints and borrowed JIT runtimes. Preparation retains qualified root
+owners and records Vulkan uniform-read dependencies once; replay does not rebuild
+or upload immutable pack storage. Closing the pack, a member or its module
+invalidates dependent prepared calls after submitted work completes. Persistent
+Graph reconstruction and structured Graph pack routes remain pending.
 
 C consumers query `ti_get_kernel_argpack_info_ext` and create the same owner with
 `ti_create_kernel_argpack_ext`. Supply exactly the value/resource leaves as

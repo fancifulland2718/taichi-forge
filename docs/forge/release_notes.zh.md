@@ -40,12 +40,13 @@
   修复复合成员写入异常及 Vulkan 嵌套向量/矩阵的布局错位。普通 AOT 导出及模板
   实例化现在能构造已声明类型的 ArgPack，占位不足时可提供带资源的 exemplar。
   独立只读 AOT ArgPack owner 已通过共同 C/Python 成员工厂接通 CPU/CUDA/Vulkan
-  普通调用及显式 ndarray 梯度；prepared 消费与 Graph 重建仍待完成。
+  普通调用、无返回值 kernel 的 prepared 执行及显式 ndarray 梯度，支持借用 JIT runtime。
+  prepared 保留根 owner 和 Vulkan uniform 读取依赖；Graph 重建及结构化参数包路径仍待完成。
   多个参数包中的同名资源成员保留各自绑定及声明顺序，避免前端覆盖成员后出现
   `NoneType` 编译错误；嵌套成员及显式反向使用同一修复。
   AOT 导出显式保留移除模板参数、提升资源成员后的公共成员路径，别名共用布局，
-  加载时与真实 kernel 参数核对；来源元数据不增加设备代码，普通消费复用该映射；
-  prepared/Graph 参数包消费仍需后续接通。
+  加载时与真实 kernel 参数核对；来源元数据不增加设备代码，普通及 prepared kernel
+  消费共用该映射。
 
 - Vulkan 按参数缓冲的整数槽类型读取向量及嵌套结构中的布尔参数，再转换为布尔表达式，
   修复 JIT/AOT 生成的 SPIR-V 访问链类型不匹配；参数布局保持不变。

@@ -2241,7 +2241,11 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     insert_pending_dispatch_barriers();
     if (!argpack_barriers_inserted) {
       for (DeviceAllocation alloc : argpack_allocations) {
-        current_cmdlist_->buffer_barrier(alloc);
+        current_cmdlist_->buffer_transition(
+            alloc.get_ptr(), std::numeric_limits<std::size_t>::max(),
+            {BufferBarrierStage::Host | BufferBarrierStage::Transfer,
+             BufferBarrierAccess::HostWrite | BufferBarrierAccess::TransferWrite,
+             BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
       }
       argpack_barriers_inserted = true;
     }
@@ -2841,6 +2845,19 @@ GraphReplayStats GfxRuntime::snapshot_graph_replay_stats(
 }
 
 namespace {
+DeviceAllocation resolved_graph_argpack(LaunchContextBuilder &context,
+                                       const std::vector<int> &indices) {
+  const auto kind = context.device_allocation_type.find(indices);
+  const auto pointer = context.array_ptrs.find(indices);
+  TI_ERROR_IF(kind == context.device_allocation_type.end() ||
+                  kind->second !=
+                      LaunchContextBuilder::DevAllocType::kResolvedArgPack ||
+                  pointer == context.array_ptrs.end() || !pointer->second ||
+                  context.argpack_ptrs.count(indices),
+              "Prepared Vulkan ArgPack requires resolved immutable storage");
+  return *static_cast<const DeviceAllocation *>(pointer->second);
+}
+
 bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
                      int task_index,
                      ShaderResourceSet *bindings,
@@ -2885,6 +2902,9 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
                                                       : kDeviceNullAllocation);
         break;
       case CompiledTaichiKernel::BufferBindingKind::ArgPack:
+        bindings->buffer(bind.binding,
+                         resolved_graph_argpack(*pd.host_ctx, bind.buffer.root_id));
+        break;
       case CompiledTaichiKernel::BufferBindingKind::RetsRw:
       case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
         TI_NOT_IMPLEMENTED;
@@ -3049,9 +3069,13 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     TI_ERROR_IF(!dispatch.host_ctx || found == ti_kernels_.end(),
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
-    TI_ERROR_IF(kernel->get_ret_buffer_size() ||
-                    !kernel->runtime_argpack_args().empty(),
-                "Prepared Vulkan Graph cannot retain host returns or ArgPacks");
+    TI_ERROR_IF(kernel->get_ret_buffer_size(),
+                "Prepared Vulkan Graph cannot retain host returns");
+    for (const auto &indices : kernel->runtime_argpack_args()) {
+      const auto allocation = resolved_graph_argpack(*dispatch.host_ctx, indices);
+      TI_ERROR_IF(allocation.device != device_ || allocation.alloc_id == 0,
+                  "Prepared Vulkan ArgPack belongs to another device or is closed");
+    }
     for (const auto &array : kernel->runtime_array_args()) {
       const auto kind =
           dispatch.host_ctx->device_allocation_type[array.indices];
@@ -3075,8 +3099,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       for (const auto &bind : kernel->buffer_binding_plan(i)) {
         TI_ERROR_IF(
-            bind.kind == CompiledTaichiKernel::BufferBindingKind::ArgPack ||
-                bind.kind == CompiledTaichiKernel::BufferBindingKind::RetsRw ||
+            bind.kind == CompiledTaichiKernel::BufferBindingKind::RetsRw ||
                 bind.kind == CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray,
             "Unsupported prepared Vulkan Graph resource binding");
       }
@@ -3112,6 +3135,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
       for (const auto &[key, allocation] : *pd.any_arrays) {
         prefix_buffers.push_back(allocation);
       }
+      for (const auto &indices : pd.kernel->runtime_argpack_args())
+        prefix_buffers.push_back(resolved_graph_argpack(*pd.host_ctx, indices));
       const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
       for (std::size_t t = 0; t < tasks.size(); ++t) {
         TI_ERROR_IF(!tasks[t].texture_binds.empty() ||
@@ -3257,6 +3282,16 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     }
     begin_timing(operation_index, compute_timing_stream);
     auto &pd = prepared[kernel_index++];
+    // Cold uploads write these immutable uniforms. The generic storage-buffer
+    // barrier does not include uniform reads. Record once, with no replay scan.
+    for (const auto &indices : pd.kernel->runtime_argpack_args()) {
+      const auto allocation = resolved_graph_argpack(*pd.host_ctx, indices);
+      commands->buffer_transition(
+          allocation.get_ptr(), std::numeric_limits<std::size_t>::max(),
+          {BufferBarrierStage::Host | BufferBarrierStage::Transfer,
+           BufferBarrierAccess::HostWrite | BufferBarrierAccess::TransferWrite,
+           BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
+    }
     const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       auto resources = device_->create_resource_set_unique();

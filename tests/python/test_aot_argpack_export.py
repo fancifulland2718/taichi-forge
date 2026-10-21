@@ -50,13 +50,35 @@ def test_aot_argpack_nested_resources_and_explicit_adjoint(tmp_path):
     module.add_kernel(energy.grad, name="backward")
     assert module._exported_kernels["automatic"] is module._exported_kernels["explicit"]
     module.archive(str(tmp_path / "packs.tcm"))
+    export_seconds = time.perf_counter() - started
     np.testing.assert_allclose(loss.to_numpy(), [106])  # Export does not execute.
     with ti.aot.borrow_runtime() as runtime:
         loaded = runtime.load_module(tmp_path / "packs.tcm")
         for name in ("automatic", "explicit", "backward"):
             entry = loaded.kernel(name)
             assert 0 not in entry._argument_layout.encoders  # A pack is a resource.
-    print(json.dumps(dict(argpack_export_seconds=time.perf_counter() - started,
+        x, dx = runtime.import_ndarray(source), runtime.import_ndarray(source.grad)
+        total, dtotal = runtime.import_ndarray(loss), runtime.import_ndarray(loss.grad)
+        loss.fill(0)
+        source.grad.fill(0)
+        forward, reverse = loaded.kernel("automatic"), loaded.kernel("backward")
+        owned = forward.argpack(
+            0, dict(source=x, basis=[[3, 0], [0, 5]],
+                    child=dict(settings=dict(scale=2, bias=[1, -1]))),
+            gradients={"source": dx},
+        )
+        prepared = forward.prepare(owned, total, gradients={1: dtotal})
+        adjoint = reverse.prepare(owned, total, gradients={1: dtotal})
+        prepared.run()
+        adjoint.run()
+        runtime.wait()
+        np.testing.assert_allclose(loss.to_numpy(), [106])
+        np.testing.assert_allclose(source.grad.to_numpy(), [13, -41, 37])
+        prepared.run()
+        adjoint.run()  # Borrower close retires submitted work before its packs.
+    np.testing.assert_allclose(loss.to_numpy(), [212])
+    np.testing.assert_allclose(source.grad.to_numpy(), [26, -82, 74])
+    print(json.dumps(dict(argpack_export_seconds=export_seconds,
                           artifact_bytes=(tmp_path / "packs.tcm").stat().st_size)))
     root = Path(__file__).resolve().parents[2]
     environment = dict(os.environ,
