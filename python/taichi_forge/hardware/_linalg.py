@@ -5,6 +5,14 @@ from types import MappingProxyType
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native_definition import NativeDefinition
 from taichi_forge.hardware._blas_definitions import GemmDefinition
+from taichi_forge.hardware._cudss_definition import (
+    CudssCallDefinition,
+    MATRIX_TYPES,
+    MATRIX_VIEWS,
+    REORDERINGS,
+    SOLVES,
+    plan_definition,
+)
 from taichi_forge.hardware._cusparse_definitions import (
     SPMM_ALGORITHMS,
     SpmmDefinition,
@@ -1411,8 +1419,8 @@ class CudssPlan:
     rewritten to call this plan.
     """
 
-    _MATRIX_TYPES = {"general": 0, "symmetric": 1, "spd": 3}
-    _MATRIX_VIEWS = {"full": 0, "lower": 1, "upper": 2}
+    _MATRIX_TYPES = MATRIX_TYPES
+    _MATRIX_VIEWS = MATRIX_VIEWS
 
     def __init__(
         self,
@@ -1501,6 +1509,10 @@ class CudssPlan:
         program = impl.get_runtime().prog
         if program is None:
             raise TaichiRuntimeError("CUDA cuDSS requires an active runtime")
+        definition = plan_definition(matrix.n, int(matrix.matrix.num_nonzero()), matrix_type, matrix_view, configuration)
+        parameters = definition.parameters
+        if configuration is not None:
+            configuration = (REORDERINGS.index(parameters["reordering"]), SOLVES.index(parameters["solve"]))
         with hardware_provider_call("cudss", failure_phase="provider_plan_failure"):
             resolved = resolve_cudss_provider(library_path)
             with cudss_dll_directories(resolved.runtime_library_path):
@@ -1511,8 +1523,8 @@ class CudssPlan:
                     extra = (configuration, True) if graph_owned else (configuration,)
                 handle = create(
                     matrix.matrix,
-                    self._MATRIX_TYPES[matrix_type],
-                    self._MATRIX_VIEWS[matrix_view],
+                    self._MATRIX_TYPES[parameters["matrix_type"]],
+                    self._MATRIX_VIEWS[parameters["matrix_view"]],
                     resolved.adapter_path,
                     resolved.runtime_library_path,
                     *extra,
@@ -1523,8 +1535,7 @@ class CudssPlan:
         self._handle = handle
         self._graph_owned = graph_owned
         self._capture_leases = 0
-        self._rows = matrix.n
-        self._nnz = int(matrix.matrix.num_nonzero())
+        self._definition = definition
         self._effect_name = f"__cudss_plan_{self._runtime_generation}_{self._handle}"
         self.matrix_type = matrix_type
         self.matrix_view = matrix_view
@@ -1615,6 +1626,9 @@ class CudssPlan:
             automatic_selection_policy="forbidden",
         )
         _register_loaded_plan(self)
+
+    _rows = property(lambda self: self._definition.parameters["rows"])
+    _nnz = property(lambda self: self._definition.parameters["nonzeros"])
 
     @property
     def closed(self):
@@ -1862,6 +1876,8 @@ class CudssSolveRecording(BackendCommandRecording):
         object.__setattr__(self, "plan", plan)
         object.__setattr__(self, "rhs", rhs)
         object.__setattr__(self, "solution", solution)
+        object.__setattr__(self, "_definition", CudssCallDefinition("solve"))
+        object.__setattr__(self, "_native_binding", self._definition.bind(((rhs, solution),)))
         attach_retained_execution_contract(
             self,
             plan._solve_execution_contract,  # pylint: disable=W0212
@@ -1869,9 +1885,7 @@ class CudssSolveRecording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.rhs, GraphAccess.READ),
-            ResourceEffect(self.solution, GraphAccess.WRITE),
+        return self._native_binding.resource_effects + (
             ResourceEffect(
                 self.plan._effect_name,
                 GraphAccess.READ_WRITE,
@@ -1950,6 +1964,8 @@ class CudssRefactorSolveRecording(BackendCommandRecording):
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "rhs", rhs)
         object.__setattr__(self, "solution", solution)
+        object.__setattr__(self, "_definition", CudssCallDefinition("transactional"))
+        object.__setattr__(self, "_native_binding", self._definition.bind(((rhs, solution),), values=values))
         attach_retained_execution_contract(
             self,
             plan._refactor_solve_execution_contract,  # pylint: disable=W0212
@@ -1957,10 +1973,7 @@ class CudssRefactorSolveRecording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.values, GraphAccess.READ),
-            ResourceEffect(self.rhs, GraphAccess.READ),
-            ResourceEffect(self.solution, GraphAccess.WRITE),
+        return self._native_binding.resource_effects + (
             ResourceEffect(
                 self.plan._effect_name,
                 GraphAccess.READ_WRITE,

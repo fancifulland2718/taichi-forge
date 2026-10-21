@@ -1,6 +1,8 @@
 """Export qualified cuDSS seeds through the shared native resource schema."""
 
-from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.graph._native_definition import NativeArrayBinding, NativeResourceBinding, NativeResourceReference
+from taichi_forge.hardware._cudss_definition import resource_definition
 
 
 def _resource(context, plan, phase, read_snapshot):
@@ -8,12 +10,9 @@ def _resource(context, plan, phase, read_snapshot):
     operation = "transaction_plan_f32" if transactional else "plan_f32"
 
     def snapshot():
-        rows, nonzeros, matrix_type, matrix_view, numeric_phase, reordering, solve, offsets, columns, values = (
-            read_snapshot()
-        )
-        expected = -1 if transactional else {"solve": 0, "factor_solve": 4, "refactor_solve": 8}[phase]
-        if numeric_phase not in (-1, expected):
-            raise TaichiRuntimeError("cuDSS AOT recording differs from its frozen numerical phase")
+        state = read_snapshot()
+        definition = resource_definition(plan, phase, state)
+        offsets, columns, values = state[-3:]
         bindings = {
             port: context.data_resource(object(), data, dtype=dtype, shape=[len(data) // 4], readonly=True)
             for port, dtype, data in (
@@ -22,21 +21,11 @@ def _resource(context, plan, phase, read_snapshot):
                 ("values", "f32", values),
             )
         }
-        return context.resource(
+        return NativeResourceBinding(
             plan,
-            "cudss",
-            operation,
-            parameters=dict(
-                rows=rows,
-                nonzeros=nonzeros,
-                matrix_type={0: "general", 1: "symmetric", 3: "spd"}[matrix_type],
-                matrix_view=("full", "lower", "upper")[matrix_view],
-                **({} if transactional else dict(phase=phase)),
-                reordering=("default", "amd", "nested_dissection", "natural")[reordering],
-                solve=("default", "general")[solve],
-            ),
-            bindings=bindings,
-        )
+            definition,
+            arrays=tuple(NativeArrayBinding(port, name, GraphAccess.READ) for port, name in bindings.items()),
+        ).lower(context, requirements={} if transactional else dict(phase=phase))
 
     return context.resource_once(plan, snapshot, policy=("cudss", operation, phase))
 
@@ -47,21 +36,14 @@ def export_capture(recording, context):
     phase = recording.phase
     # Never resample plan._matrix: it may no longer contain the private seed.
     resource = _resource(context, plan, phase, lambda: plan._program._snapshot_cuda_cudss_graph_seed(plan._handle))
-    bindings = dict(plan=resource)
-    if phase != "solve":
-        bindings["values"] = recording.binding_names[0]
-    for index, (rhs, output) in enumerate(recording._rhs_pairs):
-        bindings[f"rhs_{index}"] = rhs
-        bindings[f"output_{index}"] = output
     # JIT capture rejects aliases between every binding, including read-only
     # RHS vectors. Keep that contract as one group policy; emitting every pair
     # as a constraint would grow the package quadratically with RHS count.
-    context.native(
-        "cudss",
-        "solve_group_f32",
-        parameters=dict(rhs_count=len(recording._rhs_pairs), disjoint_bindings=True),
-        bindings=bindings,
-    )
+    recording._definition.bind(
+        recording._rhs_pairs,
+        values=None if phase == "solve" else recording.binding_names[0],
+        resource=NativeResourceReference(resource),
+    ).lower(context)
     return ()
 
 
@@ -76,12 +58,9 @@ def export_solve(recording, context):
         "solve",
         lambda: plan._program._snapshot_cuda_cudss_solve_seed(plan._handle, matrix.matrix),
     )
-    context.native(
-        "cudss",
-        "solve_group_f32",
-        parameters=dict(rhs_count=1),
-        bindings=dict(plan=resource, rhs_0=recording.rhs, output_0=recording.solution),
-    )
+    recording._definition.bind(
+        ((recording.rhs, recording.solution),), resource=NativeResourceReference(resource)
+    ).lower(context)
     return ()
 
 
@@ -96,10 +75,9 @@ def export_refactor(recording, context):
         "transactional",
         lambda: plan._program._snapshot_cuda_cudss_solve_seed(plan._handle, matrix.matrix, True),
     )
-    context.native(
-        "cudss",
-        "refactor_solve_f32",
-        parameters={},
-        bindings=dict(plan=resource, values=recording.values, rhs=recording.rhs, output=recording.solution),
-    )
+    recording._definition.bind(
+        ((recording.rhs, recording.solution),),
+        values=recording.values,
+        resource=NativeResourceReference(resource),
+    ).lower(context)
     return ()

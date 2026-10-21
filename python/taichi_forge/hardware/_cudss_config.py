@@ -2,8 +2,7 @@
 
 from collections.abc import Mapping
 
-_REORDERINGS = ("default", "amd", "nested_dissection", "natural")
-_SOLVES = ("default", "general")
+from taichi_forge.hardware._cudss_definition import REORDERINGS as _REORDERINGS, SOLVES as _SOLVES
 
 
 def canonical_configuration(configuration):

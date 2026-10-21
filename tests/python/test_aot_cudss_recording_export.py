@@ -18,7 +18,9 @@ from tests.python.test_cudss_config import _problem
 
 @pytest.mark.parametrize("phase", ("solve", "factor_solve", "refactor_solve"))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cudss_recordings_export_frozen_seed_and_selected_recipe(tmp_path, phase):
+def test_cudss_recordings_export_frozen_seed_and_selected_recipe(tmp_path, phase, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeOperationBinding, NativeResourceBinding
+
     matrix, original_values, dense, vendor = _problem()
     owner = configured_plan(matrix, {"version": 1, "reordering": "amd", "solve": "general"},
                             matrix_type="spd", matrix_view="full", library_path=vendor, _graph_owned=True)
@@ -53,6 +55,23 @@ def test_cudss_recordings_export_frozen_seed_and_selected_recipe(tmp_path, phase
     forward = CudssCaptureRecording(owner, phase=phase, values="values",
                                     _rhs_pairs=(("rhs", "solution"), ("rhs2", "solution2")))
     adjoint = CudssCaptureRecording(owner, phase=phase, values="values", rhs="adjoint_rhs", solution="adjoint")
+    resource_calls, operation_calls = [], []
+    original_resource, original_operation = NativeResourceBinding.lower, NativeOperationBinding.lower
+
+    def lower_resource(self, context, **kwargs):
+        if self.owner is owner:
+            assert self.definition is owner._definition
+            resource_calls.append(self)
+        return original_resource(self, context, **kwargs)
+
+    def lower_operation(self, context, **kwargs):
+        if self.definition.provider == "cudss":
+            assert self.definition in (forward._definition.native, adjoint._definition.native)
+            operation_calls.append(self)
+        return original_operation(self, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", lower_resource)
+    monkeypatch.setattr(NativeOperationBinding, "lower", lower_operation)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(produce, symbols["source"], symbols["rhs"], symbols["rhs2"])
     builder.append_native(forward)
@@ -93,6 +112,7 @@ def test_cudss_recordings_export_frozen_seed_and_selected_recipe(tmp_path, phase
     # Metadata comes from the native owner, not mutable Python display fields.
     owner.matrix_type, owner.matrix_view = "general", "upper"
     export("changed", graph)
+    assert len(resource_calls) == 4 and len(operation_calls) == 8
     assert len(module._data_payloads) == 3, "All exports must reuse identical read-only CSR payloads"
     if phase == "solve":
         class Unqualified(CudssCaptureRecording):

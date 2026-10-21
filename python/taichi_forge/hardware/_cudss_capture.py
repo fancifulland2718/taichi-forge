@@ -1,13 +1,14 @@
 """Graph-owned cuDSS numerical phases; no Python/vendor call on replay."""
 
 from taichi_forge._lib import core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.graph._native import (
     BackendCommandRecording,
     NativeGraphNode,
     _CudaGraphCaptureRecipe,
 )
 from taichi_forge.hardware._linalg import CudssPlan
+from taichi_forge.hardware._cudss_definition import CudssCallDefinition, PHASES as _PHASES
 from taichi_forge.hardware._native_adapter import (
     HardwareRecordingExecutable,
     static_resource_effect,
@@ -22,9 +23,6 @@ from taichi_forge.hardware._retained import (
 )
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32
-
-_PHASES = {"solve": 0, "factor_solve": 4, "refactor_solve": 8}
-
 
 class _PlanLease:
     def __init__(self, plan):
@@ -46,7 +44,9 @@ class _CaptureRecipe(_CudaGraphCaptureRecipe):
 
     def __init__(self, recording):
         self.lease = recording._lease
-        self.names, self.phase = recording.binding_names, recording.phase
+        self.names, self.definition = recording.binding_names, recording._definition
+
+    phase = property(lambda self: self.definition.phase)
 
     def append_to_graph(self, builder, program):
         from taichi_forge.graph._graph import Arg, ArgKind
@@ -141,8 +141,9 @@ class CudssCaptureRecording(BackendCommandRecording):
             replay_mode="stream_capture",
         )
         object.__setattr__(self, "plan", plan)
-        object.__setattr__(self, "phase", phase)
+        object.__setattr__(self, "_definition", CudssCallDefinition(phase, len(pairs), True))
         object.__setattr__(self, "_rhs_pairs", pairs)
+        object.__setattr__(self, "_native_binding", self._definition.bind(pairs, values=values))
         object.__setattr__(self, "_lease", _PlanLease(plan))
         object.__setattr__(self, "_cuda_capture_recipe", _CaptureRecipe(self))
         identity = make_retained_plan_identity(
@@ -189,14 +190,11 @@ class CudssCaptureRecording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        outputs = {pair[1] for pair in self._rhs_pairs}
-        return tuple(
-            ResourceEffect(
-                name,
-                (GraphAccess.WRITE if name in outputs else GraphAccess.READ),
-            )
-            for name in self.binding_names
-        ) + (static_resource_effect(self.plan._effect_name, GraphAccess.READ_WRITE),)
+        return self._native_binding.resource_effects + (
+            static_resource_effect(self.plan._effect_name, GraphAccess.READ_WRITE),
+        )
+
+    phase = property(lambda self: self._definition.phase)
 
     def _graph_provider_memory_identity(self):
         return ("cudss_graph_plan", self.plan._runtime_generation, self.plan._handle)

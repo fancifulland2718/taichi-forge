@@ -133,17 +133,42 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
         ti.hardware.probe("cublas", library_path="ignored")
 
     fake = object.__new__(ti.hardware.linalg.CudssPlan)
-    fake._rows = 2
-    fake._nnz = 4
+    from taichi_forge.hardware._cudss_definition import plan_definition
+    from taichi_forge.hardware._retained import (
+        HardwareExecutionCostModel,
+        RetainedExecutionContract,
+        RetainedPlanIdentity,
+        fixed_cost,
+        scale_cost,
+    )
+
+    fake._definition = plan_definition(2, 4, "general", "full", None)
+    fake._refactor_solve_execution_contract = RetainedExecutionContract(
+        identity=RetainedPlanIdentity(
+            operation_id="linalg.refactor_solve.cudss",
+            provider_id="cudss",
+            backend="cuda",
+            provider_scope=(("test_fixture", True),),
+            device_scope=(("test_fixture", True),),
+            problem_scope=(("rows", 2),),
+            runtime_scope=(("test_fixture", True),),
+            execution_scope=(("test_fixture", True),),
+            numeric_contract_revision=1,
+            persistent_cache_safe=False,
+        ),
+        cost_model=HardwareExecutionCostModel(
+            (fixed_cost("analysis", "provider_generation"), scale_cost("solve_execution", "rows", "nonzeros"))
+        ),
+        workspace_ownership="provider_generation",
+        concurrency_policy="single_inflight",
+        automatic_selection_policy="forbidden",
+    )
     fake._effect_name = "__test_cudss_plan"
     fake.validate_graph_lifetime = lambda **_kwargs: None
     recording = ti.hardware.linalg.CudssRefactorSolveRecording(fake)
     assert recording.replay_mode == "rerecord"
     assert recording.workspace_ownership == "provider_generation"
-    assert tuple(
-        (effect.resource, effect.access, effect.runtime_bound)
-        for effect in recording.resource_effects
-    ) == (
+    assert tuple((effect.resource, effect.access, effect.runtime_bound) for effect in recording.resource_effects) == (
         ("matrix_values", GraphAccess.READ, True),
         ("rhs", GraphAccess.READ, True),
         ("solution", GraphAccess.WRITE, True),
