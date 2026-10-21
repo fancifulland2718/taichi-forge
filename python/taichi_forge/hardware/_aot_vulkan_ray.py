@@ -94,20 +94,21 @@ def _scene(context, scene):
         bindings = dict(inputs)
         for ordinal, blas in enumerate(scene._topology):
             bindings[f"blas_{ordinal}"] = _geometry(context, blas, retained_by=scene)
-        parameters = dict(
-            instance_count=scene.instance_count,
+        # Host build/refit can replace custom IDs and masks, whereas device
+        # refits change only transforms. Preserve the current host seed policy;
+        # these mutable facts do not belong in the creation definition.
+        metadata = dict(
             custom_indices=[instance.custom_index for instance in scene._instances],
             visibility_masks=[instance.mask for instance in scene._instances],
         )
-        if any(scene.sbt_record_offsets):
-            parameters["sbt_record_offsets"] = list(scene.sbt_record_offsets)
-        return context.resource(
+        return NativeResourceBinding(
             scene,
-            "vulkan_ray",
-            "instance_tlas",
-            parameters=parameters,
-            bindings=bindings,
-        )
+            scene._definition,
+            arrays=(NativeArrayBinding("transforms", inputs["transforms"], GraphAccess.READ),),
+            resources=tuple(
+                (port, NativeResourceReference(value)) for port, value in bindings.items() if port != "transforms"
+            ),
+        ).lower(context, requirements=metadata)
 
     return context.resource_once(scene, build, policy="vulkan_ray_consumer_seed")
 

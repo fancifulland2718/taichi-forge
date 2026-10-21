@@ -114,21 +114,14 @@ def _scene(context, scene):
         bindings = dict(context=_provider(context, scene.provider), **inputs)
         for ordinal, gas in enumerate(scene._topology):
             bindings[f"gas_{ordinal}"] = _geometry(context, gas, retained_by=scene)
-        return context.resource(
+        return NativeResourceBinding(
             scene,
-            "optix",
-            "instance_scene",
-            version=2 if any(scene._sbt_offsets) else 1,
-            bindings=bindings,
-            parameters=dict(
-                instance_count=scene.instance_count,
-                allow_update=scene.allow_update,
-                custom_indices=[instance.custom_index for instance in scene._instances],
-                visibility_masks=[instance.mask for instance in scene._instances],
-                opaque=[instance.opaque for instance in scene._instances],
-                **(dict(sbt_offsets=list(scene._sbt_offsets)) if any(scene._sbt_offsets) else {}),
+            scene._definition,
+            arrays=(NativeArrayBinding("transforms", inputs["transforms"], GraphAccess.READ),),
+            resources=tuple(
+                (port, NativeResourceReference(value)) for port, value in bindings.items() if port != "transforms"
             ),
-        )
+        ).lower(context)
 
     return context.resource_once(scene, build, policy="optix_consumer_seed")
 

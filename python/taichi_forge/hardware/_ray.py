@@ -1182,7 +1182,13 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
         normalized = self._normalize_instances(instances, require_live=True)
         self._topology = tuple(instance.blas for instance in normalized)
         self._instances = normalized
-        self._sbt_record_offsets = tuple(instance.sbt_record_offset for instance in normalized)
+        offsets = tuple(instance.sbt_record_offset for instance in normalized)
+        self._definition = NativeDefinition(
+            "vulkan_ray",
+            "instance_tlas",
+            dict(instance_count=len(normalized), **(dict(sbt_record_offsets=offsets) if any(offsets) else {})),
+        )
+        self._sbt_record_offsets = self._definition.parameters.get("sbt_record_offsets", (0,) * len(normalized))
         self._handle = int(
             program._create_vulkan_instance_tlas_resource_with_sbt(
                 [blas._handle for blas in self._topology], self._sbt_record_offsets
@@ -1210,7 +1216,7 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
 
     @property
     def instance_count(self):
-        return len(self._topology)
+        return self._definition.parameters["instance_count"]
 
     @property
     def sbt_record_offsets(self):

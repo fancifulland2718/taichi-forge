@@ -2318,19 +2318,34 @@ class OptixInstanceScene:
             _api_has(api, name) for name in ("create_instance_scene_sbt", "prepare_instance_sbt")
         )):
             raise TaichiRuntimeError("OptiX adapter lacks instance SBT offsets; use a newer Forge adapter")
-        native = (_InstanceDesc * len(normalized))()
+        self._definition = NativeDefinition(
+            "optix",
+            "instance_scene",
+            dict(
+                instance_count=len(normalized),
+                allow_update=allow_update,
+                custom_indices=[v.custom_index for v in normalized],
+                visibility_masks=[v.mask for v in normalized],
+                opaque=[v.opaque for v in normalized],
+                **(dict(sbt_offsets=sbt_offsets) if uses_sbt_offsets else {}),
+            ),
+            version=2 if uses_sbt_offsets else 1,
+        )
+        parameters = self._definition.parameters
+        self._sbt_offsets = parameters.get("sbt_offsets", (0,) * len(normalized))
+        native = (_InstanceDesc * parameters["instance_count"])()
         for index, instance in enumerate(normalized):
             native[index].struct_size = ctypes.sizeof(_InstanceDesc)
-            native[index].reserved = int(instance.opaque)
+            native[index].reserved = int(parameters["opaque"][index])
             native[index].gas = instance.gas._gas
             native[index].transform[:] = instance.transform
-            native[index].custom_index = instance.custom_index
-            native[index].visibility_mask = instance.mask
+            native[index].custom_index = parameters["custom_indices"][index]
+            native[index].visibility_mask = parameters["visibility_masks"][index]
         scene = ctypes.c_void_p()
         desc = _InstanceSceneDesc(
             ctypes.sizeof(_InstanceSceneDesc),
-            len(normalized),
-            int(allow_update),
+            parameters["instance_count"],
+            int(self.allow_update),
             0,
             native,
             0,
@@ -2362,12 +2377,10 @@ class OptixInstanceScene:
         self._runtime_prog = provider._runtime_prog
         self._runtime_generation = provider._runtime_generation
         self._instances = normalized
-        self._sbt_offsets = sbt_offsets
         self._fixed_sbt_variants = set()
         self._fixed_sbt_bytes = 0
         self._topology = tuple(instance.gas for instance in normalized)
         self._has_micromaps = any(gas._micromap_id is not None for gas in self._topology)
-        self.allow_update = allow_update
         self._effect_name = RayResourceIdentity(
             "optix_instance_scene", children=tuple(gas._effect_name for gas in self._topology),
             opaque_instances=tuple(instance.opaque for instance in normalized),
@@ -2390,12 +2403,16 @@ class OptixInstanceScene:
             gas._ray_retainers.add(self)
 
     @property
+    def allow_update(self):
+        return self._definition.parameters["allow_update"]
+
+    @property
     def closed(self):
         return self._scene is None
 
     @property
     def instance_count(self):
-        return len(self._topology)
+        return self._definition.parameters["instance_count"]
 
     def _trace_function(self, typed):
         api = self.provider._loaded.api
