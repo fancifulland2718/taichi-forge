@@ -106,7 +106,10 @@ def test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cublas_gemm_executes_directly_and_through_graph():
+def test_cublas_gemm_executes_directly_and_through_graph(tmp_path, monkeypatch):
+    from taichi_forge.hardware._blas_definitions import GemmDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     if not ti.hardware.linalg.is_available():
         pytest.skip("a compatible user-provided cuBLAS shared library is unavailable")
 
@@ -139,6 +142,47 @@ def test_cublas_gemm_executes_directly_and_through_graph():
     expected = -0.75 * (a_values @ b_values) + 0.5 * initial
     np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-5, atol=2e-5)
     assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
+
+    def no_conversion(*args, **kwargs):
+        raise AssertionError("retained GEMM must execute without rebuilding its definition")
+
+    output.from_numpy(initial)
+    with monkeypatch.context() as patch:
+        patch.setattr(GemmDefinition, "__post_init__", no_conversion)
+        patch.setattr(NativeOperationBinding, "lower", no_conversion)
+        graph.run({"a": a, "b": b, "output": output})
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-5, atol=2e-5)
+    lowered = []
+    lower = NativeOperationBinding.lower
+
+    def observe(binding, context, **kwargs):
+        lowered.append(binding)
+        return lower(binding, context, **kwargs)
+
+    module = ti.aot.Module()
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeOperationBinding, "lower", observe)
+        module.add_execution_plan("gemm", graph)
+    assert len(lowered) == 1 and lowered[0] is recording._native_binding
+    artifact = tmp_path / "recorded-gemm.tcm"
+    module.archive(str(artifact))
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(artifact) as loaded:
+        bound = {
+            name: runtime.ndarray("f32", shape)
+            for name, shape in (
+                ("a", a_values.shape),
+                ("b", b_values.shape),
+                ("output", initial.shape),
+            )
+        }
+        for name, data in (("a", a_values), ("b", b_values), ("output", initial)):
+            bound[name].write(data.tobytes())
+        with loaded.prepare_execution("gemm", bound) as call:
+            call()
+            actual = np.frombuffer(bound["output"].read(), np.float32).reshape(initial.shape)
+            np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
+        for value in bound.values():
+            value.close()
 
     resolved = next(
         operation

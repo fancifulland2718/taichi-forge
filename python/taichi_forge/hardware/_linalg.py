@@ -1,11 +1,10 @@
 """Optional CUDA vendor linear-algebra providers."""
 
-import math
-from numbers import Real
 from types import MappingProxyType
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native_definition import NativeDefinition
+from taichi_forge.hardware._blas_definitions import GemmDefinition
 from taichi_forge.hardware._cusparse_definitions import (
     SPMM_ALGORITHMS,
     SpmmDefinition,
@@ -44,26 +43,6 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32
 
 
-def _dimension(value, name):
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value <= 0
-        or value > 0x7FFFFFFF
-    ):
-        raise ValueError(f"CUDA cuBLAS {name} must be in [1, INT_MAX]")
-    return value
-
-
-def _scalar(value, name):
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise TypeError(f"CUDA cuBLAS {name} must be a real scalar")
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError(f"CUDA cuBLAS {name} must be finite")
-    return result
-
-
 _CUBLAS_GEMM_EXECUTION_CONTRACT = RetainedExecutionContract(
     identity=None,
     cost_model=HardwareExecutionCostModel(
@@ -95,11 +74,7 @@ class CublasGemmRecording(BackendCommandRecording):
         b="b",
         output="output",
     ):
-        rows = _dimension(rows, "rows")
-        columns = _dimension(columns, "columns")
-        inner = _dimension(inner, "inner dimension")
-        alpha = _scalar(alpha, "alpha")
-        beta = _scalar(beta, "beta")
+        definition = GemmDefinition(rows, columns, inner, alpha, beta)
         names = (a, b, output)
         if any(not isinstance(name, str) or not name for name in names):
             raise ValueError("CUDA cuBLAS binding names must be nonempty strings")
@@ -116,43 +91,28 @@ class CublasGemmRecording(BackendCommandRecording):
             replay_mode="rerecord",
             no_host_readback=True,
         )
-        object.__setattr__(self, "rows", rows)
-        object.__setattr__(self, "columns", columns)
-        object.__setattr__(self, "inner", inner)
-        object.__setattr__(self, "alpha", alpha)
-        object.__setattr__(self, "beta", beta)
-        object.__setattr__(self, "a", a)
-        object.__setattr__(self, "b", b)
-        object.__setattr__(self, "output", output)
+        object.__setattr__(self, "_definition", definition)
+        object.__setattr__(self, "_native_binding", definition.bind(a, b, output))
         attach_retained_execution_contract(
             self,
             _CUBLAS_GEMM_EXECUTION_CONTRACT,
         )
 
+    rows = property(lambda self: self._definition.rows)
+    columns = property(lambda self: self._definition.columns)
+    inner = property(lambda self: self._definition.inner)
+    alpha = property(lambda self: self._definition.alpha)
+    beta = property(lambda self: self._definition.beta)
+    a = property(lambda self: self._native_binding.arrays[0].value)
+    b = property(lambda self: self._native_binding.arrays[1].value)
+    output = property(lambda self: self._native_binding.arrays[2].value)
+
     @property
     def resource_effects(self):
-        output_access = (
-            GraphAccess.WRITE if self.beta == 0.0 else GraphAccess.READ_WRITE
-        )
-        return (
-            ResourceEffect(self.a, GraphAccess.READ),
-            ResourceEffect(self.b, GraphAccess.READ),
-            ResourceEffect(self.output, output_access),
-        )
+        return self._native_binding.resource_effects
 
     def _export_aot(self, context):
-        context.native(
-            "cublas",
-            "gemm_f32",
-            bindings=dict(a=self.a, b=self.b, output=self.output),
-            parameters=dict(
-                rows=self.rows,
-                columns=self.columns,
-                inner=self.inner,
-                alpha=self.alpha,
-                beta=self.beta,
-            ),
-        )
+        self._native_binding.lower(context)
         return ()
 
     @staticmethod
