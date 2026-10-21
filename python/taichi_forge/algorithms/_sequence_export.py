@@ -350,12 +350,13 @@ def _scatter_add(call, context):
     ):
         raise TaichiRuntimeError("AOT scatter-add requires its concrete ScatterAddWorkspace")
     src, indices, dst = call.args
-    parameters = _scatter_add_parameters(src, indices, dst, call.kwargs["method"], call.plan)
+    binding = _scatter_add_binding(src, indices, dst, call.kwargs["method"], call.plan)
+    parameters = binding.definition.parameters
     call.workspace.check_shape(parameters["size"], parameters["dst_items"])
-    context.operations.append(_scatter_add_operation(src, indices, dst, parameters, context))
+    binding.lower(context)
 
 
-def _scatter_add_parameters(src, indices, dst, method, plan):
+def _scatter_add_binding(src, indices, dst, method, plan):
     """Qualify the same accumulation stage for standalone and grouped export."""
     from taichi_forge.aot._graph_storage_bindings import packed_description
     from . import _algorithms as algorithms
@@ -404,20 +405,19 @@ def _scatter_add_parameters(src, indices, dst, method, plan):
         or plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT scatter-add cannot reconstruct the selected cached strategy")
-    parameters = dict(size=n, dst_items=bound, dtype=str(source.scalar_type))
-    if tensors:
-        parameters.update(strategy="packed_field", element_shape=list(source.element_shape))
-    if backend == "cpu_native":
-        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
-    return parameters
+    from ._primitive_definitions import ScatterAddDefinition
 
-
-def _scatter_add_operation(src, indices, dst, parameters, context):
-    return dict(
-        kind="native", provider="builtin", operation="scatter_add", version=1,
-        parameters=parameters,
-        bindings=dict(src=context.retained_arrays.require(src), indices=context.retained_arrays.require(indices),
-                      dst=context.retained_arrays.require(dst)),
+    definition = ScatterAddDefinition(n, bound, source.scalar_type, tuple(source.element_shape))
+    if plan is not None:
+        if plan.definition != definition:
+            raise TaichiRuntimeError("AOT scatter-add definition differs from the selected native call")
+        definition = plan.definition
+    return definition.bind(
+        src,
+        indices,
+        dst,
+        strategy="packed_field" if tensors else None,
+        cpu_max_threads=max(1, impl.current_cfg().cpu_max_num_threads) if backend == "cpu_native" else None,
     )
 
 
@@ -454,14 +454,11 @@ def _packed_grouped_reduce(call, context):
             raise TaichiRuntimeError("AOT tensor grouped reduce cannot reconstruct the selected zero fill")
     if not callable(getattr(impl.get_runtime().prog, "fill_dense_field_packed", None)):
         raise TaichiRuntimeError("AOT tensor grouped reduce requires native packed zero fill")
-    parameters = _scatter_add_parameters(values, keys, output, method, scatter_plan)
-    scatter = _scatter_add_operation(values, keys, output, parameters, context)
+    binding = _scatter_add_binding(values, keys, output, method, scatter_plan)
     # Zero bits represent zero for all supported scalar types, including f64.
-    # Existing fill and scatter operations share root ownership and dependencies.
-    context.operations.extend((
-        dict(kind="fill32", destination=scatter["bindings"]["dst"], value=0),
-        scatter,
-    ))
+    # The selected fill remains before the shared accumulation definition.
+    context.operations.append(dict(kind="fill32", destination=context.retained_arrays.require(output), value=0))
+    binding.lower(context)
 
 
 def _grouped_reduce(call, context):

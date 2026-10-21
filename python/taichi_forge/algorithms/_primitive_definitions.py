@@ -64,6 +64,48 @@ class IndexedCopyDefinition:
 
 
 @dataclass(frozen=True)
+class ScatterAddDefinition:
+    size: int
+    dst_items: int
+    dtype: object
+    element_shape: tuple = ()
+
+    @staticmethod
+    def value_type_for(dtype):
+        if dtype not in NATIVE_VALUE_TYPE:
+            raise TypeError("unsupported scatter_add dtype")
+        return NATIVE_VALUE_TYPE[dtype]
+
+    def __post_init__(self):
+        object.__setattr__(self, "element_shape", tuple(self.element_shape))
+        self.value_type_for(self.dtype)
+
+    @property
+    def value_type(self):
+        return self.value_type_for(self.dtype)
+
+    def bind(self, src, indices, dst, *, strategy=None, cpu_max_threads=None):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
+        parameters = dict(size=self.size, dst_items=self.dst_items, dtype=str(self.dtype))
+        if strategy is not None:
+            parameters["strategy"] = strategy
+        if self.element_shape:
+            parameters["element_shape"] = self.element_shape
+        if cpu_max_threads is not None:
+            parameters["cpu_max_threads"] = cpu_max_threads
+        return NativeOperationBinding(
+            NativeDefinition("builtin", "scatter_add", parameters),
+            (
+                NativeArrayBinding("src", src, GraphAccess.READ),
+                NativeArrayBinding("indices", indices, GraphAccess.READ),
+                NativeArrayBinding("dst", dst, GraphAccess.READ_WRITE),
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ScanDefinition:
     """The inclusive scalar scan performed by a selected native call.
 

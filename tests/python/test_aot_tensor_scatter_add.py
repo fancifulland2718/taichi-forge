@@ -29,7 +29,10 @@ class _Parent(NativeGraphNode, NativeGraphExecutable):
 
 @pytest.mark.parametrize("case", ["matrix", "vector64", "wide_integer"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, cpu_max_num_threads=4)
-def test_tensor_scatter_add_cold_warm_parent_mutation_and_gradient(tmp_path, case):
+def test_tensor_scatter_add_cold_warm_parent_mutation_and_gradient(tmp_path, case, monkeypatch):
+    from taichi_forge.algorithms._primitive_definitions import ScatterAddDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     vector = case == "vector64"
     rows, cols = (3, 1) if vector else (8, 8) if case == "wide_integer" else (2, 3)
     n, bound = (5 if case == "wide_integer" else 17), 4
@@ -93,7 +96,27 @@ def test_tensor_scatter_add_cold_warm_parent_mutation_and_gradient(tmp_path, cas
         "scatter_add_dense_field_packed" if vector else "scatter_add_dense_field_packed_indices_field"
     )
     dst.from_numpy(initial)
-    module.add_execution_plan("warm", graph, source_bindings=public, snapshot_state=True)
+    definitions = []
+    bind = ScatterAddDefinition.bind
+
+    def observe(definition, *args, **kwargs):
+        definitions.append(definition)
+        return bind(definition, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ScatterAddDefinition, "bind", observe)
+        module.add_execution_plan("warm", graph, source_bindings=public, snapshot_state=True)
+    assert len(definitions) == 1 and definitions[0] is sequence._calls[0].plan.definition
+
+    def no_conversion(*args, **kwargs):
+        raise AssertionError("warm scatter-add must retain its selected native call")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ScatterAddDefinition, "__post_init__", no_conversion)
+        patch.setattr(NativeOperationBinding, "lower", no_conversion)
+        graph.run(dict(out=output))
+    np.testing.assert_array_equal(output.to_numpy(), np.concatenate([(initial + delta).ravel(), host.ravel()]))
+    dst.from_numpy(initial)
     parent_builder = ti.graph.GraphBuilder()
     parent_builder.append_native(_Parent(graph, output))
     parent = parent_builder.compile()

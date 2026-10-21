@@ -34,6 +34,8 @@ from taichi_forge.algorithms._primitive_definitions import (
     REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
     ScanDefinition,
     IndexedCopyDefinition,
+    ScatterAddDefinition,
+    NATIVE_VALUE_TYPE as _SCATTER_ADD_VALUE_TYPE,
     ReduceDefinition,
     TransformDefinition,
     normalize_transform_args as _normalize_transform_args,
@@ -195,7 +197,6 @@ _INDEXED_COPY_KERNEL_DTYPES = (i32, f32)
 _SUPPORTED_SCATTER_ADD_METHODS = supported_primitive_methods("scatter_add")
 _SCATTER_ADD_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _SCATTER_ADD_FIELD_DTYPES = (i32, f32)
-_SCATTER_ADD_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_BUCKET_BUILDER_METHODS = supported_primitive_methods("bucket_builder")
 _BUCKET_BUILDER_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _BUCKET_BUILDER_FIELD_DTYPES = (i32,)
@@ -7220,6 +7221,7 @@ class ScatterAddWorkspace:
         call_args,
         n,
         prog,
+        definition,
     ):
         objects, semantic_key = self._native_scatter_add_request_signature(
             src, indices, dst, value_type
@@ -7234,6 +7236,7 @@ class ScatterAddWorkspace:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_scatter_add_plan = plan
 
@@ -14350,9 +14353,7 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
 
 
 def _scatter_add_value_type(dtype):
-    if dtype in _SCATTER_ADD_VALUE_TYPE:
-        return _SCATTER_ADD_VALUE_TYPE[dtype]
-    raise TypeError("unsupported scatter_add dtype")
+    return ScatterAddDefinition.value_type_for(dtype)
 
 
 def _scatter_add_replay_signature(src, indices, dst):
@@ -14394,6 +14395,8 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
         src, indices, dst, "cuda_device", value_type
     ):
         return True
+    definition = ScatterAddDefinition(src.shape[0], dst.shape[0], src_view.dtype)
+    value_type = definition.value_type
     if src_view.is_dense_field or dst_view.is_dense_field:
         if not (src_view.is_dense_field and dst_view.is_dense_field):
             return False
@@ -14415,9 +14418,9 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
                 indices_view.snode,
                 dst_view.snode,
                 value_type,
-                src_view.num_elements,
+                definition.size,
                 indices_view.num_elements,
-                dst_view.num_elements,
+                definition.dst_items,
             )
         else:
             call_args = (
@@ -14425,8 +14428,8 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
                 indices.arr,
                 dst_view.snode,
                 value_type,
-                src_view.num_elements,
-                dst_view.num_elements,
+                definition.size,
+                definition.dst_items,
             )
         temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
@@ -14470,6 +14473,7 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
             call_args,
             indices.shape[0],
             prog,
+            definition,
         )
     return True
 
@@ -14502,6 +14506,8 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
         src, indices, dst, "vulkan_native", value_type
     ):
         return True
+    definition = ScatterAddDefinition(src.shape[0], dst.shape[0], src_view.dtype)
+    value_type = definition.value_type
     if src_view.is_dense_field or dst_view.is_dense_field:
         if not (src_view.is_dense_field and dst_view.is_dense_field):
             return False
@@ -14523,9 +14529,9 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
                 indices_view.snode,
                 dst_view.snode,
                 value_type,
-                src_view.num_elements,
+                definition.size,
                 indices_view.num_elements,
-                dst_view.num_elements,
+                definition.dst_items,
             )
         else:
             call_args = (
@@ -14533,8 +14539,8 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
                 indices.arr,
                 dst_view.snode,
                 value_type,
-                src_view.num_elements,
-                dst_view.num_elements,
+                definition.size,
+                definition.dst_items,
             )
         temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
@@ -14578,6 +14584,7 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
             call_args,
             indices.shape[0],
             prog,
+            definition,
         )
     return True
 
@@ -14606,6 +14613,8 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
         src, indices, dst, "cpu_native", value_type
     ):
         return True
+    definition = ScatterAddDefinition(src.shape[0], dst.shape[0], src_view.dtype)
+    value_type = definition.value_type
     if src_view.is_dense_field or dst_view.is_dense_field:
         if not (src_view.is_dense_field and dst_view.is_dense_field):
             return False
@@ -14622,9 +14631,9 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
                 indices_view.snode,
                 dst_view.snode,
                 value_type,
-                src_view.num_elements,
+                definition.size,
                 indices_view.num_elements,
-                dst_view.num_elements,
+                definition.dst_items,
             )
         else:
             call_args = (
@@ -14632,8 +14641,8 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
                 indices.arr,
                 dst_view.snode,
                 value_type,
-                src_view.num_elements,
-                dst_view.num_elements,
+                definition.size,
+                definition.dst_items,
             )
         temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
@@ -14677,6 +14686,7 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
             call_args,
             indices.shape[0],
             prog,
+            definition,
         )
     return True
 
@@ -14743,15 +14753,17 @@ def _try_native_dense_matrix_field_scatter_add(
         src, indices, dst, method, value_type
     ):
         return True
+    definition = ScatterAddDefinition(src.shape[0], dst.shape[0], src.dtype, _matrix_field_element_shape(src))
+    value_type = definition.value_type
     if indices_is_dense_field:
         call_args = (
             src_plan[0].snode.ptr,
             indices_view.snode,
             dst_plan[0].snode.ptr,
             value_type,
-            src_plan[2],
+            definition.size,
             indices_view.num_elements,
-            dst_plan[2],
+            definition.dst_items,
             src_plan[3],
         )
         request_items = indices_view.num_elements
@@ -14761,8 +14773,8 @@ def _try_native_dense_matrix_field_scatter_add(
             indices.arr,
             dst_plan[0].snode.ptr,
             value_type,
-            src_plan[2],
-            dst_plan[2],
+            definition.size,
+            definition.dst_items,
             src_plan[3],
         )
         request_items = indices.shape[0]
@@ -14785,6 +14797,7 @@ def _try_native_dense_matrix_field_scatter_add(
             call_args,
             request_items,
             prog,
+            definition,
         )
     return True
 
