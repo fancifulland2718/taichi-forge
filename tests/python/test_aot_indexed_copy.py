@@ -201,7 +201,11 @@ def test_indexed_copy_export_rejects_changed_strategy():
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, cpu_max_num_threads=4
 )
-def test_indexed_copy_sequence_runtime_only_and_borrowed(tmp_path):
+def test_indexed_copy_sequence_runtime_only_and_borrowed(tmp_path, monkeypatch):
+    from taichi_forge.algorithms import _algorithms as algorithms
+    from taichi_forge.algorithms._primitive_definitions import IndexedCopyDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     module = ti.aot.Module()
     cases = []
     layouts = [
@@ -266,6 +270,16 @@ def test_indexed_copy_sequence_runtime_only_and_borrowed(tmp_path):
                         expected=expected.tobytes().hex(),
                     )
                 )
+            if not scatter:
+
+                def no_conversion(*args, **kwargs):
+                    raise AssertionError("warm indexed copy must reuse its selected native call")
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(algorithms, "_indexed_copy_definition", no_conversion)
+                    patch.setattr(NativeOperationBinding, "lower", no_conversion)
+                    sequence.run()
+                assert dst.to_numpy().tobytes() == expected.tobytes()
             builder = ti.graph.GraphBuilder()
             builder.append_native(sequence)
             graph = builder.compile()
@@ -275,9 +289,19 @@ def test_indexed_copy_sequence_runtime_only_and_borrowed(tmp_path):
                 dst.to_numpy().tobytes(),
                 indices.to_numpy().tobytes(),
             )
-            plan = module.add_execution_plan(
-                name, graph, source_bindings=dict(src=src, indices=indices, dst=dst)
-            )
+            definitions = []
+            bind = IndexedCopyDefinition.bind
+
+            def observe(definition, *args, **kwargs):
+                definitions.append(definition)
+                return bind(definition, *args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(IndexedCopyDefinition, "bind", observe)
+                plan = module.add_execution_plan(name, graph, source_bindings=dict(src=src, indices=indices, dst=dst))
+            assert len(definitions) == 1
+            if not scatter:
+                assert definitions[0] is sequence._calls[0].plan.definition
             assert before == (
                 src.to_numpy().tobytes(),
                 dst.to_numpy().tobytes(),

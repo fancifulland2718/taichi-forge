@@ -32,6 +32,7 @@ from taichi_forge.algorithms._primitive_definitions import (
     NATIVE_VALUE_TYPE as _REDUCE_VALUE_TYPE,
     REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
     ScanDefinition,
+    IndexedCopyDefinition,
     ReduceDefinition,
     TransformDefinition,
     normalize_transform_args as _normalize_transform_args,
@@ -189,7 +190,6 @@ _METRIC_OPS = {
 _SUPPORTED_TRANSFORM_METHODS = supported_primitive_methods("transform")
 _SUPPORTED_INDEXED_COPY_METHODS = supported_primitive_methods("gather")
 _INDEXED_COPY_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
-_INDEXED_COPY_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _INDEXED_COPY_KERNEL_DTYPES = (i32, f32)
 _SUPPORTED_SCATTER_ADD_METHODS = supported_primitive_methods("scatter_add")
 _SCATTER_ADD_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
@@ -7003,6 +7003,7 @@ class IndexedCopyWorkspace:
         call_args,
         n,
         prog,
+        definition,
     ):
         cache = self._native_indexed_copy_plans if self._cache_native_plans else None
         plan = _record_native_primitive_plan(
@@ -7015,6 +7016,7 @@ class IndexedCopyWorkspace:
             prog,
             item_bytes,
             n,
+            definition=definition,
         )
         self._native_indexed_copy_plan = plan
 
@@ -12426,7 +12428,6 @@ def _transform_value_type(dtype):
     )
 
 
-
 def _check_transform_request(src, dst, method, workspace):
     if method not in _SUPPORTED_TRANSFORM_METHODS:
         raise NotImplementedError(f"transform method '{method}' is not implemented.")
@@ -13444,20 +13445,23 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
 
 
 def _indexed_copy_item_count(src, indices, dst, scatter):
-    if scatter:
-        if src.shape[0] != indices.shape[0]:
-            raise ValueError(
-                "experimental_scatter() expects source and indices sizes to match."
-            )
-    else:
-        if indices.shape[0] != dst.shape[0]:
-            raise ValueError(
-                "experimental_gather() expects indices and destination sizes to match."
-            )
-    return indices.shape[0]
+    return IndexedCopyDefinition.check_size(indices.shape[0], src.shape[0], dst.shape[0], scatter)
 
 
-def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, scatter):
+def _indexed_copy_definition(src, indices, dst, scatter):
+    shape = _matrix_field_element_shape(src) if _is_matrix_field(src) else getattr(src, "element_shape", ())
+    return IndexedCopyDefinition(
+        indices.shape[0],
+        src.shape[0],
+        dst.shape[0],
+        getattr(src, "scalar_dtype", src.dtype),
+        tuple(shape),
+        bool(scatter),
+    )
+
+
+def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, definition):
+    scatter = definition.scatter
     src_view = _primitive_view(src)
     indices_view = _primitive_view(indices)
     dst_view = _primitive_view(dst)
@@ -13475,7 +13479,7 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
         return False
     if indices_view.dtype != i32:
         return False
-    value_type = _INDEXED_COPY_VALUE_TYPE.get(src_view.dtype)
+    value_type = definition.value_type
     if value_type is None:
         return False
     if indices_is_dense_field and not (
@@ -13545,9 +13549,9 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             indices_view.snode,
             dst_view.snode,
             value_type,
-            src_view.num_elements,
-            indices_view.num_elements,
-            dst_view.num_elements,
+            definition.src_items,
+            definition.size,
+            definition.dst_items,
         )
     else:
         call_args = (
@@ -13555,8 +13559,8 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             indices.arr,
             dst_view.snode,
             value_type,
-            src_view.num_elements,
-            dst_view.num_elements,
+            definition.src_items,
+            definition.dst_items,
         )
     temp_bytes = _prog_method(prog, method_name)(*call_args)
     if workspace is not None:
@@ -13569,16 +13573,16 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             _dtype_nbytes(src_view.dtype),
             scatter,
             call_args,
-            indices.shape[0],
+            definition.size,
             prog,
+            definition,
         )
         workspace._mark_native_indexed_copy_backend_active(backend, temp_bytes)
     return True
 
 
-def _try_native_dense_matrix_field_indexed_copy(
-    src, indices, dst, method, workspace, scatter
-):
+def _try_native_dense_matrix_field_indexed_copy(src, indices, dst, method, workspace, definition):
+    scatter = definition.scatter
     if not (_is_matrix_field(src) and _is_matrix_field(dst)):
         return False
     indices_view = _primitive_view(indices)
@@ -13666,23 +13670,23 @@ def _try_native_dense_matrix_field_indexed_copy(
             indices_view.snode,
             dst_plan[0].snode.ptr,
             value_type,
-            src_plan[2],
-            indices_view.num_elements,
-            dst_plan[2],
+            definition.src_items,
+            definition.size,
+            definition.dst_items,
             lane_count,
         )
-        request_items = indices_view.num_elements
+        request_items = definition.size
     else:
         call_args = (
             src_plan[0].snode.ptr,
             indices.arr,
             dst_plan[0].snode.ptr,
             value_type,
-            src_plan[2],
-            dst_plan[2],
+            definition.src_items,
+            definition.dst_items,
             lane_count,
         )
-        request_items = indices.shape[0]
+        request_items = definition.size
     try:
         temp_bytes = _prog_method(prog, method_name)(*call_args)
     except RuntimeError as exc:
@@ -13702,12 +13706,14 @@ def _try_native_dense_matrix_field_indexed_copy(
             call_args,
             request_items,
             prog,
+            definition,
         )
         workspace._mark_native_indexed_copy_backend_active(backend, temp_bytes)
     return True
 
 
-def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
+def _try_cuda_device_indexed_copy(src, indices, dst, definition, workspace):
+    scatter = definition.scatter
     if current_cfg().arch != cuda:
         return False
     src_is_member = _is_struct_scalar_member_view(src)
@@ -13756,8 +13762,9 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
                 item_bytes,
                 scatter,
                 call_args,
-                indices.shape[0],
+                definition.size,
                 prog,
+                definition,
             )
             workspace._mark_native_indexed_copy_backend_active(
                 "cuda_device", temp_bytes
@@ -13785,14 +13792,16 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
             src._get_element_size(),
             scatter,
             call_args,
-            indices.shape[0],
+            definition.size,
             prog,
+            definition,
         )
         workspace._mark_native_indexed_copy_backend_active("cuda_device", temp_bytes)
     return True
 
 
-def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
+def _try_vulkan_indexed_copy(src, indices, dst, definition, workspace):
+    scatter = definition.scatter
     if current_cfg().arch != vulkan:
         return False
     src_is_member = _is_struct_scalar_member_view(src)
@@ -13844,15 +13853,12 @@ def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
             src,
             indices,
             dst,
-            (
-                _dtype_nbytes(src.dtype)
-                if src_is_member or dst_is_member
-                else src._get_element_size()
-            ),
+            (_dtype_nbytes(src.dtype) if src_is_member or dst_is_member else src._get_element_size()),
             scatter,
             call_args,
-            indices.shape[0],
+            definition.size,
             prog,
+            definition,
         )
         workspace._mark_native_indexed_copy_backend_active(
             "vulkan_native", temp_bytes
@@ -13860,7 +13866,8 @@ def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
     return True
 
 
-def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
+def _try_cpu_indexed_copy(src, indices, dst, definition, workspace):
+    scatter = definition.scatter
     if current_cfg().arch not in [x64, arm64]:
         return False
     src_is_member = _is_struct_scalar_member_view(src)
@@ -13908,8 +13915,9 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
                 item_bytes,
                 scatter,
                 call_args,
-                indices.shape[0],
+                definition.size,
                 prog,
+                definition,
             )
             workspace._mark_native_indexed_copy_backend_active(
                 "cpu_native", temp_bytes
@@ -13931,14 +13939,16 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
             src._get_element_size(),
             scatter,
             call_args,
-            indices.shape[0],
+            definition.size,
             prog,
+            definition,
         )
         workspace._mark_native_indexed_copy_backend_active("cpu_native", temp_bytes)
     return True
 
 
-def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace, scatter):
+def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace, definition):
+    scatter = definition.scatter
     src_payload = _packed_tensor_member_payload(src)
     dst_payload = _packed_tensor_member_payload(dst)
     if src_payload is None or dst_payload is None:
@@ -14005,8 +14015,9 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
             src_item_bytes,
             scatter,
             call_args,
-            indices.shape[0],
+            definition.size,
             prog,
+            definition,
         )
         workspace._mark_native_indexed_copy_backend_active(backend, temp_bytes)
     return True
@@ -14080,9 +14091,8 @@ def _experimental_indexed_copy(
         if workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter):
             record_native_ad()
             return workspace
-        if _try_native_dense_matrix_field_indexed_copy(
-            src, indices, dst, method, workspace, scatter
-        ):
+        definition = _indexed_copy_definition(src, indices, dst, scatter)
+        if _try_native_dense_matrix_field_indexed_copy(src, indices, dst, method, workspace, definition):
             record_native_ad()
             return workspace
         if workspace._try_native_indexed_copy_plan_group(
@@ -14142,9 +14152,8 @@ def _experimental_indexed_copy(
         ):
             record_native_ad()
             return workspace
-        if _try_native_tensor_member_indexed_copy(
-            src, indices, dst, method, workspace, scatter
-        ):
+        definition = _indexed_copy_definition(src, indices, dst, scatter)
+        if _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace, definition):
             record_native_ad()
             return workspace
         raise RuntimeError(
@@ -14177,14 +14186,11 @@ def _experimental_indexed_copy(
     if workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter):
         record_native_ad()
         return workspace
-    if _try_native_dense_field_indexed_copy(
-        src, indices, dst, method, workspace, scatter
-    ):
+    definition = _indexed_copy_definition(src, indices, dst, scatter)
+    if _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, definition):
         record_native_ad()
         return workspace
-    if method in ("auto", "cuda_device") and _try_cuda_device_indexed_copy(
-        src, indices, dst, scatter, workspace
-    ):
+    if method in ("auto", "cuda_device") and _try_cuda_device_indexed_copy(src, indices, dst, definition, workspace):
         record_native_ad()
         return workspace
     if method == "cuda_device":
@@ -14192,9 +14198,7 @@ def _experimental_indexed_copy(
             f"{op_name} method='cuda_device' requires CUDA ndarray or dense "
             "field inputs and available CUDA indexed-copy support."
         )
-    if method in ("auto", "vulkan_native") and _try_vulkan_indexed_copy(
-        src, indices, dst, scatter, workspace
-    ):
+    if method in ("auto", "vulkan_native") and _try_vulkan_indexed_copy(src, indices, dst, definition, workspace):
         record_native_ad()
         return workspace
     if method == "vulkan_native":
@@ -14202,9 +14206,7 @@ def _experimental_indexed_copy(
             f"{op_name} method='vulkan_native' requires Vulkan ndarray or "
             "dense field inputs and available native indexed-copy shaders."
         )
-    if method in ("auto", "cpu_native") and _try_cpu_indexed_copy(
-        src, indices, dst, scatter, workspace
-    ):
+    if method in ("auto", "cpu_native") and _try_cpu_indexed_copy(src, indices, dst, definition, workspace):
         record_native_ad()
         return workspace
     if method == "cpu_native":

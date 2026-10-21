@@ -9,6 +9,61 @@ NATIVE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 
 
 @dataclass(frozen=True)
+class IndexedCopyDefinition:
+    size: int
+    src_items: int
+    dst_items: int
+    dtype: object
+    element_shape: tuple
+    scatter: bool
+
+    @staticmethod
+    def check_size(size, src_items, dst_items, scatter):
+        if scatter and src_items != size:
+            raise ValueError("experimental_scatter() expects source and indices sizes to match.")
+        if not scatter and dst_items != size:
+            raise ValueError("experimental_gather() expects indices and destination sizes to match.")
+        return size
+
+    def __post_init__(self):
+        object.__setattr__(self, "element_shape", tuple(self.element_shape))
+        self.check_size(self.size, self.src_items, self.dst_items, self.scatter)
+
+    @property
+    def mode(self):
+        return "scatter" if self.scatter else "gather"
+
+    @property
+    def value_type(self):
+        return NATIVE_VALUE_TYPE.get(self.dtype)
+
+    def bind(self, src, indices, dst):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
+        return NativeOperationBinding(
+            NativeDefinition(
+                "builtin",
+                "indexed_copy",
+                dict(
+                    size=self.size,
+                    src_items=self.src_items,
+                    dst_items=self.dst_items,
+                    dtype=str(self.dtype),
+                    element_shape=self.element_shape,
+                    op=self.mode,
+                ),
+            ),
+            (
+                NativeArrayBinding("src", src, GraphAccess.READ),
+                NativeArrayBinding("indices", indices, GraphAccess.READ),
+                # Scatter preserves destinations not named by valid indices.
+                NativeArrayBinding("dst", dst, GraphAccess.READ_WRITE if self.scatter else GraphAccess.WRITE),
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ScanDefinition:
     """The inclusive scalar scan performed by a selected native call.
 

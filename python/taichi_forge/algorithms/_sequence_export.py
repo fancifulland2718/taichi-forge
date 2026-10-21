@@ -321,13 +321,21 @@ def _indexed_copy(call, context):
         or call.plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT indexed copy cannot reconstruct the selected cached strategy")
-    context.operations.append(dict(
-        kind="native", provider="builtin", operation="indexed_copy", version=1,
-        parameters=dict(size=size, src_items=source.index_shape[0], dst_items=destination.index_shape[0],
-                        dtype=str(source.scalar_type), element_shape=list(source.element_shape), op=mode),
-        bindings=dict(src=context.retained_arrays.require(src), indices=context.retained_arrays.require(indices),
-                      dst=context.retained_arrays.require(dst)),
-    ))
+    from ._primitive_definitions import IndexedCopyDefinition
+
+    definition = IndexedCopyDefinition(
+        size,
+        source.index_shape[0],
+        destination.index_shape[0],
+        source.scalar_type,
+        tuple(source.element_shape),
+        scatter,
+    )
+    if call.plan is not None:
+        if call.plan.definition != definition:
+            raise TaichiRuntimeError("AOT indexed-copy definition differs from the selected native call")
+        definition = call.plan.definition
+    definition.bind(src, indices, dst).lower(context)
 
 
 def _scatter_add(call, context):
