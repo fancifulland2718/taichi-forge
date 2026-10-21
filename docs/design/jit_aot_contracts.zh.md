@@ -69,6 +69,20 @@ policy。runtime-only 消费端读取 `ExecutionPlan`，不依赖这层 DSL 实�
 plan resource 与 input/output 端口。vendor handle/cache、capture 和 workspace 仍由原
 JIT/AOT owner 管理；callback、separable 变体仍有自己的准入边界。
 
+[`hardware/_cublaslt.py`](../../python/taichi_forge/hardware/_cublaslt.py) 与
+[`hardware/_cutensor.py`](../../python/taichi_forge/hardware/_cutensor.py) 使用冻结的 typed
+定义构造实际 vendor plan，录制与 AOT 通过同一默认 adapter 连接端口和 plan resource。
+cuBLASLt 已选 algorithm/layout/epilogue 在原物化点冻结；cuTENSOR 直接调用的 alpha/beta
+仍可逐次改变，recording 在创建时固定自己的系数。物化后的 workspace 要求作为重建约束，
+不覆盖语义参数，也不在导出时重新运行选型。
+
+[`_primitive_definitions.py`](../../python/taichi_forge/algorithms/_primitive_definitions.py)
+提供 Scan、Reduce、Transform 的冷阶段定义。普通 native 调用从中取得 dtype、范围、
+运算/系数，缓存计划保留该定义；AOT 在确认具体 layout 和 selected method 后消费它。
+未执行的 sequence 可建立同类型定义而不运行算法。Transform 的合法 NaN/Inf/负零系数
+按位编码，整数系数仍遵守现有 binding 的精确表示约束。布局准入及 backend/workspace
+政策仍分阶段验证；此迁移不扩充 AOT 支持的布局。暖态继续直接调用缓存 method/args。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典
@@ -103,5 +117,7 @@ Compact 的独立实例与 source-free 消费。重点保住：
 
 可复用 `test_graph_execution_domain.py`、`test_aot_graph_recording_export.py`、
 `test_aot_fft_recording_export.py`、`test_aot_prepared_tensor_sort.py`、
-`test_aot_prepared_compact.py` 和 `tests/cpp/aot` 中的 schema/workspace 测试。
+`test_aot_prepared_compact.py`、`test_aot_cublaslt_recording_export.py`、
+`test_aot_cutensor_recording_export.py`、`test_aot_scan.py`、
+`test_native_arithmetic_definitions.py` 和 `tests/cpp/aot` 中的 schema/workspace 测试。
 这些是代表合同，不是完整后端/provider 矩阵，也不是提速声明。

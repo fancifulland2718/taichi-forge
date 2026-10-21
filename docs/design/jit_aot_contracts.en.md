@@ -85,6 +85,26 @@ default adapter. Vendor handle/cache, capture and workspace ownership remain
 with their original JIT/AOT owners. Callback and separable variants retain their
 own qualification boundaries.
 
+[`hardware/_cublaslt.py`](../../python/taichi_forge/hardware/_cublaslt.py) and
+[`hardware/_cutensor.py`](../../python/taichi_forge/hardware/_cutensor.py) construct
+vendor plans from frozen typed definitions. Recordings and AOT connect ports and
+plan resources through the same default adapter. cuBLASLt freezes the selected
+algorithm, layout and epilogue at its existing materialization boundary.
+cuTENSOR direct calls retain per-call alpha/beta; a recording freezes its own
+coefficients. Materialized workspace requirements constrain reconstruction
+without replacing semantic parameters or rerunning selection during export.
+
+[`_primitive_definitions.py`](../../python/taichi_forge/algorithms/_primitive_definitions.py)
+provides cold definitions for Scan, Reduce and Transform. Ordinary native calls
+consume their dtype, extent and operation/coefficients; cached plans retain the
+definition for AOT after concrete layout and selected-method qualification.
+An unexecuted sequence can construct the same definition without executing the
+algorithm. Transform encodes legal NaN/Inf/signed-zero coefficients as bits;
+integer coefficients retain the existing binding's exact-representation limits.
+Layout admission and backend/workspace policies still have separate validation
+stages. This migration adds no AOT layouts, and warm replay directly invokes
+the cached method and arguments.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive
@@ -123,6 +143,8 @@ consumption. Keep checks for:
 
 Useful tests are `test_graph_execution_domain.py`,
 `test_aot_graph_recording_export.py`, `test_aot_fft_recording_export.py`,
-`test_aot_prepared_tensor_sort.py`, `test_aot_prepared_compact.py`, and the native
+`test_aot_prepared_tensor_sort.py`, `test_aot_prepared_compact.py`,
+`test_aot_cublaslt_recording_export.py`, `test_aot_cutensor_recording_export.py`,
+`test_aot_scan.py`, `test_native_arithmetic_definitions.py`, and the native
 schema/workspace tests under `tests/cpp/aot`. These are representative contracts,
 not an exhaustive backend/provider support matrix or a performance claim.
