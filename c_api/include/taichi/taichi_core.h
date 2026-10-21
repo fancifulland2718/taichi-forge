@@ -1254,10 +1254,40 @@ typedef struct TiKernelArgumentInfo {
 TI_DLL_EXPORT void TI_API_CALL ti_get_kernel_argument_info_ext(
     TiRuntime runtime, TiKernel kernel, TiKernelArgumentInfo *info);
 
+// Cold reflection of one logical ArgPack argument. The schema-1 tree contains
+// member origins and compiled pure-value layouts. Member paths below are
+// relative to this logical root. Copy the JSON before destroying the module.
+typedef struct TiKernelArgPackInfo {
+  const char *layout_json;
+} TiKernelArgPackInfo;
+TI_DLL_EXPORT void TI_API_CALL ti_get_kernel_argpack_info_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t logical_argument,
+    TiKernelArgPackInfo *info);
+
+// Supply exactly the value/resource leaves, excluding nested-pack nodes.
+// Values use TI_ARGUMENT_TYPE_VALUE_EXT with the queried compiled payload size;
+// resources use NDARRAY or NATIVE_RESOURCE_EXT. Layout and gradient descriptors
+// follow the existing ndarray contract. The factory copies all host data and
+// tracks resource dependencies; changing values requires creating a new pack.
+typedef struct TiArgPackMember {
+  uint32_t path_count;
+  const uint32_t *path;
+  TiArgument argument;
+  uint32_t layout_version;
+  TiNdArrayLayout layout;
+  const TiNdArray *gradient;
+} TiArgPackMember;
+TI_DLL_EXPORT TiNativeResource TI_API_CALL ti_create_kernel_argpack_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t logical_argument,
+    uint32_t member_count, const TiArgPackMember *members);
+
 // All bindings, including every dispatch of a Graph, are validated before
 // submission. Memory, layouts, kernels and Graphs must belong to this runtime.
 // Descriptors are read during this call; device storage must remain alive until
 // completion. Module destruction retires its layout and callable handles.
+// With ArgPacks created above, pass logical root arguments and root ndarray
+// bindings: the common binder expands lifted resource members before validation.
+// Closing a member resource invalidates the pack and dependent preparations.
 TI_DLL_EXPORT void TI_API_CALL ti_launch_kernel_with_bindings_ext(
     TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
     const TiArgument *args, uint32_t binding_count,

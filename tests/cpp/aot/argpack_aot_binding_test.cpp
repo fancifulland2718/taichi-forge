@@ -92,9 +92,48 @@ class AotPackSession {
     resources.push_back(result);
     return result;
   }
+  TiNativeResource public_pack(TiKernel kernel, float scale,
+                               const TiNdArray &x, const TiNdArray &dx) {
+    TiKernelArgPackInfo info{};
+    ti_get_kernel_argpack_info_ext(handle, kernel, 0, &info);
+    if (!info.layout_json || !std::strstr(info.layout_json, "scale"))
+      throw std::runtime_error("Public ArgPack reflection failed");
+    auto layout = runtime().get_kernel_argpack_layout(kernel, 0);
+    const auto &value = layout->storages().front().values.at(0);
+    std::vector<uint8_t> payload(value.layout.buffer_size, 0);
+    std::memcpy(payload.data() + value.layout.members.at(0).offset, &scale,
+                sizeof(scale));
+    const uint32_t scale_path[]{0};
+    const uint32_t array_path[]{1, 0};
+    TiArgPackMember members[2]{};
+    members[0].path_count = 1;
+    members[0].path = scale_path;
+    members[0].argument.type = TI_ARGUMENT_TYPE_VALUE_EXT;
+    members[0].argument.value.value = {payload.size(), payload.data()};
+    members[1].path_count = 2;
+    members[1].path = array_path;
+    members[1].argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+    members[1].argument.value.ndarray = x;
+    members[1].gradient = &dx;
+
+    // Invalid leaves never publish a handle or submit the target kernel.
+    EXPECT_EQ(ti_create_kernel_argpack_ext(handle, kernel, 0, 1, members), nullptr);
+    EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+    members[1].gradient = nullptr;
+    EXPECT_EQ(ti_create_kernel_argpack_ext(handle, kernel, 0, 2, members), nullptr);
+    EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+    ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+    members[1].gradient = &dx;
+    auto result = ti_create_kernel_argpack_ext(handle, kernel, 0, 2, members);
+    if (!result)
+      throw std::runtime_error("Public ArgPack creation failed");
+    resources.push_back(result);
+    return result;  // Payload/paths/gradient descriptors are copied by the API.
+  }
 };
 
-void check_aot_pack(TiArch arch, const char *backend) {
+void check_aot_pack(TiArch arch, const char *backend, bool public_factory = false) {
   const char *directory = std::getenv("TI_TEST_ARGPACK_AOT_ROOT");
   if (!directory)
     GTEST_SKIP() << "Set TI_TEST_ARGPACK_AOT_ROOT to the exported fixture directory";
@@ -120,7 +159,11 @@ void check_aot_pack(TiArch arch, const char *backend) {
   const auto dtotal = session.array({1});
   TiArgument arguments[3]{};
   arguments[0].type = TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT;
-  arguments[0].value.native_resource = session.pack(forward, 2);
+  auto make_pack = [&](float scale) {
+    return public_factory ? session.public_pack(forward, scale, x, dx)
+                          : session.pack(forward, scale);
+  };
+  arguments[0].value.native_resource = make_pack(2);
   arguments[1].type = arguments[2].type = TI_ARGUMENT_TYPE_NDARRAY;
   arguments[1].value.ndarray = total;
   arguments[2].value.ndarray = x;
@@ -129,9 +172,11 @@ void check_aot_pack(TiArch arch, const char *backend) {
   bindings[0].gradient = &dtotal;
   bindings[1].argument_index = 2;
   bindings[1].gradient = &dx;
+  const uint32_t argument_count = public_factory ? 2 : 3;
+  const uint32_t binding_count = public_factory ? 1 : 2;
   auto launch = [&](TiKernel kernel) {
-    ti_launch_kernel_with_bindings_ext(session.handle, kernel, 3, arguments,
-                                       2, bindings);
+    ti_launch_kernel_with_bindings_ext(session.handle, kernel, argument_count,
+                                       arguments, binding_count, bindings);
     check_error();
   };
   launch(forward);
@@ -144,13 +189,13 @@ void check_aot_pack(TiArch arch, const char *backend) {
   EXPECT_EQ(session.read(dx), (std::vector<float>{12, -24, 36}));
 
   // A stale resource must fail before submitting or changing either result.
-  ti_launch_kernel_with_bindings_ext(session.handle, forward, 3, arguments,
-                                     2, bindings);
+  ti_launch_kernel_with_bindings_ext(session.handle, forward, argument_count,
+                                     arguments, binding_count, bindings);
   EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
   ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
   EXPECT_EQ(session.read(total), (std::vector<float>{84}));
 
-  arguments[0].value.native_resource = session.pack(forward, 3);
+  arguments[0].value.native_resource = make_pack(3);
   session.write(x, {-1, 4, -2});
   session.write(dx, {0, 0, 0});
   session.write(total, {0});
@@ -163,21 +208,39 @@ void check_aot_pack(TiArch arch, const char *backend) {
   check_error();
   EXPECT_EQ(session.read(total), (std::vector<float>{189}));
   EXPECT_EQ(session.read(dx), (std::vector<float>{-18, 72, -36}));
+  if (public_factory) {
+    // Memory retirement invalidates packs even after their producer is gone.
+    ti_free_memory(session.handle, dx.memory);
+    auto &memories = session.memories;
+    memories.erase(std::find(memories.begin(), memories.end(), dx.memory));
+    check_error();
+    EXPECT_THROW(session.runtime().native_resource_registry().get(
+                     session.resources.back()), MemoryBindingError);
+  }
 }
 
 #ifdef TI_WITH_LLVM
 TEST(ArgPackAotBinding, CpuForwardAdjointRebindAndRetirement) {
   check_aot_pack(TI_ARCH_X64, "cpu");
 }
+TEST(ArgPackAotBinding, CpuPublicFactoryAndLogicalArguments) {
+  check_aot_pack(TI_ARCH_X64, "cpu", true);
+}
 #endif
 #ifdef TI_WITH_CUDA
 TEST(ArgPackAotBinding, CudaForwardAdjointRebindAndRetirement) {
   check_aot_pack(TI_ARCH_CUDA, "cuda");
 }
+TEST(ArgPackAotBinding, CudaPublicFactoryAndLogicalArguments) {
+  check_aot_pack(TI_ARCH_CUDA, "cuda", true);
+}
 #endif
 #ifdef TI_WITH_VULKAN
 TEST(ArgPackAotBinding, VulkanForwardAdjointRebindAndRetirement) {
   check_aot_pack(TI_ARCH_VULKAN, "vulkan");
+}
+TEST(ArgPackAotBinding, VulkanPublicFactoryAndLogicalArguments) {
+  check_aot_pack(TI_ARCH_VULKAN, "vulkan", true);
 }
 #endif
 }  // namespace

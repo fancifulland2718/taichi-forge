@@ -1901,8 +1901,38 @@ its pack through `template_args={"pack_argument": exemplar, ...}`, together with
 other required template arguments. `add_kernel_template().instantiate()` also
 accepts packs; persistent keys include resource type features, never values or
 device addresses. Template families retain their existing texture-specialization
-restriction. Export neither executes the kernel nor saves pack device storage;
-independent AOT ArgPack owners and prepared pack consumption are still pending.
+restriction. Export neither executes the kernel nor saves pack device storage.
+
+For ordinary CPU/CUDA/Vulkan calls, create an independent immutable owner with
+`pack = kernel.argpack(argument_index, members, gradients=...)`. The index is the
+logical kernel argument index; `members` is a nested dictionary matching the
+exported pack. Scalar, vector, matrix and structure values use the compiled
+layout. Pass runtime ndarrays as resource members and identify their explicit
+gradients by member-name tuples, for example
+`gradients={("child", "values"): dx}`. Then use `kernel(pack, total,
+gradients={1: dtotal})` with only the logical root arguments; lifted members are
+expanded by the common native binder. The consumer needs neither the DSL nor
+NumPy. Pack values are constants in an explicitly exported adjoint.
+
+Creation copies values and descriptors and retains member dependencies. Reuse
+the pack for compatible kernels with the same argument origin/layout, including
+an exported adjoint or an independently loaded module. Change values or member
+bindings by creating a new pack; ndarray contents can change in place. Explicitly
+closing a member allocation invalidates the pack and its dependent calls. Pack
+close waits for submitted work before releasing storage. Pack storage carries
+no producer-module pointers. Prepared pack execution and persistent Graph pack
+reconstruction remain separate, not yet qualified interfaces.
+
+C consumers query `ti_get_kernel_argpack_info_ext` and create the same owner with
+`ti_create_kernel_argpack_ext`. Supply exactly the value/resource leaves as
+`TiArgPackMember` descriptors with relative integer paths; omit nested-pack
+container nodes. Value leaves use `TI_ARGUMENT_TYPE_VALUE_EXT` with the exact
+queried payload size. Array leaves use the existing layout/gradient contract;
+other resources require a managed native resource with a qualified kernel
+binding. Raw texture handles are not retained by this factory. Destroy the
+owner through `ti_destroy_native_resource_ext`. The argument-info JSON includes
+`origins` for kernels containing packs, while its `argument_count` still reports
+the physical ABI count. Python uses those origins to expose logical arguments.
 
 Ordinary `Kernel.run()`/`Kernel.__call__()` and bound calls return compiled
 values: scalars become Python numbers (booleans for `u1`), vectors become tuples,

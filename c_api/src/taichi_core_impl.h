@@ -161,9 +161,11 @@ class Runtime {
     };
     mutable std::string argument_layout;
     mutable std::map<uint32_t, ValueWindow> value_arguments;
-    using ArgPackLayouts =
-        std::map<uint32_t,
-                 std::shared_ptr<const taichi::lang::aot::ArgPackLayout>>;
+    struct ArgPackInfo {
+      std::shared_ptr<const taichi::lang::aot::ArgPackLayout> layout;
+      std::string json;
+    };
+    using ArgPackLayouts = std::map<uint32_t, ArgPackInfo>;
     // Most kernels have no packs. Do not allocate an empty map sentinel for
     // every loaded callable; construct it only after successful reflection.
     mutable std::shared_ptr<ArgPackLayouts> argpack_layouts;

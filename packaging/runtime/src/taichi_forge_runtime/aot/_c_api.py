@@ -206,6 +206,17 @@ class KernelArgumentInfo(C.Structure):
     _fields_ = [("argument_count", UInt), ("layout_json", C.c_char_p)]
 
 
+class KernelArgPackInfo(C.Structure):
+    _fields_ = [("layout_json", C.c_char_p)]
+
+
+class ArgPackMember(C.Structure):
+    _fields_ = [
+        ("path_count", UInt), ("path", C.POINTER(UInt)), ("argument", Argument),
+        ("layout_version", UInt), ("layout", Handle), ("gradient", C.POINTER(NdArray)),
+    ]
+
+
 class BindingFamilyInfo(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in ("identity", "bindings", "executables", "resource_bytes")]
 
@@ -307,6 +318,8 @@ class Api:
             "ti_get_ndarray_layout_member_ext": ([Handle, Handle, UInt, C.POINTER(NdArrayLayoutMember)], None),
             "ti_get_kernel_return_info_ext": ([Handle, Handle, C.POINTER(KernelReturnInfo)], None),
             "ti_get_kernel_argument_info_ext": ([Handle, Handle, C.POINTER(KernelArgumentInfo)], None),
+            "ti_get_kernel_argpack_info_ext": ([Handle, Handle, UInt, C.POINTER(KernelArgPackInfo)], None),
+            "ti_create_kernel_argpack_ext": ([Handle, Handle, UInt, UInt, C.POINTER(ArgPackMember)], Handle),
             "ti_launch_kernel_with_result_ext": (
                 [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding), C.c_uint64, C.c_void_p], None,
             ),

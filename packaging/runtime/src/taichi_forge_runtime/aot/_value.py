@@ -166,9 +166,27 @@ class ArgumentLayout:
         if layout["version"] != 1 or layout["argument_count"] != info.argument_count:
             raise ValueError("Unsupported compiled argument layout")
         self.count = info.argument_count
+        self.root_indices = None
+        self.pack_indices = frozenset()
+        origins = layout.get("origins")
+        if origins is not None:
+            roots = [entry for entry in origins if len(entry["logical"]) == 1]
+            self.root_indices = {entry["logical"][0]: entry["physical"][0] for entry in roots}
+            self.count = len(roots)
+            if set(self.root_indices) != set(range(self.count)):
+                raise ValueError("Invalid logical root argument origins")
+            self.pack_indices = frozenset(
+                entry["logical"][0] for entry in roots if entry["kind"] == "argpack"
+            )
+        physical_to_root = (
+            {physical: logical for logical, physical in self.root_indices.items()}
+            if self.root_indices is not None else None
+        )
         self.encoders = {}
         for value in layout["values"]:
             index, size = value["index"], value["buffer_size"]
+            if physical_to_root is not None:
+                index = physical_to_root[index]
             if type(index) is not int or not 0 <= index < self.count or index in self.encoders:
                 raise ValueError("Invalid compiled value argument index")
             if type(size) is not int or size < 0:
@@ -184,6 +202,68 @@ class ArgumentLayout:
         argument.value.value = abi.ValueArgument(size, C.cast(buffer, C.c_void_p))
         buffers.append(buffer)
         return argument
+
+
+class ArgPackLayout:
+    """One cold pack tree; leaves reuse the compiled pure-value encoders."""
+
+    def __init__(self, module, handle, index):
+        runtime = module._runtime
+        info = abi.KernelArgPackInfo()
+        runtime._api.call(runtime._api.ti_get_kernel_argpack_info_ext,
+                          runtime._handle, handle, index, C.byref(info))
+        layout = json.loads(info.layout_json)
+        if layout["version"] != 1 or layout["logical_argument"] != index:
+            raise ValueError("Unsupported compiled ArgPack layout")
+        root = (index,)
+        self.root = root
+        self.packs, self.leaves = [], []
+        names = {root: ()}
+        children = {}
+        entries = sorted(layout["members"], key=lambda item: (len(item["origin"]["logical"]), item["origin"]["logical"]))
+        for entry in entries:
+            origin = entry["origin"]
+            path = tuple(origin["logical"])
+            if path[:1] != root:
+                raise ValueError("ArgPack member is outside its logical root")
+            if path != root:
+                parent = path[:-1]
+                names[path] = names[parent] + (origin["name"],)
+                children.setdefault(parent, []).append((origin["name"], path))
+            if origin["kind"] == "argpack":
+                self.packs.append(path)
+                continue
+            encoder = None
+            if origin["kind"] == "value":
+                size = entry["buffer_size"]
+                encoder = size, _encoder(entry["value"], size)
+            self.leaves.append((path, names[path], encoder))
+        self.children = children
+
+    def encode(self, value):
+        supplied = {self.root: value}
+        for path in self.packs:
+            members = self.children.get(path, ())
+            current = supplied[path]
+            if not isinstance(current, Mapping):
+                raise TypeError("ArgPack arguments require nested mappings")
+            if set(current) != {name for name, _ in members}:
+                raise ValueError("ArgPack members must exactly match the exported type")
+            for name, child in members:
+                supplied[child] = current[name]
+        result, buffers = [], []
+        for path, names, encoder in self.leaves:
+            value = supplied[path]
+            if encoder is not None:
+                size, encode = encoder
+                buffer = C.create_string_buffer(size)
+                encode(buffer, value)
+                value = abi.Argument()
+                value.type = 7
+                value.value.value = abi.ValueArgument(size, C.cast(buffer, C.c_void_p))
+                buffers.append(buffer)
+            result.append((path[1:], names, encoder is not None, value))
+        return result, buffers
 
 
 class ReturnLayout:

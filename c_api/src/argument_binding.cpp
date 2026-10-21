@@ -3,6 +3,7 @@
 #include "jit_module.h"
 #endif
 #include "native_resource_registry.h"
+#include "argpack_resource.h"
 
 #include <algorithm>
 #include <limits>
@@ -262,6 +263,38 @@ bool validate_gradient_parameter(
 }  // namespace
 
 namespace capi {
+void validate_kernel_ndarray_binding(Runtime &runtime,
+                                     const Runtime::KernelBinding &kernel,
+                                     uint32_t index,
+                                     const TiArgument &argument,
+                                     const TiNdArrayBinding *binding) {
+  if (argument.type != TI_ARGUMENT_TYPE_NDARRAY)
+    throw MemoryBindingError("ArgPack array member requires an ndarray");
+  const auto parameter = kernel.kernel->nested_parameters.find({int(index)});
+  if (parameter == kernel.kernel->nested_parameters.end() ||
+      parameter->second.ptype != ParameterType::kNdarray)
+    throw MemoryBindingError("ArgPack member is not a compiled ndarray");
+  const auto expected = kernel.layouts.find(index);
+  const auto *gradient = binding ? binding->gradient : nullptr;
+  if (expected != kernel.layouts.end()) {
+    if (!binding || gradient)
+      throw MemoryBindingError("Structure array needs its layout and no gradient");
+    validate_struct_argument(runtime, argument, binding->layout, expected->second,
+                              binding->layout_version, parameter->second.total_dim);
+  } else {
+    if (binding && (binding->layout || binding->layout_version || !gradient))
+      throw MemoryBindingError("Unexpected structure layout binding");
+    validate_kernel_array(runtime, *kernel.kernel, index, argument.value.ndarray);
+  }
+  if (gradient && (!parameter->second.needs_grad ||
+                   !validate_gradient_pair(argument, *gradient)))
+    throw MemoryBindingError("Invalid ArgPack ndarray gradient");
+  if (!validate_gradient_parameter(parameter->second, &argument, gradient))
+    throw MemoryBindingError("Missing or incompatible ArgPack ndarray gradient");
+  if (gradient)
+    validate_array_storage(runtime, *gradient, nullptr, true);
+}
+
 taichi::lang::DataType ndarray_scalar_type(TiDataType type) {
   return primitive_type(type);
 }
@@ -410,6 +443,14 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
 
   const auto &kernel_binding = runtime2.get_kernel(kernel);
   auto ti_kernel = kernel_binding.kernel;
+  auto expanded = expand_argpack_arguments(runtime2, kernel_binding, arg_count,
+                                            args, binding_count, bindings);
+  if (expanded.expanded) {
+    arg_count = static_cast<uint32_t>(expanded.arguments.size());
+    args = expanded.arguments.data();
+    binding_count = static_cast<uint32_t>(expanded.bindings.size());
+    bindings = expanded.bindings.data();
+  }
   if (arg_count != ti_kernel->args_type->elements().size()) {
     throw MemoryBindingError(
         "Argument count does not match the exported kernel ABI");
@@ -509,6 +550,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     if (args[i].type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT) {
       auto resource = runtime2.native_resource_registry().get(
           args[i].value.native_resource);
+      if (auto pack = std::dynamic_pointer_cast<ArgPackResource>(resource))
+        resource = pack->storage;
       try {
         auto binding = taichi::lang::prepare_native_kernel_resource(
             std::move(resource), std::vector<int>{int(i)}, runtime2.arch,

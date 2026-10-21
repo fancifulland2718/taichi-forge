@@ -28,7 +28,7 @@ from . import _c_api as abi
 from ._c_api import AotError
 from ._completion import SubmissionTicket
 from ._struct import StructLayout
-from ._value import ArgumentLayout, ReturnLayout
+from ._value import ArgPackLayout, ArgumentLayout, ReturnLayout
 
 __all__ = [
     "AotError",
@@ -1208,6 +1208,59 @@ class Kernel:
         layout = None if isinstance(self, Graph) else ReturnLayout(module, handle)
         self._return_layout = layout if layout is not None and layout.has_values else None
         self._argument_layout = None if isinstance(self, Graph) else ArgumentLayout(module, handle)
+        self._argpack_layouts = None
+
+    def argpack(self, argument, values, *, gradients=None):
+        """Create an immutable pack from nested dictionaries and member resources.
+
+        ``argument`` is the logical kernel argument index. Gradient keys are
+        tuples of member names, for example ``{("child", "values"): dx}``.
+        Reuse this NativeResource across compatible calls; create a new pack to
+        change values or resource bindings. Array contents may change in place.
+        """
+        index = operator.index(argument)
+        if self._argument_layout is None or index not in self._argument_layout.pack_indices:
+            raise ValueError("Argument is not an exported ArgPack")
+        runtime = self._module._runtime
+        with runtime._lock:
+            self._module._check()
+            if self._argpack_layouts is None:
+                self._argpack_layouts = {}
+            if index not in self._argpack_layouts:
+                self._argpack_layouts[index] = ArgPackLayout(self._module, self._handle, index)
+            leaves, buffers = self._argpack_layouts[index].encode(values)
+            gradient_members = {}
+            for path, gradient in (gradients or {}).items():
+                key = (path,) if isinstance(path, str) else tuple(path)
+                if not key or not all(isinstance(name, str) for name in key) or key in gradient_members:
+                    raise ValueError("ArgPack gradients require unique member-name paths")
+                gradient_members[key] = gradient
+            owners, native = [], []
+            for path, names, is_value, value in leaves:
+                indices = (abi.UInt * len(path))(*path)
+                buffers.append(indices)
+                member = abi.ArgPackMember()
+                member.path_count, member.path = len(path), indices
+                member.argument = value if is_value else _argument(runtime, value, owners)
+                binding = None if is_value else _layout_binding(0, value)
+                if binding is not None:
+                    member.layout_version, member.layout = binding.layout_version, binding.layout
+                if names in gradient_members:
+                    gradient = gradient_members.pop(names)
+                    binding = _gradient_binding(runtime, 0, value, gradient, owners)
+                    member.gradient = binding.gradient
+                    buffers.append(binding)
+                native.append(member)
+            if gradient_members:
+                raise ValueError("Unknown ArgPack gradient member")
+            members = (abi.ArgPackMember * len(native))(*native)
+            handle = runtime._api.call(runtime._api.ti_create_kernel_argpack_ext,
+                                       runtime._handle, self._handle, index, len(native), members)
+            try:
+                return NativeResource(runtime, handle, tuple(dict.fromkeys(owners)))
+            except BaseException:
+                runtime._api.call(runtime._api.ti_destroy_native_resource_ext, runtime._handle, handle)
+                raise
 
     def ndarray_layout(self, argument):
         """Query and cache an exported structure argument's immutable AoS ABI.

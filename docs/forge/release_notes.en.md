@@ -46,15 +46,18 @@ lifetimes. The entries below describe the changes.
   compiler's value-type lowering, fixing compound writes and Vulkan nested
   vector/matrix layout mismatches. Ordinary AOT export and template families
   now synthesize fully declared packs or accept exemplars for resource
-  specialization. This covers production; independent AOT ArgPack owners and
-  prepared consumption still need their subsequent implementation.
+  specialization. Independent immutable AOT ArgPack owners now support ordinary
+  CPU/CUDA/Vulkan calls through a shared C/Python member factory, including
+  explicit ndarray gradients. Prepared consumption and Graph reconstruction
+  remain separate pending work.
   Repeated resource member names across packs retain distinct bindings in
   declaration order, fixing frontend `NoneType` compilation errors for nested
   packs and their explicit adjoints.
   AOT exports now preserve explicit public member paths across template removal
   and resource lifting, share layouts across aliases, and validate these paths
   against loaded kernel parameters. This metadata adds no device code;
-  independent pack owners and prepared consumption remain separate work.
+  ordinary consumers reuse that mapping; prepared/Graph pack consumption remains
+  separate work.
 
 - Vulkan loads boolean vector and nested structure arguments using their
   integer buffer slots before converting them to boolean expressions. This

@@ -173,10 +173,13 @@ const Runtime::KernelBinding &Runtime::get_kernel_value_arguments(
       windows.emplace(index, KernelBinding::ValueWindow{offset, end - offset});
     }
   }
-  auto json = print(JsonValue(JsonObject{
+  JsonObject description{
       {"version", JsonValue(1)},
       {"argument_count", JsonValue(parameters.size())},
-      {"values", JsonValue(std::move(values))}}));
+      {"values", JsonValue(std::move(values))}};
+  if (kernel.argument_origins)
+    description.inner.emplace("origins", serialize(*kernel.argument_origins));
+  auto json = print(JsonValue(std::move(description)));
   binding.value_arguments = std::move(windows);
   binding.argument_layout = std::move(json);
   return binding;
@@ -191,7 +194,7 @@ Runtime::get_kernel_argpack_layout(TiKernel handle, uint32_t logical_argument) {
   if (binding.argpack_layouts) {
     const auto existing = binding.argpack_layouts->find(logical_argument);
     if (existing != binding.argpack_layouts->end())
-      return existing->second;
+      return existing->second.layout;
   }
   const auto &kernel = *binding.kernel;
   const auto layout = kernel.args_type->get_layout();
@@ -218,7 +221,8 @@ Runtime::get_kernel_argpack_layout(TiKernel handle, uint32_t logical_argument) {
       kernel, std::vector<int>{int(logical_argument)}, storage, resolve);
   if (!binding.argpack_layouts)
     binding.argpack_layouts = std::make_shared<KernelBinding::ArgPackLayouts>();
-  binding.argpack_layouts->emplace(logical_argument, result);
+  binding.argpack_layouts->emplace(logical_argument,
+                                  KernelBinding::ArgPackInfo{result, {}});
   return result;
 }
 
@@ -428,6 +432,48 @@ void ti_get_kernel_argument_info_ext(TiRuntime runtime,
   const auto &binding = rt.get_kernel_value_arguments(kernel);
   *info = {static_cast<uint32_t>(binding.kernel->args_type->elements().size()),
            binding.argument_layout.c_str()};
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_get_kernel_argpack_info_ext(TiRuntime runtime,
+                                    TiKernel kernel,
+                                    uint32_t logical_argument,
+                                    TiKernelArgPackInfo *info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(info);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto layout = rt.get_kernel_argpack_layout(kernel, logical_argument);
+  auto &cached = rt.get_kernel(kernel).argpack_layouts->at(logical_argument);
+  if (cached.json.empty()) {
+    using namespace liong::json;
+    JsonArray members;
+    const auto add = [&](const taichi::lang::ArgumentOrigin &origin,
+                         const taichi::lang::aot::ValueLayout *value) {
+      JsonObject member{{"origin", serialize(origin)}};
+      if (value) {
+        std::size_t leaf = 0;
+        member.inner.emplace("buffer_size", JsonValue(value->buffer_size));
+        member.inner.emplace("value", value_tree(value->type, *value, leaf));
+        if (leaf != value->members.size())
+          throw MemoryBindingError("Inconsistent ArgPack value layout");
+      }
+      members.inner.emplace_back(std::move(member));
+    };
+    for (const auto &pack : layout->storages()) {
+      add(pack.origin, nullptr);
+      for (const auto &value : pack.values)
+        add(value.origin, &value.layout);
+    }
+    for (const auto &resource : layout->resources())
+      add(resource, nullptr);
+    cached.json = print(JsonValue(JsonObject{
+        {"version", JsonValue(1)},
+        {"logical_argument", JsonValue(logical_argument)},
+        {"members", JsonValue(std::move(members))}}));
+  }
+  *info = {cached.json.c_str()};
   TI_CAPI_TRY_CATCH_END();
 }
 

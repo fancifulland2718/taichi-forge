@@ -48,6 +48,14 @@ taichi::lang::NativeArrayBinding bind_native_array(
     const TiNdArray &array,
     bool prepared_external_access = false);
 
+// Cold member qualification uses the same array/layout/gradient validators as
+// ordinary and prepared calls, without constructing a partial launch packet.
+void validate_kernel_ndarray_binding(Runtime &runtime,
+                                     const Runtime::KernelBinding &kernel,
+                                     uint32_t index,
+                                     const TiArgument &argument,
+                                     const TiNdArrayBinding *binding);
+
 // Cold ABI marshalling shared by ordinary launch and prepared execution. These
 // own the host descriptors referenced by LaunchContextBuilder, not device data.
 struct BoundKernelArguments {

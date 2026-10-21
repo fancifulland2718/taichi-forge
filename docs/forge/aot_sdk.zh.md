@@ -1491,7 +1491,29 @@ ndarray 梯度仍沿用既有绑定与所有权。
 specialization，其他必需模板参数仍须给出。`add_kernel_template().instantiate()`
 同样支持参数包；其持久键只包含资源类型特征，不包含值或设备地址。该模板家族入口
 仍沿用 texture specialization 的现有限制。导出不执行 kernel，也不保存参数包的
-设备存储；这不代表独立 AOT ArgPack owner 或 prepared 参数包消费已经接通。
+设备存储。
+
+CPU/CUDA/Vulkan 普通调用可通过
+`pack = kernel.argpack(argument_index, members, gradients=...)` 创建独立只读 owner。
+序号对应逻辑 kernel 参数；`members` 为与导出类型一致的嵌套字典，标量、向量、矩阵和
+结构值按编译布局编码。资源成员传入 runtime ndarray，显式梯度使用成员名称路径，
+例如 `gradients={("child", "values"): dx}`。随后以
+`kernel(pack, total, gradients={1: dtotal})` 传入逻辑根参数，共同原生绑定器负责展开
+提升到根部的成员资源。消费者不需要 DSL 或 NumPy；包内按值参数仍作为显式伴随的常量。
+
+创建时复制值和描述符，并保留成员依赖。同一 owner 可供参数来源及布局兼容的 kernel
+复用，包括显式反向和另一独立加载的模块。修改值或成员绑定时创建新包；ndarray 内容
+可以原地更新。显式关闭成员 allocation 会使包及依赖调用失效；关闭包会等待已提交
+工作结束后释放存储。包存储不持有 producer module 指针。prepared 参数包执行及 Graph 持久
+资源重建仍是尚未完成资格验证的独立边界。
+
+C 消费者通过 `ti_get_kernel_argpack_info_ext` 查询布局，通过
+`ti_create_kernel_argpack_ext` 创建同一 owner。以 `TiArgPackMember` 的相对整数路径
+精确提供所有值/资源叶子，不提供嵌套包容器节点。值使用载荷大小精确匹配的
+`TI_ARGUMENT_TYPE_VALUE_EXT`；数组复用既有布局和梯度合同，其他资源须为已具备 kernel
+绑定能力的 managed native resource。本工厂不持有原始 texture 句柄。使用
+`ti_destroy_native_resource_ext` 退休 owner。含包 kernel 的参数 JSON 还提供 `origins`，
+其中 `argument_count` 保持物理 ABI 数量，Python 根据来源映射暴露逻辑参数。
 
 普通 `Kernel.run()`/`Kernel.__call__()` 与绑定后的调用可以返回编译值：标量对应
 Python 数字（`u1` 为布尔），向量对应元组，矩阵对应嵌套元组，结构对应字典，

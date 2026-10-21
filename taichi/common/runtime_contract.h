@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Launch contexts can bind qualified independent ArgPack storage views.
-inline constexpr int kForgeNativeAbiRevision = 139;
+// Public ArgPack owners carry copied logical member descriptors and dependencies.
+inline constexpr int kForgeNativeAbiRevision = 140;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
