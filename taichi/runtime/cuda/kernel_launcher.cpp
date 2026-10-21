@@ -866,6 +866,9 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
         return false;
       }
     } else if (parameter.is_argpack) {
+      if (ctx.device_allocation_type[key] ==
+          LaunchContextBuilder::DevAllocType::kResolvedArgPack)
+        continue;
       std::vector<int> data_ptr_idx = key;
       data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_ARGPACK);
       auto *argpack = ctx.argpack_ptrs[key];
@@ -1597,6 +1600,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
                              (uint64)device_ptrs[grad_ptr_idx]);
       }
     } else if (parameter.is_argpack) {
+      if (ctx.device_allocation_type[key] ==
+          LaunchContextBuilder::DevAllocType::kResolvedArgPack)
+        continue;
       std::vector<int> data_ptr_idx = key;
       data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_ARGPACK);
       auto *argpack = ctx.argpack_ptrs[key];

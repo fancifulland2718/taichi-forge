@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Callable metadata preserves public argument origins across pack lowering.
-inline constexpr int kForgeNativeAbiRevision = 138;
+// Launch contexts can bind qualified independent ArgPack storage views.
+inline constexpr int kForgeNativeAbiRevision = 139;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

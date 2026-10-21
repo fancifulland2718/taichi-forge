@@ -98,6 +98,13 @@ taichi::lang::Device &LlvmRuntime::get() {
   return *device;
 }
 
+std::pair<const taichi::lang::StructType *, std::size_t>
+LlvmRuntime::resolve_argpack_type(const taichi::lang::StructType *type,
+                                 const std::string &layout) {
+  return executor_->get_llvm_context()->get_struct_type_with_data_layout(type,
+                                                                        layout);
+}
+
 void LlvmRuntime::prepare_cpu_scheduler(
     taichi::lang::NativePreparationContext &context) {
   if (!taichi::arch_is_cpu(arch))

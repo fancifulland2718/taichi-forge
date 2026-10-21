@@ -30,6 +30,7 @@ class ArgPackLayout {
   };
   struct Storage {
     ArgumentOrigin origin;
+    const StructType *source_type;
     const StructType *type;
     std::size_t bytes;
     std::vector<Value> values;
@@ -49,11 +50,14 @@ class ArgPackLayout {
   const ArgumentOrigins &resources() const {
     return resources_;
   }
+  bool matches(const CallableBase &kernel,
+               const std::vector<int> &physical_root) const;
 
  private:
   ValueStorage value_storage_;
   std::vector<Storage> storages_;
   ArgumentOrigins resources_;
+  ArgumentOrigins origins_;
 };
 
 }  // namespace taichi::lang::aot

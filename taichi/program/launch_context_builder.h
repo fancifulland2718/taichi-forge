@@ -29,6 +29,7 @@ class LaunchContextBuilder {
     kDenseStorage = 5,
     kAccelerationStructure = 6,
     kTextureCollection = 7,
+    kResolvedArgPack = 8,
   };
 
   struct NdarrayResourceRef {
@@ -234,6 +235,11 @@ class LaunchContextBuilder {
   // stale view from an earlier submission.
   void set_arg_ndarray(const std::vector<int> &arg_id, const Ndarray &arr);
   void set_arg_argpack(const std::vector<int> &arg_id, const ArgPack &argpack);
+  // Cold independent-owner binding. The descriptor and storage are retained by
+  // NativeArgPackKernelBinding; nested pointers were resolved before binding.
+  void set_arg_argpack_impl(const std::vector<int> &arg_id,
+                            const DeviceAllocation *allocation,
+                            std::uint64_t address);
   void set_arg_ndarray_with_grad(const std::vector<int> &arg_id,
                                  const Ndarray &arr,
                                  const Ndarray &arr_grad);

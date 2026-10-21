@@ -422,6 +422,21 @@ void LaunchContextBuilder::set_arg_argpack(const std::vector<int> &arg_id,
   set_array_device_allocation_type(arg_id, DevAllocType::kArgPack);
 }
 
+void LaunchContextBuilder::set_arg_argpack_impl(
+    const std::vector<int> &arg_id,
+    const DeviceAllocation *allocation,
+    std::uint64_t address) {
+  const auto parameter = kernel_->nested_parameters.find(arg_id);
+  if (parameter == kernel_->nested_parameters.end() ||
+      !parameter->second.is_argpack || !allocation || !allocation->device ||
+      argpack_ptrs.count(arg_id))
+    throw std::invalid_argument("Invalid independent ArgPack binding");
+  array_ptrs[arg_id] = const_cast<DeviceAllocation *>(allocation);
+  set_array_device_allocation_type(arg_id, DevAllocType::kResolvedArgPack);
+  if (arg_id.size() == 1)
+    set_argpack_ptr(arg_id, address);
+}
+
 void LaunchContextBuilder::debug_set_argpack_resource_handle(
     const std::vector<int> &arg_id,
     RuntimeResourceHandle handle) {

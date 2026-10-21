@@ -309,6 +309,9 @@ void KernelLauncher::bind_runtime_context(const Context &registration,
       ctx.set_ndarray_ptrs(key, host_ptr, host_ptr_grad);
     }
     if (parameter.is_argpack) {
+      if (ctx.device_allocation_type[key] ==
+          LaunchContextBuilder::DevAllocType::kResolvedArgPack)
+        continue;  // Immutable root/child addresses were resolved at binding.
       data_ptr_idx = key;
       data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_ARGPACK);
       auto *argpack = ctx.argpack_ptrs[key];

@@ -6,6 +6,12 @@
 #include "taichi/aot/value_layout.h"
 #include "taichi/aot/value_parameters.h"
 #include "taichi/common/json_serde.h"
+#ifdef TI_WITH_LLVM
+#include "taichi_llvm_impl.h"
+#endif
+#if defined(TI_WITH_VULKAN) || defined(TI_WITH_OPENGL)
+#include "taichi/runtime/gfx/runtime.h"
+#endif
 
 namespace {
 taichi::lang::DataType ndarray_payload(taichi::lang::aot::Kernel &kernel,
@@ -174,6 +180,46 @@ const Runtime::KernelBinding &Runtime::get_kernel_value_arguments(
   binding.value_arguments = std::move(windows);
   binding.argument_layout = std::move(json);
   return binding;
+}
+
+std::shared_ptr<const taichi::lang::aot::ArgPackLayout>
+Runtime::get_kernel_argpack_layout(TiKernel handle, uint32_t logical_argument) {
+  using namespace taichi::lang::aot;
+  if (logical_argument > std::numeric_limits<int>::max())
+    throw MemoryBindingError("ArgPack index exceeds the compiled parameter ABI");
+  const auto &binding = get_kernel(handle);
+  if (binding.argpack_layouts) {
+    const auto existing = binding.argpack_layouts->find(logical_argument);
+    if (existing != binding.argpack_layouts->end())
+      return existing->second;
+  }
+  const auto &kernel = *binding.kernel;
+  const auto layout = kernel.args_type->get_layout();
+  ArgPackLayout::Resolver resolve;
+  ValueStorage storage = ValueStorage::Host;
+#ifdef TI_WITH_LLVM
+  if (auto *llvm = dynamic_cast<capi::LlvmRuntime *>(this))
+    resolve = [llvm, layout](const taichi::lang::StructType *type) {
+      return llvm->resolve_argpack_type(type, layout);
+    };
+#endif
+#if defined(TI_WITH_VULKAN) || defined(TI_WITH_OPENGL)
+  if (arch == taichi::Arch::vulkan) {
+    storage = ValueStorage::Gfx;
+    resolve = [layout](const taichi::lang::StructType *type) {
+      return taichi::lang::gfx::GfxRuntime::get_struct_type_with_data_layout(type,
+                                                                          layout);
+    };
+  }
+#endif
+  if (!resolve)
+    throw MemoryBindingError("Independent ArgPack requires CPU, CUDA or Vulkan");
+  auto result = std::make_shared<const ArgPackLayout>(
+      kernel, std::vector<int>{int(logical_argument)}, storage, resolve);
+  if (!binding.argpack_layouts)
+    binding.argpack_layouts = std::make_shared<KernelBinding::ArgPackLayouts>();
+  binding.argpack_layouts->emplace(logical_argument, result);
+  return result;
 }
 
 const Runtime::GraphBinding &Runtime::get_graph(TiComputeGraph graph) const {

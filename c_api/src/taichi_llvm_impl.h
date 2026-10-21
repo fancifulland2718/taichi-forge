@@ -25,6 +25,9 @@ class LlvmRuntime : public Runtime {
   void check_runtime_error();
   taichi::lang::Device &get() override;
   void prepare_cpu_scheduler(taichi::lang::NativePreparationContext &context);
+  std::pair<const taichi::lang::StructType *, std::size_t>
+  resolve_argpack_type(const taichi::lang::StructType *type,
+                       const std::string &layout);
 
  private:
   /* Internally used interfaces */

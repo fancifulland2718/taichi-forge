@@ -187,6 +187,13 @@ void check_storage(Arch arch, Device &device, aot::ValueStorage kind,
 
 TEST(ArgPackStorage, RejectsUnresolvedAndIncompleteCompiledLayouts) {
   auto kernel = example();
+  const Layout layout(kernel, {0}, aot::ValueStorage::Host, host_layout);
+  EXPECT_TRUE(layout.matches(kernel, {0}));
+  EXPECT_FALSE(layout.matches(kernel, {1}));
+  auto other = kernel;
+  (*other.value_parameter_types)[{0, 1, 0}] =
+      TypeFactory::get_instance().get_tensor_type({1, 2}, PrimitiveType::f32);
+  EXPECT_FALSE(layout.matches(other, {0}));
   EXPECT_THROW(Layout(kernel, {0}, aot::ValueStorage::Host,
                       [](const StructType *type) { return std::make_pair(type, 64u); }),
                std::invalid_argument);

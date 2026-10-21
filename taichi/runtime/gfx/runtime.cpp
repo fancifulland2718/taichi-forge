@@ -658,10 +658,7 @@ class HostDeviceContextBlitter {
                                hashing::Hasher<std::vector<int>>> &ext_arrays,
       const std::unordered_map<std::vector<int>,
                                size_t,
-                               hashing::Hasher<std::vector<int>>> &ext_arr_size,
-      const std::unordered_map<std::vector<int>,
-                               const ArgPack *,
-                               hashing::Hasher<std::vector<int>>> &argpacks) {
+                               hashing::Hasher<std::vector<int>>> &ext_arr_size) {
     if (!ctx_attribs_->has_args()) {
       return;
     }
@@ -2034,7 +2031,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
                      hashing::Hasher<std::vector<int>>>
       textures;
   // `argpacks` holds argpacks that passed to this kernel.
-  std::unordered_map<std::vector<int>, const ArgPack *,
+  std::unordered_map<std::vector<int>, DeviceAllocation,
                      hashing::Hasher<std::vector<int>>>
       argpacks;
   std::vector<DeviceAllocation> argpack_allocations;
@@ -2149,17 +2146,22 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
 
     for (const auto &indices : ti_kernel->runtime_argpack_args()) {
-      TI_ASSERT(host_ctx.device_allocation_type[indices] ==
-                LaunchContextBuilder::DevAllocType::kArgPack);
-      TI_ASSERT(host_ctx.argpack_ptrs.count(indices));
-      const ArgPack *argpack = host_ctx.argpack_ptrs[indices];
-      DeviceAllocation devalloc = argpack->get_device_allocation();
+      DeviceAllocation devalloc;
+      if (host_ctx.device_allocation_type[indices] ==
+          LaunchContextBuilder::DevAllocType::kResolvedArgPack) {
+        devalloc = *static_cast<const DeviceAllocation *>(
+            host_ctx.array_ptrs.at(indices));
+      } else {
+        TI_ASSERT(host_ctx.device_allocation_type[indices] ==
+                  LaunchContextBuilder::DevAllocType::kArgPack);
+        devalloc = host_ctx.argpack_ptrs.at(indices)->get_device_allocation();
+      }
       argpacks_in_use_.insert(devalloc.alloc_id);
-      argpacks[indices] = argpack;
+      argpacks[indices] = devalloc;
       argpack_allocations.push_back(devalloc);
     }
 
-    ctx_blitter->host_to_device(any_arrays, ext_array_size, argpacks);
+    ctx_blitter->host_to_device(any_arrays, ext_array_size);
   }
 
   ensure_current_cmdlist();
@@ -2299,8 +2301,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
         continue;
       }
       if (bind.kind == CompiledTaichiKernel::BufferBindingKind::ArgPack) {
-        DeviceAllocation alloc =
-            argpacks.at(bind.buffer.root_id)->get_device_allocation();
+        DeviceAllocation alloc = argpacks.at(bind.buffer.root_id);
         bindings->buffer(bind.binding, alloc);
         continue;
       }
@@ -3157,7 +3158,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         &pd.kernel->runtime_array_args(), *pd.host_ctx, device_, pd.args_buffer,
         nullptr);
     if (blitter) {
-      blitter->host_to_device(*pd.any_arrays, {}, {});
+      blitter->host_to_device(*pd.any_arrays, {});
     }
   }
   std::unique_ptr<CommandList> commands;
@@ -3681,10 +3682,6 @@ bool GfxRuntime::launch_graph_impl(
   using SizeMap = std::unordered_map<std::vector<int>,
                                      size_t,
                                      hashing::Hasher<std::vector<int>>>;
-  using ArgPackMap =
-      std::unordered_map<std::vector<int>,
-                         const ArgPack *,
-                         hashing::Hasher<std::vector<int>>>;
 
   std::vector<uint64_t> key;
   std::vector<uint64_t> structure_key;
@@ -4324,7 +4321,6 @@ bool GfxRuntime::launch_graph_impl(
   slot->args_buffers.resize(prepared.size());
   slot->args_buffer_sizes.resize(prepared.size(), 0);
   SizeMap empty_ext_sizes;
-  ArgPackMap empty_argpacks;
   for (size_t i = 0; i < prepared.size(); ++i) {
     auto &pd = prepared[i];
     const size_t args_size = pd.kernel->get_args_buffer_size();
@@ -4347,8 +4343,7 @@ bool GfxRuntime::launch_graph_impl(
         &pd.kernel->runtime_array_args(), *pd.host_ctx, device_,
         pd.args_buffer, nullptr);
     if (ctx_blitter) {
-      ctx_blitter->host_to_device(*pd.any_arrays, empty_ext_sizes,
-                                  empty_argpacks);
+      ctx_blitter->host_to_device(*pd.any_arrays, empty_ext_sizes);
     }
   }
 

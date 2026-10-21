@@ -36,6 +36,7 @@
 #include "taichi/rhi/device.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/module_loader.h"
+#include "taichi/aot/argpack_layout.h"
 #include "taichi/aot/struct_layout.h"
 #include "taichi/common/virtual_dir.h"
 #include "taichi/runtime/native_provider.h"
@@ -160,6 +161,12 @@ class Runtime {
     };
     mutable std::string argument_layout;
     mutable std::map<uint32_t, ValueWindow> value_arguments;
+    using ArgPackLayouts =
+        std::map<uint32_t,
+                 std::shared_ptr<const taichi::lang::aot::ArgPackLayout>>;
+    // Most kernels have no packs. Do not allocate an empty map sentinel for
+    // every loaded callable; construct it only after successful reflection.
+    mutable std::shared_ptr<ArgPackLayouts> argpack_layouts;
   };
   struct GraphBinding {
     class AotModule *owner;
@@ -272,6 +279,8 @@ class Runtime {
                                   taichi::lang::DataType type);
   const KernelBinding &get_kernel(TiKernel kernel) const;
   const KernelBinding &get_kernel_value_arguments(TiKernel kernel) const;
+  std::shared_ptr<const taichi::lang::aot::ArgPackLayout>
+  get_kernel_argpack_layout(TiKernel kernel, uint32_t logical_argument);
   const GraphBinding &get_graph(TiComputeGraph graph) const;
   const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
   void retire_module(class AotModule *owner);

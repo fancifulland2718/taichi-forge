@@ -47,6 +47,7 @@ ArgPackLayout::ArgPackLayout(const CallableBase &kernel,
   for (const auto &origin : origins) {
     if (!below(origin.logical, logical_root))
       continue;
+    origins_.push_back(origin);
     if (origin.kind != "argpack" && origin.kind != "value") {
       resources_.push_back(origin);  // Bound through the existing root ABI.
       continue;
@@ -61,7 +62,7 @@ ArgPackLayout::ArgPackLayout(const CallableBase &kernel,
                   resolved->elements().size() == type->elements().size(),
               "ArgPack resolver did not supply the compiled storage layout");
       packs.emplace(origin.logical, storages_.size());
-      storages_.push_back({origin, resolved, bytes, {}, {}});
+      storages_.push_back({origin, type, resolved, bytes, {}, {}});
     }
   }
   // Match each direct value/pack member to its compiled slot once. Resources
@@ -116,6 +117,34 @@ ArgPackLayout::ArgPackLayout(const CallableBase &kernel,
   for (const auto &members : used)
     require(std::find(members.begin(), members.end(), false) == members.end(),
             "ArgPack compiled storage contains an unmapped member");
+}
+
+bool ArgPackLayout::matches(const CallableBase &kernel,
+                            const std::vector<int> &physical_root) const {
+  if (!kernel.argument_origins || storages_.empty() ||
+      storages_.front().origin.physical != physical_root)
+    return false;
+  ArgumentOrigins selected;
+  for (const auto &origin : canonical_argument_origins(*kernel.argument_origins))
+    if (below(origin.logical, storages_.front().origin.logical))
+      selected.push_back(origin);
+  if (selected != origins_)
+    return false;
+  for (const auto &storage : storages_) {
+    if (pack_storage(kernel, storage.origin.physical) != storage.source_type)
+      return false;
+    for (const auto &value : storage.values) {
+      auto logical = compiled_value_parameter_type(kernel, value.origin.physical);
+      if (kernel.value_parameter_types) {
+        const auto found = kernel.value_parameter_types->find(value.origin.physical);
+        if (found != kernel.value_parameter_types->end())
+          logical = found->second;
+      }
+      if (logical != value.layout.type)
+        return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace taichi::lang::aot
