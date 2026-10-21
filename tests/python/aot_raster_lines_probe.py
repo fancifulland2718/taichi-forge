@@ -1,6 +1,7 @@
 """Rebuild line expansion without the producer raster frontend or shader tools."""
 
 import json
+import os
 from pathlib import Path
 import statistics
 import sys
@@ -39,7 +40,11 @@ def main(mode, artifact):
         ti.init(arch=ti.vulkan, offline_cache=False)
         runtime = ti.aot.borrow_runtime()
     else:
-        runtime = Runtime("vulkan")
+        # Pixel-exact producer comparisons require the same physical device.
+        runtime = Runtime(
+            "vulkan",
+            device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", os.environ.get("TI_VISIBLE_DEVICE", "0"))),
+        )
     folder = Path(artifact).parent
     references = json.loads((folder / "references.json").read_text())
     with runtime:
