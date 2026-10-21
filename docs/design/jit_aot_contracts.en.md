@@ -160,6 +160,21 @@ counters and retirement retain their existing contracts. Small source-free and
 borrowed checks include explicit downstream gradients; this does not add
 automatic differentiation to image operations or SPD itself.
 
+Composites reuse their actual steps: PreparedUnique's head/compact actions and
+PrefixSort's frozen dispatches retain the existing Graph lowering. PrefixSort
+declares used scratch and explicit public status without snapshotting temporary
+contents. Selected Vulkan indexed-transform fusion exports its definition
+without constructing another candidate plan. Segmented execution and export
+share request-specific steps while preserving serial order, global-scan
+correction and topology policy.
+
+ParallelSort creates and reconstructs the same SPIR-V assets and prefix strategy.
+cuSPARSELt dimensions, actual algorithm configuration and recording definitions
+also use the default adapter. Native multi-stage submission and private workspace
+remain intact. Raw-A seeds and compression epochs remain state policies:
+one-time initialization differs from recompression on every run, and equivalent
+definitions do not imply shared mutable state across instances.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive

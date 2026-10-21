@@ -122,6 +122,16 @@ SPD 创建与重建共享固定图像 layout、reduction 和现有 SpirvShader �
 证书、公开 plan 的 source/output 别名、counter 与退休保持原合同。source-free/borrowed
 的小型验证覆盖下游显式梯度，不代表图像操作或 SPD 本身新增自动微分支持。
 
+组合路径优先复用实际步骤：PreparedUnique 的 head/compact、PrefixSort 的冻结 dispatch
+继续进入既有 Graph lowering。PrefixSort 显式声明用到的 scratch 和公开 status，不采集
+临时数组内容。Vulkan indexed-transform fusion 复用选中的定义，导出不再构造候选 plan；
+segmented 调用与导出共用请求对应的步骤定义，保留 serial 顺序、global-scan 校正及拓扑政策。
+
+ParallelSort 使用相同 SPIR-V 资产和 prefix 策略创建/重建；cuSPARSELt 的维度、实际算法
+配置和 recording 定义也经默认 adapter 投影。两者保持 native 多阶段提交和私有 workspace。
+cuSPARSELt raw-A 种子与压缩 epoch 是可变状态政策，仍区别一次初始化和每次重压缩，
+不因定义相同而跨实例共享可变状态。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典
