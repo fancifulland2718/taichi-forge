@@ -49,6 +49,9 @@ TEST(CudaGatedAot, LoadsDeclaredCodeAndRejectsMismatchedFrames) {
   LlvmRuntimeExecutor executor(config, nullptr);
   uint64 *result_buffer = nullptr;
   executor.materialize_runtime(nullptr, &result_buffer);
+  // Driver calls in this fixture cannot rely on a runtime API leaving its
+  // context current after returning.
+  auto context_guard = CUDAContext::get_instance().get_guard();
   LLVM::AotModuleParams params;
   params.module_path = folder;
   params.executor_ = &executor;
@@ -489,6 +492,7 @@ TEST(CudaGatedAot, FixedMaskedExecutionOwnsGatesAndPreservesActualGradients) {
   LlvmRuntimeExecutor executor(config, nullptr);
   uint64 *result_buffer = nullptr;
   executor.materialize_runtime(nullptr, &result_buffer);
+  auto context_guard = CUDAContext::get_instance().get_guard();
   LLVM::AotModuleParams params;
   params.module_path = folder;
   params.executor_ = &executor;
