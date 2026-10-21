@@ -43,6 +43,8 @@ def test_cusolverdn_capture_live_inputs_root_order_and_retirement(
             with monkeypatch.context() as hot:
                 hot.setattr(binding, "_invoke", cold_only)
                 hot.setattr(capture_module, "partial", cold_only)
+                hot.setattr(capture_module, "NativeDefinition", cold_only)
+                hot.setattr(capture_module, "NativeOperationBinding", cold_only)
                 for diagonal in (2, 4, 8):
                     host_a = (
                         np.eye(n, dtype=np.float32 if dtype == ti.f32 else np.float64)

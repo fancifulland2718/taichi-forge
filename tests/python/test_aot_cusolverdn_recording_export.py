@@ -17,7 +17,9 @@ from tests import test_utils
 @pytest.mark.parametrize("dtype,count,alias", [(ti.f32, 1, False), (ti.f64, 3, True)])
 @pytest.mark.parametrize("phase", ("solve", "factor_and_solve"))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cusolverdn_recording_export(dtype, count, alias, phase, tmp_path):
+def test_cusolverdn_recording_export(dtype, count, alias, phase, tmp_path, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeOperationBinding, NativeResourceBinding
+
     vendor = os.environ.get("TI_FORGE_TEST_CUSOLVERDN_LIBRARY_PATH")
     adapter = os.environ.get("TI_CUSOLVERDN_TEST_ADAPTER")
     if not vendor or not adapter:
@@ -34,11 +36,32 @@ def test_cusolverdn_recording_export(dtype, count, alias, phase, tmp_path):
     a.from_numpy(dense.astype(np.float32 if dtype == ti.f32 else np.float64))
     provider = ti.hardware.linalg.CusolverDnProvider(vendor)
     plan = provider.cholesky_plan(n, rhs_count=count, dtype=dtype)
+    plan_definition = plan._definition
+    report = plan_definition.parameter_dict()
+    report["rows"] = 1
+    assert plan.rows == plan_definition.parameters["rows"] == n
     binding = plan.bind(a, arrays["rhs"], arrays["solution"])
     if phase == "solve":
         binding.factor()
         a.fill(0)  # This is no longer a valid factor seed.
     captured = binding.capture(mode=phase)
+    resource_calls, operation_calls = [], []
+    original_resource, original_operation = NativeResourceBinding.lower, NativeOperationBinding.lower
+
+    def lower_resource(self, context, **kwargs):
+        if self.owner is plan:
+            assert self.definition is plan_definition
+            resource_calls.append(self)
+        return original_resource(self, context, **kwargs)
+
+    def lower_operation(self, context, **kwargs):
+        if self.definition.provider == "cusolverdn":
+            assert self.definition is captured._definition
+            operation_calls.append(self)
+        return original_operation(self, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", lower_resource)
+    monkeypatch.setattr(NativeOperationBinding, "lower", lower_operation)
     arrays["status"] = plan.info
     initial_status = plan.info.to_numpy()
 
@@ -91,6 +114,7 @@ def test_cusolverdn_recording_export(dtype, count, alias, phase, tmp_path):
     minimal_builder.append_native(captured.record())
     minimal = minimal_builder.compile()
     module.add_execution_plan("minimal", minimal, snapshot_state=phase == "solve")
+    assert len(resource_calls) == len(operation_calls) == 3
     minimal.close()
     # No unused old factor is serialized for a graph that refactors first.
     assert len(module._data_payloads) == (2 if phase == "solve" else 1)

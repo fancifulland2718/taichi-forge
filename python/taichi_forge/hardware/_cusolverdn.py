@@ -6,6 +6,7 @@ import threading
 from types import MappingProxyType
 import weakref
 
+from taichi_forge.graph._native_definition import NativeDefinition
 from taichi_forge.hardware._cusolverdn_abi import (
     ABI,
     DriverBinding,
@@ -144,13 +145,14 @@ class CusolverDnCholeskyPlan:
     def __init__(self, provider, rows, *, rhs_count=1, dtype=f32):
         if provider.closed:
             raise TaichiRuntimeError("CusolverDnProvider has been closed")
-        validate_runtime_generation(
-            provider, "CusolverDnProvider belongs to an old runtime"
-        )
-        self.rows, self.rhs_count = _size(rows, "rows"), _size(rhs_count, "rhs_count")
+        validate_runtime_generation(provider, "CusolverDnProvider belongs to an old runtime")
+        rows, rhs_count = _size(rows, "rows"), _size(rhs_count, "rhs_count")
         if dtype not in (f32, f64):
             raise TypeError("cuSOLVERDn Cholesky dtype must be f32 or f64")
-        self.dtype = dtype
+        self._definition = NativeDefinition(
+            "cusolverdn", "cholesky_plan", dict(rows=rows, rhs_count=rhs_count, dtype=str(dtype))
+        )
+        rows, rhs_count, dtype = self.rows, self.rhs_count, self.dtype
         self.provider = provider
         self._runtime_prog = provider._runtime_prog
         self._lock = provider._lock
@@ -221,6 +223,10 @@ class CusolverDnCholeskyPlan:
             self._driver.close()
             self.closed = True
             raise
+
+    rows = property(lambda self: self._definition.parameters["rows"])
+    rhs_count = property(lambda self: self._definition.parameters["rhs_count"])
+    dtype = property(lambda self: f32 if self._definition.parameters["dtype"] == "f32" else f64)
 
     def _check(self, result):
         try:

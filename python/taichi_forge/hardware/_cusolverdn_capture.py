@@ -7,8 +7,9 @@ This is a root-ordered Graph command, not enclosing Graph fusion or a search axi
 import ctypes as ct
 from functools import partial
 
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
 from taichi_forge.graph._recipes.definition import _digest
 from taichi_forge.hardware._cusolverdn_abi import _function, check
 from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
@@ -24,7 +25,11 @@ class CusolverDnCapture:
     graph_runtime_lifetime_check_required = False
 
     def __init__(self, binding, mode):
-        self.binding, self.mode = binding, mode
+        self.binding = binding
+        self._definition = NativeDefinition(
+            "cusolverdn", "cholesky", dict(phase="solve" if mode == "solve" else "factor_and_solve")
+        )
+        mode = self.mode
         self._closed = True
         self._exec = ct.c_void_p()
         plan = binding._plan
@@ -96,6 +101,7 @@ class CusolverDnCapture:
         )
 
     closed = property(lambda self: self._closed)
+    mode = property(lambda self: "solve" if self._definition.parameters["phase"] == "solve" else "both")
 
     def validate_graph_lifetime(self):
         if self._closed or self.binding._plan.closed:
@@ -174,6 +180,18 @@ class _Recording(BackendCommandRecording):
             replay_mode="native_replay",
         )
         object.__setattr__(self, "capture", capture)
+        binding = capture.binding
+        object.__setattr__(
+            self,
+            "_arrays",
+            (
+                NativeArrayBinding("a", names[0], GraphAccess.READ),
+                NativeArrayBinding(
+                    "rhs", names[1], GraphAccess.READ_WRITE if binding._rhs == binding._output else GraphAccess.READ
+                ),
+                NativeArrayBinding("solution", names[2], GraphAccess.WRITE),
+            ),
+        )
         object.__setattr__(self, "_graph_semantic_fingerprint", capture._semantic_id)
         object.__setattr__(self, "_graph_physical_plan_id", capture._identity)
 
@@ -181,28 +199,15 @@ class _Recording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        binding = self.capture.binding
-        return (
-            ResourceEffect(self.binding_names[0], GraphAccess.READ),
-            ResourceEffect(
-                self.binding_names[1],
-                (
-                    GraphAccess.READ_WRITE
-                    if binding._rhs == binding._output
-                    else GraphAccess.READ
-                ),
-            ),
-            ResourceEffect(self.binding_names[2], GraphAccess.WRITE),
-        )
+        return tuple(array.effect for array in self._arrays)
+
+    def _operation_binding(self, resource):
+        return NativeOperationBinding(self.capture._definition, self._arrays, (("plan", resource),))
 
     def validate_graph_bindings(self, bindings):
-        for name, original in zip(
-            self.binding_names, self.capture.binding._resources[:3]
-        ):
+        for name, original in zip(self.binding_names, self.capture.binding._resources[:3]):
             if bindings[name] is not original:
-                raise TaichiRuntimeError(
-                    "cuSOLVERDn recording requires its original fixed arrays"
-                )
+                raise TaichiRuntimeError("cuSOLVERDn recording requires its original fixed arrays")
 
     def execute(self, bindings):
         self.capture.run()

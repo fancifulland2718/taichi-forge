@@ -2,6 +2,8 @@
 
 import struct
 
+from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.graph._native_definition import NativeArrayBinding, NativeResourceBinding, NativeResourceReference
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
@@ -52,19 +54,15 @@ def export_capture(recording, context):
                 # Initialization runs once on first execution, never at prepare.
                 # Subsequent kernels and provider calls share the public slot.
                 context.initialization.append(dict(kind="copy", source=initial, destination=status))
-            return context.resource(
+            return NativeResourceBinding(
                 plan,
-                "cusolverdn",
-                "cholesky_plan",
-                parameters=dict(rows=plan.rows, rhs_count=plan.rhs_count, dtype=str(plan.dtype), seeded=seeded),
-                bindings=dict(factor=factor, status=status),
-            )
+                plan._definition,
+                arrays=(
+                    NativeArrayBinding("factor", factor, GraphAccess.READ_WRITE),
+                    NativeArrayBinding("status", status, GraphAccess.READ_WRITE),
+                ),
+            ).lower(context, requirements=dict(seeded=seeded))
 
         resource = context.resource_once(plan, build_resource, policy=("cusolverdn", "cholesky_plan"))
-        context.native(
-            "cusolverdn",
-            "cholesky",
-            parameters=dict(phase="solve" if capture.mode == "solve" else "factor_and_solve"),
-            bindings=dict(plan=resource, **dict(zip(("a", "rhs", "solution"), recording.binding_names))),
-        )
+        recording._operation_binding(NativeResourceReference(resource)).lower(context)
     return ()
