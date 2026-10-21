@@ -27,6 +27,7 @@ from taichi_forge.algorithms._primitive_capabilities import (
     primitive_capability,
     supported_primitive_methods,
 )
+from taichi_forge.algorithms._primitive_definitions import SCAN_VALUE_TYPE as _SCAN_VALUE_TYPE, ScanDefinition
 from taichi_forge._kernels import (
     add_ndarray_to_ndarray,
     add_scalar_field_to_dense_field,
@@ -198,7 +199,6 @@ _GROUPED_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _GROUPED_REDUCE_FIELD_DTYPES = (i32,)
 _GROUPED_REDUCE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SCAN_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
-_SCAN_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _HISTOGRAM_VALUE_DTYPES = (i32, u32)
 _HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
 _HISTOGRAM_BIN_DTYPES = (i32, i64)
@@ -986,6 +986,7 @@ class _NativePrimitivePlan:
         "call_args",
         "prog_id",
         "method_descriptor",
+        "definition",
         "value_type",
         "n",
     )
@@ -1000,7 +1001,9 @@ class _NativePrimitivePlan:
         prog,
         value_type,
         n,
+        definition=None,
     ):
+        self.definition = definition
         self.backend = backend
         self.method_name = method_name
         self.objects = tuple(objects)
@@ -1954,6 +1957,7 @@ def _record_native_primitive_plan(
     prog,
     value_type,
     n,
+    definition=None,
 ):
     plan = _NativePrimitivePlan(
         backend=backend,
@@ -1964,6 +1968,7 @@ def _record_native_primitive_plan(
         prog=prog,
         value_type=value_type,
         n=n,
+        definition=definition,
     )
     _native_plan_cache_store(plan_cache, plan)
     if _primitive_diagnostics_enabled:
@@ -16855,11 +16860,6 @@ class PrefixSumExecutor:
             self.large_arr = field(i32, shape=self.workspace_length)
         return self.large_arr
 
-    def _scan_value_type(self, dtype):
-        if dtype in _SCAN_VALUE_TYPE:
-            return _SCAN_VALUE_TYPE[dtype]
-        raise RuntimeError("unsupported PrefixSumExecutor ndarray dtype.")
-
     def _native_scan_backend_for_arch(self):
         arch = current_cfg().arch
         if arch == cuda:
@@ -16898,7 +16898,7 @@ class PrefixSumExecutor:
             self._native_scan_plan = group.plans[-1]
 
     def _record_native_scan_plan_raw(
-        self, backend, method_name, input_arr, value_type, n, call_args, prog
+        self, backend, method_name, input_arr, value_type, n, call_args, prog, definition=None
     ):
         plan = _record_native_primitive_plan(
             self._native_scan_plans,
@@ -16910,22 +16910,9 @@ class PrefixSumExecutor:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_scan_plan = plan
-
-    def _record_native_scan_plan(
-        self, backend, method_name, input_arr, view, call_args, prog
-    ):
-        value_type = self._scan_value_type(view.dtype)
-        self._record_native_scan_plan_raw(
-            backend,
-            method_name,
-            input_arr,
-            value_type,
-            view.num_elements,
-            call_args,
-            prog,
-        )
 
     def _record_native_scan_plan_group(self, input_arr, plans):
         backend = self._native_scan_backend_for_arch()
@@ -16986,9 +16973,7 @@ class PrefixSumExecutor:
         )
         return True
 
-    def _try_cuda_device_scan(self, input_arr):
-        if current_cfg().arch != cuda:
-            return False
+    def _try_native_scalar_scan(self, input_arr, backend, prefix):
         view = _primitive_view(input_arr)
         if view is None or not (view.is_native_numeric_dense or view.is_dense_field):
             return False
@@ -16997,164 +16982,41 @@ class PrefixSumExecutor:
         if view.is_dense_field:
             impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not _prog_available(prog, "cuda_device_scan_available"):
+        if not _prog_available(prog, prefix + "_scan_available"):
             return False
-        value_type = self._scan_value_type(view.dtype)
-        if view.is_dense_field:
-            method = _prog_method(prog, "cuda_device_inclusive_scan_dense_field")
-            if method is None:
-                return False
-            method(view.snode, value_type, view.num_elements)
-            self._record_native_scan_plan(
-                "cuda_device",
-                "cuda_device_inclusive_scan_dense_field",
-                input_arr,
-                view,
-                (view.snode, value_type, view.num_elements),
-                prog,
-            )
-        elif view.is_struct_scalar_member:
-            method = _prog_method(prog, "cuda_device_inclusive_scan_member_ndarray")
-            if method is None:
-                return False
-            method(view.payload_arr, value_type, view.offset, view.stride)
-            self._record_native_scan_plan(
-                "cuda_device",
-                "cuda_device_inclusive_scan_member_ndarray",
-                input_arr,
-                view,
-                (view.payload_arr, value_type, view.offset, view.stride),
-                prog,
-            )
-        else:
-            method = _prog_method(prog, "cuda_device_inclusive_scan_ndarray")
-            if method is None:
-                return False
-            method(view.payload_arr, value_type)
-            self._record_native_scan_plan(
-                "cuda_device",
-                "cuda_device_inclusive_scan_ndarray",
-                input_arr,
-                view,
-                (view.payload_arr, value_type),
-                prog,
-            )
-        return True
-
-
-    def _try_vulkan_native_scan(self, input_arr):
-        if current_cfg().arch != vulkan:
-            return False
-        view = _primitive_view(input_arr)
-        if view is None or not (view.is_native_numeric_dense or view.is_dense_field):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        if view.is_dense_field:
-            impl.get_runtime().materialize()
-        prog = impl.get_runtime().prog
-        if not _prog_available(prog, "vulkan_scan_available"):
-            return False
-        value_type = self._scan_value_type(view.dtype)
-        if not _prog_value_available(
-            prog, "vulkan_scan_value_type_available", value_type
+        definition = ScanDefinition(view.num_elements, view.dtype)
+        if backend == "vulkan_native" and not _prog_value_available(
+            prog, "vulkan_scan_value_type_available", definition.value_type
         ):
             return False
         if view.is_dense_field:
-            method = _prog_method(prog, "vulkan_inclusive_scan_dense_field")
-            if method is None:
-                return False
-            method(view.snode, value_type, view.num_elements)
-            self._record_native_scan_plan(
-                "vulkan_native",
-                "vulkan_inclusive_scan_dense_field",
-                input_arr,
-                view,
-                (view.snode, value_type, view.num_elements),
-                prog,
-            )
+            suffix = "dense_field"
+            call_args = (view.snode, definition.value_type, definition.size)
         elif view.is_struct_scalar_member:
-            method = _prog_method(prog, "vulkan_inclusive_scan_member_ndarray")
-            if method is None:
-                return False
-            method(view.payload_arr, value_type, view.offset, view.stride)
-            self._record_native_scan_plan(
-                "vulkan_native",
-                "vulkan_inclusive_scan_member_ndarray",
-                input_arr,
-                view,
-                (view.payload_arr, value_type, view.offset, view.stride),
-                prog,
-            )
+            suffix = "member_ndarray"
+            call_args = (view.payload_arr, definition.value_type, view.offset, view.stride)
         else:
-            method = _prog_method(prog, "vulkan_inclusive_scan_ndarray")
-            if method is None:
-                return False
-            method(view.payload_arr, value_type)
-            self._record_native_scan_plan(
-                "vulkan_native",
-                "vulkan_inclusive_scan_ndarray",
-                input_arr,
-                view,
-                (view.payload_arr, value_type),
-                prog,
-            )
+            suffix = "ndarray"
+            call_args = (view.payload_arr, definition.value_type)
+        method_name = prefix + "_inclusive_scan_" + suffix
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return False
+        method(*call_args)
+        self._record_native_scan_plan_raw(
+            backend, method_name, input_arr, definition.value_type, definition.size,
+            call_args, prog, definition=definition,
+        )
         return True
+
+    def _try_cuda_device_scan(self, input_arr):
+        return current_cfg().arch == cuda and self._try_native_scalar_scan(input_arr, "cuda_device", "cuda_device")
+
+    def _try_vulkan_native_scan(self, input_arr):
+        return current_cfg().arch == vulkan and self._try_native_scalar_scan(input_arr, "vulkan_native", "vulkan")
 
     def _try_cpu_native_scan(self, input_arr):
-        if current_cfg().arch not in [x64, arm64]:
-            return False
-        view = _primitive_view(input_arr)
-        if view is None or not (view.is_native_numeric_dense or view.is_dense_field):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        if view.is_dense_field:
-            impl.get_runtime().materialize()
-        prog = impl.get_runtime().prog
-        if not _prog_available(prog, "cpu_scan_available"):
-            return False
-        value_type = self._scan_value_type(view.dtype)
-        if view.is_dense_field:
-            method = _prog_method(prog, "cpu_inclusive_scan_dense_field")
-            if method is None:
-                return False
-            method(view.snode, value_type, view.num_elements)
-            self._record_native_scan_plan(
-                "cpu_native",
-                "cpu_inclusive_scan_dense_field",
-                input_arr,
-                view,
-                (view.snode, value_type, view.num_elements),
-                prog,
-            )
-        elif view.is_struct_scalar_member:
-            method = _prog_method(prog, "cpu_inclusive_scan_member_ndarray")
-            if method is None:
-                return False
-            method(view.payload_arr, value_type, view.offset, view.stride)
-            self._record_native_scan_plan(
-                "cpu_native",
-                "cpu_inclusive_scan_member_ndarray",
-                input_arr,
-                view,
-                (view.payload_arr, value_type, view.offset, view.stride),
-                prog,
-            )
-        else:
-            method = _prog_method(prog, "cpu_inclusive_scan_ndarray")
-            if method is None:
-                return False
-            method(view.payload_arr, value_type)
-            self._record_native_scan_plan(
-                "cpu_native",
-                "cpu_inclusive_scan_ndarray",
-                input_arr,
-                view,
-                (view.payload_arr, value_type),
-                prog,
-            )
-        return True
+        return current_cfg().arch in (x64, arm64) and self._try_native_scalar_scan(input_arr, "cpu_native", "cpu")
 
     def _run_field_workspace(self, large_arr):
         ele_nums = self.ele_nums

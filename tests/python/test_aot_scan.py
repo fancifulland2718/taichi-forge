@@ -13,6 +13,54 @@ from tests import test_utils
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_scan_definition_is_shared_and_replay_stays_direct(monkeypatch):
+    from taichi_forge.algorithms import _algorithms as algorithms
+    from taichi_forge.algorithms._primitive_definitions import ScanDefinition
+    from taichi_forge.graph._native_definition import NativeDefinition
+
+    values = ti.ndarray(ti.i32, 17)
+    values.fill(1)
+    executor = ti.algorithms.PrefixSumExecutor(17)
+    executor.run(values)
+    definition = executor._native_scan_plan.definition
+    sequence = ti.algorithms.primitive_sequence().scan(values, executor=executor)
+    sequence.run()
+    assert sequence._calls[0].plan.definition is definition
+
+    def no_conversion(*args, **kwargs):
+        raise AssertionError("warm native scan must not construct or serialize definitions")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(algorithms, "ScanDefinition", no_conversion)
+        patch.setattr(ScanDefinition, "bind", no_conversion)
+        patch.setattr(NativeDefinition, "parameter_dict", no_conversion)
+        executor.run(values)
+        sequence.run()
+    expected = np.ones(17, dtype=np.int32)
+    for _ in range(4):
+        expected = np.cumsum(expected, dtype=np.int32)
+    np.testing.assert_array_equal(values.to_numpy(), expected)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(sequence)
+    graph = builder.compile()
+    module = ti.aot.Module()
+    definitions = []
+    bind = ScanDefinition.bind
+
+    def record_bind(selected, array):
+        definitions.append(selected)
+        return bind(selected, array)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ScanDefinition, "bind", record_bind)
+        plan = module.add_execution_plan("scan", graph, source_bindings=dict(values=values))
+    assert len(definitions) == 1 and definitions[0] is definition
+    assert json.loads(plan.to_json())["operations"][0]["parameters"] == dict(size=17, dtype="i32")
+    np.testing.assert_array_equal(values.to_numpy(), expected)
+    graph.close()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_scan_sequence_and_native_prefix_export(tmp_path):
     module = ti.aot.Module()
     cases = []

@@ -8,6 +8,7 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 def _scan(call, context):
     from taichi_forge.aot._graph_storage_bindings import packed_description
     from . import _algorithms as algorithms
+    from ._primitive_definitions import ScanDefinition
 
     if (
         call.func is not algorithms._primitive_sequence_scan
@@ -22,9 +23,10 @@ def _scan(call, context):
     if len(desc.index_shape) != 1 or desc.element_shape:
         raise TaichiRuntimeError("AOT scan requires one-dimensional packed scalar storage")
     size = desc.index_shape[0]
-    dtype = str(desc.scalar_type)
-    if dtype not in {"i32", "u32", "f32", "i64", "u64", "f64"}:
-        raise TaichiRuntimeError("AOT scan requires supported native scalar types")
+    try:
+        definition = ScanDefinition(size, desc.scalar_type)
+    except RuntimeError as exc:
+        raise TaichiRuntimeError("AOT scan requires supported native scalar types") from exc
     if call.workspace.sorting_length != size:
         raise TaichiRuntimeError("AOT scan executor length must match its input")
     arch = impl.current_cfg().arch
@@ -38,7 +40,7 @@ def _scan(call, context):
     if backend is None or not getattr(prog, capability)():
         raise TaichiRuntimeError("AOT scan's selected native backend is unavailable")
     if arch == core.Arch.vulkan and not prog.vulkan_scan_value_type_available(
-        algorithms._SCAN_VALUE_TYPE[values.dtype]
+        definition.value_type
     ):
         raise TaichiRuntimeError("AOT scan dtype is unavailable on this Vulkan device")
     if call.plan is not None and (
@@ -51,12 +53,11 @@ def _scan(call, context):
         }
     ):
         raise TaichiRuntimeError("AOT scan cannot reconstruct the selected cached strategy")
-    context.operations.append(dict(
-        kind="native", provider="builtin", operation="scan", version=1,
-        parameters=dict(size=size, dtype=dtype),
-        bindings=dict(values=context.retained_arrays.require(values)),
-    ))
-
+    if call.plan is not None:
+        if call.plan.definition != definition:
+            raise TaichiRuntimeError("AOT scan's selected definition differs from its storage")
+        definition = call.plan.definition
+    definition.bind(values).lower(context)
 
 def _reduce(call, context):
     from math import prod
