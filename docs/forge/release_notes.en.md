@@ -34,6 +34,13 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Nested ArgPack structures use pack setters recursively and share the
+  compiler's value-type lowering, fixing compound writes and Vulkan nested
+  vector/matrix layout mismatches. Ordinary AOT export and template families
+  now synthesize fully declared packs or accept exemplars for resource
+  specialization. This covers production; independent AOT ArgPack owners and
+  prepared consumption still need their subsequent implementation.
+
 - Vulkan loads boolean vector and nested structure arguments using their
   integer buffer slots before converting them to boolean expressions. This
   fixes invalid SPIR-V access-chain types in JIT/AOT without changing layouts.

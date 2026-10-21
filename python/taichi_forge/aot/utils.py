@@ -3,12 +3,15 @@ from typing import Any
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture, TextureCollection
+from taichi_forge.lang.argpack import ArgPack, ArgPackType
 from taichi_forge.lang.enums import Format
 from taichi_forge.lang.exception import TaichiCompilationError
+from taichi_forge.lang.kernel_arguments import KernelArgument
 from taichi_forge.lang.matrix import (
     Matrix,
     MatrixType,
 )
+from taichi_forge.lang.struct import StructType
 from taichi_forge.types.annotations import template
 from taichi_forge.types.ndarray_type import NdarrayType
 from taichi_forge.types._argument_descriptor import (
@@ -69,14 +72,22 @@ def check_type_match(lhs, rhs):
 
 def produce_injected_args_from_template(kernel, template_args):
     injected_args = []
-    num_template_args = len([arg.annotation for arg in kernel.arguments if isinstance(arg.annotation, template_types)])
-    assert num_template_args == len(
-        template_args
-    ), f"Need {num_template_args} inputs to instantiate the template parameters, got {len(template_args)}"
+    required = {arg.name for arg in kernel.arguments if isinstance(arg.annotation, template_types)}
+    optional = {arg.name for arg in kernel.arguments if isinstance(arg.annotation, ArgPackType)}
+    missing = sorted(required - template_args.keys())
+    unexpected = sorted(template_args.keys() - required - optional)
+    if missing or unexpected:
+        raise TaichiCompilationError(
+            f"Invalid AOT template_args: missing {missing}, unexpected {unexpected}"
+        )
     for arg in kernel.arguments:
         anno = arg.annotation
         if isinstance(anno, template_types):
             injected_args.append(template_args[arg.name])
+        elif isinstance(anno, ArgPackType):
+            injected_args.append(
+                template_args[arg.name] if arg.name in template_args else _produce_injected_arg(arg)
+            )
         elif isinstance(anno, AccelerationStructureType):
             injected_args.append(None)
         elif isinstance(anno, TextureCollectionType):
@@ -90,8 +101,35 @@ def produce_injected_args_from_template(kernel, template_args):
     return injected_args
 
 
+def _produce_injected_argpack(annotation, name):
+    entries = {}
+    for member, dtype in annotation.members.items():
+        path = f"{name}.{member}"
+        if isinstance(dtype, NdarrayType):
+            descriptor = describe_annotation(dtype)
+            if descriptor.ndim is None or not descriptor.element.is_complete:
+                raise TaichiCompilationError(
+                    f"AOT ArgPack member {path} needs a concrete ndarray dtype and ndim; "
+                    "provide the containing argument pack in template_args to specialize it"
+                )
+        if isinstance(dtype, MatrixType):
+            entries[member] = dtype(0)
+        elif isinstance(dtype, StructType):
+            entries[member] = dtype()
+        else:
+            entries[member] = _produce_injected_arg(KernelArgument(dtype, path))
+    # Compilation needs member types, not the exemplar's runtime addresses or
+    # values. Use the existing managed pack once, avoiding ArgPackType.cast's
+    # second normalization allocation for these already typed placeholders.
+    return ArgPack(annotation.members, annotation.dtype, entries)
+
+
 def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
     anno = arg.annotation
+    if isinstance(anno, ArgPackType):
+        if has_symbolic_arg:
+            raise TaichiCompilationError("Symbolic Graph arguments do not support ArgPack")
+        return _produce_injected_argpack(anno, arg.name)
     if isinstance(anno, AccelerationStructureType):
         if has_symbolic_arg and (
             symbolic_arg is None

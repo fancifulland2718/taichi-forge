@@ -1895,6 +1895,15 @@ cannot carry resource handles or ArgPacks and does not extend ordinary CGraph
 input types or prepared returns. Value parameters are constants in an explicitly
 exported adjoint; ndarray gradients keep their existing bindings and ownership.
 
+The producer's `Module.add_kernel()` synthesizes compilation exemplars for fully
+declared ArgPacks. When a member ndarray has an unspecified dtype or rank, supply
+its pack through `template_args={"pack_argument": exemplar, ...}`, together with
+other required template arguments. `add_kernel_template().instantiate()` also
+accepts packs; persistent keys include resource type features, never values or
+device addresses. Template families retain their existing texture-specialization
+restriction. Export neither executes the kernel nor saves pack device storage;
+independent AOT ArgPack owners and prepared pack consumption are still pending.
+
 Ordinary `Kernel.run()`/`Kernel.__call__()` and bound calls return compiled
 values: scalars become Python numbers (booleans for `u1`), vectors become tuples,
 matrices become nested tuples, structures become dictionaries, and multiple

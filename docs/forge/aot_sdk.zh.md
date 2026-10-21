@@ -1486,6 +1486,13 @@ launch/prepare 在返回前复制载荷。此形式不能携带资源句柄或 A
 CGraph 的输入类型或 prepared 返回值。显式导出的伴随中，按值参数作为常量使用；
 ndarray 梯度仍沿用既有绑定与所有权。
 
+生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray
+的 dtype/ndim 未指定时，通过 `template_args={"pack参数名": 实际参数包, ...}` 提供
+specialization，其他必需模板参数仍须给出。`add_kernel_template().instantiate()`
+同样支持参数包；其持久键只包含资源类型特征，不包含值或设备地址。该模板家族入口
+仍沿用 texture specialization 的现有限制。导出不执行 kernel，也不保存参数包的
+设备存储；这不代表独立 AOT ArgPack owner 或 prepared 参数包消费已经接通。
+
 普通 `Kernel.run()`/`Kernel.__call__()` 与绑定后的调用可以返回编译值：标量对应
 Python 数字（`u1` 为布尔），向量对应元组，矩阵对应嵌套元组，结构对应字典，
 多个返回值对应元组。位宽、padding 和形状来自已加载的编译布局，每个 Kernel

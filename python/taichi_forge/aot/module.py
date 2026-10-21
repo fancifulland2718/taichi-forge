@@ -12,12 +12,14 @@ import numpy as np
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.aot.utils import (
+    _produce_injected_arg,
     produce_injected_args,
     produce_injected_args_from_template,
     reject_acceleration_structure_arguments,
     reject_texture_collection_arguments,
 )
 from taichi_forge.lang import impl, kernel_impl
+from taichi_forge.lang.argpack import ArgPack, ArgPackType
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
 from taichi_forge.lang.enums import Layout
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
@@ -141,6 +143,29 @@ class KernelTemplate:
             f"boundary_{int(feature[3])}"
         )
 
+    @staticmethod
+    def _argpack_keygen(value, annotation, name):
+        if not isinstance(value, ArgPack):
+            raise TaichiCompilationError(f"AOT template argument {name} must be an ArgPack")
+        parts = []
+        for member, dtype in annotation.members.items():
+            path = name + "." + member
+            if isinstance(dtype, ArgPackType):
+                parts.append(KernelTemplate._argpack_keygen(value[member], dtype, path))
+            elif isinstance(dtype, NdarrayType):
+                parts.append(
+                    KernelTemplate._key_atom(path) + "="
+                    + KernelTemplate._ndarray_keygen(value[member], dtype, path) + "__"
+                )
+            elif isinstance(dtype, (TextureType, RWTextureType)):
+                raise TaichiCompilationError(
+                    "AOT kernel templates do not support texture specialization "
+                    f"({path}); use Module.add_kernel() with template_args"
+                )
+        # Scalar and aggregate values do not specialize a declared ArgPack.
+        # Only its nested resource descriptors enter the persistent key.
+        return "".join(parts)
+
     def instantiate(self, **kwargs):
         kernel, name, bound_args = _resolve_kernel(self._kernel_fn)
         reject_acceleration_structure_arguments(kernel, "AOT kernel templates")
@@ -152,9 +177,10 @@ class KernelTemplate:
             for arg in kernel.arguments
             if isinstance(arg.annotation, (template, NdarrayType))
         } - set(bound_args)
+        optional = {arg.name for arg in kernel.arguments if isinstance(arg.annotation, ArgPackType)}
         provided = set(kwargs)
         missing = sorted(required - provided)
-        unknown = sorted(provided - required)
+        unknown = sorted(provided - required - optional)
         if missing:
             raise TaichiCompilationError(
                 "Missing AOT kernel template arguments: " + ", ".join(missing)
@@ -182,6 +208,10 @@ class KernelTemplate:
                     + "__"
                 )
                 injected_args.append(v)
+            elif isinstance(arg.annotation, ArgPackType):
+                value = kwargs[arg.name] if arg.name in kwargs else _produce_injected_arg(arg)
+                key_p += self._argpack_keygen(value, arg.annotation, arg.name)
+                injected_args.append(value)
             elif isinstance(arg.annotation, (TextureType, RWTextureType)):
                 raise TaichiCompilationError(
                     "AOT kernel templates do not support texture "
@@ -416,7 +446,9 @@ class Module:
           template_args (Dict[str, Any]): a dict where key is the template
             parameter name, and value is the instantiating arg. Note that this
             works for both :class:`~taichi_forge.types.template` and for
-            `:class:`~taichi_forge.types.ndarray`.
+            `:class:`~taichi_forge.types.ndarray`. An ArgPack exemplar may also
+            supply concrete types for its resource members; fully declared
+            ArgPacks can be omitted and are synthesized for compilation.
           name (str): Name to identify this kernel in the module. If not
             provided, uses the source function name, suffixed with ``_grad``
             for a reverse kernel. A bound method freezes its owner at export.
