@@ -3,6 +3,7 @@
 #include <limits>
 #include <utility>
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_primitive_contract.h"
 #include "taichi/runtime/native_reduce.h"
 #include "taichi/runtime/native_scatter_add.h"
 #include "taichi/runtime/native_host_blob.h"
@@ -27,6 +28,56 @@
 #endif
 
 namespace taichi::lang {
+TEST(NativeOperationRegistry, PrimitiveSchemasPreserveLayoutAndPolicyContracts) {
+  const auto &registry = native_operation_registry();
+  auto sort = NativeOperationDescription::parse(liong::json::parse_complete(R"(
+    {"kind":"native","provider":"builtin","operation":"sort","version":1,
+     "parameters":{"nan_policy":"last"},"bindings":{"keys":"k","values":"v"}})"));
+  const auto request = registry.decode(sort);
+  NativeArrayBinding keys{{}, 28, PrimitiveType::i32, {7}, {}};
+  // AOT's raw-word payload contract is wider than the direct JIT API. Keep it.
+  NativeArrayBinding values{{}, 28, PrimitiveType::i16, {7}, {2}};
+  NativeOperationBindings inputs{{"keys", keys}, {"values", values}};
+  const auto bound = registry.bind<SortOperation>(request, inputs);
+  EXPECT_EQ(bound.key_type, NativeSortKeyType::i32);
+  EXPECT_EQ(bound.size, 7);
+  EXPECT_EQ(bound.value_bytes, 4);
+  EXPECT_EQ(bound.value_scalar_bytes, 2);
+  EXPECT_FALSE(bound.workspace);
+  EXPECT_THROW(registry.bind<CompactOperation>(request, inputs), std::invalid_argument);
+  inputs.erase("values");
+  EXPECT_THROW(registry.bind<SortOperation>(request, inputs), std::invalid_argument);
+  values.shape = {8};
+  inputs.emplace("values", values);
+  EXPECT_THROW(registry.bind<SortOperation>(request, inputs), std::invalid_argument);
+  sort.parameters = liong::json::parse_complete(R"({"nan_policy":"bitwise"})");
+  EXPECT_THROW(registry.decode(sort), std::invalid_argument);
+
+  auto compact = NativeOperationDescription::parse(liong::json::parse_complete(R"(
+    {"kind":"native","provider":"builtin","operation":"compact","version":1,
+     "parameters":{"column_count":1},"bindings":{"flags":"f","count":"c",
+       "values_0":"v","output_0":"o"}})"));
+  NativeArrayBinding count{{}, 4, PrimitiveType::i32, {}, {}};
+  values.shape = {7};
+  auto output = values;
+  output.shape = {11};
+  const auto compact_request = registry.decode(compact);
+  NativeOperationBindings columns{{"flags", keys}, {"count", count},
+                                  {"values_0", values}, {"output_0", output}};
+  const auto selection = registry.bind<CompactOperation>(compact_request, columns);
+  EXPECT_EQ(selection.size, 7);
+  ASSERT_EQ(selection.columns.size(), 1);
+  EXPECT_EQ(selection.columns[0].item_bytes, 4);
+  output.shape = {6};
+  columns.insert_or_assign("output_0", output);
+  EXPECT_THROW(registry.bind<CompactOperation>(compact_request, columns), std::invalid_argument);
+  for (const auto *parameters : {R"({"column_count":0})", R"({"column_count":2})",
+                                 R"({"column_count":9223372036854775807})"}) {
+    compact.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(compact), std::invalid_argument);
+  }
+}
+
 TEST(NativeOperationRegistry, BucketSchemaPreservesPayloadAndAlgorithmPolicy) {
   const auto &registry = native_operation_registry();
   NativeOperationDescription d;

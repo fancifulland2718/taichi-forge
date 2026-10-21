@@ -715,12 +715,14 @@ TEST(ExecutionPlan, NativeCompactRetainsAllSymbolicDependencies) {
   const auto plan = ExecutionPlan::parse(R"({"version":1,"operations":[
     {"kind":"compact","values":"x","flags":"active","output":"selected","count":"n"}]})");
   ASSERT_EQ(plan.operations.size(), 1);
-  const auto &compact = std::get<ExecutionPlan::Compact>(plan.operations[0]);
-  ASSERT_EQ(compact.columns.size(), 1);
-  EXPECT_EQ(compact.columns[0].values, "x");
-  EXPECT_EQ(compact.flags, "active");
-  EXPECT_EQ(compact.columns[0].output, "selected");
-  EXPECT_EQ(compact.count, "n");
+  const auto &compact = std::get<ExecutionPlan::Native>(plan.operations[0]);
+  EXPECT_EQ(compact.parameters["column_count"].num_int, 1);
+  EXPECT_EQ(compact.operation, "compact");
+  EXPECT_NO_THROW(native_operation_registry().decode(compact));
+  EXPECT_EQ(compact.bindings.at("values_0"), "x");
+  EXPECT_EQ(compact.bindings.at("flags"), "active");
+  EXPECT_EQ(compact.bindings.at("output_0"), "selected");
+  EXPECT_EQ(compact.bindings.at("count"), "n");
   EXPECT_EQ(plan.arguments,
             (std::vector<std::string>{"active", "n", "selected", "x"}));
   EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
@@ -789,8 +791,9 @@ TEST(ExecutionPlan, SortHasOptionalPayloadWithoutImplicitArguments) {
     {"kind":"sort","keys":"x"},
     {"kind":"sort","keys":"x","values":"indices"}]})");
   ASSERT_EQ(plan.operations.size(), 2);
-  EXPECT_FALSE(std::get<ExecutionPlan::Sort>(plan.operations[0]).values);
-  EXPECT_EQ(*std::get<ExecutionPlan::Sort>(plan.operations[1]).values,
+  EXPECT_FALSE(std::get<ExecutionPlan::Native>(plan.operations[0]).bindings.count("values"));
+  EXPECT_NO_THROW(native_operation_registry().decode(std::get<ExecutionPlan::Native>(plan.operations[0])));
+  EXPECT_EQ(std::get<ExecutionPlan::Native>(plan.operations[1]).bindings.at("values"),
             "indices");
   EXPECT_EQ(plan.arguments, (std::vector<std::string>{"indices", "x"}));
   EXPECT_THROW(ExecutionPlan::parse(R"({"version":1,"operations":[
@@ -831,10 +834,11 @@ TEST(ExecutionPlan, CompactColumnsShareOnePredicateAndCount) {
     {"kind":"compact","flags":"active","count":"n","columns":[
       {"values":"keys","output":"selected_keys"},
       {"values":"values","output":"selected_values"}]}]})");
-  const auto &compact = std::get<ExecutionPlan::Compact>(plan.operations[0]);
-  ASSERT_EQ(compact.columns.size(), 2);
-  EXPECT_EQ(compact.columns[1].values, "values");
-  EXPECT_EQ(compact.columns[1].output, "selected_values");
+  const auto &compact = std::get<ExecutionPlan::Native>(plan.operations[0]);
+  EXPECT_EQ(compact.parameters["column_count"].num_int, 2);
+  EXPECT_NO_THROW(native_operation_registry().decode(compact));
+  EXPECT_EQ(compact.bindings.at("values_1"), "values");
+  EXPECT_EQ(compact.bindings.at("output_1"), "selected_values");
   EXPECT_EQ(plan.arguments.size(), 6);
   for (
       const auto *description :

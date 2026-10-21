@@ -396,23 +396,27 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           operations.emplace_back(std::move(native));
         } else if (kind == "sort") {
           fields(step, {"kind", "keys", "values"});
-          Sort sort{name(step["keys"]), std::nullopt};
-          arguments.insert(sort.keys);
+          Native sort{"builtin", "sort", 1, JsonValue(liong::json::JsonObject{})};
+          sort.bindings.emplace("keys", name(step["keys"]));
+          arguments.insert(sort.bindings.at("keys"));
           if (auto found = step.obj.inner.find("values");
               found != step.obj.inner.end()) {
-            sort.values = name(found->second);
-            arguments.insert(*sort.values);
+            sort.bindings.emplace("values", name(found->second));
+            arguments.insert(sort.bindings.at("values"));
           }
           operations.emplace_back(std::move(sort));
         } else if (kind == "compact") {
           fields(step,
                  {"kind", "values", "flags", "output", "count", "columns"});
-          Compact compact{{}, name(step["flags"]), name(step["count"])};
+          Native compact{"builtin", "compact", 1, JsonValue(liong::json::JsonObject{})};
+          compact.bindings = {{"flags", name(step["flags"])}, {"count", name(step["count"])}};
+          std::uint64_t column_count = 0;
           auto add_column = [&](const JsonValue &column) {
-            compact.columns.push_back(
-                {name(column["values"]), name(column["output"])});
-            arguments.insert(compact.columns.back().values);
-            arguments.insert(compact.columns.back().output);
+            const auto suffix = "_" + std::to_string(column_count++);
+            compact.bindings.emplace("values" + suffix, name(column["values"]));
+            compact.bindings.emplace("output" + suffix, name(column["output"]));
+            arguments.insert(compact.bindings.at("values" + suffix));
+            arguments.insert(compact.bindings.at("output" + suffix));
           };
           if (auto found = step.obj.inner.find("columns");
               found != step.obj.inner.end()) {
@@ -429,8 +433,9 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           } else {
             add_column(step);
           }
-          arguments.insert(compact.flags);
-          arguments.insert(compact.count);
+          compact.parameters.obj.inner.emplace("column_count", JsonValue(column_count));
+          arguments.insert(compact.bindings.at("flags"));
+          arguments.insert(compact.bindings.at("count"));
           operations.emplace_back(std::move(compact));
         } else if (kind == "fill32") {
           fields(step,

@@ -13,7 +13,6 @@
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_sort.h"
-#include "taichi/runtime/native_primitive_contract.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
@@ -1712,42 +1711,27 @@ static TiPreparedExecution prepare_execution_plan_impl(
       } else if (const auto *native =
                      std::get_if<aot::ExecutionPlan::Native>(&operation)) {
         try {
-          operations.emplace_back(native_operation_registry().prepare(
-              preparation, decoded.at(native), native_inputs(*native)));
-        } catch (const std::invalid_argument &error) {
-          throw MemoryBindingError(error.what());
-        }
-      } else if (const auto *sort =
-                     std::get_if<aot::ExecutionPlan::Sort>(&operation)) {
-        try {
-          auto descriptor = bind_sort_operation(
-              array_binding(sort->keys),
-              sort->values ? &array_binding(*sort->values) : nullptr);
-          if (!preparing_initialization) {
-            const auto description = SortWorkspaceDescription::from(descriptor);
-            auto &workspace = sort_workspaces[description.signature()];
-            if (!workspace) {
-              workspace = prepare_sort_workspace(rt.arch, rt.get(), description);
-              prepared->native_resources.push_back(workspace);
-              prepared->replay_resources.insert(workspace.get());
+          const auto &registry = native_operation_registry();
+          const auto &request = decoded.at(native);
+          const auto inputs = native_inputs(*native);
+          if (request.kind() == SortOperation::kind) {
+            // Only owner-local workspace policy belongs here. The common
+            // schema/binder owns all operation-specific input semantics.
+            auto descriptor = registry.bind<SortOperation>(request, inputs);
+            if (!preparing_initialization) {
+              const auto description = SortWorkspaceDescription::from(descriptor);
+              auto &workspace = sort_workspaces[description.signature()];
+              if (!workspace) {
+                workspace = prepare_sort_workspace(rt.arch, rt.get(), description);
+                prepared->native_resources.push_back(workspace);
+                prepared->replay_resources.insert(workspace.get());
+              }
+              descriptor.workspace = workspace;
             }
-            descriptor.workspace = workspace;
+            operations.emplace_back(registry.prepare(preparation, descriptor));
+          } else {
+            operations.emplace_back(registry.prepare(preparation, request, inputs));
           }
-          operations.emplace_back(
-              prepare_sort_operation(rt.arch, rt.get(), descriptor));
-        } catch (const std::invalid_argument &error) {
-          throw MemoryBindingError(error.what());
-        }
-      } else if (const auto *compact =
-                     std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
-        try {
-          std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> columns;
-          for (const auto &column : compact->columns)
-            columns.emplace_back(array_binding(column.values), array_binding(column.output));
-          const auto descriptor = bind_compact_operation(
-              array_binding(compact->flags), array_binding(compact->count), columns);
-          operations.emplace_back(
-              prepare_compact_operation(rt.arch, rt.get(), descriptor));
         } catch (const std::invalid_argument &error) {
           throw MemoryBindingError(error.what());
         }

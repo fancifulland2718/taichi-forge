@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <tuple>
+#include "taichi/common/operation_json.h"
 #include "taichi/rhi/arch.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
@@ -304,6 +305,26 @@ std::shared_ptr<NativeOperation> prepare_cuda_compact(
 
 void register_compact_operation(NativeOperationRegistry &registry) {
   registry.define<CompactOperation>(validate_compact_operation);
+  registry.register_schema<CompactOperation>(
+      "builtin", "compact", {"flags", "count"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<CompactOperation> {
+        operation_json::fields(parameters, {"column_count"});
+        const auto count = operation_json::integer(parameters["column_count"]);
+        if (!count)
+          throw std::invalid_argument("Compact requires at least one column");
+        return [count](const NativeOperationBindings &bindings) {
+          std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> columns;
+          columns.reserve(static_cast<std::size_t>(count));
+          for (std::uint64_t i = 0; i < count; ++i) {
+            const auto suffix = "_" + std::to_string(i);
+            columns.emplace_back(bindings.at("values" + suffix).array(),
+                                 bindings.at("output" + suffix).array());
+          }
+          return bind_compact_operation(bindings.at("flags").array(),
+                                        bindings.at("count").array(), columns);
+        };
+      }, {}, {}, {{"column_count", {"values", "output"}}});
 #ifdef TI_WITH_LLVM
   registry.register_factory<CompactOperation>(
       host_arch(), NativeOperationMode::cpu, prepare_cpu_compact);

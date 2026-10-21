@@ -10,6 +10,7 @@
 #include <numeric>
 #include <type_traits>
 #include <vector>
+#include "taichi/common/operation_json.h"
 #include "taichi/rhi/arch.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
@@ -440,6 +441,21 @@ void register_sort_operation(NativeOperationRegistry &registry) {
         validate_sort_workspace_description(d);
       }, NativeObjectKind::resource);
   registry.define<SortOperation>(validate_sort_operation);
+  registry.register_schema<SortOperation>(
+      "builtin", "sort", {"keys"},
+      [](const liong::json::JsonValue &parameters)
+          -> NativeOperationRegistry::Binder<SortOperation> {
+        operation_json::fields(parameters, {"nan_policy"});
+        const auto policy = parameters.obj.inner.find("nan_policy");
+        if (policy != parameters.obj.inner.end() &&
+            operation_json::name(policy->second) != "last")
+          throw std::invalid_argument("Reconstructed sort requires the NaNs-last strategy");
+        return [](const NativeOperationBindings &bindings) {
+          const auto values = bindings.find("values");
+          return bind_sort_operation(bindings.at("keys").array(),
+              values == bindings.end() ? nullptr : &values->second.array());
+        };
+      }, {}, {"values"});
 #ifdef TI_WITH_LLVM
   registry.register_factory<SortWorkspaceDescription>(
       host_arch(), NativeOperationMode::cpu, prepare_cpu_sort_workspace);

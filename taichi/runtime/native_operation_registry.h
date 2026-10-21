@@ -154,6 +154,16 @@ class NativeOperationRegistry {
   DecodedOperation decode(
       const NativeOperationDescription &description,
       NativeObjectKind kind = NativeObjectKind::operation) const;
+  // Cold typed projection for an owner's preparation policy (for example,
+  // sharing scratch within one ordered region). Uses the schema's binder;
+  // the caller still enters prepare() for device validation and construction.
+  template <typename Descriptor>
+  Descriptor bind(const DecodedOperation &operation,
+                  const NativeOperationBindings &bindings) const {
+    if (operation.type_ != typeid(Descriptor))
+      throw std::invalid_argument("Native operation descriptor type mismatch");
+    return *std::static_pointer_cast<const Descriptor>(bind_impl(operation, bindings));
+  }
   std::optional<NativeOperationDescription> lower_legacy(
       const liong::json::JsonValue &description) const;
   std::shared_ptr<NativeOperation> prepare(
@@ -271,6 +281,9 @@ class NativeOperationRegistry {
       NativeObjectKind object_kind = NativeObjectKind::operation) const;
 
  private:
+  std::shared_ptr<const void> bind_impl(
+      const DecodedOperation &operation,
+      const NativeOperationBindings &bindings) const;
   using Key = std::pair<std::string, std::uint32_t>;
   using ErasedValidator = std::function<void(Device &, const void *)>;
   using ErasedFactory =

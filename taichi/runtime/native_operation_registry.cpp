@@ -206,15 +206,21 @@ std::shared_ptr<NativeResource> NativeOperationRegistry::prepare_bound(
   if (operation.object_kind_ != kind)
     throw std::invalid_argument(
         "Native operation/resource binding kind mismatch");
+  const auto value = bind_impl(operation, bindings);
+  return prepare_impl(operation.kind_, operation.version_, operation.type_,
+                      context, value.get(), kind);
+}
+
+std::shared_ptr<const void> NativeOperationRegistry::bind_impl(
+    const DecodedOperation &operation,
+    const NativeOperationBindings &bindings) const {
   if (!operation.bind_ || bindings.size() != operation.ports_.size())
     throw std::invalid_argument(
         "Native operation storage set does not match its schema");
   for (const auto &port : operation.ports_)
     if (!bindings.count(port))
       throw std::invalid_argument("Missing native operation storage: " + port);
-  const auto value = operation.bind_(bindings);
-  return prepare_impl(operation.kind_, operation.version_, operation.type_,
-                      context, value.get(), kind);
+  return operation.bind_(bindings);
 }
 
 void NativeOperationRegistry::define_impl(const std::string &kind,

@@ -50,19 +50,6 @@ struct ExecutionPlan {
     std::uint64_t offset{0};
     std::optional<std::uint64_t> bytes;
   };
-  struct Compact {
-    struct Column {
-      std::string values;
-      std::string output;
-    };
-    std::vector<Column> columns;
-    std::string flags;
-    std::string count;
-  };
-  struct Sort {
-    std::string keys;
-    std::optional<std::string> values;
-  };
   using Native = NativeOperationDescription;
   struct Branch;
   struct While;
@@ -70,8 +57,6 @@ struct ExecutionPlan {
   using Operation = std::variant<Kernel,
                                  Copy,
                                  Fill,
-                                 Compact,
-                                 Sort,
                                  Native,
                                  std::shared_ptr<const Branch>,
                                  std::shared_ptr<const While>,
