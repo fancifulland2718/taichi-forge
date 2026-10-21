@@ -129,8 +129,21 @@ bool ArgPackLayout::matches(const CallableBase &kernel,
   for (const auto &origin : canonical_argument_origins(*kernel.argument_origins))
     if (below(origin.logical, storages_.front().origin.logical))
       selected.push_back(origin);
-  if (selected != origins_)
+  if (selected.size() != origins_.size())
     return false;
+  for (std::size_t i = 0; i < selected.size(); ++i) {
+    const auto &target = selected[i];
+    const auto &source = origins_[i];
+    // Lifted resources live in the consumer's root argument list, not in the
+    // pack allocation. Other root parameters may move those resource slots
+    // without changing this immutable storage. Their dtype/shape and gradient
+    // contract are checked by the ordinary argument binder at the new slots.
+    if (target.logical != source.logical || target.name != source.name ||
+        target.kind != source.kind ||
+        ((source.kind == "argpack" || source.kind == "value") &&
+         target.physical != source.physical))
+      return false;
+  }
   for (const auto &storage : storages_) {
     if (pack_storage(kernel, storage.origin.physical) != storage.source_type)
       return false;

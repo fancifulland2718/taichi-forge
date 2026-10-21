@@ -69,6 +69,25 @@ def main(arch, artifact):
         assert read(loss) == [106]
         assert read(dx) == [13, -41, 37]
 
+        # An extra root argument moves the lifted array slot from 2 to 3.
+        # Reuse the values and its gradient owner through the target origins.
+        moved = module.kernel("shifted")
+        moved_reverse = module.kernel("shifted_backward")
+        for prepare in (False, True):
+            write(loss, [0])
+            write(dx, [0, 0, 0])
+            first = moved.bind(pack, 2.0, loss, gradients={2: dloss})
+            second = moved_reverse.bind(pack, 2.0, loss, gradients={2: dloss})
+            if prepare:
+                first, second = first.prepare(), second.prepare()
+            first.run()
+            second.run()
+            runtime.wait()
+            assert read(loss) == [212] and read(dx) == [26, -82, 74]
+            if prepare:
+                first.close()
+                second.close()
+
         persistent = module.prepare_execution("persistent_complex", dict(
             source=x, source_grad=dx, total=loss, total_grad=dloss))
         persistent.run()

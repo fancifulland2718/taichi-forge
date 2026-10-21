@@ -246,6 +246,27 @@ TEST(ArgPackStorage, RejectsUnresolvedAndIncompleteCompiledLayouts) {
                std::invalid_argument);
 }
 
+TEST(ArgPackStorage, LiftedResourceSlotsDoNotDefinePackStorage) {
+  auto kernel = example();
+  const Layout layout(kernel, {0}, aot::ValueStorage::Host, host_layout);
+  // The two resources have the same declared type but distinct logical paths.
+  // Swapping their root slots must not change the pack's value/pointer layout.
+  for (auto &origin : *kernel.argument_origins)
+    if (origin.kind == "ndarray")
+      origin.physical[0] = 3 - origin.physical[0];
+  EXPECT_TRUE(layout.matches(kernel, {0}));
+  auto renamed = kernel;
+  renamed.argument_origins->back().name = "different";
+  EXPECT_FALSE(layout.matches(renamed, {0}));
+  auto changed_kind = kernel;
+  changed_kind.argument_origins->back().kind = "texture";
+  EXPECT_FALSE(layout.matches(changed_kind, {0}));
+  auto changed_value = kernel;
+  (*changed_value.value_parameter_types)[{0, 1, 0}] =
+      TypeFactory::get_instance().get_tensor_type({1, 2}, PrimitiveType::f32);
+  EXPECT_FALSE(layout.matches(changed_value, {0}));
+}
+
 TEST(ArgPackStorage, PersistentSchemaRejectsInvalidPathsAndPorts) {
   const auto &registry = native_operation_registry();
   const auto source = pack_description();

@@ -21,10 +21,14 @@ ExpandedArgPackArguments expand_argpack_arguments(
   if (binding_count && !bindings)
     throw MemoryBindingError("Missing ndarray binding descriptors");
   std::map<uint32_t, uint32_t> roots;
+  std::map<std::vector<int>, uint32_t> resource_slots;
   std::map<uint32_t, std::shared_ptr<ArgPackResource>> packs;
   for (const auto &origin : *kernel.kernel->argument_origins) {
-    if (origin.logical.size() != 1)
+    if (origin.logical.size() != 1) {
+      if (origin.kind != "argpack" && origin.kind != "value")
+        resource_slots.emplace(origin.logical, uint32_t(origin.physical.at(0)));
       continue;
+    }
     const auto index = uint32_t(origin.logical.front());
     roots.emplace(index, uint32_t(origin.physical.front()));
     if (origin.kind != "argpack" || index >= argument_count)
@@ -63,12 +67,17 @@ ExpandedArgPackArguments expand_argpack_arguments(
     if (!pack->storage->layout().matches(*kernel.kernel,
                                          {int(roots.at(index))}))
       throw MemoryBindingError("ArgPack does not match this kernel argument");
+    std::map<uint32_t, uint32_t> relocated;
+    for (const auto &origin : pack->storage->layout().resources())
+      relocated.emplace(uint32_t(origin.physical.at(0)),
+                         resource_slots.at(origin.logical));
     for (const auto &member : pack->members) {
-      assign(member.physical, member.argument);
+      const auto physical = relocated.at(member.physical);
+      assign(physical, member.argument);
       TiNdArrayBinding binding{};
-      binding.argument_index = member.physical;
+      binding.argument_index = physical;
       if (member.structure_type) {
-        const auto layout = kernel.layouts.find(member.physical);
+        const auto layout = kernel.layouts.find(physical);
         if (layout == kernel.layouts.end() ||
             runtime.get_layout(layout->second).type != *member.structure_type)
           throw MemoryBindingError("ArgPack structure member layout changed");

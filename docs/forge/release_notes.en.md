@@ -62,6 +62,9 @@ lifetimes. The entries below describe the changes.
   and resource lifting, share layouts across aliases, and validate these paths
   against loaded kernel parameters. This metadata adds no device code;
   ordinary and prepared kernel consumers reuse that mapping.
+  Reusing a pack with kernels that have different numbers of other root
+  arguments remaps lifted resources and explicit gradients through the target
+  origins. Changed resource slots no longer invalidate unchanged pack storage.
 
 - Vulkan loads boolean vector and nested structure arguments using their
   integer buffer slots before converting them to boolean expressions. This

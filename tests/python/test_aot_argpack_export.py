@@ -35,6 +35,12 @@ def test_aot_argpack_nested_resources_and_explicit_adjoint(tmp_path):
             total[0] += (p.child.settings.scale * p.basis[i % 2, i % 2] * p.source[i] ** 2
                          + p.child.settings.bias[i % 2] * p.source[i])
 
+    @ti.kernel
+    def shifted(p: pack_type, scale: ti.f32, total: ti.types.ndarray(ti.f32, 1, needs_grad=True)):
+        for i in p.source:
+            total[0] += scale * (p.child.settings.scale * p.basis[i % 2, i % 2] * p.source[i] ** 2
+                                 + p.child.settings.bias[i % 2] * p.source[i])
+
     loss.fill(0)
     loss.grad.fill(1)
     source.grad.fill(0)
@@ -48,6 +54,8 @@ def test_aot_argpack_nested_resources_and_explicit_adjoint(tmp_path):
     module.add_kernel(energy, name="automatic")
     module.add_kernel(energy, template_args={"p": pack, "total": loss}, name="explicit")
     module.add_kernel(energy.grad, name="backward")
+    module.add_kernel(shifted)
+    module.add_kernel(shifted.grad, name="shifted_backward")
     assert module._exported_kernels["automatic"] is module._exported_kernels["explicit"]
     module.add_execution_plan("persistent_complex", ti.aot.ExecutionPlan([
         dict(kind="fill32", destination="total", value=0),
