@@ -113,7 +113,9 @@ def test_field_candidate_sequence_export_and_native_only_snapshot(tmp_path, prep
     assert len(module._exported_kernels) == 5  # Four user entries and one shared head helper.
     assert len(module._array_fields) == 10
     document = json.loads(plan.to_json())
-    assert [op["kind"] for op in document["operations"]] == [
+    # Prepared primitives use the shared native envelope; ordinary sequence
+    # compatibility variants retain their existing reader representation.
+    assert [op.get("operation", op["kind"]) for op in document["operations"]] == [
         "kernel",
         "compact",
         "compact",

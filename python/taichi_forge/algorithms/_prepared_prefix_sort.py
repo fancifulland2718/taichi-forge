@@ -150,6 +150,12 @@ class _PrefixExecutable(NativeGraphExecutable):
         self._bindings = {
             name: value for name, value in self._bindings.items() if name in used
         }
+        self._array_bindings = {symbol.name: views[name] for name, symbol in symbols.items() if symbol.name in used}
+        self._scratch = tuple(
+            value
+            for name, value in views.items()
+            if name not in ("keys", "values", "count") and symbols[name].name in used
+        )
         self._action = DispatchGraphAction(
             dispatches,
             backends=("cuda", "vulkan"),
@@ -173,6 +179,17 @@ class _PrefixExecutable(NativeGraphExecutable):
             raise TaichiRuntimeError("Prepared prefix sort belongs to another runtime")
         _autodiff.reject_unsupported_automatic_ad("sort")
         self._compiled.jit_run_cached(impl.current_cfg(), self._flattened, self._cache)
+
+    def _export_aot_bindings(self, context):
+        # Initialization, merge and gather write every workspace element that
+        # later dispatches read. Inactive prefixes/tails are never read, and an
+        # unused ping-pong buffer is absent from the frozen dispatch bindings.
+        # Public status storage remains an explicit consumer binding.
+        for owner in self._scratch:
+            if context.source_arrays.find(owner) is None:
+                context.retained_arrays.declare_scratch(owner)
+        for name, owner in self._array_bindings.items():
+            context.retained_arrays.bind_private(name, owner)
 
     @property
     def recordable_action(self):
