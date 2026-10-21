@@ -7,6 +7,7 @@ import numpy as np
 import taichi_forge as ti
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.ui.scene import SceneV2
+from ._raster_definition import RasterDrawDefinition
 from taichi_forge.ui.staging_buffer import (
     copy_all_to_vbo,
     copy_all_to_vbo_particle,
@@ -88,7 +89,6 @@ class PreparedRasterDraw:
         args = dict(bound.arguments)
         args.pop("self")
         self.kind = kind
-        self._resolved_arguments = MappingProxyType(args)
         self._updates = []
         self._owned_arrays = []
         self._sources = tuple(arguments.values())
@@ -150,68 +150,19 @@ class PreparedRasterDraw:
 
         vbo_info, index_info = get_field_info(vbo), get_field_info(indices)
         self._native = getattr(scene.scene, kind)
-        if kind == "particles":
-            n = args["index_count"] if args["index_count"] is not None else count
-            self._arguments = (
-                vbo_info,
-                has_color,
-                args["per_vertex_radius"] is not None,
-                args["color"],
-                args["radius"],
-                n,
-                args["index_offset"],
-            )
-        else:
-            n = args["vertex_count"] if args["vertex_count"] is not None else count
-            ni = (
-                args["index_count"] if args["index_count"] is not None else (n if indices is None else indices.shape[0])
-            )
-            tail = (ni, args["index_offset"], n, args["vertex_offset"])
-            if kind == "lines":
-                n = min(n, count - args["vertex_offset"])
-                n -= n % 2
-                self._arguments = (
-                    vbo_info,
-                    index_info,
-                    has_color,
-                    args["color"],
-                    args["width"],
-                    ni,
-                    args["index_offset"],
-                    n,
-                    args["vertex_offset"],
-                )
-            elif kind == "mesh":
-                self._arguments = (
-                    vbo_info,
-                    has_color,
-                    index_info,
-                    args["color"],
-                    args["two_sided"],
-                    *tail,
-                    args["show_wireframe"],
-                )
-            else:
-                transforms = self._buffer(args["transforms"], transforms=True)
-                if transforms is not None:
-                    self._buffers["transforms"] = transforms
-                instances = (
-                    1
-                    if transforms is None
-                    else (args["instance_count"] if args["instance_count"] is not None else transforms.shape[0])
-                )
-                self._arguments = (
-                    vbo_info,
-                    has_color,
-                    index_info,
-                    args["color"],
-                    args["two_sided"],
-                    get_field_info(transforms),
-                    instances,
-                    args["instance_offset"],
-                    *tail,
-                    args["show_wireframe"],
-                )
+        transforms = None
+        if kind == "mesh_instance":
+            transforms = self._buffer(args["transforms"], transforms=True)
+            if transforms is not None:
+                self._buffers["transforms"] = transforms
+        self._definition = RasterDrawDefinition.resolve(
+            kind,
+            args,
+            count,
+            None if indices is None else indices.shape[0],
+            None if transforms is None else transforms.shape[0],
+        )
+        self._arguments = self._definition.native_arguments(vbo_info, index_info, get_field_info(transforms))
         self.requested_bytes = sum(array._get_nelement() * array._get_element_size() for array in self._owned_arrays)
         self._updates = tuple(self._updates)
         self._owned_arrays = tuple(self._owned_arrays)

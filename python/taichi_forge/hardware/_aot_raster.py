@@ -23,15 +23,21 @@ def _count(value):
 
 
 def _draw_range(draw):
-    args = draw._arguments
+    definition = draw._definition
     count = draw._buffers["vertices"].shape[0]
     result = dict(first_vertex=0, first_index=0, first_instance=0, vertex_offset=0, instance_count=1)
     if draw.kind == "particles":
-        result.update(element_count=6, instance_count=_count(args[-2]), first_instance=_count(args[-1]) % count)
+        result.update(
+            element_count=6,
+            instance_count=_count(definition.index_count),
+            first_instance=_count(definition.index_offset) % count,
+        )
         if result["instance_count"] + result["first_instance"] > count:
             raise TaichiRuntimeError("AOT particle range exceeds its center buffer")
         return result
-    ni, first_index, nv, first_vertex = map(_count, args[-4:] if draw.kind == "lines" else args[-5:-1])
+    ni, first_index, nv, first_vertex = map(
+        _count, (definition.index_count, definition.index_offset, definition.vertex_count, definition.vertex_offset)
+    )
     first_vertex %= count
     if (indices := draw._buffers.get("indices")) is not None:
         if not indices.shape[0]:
@@ -55,7 +61,7 @@ def _draw_range(draw):
     if draw.kind == "lines":
         result["element_count"] -= result["element_count"] % 2
     if draw.kind == "mesh_instance" and "transforms" in draw._buffers:
-        instances, first = _count(args[6]), _count(args[7])
+        instances, first = _count(definition.instance_count), _count(definition.instance_offset)
         available = draw._buffers["transforms"].shape[0] - first
         if available < 0:
             raise TaichiRuntimeError("AOT raster instance offset exceeds its transform buffer")
@@ -89,12 +95,12 @@ def preflight(recording, context):
     for draw, selected in zip(recording._prepared_draws, ranges, strict=True):
         uniform = None
         if draw.kind == "lines" and selected["element_count"]:
-            args = draw._resolved_arguments
+            definition = draw._definition
             uniform = core._raster_line_uniforms(
-                tuple(args["color"]),
-                args["width"],
+                definition.color,
+                definition.width,
                 height,
-                args["per_vertex_color"] is not None,
+                definition.has_color,
                 selected["vertex_offset"] if "indices" in draw._buffers else selected["first_vertex"],
                 selected["first_index"],
                 selected["element_count"],
@@ -243,9 +249,9 @@ def export(recording, context):
         buffers = draw._export_aot_preparation(context)
         if scene_resource is None:
             scene_resource = immutable(scene, "uniform")
-        args = draw._resolved_arguments
+        definition = draw._definition
         particles = draw.kind == "particles"
-        pipeline, contract = _pipeline(context, draw.kind, bool(args.get("show_wireframe", False)))
+        pipeline, contract = _pipeline(context, draw.kind, bool(definition.wireframe))
         if draw.kind == "lines":
             buffers, selected = _expand_lines(
                 context,
@@ -261,16 +267,16 @@ def export(recording, context):
                 light_resource = immutable(lights, "storage")
             uniform = (
                 core._raster_particle_uniforms(
-                    tuple(args["color"]),
-                    args["per_vertex_color"] is not None,
-                    args["per_vertex_radius"] is not None,
-                    args["radius"],
+                    definition.color,
+                    definition.has_color,
+                    definition.has_radius,
+                    definition.radius,
                 )
                 if particles
                 else core._raster_mesh_uniforms(
-                    tuple(args["color"]),
-                    args["per_vertex_color"] is not None,
-                    args["two_sided"],
+                    definition.color,
+                    definition.has_color,
+                    definition.two_sided,
                     "transforms" in buffers,
                 )
             )
