@@ -453,6 +453,10 @@ def test_cub_source_provider_executes_explicit_primitives_and_graph(n, monkeypat
     # Profile/eligibility work belongs to explicit load/plan boundaries, not
     # an already bound replay. Also cross CTA boundaries in the larger case.
     with monkeypatch.context() as replay_patch:
+        replay_patch.setattr(type(scan), "_native_binding", lambda *args: pytest.fail("replay rebuilt native bindings"))
+        replay_patch.setattr(
+            type(scan), "_resource_definition", lambda *args: pytest.fail("replay rebuilt resource definitions")
+        )
         replay_patch.setattr(
             type(provider.manifest),
             "build_report",

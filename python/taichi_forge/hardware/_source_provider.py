@@ -231,6 +231,20 @@ class SourceProviderManifest:
     manifest_sha256: str
     build_profile: object = None
 
+    def native_requirements(self):
+        """Project immutable deployment requirements without producer paths.
+
+        Provider plans add their own semantic/version facts and freeze this
+        projection at creation. It neither loads nor packages the addon.
+        """
+        contract = {} if self.build_profile is None else self.build_profile["driver_contract"]
+        return dict(
+            binary_sha256=self.binary_sha256,
+            target_code=list(self.toolchain["target_code"]),
+            minimum_driver_api_version=contract.get("minimum_api_version", 0),
+            ptx_driver_api_version=contract.get("ptx_api_version", 0),
+        )
+
     def cuda_compatibility(self, capability, driver_api_version):
         """Evaluate declared code/driver requirements at explicit load/search.
 

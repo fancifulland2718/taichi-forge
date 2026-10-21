@@ -16,6 +16,12 @@ from taichi_forge._hardware_telemetry import (
 )
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceBinding,
+)
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     static_resource_effect,
@@ -53,6 +59,7 @@ _OPERATION_SPECS = {
     "radix_sort_pairs_u32": {
         "code": _RADIX_SORT_PAIRS_U32,
         "bindings": ("keys_in", "values_in", "keys_out", "values_out"),
+        "ports": ("input0", "input1", "output0", "output1"),
         "dtypes": (u32, u32, u32, u32),
         "access": (
             GraphAccess.READ,
@@ -64,6 +71,7 @@ _OPERATION_SPECS = {
     "radix_sort_pairs_u64": {
         "code": _RADIX_SORT_PAIRS_U64,
         "bindings": ("keys_in", "values_in", "keys_out", "values_out"),
+        "ports": ("input0", "input1", "output0", "output1"),
         "dtypes": (u64, u32, u64, u32),
         "access": (
             GraphAccess.READ,
@@ -75,12 +83,14 @@ _OPERATION_SPECS = {
     "exclusive_scan_u32": {
         "code": _EXCLUSIVE_SCAN_U32,
         "bindings": ("input", "output"),
+        "ports": ("input0", "output0"),
         "dtypes": (u32, u32),
         "access": (GraphAccess.READ, GraphAccess.WRITE),
     },
     "select_flagged_u32": {
         "code": _SELECT_FLAGGED_U32,
         "bindings": ("input", "flags", "output", "count"),
+        "ports": ("input0", "input1", "output0", "output1"),
         "dtypes": (u32, u32, u32, u32),
         "access": (
             GraphAccess.READ,
@@ -100,6 +110,7 @@ for _mode, _code in (
     _OPERATION_SPECS[f"segmented_{_mode}_scan_u32"] = {
         "code": _code,
         "bindings": ("input", "heads", "output"),
+        "ports": ("input0", "input1", "output0"),
         "dtypes": ((i32, u32), u32, (i32, u32)),
         "access": (GraphAccess.READ, GraphAccess.READ, GraphAccess.WRITE),
     }
@@ -305,8 +316,17 @@ class CubSourcePlan(BackendCommandRecording):
         if operation not in _OPERATION_SPECS:
             raise ValueError(f"unsupported CUB source-provider operation {operation!r}")
         self.provider = provider
-        self.operation = operation
-        self.num_items = _dimension(num_items)
+        self._definition = NativeDefinition(
+            "cub_source",
+            "plan",
+            dict(
+                operation=operation,
+                num_items=_dimension(num_items),
+                cub_version=int(provider._library.info.cub_version),
+                cuda_runtime_version=int(provider._library.info.cuda_runtime_version),
+                **provider.manifest.native_requirements(),
+            ),
+        )
         spec = _OPERATION_SPECS[operation]
         if not provider._library.info.features & (1 << (spec["code"] - 1)):
             raise TaichiRuntimeError(f"CUB addon does not provide {operation}")
@@ -326,7 +346,7 @@ class CubSourcePlan(BackendCommandRecording):
             operation=spec["code"],
             num_items=self.num_items,
         )
-        self.workspace_bytes = provider._library.workspace_bytes(query)
+        self._workspace_bytes = provider._library.workspace_bytes(query)
         self.workspace = impl.ndarray(u8, shape=max(1, self.workspace_bytes))
         build_report = provider.manifest.build_report()
         self._graph_semantic_fingerprint = (
@@ -377,6 +397,44 @@ class CubSourcePlan(BackendCommandRecording):
         )
 
     @property
+    def operation(self):
+        return self._definition.parameters["operation"]
+
+    @property
+    def num_items(self):
+        return self._definition.parameters["num_items"]
+
+    @property
+    def workspace_bytes(self):
+        return self._workspace_bytes
+
+    def _resource_definition(self, dtype):
+        # Segmented scan shares one native plan between signed/unsigned inputs.
+        # The bound scalar type becomes a reconstruction fact at this boundary.
+        expected = _OPERATION_SPECS[self.operation]["dtypes"][0]
+        allowed = expected if isinstance(expected, tuple) else (expected,)
+        if str(dtype) not in tuple(str(item) for item in allowed):
+            raise TaichiRuntimeError("CUB source plan dtype differs from its operation")
+        return NativeDefinition(
+            "cub_source",
+            "plan",
+            dict(self._definition.parameter_dict(), dtype=str(dtype), workspace_bytes=self.workspace_bytes),
+        )
+
+    def _native_binding(self, dtype, values):
+        spec = _OPERATION_SPECS[self.operation]
+        if len(values) != len(spec["ports"]):
+            raise ValueError("CUB source binding count differs from its operation")
+        return NativeOperationBinding(
+            NativeDefinition("cub_source", "execute", {}),
+            tuple(
+                NativeArrayBinding(port, value, access)
+                for port, value, access in zip(spec["ports"], values, spec["access"])
+            ),
+            (("plan", NativeResourceBinding(self, self._resource_definition(dtype))),),
+        )
+
+    @property
     def resource_effects(self):
         spec = _OPERATION_SPECS[self.operation]
         return tuple(
@@ -423,24 +481,11 @@ class CubSourcePlan(BackendCommandRecording):
         program = impl.get_runtime().prog
         pointers = [_device_pointer(program, value) for value in values]
         workspace = _device_pointer(program, self.workspace)
-        if self.operation.startswith("radix_sort_pairs"):
-            input0, input1, output0, output1 = pointers
-        elif self.operation == "exclusive_scan_u32":
-            input0, output0 = pointers
-            input1 = output1 = 0
-        elif self.operation.startswith("segmented_"):
-            input0, input1, output0 = pointers
-            output1 = 0
-        else:
-            input0, input1, output0, output1 = pointers
         return _Invocation(
             struct_size=ctypes.sizeof(_Invocation),
             operation=spec["code"],
             num_items=self.num_items,
-            input0=input0,
-            input1=input1,
-            output0=output0,
-            output1=output1,
+            **dict(zip(spec["ports"], pointers)),
             workspace=workspace,
             workspace_bytes=self.workspace_bytes,
             stream=0,

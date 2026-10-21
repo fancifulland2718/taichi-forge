@@ -96,6 +96,8 @@ def test_cub_source_native_primitive_inventory(tmp_path):
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_selected_cub_source_scan_and_downstream_gradient(tmp_path, dtype, inclusive, n):
     from taichi_forge.hardware.source_providers import CubSegmentedScanRecipeProvider
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+    from taichi_forge.hardware._source_provider import SourceProviderManifest
 
     manifest = os.environ.get("TI_FORGE_TEST_CUB_SOURCE_PROVIDER_MANIFEST")
     if not manifest or not os.environ.get("TI_CUB_SOURCE_TEST_ADAPTER"):
@@ -141,11 +143,32 @@ def test_selected_cub_source_scan_and_downstream_gradient(tmp_path, dtype, inclu
     module = ti.aot.Module()
     with definition.materialization_context(providers=providers) as context:
         with context.materialize(recipe) as materialized:
-            plan = module.add_execution_plan(
-                "step",
-                materialized.executor,
-                source_bindings=dict(input=values, result=output),
-                gradients=dict(w="dw", loss="dloss"),
+            lowered = []
+            original_lower = NativeOperationBinding.lower
+
+            def observe_lower(binding, *args, **kwargs):
+                if binding.definition.provider == "cub_source":
+                    lowered.append(binding)
+                return original_lower(binding, *args, **kwargs)
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(NativeOperationBinding, "lower", observe_lower)
+                patch.setattr(
+                    SourceProviderManifest,
+                    "native_requirements",
+                    lambda *_: pytest.fail("export rebuilt provider identity"),
+                )
+                plan = module.add_execution_plan(
+                    "step",
+                    materialized.executor,
+                    source_bindings=dict(input=values, result=output),
+                    gradients=dict(w="dw", loss="dloss"),
+                )
+            assert len(lowered) == 1
+            resource = lowered[0].resources[0][1]
+            assert all(
+                resource.definition.parameters[key] == value
+                for key, value in resource.owner._definition.parameters.items()
             )
             document = json.loads(plan.to_json())
             assert set(plan.argument_names) == {"input", "result", "w", "dw", "loss"}
