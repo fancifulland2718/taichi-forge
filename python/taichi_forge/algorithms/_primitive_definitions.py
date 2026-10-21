@@ -467,3 +467,51 @@ class TransformDefinition:
             NativeDefinition("builtin", "transform", parameters),
             (NativeArrayBinding("src", src, GraphAccess.READ), NativeArrayBinding("dst", dst, GraphAccess.WRITE)),
         )
+
+
+@dataclass(frozen=True)
+class IndexedTransformDefinition:
+    """The selected Vulkan transform/gather/scatter fusion, with all stores."""
+
+    transform: TransformDefinition
+    index_size: int
+    dst_size: int
+    method_name = "vulkan_transform_indexed_affine_ndarray"
+
+    @property
+    def semantic_key(self):
+        return (
+            "transform_indexed_affine",
+            self.transform.value_type,
+            self.transform.scale,
+            self.transform.bias,
+            self.index_size,
+            self.transform.size,
+            self.dst_size,
+        )
+
+    def bind(self, src, transformed, indices, gathered, dst):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
+        return NativeOperationBinding(
+            NativeDefinition(
+                "builtin",
+                "indexed_transform",
+                dict(
+                    src_size=self.transform.size,
+                    index_size=self.index_size,
+                    dst_size=self.dst_size,
+                    dtype=str(self.transform.dtype),
+                    scale_bits=self.transform.scale_bits,
+                    bias_bits=self.transform.bias_bits,
+                ),
+            ),
+            (
+                NativeArrayBinding("src", src, GraphAccess.READ),
+                NativeArrayBinding("transformed", transformed, GraphAccess.WRITE),
+                NativeArrayBinding("indices", indices, GraphAccess.READ),
+                NativeArrayBinding("gathered", gathered, GraphAccess.WRITE),
+                NativeArrayBinding("dst", dst, GraphAccess.READ_WRITE),
+            ),
+        )

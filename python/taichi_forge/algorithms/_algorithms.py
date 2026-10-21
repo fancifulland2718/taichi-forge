@@ -51,6 +51,7 @@ from taichi_forge.algorithms._primitive_definitions import (
     NATIVE_VALUE_TYPE as _SCATTER_ADD_VALUE_TYPE,
     ReduceDefinition,
     TransformDefinition,
+    IndexedTransformDefinition,
     normalize_transform_args as _normalize_transform_args,
 )
 from taichi_forge._kernels import (
@@ -2216,7 +2217,7 @@ def _same_ndarray_storage(lhs, rhs):
     return lhs is rhs or getattr(lhs, "arr", None) is getattr(rhs, "arr", None)
 
 
-def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke, respect_preferences=True):
+def _resolve_vulkan_indexed_transform_definition(calls, prog, *, respect_preferences=True):
     if (respect_preferences and not _primitive_sequence_fusion_enabled()) or current_cfg().arch != vulkan:
         return None
     if len(calls) != 3:
@@ -2293,37 +2294,44 @@ def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke, re
         prog, "vulkan_transform_value_type_available", value_type
     ):
         return None
-    method_name = "vulkan_transform_indexed_affine_ndarray"
+    method_name = IndexedTransformDefinition.method_name
     if not _prog_has(prog, method_name):
         return None
-    scale, bias = _normalize_transform_args(
-        src.dtype,
-        transform_call.kwargs.get("scale", 1),
-        transform_call.kwargs.get("bias", 0),
-    )
-    call_args = (src.arr, tmp.arr, indices.arr, gathered.arr, dst.arr, value_type, scale, bias)
-    semantic_key = (
-        "transform_indexed_affine",
-        value_type,
-        scale,
-        bias,
+    definition = IndexedTransformDefinition(
+        TransformDefinition(
+            int(src_shape[0]),
+            src.dtype,
+            transform_call.kwargs.get("scale", 1),
+            transform_call.kwargs.get("bias", 0),
+        ),
         int(indices_shape[0]),
-        int(src_shape[0]),
         int(dst_shape[0]),
     )
+    return definition, (src, tmp, indices, gathered, dst)
+
+
+def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke, respect_preferences=True):
+    resolved = _resolve_vulkan_indexed_transform_definition(calls, prog, respect_preferences=respect_preferences)
+    if resolved is None:
+        return None
+    definition, objects = resolved
+    transform = definition.transform
+    call_args = tuple(array.arr for array in objects) + (transform.value_type, transform.scale, transform.bias)
     plan = _NativePrimitivePlan(
         "vulkan_native",
-        method_name,
-        (src, tmp, indices, gathered, dst),
-        semantic_key,
+        definition.method_name,
+        objects,
+        definition.semantic_key,
         call_args,
         prog,
-        value_type,
-        int(indices_shape[0]),
+        transform.value_type,
+        definition.index_size,
+        definition=definition,
     )
     if invoke and plan.invoke(prog) is None:
         return None
     return plan
+
 
 class PrimitiveSequence:
     """Prewarmed sequence of experimental primitive calls.

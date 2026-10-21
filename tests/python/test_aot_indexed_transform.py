@@ -27,6 +27,24 @@ def sequence_for(dtype):
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_fused_sequence_cold_warm_runtime_only_and_borrowed(tmp_path, monkeypatch):
+    from taichi_forge.algorithms import _algorithms as algorithms
+    from taichi_forge.algorithms._primitive_definitions import IndexedTransformDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
+    bound = []
+    original_bind = IndexedTransformDefinition.bind
+
+    def observe(definition, *arrays):
+        binding = original_bind(definition, *arrays)
+        assert isinstance(binding, NativeOperationBinding)
+        bound.append(definition)
+        return binding
+
+    monkeypatch.setattr(IndexedTransformDefinition, "bind", observe)
+
+    def no_rebuild(*args, **kwargs):
+        raise AssertionError("Export/replay must not construct a replacement fused native plan")
+
     module = ti.aot.Module()
     cases = []
     for dtype in (ti.i32, ti.u32, ti.f32):
@@ -45,12 +63,23 @@ def test_fused_sequence_cold_warm_runtime_only_and_borrowed(tmp_path, monkeypatc
             builder.append_native(sequence)
             graph = builder.compile()
             name = f"{dtype}_{warm}"
-            plan = module.add_execution_plan(name, graph, source_bindings=arrays)
+            bound.clear()
+            with monkeypatch.context() as patch:
+                patch.setattr(algorithms._NativePrimitivePlan, "__init__", no_rebuild)
+                plan = module.add_execution_plan(name, graph, source_bindings=arrays)
+            assert len(bound) == 1
+            if warm:
+                assert bound[0] is sequence._fused_plan.definition
             assert before == {name: value.to_numpy().tobytes() for name, value in arrays.items()}
             assert sequence.fused_plan_count == int(warm)
             operation, = json.loads(plan.to_json())["operations"]
             assert operation["operation"] == "indexed_transform"
             assert len(operation["bindings"]) == 5
+            if warm:
+                with monkeypatch.context() as patch:
+                    patch.setattr(algorithms, "_resolve_vulkan_indexed_transform_definition", no_rebuild)
+                    patch.setattr(IndexedTransformDefinition, "bind", no_rebuild)
+                    sequence.run()
             cases.append(dict(name=name, dtype=str(dtype), offset=False))
             if not warm:
                 operation["bindings"] = {port: f"view_{port}" for port in arrays}
