@@ -132,6 +132,11 @@ ParallelSort 使用相同 SPIR-V 资产和 prefix 策略创建/重建；cuSPARSE
 cuSPARSELt raw-A 种子与压缩 epoch 是可变状态政策，仍区别一次初始化和每次重压缩，
 不因定义相同而跨实例共享可变状态。
 
+多键排序复用 gather/transform 的定义；Unique/RLE 的 helper 选择由算法层提供，
+Module 与 Sequence adapter 共享其特化事实。确定性 retained scatter-reduce 仍共用原
+fused kernel/action；其固定 provider-owned 存储和拓扑尚无 AOT 重建角色，当前仍拒绝导出。
+普通 Graph 的单 dispatch 支持不能替代这个部署合同。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典

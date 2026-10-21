@@ -175,6 +175,13 @@ remain intact. Raw-A seeds and compression epochs remain state policies:
 one-time initialization differs from recompression on every run, and equivalent
 definitions do not imply shared mutable state across instances.
 
+Multi-key sort reuses gather/transform definitions. Unique/RLE helper selection
+belongs to the algorithms layer, with specialization facts shared by Module and
+Sequence adapters. Deterministic retained scatter-reduce shares its existing
+fused kernel/action, but still rejects AOT export: fixed provider-owned storage
+and topology lack explicit reconstruction roles. Ordinary single-dispatch Graph
+support does not establish that deployment contract.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive
