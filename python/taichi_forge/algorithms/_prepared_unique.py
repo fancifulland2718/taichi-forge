@@ -3,7 +3,7 @@
 import hashlib
 import json
 
-from taichi_forge._kernels import rle_mark_boundaries_ndarray
+from taichi_forge.algorithms._consecutive_definition import head_kernel
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.algorithms._prepared_compact import PreparedCompactPlan
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
@@ -29,7 +29,7 @@ class _UniqueHeadExecutable(NativeGraphExecutable):
         self._bindings = dict(zip((arg.name for arg in args), (key_view, flags, size, capacity)))
         # Real fixed bindings provide specialization facts. Symbolic Graph
         # injection would allocate/free dummy ndarrays and can wait on Vulkan.
-        kernel = rle_mark_boundaries_ndarray._primal
+        kernel = head_kernel()._primal
         specialization = kernel.ensure_compiled(key_view, flags, size, capacity)
         compiled = kernel.compiled_kernels[specialization]
         self._action = DispatchGraphAction(

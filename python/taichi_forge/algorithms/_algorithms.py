@@ -5,6 +5,7 @@ from collections import OrderedDict
 
 import numpy as np
 
+from taichi_forge.algorithms._consecutive_definition import head_kernel as _consecutive_head_kernel
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.algorithms._autodiff import (
     is_fwd_mode_active,
@@ -10430,23 +10431,13 @@ def _rle_reset_count(count, ndarray_mode):
 
 
 def _rle_mark_boundaries(keys, flags, n, capacity, ndarray_mode):
-    if ndarray_mode:
-        rle_mark_boundaries_ndarray(keys, flags, n, capacity)
-    else:
-        rle_mark_boundaries_field(keys, flags, n, capacity)
+    _consecutive_head_kernel(ndarray_mode=ndarray_mode)(keys, flags, n, capacity)
 
 
 def _rle_mark_boundaries_and_starts(
     keys, flags, starts, n, capacity, ndarray_mode
 ):
-    if ndarray_mode:
-        rle_mark_boundaries_and_starts_ndarray(
-            keys, flags, starts, n, capacity
-        )
-    else:
-        rle_mark_boundaries_and_starts_field(
-            keys, flags, starts, n, capacity
-        )
+    _consecutive_head_kernel(with_indices=True, ndarray_mode=ndarray_mode)(keys, flags, starts, n, capacity)
 
 
 def experimental_unique(

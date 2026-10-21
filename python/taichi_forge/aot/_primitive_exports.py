@@ -8,6 +8,7 @@ Only the expanded plan/code are deployed, never this registry or Python calls.
 from dataclasses import dataclass
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.algorithms._consecutive_definition import unique_helper
 
 
 @dataclass(frozen=True)
@@ -82,23 +83,6 @@ _EXPORTS = {
     ("compact", 1): (_compact, (("compact", 1),)),
     ("unique", 1): (_unique, (("compact", 1),)),
 }
-
-
-def unique_helper(dtype, with_indices):
-    """Return the shared head helper and allocation-free specialization facts."""
-    import numpy as np
-
-    from taichi_forge._kernels import rle_mark_boundaries_and_starts_ndarray, rle_mark_boundaries_ndarray
-
-    exemplar = {
-        "keys": np.empty(0, dtype={"i32": "int32", "u32": "uint32", "i64": "int64", "u64": "uint64"}[dtype]),
-        "flags": np.empty(0, dtype="int32"),
-    }
-    helper = rle_mark_boundaries_ndarray
-    if with_indices:
-        helper = rle_mark_boundaries_and_starts_ndarray
-        exemplar["starts"] = exemplar["flags"]
-    return helper, exemplar
 
 
 def export_primitive(module, name, kind, version, options):

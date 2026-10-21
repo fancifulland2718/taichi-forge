@@ -736,7 +736,7 @@ def _compact(call, context):
 
 
 def _consecutive(call, context):
-    from taichi_forge.aot._primitive_exports import unique_helper
+    from ._consecutive_definition import unique_helper
     from taichi_forge.graph._graph import Arg, ArgKind
     from taichi_forge_runtime.aot import Scalar
     from . import _algorithms as algorithms
