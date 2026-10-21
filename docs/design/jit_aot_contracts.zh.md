@@ -1,0 +1,107 @@
+# JIT 与 AOT 内部契约
+
+本文记录 Forge 0.6.4 第一轮契约收敛后的维护方式，不是新的公共插件 ABI，
+也不表示所有 native 操作均可重建。[English](jit_aot_contracts.en.md)
+
+## 权威来源与所有权
+
+| 事实 | 权威来源 | 消费与边界 |
+| --- | --- | --- |
+| 有效 kernel 编译选项 | `KernelCompileRequest` | 沿用已有 JIT/AOT 编译入口；完整 target/cache identity 工作另行处理。 |
+| LLVM 实际调用 ABI 与资源依赖 | 编译产物中的 `KernelCallContract` | JIT 注册与 AOT metadata 投影编译事实；编译后不再从 frontend Kernel 维护另一份 ABI。 |
+| GFX 调用 ABI 与依赖 | 编译后的 GFX attributes | 保留后端物理布局差异，不建立统一物理 ABI。 |
+| 已选 Graph 执行结构 | `graph/_lowering.py` | 共用遍历、物理 operation 边界、绑定规则与控制 lowering。 |
+| 部署发布与快照 | AOT `_ExportContext` | 导出事务、结构/Field 发布、数据捕获、编译后根资源闭包确认。 |
+| 已选 JIT 代码与 live storage | JIT `_JitContext` | 借用冻结 dispatch，验证 owner 代次，不伪造 AOT Module。 |
+| Native 语义定义 | 功能模块的规范化定义与 native schema/binder | Python 创建、recording 与重建消费同一语义事实。 |
+| Workspace、handle、提交与退休 | 现有 prepared/execution owner | 共享定义不等于共享可变状态。 |
+
+LLVM 契约定义见
+[`kernel_call_contract.h`](../../taichi/codegen/llvm/kernel_call_contract.h)。
+task/module 所有权及 serializer 继续由后端负责。AOT 根重定位仍先克隆 producer 代码，
+launch ABI 从变换后的代码投影。源分析 Graph metadata 与部署根 tree ID 的含义不同，
+不能一起重映射。
+
+共同 [`GraphLoweringContext`](../../python/taichi_forge/graph/_lowering.py)
+只持有生产端冷阶段构造状态，不含 Module 发布或快照事务。
+`lower_frozen_graph()` 保留 submission recipe 所需的 `operation_ends`，遍历结束不等于
+导出已经定稿。AOT 在确认实际编译闭包后发布快照；JIT 引用已经选中的代码与 launch
+policy。runtime-only 消费端读取 `ExecutionPlan`，不依赖这层 DSL 实现。
+
+普通 kernel JIT 与 `Graph.run()` 的执行/提交路径不变。共用 JIT plan 路径仍限于已验证的
+固定 CUDA execution-domain 路线。`.tic` cache 与 `.tcm` 部署容器继续采用不同的所有权、
+失效和失败政策。
+
+## 接入 native 算法或外部库操作
+
+扩展单元是操作及资源，不是整个外部库对应一个大基类。复用
+[`NativeOperationRegistry`](../../taichi/runtime/native_operation_registry.h)、
+`NativeOperation`/`NativeResource`、现有 recording 与 Graph adapter。
+
+1. **创建时规范化并冻结语义。** 功能模块的 typed 定义可包装
+   [`NativeDefinition`](../../python/taichi_forge/graph/_native_definition.py)。
+   它保存 provider/operation/version 和不含指针的参数。默认值、布局解释归操作自身，
+   exporter 不再重新决定；live handle、可变数据和 owner 留在绑定/资源层。
+2. **一次描述端口和资源关系。** `NativeOperationBinding` 连接 `NativeArrayBinding`
+   角色和 `NativeResourceBinding` owner。默认 adapter 组织符号名、数组 effects、资源引用，
+   并将 native 描述交给 lowering context。功能模块继续补充其 recording 所需的额外
+   workspace/resource effects。
+3. **在冷边界判断具体准入。** 调用 `binding.lower(context)` 前检查实际变体、后端和
+   重建政策。子类可能新增 callback/epilogue 时继续保留具体类 `_export_aot` 检查；
+   继承本身不能证明其行为已被完整导出。
+4. **注册 schema、typed binder 和后端 factory。** decode 只检查语义参数与符号端口，
+   不分配 workspace。binder 在获得绑定事实后应用共同 dtype/layout 规则；真实 storage
+   解析后再检查设备、范围和 alias。probe/factory 保留各自的依赖可用性与准备政策。
+5. **保留直接执行 callable。** typed JIT adapter 可以直接消费冻结定义和共同 normalizer，
+   不必每次执行 JSON 编解码、查询 registry 或重新创建 vendor plan。close 时按既有 owner
+   政策释放新增绑定引用。
+
+对现有合同能够表达的扩展，主要修改功能自身的定义、schema/binder、factory 和测试，
+以及显式 registry 安装/构建项。不要在共同 Graph lowering 或 prepared executor 中
+另加一套输入语义分支。确实新增执行或所有权语义时，应明确扩展公共合同；描述对象不会
+自动让任意 Python callback 获得部署能力。
+
+## 真实案例与保留的政策
+
+[`hardware/_fft.py`](../../python/taichi_forge/hardware/_fft.py) 使用
+`_CufftPlanDefinition` 冻结普通 cuFFT plan 创建事实；创建与重建共同消费它，
+不再维护独立 `_aot_plan_parameters`。recording 经默认 adapter 将 execute 定义连接到
+plan resource 与 input/output 端口。vendor handle/cache、capture 和 workspace 仍由原
+JIT/AOT owner 管理；callback、separable 变体仍有自己的准入边界。
+
+[`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
+与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
+让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典
+不是语义权威。
+[`native_primitive_contract.h`](../../taichi/runtime/native_primitive_contract.h)
+提供 direct JIT 与 native schema 共用的冷阶段 binder/validator；GPU direct driver 路径保留。
+
+| 政策 | 保留行为 |
+| --- | --- |
+| JIT Sort/Compact prepare | 检查 storage，不排序/压缩，也不分配 scratch；首次执行仍可准备 workspace。 |
+| JIT workspace | GPU 保持 Program 所有，CPU Sort 保持 plan 所有。 |
+| AOT Sort workspace | 独立实例持有私有状态；兼容 sort 只在既有顺序区域内共享 scratch。执行层保留此政策分支，不重复输入校验。 |
+| NaN | CUDA JIT 仍可选择 `bitwise`；重建 Sort 只接受 `last`，其他政策在冷阶段明确拒绝。 |
+| 公开后端支持 | Prepared Compact 仍限 CUDA/Vulkan；native CPU factory 不自动扩充公开 prepared API。 |
+| 旧计划表示 | reader 将 `kind="sort"/"compact"` 归一到相同 native schema；prepared exporter 改为写 native envelope。 |
+
+registry 的 typed `bind()` 投影允许 owner 在 `prepare()` 前应用准备政策；设备校验和构造
+仍由 `prepare()` 完成。它不授权设备访问，也不替代准备。必需 binding group 的规模由
+实际输入 inventory 约束，不另设人为列数上限。
+
+## 审查依据
+
+先检查一条真实创建/recording/export/consumer 路径，再扩展接口。现有测试覆盖冻结的
+cuFFT 参数、普通重放不转换描述、带显式下游梯度的 tensor/Field/view Sort，以及多列
+Compact 的独立实例与 source-free 消费。重点保住：
+
+- 暖态不增加描述转换、registry 查询或 scratch 准备；
+- 选中的物理 dispatch 与 launch policy 在 lowering 后保持；
+- 连续导出不改变 producer；
+- 显式共享、实例私有状态、失败事务及退休顺序；
+- 除 round trip 外，用新 reader 消费实际改造前产物。
+
+可复用 `test_graph_execution_domain.py`、`test_aot_graph_recording_export.py`、
+`test_aot_fft_recording_export.py`、`test_aot_prepared_tensor_sort.py`、
+`test_aot_prepared_compact.py` 和 `tests/cpp/aot` 中的 schema/workspace 测试。
+这些是代表合同，不是完整后端/provider 矩阵，也不是提速声明。
