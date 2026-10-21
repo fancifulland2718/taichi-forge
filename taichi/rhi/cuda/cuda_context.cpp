@@ -399,7 +399,15 @@ void CUDAContext::launch(void *func,
     profiler_->stop(task_handle);
 
   if (debug_) {
-    driver_.stream_synchronize(stream);
+    // Captured launches describe work; they cannot synchronize that stream.
+    // Keep ordinary debug synchronization and let replay/wait report runtime
+    // assertions after the recorded graph has actually executed.
+    std::uint32_t capture_status = 0;
+    if (stream)
+      driver_.stream_get_capture_info_v2(stream, &capture_status, nullptr,
+                                          nullptr, nullptr, nullptr);
+    if (capture_status == 0)
+      driver_.stream_synchronize(stream);
   }
 }
 
