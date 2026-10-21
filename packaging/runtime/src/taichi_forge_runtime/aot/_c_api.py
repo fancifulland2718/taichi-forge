@@ -141,6 +141,10 @@ class Texture(C.Structure):
     ]
 
 
+class ValueArgument(C.Structure):
+    _fields_ = [("size", C.c_uint64), ("data", C.c_void_p)]
+
+
 class ArgumentValue(C.Union):
     _fields_ = [
         ("native_resource", Handle),
@@ -150,6 +154,7 @@ class ArgumentValue(C.Union):
         ("texture", Texture),
         ("scalar", Scalar),
         ("tensor", Tensor),
+        ("value", ValueArgument),
     ]
 
 
@@ -195,6 +200,10 @@ class NdArrayLayoutMember(C.Structure):
 
 class KernelReturnInfo(C.Structure):
     _fields_ = [("buffer_size", C.c_uint64), ("layout_json", C.c_char_p)]
+
+
+class KernelArgumentInfo(C.Structure):
+    _fields_ = [("argument_count", UInt), ("layout_json", C.c_char_p)]
 
 
 class BindingFamilyInfo(C.Structure):
@@ -297,6 +306,7 @@ class Api:
             "ti_get_ndarray_layout_info_ext": ([Handle, Handle, C.POINTER(NdArrayLayoutInfo)], None),
             "ti_get_ndarray_layout_member_ext": ([Handle, Handle, UInt, C.POINTER(NdArrayLayoutMember)], None),
             "ti_get_kernel_return_info_ext": ([Handle, Handle, C.POINTER(KernelReturnInfo)], None),
+            "ti_get_kernel_argument_info_ext": ([Handle, Handle, C.POINTER(KernelArgumentInfo)], None),
             "ti_launch_kernel_with_result_ext": (
                 [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding), C.c_uint64, C.c_void_p], None,
             ),

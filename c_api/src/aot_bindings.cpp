@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "taichi/aot/value_layout.h"
+#include "taichi/aot/value_parameters.h"
 #include "taichi/common/json_serde.h"
 
 namespace {
@@ -57,12 +58,15 @@ liong::json::JsonValue value_tree(
                                 {"members", JsonValue(std::move(members))}});
   }
   const auto &member = layout.members.at(leaf++);
-  return JsonValue(JsonObject{
+  JsonObject result{
       {"kind", JsonValue(member.shape.empty() ? "scalar" : "tensor")},
       {"dtype", JsonValue(member.scalar_type->to_string())},
       {"shape", serialize(member.shape)},
       {"offset", JsonValue(member.offset)},
-      {"scalar_size", JsonValue(member.scalar_size)}});
+      {"scalar_size", JsonValue(member.scalar_size)}};
+  if (!member.component_offsets.empty())
+    result.inner.emplace("component_offsets", serialize(member.component_offsets));
+  return JsonValue(std::move(result));
 }
 
 std::string return_layout_json(taichi::lang::aot::Kernel &kernel,
@@ -122,6 +126,56 @@ const Runtime::KernelBinding &Runtime::get_kernel(TiKernel kernel) const {
     throw MemoryBindingError("Kernel is not live in this runtime");
   return found->second;
 }
+
+const Runtime::KernelBinding &Runtime::get_kernel_value_arguments(
+    TiKernel handle) const {
+  using namespace liong::json;
+  using namespace taichi::lang::aot;
+  const auto &binding = get_kernel(handle);
+  if (!binding.argument_layout.empty())
+    return binding;
+  const auto &kernel = *binding.kernel;
+  JsonArray values;
+  std::map<uint32_t, KernelBinding::ValueWindow> windows;
+  const auto &parameters = kernel.args_type->elements();
+  if (kernel.value_parameter_types) {
+    for (const auto &[indices, logical] : *kernel.value_parameter_types) {
+      // ArgPack members use their resource owner's binding contract.
+      if (indices.size() != 1)
+        continue;
+      const auto index = indices.front();
+      if (index < 0 || index >= parameters.size())
+        throw MemoryBindingError("Value argument exceeds compiled parameters");
+      const auto offset = kernel.args_type->get_element_offset({index});
+      const auto end = index + 1 < parameters.size()
+                           ? kernel.args_type->get_element_offset({index + 1})
+                           : kernel.args_size;
+      if (offset > end || end > kernel.args_size)
+        throw MemoryBindingError("Invalid compiled value argument window");
+      ValueLayout layout(logical, compiled_value_parameter_type(kernel, indices),
+                          end - offset,
+                          taichi::arch_uses_llvm(arch) ? ValueStorage::Host
+                                                       : ValueStorage::Gfx);
+      std::size_t leaf = 0;
+      auto tree = value_tree(logical, layout, leaf);
+      if (leaf != layout.members.size())
+        throw MemoryBindingError("Inconsistent value argument layout");
+      values.inner.emplace_back(JsonObject{
+          {"index", JsonValue(index)},
+          {"buffer_size", JsonValue(end - offset)},
+          {"value", std::move(tree)}});
+      windows.emplace(index, KernelBinding::ValueWindow{offset, end - offset});
+    }
+  }
+  auto json = print(JsonValue(JsonObject{
+      {"version", JsonValue(1)},
+      {"argument_count", JsonValue(parameters.size())},
+      {"values", JsonValue(std::move(values))}}));
+  binding.value_arguments = std::move(windows);
+  binding.argument_layout = std::move(json);
+  return binding;
+}
+
 const Runtime::GraphBinding &Runtime::get_graph(TiComputeGraph graph) const {
   const auto found = graphs_.find(graph);
   if (found == graphs_.end())
@@ -314,6 +368,20 @@ void ti_get_kernel_return_info_ext(TiRuntime runtime,
   if (binding.return_layout.empty())
     binding.return_layout = return_layout_json(*binding.kernel, rt.arch);
   *info = {binding.kernel->ret_size, binding.return_layout.c_str()};
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_get_kernel_argument_info_ext(TiRuntime runtime,
+                                      TiKernel kernel,
+                                      TiKernelArgumentInfo *info) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(info);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  const auto &binding = rt.get_kernel_value_arguments(kernel);
+  *info = {static_cast<uint32_t>(binding.kernel->args_type->elements().size()),
+           binding.argument_layout.c_str()};
   TI_CAPI_TRY_CATCH_END();
 }
 

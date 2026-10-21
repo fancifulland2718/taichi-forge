@@ -1470,6 +1470,22 @@ Vulkan 复用固定命令。返回对象可重复调用、读取 `info`，使用
 执行对象；暖态只查原生句柄，不重新装箱参数或扫描全部数组 owner。
 公开 Python 消费示例添加 `--prepared` 即可验证此路径。
 
+Kernel 的按值参数还接受向量序列、矩阵嵌套序列及按名称绑定的结构 mapping，支持
+嵌套结构。形状来自导出声明，三元素向量与 3×1 矩阵不同。`bind()` 复制值，之后修改
+Python 输入不会改变已绑定调用；`prepare()` 再复制到原生参数上下文，重放不重复
+编码。改变值需重新 bind/prepare。接口不设置固定元素数量上限，仍遵守目标参数
+缓冲的底层约束。缺失/多余成员、形状错误及整数越界在提交前报错。消费者无需
+NumPy 或 DSL 前端。
+
+C 消费者使用 `ti_get_kernel_argument_info_ext` 获取 schema-1 布局，其中包含
+`argument_count` 和 `values`。每个值包含 `index`、`buffer_size` 及递归 `value` 树，
+叶子使用下述返回值布局字段。偏移相对于该参数的载荷；可选 `component_offsets`
+描述非连续张量槽。清零 padding，按编译偏移填值，再以 `TI_ARGUMENT_TYPE_VALUE_EXT`
+和 `TiValueArgument {size, data}` 传入，大小必须精确匹配。布局字符串归模块所有，
+launch/prepare 在返回前复制载荷。此形式不能携带资源句柄或 ArgPack，也不扩展普通
+CGraph 的输入类型或 prepared 返回值。显式导出的伴随中，按值参数作为常量使用；
+ndarray 梯度仍沿用既有绑定与所有权。
+
 普通 `Kernel.run()`/`Kernel.__call__()` 与绑定后的调用可以返回编译值：标量对应
 Python 数字（`u1` 为布尔），向量对应元组，矩阵对应嵌套元组，结构对应字典，
 多个返回值对应元组。位宽、padding 和形状来自已加载的编译布局，每个 Kernel

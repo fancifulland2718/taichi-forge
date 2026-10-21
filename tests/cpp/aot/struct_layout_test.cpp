@@ -216,6 +216,48 @@ TEST(AotValueLayout, SharesNaturalRecordOffsetsWithoutLosingTensorMetadata) {
   EXPECT_EQ(value.members[2].indices, std::vector<int>({1, 1}));
 }
 
+TEST(AotValueLayout, LogicalTensorUsesCompiledComponentSlots) {
+  auto &factory = TypeFactory::get_instance();
+  auto column = factory.get_tensor_type({3, 1}, PrimitiveType::f32);
+  auto padded = factory.get_struct_type(
+      {{PrimitiveType::f32, "a", 0}, {PrimitiveType::f32, "b", 8},
+       {PrimitiveType::f32, "c", 16}}, "1-");
+  ValueLayout layout(column, padded, 24, ValueStorage::Host);
+  ASSERT_EQ(layout.members.size(), 1u);
+  EXPECT_EQ(layout.members[0].shape, std::vector<int>({3, 1}));
+  EXPECT_EQ(layout.members[0].component_offsets,
+            std::vector<std::size_t>({0, 8, 16}));
+  EXPECT_EQ(layout.members[0].size, 20u);
+  EXPECT_EQ(layout.buffer_size, 24u);
+  EXPECT_THROW(ValueLayout(column, padded, 19, ValueStorage::Host),
+               std::invalid_argument);
+  auto contiguous = factory.get_struct_type(
+      {{PrimitiveType::f32, "a"}, {PrimitiveType::f32, "b"},
+       {PrimitiveType::f32, "c"}});
+  ValueLayout dense(column, contiguous, 12, ValueStorage::Host);
+  EXPECT_TRUE(dense.members[0].component_offsets.empty());
+  EXPECT_EQ(dense.members[0].size, 12u);
+}
+
+TEST(AotValueLayout, LogicalNestedFlagsUseGfxWidthsAndPhysicalOffsets) {
+  auto &factory = TypeFactory::get_instance();
+  auto flags = factory.get_struct_type(
+      {{PrimitiveType::u1, "a"}, {PrimitiveType::u1, "b"}});
+  auto logical = factory.get_struct_type(
+      {{PrimitiveType::i8, "tag"}, {flags, "flags"}});
+  auto physical_flags = factory.get_struct_type(
+      {{PrimitiveType::u1, "a", 0}, {PrimitiveType::u1, "b", 4}}, "1-");
+  auto physical = factory.get_struct_type(
+      {{PrimitiveType::i8, "tag", 0}, {physical_flags, "flags", 16}}, "1-");
+  ValueLayout layout(logical, physical, 32, ValueStorage::Gfx);
+  ASSERT_EQ(layout.members.size(), 3u);
+  EXPECT_EQ(layout.members[1].path, "flags.a");
+  EXPECT_EQ(layout.members[1].offset, 16u);
+  EXPECT_EQ(layout.members[2].offset, 20u);
+  EXPECT_EQ(layout.members[2].scalar_size, 4u);
+  EXPECT_EQ(layout.members[2].size, 4u);
+}
+
 #if defined(TI_WITH_VULKAN) || defined(TI_WITH_OPENGL)
 TEST(AotValueLayout, UsesActualGfxUniformAndStorageBufferLayouts) {
   auto &factory = TypeFactory::get_instance();

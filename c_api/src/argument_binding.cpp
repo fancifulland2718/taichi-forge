@@ -707,6 +707,20 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
         devallocs.emplace_back(std::move(devalloc));
         break;
       }
+      case TI_ARGUMENT_TYPE_VALUE_EXT: {
+        const auto &values = runtime2.get_kernel_value_arguments(kernel).value_arguments;
+        const auto found = values.find(i);
+        if (found == values.end())
+          throw MemoryBindingError("Argument has no exported pure value layout");
+        const auto &window = found->second;
+        const auto &value = arg.value.value;
+        if (value.size != window.size || (value.size && !value.data))
+          throw MemoryBindingError("Value storage must match the compiled argument size");
+        if (value.size)
+          std::memcpy(builder.get_context().arg_buffer + window.offset,
+                      value.data, window.size);
+        break;
+      }
       case TI_ARGUMENT_TYPE_TENSOR: {
         auto &tensor = arg.value.tensor;
         const uint32_t capacity = ti_tensor_value_capacity(tensor.type);

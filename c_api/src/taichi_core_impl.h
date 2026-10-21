@@ -6,6 +6,7 @@
 #include <functional>
 #include <stdexcept>
 #include <mutex>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -153,6 +154,12 @@ class Runtime {
     // A failed launch/wait may leave a host readback in flight. Keep the whole
     // binding until a successful wait, or the owner's synchronized retirement.
     mutable std::shared_ptr<capi::BoundKernelArguments> pending_return;
+    struct ValueWindow {
+      std::size_t offset;
+      std::size_t size;
+    };
+    mutable std::string argument_layout;
+    mutable std::map<uint32_t, ValueWindow> value_arguments;
   };
   struct GraphBinding {
     class AotModule *owner;
@@ -264,6 +271,7 @@ class Runtime {
   TiNdArrayLayout register_layout(class AotModule *owner,
                                   taichi::lang::DataType type);
   const KernelBinding &get_kernel(TiKernel kernel) const;
+  const KernelBinding &get_kernel_value_arguments(TiKernel kernel) const;
   const GraphBinding &get_graph(TiComputeGraph graph) const;
   const taichi::lang::aot::StructLayout &get_layout(TiNdArrayLayout layout) const;
   void retire_module(class AotModule *owner);

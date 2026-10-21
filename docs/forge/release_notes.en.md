@@ -45,6 +45,13 @@ lifetimes. The entries below describe the changes.
   members to avoid incorrect gradients from cross-loop state. Ordinary forward
   copy semantics are unchanged. Update the runtime and frontend together.
 
+- Public AOT kernel calls accept dynamically sized vector/matrix and nested
+  structure values through the shared compiled layout, for ordinary and
+  prepared execution on CPU/CUDA/Vulkan. Python consumers use sequences and
+  mappings without NumPy or the frontend. The C descriptor copies payloads
+  during binding; prepared replay retains its native storage. ArgPack resources,
+  ordinary CGraph input types and prepared returns retain their existing scope.
+
 - AOT Graph export reconstructs `VulkanBufferCommandRecording` through the
   common native registry, preserving fill/copy offsets and explicit barriers.
   Independent and borrowed consumers retain the existing resource lifecycle;

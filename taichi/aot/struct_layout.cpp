@@ -1,5 +1,6 @@
 #include "taichi/aot/struct_layout.h"
 #include "taichi/aot/value_layout.h"
+#include "taichi/aot/value_parameters.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -121,6 +122,51 @@ ValueLayout::ValueLayout(DataType type,
   if (extent.size > buffer_size) {
     throw std::invalid_argument("Value members exceed compiled buffer size");
   }
+}
+
+ValueLayout::ValueLayout(DataType logical,
+                         DataType physical,
+                         std::size_t buffer_size,
+                         ValueStorage storage)
+    : ValueLayout(logical, std::numeric_limits<std::size_t>::max(),
+                   ValueStorage::Host) {
+  validate_value_parameter_type(logical, physical);
+  ValueLayout compiled(physical, buffer_size, storage);
+  this->buffer_size = buffer_size;
+  std::size_t leaf = 0, component = 0;
+  for (auto &member : members) {
+    const auto count = member.size / member.scalar_size;
+    std::size_t end = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (leaf >= compiled.members.size())
+        throw std::invalid_argument("Missing compiled value component");
+      const auto &source = compiled.members[leaf];
+      if (member.scalar_type != source.scalar_type)
+        throw std::invalid_argument("Compiled value component type mismatch");
+      const auto offset = source.offset + component * source.scalar_size;
+      if (i == 0) {
+        member.offset = offset;
+        member.scalar_size = source.scalar_size;
+        member.scalar_alignment = source.scalar_alignment;
+      }
+      if (offset != member.offset + i * member.scalar_size &&
+          member.component_offsets.empty()) {
+        member.component_offsets.reserve(count);
+        for (std::size_t j = 0; j < i; ++j)
+          member.component_offsets.push_back(member.offset + j * member.scalar_size);
+      }
+      if (!member.component_offsets.empty())
+        member.component_offsets.push_back(offset);
+      end = offset + source.scalar_size;
+      if (++component == source.size / source.scalar_size) {
+        ++leaf;
+        component = 0;
+      }
+    }
+    member.size = end - member.offset;
+  }
+  if (leaf != compiled.members.size() || component != 0)
+    throw std::invalid_argument("Unexpected compiled value components");
 }
 
 StructLayout::StructLayout(DataType type) : type(type) {

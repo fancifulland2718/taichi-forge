@@ -526,6 +526,8 @@ typedef enum TiArgumentType {
   TI_ARGUMENT_TYPE_TENSOR = 5,
   // Same-runtime resource created through ti_create_native_resource_ext.
   TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT = 6,
+  // Pure value bytes matching ti_get_kernel_argument_info_ext's compiled ABI.
+  TI_ARGUMENT_TYPE_VALUE_EXT = 7,
   TI_ARGUMENT_TYPE_MAX_ENUM = 0xffffffff,
 } TiArgumentType;
 
@@ -951,6 +953,15 @@ typedef struct TiTensor {
   TiTensorValueWithLength contents;
 } TiTensor;
 
+// Dynamically sized tensor/structure argument. The bytes must match the exact
+// queried argument buffer size and component offsets, with padding zeroed.
+// They are copied during launch/prepare and need not survive that API call.
+// This descriptor cannot carry ndarray, texture, ArgPack or native handles.
+typedef struct TiValueArgument {
+  uint64_t size;
+  const void *data;
+} TiValueArgument;
+
 // Union `TiArgumentValue` (1.4.0)
 //
 // A scalar or structured argument value.
@@ -970,6 +981,7 @@ typedef union TiArgumentValue {
   // A tensor to be bound.
   TiTensor tensor;
   TiNativeResource native_resource;
+  TiValueArgument value;
 } TiArgumentValue;
 
 // Structure `TiArgument` (1.4.0)
@@ -1228,6 +1240,19 @@ typedef struct TiKernelReturnInfo {
 } TiKernelReturnInfo;
 TI_DLL_EXPORT void TI_API_CALL ti_get_kernel_return_info_ext(
     TiRuntime runtime, TiKernel kernel, TiKernelReturnInfo *info);
+
+// Cold reflection for exported pure value arguments. schema-1 layout_json
+// contains argument_count and a values array: index, buffer_size and value
+// tree. Leaf offsets are relative to that argument's payload; an optional
+// component_offsets array describes noncontiguous tensor slots. The tree
+// preserves logical shape and named structure members. Copy the JSON before
+// destroying the module. Scalar and resource arguments use their existing ABI.
+typedef struct TiKernelArgumentInfo {
+  uint32_t argument_count;
+  const char *layout_json;
+} TiKernelArgumentInfo;
+TI_DLL_EXPORT void TI_API_CALL ti_get_kernel_argument_info_ext(
+    TiRuntime runtime, TiKernel kernel, TiKernelArgumentInfo *info);
 
 // All bindings, including every dispatch of a Graph, are validated before
 // submission. Memory, layouts, kernels and Graphs must belong to this runtime.

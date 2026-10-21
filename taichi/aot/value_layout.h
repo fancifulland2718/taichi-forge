@@ -10,8 +10,8 @@ namespace taichi::lang::aot {
 
 enum class ValueStorage { Host, Gfx };
 
-// A leaf in a compiled value buffer. Tensor elements are contiguous scalar
-// slots; padding between members comes exclusively from the compiled type.
+// A leaf in a compiled value buffer. Padding comes exclusively from the
+// compiled type; lowered tensors can have explicitly spaced component slots.
 struct ValueLayoutMember {
   std::string path;
   std::vector<int> indices;
@@ -21,6 +21,8 @@ struct ValueLayoutMember {
   std::size_t size;
   std::size_t scalar_size;
   std::size_t scalar_alignment;
+  // Empty for contiguous scalar slots; otherwise one byte offset per component.
+  std::vector<std::size_t> component_offsets;
 };
 
 // Cold reflection of an already compiled argument/return buffer. This does not
@@ -33,6 +35,8 @@ struct ValueLayout {
   std::vector<ValueLayoutMember> members;
 
   ValueLayout(DataType type, std::size_t buffer_size, ValueStorage storage);
+  ValueLayout(DataType logical, DataType physical, std::size_t buffer_size,
+              ValueStorage storage);
 };
 
 }  // namespace taichi::lang::aot

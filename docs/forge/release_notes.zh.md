@@ -39,6 +39,11 @@
   如需修改成员，请先在循环内创建局部副本，避免跨循环副本状态产生错误梯度。
   普通前向按值修改语义保持。runtime/frontend 需配对更新。
 
+- 公共 AOT kernel 接口按共用编译布局绑定动态大小的向量/矩阵及嵌套结构值，覆盖
+  CPU/CUDA/Vulkan 的普通和 prepared 执行。Python 消费者使用序列和 mapping，
+  无需 NumPy 或前端；C 描述符在绑定时复制载荷，prepared 重放复用原生存储。
+  ArgPack 资源、普通 CGraph 输入类型和 prepared 返回值仍保持各自现有范围。
+
 - AOT Graph 导出通过共用 native registry 重建 `VulkanBufferCommandRecording`，
   保留 fill/copy 偏移和显式 barrier。独立/借用消费者沿用既有资源生命周期，
   覆盖 dense Field/view 快照和后段 kernel 梯度。buffer 准备检查物理别名与地址溢出，

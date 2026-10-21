@@ -28,7 +28,7 @@ from . import _c_api as abi
 from ._c_api import AotError
 from ._completion import SubmissionTicket
 from ._struct import StructLayout
-from ._value import ReturnLayout
+from ._value import ArgumentLayout, ReturnLayout
 
 __all__ = [
     "AotError",
@@ -946,9 +946,12 @@ class BoundCall:
     retain modules and allocations until the runtime finishes submitted work.
     """
 
-    def __init__(self, entry, arguments, bindings, owners):
+    def __init__(self, entry, arguments, bindings, owners, value_buffers=()):
         self._entry, self._arguments, self._bindings = entry, arguments, bindings
         self._owners = tuple(dict.fromkeys(owners))
+        # Native prepare copies these bytes into its context. Ordinary bound
+        # launches keep the immutable payload alive independently of user values.
+        self._value_buffers = tuple(value_buffers)
         layout = entry._return_layout
         self._result = C.create_string_buffer(layout.size) if layout is not None and layout.size else None
 
@@ -1204,6 +1207,7 @@ class Kernel:
         self._layouts = {}
         layout = None if isinstance(self, Graph) else ReturnLayout(module, handle)
         self._return_layout = layout if layout is not None and layout.has_values else None
+        self._argument_layout = None if isinstance(self, Graph) else ArgumentLayout(module, handle)
 
     def ndarray_layout(self, argument):
         """Query and cache an exported structure argument's immutable AoS ABI.
@@ -1231,8 +1235,15 @@ class Kernel:
         runtime = self._module._runtime
         with runtime._lock:
             self._module._check()
+            if len(arguments) != self._argument_layout.count:
+                raise ValueError("Argument count does not match the exported kernel ABI")
             owners = [self._module]
-            native = (abi.Argument * len(arguments))(*[_argument(runtime, value, owners) for value in arguments])
+            buffers = []
+            native = (abi.Argument * len(arguments))(*[
+                self._argument_layout.encode(index, value, buffers)
+                if index in self._argument_layout.encoders else _argument(runtime, value, owners)
+                for index, value in enumerate(arguments)
+            ])
             bindings = [
                 binding for index, value in enumerate(arguments)
                 if (binding := _layout_binding(index, value)) is not None
@@ -1242,7 +1253,7 @@ class Kernel:
                 if not 0 <= index < len(arguments) or not isinstance(arguments[index], NdArray):
                     raise ValueError("Gradient indices must refer to ndarray arguments")
                 bindings.append(_gradient_binding(runtime, index, arguments[index], gradient, owners))
-            return BoundCall(self, native, (abi.Binding * len(bindings))(*bindings), owners)
+            return BoundCall(self, native, (abi.Binding * len(bindings))(*bindings), owners, buffers)
 
     def run(self, *arguments, gradients=None):
         """Run and return Python scalars, tuples or named dictionaries.

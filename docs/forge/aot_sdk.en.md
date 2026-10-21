@@ -1873,6 +1873,28 @@ cleared nor seeded automatically. `entry.bind(...)` freezes Python argument
 descriptors for repeated `call()` submissions; this is ordinary execution,
 not a captured GPU Graph.
 
+Kernel value arguments also accept vector sequences, nested matrix sequences
+and named structure mappings, including nested structures. Shapes come from
+the exported declaration: a three-element vector differs from a 3-by-1 matrix.
+`bind()` copies values, so later edits to Python inputs do not change a bound
+call. `prepare()` copies them into its native context; replay does not encode
+them again. Bind/prepare a new call to change values. There is no fixed element
+count limit imposed by this interface; target argument-buffer constraints still
+apply. Missing/extra members, shape errors and out-of-range integers fail before
+submission. NumPy and the frontend are not required by the consumer.
+
+For C consumers, `ti_get_kernel_argument_info_ext` returns a schema-1 layout
+with `argument_count` and `values`. Each value has an `index`, `buffer_size` and
+recursive `value` tree using the result-layout leaf fields described below.
+Leaf offsets are relative to that argument's payload; optional
+`component_offsets` describe noncontiguous tensor slots. Zero padding, write
+values at the compiled offsets, and pass `TI_ARGUMENT_TYPE_VALUE_EXT` with
+`TiValueArgument {size, data}`. The size must match exactly. The module owns the
+layout string; launch/prepare copies payload bytes before returning. This form
+cannot carry resource handles or ArgPacks and does not extend ordinary CGraph
+input types or prepared returns. Value parameters are constants in an explicitly
+exported adjoint; ndarray gradients keep their existing bindings and ownership.
+
 Ordinary `Kernel.run()`/`Kernel.__call__()` and bound calls return compiled
 values: scalars become Python numbers (booleans for `u1`), vectors become tuples,
 matrices become nested tuples, structures become dictionaries, and multiple
