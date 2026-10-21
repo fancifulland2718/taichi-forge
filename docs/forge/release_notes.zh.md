@@ -34,6 +34,11 @@
 - Vulkan 按参数缓冲的整数槽类型读取向量及嵌套结构中的布尔参数，再转换为布尔表达式，
   修复 JIT/AOT 生成的 SPIR-V 访问链类型不匹配；参数布局保持不变。
 
+- 反向自动微分区分编译器生成的结构参数初始化和用户循环，修复嵌套结构/矩阵参数
+  导致的循环混用误报，并保留多循环的反向顺序。循环中的结构参数作为常量使用；
+  如需修改成员，请先在循环内创建局部副本，避免跨循环副本状态产生错误梯度。
+  普通前向按值修改语义保持。runtime/frontend 需配对更新。
+
 - AOT Graph 导出通过共用 native registry 重建 `VulkanBufferCommandRecording`，
   保留 fill/copy 偏移和显式 barrier。独立/借用消费者沿用既有资源生命周期，
   覆盖 dense Field/view 快照和后段 kernel 梯度。buffer 准备检查物理别名与地址溢出，

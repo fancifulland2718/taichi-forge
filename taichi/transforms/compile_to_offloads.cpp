@@ -19,6 +19,7 @@
 #include "taichi/transforms/make_external_shared_staged.inc"
 
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace taichi::lang {
@@ -26,6 +27,67 @@ namespace taichi::lang {
 namespace irpass {
 
 namespace {
+
+// Only reverse-mode bodies with outer loops need this check. These local
+// copies are initialized outside the independent blocks and cannot carry a
+// differentiable state between loops without an explicit primal recording.
+std::vector<Identifier> loop_parameter_copies(IRNode *ir,
+                                             AutodiffMode autodiff_mode) {
+  if (autodiff_mode != AutodiffMode::kReverse)
+    return {};
+  auto *root = ir->as<Block>();
+  const auto *callable = root->parent_callable();
+  if (!callable || callable->argument_initialization_size == 0)
+    return {};
+  const auto prefix = callable->argument_initialization_size;
+  TI_ASSERT(prefix <= root->size());
+  bool has_loop = false;
+  for (size_t i = prefix; i < root->size(); ++i)
+    has_loop |= root->statements[i]->is<FrontendForStmt>();
+  if (!has_loop)
+    return {};
+  std::vector<Identifier> ids;
+  for (size_t i = 0; i < prefix; ++i)
+    if (auto *allocation = root->statements[i]->cast<FrontendAllocaStmt>())
+      ids.push_back(allocation->ident);
+  return ids;
+}
+
+class CheckLoopParameterCopies : public BasicStmtVisitor {
+ public:
+  using BasicStmtVisitor::visit;
+
+  CheckLoopParameterCopies(Block *root, const std::vector<Identifier> &ids)
+      : root_(root) {
+    invoke_default_visitor = true;
+    for (const auto &id : ids)
+      copies_.insert(root->lookup_var(id));
+  }
+
+  void visit(Stmt *stmt) override {
+    if (stmt->parent == root_)
+      return;
+    for (auto *destination : analysis::get_store_destination(stmt, true)) {
+      while (auto *element = destination->cast<MatrixPtrStmt>())
+        destination = element->origin;
+      TI_ERROR_IF(copies_.count(destination),
+                  "Reverse-mode autodiff treats structure parameters as "
+                  "constants across loops. Copy the parameter to a local "
+                  "variable inside the loop before modifying its members.");
+    }
+  }
+
+  static void run(IRNode *ir, const std::vector<Identifier> &ids) {
+    if (ids.empty())
+      return;
+    CheckLoopParameterCopies check(ir->as<Block>(), ids);
+    ir->accept(&check);
+  }
+
+ private:
+  Block *root_;
+  std::unordered_set<Stmt *> copies_;
+};
 
 struct TaskLaunchPolicyApplication {
   bool active{false};
@@ -633,6 +695,7 @@ void compile_to_offloads(IRNode *ir,
     std::cout << std::flush;
   }
 
+  const auto parameter_copies = loop_parameter_copies(ir, autodiff_mode);
   if (autodiff_mode == AutodiffMode::kReverse) {
     irpass::reverse_segments(ir);
     print("Segment reversed (for autodiff)");
@@ -660,6 +723,7 @@ void compile_to_offloads(IRNode *ir,
     irpass::analysis::gather_func_store_dests(ir);
   }
   validate_task_launch_policy_body(ir, task_launch_policy);
+  CheckLoopParameterCopies::run(ir, parameter_copies);
 
   {
     TI_COMPILE_PROFILER("cpp.ir.validate_shared_array_scope");
@@ -1115,6 +1179,7 @@ void compile_function(IRNode *ir,
 
   if (target_stage >= Function::IRStage::BeforeLowerAccess &&
       current_stage < Function::IRStage::BeforeLowerAccess) {
+    const auto parameter_copies = loop_parameter_copies(ir, autodiff_mode);
     if (autodiff_mode == AutodiffMode::kReverse) {
       irpass::reverse_segments(ir);
       print("Segment reversed (for autodiff)");
@@ -1125,6 +1190,7 @@ void compile_function(IRNode *ir,
       irpass::lower_ast(ir);
       print("Lowered");
     }
+    CheckLoopParameterCopies::run(ir, parameter_copies);
 
     // Removes MatrixOfMatrixPtrStmt & MatrixOfGlobalPtrStmt
     irpass::lower_matrix_ptr(ir, config.force_scalarize_matrix);

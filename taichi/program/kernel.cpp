@@ -774,6 +774,7 @@ void Kernel::retire_definition(bool preserve_relocatable_abi) {
   std::lock_guard<std::mutex> key_lock(kernel_key_mutex_);
   ir.reset();
   context.reset();
+  argument_initialization_size = 0;
   inline_functions_.clear();
   std::vector<SNode *>().swap(no_activate);
   name.clear();

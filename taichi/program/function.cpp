@@ -14,6 +14,7 @@ Function::Function(Program *program, const FunctionKey &func_key)
 }
 
 void Function::set_function_body(const std::function<void()> &func) {
+  argument_initialization_size = 0;
   context = std::make_unique<FrontendContext>(program->compile_config().arch,
                                               /*is_kernel_=*/false);
   ir = context->get_root();
@@ -40,6 +41,7 @@ void Function::set_function_body(const std::function<void()> &func) {
 }
 
 void Function::set_function_body(std::unique_ptr<IRNode> func_body) {
+  argument_initialization_size = 0;
   ir = std::move(func_body);
 
   TI_ASSERT(ir->is<Block>());
@@ -53,6 +55,7 @@ void Function::set_function_body(std::unique_ptr<IRNode> func_body) {
 void Function::retire_definition() {
   ir.reset();
   context.reset();
+  argument_initialization_size = 0;
   ast_serialization_data_.reset();
   store_dests.clear();
 }

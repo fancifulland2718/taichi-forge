@@ -30,6 +30,7 @@ enum class StmtOpCode : std::uint8_t {
 #define PER_STATEMENT(x) x,
 #include "taichi/inc/frontend_statements.inc.h"
 #undef PER_STATEMENT
+  ArgumentInitialization,
 };
 
 enum class ForLoopType : std::uint8_t {
@@ -296,6 +297,11 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   void visit(Block *block) override {
     emit(StmtOpCode::EnterBlock);
     emit(static_cast<std::size_t>(block->statements.size()));
+    if (const auto *callable = block->parent_callable();
+        callable && callable->argument_initialization_size != 0) {
+      emit(StmtOpCode::ArgumentInitialization);
+      emit(callable->argument_initialization_size);
+    }
     for (auto &stmt : block->statements) {
       emit(stmt.get());
     }

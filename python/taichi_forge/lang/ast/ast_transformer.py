@@ -761,6 +761,7 @@ class ASTTransformer(Builder):
                 ctx.create_variable(k, v)
 
             impl.get_runtime().compiling_callable.finalize_params()
+            impl.get_runtime().compiling_callable.finish_argument_initialization()
             # remove original args
             node.args.args = []
 

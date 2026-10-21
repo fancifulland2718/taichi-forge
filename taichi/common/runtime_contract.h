@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Disk-loaded LLVM payloads share context ownership with their module clones.
-inline constexpr int kForgeNativeAbiRevision = 135;
+// Callable preserves the frontend argument initialization boundary for AD.
+inline constexpr int kForgeNativeAbiRevision = 136;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

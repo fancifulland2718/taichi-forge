@@ -1,5 +1,6 @@
 #include "taichi/program/callable.h"
 #include "taichi/ir/type.h"
+#include "taichi/ir/frontend_ir.h"
 #include "taichi/program/program.h"
 
 namespace taichi::lang {
@@ -211,6 +212,16 @@ void Callable::finalize_rets() {
   std::string layout = program->get_kernel_return_data_layout();
   std::tie(ret_type, ret_size) =
       program->get_struct_type_with_data_layout(type, layout);
+}
+
+void Callable::finish_argument_initialization() {
+  TI_ASSERT(ir && ir->is<Block>());
+  auto *block = ir->as<Block>();
+  for (const auto &stmt : block->statements) {
+    TI_ASSERT(stmt->is<FrontendAllocaStmt>() ||
+              stmt->is<FrontendAssignStmt>());
+  }
+  argument_initialization_size = block->size();
 }
 
 void Callable::finalize_params() {

@@ -146,6 +146,9 @@ class TI_DLL_EXPORT Callable : public CallableBase {
   std::unique_ptr<IRNode> ir{nullptr};
   std::unique_ptr<FrontendContext> context{nullptr};
   AutodiffMode autodiff_mode{AutodiffMode::kNone};
+  // Frontend-only prefix generated while unpacking value parameters. The
+  // kernel body starts after it; reverse AD must retain it before all loops.
+  size_t argument_initialization_size{0};
 
   Callable();
   virtual ~Callable();
@@ -185,6 +188,8 @@ class TI_DLL_EXPORT Callable : public CallableBase {
   void finalize_rets();
 
   void finalize_params();
+
+  void finish_argument_initialization();
 
   [[nodiscard]] virtual std::string get_name() const = 0;
 

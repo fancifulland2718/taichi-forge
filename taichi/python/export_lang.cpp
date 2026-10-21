@@ -7480,6 +7480,8 @@ void export_lang(py::module &m) {
       .def("insert_ret", &Kernel::insert_ret)
       .def("finalize_rets", &Kernel::finalize_rets)
       .def("finalize_params", &Kernel::finalize_params)
+      .def("finish_argument_initialization",
+           &Kernel::finish_argument_initialization)
       .def("make_launch_context", &Kernel::make_launch_context,
            py::arg("cpu_bounded_range") = false)
       .def("definition_retired", &Kernel::definition_retired)
@@ -7586,6 +7588,8 @@ void export_lang(py::module &m) {
                &Function::set_function_body))
       .def("finalize_rets", &Function::finalize_rets)
       .def("finalize_params", &Function::finalize_params)
+      .def("finish_argument_initialization",
+           &Function::finish_argument_initialization)
       .def(
           "ast_builder",
           [](Function *self) -> ASTBuilder * {

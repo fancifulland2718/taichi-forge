@@ -38,6 +38,13 @@ lifetimes. The entries below describe the changes.
   integer buffer slots before converting them to boolean expressions. This
   fixes invalid SPIR-V access-chain types in JIT/AOT without changing layouts.
 
+- Reverse autodiff distinguishes generated structure-argument initialization
+  from user loops, fixing false mixed-loop errors for nested structure/matrix
+  parameters while preserving reverse loop order. Treat structure parameters
+  as constants across loops; create a local copy inside a loop before modifying
+  members to avoid incorrect gradients from cross-loop state. Ordinary forward
+  copy semantics are unchanged. Update the runtime and frontend together.
+
 - AOT Graph export reconstructs `VulkanBufferCommandRecording` through the
   common native registry, preserving fill/copy offsets and explicit barriers.
   Independent and borrowed consumers retain the existing resource lifecycle;
