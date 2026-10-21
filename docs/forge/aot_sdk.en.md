@@ -738,6 +738,13 @@ empty mask table, while the optional fixed-query adapter needs no such table.
 Ordinary typed queries
 default to the closest accepted hit.
 
+Exact floating-point interval endpoints retain a numerical qualification boundary:
+in one nonuniform-transform fixture, a triangle at world z=1.5 misses at
+`t_max=1.5` in both query versions, but hits at the next representable f32 and
+reports t=1.5. This differs from the double-precision closed-interval reference;
+passing face-rule checks does not resolve it. Forge does not widen ray intervals
+or guarantee bit-exact endpoint agreement with double-precision intersection.
+
 These record ports also accept AoS vector ndarrays: shape `[count]` with element
 shape `[width]`, using widths 3, 8, 4 or 1 as appropriate. Single-word ports
 (face tables and occlusion) additionally accept scalar `[count,1]`. Storage must
@@ -5473,6 +5480,15 @@ sole TCM are unchanged. Its 12,727,831-byte wheel is external dependency size.
 This covers basic rigid scenes without contact, not arbitrary USD assets, plugin
 schemas, contact or complete solver gradients. Successful import does not mean
 the fixed TCM has been specialized for the new scene.
+
+The 2026-10-21 installed refresh uses matching runtime/frontend `b2623ea21`
+(private ABI143) and the unchanged dev20 qualification application. Eleven fixed
+CUDA entries, four history/explicit-gradient/retirement checks and the six USD
+scenes above pass. Independent runtime consumers still import neither the
+frontend, NumPy nor the GeoPhys host. The sole application TCM is 622,142B; the
+base SDK's 44 external dependencies and the USD profile's 45 remain unchanged.
+Runtime/frontend wheels are 26,952,013/4,154,623B. These specific checks do not
+requalify every historical scene or automatic differentiation of complete solvers.
 
 An expanded 534-module application profile also passes source-hidden offscreen
 compute raster rendering on Windows CPU/CUDA/Vulkan: consumer-created two-box
