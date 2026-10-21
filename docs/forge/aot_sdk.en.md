@@ -2015,10 +2015,12 @@ bindings have separate frames. Discarded frames require no zero initialization,
 host-visible allocation or readback, and remain owned through in-flight retirement.
 Their unique byte sizes contribute to `info["native_resource_bytes"]`. No new
 code payload or serialized execution-plan format is required.
-Windows CPU/CUDA/Vulkan checks cover ordinary/prepared CGraphs, explicit plans,
+Matched Windows runtime/frontend installations cover ordinary/prepared CGraphs
+and explicit plans on CPU/CUDA/Vulkan, including
 zero/early/budgeted and nested control, actual suffix adjoints and retirement.
 CUDA additionally qualifies parallel branches, binding-family initialization
 and selected execution domains; Vulkan checks include synchronization validation.
+Runtime-only plan consumers require neither the DSL frontend nor NumPy.
 
 C consumers query `ti_get_kernel_return_info_ext` for `TiKernelReturnInfo` and
 call `ti_launch_kernel_with_result_ext` with exactly `buffer_size` host bytes.

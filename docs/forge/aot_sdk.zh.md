@@ -1570,9 +1570,10 @@ dispatch，包括初始化与控制区域；丢弃数值，保留数组副作用
 准备时，相同编译结果布局在顺序区域内共享只写暂存；CUDA 并行分支及独立准备对象
 分别持有结果帧。丢弃帧无需零初始化、主机可读分配或读回，存活至在途工作退休。
 去重后的字节数计入 `info["native_resource_bytes"]`，不增加代码载荷或持久计划格式。
-Windows CPU/CUDA/Vulkan 已验证普通/固定 CGraph、显式计划、零轮/早停/预算耗尽、
+匹配的 Windows runtime/frontend 安装包已在 CPU/CUDA/Vulkan 验证普通/固定 CGraph、
+显式计划、零轮/早停/预算耗尽、
 嵌套控制、真实后段反向与退休；CUDA 另覆盖并行分支、绑定族初始化和选定执行域，
-Vulkan 包含同步验证。
+Vulkan 包含同步验证。runtime-only 计划消费无需 DSL 前端或 NumPy。
 
 C 消费者先用 `ti_get_kernel_return_info_ext` 查询 `TiKernelReturnInfo`，再给
 `ti_launch_kernel_with_result_ext` 提供恰好 `buffer_size` 字节的 host 缓冲。
