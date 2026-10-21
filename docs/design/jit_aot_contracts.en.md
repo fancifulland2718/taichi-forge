@@ -146,6 +146,20 @@ and content identities. Topology bytes and workspace retain separate lifetimes;
 large binaries are not ordinary parameters. Concrete shader, pipeline and AS
 closures still require their own adapter qualification.
 
+Image copy/blit and buffer-image transfer share region, mip and offset/pitch
+definitions between direct prepared commands and the default native adapter.
+Array and resource references retain precise ResourceEffects across symbol
+relocation. Texture creation, sampler/mip state and ordered TextureCollection
+members also define reconstruction. Texels, consumer seeds, first full writes
+and public aliases remain the lowering context's responsibility; definitions
+neither allocate nor initialize resources.
+
+SPD creation and reconstruction share fixed image layouts, reduction and the
+existing SpirvShader asset. The expected-plan certificate, public plan aliases,
+counters and retirement retain their existing contracts. Small source-free and
+borrowed checks include explicit downstream gradients; this does not add
+automatic differentiation to image operations or SPD itself.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive

@@ -112,6 +112,16 @@ NativeDefinition，包括实际 strategy 和 workspace；两种 exporter 均通�
 SPIR-V/PTX 继续复用既有不可变资产及内容身份；拓扑 bytes 与 workspace 生命周期仍分别管理，
 不把大二进制装入普通参数。具体 shader/pipeline/AS 闭包的资格仍由所属适配器检查。
 
+Image copy/blit 和 buffer-image transfer 的 region、mip、offset/pitch 由共同定义投影到
+直接 prepared 命令与默认 native adapter。数组及资源引用保留原来的精确 ResourceEffect，
+不会因符号重定位扩大成整资源读写。Texture 的创建参数、sampler 和 mip 链以及
+TextureCollection 的有序成员合同也用于重建；texels、消费者种子、首次完整覆盖和公开
+别名仍由现有 lowering context 管理，定义自身不分配或初始化资源。
+
+SPD 创建与重建共享固定图像 layout、reduction 和现有 SpirvShader 资产；expected-plan
+证书、公开 plan 的 source/output 别名、counter 与退休保持原合同。source-free/borrowed
+的小型验证覆盖下游显式梯度，不代表图像操作或 SPD 本身新增自动微分支持。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典
