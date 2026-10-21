@@ -1,5 +1,6 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_sort.h"
+#include "taichi/runtime/native_primitive_contract.h"
 
 #include <algorithm>
 #include <array>
@@ -242,7 +243,7 @@ class CudaSort final : public SortBase {
   CudaSortWorkspace *typed_;
 };
 #endif
-void validate_sort_workspace(Device &, const SortWorkspaceDescription &d) {
+void validate_sort_workspace_description(const SortWorkspaceDescription &d) {
   const auto type = static_cast<int>(d.key_type);
   const std::size_t key_bytes = type >= 3 ? 8 : 4;
   if (type < 0 || type > 5 || d.size > std::numeric_limits<int>::max() ||
@@ -251,36 +252,66 @@ void validate_sort_workspace(Device &, const SortWorkspaceDescription &d) {
        (!d.value_scalar_bytes || d.value_bytes % d.value_scalar_bytes)) ||
       (!d.value_bytes && d.value_scalar_bytes) ||
       d.value_bytes / 4 > std::numeric_limits<int>::max() ||
+      d.value_bytes > std::numeric_limits<std::size_t>::max() - key_bytes - sizeof(std::uint32_t) ||
       d.size > std::numeric_limits<std::size_t>::max() /
                    (key_bytes + d.value_bytes + sizeof(std::uint32_t)))
     throw std::invalid_argument(
         "Sort workspace exceeds its record or i32 index ABI");
 }
 
-void validate_sort(Device &device, const SortOperation &operation) {
-  validate_sort_workspace(device, SortWorkspaceDescription::from(operation));
+}  // namespace
+
+SortOperation bind_sort_operation(const NativeArrayBinding &keys,
+                                  const NativeArrayBinding *values) {
+  if (keys.shape.size() != 1 || !keys.element_shape.empty() || keys.strides)
+    throw std::invalid_argument("Sort requires 1D scalar keys");
+  const std::array<DataType, 6> types{
+      PrimitiveType::u32, PrimitiveType::i32, PrimitiveType::f32,
+      PrimitiveType::u64, PrimitiveType::i64, PrimitiveType::f64};
+  const auto found = std::find(types.begin(), types.end(), keys.scalar_type);
+  if (found == types.end())
+    throw std::invalid_argument("Sort keys require i32/u32/f32/i64/u64/f64");
+  const auto width = native_primitive_record_bytes(keys);
+  if (keys.base_offset % width || keys.pointer.offset % width)
+    throw std::invalid_argument("Sort key storage is misaligned");
+  SortOperation result{keys.pointer, {}, keys.shape[0],
+                       static_cast<NativeSortKeyType>(found - types.begin())};
+  if (values) {
+    const auto bytes = native_primitive_record_bytes(*values);
+    if (values->shape != keys.shape || bytes % 4 ||
+        values->base_offset % 4 || values->pointer.offset % 4)
+      throw std::invalid_argument("Sort payload requires matching 1D raw-word records");
+    result.values = values->pointer;
+    result.value_bytes = bytes;
+    result.value_scalar_bytes = data_type_size(values->scalar_type);
+  }
+  validate_sort_workspace_description(SortWorkspaceDescription::from(result));
+  return result;
+}
+
+void validate_sort_operation(Device &device, const SortOperation &operation) {
+  validate_sort_workspace_description(SortWorkspaceDescription::from(operation));
   if (operation.workspace && (&operation.workspace->device() != &device ||
                               !operation.workspace->matches(operation)))
     throw std::invalid_argument("Sort workspace does not match its operation");
   const auto type = static_cast<int>(operation.key_type);
   const std::size_t key_bytes = type >= 3 ? 8 : 4;
-  if (type < 0 || type > 5 ||
-      operation.size > std::numeric_limits<int>::max() ||
-      operation.keys.device != &device || operation.keys.offset % key_bytes ||
+  if (operation.keys.device != &device || operation.keys.offset % key_bytes ||
       (operation.values.device &&
        (operation.values.device != &device || operation.values.offset % 4 ||
-        !operation.value_bytes || operation.value_bytes % 4 ||
-        !operation.value_scalar_bytes ||
-        operation.value_bytes % operation.value_scalar_bytes)) ||
-      (!operation.values.device && operation.value_bytes) ||
-      operation.value_bytes / 4 > std::numeric_limits<int>::max() ||
-      operation.size >
-          std::numeric_limits<std::size_t>::max() /
-              (key_bytes + operation.value_bytes + sizeof(std::uint32_t)))
+        !operation.value_bytes)) ||
+      (!operation.values.device && operation.value_bytes))
     throw std::invalid_argument(
         "Sort exceeds its key, record or i32 index ABI");
+  if (operation.size && operation.values.device &&
+      operation.keys.alloc_id == operation.values.alloc_id &&
+      (operation.keys.offset <= operation.values.offset
+           ? operation.values.offset - operation.keys.offset < operation.size * key_bytes
+           : operation.keys.offset - operation.values.offset < operation.size * operation.value_bytes))
+    throw std::invalid_argument("Sort key and payload ranges must not overlap");
 }
 
+namespace {
 template <typename Map>
 void map_sort(SortBase &result, const SortOperation &operation, Map map) {
   const std::size_t key_bytes =
@@ -404,9 +435,11 @@ prepare_cuda_sort(Arch arch, Device &device, const SortOperation &operation) {
 }  // namespace
 
 void register_sort_operation(NativeOperationRegistry &registry) {
-  registry.define<SortWorkspaceDescription>(validate_sort_workspace,
-                                            NativeObjectKind::resource);
-  registry.define<SortOperation>(validate_sort);
+  registry.define<SortWorkspaceDescription>(
+      [](Device &, const SortWorkspaceDescription &d) {
+        validate_sort_workspace_description(d);
+      }, NativeObjectKind::resource);
+  registry.define<SortOperation>(validate_sort_operation);
 #ifdef TI_WITH_LLVM
   registry.register_factory<SortWorkspaceDescription>(
       host_arch(), NativeOperationMode::cpu, prepare_cpu_sort_workspace);

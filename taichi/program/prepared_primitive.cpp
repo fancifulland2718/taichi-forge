@@ -7,6 +7,7 @@
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/runtime/native_operation.h"
+#include "taichi/runtime/native_primitive_contract.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
 #endif
@@ -14,26 +15,23 @@
 namespace taichi::lang {
 namespace {
 
-int sort_key_type(DataType type) {
-  if (type == PrimitiveType::u32) {
-    return 0;
-  }
-  if (type == PrimitiveType::i32) {
-    return 1;
-  }
-  if (type == PrimitiveType::f32) {
-    return 2;
-  }
-  if (type == PrimitiveType::u64) {
-    return 3;
-  }
-  if (type == PrimitiveType::i64) {
-    return 4;
-  }
-  if (type == PrimitiveType::f64) {
-    return 5;
-  }
-  TI_ERROR("Prepared sort keys require i32/u32/f32/i64/u64/f64");
+NativeArrayBinding primitive_array_layout(const storage::DenseStorageDescriptor &descriptor) {
+  NativeArrayBinding result;
+  result.scalar_type = descriptor.scalar_type();
+  auto shape = [](const auto &source) {
+    std::vector<std::uint64_t> result;
+    for (const auto extent : source) {
+      if (extent < 0)
+        throw std::invalid_argument("Prepared primitive shape cannot be negative");
+      result.push_back(static_cast<std::uint64_t>(extent));
+    }
+    return result;
+  };
+  result.shape = shape(descriptor.index_shape());
+  result.element_shape = shape(descriptor.element_shape());
+  // Storage admission below proves packed access, lifetime and alignment.
+  // Do not resolve an address or allocate scratch to normalize semantic facts.
+  return result;
 }
 
 int sort_value_type(DataType type) {
@@ -63,40 +61,27 @@ int sort_value_type(DataType type) {
 std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
     const storage::DenseStorageDescriptor &keys,
     const storage::DenseStorageDescriptor *values,
-    int nan_policy) {
+    int nan_policy) try {
   const auto arch = compile_config().arch;
   TI_ERROR_IF(!arch_is_cpu(arch) && arch != Arch::cuda && arch != Arch::vulkan,
               "Prepared sort requires CPU, CUDA or Vulkan");
   TI_ERROR_IF(nan_policy < 0 || nan_policy > 1 ||
                   (arch != Arch::cuda && nan_policy != 0),
               "Prepared CPU/Vulkan sort supports only nan_policy='last'");
-  TI_ERROR_IF(keys.index_rank() != 1 || keys.element_rank() != 0,
-              "Prepared sort requires one-dimensional scalar keys");
-  const auto n = keys.index_extent(0);
-  TI_ERROR_IF(n < 0 || n > std::numeric_limits<int>::max(),
-              "Prepared sort supports at most INT_MAX items");
+  const auto key_layout = primitive_array_layout(keys);
+  const auto value_layout = values ? primitive_array_layout(*values) : NativeArrayBinding{};
+  auto normalized = bind_sort_operation(key_layout, values ? &value_layout : nullptr);
   auto plan = std::make_shared<PreparedPrimitiveSort>();
-  plan->count_ = static_cast<int>(n);
-  plan->key_type_ = sort_key_type(keys.scalar_type());
+  plan->count_ = static_cast<int>(normalized.size);
+  plan->key_type_ = static_cast<int>(normalized.key_type);
   plan->key_bytes_ = data_type_size(keys.scalar_type());
   plan->nan_policy_ = nan_policy;
   std::vector<const storage::DenseStorageDescriptor *> descriptors{&keys};
   if (values) {
-    TI_ERROR_IF(values->index_rank() != 1 || values->element_rank() > 2 ||
-                    values->index_extent(0) != n,
-                "Prepared sort requires a matching scalar/vector/matrix payload range");
+    TI_ERROR_IF(values->element_rank() > 2,
+                "Prepared sort requires a scalar/vector/matrix payload range");
     plan->value_type_ = sort_value_type(values->scalar_type());
-    plan->value_bytes_ = data_type_size(values->scalar_type());
-    for (auto extent : values->element_shape()) {
-      TI_ERROR_IF(extent <= 0 || extent > std::numeric_limits<int>::max() ||
-                      plan->value_bytes_ >
-                          std::numeric_limits<std::size_t>::max() / extent,
-                  "Prepared sort payload dimensions exceed the native representation");
-      plan->value_bytes_ *= extent;
-    }
-    TI_ERROR_IF(plan->value_bytes_ / sizeof(std::uint32_t) >
-                    std::numeric_limits<int>::max(),
-                "Prepared sort payload word count exceeds INT_MAX");
+    plan->value_bytes_ = normalized.value_bytes;
     descriptors.push_back(values);
   }
   if (arch == Arch::cuda) {
@@ -113,15 +98,6 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
                 "Native stable sort is unavailable");
     plan->storage_ = prepare_native_storage(
         descriptors, std::vector<bool>(descriptors.size(), true));
-    if (values) {
-      const auto &a = plan->storage_->binding(0);
-      const auto &b = plan->storage_->binding(1);
-      TI_ERROR_IF(a.pointer.device == b.pointer.device &&
-                      a.pointer.alloc_id == b.pointer.alloc_id &&
-                      a.pointer.offset < b.pointer.offset + b.bytes &&
-                      b.pointer.offset < a.pointer.offset + a.bytes,
-                  "Prepared sort key and payload ranges must not overlap");
-    }
     for (std::size_t i = 0; arch == Arch::vulkan && i < descriptors.size(); ++i) {
       const auto &binding = plan->storage_->binding(i);
       DeviceAllocation allocation{binding.pointer.device,
@@ -136,9 +112,15 @@ std::shared_ptr<PreparedPrimitiveSort> Program::prepare_primitive_sort(
           allocation, dtype, std::vector<int>{plan->count_});
     }
   }
+  normalized.keys = plan->storage_->binding(0).pointer;
+  if (values)
+    normalized.values = plan->storage_->binding(1).pointer;
+  validate_sort_operation(*normalized.keys.device, normalized);
   // No mathematical operation, command submission, scratch allocation or
   // synchronization. First execution may populate the backend workspace.
   return plan;
+} catch (const std::invalid_argument &error) {
+  TI_ERROR("{}", error.what());
 }
 
 std::size_t Program::execute_primitive_sort(const PreparedPrimitiveSort &plan) {
@@ -189,22 +171,20 @@ std::shared_ptr<PreparedPrimitiveCompact> Program::prepare_primitive_compact(
     const std::vector<const storage::DenseStorageDescriptor *> &inputs,
     const storage::DenseStorageDescriptor &flags,
     const std::vector<const storage::DenseStorageDescriptor *> &outputs,
-    const storage::DenseStorageDescriptor &count) {
+    const storage::DenseStorageDescriptor &count) try {
   const auto arch = compile_config().arch;
   TI_ERROR_IF(arch != Arch::cuda && arch != Arch::vulkan,
               "Prepared compact requires CUDA or Vulkan");
   TI_ERROR_IF(inputs.empty() || inputs.size() != outputs.size(),
               "Prepared compact requires matching input/output columns");
-  TI_ERROR_IF(flags.index_rank() != 1 || flags.element_rank() != 0 ||
-                  flags.scalar_type() != PrimitiveType::i32,
-              "Prepared compact flags require a 1D scalar i32 range");
-  const auto n = flags.index_extent(0);
-  TI_ERROR_IF(n <= 0 || n > std::numeric_limits<int>::max(),
-              "Prepared compact capacity must be positive and at most INT_MAX");
-  TI_ERROR_IF(count.element_rank() != 0 || count.index_rank() > 1 ||
-                  count.scalar_type() != PrimitiveType::i32 ||
-                  (count.index_rank() == 1 && count.index_extent(0) < 1),
-              "Prepared compact count requires scalar i32 or a nonempty i32 vector");
+  std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> columns;
+  for (std::size_t i = 0; i < inputs.size(); ++i) {
+    TI_ERROR_IF(!inputs[i] || !outputs[i], "Prepared compact requires live columns");
+    columns.emplace_back(primitive_array_layout(*inputs[i]), primitive_array_layout(*outputs[i]));
+  }
+  auto normalized = bind_compact_operation(primitive_array_layout(flags), primitive_array_layout(count), columns);
+  const auto n = normalized.size;
+  TI_ERROR_IF(!n, "Prepared compact capacity must be positive");
   auto plan = std::make_shared<PreparedPrimitiveCompact>();
   plan->count_ = static_cast<int>(n);
   std::vector<const storage::DenseStorageDescriptor *> descriptors{&flags, &count};
@@ -212,22 +192,11 @@ std::shared_ptr<PreparedPrimitiveCompact> Program::prepare_primitive_compact(
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     const auto *input = inputs[i];
     const auto *output = outputs[i];
-    TI_ERROR_IF(!input || !output || input->index_rank() != 1 ||
-                    output->index_rank() != 1 || input->index_extent(0) != n ||
-                    output->index_extent(0) < n,
-                "Prepared compact needs matching input/flags and sufficient output capacity");
     // The existing raw-word scatter supports scalar, vector and matrix records.
     sort_value_type(input->scalar_type());
-    TI_ERROR_IF(input->scalar_type() != output->scalar_type() ||
-                    input->element_shape() != output->element_shape() ||
-                    input->element_rank() > 2,
-                "Prepared compact input/output record types must match");
-    std::size_t bytes = data_type_size(input->scalar_type());
-    for (auto extent : input->element_shape()) {
-      TI_ERROR_IF(extent <= 0 || bytes > std::numeric_limits<int>::max() / extent,
-                  "Prepared compact record size is unsupported");
-      bytes *= extent;
-    }
+    TI_ERROR_IF(input->element_rank() > 2,
+                "Prepared compact requires scalar/vector/matrix records");
+    const auto bytes = normalized.columns[i].item_bytes;
     TI_ERROR_IF(arch == Arch::vulkan &&
                     static_cast<std::size_t>(n) >
                         std::numeric_limits<std::uint32_t>::max() / (bytes / 4),
@@ -246,20 +215,17 @@ std::shared_ptr<PreparedPrimitiveCompact> Program::prepare_primitive_compact(
   } else {
     TI_ERROR_IF(!vulkan_compact_available(), "Vulkan native compact is unavailable");
     plan->storage_ = prepare_native_storage(descriptors, writable);
-    for (std::size_t i = 0; i < descriptors.size(); ++i) {
-      const auto &a = plan->storage_->binding(i);
-      for (std::size_t j = 0; j < i; ++j) {
-        const auto &b = plan->storage_->binding(j);
-        TI_ERROR_IF((writable[i] || writable[j]) &&
-                        a.pointer.device == b.pointer.device &&
-                        a.pointer.alloc_id == b.pointer.alloc_id &&
-                        a.pointer.offset < b.pointer.offset + b.bytes &&
-                        b.pointer.offset < a.pointer.offset + a.bytes,
-                    "Prepared compact writable storage ranges must not overlap");
-      }
-    }
   }
+  normalized.flags = plan->storage_->binding(0).pointer;
+  normalized.count = plan->storage_->binding(1).pointer;
+  for (std::size_t i = 0; i < normalized.columns.size(); ++i) {
+    normalized.columns[i].values = plan->storage_->binding(2 + i * 2).pointer;
+    normalized.columns[i].output = plan->storage_->binding(3 + i * 2).pointer;
+  }
+  validate_compact_operation(*normalized.flags.device, normalized);
   return plan;
+} catch (const std::invalid_argument &error) {
+  TI_ERROR("{}", error.what());
 }
 
 std::size_t Program::execute_primitive_compact(const PreparedPrimitiveCompact &plan) {

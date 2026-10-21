@@ -1,4 +1,5 @@
 #include "taichi/runtime/native_operation_registry.h"
+#include "taichi/runtime/native_primitive_contract.h"
 
 #include <algorithm>
 #include <cstring>
@@ -181,7 +182,39 @@ class CudaCompact final : public CompactBase {
   void *workspace_pointer_{nullptr};
 };
 #endif
-void validate_compact(Device &device, const CompactOperation &operation) {
+}  // namespace
+
+CompactOperation bind_compact_operation(
+    const NativeArrayBinding &flags,
+    const NativeArrayBinding &count,
+    const std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> &columns) {
+  if (flags.strides || count.strides || flags.shape.size() != 1 ||
+      flags.scalar_type != PrimitiveType::i32 || !flags.element_shape.empty() ||
+      count.scalar_type != PrimitiveType::i32 || !count.element_shape.empty() ||
+      count.shape.size() > 1 || (!count.shape.empty() && !count.shape[0]) ||
+      flags.base_offset % 4 || flags.pointer.offset % 4 ||
+      count.base_offset % 4 || count.pointer.offset % 4)
+    throw std::invalid_argument("Compact requires 1D i32 flags and a writable i32 count");
+  if (columns.empty() || flags.shape[0] > std::numeric_limits<std::int32_t>::max())
+    throw std::invalid_argument("Compact requires columns and an i32 count");
+  CompactOperation result{{}, flags.pointer, count.pointer, flags.shape[0]};
+  for (const auto &[input, output] : columns) {
+    const auto bytes = native_primitive_record_bytes(input);
+    native_primitive_record_bytes(output);
+    if (input.shape != flags.shape || output.shape.size() != 1 ||
+        output.shape[0] < input.shape[0] || input.scalar_type != output.scalar_type ||
+        input.element_shape != output.element_shape || bytes % 4 ||
+        input.base_offset % 4 || input.pointer.offset % 4 ||
+        output.base_offset % 4 || output.pointer.offset % 4 ||
+        bytes / 4 > std::numeric_limits<int>::max() ||
+        result.size > std::numeric_limits<std::size_t>::max() / bytes)
+      throw std::invalid_argument("Compact requires matching 1D raw-word records and sufficient output capacity");
+    result.columns.push_back({input.pointer, output.pointer, bytes});
+  }
+  return result;
+}
+
+void validate_compact_operation(Device &device, const CompactOperation &operation) {
   if (operation.size > std::numeric_limits<std::int32_t>::max() ||
       operation.columns.empty())
     throw std::invalid_argument("Compact requires columns and an i32 count");
@@ -210,6 +243,7 @@ void validate_compact(Device &device, const CompactOperation &operation) {
   validate_ranges(std::move(ranges));
 }
 
+namespace {
 template <typename Map>
 void map_compact(CompactBase &result,
                  const CompactOperation &operation,
@@ -269,7 +303,7 @@ std::shared_ptr<NativeOperation> prepare_cuda_compact(
 }  // namespace
 
 void register_compact_operation(NativeOperationRegistry &registry) {
-  registry.define<CompactOperation>(validate_compact);
+  registry.define<CompactOperation>(validate_compact_operation);
 #ifdef TI_WITH_LLVM
   registry.register_factory<CompactOperation>(
       host_arch(), NativeOperationMode::cpu, prepare_cpu_compact);

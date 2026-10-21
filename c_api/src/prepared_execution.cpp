@@ -13,6 +13,7 @@
 #include "taichi/runtime/fixed_execution.h"
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_sort.h"
+#include "taichi/runtime/native_primitive_contract.h"
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
@@ -1718,62 +1719,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
         }
       } else if (const auto *sort =
                      std::get_if<aot::ExecutionPlan::Sort>(&operation)) {
-        const auto keys = storage(sort->keys, 0);
-        const auto &array = arguments.at(sort->keys)->value.ndarray;
-        if (array.shape.dim_count != 1 || array.elem_shape.dim_count)
-          throw MemoryBindingError("Sort requires 1D scalar keys");
-        NativeSortKeyType key_type;
-        switch (array.elem_type) {
-          case TI_DATA_TYPE_U32:
-            key_type = NativeSortKeyType::u32;
-            break;
-          case TI_DATA_TYPE_I32:
-            key_type = NativeSortKeyType::i32;
-            break;
-          case TI_DATA_TYPE_F32:
-            key_type = NativeSortKeyType::f32;
-            break;
-          case TI_DATA_TYPE_U64:
-            key_type = NativeSortKeyType::u64;
-            break;
-          case TI_DATA_TYPE_I64:
-            key_type = NativeSortKeyType::i64;
-            break;
-          case TI_DATA_TYPE_F64:
-            key_type = NativeSortKeyType::f64;
-            break;
-          default:
-            throw MemoryBindingError(
-                "Sort keys require i32/u32/f32/i64/u64/f64");
-        }
-        if (rt.get_memory(array.memory, bool(domain)).base_offset %
-            keys.element_bytes)
-          throw MemoryBindingError("Sort key storage is misaligned");
-        SortOperation descriptor{
-            keys.pointer, {}, array.shape.dims[0], key_type};
-        if (sort->values) {
-          const auto values = storage(*sort->values, 0);
-          const auto &payload = arguments.at(*sort->values)->value.ndarray;
-          if (payload.shape.dim_count != 1 ||
-              payload.shape.dims[0] != array.shape.dims[0] ||
-              !values.element_bytes || values.element_bytes % 4 ||
-              rt.get_memory(payload.memory, bool(domain)).base_offset % 4)
-            throw MemoryBindingError(
-                "Sort payload requires matching 1D raw-word records");
-          if (keys.size && values.size &&
-              keys.pointer.alloc_id == values.pointer.alloc_id &&
-              (keys.pointer.offset <= values.pointer.offset
-                   ? values.pointer.offset - keys.pointer.offset < keys.size
-                   : keys.pointer.offset - values.pointer.offset < values.size))
-            throw MemoryBindingError(
-                "Sort key and payload ranges must not overlap");
-          descriptor.values = values.pointer;
-          descriptor.value_bytes = static_cast<size_t>(values.element_bytes);
-          descriptor.value_scalar_bytes = descriptor.value_bytes;
-          for (uint32_t i = 0; i < payload.elem_shape.dim_count; ++i)
-            descriptor.value_scalar_bytes /= payload.elem_shape.dims[i];
-        }
         try {
+          auto descriptor = bind_sort_operation(
+              array_binding(sort->keys),
+              sort->values ? &array_binding(*sort->values) : nullptr);
           if (!preparing_initialization) {
             const auto description = SortWorkspaceDescription::from(descriptor);
             auto &workspace = sort_workspaces[description.signature()];
@@ -1791,51 +1740,12 @@ static TiPreparedExecution prepare_execution_plan_impl(
         }
       } else if (const auto *compact =
                      std::get_if<aot::ExecutionPlan::Compact>(&operation)) {
-        auto compact_storage = [&](const std::string &name) {
-          auto result = storage(name, 0);
-          if (rt.get_memory(arguments.at(name)->value.ndarray.memory,
-                            bool(domain))
-                  .base_offset %
-              4)
-            throw MemoryBindingError("Compact storage must be 4-byte aligned");
-          return result;
-        };
-        const auto flag_storage = compact_storage(compact->flags);
-        const auto count_storage = compact_storage(compact->count);
-        const auto &flags = arguments.at(compact->flags)->value.ndarray;
-        const auto &count = arguments.at(compact->count)->value.ndarray;
-        if (flags.shape.dim_count != 1 || flags.elem_type != TI_DATA_TYPE_I32 ||
-            flags.elem_shape.dim_count || count.elem_type != TI_DATA_TYPE_I32 ||
-            count.elem_shape.dim_count || count.shape.dim_count > 1 ||
-            (count.shape.dim_count == 1 && count.shape.dims[0] < 1))
-          throw MemoryBindingError(
-              "Compact requires 1D i32 flags and a writable i32 count");
-        CompactOperation descriptor{{},
-                                    flag_storage.pointer,
-                                    count_storage.pointer,
-                                    flags.shape.dims[0]};
-        for (const auto &column : compact->columns) {
-          const auto source = compact_storage(column.values);
-          const auto destination = compact_storage(column.output);
-          const auto &values = arguments.at(column.values)->value.ndarray;
-          const auto &output = arguments.at(column.output)->value.ndarray;
-          if (values.shape.dim_count != 1 || output.shape.dim_count != 1 ||
-              values.shape.dims[0] != flags.shape.dims[0] ||
-              output.shape.dims[0] < values.shape.dims[0] ||
-              values.elem_type != output.elem_type ||
-              values.elem_shape.dim_count != output.elem_shape.dim_count)
-            throw MemoryBindingError(
-                "Compact requires matching 1D records and sufficient output "
-                "capacity");
-          for (uint32_t i = 0; i < values.elem_shape.dim_count; ++i)
-            if (values.elem_shape.dims[i] != output.elem_shape.dims[i])
-              throw MemoryBindingError(
-                  "Compact input and output element shapes differ");
-          descriptor.columns.push_back(
-              {source.pointer, destination.pointer,
-               static_cast<size_t>(source.element_bytes)});
-        }
         try {
+          std::vector<std::pair<NativeArrayBinding, NativeArrayBinding>> columns;
+          for (const auto &column : compact->columns)
+            columns.emplace_back(array_binding(column.values), array_binding(column.output));
+          const auto descriptor = bind_compact_operation(
+              array_binding(compact->flags), array_binding(compact->count), columns);
           operations.emplace_back(
               prepare_compact_operation(rt.arch, rt.get(), descriptor));
         } catch (const std::invalid_argument &error) {
