@@ -105,6 +105,13 @@ cuBLAS GEMM 的普通调用、recording 和导出共用 `GemmDefinition`，保�
 提交及 beta 对输出读写的影响。dot/axpy/scal/nrm2 已有 native 描述与 factory；它们没有
 因此新增普通 Python recording。共享定义不代表新的后端、布局或自动微分资格。
 
+CUB source addon 的普通 plan 与 selected segmented capture 共用冻结的操作、范围和
+外部二进制/target/driver 身份。CUTLASS selected recording 与 capture 直接共用同一
+NativeDefinition，包括实际 strategy 和 workspace；两种 exporter 均通过默认 adapter
+连接资源，不在导出时重新查询 provider。manifest 只投影部署要求，外部 addon 仍独立安装。
+SPIR-V/PTX 继续复用既有不可变资产及内容身份；拓扑 bytes 与 workspace 生命周期仍分别管理，
+不把大二进制装入普通参数。具体 shader/pipeline/AS 闭包的资格仍由所属适配器检查。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典

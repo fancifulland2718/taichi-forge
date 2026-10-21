@@ -136,6 +136,16 @@ already have native descriptions and factories; this does not add ordinary Pytho
 recordings for them. Shared definitions do not imply new backend, layout or
 autodiff qualification.
 
+Ordinary CUB source plans and selected segmented capture share frozen operation,
+extent and external binary/target/driver facts. Selected CUTLASS recordings and
+capture share the same NativeDefinition, including actual strategy and workspace.
+Both exporters connect resources through the default adapter without querying
+providers again. Manifest projections carry deployment requirements; external
+addons remain separately installed. SPIR-V/PTX reuse existing immutable assets
+and content identities. Topology bytes and workspace retain separate lifetimes;
+large binaries are not ordinary parameters. Concrete shader, pipeline and AS
+closures still require their own adapter qualification.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive
