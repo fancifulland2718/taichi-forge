@@ -1527,6 +1527,13 @@ uniform 读取依赖；重放不重建或上传只读包存储。关闭包、成
 family 按既有私有状态合同共享存储。symbolic Graph 参数包自动导出及结构化 Graph
 参数包路径仍待完成。
 
+配套 Windows runtime/frontend wheel 已通过 CPU/CUDA/Vulkan 的正常安装验证，
+覆盖独立与借用执行、持久参数包的前向/显式反向、状态隔离和退休；仅安装 runtime 的
+独立环境也能消费同一产物，Vulkan 同步验证通过。参数包及共享布局这批更新相对上一
+安装节点增加 runtime wheel 35,877B、frontend 1,294B。既有 GeoPhys `fem_material`
+和 `rigid_parent` 固定入口通过结果检查；应用唯一 TCM 与44项外部依赖保持，
+这不代表已在最新组件上重跑全部应用场景。
+
 C 消费者通过 `ti_get_kernel_argpack_info_ext` 查询布局，通过
 `ti_create_kernel_argpack_ext` 创建同一 owner。以 `TiArgPackMember` 的相对整数路径
 精确提供所有值/资源叶子，不提供嵌套包容器节点。值使用载荷大小精确匹配的

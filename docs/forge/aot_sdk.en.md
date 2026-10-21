@@ -1951,6 +1951,15 @@ own independent storage; selected CUDA binding families share it with their
 existing private state. Automatic symbolic Graph pack export and structured
 Graph pack routes remain pending.
 
+Matching Windows runtime/frontend wheels pass installed CPU/CUDA/Vulkan checks
+for standalone and borrowed execution, persistent-pack forward/explicit reverse
+calls, state isolation and retirement. A separate runtime-only environment also
+consumes the artifacts; Vulkan synchronization validation passes. This pack and
+shared-layout batch adds 35,877B to the runtime wheel and 1,294B to the frontend
+relative to the previous installed node. Existing GeoPhys `fem_material` and
+`rigid_parent` entries pass result checks with the application's single TCM and
+44 external dependencies unchanged; this is not a full application requalification.
+
 C consumers query `ti_get_kernel_argpack_info_ext` and create the same owner with
 `ti_create_kernel_argpack_ext`. Supply exactly the value/resource leaves as
 `TiArgPackMember` descriptors with relative integer paths; omit nested-pack
