@@ -16,6 +16,7 @@ from taichi_forge._hardware_telemetry import (
 )
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native_definition import NativeDefinition
+from taichi_forge.hardware._optix_query_definition import OptixQueryDefinition
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
@@ -1269,13 +1270,22 @@ class OptixRayQueryRecording(BackendCommandRecording):
             replay_mode="rerecord",
             no_host_readback=True,
         )
+        object.__setattr__(
+            self,
+            "_query_definition",
+            OptixQueryDefinition(
+                ray_count,
+                any_hit,
+                _occlusion,
+                scene.instance_count if isinstance(scene, OptixInstanceScene) else 1,
+                face_rules,
+                alpha_masks,
+            ),
+        )
         object.__setattr__(self, "scene", scene)
-        object.__setattr__(self, "ray_count", ray_count)
         object.__setattr__(self, "rays", rays)
         object.__setattr__(self, "hits", hits)
         object.__setattr__(self, "hit_indices", hit_indices)
-        object.__setattr__(self, "alpha_masks", alpha_masks)
-        object.__setattr__(self, "face_rules", face_rules)
         object.__setattr__(
             self,
             "_face_identity",
@@ -1288,9 +1298,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 )
             ),
         )
-        object.__setattr__(self, "any_hit", any_hit)
         object.__setattr__(self, "_micromap", micromap)
-        object.__setattr__(self, "_occlusion", _occlusion)
         object.__setattr__(
             self, "_hit_layout", "u32_occlusion" if _occlusion else "legacy_float4" if hit_indices is None else "typed"
         )
@@ -1328,6 +1336,26 @@ class OptixRayQueryRecording(BackendCommandRecording):
                     else 2 if alpha_masks is not None or _occlusion else 1 if hit_indices is not None else 0
                 )
             )
+
+    @property
+    def ray_count(self):
+        return self._query_definition.ray_count
+
+    @property
+    def alpha_masks(self):
+        return self._query_definition.alpha_masks
+
+    @property
+    def face_rules(self):
+        return self._query_definition.face_rules
+
+    @property
+    def any_hit(self):
+        return self._query_definition.any_hit
+
+    @property
+    def _occlusion(self):
+        return self._query_definition.occlusion
 
     @property
     def resource_effects(self):

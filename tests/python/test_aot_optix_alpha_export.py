@@ -15,10 +15,23 @@ from tests.python.aot_optix_probe import RAYS
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_optix_alpha_recording_export(tmp_path):
+def test_optix_alpha_recording_export(tmp_path, monkeypatch):
     adapter = os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER")
     if not adapter:
         pytest.skip("explicit common OptiX adapter required")
+
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
+    definitions, lowered = [], []
+    original_lower = NativeOperationBinding.lower
+
+    def lower(binding, context, **kwargs):
+        if binding.definition.provider == "optix" and binding.definition.operation == "query":
+            assert any(binding.definition is item for item in definitions)
+            lowered.append(binding.definition)
+        return original_lower(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeOperationBinding, "lower", lower)
 
     @ti.kernel
     def update(
@@ -118,16 +131,11 @@ def test_optix_alpha_recording_export(tmp_path):
                         for uv, tex in (("uva", "alpha_a"), ("uvb", "alpha_b"))
                     )
                     rules = (ti.hardware.ray.OptixFaceRuleTable("faces"), "front_only")
-                    builder.append_native(
-                        scene.record_typed(
-                            4, hit_indices="ids", alpha_masks=masks, face_rules=rules
-                        ),
-                        admission="explicit",
-                    )
-                    builder.append_native(
-                        scene.record_occlusion(4, alpha_masks=masks, face_rules=rules),
-                        admission="explicit",
-                    )
+                    main = scene.record_typed(4, hit_indices="ids", alpha_masks=masks, face_rules=rules)
+                    shadow = scene.record_occlusion(4, alpha_masks=masks, face_rules=rules)
+                    definitions.extend((main._query_definition.native, shadow._query_definition.native))
+                    builder.append_native(main, admission="explicit")
+                    builder.append_native(shadow, admission="explicit")
                     jit_graph = builder.compile()
                     builder.dispatch(
                         clear, symbol("dhits", 2), symbol("loss", 1), symbol("dloss", 1)
@@ -156,7 +164,7 @@ def test_optix_alpha_recording_export(tmp_path):
                             (
                                 sources,
                                 seeds | {texture: dict(pixels="alpha_a")},
-                                "qualified sampled-image",
+                                "qualified typed operation",
                             ),
                         ):
                             with pytest.raises(
@@ -257,6 +265,7 @@ def test_optix_alpha_recording_export(tmp_path):
                         )
 
                         SourceImageBindings(sources, {})
+    assert all(any(item is definition for item in lowered) for definition in definitions)
     artifact = tmp_path / "alpha-export.tcm"
     assert len(module._exported_kernels) == 4 and not module._data_payloads
     module.archive(str(artifact))

@@ -7,7 +7,7 @@ import weakref
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
-from taichi_forge.graph._native_definition import NativeDefinition
+from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge._hardware_telemetry import (
     hardware_failure_phase,
@@ -121,7 +121,7 @@ class VulkanRayQueryRecording(BackendCommandRecording):
             no_host_readback=True,
         )
         object.__setattr__(self, "scene", scene)
-        object.__setattr__(self, "ray_count", ray_count)
+        object.__setattr__(self, "_definition", NativeDefinition("vulkan_ray", "query", dict(ray_count=ray_count)))
         object.__setattr__(self, "rays", rays)
         object.__setattr__(self, "hits", hits)
         object.__setattr__(self, "hit_indices", hit_indices)
@@ -129,6 +129,20 @@ class VulkanRayQueryRecording(BackendCommandRecording):
             self, "trace_closest", scene._effect_name, ray_count=ray_count,
             hit_layout="legacy_float4" if hit_indices is None else "typed",
         )
+
+    @property
+    def ray_count(self):
+        return self._definition.parameters["ray_count"]
+
+    @property
+    def _arrays(self):
+        arrays = (
+            NativeArrayBinding("rays", self.rays, GraphAccess.READ),
+            NativeArrayBinding("hits", self.hits, GraphAccess.WRITE),
+        )
+        if self.hit_indices is not None:
+            arrays += (NativeArrayBinding("hit_indices", self.hit_indices, GraphAccess.WRITE),)
+        return arrays
 
     @property
     def resource_effects(self):

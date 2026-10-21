@@ -214,6 +214,8 @@ def test_shared_gas_faces_graph_refit_rebind_and_retirement(monkeypatch):
             patched.setattr(_optix, "_ray_storage", no_cold_work)
             patched.setattr(_optix, "_instance_transform_storage", no_cold_work)
             patched.setattr(_optix, "_query_provider", no_cold_work)
+            patched.setattr(_optix, "OptixQueryDefinition", no_cold_work)
+            patched.setattr(_optix, "NativeDefinition", no_cold_work)
             for transform in variants:
                 matrices = np.tile(transform, (2, 1, 1))
                 matrices[1, 0, 3] += 4

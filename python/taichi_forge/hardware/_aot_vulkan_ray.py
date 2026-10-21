@@ -5,10 +5,10 @@ from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.graph._native_definition import (
     NativeArrayBinding,
     NativeDefinition,
+    NativeOperationBinding,
     NativeResourceBinding,
     NativeResourceReference,
 )
-
 
 def export_micromap(asset, context):
     from ._vulkan_micromap import VulkanOpacityMicromap
@@ -115,10 +115,11 @@ def _scene(context, scene):
 
 def export_query(recording, context):
     recording.validate_graph_lifetime()
-    bindings = dict(scene=_scene(context, recording.scene), rays=recording.rays, hits=recording.hits)
-    if recording.hit_indices is not None:
-        bindings["hit_indices"] = recording.hit_indices
-    context.native("vulkan_ray", "query", parameters=dict(ray_count=recording.ray_count), bindings=bindings)
+    NativeOperationBinding(
+        recording._definition,
+        recording._arrays,
+        resources=(("scene", NativeResourceReference(_scene(context, recording.scene))),),
+    ).lower(context)
     return ()
 
 
