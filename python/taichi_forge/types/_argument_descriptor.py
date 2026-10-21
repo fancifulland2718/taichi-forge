@@ -80,9 +80,12 @@ class ArgumentTypeDescriptor:
     needs_grad: Optional[bool] = None
     fmt: object = None
     capacity: Optional[int] = None
+    # Logical members include resources omitted from the packed value dtype.
+    # This describes specialization, never device offsets or live owners.
+    members: Tuple[Tuple[str, "ArgumentTypeDescriptor"], ...] = ()
 
     def structural_key(self):
-        return (
+        key = (
             self.kind,
             self.element.structural_key() if self.element is not None else None,
             self.ndim,
@@ -90,6 +93,9 @@ class ArgumentTypeDescriptor:
             str(self.fmt) if self.fmt is not None else None,
             self.capacity,
         )
+        if self.kind == "argpack":
+            return key + (tuple((name, member.structural_key()) for name, member in self.members),)
+        return key
 
 
 def describe_element_type(dtype):
@@ -134,6 +140,7 @@ def describe_annotation(annotation):
     # frontend import cycle.
     from taichi_forge.lang.matrix import MatrixType
     from taichi_forge.lang.struct import StructType
+    from taichi_forge.lang.argpack import ArgPackType
     from taichi_forge.types.ndarray_type import NdarrayType
     from taichi_forge.types.ray_type import AccelerationStructureType
     from taichi_forge.types.texture_type import (
@@ -142,6 +149,26 @@ def describe_annotation(annotation):
         TextureType,
     )
 
+    if isinstance(annotation, ArgPackType):
+        active = set()
+
+        def describe_pack(pack):
+            if id(pack) in active:
+                raise ValueError("Cyclic ArgPack type declaration")
+            active.add(id(pack))
+            try:
+                return ArgumentTypeDescriptor(
+                    "argpack",
+                    members=tuple(
+                        (name, describe_pack(member) if isinstance(member, ArgPackType)
+                         else describe_annotation(member))
+                        for name, member in pack.members.items()
+                    ),
+                )
+            finally:
+                active.remove(id(pack))
+
+        return describe_pack(annotation)
     if isinstance(annotation, NdarrayType):
         return ArgumentTypeDescriptor(
             "ndarray",
