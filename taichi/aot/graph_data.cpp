@@ -5443,6 +5443,9 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   };
 #if defined(TI_WITH_CUDA)
   if (cuda_graph_state) {
+    // Diagnostics may read device control counters after the submission guard
+    // restored the caller's context. Do not require a sticky current context.
+    auto context_guard = CUDAContext::get_instance().get_guard();
     if (graph_diagnostics_enabled) {
       cuda_graph_state->diagnostics_enabled = true;
       for (const auto &alternate : cuda_graph_state_alternates) {
