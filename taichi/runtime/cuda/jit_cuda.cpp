@@ -1,5 +1,6 @@
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
+#include "taichi/runtime/cuda/runtime_module.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
@@ -11,6 +12,9 @@
 
 #include "llvm/IR/Metadata.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Support/MemoryBuffer.h"
 
 namespace taichi::lang {
 
@@ -94,6 +98,86 @@ const char *cuda_artifact_role_name(JITModuleRole role) {
   TI_NOT_IMPLEMENTED
 }
 
+// Physical group owners are allocated during session initialization. Deferred
+// preparation fills existing slots without changing the module-owner vector.
+class RuntimeModuleCUDA final : public JITModuleCUDA {
+ public:
+  using Loader =
+      std::function<void(std::unique_ptr<llvm::Module> &, CUDARuntimeGroup)>;
+
+  RuntimeModuleCUDA(const llvm::Module &module,
+                    const std::vector<std::string> &entries,
+                    const std::map<CUDARuntimeGroup, JITModuleCUDA *> &groups,
+                    Loader loader)
+      : JITModuleCUDA(nullptr, CUDAArtifactKind::ptx, 0),
+        loader_(std::move(loader)) {
+    for (const auto &entry : entries)
+      entries_.emplace(entry, Entry{cuda_runtime_group(entry), nullptr});
+    for (const auto &[group, owner] : groups)
+      groups_.emplace(group, Group{owner, false});
+    llvm::raw_string_ostream output(bitcode_);
+    llvm::WriteBitcodeToFile(module, output);
+  }
+
+  void *lookup_function(const std::string &name) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = entries_.find(name);
+    TI_ERROR_IF(found == entries_.end(), "Unknown CUDA runtime entry {}", name);
+    auto &entry = found->second;
+    if (!entry.function) {
+      prepare(entry.group);
+      entry.function = groups_.at(entry.group).owner->lookup_function(name);
+    }
+    return entry.function;
+  }
+
+  void prepare(CUDARuntimeGroup group) {
+    auto &state = groups_.at(group);
+    if (state.ready)
+      return;
+    TI_COMPILE_PROFILER("cuda_runtime_group_prepare")
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    std::uint32_t capture_status = 0;
+    driver.stream_get_capture_info_v2(nullptr, &capture_status, nullptr,
+                                      nullptr, nullptr, nullptr);
+    TI_ERROR_IF(capture_status != 0,
+                "Prepare CUDA runtime group {} before stream capture",
+                cuda_runtime_group_name(group));
+    // Each preparation owns a fresh LLVM context. Failed compilation leaves
+    // the immutable bitcode and the empty physical slot available for retry.
+    llvm::LLVMContext context;
+    auto parsed = llvm::parseBitcodeFile(
+        llvm::MemoryBufferRef(bitcode_, "cuda_runtime"), context);
+    if (!parsed)
+      TI_ERROR("Cannot parse CUDA runtime group: {}",
+               llvm::toString(parsed.takeError()));
+    auto module = std::move(*parsed);
+    retain_cuda_runtime_group(*module, group);
+    TI_TRACE("Preparing CUDA runtime group {}", cuda_runtime_group_name(group));
+    loader_(module, group);
+    state.ready = true;
+    if (std::all_of(groups_.begin(), groups_.end(),
+                    [](const auto &item) { return item.second.ready; }))
+      std::string().swap(bitcode_);
+  }
+
+ private:
+  struct Entry {
+    CUDARuntimeGroup group;
+    void *function;
+  };
+  struct Group {
+    JITModuleCUDA *owner;
+    bool ready;
+  };
+  std::mutex mutex_;
+  std::string bitcode_;
+  std::map<std::string, Entry> entries_;
+  std::map<CUDARuntimeGroup, Group> groups_;
+  Loader loader_;
+};
+
 }  // namespace
 
 std::string convert(std::string new_name);
@@ -104,17 +188,62 @@ static std::vector<char> emit_module_to_ptx(
     const CUDACodegenTarget &codegen_target,
     std::vector<int> &tree_relocations);
 
-JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
-                                       int max_reg,
-                                       JITModuleRole role) {
+JITModule *JITSessionCUDA::add_module(std::unique_ptr<llvm::Module> M,
+                                      int max_reg,
+                                      JITModuleRole role) {
   auto &context = CUDAContext::get_instance();
   const CUDACodegenTarget target{context.get_mcpu(), context.get_mattrs()};
-  auto artifact = compile_cuda_kernel_artifact(M, config_, target, max_reg, role);
-  if (this->config_.print_kernel_asm) {
-    static FileSequenceWriter writer("taichi_kernel_nvptx_{:04d}.ptx",
-                                     "module NVPTX");
-    writer.write(std::string(artifact.payload.data(), artifact.code_size()));
+  auto compile = [target, max_reg, role](std::unique_ptr<llvm::Module> &module,
+                                         const CompileConfig &config) {
+    auto artifact =
+        compile_cuda_kernel_artifact(module, config, target, max_reg, role);
+    if (config.print_kernel_asm) {
+      static FileSequenceWriter writer("taichi_kernel_nvptx_{:04d}.ptx",
+                                       "module NVPTX");
+      writer.write(std::string(artifact.payload.data(), artifact.code_size()));
+    }
+    return artifact;
+  };
+  if (role == JITModuleRole::runtime && cuda_runtime_can_partition(*M) &&
+      CUDADriver::get_instance().stream_get_capture_info_v2.available()) {
+    const auto entries = cuda_kernel_entry_names(*M);
+    std::map<CUDARuntimeGroup, std::unique_ptr<JITModuleCUDA>> owners;
+    std::map<CUDARuntimeGroup, JITModuleCUDA *> slots;
+    for (const auto &entry : entries) {
+      auto group = cuda_runtime_group(entry);
+      if (!owners.count(group)) {
+        auto owner =
+            std::make_unique<JITModuleCUDA>(nullptr, CUDAArtifactKind::ptx, 0);
+        slots.emplace(group, owner.get());
+        owners.emplace(group, std::move(owner));
+      }
+    }
+    if (owners.count(CUDARuntimeGroup::core) && owners.size() > 1) {
+      modules.reserve(modules.size() + owners.size() + 1);
+      auto loader = [this, compile, config = config_, slots](
+                        std::unique_ptr<llvm::Module> &module,
+                        CUDARuntimeGroup group) {
+        auto artifact = select_artifact(compile(module, config));
+        auto *slot = slots.at(group);
+        auto *handle = load_artifact(artifact);
+        slot->artifact_kind_ = artifact.kind;
+        slot->artifact_code_size_ = artifact.code_size();
+        slot->module_ = handle;
+      };
+      auto proxy = std::make_unique<RuntimeModuleCUDA>(*M, entries, slots,
+                                                       std::move(loader));
+      // Publish every owner before preparing core. The existing session
+      // teardown handles both failed preparation and successfully loaded
+      // groups.
+      auto *result = proxy.get();
+      for (auto &[group, owner] : owners)
+        modules.push_back(std::move(owner));
+      modules.push_back(std::move(proxy));
+      result->prepare(CUDARuntimeGroup::core);
+      return result;
+    }
   }
+  auto artifact = compile(M, config_);
   artifact = select_artifact(std::move(artifact));
   return add_artifact(artifact);
 }

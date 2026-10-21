@@ -34,6 +34,14 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CUDA JIT and AOT consumers prepare the internal runtime by functional group:
+  core entries at initialization, sparse allocation and statistics on first
+  use. Groups share the existing executor state and module ownership; user
+  kernels keep their compilation path. This reduces startup work for consumers
+  that do not need every group. Using all groups can increase total preparation
+  time and code size, especially with an already populated driver cache.
+  CPU and Vulkan retain their existing runtime preparation paths.
+
 - Nested ArgPack structures use pack setters recursively and share the
   compiler's value-type lowering, fixing compound writes and Vulkan nested
   vector/matrix layout mismatches. Ordinary AOT export and template families

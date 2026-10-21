@@ -9,6 +9,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/TargetSelect.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
+#include "taichi/runtime/cuda/cuda_artifact_provider.h"
 #include "taichi/runtime/cuda/runtime_module.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/platform/cuda/detect_cuda.h"
@@ -206,6 +207,100 @@ TEST(CUDARuntimeModule, SeparateContextsAndModulesShareExplicitDeviceState) {
   EXPECT_TRUE(session.remove_module(statistics));
   EXPECT_TRUE(session.remove_module(sparse));
   EXPECT_TRUE(session.remove_module(core));
+}
+
+TEST(CUDARuntimeModule, SessionDefersGroupsAndRetriesWithIndependentContexts) {
+  if (!is_cuda_api_available() ||
+      !CUDADriver::get_instance().stream_get_capture_info_v2.available())
+    GTEST_SKIP();
+  LLVMInitializeNVPTXTargetInfo();
+  LLVMInitializeNVPTXTarget();
+  LLVMInitializeNVPTXTargetMC();
+  LLVMInitializeNVPTXAsmPrinter();
+  auto &cuda_context = CUDAContext::get_instance();
+  auto guard = cuda_context.get_guard();
+  auto &driver = CUDADriver::get_instance();
+  CompileConfig config;
+  config.arch = Arch::cuda;
+  JITSessionCUDA session(nullptr, config, llvm::DataLayout(""));
+  const auto loaded = [] {
+    return cuda::get_cuda_artifact_provider_telemetry_snapshot()
+        .entry_points_loaded;
+  };
+  const auto before = loaded();
+  JITModule *runtime = nullptr;
+  {
+    llvm::LLVMContext context;
+    auto module = std::make_unique<llvm::Module>("deferred_runtime", context);
+    module->setTargetTriple("nvptx64-nvidia-cuda");
+    const char *names[] = {"runtime_initialize",
+                           "runtime_NodeAllocator_initialize_ex",
+                           "runtime_sparse_tree_statistics_reset"};
+    for (int index = 0; index < 3; ++index) {
+      auto *function = llvm::Function::Create(
+          llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                                  {llvm::PointerType::get(context, 1)}, false),
+          llvm::GlobalValue::ExternalLinkage, names[index], *module);
+      llvm::IRBuilder<> builder(
+          llvm::BasicBlock::Create(context, "body", function));
+      auto *old = builder.CreateLoad(builder.getInt32Ty(), function->getArg(0));
+      auto *value = index == 0 ? static_cast<llvm::Value *>(builder.getInt32(7))
+                    : index == 1 ? builder.CreateAdd(old, builder.getInt32(5))
+                                 : builder.CreateMul(old, builder.getInt32(2));
+      builder.CreateStore(value, function->getArg(0));
+      builder.CreateRetVoid();
+      module->getOrInsertNamedMetadata("nvvm.annotations")
+          ->addOperand(llvm::MDNode::get(
+              context, {llvm::ValueAsMetadata::get(function),
+                        llvm::MDString::get(context, "kernel"),
+                        llvm::ConstantAsMetadata::get(builder.getInt32(1))}));
+    }
+    runtime = session.add_module(std::move(module), 0, JITModuleRole::runtime);
+  }
+  ASSERT_EQ(loaded() - before, 1u);
+  EXPECT_ANY_THROW(runtime->lookup_function("runtime_missing"));
+  EXPECT_EQ(loaded() - before, 1u);
+  void *state = nullptr;
+  driver.malloc(&state, sizeof(int));
+  auto release = [&](void *ptr) { driver.mem_free(ptr); };
+  std::unique_ptr<void, decltype(release)> allocation(state, release);
+  runtime->call<void *>("runtime_initialize", state);
+  // Force the existing provider identity check to fail during a deferred
+  // preparation. Restoring the original environment must allow retry.
+  const char *key = "TI_CUDA_PTXAS_MODE";
+  const char *env = std::getenv(key);
+  const bool had_env = env != nullptr;
+  const std::string previous = env ? env : "";
+  const auto set_env = [&](const char *value) {
+#ifdef _WIN32
+    _putenv_s(key, value ? value : "");
+#else
+    if (value)
+      setenv(key, value, 1);
+    else
+      unsetenv(key);
+#endif
+  };
+  set_env(previous == "external" ? "driver" : "external");
+  EXPECT_ANY_THROW(
+      runtime->lookup_function("runtime_NodeAllocator_initialize_ex"));
+  set_env(had_env ? previous.c_str() : nullptr);
+  EXPECT_EQ(loaded() - before, 1u);
+  auto *sparse = std::async(std::launch::async, [&] {
+                   return runtime->lookup_function(
+                       "runtime_NodeAllocator_initialize_ex");
+                 }).get();
+  EXPECT_NE(sparse, nullptr);
+  EXPECT_EQ(loaded() - before, 2u);
+  EXPECT_EQ(runtime->lookup_function("runtime_NodeAllocator_initialize_ex"),
+            sparse);
+  runtime->call<void *>("runtime_NodeAllocator_initialize_ex", state);
+  runtime->call<void *>("runtime_sparse_tree_statistics_reset", state);
+  EXPECT_EQ(loaded() - before, 3u);
+  int result = 0;
+  driver.memcpy_device_to_host(&result, state, sizeof(result));
+  EXPECT_EQ(result, 24);
+  // All prepared physical modules retire with their existing session owner.
 }
 
 TEST(CUDARuntimeModule, ActualRuntimePartitionsCoverEveryEntry) {
