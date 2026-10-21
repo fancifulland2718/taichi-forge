@@ -3557,11 +3557,18 @@ class TaskCodegen : public IRVisitor {
       ir_->register_value(stmt->raw_name(), val);
       return;
     }
-    const auto val_type = ir_->get_primitive_type(stmt->element_type());
+    // Uniform-buffer bool members use i32 slots, just like scalar arguments.
+    // The access chain and load must use that physical type before conversion.
+    const bool is_bool = stmt->element_type() == PrimitiveType::u1;
+    const auto val_type = is_bool ? ir_->i32_type()
+                                  : ir_->get_primitive_type(stmt->element_type());
     const auto val_type_ptr =
         ir_->get_pointer_type(val_type, spv::StorageClassUniform);
     val = ir_->make_access_chain(val_type_ptr, val, stmt->index);
     val = ir_->load_variable(val, val_type);
+    if (is_bool) {
+      val = ir_->cast(ir_->bool_type(), val);
+    }
     ir_->register_value(stmt->raw_name(), val);
   }
 

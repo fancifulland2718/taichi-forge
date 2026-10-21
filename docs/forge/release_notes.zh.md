@@ -31,6 +31,9 @@
 本版主线是编译改进与杂项修复，两方面均已有改动进入源码，包括大型函数的编译开销
 优化，以及后端正确性、自动微分和资源生命周期等修复。下面列出具体变化。
 
+- Vulkan 按参数缓冲的整数槽类型读取向量及嵌套结构中的布尔参数，再转换为布尔表达式，
+  修复 JIT/AOT 生成的 SPIR-V 访问链类型不匹配；参数布局保持不变。
+
 - AOT Graph 导出通过共用 native registry 重建 `VulkanBufferCommandRecording`，
   保留 fill/copy 偏移和显式 barrier。独立/借用消费者沿用既有资源生命周期，
   覆盖 dense Field/view 快照和后段 kernel 梯度。buffer 准备检查物理别名与地址溢出，

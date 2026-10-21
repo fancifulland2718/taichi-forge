@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Vulkan loads boolean vector and nested structure arguments using their
+  integer buffer slots before converting them to boolean expressions. This
+  fixes invalid SPIR-V access-chain types in JIT/AOT without changing layouts.
+
 - AOT Graph export reconstructs `VulkanBufferCommandRecording` through the
   common native registry, preserving fill/copy offsets and explicit barriers.
   Independent and borrowed consumers retain the existing resource lifecycle;
