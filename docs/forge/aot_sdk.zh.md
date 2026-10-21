@@ -1558,6 +1558,9 @@ kernel 仍返回 `None`，不增加等待。这不增加自动求导或 Graph �
 完成 ticket 不保存结果快照。需要保存数值时先读取，或使用独立准备对象。解码后的
 Python 值不依赖模块寿命。无返回值的准备对象不分配结果帧，也不增加读回或完成事件。
 `info["native_resource_bytes"]` 包含该帧的编译字节数，不代表驱动实际驻留大小。
+匹配的 Windows runtime/frontend 安装包已验证三后端的独立/借用消费、复合返回、
+显式 ndarray 反向、重复提交及在途退休；runtime-only 进程无需 DSL 或 NumPy。
+CUDA debug 的 Graph 准备不在 capture 内同步 stream，执行后的断言仍在等待时报告。
 
 普通 CGraph 丢弃各 kernel 的返回值，并返回 `None`。CUDA/Vulkan 省去无消费者的
 host 结果回读，保留编译后的设备结果存储、数组写回及执行依赖。外部 host 数组的

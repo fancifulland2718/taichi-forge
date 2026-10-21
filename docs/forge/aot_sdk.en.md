@@ -1996,6 +1996,11 @@ separate results are needed. Decoded Python values survive module closure.
 Void preparations allocate no result frame and add no readback or completion
 event. `info["native_resource_bytes"]` includes the compiled frame size, not
 driver-private residency.
+Matched Windows runtime/frontend installations qualify all three backends for
+standalone/borrowed consumption, composite returns, explicit ndarray adjoints,
+repeated submissions and in-flight retirement. Runtime-only processes need no
+DSL or NumPy. CUDA debug preparation avoids stream synchronization during
+capture; assertions from the executed graph are still reported on wait.
 
 Ordinary CGraph dispatches discard kernel return values and return `None`.
 CUDA/Vulkan omit the unused host result readback while retaining the compiled
