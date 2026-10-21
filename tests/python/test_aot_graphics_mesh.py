@@ -76,7 +76,7 @@ def test_aot_graphics_mesh_export_and_gradients(tmp_path, task, recipe):
     shader_inputs = {f"shader_{i}": shader for i, shader in enumerate(pipeline._shader_artifacts)}
     for name, shader in shader_inputs.items():
         (tmp_path / (name + ".spv")).write_bytes(shader.code)
-    (tmp_path / "pipeline.json").write_text(pipeline._aot_pipeline_spec)
+    (tmp_path / "pipeline.json").write_text(json.dumps(pipeline._definition.native.parameter_dict()))
 
     def export(graph):
         for public in (False, True):

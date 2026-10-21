@@ -31,7 +31,19 @@ def selected_graphics(definition, choice="graphics-queue-argument-images"):
 
 @pytest.mark.parametrize("recipe", ["ordinary", "selected"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe):
+def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeResourceBinding
+
+    original_lower = NativeResourceBinding.lower
+    exported_pipelines = []
+
+    def lower(self, context, **kwargs):
+        if self.definition.provider == "vulkan_graphics":
+            assert self.definition is self.owner._definition.native
+            exported_pipelines.append(self.owner)
+        return original_lower(self, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", lower)
     @ti.kernel
     def sample(image: ti.types.texture(2), output: ti.types.ndarray(ti.f32, 1)):
         for i in range(64):
@@ -72,7 +84,7 @@ def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe):
             color_targets=(graphics.ColorTarget(),),
         )
         pipelines.append(pipeline)
-        (tmp_path / f"pipeline_{int(instanced)}.json").write_text(pipeline._aot_pipeline_spec)
+        (tmp_path / f"pipeline_{int(instanced)}.json").write_text(json.dumps(pipeline._definition.native.parameter_dict()))
     pipeline, instance = pipelines
     first = pipeline.record_pass(
         (
@@ -185,6 +197,7 @@ def test_aot_graphics_recording_export_and_gradients(tmp_path, recipe):
             finally:
                 graph.close()
 
+    assert all(pipeline in exported_pipelines for pipeline in pipelines)
     # The legacy single-draw recording shares the same explicit pass factory.
     single = ti.graph.GraphBuilder()
     single.append_native(

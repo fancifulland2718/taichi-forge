@@ -1,123 +1,14 @@
 """Cold raster reconstruction through the shared native resource registry."""
 
-import hashlib
-import json
 import math
 import struct
 
 from taichi_forge._lib import core
+from taichi_forge.graph._native_definition import NativeResourceBinding, NativeResourceReference
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.texture_type import FORMAT2TY_CH, is_float_sampled_texture_format
 
 from ._shader_artifact import SpirvShader, _digest
-
-
-def freeze_pipeline(
-    pipeline, *, topology, polygon_mode, front_cull, back_cull, depth_test, depth_write, depth, targets, blending
-):
-    """Snapshot the exact creation state; never inspect mutable attributes at export."""
-    spec = pipeline_description(
-        pipeline._shader_artifacts,
-        pipeline.vertex_bindings,
-        pipeline.vertex_attributes,
-        topology=topology,
-        polygon_mode=polygon_mode,
-        front_cull=front_cull,
-        back_cull=back_cull,
-        depth_test=depth_test,
-        depth_write=depth_write,
-        depth=depth,
-        targets=targets,
-        blending=blending,
-    )
-    return json.dumps(spec, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def pipeline_description(
-    shaders,
-    vertices,
-    attributes,
-    *,
-    topology,
-    polygon_mode,
-    front_cull,
-    back_cull,
-    depth_test,
-    depth_write,
-    depth,
-    targets,
-    blending,
-):
-    """The shared cold code/layout contract, without constructing a GPU pipeline."""
-    from ._graphics import _BLEND_FACTORS, _BLEND_OPS, _DEPTH_COMPARE_OPS, _POLYGON_MODES, _TOPOLOGIES
-
-    if blending and not targets:
-        targets = ((True, 15, 6, 7, 0, 6, 7, 0),)
-    factors, ops = tuple(_BLEND_FACTORS), tuple(_BLEND_OPS)
-    spec = dict(
-        shader_count=len(shaders),
-        shaders=[dict(stage=value.stage) for value in shaders],
-        vertices=[dict(binding=v.binding, stride=v.stride, instance=v.instance) for v in vertices],
-        attributes=[
-            dict(location=v.location, binding=v.binding, format=v.format.name, offset=v.offset) for v in attributes
-        ],
-        topology=tuple(_TOPOLOGIES)[topology],
-        polygon_mode=tuple(_POLYGON_MODES)[polygon_mode],
-        front_face_cull=bool(front_cull),
-        back_face_cull=bool(back_cull),
-        depth_test=bool(depth_test),
-        depth_write=bool(depth_write),
-        depth_compare=tuple(_DEPTH_COMPARE_OPS)[depth[0]],
-        depth_bias_constant=depth[1],
-        depth_bias_slope=depth[2],
-        color_targets=[
-            dict(
-                blending=v[0],
-                write_mask=v[1],
-                src_color_factor=factors[v[2]],
-                dst_color_factor=factors[v[3]],
-                color_op=ops[v[4]],
-                src_alpha_factor=factors[v[5]],
-                dst_alpha_factor=factors[v[6]],
-                alpha_op=ops[v[7]],
-            )
-            for v in targets
-        ],
-    )
-    # Match native pipeline_contract v1's typed, length-delimited serialization.
-    digest = hashlib.sha256()
-
-    def number(value):
-        digest.update(int(value).to_bytes(8, "little"))
-
-    def text(value):
-        encoded = value.encode()
-        number(len(encoded))
-        digest.update(encoded)
-
-    text("forge-vulkan-graphics-v1")
-    number(len(shaders))
-    for shader in shaders:
-        number({"vertex": 2, "fragment": 1, "task": 6, "mesh": 7}[shader.stage])
-        text(shader.code_sha256)
-    for value in (topology, polygon_mode, front_cull, back_cull, depth_test, depth_write, depth[0]):
-        number(value)
-    for value in depth[1:]:
-        number(struct.unpack("<I", struct.pack("<f", value))[0])
-    number(len(targets))
-    for v in targets:
-        for i in (0, 1, 4, 2, 3, 7, 5, 6):
-            number(v[i])
-    number(len(spec["vertices"]))
-    for v in spec["vertices"]:
-        for key in ("binding", "stride", "instance"):
-            number(v[key])
-    number(len(spec["attributes"]))
-    for v in spec["attributes"]:
-        for value in (v["location"], v["binding"], int(core.Format.__members__[v["format"]]), v["offset"]):
-            number(value)
-    spec["expected_pipeline"] = digest.hexdigest()
-    return spec
 
 
 def _pipeline(context, pipeline):
@@ -125,7 +16,8 @@ def _pipeline(context, pipeline):
     if id(pipeline) in cache:
         return cache[id(pipeline)]
     pipeline._validate_lifetime()
-    spec = json.loads(pipeline._aot_pipeline_spec)
+    definition = pipeline._definition
+    spec = definition.native.parameters
     if (public := context.public_resource(pipeline)) is not None:
         cache[id(pipeline)] = public, spec["expected_pipeline"]
         return cache[id(pipeline)]
@@ -140,10 +32,10 @@ def _pipeline(context, pipeline):
                 if type(asset) is not SpirvShader or _digest(asset.to_dict()) != _digest(fact):
                     raise TaichiRuntimeError("AOT graphics shader asset differs from the source pipeline contract")
                 inputs[port] = asset._export_aot_resource(context)
-        version = 2 if any(shader["stage"] == "mesh" for shader in spec["shaders"]) else 1
-        return context.resource(
-            pipeline, "vulkan_graphics", "pipeline", version=version, parameters=spec, bindings=inputs
-        )
+        return NativeResourceBinding(
+            pipeline, definition.native,
+            resources=tuple((port, NativeResourceReference(name)) for port, name in inputs.items()),
+        ).lower(context)
 
     cache[id(pipeline)] = (
         context.resource_once(pipeline, build, policy="vulkan_graphics_code"),

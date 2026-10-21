@@ -1497,10 +1497,10 @@ class VulkanGraphicsPipeline:
         self._shader_image_by_key = shader_image_by_key
         self.shader_acceleration_structure_bindings = shader_acceleration_structure_bindings
         self._shader_as_by_key = shader_as_by_key
-        from ._aot_vulkan_graphics import freeze_pipeline
+        from ._graphics_definition import GraphicsPipelineDefinition
 
-        self._aot_pipeline_spec = freeze_pipeline(
-            self, topology=topology_value, polygon_mode=polygon_value,
+        self._definition = GraphicsPipelineDefinition(
+            self._shader_artifacts, self.vertex_bindings, self.vertex_attributes, topology=topology_value, polygon_mode=polygon_value,
             front_cull=front_cull, back_cull=back_cull,
             depth_test=bool(depth_test), depth_write=bool(depth_write),
             depth=depth_params, targets=targets, blending=bool(blending),
@@ -1512,22 +1512,13 @@ class VulkanGraphicsPipeline:
                     fragment_code,
                     tuple(
                         (item.binding, item.stride, item.instance)
-                        for item in vertex_bindings
+                        for item in self._definition.vertices
                     ),
                     tuple(
                         (item.location, item.binding, item.format, item.offset)
-                        for item in vertex_attributes
+                        for item in self._definition.attributes
                     ),
-                    topology_value,
-                    polygon_value,
-                    front_cull,
-                    back_cull,
-                    bool(depth_test),
-                    bool(depth_write),
-                    bool(blending),
-                    name,
-                    *depth_params,
-                    targets,
+                    *self._definition.driver_arguments(name),
                 )
             )
         self._graphics_pipeline_id = pipeline_id
@@ -1799,10 +1790,10 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         )
         self.vertex_bindings = ()
         self.vertex_attributes = ()
-        from ._aot_vulkan_graphics import freeze_pipeline
+        from ._graphics_definition import GraphicsPipelineDefinition
 
-        self._aot_pipeline_spec = freeze_pipeline(
-            self, topology=topology_value, polygon_mode=polygon_value,
+        self._definition = GraphicsPipelineDefinition(
+            self._shader_artifacts, self.vertex_bindings, self.vertex_attributes, topology=topology_value, polygon_mode=polygon_value,
             front_cull=front_cull, back_cull=back_cull,
             depth_test=bool(depth_test), depth_write=bool(depth_write),
             depth=depth_params, targets=targets, blending=bool(blending),
@@ -1819,16 +1810,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
                     task_code,
                     mesh_code,
                     fragment_code,
-                    topology_value,
-                    polygon_value,
-                    front_cull,
-                    back_cull,
-                    bool(depth_test),
-                    bool(depth_write),
-                    bool(blending),
-                    name,
-                    *depth_params,
-                    targets,
+                    *self._definition.driver_arguments(name),
                 )
             )
         self._graphics_pipeline_id = pipeline_id

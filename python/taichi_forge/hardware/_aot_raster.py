@@ -7,7 +7,8 @@ import struct
 from taichi_forge._lib import core
 from taichi_forge.lang.exception import TaichiRuntimeError
 
-from ._aot_vulkan_graphics import _clear_bits, pipeline_description
+from ._aot_vulkan_graphics import _clear_bits
+from ._graphics_definition import pipeline_description
 from ._graphics import VertexAttribute, VertexBinding
 from ._shader_artifact import SpirvShader
 
