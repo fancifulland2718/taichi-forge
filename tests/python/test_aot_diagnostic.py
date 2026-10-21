@@ -18,6 +18,9 @@ from tests.python.aot_scan_probe import reject
     arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, cpu_max_num_threads=4
 )
 def test_diagnostic_sequence_and_selected_nodes_runtime_only(tmp_path):
+    from taichi_forge.algorithms._primitive_definitions import CheckDefinition, MetricDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     arch = ti.lang.impl.current_cfg().arch
     module = ti.aot.Module()
     configurations = [
@@ -94,10 +97,34 @@ def test_diagnostic_sequence_and_selected_nodes_runtime_only(tmp_path):
             bindings["other"] = other
         before = {name: value.to_numpy().tobytes() for name, value in bindings.items()}
         name = function + "_" + dtype
-        plan = module.add_execution_plan(name, graph, source_bindings=bindings)
+        definition_type = MetricDefinition if metric else CheckDefinition
+        bound = []
+        original_bind = definition_type.bind
+
+        def observe_binding(definition, *args, **kwargs):
+            bound.append(definition)
+            return original_bind(definition, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(definition_type, "bind", observe_binding)
+            plan = module.add_execution_plan(name, graph, source_bindings=bindings)
+        assert len(bound) == 1
+        if selected:
+            assert bound[0] is result._plan.definition
         assert before == {
             name: value.to_numpy().tobytes() for name, value in bindings.items()
         }
+        if selected:
+
+            def reject_conversion(*args, **kwargs):
+                raise AssertionError("warm diagnostic replay must not rebuild its native description")
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(definition_type, "bind", reject_conversion)
+                patch.setattr(NativeOperationBinding, "lower", reject_conversion)
+                graph.run({})
+                graph.run({})
+            assert output.to_numpy()[0] == expected_first
         operation = json.loads(plan.to_json())["operations"][0]
         assert operation["operation"] == ("metric_reduce" if metric else "check_count")
         if function in ("all_if", "all_finite"):

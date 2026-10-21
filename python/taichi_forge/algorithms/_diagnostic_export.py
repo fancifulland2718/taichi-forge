@@ -6,9 +6,7 @@ from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
-_CHECK_NAMES = ("nonzero", "zero", "nan", "inf", "not_finite", "index_oob")
-_METRIC_NAMES = ("max_abs", "max_abs_delta")
-
+from ._primitive_definitions import CHECK_OPS, METRIC_OPS, CheckDefinition, MetricDefinition
 
 def _export(kind, values, other, output, op, lower, upper, method, plan, context):
     from taichi_forge.aot._graph_storage_bindings import packed_description
@@ -33,7 +31,7 @@ def _export(kind, values, other, output, op, lower, upper, method, plan, context
         raise TaichiRuntimeError(
             "AOT diagnostic output dtype does not match its operation"
         )
-    names = _METRIC_NAMES if metric else _CHECK_NAMES
+    names = tuple(METRIC_OPS if metric else CHECK_OPS)
     if type(op) is not int or not 0 <= op < len(names):
         raise TaichiRuntimeError("AOT diagnostic operation is invalid")
     if not metric and op == 5 and value_type in (1, 5):
@@ -96,38 +94,28 @@ def _export(kind, values, other, output, op, lower, upper, method, plan, context
         raise TaichiRuntimeError(
             "AOT diagnostic cannot reconstruct the selected cached strategy"
         )
-    parameters = dict(size=source.index_shape[0], dtype=str(dtype), op=names[op])
-    if not metric:
-        parameters.update(lower=lower, upper=upper)
+    definition = (
+        MetricDefinition(source.index_shape[0], dtype, names[op])
+        if metric
+        else CheckDefinition(source.index_shape[0], dtype, names[op], lower, upper)
+    )
+    if plan is not None:
+        if plan.definition != definition:
+            raise TaichiRuntimeError("AOT diagnostic definition differs from the selected native call")
+        definition = plan.definition
+    policy = {}
     if backend == "cpu_native":
-        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
+        policy["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
     elif backend == "vulkan_native":
-        parameters["vulkan_items_per_group"] = max(
-            256,
-            int(
-                os.environ.get(f"TI_VULKAN_{operation.upper()}_ITEMS_PER_GROUP", 16384)
-            ),
+        policy["vulkan_items_per_group"] = max(
+            256, int(os.environ.get(f"TI_VULKAN_{operation.upper()}_ITEMS_PER_GROUP", 16384))
         )
-    # A concrete result workspace is completely overwritten. Preserve an
-    # explicit external binding, otherwise reconstruct its private scalar.
+    # The result is overwritten; retain public binding or declare private scratch.
     if context.source_arrays.find(output) is None:
         context.retained_arrays.declare_scratch(output)
-    bindings = dict(
-        values=context.retained_arrays.require(values),
-        output=context.retained_arrays.require(output),
-    )
-    if other is not None:
-        bindings["other"] = context.retained_arrays.require(other)
-    context.operations.append(
-        dict(
-            kind="native",
-            provider="builtin",
-            operation=operation,
-            version=1,
-            parameters=parameters,
-            bindings=bindings,
-        )
-    )
+    if metric:
+        policy["other"] = other
+    definition.bind(values, output, **policy).lower(context)
 
 
 def export_check_call(call, context):

@@ -34,6 +34,12 @@ from taichi_forge.algorithms._primitive_definitions import (
     REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
     ScanDefinition,
     HistogramDefinition,
+    CheckDefinition,
+    MetricDefinition,
+    NATIVE_VALUE_TYPE as _CHECK_VALUE_TYPE,
+    METRIC_VALUE_TYPE as _METRIC_VALUE_TYPE,
+    CHECK_OPS as _CHECK_OPS,
+    METRIC_OPS as _METRIC_OPS,
     GroupedReduceDefinition,
     GROUPED_REDUCE_OPS as _SUPPORTED_GROUPED_REDUCE_OPS,
     HISTOGRAM_VALUE_TYPE as _HISTOGRAM_VALUE_TYPE,
@@ -179,22 +185,8 @@ _REDUCE_FIELD_DTYPES = (i32, f32)
 _SUPPORTED_CHECK_METHODS = supported_primitive_methods("check")
 _CHECK_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _CHECK_INTEGER_DTYPES = (u32, i32, u64, i64)
-_CHECK_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
-_CHECK_OPS = {
-    "nonzero": 0,
-    "zero": 1,
-    "nan": 2,
-    "inf": 3,
-    "not_finite": 4,
-    "index_oob": 5,
-}
 _SUPPORTED_METRIC_METHODS = supported_primitive_methods("metric")
 _METRIC_VALUE_DTYPES = (f32, f64)
-_METRIC_VALUE_TYPE = {f32: 1, f64: 5}
-_METRIC_OPS = {
-    "max_abs": 0,
-    "max_abs_delta": 1,
-}
 _SUPPORTED_TRANSFORM_METHODS = supported_primitive_methods("transform")
 _SUPPORTED_INDEXED_COPY_METHODS = supported_primitive_methods("gather")
 _INDEXED_COPY_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
@@ -5754,6 +5746,7 @@ class CheckWorkspace:
         call_args,
         n,
         prog,
+        definition,
     ):
         plan = _record_native_primitive_plan(
             self._native_check_plans,
@@ -5765,6 +5758,7 @@ class CheckWorkspace:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_check_plan = plan
         return plan
@@ -5884,6 +5878,7 @@ class MetricWorkspace:
         call_args,
         n,
         prog,
+        definition,
     ):
         plan = _record_native_primitive_plan(
             self._native_metric_plans,
@@ -5895,6 +5890,7 @@ class MetricWorkspace:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_metric_plan = plan
         return plan
@@ -6067,10 +6063,9 @@ def _native_check_count(
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    value_type = _check_value_type(values_view.dtype)
-    check_op_id = _CHECK_OPS[check_op]
-    lower = int(lower)
-    upper = int(upper)
+    definition = CheckDefinition(n, values_view.dtype, check_op, lower, upper)
+    value_type, check_op_id = definition.value_type, definition.op_id
+    lower, upper = definition.lower, definition.upper
     if backend in ("cuda_device", "cuda_cub"):
         prefix = "cuda_device" if backend == "cuda_device" else "cuda_cub"
         if not _prog_available(prog, f"{prefix}_check_count_available"):
@@ -6146,6 +6141,7 @@ def _native_check_count(
         call_args,
         n,
         prog,
+        definition,
     )
     return DeviceCheckResult(
         output, kind=kind, truth_when=truth_when, ok_when=ok_when, plan=plan
@@ -6182,8 +6178,8 @@ def _native_metric_reduce(
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    value_type = _metric_value_type(values_view.dtype)
-    metric_op_id = _METRIC_OPS[metric_op]
+    definition = MetricDefinition(n, values_view.dtype, metric_op)
+    value_type, metric_op_id = definition.value_type, definition.op_id
     mixed_dense_array = values_view.is_dense_field != other_view.is_dense_field
     if backend in ("cuda_device", "cuda_cub"):
         prefix = "cuda_device" if backend == "cuda_device" else "cuda_cub"
@@ -6305,6 +6301,7 @@ def _native_metric_reduce(
         call_args,
         n,
         prog,
+        definition,
     )
     return DeviceMetricResult(output, kind=kind, plan=plan)
 

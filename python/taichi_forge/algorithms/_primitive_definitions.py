@@ -9,6 +9,84 @@ NATIVE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
 HISTOGRAM_BIN_TYPE = {i32: 0, i64: 4}
 GROUPED_REDUCE_OPS = {"sum": 0}
+CHECK_OPS = {"nonzero": 0, "zero": 1, "nan": 2, "inf": 3, "not_finite": 4, "index_oob": 5}
+METRIC_OPS = {"max_abs": 0, "max_abs_delta": 1}
+METRIC_VALUE_TYPE = {f32: 1, f64: 5}
+
+
+def _diagnostic_binding(operation, parameters, values, output, other, *, cpu_max_threads, vulkan_items_per_group):
+    from taichi_forge.graph._ir import GraphAccess
+    from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
+    if cpu_max_threads is not None:
+        parameters["cpu_max_threads"] = cpu_max_threads
+    if vulkan_items_per_group is not None:
+        parameters["vulkan_items_per_group"] = vulkan_items_per_group
+    arrays = (
+        NativeArrayBinding("values", values, GraphAccess.READ),
+        NativeArrayBinding("output", output, GraphAccess.WRITE),
+    )
+    if other is not None:
+        arrays += (NativeArrayBinding("other", other, GraphAccess.READ),)
+    return NativeOperationBinding(NativeDefinition("builtin", operation, parameters), arrays)
+
+
+@dataclass(frozen=True)
+class CheckDefinition:
+    size: int
+    dtype: object
+    op: str
+    lower: int = 0
+    upper: int = 0
+
+    def __post_init__(self):
+        object.__setattr__(self, "lower", int(self.lower))
+        object.__setattr__(self, "upper", int(self.upper))
+
+    @property
+    def value_type(self):
+        return NATIVE_VALUE_TYPE[self.dtype]
+
+    @property
+    def op_id(self):
+        return CHECK_OPS[self.op]
+
+    def bind(self, values, output, *, cpu_max_threads=None, vulkan_items_per_group=None):
+        return _diagnostic_binding(
+            "check_count",
+            dict(size=self.size, dtype=str(self.dtype), op=self.op, lower=self.lower, upper=self.upper),
+            values,
+            output,
+            None,
+            cpu_max_threads=cpu_max_threads,
+            vulkan_items_per_group=vulkan_items_per_group,
+        )
+
+
+@dataclass(frozen=True)
+class MetricDefinition:
+    size: int
+    dtype: object
+    op: str
+
+    @property
+    def value_type(self):
+        return METRIC_VALUE_TYPE[self.dtype]
+
+    @property
+    def op_id(self):
+        return METRIC_OPS[self.op]
+
+    def bind(self, values, output, *, other=None, cpu_max_threads=None, vulkan_items_per_group=None):
+        return _diagnostic_binding(
+            "metric_reduce",
+            dict(size=self.size, dtype=str(self.dtype), op=self.op),
+            values,
+            output,
+            other,
+            cpu_max_threads=cpu_max_threads,
+            vulkan_items_per_group=vulkan_items_per_group,
+        )
 
 
 @dataclass(frozen=True)
