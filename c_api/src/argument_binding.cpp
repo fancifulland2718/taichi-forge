@@ -443,8 +443,14 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
 
   const auto &kernel_binding = runtime2.get_kernel(kernel);
   auto ti_kernel = kernel_binding.kernel;
+  for (const auto &[index, resource] : resources) {
+    if (index >= arg_count || !resource)
+      throw MemoryBindingError("Invalid managed kernel resource argument");
+    if (args[index].type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+      throw MemoryBindingError("Kernel resource has both public and private owners");
+  }
   auto expanded = expand_argpack_arguments(runtime2, kernel_binding, arg_count,
-                                            args, binding_count, bindings);
+                                           args, binding_count, bindings, resources);
   if (expanded.expanded) {
     arg_count = static_cast<uint32_t>(expanded.arguments.size());
     args = expanded.arguments.data();
@@ -455,9 +461,7 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
     throw MemoryBindingError(
         "Argument count does not match the exported kernel ABI");
   }
-  for (const auto &[index, resource] : resources)
-    if (index >= arg_count || !resource)
-      throw MemoryBindingError("Invalid managed kernel resource argument");
+  const auto &managed = expanded.expanded ? expanded.resources : resources;
 
   if (binding_count)
     TI_CAPI_ARGUMENT_NULL_RV(bindings);
@@ -565,11 +569,14 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
       }
       continue;
     }
-    if (const auto resource = resources.find(i); resource != resources.end()) {
+    if (const auto resource = managed.find(i); resource != managed.end()) {
+      auto owner = resource->second;
+      if (auto pack = std::dynamic_pointer_cast<ArgPackResource>(owner))
+        owner = pack->storage;
       try {
         result->kernel_resources.push_back(
             taichi::lang::prepare_native_kernel_resource(
-                resource->second, std::vector<int>{int(i)}, runtime2.arch,
+                std::move(owner), std::vector<int>{int(i)}, runtime2.arch,
                 runtime2.get(), *ti_kernel, builder));
       } catch (const std::invalid_argument &error) {
         throw MemoryBindingError(error.what());

@@ -41,7 +41,8 @@
   实例化现在能构造已声明类型的 ArgPack，占位不足时可提供带资源的 exemplar。
   独立只读 AOT ArgPack owner 已通过共同 C/Python 成员工厂接通 CPU/CUDA/Vulkan
   普通调用、无返回值 kernel 的 prepared 执行及显式 ndarray 梯度，支持借用 JIT runtime。
-  prepared 保留根 owner 和 Vulkan uniform 读取依赖；Graph 重建及结构化参数包路径仍待完成。
+  prepared 保留根 owner 和 Vulkan uniform 读取依赖；平直 execution plan 通过同一
+  逻辑成员绑定接受外部参数包，持久重建及结构化参数包路径仍待完成。
   多个参数包中的同名资源成员保留各自绑定及声明顺序，避免前端覆盖成员后出现
   `NoneType` 编译错误；嵌套成员及显式反向使用同一修复。
   AOT 导出显式保留移除模板参数、提升资源成员后的公共成员路径，别名共用布局，

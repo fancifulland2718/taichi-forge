@@ -53,6 +53,8 @@ def test_aot_argpack_nested_resources_and_explicit_adjoint(tmp_path):
     export_seconds = time.perf_counter() - started
     np.testing.assert_allclose(loss.to_numpy(), [106])  # Export does not execute.
     with ti.aot.borrow_runtime() as runtime:
+        from taichi_forge_runtime import aot
+
         loaded = runtime.load_module(tmp_path / "packs.tcm")
         for name in ("automatic", "explicit", "backward"):
             entry = loaded.kernel(name)
@@ -74,8 +76,11 @@ def test_aot_argpack_nested_resources_and_explicit_adjoint(tmp_path):
         runtime.wait()
         np.testing.assert_allclose(loss.to_numpy(), [106])
         np.testing.assert_allclose(source.grad.to_numpy(), [13, -41, 37])
-        prepared.run()
-        adjoint.run()  # Borrower close retires submitted work before its packs.
+        planned = aot.ExecutionPlan([
+            dict(kind="kernel", entry="automatic", arguments=["p", "total"]),
+            dict(kind="kernel", entry="backward", arguments=["p", "total"]),
+        ]).prepare(loaded, dict(p=owned, total=total), gradients={"total": dtotal})
+        planned.run()  # Borrower close retires submitted work before its packs.
     np.testing.assert_allclose(loss.to_numpy(), [212])
     np.testing.assert_allclose(source.grad.to_numpy(), [26, -82, 74])
     print(json.dumps(dict(argpack_export_seconds=export_seconds,
@@ -114,6 +119,10 @@ def test_aot_argpack_template_specialization_and_errors(tmp_path):
     def paired(p: concrete, q: concrete) -> ti.f32:
         return p.offset * p.values[0] + q.offset * q.values[0]
 
+    @ti.kernel
+    def paired_write(p: concrete, q: concrete, out: ti.types.ndarray(ti.f32, 1)):
+        out[0] = p.offset * p.values[0] + q.offset * q.values[0]
+
     values = ti.ndarray(ti.f32, 1)
     values.fill(3)
     exemplar = concrete(offset=7, values=values)
@@ -130,6 +139,7 @@ def test_aot_argpack_template_specialization_and_errors(tmp_path):
     module.add_kernel(fixed, template_args={"scale": 2}, name="fixed")
     module.add_kernel(inferred, template_args={"p": nested, "scale": 2}, name="inferred")
     module.add_kernel(paired, name="paired")
+    module.add_kernel(paired_write, name="paired_write")
     with module.add_kernel_template(fixed) as family:
         family.instantiate(scale=2)
         family.instantiate(p=exemplar, scale=2)
@@ -141,7 +151,8 @@ def test_aot_argpack_template_specialization_and_errors(tmp_path):
     with ti.aot.borrow_runtime() as runtime:
         loaded = runtime.load_module(tmp_path / "specialized.tcm")
         for name in module._exported_kernels:
-            assert loaded.kernel(name)._return_layout.has_values
+            if name != "paired_write":
+                assert loaded.kernel(name)._return_layout.has_values
         first, second = runtime.ndarray("f32", 1), runtime.ndarray("f32", 1)
         first.write(np.array([3], dtype=np.float32).tobytes())
         second.write(np.array([2], dtype=np.float32).tobytes())
@@ -155,6 +166,23 @@ def test_aot_argpack_template_specialization_and_errors(tmp_path):
         assert pair(p2, q2) == 16
         first.write(np.array([4], dtype=np.float32).tobytes())
         assert pair(p, q) == 18
+        from taichi_forge_runtime import aot
+
+        writer = loaded.kernel("paired_write")
+        out = runtime.ndarray("f32", 1)
+        wp = writer.argpack(0, dict(offset=2, values=first))
+        wq = writer.argpack(1, dict(offset=5, values=second))
+        plan = aot.ExecutionPlan([dict(kind="kernel", entry="paired_write",
+                                       arguments=["p", "q", "out"])])
+        prepared = plan.prepare(loaded, dict(p=wp, q=wq, out=out))
+        prepared.run()
+        runtime.wait()
+        np.testing.assert_allclose(np.frombuffer(out.read(), dtype=np.float32), [18])
+        first.write(np.array([6], dtype=np.float32).tobytes())
+        prepared.run()
+        runtime.wait()
+        np.testing.assert_allclose(np.frombuffer(out.read(), dtype=np.float32), [22])
+        first.write(np.array([4], dtype=np.float32).tobytes())
         fixed_entry, inferred_entry = loaded.kernel("fixed"), loaded.kernel("inferred")
         fixed_pack = fixed_entry.argpack(0, dict(offset=7, values=first))
         inferred_pack = inferred_entry.argpack(0, dict(child=dict(values=first)))

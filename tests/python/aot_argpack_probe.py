@@ -69,6 +69,24 @@ def main(arch, artifact):
         assert read(loss) == [106]
         assert read(dx) == [13, -41, 37]
 
+        plan = aot.ExecutionPlan([
+            dict(kind="fill32", destination="total", value=0),
+            dict(kind="fill32", destination="dx", value=0),
+            dict(kind="kernel", entry="automatic", arguments=["pack", "total"]),
+            dict(kind="kernel", entry="backward", arguments=["pack", "total"]),
+        ])
+        planned = plan.prepare(module, dict(pack=pack, total=loss, dx=dx),
+                               gradients={"total": dloss})
+        assert read(loss) == [106]  # Recording the fills must not execute them.
+        planned.run()
+        runtime.wait()
+        assert read(loss) == [106]
+        assert read(dx) == [13, -41, 37]
+        planned.run()
+        runtime.wait()
+        assert read(loss) == [106]
+        assert read(dx) == [13, -41, 37]
+
         start = time.perf_counter()
         prepared, prepared_reverse = call.prepare(), reverse.prepare()
         times["prepare_forward_reverse_seconds"] = time.perf_counter() - start
@@ -100,21 +118,34 @@ def main(arch, artifact):
         next_forward, next_reverse = other.kernel("explicit"), other.kernel("backward")
         module.close()
         reject((RuntimeError, aot.AotError), prepared.run)
+        reject((RuntimeError, aot.AotError), planned.run)
         write(x, [-1, 4, -2])
         write(dx, [0, 0, 0])
         write(loss, [0])
         next_call = next_forward.prepare(replacement, loss, gradients={1: dloss})
         next_adjoint = next_reverse.prepare(replacement, loss, gradients={1: dloss})
+        next_plan = plan.prepare(other, dict(pack=replacement, total=loss, dx=dx),
+                                 gradients={"total": dloss})
+        next_plan.run()
+        runtime.wait()
+        assert read(loss) == [278]
+        assert read(dx) == [-17, 119, -35]
+        write(loss, [0])
+        write(dx, [0, 0, 0])
         next_call.run()
         next_adjoint.run()
         # Closing the pack completes its in-flight work; no producer is needed.
         replacement.close()
         reject((RuntimeError, aot.AotError), next_call.run)
+        reject((RuntimeError, aot.AotError), next_plan.run)
         assert read(loss) == [278]
         assert read(dx) == [-17, 119, -35]
         stale = next_forward.prepare(pack, loss, gradients={1: dloss})
+        stale_plan = plan.prepare(other, dict(pack=pack, total=loss, dx=dx),
+                                  gradients={"total": dloss})
         x.close()
         reject(aot.AotError, stale.run)
+        reject(aot.AotError, stale_plan.run)
         assert read(loss) == [278]
         print(json.dumps(dict(arch=arch, **times)))
     print("ARGPACK_RUNTIME_PASSED")

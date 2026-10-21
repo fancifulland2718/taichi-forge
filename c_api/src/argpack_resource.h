@@ -36,16 +36,19 @@ class ArgPackResource final : public taichi::lang::NativeResource {
   const std::vector<Member> members;
 };
 
-// Empty unless an owned public pack needs logical-root expansion. Gradients
-// point into immutable registered owners, whose handles remain in arguments.
+// Empty unless an owned pack needs logical-root expansion. Gradients point into
+// immutable owners, retained by public handles or the private resource map.
 struct ExpandedArgPackArguments {
   std::vector<TiArgument> arguments;
   std::vector<TiNdArrayBinding> bindings;
+  std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>> resources;
   bool expanded{false};
 };
 ExpandedArgPackArguments expand_argpack_arguments(
     Runtime &runtime, const Runtime::KernelBinding &kernel,
     uint32_t argument_count, const TiArgument *arguments,
-    uint32_t binding_count, const TiNdArrayBinding *bindings);
+    uint32_t binding_count, const TiNdArrayBinding *bindings,
+    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
+        &resources);
 
 }  // namespace capi

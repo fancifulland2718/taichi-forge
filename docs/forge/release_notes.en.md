@@ -50,7 +50,9 @@ lifetimes. The entries below describe the changes.
   CPU/CUDA/Vulkan calls and no-return kernel preparation through a shared
   C/Python member factory, including explicit ndarray gradients and borrowed
   JIT runtimes. Prepared calls retain root owners and Vulkan uniform-read
-  dependencies; Graph reconstruction and structured pack routes remain pending.
+  dependencies. Flat execution plans accept external packs through the same
+  logical member binding; persistent reconstruction and structured pack routes
+  remain pending.
   Repeated resource member names across packs retain distinct bindings in
   declaration order, fixing frontend `NoneType` compilation errors for nested
   packs and their explicit adjoints.

@@ -12,7 +12,9 @@ namespace capi {
 ExpandedArgPackArguments expand_argpack_arguments(
     Runtime &runtime, const Runtime::KernelBinding &kernel,
     uint32_t argument_count, const TiArgument *arguments,
-    uint32_t binding_count, const TiNdArrayBinding *bindings) {
+    uint32_t binding_count, const TiNdArrayBinding *bindings,
+    const std::map<uint32_t, std::shared_ptr<taichi::lang::NativeResource>>
+        &resources) {
   ExpandedArgPackArguments result;
   if (!kernel.kernel->argument_origins)
     return result;
@@ -25,12 +27,15 @@ ExpandedArgPackArguments expand_argpack_arguments(
       continue;
     const auto index = uint32_t(origin.logical.front());
     roots.emplace(index, uint32_t(origin.physical.front()));
-    if (origin.kind != "argpack" || index >= argument_count ||
-        arguments[index].type != TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+    if (origin.kind != "argpack" || index >= argument_count)
       continue;
-    auto pack = std::dynamic_pointer_cast<ArgPackResource>(
-        runtime.native_resource_registry().get(
-            arguments[index].value.native_resource));
+    std::shared_ptr<taichi::lang::NativeResource> resource;
+    if (const auto found = resources.find(index); found != resources.end())
+      resource = found->second;
+    else if (arguments[index].type == TI_ARGUMENT_TYPE_NATIVE_RESOURCE_EXT)
+      resource = runtime.native_resource_registry().get(
+          arguments[index].value.native_resource);
+    auto pack = std::dynamic_pointer_cast<ArgPackResource>(resource);
     if (pack)
       packs.emplace(index, std::move(pack));
   }
@@ -51,6 +56,8 @@ ExpandedArgPackArguments expand_argpack_arguments(
     if (found == roots.end())
       throw MemoryBindingError("Missing logical root argument origin");
     assign(found->second, arguments[index]);
+    if (const auto resource = resources.find(index); resource != resources.end())
+      result.resources.emplace(found->second, resource->second);
   }
   for (const auto &[index, pack] : packs) {
     if (!pack->storage->layout().matches(*kernel.kernel,

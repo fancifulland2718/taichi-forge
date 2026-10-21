@@ -1508,7 +1508,9 @@ CPU/CUDA/Vulkan 普通调用可通过
 kernel 也可通过 `kernel.prepare(pack, total, gradients={1: dtotal})` 使用同一参数包，
 包括显式反向及借用 JIT runtime。prepare 保留带代次的根 owner，一次性录制 Vulkan
 uniform 读取依赖；重放不重建或上传只读包存储。关闭包、成员或模块会在已提交工作
-完成后使依赖的 prepared 调用失效。Graph 持久资源重建及结构化 Graph 参数包路径仍待完成。
+完成后使依赖的 prepared 调用失效。平直 `ExecutionPlan` 的 kernel 步也可按符号名
+传入外部创建的参数包，参数列表使用逻辑根参数；计划内部的 owner 表与普通调用共用
+成员及梯度展开。从产物持久重建参数包及结构化 Graph 参数包路径仍待完成。
 
 C 消费者通过 `ti_get_kernel_argpack_info_ext` 查询布局，通过
 `ti_create_kernel_argpack_ext` 创建同一 owner。以 `TiArgPackMember` 的相对整数路径

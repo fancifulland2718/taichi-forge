@@ -1925,8 +1925,11 @@ no producer-module pointers. No-return kernels also accept the same packs throug
 explicit adjoints and borrowed JIT runtimes. Preparation retains qualified root
 owners and records Vulkan uniform-read dependencies once; replay does not rebuild
 or upload immutable pack storage. Closing the pack, a member or its module
-invalidates dependent prepared calls after submitted work completes. Persistent
-Graph reconstruction and structured Graph pack routes remain pending.
+invalidates dependent prepared calls after submitted work completes. Flat
+`ExecutionPlan` kernel steps also accept externally created packs by symbolic
+name, with logical root arguments. Their private owner map uses the same member
+and gradient expansion as ordinary calls. Persistently reconstructing a pack
+from an archive and structured Graph pack routes remain pending.
 
 C consumers query `ti_get_kernel_argpack_info_ext` and create the same owner with
 `ti_create_kernel_argpack_ext`. Supply exactly the value/resource leaves as

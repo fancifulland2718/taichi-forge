@@ -191,6 +191,21 @@ void check_aot_pack(TiArch arch, const char *backend, bool public_factory = fals
     FixedExecution::Dispatch unowned{bound->kernel, bound->context.get()};
     EXPECT_THROW((FixedExecution(rt.arch, rt.get(), nullptr, {unowned})),
                  std::invalid_argument);
+    auto owner = rt.native_resource_registry().get(arguments[0].value.native_resource);
+    const std::map<uint32_t, std::shared_ptr<NativeResource>> owners{{0, owner}};
+    EXPECT_THROW(capi::bind_kernel_arguments(rt, forward, argument_count, arguments,
+                                             binding_count, bindings, false, owners),
+                 MemoryBindingError);
+    TiArgument private_args[2]{{}, arguments[1]};
+    auto private_bound = capi::bind_kernel_arguments(
+        rt, forward, 2, private_args, binding_count, bindings, false, owners);
+    ASSERT_NE(private_bound, nullptr);
+    EXPECT_EQ(private_bound->kernel_resources.size(), bound->kernel_resources.size());
+    EXPECT_EQ(private_bound->memories, bound->memories);
+    const std::map<uint32_t, std::shared_ptr<NativeResource>> extra{{2, owner}};
+    EXPECT_THROW(capi::bind_kernel_arguments(rt, forward, 2, private_args,
+                                             binding_count, bindings, false, extra),
+                 MemoryBindingError);
   }
   std::map<std::pair<TiKernel, TiNativeResource>, TiPreparedExecution> fixed;
   auto launch = [&](TiKernel kernel) {
