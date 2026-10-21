@@ -53,6 +53,27 @@ def test_argpack_with_struct():
     assert foo(pack) == test_utils.approx(2 + 2.1 + 2.1, rel=1e-3)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_argpack_struct_compound_members():
+    leaf = ti.types.struct(code=ti.u32)
+    record = ti.types.struct(
+        vector=ti.types.vector(2, ti.i32), matrix=ti.types.matrix(2, 2, ti.f32), child=leaf,
+    )
+    pack_type = ti.types.argpack(record=record)
+
+    @ti.kernel
+    def read(pack: pack_type) -> ti.types.vector(7, ti.f32):
+        return ti.Vector([pack.record.vector[0], pack.record.vector[1],
+                          pack.record.matrix[0, 0], pack.record.matrix[0, 1],
+                          pack.record.matrix[1, 0], pack.record.matrix[1, 1],
+                          pack.record.child.code])
+
+    pack = pack_type(record=record(vector=[-2, 7], matrix=[[1.5, -3], [4, 2]], child=leaf(code=513)))
+    assert list(read(pack)) == [-2, 7, 1.5, -3, 4, 2, 513]
+    pack.record = record(vector=[9, -11], matrix=[[0.5, 3], [-4, 8]], child=leaf(code=17))
+    assert list(read(pack)) == [9, -11, 0.5, 3, -4, 8, 17]
+
+
 @test_utils.test()
 def test_argpack_with_vector():
     pack_type = ti.types.argpack(a=ti.i32, b=ti.types.vector(3, ti.f32), c=ti.f32)

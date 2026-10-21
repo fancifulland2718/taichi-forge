@@ -745,7 +745,7 @@ class StructType(CompoundType):
         for index, pair in enumerate(items):
             name, dtype = pair
             if isinstance(dtype, CompoundType):
-                dtype.set_kernel_struct_args(struct[name], argpack, ret_index + (index,))
+                dtype.set_argpack_struct_args(struct[name], argpack, ret_index + (index,))
             else:
                 if dtype in primitive_types.integer_types:
                     if is_signed(cook_dtype(dtype)):
