@@ -29,6 +29,7 @@ from taichi_forge.algorithms._primitive_capabilities import (
 )
 from taichi_forge.algorithms._primitive_definitions import (
     NATIVE_VALUE_TYPE as _SCAN_VALUE_TYPE,
+    NATIVE_VALUE_TYPE as _GROUPED_REDUCE_VALUE_TYPE,
     NATIVE_VALUE_TYPE as _REDUCE_VALUE_TYPE,
     REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
     ScanDefinition,
