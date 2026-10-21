@@ -1483,7 +1483,7 @@ C 消费者使用 `ti_get_kernel_argument_info_ext` 获取 schema-1 布局，其
 描述非连续张量槽。清零 padding，按编译偏移填值，再以 `TI_ARGUMENT_TYPE_VALUE_EXT`
 和 `TiValueArgument {size, data}` 传入，大小必须精确匹配。布局字符串归模块所有，
 launch/prepare 在返回前复制载荷。此形式不能携带资源句柄或 ArgPack，也不扩展普通
-CGraph 的输入类型或 prepared 返回值。显式导出的伴随中，按值参数作为常量使用；
+CGraph 的输入类型。显式导出的伴随中，按值参数作为常量使用；
 ndarray 梯度仍沿用既有绑定与所有权。
 
 生产端 `Module.add_kernel()` 可为完全声明的 ArgPack 自动构造编译占位；成员 ndarray
@@ -1550,11 +1550,19 @@ C 消费者通过 `ti_get_kernel_argpack_info_ext` 查询布局，通过
 Python 数字（`u1` 为布尔），向量对应元组，矩阵对应嵌套元组，结构对应字典，
 多个返回值对应元组。位宽、padding 和形状来自已加载的编译布局，每个 Kernel
 包装对象只查询一次，绑定调用复用解码方案。非空 host 结果会等待完成；无返回值
-kernel 仍返回 `None`，不增加等待。这不增加自动求导或 prepared/Graph 结果帧。
+kernel 仍返回 `None`，不增加等待。这不增加自动求导或 Graph 结果帧。
+
+直接 kernel 的 `prepare()` 也支持返回值。每个固定绑定拥有一个独立设备结果帧；
+`prepared.run()`/`submit()` 只提交，`prepared.result()` 显式等待并解码最近一次成功
+提交的结果。尚未提交、执行失败或依赖已退休时不能读取。重复提交覆盖同一帧；旧
+完成 ticket 不保存结果快照。需要保存数值时先读取，或使用独立准备对象。解码后的
+Python 值不依赖模块寿命。无返回值的准备对象不分配结果帧，也不增加读回或完成事件。
+`info["native_resource_bytes"]` 包含该帧的编译字节数，不代表驱动实际驻留大小。
 
 普通 CGraph 丢弃各 kernel 的返回值，并返回 `None`。CUDA/Vulkan 省去无消费者的
 host 结果回读，保留编译后的设备结果存储、数组写回及执行依赖。外部 host 数组的
-写回仍在对应 launch 返回前完成。prepared 执行仍要求无返回值的 kernel。
+写回仍在对应 launch 返回前完成。prepared CGraph/ExecutionPlan 尚不接纳含返回值的
+kernel；上述结果接口仅用于直接 kernel 准备。
 
 C 消费者先用 `ti_get_kernel_return_info_ext` 查询 `TiKernelReturnInfo`，再给
 `ti_launch_kernel_with_result_ext` 提供恰好 `buffer_size` 字节的 host 缓冲。
@@ -1563,12 +1571,13 @@ C 消费者先用 `ti_get_kernel_return_info_ext` 查询 `TiKernelReturnInfo`，
 （`members`，每项含 `name`、`value`）；偏移相对整个结果缓冲，张量标量槽连续。
 校验在提交前进行，失败调用不覆盖调用方结果。旧的 void C launch 入口丢弃结果，
 但同样在释放接收存储前完成非空结果回读。Windows CPU/CUDA/Vulkan 验证覆盖普通
-独立/借用消费、重复绑定、混合位宽嵌套值、显式 ndarray 伴随和退休；prepared
-仍要求无 host 返回值的 kernel。
+独立/借用消费、重复绑定、混合位宽嵌套值、显式 ndarray 伴随和退休。
+prepared kernel 使用同一布局，调用 `ti_read_prepared_kernel_result_ext` 显式等待
+并复制精确大小的结果；读取前不执行新 kernel，失败的生产者不发布数值。
 
 对应 C API 为 `ti_prepare_kernel_ext` / `ti_prepare_compute_graph_ext`，使用
 `TiNdArrayBinding` / `TiNamedNdArrayBinding`，随后调用 `ti_launch_prepared_ext`
-和 `ti_destroy_prepared_ext`。这些入口覆盖无 host 返回值的普通 kernel 批次，
+和 `ti_destroy_prepared_ext`。这些入口覆盖直接 kernel 与无返回值的 Graph 批次，
 CPU/CUDA 稀疏树的版本与固定执行合同见下文资源章节；其他资源通过对应的重建合同
 接入。产物不保存设备 Graph 句柄，消费者加载代码后再准备。
 

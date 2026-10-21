@@ -14,6 +14,7 @@
 #include "taichi/runtime/control_encoding_cost.h"
 #include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/native_array_contract.h"
+#include "taichi/runtime/native_kernel_result.h"
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
@@ -2924,6 +2925,10 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
                          resolved_graph_argpack(*pd.host_ctx, bind.buffer.root_id));
         break;
       case CompiledTaichiKernel::BufferBindingKind::RetsRw:
+        TI_ASSERT(pd.host_ctx->prepared_result);
+        bindings->rw_buffer(bind.binding,
+                            pd.host_ctx->prepared_result->allocation());
+        break;
       case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
         TI_NOT_IMPLEMENTED;
     }
@@ -3087,8 +3092,13 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     TI_ERROR_IF(!dispatch.host_ctx || found == ti_kernels_.end(),
                 "Prepared Vulkan Graph requires fixed kernel dispatches");
     auto *kernel = found->second.get();
-    TI_ERROR_IF(kernel->get_ret_buffer_size(),
-                "Prepared Vulkan Graph cannot retain host returns");
+    if (kernel->get_ret_buffer_size()) {
+      const auto &result = dispatch.host_ctx->prepared_result;
+      TI_ERROR_IF(!result || &result->device() != device_ ||
+                      result->device_payload_bytes() != kernel->get_ret_buffer_size(),
+                  "Prepared Vulkan Graph requires owned device results");
+      slot.retained_owners.push_back(result);
+    }
     for (const auto &indices : kernel->runtime_argpack_args()) {
       const auto allocation = resolved_graph_argpack(*dispatch.host_ctx, indices);
       TI_ERROR_IF(allocation.device != device_ || allocation.alloc_id == 0,
@@ -3117,8 +3127,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       for (const auto &bind : kernel->buffer_binding_plan(i)) {
         TI_ERROR_IF(
-            bind.kind == CompiledTaichiKernel::BufferBindingKind::RetsRw ||
-                bind.kind == CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray,
+            bind.kind == CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray,
             "Unsupported prepared Vulkan Graph resource binding");
       }
     }
@@ -3301,6 +3310,17 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     begin_timing(operation_index, compute_timing_stream);
     auto &pd = prepared[kernel_index++];
     record_graph_argpack_reads(pd, commands.get());
+    if (const auto &result = pd.host_ctx->prepared_result) {
+      // Cold initialization, a preceding replay or explicit readback may be
+      // the previous access. Record a reusable transition, not a host wait.
+      commands->buffer_transition(
+          result->allocation().get_ptr(), result->device_payload_bytes(),
+          {BufferBarrierStage::Host | BufferBarrierStage::Transfer | BufferBarrierStage::Compute,
+           BufferBarrierAccess::HostWrite | BufferBarrierAccess::TransferWrite |
+               BufferBarrierAccess::HostRead | BufferBarrierAccess::TransferRead |
+               BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::Compute, BufferBarrierAccess::ShaderWrite});
+    }
     const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       auto resources = device_->create_resource_set_unique();
@@ -3420,6 +3440,12 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                   "Prepared Vulkan Graph dispatch recording failed");
       commands->memory_barrier();
       slot.resource_sets.push_back(std::move(resources));
+    }
+    if (const auto &result = pd.host_ctx->prepared_result) {
+      commands->buffer_transition(
+          result->allocation().get_ptr(), result->device_payload_bytes(),
+          {BufferBarrierStage::Compute, BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::Host, BufferBarrierAccess::HostRead});
     }
     end_timing(operation_index, compute_timing_stream);
   }

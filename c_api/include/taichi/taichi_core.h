@@ -1433,6 +1433,15 @@ ti_get_prepared_binding_family_info_ext(TiRuntime runtime,
                                         TiPreparedBindingFamilyInfo *info);
 TI_DLL_EXPORT void TI_API_CALL
 ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
+// Explicitly wait and copy the latest result of a direct prepared kernel.
+// Requires a successful submission, a live binding and exactly the reflected
+// compiled size. Replays overwrite this frame; tickets do not snapshot values.
+// Graph/plan preparations and void kernels do not expose a return value.
+TI_DLL_EXPORT void TI_API_CALL
+ti_read_prepared_kernel_result_ext(TiRuntime runtime,
+                                   TiPreparedExecution execution,
+                                   uint64_t result_size,
+                                   void *result_data);
 // Submit the same prepared execution and record a CPU/CUDA/Vulkan completion
 // atomically with respect to this runtime's submissions. No result snapshot or
 // workspace lease is implied. Destroy tickets explicitly, including completed

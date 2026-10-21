@@ -31,6 +31,114 @@ def read(value, code):
     return result.tolist()
 
 
+def check_prepared(runtime, module, effects, arch, timings):
+    from taichi_forge_runtime import aot
+
+    started = time.perf_counter()
+    first = module.kernel("scalar").bind(5, effects).prepare()
+    second = module.kernel("scalar").bind(-2, effects).prepare()
+    timings["prepared_two_bindings_seconds"] = time.perf_counter() - started
+    before = read(effects, "i")
+    reject(aot.AotError, first.result)
+    assert read(effects, "i") == before  # Preparing/reading unsubmitted never runs.
+    reader = runtime._api.ti_read_prepared_kernel_result_ext
+
+    def unexpected(*args):
+        raise AssertionError("Submitting a prepared kernel read back its result")
+
+    runtime._api.ti_read_prepared_kernel_result_ext = unexpected
+    first.run()
+    ticket = second.submit()
+    runtime._api.ti_read_prepared_kernel_result_ext = reader
+    ticket.wait()
+    ticket.close()
+    assert first.result() == 13 and second.result() == -8
+    assert read(effects, "i") == [before[0] + 2]
+    assert first.info["native_resource_bytes"] == module.kernel("scalar")._return_layout.size
+    assert first.info["launches"] == 1
+    sentinel = C.create_string_buffer(b"\xa5" * 16, 16)
+    reject(aot.AotError, lambda: runtime._api.call(reader, runtime._handle,
+                                                first._handle, 16, sentinel))
+    assert sentinel.raw == b"\xa5" * 16 and first.result() == 13
+    for name, value, expected in (
+        ("vec", 2.0, (2.0, 2.5, -2.0)),
+        ("col", 2.0, ((2.0,), (2.5,), (-2.0,))),
+        ("multiple", -4, (-7, -2.0)),
+        ("widths", -3, dict(flag=False, flags=(False, True), half=-1.5,
+                            precise=-3 + 2.0**-40)),
+    ):
+        prepared = module.kernel(name).bind(value).prepare()
+        prepared.run()
+        assert prepared.result() == expected
+        prepared.close()
+    structured = module.kernel("structured").bind(1.5).prepare()
+    structured.run()
+    result = structured.result()
+    structured.close()
+    assert result == dict(tag=-7, wide=0xFEDCBA9876543210,
+                         inner=dict(code=513, weight=1.5),
+                         values=tuple(1.5 + i for i in range(65)),
+                         basis=tuple(tuple(1.5 + i * 9 + j for j in range(9)) for i in range(9)))
+    reject(RuntimeError, structured.result)
+
+    if arch != "vulkan":
+        failed = module.kernel("checked").bind(-1).prepare()
+        failed.run()
+        size = module.kernel("checked")._return_layout.size
+        sentinel = C.create_string_buffer(b"\xa5" * size, size)
+        reject(aot.AotError, lambda: runtime._api.call(reader, runtime._handle,
+                                                    failed._handle, size, sentinel))
+        assert sentinel.raw == b"\xa5" * size
+        reject(aot.AotError, failed.result)  # Do not publish a failed producer.
+        failed.close()
+        valid = module.kernel("checked").bind(3).prepare()
+        valid.run()
+        assert valid.result() == 8
+        valid.close()
+
+    x, dx = runtime.ndarray("f32", 4), runtime.ndarray("f32", 4)
+    y, dy = runtime.ndarray("f32", 1), runtime.ndarray("f32", 1)
+    x.write(array.array("f", [1, 2, -3, 0.5]).tobytes())
+    dx.write(bytes(16))
+    y.write(bytes(4))
+    dy.write(array.array("f", [1]).tobytes())
+    forward = module.kernel("energy").bind(x, y, gradients={0: dx, 1: dy}).prepare()
+    backward = module.kernel("backward").bind(x, y, gradients={0: dx, 1: dy}).prepare()
+    query = module.kernel("read_energy").bind(y).prepare()
+    assert forward.info["native_resource_bytes"] == 0
+    reject(ValueError, forward.result)
+    forward.run()
+    backward.run()
+    old_ticket = query.submit()
+    old_ticket.wait()
+    assert query.result() == 14.25
+    assert read(dx, "f") == [2, 4, -6, 1]
+    y.write(array.array("f", [9]).tobytes())
+    query.run()
+    # A completed old ticket is not a snapshot of the reusable result frame.
+    old_ticket.wait()
+    assert query.result() == 9
+    old_ticket.close()
+    for call in (forward, backward, query):
+        call.close()
+
+    submits, totals = [], []
+    for _ in range(12):
+        started = time.perf_counter()
+        first.run()
+        submits.append(time.perf_counter() - started)
+        assert first.result() == 13
+        totals.append(time.perf_counter() - started)
+    timings["prepared_host_submit_median_seconds"] = statistics.median(submits)
+    timings["prepared_result_median_seconds"] = statistics.median(totals)
+    timings["prepared_native_resource_bytes"] = first.info["native_resource_bytes"]
+    first.close()
+    # Closing in-flight result storage drains it before releasing its frame.
+    second.run()
+    second.close()
+    reject(RuntimeError, second.result)
+
+
 def main(mode, arch, artifact):
     if mode == "standalone":
         sys.meta_path.insert(0, NoFrontend())
@@ -187,13 +295,15 @@ def main(mode, arch, artifact):
         timings["warm_result_median_seconds"] = statistics.median(samples)
         timings["scalar_result_bytes"] = scalar._return_layout.size
         timings["structured_result_bytes"] = structured._return_layout.size
-        reject(
-            aot.AotError, bound.prepare
-        )  # Prepared result frames are a separate delivery.
+        check_prepared(runtime, module, effects, arch, timings)
 
         sibling = runtime.load_module(artifact)
         sibling_call = sibling.kernel("scalar").bind(9, effects)
+        retired_result = bound.prepare()
+        retired_result.run()
         module.close()
+        reject(aot.AotError, retired_result.result)
+        retired_result.close()
         reject(RuntimeError, bound)
         info = abi.KernelReturnInfo()
         reject(
@@ -213,8 +323,11 @@ def main(mode, arch, artifact):
         late_module = late.load_module(artifact)
         late_call = late_module.kernel("vec").bind(3.0)
         assert late_call() == (3, 3.5, -3)
+        late_prepared = late_call.prepare()
+        late_prepared.run()
         ti.reset()
         reject(RuntimeError, late_call)
+        reject(RuntimeError, late_prepared.result)
         late.close()
     print(json.dumps(dict(mode=mode, arch=arch, timings=timings)))
     Path(artifact, mode + "-result.json").write_text(json.dumps(timings, indent=2))

@@ -1,4 +1,5 @@
 #include "taichi/runtime/cpu/kernel_launcher.h"
+#include "taichi/runtime/native_kernel_result.h"
 
 #include <chrono>
 #include <ctime>
@@ -338,8 +339,9 @@ KernelLauncher::PreparedLaunch KernelLauncher::prepare_launch(
   const auto found = contexts_.find(handle.get_launch_id());
   TI_ERROR_IF(found == contexts_.end(),
               "Prepared CPU entry is no longer registered");
-  TI_ERROR_IF(ctx.result_buffer_size || !ctx.argpack_ptrs.empty(),
-              "Prepared CPU execution does not support returns or ArgPacks");
+  TI_ERROR_IF((ctx.result_buffer_size && !ctx.prepared_result) ||
+                  !ctx.argpack_ptrs.empty(),
+              "Prepared CPU execution requires owned returns and ArgPacks");
   PreparedLaunch result;
   result.registration_ = found->second;
   bind_runtime_context(*result.registration_, ctx);
@@ -355,7 +357,8 @@ KernelLauncher::PreparedLaunch KernelLauncher::prepare_launch(
   result.context_.arg_buffer = result.arguments_.empty()
                                    ? nullptr
                                    : result.arguments_.data() + prefix;
-  result.context_.result_buffer = nullptr;
+  result.context_.result_buffer = ctx.prepared_result
+      ? reinterpret_cast<uint64_t *>(ctx.prepared_result->address()) : nullptr;
   return result;
 }
 

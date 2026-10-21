@@ -1892,7 +1892,7 @@ values at the compiled offsets, and pass `TI_ARGUMENT_TYPE_VALUE_EXT` with
 `TiValueArgument {size, data}`. The size must match exactly. The module owns the
 layout string; launch/prepare copies payload bytes before returning. This form
 cannot carry resource handles or ArgPacks and does not extend ordinary CGraph
-input types or prepared returns. Value parameters are constants in an explicitly
+input types. Value parameters are constants in an explicitly
 exported adjoint; ndarray gradients keep their existing bindings and ownership.
 
 The producer's `Module.add_kernel()` synthesizes compilation exemplars for fully
@@ -1984,13 +1984,25 @@ returns become a tuple. The loaded compiler layout determines scalar widths,
 padding and shape; it is queried once per Kernel wrapper and reused by bound
 calls. A nonempty host result waits for completion. Void kernels continue to
 return `None` without adding a wait. These result reads do not add automatic
-differentiation or prepared/Graph result frames.
+differentiation or Graph result frames.
+
+Direct kernel `prepare()` also supports return values. Each immutable binding
+owns one independent device result frame. `prepared.run()`/`submit()` only submit;
+`prepared.result()` explicitly waits and decodes the latest successful submission.
+Reading before submission, after a failed producer or after retirement fails.
+Repeated submissions overwrite that frame: an older completion ticket is not a
+value snapshot. Read values before reuse or prepare independent bindings when
+separate results are needed. Decoded Python values survive module closure.
+Void preparations allocate no result frame and add no readback or completion
+event. `info["native_resource_bytes"]` includes the compiled frame size, not
+driver-private residency.
 
 Ordinary CGraph dispatches discard kernel return values and return `None`.
 CUDA/Vulkan omit the unused host result readback while retaining the compiled
 device result storage, array writes and execution dependencies. Host external
-array writes still complete before their launch returns. Prepared execution
-continues to require kernels without returns.
+array writes still complete before their launch returns. Prepared CGraph and
+ExecutionPlan entries still require kernels without returns; the result API
+above applies only to direct kernel preparation.
 
 C consumers query `ti_get_kernel_return_info_ext` for `TiKernelReturnInfo` and
 call `ti_launch_kernel_with_result_ext` with exactly `buffer_size` host bytes.
@@ -2003,7 +2015,9 @@ the caller's result buffer. Older void C launch entry points discard results,
 but also complete a nonempty return readback before releasing its host storage.
 Windows CPU/CUDA/Vulkan checks cover ordinary independent and borrowed consumers,
 repeated bindings, mixed-width nested values, explicit ndarray adjoints and
-retirement. Prepared execution still requires kernels without host returns.
+retirement. Prepared kernels use the same reflected layout and
+`ti_read_prepared_kernel_result_ext` to explicitly wait and copy an exact-size
+result. Reading executes no new kernel, and failed producers publish no value.
 
 `entry.prepare(...)` (or `bound_call.prepare()`) prepares immutable native
 execution without running the kernels. CPU uses resolved function entries and
@@ -2021,7 +2035,7 @@ without re-marshalling arguments or scanning every array owner.
 The corresponding C API is `ti_prepare_kernel_ext` /
 `ti_prepare_compute_graph_ext` with `TiNdArrayBinding` /
 `TiNamedNdArrayBinding`, followed by `ti_launch_prepared_ext` and
-`ti_destroy_prepared_ext`. These entries cover ordinary no-return kernel batches;
+`ti_destroy_prepared_ext`. These entries cover direct kernels and no-return Graph batches;
 the resource section below specifies CPU/CUDA sparse versions and fixed execution.
 Other resources use their corresponding reconstruction contracts. Device Graph
 handles are not serialized into the artifact.

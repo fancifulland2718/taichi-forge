@@ -335,6 +335,7 @@ class Api:
                 Handle,
             ),
             "ti_launch_prepared_ext": ([Handle, Handle], None),
+            "ti_read_prepared_kernel_result_ext": ([Handle, Handle, C.c_uint64, C.c_void_p], None),
             "ti_submit_prepared_ext": ([Handle, Handle], Handle),
             "ti_query_submission_ext": ([Handle], UInt),
             "ti_wait_submission_ext": ([Handle], None),

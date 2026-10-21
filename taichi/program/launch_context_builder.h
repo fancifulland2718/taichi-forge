@@ -12,6 +12,7 @@ namespace taichi::lang {
 
 struct RuntimeContext;
 class NativeAccelerationStructure;
+class NativeKernelResultStorage;
 namespace aot {
 struct CompiledGraphKernelInvocation;
 }
@@ -86,6 +87,10 @@ class LaunchContextBuilder {
 
   explicit LaunchContextBuilder(CallableBase *kernel,
                                 bool cpu_bounded_range = false);
+
+  // Cold fixed binding only. Retain the device frame separately from the
+  // ordinary host return buffer, which must never enter a captured packet.
+  std::shared_ptr<NativeKernelResultStorage> prepared_result;
 
   void set_cpu_bounded_range(void *extent, std::int32_t capacity);
   std::size_t arg_buffer_prefix_size() const noexcept;

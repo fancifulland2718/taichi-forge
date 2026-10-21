@@ -1,6 +1,7 @@
 #include "taichi/runtime/native_kernel_result.h"
 
 #include <stdexcept>
+#include <cstring>
 #include <vector>
 #include "taichi/aot/value_layout.h"
 #include "taichi/program/callable.h"
@@ -24,7 +25,7 @@ NativeKernelResultStorage::NativeKernelResultStorage(
   if (!bytes_)
     return;
   auto [allocation, status] = device.allocate_memory_unique(
-      {bytes_, false, false, false, AllocUsage::Storage});
+      {bytes_, false, arch == Arch::vulkan, false, AllocUsage::Storage});
   if (status != RhiResult::success)
     throw std::runtime_error("Unable to allocate kernel result storage");
   allocation_ = std::move(allocation);
@@ -53,6 +54,17 @@ void NativeKernelResultStorage::read_completed(void *destination,
     throw std::invalid_argument("Kernel result destination must match compiled size");
   if (!bytes)
     return;
+  if (arch_ == Arch::vulkan) {
+    // The prepared recording supplies ShaderWrite -> HostRead visibility and
+    // the caller has waited. Reuse ordinary GFX return-buffer mapping instead
+    // of allocating staging and submitting a second download for every read.
+    void *source = nullptr;
+    if (device_.map(*allocation_, &source) != RhiResult::success)
+      throw std::runtime_error("Unable to map completed kernel result storage");
+    std::memcpy(destination, source, bytes);
+    device_.unmap(*allocation_);
+    return;
+  }
   auto source = allocation_->get_ptr();
   if (device_.readback_data(&source, &destination, &bytes, 1) != RhiResult::success)
     throw std::runtime_error("Unable to read completed kernel result storage");

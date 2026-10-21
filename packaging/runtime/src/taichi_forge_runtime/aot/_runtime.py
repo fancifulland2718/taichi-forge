@@ -1012,7 +1012,7 @@ class BoundCall:
                 len(self._bindings),
                 self._bindings,
             )
-            return PreparedCall(runtime, handle, self._owners)
+            return PreparedCall(runtime, handle, self._owners, return_layout=self._entry._return_layout)
 
 
 class _BindingFamily:
@@ -1032,11 +1032,13 @@ class PreparedCall(_Resource):
 
     _kind = "prepared"
 
-    def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None, execution_domain=None):
+    def __init__(self, runtime, handle, owners, *, replay_owners=None, family=None, execution_domain=None,
+                 return_layout=None):
         self._owners = owners
         self._replay_owners = replay_owners
         self._family = family
         self._execution_domain = execution_domain
+        self._return_layout = return_layout
         super().__init__(runtime, handle)
         if execution_domain is not None:
             execution_domain._clients.add(runtime)
@@ -1145,6 +1147,25 @@ class PreparedCall(_Resource):
             raise
 
     __call__ = run
+
+    def result(self):
+        """Wait and decode this direct kernel binding's latest submitted result.
+
+        Repeated submissions overwrite one frame. Completion tickets do not
+        snapshot results. Separate preparations own independent frames; the
+        decoded Python value is independent of both frame and module lifetime.
+        """
+        runtime = self._runtime
+        with runtime._lock:
+            self._check()
+            layout = self._return_layout
+            if layout is None:
+                raise ValueError("This prepared call has no kernel return value")
+            data = C.create_string_buffer(layout.size)
+            runtime._api.call(runtime._api.ti_read_prepared_kernel_result_ext,
+                              runtime._handle, self._handle, layout.size, data)
+            runtime._pending.clear()
+            return layout.decode(data)
 
     def _submit_ordinary(self):
         """Run and return a completion ticket; output storage remains caller-owned."""

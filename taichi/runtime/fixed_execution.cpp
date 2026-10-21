@@ -15,6 +15,7 @@
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_kernel_resource.h"
+#include "taichi/runtime/native_kernel_result.h"
 #include "taichi/program/launch_context_builder.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -47,6 +48,7 @@ struct FixedExecution::State {
   // Destroy backend recordings before their retained workspace owners.
   std::vector<std::shared_ptr<NativeOperation>> native_operations;
   std::vector<std::shared_ptr<NativeKernelResourceBinding>> kernel_resources;
+  std::vector<std::shared_ptr<NativeKernelResultStorage>> kernel_results;
   std::size_t native_workspace_bytes{0};
   // Host steps retire their native blocks and readback commands before staging
   // and provider owners. All selection storage/commands are prepared cold.
@@ -499,11 +501,17 @@ FixedExecution::FixedExecution(
           throw std::invalid_argument(
               "Indirect dispatch requires a flat Vulkan recording and aligned packet");
         if (!dispatch->kernel || !dispatch->context ||
-            dispatch->kernel->ret_size ||
             !dispatch->context->argpack_ptrs.empty())
           throw std::invalid_argument(
-              "Fixed execution requires loaded entries without returns or "
+              "Fixed execution requires loaded entries without "
               "Program-owned ArgPacks");
+        const auto &result = dispatch->context->prepared_result;
+        if ((dispatch->kernel->ret_size && !result) ||
+            (result && !result->matches(arch, device, *dispatch->kernel)))
+          throw std::invalid_argument(
+              "Fixed kernel returns require matching owned result storage");
+        if (result)
+          state_->kernel_results.push_back(result);
 #ifdef TI_WITH_CUDA
         if (execution_binding) {
           auto *kernel = dynamic_cast<llvm_aot::KernelImpl *>(dispatch->kernel);
@@ -862,6 +870,7 @@ FixedExecution::FixedExecution(
         std::shared_ptr<RuntimeCompletionResources> bindings;
         std::vector<std::shared_ptr<NativeOperation>> operations;
         std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
+        std::vector<std::shared_ptr<NativeKernelResultStorage>> results;
         std::vector<std::shared_ptr<void>> provider_bindings;
         std::size_t retained_resource_count(
             std::uint32_t kind) const noexcept override {
@@ -872,6 +881,7 @@ FixedExecution::FixedExecution(
       retained->bindings = execution_binding->operands;
       retained->operations = state_->native_operations;
       retained->resources = state_->kernel_resources;
+      retained->results = state_->kernel_results;
       retained->provider_bindings = state_->cuda_provider_bindings;
       state_->cuda_instance = std::make_shared<State::CudaInstance>();
       state_->cuda_instance->operands = std::move(retained);
@@ -1032,11 +1042,13 @@ FixedExecution::FixedExecution(
         std::shared_ptr<void> bindings;
         std::vector<std::shared_ptr<NativeOperation>> operations;
         std::vector<std::shared_ptr<NativeKernelResourceBinding>> resources;
+        std::vector<std::shared_ptr<NativeKernelResultStorage>> results;
       };
       auto retained = std::make_shared<FrameOperands>();
       retained->bindings = std::move(binding_operands);
       retained->operations = state_->native_operations;
       retained->resources = state_->kernel_resources;
+      retained->results = state_->kernel_results;
       auto &cuda = CUDAContext::get_instance();
       auto lock = cuda.get_submission_lock_guard();
       auto guard = cuda.get_guard();

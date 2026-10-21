@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/native_kernel_result.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
@@ -789,7 +790,7 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
   }
   if (uses_sparse && (!allow_sparse_replay || !sparse_graph_contract_))
     return false;
-  if (ctx.result_buffer_size > 0) {
+  if (ctx.result_buffer_size > 0 && !ctx.prepared_result) {
     return false;
   }
 
@@ -888,12 +889,14 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
 
   context = ctx.get_context();
   // A no-return CUDA field task repurposes this otherwise unused slot for its
-  // registration-owned compact root binding. Other tasks canonicalize it so
-  // capture packets do not retain a transient host address.
+  // registration-owned compact root binding. Returning tasks retain a fixed
+  // device frame; no packet may retain the ordinary transient host buffer.
   context.result_buffer = launcher_ctx->uses_root_binding
                               ? static_cast<uint64_t *>(
                                     launcher_ctx->root_binding)
-                              : nullptr;
+                              : ctx.prepared_result
+                                  ? reinterpret_cast<uint64_t *>(ctx.prepared_result->address())
+                                  : nullptr;
   if (resolved_tasks != nullptr) {
     *resolved_tasks = offloaded_tasks;
     if (uses_sparse && allow_sparse_replay && plan == nullptr) {

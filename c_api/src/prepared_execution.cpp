@@ -16,6 +16,7 @@
 #include "taichi/runtime/native_operation_registry.h"
 #include "taichi/runtime/native_host_blob.h"
 #include "taichi/runtime/native_image.h"
+#include "taichi/runtime/native_kernel_result.h"
 #include "taichi/program/runtime_fault.h"
 #ifdef TI_WITH_CUDA
 #include "taichi/runtime/cuda/binding_frame_replay.h"
@@ -52,6 +53,10 @@ struct PreparedExecution {
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
+  // Direct-kernel preparations expose one latest-result frame. A completion
+  // ticket does not snapshot it; each replay overwrites the same binding.
+  std::shared_ptr<NativeKernelResultStorage> kernel_result;
+  bool result_valid{false};
   uint64_t native_resource_workspace_bytes{0};
   uint64_t native_resource_payload_bytes{0};
   // The backend consumes these cold descriptors before they are released.
@@ -88,6 +93,8 @@ struct PreparedExecution {
   }
 
   void release_native_resources() {
+    kernel_result.reset();
+    result_valid = false;
     while (!native_resources.empty())
       native_resources.pop_back();
     native_resource_workspace_bytes = 0;
@@ -304,6 +311,7 @@ struct PreparedExecution {
     if (family && family->failed)
       throw MemoryBindingError(
           "Binding family initialization failed; prepare a new family");
+    result_valid = false;
     if (domain) {
       if (!domain_initialized)
         throw MemoryBindingError(
@@ -313,6 +321,7 @@ struct PreparedExecution {
       native->run();
     }
     ++info.launches;
+    result_valid = bool(kernel_result);
   }
 
   void invalidate() {
@@ -681,6 +690,14 @@ TiPreparedExecution ti_prepare_kernel_ext(TiRuntime runtime,
   prepared->memories = arguments->memories;
   prepared->external_resources = arguments->native_resources;
   prepared->kernel_arguments = std::move(arguments);
+  if (prepared->kernel_arguments->kernel->ret_size) {
+    prepared->kernel_result =
+        std::make_shared<taichi::lang::NativeKernelResultStorage>(
+            rt.arch, rt.get(), *prepared->kernel_arguments->kernel);
+    prepared->kernel_arguments->context->prepared_result = prepared->kernel_result;
+    prepared->native_resources.push_back(prepared->kernel_result);
+    prepared->replay_resources.insert(prepared->kernel_result.get());
+  }
   taichi::lang::FixedExecution::Dispatch dispatch{
       prepared->kernel_arguments->kernel,
       prepared->kernel_arguments->context.get()};
@@ -2256,6 +2273,33 @@ void ti_launch_prepared_ext(TiRuntime runtime, TiPreparedExecution execution) {
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   rt.prepared_registry().run(execution);
+  TI_CAPI_TRY_CATCH_END();
+}
+void ti_read_prepared_kernel_result_ext(TiRuntime runtime,
+                                        TiPreparedExecution execution,
+                                        uint64_t result_size,
+                                        void *result_data) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(execution);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto &entry = rt.prepared_registry().get(execution);
+  if (!entry.live || !entry.kernel_result || !entry.result_valid || entry.domain)
+    throw MemoryBindingError(
+        "Prepared result requires a live direct kernel with a successful submission");
+  if (result_size != entry.kernel_result->device_payload_bytes() || !result_data)
+    throw MemoryBindingError("Prepared result destination must match compiled size");
+  // Explicit observation is the only synchronization point. The submission
+  // mutex prevents another replay from overwriting the frame during its copy.
+  try {
+    rt.wait();
+    rt.complete_submission_completions();
+    entry.kernel_result->read_completed(result_data, result_size);
+  } catch (...) {
+    entry.result_valid = false;
+    throw;
+  }
   TI_CAPI_TRY_CATCH_END();
 }
 TiSubmissionTicket ti_submit_prepared_ext(TiRuntime runtime,
