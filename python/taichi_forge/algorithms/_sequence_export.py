@@ -571,24 +571,28 @@ def _histogram(call, context):
         }
     ):
         raise TaichiRuntimeError("AOT histogram cannot reconstruct the selected cached strategy")
-    parameters = dict(size=source.index_shape[0], num_bins=destination.index_shape[0],
-                      value_dtype=str(values.dtype), counter_dtype=str(bins.dtype))
-    if backend == "cpu_native":
-        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
-    elif backend == "vulkan_native":
-        # Export a semantic recipe with cold export-time preferences, not the
-        # producer's materialized command buffers. Consumer environments cannot
-        # change this recipe, and replay never probes environment configuration.
-        parameters["vulkan_policy"] = {
+    from ._primitive_definitions import HistogramDefinition
+
+    definition = HistogramDefinition(source.index_shape[0], destination.index_shape[0], values.dtype, bins.dtype)
+    if call.plan is not None:
+        if call.plan.definition != definition:
+            raise TaichiRuntimeError("AOT histogram definition differs from the selected native call")
+        definition = call.plan.definition
+    policy = None
+    if backend == "vulkan_native":
+        # Keep the existing cold export-time preference policy. This semantic
+        # recipe does not serialize materialized command buffers, and consumer
+        # environment changes cannot alter its preparation choices.
+        policy = {
             key: max(0, int(os.environ.get("TI_VULKAN_HISTOGRAM_" + key.upper(), default)))
-            for key, default in (("private_min_n", 65536), ("private_max_bins", 512),
-                                 ("single_shared_max_n", 4096))
+            for key, default in (("private_min_n", 65536), ("private_max_bins", 512), ("single_shared_max_n", 4096))
         }
-    context.operations.append(dict(
-        kind="native", provider="builtin", operation="histogram", version=1,
-        parameters=parameters,
-        bindings=dict(values=context.retained_arrays.require(values), bins=context.retained_arrays.require(bins)),
-    ))
+    definition.bind(
+        values,
+        bins,
+        cpu_max_threads=max(1, impl.current_cfg().cpu_max_num_threads) if backend == "cpu_native" else None,
+        vulkan_policy=policy,
+    ).lower(context)
 
 
 def _sort(call, context):

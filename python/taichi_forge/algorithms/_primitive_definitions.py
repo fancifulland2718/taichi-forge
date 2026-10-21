@@ -6,6 +6,52 @@ import struct
 from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 
 NATIVE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
+HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
+HISTOGRAM_BIN_TYPE = {i32: 0, i64: 4}
+
+
+@dataclass(frozen=True)
+class HistogramDefinition:
+    size: int
+    num_bins: int
+    value_dtype: object
+    counter_dtype: object
+
+    def __post_init__(self):
+        if self.value_dtype not in HISTOGRAM_VALUE_TYPE:
+            raise TypeError("unsupported histogram value dtype")
+        if self.counter_dtype not in HISTOGRAM_BIN_TYPE:
+            raise TypeError("unsupported histogram bin dtype")
+
+    @property
+    def value_type(self):
+        return HISTOGRAM_VALUE_TYPE[self.value_dtype]
+
+    @property
+    def bin_type(self):
+        return HISTOGRAM_BIN_TYPE[self.counter_dtype]
+
+    def bind(self, values, bins, *, cpu_max_threads=None, vulkan_policy=None):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
+        parameters = dict(
+            size=self.size,
+            num_bins=self.num_bins,
+            value_dtype=str(self.value_dtype),
+            counter_dtype=str(self.counter_dtype),
+        )
+        if cpu_max_threads is not None:
+            parameters["cpu_max_threads"] = cpu_max_threads
+        if vulkan_policy is not None:
+            parameters["vulkan_policy"] = vulkan_policy
+        return NativeOperationBinding(
+            NativeDefinition("builtin", "histogram", parameters),
+            (
+                NativeArrayBinding("values", values, GraphAccess.READ),
+                NativeArrayBinding("bins", bins, GraphAccess.WRITE),
+            ),
+        )
 
 
 @dataclass(frozen=True)

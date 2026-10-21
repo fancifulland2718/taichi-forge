@@ -33,6 +33,9 @@ from taichi_forge.algorithms._primitive_definitions import (
     NATIVE_VALUE_TYPE as _REDUCE_VALUE_TYPE,
     REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
     ScanDefinition,
+    HistogramDefinition,
+    HISTOGRAM_VALUE_TYPE as _HISTOGRAM_VALUE_TYPE,
+    HISTOGRAM_BIN_TYPE as _HISTOGRAM_BIN_TYPE,
     IndexedCopyDefinition,
     ScatterAddDefinition,
     NATIVE_VALUE_TYPE as _SCATTER_ADD_VALUE_TYPE,
@@ -207,9 +210,7 @@ _GROUPED_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _GROUPED_REDUCE_FIELD_DTYPES = (i32,)
 _SCAN_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _HISTOGRAM_VALUE_DTYPES = (i32, u32)
-_HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
 _HISTOGRAM_BIN_DTYPES = (i32, i64)
-_HISTOGRAM_BIN_TYPE = {i32: 0, i64: 4}
 _SUPPORTED_HISTOGRAM_METHODS = supported_primitive_methods("histogram")
 _REDUCE_FIELD_PRIVATE_MIN_N = 65536
 _REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
@@ -6592,6 +6593,7 @@ class HistogramWorkspace:
         call_args,
         n,
         prog,
+        definition,
     ):
         plan = _record_native_primitive_plan(
             self._native_histogram_plans,
@@ -6603,6 +6605,7 @@ class HistogramWorkspace:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_histogram_plan = plan
 
@@ -11954,6 +11957,8 @@ def _try_cuda_histogram_provider(values, bins, workspace, backend):
         values, bins, backend, value_type, bin_type
     ):
         return True
+    definition = HistogramDefinition(values.shape[0], bins.shape[0], values.dtype, bins.dtype)
+    value_type, bin_type = definition.value_type, definition.bin_type
     if dense_field_mode:
         if backend == "cuda_cub" and not _dense_histogram_fields_are_contiguous(
             values_view, bins_view
@@ -11968,8 +11973,8 @@ def _try_cuda_histogram_provider(values, bins, workspace, backend):
             bins_view.snode,
             value_type,
             bin_type,
-            values_view.num_elements,
-            bins_view.num_elements,
+            definition.size,
+            definition.num_bins,
         )
         temp_bytes = method(*call_args)
     elif _prog_has(prog, f"{prefix}_histogram_ndarray"):
@@ -11997,6 +12002,7 @@ def _try_cuda_histogram_provider(values, bins, workspace, backend):
             call_args,
             values.shape[0],
             prog,
+            definition,
         )
     return True
 
@@ -12040,6 +12046,8 @@ def _try_vulkan_histogram(values, bins, workspace):
         values, bins, "vulkan_two_level", value_type, bin_type
     ):
         return True
+    definition = HistogramDefinition(values.shape[0], bins.shape[0], values.dtype, bins.dtype)
+    value_type, bin_type = definition.value_type, definition.bin_type
     if dense_field_mode:
         if not _dense_histogram_fields_are_contiguous(values_view, bins_view):
             return False
@@ -12052,8 +12060,8 @@ def _try_vulkan_histogram(values, bins, workspace):
             bins_view.snode,
             value_type,
             bin_type,
-            values_view.num_elements,
-            bins_view.num_elements,
+            definition.size,
+            definition.num_bins,
         )
         temp_bytes = method(*call_args)
     elif _prog_has(prog, "vulkan_histogram_ndarray"):
@@ -12081,6 +12089,7 @@ def _try_vulkan_histogram(values, bins, workspace):
             call_args,
             values.shape[0],
             prog,
+            definition,
         )
     return True
 
@@ -12112,6 +12121,8 @@ def _try_cpu_native_histogram(values, bins, workspace):
         values, bins, "cpu_two_level", value_type, bin_type
     ):
         return True
+    definition = HistogramDefinition(values.shape[0], bins.shape[0], values.dtype, bins.dtype)
+    value_type, bin_type = definition.value_type, definition.bin_type
     if dense_field_mode:
         method_name = "cpu_histogram_dense_field"
         method = _prog_method(prog, method_name)
@@ -12122,8 +12133,8 @@ def _try_cpu_native_histogram(values, bins, workspace):
             bins_view.snode,
             value_type,
             bin_type,
-            values_view.num_elements,
-            bins_view.num_elements,
+            definition.size,
+            definition.num_bins,
         )
         temp_bytes = method(*call_args)
     elif _prog_has(prog, "cpu_histogram_ndarray"):
@@ -12151,6 +12162,7 @@ def _try_cpu_native_histogram(values, bins, workspace):
             call_args,
             values.shape[0],
             prog,
+            definition,
         )
     return True
 

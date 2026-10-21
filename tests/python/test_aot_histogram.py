@@ -18,6 +18,9 @@ from tests.python.aot_scan_probe import reject
     arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, cpu_max_num_threads=4
 )
 def test_histogram_sequence_runtime_only_and_borrowed(tmp_path, monkeypatch):
+    from taichi_forge.algorithms._primitive_definitions import HistogramDefinition
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
     module = ti.aot.Module()
     arch = ti.lang.impl.current_cfg().arch
     for key, value in (
@@ -64,9 +67,27 @@ def test_histogram_sequence_runtime_only_and_borrowed(tmp_path, monkeypatch):
         graph = builder.compile()
         name = f"histogram_{value_type}_{bin_type}_{n}"
         before = values.to_numpy().tobytes(), bins.to_numpy().tobytes()
-        plan = module.add_execution_plan(
-            name, graph, source_bindings=dict(values=values, bins=bins)
-        )
+        definitions = []
+        bind = HistogramDefinition.bind
+
+        def observe(definition, *args, **kwargs):
+            definitions.append(definition)
+            return bind(definition, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(HistogramDefinition, "bind", observe)
+            plan = module.add_execution_plan(name, graph, source_bindings=dict(values=values, bins=bins))
+        assert len(definitions) == 1
+        if value_type == ti.i32:
+            assert definitions[0] is sequence._calls[0].plan.definition
+
+            def no_conversion(*args, **kwargs):
+                raise AssertionError("warm histogram must retain its native plan")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(HistogramDefinition, "__post_init__", no_conversion)
+                patch.setattr(NativeOperationBinding, "lower", no_conversion)
+                sequence.run()
         assert before == (values.to_numpy().tobytes(), bins.to_numpy().tobytes())
         operation = json.loads(plan.to_json())["operations"][0]
         assert operation["operation"] == "histogram"
