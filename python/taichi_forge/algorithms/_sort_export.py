@@ -10,6 +10,8 @@ from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.matrix import MatrixNdarray, VectorNdarray
 
+from ._primitive_definitions import IndexedCopyDefinition, TransformDefinition
+
 
 def export_key_parts(call, context):
     from taichi_forge.aot._graph_storage_bindings import packed_description
@@ -148,10 +150,6 @@ def export_key_parts(call, context):
         # are initialized once, using the same helper code as each sort pass.
         context.initialization.extend(context.region(emit_arange, identity_order))
     temporaries = {}
-    identity = dict(
-        scale_bits=Scalar("f64", 1).resource("scale")["bits"],
-        bias_bits=Scalar("f64", 0).resource("bias")["bits"],
-    )
     for key_index in reversed(range(len(parts))):
         emit_arange(context, order)
         context.operations.append(
@@ -174,45 +172,11 @@ def export_key_parts(call, context):
                     ),
                 )
             temp = temporaries[key]
-            gather = dict(
-                size=n,
-                src_items=n,
-                dst_items=n,
-                dtype=dtype,
-                element_shape=list(shape),
-                op="gather",
-            )
-            context.operations.append(
-                dict(
-                    kind="native",
-                    provider="builtin",
-                    operation="indexed_copy",
-                    version=1,
-                    parameters=gather,
-                    bindings=dict(src=name, indices=order, dst=temp),
-                )
-            )
+            gather = IndexedCopyDefinition(n, n, n, descriptor.scalar_type, shape, False)
+            gather.bind(name, order, temp).lower(context)
             if shape:
-                context.operations.append(
-                    dict(
-                        kind="native",
-                        provider="builtin",
-                        operation="indexed_copy",
-                        version=1,
-                        parameters=dict(gather),
-                        bindings=dict(src=temp, indices=identity_order, dst=name),
-                    )
-                )
+                gather.bind(temp, identity_order, name).lower(context)
                 continue
             # Preserve the JIT's affine identity operation, including its
             # floating-point semantics; a byte copy is not an equivalent swap.
-            context.operations.append(
-                dict(
-                    kind="native",
-                    provider="builtin",
-                    operation="transform",
-                    version=1,
-                    parameters=dict(size=n, dtype=dtype, **identity),
-                    bindings=dict(src=temp, dst=name),
-                )
-            )
+            TransformDefinition(n, descriptor.scalar_type, 1, 0).bind(temp, name).lower(context)
