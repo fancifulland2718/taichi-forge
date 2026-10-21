@@ -40,6 +40,9 @@ lifetimes. The entries below describe the changes.
   now synthesize fully declared packs or accept exemplars for resource
   specialization. This covers production; independent AOT ArgPack owners and
   prepared consumption still need their subsequent implementation.
+  Repeated resource member names across packs retain distinct bindings in
+  declaration order, fixing frontend `NoneType` compilation errors for nested
+  packs and their explicit adjoints.
 
 - Vulkan loads boolean vector and nested structure arguments using their
   integer buffer slots before converting them to boolean expressions. This

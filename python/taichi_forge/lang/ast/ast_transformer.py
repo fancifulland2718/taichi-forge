@@ -629,26 +629,26 @@ class ASTTransformer(Builder):
         assert args.kw_defaults == []
         assert args.kwarg is None
 
-        def decl_and_create_variable(annotation, name, arg_features, invoke_later_dict, prefix_name, arg_depth):
+        def decl_and_create_variable(annotation, name, arg_features, pending_argpack_members, prefix_name, arg_depth):
             full_name = prefix_name + "_" + name
             if not isinstance(annotation, primitive_types.RefType):
                 ctx.kernel_args.append(name)
             if isinstance(annotation, ArgPackType):
                 kernel_arguments.push_argpack_arg(name)
                 d = {}
-                items_to_put_in_dict = []
+                pending_members = []
                 for j, (_name, anno) in enumerate(annotation.members.items()):
                     result, obj = decl_and_create_variable(
-                        anno, _name, arg_features[j], invoke_later_dict, full_name, arg_depth + 1
+                        anno, _name, arg_features[j], pending_argpack_members, full_name, arg_depth + 1
                     )
                     if not result:
                         d[_name] = None
-                        items_to_put_in_dict.append((full_name + "_" + _name, _name, obj))
+                        pending_members.append((_name, obj))
                     else:
                         d[_name] = obj
                 argpack = kernel_arguments.decl_argpack_arg(annotation, d)
-                for item in items_to_put_in_dict:
-                    invoke_later_dict[item[0]] = argpack, item[1], *item[2]
+                for member, declaration in pending_members:
+                    pending_argpack_members.append((argpack, member, *declaration))
                 return True, argpack
             if isinstance(annotation, annotations.template):
                 return True, ctx.global_vars[name]
@@ -724,38 +724,39 @@ class ASTTransformer(Builder):
                     kernel_arguments.decl_ret(return_type)
             impl.get_runtime().compiling_callable.finalize_rets()
 
-            invoke_later_dict = dict()
+            # Keep every declaration in order. Generated names need not be
+            # unique across packs (or across nested underscore-separated paths).
+            pending_argpack_members = []
             create_variable_later = dict()
             for i, arg in enumerate(args.args):
                 if isinstance(ctx.func.arguments[i].annotation, ArgPackType):
                     kernel_arguments.push_argpack_arg(ctx.func.arguments[i].name)
                     d = {}
-                    items_to_put_in_dict = []
+                    pending_members = []
                     for j, (name, anno) in enumerate(ctx.func.arguments[i].annotation.members.items()):
                         result, obj = decl_and_create_variable(
-                            anno, name, ctx.arg_features[i][j], invoke_later_dict, "__argpack_" + name, 1
+                            anno, name, ctx.arg_features[i][j], pending_argpack_members, "__argpack_" + name, 1
                         )
                         if not result:
                             d[name] = None
-                            items_to_put_in_dict.append(("__argpack_" + name, name, obj))
+                            pending_members.append((name, obj))
                         else:
                             d[name] = obj
                     argpack = kernel_arguments.decl_argpack_arg(ctx.func.arguments[i].annotation, d)
-                    for item in items_to_put_in_dict:
-                        invoke_later_dict[item[0]] = argpack, item[1], *item[2]
+                    for member, declaration in pending_members:
+                        pending_argpack_members.append((argpack, member, *declaration))
                     create_variable_later[arg.arg] = argpack
                 else:
                     result, obj = decl_and_create_variable(
                         ctx.func.arguments[i].annotation,
                         ctx.func.arguments[i].name,
                         ctx.arg_features[i] if ctx.arg_features is not None else None,
-                        invoke_later_dict,
+                        pending_argpack_members,
                         "",
                         0,
                     )
                     ctx.create_variable(arg.arg, obj if result else obj[0](*obj[1]))
-            for k, v in invoke_later_dict.items():
-                argpack, name, func, params = v
+            for argpack, name, func, params in pending_argpack_members:
                 argpack[name] = func(*params)
             for k, v in create_variable_later.items():
                 ctx.create_variable(k, v)
