@@ -6,7 +6,13 @@ from types import MappingProxyType
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native_definition import NativeDefinition
-from taichi_forge.hardware._cusparse_definitions import SPMM_ALGORITHMS, SpmmDefinition, bind_sparse_operation
+from taichi_forge.hardware._cusparse_definitions import (
+    SPMM_ALGORITHMS,
+    SpmmDefinition,
+    TriangularDefinition,
+    bind_sparse_operation,
+    sparse_array_ports,
+)
 from taichi_forge.graph._native import (
     BackendCommandRecording,
     _CudaGraphCaptureRecipe,
@@ -1163,8 +1169,6 @@ def _cusparse_triangular_execution_contract(
 
 
 class _CusparseTriangularRecording(BackendCommandRecording):
-    _FILL_MODES = {"lower": 0, "upper": 1}
-
     def __init__(
         self,
         matrix,
@@ -1185,20 +1189,8 @@ class _CusparseTriangularRecording(BackendCommandRecording):
 
         if not isinstance(matrix, SparseMatrix):
             raise TypeError("CUDA cuSPARSE triangular matrix must be a SparseMatrix")
-        if isinstance(rhs_count, bool) or not isinstance(rhs_count, int):
-            raise TypeError("CUDA cuSPARSE triangular rhs_count must be an integer")
-        if rhs_count < 1 or rhs_count > 0x7FFFFFFF:
-            raise ValueError(
-                "CUDA cuSPARSE triangular rhs_count must be in [1, INT_MAX]"
-            )
-        if fill_mode not in self._FILL_MODES:
-            raise ValueError("CUDA cuSPARSE fill_mode must be lower or upper")
-        if not isinstance(unit_diagonal, bool):
-            raise TypeError("CUDA cuSPARSE unit_diagonal must be a bool")
-        if not isinstance(transpose, bool):
-            raise TypeError("CUDA cuSPARSE transpose must be a bool")
-        if algorithm != "default":
-            raise ValueError("CUDA cuSPARSE triangular algorithm must be default")
+        definition = TriangularDefinition(rhs_count, fill_mode, unit_diagonal, transpose, algorithm)
+        object.__setattr__(self, "_definition", definition)
         matrix._ensure_valid()  # pylint: disable=W0212
         contract = matrix._get_format_contract()  # pylint: disable=W0212
         identity = contract["identity"]
@@ -1223,6 +1215,7 @@ class _CusparseTriangularRecording(BackendCommandRecording):
             raise ValueError("CUDA cuSPARSE binding names must be nonempty strings")
         if input == output:
             raise ValueError("CUDA cuSPARSE binding names must be unique")
+        object.__setattr__(self, "_native_arrays", sparse_array_ports(input, output))
         super().__init__(
             backend="cuda",
             binding_names=names,
@@ -1235,14 +1228,6 @@ class _CusparseTriangularRecording(BackendCommandRecording):
             no_host_readback=True,
         )
         object.__setattr__(self, "matrix", matrix)
-        object.__setattr__(self, "rhs_count", rhs_count)
-        object.__setattr__(self, "fill_mode", fill_mode)
-        object.__setattr__(self, "_fill_mode_code", self._FILL_MODES[fill_mode])
-        object.__setattr__(self, "unit_diagonal", unit_diagonal)
-        object.__setattr__(self, "transpose", transpose)
-        object.__setattr__(self, "algorithm", algorithm)
-        object.__setattr__(self, "input", input)
-        object.__setattr__(self, "output", output)
         object.__setattr__(self, "_operation_id", operation_id)
         object.__setattr__(
             self,
@@ -1271,12 +1256,18 @@ class _CusparseTriangularRecording(BackendCommandRecording):
         attach_retained_execution_contract(self, retained_contract)
         object.__setattr__(self, "_memory_resources", memory_resources)
 
+    input = property(lambda self: self._native_arrays[0].value)
+    output = property(lambda self: self._native_arrays[1].value)
+    _fill_mode_code = property(lambda self: self._definition.fill_mode_code)
+    rhs_count = property(lambda self: self._definition.rhs_count)
+    fill_mode = property(lambda self: self._definition.fill_mode)
+    unit_diagonal = property(lambda self: self._definition.unit_diagonal)
+    transpose = property(lambda self: self._definition.transpose)
+    algorithm = property(lambda self: self._definition.algorithm)
+
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.input, GraphAccess.READ),
-            ResourceEffect(self.output, GraphAccess.WRITE),
-        )
+        return tuple(ResourceEffect(port.value, port.access) for port in self._native_arrays)
 
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA cuSPARSE triangular solve")

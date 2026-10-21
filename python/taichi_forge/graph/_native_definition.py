@@ -86,17 +86,40 @@ class NativeResourceReference:
 
 @dataclass(frozen=True)
 class NativeResourceBinding:
-    """A live owner and the definition which can rebuild its private state."""
+    """A live owner and its reconstruction node in the context's resource DAG.
+
+    Child resources are resolved references. Their snapshot/asset policy stays
+    with the provider adapter; lowering never recursively rebuilds a child.
+    """
 
     owner: object
     definition: NativeDefinition
     arrays: tuple = ()
+    resources: tuple = ()
 
     def __post_init__(self):
         object.__setattr__(self, "arrays", tuple(self.arrays))
-        ports = [item.port for item in self.arrays]
+        object.__setattr__(self, "resources", tuple(self.resources))
+        ports = [item.port for item in self.arrays] + [port for port, _ in self.resources]
         if len(set(ports)) != len(ports):
             raise ValueError("Native resource input ports must be distinct")
+        if any(not isinstance(resource, NativeResourceReference) for _, resource in self.resources):
+            raise TypeError("Native resource dependencies require resolved context references")
+
+    def lower(self, context, *, requirements=None):
+        definition = self.definition
+        parameters = definition.parameter_dict()
+        extra = requirements or {}
+        if parameters.keys() & extra.keys():
+            raise ValueError("Preparation requirements cannot replace a frozen native parameter")
+        return context.resource(
+            self.owner,
+            definition.provider,
+            definition.operation,
+            parameters=dict(parameters, **extra),
+            bindings=dict(_array_symbols(self.arrays, context), **{p: r.name for p, r in self.resources}),
+            version=definition.version,
+        )
 
 
 def _array_symbols(arrays, context):
@@ -147,19 +170,7 @@ class NativeOperationBinding:
                     raise ValueError("Resolved resources cannot accept new preparation requirements")
                 bindings[port] = resource.name
                 continue
-            definition = resource.definition
-            parameters = definition.parameter_dict()
-            extra = requirements.get(port, {})
-            if parameters.keys() & extra.keys():
-                raise ValueError("Preparation requirements cannot replace a frozen native parameter")
-            bindings[port] = context.resource(
-                resource.owner,
-                definition.provider,
-                definition.operation,
-                parameters=dict(parameters, **extra),
-                bindings=_array_symbols(resource.arrays, context),
-                version=definition.version,
-            )
+            bindings[port] = resource.lower(context, requirements=requirements.get(port))
         definition = self.definition
         context.native(
             definition.provider,

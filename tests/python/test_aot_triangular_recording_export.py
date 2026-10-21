@@ -16,7 +16,10 @@ from tests import test_utils
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("rhs_count", (1, 2))
-def test_triangular_recording_and_selected_recipe_export(tmp_path, rhs_count):
+def test_triangular_recording_and_selected_recipe_export(tmp_path, rhs_count, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding, NativeResourceBinding
+    from taichi_forge.hardware._cusparse_definitions import TriangularDefinition
+
     probe = (
         ti.hardware.linalg.cusparse_spsv_is_available
         if rhs_count == 1
@@ -77,7 +80,20 @@ def test_triangular_recording_and_selected_recipe_export(tmp_path, rhs_count):
 
     def export(name, source):
         before = matrix._debug_runtime_stats()["transfers"]["device_to_host_bytes"]
-        plan = module.add_execution_plan(name, source)
+        lowered = []
+        lower = NativeResourceBinding.lower
+
+        def observe(binding, context, **kwargs):
+            lowered.append(binding)
+            return lower(binding, context, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(NativeResourceBinding, "lower", observe)
+            plan = module.add_execution_plan(name, source)
+        assert len(lowered) == 2
+        assert all(binding.definition.operation == "triangular_plan_f32" for binding in lowered)
+        assert all(binding.resources[0][0] == "matrix" for binding in lowered)
+        assert lowered[0].resources[0][1].name == lowered[1].resources[0][1].name
         after = matrix._debug_runtime_stats()["transfers"]["device_to_host_bytes"]
         assert after - before == 56, "Both triangular plans must share one cold CSR snapshot"
         resources = json.loads(plan.to_json())["resources"]
@@ -90,6 +106,16 @@ def test_triangular_recording_and_selected_recipe_export(tmp_path, rhs_count):
     graph.run(graph.bind(frames))
     dense = np.array([[2, 0, 0], [1, 4, 0], [0, -1, 2]], np.float32)
     expected = 2 * np.linalg.solve(dense.T, np.linalg.solve(dense, host)) + 0.25
+    np.testing.assert_allclose(frames["result"].to_numpy(), expected, rtol=2e-5, atol=2e-5)
+
+    def no_conversion(*args, **kwargs):
+        raise AssertionError("warm triangular solve must retain its native plan")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(TriangularDefinition, "resource", no_conversion)
+        patch.setattr(NativeDefinition, "parameter_dict", no_conversion)
+        patch.setattr(NativeOperationBinding, "lower", no_conversion)
+        graph.run(graph.bind(frames))
     np.testing.assert_allclose(frames["result"].to_numpy(), expected, rtol=2e-5, atol=2e-5)
     export("warm", graph)
     definition = builder.freeze()

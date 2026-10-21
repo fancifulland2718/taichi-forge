@@ -2,7 +2,12 @@
 
 from dataclasses import replace
 
-from taichi_forge.graph._native_definition import NativeResourceReference
+from taichi_forge.graph._native_definition import (
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceBinding,
+    NativeResourceReference,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -76,22 +81,19 @@ def export_triangular(recording, context):
     recording.validate_graph_lifetime()
     mutable_values = context.source_arrays.find(recording.matrix) is not None
     matrix = snapshot_csr(context, recording.matrix)
-    plan = context.resource(
+    plan = NativeResourceBinding(
         recording,
-        "cusparse",
-        "triangular_plan_f32",
-        parameters=dict(
-            rhs_count=recording.rhs_count,
-            fill_mode=recording.fill_mode,
-            unit_diagonal=recording.unit_diagonal,
-            transpose=recording.transpose,
-            mutable_values=mutable_values,
-        ),
-        bindings=dict(matrix=matrix, input=recording.input, output=recording.output),
-    )
-    if mutable_values:
-        # Analysis may retain numeric data. Capture its refresh after any
-        # preceding coefficient kernel, including on repeated Graph replay.
-        context.native("cusparse", "triangular_update_f32", bindings=dict(plan=plan))
-    context.native("cusparse", "triangular_solve_f32", bindings=dict(plan=plan))
+        recording._definition.resource(mutable_values=mutable_values),
+        recording._native_arrays,
+        (("matrix", NativeResourceReference(matrix)),),
+    ).lower(context)
+    operations = ("triangular_update_f32", "triangular_solve_f32") if mutable_values else ("triangular_solve_f32",)
+    for operation in operations:
+        # Numeric refresh remains after preceding coefficient kernels and before
+        # solve on every replay; freezing parameters does not freeze values.
+        NativeOperationBinding(
+            NativeDefinition("cusparse", operation, {}),
+            (),
+            (("plan", NativeResourceReference(plan)),),
+        ).lower(context)
     return ()
