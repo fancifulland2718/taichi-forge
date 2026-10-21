@@ -26,6 +26,7 @@ def test_parallel_sort_aot_capability_is_backend_specific():
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_parallel_sort_recording_export_and_downstream_grad(tmp_path, monkeypatch, payload, fused):
     from taichi_forge.hardware import _parallel_sort
+    from taichi_forge.graph._native_definition import NativeResourceBinding
 
     compiler = os.environ.get("TI_TEST_PARALLEL_SORT_DXC")
     if not compiler:
@@ -117,6 +118,16 @@ def test_parallel_sort_recording_export_and_downstream_grad(tmp_path, monkeypatc
         raise AssertionError("AOT export repeated shader compilation")
 
     monkeypatch.setattr(_parallel_sort, "compile_shaders", no_compile)
+    lowered = []
+    original_lower = NativeResourceBinding.lower
+
+    def observe(binding, context, **kwargs):
+        if binding.definition.provider == "fidelityfx_parallel_sort":
+            lowered.append(binding)
+            assert binding.definition is binding.owner._definition
+        return original_lower(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", observe)
     module = ti.aot.Module()
     description = json.loads(
         module.add_execution_plan("step", graph, gradients=dict(w="dw", loss="dloss")).to_json()
@@ -125,17 +136,18 @@ def test_parallel_sort_recording_export_and_downstream_grad(tmp_path, monkeypatc
     native = [r for r in description["resources"] if r["kind"] == "native"]
     blobs = [r for r in description["resources"] if r["kind"] == "host_blob"]
     assert len(native) == len(plans) and len(blobs) == 1
+    assert [binding.owner for binding in lowered] == plans
     assert all(r["bindings"]["code"] == blobs[0]["name"] for r in native)
-    assert blobs[0]["byte_size"] == len(plans[0]._aot_shader_payload)
+    assert blobs[0]["byte_size"] == sum(len(shader.code) for shader in plans[0]._shaders)
     for plan in plans:
         assert plan.memory_report().known_resident_requested_bytes == (
-            plan.statistics()["workspace_bytes"] + len(plan._aot_shader_payload)
+            plan.statistics()["workspace_bytes"] + sum(len(shader.code) for shader in plan._shaders)
         )
     np.testing.assert_array_equal(keys.to_numpy(), snapshot)
     graph.close()
     for plan in plans:
         plan.close()
-        assert plan._aot_shader_payload == b""
+        assert plan._shaders == ()
         assert plan.memory_report().known_resident_requested_bytes == 0
     artifact = tmp_path / "parallel-sort.tcm"
     module.archive(str(artifact))

@@ -3,8 +3,15 @@
 from functools import partial
 import struct
 
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceBinding,
+    NativeResourceReference,
+)
 from taichi_forge.graph._recipes.definition import _digest
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
@@ -13,10 +20,13 @@ from taichi_forge.hardware._native_adapter import (
 )
 from taichi_forge.hardware._parallel_sort_jit import compile_shaders
 from taichi_forge.hardware._runtime import active_backend
+from taichi_forge.hardware._shader_artifact import SpirvShader
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import u32
+
+_EXECUTE = NativeDefinition("fidelityfx_parallel_sort", "execute_u32", {})
 
 
 class VulkanParallelSortPlan:
@@ -78,15 +88,26 @@ class VulkanParallelSortPlan:
         # Preserve compiled code for AOT export even if DXC/source files retire.
         # The consumer deduplicates this immutable host blob and allocates no
         # device buffer for it. No scratch or producer addresses are captured.
-        self._aot_shader_sizes = tuple(len(shader) * 4 for shader in shaders)
-        self._aot_shader_payload = b"".join(
-            struct.pack(f"<{len(shader)}I", *shader) for shader in shaders
+        self._shaders = tuple(SpirvShader(struct.pack(f"<{len(shader)}I", *shader), "compute") for shader in shaders)
+        self._definition = NativeDefinition(
+            "fidelityfx_parallel_sort",
+            "plan_u32",
+            dict(
+                key_count=keys.shape[0],
+                payload=values is not None,
+                fused_prefix=fused_create is not None,
+                shader_sizes=tuple(len(shader.code) for shader in self._shaders),
+            ),
         )
-        create = fused_create or create
+        create = fused_create if self._definition.parameters["fused_prefix"] else create
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self._keys, self._values = keys, values
-        self._handle = create(keys.arr, None if values is None else values.arr, shaders)
+        self._handle = create(
+            keys.arr,
+            values.arr if self._definition.parameters["payload"] else None,
+            tuple(struct.unpack(f"<{len(shader.code) // 4}I", shader.code) for shader in self._shaders),
+        )
         self._closed = False
         try:
             self._statistics = dict(
@@ -152,11 +173,11 @@ class VulkanParallelSortPlan:
                 ),
                 HardwareMemoryComponent(
                     "host_shader_code_bytes",
-                    sum(self._aot_shader_sizes),
+                    sum(len(shader.code) for shader in self._shaders),
                     True,
                     "provider_generation",
                     "provider",
-                    resident=bool(self._aot_shader_payload),
+                    resident=bool(self._shaders),
                 ),
                 HardwareMemoryComponent(
                     "driver_objects_and_pending_commands",
@@ -167,9 +188,7 @@ class VulkanParallelSortPlan:
                     resident=valid,
                 ),
             ),
-            lifecycle_state=(
-                "closed" if self.closed else "ready" if valid else "runtime_invalid"
-            ),
+            lifecycle_state=("closed" if self.closed else "ready" if valid else "runtime_invalid"),
             ownership_scope="requested device workspace and retained host shader code exclude caller storage and opaque driver allocations; close is not a retirement observation",
         )
 
@@ -182,7 +201,7 @@ class VulkanParallelSortPlan:
         if not self.closed:
             self._runtime_prog._destroy_vulkan_parallel_sort_plan(self._handle)
             self._closed = True
-            self._aot_shader_payload = b""
+            self._shaders = ()
 
     def __enter__(self):
         self.validate_graph_lifetime()
@@ -207,22 +226,13 @@ class _Recording(BackendCommandRecording):
         plan = self.plan
 
         def resource():
-            code = context.host_blob_resource(plan._aot_shader_payload)
-            bindings = dict(keys=self.binding_names[0], code=code)
-            if plan._values is not None:
-                bindings["values"] = self.binding_names[1]
-            return context.resource(
+            code = context.host_blob_resource(b"".join(shader.code for shader in plan._shaders))
+            return NativeResourceBinding(
                 plan,
-                "fidelityfx_parallel_sort",
-                "plan_u32",
-                parameters=dict(
-                    key_count=plan._keys.shape[0],
-                    payload=plan._values is not None,
-                    fused_prefix=bool(plan._statistics["fused_prefix"]),
-                    shader_sizes=plan._aot_shader_sizes,
-                ),
-                bindings=bindings,
-            )
+                plan._definition,
+                arrays=self._array_bindings(),
+                resources=(("code", NativeResourceReference(code)),),
+            ).lower(context)
 
         restored = context.resource_once(
             plan,
@@ -232,9 +242,7 @@ class _Recording(BackendCommandRecording):
                 tuple(context.binding(n) for n in self.binding_names),
             ),
         )
-        context.native(
-            "fidelityfx_parallel_sort", "execute_u32", bindings=dict(plan=restored)
-        )
+        NativeOperationBinding(_EXECUTE, (), resources=(("plan", NativeResourceReference(restored)),)).lower(context)
         return ()
 
     def __init__(self, plan, names):
@@ -251,11 +259,15 @@ class _Recording(BackendCommandRecording):
 
     source = property(lambda self: self.plan)
 
+    def _array_bindings(self):
+        return tuple(
+            NativeArrayBinding(port, name, GraphAccess.READ_WRITE)
+            for port, name in zip(("keys", "values"), self.binding_names)
+        )
+
     @property
     def resource_effects(self):
-        return tuple(
-            ResourceEffect(name, GraphAccess.READ_WRITE) for name in self.binding_names
-        )
+        return tuple(binding.effect for binding in self._array_bindings())
 
     def validate_graph_bindings(self, bindings):
         for name, array in zip(

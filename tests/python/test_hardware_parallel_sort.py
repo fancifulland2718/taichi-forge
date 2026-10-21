@@ -50,9 +50,8 @@ def test_parallel_sort_exact_capacity_and_stable_duplicate_payload(with_payload,
             assert stats["dispatch_count"] == (24 if stats.get("fused_prefix") else 40)
             assert stats["barrier_count"] == stats["dispatch_count"] + 1
             assert stats["device_copy_count"] == 0
-            assert (
-                plan.memory_report().known_capacity_requested_bytes
-                == stats["workspace_bytes"] + sum(plan._aot_shader_sizes)
+            assert plan.memory_report().known_capacity_requested_bytes == stats["workspace_bytes"] + sum(
+                len(shader.code) for shader in plan._shaders
             )
             assert not plan.memory_report().resident_requested_bytes_complete
         with pytest.raises(RuntimeError, match="closed"):
