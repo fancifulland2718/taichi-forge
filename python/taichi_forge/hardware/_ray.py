@@ -7,6 +7,7 @@ import weakref
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native_definition import NativeDefinition
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge._hardware_telemetry import (
     hardware_failure_phase,
@@ -395,16 +396,17 @@ class TriangleScene(_TypedRayScene):
         index_storage, triangle_count = _ray_storage(indices, 3, (i32,), "indices")
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
+        self._definition = NativeDefinition(
+            "vulkan_ray", "triangle_scene", dict(vertex_count=vertex_count, triangle_count=triangle_count)
+        )
         self._handle = int(
             program._create_vulkan_triangle_ray_scene(
                 vertex_storage.descriptor,
                 index_storage.descriptor,
-                vertex_count,
-                triangle_count,
+                self.vertex_count,
+                self.triangle_count,
             )
         )
-        self.vertex_count = vertex_count
-        self.triangle_count = triangle_count
         self._effect_name = RayResourceIdentity(
             "vulkan_triangle_scene", vertex_count=vertex_count, triangle_count=triangle_count
         )
@@ -412,6 +414,14 @@ class TriangleScene(_TypedRayScene):
         self._memory_stats = dict(
             program._vulkan_triangle_ray_scene_memory_stats(self._handle)
         )
+
+    @property
+    def vertex_count(self):
+        return self._definition.parameters["vertex_count"]
+
+    @property
+    def triangle_count(self):
+        return self._definition.parameters["triangle_count"]
 
     @property
     def closed(self):
@@ -684,8 +694,6 @@ class TriangleBLAS:
         triangle_count = _ray_storage(indices, 3, (i32,), "indices")[1]
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
-        self.vertex_count = vertex_count
-        self.triangle_count = triangle_count
         self._micromap_memory = None
         self._micromap_id = None
         self._ray_retainers = weakref.WeakSet()
@@ -695,13 +703,19 @@ class TriangleBLAS:
             raise ValueError(
                 "An OMM BLAS must use its micromap opacity, not opaque=True"
             )
-        self._opaque = opacity_micromap is None and opaque is not False
+        self._definition = NativeDefinition(
+            "vulkan_ray",
+            "triangle_blas",
+            dict(
+                vertex_count=vertex_count,
+                triangle_count=triangle_count,
+                opaque=opacity_micromap is None and opaque is not False,
+            ),
+        )
         if opacity_micromap is None:
-            if self._opaque:
+            if self.opaque:
                 self._handle = int(
-                    program._create_vulkan_triangle_blas_resource(
-                        vertex_count, triangle_count
-                    )
+                    program._create_vulkan_triangle_blas_resource(self.vertex_count, self.triangle_count)
                 )
             else:
                 create = getattr(
@@ -711,7 +725,7 @@ class TriangleBLAS:
                     raise TaichiRuntimeError(
                         "The installed runtime does not support nonopaque Vulkan BLAS"
                     )
-                self._handle = int(create(vertex_count, triangle_count, False))
+                self._handle = int(create(self.vertex_count, self.triangle_count, self.opaque))
         else:
             from taichi_forge.hardware._vulkan_micromap import VulkanOpacityMicromap
 
@@ -727,8 +741,8 @@ class TriangleBLAS:
                     "The installed runtime does not support Vulkan micromap import"
                 )
             self._handle, self._micromap_memory = create(
-                vertex_count,
-                triangle_count,
+                self.vertex_count,
+                self.triangle_count,
                 opacity_micromap.data,
                 opacity_micromap.descriptors,
                 opacity_micromap.triangle_indices or b"",
@@ -736,8 +750,10 @@ class TriangleBLAS:
             )
             self._micromap_id = opacity_micromap.fingerprint
         self._effect_name = RayResourceIdentity(
-            "vulkan_triangle_blas", vertex_count=vertex_count,
-            triangle_count=triangle_count, opaque=self._opaque,
+            "vulkan_triangle_blas",
+            vertex_count=vertex_count,
+            triangle_count=triangle_count,
+            opaque=self.opaque,
             micromap_asset=self._micromap_id,
         )
         try:
@@ -750,8 +766,16 @@ class TriangleBLAS:
             raise
 
     @property
+    def vertex_count(self):
+        return self._definition.parameters["vertex_count"]
+
+    @property
+    def triangle_count(self):
+        return self._definition.parameters["triangle_count"]
+
+    @property
     def opaque(self):
-        return self._opaque
+        return self._definition.parameters["opaque"]
 
     @property
     def closed(self):

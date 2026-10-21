@@ -15,6 +15,7 @@ from taichi_forge._hardware_telemetry import (
     instrument_hardware_recording,
 )
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native_definition import NativeDefinition
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
@@ -817,6 +818,7 @@ class OptixProvider:
                 raise TaichiRuntimeError(
                     "no loadable OptiX provider adapter: " + "; ".join(load_failures)
                 )
+        self._definition = NativeDefinition("optix", "context", dict(validation=validation))
         failures = list(load_failures)
         loaded = None
         context = None
@@ -829,7 +831,7 @@ class OptixProvider:
                     ctypes.sizeof(_ContextDesc),
                     0,
                     0,
-                    int(validation),
+                    int(self._definition.parameters["validation"]),
                     0,
                     _runtime_library_argument(runtime_path),
                 )
@@ -854,7 +856,6 @@ class OptixProvider:
                 )
         self._loaded = loaded
         self._context = context
-        self._validation = validation
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self.required_features = required_features
@@ -885,6 +886,10 @@ class OptixProvider:
         )
         _loaded_providers.add(self)
         impl.get_runtime().register_runtime_object(self)
+
+    @property
+    def _validation(self):
+        return self._definition.parameters["validation"]
 
     @property
     def closed(self):
@@ -2023,6 +2028,17 @@ class OptixTriangleGAS:
                 raise TaichiRuntimeError(
                     "OptiX adapter does not support baked OMM import"
                 )
+        self._definition = NativeDefinition(
+            "optix",
+            "triangle_gas",
+            dict(
+                vertex_count=vertex_count,
+                triangle_count=triangle_count,
+                allow_update=allow_update,
+                **(dict(expected_micromap=opacity_micromap.fingerprint) if opacity_micromap else {}),
+            ),
+            version=2 if opacity_micromap else 1,
+        )
         storage, owners = _prepare_storage(
             provider,
             (vertices, indices),
@@ -2032,9 +2048,9 @@ class OptixTriangleGAS:
         gas = ctypes.c_void_p()
         desc = _TriangleSceneDesc(
             ctypes.sizeof(_TriangleSceneDesc),
-            vertex_count,
-            triangle_count,
-            int(allow_update),
+            self.vertex_count,
+            self.triangle_count,
+            int(self.allow_update),
             *storage.pointers,
             0,
         )
@@ -2072,10 +2088,7 @@ class OptixTriangleGAS:
         self._gas = gas
         self._runtime_prog = provider._runtime_prog
         self._runtime_generation = provider._runtime_generation
-        self.vertex_count = vertex_count
-        self.triangle_count = triangle_count
-        self.allow_update = allow_update
-        self._micromap_id = opacity_micromap.fingerprint if opacity_micromap else None
+        self._micromap_id = self._definition.parameters.get("expected_micromap")
         self._micromap_memory = micromap_memory
         self._ray_retainers = weakref.WeakSet()
         self._indices = indices
@@ -2096,6 +2109,18 @@ class OptixTriangleGAS:
         self._memory = memory
         provider._shared_pipeline_sbt_bytes = int(memory.shared_pipeline_sbt_bytes)
         provider._gases.add(self)
+
+    @property
+    def vertex_count(self):
+        return self._definition.parameters["vertex_count"]
+
+    @property
+    def triangle_count(self):
+        return self._definition.parameters["triangle_count"]
+
+    @property
+    def allow_update(self):
+        return self._definition.parameters["allow_update"]
 
     @property
     def closed(self):
@@ -2587,6 +2612,11 @@ class OptixTriangleScene:
         provider._validate_lifetime()
         vertex_description, vertex_count = _ray_storage(vertices, 3, (f32,), "vertices")
         index_description, triangle_count = _ray_storage(indices, 3, (i32,), "indices")
+        self._definition = NativeDefinition(
+            "optix",
+            "triangle_scene",
+            dict(vertex_count=vertex_count, triangle_count=triangle_count, allow_update=allow_update),
+        )
         storage, owners = _prepare_storage(
             provider,
             (vertices, indices),
@@ -2596,9 +2626,9 @@ class OptixTriangleScene:
         scene = ctypes.c_void_p()
         desc = _TriangleSceneDesc(
             ctypes.sizeof(_TriangleSceneDesc),
-            vertex_count,
-            triangle_count,
-            int(allow_update),
+            self.vertex_count,
+            self.triangle_count,
+            int(self.allow_update),
             *storage.pointers,
             0,
         )
@@ -2621,9 +2651,6 @@ class OptixTriangleScene:
         self._scene = scene
         self._runtime_prog = provider._runtime_prog
         self._runtime_generation = provider._runtime_generation
-        self.vertex_count = vertex_count
-        self.triangle_count = triangle_count
-        self.allow_update = allow_update
         self._indices = indices
         self._indices_description = index_description
         self._index_owner = indices.arr if isinstance(indices, Ndarray) else indices
@@ -2647,6 +2674,18 @@ class OptixTriangleScene:
     def _trace_function(self, typed):
         api = self.provider._loaded.api
         return api.trace_typed if typed else api.trace
+
+    @property
+    def vertex_count(self):
+        return self._definition.parameters["vertex_count"]
+
+    @property
+    def triangle_count(self):
+        return self._definition.parameters["triangle_count"]
+
+    @property
+    def allow_update(self):
+        return self._definition.parameters["allow_update"]
 
     @property
     def closed(self):

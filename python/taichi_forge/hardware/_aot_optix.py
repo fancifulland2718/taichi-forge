@@ -1,6 +1,13 @@
 """Reconstruct qualified OptiX recordings through the common AOT factories."""
 
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeResourceBinding,
+    NativeResourceReference,
+)
 
 
 def export_micromap(asset, context):
@@ -17,13 +24,11 @@ def export_micromap(asset, context):
         )
         if asset.triangle_indices is not None:
             bindings["indices"] = context.host_blob_resource(asset.triangle_indices)
-        return context.resource(
+        return NativeResourceBinding(
             asset,
-            "optix",
-            "opacity_micromap",
-            parameters=dict(triangle_count=asset.triangle_count),
-            bindings=bindings,
-        )
+            NativeDefinition("optix", "opacity_micromap", dict(triangle_count=asset.triangle_count)),
+            resources=tuple((port, NativeResourceReference(value)) for port, value in bindings.items()),
+        ).lower(context)
 
     return context.resource_once(asset, build, policy="optix_baked_opacity_micromap")
 
@@ -34,7 +39,7 @@ def _provider(context, provider):
         return public
     return context.resource_once(
         provider,
-        lambda: context.resource(provider, "optix", "context", parameters=dict(validation=provider._validation)),
+        lambda: NativeResourceBinding(provider, provider._definition).lower(context),
         policy="optix_context",
     )
 
@@ -72,19 +77,14 @@ def _geometry(context, geometry, *, retained_by=None):
             if type(asset) is not OptixOpacityMicromap or asset.fingerprint != geometry._micromap_id:
                 raise TaichiRuntimeError("AOT OptiX baked micromap must match the source GAS fingerprint")
             inputs["opacity_micromap"] = export_micromap(asset, context)
-        return context.resource(
+        dependencies = {k: v for k, v in inputs.items() if k not in ("vertices", "indices")}
+        dependencies["context"] = _provider(context, geometry.provider)
+        return NativeResourceBinding(
             geometry,
-            "optix",
-            "triangle_gas" if shared else "triangle_scene",
-            version=2 if has_micromap else 1,
-            parameters=dict(
-                vertex_count=geometry.vertex_count,
-                triangle_count=geometry.triangle_count,
-                allow_update=geometry.allow_update,
-                **(dict(expected_micromap=geometry._micromap_id) if has_micromap else {}),
-            ),
-            bindings=dict(context=_provider(context, geometry.provider), **inputs),
-        )
+            geometry._definition,
+            arrays=tuple(NativeArrayBinding(port, inputs[port], GraphAccess.READ) for port in ("vertices", "indices")),
+            resources=tuple((port, NativeResourceReference(value)) for port, value in dependencies.items()),
+        ).lower(context)
 
     return context.resource_once(geometry, build, policy="optix_consumer_seed")
 

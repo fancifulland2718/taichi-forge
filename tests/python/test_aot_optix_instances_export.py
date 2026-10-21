@@ -17,10 +17,23 @@ from tests.python.aot_optix_probe import VERTICES
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_optix_instance_recording_export_and_retained_geometry(tmp_path):
+def test_optix_instance_recording_export_and_retained_geometry(tmp_path, monkeypatch):
     adapter = os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER")
     if not adapter:
         pytest.skip("explicit common OptiX adapter required")
+
+    from taichi_forge.graph._native_definition import NativeResourceBinding
+
+    lowered = []
+    original_lower = NativeResourceBinding.lower
+
+    def lower(binding, context, **kwargs):
+        if hasattr(binding.owner, "_definition"):
+            assert binding.definition is binding.owner._definition
+            lowered.append(binding.owner)
+        return original_lower(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", lower)
 
     @ti.kernel
     def animate(
@@ -223,6 +236,7 @@ def test_optix_instance_recording_export_and_retained_geometry(tmp_path):
             module.add_execution_plan("missing_instance_seeds", graph)
         graph.close()
         assert len(module._exported_kernels) == 4 and not module._data_payloads
+        assert provider in lowered
         artifact = tmp_path / "instances.tcm"
         start = time.perf_counter()
         module.archive(str(artifact))

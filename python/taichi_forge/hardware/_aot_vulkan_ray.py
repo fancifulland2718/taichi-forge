@@ -1,6 +1,13 @@
 """Lower qualified Vulkan ray recordings through the shared AOT factories."""
 
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeResourceBinding,
+    NativeResourceReference,
+)
 
 
 def export_micromap(asset, context):
@@ -17,13 +24,11 @@ def export_micromap(asset, context):
         )
         if asset.triangle_indices is not None:
             bindings["indices"] = context.host_blob_resource(asset.triangle_indices)
-        return context.resource(
+        return NativeResourceBinding(
             asset,
-            "vulkan_ray",
-            "opacity_micromap",
-            parameters=dict(triangle_count=asset.triangle_count),
-            bindings=bindings,
-        )
+            NativeDefinition("vulkan_ray", "opacity_micromap", dict(triangle_count=asset.triangle_count)),
+            resources=tuple((port, NativeResourceReference(value)) for port, value in bindings.items()),
+        ).lower(context)
 
     return context.resource_once(asset, build, policy="vulkan_baked_opacity_micromap")
 
@@ -58,16 +63,16 @@ def _geometry(context, scene, *, retained_by=None):
             if type(asset) is not VulkanOpacityMicromap or asset.fingerprint != scene._micromap_id:
                 raise TaichiRuntimeError("AOT Vulkan baked micromap must match the source BLAS fingerprint")
             inputs["opacity_micromap"] = export_micromap(asset, context)
-        parameters = dict(vertex_count=scene.vertex_count, triangle_count=scene.triangle_count)
-        if shared:
-            parameters["opaque"] = scene.opaque
-        return context.resource(
+        return NativeResourceBinding(
             scene,
-            "vulkan_ray",
-            "triangle_blas" if shared else "triangle_scene",
-            parameters=parameters,
-            bindings=inputs,
-        )
+            scene._definition,
+            arrays=tuple(NativeArrayBinding(port, inputs[port], GraphAccess.READ) for port in ("vertices", "indices")),
+            resources=tuple(
+                (port, NativeResourceReference(value))
+                for port, value in inputs.items()
+                if port not in ("vertices", "indices")
+            ),
+        ).lower(context)
 
     return context.resource_once(scene, build, policy="vulkan_ray_consumer_seed")
 

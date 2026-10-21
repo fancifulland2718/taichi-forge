@@ -15,9 +15,22 @@ from tests.python.aot_vulkan_ray_probe import VERTICES
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_vulkan_ray_recording_export(tmp_path):
+def test_vulkan_ray_recording_export(tmp_path, monkeypatch):
     if not ti.hardware.ray.is_available():
         pytest.skip("Vulkan ray query unavailable")
+
+    from taichi_forge.graph._native_definition import NativeResourceBinding
+
+    lowered = []
+    original_lower = NativeResourceBinding.lower
+
+    def lower(binding, context, **kwargs):
+        if hasattr(binding.owner, "_definition"):
+            assert binding.definition is binding.owner._definition
+            lowered.append(binding.owner)
+        return original_lower(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", lower)
 
     @ti.kernel
     def move(
@@ -95,6 +108,7 @@ def test_vulkan_ray_recording_export(tmp_path):
             assert "scene" in public.argument_names and "indices" not in public.argument_names
             graph.close()
     assert len(module._exported_kernels) == 4 and not module._data_payloads
+    assert scene in lowered
     artifact = tmp_path / "vulkan_export.tcm"
     module.archive(str(artifact))
     costs["artifact_bytes"] = artifact.stat().st_size
