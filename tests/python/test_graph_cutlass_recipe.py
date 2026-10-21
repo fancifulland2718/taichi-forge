@@ -122,6 +122,7 @@ def test_cutlass_complete_regions_feedback_layout_and_cold_boundaries(
                 np.testing.assert_array_equal(bindings["output"].to_numpy(), host[2])
                 expected = host[2].astype(np.float64)
                 with monkeypatch.context() as hot:
+                    hot.setattr(_Recording, "_native_binding", _fail)
                     hot.setattr(_Library, "workspace", _fail)
                     hot.setattr(_Recording, "validate_graph_bindings", _fail)
                     hot.setattr(provider._library, "query", _fail)

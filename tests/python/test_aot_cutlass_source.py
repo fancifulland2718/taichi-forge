@@ -33,6 +33,8 @@ def test_cutlass_source_capability_is_backend_specific():
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_selected_cutlass_source_and_adjoint(tmp_path, strategy, transpose, activation):
     from tests.python.test_graph_cutlass_recipe import _provider
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+    from taichi_forge.hardware._source_provider import SourceProviderManifest
 
     if not os.environ.get("TI_CUTLASS_SOURCE_TEST_ADAPTER"):
         pytest.skip("requires the CUTLASS common adapter")
@@ -119,9 +121,27 @@ def test_selected_cutlass_source_and_adjoint(tmp_path, strategy, transpose, acti
     module = ti.aot.Module()
     with definition.materialization_context(providers=providers) as context:
         with context.materialize(recipe) as materialized:
-            plan = module.add_execution_plan(
-                "step", materialized.executor, gradients=dict(output="dy", loss="dl")
-            )
+            lowered = []
+            original_lower = NativeOperationBinding.lower
+
+            def observe_lower(binding, *args, **kwargs):
+                if binding.definition.provider == "cutlass_source":
+                    lowered.append(binding)
+                return original_lower(binding, *args, **kwargs)
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(NativeOperationBinding, "lower", observe_lower)
+                patch.setattr(
+                    SourceProviderManifest,
+                    "native_requirements",
+                    lambda *_: pytest.fail("export rebuilt provider identity"),
+                )
+                plan = module.add_execution_plan("step", materialized.executor, gradients=dict(output="dy", loss="dl"))
+            assert len(lowered) == 3
+            for binding in lowered:
+                resource = binding.resources[0][1]
+                assert resource.definition is resource.owner._definition
+                assert resource.definition is resource.owner._cuda_capture_recipe._definition
             assert set(plan.argument_names) == {"a", "b", "output", "da", "db", "dprevious", "loss"}
             document = json.loads(plan.to_json())
             resources = [r for r in document["resources"] if r["kind"] == "native"]

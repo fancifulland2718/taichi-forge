@@ -13,6 +13,12 @@ from taichi_forge.graph._native import (
     NativeGraphNode,
     _CudaGraphCaptureRecipe,
 )
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceBinding,
+)
 from taichi_forge.graph._recipes.definition import _digest
 from taichi_forge.graph._recipes.families import (
     GraphRuntimeFragmentProvider,
@@ -82,6 +88,46 @@ def _payload(semantics, strategy):
         activation=semantics["activation"] == "relu",
         alpha=semantics["alpha"],
         beta=semantics["beta"],
+    )
+
+
+def _selected_definition(library, semantics, strategy, workspace_bytes):
+    if semantics["batch_count"] != 1:
+        raise TaichiRuntimeError("CUTLASS requires the selected single-matrix contract")
+    source = next(item for item in library.manifest.toolchain["source_dependencies"] if item.name == "cutlass")
+    major, minor, patch = (int(item) for item in source.version.split("."))
+    return NativeDefinition(
+        "cutlass_source",
+        "plan",
+        dict(
+            **{
+                key: semantics[key]
+                for key in ("m", "n", "k", "transpose_a", "transpose_b", "alpha", "beta", "activation")
+            },
+            strategy=strategy,
+            workspace_bytes=workspace_bytes,
+            cutlass_version=major * 10000 + minor * 100 + patch,
+            **library.manifest.native_requirements(),
+        ),
+    )
+
+
+def _definition_shapes(definition):
+    return _shapes(dict(definition.parameters, batch_count=1))
+
+
+def _array_bindings(definition, names):
+    return tuple(
+        NativeArrayBinding(port, name, access)
+        for port, name, access in zip(
+            ("a", "b", "output"),
+            names,
+            (
+                GraphAccess.READ,
+                GraphAccess.READ,
+                GraphAccess.READ_WRITE if definition.parameters["beta"] else GraphAccess.WRITE,
+            ),
+        )
     )
 
 
@@ -178,9 +224,7 @@ class _Capture(_CudaGraphCaptureRecipe):
         # must release their large partial-product arrays promptly.
         for name in (
             "library",
-            "semantics",
-            "strategy",
-            "workspace_bytes",
+            "_definition",
             "binding_names",
         ):
             setattr(self, name, getattr(recording, name))
@@ -192,12 +236,12 @@ class _Capture(_CudaGraphCaptureRecipe):
         validate_runtime_generation(
             r.library, "CUTLASS addon belongs to a retired runtime"
         )
-        payload = _payload(r.semantics, r.strategy)
-        payload.workspace_bytes = r.workspace_bytes
-        fields = ("a", "b", "output") + (("workspace",) if r.workspace_bytes else ())
-        shapes = _shapes(r.semantics) + (
-            ((r.workspace_bytes,),) if r.workspace_bytes else ()
-        )
+        facts = r._definition.parameters
+        workspace_bytes = facts["workspace_bytes"]
+        payload = _payload(facts, facts["strategy"])
+        payload.workspace_bytes = workspace_bytes
+        fields = ("a", "b", "output") + (("workspace",) if workspace_bytes else ())
+        shapes = _definition_shapes(r._definition) + (((workspace_bytes,),) if workspace_bytes else ())
         builder._dispatch_cuda_addon_capture_recipe(
             program,
             ctypes.cast(r.library.capture, ctypes.c_void_p).value,
@@ -214,7 +258,7 @@ class _Capture(_CudaGraphCaptureRecipe):
             ),
             tuple(getattr(_Invocation, field).offset for field in fields),
             tuple(math.prod(shape) for shape in shapes),
-            (False, False, True) + ((True,) if r.workspace_bytes else ()),
+            (False, False, True) + ((True,) if workspace_bytes else ()),
             ctypes.cast(r.library.error, ctypes.c_void_p).value,
         )
 
@@ -230,6 +274,7 @@ class _Recording(BackendCommandRecording):
     def __init__(
         self, library, semantics, strategy, workspace_bytes, prefix, physical_id
     ):
+        definition = _selected_definition(library, semantics, strategy, workspace_bytes)
         public = tuple(semantics[x] for x in ("a", "b", "output"))
         workspace = impl.ndarray(u8, workspace_bytes) if workspace_bytes else None
         name = prefix + "_workspace"
@@ -244,10 +289,8 @@ class _Recording(BackendCommandRecording):
         )
         for key, value in dict(
             library=library,
-            semantics=semantics,
-            strategy=strategy,
+            _definition=definition,
             workspace=workspace,
-            workspace_bytes=workspace_bytes,
             _graph_physical_plan_id=physical_id,
             _graph_semantic_fingerprint=_digest(semantics),
         ).items():
@@ -283,21 +326,33 @@ class _Recording(BackendCommandRecording):
         )
 
     @property
+    def workspace_bytes(self):
+        return self._definition.parameters["workspace_bytes"]
+
+    @property
+    def strategy(self):
+        return self._definition.parameters["strategy"]
+
+    def _native_binding(self):
+        return NativeOperationBinding(
+            NativeDefinition("cutlass_source", "execute", {}),
+            _array_bindings(self._definition, self.binding_names[:3]),
+            (("plan", NativeResourceBinding(self, self._definition)),),
+        )
+
+    @property
     def resource_effects(self):
-        access = (
-            GraphAccess.READ,
-            GraphAccess.READ,
-            GraphAccess.READ_WRITE if self.semantics["beta"] else GraphAccess.WRITE,
+        effects = tuple(
+            ResourceEffect(item.value, item.access)
+            for item in _array_bindings(self._definition, self.binding_names[:3])
         )
         if self.workspace_bytes:
-            access += (GraphAccess.READ_WRITE,)
-        return tuple(
-            ResourceEffect(name, mode) for name, mode in zip(self.binding_names, access)
-        )
+            effects += (ResourceEffect(self.binding_names[3], GraphAccess.READ_WRITE),)
+        return effects
 
     def validate_graph_bindings(self, bindings):
         values = []
-        for name, shape in zip(self.binding_names[:3], _shapes(self.semantics)):
+        for name, shape in zip(self.binding_names[:3], _definition_shapes(self._definition)):
             value = bindings[name]
             if (
                 not isinstance(value, Ndarray)
