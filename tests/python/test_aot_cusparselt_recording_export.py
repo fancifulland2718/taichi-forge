@@ -15,7 +15,7 @@ from tests.python.aot_cusparselt_recording_probe import M, N, K
 
 @pytest.mark.parametrize("group", (True, False))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cusparselt_recording_export(group, tmp_path):
+def test_cusparselt_recording_export(group, tmp_path, monkeypatch):
     vendor = os.environ.get("TI_FORGE_TEST_CUSPARSELT_LIBRARY_PATH")
     if not vendor:
         pytest.skip("real cuSPARSELt required")
@@ -23,6 +23,7 @@ def test_cusparselt_recording_export(group, tmp_path):
     from taichi_forge.hardware._cusparselt import DEFINITION
     from taichi_forge.hardware._cusparselt_config import configured_plan
     from taichi_forge.hardware._cusparselt_capture import CusparseLtCaptureRecording
+    from taichi_forge.graph._native_definition import NativeOperationBinding, NativeResourceBinding
 
     adapter = _bundled_provider_candidates(DEFINITION)[0]
     provider = ti.hardware.tensor.CusparseLtProvider(vendor)
@@ -94,7 +95,30 @@ def test_cusparselt_recording_export(group, tmp_path):
     builder.dispatch(adjoint, *(args[name] for name in ("a", "b", "b2", "d", "e", "da", "db", "db2", "loss")))
     graph = builder.compile()
     module = ti.aot.Module()
+    original_resource = NativeResourceBinding.lower
+    original_operation = NativeOperationBinding.lower
+    matmuls = []
+
+    def resource(binding, context, **kwargs):
+        if binding.definition.provider == "cusparselt":
+            assert binding.owner is plan and binding.definition is plan._definition
+        return original_resource(binding, context, **kwargs)
+
+    def operation(binding, context, **kwargs):
+        if binding.definition.operation == "matmul_f16":
+            assert any(binding.definition is record._definition.operation for record in records)
+            matmuls.append(binding)
+        return original_operation(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", resource)
+    monkeypatch.setattr(NativeOperationBinding, "lower", operation)
+    assert all(record._cuda_capture_recipe._definition is record._definition for record in records)
+    if not group:
+        facts = plan._configuration
+        facts["activation"] = "identity"
+        assert plan._configuration["activation"] == "relu"
     description = json.loads(module.add_execution_plan("step", graph).to_json())
+    assert len(matmuls) == 2
     assert len(description["resources"]) == 1
     assert sum(op.get("operation") == "compress_f16" for op in description["operations"]) == (1 if group else 2)
     assert sum(op.get("operation") == "matmul_f16" for op in description["operations"]) == 2

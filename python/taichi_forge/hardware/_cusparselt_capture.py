@@ -1,6 +1,7 @@
 """Retained cuSPARSELt snapshot or recompress/matmul Graph commands."""
 
 import ctypes
+from dataclasses import dataclass
 import math
 
 from taichi_forge._lib import core
@@ -9,6 +10,13 @@ from taichi_forge.graph._native import (
     BackendCommandRecording,
     NativeGraphNode,
     _CudaGraphCaptureRecipe,
+)
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceBinding,
+    NativeResourceReference,
 )
 from taichi_forge.hardware._cusparselt import CusparseLtMatmulPlan
 from taichi_forge.hardware._native_adapter import HardwareRecordingExecutable
@@ -22,6 +30,23 @@ from taichi_forge.hardware._retained import (
 )
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f16, u8
+
+_COMPRESS = NativeDefinition("cusparselt", "compress_f16", {})
+
+
+@dataclass(frozen=True)
+class _MatmulDefinition:
+    recompress: bool
+    matmul_count: int
+    operation: NativeDefinition
+
+    @property
+    def alpha(self):
+        return self.operation.parameters["alpha"]
+
+    @property
+    def beta(self):
+        return self.operation.parameters["beta"]
 
 
 class _PlanLease:
@@ -64,12 +89,7 @@ class _MatmulCaptureRecipe(_CudaGraphCaptureRecipe):
     def __init__(self, recording):
         self.lease = recording._lease
         self.names, self.arrays = recording.binding_names, recording._arrays
-        self.recompress, self.alpha, self.beta = (
-            recording.recompress,
-            recording.alpha,
-            recording.beta,
-        )
-        self.matmul_count = recording.matmul_count
+        self._definition = recording._definition
         self.kind = (
             "cusparselt_compress_matmul_f16"
             if self.recompress
@@ -77,6 +97,11 @@ class _MatmulCaptureRecipe(_CudaGraphCaptureRecipe):
         )
         if self.matmul_count > 1:
             self.kind = "cusparselt_shared_a_matmul_f16"
+
+    recompress = property(lambda self: self._definition.recompress)
+    alpha = property(lambda self: self._definition.alpha)
+    beta = property(lambda self: self._definition.beta)
+    matmul_count = property(lambda self: self._definition.matmul_count)
 
     def append_to_graph(self, builder, program):
         from taichi_forge.graph._graph import Arg, ArgKind
@@ -210,12 +235,15 @@ class CusparseLtCaptureRecording(BackendCommandRecording):
             replay_mode="stream_capture",
         )
         object.__setattr__(self, "_lease", _PlanLease(plan, recompress))
+        object.__setattr__(
+            self,
+            "_definition",
+            _MatmulDefinition(
+                recompress, len(products), NativeDefinition("cusparselt", "matmul_f16", dict(alpha=alpha, beta=beta))
+            ),
+        )
         for name, value in dict(
             plan=plan,
-            matmul_count=len(products),
-            recompress=recompress,
-            alpha=alpha,
-            beta=beta,
             _public_names=public,
             _fixed_bindings=fixed,
             _arrays=tuple(arrays),
@@ -270,25 +298,35 @@ class CusparseLtCaptureRecording(BackendCommandRecording):
             ),
         )
 
+    recompress = property(lambda self: self._definition.recompress)
+    alpha = property(lambda self: self._definition.alpha)
+    beta = property(lambda self: self._definition.beta)
+    matmul_count = property(lambda self: self._definition.matmul_count)
+
+    def _product_arrays(self, index):
+        return tuple(
+            NativeArrayBinding(port, name, access)
+            for port, name, access in zip(
+                ("b", "c", "d"),
+                self._public_names[3 * index : 3 * index + 3],
+                (GraphAccess.READ, GraphAccess.READ, GraphAccess.WRITE),
+            )
+        )
+
     @property
     def resource_effects(self):
-        return tuple(
+        public = tuple(binding.effect for index in range(self.matmul_count) for binding in self._product_arrays(index))
+        return public + tuple(
             ResourceEffect(
                 name,
                 (
-                    GraphAccess.WRITE
-                    if i < 3 * self.matmul_count and i % 3 == 2
-                    else (
-                        GraphAccess.READ_WRITE
-                        if dtype == u8
-                        and (i != 3 * self.matmul_count or self.recompress)
-                        else GraphAccess.READ
-                    )
+                    GraphAccess.READ_WRITE
+                    if dtype == u8 and (i != 3 * self.matmul_count or self.recompress)
+                    else GraphAccess.READ
                 ),
             )
-            for i, (name, (dtype, _)) in enumerate(
-                zip(self.binding_names, self._arrays)
-            )
+            for i, (name, (dtype, _)) in enumerate(zip(self.binding_names, self._arrays))
+            if i >= 3 * self.matmul_count
         )
 
     def _graph_provider_memory_report(self):
@@ -343,24 +381,31 @@ class CusparseLtCaptureRecording(BackendCommandRecording):
                     "AOT cuSPARSELt snapshot recording needs an explicit raw-A initialization payload; "
                     "call compress(A, retain_aot_data=True) before recording"
                 )
-            parameters = dict(self.plan._aot_plan_parameters)
-            if expected_resources is not None:
-                parameters["expected_resources"] = list(expected_resources)
-            plan = context.resource(self.plan, "cusparselt", "matmul_plan_f16", parameters=parameters)
+            plan = NativeResourceBinding(self.plan, self.plan._definition).lower(
+                context,
+                requirements=(
+                    dict(expected_resources=list(expected_resources)) if expected_resources is not None else None
+                ),
+            )
+            reference = NativeResourceReference(plan)
             if self.recompress:
-                context.native("cusparselt", "compress_f16", bindings=dict(plan=plan, a=self._public_names[-1]))
+                NativeOperationBinding(
+                    _COMPRESS,
+                    (NativeArrayBinding("a", self._public_names[-1], GraphAccess.READ),),
+                    resources=(("plan", reference),),
+                ).lower(context)
             else:
                 initial = self.plan._aot_initial_a
                 a = context.data_resource(initial, initial, dtype="f16", shape=[self.plan.m, self.plan.k])
-                context.initialize_native_once(plan, "cusparselt", "compress_f16", bindings=dict(plan=plan, a=a))
-            for index in range(self.matmul_count):
-                b, c, d = self._public_names[3 * index : 3 * index + 3]
-                context.native(
-                    "cusparselt",
-                    "matmul_f16",
-                    bindings=dict(plan=plan, b=b, c=c, d=d),
-                    parameters=dict(alpha=self.alpha, beta=self.beta),
+                context.initialize_native_once(
+                    plan, _COMPRESS.provider, _COMPRESS.operation, bindings=dict(plan=plan, a=a)
                 )
+            for index in range(self.matmul_count):
+                NativeOperationBinding(
+                    self._definition.operation,
+                    self._product_arrays(index),
+                    resources=(("plan", reference),),
+                ).lower(context)
         return tuple(self._fixed_bindings)
 
     def _as_graph_native_node(self):

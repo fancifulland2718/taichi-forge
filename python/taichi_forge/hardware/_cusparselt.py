@@ -6,6 +6,7 @@ from types import MappingProxyType
 import threading
 import weakref
 
+from taichi_forge.graph._native_definition import NativeDefinition
 from taichi_forge.hardware._bundled_runtime_provider import (
     BundledRuntimeProviderDefinition,
     open_runtime as _open_runtime,
@@ -279,7 +280,10 @@ class CusparseLtMatmulPlan:
             or alignment_bytes <= 0
         ):
             raise ValueError("cuSPARSELt alignment_bytes must be a positive integer")
-        desc = _PlanDesc(ctypes.sizeof(_PlanDesc), alignment_bytes, m, n, k)
+        self._definition = NativeDefinition(
+            "cusparselt", "matmul_plan_f16", dict(m=m, n=n, k=k, alignment_bytes=alignment_bytes)
+        )
+        desc = _PlanDesc(ctypes.sizeof(_PlanDesc), self._alignment_bytes, self.m, self.n, self.k)
         handle = ctypes.c_void_p()
         info = _PlanInfo()
         info.struct_size = ctypes.sizeof(_PlanInfo)
@@ -312,13 +316,10 @@ class CusparseLtMatmulPlan:
         self._lock = threading.RLock()
         self._runtime_prog = provider._runtime_prog
         self._runtime_generation = provider._runtime_generation
-        self.m, self.n, self.k = dimensions
-        self._alignment_bytes = alignment_bytes
         self._capture_leases = 0
         self._capture_mode = None
         self._aot_initial_a = None
         self._preparation_only = _preparation_only
-        self._configuration = None
         self._algorithm_count = None
         self.compressed_bytes = int(info.compressed_bytes)
         self.compression_buffer_bytes = int(info.compression_buffer_bytes)
@@ -327,14 +328,22 @@ class CusparseLtMatmulPlan:
             if _configuration is not None:
                 from taichi_forge.hardware._cusparselt_config import _read
 
-                self._configuration, self._algorithm_count = _read(provider, handle)
-            self._aot_plan_parameters = dict(m=m, n=n, k=k, alignment_bytes=alignment_bytes)
-            if self._configuration is not None:
-                self._aot_plan_parameters.update(
-                    (name, self._configuration[name])
-                    for name in ("algorithm_id", "split_k", "split_k_mode", "split_k_buffers")
+                configuration, self._algorithm_count = _read(provider, handle)
+                # The vendor's actual selection replaces the request facts at
+                # the existing cold creation boundary. Reports and exporters
+                # project this definition; neither owns another configuration.
+                self._definition = NativeDefinition(
+                    "cusparselt",
+                    "matmul_plan_f16",
+                    dict(
+                        self._definition.parameters,
+                        **{
+                            name: configuration[name]
+                            for name in ("algorithm_id", "split_k", "split_k_mode", "split_k_buffers")
+                        },
+                        relu=configuration["activation"] == "relu",
+                    ),
                 )
-                self._aot_plan_parameters["relu"] = self._configuration["activation"] == "relu"
             if (
                 _expected_configuration is not None
                 and self._configuration != _expected_configuration
@@ -376,6 +385,21 @@ class CusparseLtMatmulPlan:
     @property
     def closed(self):
         return self._handle is None
+
+    m = property(lambda self: self._definition.parameters["m"])
+    n = property(lambda self: self._definition.parameters["n"])
+    k = property(lambda self: self._definition.parameters["k"])
+    _alignment_bytes = property(lambda self: self._definition.parameters["alignment_bytes"])
+
+    @property
+    def _configuration(self):
+        parameters = self._definition.parameters
+        if "algorithm_id" not in parameters:
+            return None
+        return dict(
+            **{name: parameters[name] for name in ("algorithm_id", "split_k", "split_k_mode", "split_k_buffers")},
+            activation="relu" if parameters["relu"] else "identity",
+        )
 
     def _validate_lifetime(self):
         if self._handle is None:
