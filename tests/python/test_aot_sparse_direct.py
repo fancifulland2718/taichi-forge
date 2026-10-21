@@ -12,7 +12,19 @@ from tests.python.aot_sparse_direct_probe import resource_spec, solve_op
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_sparse_direct_aot_cpu_reconstruction_and_explicit_adjoint(tmp_path):
+def test_sparse_direct_aot_cpu_reconstruction_and_explicit_adjoint(tmp_path, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeOperationBinding
+
+    exported = []
+    original_lower = NativeOperationBinding.lower
+
+    def lower(self, context, **kwargs):
+        if self.definition.provider == "sparse_direct":
+            assert self.definition is recording._operation
+            exported.append(self)
+        return original_lower(self, context, **kwargs)
+
+    monkeypatch.setattr(NativeOperationBinding, "lower", lower)
     @ti.kernel
     def energy(
         x: ti.types.ndarray(ti.f32, ndim=1, needs_grad=True), loss: ti.types.ndarray(ti.f32, ndim=1, needs_grad=True)
@@ -84,6 +96,7 @@ def test_sparse_direct_aot_cpu_reconstruction_and_explicit_adjoint(tmp_path):
         solver = ti.linalg.SparseSolver(dtype=dtype, solver_type="LLT", ordering="COLAMD")
         solver.compute(matrix)
         recording = solver.record_solve(rhs="b", solution="x")
+        assert recording._definition is solver._definition
         graph_builder = ti.graph.GraphBuilder()
         graph_builder.append_native(recording)
         graph_builder.append_native(recording)
@@ -100,6 +113,7 @@ def test_sparse_direct_aot_cpu_reconstruction_and_explicit_adjoint(tmp_path):
             recording.execute(dict(b=rhs, x=output))
         with pytest.raises(RuntimeError, match="factor changed"):
             module.add_execution_plan("stale_" + suffix, graph)
+    assert len(exported) == 6
     artifact = tmp_path / "sparse_direct.tcm"
     module.archive(str(artifact))
     for mode in ("standalone", "borrowed"):

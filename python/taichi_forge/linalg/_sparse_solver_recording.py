@@ -3,6 +3,12 @@
 from taichi_forge._lib import core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
 from taichi_forge.graph._native import BackendCommandRecording, NativeGraphExecutable, NativeGraphNode
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeOperationBinding,
+    NativeResourceBinding,
+    NativeResourceReference,
+)
 from taichi_forge.hardware._native_adapter import native_recording_node, validate_exact_bindings
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -29,6 +35,16 @@ class SparseSolveRecording(BackendCommandRecording):
         object.__setattr__(self, "_matrix", solver.matrix)
         object.__setattr__(self, "_program", impl.get_runtime().prog)
         object.__setattr__(self, "_generation", solver._factorization_generation)
+        object.__setattr__(self, "_definition", solver._definition)
+        object.__setattr__(self, "_operation", solver._definition.solve(solver.selected_provider))
+        object.__setattr__(
+            self,
+            "_arrays",
+            (
+                NativeArrayBinding("rhs_0", rhs, GraphAccess.READ),
+                NativeArrayBinding("output_0", solution, GraphAccess.WRITE),
+            ),
+        )
 
     def validate_graph_lifetime(self):
         solver = self._solver
@@ -56,9 +72,7 @@ class SparseSolveRecording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.binding_names[0], GraphAccess.READ),
-            ResourceEffect(self.binding_names[1], GraphAccess.WRITE),
+        return tuple(array.effect for array in self._arrays) + (
             ResourceEffect(self._solver, GraphAccess.READ_WRITE, runtime_bound=False),
         )
 
@@ -94,29 +108,15 @@ class SparseSolveRecording(BackendCommandRecording):
                 ("values", dtype, values, count),
             ):
                 arrays[name] = context.data_resource(object(), payload, dtype=scalar, shape=[size], readonly=True)
-            return context.resource(
+            return NativeResourceBinding(
                 solver,
-                "sparse_direct",
-                "plan",
-                parameters=dict(
-                    rows=rows,
-                    nonzeros=count,
-                    dtype=dtype,
-                    implementation=implementation,
-                    method=solver._solver_type,
-                    ordering=solver._ordering,
-                    format="csc" if cpu else "csr",
-                    phase="solve",
-                ),
-                bindings=arrays,
-            )
+                self._definition.resource(implementation, rows, count, dtype),
+                arrays=tuple(NativeArrayBinding(port, name, GraphAccess.READ) for port, name in arrays.items()),
+            ).lower(context)
 
         resource = context.resource_once(solver, snapshot, policy=(implementation, self._generation))
-        context.native(
-            "sparse_direct",
-            "solve" if cpu or solver._solver_type == "LLT" else "solve_ordered",
-            parameters=dict(rhs_count=1),
-            bindings=dict(plan=resource, rhs_0=self.binding_names[0], output_0=self.binding_names[1]),
+        NativeOperationBinding(self._operation, self._arrays, (("plan", NativeResourceReference(resource)),)).lower(
+            context
         )
         context.reconstructed_binding_validators.add(id(self))
         return ()

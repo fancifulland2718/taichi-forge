@@ -6,6 +6,7 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import Field
 from taichi_forge.lang.impl import get_runtime
 from taichi_forge.linalg.sparse_matrix import SparseMatrix
+from taichi_forge.linalg._sparse_solver_definition import SparseSolverDefinition
 from taichi_forge.types.primitive_types import f32
 
 
@@ -42,10 +43,8 @@ class SparseSolver:
         expected_reuse=None,
     ):
         self.matrix = None
-        self.dtype = dtype
+        self._definition = SparseSolverDefinition(dtype, solver_type, ordering)
         self.solver = None
-        self._solver_type = solver_type
-        self._ordering = ordering
         self._provider_request = provider
         self._selected_provider = "unresolved"
         self._provider_fallback_reason = None
@@ -122,12 +121,16 @@ class SparseSolver:
                         "SparseSolver provider selection is available only on "
                         "the CUDA backend."
                     )
-                self.solver = _ti_core.make_sparse_solver(dtype, solver_type, ordering)
+                self.solver = _ti_core.make_sparse_solver(self.dtype, self._solver_type, self._ordering)
                 self._selected_provider = "eigen"
         else:
             raise TaichiRuntimeError(
                 f"The solver type {solver_type} with {ordering} is not supported for now. Only {solver_type_list} with {solver_ordering} are supported."
             )
+
+    dtype = property(lambda self: self._definition.dtype)
+    _solver_type = property(lambda self: self._definition.method)
+    _ordering = property(lambda self: self._definition.ordering)
 
     @property
     def selected_provider(self):

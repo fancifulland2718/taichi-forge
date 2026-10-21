@@ -127,6 +127,7 @@ def test_sparse_direct_cuda_export_capture_ordered_and_adjoint(tmp_path):
         solver = ti.linalg.SparseSolver(solver_type=method, ordering="COLAMD", provider="cusolver_sp")
         solver.compute(matrix)
         recording = solver.record_solve(rhs="b", solution="x")
+        assert recording._definition is solver._definition
         graph_builder = ti.graph.GraphBuilder()
         graph_builder.append_native(recording)
         graph_builder.append_native(recording)
