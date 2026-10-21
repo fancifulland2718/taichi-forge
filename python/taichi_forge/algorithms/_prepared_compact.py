@@ -37,11 +37,26 @@ class PreparedCompactPlan(_PreparedNativePlan):
         return plan
 
     def _prepare_columns(self, columns, flags, count):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
         owners = (flags, count, *(value for column in columns for value in column))
         access = ("read", "write", *(mode for _ in columns for mode in ("read", "write")))
+        definition = NativeDefinition("builtin", "compact", {"column_count": len(columns)})
+        ports = (
+            "flags",
+            "count",
+            *(port for i in range(definition.parameters["column_count"]) for port in (f"values_{i}", f"output_{i}")),
+        )
+        native_binding = NativeOperationBinding(
+            definition,
+            tuple(
+                NativeArrayBinding(port, owner, GraphAccess(mode)) for port, owner, mode in zip(ports, owners, access)
+            ),
+        )
         descriptions = tuple(
-            describe_storage(value, access="read" if mode == "read" else "readwrite")
-            for value, mode in zip(owners, access)
+            describe_storage(binding.value, access="read" if binding.access == GraphAccess.READ else "readwrite")
+            for binding in native_binding.arrays
         )
         for description in descriptions:
             if not description.supported:
@@ -52,9 +67,10 @@ class PreparedCompactPlan(_PreparedNativePlan):
         if prepare is None:
             raise TaichiRuntimeError("Prepared compact requires native prepared-compaction support")
         command = prepare(descriptors[2::2], descriptors[0], descriptors[3::2], descriptors[1])
+        self._definition, self._native_binding = definition, native_binding
         self._program, self._command = program, command
         self._execute = program._execute_primitive_compact
-        self._owners, self._access = owners, access
+        self._owners = owners
         self._workspace_bytes = None
         self._workspace_effect = "forge-native-compact-workspace"
         self._backend = "cuda" if impl.current_cfg().arch == _ti_core.Arch.cuda else "vulkan"

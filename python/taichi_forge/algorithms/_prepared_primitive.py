@@ -29,6 +29,7 @@ class _PreparedNativePlan:
         """Drop bindings without clearing shared scratch or waiting for GPU work."""
         self._command = None
         self._owners = ()
+        self._native_binding = None
         self._execute = None
         self._program = None
 
@@ -89,10 +90,21 @@ class PreparedSortPlan(_PreparedNativePlan):
     _ad_kind = "sort"
 
     def __init__(self, keys, values=None, *, nan_policy="last"):
+        from taichi_forge.graph._ir import GraphAccess
+        from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
+
         if nan_policy not in ("last", "bitwise"):
             raise ValueError("Prepared sort nan_policy must be 'last' or 'bitwise'")
         owners = (keys,) if values is None else (keys, values)
-        descriptions = tuple(describe_storage(value, access="readwrite") for value in owners)
+        definition = NativeDefinition("builtin", "sort", {"nan_policy": nan_policy})
+        native_binding = NativeOperationBinding(
+            definition,
+            tuple(
+                NativeArrayBinding(port, owner, GraphAccess.READ_WRITE)
+                for port, owner in zip(("keys", "values"), owners)
+            ),
+        )
+        descriptions = tuple(describe_storage(binding.value, access="readwrite") for binding in native_binding.arrays)
         for name, description in zip(("keys", "values"), descriptions):
             if not description.supported:
                 raise TaichiRuntimeError(
@@ -105,8 +117,9 @@ class PreparedSortPlan(_PreparedNativePlan):
         command = prepare(
             descriptions[0].descriptor,
             None if values is None else descriptions[1].descriptor,
-            0 if nan_policy == "last" else 1,
+            0 if definition.parameters["nan_policy"] == "last" else 1,
         )
+        self._definition, self._native_binding = definition, native_binding
         self._program = program
         self._owners = owners
         self._command = command
@@ -122,13 +135,12 @@ class PreparedSortPlan(_PreparedNativePlan):
             "key_dtype": str(descriptions[0].descriptor.scalar_type),
             "value_dtype": None if values is None else str(descriptions[1].descriptor.scalar_type),
             "value_element_shape": [] if values is None else list(descriptions[1].descriptor.element_shape),
-            "nan_policy": nan_policy,
+            "nan_policy": definition.parameters["nan_policy"],
             "ascending": True,
             "stable": True,
         }
         canonical = json.dumps(self._description, sort_keys=True, separators=(",", ":"))
         self._physical_id = "prepared-native-sort-v1:" + hashlib.sha256(canonical.encode()).hexdigest()
-        self._access = ("read_write",) * len(owners)
         self._workspace_effect = "forge-native-sort-workspace"
 
 
@@ -146,8 +158,8 @@ def prepare_sort(keys, values=None, *, count=None, nan_policy="last"):
 
 
 def _native_recording(plan):
-    # Import the existing generic recording seam only when requested. Ordinary
-    # algorithms import neither Graph nor hardware provider discovery.
+    # Construct the executable recording only when requested. Definitions and
+    # bound roles never replace the direct prepared command on ordinary replay.
     from taichi_forge.graph._ir import GraphAccess, ResourceEffect
     from taichi_forge.graph._native import BackendCommandRecording
     from taichi_forge.hardware._native_adapter import native_recording_node
@@ -156,7 +168,7 @@ def _native_recording(plan):
         def __init__(self):
             super().__init__(
                 backend=plan._backend,
-                binding_names=(),
+                binding_names=plan._native_binding.binding_names,
                 command_count=1,
                 barrier_policy="internal",
                 workspace_ownership="provider_generation",
@@ -167,10 +179,7 @@ def _native_recording(plan):
             object.__setattr__(
                 self,
                 "_effects",
-                tuple(
-                    ResourceEffect(value, GraphAccess(access), runtime_bound=False)
-                    for value, access in zip(plan._owners, plan._access)
-                )
+                plan._native_binding.resource_effects
                 + (ResourceEffect(plan._workspace_effect, GraphAccess.READ_WRITE, runtime_bound=False),),
             )
             object.__setattr__(self, "_graph_physical_plan_id", plan._physical_id)

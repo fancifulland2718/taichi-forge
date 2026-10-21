@@ -47,6 +47,8 @@ def test_prepared_tensor_sort_aot_views_fields_and_downstream_grad(
                 ti.experimental.ndarray_view(a, slices=(selection,)) for a in owners
             ]
         prepared = ti.algorithms.prepare_sort(*owners)
+        # Diagnostics are not the authority for a command's frozen semantics.
+        prepared._description["nan_policy"] = "bitwise"
         builder = ti.graph.GraphBuilder()
         builder.append_native(prepared.record())
         graph = builder.compile()
@@ -67,11 +69,13 @@ def test_prepared_tensor_sort_aot_views_fields_and_downstream_grad(
                     snapshot_state=storage == "field",
                 )
             document = json.loads(plan.to_json())
-            assert [op["kind"] for op in document["operations"]] == ["sort"]
+            assert [op["kind"] for op in document["operations"]] == ["native"]
+            assert document["operations"][0]["operation"] == "sort"
+            assert document["operations"][0]["parameters"] == {"nan_policy": "last"}
             if storage == "field":
                 # Exercise the automatically reconstructed private Field via
                 # public IO; copies preserve raw bits without a helper kernel.
-                private = document["operations"][0]["values"]
+                private = document["operations"][0]["bindings"]["values"]
                 document["operations"] = [
                     dict(kind="copy", source="values", destination=private),
                     *document["operations"],
@@ -110,7 +114,15 @@ def test_prepared_tensor_sort_aot_views_fields_and_downstream_grad(
                 initial_payload = payload.copy()
                 document = export("cold")
                 assert values.to_numpy().tobytes() == payload.tobytes()
-            prepared.run()
+            from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding
+
+            def no_cold_conversion(*args, **kwargs):
+                raise AssertionError("Ordinary prepared replay must not serialize or lower its definition")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(NativeDefinition, "parameter_dict", no_cold_conversion)
+                patch.setattr(NativeOperationBinding, "lower", no_cold_conversion)
+                (prepared.run if shift == 0 else lambda: graph.run({}))()
             order = np.arange(n)
             order[selection] = order[selection][
                 np.argsort(source[selection], kind="stable")
