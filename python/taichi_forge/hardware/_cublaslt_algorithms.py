@@ -137,7 +137,7 @@ class _AlgorithmApi:
                 library.preference_set_attribute,
                 preference,
                 1,
-                ctypes.c_size_t(plan.workspace_limit_bytes),
+                ctypes.c_size_t(plan._definition.workspace_limit_bytes),
                 "recipe workspace limit",
             )
             results, returned = (_HeuristicResult * count)(), ctypes.c_int()
@@ -159,7 +159,7 @@ class _AlgorithmApi:
             for result in results[: returned.value]:
                 if (
                     result.state != 0
-                    or result.workspace_size > plan.workspace_limit_bytes
+                    or result.workspace_size > plan._definition.workspace_limit_bytes
                 ):
                     continue
                 choice = self.describe(result.algo, result.workspace_size)

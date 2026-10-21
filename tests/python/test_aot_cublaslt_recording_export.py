@@ -15,10 +15,11 @@ from tests import test_utils
 
 @pytest.mark.parametrize("capture", (False, True))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cublaslt_recording_export_without_source_plan(tmp_path, capture):
+def test_cublaslt_recording_export_without_source_plan(tmp_path, monkeypatch, capture):
     from taichi_forge.hardware._aot_cublaslt import frozen_parameters
     from taichi_forge.hardware._cublaslt import CublasLtProvider
     from taichi_forge.hardware._cublaslt_algorithms import _MatmulRecipePlan
+    from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding
 
     adapter = os.environ.get("TI_CUBLASLT_TEST_ADAPTER")
     vendor = os.environ.get("TI_FORGE_TEST_CUBLASLT_LIBRARY_PATH")
@@ -87,6 +88,26 @@ def test_cublaslt_recording_export_without_source_plan(tmp_path, capture):
     host["b"] = (np.arange(np.prod(plan.b_shape)).reshape(plan.b_shape) % 7 - 3).astype(np.float32) / 8
     for key, value in arrays.items():
         value.from_numpy(host[key])
+    original = frozen_parameters(plan)
+    effects = recording.resource_effects
+    # These conveniences are not the authority for the existing native plan.
+    plan.m, plan.n, plan.k, plan.batch_count = 1, 1, 1, 1
+    plan.transpose_a = plan.transpose_b = False
+    plan.alpha, plan.beta, plan.workspace_limit_bytes = 0.0, 0.0, 0
+    assert (plan.a_shape, plan.b_shape, plan.output_shape) == (shapes["a"], shapes["b"], shapes["output"])
+    assert recording.resource_effects == effects
+
+    def no_cold_conversion(*args, **kwargs):
+        raise AssertionError("warm matmul must not convert its native definition")
+
+    if not capture:
+        with monkeypatch.context() as patch:
+            patch.setattr(NativeDefinition, "parameter_dict", no_cold_conversion)
+            patch.setattr(NativeOperationBinding, "lower", no_cold_conversion)
+            plan.run(a=arrays["a"], b=arrays["b"], output=arrays["output"])
+        expected_direct = 0.75 * (host["a"].T @ host["b"].T) + 0.25 * host["output"]
+        np.testing.assert_allclose(arrays["output"].to_numpy(), expected_direct, rtol=2e-5, atol=2e-5)
+        arrays["output"].from_numpy(host["output"])
     symbols = {
         key: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, key, ti.f32, ndim=len(shape)) for key, shape in shapes.items()
     }
@@ -97,15 +118,30 @@ def test_cublaslt_recording_export_without_source_plan(tmp_path, capture):
     builder.dispatch(publish, symbols["output"], symbols["result"])
     graph = builder.compile()
     module = ti.aot.Module()
-    exported = module.add_execution_plan("matmul", graph)
+    lowered = []
+    native_lower = NativeOperationBinding.lower
+
+    def record_lower(binding, context, **kwargs):
+        lowered.append((binding.definition.provider, binding.definition.operation))
+        return native_lower(binding, context, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeOperationBinding, "lower", record_lower)
+        exported = module.add_execution_plan("matmul", graph)
+    assert lowered == [("cublaslt", "matmul_f32")] * 2
     document = json.loads(exported.to_json())
     resources = document["resources"]
     assert len(resources) == 1 and resources[0]["provider"] == "cublaslt"
-    assert resources[0]["parameters"] == frozen_parameters(plan)
+    assert resources[0]["parameters"] == original == frozen_parameters(plan)
+    assert original["m"] == m and original["batch_count"] == batch
+    assert original["alpha"] == 0.75 and original["beta"] == 0.25
     assert not module._data_payloads  # No unused matrix or workspace snapshots.
     for key in ("output", "result"):
         np.testing.assert_array_equal(arrays[key].to_numpy(), host[key])
-    graph.run(arrays)
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeDefinition, "parameter_dict", no_cold_conversion)
+        patch.setattr(NativeOperationBinding, "lower", no_cold_conversion)
+        graph.run(arrays)
     product = 0.75 * (host["a"].swapaxes(-2, -1) @ host["b"].swapaxes(-2, -1))
     expected = 2 * host["seed"]
     for _ in range(2):

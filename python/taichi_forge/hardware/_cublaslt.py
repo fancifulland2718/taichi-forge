@@ -9,6 +9,7 @@ plan retains descriptors, a selected algorithm, and its exact workspace.
 
 import _ctypes
 import ctypes
+from dataclasses import asdict, dataclass
 import importlib.metadata
 import math
 import numbers
@@ -20,8 +21,9 @@ import threading
 import weakref
 
 from taichi_forge._hardware_telemetry import hardware_provider_call
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native_definition import NativeArrayBinding, NativeDefinition, NativeOperationBinding
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     runtime_generation_matches,
@@ -506,6 +508,58 @@ class CublasLtProvider:
             pass
 
 
+@dataclass(frozen=True)
+class _MatmulDefinition:
+    """Creation facts, independent of the selected algorithm and live owner."""
+
+    m: int
+    n: int
+    k: int
+    batch_count: int
+    transpose_a: bool
+    transpose_b: bool
+    alpha: float
+    beta: float
+    workspace_limit_bytes: int
+
+    @classmethod
+    def normalize(cls, m, n, k, batch_count, transpose_a, transpose_b, alpha, beta, workspace_limit_bytes):
+        m, n, k, batch_count = (
+            _positive_dimension(value, name)
+            for value, name in ((m, "m"), (n, "n"), (k, "k"), (batch_count, "batch_count"))
+        )
+        if not isinstance(transpose_a, bool) or not isinstance(transpose_b, bool):
+            raise TypeError("cuBLASLt transpose flags must be bool")
+        if any(isinstance(value, bool) or not isinstance(value, numbers.Real) for value in (alpha, beta)):
+            raise TypeError("cuBLASLt alpha and beta must be real numbers")
+        alpha, beta = float(alpha), float(beta)
+        if not math.isfinite(alpha) or not math.isfinite(beta):
+            raise ValueError("cuBLASLt alpha and beta must be finite")
+        return cls(m, n, k, batch_count, transpose_a, transpose_b, alpha, beta, _workspace_limit(workspace_limit_bytes))
+
+    def shape(self, port):
+        if port == "a":
+            matrix = (self.k, self.m) if self.transpose_a else (self.m, self.k)
+        elif port == "b":
+            matrix = (self.n, self.k) if self.transpose_b else (self.k, self.n)
+        else:
+            matrix = (self.m, self.n)
+        return matrix if self.batch_count == 1 else (self.batch_count, *matrix)
+
+    def resource(self, *, layout, epilogue, provider_version, algorithm):
+        return NativeDefinition(
+            "cublaslt",
+            "matmul_plan_f32",
+            dict(
+                asdict(self),
+                layout=layout,
+                epilogue=epilogue,
+                provider_version=provider_version,
+                algorithm=algorithm.to_dict(),
+            ),
+        )
+
+
 class CublasLtMatmulPlan(BackendCommandRecording):
     """Retained row-major f32 single or strided-batched matmul plan."""
 
@@ -533,30 +587,29 @@ class CublasLtMatmulPlan(BackendCommandRecording):
     ):
         if not isinstance(provider, CublasLtProvider):
             raise TypeError("provider must be a CublasLtProvider")
-        self.m = _positive_dimension(m, "m")
-        self.n = _positive_dimension(n, "n")
-        self.k = _positive_dimension(k, "k")
-        self.batch_count = _positive_dimension(batch_count, "batch_count")
-        if not isinstance(transpose_a, bool) or not isinstance(transpose_b, bool):
-            raise TypeError("cuBLASLt transpose flags must be bool")
-        self.transpose_a = transpose_a
-        self.transpose_b = transpose_b
-        if any(
-            isinstance(value, bool) or not isinstance(value, numbers.Real)
-            for value in (alpha, beta)
-        ):
-            raise TypeError("cuBLASLt alpha and beta must be real numbers")
-        self.alpha = float(alpha)
-        self.beta = float(beta)
-        if not math.isfinite(self.alpha) or not math.isfinite(self.beta):
-            raise ValueError("cuBLASLt alpha and beta must be finite")
-        self.workspace_limit_bytes = _workspace_limit(workspace_limit_bytes)
+        self._definition = _MatmulDefinition.normalize(
+            m, n, k, batch_count, transpose_a, transpose_b, alpha, beta, workspace_limit_bytes
+        )
+        # Retain convenient public attributes without making them a second
+        # creation or reconstruction authority.
+        for name, value in asdict(self._definition).items():
+            setattr(self, name, value)
         names = (a, b, output)
         if any(not isinstance(name, str) or not name for name in names):
             raise ValueError("cuBLASLt binding names must be nonempty strings")
         if len(set(names)) != 3:
             raise ValueError("cuBLASLt binding names must be unique")
         self.a, self.b, self.output = names
+        self._operation_binding = NativeOperationBinding(
+            NativeDefinition("cublaslt", "matmul_f32", {}),
+            (
+                NativeArrayBinding("a", a, GraphAccess.READ),
+                NativeArrayBinding("b", b, GraphAccess.READ),
+                NativeArrayBinding(
+                    "output", output, GraphAccess.WRITE if self._definition.beta == 0 else GraphAccess.READ_WRITE
+                ),
+            ),
+        )
         super().__init__(
             backend="cuda",
             binding_names=names,
@@ -583,6 +636,12 @@ class CublasLtMatmulPlan(BackendCommandRecording):
         except Exception:
             self._close_native()
             raise
+        self._native_definition = self._definition.resource(
+            layout=self._physical_layout,
+            epilogue=self._physical_epilogue,
+            provider_version=provider.version,
+            algorithm=self._algorithm_choice,
+        )
         identity = make_retained_plan_identity(
             "linalg.matmul.cublaslt_explicit",
             "cublaslt",
@@ -594,22 +653,22 @@ class CublasLtMatmulPlan(BackendCommandRecording):
                 "library_candidate": provider._library.candidate,
             },
             problem_scope={
-                "m": self.m,
-                "n": self.n,
-                "k": self.k,
-                "batch_count": self.batch_count,
-                "transpose_a": self.transpose_a,
-                "transpose_b": self.transpose_b,
+                "m": self._definition.m,
+                "n": self._definition.n,
+                "k": self._definition.k,
+                "batch_count": self._definition.batch_count,
+                "transpose_a": self._definition.transpose_a,
+                "transpose_b": self._definition.transpose_b,
             },
             execution_scope={
                 "algorithm_configuration": self._algorithm_choice.to_dict(),
                 "workspace_bytes": self.workspace_bytes,
-                "workspace_limit_bytes": self.workspace_limit_bytes,
+                "workspace_limit_bytes": self._definition.workspace_limit_bytes,
                 "row_major": self._physical_layout == "row_major",
                 "physical_layout": self._physical_layout,
                 "epilogue": self._physical_epilogue,
-                "alpha": self.alpha,
-                "beta": self.beta,
+                "alpha": self._definition.alpha,
+                "beta": self._definition.beta,
             },
         )
         attach_retained_execution_contract(
@@ -646,18 +705,15 @@ class CublasLtMatmulPlan(BackendCommandRecording):
 
     @property
     def a_shape(self):
-        matrix = (self.k, self.m) if self.transpose_a else (self.m, self.k)
-        return matrix if self.batch_count == 1 else (self.batch_count, *matrix)
+        return self._definition.shape("a")
 
     @property
     def b_shape(self):
-        matrix = (self.n, self.k) if self.transpose_b else (self.k, self.n)
-        return matrix if self.batch_count == 1 else (self.batch_count, *matrix)
+        return self._definition.shape("b")
 
     @property
     def output_shape(self):
-        matrix = (self.m, self.n)
-        return matrix if self.batch_count == 1 else (self.batch_count, *matrix)
+        return self._definition.shape("output")
 
     def _create_layout(self, rows, columns, *, column_major=False):
         library = self.provider._library
@@ -682,8 +738,8 @@ class CublasLtMatmulPlan(BackendCommandRecording):
                 order,
                 "matrix storage order",
             )
-            if self.batch_count > 1:
-                count = ctypes.c_int(self.batch_count)
+            if self._definition.batch_count > 1:
+                count = ctypes.c_int(self._definition.batch_count)
                 stride = ctypes.c_int64(rows * columns)
                 _set_attribute(
                     library,
@@ -725,7 +781,7 @@ class CublasLtMatmulPlan(BackendCommandRecording):
             "matmul descriptor creation",
         )
         self._matmul_desc = desc
-        transpose_a, transpose_b = self.transpose_a, self.transpose_b
+        transpose_a, transpose_b = self._definition.transpose_a, self._definition.transpose_b
         if column_major:
             transpose_a, transpose_b = transpose_b, transpose_a
         trans_a = ctypes.c_int(_CUBLAS_OP_T if transpose_a else _CUBLAS_OP_N)
@@ -780,19 +836,20 @@ class CublasLtMatmulPlan(BackendCommandRecording):
         if epilogue not in ("identity", "relu"):
             raise ValueError("Unknown cuBLASLt physical epilogue")
         self._physical_layout, self._physical_epilogue = layout, epilogue
+        definition = self._definition
         desc = _abi.PlanDesc(
             ctypes.sizeof(_abi.PlanDesc),
             int(layout != "row_major"),
-            self.m,
-            self.n,
-            self.k,
-            self.batch_count,
-            self.transpose_a,
-            self.transpose_b,
+            definition.m,
+            definition.n,
+            definition.k,
+            definition.batch_count,
+            definition.transpose_a,
+            definition.transpose_b,
             int(epilogue == "relu"),
-            self.alpha,
-            self.beta,
-            self.workspace_limit_bytes,
+            definition.alpha,
+            definition.beta,
+            definition.workspace_limit_bytes,
         )
         selected = None if choice is None else _abi.Algorithm.from_choice(choice)
         info = _abi.PlanInfo(struct_size=ctypes.sizeof(_abi.PlanInfo))
@@ -813,14 +870,7 @@ class CublasLtMatmulPlan(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        output_access = (
-            GraphAccess.WRITE if self.beta == 0.0 else GraphAccess.READ_WRITE
-        )
-        effects = (
-            ResourceEffect(self.a, GraphAccess.READ),
-            ResourceEffect(self.b, GraphAccess.READ),
-            ResourceEffect(self.output, output_access),
-        )
+        effects = self._operation_binding.resource_effects
         if self.workspace is not None:
             effects += (static_resource_effect(self.workspace, GraphAccess.READ_WRITE),)
         return effects
@@ -847,12 +897,11 @@ class CublasLtMatmulPlan(BackendCommandRecording):
             raise TaichiRuntimeError(
                 "cuBLASLt matmul requires a live plan on the CUDA backend"
             )
-        a = bindings[self.a]
-        b = bindings[self.b]
-        output = bindings[self.output]
-        self._validate_array(a, self.a, self.a_shape)
-        self._validate_array(b, self.b, self.b_shape)
-        self._validate_array(output, self.output, self.output_shape)
+        a_name, b_name, output_name = self.binding_names
+        a, b, output = (bindings[name] for name in self.binding_names)
+        self._validate_array(a, a_name, self.a_shape)
+        self._validate_array(b, b_name, self.b_shape)
+        self._validate_array(output, output_name, self.output_shape)
         if output is a or output is b:
             raise TaichiRuntimeError("cuBLASLt output must not alias either input")
 
@@ -907,9 +956,9 @@ class CublasLtMatmulPlan(BackendCommandRecording):
             ),
             debug_info=lambda item: {
                 "kind": "cuda_cublaslt_matmul_f32",
-                "shape": (item.batch_count, item.m, item.n, item.k),
-                "transpose_a": item.transpose_a,
-                "transpose_b": item.transpose_b,
+                "shape": (item._definition.batch_count, item._definition.m, item._definition.n, item._definition.k),
+                "transpose_a": item._definition.transpose_a,
+                "transpose_b": item._definition.transpose_b,
                 "workspace_bytes": item.workspace_bytes,
                 "provider_version": _version_string(item.provider.version),
             },
