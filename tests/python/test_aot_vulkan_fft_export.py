@@ -19,6 +19,9 @@ from tests.python.test_graph_vulkan_fft_recipe import _providers
 @pytest.mark.parametrize("selected", ["ordinary", "partition", "frame_partition"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_fft_recording_export(tmp_path, monkeypatch, selected):
+    from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding
+    from taichi_forge.hardware._vulkan_fft import _VulkanFftDefinition
+
     dimensions, batches = ((8,) if selected == "ordinary" else (3, 5)), 5
     data, values = _input(dimensions, batches)
     plans = [
@@ -85,9 +88,38 @@ def test_vulkan_fft_recording_export(tmp_path, monkeypatch, selected):
     graph.run(arrays)
     np.testing.assert_allclose(arrays["y"].to_numpy(), values, atol=1e-5)
     np.testing.assert_allclose(arrays["dx"].to_numpy(), 4 * size * values, atol=1e-4)
+
+    def no_conversion(*args, **kwargs):
+        raise AssertionError("warm Vulkan FFT must not construct or serialize definitions")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_VulkanFftDefinition, "normalize", no_conversion)
+        patch.setattr(NativeDefinition, "parameter_dict", no_conversion)
+        patch.setattr(NativeOperationBinding, "lower", no_conversion)
+        graph.run(arrays)
+    np.testing.assert_allclose(arrays["y"].to_numpy(), values, atol=1e-5)
     module = ti.aot.Module()
     before = data.to_numpy()
-    description = json.loads(module.add_execution_plan("step", graph).to_json())
+    lowered = []
+    lower = NativeOperationBinding.lower
+
+    def record_lower(binding, context, **kwargs):
+        lowered.append(binding)
+        return lower(binding, context, **kwargs)
+
+    if selected == "ordinary":
+        # Diagnostic statistics do not replace the actual selected definition.
+        for plan in plans:
+            plan._statistics["batch_tile"] = -7
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeOperationBinding, "lower", record_lower)
+        description = json.loads(module.add_execution_plan("step", graph).to_json())
+    assert len(lowered) == 2
+    for binding in lowered:
+        assert binding.definition.provider == "vkfft" and binding.definition.operation == "execute_f32"
+        assert binding.binding_names == ("data",)
+        assert binding.resources[0][1].definition is binding.resources[0][1].owner._native_definition
+    assert all(resource["bindings"] == dict(data="data") for resource in description["resources"])
     np.testing.assert_array_equal(data.to_numpy(), before)
     assert len(description["resources"]) == 2
     assert [r["parameters"]["direction"] for r in description["resources"]] == ["forward", "inverse"]

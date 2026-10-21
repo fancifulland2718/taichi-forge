@@ -1,12 +1,16 @@
 """Explicit, fixed-storage Vulkan FFT plans with cold-only JIT and discovery."""
 
 import ctypes
+from dataclasses import dataclass
 from functools import partial
 import os
 from pathlib import Path
 import weakref
 
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding, NativeDefinition, NativeOperationBinding, NativeResourceBinding,
+)
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.graph._recipes.definition import _digest
 from taichi_forge.graph._recipes.deferred import FrozenNativeRecipeSource
@@ -162,6 +166,55 @@ def _positive_int(value, name):
     return value
 
 
+@dataclass(frozen=True)
+class _VulkanFftDefinition:
+    dimensions: tuple
+    batch_count: int
+    direction: str
+    normalization: str
+    batch_tile: object = None
+
+    @classmethod
+    def normalize(cls, dimensions, batch_count, direction, normalization, _batch_tile):
+        dimensions = tuple(dimensions)
+        if not 1 <= len(dimensions) <= 3:
+            raise ValueError("Vulkan FFT requires rank 1--3")
+        for value in dimensions:
+            remaining = _positive_int(value, "dimension")
+            for radix in (2, 3, 5, 7, 11, 13):
+                while remaining % radix == 0:
+                    remaining //= radix
+            if remaining != 1:
+                raise ValueError("Vulkan FFT dimensions must have prime factors at most 13")
+        batch_count = _positive_int(batch_count, "batch_count")
+        if _batch_tile is not None:
+            _positive_int(_batch_tile, "private batch tile")
+            if _batch_tile > batch_count:
+                raise ValueError("Vulkan FFT private batch tile exceeds batch_count")
+        if direction not in ("forward", "inverse"):
+            raise ValueError("Vulkan FFT direction must be 'forward' or 'inverse'")
+        if normalization not in ("none", "inverse"):
+            raise ValueError("Vulkan FFT normalization must be 'none' or 'inverse'")
+        return cls(dimensions, batch_count, direction, normalization, _batch_tile)
+
+    @property
+    def shape(self):
+        return ((self.batch_count,) if self.batch_count > 1 else ()) + self.dimensions + (2,)
+
+    def resource(self, selected_batch_tile):
+        return NativeDefinition(
+            "vkfft",
+            "plan_f32",
+            dict(
+                dimensions=self.dimensions,
+                batch_count=self.batch_count,
+                direction=self.direction,
+                normalization=self.normalization,
+                batch_tile=selected_batch_tile,
+            ),
+        )
+
+
 class VulkanFftPlan:
     """In-place compact scalar-f32 complex FFT on a frozen Vulkan ndarray.
 
@@ -194,30 +247,8 @@ class VulkanFftPlan:
         _batch_tile=None,
     ):
         self._closed = True
-        self._dimensions = tuple(dimensions)
-        if not 1 <= len(self._dimensions) <= 3:
-            raise ValueError("Vulkan FFT requires rank 1--3")
-        for value in self._dimensions:
-            remaining = _positive_int(value, "dimension")
-            for radix in (2, 3, 5, 7, 11, 13):
-                while remaining % radix == 0:
-                    remaining //= radix
-            if remaining != 1:
-                raise ValueError(
-                    "Vulkan FFT dimensions must have prime factors at most 13"
-                )
-        self._batch_count = _positive_int(batch_count, "batch_count")
-        if _batch_tile is not None:
-            _positive_int(_batch_tile, "private batch tile")
-            if _batch_tile > batch_count:
-                raise ValueError("Vulkan FFT private batch tile exceeds batch_count")
-        if direction not in ("forward", "inverse"):
-            raise ValueError("Vulkan FFT direction must be 'forward' or 'inverse'")
-        if normalization not in ("none", "inverse"):
-            raise ValueError("Vulkan FFT normalization must be 'none' or 'inverse'")
-        self._direction, self._normalization = direction, normalization
-        self._shape = (
-            ((batch_count,) if batch_count > 1 else ()) + self.dimensions + (2,)
+        self._definition = definition = _VulkanFftDefinition.normalize(
+            dimensions, batch_count, direction, normalization, _batch_tile
         )
         program = impl.get_runtime().prog
         if program is None or active_backend() != "vulkan":
@@ -239,7 +270,7 @@ class VulkanFftPlan:
         self._adapter_sha256 = _binary_sha256(self._adapter_path)
         create_name = (
             "_create_vulkan_fft_plan"
-            if _batch_tile is None
+            if definition.batch_tile is None
             else "_create_vulkan_fft_recipe_plan"
         )
         create_plan = getattr(program, create_name, None)
@@ -251,14 +282,15 @@ class VulkanFftPlan:
             self._adapter_path,
             data.arr,
             self.dimensions,
-            batch_count,
-            -1 if direction == "forward" else 1,
-            normalization == "inverse",
-            *((_batch_tile,) if _batch_tile is not None else ()),
+            definition.batch_count,
+            -1 if definition.direction == "forward" else 1,
+            definition.normalization == "inverse",
+            *((definition.batch_tile,) if definition.batch_tile is not None else ()),
         )
         self._closed = False
         try:
             self._statistics = dict(program._vulkan_fft_plan_statistics(self._handle))
+            self._native_definition = definition.resource(self._statistics.get("batch_tile", 0))
         except Exception:
             self.close()
             raise
@@ -269,9 +301,9 @@ class VulkanFftPlan:
             (
                 "vulkan-compact-inplace-c2c-f32-v1",
                 self.dimensions,
-                batch_count,
-                direction,
-                normalization,
+                definition.batch_count,
+                definition.direction,
+                definition.normalization,
             )
         )
         self._physical_id = _digest(
@@ -279,11 +311,11 @@ class VulkanFftPlan:
         )
         _PLANS.add(self)
 
-    dimensions = property(lambda self: self._dimensions)
-    batch_count = property(lambda self: self._batch_count)
-    direction = property(lambda self: self._direction)
-    normalization = property(lambda self: self._normalization)
-    shape = property(lambda self: self._shape)
+    dimensions = property(lambda self: self._definition.dimensions)
+    batch_count = property(lambda self: self._definition.batch_count)
+    direction = property(lambda self: self._definition.direction)
+    normalization = property(lambda self: self._definition.normalization)
+    shape = property(lambda self: self._definition.shape)
     closed = property(lambda self: self._closed)
 
     def run(self):
@@ -380,18 +412,32 @@ class _Recording(BackendCommandRecording):
     _owns_vulkan_binding_frame_recipe = True
 
     def __init__(self, plan, data, *, recipe_owned=False):
+        binding = NativeOperationBinding(
+            NativeDefinition("vkfft", "execute_f32", {}),
+            (),
+            (
+                (
+                    "plan",
+                    NativeResourceBinding(
+                        plan, plan._native_definition, (NativeArrayBinding("data", data, GraphAccess.READ_WRITE),)
+                    ),
+                ),
+            ),
+        )
+        object.__setattr__(self, "_native_binding", binding)
         super().__init__(
             backend="vulkan",
-            binding_names=(data,),
+            binding_names=binding.binding_names,
             command_count=1,
             workspace_ownership="provider_generation",
             replay_mode="native_replay",
         )
         object.__setattr__(self, "plan", plan)
-        object.__setattr__(self, "data", data)
         object.__setattr__(self, "_recipe_owned", recipe_owned)
         object.__setattr__(self, "_graph_semantic_fingerprint", plan._semantic_id)
         object.__setattr__(self, "_graph_physical_plan_id", plan._physical_id)
+
+    data = property(lambda self: self._native_binding.binding_names[0])
 
     @property
     def source(self):
@@ -404,31 +450,16 @@ class _Recording(BackendCommandRecording):
         if type(self.plan) is not VulkanFftPlan:
             raise TaichiRuntimeError("AOT Vulkan FFT variants require their own reconstruction contract")
         self.plan.validate_graph_lifetime()
-        plan = context.resource(
-            self.plan,
-            "vkfft",
-            "plan_f32",
-            parameters=dict(
-                dimensions=self.plan.dimensions,
-                batch_count=self.plan.batch_count,
-                direction=self.plan.direction,
-                normalization=self.plan.normalization,
-                batch_tile=self.plan._statistics.get("batch_tile", 0),
-            ),
-            bindings=dict(data=self.data),
-        )
-        context.native("vkfft", "execute_f32", bindings=dict(plan=plan), parameters={})
+        self._native_binding.lower(context)
         return ()
 
     def _vulkan_graph_command(self):
         self.plan.validate_graph_lifetime()
-        return self.plan._runtime_prog._vulkan_fft_graph_command(
-            self.plan._handle, self.data
-        )
+        return self.plan._runtime_prog._vulkan_fft_graph_command(self.plan._handle, self.data)
 
     @property
     def resource_effects(self):
-        return (ResourceEffect(self.data, GraphAccess.READ_WRITE),)
+        return self._native_binding.resource_effects
 
     def validate_graph_bindings(self, bindings):
         if bindings[self.data] is not self.plan._data:
@@ -493,10 +524,7 @@ class _FrozenVulkanFftSource(FrozenNativeRecipeSource):
             "_data",
             "_runtime_prog",
             "_runtime_generation",
-            "dimensions",
-            "batch_count",
-            "direction",
-            "normalization",
+            "_definition",
             "_adapter_path",
             "_adapter_sha256",
             "_semantic_id",
@@ -506,6 +534,11 @@ class _FrozenVulkanFftSource(FrozenNativeRecipeSource):
         self._statistics = dict(plan._statistics)
         self.data = recording.data
         self.resource_effects = recording.resource_effects
+
+    dimensions = property(lambda self: self._definition.dimensions)
+    batch_count = property(lambda self: self._definition.batch_count)
+    direction = property(lambda self: self._definition.direction)
+    normalization = property(lambda self: self._definition.normalization)
 
     _recording = property(lambda self: self)
     source = property(lambda self: self)

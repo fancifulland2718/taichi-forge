@@ -74,6 +74,19 @@ class NativeResourceBinding:
 
     owner: object
     definition: NativeDefinition
+    arrays: tuple = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "arrays", tuple(self.arrays))
+        ports = [item.port for item in self.arrays]
+        if len(set(ports)) != len(ports):
+            raise ValueError("Native resource input ports must be distinct")
+
+
+def _array_symbols(arrays, context):
+    return {
+        item.port: item.value if item.runtime_bound else context.retained_arrays.require(item.value) for item in arrays
+    }
 
 
 @dataclass(frozen=True)
@@ -93,11 +106,17 @@ class NativeOperationBinding:
 
     @property
     def binding_names(self):
-        return tuple(item.value for item in self.arrays if item.runtime_bound)
+        return tuple(item.value for item in self._array_bindings if item.runtime_bound)
+
+    @property
+    def _array_bindings(self):
+        return self.arrays + tuple(item for _, resource in self.resources for item in resource.arrays)
 
     @property
     def resource_effects(self):
-        return tuple(ResourceEffect(item.value, item.access, runtime_bound=item.runtime_bound) for item in self.arrays)
+        return tuple(
+            ResourceEffect(item.value, item.access, runtime_bound=item.runtime_bound) for item in self._array_bindings
+        )
 
     def lower(self, context, *, resource_requirements=None):
         # The context decides how fixed arrays and resource owners are referenced;
@@ -105,10 +124,7 @@ class NativeOperationBinding:
         requirements = resource_requirements or {}
         if requirements.keys() - {port for port, _ in self.resources}:
             raise ValueError("Native resource requirements reference an unknown port")
-        bindings = {
-            item.port: item.value if item.runtime_bound else context.retained_arrays.require(item.value)
-            for item in self.arrays
-        }
+        bindings = _array_symbols(self.arrays, context)
         for port, resource in self.resources:
             definition = resource.definition
             parameters = definition.parameter_dict()
@@ -120,6 +136,7 @@ class NativeOperationBinding:
                 definition.provider,
                 definition.operation,
                 parameters=dict(parameters, **extra),
+                bindings=_array_symbols(resource.arrays, context),
                 version=definition.version,
             )
         definition = self.definition
