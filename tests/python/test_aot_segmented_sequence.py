@@ -104,7 +104,12 @@ def test_segmented_sequence_runtime_only_and_borrowed(tmp_path, monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_segmented_sequence_shared_workspace_and_cold_export(tmp_path):
+def test_segmented_sequence_shared_workspace_and_cold_export(tmp_path, monkeypatch):
+    from taichi_forge.algorithms._segmented_definition import SegmentedDefinition
+
+    def no_redefine(*args, **kwargs):
+        raise AssertionError("Equivalent segmented requests must reuse the frozen definition")
+
     workspace = ti.algorithms.SegmentedWorkspace(max_items=17, max_segments=3)
     values = ti.ndarray(ti.i32, 17)
     left, right = ti.ndarray(ti.i32, 3), ti.ndarray(ti.i32, 3)
@@ -116,6 +121,7 @@ def test_segmented_sequence_shared_workspace_and_cold_export(tmp_path):
     module = ti.aot.Module()
     for name, warm in (("cold", False), ("warm", True)):
         if warm:
+            monkeypatch.setattr(SegmentedDefinition, "__init__", no_redefine)
             values.fill(1)
             sequence.run()  # The workspace's last plan belongs to right, not left.
         left.fill(73)
@@ -123,6 +129,7 @@ def test_segmented_sequence_shared_workspace_and_cold_export(tmp_path):
         graph = _graph(sequence)
         plan = module.add_execution_plan(name, graph, source_bindings=dict(values=values, left=left, right=right))
         assert len(json.loads(plan.to_json())["operations"]) == 2
+        assert len(workspace._definitions) == 1  # Different topology, equal math/layout facts.
         np.testing.assert_array_equal(left.to_numpy(), [73] * 3)
         np.testing.assert_array_equal(right.to_numpy(), [74] * 3)
         graph.close()

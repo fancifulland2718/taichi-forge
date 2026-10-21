@@ -59,8 +59,9 @@ def export_segmented_reduce(call, context):
         raise TaichiRuntimeError("AOT grouped segmented reduce requires plain ndarrays")
     if any(len(d.index_shape) != 1 or d.element_shape for d in map(packed_description, (values, output))):
         raise TaichiRuntimeError("AOT segmented reduce requires packed scalar storage")
+    definition = call.workspace._definition("reduce", values.dtype, layout, method, ndarray_mode)
     arrays = context.retained_arrays
-    if ndarray_mode and method in ("auto", "grouped"):
+    if definition.method == "grouped":
         from ._sequence_export import _grouped_reduce
 
         workspace = call.workspace._grouped_reduce_workspace
@@ -88,11 +89,11 @@ def export_segmented_reduce(call, context):
 
     offsets = _topology_binding(layout, context)
     count = context._resource(
-        object(), {k: v for k, v in Scalar("i32", layout.num_segments).resource("count").items() if k != "name"}
+        object(), {k: v for k, v in Scalar("i32", definition.num_segments).resource("count").items() if k != "name"}
     )
     args = [Arg(ArgKind.NDARRAY, offsets, algorithms.i32, ndim=1), Arg(ArgKind.SCALAR, count, algorithms.i32)]
+    helper = definition.serial_kernel
     if ndarray_mode:
-        helper = algorithms.segmented_reduce_sum_ndarray
         source, destination = arrays.require(values), arrays.require(output)
         context.binding_constraints.append(dict(kind="disjoint", left=source, right=destination))
         args.insert(0, Arg(ArgKind.NDARRAY, source, values.dtype, ndim=1))
@@ -100,10 +101,9 @@ def export_segmented_reduce(call, context):
     else:
         # Export the actual Field helper: unlike the ndarray helper it starts
         # each sum at zero, and honors the captured Field index offsets.
-        helper = algorithms.segmented_reduce_sum_field
         context.field_state(tuple(packed_description(a).tree_identity for a in (values, output)))
     kernel = helper._primal
-    specialization = kernel.ensure_compiled(values, layout._offsets, output, layout.num_segments, _for_aot=True)
+    specialization = kernel.ensure_compiled(values, layout._offsets, output, definition.num_segments, _for_aot=True)
     context.kernel(kernel.compiled_kernels[specialization], tuple(args))
 
 
@@ -130,7 +130,15 @@ def export_segmented_scan(call, context):
     )
     if any(len(d.index_shape) != 1 or d.element_shape for d in map(packed_description, (values, output))):
         raise TaichiRuntimeError("AOT segmented scan requires packed scalar storage")
-    method = algorithms._select_segmented_scan_method(values.dtype, layout, call.kwargs["method"])
+    definition = call.workspace._definition(
+        "scan",
+        values.dtype,
+        layout,
+        call.kwargs["method"],
+        ndarray_mode,
+        inclusive=call.kwargs["inclusive"],
+        in_place=in_place,
+    )
     offsets = _topology_binding(layout, context)
     arrays = context.retained_arrays
 
@@ -140,7 +148,7 @@ def export_segmented_scan(call, context):
         )
         return Arg(ArgKind.SCALAR, name, algorithms.i32)
 
-    count, inclusive = scalar(layout.num_segments), scalar(int(call.kwargs["inclusive"]))
+    count, inclusive = scalar(definition.num_segments), scalar(int(definition.inclusive))
     offset_arg = Arg(ArgKind.NDARRAY, offsets, algorithms.i32, ndim=1)
 
     def emit(helper, operands, args):
@@ -148,10 +156,10 @@ def export_segmented_scan(call, context):
         specialization = kernel.ensure_compiled(*operands, _for_aot=True)
         context.kernel(kernel.compiled_kernels[specialization], tuple(args))
 
-    if method == "serial":
+    if definition.method == "serial":
         args = [offset_arg, count, inclusive]
+        helper = definition.serial_kernel
         if ndarray_mode:
-            helper = algorithms.segmented_scan_sum_serial_ndarray
             source, destination = arrays.require(values), arrays.require(output)
             context.binding_constraints.append(
                 dict(kind="disjoint", left=source, right=destination, allow_same_view=True)
@@ -159,24 +167,28 @@ def export_segmented_scan(call, context):
             args.insert(0, Arg(ArgKind.NDARRAY, source, values.dtype, ndim=1))
             args.insert(2, Arg(ArgKind.NDARRAY, destination, output.dtype, ndim=1))
         else:
-            helper = algorithms.segmented_scan_sum_serial_field
             context.field_state(tuple(packed_description(a).tree_identity for a in (values, output)))
-        emit(helper, (values, layout._offsets, output, layout.num_segments, int(call.kwargs["inclusive"])), args)
+        emit(helper, (values, layout._offsets, output, definition.num_segments, int(definition.inclusive)), args)
         return
 
     from ._sequence_export import _scan, _transform
 
-    if not in_place:
+    if definition.copy is not None:
         workspace = call.workspace._get_transform_workspace(layout)
         if type(workspace) is not algorithms.TransformWorkspace:
             raise TaichiRuntimeError("AOT segmented scan requires its concrete transform child workspace")
         child = algorithms._PrimitiveSequenceCall(
-            "transform", algorithms.experimental_transform, (values, output),
-            dict(scale=1, bias=0, method="auto"), workspace,
+            "transform",
+            algorithms.experimental_transform,
+            (values, output),
+            dict(scale=definition.copy.scale, bias=definition.copy.bias, method="auto"),
+            workspace,
         )
         child.plan = algorithms._native_plan_cache_lookup(
-            workspace._native_transform_plans, workspace._native_transform_backend_for_method("auto"),
-            child.args, (1, 0),
+            workspace._native_transform_plans,
+            workspace._native_transform_backend_for_method("auto"),
+            child.args,
+            (definition.copy.scale, definition.copy.bias),
         )
         _transform(child, context)
     executor = call.workspace._get_scan_executor(layout)
@@ -193,12 +205,11 @@ def export_segmented_scan(call, context):
     # Gather overwrites every base, including empty segments, before correction.
     base_arg = Arg(ArgKind.NDARRAY, arrays.declare_scratch(bases), values.dtype, ndim=1)
     args = [offset_arg, base_arg, count]
+    gather, apply = definition.correction_kernels
     if ndarray_mode:
-        gather, apply = algorithms.segmented_scan_gather_bases_ndarray, algorithms.segmented_scan_apply_bases_ndarray
         args.insert(0, Arg(ArgKind.NDARRAY, arrays.require(output), output.dtype, ndim=1))
     else:
-        gather, apply = algorithms.segmented_scan_gather_bases_field, algorithms.segmented_scan_apply_bases_field
         context.field_state((packed_description(output).tree_identity,))
-    operands = (output, layout._offsets, bases, layout.num_segments)
+    operands = (output, layout._offsets, bases, definition.num_segments)
     emit(gather, operands, args)
-    emit(apply, operands + (int(call.kwargs["inclusive"]),), args + [inclusive])
+    emit(apply, operands + (int(definition.inclusive),), args + [inclusive])

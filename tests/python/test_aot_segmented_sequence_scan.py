@@ -124,7 +124,9 @@ def test_sequence_scan_runtime_only_and_borrowed(tmp_path):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_sequence_scan_field_snapshot_and_downstream_ad(tmp_path):
+def test_sequence_scan_field_snapshot_and_downstream_ad(tmp_path, monkeypatch):
+    from taichi_forge.algorithms._segmented_definition import SegmentedDefinition
+
     layout = ti.algorithms.SegmentedLayout.from_offsets(np.asarray([0, 0, 1, 3, 3, 7], np.int32), capacity=9)
     floating = ti.field(ti.f32, shape=9, offset=5)
     serial = ti.field(ti.f32, shape=9, offset=11)
@@ -136,6 +138,11 @@ def test_sequence_scan_field_snapshot_and_downstream_ad(tmp_path):
     sequence = ti.algorithms.primitive_sequence()
     sequence.segmented_scan(floating, layout, serial, inclusive=False)
     sequence.segmented_scan(integer, layout, global_scan, method="global_scan")
+    sequence.run()
+
+    def no_redefine(*args, **kwargs):
+        raise AssertionError("Scan replay/export must reuse the ordinary call's definition")
+
     weights = ti.field(ti.f32, shape=9, needs_grad=True)
     loss = ti.field(ti.f32, shape=(), needs_grad=True)
     weights.fill(2)
@@ -166,7 +173,10 @@ def test_sequence_scan_field_snapshot_and_downstream_ad(tmp_path):
     module = ti.aot.Module()
     with pytest.raises(ti.TaichiRuntimeError, match="snapshot_state"):
         module.add_execution_plan("bad", graph)
-    module.add_execution_plan("fields", graph, snapshot_state=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(SegmentedDefinition, "__init__", no_redefine)
+        sequence.run()
+        module.add_execution_plan("fields", graph, snapshot_state=True)
     artifact = tmp_path / "fields.tcm"
     module.archive(str(artifact))
     graph.close()

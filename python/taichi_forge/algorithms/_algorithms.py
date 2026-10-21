@@ -5264,6 +5264,7 @@ class SegmentedWorkspace:
         self._grouped_reduce_workspace = None
         self._transform_workspace = None
         self._last_scan_method = None
+        self._definitions = {}
 
     @property
     def last_scan_method(self):
@@ -5288,6 +5289,24 @@ class SegmentedWorkspace:
                 f"Layout segment count {layout.num_segments} exceeds "
                 f"max_segments={self.max_segments}."
             )
+
+    def _definition(self, kind, dtype, layout, method, ndarray_mode, *, inclusive=True, in_place=False):
+        from ._segmented_definition import SegmentedDefinition
+
+        # Selection remains request-specific; a shared workspace's latest call
+        # does not determine another layout's route. Definitions hold no owner
+        # or topology bytes and are reusable across equivalent layout facts.
+        selected = (
+            _select_segmented_scan_method(dtype, layout, method)
+            if kind == "scan"
+            else "grouped" if ndarray_mode and method in ("auto", "grouped") else "serial"
+        )
+        key = (kind, dtype, selected, ndarray_mode, layout.capacity, layout.num_segments, bool(inclusive), in_place)
+        definition = self._definitions.get(key)
+        if definition is None:
+            definition = SegmentedDefinition(*key)
+            self._definitions[key] = definition
+        return definition
 
     def _get_grouped_reduce_workspace(self, layout):
         if self._grouped_reduce_workspace is None:
@@ -5404,6 +5423,7 @@ class SegmentedWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._last_scan_method = None
+        self._definitions.clear()
 
 
 class ReduceWorkspace:
@@ -10867,7 +10887,8 @@ def experimental_segmented_reduce(
             "reduce", values, layout, output, (op, method)
         )
     workspace.check_layout(layout)
-    if use_grouped:
+    definition = workspace._definition("reduce", values.dtype, layout, method, ndarray_mode)
+    if definition.method == "grouped":
         grouped_workspace = workspace._get_grouped_reduce_workspace(layout)
         experimental_grouped_reduce(
             layout._segment_ids,
@@ -10877,14 +10898,8 @@ def experimental_segmented_reduce(
             method="auto",
             workspace=grouped_workspace,
         )
-    elif ndarray_mode:
-        segmented_reduce_sum_ndarray(
-            values, layout._offsets, output, layout.num_segments
-        )
     else:
-        segmented_reduce_sum_field(
-            values, layout._offsets, output, layout.num_segments
-        )
+        definition.serial_kernel(values, layout._offsets, output, definition.num_segments)
     workspace._update_usage()
     return workspace
 
@@ -10941,66 +10956,36 @@ def experimental_segmented_scan(
         workspace=workspace,
         scan=True,
     )
+    # Keep invalid floating global scans rejected before creating a workspace.
     selected_method = _select_segmented_scan_method(values.dtype, layout, method)
     if workspace is None:
         workspace = _segmented_default_workspace(
             "scan", values, layout, output, (op, method, bool(inclusive))
         )
     workspace.check_layout(layout)
-    workspace._last_scan_method = selected_method
-    if selected_method == "serial":
-        if ndarray_mode:
-            segmented_scan_sum_serial_ndarray(
-                values,
-                layout._offsets,
-                output,
-                layout.num_segments,
-                int(inclusive),
-            )
-        else:
-            segmented_scan_sum_serial_field(
-                values,
-                layout._offsets,
-                output,
-                layout.num_segments,
-                int(inclusive),
-            )
+    definition = workspace._definition(
+        "scan", values.dtype, layout, selected_method, ndarray_mode, inclusive=inclusive, in_place=in_place
+    )
+    workspace._last_scan_method = definition.method
+    if definition.method == "serial":
+        definition.serial_kernel(values, layout._offsets, output, definition.num_segments, int(definition.inclusive))
         workspace._update_usage()
         return workspace
-    if not in_place:
+    if definition.copy is not None:
         experimental_transform(
             values,
             output,
-            scale=1,
-            bias=0,
+            scale=definition.copy.scale,
+            bias=definition.copy.bias,
             method="auto",
             workspace=workspace._get_transform_workspace(layout),
         )
     executor = workspace._get_scan_executor(layout)
     executor.run(output)
     bases = workspace._get_base_buffer(values.dtype, layout)
-    if ndarray_mode:
-        segmented_scan_gather_bases_ndarray(
-            output, layout._offsets, bases, layout.num_segments
-        )
-        segmented_scan_apply_bases_ndarray(
-            output,
-            layout._offsets,
-            bases,
-            layout.num_segments,
-            int(inclusive),
-        )
-    else:
-        segmented_scan_gather_bases_field(
-            output, layout._offsets, bases, layout.num_segments
-        )
-        segmented_scan_apply_bases_field(
-            output,
-            layout._offsets,
-            bases,
-            layout.num_segments,
-            int(inclusive),
-        )
+    gather, apply = definition.correction_kernels
+    gather(output, layout._offsets, bases, definition.num_segments)
+    apply(output, layout._offsets, bases, definition.num_segments, int(definition.inclusive))
     workspace._update_usage(include_scan_provider=True)
     return workspace
 
