@@ -2858,6 +2858,24 @@ DeviceAllocation resolved_graph_argpack(LaunchContextBuilder &context,
   return *static_cast<const DeviceAllocation *>(pointer->second);
 }
 
+void record_graph_argpack_reads(
+    const GfxRuntime::GraphReplayExecutable::PreparedDispatch &dispatch,
+    CommandList *commands,
+    std::unordered_set<DeviceAllocationId> *recorded = nullptr) {
+  for (const auto &indices : dispatch.kernel->runtime_argpack_args()) {
+    const auto allocation = resolved_graph_argpack(*dispatch.host_ctx, indices);
+    if (recorded && !recorded->insert(allocation.alloc_id).second)
+      continue;
+    // Immutable uniforms were uploaded on the cold path. Storage-buffer
+    // barriers do not include uniform reads; encode this once per allocation.
+    commands->buffer_transition(
+        allocation.get_ptr(), std::numeric_limits<std::size_t>::max(),
+        {BufferBarrierStage::Host | BufferBarrierStage::Transfer,
+         BufferBarrierAccess::HostWrite | BufferBarrierAccess::TransferWrite,
+         BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
+  }
+}
+
 bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
                      int task_index,
                      ShaderResourceSet *bindings,
@@ -3282,16 +3300,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     }
     begin_timing(operation_index, compute_timing_stream);
     auto &pd = prepared[kernel_index++];
-    // Cold uploads write these immutable uniforms. The generic storage-buffer
-    // barrier does not include uniform reads. Record once, with no replay scan.
-    for (const auto &indices : pd.kernel->runtime_argpack_args()) {
-      const auto allocation = resolved_graph_argpack(*pd.host_ctx, indices);
-      commands->buffer_transition(
-          allocation.get_ptr(), std::numeric_limits<std::size_t>::max(),
-          {BufferBarrierStage::Host | BufferBarrierStage::Transfer,
-           BufferBarrierAccess::HostWrite | BufferBarrierAccess::TransferWrite,
-           BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
-    }
+    record_graph_argpack_reads(pd, commands.get());
     const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
     for (std::size_t i = 0; i < tasks.size(); ++i) {
       auto resources = device_->create_resource_set_unique();
@@ -3932,8 +3941,15 @@ bool GfxRuntime::launch_graph_impl(
     }
     auto *ti_kernel = kernel_iter->second.get();
     if (ti_kernel->get_ret_buffer_size() != 0 ||
-        !ti_kernel->runtime_argpack_args().empty()) {
+        (!prepare_only && !ti_kernel->runtime_argpack_args().empty())) {
       return reject();
+    }
+    // FixedExecution qualifies and retains independent immutable pack owners.
+    // Ordinary mutable JIT Graph packs still need their own generation contract.
+    for (const auto &indices : ti_kernel->runtime_argpack_args()) {
+      const auto allocation = resolved_graph_argpack(*dispatch.host_ctx, indices);
+      if (allocation.device != device_ || allocation.alloc_id == 0)
+        return reject();
     }
 
     PreparedDispatch prepared_dispatch;
@@ -4149,7 +4165,19 @@ bool GfxRuntime::launch_graph_impl(
                 structure_key, alloc ? *alloc : kDeviceNullAllocation);
             break;
           }
-          case CompiledTaichiKernel::BufferBindingKind::ArgPack:
+          case CompiledTaichiKernel::BufferBindingKind::ArgPack: {
+            const auto allocation =
+                resolved_graph_argpack(*dispatch.host_ctx, bind.buffer.root_id);
+            key.push_back(0xB103u);
+            key.push_back(static_cast<uint64_t>(bind.binding));
+            push_graph_allocation_key(key, allocation);
+            // Entry barriers embed this allocation too; never descriptor-patch
+            // the resource without rebuilding those recorded transitions.
+            structure_key.push_back(0xB103u);
+            structure_key.push_back(static_cast<uint64_t>(bind.binding));
+            push_graph_allocation_key(structure_key, allocation);
+            break;
+          }
           case CompiledTaichiKernel::BufferBindingKind::RetsRw:
           case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
             return reject();
@@ -5157,6 +5185,9 @@ bool GfxRuntime::launch_graph_impl(
   auto *cmdlist = recorded_cmdlist.get();
 
   if (structured_control != nullptr || nested_control != nullptr) {
+    std::unordered_set<DeviceAllocationId> pack_reads;
+    for (const auto &dispatch : prepared)
+      record_graph_argpack_reads(dispatch, cmdlist, &pack_reads);
     struct StructuredBufferAccess {
       DeviceAllocation allocation{kDeviceNullAllocation};
       bool read{false};

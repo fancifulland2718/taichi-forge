@@ -1948,8 +1948,14 @@ uses `entry`, `argument`, `value_count`, relative integer `paths`, and
 `value_<index>` blob bindings, one exact compiled payload per value leaf.
 Its module layout resolver exists only during preparation. Independent prepares
 own independent storage; selected CUDA binding families share it with their
-existing private state. Automatic symbolic Graph pack export and structured
-Graph pack routes remain pending.
+existing private state. Explicit CPU/CUDA conditional and nested plans, and
+selected Vulkan compact/chained/conditional and depth-two nested recordings,
+support immutable pack values with lifted array members. Recording adds uniform
+read dependencies once, coalescing duplicate allocations; replay uploads no pack
+values. Checks cover zero/early/budget exits, independent instances, rebuilt
+values, explicit suffix adjoints and in-flight retirement. Vulkan control retains
+its buffer-only resource scope. Automatic symbolic Graph pack export and mutable
+JIT pack Graph bindings remain pending.
 
 Matching Windows runtime/frontend wheels pass installed CPU/CUDA/Vulkan checks
 for standalone and borrowed execution, persistent-pack forward/explicit reverse

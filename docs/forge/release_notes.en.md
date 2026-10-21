@@ -53,8 +53,11 @@ lifetimes. The entries below describe the changes.
   dependencies. Flat execution plans accept external packs through the same
   logical member binding. Persistent plans reconstruct values through the shared
   `memory/argpack` registry, with compiled producer layouts, existing private
-  arrays/adjoints and CUDA binding-family ownership. Automatic symbolic Graph
-  pack export and structured pack routes remain pending.
+  arrays/adjoints and CUDA binding-family ownership. Explicit conditional and
+  nested plans support immutable values and lifted arrays; selected Vulkan
+  recordings share uniform binding and coalesce read dependencies at preparation.
+  Suffix adjoints and retirement are qualified. Automatic symbolic Graph pack
+  export and mutable JIT pack Graph bindings remain pending.
   Repeated resource member names across packs retain distinct bindings in
   declaration order, fixing frontend `NoneType` compilation errors for nested
   packs and their explicit adjoints.

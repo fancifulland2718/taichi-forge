@@ -43,8 +43,10 @@
   普通调用、无返回值 kernel 的 prepared 执行及显式 ndarray 梯度，支持借用 JIT runtime。
   prepared 保留根 owner 和 Vulkan uniform 读取依赖；平直 execution plan 通过同一
   逻辑成员绑定接受外部参数包。持久计划通过共同 `memory/argpack` 注册表重建值，
-  生产端使用编译布局，复用私有数组/显式反向及 CUDA binding family 所有权；symbolic
-  Graph 参数包自动导出及结构化路径仍待完成。
+  生产端使用编译布局，复用私有数组/显式反向及 CUDA binding family 所有权。
+  显式条件与嵌套计划支持只读包值和提升数组，Vulkan 已选录制共用 uniform 绑定及
+  冷端合并的读取依赖；后段显式反向和退休已验证。symbolic Graph 参数包自动导出
+  及可变 JIT 参数包的 Graph 绑定仍待完成。
   多个参数包中的同名资源成员保留各自绑定及声明顺序，避免前端覆盖成员后出现
   `NoneType` 编译错误；嵌套成员及显式反向使用同一修复。
   AOT 导出显式保留移除模板参数、提升资源成员后的公共成员路径，别名共用布局，

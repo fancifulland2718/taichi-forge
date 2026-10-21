@@ -1524,8 +1524,12 @@ uniform 读取依赖；重放不重建或上传只读包存储。关闭包、成
 指针或设备地址。原生 schema 使用 `entry`、`argument`、`value_count`、相对整数
 `paths` 和 `value_<index>` blob 绑定，每个值叶子对应一个精确编译载荷。
 模块布局解析器只在 prepare 期间有效。独立 prepare 拥有独立存储；选定 CUDA binding
-family 按既有私有状态合同共享存储。symbolic Graph 参数包自动导出及结构化 Graph
-参数包路径仍待完成。
+family 按既有私有状态合同共享存储。显式计划的 CPU/CUDA 条件与嵌套循环，以及
+Vulkan 已选 compact/chained/conditional 和二层嵌套录制，支持只读包值与提升后的
+数组成员；录制一次 uniform 读取依赖，按 allocation 合并重复引用，重放无需上传。
+这些路线通过零轮/提前结束/预算耗尽、双实例、参数值重建、后段显式反向与在途退休
+检查。Vulkan 条件区域仍沿用 buffer-only 资源范围；symbolic Graph 参数包自动导出
+和可变 JIT 参数包的 Graph 绑定尚未接通。
 
 配套 Windows runtime/frontend wheel 已通过 CPU/CUDA/Vulkan 的正常安装验证，
 覆盖独立与借用执行、持久参数包的前向/显式反向、状态隔离和退休；仅安装 runtime 的
