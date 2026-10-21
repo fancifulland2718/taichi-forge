@@ -146,6 +146,23 @@ Vulkan classic/mesh pipeline 的冻结 driver 配置、资产与原 contract has
 创建路径不依赖 AOT 私有模块。默认 adapter 连接已有 shader 资源引用；公开 pipeline 借用、
 draw 闭包和初始化资格仍由各自冷阶段合同决定。
 
+RasterDrawDefinition 在 prepare 时冻结范围、颜色和绘制参数，GGUI 原生参数与 AOT
+uniform/range lowering 共同消费；相机、灯光、数据种子与辅助存储仍属于各自状态政策。
+Draw/GraphicsPassDraw 已提供共同的具体描述，普通/pass 共享 indexed 校验，IndirectDraw
+统一解析 command stride。保留 mesh、descriptor array 和 indirect 的具体准入与提交方式。
+
+OptiX/Vulkan ray 的几何创建事实与实例布局进入共同定义，默认 adapter 连接 context、
+AS、数组及 micromap 资产。重建仍要求明确的消费者种子：旧输入数组不代表当前 AS 内容。
+Vulkan host refit 可修改的实例 metadata 与固定拓扑分开；device refit 不隐式采集状态。
+OptixQueryDefinition 同时供普通准备与 typed/occlusion 导出使用，保留 face/alpha 的组合
+语义、实例顺序和既有输出布局，不在暖态重新生成描述。
+
+RayProgramDefinition 统一 programmable ray 的代码/布局合同及原 contract hash，普通
+pipeline 创建和资源 adapter 消费同一份事实。launch 继续采用已有冻结 recording、SBT
+与标量参数类型。部署端的资源符号、SBT 引用重定位、初始化和闭包校验仍需要专用 codec；
+它们不应为了接口形式一致而取代原执行器、workspace 或 owner。现有 micromap、PTX、
+SPIR-V 类型继续负责资产，不把第三方库或本机路径塞入定义。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典

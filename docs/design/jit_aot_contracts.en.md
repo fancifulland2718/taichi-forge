@@ -194,6 +194,29 @@ and the existing contract hash. Creation no longer depends on an AOT-private
 module. The default adapter connects shader resources; public pipeline borrowing,
 draw closures and initialization remain separate cold contracts.
 
+RasterDrawDefinition freezes ranges, colors and draw parameters at preparation;
+GGUI native arguments and AOT uniform/range lowering consume it together. Camera,
+lighting, data seeds and auxiliary storage retain their own state policies.
+Draw/GraphicsPassDraw already provide concrete shared descriptions. Ordinary and
+pass paths share indexed validation, and IndirectDraw resolves command stride.
+Mesh, descriptor arrays and indirect draws keep their specific admission and submission.
+
+OptiX/Vulkan ray geometry creation facts and instance layouts use shared definitions;
+the default adapter connects contexts, AS resources, arrays and micromap assets.
+Reconstruction still needs explicit consumer seeds: old input arrays do not describe
+current AS contents. Mutable Vulkan host-refit metadata remains separate from fixed
+topology; device refits do not implicitly snapshot state. OptixQueryDefinition feeds
+ordinary preparation and typed/occlusion export while preserving combined face/alpha
+semantics, instance order and existing output layouts, without warm description work.
+
+RayProgramDefinition owns programmable ray code/layout contracts and their existing
+contract hashes for direct pipeline creation and resource adapters. Launches retain
+the existing frozen recording, SBT and scalar parameter types. Deployment still needs
+specialized codecs for resource symbols, SBT reference relocation, initialization
+and closure validation. Interface uniformity does not justify replacing executors,
+workspaces or owners. Existing micromap, PTX and SPIR-V types continue to represent
+assets; definitions do not embed third-party libraries or producer-local paths.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive
