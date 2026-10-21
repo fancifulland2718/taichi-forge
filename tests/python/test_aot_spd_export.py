@@ -24,10 +24,10 @@ def test_aot_spd_graph_export_fixed_images_and_gradients(tmp_path, monkeypatch):
     start = time.perf_counter()
     spd = ti.hardware.image.VulkanSpdPlan(source, pyramid, reduction="max", **_dependencies())
     spd_ms = (time.perf_counter() - start) * 1000
-    spec = json.loads(spd._aot_plan_spec)
+    spec = spd._definition.native.parameter_dict()
     spec.update(shape=shape, levels=levels)
     (tmp_path / "spec.json").write_text(json.dumps(spec))
-    (tmp_path / "shader.spv").write_bytes(spd._aot_shader)
+    (tmp_path / "shader.spv").write_bytes(spd._definition.shader.code)
     import taichi_forge.hardware._spd as spd_module
 
     monkeypatch.setattr(spd_module, "compile_shader", lambda *args: pytest.fail("export must reuse frozen shader"))
@@ -76,13 +76,31 @@ def test_aot_spd_graph_export_fixed_images_and_gradients(tmp_path, monkeypatch):
     costs = []
 
     def export(graph, recipe):
+        from taichi_forge.graph._native_definition import NativeOperationBinding, NativeResourceBinding
+
         start = time.perf_counter()
         for policy, resources in (
             ("private", {source: dict(pixels="seed")}),
             ("images", {source: "public_source", pyramid: "public_pyramid"}),
             ("public", {spd: "public_spd", source: "public_source", pyramid: "public_pyramid"}),
         ):
-            plan = module.add_execution_plan(recipe + "_" + policy, graph, **options, resource_bindings=resources)
+            lowered = []
+            original_lower = NativeOperationBinding.lower
+
+            def observe_lower(binding, *args, **kwargs):
+                if binding.definition.provider == "spd":
+                    lowered.append(binding)
+                return original_lower(binding, *args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(NativeOperationBinding, "lower", observe_lower)
+                plan = module.add_execution_plan(recipe + "_" + policy, graph, **options, resource_bindings=resources)
+            assert len(lowered) == 2
+            for binding in lowered:
+                resource = binding.resources[0][1]
+                if isinstance(resource, NativeResourceBinding):
+                    assert resource.definition is spd._definition.native
+                assert binding.resource_effects == spd._definition.effects(("source", "pyramid"))
             document = json.loads(plan.to_json())
             factories = [r for r in document.get("resources", []) if r.get("provider") == "spd"]
             assert len(factories) == (0 if policy == "public" else 1)

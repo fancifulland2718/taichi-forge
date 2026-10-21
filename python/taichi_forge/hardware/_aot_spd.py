@@ -1,30 +1,8 @@
 """Frozen SPD code and fixed image relationships for cold Graph export."""
 
-import hashlib
-import json
-import struct
-
 from taichi_forge._lib import core
+from taichi_forge.graph._native_definition import NativeResourceBinding, NativeResourceReference
 from taichi_forge.lang.exception import TaichiRuntimeError
-
-
-def freeze(plan, words):
-    code = struct.pack(f"<{len(words)}I", *words)
-    digest = hashlib.sha256()
-
-    def text(value):
-        encoded = value.encode()
-        digest.update(struct.pack("<Q", len(encoded)))
-        digest.update(encoded)
-
-    text("forge.spd.plan.v1")
-    text(plan._reduction)
-    for image in (plan._source, plan._output):
-        fmt, shape, levels, _ = image._creation_metadata
-        text(fmt.name)
-        digest.update(struct.pack("<4Q", *shape, 1, levels))
-    text(hashlib.sha256(code).hexdigest())
-    return code, json.dumps(dict(reduction=plan._reduction, expected_plan=digest.hexdigest()), sort_keys=True)
 
 
 def preflight(recording, context):
@@ -40,29 +18,27 @@ def preflight(recording, context):
 def export(recording, context):
     preflight(recording, context)
     plan = recording.plan
-    spec = json.loads(plan._aot_plan_spec)
+    definition = plan._definition
     images = context.source_images
     source = images.resource(context, recording.binding_names[0])
     output = images.resource(context, recording.binding_names[1], full_overwrite=True)
     context.resource_links(plan, dict(source=plan._source, output=plan._output))
     resource = context.public_resource(plan)
     if resource is None:
-        resource = context.resource_once(
+        resource = NativeResourceBinding(
             plan,
-            lambda: context.resource(
-                plan,
-                "spd",
-                "plan",
-                parameters=spec,
-                bindings=dict(source=source, output=output, shader=context.host_blob_resource(plan._aot_shader)),
+            definition.native,
+            resources=tuple(
+                (port, NativeResourceReference(symbol))
+                for port, symbol in (
+                    ("source", source),
+                    ("output", output),
+                    ("shader", definition.shader._export_aot_resource(context)),
+                )
             ),
-            policy="spd_frozen_code_and_images",
         )
-    context.native(
-        "spd",
-        "run",
-        parameters=dict(expected_plan=spec["expected_plan"]),
-        bindings=dict(plan=resource, source=source, output=output),
-    )
+    else:
+        resource = NativeResourceReference(resource)
+    definition.bind(resource, recording.binding_names, (source, output)).lower(context)
     context.reconstructed_binding_validators.add(id(recording))
     return ()

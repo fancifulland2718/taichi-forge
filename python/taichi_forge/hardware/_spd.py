@@ -2,7 +2,6 @@
 
 from functools import partial
 
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.graph._recipes.definition import _digest
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
@@ -12,6 +11,7 @@ from taichi_forge.hardware._native_adapter import (
 )
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.hardware._spd_jit import compile_shader
+from taichi_forge.hardware._spd_definition import SpdDefinition
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.enums import Format
@@ -79,15 +79,12 @@ class VulkanSpdPlan:
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self._source, self._output = source, output
-        self._handle = create(source.tex, output.tex, shader)
+        self._definition = SpdDefinition.from_images(source, output, reduction, shader)
+        self._handle = create(source.tex, output.tex, self._definition.shader_words)
         self._closed = False
         try:
             self._statistics = dict(program._vulkan_spd_plan_statistics(self._handle))
             self._facts = facts
-            self._reduction = reduction
-            from ._aot_spd import freeze
-
-            self._aot_shader, self._aot_plan_spec = freeze(self, shader)
             self._semantic_id = _digest(
                 (
                     "image-reduction-pyramid-v1",
@@ -126,7 +123,7 @@ class VulkanSpdPlan:
         return {
             **self._statistics,
             **self._facts,
-            "reduction": self._reduction,
+            "reduction": self._definition.reduction,
             "physical_plan_id": self._physical_id,
             "graph_integration": "root_ordered",
             "gpu_sequence": "retained_secondary_commands",
@@ -214,10 +211,7 @@ class _Recording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        return (
-            ResourceEffect(self.binding_names[0], GraphAccess.READ, subresource=("image", "whole")),
-            ResourceEffect(self.binding_names[1], GraphAccess.WRITE, subresource=("image", "whole")),
-        )
+        return self.plan._definition.effects(self.binding_names)
 
     def validate_graph_bindings(self, bindings):
         if (
