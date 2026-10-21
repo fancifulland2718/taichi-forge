@@ -15,7 +15,19 @@ from tests.python.test_aot_binding_recipe_export import selected
 
 @pytest.mark.parametrize("recipe", ["ordinary", "selected"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_texture_collection_graph_reconstruction(tmp_path, recipe):
+def test_aot_texture_collection_graph_reconstruction(tmp_path, recipe, monkeypatch):
+    from taichi_forge.graph._native_definition import NativeResourceBinding
+
+    lowered = []
+    original_lower = NativeResourceBinding.lower
+
+    def observe(binding, context, **kwargs):
+        if binding.definition.provider == "image":
+            lowered.append(binding)
+        return original_lower(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", observe)
+
     @ti.kernel
     def sample(
         table: ti.types.texture_collection(ndim=2, capacity=3),
@@ -106,6 +118,13 @@ def test_aot_texture_collection_graph_reconstruction(tmp_path, recipe):
         images = [r for r in document["resources"] if r.get("operation") == "sampled"]
         tables = [r for r in document["resources"] if r.get("operation") == "collection"]
         assert len(images) == 2 and len(tables) == 1
+        assert {id(binding.owner) for binding in lowered} == {id(first), id(second), id(table)}
+        assert len(lowered) == 3
+        table_binding = next(binding for binding in lowered if binding.owner is table)
+        references = dict(table_binding.resources)
+        assert tuple(references) == ("image_0", "image_1", "image_2")
+        assert references["image_0"].name == references["image_2"].name
+        assert references["image_0"].name != references["image_1"].name
         assert sum(r["parameters"].get("storage", False) for r in images) == 1
         assert tables[0]["bindings"]["image_0"] == tables[0]["bindings"]["image_2"]
         assert len(document["initialization"]) == 2

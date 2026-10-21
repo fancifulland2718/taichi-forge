@@ -3,6 +3,7 @@ import operator
 import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang._texture_definition import TextureCollectionDefinition, TextureDefinition
 from taichi_forge.lang.expr import Expr, make_expr_group
 from taichi_forge.lang.matrix import Matrix
 from taichi_forge.lang.util import taichi_scope
@@ -249,29 +250,30 @@ class Texture:
             raise TypeError(
                 "sampler must be a ti.hardware.sampling.SamplerConfig"
             )
-        sampler_config = sampler._as_core_config()
+        self._definition = definition = TextureDefinition(fmt, arr_shape, mip_levels, sampler)
+        sampler_config = definition.sampler._as_core_config()
         self.tex = self._runtime_prog.create_texture(
-            fmt, arr_shape, sampler_config, mip_levels
+            definition.format, definition.shape, sampler_config, definition.mip_levels
         )
-        self.fmt = fmt
-        self.num_dims = len(arr_shape)
-        self.shape = arr_shape
-        self._mip_levels = mip_levels
-        # Immutable creation metadata; AOT reconstruction never reads texels or
-        # serializes the producer's device allocation / sampled-object handle.
-        self._creation_metadata = (fmt, arr_shape, mip_levels, sampler)
+        self.fmt = definition.format
+        self.num_dims = len(definition.shape)
+        self.shape = definition.shape
         runtime.register_runtime_object(self)
 
     @property
+    def _creation_metadata(self):
+        return self._definition.metadata
+
+    @property
     def mip_levels(self):
-        return self._mip_levels
+        return self._definition.mip_levels
 
     def mip_shape(self, level):
         """Return the allocated mip extent; odd dimensions round down."""
         if isinstance(level, bool):
             raise TypeError("Texture mip level must be an integer")
         level = operator.index(level)
-        if not 0 <= level < self._mip_levels:
+        if not 0 <= level < self.mip_levels:
             raise ValueError("Texture mip level is outside the allocated chain")
         return tuple(max(1, extent >> level) for extent in self.shape)
 
@@ -311,7 +313,6 @@ class Texture:
             field (ti.Field): Source field to load from.
         """
         self.tex.from_snode(field.snode.ptr)
-
 
     def _device_allocation_ptr(self):
         return self.tex.device_allocation_ptr()
@@ -398,12 +399,13 @@ class TextureCollection:
             )
 
         self._members = members
+        self._definition = definition = TextureCollectionDefinition(ndim, len(members))
         self._runtime_prog = owner
         self.collection = _ti_core.TextureCollection(
-            [texture.tex for texture in members]
+            [texture.tex for texture in definition.member_links(members).values()]
         )
-        self.num_dims = ndim
-        self.capacity = len(members)
+        self.num_dims = definition.dimensions
+        self.capacity = definition.image_count
         self._snapshot_id = self.collection.snapshot_id()
         impl.get_runtime().register_runtime_object(self)
 

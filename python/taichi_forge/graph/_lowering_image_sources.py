@@ -1,12 +1,12 @@
 """Cold image metadata and explicit consumer seeds for Graph export."""
 
-from dataclasses import asdict
-
 from taichi_forge._lib import core
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.texture_type import FORMAT2TY_CH, is_float_sampled_texture_format
+
+from ._native_definition import NativeResourceBinding, NativeResourceReference
 
 
 class SourceImageBindings:
@@ -87,8 +87,8 @@ class SourceImageBindings:
             if (
                 arch != core.Arch.vulkan
                 or type(owner) is not TextureCollection
-                or owner.num_dims != arg.field_dim
-                or tuple(arg.element_shape) != (owner.capacity,)
+                or owner._definition.dimensions != arg.field_dim
+                or tuple(arg.element_shape) != (owner._definition.image_count,)
             ):
                 raise TaichiRuntimeError("AOT TextureCollection dimension/capacity differs from the Graph argument")
             return
@@ -134,7 +134,7 @@ class SourceImageBindings:
         unique = {id(member): member for member in owner.members}
         for member in unique.values():
             self._validate_owner(member)
-        links = {f"image_{i}": member for i, member in enumerate(owner.members)}
+        links = owner._definition.member_links(owner.members)
         # Record all slots, including repeated members. Public consumers must
         # preserve aliases with other kernel/provider uses of the same image.
         context.resource_links(owner, links)
@@ -143,21 +143,20 @@ class SourceImageBindings:
 
         def build():
             resources = {key: self._image_resource(context, member) for key, member in unique.items()}
-            return context.resource(
+            return NativeResourceBinding(
                 owner,
-                "image",
-                "collection",
-                parameters=dict(dimensions=owner.num_dims, image_count=owner.capacity),
-                bindings={port: resources[id(member)] for port, member in links.items()},
-            )
+                owner._definition.native_definition(),
+                resources=tuple(
+                    (port, NativeResourceReference(resources[id(member)])) for port, member in links.items()
+                ),
+            ).lower(context)
 
         return context.resource_once(owner, build, policy="image_collection_members")
 
     def _image_resource(self, context, owner, *, first_clear=False, full_overwrite=False):
-        from taichi_forge.hardware._sampling import SamplerConfig
-
         self._validate_owner(owner)
-        fmt, shape, mip_levels, sampler = owner._creation_metadata
+        definition = owner._definition
+        fmt, shape, mip_levels, sampler = definition.metadata
         sampled = is_float_sampled_texture_format(fmt)
         attachment = id(owner) in self._attachment_owners
         if first_clear and not attachment:
@@ -170,14 +169,7 @@ class SourceImageBindings:
             raise TaichiRuntimeError(
                 "AOT sampled-image reconstruction requires CUDA/Vulkan; mip chains require 2D Vulkan"
             )
-        basic = SamplerConfig(
-            min_filter=sampler.min_filter,
-            mag_filter=sampler.min_filter,
-            address_mode_u=sampler.address_mode_u,
-            address_mode_v=sampler.address_mode_v,
-            address_mode_w=sampler.address_mode_w,
-        )
-        if context.arch == core.Arch.cuda and sampler != basic:
+        if context.arch == core.Arch.cuda and sampler != definition.basic_sampler:
             raise TaichiRuntimeError(
                 "AOT sampled-image reconstruction requires a basic sampler with matching min/mag filters"
             )
@@ -195,26 +187,10 @@ class SourceImageBindings:
                 context.resource_inputs.require(owner, ports)
                 if not (first_clear or full_overwrite) or context.resource_inputs.has_inputs(owner) else None
             )
-            sampling = (
-                dict(
-                    filter=sampler.min_filter,
-                    address_modes=[sampler.address_mode_u, sampler.address_mode_v, sampler.address_mode_w][: len(shape)],
-                )
-                if sampler == basic else dict(sampler=asdict(sampler))
-            )
-            resource = context.resource(
+            resource = NativeResourceBinding(
                 owner,
-                "image",
-                "sampled" if sampled else "storage",
-                parameters=dict(
-                    format=fmt.name,
-                    shape=list(shape),
-                    **({"mip_levels": mip_levels} if mip_levels != 1 else {}),
-                    **(sampling if sampled else {}),
-                    **({"storage": True} if sampled and id(owner) in self._storage_owners else {}),
-                    **({"attachment": True} if attachment else {}),
-                ),
-            )
+                definition.native_definition(storage=id(owner) in self._storage_owners, attachment=attachment),
+            ).lower(context)
             if inputs is not None:
                 context.initialize_native_once(
                     resource,
