@@ -17,9 +17,24 @@ from tests.python.test_hardware_vulkan_ray_program import _shader
 
 @pytest.mark.parametrize("recipe", ["explicit", "graph", "selected"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe):
+def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe, monkeypatch):
     if not ti.hardware.ray.is_program_available():
         pytest.skip("Vulkan RT pipeline unavailable")
+
+    from taichi_forge.graph._native_definition import NativeResourceBinding
+    from taichi_forge.hardware._ray_program_definition import RayProgramDefinition
+
+    lowered = []
+    original_lower = NativeResourceBinding.lower
+
+    def lower(binding, context, **kwargs):
+        definition = getattr(binding.owner, "_definition", None)
+        if isinstance(definition, RayProgramDefinition):
+            assert binding.definition is definition.native
+            lowered.append(binding.owner)
+        return original_lower(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", lower)
 
     @ti.kernel
     def decode(values: ti.types.ndarray(ti.u32, 2), output: ti.types.ndarray(ti.f32, 1)):
@@ -97,6 +112,7 @@ def test_aot_vulkan_ray_program_resources_and_gradients(tmp_path, recipe):
                 ),
             )
     costs = dict(compile_ms=(time.perf_counter() - start) * 1000)
+    assert recipe == "explicit" or lowered
     artifact = tmp_path / "ray_program.tcm"
     module.archive(str(artifact))
     costs["artifact_bytes"] = artifact.stat().st_size

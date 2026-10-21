@@ -7,12 +7,12 @@ including indirect SBT references, must use owner-bearing resource fields.
 
 import ctypes as c
 from dataclasses import dataclass
-import json
 import struct
 from types import MappingProxyType
 import weakref
 
 from taichi_forge._lib import core
+from taichi_forge.hardware._ray_program_definition import optix_program_definition
 from taichi_forge.hardware import _optix_program_abi as a
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import runtime_generation_matches
@@ -179,7 +179,7 @@ class OptixProgram:
             raise ValueError("trace depth must fit uint32")
         if not isinstance(allow_opacity_micromaps, bool):
             raise TypeError("allow_opacity_micromaps must be bool")
-        groups, indices, descriptions = [], {}, []
+        indices, descriptions = {}, []
 
         def entry(value, prefix):
             if value is None:
@@ -205,8 +205,7 @@ class OptixProgram:
                     if not first.name:
                         raise ValueError("raygen/miss groups require an entry")
                     second = a.Entry()
-                indices[name] = (len(groups), kind)
-                groups.append(a.Group(kind, first, second))
+                indices[name] = (len(descriptions), kind)
                 descriptions.append(
                     dict(
                         name=name,
@@ -236,22 +235,33 @@ class OptixProgram:
                 name: provider.identity[name] for name in ("provider_abi", "optix_abi_version", "build_identity")
             },
         )
-        self._manifest_json = json.dumps(facts, sort_keys=True, separators=(",", ":"))
+        self._definition = optix_program_definition(facts)
+        parameters_spec = self._definition.native.parameters
+
         self._program_id = "optix-program:" + _digest(facts)
         native_modules = (a.Module * len(modules))(*(a.Module(module.code, len(module.code)) for module in modules))
-        native_groups = (a.Group * len(groups))(*groups)
+
+        def native_entry(value):
+            return a.Entry() if value is None else a.Entry(value["module"], value["name"].encode())
+
+        native_groups = (a.Group * len(parameters_spec["groups"]))(
+            *(
+                a.Group(g["kind"], native_entry(g["entry"]), native_entry(g["any_hit"]))
+                for g in parameters_spec["groups"]
+            )
+        )
         desc = a.ProgramDesc(
             c.sizeof(a.ProgramDesc),
             len(modules),
             native_modules,
-            len(groups),
+            len(parameters_spec["groups"]),
             native_groups,
-            parameter_name.encode(),
-            parameters.size,
-            payload_count,
-            attribute_count,
-            max_trace_depth,
-            int(allow_opacity_micromaps),
+            parameters_spec["parameter_name"].encode(),
+            parameters_spec["parameter_size"],
+            parameters_spec["payload_count"],
+            parameters_spec["attribute_count"],
+            parameters_spec["max_trace_depth"],
+            int(parameters_spec["allow_opacity_micromaps"]),
         )
         handle = c.c_void_p()
         scope = self._runtime_prog._begin_external_cuda_submission()
@@ -276,7 +286,7 @@ class OptixProgram:
         return self._handle is None
 
     def to_dict(self):
-        return dict(program_id=self.program_id, **json.loads(self._manifest_json))
+        return dict(program_id=self.program_id, **self._definition.to_dict())
 
     def _validate_lifetime(self):
         if self.closed:

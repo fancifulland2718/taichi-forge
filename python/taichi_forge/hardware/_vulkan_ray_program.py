@@ -7,13 +7,13 @@ not unowned device pointers. No compiler or vendor runtime is loaded here.
 """
 
 from dataclasses import asdict, dataclass
-import json
 from functools import partial
 import struct
 from types import MappingProxyType
 import weakref
 
 from taichi_forge._lib import core
+from taichi_forge.hardware._ray_program_definition import vulkan_program_definition
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import runtime_generation_matches, validate_runtime_generation
 from taichi_forge.hardware._ray import InstanceTLAS
@@ -132,7 +132,7 @@ class VulkanRayTracingPipeline:
         _uint(max_trace_depth, "max_trace_depth", 1)
         if not isinstance(allow_opacity_micromaps, bool):
             raise TypeError("allow_opacity_micromaps must be bool")
-        shaders, groups, indices, facts, shader_indices = [], [], {}, [], {}
+        shaders, indices, facts, shader_indices = [], {}, [], {}
 
         def shader_index(shader, stage):
             if shader is None:
@@ -154,32 +154,38 @@ class VulkanRayTracingPipeline:
                 _name(name)
                 if name in indices:
                     raise ValueError("program group names must be unique across stages")
-                group = core._VulkanRayProgramGroup()
-                group.kind = getattr(core._VulkanRayGroupKind, kind)
                 if kind == "triangles":
                     if not isinstance(value, VulkanHitGroup):
                         raise TypeError("hit_groups values must be VulkanHitGroup")
-                    group.closest_hit = shader_index(value.closest_hit, "closest_hit")
-                    group.any_hit = shader_index(value.any_hit, "any_hit")
+                    shader_index(value.closest_hit, "closest_hit")
+                    shader_index(value.any_hit, "any_hit")
                     code = [None if x is None else x.to_dict() for x in (value.closest_hit, value.any_hit)]
                 else:
                     if value is None:
                         raise TypeError("raygen/miss groups require a SpirvShader")
-                    group.general = shader_index(value, kind)
+                    shader_index(value, kind)
                     code = value.to_dict()
-                indices[name] = (len(groups), kind)
-                groups.append(group)
+                indices[name] = (len(facts), kind)
                 facts.append(dict(name=name, kind=kind, shaders=code))
         if not any(kind == "raygen" for _, kind in indices.values()):
             raise ValueError("program requires at least one raygen group")
         facts = dict(groups=facts, max_trace_depth=max_trace_depth, opacity_micromaps=allow_opacity_micromaps)
-        self._manifest = json.dumps(facts, sort_keys=True)
+        self._definition = vulkan_program_definition(facts)
+        parameters_spec = self._definition.native.parameters
+        groups = []
+        for spec in parameters_spec["groups"]:
+            group = core._VulkanRayProgramGroup()
+            group.kind = getattr(core._VulkanRayGroupKind, spec["kind"])
+            for key in ("general", "closest_hit", "any_hit"):
+                if key in spec:
+                    setattr(group, key, spec[key])
+            groups.append(group)
         self._program_id = "vulkan-ray-program:" + _digest(facts)
         self._groups = MappingProxyType(indices)
         self._runtime_prog = impl.get_runtime().prog
         self._runtime_generation = int(impl.runtime_generation())
         self._handle = self._runtime_prog._create_vulkan_ray_program(
-            shaders, groups, max_trace_depth, allow_opacity_micromaps
+            shaders, groups, parameters_spec["max_trace_depth"], parameters_spec["allow_opacity_micromaps"]
         )
 
     @property
@@ -191,7 +197,7 @@ class VulkanRayTracingPipeline:
         return self._handle is None
 
     def to_dict(self):
-        return dict(program_id=self.program_id, **json.loads(self._manifest))
+        return dict(program_id=self.program_id, **self._definition.to_dict())
 
     def _validate_lifetime(self):
         if self.closed:

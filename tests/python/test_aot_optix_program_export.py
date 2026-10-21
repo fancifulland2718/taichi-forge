@@ -17,12 +17,27 @@ from tests.python.test_hardware_optix_program_public import PARAMS, HIT, MISS
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("micromap", [False, True])
-def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path, micromap):
+def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path, micromap, monkeypatch):
     adapter = os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER")
     if not adapter:
         pytest.skip("explicit common OptiX adapter required")
     ray = ti.hardware.ray
     code = ray.PtxModule.from_file(Path(__file__).with_name("assets") / "hardware_optix_program.ptx")
+
+    from taichi_forge.graph._native_definition import NativeResourceBinding
+    from taichi_forge.hardware._ray_program_definition import RayProgramDefinition
+
+    lowered = []
+    original_lower = NativeResourceBinding.lower
+
+    def lower(binding, context, **kwargs):
+        definition = getattr(binding.owner, "_definition", None)
+        if isinstance(definition, RayProgramDefinition):
+            assert binding.definition is definition.native
+            lowered.append(binding.owner)
+        return original_lower(binding, context, **kwargs)
+
+    monkeypatch.setattr(NativeResourceBinding, "lower", lower)
 
     @ti.kernel
     def convert(source: ti.types.ndarray(ti.u32, 1), output: ti.types.ndarray(ti.f32, 1)):
@@ -179,6 +194,7 @@ def test_optix_program_graph_export_assets_aliases_and_gradients(tmp_path, micro
                         "split_context", graph, **options, resource_bindings=seeds | {program: "shared_program"}
                     )
                 assert not module._graph_export_failed
+    assert lowered
     artifact = tmp_path / "program_export.tcm"
     module.archive(str(artifact))
     timings["artifact_bytes"] = artifact.stat().st_size

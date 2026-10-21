@@ -1,65 +1,13 @@
 """Cold program/packet export through the shared native resource catalog."""
 
-import hashlib
 from math import prod
 
 from taichi_forge._lib import core
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.graph._native_definition import NativeResourceBinding, NativeResourceReference
 
 from ._aot_optix import _provider, _scene
 from ._shader_artifact import PtxModule, _digest
-
-
-def program_spec(program):
-    manifest = program.to_dict()
-    facts = manifest["modules"]
-
-    def entry(value):
-        return None if value is None else dict(module=value[0], name=value[1])
-
-    spec = dict(
-        module_count=len(facts),
-        module_sha256=[f["code_sha256"] for f in facts],
-        groups=[
-            dict(name=g["name"], kind=g["kind"], entry=entry(g["entry"]), any_hit=entry(g["any_hit"]))
-            for g in manifest["groups"]
-        ],
-        parameter_name=manifest["parameter_name"],
-        parameter_size=manifest["parameters"]["size"],
-        **{
-            key: manifest[key]
-            for key in ("payload_count", "attribute_count", "max_trace_depth", "allow_opacity_micromaps")
-        },
-    )
-    # native_optix_program.cpp program_contract v1. Driver/build identity does
-    # not belong in a durable code/layout contract.
-    digest = hashlib.sha256()
-
-    def number(value):
-        digest.update(int(value).to_bytes(8, "little"))
-
-    def text(value):
-        data = value.encode("utf-8")
-        number(len(data))
-        digest.update(data)
-
-    text("forge-optix-program-v1")
-    number(spec["module_count"])
-    for value in spec["module_sha256"]:
-        text(value)
-    number(len(spec["groups"]))
-    for group in spec["groups"]:
-        text(group["name"])
-        number(group["kind"])
-        for key in ("entry", "any_hit"):
-            item = group[key] or {}
-            number(item.get("module", 0))
-            text(item.get("name", ""))
-    text(spec["parameter_name"])
-    for key in ("parameter_size", "payload_count", "attribute_count", "max_trace_depth", "allow_opacity_micromaps"):
-        number(spec[key])
-    spec["expected_program"] = digest.hexdigest()
-    return spec, facts
 
 
 def _program(context, program):
@@ -67,7 +15,8 @@ def _program(context, program):
     if id(program) in cache:
         return cache[id(program)]
     program._validate_lifetime()
-    spec, facts = program_spec(program)
+    definition = program._definition
+    spec, facts = definition.native.parameters, definition.asset_facts()
     context.resource_links(program, dict(context=program.provider))
     if (public := context.public_resource(program)) is not None:
         cache[id(program)] = public, spec["expected_program"]
@@ -83,7 +32,11 @@ def _program(context, program):
                     raise TaichiRuntimeError("AOT OptiX PTX asset differs from the source program contract")
                 inputs[port] = asset._export_aot_resource(context)
         inputs["context"] = _provider(context, program.provider)
-        return context.resource(program, "optix", "program", parameters=spec, bindings=inputs)
+        return NativeResourceBinding(
+            program,
+            definition.native,
+            resources=tuple((port, NativeResourceReference(value)) for port, value in inputs.items()),
+        ).lower(context)
 
     cache[id(program)] = context.resource_once(program, build, policy="optix_program_code"), spec["expected_program"]
     return cache[id(program)]

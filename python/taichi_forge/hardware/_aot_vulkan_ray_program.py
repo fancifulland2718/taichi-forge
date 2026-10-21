@@ -1,76 +1,17 @@
 """Cold export of initialized, fixed Vulkan RT launches; no driver snapshots."""
 
-import hashlib
 
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.graph._native_definition import NativeResourceBinding, NativeResourceReference
 
 from ._shader_artifact import SpirvShader, _digest
 from ._aot_vulkan_ray import _scene
 
 
-def _contract(spec, facts):
-    """Match native pipeline_contract v1, without retaining JIT shader bytes."""
-    digest = hashlib.sha256()
-
-    def integer(value, width=4):
-        digest.update(value.to_bytes(width, "little"))
-
-    def text(value):
-        encoded = value.encode("utf-8")
-        integer(len(encoded), 8)
-        digest.update(encoded)
-
-    text("forge-vulkan-ray-program-v1")
-    integer(len(facts), 8)
-    for shader in facts:
-        integer(("raygen", "miss", "closest_hit", "any_hit").index(shader["stage"]))
-        text(shader["entry_point"])
-        text(shader["code_sha256"])
-    integer(len(spec["groups"]), 8)
-    for group in spec["groups"]:
-        integer(("raygen", "miss", "triangles").index(group["kind"]))
-        for field in ("general", "closest_hit", "any_hit"):
-            integer(group.get(field, 0xFFFFFFFF))
-    integer(spec["max_trace_depth"])
-    integer(int(spec["allow_opacity_micromaps"]))
-    return digest.hexdigest()
-
-
-def pipeline_spec(program):
-    manifest = program.to_dict()
-    facts, indices, groups = [], {}, []
-
-    def shader_index(fact):
-        if fact is None:
-            return 0xFFFFFFFF
-        key = _digest(fact)
-        if key not in indices:
-            indices[key] = len(facts)
-            facts.append(fact)
-        return indices[key]
-
-    # Preserve the original sorted group order and artifact deduplication.
-    for group in manifest["groups"]:
-        item = dict(kind=group["kind"])
-        if group["kind"] == "triangles":
-            item.update(zip(("closest_hit", "any_hit"), map(shader_index, group["shaders"])))
-        else:
-            item["general"] = shader_index(group["shaders"])
-        groups.append(item)
-    spec = dict(
-        shader_count=len(facts),
-        shaders=[dict(stage=f["stage"], entry=f["entry_point"]) for f in facts],
-        groups=groups,
-        max_trace_depth=manifest["max_trace_depth"],
-        allow_opacity_micromaps=manifest["opacity_micromaps"],
-    )
-    spec["expected_pipeline"] = _contract(spec, facts)
-    return spec, facts
-
-
 def _pipeline(context, program):
     program._validate_lifetime()
-    spec, facts = pipeline_spec(program)
+    definition = program._definition
+    spec, facts = definition.native.parameters, definition.asset_facts()
     if (public := context.public_resource(program)) is not None:
         return public, spec["expected_pipeline"]
 
@@ -83,7 +24,11 @@ def _pipeline(context, program):
                 if type(asset) is not SpirvShader or _digest(asset.to_dict()) != _digest(fact):
                     raise TaichiRuntimeError("AOT ray shader asset differs from the source pipeline contract")
                 inputs[port] = asset._export_aot_resource(context)
-        return context.resource(program, "vulkan_ray_program", "pipeline", parameters=spec, bindings=inputs)
+        return NativeResourceBinding(
+            program,
+            definition.native,
+            resources=tuple((port, NativeResourceReference(value)) for port, value in inputs.items()),
+        ).lower(context)
 
     return context.resource_once(program, build, policy="vulkan_ray_program_code"), spec["expected_pipeline"]
 
