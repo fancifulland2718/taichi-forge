@@ -302,12 +302,16 @@ class _IntermediateArgPack(ArgPack):
 
 class ArgPackType(CompoundType):
     def __init__(self, **kwargs):
+        # Import at construction time to avoid the frontend import cycle. The
+        # storage type must match the compiler's recursively lowered value ABI.
+        from taichi_forge.lang.kernel_arguments import get_type_for_kernel_args
+
         self.members = {}
         elements = []
         for k, dtype in kwargs.items():
-            if isinstance(dtype, StructType):
+            if isinstance(dtype, (StructType, MatrixType)):
                 self.members[k] = dtype
-                elements.append([dtype.dtype, k])
+                elements.append([get_type_for_kernel_args(dtype, k), k])
             elif isinstance(dtype, ArgPackType):
                 self.members[k] = dtype
                 elements.append(
@@ -318,14 +322,6 @@ class ArgPackType(CompoundType):
                         k,
                     ]
                 )
-            elif isinstance(dtype, MatrixType):
-                # Convert MatrixType to StructType
-                if dtype.ndim == 1:
-                    elements_ = [(dtype.dtype, f"{k}_{i}") for i in range(dtype.n)]
-                else:
-                    elements_ = [(dtype.dtype, f"{k}_{i}_{j}") for i in range(dtype.n) for j in range(dtype.m)]
-                self.members[k] = dtype
-                elements.append([_ti_core.get_type_factory_instance().get_struct_type(elements_), k])
             elif isinstance(dtype, sparse_matrix_builder):
                 self.members[k] = dtype
             elif isinstance(dtype, ndarray_type.NdarrayType):

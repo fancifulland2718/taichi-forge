@@ -74,6 +74,29 @@ def test_argpack_struct_compound_members():
     assert list(read(pack)) == [9, -11, 0.5, 3, -4, 8, 17]
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_argpack_struct_tensor_layout():
+    record = ti.types.struct(scale=ti.f32, bias=ti.types.vector(2, ti.f32),
+                             column=ti.types.matrix(3, 1, ti.f32))
+    inner = ti.types.argpack(value=record)
+    outer = ti.types.argpack(child=inner)
+    pack = outer(child=inner(value=record(scale=2, bias=[1, -1], column=[[3], [5], [3]])))
+    out = ti.ndarray(ti.f32, 5)
+
+    @ti.kernel
+    def read(p: outer, result: ti.types.ndarray(ti.f32, 1)):
+        for i in range(3):
+            result[i] = p.child.value.scale * p.child.value.column[i, 0] + p.child.value.bias[i % 2]
+        result[3] = p.child.value.bias[0]
+        result[4] = p.child.value.bias[1]
+
+    read(pack, out)
+    assert out.to_numpy().tolist() == [7, 9, 7, 1, -1]
+    pack.child.value = record(scale=3, bias=[-2, 4], column=[[1], [2], [3]])
+    read(pack, out)
+    assert out.to_numpy().tolist() == [1, 10, 7, -2, 4]
+
+
 @test_utils.test()
 def test_argpack_with_vector():
     pack_type = ti.types.argpack(a=ti.i32, b=ti.types.vector(3, ti.f32), c=ti.f32)
