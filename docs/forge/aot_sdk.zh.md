@@ -1510,7 +1510,22 @@ kernel 也可通过 `kernel.prepare(pack, total, gradients={1: dtotal})` 使用�
 uniform 读取依赖；重放不重建或上传只读包存储。关闭包、成员或模块会在已提交工作
 完成后使依赖的 prepared 调用失效。平直 `ExecutionPlan` 的 kernel 步也可按符号名
 传入外部创建的参数包，参数列表使用逻辑根参数；计划内部的 owner 表与普通调用共用
-成员及梯度展开。从产物持久重建参数包及结构化 Graph 参数包路径仍待完成。
+成员及梯度展开。
+
+持久计划可在 CPU/CUDA/Vulkan 重建只读参数包值。导出时将
+`module.argpack_resources("pack", "energy", 0, {"gain": 2, "child": {"bias": 1}})`
+的返回项加入计划 resources。字典提供值成员及嵌套包字典，省略提升的 ndarray/image
+成员；`module.get_argpack_layout("energy", 0)` 可查询其逻辑路径与物理序号。
+这种持久形式的 kernel 步使用物理参数列表：重建包的根、其他根及提升的资源均按查询
+序号放置。数组、视图和显式梯度继续采用既有计划绑定与生命周期。
+
+该助手按真实编译布局编码，复用 runtime 消费者的值编码器，处理 padding、张量槽和
+嵌套结构；返回按内容寻址的 `host_blob` 及 `memory/argpack` 原生资源，不保存生产端
+指针或设备地址。原生 schema 使用 `entry`、`argument`、`value_count`、相对整数
+`paths` 和 `value_<index>` blob 绑定，每个值叶子对应一个精确编译载荷。
+模块布局解析器只在 prepare 期间有效。独立 prepare 拥有独立存储；选定 CUDA binding
+family 按既有私有状态合同共享存储。symbolic Graph 参数包自动导出及结构化 Graph
+参数包路径仍待完成。
 
 C 消费者通过 `ti_get_kernel_argpack_info_ext` 查询布局，通过
 `ti_create_kernel_argpack_ext` 创建同一 owner。以 `TiArgPackMember` 的相对整数路径

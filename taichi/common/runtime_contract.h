@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Fixed ArgPack bindings require root owners and explicit uniform-read access.
-inline constexpr int kForgeNativeAbiRevision = 141;
+// Native preparation can resolve compiled module layouts for persistent packs.
+inline constexpr int kForgeNativeAbiRevision = 142;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

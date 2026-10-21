@@ -51,8 +51,10 @@ lifetimes. The entries below describe the changes.
   C/Python member factory, including explicit ndarray gradients and borrowed
   JIT runtimes. Prepared calls retain root owners and Vulkan uniform-read
   dependencies. Flat execution plans accept external packs through the same
-  logical member binding; persistent reconstruction and structured pack routes
-  remain pending.
+  logical member binding. Persistent plans reconstruct values through the shared
+  `memory/argpack` registry, with compiled producer layouts, existing private
+  arrays/adjoints and CUDA binding-family ownership. Automatic symbolic Graph
+  pack export and structured pack routes remain pending.
   Repeated resource member names across packs retain distinct bindings in
   declaration order, fixing frontend `NoneType` compilation errors for nested
   packs and their explicit adjoints.

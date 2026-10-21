@@ -69,6 +69,13 @@ def main(arch, artifact):
         assert read(loss) == [106]
         assert read(dx) == [13, -41, 37]
 
+        persistent = module.prepare_execution("persistent_complex", dict(
+            source=x, source_grad=dx, total=loss, total_grad=dloss))
+        persistent.run()
+        runtime.wait()
+        assert read(loss) == [106]
+        assert read(dx) == [13, -41, 37]
+
         plan = aot.ExecutionPlan([
             dict(kind="fill32", destination="total", value=0),
             dict(kind="fill32", destination="dx", value=0),

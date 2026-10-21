@@ -14,6 +14,7 @@
 #include "taichi/ir/snode.h"
 #include "taichi/common/commit_hash.h"
 #include "taichi/common/runtime_contract.h"
+#include "taichi/aot/argpack_layout.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 
 #if TI_WITH_LLVM
@@ -7459,6 +7460,22 @@ void export_lang(py::module &m) {
            py::arg("conditional_type"), py::arg("default_branch") = -1);
 
   py::class_<Kernel>(m, "Kernel")
+      .def("_argpack_layout_json", [](Kernel *kernel, int argument) {
+        TI_ERROR_IF(!kernel->program || kernel->definition_retired() || argument < 0,
+                    "ArgPack layout requires a live compiled kernel argument");
+        auto *program = kernel->program;
+        auto guard = program->acquire_snode_tree_lifecycle_read_guard();
+        const auto arch = program->compile_config().arch;
+        TI_ERROR_IF(!arch_is_cpu(arch) && arch != Arch::cuda && arch != Arch::vulkan,
+                    "ArgPack export layout requires CPU, CUDA or Vulkan");
+        const auto layout = program->get_kernel_argument_data_layout();
+        return aot::ArgPackLayout(
+            *kernel, {argument}, arch == Arch::vulkan ? aot::ValueStorage::Gfx
+                                                    : aot::ValueStorage::Host,
+            [program, layout](const StructType *type) {
+              return program->get_struct_type_with_data_layout(type, layout);
+            }).to_json();
+      })
       .def("no_activate",
            [](Kernel *self, SNode *snode) {
              // TODO(#2193): Also apply to @ti.func?

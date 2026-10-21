@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -507,6 +508,46 @@ class Module:
         if previous != snapshot:
             raise ValueError("AOT data digest collision")
         return key
+
+    def get_argpack_layout(self, entry, argument_index):
+        """Return copied compiled member origins and value layouts for an exported pack."""
+        if type(argument_index) is not int or argument_index < 0:
+            raise ValueError("ArgPack argument index must be a nonnegative integer")
+        kernel = self._exported_kernels.get(entry)
+        if kernel is None:
+            raise ValueError(f"ArgPack kernel has not been exported: {entry}")
+        cache = getattr(self, "_argpack_layout_json", None)
+        if cache is None:
+            cache = self._argpack_layout_json = {}
+        key = (id(kernel), argument_index)
+        if key not in cache:
+            cache[key] = kernel._argpack_layout_json(argument_index)
+        return json.loads(cache[key])
+
+    def argpack_resources(self, name, entry, argument_index, values):
+        """Snapshot pack values into native and host-blob execution resources.
+
+        ``values`` contains value members and nested pack dictionaries, omitting
+        lifted ndarray/image members. The plan binds lifted resources separately
+        at the physical indices reported by ``get_argpack_layout``. Payloads use
+        the compiled layout and share the runtime consumer's value encoders.
+        """
+        from taichi_forge_runtime.aot._value import ArgPackLayout
+
+        if not isinstance(name, str) or not name or "\0" in name:
+            raise ValueError("ArgPack resource requires a nonempty name without NUL")
+        layout = ArgPackLayout.from_description(self.get_argpack_layout(entry, argument_index), argument_index)
+        members, buffers = layout.encode(values, values_only=True)
+        resources, paths, bindings = [], [], {}
+        for index, ((path, _, _, _), buffer) in enumerate(zip(members, buffers, strict=True)):
+            symbol = f"{name}.value_{index}"
+            resources.append(dict(kind="host_blob", name=symbol, byte_size=len(buffer), data=self.add_data(buffer.raw)))
+            paths.append(list(path))
+            bindings[f"value_{index}"] = symbol
+        resources.append(dict(kind="native", name=name, provider="memory", operation="argpack", version=1,
+                               parameters=dict(entry=entry, argument=argument_index, value_count=len(paths), paths=paths),
+                               bindings=bindings))
+        return resources
 
     def _add_initial_root_snapshots(self, dependencies, payloads):
         """Publish one coherent root snapshot after its export closure is known."""

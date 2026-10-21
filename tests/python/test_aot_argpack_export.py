@@ -49,6 +49,15 @@ def test_aot_argpack_nested_resources_and_explicit_adjoint(tmp_path):
     module.add_kernel(energy, template_args={"p": pack, "total": loss}, name="explicit")
     module.add_kernel(energy.grad, name="backward")
     assert module._exported_kernels["automatic"] is module._exported_kernels["explicit"]
+    module.add_execution_plan("persistent_complex", ti.aot.ExecutionPlan([
+        dict(kind="fill32", destination="total", value=0),
+        dict(kind="fill32", destination="source_grad", value=0),
+        dict(kind="kernel", entry="automatic", arguments=["pack", "total", "source"]),
+        dict(kind="kernel", entry="backward", arguments=["pack", "total", "source"]),
+    ], resources=module.argpack_resources(
+        "pack", "automatic", 0, dict(basis=[[3, 0], [0, 5]],
+                                     child=dict(settings=dict(scale=2, bias=[1, -1])))),
+        gradients=dict(source="source_grad", total="total_grad")))
     module.archive(str(tmp_path / "packs.tcm"))
     export_seconds = time.perf_counter() - started
     np.testing.assert_allclose(loss.to_numpy(), [106])  # Export does not execute.

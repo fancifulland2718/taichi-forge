@@ -213,6 +213,15 @@ class ArgPackLayout:
         runtime._api.call(runtime._api.ti_get_kernel_argpack_info_ext,
                           runtime._handle, handle, index, C.byref(info))
         layout = json.loads(info.layout_json)
+        self._initialize(layout, index)
+
+    @classmethod
+    def from_description(cls, layout, index):
+        result = cls.__new__(cls)
+        result._initialize(layout, index)
+        return result
+
+    def _initialize(self, layout, index):
         if layout["version"] != 1 or layout["logical_argument"] != index:
             raise ValueError("Unsupported compiled ArgPack layout")
         root = (index,)
@@ -240,10 +249,14 @@ class ArgPackLayout:
             self.leaves.append((path, names[path], encoder))
         self.children = children
 
-    def encode(self, value):
+    def encode(self, value, *, values_only=False):
+        values = {path for path, _, encoder in self.leaves if encoder is not None}
+        packs = set(self.packs)
         supplied = {self.root: value}
         for path in self.packs:
             members = self.children.get(path, ())
+            if values_only:
+                members = [(name, child) for name, child in members if child in values or child in packs]
             current = supplied[path]
             if not isinstance(current, Mapping):
                 raise TypeError("ArgPack arguments require nested mappings")
@@ -253,6 +266,8 @@ class ArgPackLayout:
                 supplied[child] = current[name]
         result, buffers = [], []
         for path, names, encoder in self.leaves:
+            if values_only and encoder is None:
+                continue
             value = supplied[path]
             if encoder is not None:
                 size, encode = encoder

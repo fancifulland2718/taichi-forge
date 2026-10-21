@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "taichi/aot/value_layout.h"
+#include "taichi/aot/value_json.h"
 #include "taichi/aot/value_parameters.h"
 #include "taichi/common/json_serde.h"
 #ifdef TI_WITH_LLVM
@@ -47,32 +48,12 @@ TiDataType scalar_type(taichi::lang::DataType type) {
 
 liong::json::JsonValue value_tree(
     taichi::lang::DataType type,
-    const taichi::lang::aot::ValueLayout &layout,
-    std::size_t &leaf) {
-  using namespace liong::json;
-  if (const auto *structure = type->cast<taichi::lang::StructType>()) {
-    JsonArray members;
-    std::unordered_set<std::string> names;
-    for (const auto &member : structure->elements()) {
-      if (member.name.empty() || !names.insert(member.name).second)
-        throw MemoryBindingError("Invalid value structure member name");
-      members.inner.emplace_back(JsonObject{
-          {"name", JsonValue(member.name)},
-          {"value", value_tree(member.type, layout, leaf)}});
-    }
-    return JsonValue(JsonObject{{"kind", JsonValue("struct")},
-                                {"members", JsonValue(std::move(members))}});
+    const taichi::lang::aot::ValueLayout &layout, std::size_t &leaf) {
+  try {
+    return taichi::lang::aot::value_layout_tree(type, layout, leaf);
+  } catch (const std::invalid_argument &error) {
+    throw MemoryBindingError(error.what());
   }
-  const auto &member = layout.members.at(leaf++);
-  JsonObject result{
-      {"kind", JsonValue(member.shape.empty() ? "scalar" : "tensor")},
-      {"dtype", JsonValue(member.scalar_type->to_string())},
-      {"shape", serialize(member.shape)},
-      {"offset", JsonValue(member.offset)},
-      {"scalar_size", JsonValue(member.scalar_size)}};
-  if (!member.component_offsets.empty())
-    result.inner.emplace("component_offsets", serialize(member.component_offsets));
-  return JsonValue(std::move(result));
 }
 
 std::string return_layout_json(taichi::lang::aot::Kernel &kernel,
@@ -447,31 +428,11 @@ void ti_get_kernel_argpack_info_ext(TiRuntime runtime,
   const auto layout = rt.get_kernel_argpack_layout(kernel, logical_argument);
   auto &cached = rt.get_kernel(kernel).argpack_layouts->at(logical_argument);
   if (cached.json.empty()) {
-    using namespace liong::json;
-    JsonArray members;
-    const auto add = [&](const taichi::lang::ArgumentOrigin &origin,
-                         const taichi::lang::aot::ValueLayout *value) {
-      JsonObject member{{"origin", serialize(origin)}};
-      if (value) {
-        std::size_t leaf = 0;
-        member.inner.emplace("buffer_size", JsonValue(value->buffer_size));
-        member.inner.emplace("value", value_tree(value->type, *value, leaf));
-        if (leaf != value->members.size())
-          throw MemoryBindingError("Inconsistent ArgPack value layout");
-      }
-      members.inner.emplace_back(std::move(member));
-    };
-    for (const auto &pack : layout->storages()) {
-      add(pack.origin, nullptr);
-      for (const auto &value : pack.values)
-        add(value.origin, &value.layout);
+    try {
+      cached.json = layout->to_json();
+    } catch (const std::invalid_argument &error) {
+      throw MemoryBindingError(error.what());
     }
-    for (const auto &resource : layout->resources())
-      add(resource, nullptr);
-    cached.json = print(JsonValue(JsonObject{
-        {"version", JsonValue(1)},
-        {"logical_argument", JsonValue(logical_argument)},
-        {"members", JsonValue(std::move(members))}}));
   }
   *info = {cached.json.c_str()};
   TI_CAPI_TRY_CATCH_END();

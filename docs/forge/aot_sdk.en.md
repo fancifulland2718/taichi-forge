@@ -1928,8 +1928,28 @@ or upload immutable pack storage. Closing the pack, a member or its module
 invalidates dependent prepared calls after submitted work completes. Flat
 `ExecutionPlan` kernel steps also accept externally created packs by symbolic
 name, with logical root arguments. Their private owner map uses the same member
-and gradient expansion as ordinary calls. Persistently reconstructing a pack
-from an archive and structured Graph pack routes remain pending.
+and gradient expansion as ordinary calls.
+
+Persistent plans can reconstruct immutable pack values on CPU/CUDA/Vulkan. At
+export, extend the plan's resources with
+`module.argpack_resources("pack", "energy", 0, {"gain": 2, "child": {"bias": 1}})`.
+The dictionary contains value members and nested pack dictionaries; omit lifted
+ndarray/image members. `module.get_argpack_layout("energy", 0)` reports their
+logical paths and physical indices. In this persistent form, kernel steps list
+physical arguments: the rebuilt pack root followed by ordinary roots and lifted
+resources at their reported indices. Arrays, views and explicit gradients keep
+the existing plan bindings and lifetime rules.
+
+The helper uses the compiled layout and the same value encoders as the runtime
+consumer, including padding, tensor slots and nested structures. It returns
+content-addressed `host_blob` resources and a `memory/argpack` native resource;
+no producer pointers or device addresses enter the archive. This native schema
+uses `entry`, `argument`, `value_count`, relative integer `paths`, and
+`value_<index>` blob bindings, one exact compiled payload per value leaf.
+Its module layout resolver exists only during preparation. Independent prepares
+own independent storage; selected CUDA binding families share it with their
+existing private state. Automatic symbolic Graph pack export and structured
+Graph pack routes remain pending.
 
 C consumers query `ti_get_kernel_argpack_info_ext` and create the same owner with
 `ti_create_kernel_argpack_ext`. Supply exactly the value/resource leaves as

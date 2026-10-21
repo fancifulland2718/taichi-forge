@@ -2,6 +2,8 @@
 #include "taichi/aot/argpack_layout.h"
 #include "taichi/program/callable.h"
 #include "taichi/runtime/native_argpack_storage.h"
+#include "taichi/runtime/native_host_blob.h"
+#include "taichi/runtime/native_operation_registry.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -131,6 +133,22 @@ Values payload(const Layout &layout) {
     }
   return values;
 }
+NativeOperationDescription pack_description() {
+  return NativeOperationDescription::parse(liong::json::parse_complete(R"(
+    {"kind":"native","provider":"memory","operation":"argpack","version":1,
+     "parameters":{"entry":"sample","argument":0,"value_count":3,
+                   "paths":[[0],[1,0],[1,1]]},
+     "bindings":{"value_0":"gain","value_1":"vector","value_2":"flag"}})"));
+}
+NativeOperationBindings blob_inputs(Arch arch, Device &device, const Values &values) {
+  NativeOperationBindings result;
+  std::size_t i = 0;
+  for (const auto &[path, bytes] : values)
+    result.emplace("value_" + std::to_string(i++),
+                   std::make_shared<NativeHostBlobResource>(
+                       arch, device, std::make_shared<const NativeHostBlobResource::Bytes>(bytes)));
+  return result;
+}
 void check_storage(Arch arch, Device &device, aot::ValueStorage kind,
                    const Layout::Resolver &resolver) {
   auto layout = std::make_shared<const Layout>(example(), std::vector<int>{0},
@@ -140,7 +158,25 @@ void check_storage(Arch arch, Device &device, aot::ValueStorage kind,
   EXPECT_EQ(layout->resources()[0].physical, (std::vector<int>{1}));
   EXPECT_EQ(layout->resources()[1].physical, (std::vector<int>{2}));
   auto input = payload(*layout);
-  auto owner = std::make_shared<NativeArgPackStorage>(arch, device, layout, input);
+  const auto &registry = native_operation_registry();
+  auto request = registry.decode(pack_description(), NativeObjectKind::resource);
+  NativePreparationContext context(arch, device);
+  int lookups = 0;
+  context.resolve_argpack_layout = [&](const std::string &entry, std::uint32_t index) {
+    EXPECT_EQ(entry, "sample");
+    EXPECT_EQ(index, 0u);
+    ++lookups;
+    return layout;
+  };
+  auto inputs = blob_inputs(arch, device, input);
+  std::weak_ptr<NativeHostBlobResource> first_blob =
+      inputs.begin()->second.resource<NativeHostBlobResource>();
+  auto owner = std::dynamic_pointer_cast<NativeArgPackStorage>(
+      registry.prepare_resource(context, request, inputs));
+  ASSERT_NE(owner, nullptr);
+  EXPECT_EQ(lookups, 1);
+  inputs.clear();
+  EXPECT_TRUE(first_blob.expired());  // The resource copies values, not blob owners.
   input.clear();  // No caller host pointers may be retained after cold upload.
   std::size_t bytes = 0;
   for (std::size_t i = 0; i < layout->storages().size(); ++i) {
@@ -210,6 +246,29 @@ TEST(ArgPackStorage, RejectsUnresolvedAndIncompleteCompiledLayouts) {
                std::invalid_argument);
 }
 
+TEST(ArgPackStorage, PersistentSchemaRejectsInvalidPathsAndPorts) {
+  const auto &registry = native_operation_registry();
+  const auto source = pack_description();
+  EXPECT_EQ(registry.decode(source, NativeObjectKind::resource).kind(), "memory_argpack");
+  EXPECT_THROW(registry.decode(source), std::invalid_argument);
+  for (const char *parameters : {
+           R"({"entry":"sample","argument":0,"value_count":3,"paths":[[0],[0],[1,1]]})",
+           R"({"entry":"sample","argument":0,"value_count":3,"paths":[[],[1,0],[1,1]]})",
+           R"({"entry":"sample","argument":0,"value_count":2,"paths":[[0],[1,0],[1,1]]})",
+           R"({"entry":"sample","argument":2147483648,"value_count":3,"paths":[[0],[1,0],[1,1]]})",
+           R"({"entry":"sample","argument":0,"value_count":3,"paths":[[-1],[1,0],[1,1]]})"}) {
+    auto invalid = source;
+    invalid.parameters = liong::json::parse_complete(parameters);
+    EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource), std::invalid_argument);
+  }
+  auto invalid = source;
+  invalid.bindings.erase("value_2");
+  EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource), std::invalid_argument);
+  invalid = source;
+  invalid.bindings.emplace("extra", "unexpected");
+  EXPECT_THROW(registry.decode(invalid, NativeObjectKind::resource), std::invalid_argument);
+}
+
 TEST(ArgPackStorage, RepeatedPackTypesShareColdResolutionWithoutMemberCaps) {
   auto &factory = TypeFactory::get_instance();
   const auto empty = pointer(factory.get_struct_type({}));
@@ -268,6 +327,34 @@ class FailingDevice : public cpu::CpuDevice {
     return cpu::CpuDevice::upload_data(ptr, data, size, count);
   }
 };
+TEST(ArgPackStorage, PersistentFactoryValidatesBeforeAllocationAndCanRetry) {
+  FailingDevice device;
+  const auto layout = std::make_shared<const Layout>(
+      example(), std::vector<int>{0}, aot::ValueStorage::Host, host_layout);
+  const auto &registry = native_operation_registry();
+  const auto request = registry.decode(pack_description(), NativeObjectKind::resource);
+  NativePreparationContext context(host_arch(), device);
+  auto values = payload(*layout);
+  auto inputs = blob_inputs(host_arch(), device, values);
+  EXPECT_THROW(registry.prepare_resource(context, request, inputs), std::invalid_argument);
+  context.resolve_argpack_layout = [&](const std::string &, std::uint32_t) { return layout; };
+  values.begin()->second.pop_back();
+  auto invalid = blob_inputs(host_arch(), device, values);
+  EXPECT_THROW(registry.prepare_resource(context, request, invalid), std::invalid_argument);
+  cpu::CpuDevice foreign;
+  invalid = blob_inputs(host_arch(), foreign, payload(*layout));
+  EXPECT_THROW(registry.prepare_resource(context, request, invalid), std::invalid_argument);
+  EXPECT_EQ(device.allocations, 0);
+  device.fail_at = 1;
+  EXPECT_THROW(registry.prepare_resource(context, request, inputs), std::runtime_error);
+  EXPECT_EQ(device.live, 0);
+  device.fail_at = -1;
+  {
+    auto owner = registry.prepare_resource(context, request, inputs);
+    EXPECT_EQ(device.live, 3);
+  }
+  EXPECT_EQ(device.live, 0);
+}
 TEST(ArgPackStorage, ColdFailuresReleasePartialStorageAndAllowRetry) {
   auto layout = std::make_shared<const Layout>(example(), std::vector<int>{0},
                                                aot::ValueStorage::Host, host_layout);

@@ -16,6 +16,9 @@ class ThreadPool;
 
 namespace taichi::lang {
 class RuntimeFaultDomain;
+namespace aot {
+class ArgPackLayout;
+}
 namespace gfx {
 class GfxRuntime;
 }
@@ -57,6 +60,10 @@ struct NativePreparationContext {
   // consults these fields; frozen partitions need not equal worker count.
   ThreadPool *cpu_thread_pool{nullptr};
   int cpu_max_threads{1};
+  // Scoped to cold module preparation. Factories copy resolved layouts, never
+  // retain this callback or a module/kernel pointer in their storage owners.
+  std::function<std::shared_ptr<const aot::ArgPackLayout>(
+      const std::string &, std::uint32_t)> resolve_argpack_layout;
 };
 
 // Build privately, then publish as const. No static registration side effects,
@@ -336,6 +343,7 @@ const NativeOperationRegistry &native_operation_registry();
 
 // Explicit entry points keep registration deterministic under static linking.
 void register_memory_allocator_resources(NativeOperationRegistry &registry);
+void register_argpack_resources(NativeOperationRegistry &registry);
 void register_compact_operation(NativeOperationRegistry &registry);
 void register_sort_operation(NativeOperationRegistry &registry);
 void register_fft_operation(NativeOperationRegistry &registry);

@@ -1,6 +1,7 @@
 #include "taichi/aot/argpack_layout.h"
 #include "taichi/aot/argument_origins.h"
 #include "taichi/aot/value_parameters.h"
+#include "taichi/aot/value_json.h"
 #include "taichi/program/callable.h"
 
 #include <algorithm>
@@ -145,6 +146,33 @@ bool ArgPackLayout::matches(const CallableBase &kernel,
     }
   }
   return true;
+}
+
+std::string ArgPackLayout::to_json() const {
+  using namespace liong::json;
+  JsonArray members;
+  const auto add = [&](const ArgumentOrigin &origin, const ValueLayout *value) {
+    JsonObject member{{"origin", serialize(origin)}};
+    if (value) {
+      std::size_t leaf = 0;
+      member.inner.emplace("buffer_size", JsonValue(value->buffer_size));
+      member.inner.emplace("value", value_layout_tree(value->type, *value, leaf));
+      if (leaf != value->members.size())
+        throw std::invalid_argument("Inconsistent ArgPack value layout");
+    }
+    members.inner.emplace_back(std::move(member));
+  };
+  for (const auto &pack : storages_) {
+    add(pack.origin, nullptr);
+    for (const auto &value : pack.values)
+      add(value.origin, &value.layout);
+  }
+  for (const auto &resource : resources_)
+    add(resource, nullptr);
+  return print(JsonValue(JsonObject{
+      {"version", JsonValue(1)},
+      {"logical_argument", JsonValue(storages_.at(0).origin.logical.at(0))},
+      {"members", JsonValue(std::move(members))}}));
 }
 
 }  // namespace taichi::lang::aot

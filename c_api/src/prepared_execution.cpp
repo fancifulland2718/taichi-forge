@@ -909,6 +909,21 @@ static TiPreparedExecution prepare_execution_plan_impl(
       family ? nullptr : capi::make_native_preparation_context(rt);
   auto &preparation = family ? *family->preparation : *local_preparation;
   preparation.fault_domain->throw_if_submission_disallowed("prepare AOT plan");
+  struct RestoreArgPackResolver {
+    NativePreparationContext &context;
+    decltype(context.resolve_argpack_layout) previous;
+    ~RestoreArgPackResolver() {
+      context.resolve_argpack_layout = std::move(previous);
+    }
+  } restore_argpack_resolver{preparation,
+                              std::move(preparation.resolve_argpack_layout)};
+  preparation.resolve_argpack_layout = [&rt, &mod](const std::string &entry,
+                                                   std::uint32_t argument) {
+    const auto handle = mod.get_kernel_handle(entry);
+    if (!handle)
+      throw MemoryBindingError("ArgPack layout kernel was not exported: " + entry);
+    return rt.get_kernel_argpack_layout(handle, argument);
+  };
   std::set<std::pair<std::string, std::uint32_t>> probed;
   std::map<const aot::ExecutionPlan::Native *,
            NativeOperationRegistry::DecodedOperation>

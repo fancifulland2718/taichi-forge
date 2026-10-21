@@ -15,7 +15,7 @@ namespace taichi::lang::aot {
 // The resolver is the backend's existing compiler layout routine. Pointer
 // targets in LLVM artifacts can still have layout="none"; their zero offsets
 // are not compiled offsets. This object never defines a second packing ABI.
-class ArgPackLayout {
+class TI_DLL_EXPORT ArgPackLayout {
  public:
   using Resolver = std::function<std::pair<const StructType *, std::size_t>(
       const StructType *)>;
@@ -52,6 +52,7 @@ class ArgPackLayout {
   }
   bool matches(const CallableBase &kernel,
                const std::vector<int> &physical_root) const;
+  std::string to_json() const;
 
  private:
   ValueStorage value_storage_;
