@@ -6,6 +6,7 @@
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
+#include "taichi/runtime/llvm/aot_kernel_contract.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/program/kernel_compile_request.h"
@@ -151,9 +152,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     auto module = llvm::CloneModule(
         *cache_.kernels.at(kernel.kernel_key).compiled_data.module);
     if (relocatable) {
-      LLVM::remap_aot_tree_id_symbols(*module, tree_mapping);
-      for (int &id : kernel.used_snode_tree_ids)
-        id = tree_mapping.at(id);
+      LLVM::remap_aot_kernel_tree_ids(*module, kernel, tree_mapping);
     } else {
       // Unsupported layouts/tasks and legacy targets retain embedded IDs.
       LLVM::resolve_aot_tree_ids(*module, tree_mapping);
@@ -308,8 +307,8 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
     compiled.compiled_data =
         LLVM::make_cuda_graph_gated_kernel(compiled.compiled_data);
   }
-  const auto context_abi =
-      LLVM::runtime_context_abi(*compiled.compiled_data.module);
+  const std::string compiled_launch_abi =
+      LLVM::compiled_kernel_launch_abi(*compiled.compiled_data.module);
   LlvmOfflineCache::KernelCacheData kcache(std::move(compiled));
   kcache.kernel_key = identifier;
   // A callable artifact must contain the layouts of every tree it accesses,
@@ -323,14 +322,10 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   kcache.last_used_at = std::time(nullptr);
   kcache.created_at = std::time(nullptr);
   cache_.kernels[identifier] = std::move(kcache);
-  if (context_abi == LLVM::kRuntimeContextABI) {
-    kernel_launch_abis_[identifier] = launch_abi == cuda::kGraphGateLaunchABI
-                                          ? cuda::kGraphGateContextLaunchABI
-                                          : cuda::kContextLaunchABI;
-  } else if (launch_abi == "ordinary")
+  if (compiled_launch_abi == "ordinary")
     kernel_launch_abis_.erase(identifier);
   else
-    kernel_launch_abis_[identifier] = launch_abi;
+    kernel_launch_abis_[identifier] = compiled_launch_abi;
 }
 
 void LlvmAotModuleBuilder::add_per_backend_tmpl(const std::string &identifier,

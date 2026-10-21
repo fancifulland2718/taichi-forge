@@ -6,6 +6,7 @@
 #include "taichi/aot/graph_artifact.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
+#include "taichi/runtime/llvm/aot_kernel_contract.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
@@ -409,8 +410,8 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
       LLVM::runtime_context_abi(
           *compiled.get_internal_data().compiled_data.module) != context_abi,
       "AOT LLVM code does not match its RuntimeContext layout: {}", name);
-  TI_ERROR_IF(has_cuda_graph_gate(
-                  *compiled.get_internal_data().compiled_data.module) != gated,
+  TI_ERROR_IF(compiled_kernel_launch_abi(
+                  *compiled.get_internal_data().compiled_data.module) != launch_abi,
               "AOT LLVM code does not match its kernel launch ABI: {}", name);
   KernelLaunchHandle handle;
   if (gated) {

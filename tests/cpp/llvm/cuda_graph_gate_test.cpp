@@ -6,6 +6,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
 #include "taichi/codegen/llvm/llvm_compiled_data.h"
+#include "taichi/runtime/llvm/aot_kernel_contract.h"
 
 namespace taichi::lang {
 namespace {
@@ -101,6 +102,68 @@ TEST(CudaGraphGate, RejectsIncompleteOrIncompatibleEntryAbiWithoutMutation) {
   source.tasks.back().name = "helper";  // Valid definition, wrong entry ABI.
   EXPECT_ANY_THROW(LLVM::make_cuda_graph_gated_kernel(source));
   EXPECT_EQ(module_text(*source.module), ordinary);
+}
+
+TEST(CudaGraphGate, HiddenLaunchContractComesFromTransformedCode) {
+  for (bool context_v2 : {false, true}) {
+    auto source = source_kernel();
+    if (context_v2)
+      LLVM::declare_runtime_context_abi(*source.module);
+    const auto text = module_text(*source.module);
+    auto variant = LLVM::make_cuda_graph_gated_kernel(source);
+    EXPECT_STREQ(LLVM::compiled_kernel_launch_abi(*source.module),
+                 context_v2 ? "runtime_context_v2" : "ordinary");
+    EXPECT_STREQ(LLVM::compiled_kernel_launch_abi(*variant.module),
+                 context_v2 ? "cuda_graph_gate_context_v2"
+                            : "cuda_graph_gate_v1");
+    EXPECT_EQ(LLVM::runtime_context_abi(*variant.module), context_v2 ? 2 : 1);
+    // Public entry types are unchanged; only the hidden argument prefix differs.
+    for (const auto &task : source.tasks) {
+      EXPECT_EQ(source.module->getFunction(task.name)->getFunctionType(),
+                variant.module->getFunction(task.name)->getFunctionType());
+    }
+    EXPECT_EQ(module_text(*source.module), text);
+  }
+}
+
+TEST(LLVMAotContract, RelocationProjectsCodeAndDependenciesTogether) {
+  auto source = source_kernel();
+  auto &context = source.module->getContext();
+  auto *entry = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context), false),
+      llvm::Function::ExternalLinkage, "tree_ids", *source.module);
+  llvm::IRBuilder<> builder(llvm::BasicBlock::Create(context, "entry", entry));
+  auto *first = LLVM::emit_aot_tree_id(*source.module, builder, 2, false);
+  auto *second = LLVM::emit_aot_tree_id(*source.module, builder, 9, false);
+  builder.CreateRet(builder.CreateAdd(first, second));
+  LLVM::KernelCallContract contract;
+  contract.used_snode_tree_ids = {2, 9};
+  const auto text = module_text(*source.module);
+  auto artifact = source.clone();
+  auto projected = contract;
+  LLVM::remap_aot_kernel_tree_ids(*artifact.module, projected, {{2, 0}, {9, 1}});
+  EXPECT_EQ(projected.used_snode_tree_ids, (std::vector<int>{0, 1}));
+  std::vector<int> code_ids;
+  for (const auto &[id, global] : LLVM::aot_tree_id_globals(*artifact.module)) {
+    code_ids.push_back(id);
+    EXPECT_FALSE(global->use_empty());
+  }
+  EXPECT_EQ(code_ids, projected.used_snode_tree_ids);
+  EXPECT_FALSE(llvm::verifyModule(*artifact.module, &llvm::errs()));
+  EXPECT_EQ(module_text(*source.module), text);
+  EXPECT_EQ(contract.used_snode_tree_ids, (std::vector<int>{2, 9}));
+
+  // Invalid closure cannot publish half-remapped code or metadata.
+  auto failed = source.clone();
+  EXPECT_ANY_THROW(
+      LLVM::remap_aot_kernel_tree_ids(*failed.module, contract, {{2, 0}}));
+  EXPECT_EQ(module_text(*failed.module), text);
+  EXPECT_EQ(contract.used_snode_tree_ids, (std::vector<int>{2, 9}));
+  LLVM::KernelCallContract missing;
+  missing.used_snode_tree_ids = {2};
+  EXPECT_ANY_THROW(LLVM::remap_aot_kernel_tree_ids(
+      *failed.module, missing, {{2, 0}, {9, 1}}));
+  EXPECT_EQ(module_text(*failed.module), text);
 }
 
 }  // namespace
