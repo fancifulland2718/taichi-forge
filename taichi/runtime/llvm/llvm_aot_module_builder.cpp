@@ -310,10 +310,8 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   }
   const auto context_abi =
       LLVM::runtime_context_abi(*compiled.compiled_data.module);
-  LlvmOfflineCache::KernelCacheData kcache;
+  LlvmOfflineCache::KernelCacheData kcache(std::move(compiled));
   kcache.kernel_key = identifier;
-  kcache.compiled_data = std::move(compiled.compiled_data);
-  kcache.used_snode_tree_ids = std::move(compiled.used_snode_tree_ids);
   // A callable artifact must contain the layouts of every tree it accesses,
   // including gradient trees. add_field() is optional name publication, not a
   // prerequisite for making the kernel's storage dependencies deployable.
@@ -322,15 +320,6 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
       cache_.fields.emplace(tree_id, prog_->get_cached_field(tree_id));
     }
   }
-  kcache.graph_metadata = std::move(compiled.graph_metadata);
-  kcache.args.reserve(kernel->nested_parameters.size());
-  for (const auto &p : kernel->nested_parameters)
-    kcache.args.push_back(p);
-  kcache.args_type = kernel->args_type;
-  kcache.args_size = kernel->args_size;
-  kcache.rets = kernel->rets;
-  kcache.ret_size = kernel->ret_size;
-  kcache.ret_type = kernel->ret_type;
   kcache.last_used_at = std::time(nullptr);
   kcache.created_at = std::time(nullptr);
   cache_.kernels[identifier] = std::move(kcache);

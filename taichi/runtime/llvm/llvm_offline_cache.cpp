@@ -526,51 +526,30 @@ LlvmOfflineCache::KernelCacheData LlvmOfflineCache::KernelCacheData::clone()
 LlvmOfflineCache::KernelCacheData
 LlvmOfflineCache::KernelCacheData::clone_metadata() const {
   LlvmOfflineCache::KernelCacheData result;
+  static_cast<LLVM::KernelCallContract &>(result) = *this;
   result.kernel_key = kernel_key;
-  result.args = args;
-  result.rets = rets;
   result.compiled_data = LLVMCompiledKernel{compiled_data.tasks, nullptr,
                                             compiled_data.module_context_owner,
                                             compiled_data.cuda_max_registers};
-  result.used_snode_tree_ids = used_snode_tree_ids;
-  result.graph_metadata = graph_metadata;
   result.size = size;
   result.created_at = created_at;
   result.last_used_at = last_used_at;
-  result.ret_size = ret_size;
-  result.ret_type = ret_type;
-  result.args_size = args_size;
-  result.args_type = args_type;
   return result;
 }
 
 LLVM::CompiledKernelData::InternalData
 LlvmOfflineCache::KernelCacheData::convert_to_llvm_ckd_data() const {
   LLVM::CompiledKernelData::InternalData result;
-  result.args = args;
-  result.rets = rets;
+  static_cast<LLVM::KernelCallContract &>(result) = *this;
   result.compiled_data = compiled_data.clone();
-  result.used_snode_tree_ids = used_snode_tree_ids;
-  result.graph_metadata = graph_metadata;
-  result.ret_size = ret_size;
-  result.ret_type = ret_type;
-  result.args_size = args_size;
-  result.args_type = args_type;
   return result;
 }
 
 LLVM::CompiledKernelData::InternalData
 LlvmOfflineCache::KernelCacheData::take_llvm_ckd_data() && {
   LLVM::CompiledKernelData::InternalData result;
-  result.args = std::move(args);
-  result.rets = std::move(rets);
+  static_cast<LLVM::KernelCallContract &>(result) = std::move(*this);
   result.compiled_data = std::move(compiled_data);
-  result.used_snode_tree_ids = std::move(used_snode_tree_ids);
-  result.graph_metadata = std::move(graph_metadata);
-  result.ret_size = ret_size;
-  result.ret_type = ret_type;
-  result.args_size = args_size;
-  result.args_type = args_type;
   return result;
 }
 

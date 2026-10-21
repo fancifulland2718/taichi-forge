@@ -29,19 +29,9 @@ struct LlvmOfflineCache {
     PTX = CUDAArtifact,
   };
 
-  struct KernelCacheData {
+  struct KernelCacheData : LLVM::KernelCallContract {
     std::string kernel_key;
-    std::vector<std::pair<std::vector<int>, Callable::Parameter>> args;
-    std::vector<Callable::Ret> rets;
     LLVMCompiledKernel compiled_data;
-    std::vector<int> used_snode_tree_ids;
-    GraphKernelMetadata graph_metadata;
-
-    const StructType *ret_type = nullptr;
-    size_t ret_size{0};
-
-    const StructType *args_type = nullptr;
-    size_t args_size{0};
 
     // For cache cleaning
     std::size_t size{0};          // byte
@@ -49,6 +39,10 @@ struct LlvmOfflineCache {
     std::time_t last_used_at{0};  // millsec
 
     KernelCacheData() = default;
+    explicit KernelCacheData(LLVM::CompiledKernelData::InternalData data)
+        : LLVM::KernelCallContract(std::move(data)),
+          compiled_data(std::move(data.compiled_data)) {
+    }
     KernelCacheData(KernelCacheData &&) = default;
     KernelCacheData &operator=(KernelCacheData &&) = default;
     ~KernelCacheData() = default;

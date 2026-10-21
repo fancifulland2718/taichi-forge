@@ -14,7 +14,7 @@ class KernelImpl : public aot::Kernel {
                       KernelLaunchHandle handle,
                       Arch target_arch,
                       const std::string &kernel_name,
-                      const LLVM::CompiledKernelData::InternalData &kernel_data)
+                      const LLVM::KernelCallContract &kernel_data)
       : launcher_(launcher), handle_(handle) {
     TI_ASSERT(launcher_ != nullptr);
     TI_ASSERT(handle_.get_launch_id() >= 0);

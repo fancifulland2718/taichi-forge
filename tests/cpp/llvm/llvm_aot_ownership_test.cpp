@@ -39,6 +39,82 @@ TEST(LLVMCompiledKernelOwnership, MoveAssignmentRetiresModuleBeforeItsContext) {
   EXPECT_TRUE(new_context.expired());
 }
 
+TEST(LLVMAotOwnership, CompilerContractSurvivesPackagingAndIndependentCopies) {
+  LLVM::CompiledKernelData::InternalData compiled;
+  compiled.compiled_data.module_context_owner =
+      std::make_shared<llvm::LLVMContext>();
+  compiled.compiled_data.module = std::make_unique<llvm::Module>(
+      "source", *compiled.compiled_data.module_context_owner);
+  compiled.compiled_data.tasks.emplace_back("task", 64, 128);
+  compiled.compiled_data.cuda_max_registers = 48;
+  compiled.args.emplace_back(std::vector<int>{0, 1},
+                             Callable::Parameter(PrimitiveType::i32, false));
+  compiled.rets.emplace_back(PrimitiveType::f32);
+  compiled.args_type = TypeFactory::get_instance()
+                           .get_struct_type({{PrimitiveType::i32, "arg"}})
+                           ->as<StructType>();
+  compiled.ret_type = TypeFactory::get_instance()
+                          .get_struct_type({{PrimitiveType::f32, "ret"}})
+                          ->as<StructType>();
+  compiled.args_size = compiled.ret_size = 4;
+  compiled.used_snode_tree_ids = {2, 5};
+  compiled.graph_metadata.available = true;
+  compiled.graph_metadata.opaque = false;
+  compiled.graph_metadata.blocker.clear();
+  GraphKernelResourceEffect effect;
+  effect.resource_kind = "snode";
+  effect.snode_tree_id = 5;
+  effect.access = "write";
+  compiled.graph_metadata.effects.push_back(effect);
+  auto *module = compiled.compiled_data.module.get();
+  const auto *args_type = compiled.args_type;
+  const auto *ret_type = compiled.ret_type;
+  auto check = [&](const LLVM::KernelCallContract &contract) {
+    ASSERT_EQ(contract.args.size(), 1);
+    EXPECT_EQ(contract.args[0].first, (std::vector<int>{0, 1}));
+    EXPECT_EQ(contract.args[0].second.get_dtype(), PrimitiveType::i32);
+    ASSERT_EQ(contract.rets.size(), 1);
+    EXPECT_EQ(contract.rets[0].dt, PrimitiveType::f32);
+    EXPECT_EQ(contract.args_type, args_type);
+    EXPECT_EQ(contract.ret_type, ret_type);
+    EXPECT_EQ(contract.args_size, 4);
+    EXPECT_EQ(contract.ret_size, 4);
+    EXPECT_EQ(contract.used_snode_tree_ids, (std::vector<int>{2, 5}));
+    EXPECT_TRUE(contract.graph_metadata.available);
+    EXPECT_FALSE(contract.graph_metadata.opaque);
+    EXPECT_TRUE(contract.graph_metadata.blocker.empty());
+    ASSERT_EQ(contract.graph_metadata.effects.size(), 1);
+    EXPECT_EQ(contract.graph_metadata.effects[0].snode_tree_id, 5);
+    EXPECT_EQ(contract.graph_metadata.effects[0].access, "write");
+  };
+
+  // Packaging consumes compiler facts, with no frontend Kernel to consult.
+  LlvmOfflineCache::KernelCacheData cache(std::move(compiled));
+  check(cache);
+  EXPECT_EQ(cache.compiled_data.module.get(), module);
+  EXPECT_EQ(compiled.compiled_data.module, nullptr);
+  auto metadata = cache.clone_metadata();
+  check(metadata);
+  EXPECT_EQ(metadata.compiled_data.module, nullptr);
+  auto copied = cache.convert_to_llvm_ckd_data();
+  check(copied);
+  EXPECT_NE(copied.compiled_data.module.get(), module);
+  EXPECT_EQ(cache.compiled_data.module.get(), module);
+  // Deployment relocation and contract edits cannot alter the producer.
+  copied.used_snode_tree_ids[0] = 7;
+  copied.graph_metadata.effects[0].snode_tree_id = 9;
+  copied.compiled_data.tasks[0].name = "relocated";
+  check(cache);
+  EXPECT_EQ(cache.compiled_data.tasks[0].name, "task");
+  auto consumed = std::move(cache).take_llvm_ckd_data();
+  check(consumed);
+  EXPECT_EQ(consumed.compiled_data.module.get(), module);
+  EXPECT_EQ(cache.compiled_data.module, nullptr);
+  ASSERT_EQ(consumed.compiled_data.tasks.size(), 1);
+  EXPECT_EQ(consumed.compiled_data.tasks[0].name, "task");
+  EXPECT_EQ(consumed.compiled_data.cuda_max_registers, 48);
+}
+
 class LoadedEntryLauncher : public LLVM::KernelLauncher {
  public:
   LoadedEntryLauncher() : LLVM::KernelLauncher(Config{}) {

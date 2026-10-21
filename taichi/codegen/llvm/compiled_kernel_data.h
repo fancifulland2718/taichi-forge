@@ -2,7 +2,7 @@
 
 #include "taichi/codegen/compiled_kernel_data.h"
 #include "taichi/codegen/llvm/llvm_compiled_data.h"
-#include "taichi/program/callable.h"
+#include "taichi/codegen/llvm/kernel_call_contract.h"
 
 #include "llvm/IR/LLVMContext.h"
 
@@ -12,19 +12,9 @@ namespace LLVM {
 
 class CompiledKernelData : public lang::CompiledKernelData {
  public:
-  struct InternalData {
-    std::vector<std::pair<std::vector<int>, Callable::Parameter>> args;
-    std::vector<Callable::Ret> rets;
+  struct InternalData : KernelCallContract {
     LLVMCompiledKernel compiled_data;
-    std::vector<int> used_snode_tree_ids;
     bool may_trigger_hash_overflow{false};
-    GraphKernelMetadata graph_metadata;
-
-    const StructType *ret_type = nullptr;
-    size_t ret_size{0};
-
-    const StructType *args_type = nullptr;
-    size_t args_size{0};
 
     TI_IO_DEF(args,
               rets,
@@ -40,16 +30,9 @@ class CompiledKernelData : public lang::CompiledKernelData {
     InternalData() = default;
 
     InternalData(const InternalData &o)
-        : args(o.args),
-          rets(o.rets),
+        : KernelCallContract(o),
           compiled_data(o.compiled_data.clone()),
-          used_snode_tree_ids(o.used_snode_tree_ids),
-          may_trigger_hash_overflow(o.may_trigger_hash_overflow),
-          graph_metadata(o.graph_metadata),
-          ret_type(o.ret_type),
-          ret_size(o.ret_size),
-          args_type(o.args_type),
-          args_size(o.args_size) {
+          may_trigger_hash_overflow(o.may_trigger_hash_overflow) {
     }
 
     InternalData(InternalData &&o) = default;
