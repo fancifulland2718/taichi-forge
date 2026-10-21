@@ -2,8 +2,14 @@
 
 from dataclasses import dataclass
 
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.graph._native import BackendCommandRecording, _CudaGraphCaptureRecipe
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceBinding,
+)
 from taichi_forge._hardware_telemetry import (
     hardware_provider_call,
     instrument_hardware_recording,
@@ -142,6 +148,82 @@ def _resolve_direction(transform, direction):
     return direction, direction_value
 
 
+@dataclass(frozen=True)
+class _CufftPlanDefinition:
+    """Actual creation facts; public plan attributes are only convenience views."""
+
+    dimensions: tuple
+    batch_count: int
+    transform: str
+    input_layout: CufftLayout
+    output_layout: CufftLayout
+    input_dimensions: tuple
+    output_dimensions: tuple
+    input_compact: bool
+    output_compact: bool
+    input_storage_scalars: int
+    output_storage_scalars: int
+
+    @classmethod
+    def normalize(cls, dimensions, batch_count, transform, input_layout, output_layout):
+        dimensions = _positive_int_tuple(dimensions, "dimensions")
+        batch_count = _positive_int(batch_count, "batch_count")
+        _transform_value(transform)
+        input_dimensions, output_dimensions = list(dimensions), list(dimensions)
+        if transform == "c2r":
+            input_dimensions[-1] = input_dimensions[-1] // 2 + 1
+        if transform == "r2c":
+            output_dimensions[-1] = output_dimensions[-1] // 2 + 1
+        input_layout, input_span, input_compact = _resolve_layout(input_layout, tuple(input_dimensions), "input")
+        output_layout, output_span, output_compact = _resolve_layout(output_layout, tuple(output_dimensions), "output")
+        return cls(
+            dimensions,
+            batch_count,
+            transform,
+            input_layout,
+            output_layout,
+            tuple(input_dimensions),
+            tuple(output_dimensions),
+            input_compact,
+            output_compact,
+            ((batch_count - 1) * input_layout.batch_distance + input_span) * (1 if transform == "r2c" else 2),
+            ((batch_count - 1) * output_layout.batch_distance + output_span) * (1 if transform == "c2r" else 2),
+        )
+
+    @property
+    def rank(self):
+        return len(self.dimensions)
+
+    @property
+    def transform_value(self):
+        return _TRANSFORMS[self.transform]
+
+    def shape(self, *, output=False):
+        compact = self.output_compact if output else self.input_compact
+        if not compact:
+            return (self.output_storage_scalars if output else self.input_storage_scalars,)
+        dimensions = self.output_dimensions if output else self.input_dimensions
+        real = self.transform == ("c2r" if output else "r2c")
+        shape = dimensions if real else (*dimensions, 2)
+        return shape if self.batch_count == 1 else (self.batch_count, *shape)
+
+    def native_resource(self):
+        def layout(value):
+            return dict(embed=value.embed, stride=value.stride, batch_distance=value.batch_distance)
+
+        return NativeDefinition(
+            "cufft",
+            "plan_f32",
+            dict(
+                dimensions=self.dimensions,
+                batch_count=self.batch_count,
+                transform=self.transform,
+                input_layout=layout(self.input_layout),
+                output_layout=layout(self.output_layout),
+            ),
+        )
+
+
 class _CufftCaptureRecipe(_CudaGraphCaptureRecipe):
     kind = "cufft_fixed_plan"
 
@@ -172,8 +254,8 @@ class _CufftCaptureRecipe(_CudaGraphCaptureRecipe):
             input_arg,
             output_arg,
             self._direction,
-            self._plan.input_storage_scalars,
-            self._plan.output_storage_scalars,
+            self._plan._definition.input_storage_scalars,
+            self._plan._definition.output_storage_scalars,
         )
 
 
@@ -191,14 +273,28 @@ class CufftRecording(BackendCommandRecording):
     ):
         if not isinstance(plan, _CufftPlanBase):
             raise TypeError("CUDA cuFFT recording requires a cuFFT plan")
-        direction, direction_value = _resolve_direction(plan.transform, direction)
+        direction, direction_value = _resolve_direction(plan._definition.transform, direction)
         if any(not isinstance(name, str) or not name for name in (input, output)):
             raise ValueError("CUDA cuFFT binding names must be nonempty strings")
         if input == output:
             raise ValueError("CUDA cuFFT input and output binding names must differ")
+        definition = NativeOperationBinding(
+            plan._execution_definitions[direction],
+            (
+                NativeArrayBinding(
+                    "input", input, GraphAccess.READ_WRITE if plan._definition.transform == "c2r" else GraphAccess.READ
+                ),
+                NativeArrayBinding("output", output, GraphAccess.WRITE),
+            ),
+            (
+                (("plan", NativeResourceBinding(plan, plan._native_resource_definition)),)
+                if plan._native_resource_definition is not None
+                else ()
+            ),
+        )
         super().__init__(
             backend="cuda",
-            binding_names=(input, output),
+            binding_names=definition.binding_names,
             command_count=1,
             queue="compute",
             stream_binding="runtime_ordered",
@@ -208,6 +304,8 @@ class CufftRecording(BackendCommandRecording):
             no_host_readback=True,
         )
         object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "_definition", definition)
+        object.__setattr__(self, "_effects", definition.resource_effects)
         object.__setattr__(self, "direction", direction)
         object.__setattr__(self, "direction_value", direction_value)
         object.__setattr__(
@@ -229,31 +327,17 @@ class CufftRecording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        return (
-            # Out-of-place C2R still overwrites its half-spectrum input. This
-            # is a freeze-time dependency, not a replay-time alias check.
-            ResourceEffect(
-                self.input,
-                GraphAccess.READ_WRITE if self.plan.transform == "c2r" else GraphAccess.READ,
-            ),
-            ResourceEffect(self.output, GraphAccess.WRITE),
-        )
+        return self._effects
 
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA cuFFT")
-        self.validate_graph_lifetime()
-        source = self.plan._validate_array(
-            bindings[self.input], self.input, self.plan.input_shape
+        self.plan._execute_arrays(
+            bindings[self.input],
+            bindings[self.output],
+            self.direction_value,
+            input_name=self.input,
+            output_name=self.output,
         )
-        destination = self.plan._validate_array(
-            bindings[self.output], self.output, self.plan.output_shape
-        )
-        if bindings[self.input] is bindings[self.output]:
-            raise TaichiRuntimeError(
-                "The first CUDA cuFFT slice requires distinct input and output arrays"
-            )
-        with hardware_provider_call("cufft"):
-            self.plan._execute(source, destination, self.direction_value)
 
     def validate_graph_lifetime(self):
         self.plan._validate_lifetime()
@@ -262,17 +346,15 @@ class CufftRecording(BackendCommandRecording):
         if type(self.plan) not in (CufftPlan1D, CufftPlanND):
             raise TaichiRuntimeError("AOT cuFFT plan variants require their own reconstruction contract")
         self.validate_graph_lifetime()
-        if self.plan._aot_plan_parameters is None:
+        if self.plan._native_resource_definition is None:
             raise TaichiRuntimeError("AOT cuFFT callbacks and separable recipes require explicit reconstruction")
-        parameters = dict(self.plan._aot_plan_parameters)
-        if expected_workspace_bytes is not None:
-            parameters["expected_workspace_bytes"] = expected_workspace_bytes
-        plan = context.resource(self.plan, "cufft", "plan_f32", parameters=parameters)
-        context.native(
-            "cufft",
-            "execute_f32",
-            bindings=dict(plan=plan, input=self.input, output=self.output),
-            parameters=dict(direction=self.direction),
+        self._definition.lower(
+            context,
+            resource_requirements=(
+                None
+                if expected_workspace_bytes is None
+                else {"plan": dict(expected_workspace_bytes=expected_workspace_bytes)}
+            ),
         )
         return ()
 
@@ -284,14 +366,14 @@ class CufftRecording(BackendCommandRecording):
             self,
             lifetime_leases=lambda item: (item.plan,),
             debug_info=lambda item: {
-                "kind": f"cuda_cufft_{item.plan.transform}_{item.plan.rank}d",
-                "dimensions": item.plan.dimensions,
-                "batch_count": item.plan.batch_count,
-                "transform": item.plan.transform,
+                "kind": f"cuda_cufft_{item.plan._definition.transform}_{item.plan._definition.rank}d",
+                "dimensions": item.plan._definition.dimensions,
+                "batch_count": item.plan._definition.batch_count,
+                "transform": item.plan._definition.transform,
                 "direction": item.direction,
                 "output_scale": item.output_scale,
-                "input_layout": item.plan.input_layout,
-                "output_layout": item.plan.output_layout,
+                "input_layout": item.plan._definition.input_layout,
+                "output_layout": item.plan._definition.output_layout,
             },
         )
 
@@ -310,56 +392,37 @@ class _CufftPlanBase:
         _cross_batch=False,
         _store_callback=None,
     ):
-        self.dimensions = _positive_int_tuple(dimensions, "dimensions")
-        self.rank = len(self.dimensions)
-        self.batch_count = _positive_int(batch_count, "batch_count")
-        self.transform = transform
-        self.transform_value = _transform_value(transform)
+        definition = _CufftPlanDefinition.normalize(dimensions, batch_count, transform, input_layout, output_layout)
+        self._definition = definition
+        # Preserve writable convenience attributes without making them inputs
+        # to an already-created plan or its recording/reconstruction contract.
+        for name in (
+            "dimensions",
+            "rank",
+            "batch_count",
+            "transform",
+            "transform_value",
+            "input_dimensions",
+            "output_dimensions",
+            "input_layout",
+            "output_layout",
+            "input_storage_scalars",
+            "output_storage_scalars",
+        ):
+            setattr(self, name, getattr(definition, name))
         self._separable = bool(_separable)
         self._cross_batch = bool(_cross_batch)
-        if self._cross_batch and (not self._separable or self.rank != 2 or transform != "c2c"):
+        if self._cross_batch and (not self._separable or definition.rank != 2 or transform != "c2c"):
             raise ValueError("Cross-batch FFT requires a separable two-dimensional C2C plan")
-        input_dimensions = list(self.dimensions)
-        output_dimensions = list(self.dimensions)
-        if transform == "c2r":
-            input_dimensions[-1] = input_dimensions[-1] // 2 + 1
-        if transform == "r2c":
-            output_dimensions[-1] = output_dimensions[-1] // 2 + 1
-        self.input_dimensions = tuple(input_dimensions)
-        self.output_dimensions = tuple(output_dimensions)
-        self.input_layout, input_span, input_compact = _resolve_layout(
-            input_layout, self.input_dimensions, "input"
+        self._input_compact = definition.input_compact
+        self._output_compact = definition.output_compact
+        self._native_resource_definition = (
+            definition.native_resource() if not (_separable or _cross_batch or _store_callback is not None) else None
         )
-        self.output_layout, output_span, output_compact = _resolve_layout(
-            output_layout, self.output_dimensions, "output"
-        )
-        self._input_compact = input_compact
-        self._output_compact = output_compact
-        # Capture the native creation parameters once. Public convenience fields
-        # can be reassigned later; that does not alter an existing vendor plan.
-        self._aot_plan_parameters = None
-        if not (_separable or _cross_batch or _store_callback is not None):
-            self._aot_plan_parameters = dict(
-                dimensions=self.dimensions,
-                batch_count=self.batch_count,
-                transform=self.transform,
-                input_layout=dict(
-                    embed=self.input_layout.embed,
-                    stride=self.input_layout.stride,
-                    batch_distance=self.input_layout.batch_distance,
-                ),
-                output_layout=dict(
-                    embed=self.output_layout.embed,
-                    stride=self.output_layout.stride,
-                    batch_distance=self.output_layout.batch_distance,
-                ),
-            )
-        self.input_storage_scalars = (
-            (self.batch_count - 1) * self.input_layout.batch_distance + input_span
-        ) * (1 if transform == "r2c" else 2)
-        self.output_storage_scalars = (
-            (self.batch_count - 1) * self.output_layout.batch_distance + output_span
-        ) * (1 if transform == "c2r" else 2)
+        self._execution_definitions = {
+            direction: NativeDefinition("cufft", "execute_f32", dict(direction=direction))
+            for direction in (tuple(_DIRECTIONS) if transform == "c2c" else (_NATURAL_DIRECTIONS[transform],))
+        }
         program = impl.get_runtime().prog
         if program is None:
             raise TaichiRuntimeError(
@@ -375,10 +438,10 @@ class _CufftPlanBase:
         with hardware_provider_call("cufft", failure_phase="provider_plan_failure"):
             if _store_callback is not None:
                 if (
-                    self.rank != 2
+                    definition.rank != 2
                     or transform != "c2c"
-                    or not input_compact
-                    or not output_compact
+                    or not definition.input_compact
+                    or not definition.output_compact
                     or self._separable
                 ):
                     raise ValueError(
@@ -392,33 +455,33 @@ class _CufftPlanBase:
                         "LTO store callbacks are unavailable in this native runtime"
                     )
                 handle = create(
-                    self.dimensions,
-                    self.batch_count,
+                    definition.dimensions,
+                    definition.batch_count,
                     _store_callback.ir,
                     _store_callback.symbol,
                 )
             elif self._cross_batch:
-                if not input_compact or not output_compact:
+                if not definition.input_compact or not definition.output_compact:
                     raise ValueError("Cross-batch FFT requires compact input and output")
                 create = getattr(program, "_create_cuda_cufft_cross_batch_plan", None)
                 if create is None:
                     raise TaichiRuntimeError("Cross-batch FFT is unavailable in this native runtime")
-                handle = create(self.dimensions, self.batch_count)
-            elif self.rank == 1 and input_compact and output_compact:
+                handle = create(definition.dimensions, definition.batch_count)
+            elif definition.rank == 1 and definition.input_compact and definition.output_compact:
                 handle = program._create_cuda_cufft_plan_1d(
-                    self.dimensions[0], self.batch_count, self.transform_value
+                    definition.dimensions[0], definition.batch_count, definition.transform_value
                 )
             else:
                 arguments = (
-                    self.dimensions,
-                    self.input_layout.embed,
-                    self.input_layout.stride,
-                    self.input_layout.batch_distance,
-                    self.output_layout.embed,
-                    self.output_layout.stride,
-                    self.output_layout.batch_distance,
-                    self.batch_count,
-                    self.transform_value,
+                    definition.dimensions,
+                    definition.input_layout.embed,
+                    definition.input_layout.stride,
+                    definition.input_layout.batch_distance,
+                    definition.output_layout.embed,
+                    definition.output_layout.stride,
+                    definition.output_layout.batch_distance,
+                    definition.batch_count,
+                    definition.transform_value,
                 )
                 handle = program._create_cuda_cufft_plan_many(
                     *arguments, *((True,) if self._separable else ())
@@ -436,20 +499,8 @@ class _CufftPlanBase:
             "cuda",
             provider_scope=provider_scope,
             problem_scope={
-                "dimensions": self.dimensions,
-                "batch_count": self.batch_count,
-                "transform": self.transform,
+                **(self._native_resource_definition or definition.native_resource()).parameter_dict(),
                 "resource_handle": self._handle,
-                "input_layout": {
-                    "embed": self.input_layout.embed,
-                    "stride": self.input_layout.stride,
-                    "batch_distance": self.input_layout.batch_distance,
-                },
-                "output_layout": {
-                    "embed": self.output_layout.embed,
-                    "stride": self.output_layout.stride,
-                    "batch_distance": self.output_layout.batch_distance,
-                },
             },
             execution_scope={
                 "algorithm": (
@@ -503,33 +554,17 @@ class _CufftPlanBase:
 
     @property
     def input_shape(self):
-        if not self._input_compact:
-            return (self.input_storage_scalars,)
-        components = 1 if self.transform == "r2c" else 2
-        shape = (
-            self.input_dimensions if components == 1 else (*self.input_dimensions, 2)
-        )
-        if self.batch_count == 1:
-            return shape
-        return (self.batch_count, *shape)
+        return self._definition.shape()
 
     @property
     def output_shape(self):
-        if not self._output_compact:
-            return (self.output_storage_scalars,)
-        components = 1 if self.transform == "c2r" else 2
-        shape = (
-            self.output_dimensions if components == 1 else (*self.output_dimensions, 2)
-        )
-        if self.batch_count == 1:
-            return shape
-        return (self.batch_count, *shape)
+        return self._definition.shape(output=True)
 
     @property
     def inverse_scale(self):
         """Scale required after an unnormalized C2C inverse or C2R transform."""
 
-        return 1.0 / _product(self.dimensions)
+        return 1.0 / _product(self._definition.dimensions)
 
     def record(
         self,
@@ -547,9 +582,21 @@ class _CufftPlanBase:
         )
 
     def execute(self, input, output, *, direction=None):
+        # Retain the existing recording/telemetry path and typed handle. Frozen
+        # definitions were built at plan creation; execution never serializes
+        # them or invokes the reconstruction adapter.
         recording = self.record(direction=direction)
         recording.execute({"input": input, "output": output})
         return output
+
+    def _execute_arrays(self, input, output, direction, *, input_name="input", output_name="output"):
+        self._validate_lifetime()
+        source = self._validate_array(input, input_name, self.input_shape)
+        destination = self._validate_array(output, output_name, self.output_shape)
+        if input is output:
+            raise TaichiRuntimeError("The first CUDA cuFFT slice requires distinct input and output arrays")
+        with hardware_provider_call("cufft"):
+            self._execute(source, destination, direction)
 
     def _validate_array(self, value, name, expected_shape):
         if not isinstance(value, Ndarray):
@@ -590,7 +637,7 @@ class _CufftPlanBase:
         handle_present = self._handle is not None
         runtime_valid = handle_present and runtime_generation_matches(self)
         return make_memory_report(
-            f"cufft_{self.transform}_{self.rank}d",
+            f"cufft_{self._definition.transform}_{self._definition.rank}d",
             "cuda",
             (
                 HardwareMemoryComponent(
@@ -610,11 +657,7 @@ class _CufftPlanBase:
                     resident=runtime_valid,
                 ),
             ),
-            lifecycle_state=(
-                "ready"
-                if runtime_valid
-                else "closed" if not handle_present else "runtime_invalid"
-            ),
+            lifecycle_state=("ready" if runtime_valid else "closed" if not handle_present else "runtime_invalid"),
             ownership_scope="plan_generation",
         )
 
@@ -625,11 +668,11 @@ class _CufftPlanBase:
         identity = (
             "cufft_plan",
             self._runtime_generation,
-            self.dimensions,
-            self.batch_count,
-            self.transform,
-            self.input_layout,
-            self.output_layout,
+            self._definition.dimensions,
+            self._definition.batch_count,
+            self._definition.transform,
+            self._definition.input_layout,
+            self._definition.output_layout,
         )
         if self._cross_batch:
             return (*identity, "row_batch_cross_batch_columns")

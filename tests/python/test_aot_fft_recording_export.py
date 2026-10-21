@@ -7,9 +7,77 @@ from pathlib import Path
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 import taichi_forge as ti
 from tests import test_utils
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cufft_creation_recording_and_export_share_frozen_definition(tmp_path, monkeypatch):
+    from taichi_forge.graph._ir import GraphAccess
+    from taichi_forge.graph._native_definition import NativeDefinition, NativeOperationBinding
+    from taichi_forge_runtime.aot import Runtime
+
+    fft = ti.hardware.fft
+    if not fft.is_available():
+        pytest.skip("external cuFFT required")
+    plan = fft.CufftPlan1D(8, batch_count=2)
+    assert not hasattr(plan, "_aot_plan_parameters")
+    # Reassignment remains allowed; these attributes do not reconfigure cuFFT.
+    plan.dimensions, plan.batch_count, plan.transform = (99,), 5, "c2r"
+    plan.input_layout = fft.CufftLayout((99,), stride=3, batch_distance=300)
+    assert plan.input_shape == plan.output_shape == (2, 8, 2)
+    assert plan.inverse_scale == 1 / 8
+    recording = plan.record(input="signal", output="spectrum")
+    assert recording.direction == "forward"
+    assert recording.binding_names == ("signal", "spectrum")
+    assert tuple((effect.resource, effect.access) for effect in recording.resource_effects) == (
+        ("signal", GraphAccess.READ),
+        ("spectrum", GraphAccess.WRITE),
+    )
+    values = np.arange(32, dtype=np.float32).reshape(2, 8, 2) / 16
+    source, output = (ti.ndarray(ti.f32, (2, 8, 2)) for _ in range(2))
+    source.from_numpy(values)
+    expected = np.fft.fft(values[..., 0] + 1j * values[..., 1], axis=1)
+
+    def no_description_conversion(*args, **kwargs):
+        raise AssertionError("Ordinary execution entered description lowering")
+
+    before = fft.cache_statistics()
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeDefinition, "parameter_dict", no_description_conversion)
+        patch.setattr(NativeOperationBinding, "lower", no_description_conversion)
+        plan.execute(source, output)
+        recording.execute(dict(signal=source, spectrum=output))
+    assert fft.cache_statistics() == before
+    actual = output.to_numpy()
+    np.testing.assert_allclose(actual[..., 0] + 1j * actual[..., 1], expected, rtol=2e-5, atol=2e-5)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording)
+    graph = builder.compile()
+    graph.run(dict(signal=source, spectrum=output))
+    module = ti.aot.Module()
+    exported = module.add_execution_plan("fft", graph)
+    document = json.loads(exported.to_json())
+    resource = document["resources"][0]
+    assert resource["parameters"]["dimensions"] == [8]
+    assert resource["parameters"]["batch_count"] == 2
+    assert resource["parameters"]["transform"] == "c2c"
+    assert document["operations"][0]["bindings"] == dict(plan=resource["name"], input="signal", output="spectrum")
+    artifact = tmp_path / "fft.tcm"
+    module.archive(str(artifact))
+    graph.close()
+    plan.close()
+    with Runtime("cuda") as runtime:
+        loaded = runtime.load_module(artifact)
+        x, y = (runtime.ndarray("f32", (2, 8, 2)) for _ in range(2))
+        x.write(values.tobytes())
+        prepared = loaded.prepare_execution("fft", dict(signal=x, spectrum=y))
+        prepared()
+        actual = np.frombuffer(y.read(), np.float32).reshape(2, 8, 2)
+        np.testing.assert_allclose(actual[..., 0] + 1j * actual[..., 1], expected, rtol=2e-5, atol=2e-5)
+        prepared.close()
 
 
 @pytest.mark.parametrize("case", ("complex", "padded", "real", "workspace"))
