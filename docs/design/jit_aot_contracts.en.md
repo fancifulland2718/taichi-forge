@@ -182,6 +182,18 @@ fused kernel/action, but still rejects AOT export: fixed provider-owned storage
 and topology lack explicit reconstruction roles. Ordinary single-dispatch Graph
 support does not establish that deployment contract.
 
+Solver resources separate configuration from numerical state. cuSOLVERDn shares
+creation/recording definitions while snapshotting factor/status at one boundary.
+cuDSS reads actual seeds from the native owner and verifies frozen configuration.
+SparseSolver uses the same dtype/method/ordering for direct creation and export,
+preserving factor generations and CUDA LU's host boundary. AmgX retains its direct
+provider ABI and explicit AOT descriptions; ordinary recordings are not automatically exported.
+
+Vulkan classic/mesh pipeline definitions own frozen driver configuration, assets
+and the existing contract hash. Creation no longer depends on an AOT-private
+module. The default adapter connects shader resources; public pipeline borrowing,
+draw closures and initialization remain separate cold contracts.
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 and [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 use that same adapter for Sort/Compact. Creation and recorded effects derive

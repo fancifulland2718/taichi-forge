@@ -137,6 +137,15 @@ Module 与 Sequence adapter 共享其特化事实。确定性 retained scatter-r
 fused kernel/action；其固定 provider-owned 存储和拓扑尚无 AOT 重建角色，当前仍拒绝导出。
 普通 Graph 的单 dispatch 支持不能替代这个部署合同。
 
+求解资源将静态配置和数值状态分开：cuSOLVERDn 的创建/recording 定义共用，factor/status
+仍在同一快照边界读取；cuDSS 从 native owner 取得实际 seed，并校对冻结配置。SparseSolver
+从相同 dtype/method/ordering 构造直接 solver 和导出描述，保留 factor generation 与 CUDA LU
+的 host 边界。AmgX 仍使用直接 provider ABI 和显式 AOT 描述，尚无普通 recording 自动导出。
+
+Vulkan classic/mesh pipeline 的冻结 driver 配置、资产与原 contract hash 属于共同定义，
+创建路径不依赖 AOT 私有模块。默认 adapter 连接已有 shader 资源引用；公开 pipeline 借用、
+draw 闭包和初始化资格仍由各自冷阶段合同决定。
+
 [`_prepared_primitive.py`](../../python/taichi_forge/algorithms/_prepared_primitive.py)
 与 [`_prepared_compact.py`](../../python/taichi_forge/algorithms/_prepared_compact.py)
 让 Sort/Compact 使用同一 adapter。创建和 recording effects 从冻结角色得到，报告字典
