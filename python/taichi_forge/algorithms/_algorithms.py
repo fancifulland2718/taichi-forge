@@ -27,7 +27,15 @@ from taichi_forge.algorithms._primitive_capabilities import (
     primitive_capability,
     supported_primitive_methods,
 )
-from taichi_forge.algorithms._primitive_definitions import SCAN_VALUE_TYPE as _SCAN_VALUE_TYPE, ScanDefinition
+from taichi_forge.algorithms._primitive_definitions import (
+    NATIVE_VALUE_TYPE as _SCAN_VALUE_TYPE,
+    NATIVE_VALUE_TYPE as _REDUCE_VALUE_TYPE,
+    REDUCE_OPS as _SUPPORTED_REDUCE_OPS,
+    ScanDefinition,
+    ReduceDefinition,
+    TransformDefinition,
+    normalize_transform_args as _normalize_transform_args,
+)
 from taichi_forge._kernels import (
     add_ndarray_to_ndarray,
     add_scalar_field_to_dense_field,
@@ -157,10 +165,8 @@ _SUPPORTED_SEGMENTED_SCAN_METHODS = supported_primitive_methods("segmented_scan"
 _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_ITEMS = 1 << 16
 _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_SEGMENT_LENGTH = 1 << 12
 _SUPPORTED_REDUCE_METHODS = supported_primitive_methods("reduce")
-_SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
 _REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _REDUCE_FIELD_DTYPES = (i32, f32)
-_REDUCE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_CHECK_METHODS = supported_primitive_methods("check")
 _CHECK_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _CHECK_INTEGER_DTYPES = (u32, i32, u64, i64)
@@ -197,8 +203,7 @@ _SUPPORTED_GROUPED_REDUCE_METHODS = supported_primitive_methods("grouped_reduce"
 _SUPPORTED_GROUPED_REDUCE_OPS = {"sum": 0}
 _GROUPED_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _GROUPED_REDUCE_FIELD_DTYPES = (i32,)
-_GROUPED_REDUCE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
-_SCAN_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_GROUPED_SCAN_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _HISTOGRAM_VALUE_DTYPES = (i32, u32)
 _HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
 _HISTOGRAM_BIN_DTYPES = (i32, i64)
@@ -5548,6 +5553,8 @@ class ReduceWorkspace:
         call_args,
         n,
         prog,
+        *,
+        definition=None,
     ):
         cache = self._native_reduce_plans if self._cache_native_plans else None
         plan = _record_native_primitive_plan(
@@ -5560,6 +5567,7 @@ class ReduceWorkspace:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_reduce_plan = plan
 
@@ -6834,6 +6842,8 @@ class TransformWorkspace:
         call_args,
         n,
         prog,
+        *,
+        definition=None,
     ):
         cache = self._native_transform_plans if self._cache_native_plans else None
         plan = _record_native_primitive_plan(
@@ -6846,6 +6856,7 @@ class TransformWorkspace:
             prog,
             value_type,
             n,
+            definition=definition,
         )
         self._native_transform_plan = plan
 
@@ -11071,9 +11082,10 @@ def _try_native_dense_matrix_field_reduce(values, output, op, method, workspace)
         or output_plan[2] != 1
     ):
         return False
-    value_type = values_plan[1]
+    definition = ReduceDefinition(values_plan[2], values.dtype, op)
+    value_type = definition.value_type
     lane_count = values_plan[3]
-    op_id = _SUPPORTED_REDUCE_OPS[op]
+    op_id = definition.op_id
     arch = current_cfg().arch
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -11129,6 +11141,7 @@ def _try_native_dense_matrix_field_reduce(values, output, op, method, workspace)
             call_args,
             values_plan[2],
             prog,
+            definition=definition,
         )
         workspace._mark_native_reduce_backend_active(backend, temp_bytes)
     return True
@@ -11140,6 +11153,7 @@ def _try_cuda_reduce_provider(values, output, op, workspace, backend):
         raise ValueError(f"unsupported CUDA reduce provider: {backend}")
     prefix = "cuda_device" if backend == "cuda_device" else "cuda_cub"
     available_name = f"{prefix}_reduce_available"
+    definition = ReduceDefinition(_shape_numel(values), values.dtype, op)
     values_view = _primitive_view(values)
     output_view = _primitive_view(output)
     if (
@@ -11161,13 +11175,13 @@ def _try_cuda_reduce_provider(values, output, op, workspace, backend):
         temp_bytes = method(
             values_view.snode,
             output_view.snode,
-            _reduce_value_type(values_view.dtype),
-            values_view.num_elements,
-            _SUPPORTED_REDUCE_OPS[op],
+            definition.value_type,
+            definition.size,
+            definition.op_id,
         )
         if workspace is not None:
-            value_type = _reduce_value_type(values_view.dtype)
-            op_id = _SUPPORTED_REDUCE_OPS[op]
+            value_type = definition.value_type
+            op_id = definition.op_id
             workspace._record_native_reduce_plan(
                 backend,
                 method_name,
@@ -11179,11 +11193,12 @@ def _try_cuda_reduce_provider(values, output, op, workspace, backend):
                     values_view.snode,
                     output_view.snode,
                     value_type,
-                    values_view.num_elements,
+                    definition.size,
                     op_id,
                 ),
-                values_view.num_elements,
+                definition.size,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_reduce_backend_active(backend, temp_bytes)
         return True
@@ -11209,12 +11224,12 @@ def _try_cuda_reduce_provider(values, output, op, workspace, backend):
         temp_bytes = method(
             values_arr,
             output_arr,
-            _reduce_value_type(values.dtype),
+            definition.value_type,
             values_offset,
             values_stride,
             output_offset,
             output_stride,
-            _SUPPORTED_REDUCE_OPS[op],
+            definition.op_id,
         )
         if workspace is not None:
             workspace._record_native_reduce_plan(
@@ -11222,20 +11237,21 @@ def _try_cuda_reduce_provider(values, output, op, workspace, backend):
                 method_name,
                 values,
                 output,
-                _reduce_value_type(values.dtype),
+                definition.value_type,
                 op,
                 (
                     values_arr,
                     output_arr,
-                    _reduce_value_type(values.dtype),
+                    definition.value_type,
                     values_offset,
                     values_stride,
                     output_offset,
                     output_stride,
-                    _SUPPORTED_REDUCE_OPS[op],
+                    definition.op_id,
                 ),
-                values.shape[0],
+                definition.size,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_reduce_backend_active(backend, temp_bytes)
         return True
@@ -11253,8 +11269,8 @@ def _try_cuda_reduce_provider(values, output, op, workspace, backend):
     temp_bytes = method(
         values.arr,
         output.arr,
-        _reduce_value_type(values.dtype),
-        _SUPPORTED_REDUCE_OPS[op],
+        definition.value_type,
+        definition.op_id,
     )
     if workspace is not None:
         workspace._record_native_reduce_plan(
@@ -11262,16 +11278,17 @@ def _try_cuda_reduce_provider(values, output, op, workspace, backend):
             method_name,
             values,
             output,
-            _reduce_value_type(values.dtype),
+            definition.value_type,
             op,
             (
                 values.arr,
                 output.arr,
-                _reduce_value_type(values.dtype),
-                _SUPPORTED_REDUCE_OPS[op],
+                definition.value_type,
+                definition.op_id,
             ),
-            values.shape[0],
+            definition.size,
             prog,
+            definition=definition,
         )
         workspace._mark_native_reduce_backend_active(backend, temp_bytes)
     return True
@@ -11288,6 +11305,7 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
 def _try_vulkan_reduce(values, output, op, workspace):
     if current_cfg().arch != vulkan:
         return False
+    definition = ReduceDefinition(_shape_numel(values), values.dtype, op)
     values_view = _primitive_view(values)
     output_view = _primitive_view(output)
     if (
@@ -11302,7 +11320,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
         prog = impl.get_runtime().prog
         if not _prog_available(prog, "vulkan_reduce_available"):
             return False
-        value_type = _reduce_value_type(values_view.dtype)
+        value_type = definition.value_type
         if not _prog_value_available(
             prog, "vulkan_reduce_value_type_available", value_type
         ):
@@ -11314,11 +11332,11 @@ def _try_vulkan_reduce(values, output, op, workspace):
             values_view.snode,
             output_view.snode,
             value_type,
-            values_view.num_elements,
-            _SUPPORTED_REDUCE_OPS[op],
+            definition.size,
+            definition.op_id,
         )
         if workspace is not None:
-            op_id = _SUPPORTED_REDUCE_OPS[op]
+            op_id = definition.op_id
             workspace._record_native_reduce_plan(
                 "vulkan_native",
                 "vulkan_reduce_dense_field",
@@ -11330,11 +11348,12 @@ def _try_vulkan_reduce(values, output, op, workspace):
                     values_view.snode,
                     output_view.snode,
                     value_type,
-                    values_view.num_elements,
+                    definition.size,
                     op_id,
                 ),
-                values_view.num_elements,
+                definition.size,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_reduce_backend_active("vulkan_native", temp_bytes)
         return True
@@ -11351,7 +11370,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
         prog = impl.get_runtime().prog
         if not _prog_available(prog, "vulkan_reduce_available"):
             return False
-        value_type = _reduce_value_type(values.dtype)
+        value_type = definition.value_type
         if not _prog_value_available(
             prog, "vulkan_reduce_value_type_available", value_type
         ):
@@ -11369,7 +11388,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
             values_stride,
             output_offset,
             output_stride,
-            _SUPPORTED_REDUCE_OPS[op],
+            definition.op_id,
         )
         if workspace is not None:
             workspace._record_native_reduce_plan(
@@ -11387,10 +11406,11 @@ def _try_vulkan_reduce(values, output, op, workspace):
                     values_stride,
                     output_offset,
                     output_stride,
-                    _SUPPORTED_REDUCE_OPS[op],
+                    definition.op_id,
                 ),
-                values.shape[0],
+                definition.size,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_reduce_backend_active("vulkan_native", temp_bytes)
         return True
@@ -11401,7 +11421,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
     prog = impl.get_runtime().prog
     if not _prog_available(prog, "vulkan_reduce_available"):
         return False
-    value_type = _reduce_value_type(values.dtype)
+    value_type = definition.value_type
     if not _prog_value_available(
         prog, "vulkan_reduce_value_type_available", value_type
     ):
@@ -11409,7 +11429,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
     method = _prog_method(prog, "vulkan_reduce_ndarray")
     if method is not None:
         method_name = "vulkan_reduce_ndarray"
-        call_args = (values.arr, output.arr, value_type, _SUPPORTED_REDUCE_OPS[op])
+        call_args = (values.arr, output.arr, value_type, definition.op_id)
         temp_bytes = method(*call_args)
     else:
         if values.dtype != i32:
@@ -11418,7 +11438,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
         if method is None:
             return False
         method_name = "vulkan_reduce_i32_ndarray"
-        call_args = (values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op])
+        call_args = (values.arr, output.arr, definition.op_id)
         temp_bytes = method(*call_args)
     if workspace is not None:
         workspace._record_native_reduce_plan(
@@ -11429,8 +11449,9 @@ def _try_vulkan_reduce(values, output, op, workspace):
             value_type,
             op,
             call_args,
-            values.shape[0],
+            definition.size,
             prog,
+            definition=definition,
         )
         workspace._mark_native_reduce_backend_active("vulkan_native", temp_bytes)
     return True
@@ -11439,6 +11460,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
 def _try_cpu_reduce(values, output, op, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    definition = ReduceDefinition(_shape_numel(values), values.dtype, op)
     values_view = _primitive_view(values)
     output_view = _primitive_view(output)
     if (
@@ -11457,13 +11479,13 @@ def _try_cpu_reduce(values, output, op, workspace):
         temp_bytes = method(
             values_view.snode,
             output_view.snode,
-            _reduce_value_type(values_view.dtype),
-            values_view.num_elements,
-            _SUPPORTED_REDUCE_OPS[op],
+            definition.value_type,
+            definition.size,
+            definition.op_id,
         )
         if workspace is not None:
-            value_type = _reduce_value_type(values_view.dtype)
-            op_id = _SUPPORTED_REDUCE_OPS[op]
+            value_type = definition.value_type
+            op_id = definition.op_id
             workspace._record_native_reduce_plan(
                 "cpu_native",
                 "cpu_reduce_dense_field",
@@ -11475,11 +11497,12 @@ def _try_cpu_reduce(values, output, op, workspace):
                     values_view.snode,
                     output_view.snode,
                     value_type,
-                    values_view.num_elements,
+                    definition.size,
                     op_id,
                 ),
-                values_view.num_elements,
+                definition.size,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_reduce_backend_active("cpu_native", temp_bytes)
         return True
@@ -11504,12 +11527,12 @@ def _try_cpu_reduce(values, output, op, workspace):
         temp_bytes = method(
             values_arr,
             output_arr,
-            _reduce_value_type(values.dtype),
+            definition.value_type,
             values_offset,
             values_stride,
             output_offset,
             output_stride,
-            _SUPPORTED_REDUCE_OPS[op],
+            definition.op_id,
         )
         if workspace is not None:
             workspace._record_native_reduce_plan(
@@ -11517,20 +11540,21 @@ def _try_cpu_reduce(values, output, op, workspace):
                 "cpu_reduce_strided_ndarray",
                 values,
                 output,
-                _reduce_value_type(values.dtype),
+                definition.value_type,
                 op,
                 (
                     values_arr,
                     output_arr,
-                    _reduce_value_type(values.dtype),
+                    definition.value_type,
                     values_offset,
                     values_stride,
                     output_offset,
                     output_stride,
-                    _SUPPORTED_REDUCE_OPS[op],
+                    definition.op_id,
                 ),
-                values.shape[0],
+                definition.size,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_reduce_backend_active("cpu_native", temp_bytes)
         return True
@@ -11545,7 +11569,7 @@ def _try_cpu_reduce(values, output, op, workspace):
     if method is None:
         return False
     temp_bytes = method(
-        values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
+        values.arr, output.arr, definition.value_type, definition.op_id
     )
     if workspace is not None:
         workspace._record_native_reduce_plan(
@@ -11553,16 +11577,17 @@ def _try_cpu_reduce(values, output, op, workspace):
             "cpu_reduce_ndarray",
             values,
             output,
-            _reduce_value_type(values.dtype),
+            definition.value_type,
             op,
             (
                 values.arr,
                 output.arr,
-                _reduce_value_type(values.dtype),
-                _SUPPORTED_REDUCE_OPS[op],
+                definition.value_type,
+                definition.op_id,
             ),
-            values.shape[0],
+            definition.size,
             prog,
+            definition=definition,
         )
         workspace._mark_native_reduce_backend_active("cpu_native", temp_bytes)
     return True
@@ -12393,77 +12418,13 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
 
 
 def _transform_value_type(dtype):
-    if dtype == i32:
-        return 0
-    if dtype == f32:
-        return 1
-    if dtype == u32:
-        return 2
-    if dtype == u64:
-        return 3
-    if dtype == i64:
-        return 4
-    if dtype == f64:
-        return 5
+    if dtype in _REDUCE_VALUE_TYPE:
+        return _REDUCE_VALUE_TYPE[dtype]
     raise TypeError(
         "experimental_transform() currently supports ti.u32, ti.i32, ti.f32, "
         "ti.u64, ti.i64, and ti.f64 ndarray values."
     )
 
-
-def _as_integral_transform_arg(name, value, *, bits, signed):
-    try:
-        result = int(value)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(
-            f"experimental_transform() integer {name} must be integral."
-        ) from exc
-    if result != value:
-        raise TypeError(f"experimental_transform() integer {name} must be integral.")
-    lo = -(1 << (bits - 1)) if signed else 0
-    hi = (1 << (bits - 1)) - 1 if signed else (1 << bits) - 1
-    if result < lo or result > hi:
-        raise ValueError(
-            f"experimental_transform() integer {name} is out of range for "
-            f"{'i' if signed else 'u'}{bits}."
-        )
-    if bits == 64 and abs(result) > (1 << 53) - 1:
-        raise ValueError(
-            "experimental_transform() 64-bit integer scale/bias must be exactly "
-            "representable by the current native binding."
-        )
-    return result
-
-
-def _normalize_transform_args(dtype, scale, bias):
-    if dtype == i32:
-        return (
-            _as_integral_transform_arg("scale", scale, bits=32, signed=True),
-            _as_integral_transform_arg("bias", bias, bits=32, signed=True),
-        )
-    if dtype == u32:
-        return (
-            _as_integral_transform_arg("scale", scale, bits=32, signed=False),
-            _as_integral_transform_arg("bias", bias, bits=32, signed=False),
-        )
-    if dtype == i64:
-        return (
-            _as_integral_transform_arg("scale", scale, bits=64, signed=True),
-            _as_integral_transform_arg("bias", bias, bits=64, signed=True),
-        )
-    if dtype == u64:
-        return (
-            _as_integral_transform_arg("scale", scale, bits=64, signed=False),
-            _as_integral_transform_arg("bias", bias, bits=64, signed=False),
-        )
-    if dtype == f32:
-        return float(scale), float(bias)
-    if dtype == f64:
-        return float(scale), float(bias)
-    raise TypeError(
-        "experimental_transform() currently supports ti.u32, ti.i32, ti.f32, "
-        "ti.u64, ti.i64, and ti.f64 ndarray values."
-    )
 
 
 def _check_transform_request(src, dst, method, workspace):
@@ -12529,6 +12490,8 @@ def _check_transform_request(src, dst, method, workspace):
 def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch != cuda:
         return False
+    definition = TransformDefinition(_shape_numel(src), src.dtype, scale, bias)
+    value_type, scale, bias = definition.value_type, definition.scale, definition.bias
     src_view = _primitive_view(src, allow_dense_nd=True)
     dst_view = _primitive_view(dst, allow_dense_nd=True)
     if (
@@ -12573,6 +12536,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
                 ),
                 src_view.num_elements,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
         return True
@@ -12626,6 +12590,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
                 ),
                 _shape_numel(src),
                 prog,
+                definition=definition,
             )
             workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
         return True
@@ -12649,6 +12614,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
             (src.arr, dst.arr, value_type, scale, bias),
             _shape_numel(src),
             prog,
+            definition=definition,
         )
         workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
     return True
@@ -12657,6 +12623,8 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
 def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch != vulkan:
         return False
+    definition = TransformDefinition(_shape_numel(src), src.dtype, scale, bias)
+    value_type, scale, bias = definition.value_type, definition.scale, definition.bias
     src_view = _primitive_view(src, allow_dense_nd=True)
     dst_view = _primitive_view(dst, allow_dense_nd=True)
     if (
@@ -12710,6 +12678,7 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
                 ),
                 src_view.num_elements,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_transform_backend_active(
                 "vulkan_native", temp_bytes
@@ -12777,6 +12746,7 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
             call_args,
             _shape_numel(src),
             prog,
+            definition=definition,
         )
         workspace._mark_native_transform_backend_active("vulkan_native", temp_bytes)
     return True
@@ -12785,6 +12755,8 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
 def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    definition = TransformDefinition(_shape_numel(src), src.dtype, scale, bias)
+    value_type, scale, bias = definition.value_type, definition.scale, definition.bias
     src_view = _primitive_view(src, allow_dense_nd=True)
     dst_view = _primitive_view(dst, allow_dense_nd=True)
     if (
@@ -12827,6 +12799,7 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
                 ),
                 src_view.num_elements,
                 prog,
+                definition=definition,
             )
             workspace._mark_native_transform_backend_active("cpu_native", temp_bytes)
         return True
@@ -12882,6 +12855,7 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
                 ),
                 _shape_numel(src),
                 prog,
+                definition=definition,
             )
             workspace._mark_native_transform_backend_active("cpu_native", temp_bytes)
         return True
@@ -12901,6 +12875,7 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
             (src.arr, dst.arr, value_type, scale, bias),
             _shape_numel(src),
             prog,
+            definition=definition,
         )
         workspace._mark_native_transform_backend_active("cpu_native", temp_bytes)
     return True
@@ -12923,6 +12898,8 @@ def _try_native_dense_matrix_field_transform(
         return False
     if src_plan[1] != value_type:
         return False
+    definition = TransformDefinition(_shape_numel(src), src.dtype, scale, bias)
+    value_type, scale, bias = definition.value_type, definition.scale, definition.bias
     arch = current_cfg().arch
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -12978,6 +12955,7 @@ def _try_native_dense_matrix_field_transform(
             call_args,
             src_plan[2],
             prog,
+            definition=definition,
         )
         workspace._mark_native_transform_backend_active(backend, temp_bytes)
     return True
@@ -13001,6 +12979,10 @@ def _try_native_packed_tensor_transform(src, dst, method, value_type, scale, bia
     scalar_bytes = _dtype_nbytes(src.dtype if isinstance(src, Ndarray) else src.scalar_dtype)
     if scalar_bytes <= 0:
         return False
+    definition = TransformDefinition(
+        _shape_numel(src), src.dtype if isinstance(src, Ndarray) else src.scalar_dtype, scale, bias
+    )
+    value_type, scale, bias = definition.value_type, definition.scale, definition.bias
     lane_count = src_item_bytes // scalar_bytes
     if lane_count < 1:
         return False
@@ -13039,6 +13021,7 @@ def _try_native_packed_tensor_transform(src, dst, method, value_type, scale, bia
                     call_args,
                     _shape_numel(src),
                     prog,
+                    definition=definition,
                 )
                 workspace._mark_native_transform_backend_active(
                     "cuda_device", temp_bytes
@@ -13082,6 +13065,7 @@ def _try_native_packed_tensor_transform(src, dst, method, value_type, scale, bia
                     call_args,
                     _shape_numel(src),
                     prog,
+                    definition=definition,
                 )
                 workspace._mark_native_transform_backend_active(
                     "vulkan_native", temp_bytes
@@ -13121,6 +13105,7 @@ def _try_native_packed_tensor_transform(src, dst, method, value_type, scale, bia
                     call_args,
                     _shape_numel(src),
                     prog,
+                    definition=definition,
                 )
                 workspace._mark_native_transform_backend_active(
                     "cpu_native", temp_bytes

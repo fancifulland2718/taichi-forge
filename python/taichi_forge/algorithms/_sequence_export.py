@@ -146,26 +146,23 @@ def _reduce(call, context):
         or call.plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT reduce cannot reconstruct the selected cached strategy")
-    parameters = dict(size=prod(source.index_shape), dtype=str(source.scalar_type), op=op)
-    if strategy != "packed_array":
-        parameters["strategy"] = strategy
-    if tensors:
-        parameters["element_shape"] = list(element_shape)
-    if backend == "cpu_native":
-        parameters["cpu_max_threads"] = max(1, impl.current_cfg().cpu_max_num_threads)
-    context.operations.append(dict(
-        kind="native", provider="builtin", operation="reduce", version=1,
-        parameters=parameters,
-        bindings=dict(values=context.retained_arrays.require(values),
-                      output=context.retained_arrays.require(output)),
-    ))
+    from ._primitive_definitions import ReduceDefinition
+
+    definition = ReduceDefinition(prod(source.index_shape), source.scalar_type, op)
+    if call.plan is not None:
+        if call.plan.definition != definition:
+            raise TaichiRuntimeError("AOT reduce's selected definition differs from its request")
+        definition = call.plan.definition
+    definition.bind(
+        values, output, strategy=strategy, element_shape=element_shape,
+        cpu_max_threads=max(1, impl.current_cfg().cpu_max_num_threads) if backend == "cpu_native" else None,
+    ).lower(context)
 
 
 def _transform(call, context):
     from math import prod
     from taichi_forge.aot._graph_storage_bindings import field_description, packed_description
     from taichi_forge.lang._storage_view import describe_storage
-    from taichi_forge_runtime.aot import Scalar
     from . import _algorithms as algorithms
 
     if (
@@ -221,7 +218,12 @@ def _transform(call, context):
         raise TaichiRuntimeError("AOT tensor transform requires matching packed vector/matrix ndarrays or Fields")
     if packed_fields and any(a._native_dense_packed_plan() is None for a in call.args):
         raise TaichiRuntimeError("AOT tensor Field transform requires its native packed layout")
-    scale, bias = algorithms._normalize_transform_args(src.dtype, call.kwargs["scale"], call.kwargs["bias"])
+    from ._primitive_definitions import TransformDefinition
+
+    definition = TransformDefinition(
+        prod(source.index_shape), source.scalar_type, call.kwargs["scale"], call.kwargs["bias"]
+    )
+    scale, bias = definition.scale, definition.bias
     arch = impl.current_cfg().arch
     backend, capability = {
         core.Arch.x64: ("cpu_native", "cpu_transform_available"),
@@ -256,17 +258,14 @@ def _transform(call, context):
         or call.plan.method_name not in methods
     ):
         raise TaichiRuntimeError("AOT transform cannot reconstruct the selected cached strategy")
-    context.operations.append(dict(
-        kind="native", provider="builtin", operation="transform", version=1,
-        parameters=dict(size=prod(source.index_shape), dtype=str(source.scalar_type),
-                        scale_bits=Scalar("f64", float(scale)).resource("scale")["bits"],
-                        bias_bits=Scalar("f64", float(bias)).resource("bias")["bits"],
-                        **(dict(element_shape=list(element_shape)) if tensor else {}),
-                        **(dict(strategy="strided_scalar") if members or strided_fields else
-                           dict(strategy="packed_field") if packed_fields else {})),
-        bindings=dict(src=context.retained_arrays.require(src),
-                      dst=context.retained_arrays.require(dst)),
-    ))
+    if call.plan is not None:
+        if call.plan.definition != definition:
+            raise TaichiRuntimeError("AOT transform's selected definition differs from its request")
+        definition = call.plan.definition
+    definition.bind(
+        src, dst, element_shape=element_shape,
+        strategy="strided_scalar" if members or strided_fields else "packed_field" if packed_fields else None,
+    ).lower(context)
 
 
 def _indexed_copy(call, context):
