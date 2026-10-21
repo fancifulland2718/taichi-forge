@@ -10,6 +10,12 @@ from taichi_forge.graph._native import (
     NativeGraphNode,
     _CudaGraphCaptureRecipe,
 )
+from taichi_forge.graph._native_definition import (
+    NativeArrayBinding,
+    NativeDefinition,
+    NativeOperationBinding,
+    NativeResourceBinding,
+)
 from taichi_forge.hardware._cutensor import CutensorContractionPlan
 from taichi_forge.hardware._native_adapter import HardwareRecordingExecutable
 from taichi_forge.hardware._retained import (
@@ -47,7 +53,8 @@ class _ContractionCaptureRecipe(_CudaGraphCaptureRecipe):
     def __init__(self, recording):
         self.lease = recording._lease
         self.names = recording.binding_names
-        self.alpha, self.beta = recording.alpha, recording.beta
+        parameters = recording._native_binding.definition.parameters
+        self.alpha, self.beta = parameters["alpha"], parameters["beta"]
 
     def append_to_graph(self, builder, program):
         from taichi_forge.graph._graph import Arg, ArgKind
@@ -59,14 +66,14 @@ class _ContractionCaptureRecipe(_CudaGraphCaptureRecipe):
             plan.provider._execution_api.execute_contraction, ctypes.c_void_p
         ).value
         native.handle = plan._handle.value
-        native.shapes = plan._shapes
+        native.shapes = plan._definition.shapes
         native.workspace_bytes = plan.workspace_required_bytes
-        native.alignment_bytes = plan._alignment_bytes
-        native.output_alias_compatible = plan._tensors[2] == plan._tensors[3]
+        native.alignment_bytes = plan._definition.alignment_bytes
+        native.output_alias_compatible = plan._definition.tensors[2] == plan._definition.tensors[3]
         native.alpha, native.beta = self.alpha, self.beta
         args = [
             Arg(ArgKind.NDARRAY, name, f32, ndim=len(shape))
-            for name, shape in zip(self.names, plan._shapes)
+            for name, shape in zip(self.names, plan._definition.shapes)
         ]
         if plan.workspace_required_bytes:
             args.append(Arg(ArgKind.NDARRAY, self.names[4], u8, ndim=1))
@@ -150,16 +157,26 @@ class CutensorCaptureRecording(BackendCommandRecording):
         object.__setattr__(self, "alpha", alpha)
         object.__setattr__(self, "beta", beta)
         object.__setattr__(
-            self, "_cuda_capture_recipe", _ContractionCaptureRecipe(self)
+            self,
+            "_native_binding",
+            NativeOperationBinding(
+                NativeDefinition("cutensor", "contract_f32", dict(alpha=alpha, beta=beta)),
+                tuple(
+                    NativeArrayBinding(port, name, GraphAccess.READ if port != "d" else GraphAccess.WRITE)
+                    for port, name in zip("abcd", names[:4])
+                ),
+                (("plan", NativeResourceBinding(plan, plan._native_definition)),),
+            ),
         )
+        object.__setattr__(self, "_cuda_capture_recipe", _ContractionCaptureRecipe(self))
         identity = make_retained_plan_identity(
             "tensor.contract.cutensor",
             "cutensor",
             "cuda",
             provider_scope=dict(plan.provider.identity),
             problem_scope={
-                "tensors": plan._tensors,
-                "compute": plan._compute,
+                "tensors": plan._definition.tensors,
+                "compute": plan._definition.compute,
                 "alpha": alpha,
                 "beta": beta,
             },
@@ -190,47 +207,22 @@ class CutensorCaptureRecording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        return tuple(
-            ResourceEffect(
-                name,
-                (
-                    GraphAccess.READ
-                    if i < 3
-                    else (GraphAccess.WRITE if i == 3 else GraphAccess.READ_WRITE)
-                ),
-            )
-            for i, name in enumerate(self.binding_names)
+        return self._native_binding.resource_effects + tuple(
+            ResourceEffect(name, GraphAccess.READ_WRITE) for name in self.binding_names[4:]
         )
 
     def _export_aot(self, context, *, expected_workspace_bytes=None):
         plan = self.plan
         if type(plan) is not CutensorContractionPlan:
-            raise TaichiRuntimeError(
-                "cuTENSOR plan variant needs its own AOT reconstruction contract"
-            )
+            raise TaichiRuntimeError("cuTENSOR plan variant needs its own AOT reconstruction contract")
         with plan.provider._lock, plan._lock:
             plan._validate_lifetime()
-            parameters = {
-                key: dict(shape=shape, modes=modes)
-                for key, (shape, modes, _) in zip("abcd", plan._tensors)
-            }
-            parameters.update(
-                compute_mode=plan._compute,
-                alignment_bytes=plan._alignment_bytes,
-                workspace_preference=plan._workspace_preference,
-                workspace_limit_bytes=plan._workspace_limit_bytes,
+            requirements = (
+                {}
+                if expected_workspace_bytes is None
+                else {"plan": dict(expected_workspace_bytes=expected_workspace_bytes)}
             )
-            if expected_workspace_bytes is not None:
-                parameters["expected_workspace_bytes"] = expected_workspace_bytes
-            resource = context.resource(
-                plan, "cutensor", "contraction_plan_f32", parameters=parameters
-            )
-        context.native(
-            "cutensor",
-            "contract_f32",
-            bindings=dict(plan=resource, **dict(zip("abcd", self.binding_names[:4]))),
-            parameters=dict(alpha=self.alpha, beta=self.beta),
-        )
+            self._native_binding.lower(context, resource_requirements=requirements)
         return self.binding_names[4:]
 
     def _graph_provider_memory_report(self):

@@ -1,11 +1,13 @@
 """Optional cuTENSOR runtime and FP32 contraction execution resource."""
 
 import ctypes
+from dataclasses import dataclass, field
 import os
 from types import MappingProxyType
 import threading
 import weakref
 
+from taichi_forge.graph._native_definition import NativeDefinition
 from taichi_forge.hardware._bundled_runtime_provider import (
     BundledRuntimeProviderDefinition,
     open_runtime as _open_runtime,
@@ -312,6 +314,48 @@ class CutensorProvider:
             pass
 
 
+@dataclass(frozen=True)
+class _ContractionDefinition:
+    """Plan semantics shared by vendor construction and reconstruction."""
+
+    tensors: tuple
+    compute: str
+    alignment_bytes: int
+    workspace_preference: str
+    workspace_limit_bytes: int
+    shapes: tuple = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "shapes", tuple(item[0] for item in self.tensors))
+
+    @classmethod
+    def normalize(cls, tensors, compute, alignment_bytes, workspace_preference, workspace_limit_bytes):
+        if compute not in ("f32", "tf32"):
+            raise ValueError("cuTENSOR compute must be 'f32' or 'tf32'")
+        if workspace_preference not in ("min", "default", "max"):
+            raise ValueError("cuTENSOR workspace_preference must be 'min', 'default', or 'max'")
+        if isinstance(alignment_bytes, bool) or not isinstance(alignment_bytes, int) or alignment_bytes <= 0:
+            raise ValueError("cuTENSOR alignment_bytes must be a positive integer")
+        if (
+            isinstance(workspace_limit_bytes, bool)
+            or not isinstance(workspace_limit_bytes, int)
+            or workspace_limit_bytes < 0
+        ):
+            raise ValueError("cuTENSOR workspace_limit_bytes must be a nonnegative integer")
+        tensors = tuple(_normalize_tensor(shape, modes, name) for (shape, modes), name in zip(tensors, "ABCD"))
+        return cls(tensors, compute, alignment_bytes, workspace_preference, workspace_limit_bytes)
+
+    def native_resource(self):
+        parameters = {key: dict(shape=shape, modes=modes) for key, (shape, modes, _) in zip("abcd", self.tensors)}
+        parameters.update(
+            compute_mode=self.compute,
+            alignment_bytes=self.alignment_bytes,
+            workspace_preference=self.workspace_preference,
+            workspace_limit_bytes=self.workspace_limit_bytes,
+        )
+        return NativeDefinition("cutensor", "contraction_plan_f32", parameters)
+
+
 class CutensorContractionPlan:
     """Reusable FP32 cuTENSOR contraction plan over scalar CUDA ndarrays."""
 
@@ -336,44 +380,21 @@ class CutensorContractionPlan:
     ):
         if not isinstance(provider, CutensorProvider):
             raise TypeError("provider must be a CutensorProvider")
-        compute_modes = {"f32": 0, "tf32": 1}
-        workspace_modes = {"min": 1, "default": 2, "max": 3}
-        if compute not in compute_modes:
-            raise ValueError("cuTENSOR compute must be 'f32' or 'tf32'")
-        if workspace_preference not in workspace_modes:
-            raise ValueError(
-                "cuTENSOR workspace_preference must be 'min', 'default', or 'max'"
-            )
-        if (
-            isinstance(alignment_bytes, bool)
-            or not isinstance(alignment_bytes, int)
-            or alignment_bytes <= 0
-        ):
-            raise ValueError("cuTENSOR alignment_bytes must be a positive integer")
-        if (
-            isinstance(workspace_limit_bytes, bool)
-            or not isinstance(workspace_limit_bytes, int)
-            or workspace_limit_bytes < 0
-        ):
-            raise ValueError(
-                "cuTENSOR workspace_limit_bytes must be a nonnegative integer"
-            )
-        tensors = tuple(
-            _normalize_tensor(shape, modes, name)
-            for shape, modes, name in (
-                (a_shape, a_modes, "A"),
-                (b_shape, b_modes, "B"),
-                (c_shape, c_modes, "C"),
-                (d_shape, d_modes, "D"),
-            )
+        self._definition = definition = _ContractionDefinition.normalize(
+            ((a_shape, a_modes), (b_shape, b_modes), (c_shape, c_modes), (d_shape, d_modes)),
+            compute,
+            alignment_bytes,
+            workspace_preference,
+            workspace_limit_bytes,
         )
-        native_tensors = tuple(_native_tensor(*tensor) for tensor in tensors)
+        self._native_definition = definition.native_resource()
+        native_tensors = tuple(_native_tensor(*tensor) for tensor in definition.tensors)
         desc = _PlanDesc(
             ctypes.sizeof(_PlanDesc),
-            compute_modes[compute],
-            alignment_bytes,
-            workspace_modes[workspace_preference],
-            workspace_limit_bytes,
+            {"f32": 0, "tf32": 1}[definition.compute],
+            definition.alignment_bytes,
+            {"min": 1, "default": 2, "max": 3}[definition.workspace_preference],
+            definition.workspace_limit_bytes,
             *(item[0] for item in native_tensors),
         )
         handle = ctypes.c_void_p()
@@ -397,22 +418,12 @@ class CutensorContractionPlan:
         self._lock = threading.RLock()
         self._runtime_prog = provider._runtime_prog
         self._runtime_generation = provider._runtime_generation
-        self._shapes = tuple(item[0] for item in tensors)
-        self._tensors = tensors
-        self._alignment_bytes = alignment_bytes
-        self._compute = compute
-        # Persist the original policy, not a guess based on selected workspace.
-        self._workspace_preference = workspace_preference
-        self._workspace_limit_bytes = workspace_limit_bytes
         self._capture_leases = 0
         self._preparation_only = _preparation_only
         self.workspace_estimate_bytes = int(info.workspace_estimate_bytes)
         self.workspace_required_bytes = int(info.workspace_required_bytes)
         try:
-            if (
-                _expected_workspace_bytes is not None
-                and self.workspace_required_bytes != _expected_workspace_bytes
-            ):
+            if _expected_workspace_bytes is not None and self.workspace_required_bytes != _expected_workspace_bytes:
                 raise TaichiRuntimeError("cuTENSOR restored plan workspace drifted")
             self._workspace = (
                 ScalarNdarray(u8, (self.workspace_required_bytes,))
@@ -440,7 +451,7 @@ class CutensorContractionPlan:
     def execute(self, a, b, c, d, *, alpha=1.0, beta=0.0):
         with self.provider._lock, self._lock:
             self._validate_lifetime()
-            for value, shape, name in zip((a, b, c, d), self._shapes, "ABCD"):
+            for value, shape, name in zip((a, b, c, d), self._definition.shapes, "ABCD"):
                 _validate_array(value, shape, name)
             resources = [a, b, c, d]
             if self._workspace is not None:
